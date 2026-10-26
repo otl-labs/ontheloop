@@ -5,10 +5,10 @@ handoff_policy:
 slug: terraform-github-org-rekey
 intent: >-
   Re-key terraform/github onto otl-labs/ontheloop with the org-owned apply App and record the transfer contract's last
-  prove gates: the defaults flip, the provider gains an App lane that keeps the App key out of every Terraform
-  variable and saved plan, the transfer check evaluates breakage_map.terraform_github_root per phase, and the operator
-  re-keys the state from AWS CloudShell (state rm of the five, import-only apply under the App), proven by the PR-time
-  CI plan. A closure PR records phases.prove gate 2 and gate 1's code-owner review (its unproven non-owner part named,
+  prove gates: the defaults flip, github_token turns ephemeral so the apply App's installation token, minted from the
+  App key outside Terraform by each paste, never lands in a saved plan or state, the transfer check evaluates
+  breakage_map.terraform_github_root per phase, and the operator re-keys the state from AWS CloudShell (state rm of the
+  five, import-only apply under the App), proven by the PR-time CI plan. A closure PR records phases.prove gate 2 and gate 1's code-owner review (its unproven non-owner part named,
   rec-4625), flips identity.phase to proven and GH-08 and GH-09 to proven, and closes rec-4355; the AWS account build
   waits on that flip (operator, 2026-10-25).
 plan_type: IMPLEMENTATION
@@ -23,15 +23,14 @@ scope:
   - file: terraform/github/variables.tf
     action: Modify
     purpose: >-
-      github_owner and repository_name defaults to otl-labs and ontheloop (rec-4355's acceptance); github_token becomes
-      optional (default null) with an exactly-one-credential validation and a non-empty validation; new bool
-      github_app_auth (default false). Exact text: execution_steps step 2. CI keeps TF_VAR_github_token unchanged.
+      github_owner and repository_name defaults to otl-labs and ontheloop (rec-4355's acceptance); github_token stays
+      required and sensitive and gains ephemeral = true and a non-empty validation (amendment 2026-10-26: no app_auth
+      lane). Exact text: execution_steps step 2. CI keeps TF_VAR_github_token unchanged.
   - file: terraform/github/main.tf
     action: Modify
     purpose: >-
-      The provider gains an empty dynamic app_auth block keyed on var.github_app_auth (the provider then reads the
-      GITHUB_APP_* environment variables); the header's stale Apply comment names the two credential lanes. Exact
-      text: execution_steps step 3.
+      Header comment only: the stale Apply comment names the one ephemeral token lane and why there is no app_auth
+      block; the provider block is unchanged. Exact text: execution_steps step 3.
   - file: terraform/github/repo.tf
     action: Modify
     purpose: >-
@@ -52,8 +51,8 @@ scope:
   - file: tests/checks/iam_tf/test_terraform_github_provider_auth.py
     action: Create
     purpose: >-
-      Static guard of the credential lanes over the real terraform/github tree and the PR-time plan workflow, each
-      predicate with a red case on synthetic text. Spec: execution_steps step 7.
+      Static guard of the token lane over the real terraform/github tree and the PR-time plan workflow, each predicate
+      with a red case on synthetic text. Spec: execution_steps step 7.
   - file: config/agent/verification_registry/entries/github-org-transfer-terraform-github-root-row.yaml
     action: Create
     purpose: Graduation record for VP step 1 (exact text in execution_steps step 8).
@@ -86,8 +85,9 @@ infrastructure_dependencies:
     The org-owned terraform/github apply App (Administration and Actions read and write, Metadata read; installed on
     otl-labs with All repositories): one JSON Secrets Manager entry, agent-platform-terraform-github-apply-app
     (eu-west-2; keys app_id, installation_id, private_key; PLAN-github-transfer-credential-prestage). First used by
-    paste 0. The provider mints an installation token with the installation's full permissions for one hour and never
-    revokes it (accepted residual; narrowing the installation is rec-4538's).
+    paste 0. Each paste mints an installation token scoped to the ontheloop repository (a ten-minute JWT signed by
+    openssl inside the paste's bash process, then POST /app/installations/{id}/access_tokens) and revokes it on exit;
+    a token lives at most one hour. Narrowing the installation itself is rec-4538's.
   - >-
     The read-only otl-labs plan App installation behind .github/workflows/terraform-github-plan.yml (unchanged; it
     still passes TF_VAR_github_token). Its runs on the build PR give E0, E1 (a re-run after paste A) and E2 (a re-run
@@ -97,7 +97,8 @@ infrastructure_dependencies:
     api.github.com, signed in as an operator identity that can read the apply App secret and Get/Put/Delete
     tfstate/github/*. The classic admin PAT lane (TF_VAR_github_token) stays as rollback; this walk never uses it.
   - >-
-    GitHub-side writes: none. An import-only apply issues GitHub reads only and no step updates the ruleset (its two
+    GitHub-side writes: none to the repository (each paste only mints and revokes its own installation token). An
+    import-only apply issues GitHub reads only and no step updates the ruleset (its two
     unmodelled pull_request keys, rec-4624). The agent reads through the cloud-session proxy (ruleset, CODEOWNERS
     errors, rule suites) and the read-only ADMIN profile (the S3 state object).
 acceptance_criteria:
@@ -107,9 +108,9 @@ acceptance_criteria:
     variable references, and no sensitive variable has a non-null default; PENDING_STATIC_ROWS is empty; the new
     class's phase matrix and red cases pass and the real tree is green (VP steps 1 and 3).
   - >-
-    The provider authenticates with the apply App only through an empty dynamic app_auth block keyed on
-    var.github_app_auth, exactly one credential lane is accepted, no variable carries App key material, and the
-    PR-time plan workflow keeps TF_VAR_github_token and sets no App lane variable (VP step 2).
+    The provider has no app_auth block and one credential input, var.github_token, which is sensitive and ephemeral
+    with no default and rejects an empty value; no variable carries App key material; the PR-time plan workflow keeps
+    TF_VAR_github_token and sets no App variable (VP step 2).
   - rec-4355's acceptance holds on the build PR and at the closing sha (VP steps 4 and 22).
   - >-
     The contract and inventory changes equal the operator-approved texts of execution_steps steps 9, 15 and 16, with
@@ -310,21 +311,23 @@ verification_plan:
   - step: 10
     phase: pre-deploy
     action: >-
-      PRE-MERGE, OPERATOR, AWS CloudShell, nothing shared written -- paste 0 (Terraform, the apply App from the
-      environment, and the dry run of the state rm and import plan on a local copy of the state) at the CI-green build
-      PR head. Exact text: execution_steps step 11 (the agent fills HEAD_SHA). The agent saves the operator's reported
+      PRE-MERGE, OPERATOR, AWS CloudShell, nothing shared written -- paste 0 (Terraform, an installation token minted
+      from the apply App's key, and the dry run of the state rm and import plan on a local copy of the state) at the
+      CI-green build PR head. Exact text: execution_steps step 11 (the agent fills HEAD_SHA). The agent saves the operator's reported
       lines into $PASTE0_REPORT (the latest run only). A new head that changes terraform/github re-runs it.
     command: >-
-      for l in TERRAFORM_OK APP_ENV_OK INIT_OK DRYRUN_IMPORT_ONLY APP_SEES_BYPASS APP_SEES_SAN; do
+      for l in TERRAFORM_OK TOKEN_OK INIT_OK DRYRUN_IMPORT_ONLY APP_SEES_BYPASS APP_SEES_SAN; do
       printf '%s\n' "$PASTE0_REPORT" | grep -qxF "$l" || exit 1; done && echo PASTE0_OK
     expected: >-
       PASTE0_OK: the six lines reported. DRYRUN_IMPORT_ONLY means the dry plan read COUNTS import=5 add=0 change=0
       destroy=0 under the App; APP_SEES_BYPASS and APP_SEES_SAN mean its import read the ruleset's one bypass actor and
-      the repository's security_and_analysis.
+      the repository's security_and_analysis. TOKEN_REVOKED should close the paste; if it is missing, record it (the
+      token expires within the hour).
     fix_if: >-
       Checksum mismatch: stop, do not run the binary. AccessDenied on the secret or the state: the operator chooses
-      another identity (any IAM grant is always-ask). The provider's App error (an empty GITHUB_APP_* or a refused key):
-      stop and report; never fall back to the PAT lane, since the contract wants the App proven. A "DRYRUN COUNTS ..."
+      another identity (any IAM grant is always-ask). No TOKEN_OK (a jq error on the secret, an openssl key error, or an
+      HTTP 401, 404 or 422 from the token request): stop and report the error line; never fall back to the PAT lane,
+      since the contract wants the App proven. A "DRYRUN COUNTS ..."
       line: stop, do not merge; an update row is a config gap for the planning thread (a plan amendment), never an
       apply. DRYRUN_IMPORT_ONLY without both APP_SEES lines: stop and escalate to the planning thread before merge.
     hermetic: false
@@ -377,11 +380,12 @@ verification_plan:
       import-only). Exact text: the first block of execution_steps step 12 (the agent fills MERGE_SHA). Run only after
       steps 11 and 12 passed. The agent saves the reported lines into $PASTEA_REPORT.
     command: >-
-      printf '%s\n' "$PASTEA_REPORT" | grep -cxE 'BACKUP_OK|COUNTS import=5 add=0 change=0 destroy=0|PLAN_IMPORT_ONLY'
-      | grep -qx 3 && echo PASTEA_OK
+      printf '%s\n' "$PASTEA_REPORT" | grep -cxE 'TOKEN_OK|BACKUP_OK|COUNTS import=5 add=0 change=0 destroy=0|PLAN_IMPORT_ONLY'
+      | grep -qx 4 && echo PASTEA_OK
     expected: >-
-      PASTEA_OK: the operator reported BACKUP_OK, Successfully removed 5 resource instance(s), COUNTS import=5 add=0
-      change=0 destroy=0, PLAN_IMPORT_ONLY and five "will be imported" address lines, and stopped there.
+      PASTEA_OK: the operator reported TOKEN_OK, BACKUP_OK, Successfully removed 5 resource instance(s), COUNTS import=5
+      add=0 change=0 destroy=0, PLAN_IMPORT_ONLY, five "will be imported" address lines and TOKEN_REVOKED, and stopped
+      there. No TOKEN_OK means nothing was written: fix the cause and re-run paste A.
     fix_if: >-
       No PLAN_IMPORT_ONLY (or the paste stopped early): do NOT run paste B. Restore per the rollback field (the S3
       version recorded at step 11 on the operator's word on the exact command, or paste R, execution_steps step 13);
@@ -585,15 +589,15 @@ test_obligations:
       Red if the defaults stay on the old owner and name once staged_phase proven and the evaluator land; green after
       execution_steps steps 2, 5 and 9.
   - source: terraform/github/variables.tf
-    behavior: Exactly one credential lane is accepted, github_token defaults null and never empty, github_app_auth is a false-default bool.
+    behavior: github_token is sensitive and ephemeral with no default and rejects an empty value; no variable carries App key material.
     verification_step: 2
     test_selector: tests/checks/iam_tf/test_terraform_github_provider_auth.py::TestTerraformGithubProviderAuth
     red_green_expectation: Red before (the test file does not exist on origin/main); green after execution_steps steps 2 and 7.
   - source: terraform/github/main.tf
-    behavior: The provider's only App path is an empty dynamic app_auth keyed on var.github_app_auth, with owner and token from variables.
+    behavior: The provider has no app_auth block, static or dynamic; its owner and token come from variables.
     verification_step: 2
     test_selector: tests/checks/iam_tf/test_terraform_github_provider_auth.py::TestTerraformGithubProviderAuth
-    red_green_expectation: Red before (no such block or test on origin/main); green after execution_steps steps 3 and 7.
+    red_green_expectation: Red before (the test file does not exist on origin/main); green after execution_steps steps 3 and 7.
   - source: terraform/github/repo.tf
     behavior: Comment-only edit citing rec-4624 and rec-4625.
     verification_step: 4
@@ -643,8 +647,10 @@ constraints:
     A Claude Code cloud session cannot plan this root. Never author a local terraform init, validate or plan step for
     it (Decision 119); verification reads the S3 state object, the proxy-served API and the PR-time CI plan.
   - >-
-    The App key reaches the provider only as GITHUB_APP_* environment variables inside a paste's own bash process;
-    never a Terraform variable, a file, a saved plan, a log or chat. Every paste starts with set +x and unsets
+    The App key stays inside a paste's own bash process: read from Secrets Manager into an unexported shell variable,
+    piped to openssl to sign a ten-minute JWT, then unset; never an environment variable, a Terraform variable, a file,
+    a saved plan, a log or chat. Terraform sees only the minted installation token, scoped to ontheloop, as the
+    ephemeral TF_VAR_github_token, which each paste revokes on exit. Every paste starts with set +x and unsets
     GITHUB_TOKEN, GITHUB_OWNER, GITHUB_ORGANIZATION, TF_VAR_github_token, TF_LOG and TF_LOG_PROVIDER.
   - >-
     Evidence is counts, dates, the merge sha, workflow-run URLs and marker lines only (Decision 101): never plan text,
@@ -667,12 +673,13 @@ context:
     Decision-scout verdict FLAGS_FOUND. CITE: 218, 172, 126, 77, 119, 83, 101, 201. Decisions triaged: 188 of 188;
     roadmap items intersected 3, CONFLICT 0. NOTE 100 adopted (rollback on the recorded S3 version); NOTE 92 (the
     taxonomy row names the PAT) deferred to rec-4538 by the operator. Report: /mnt/project-files/rec-4355/scout-report.md.
-  - 'gates: decision-scout=FLAGS_FOUND (two NOTEs, resolved); red_overlap={"verdict": "clear", "reds": []}; plan-critique=PROCEED after 2 rounds; round 2 autonomous (its non-blocking findings folded in)'
+  - 'gates: decision-scout=FLAGS_FOUND (two NOTEs, resolved); red_overlap={"verdict": "clear", "reds": []}; plan-critique=PENDING (amendment 2026-10-26; the original plan: PROCEED after 2 rounds)'
   - >-
     Approval: "yes to all and write the plan" (cmsg_017f94mmYqSe3q2p9o6tPW3UA8nvZJGPJ3jHgH8DR31f9D, 2026-10-25) for
     /mnt/project-files/rec-4355/step6b-presentation.md: F1 A (env-lane app_auth), F2 A (record the code-owner rule as
     evaluated, non-owner part unproven, rec-4625), F3 A (defer the PAT texts to rec-4538), the decided-with-notice list
-    and the exact wording (rec-NNNN filled as rec-4625 and VP NN as 13-16 and 14, within its variance).
+    and the exact wording (rec-NNNN filled as rec-4625 and VP NN as 13-16 and 14, within its variance). Amendment
+    2026-10-26 (the build found CI's validate rejects the empty app_auth block): @@AMEND_APPROVAL@@.
   - >-
     V3 resolution: E0 (step 9) and paste 0 at the CI-green head (step 10, the App's dry run of the import on a local
     state copy), posted as the PR's TERRAFORM GITHUB PRE-MERGE EVIDENCE comment before code review, are the pre-merge
@@ -684,23 +691,23 @@ context:
     CODEOWNERS errors empty; rule suites for #1534 and #1599 read pull_request pass with no review; the S3 state keys the
     five on theseus under the old owner with bypass_actors and security_and_analysis present.
   - >-
-    Provider 6.12.1 (source read at the tag): app_auth overrides token and errors on any empty field, so a static block
-    would break the PR-time plan; GITHUB_OWNER and GITHUB_ORGANIZATION override an explicit owner; pem_file takes PEM
-    contents; an empty token falls back to the gh CLI, then anonymous; its docs show app_auth {} fed by GITHUB_APP_*.
-    Terraform 1.10.5 scratch test: the two validations accept exactly one lane and reject an empty token. The report
-    script counts an import that also updates as an import only, so E1's verdict word is CHANGES (its table is read).
+    Provider 6.12.1: app_auth's three arguments are Required with GITHUB_APP_* env defaults that the SDK honours only
+    when set at schema time, so CI's validate rejects an empty block, and a placeholder value beats the env (reproduced
+    2026-10-26); GITHUB_OWNER and GITHUB_ORGANIZATION override an explicit owner; an empty token falls back to the gh
+    CLI. Terraform 1.10.5 toy root: an ephemeral variable stays out of the saved plan file and state, show -json works
+    without it, and a saved-plan apply needs it again. The report script counts an import that also updates as an
+    import only, so E1's verdict word is CHANGES (its table is read).
   - >-
     Advice: /mnt/project-files/rec-4355/ADVICE.md (Fable). Adopted: the staged_phase evaluator, the E1 re-run between
     pastes A and B, paste 0 proving App auth and visibility, the unset line, /users/<login>, shredding plan files.
-    Adapted: the App lane reads the environment, not Terraform variables, so no saved plan holds key material.
+    Adapted (amended): the App reaches Terraform only as a minted, ephemeral, revoked installation token.
   - >-
     Follow-ons: rec-4624 (set the two unmodelled keys once a provider release models them), rec-4625 (the first
     non-owner PR on a code-owner path); rec-2827 extended with the rule-suite finding; rec-4538 extended with the runbook
     and taxonomy switch. Precedent: PLAN-terraform-github-state-reconcile (rec-3136).
   - >-
-    Gotchas: github-org-transfer.yaml is at 492 of 500 effective lines (496 after the build, 498 after the closure);
-    E0 runs against state keyed on the old name, so its counts or failure are recorded, not gated; $*_REPORT hold
-    reported text, $E*_LOG, $*_COMMENT, $*_BODY and $BUILD_REVIEWS are file paths.
+    Gotchas: github-org-transfer.yaml at 492 of 500 effective lines (498 after the closure); E0's counts are recorded,
+    not gated; $*_REPORT hold reported text, $E*_LOG, $*_COMMENT, $*_BODY and $BUILD_REVIEWS are file paths.
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -714,30 +721,18 @@ execution_steps:
     transferred with no staged_phase and the 2026-10-24 prove ledger entry present. Otherwise wait and tell the
     coordinator. Restart the harness branch from origin/main and set implementation_declared true in this plan.
   - |-
-    terraform/github/variables.tf: replace the whole github_token block with exactly this text (it adds github_app_auth
-    after it):
+    terraform/github/variables.tf: replace the whole github_token block with exactly:
 
     variable "github_token" {
-      description = "GitHub token, supplied at run time and never committed: the PR-time plan's App installation token, or the classic admin PAT (repo, admin:repo_hook, read:org) as rollback until it is revoked. Leave unset when github_app_auth is true."
+      description = "GitHub token, supplied at run time and never committed: an installation token of the PR-time plan App or of the apply App (rec-4355), or the classic admin PAT (repo, admin:repo_hook, read:org) as rollback until it is revoked. Ephemeral, so no saved plan or state holds it; applying a saved plan needs it set again."
       type        = string
       sensitive   = true
-      default     = null
-
-      validation {
-        condition     = (var.github_token != null) != var.github_app_auth
-        error_message = "Set exactly one credential: TF_VAR_github_token, or TF_VAR_github_app_auth=true with GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID and GITHUB_APP_PEM_FILE in the environment."
-      }
+      ephemeral   = true
 
       validation {
         condition     = var.github_token != ""
-        error_message = "github_token is empty; an empty token makes the provider fall back to anonymous access."
+        error_message = "github_token is empty; an empty token makes the provider fall back to the gh CLI, then anonymous access."
       }
-    }
-
-    variable "github_app_auth" {
-      description = "true: authenticate as the org-owned terraform/github apply App from the GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID and GITHUB_APP_PEM_FILE environment variables, so its key never enters a variable or a saved plan (rec-4355). false: use github_token."
-      type        = bool
-      default     = false
     }
 
     and change github_owner's default to "otl-labs" and repository_name's default to "ontheloop" (nothing else in those
@@ -748,23 +743,12 @@ execution_steps:
 
     # Apply: see terraform/github/CLAUDE.md; init with the region from config/aws-region (rec-4067):
     # terraform -chdir=terraform/github init -backend-config="region=$(tr -d '[:space:]' < config/aws-region)".
-    # Credentials, exactly one lane per run (variables.tf validates it): TF_VAR_github_app_auth=true with
-    # the apply App's GITHUB_APP_* environment variables (rec-4355), or TF_VAR_github_token (the PR-time
-    # plan's App token; the classic admin PAT as rollback until it is revoked).
+    # One credential lane, TF_VAR_github_token (ephemeral): an installation token minted from the apply
+    # App's key outside Terraform (rec-4355), the PR-time plan App's token, or the classic admin PAT as
+    # rollback until it is revoked. No app_auth block: provider 6.12.1 needs its three arguments in the
+    # config unless GITHUB_APP_* are set at validate time, so the key would have to enter Terraform.
 
-    and replace the provider block with exactly:
-
-    provider "github" {
-      owner = var.github_owner
-      token = var.github_token
-
-      # Empty on purpose: the provider reads the App id, installation id and private key from the
-      # GITHUB_APP_* environment variables, so key material never enters a variable or a saved plan.
-      dynamic "app_auth" {
-        for_each = var.github_app_auth ? [1] : []
-        content {}
-      }
-    }
+    The provider block stays as it is.
   - |-
     terraform/github/repo.tf (comments only): replace the seven-line paragraph that starts "# require_code_owner_review
     = true (DEP-05 / T2.50 / Decision 144)" with exactly:
@@ -796,7 +780,8 @@ execution_steps:
     # (github-org-transfer.yaml evidence_ledger, 2026-10-24); it is set in the organisation's or
     # the repository's Actions settings, never here.
 
-    The planner ran terraform fmt -check (provider-free) on all three edited files: clean.
+    The planner ran the repo's credential-free gate (terraform init -backend=false, validate, fmt -check, as in
+    scripts/checks/_terraform.py) over origin/main with steps 2-4 applied: valid and clean (2026-10-26).
   - >-
     scripts/checks/contracts/validate_github_org_transfer.py: add _evaluate_terraform_github_root(contract, repo_root,
     failed) next to _evaluate_oidc_trust_segment, register it as ROW_EVALUATORS["terraform_github_root"], and make
@@ -838,14 +823,12 @@ execution_steps:
   - >-
     Create tests/checks/iam_tf/test_terraform_github_provider_auth.py with class TestTerraformGithubProviderAuth: pure
     predicates over text read from the real terraform/github/*.tf files and .github/workflows/terraform-github-plan.yml,
-    each with its own red case on synthetic text: (a) the provider "github" block holds exactly one dynamic "app_auth"
-    block whose for_each is var.github_app_auth ? [1] : [] and whose content block is empty, and no .tf file under
-    terraform/github has a static app_auth block; (b) the provider's owner is var.github_owner and its token is
-    var.github_token; (c) variable github_app_auth has type = bool and default = false; (d) variable github_token has
-    sensitive = true, default = null, a validation whose condition is (var.github_token != null) != var.github_app_auth
-    and one whose condition is var.github_token != ""; (e) no variable name under terraform/github contains pem,
-    private_key, app_id or installation; (f) the workflow sets TF_VAR_github_token and contains none of
-    TF_VAR_github_app_auth, GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID or GITHUB_APP_PEM_FILE. Reuse
+    each with its own red case on synthetic text: (a) no .tf file under terraform/github holds an app_auth block,
+    static or dynamic, outside comments; (b) the provider's owner is var.github_owner and its token is
+    var.github_token; (c) variable github_token has sensitive = true, ephemeral = true, no default, and a validation
+    whose condition is var.github_token != ""; (d) no variable name under terraform/github contains pem, private_key,
+    app_id or installation; (e) the workflow sets TF_VAR_github_token and contains none of GITHUB_APP_ID,
+    GITHUB_APP_INSTALLATION_ID or GITHUB_APP_PEM_FILE. Reuse
     tests/fixtures/terraform_hcl_blocks' tf_dir_file_texts; whitespace-normalise expressions before comparing. No
     retired-identity literal in the file.
   - |-
@@ -907,8 +890,8 @@ execution_steps:
     Resolves trailer: rec-4355 closes with the closure PR). Then run VP steps 11 and 12 and hand the operator paste A
     with MERGE_SHA filled in.
   - |-
-    Paste 0 (VP step 10), pre-merge; the agent fills HEAD_SHA (the CI-green build PR head). It writes nothing shared:
-    the dry run uses a local copy of the state and plan -lock=false is never needed (no shared plan runs).
+    Paste 0 (VP step 10), pre-merge; the agent fills HEAD_SHA (the CI-green build PR head). It writes nothing shared
+    (it only mints and revokes its own token): the dry run uses a local copy of the state.
 
     bash -euo pipefail <<'PASTE0'
     set +x
@@ -931,14 +914,21 @@ execution_steps:
     git init -q repo
     git -C repo fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git "$HEAD_SHA"
     git -C repo checkout -q FETCH_HEAD
+    b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
     APP_JSON="$(aws secretsmanager get-secret-value --region eu-west-2 --secret-id agent-platform-terraform-github-apply-app --query SecretString --output text)"
-    export GITHUB_APP_ID="$(printf '%s' "$APP_JSON" | jq -er .app_id)"
-    export GITHUB_APP_INSTALLATION_ID="$(printf '%s' "$APP_JSON" | jq -er .installation_id)"
-    export GITHUB_APP_PEM_FILE="$(printf '%s' "$APP_JSON" | jq -er .private_key)"
+    APP_ID="$(printf '%s' "$APP_JSON" | jq -er .app_id)"
+    INST_ID="$(printf '%s' "$APP_JSON" | jq -er .installation_id)"
+    NOW="$(date +%s)"
+    JH="$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)"
+    JP="$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((NOW - 60))" "$((NOW + 540))" "$APP_ID" | b64url)"
+    JS="$(printf '%s.%s' "$JH" "$JP" | openssl dgst -sha256 -sign <(printf '%s' "$APP_JSON" | jq -er .private_key) -binary | b64url)"
     unset APP_JSON
-    export TF_VAR_github_app_auth=true
-    echo APP_ENV_OK
-    RID="$(curl -fsS https://api.github.com/users/benjamin-blake | jq -er .id)"
+    TF_VAR_github_token="$(curl -fsS -X POST -H "Authorization: Bearer $JH.$JP.$JS" -H 'Accept: application/vnd.github+json' -d '{"repositories":["ontheloop"]}' "https://api.github.com/app/installations/$INST_ID/access_tokens" | jq -er .token)"
+    export TF_VAR_github_token
+    unset JH JP JS NOW
+    trap 'curl -fsS -o /dev/null -X DELETE -H "Authorization: Bearer $TF_VAR_github_token" https://api.github.com/installation/token && echo TOKEN_REVOKED' EXIT
+    echo TOKEN_OK
+    RID="$(curl -fsS -H "Authorization: Bearer $TF_VAR_github_token" https://api.github.com/users/benjamin-blake | jq -er .id)"
     export TF_VAR_gated_apply_reviewer_user_ids="[$RID]"
     TF="$HOME/bin/terraform"
     D="$HOME/tfgithub/repo/terraform/github"
@@ -985,13 +975,21 @@ execution_steps:
     git -C repo fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git "$MERGE_SHA"
     git -C repo checkout -q FETCH_HEAD
     $TF -chdir="$D" init -input=false -lockfile=readonly -backend-config="region=$(tr -d '[:space:]' < "$HOME/tfgithub/repo/config/aws-region")" >/dev/null
+    b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
     APP_JSON="$(aws secretsmanager get-secret-value --region eu-west-2 --secret-id agent-platform-terraform-github-apply-app --query SecretString --output text)"
-    export GITHUB_APP_ID="$(printf '%s' "$APP_JSON" | jq -er .app_id)"
-    export GITHUB_APP_INSTALLATION_ID="$(printf '%s' "$APP_JSON" | jq -er .installation_id)"
-    export GITHUB_APP_PEM_FILE="$(printf '%s' "$APP_JSON" | jq -er .private_key)"
+    APP_ID="$(printf '%s' "$APP_JSON" | jq -er .app_id)"
+    INST_ID="$(printf '%s' "$APP_JSON" | jq -er .installation_id)"
+    NOW="$(date +%s)"
+    JH="$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)"
+    JP="$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((NOW - 60))" "$((NOW + 540))" "$APP_ID" | b64url)"
+    JS="$(printf '%s.%s' "$JH" "$JP" | openssl dgst -sha256 -sign <(printf '%s' "$APP_JSON" | jq -er .private_key) -binary | b64url)"
     unset APP_JSON
-    export TF_VAR_github_app_auth=true
-    RID="$(curl -fsS https://api.github.com/users/benjamin-blake | jq -er .id)"
+    TF_VAR_github_token="$(curl -fsS -X POST -H "Authorization: Bearer $JH.$JP.$JS" -H 'Accept: application/vnd.github+json' -d '{"repositories":["ontheloop"]}' "https://api.github.com/app/installations/$INST_ID/access_tokens" | jq -er .token)"
+    export TF_VAR_github_token
+    unset JH JP JS NOW
+    trap 'curl -fsS -o /dev/null -X DELETE -H "Authorization: Bearer $TF_VAR_github_token" https://api.github.com/installation/token && echo TOKEN_REVOKED' EXIT
+    echo TOKEN_OK
+    RID="$(curl -fsS -H "Authorization: Bearer $TF_VAR_github_token" https://api.github.com/users/benjamin-blake | jq -er .id)"
     export TF_VAR_gated_apply_reviewer_user_ids="[$RID]"
     $TF -chdir="$D" state pull > "$HOME/tfgithub/pre-rekey.tfstate"
     test -s "$HOME/tfgithub/pre-rekey.tfstate"
@@ -1011,25 +1009,34 @@ execution_steps:
     TF="$HOME/bin/terraform"
     D="$HOME/tfgithub/repo/terraform/github"
     export CHECKPOINT_DISABLE=1
+    b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
     APP_JSON="$(aws secretsmanager get-secret-value --region eu-west-2 --secret-id agent-platform-terraform-github-apply-app --query SecretString --output text)"
-    export GITHUB_APP_ID="$(printf '%s' "$APP_JSON" | jq -er .app_id)"
-    export GITHUB_APP_INSTALLATION_ID="$(printf '%s' "$APP_JSON" | jq -er .installation_id)"
-    export GITHUB_APP_PEM_FILE="$(printf '%s' "$APP_JSON" | jq -er .private_key)"
+    APP_ID="$(printf '%s' "$APP_JSON" | jq -er .app_id)"
+    INST_ID="$(printf '%s' "$APP_JSON" | jq -er .installation_id)"
+    NOW="$(date +%s)"
+    JH="$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)"
+    JP="$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((NOW - 60))" "$((NOW + 540))" "$APP_ID" | b64url)"
+    JS="$(printf '%s.%s' "$JH" "$JP" | openssl dgst -sha256 -sign <(printf '%s' "$APP_JSON" | jq -er .private_key) -binary | b64url)"
     unset APP_JSON
-    RID="$(curl -fsS https://api.github.com/users/benjamin-blake | jq -er .id)"
+    TF_VAR_github_token="$(curl -fsS -X POST -H "Authorization: Bearer $JH.$JP.$JS" -H 'Accept: application/vnd.github+json' -d '{"repositories":["ontheloop"]}' "https://api.github.com/app/installations/$INST_ID/access_tokens" | jq -er .token)"
+    export TF_VAR_github_token
+    unset JH JP JS NOW
+    trap 'curl -fsS -o /dev/null -X DELETE -H "Authorization: Bearer $TF_VAR_github_token" https://api.github.com/installation/token && echo TOKEN_REVOKED' EXIT
+    echo TOKEN_OK
+    RID="$(curl -fsS -H "Authorization: Bearer $TF_VAR_github_token" https://api.github.com/users/benjamin-blake | jq -er .id)"
     $TF -chdir="$D" apply -input=false rekey.tfplan
     shred -u "$D/rekey.tfplan"
-    export TF_VAR_github_app_auth=true TF_VAR_gated_apply_reviewer_user_ids="[$RID]"
+    export TF_VAR_gated_apply_reviewer_user_ids="[$RID]"
     rc=0
     $TF -chdir="$D" plan -input=false -lock=false -detailed-exitcode >/dev/null || rc=$?
     echo "POST_PLAN_EXIT=$rc"
     test "$rc" -eq 0
     PASTEB
 
-    The saved plan holds only github_app_auth and the reviewer ids as variable values; the App credentials are
-    re-read from the environment at apply time, which is why paste B exports them again. Paste B resolves the reviewer
-    id before the apply (an anonymous lookup that could be rate-limited must fail before any write) and exports the
-    TF_VAR_ values only after it, for the re-plan.
+    The saved plan holds only the reviewer ids as a variable value: github_token is ephemeral, so paste B mints a fresh
+    token for the apply (Terraform refuses the apply without it, and paste A's token may have expired). Every lookup
+    and the mint run before the apply, so a failure there writes nothing; the reviewer ids are exported after it, for
+    the re-plan (a saved-plan apply ignores non-ephemeral TF_VAR_ values).
   - |-
     Paste R (rollback, only when VP step 13, 14 or 15 says so, before or instead of any retry):
 
@@ -1038,7 +1045,7 @@ execution_steps:
     unset GITHUB_TOKEN GITHUB_OWNER GITHUB_ORGANIZATION TF_VAR_github_token TF_LOG TF_LOG_PROVIDER
     TF="$HOME/bin/terraform"
     D="$HOME/tfgithub/repo/terraform/github"
-    export CHECKPOINT_DISABLE=1 TF_VAR_github_app_auth=true
+    export CHECKPOINT_DISABLE=1
     if [ -e "$D/rekey.tfplan" ]; then shred -u "$D/rekey.tfplan"; fi
     $TF -chdir="$D" state push -force "$HOME/tfgithub/pre-rekey.tfstate"
     $TF -chdir="$D" state list
