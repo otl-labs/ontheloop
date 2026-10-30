@@ -19,12 +19,6 @@ phase: >-
   carries the wording check, the plan-defect alarm and the skill texts, and builds after this one.
 closes_criteria: []
 scope:
-  - file: docs/plans/approved/plan-lint.yaml
-    action: Create
-    purpose: >-
-      Lands WITH THIS PLAN (plan PR), not in the build. The approved-text sidecar (schema_version 1, 4 blocks, all on
-      docs/contracts/plan-obligations.yaml; `{{DATE}}` is the only placeholder). The build applies it verbatim and
-      validate_merge_step binds the merged words to it (git-ops.yaml approved_text_binding).
   - file: docs/contracts/plan-obligations.yaml
     action: Modify
     purpose: >-
@@ -35,10 +29,12 @@ scope:
   - file: scripts/roadmap/plan_lint/__init__.py
     action: Create
     purpose: >-
-      Facade. derive(plan: dict, root: Path) -> LintResult(gating: list[str], advisory: list[str]); reads the rows
-      through _rows, dispatches each row id to its derivation, puts a row's findings under gating or advisory by the
-      row's own `gating` flag (never a second copy in code), and turns a row with no derivation, a derivation with no
-      row, or any derivation exception into one gating finding naming it. Never raises.
+      Facade. derive(plan: dict, root: Path, *, report: bool = False) -> LintResult(gating, advisory: list[str]); a
+      STATIC dispatch table maps the eight row ids to derivations. It reads the rows through _rows and runs each row by
+      its own `gating` flag (never a second copy in code): gating rows always, advisory rows only when report=True, so
+      the CI check path (report=False) never runs git log, the shard walk or anything network-backed (acceptance is
+      not in this table at all; see acceptance.py). A contract row with no table entry, a table entry with no row, or
+      any derivation exception becomes one gating finding naming it. Never raises.
   - file: scripts/roadmap/plan_lint/_rows.py
     action: Create
     purpose: >-
@@ -53,8 +49,9 @@ scope:
       scoped module gated Entries reach when no new_imports is declared. accounting_baseline_strike: Modify rows whose
       file is the module (Entry.module from registry._ALL_ENTRIES, no check import) of a name in
       config/check_accounting_baseline.yaml `entries` require that file in scope. class_d_amendment_entry: Modify rows on
-      docs/contracts/*.yaml whose file has a top-level amendment_log require the token amendment_log in that row's
-      purpose. registry_shard_disposition: Modify/Delete rows on tests/**.py named by a shard's check_spec.node_id
+      docs/contracts/*.yaml whose contract.class is D and that carry an amendment_log (the scoping
+      scripts/checks/contracts/_population.check_amendment_log_for_class_d uses) require the token amendment_log in that
+      row's purpose; Class A/B/C contracts are left to validate_contract_drift's own field rule. registry_shard_disposition: Modify/Delete rows on tests/**.py named by a shard's check_spec.node_id
       prefix or check_spec.command text require that shard's path in scope or its check_id anywhere in the plan text.
       frozen_companions: names the test and breaks_when for each scoped source matching a row's source glob.
   - file: scripts/roadmap/plan_lint/headroom.py
@@ -65,49 +62,66 @@ scope:
       scripts.checks.structural._classify for governed non-Python files; bytes against a path key of
       config/prose_budgets.yaml for prose files; NEAR_CAP when headroom < 5% of the limit. unbuilt_same_file: plans with
       schema_version >= 4, implementation_declared not true and added in the last 30 days (ONE `git log --diff-filter=A
-      --since=30.days --name-only -- docs/plans/` call, never one per plan) whose scope lists the same file.
+      --since=30.days --name-only -- docs/plans/` call, never one per plan) whose scope lists the same file, excluding
+      the plan under report.
   - file: scripts/roadmap/plan_lint/acceptance.py
     action: Create
     purpose: >-
-      acceptance_decidable: fetches bundled_recommendations through src.common.ducklake_reader_client (imported inside
-      the function) and runs scripts.executor.acceptance_lint.lint_acceptance_command(require_decidable=True) on each
-      acceptance; any reader exception yields one advisory UNREACHABLE line, never a raise. Called from the --plan report
-      only, never from evaluate_plan (the CI check has no reader credentials).
+      acceptance_decidable, run ONLY as a subprocess (`sys.executable -m scripts.roadmap.plan_lint.acceptance <rec ids>`,
+      cwd ROOT, timeout 60 s) from plan_obligations.build_report and imported by no module, so neither the reader nor
+      scripts.executor.acceptance_lint (whose deferred imports reach about 57 executor, ops-portal and DuckLake paths)
+      enters any gated Entry's import closure. Its main fetches the recs through src.common.ducklake_reader_client and
+      runs lint_acceptance_command(require_decidable=True) on each acceptance, printing one line per rec; any failure,
+      non-zero exit or timeout becomes one advisory UNREACHABLE line in the report, never a raise.
   - file: scripts/roadmap/plan_obligations.py
     action: Modify
     purpose: >-
-      evaluate_plan appends plan_lint.derive(...).gating (prefixed with the plan name) after the registration findings;
-      build_report adds a "derived findings (advisory)" section with the advisory lines and the acceptance lines; the
-      module docstring names the new seam. The CLI still always exits 0. 437 -> about 460 lines (368 -> about 385 SLOC).
+      evaluate_plan appends plan_lint.derive(..., report=False).gating (prefixed with the plan name) after the
+      registration findings; build_report calls derive(..., report=True) and adds a "derived findings (advisory)"
+      section with the advisory lines and the acceptance subprocess's lines; the module docstring names the new seam.
+      The CLI still always exits 0. validate_test_coverage maps this module to tests/test_plan_obligations.py alone, so
+      the new lines are covered from that file. 437 -> about 460 lines (368 -> about 385 SLOC).
   - file: scripts/roadmap/plan_document.py
     action: Modify
     purpose: >-
       ScopeEntry gains `new_imports: list[str] = Field(default_factory=list)`, each a dotted first-party module name
       (regex ^(scripts|src|tests)(\.[A-Za-z_][A-Za-z0-9_]*)+$). 485 SLOC, NEAR_CAP: if the edit takes it past 495 SLOC
       measured on the rebased branch, move ScopeEntry and its validator into scripts/roadmap/plan_scope_entry.py and
-      re-export it from plan_document (facade, Decision 80/104/124) -- never a budget raise.
+      re-export it from plan_document (facade, Decision 80/104/124), with its tests in tests/test_plan_scope_entry.py
+      (validate_test_coverage maps the module there) -- never a budget raise.
   - file: scripts/checks/deps/validate_pre_glob_closure.py
     action: Modify
     purpose: >-
-      Public seam uncovered_after_edges(edges: Iterable[tuple[str, str]], root: Path) -> dict[str, list[str]]: copies
-      the import view, adds each edge (adding an absent target node whose repo path the dotted name gives), and returns,
-      per gated Entry name, the reported paths not reported on the unmodified view. Reuses _closure_view,
-      _gated_entries and _uncovered_and_suppressed; the registered check's behaviour is unchanged.
+      Public seam uncovered_after_edges(edges: Iterable[tuple[str, str]], new_paths: Mapping[str, str], root: Path) ->
+      dict[str, list[str]]: copies the import view, adds each edge, and returns, per gated Entry name, the closure paths
+      no pre_glob matches that the unmodified view does not already report. A target module absent from the tree
+      resolves through new_paths (dotted name -> the plan's Create row path, `x/__init__.py` when the plan creates
+      that, else `x.py`), because _module_to_repo_path returns None for a missing file and would drop it. Reuses
+      _closure_view, _closure_modules, _gated_entries and _glob_match; the registered check's behaviour is unchanged.
   - file: scripts/checks/roadmap/_manifest.py
     action: Modify
     purpose: >-
-      validate_plan_scope_closure's pre_globs gain exactly the globs validate_pre_glob_closure reports for the new import
-      closure (the pre_glob_closure obligation, applied to this plan by hand because its own field lands here).
+      validate_plan_scope_closure's pre_globs gain exactly the per-path or per-directory globs validate_pre_glob_closure
+      reports for the new import closure (plan_lint -> validate_pre_glob_closure, registry, structural._classify and
+      their imports; measured at critique about 7 paths once acceptance is a subprocess), never `scripts/**`, `src/**`
+      or `scripts/checks/**` (TestPaydownDirection). The pre_glob_closure obligation, applied to this plan by hand
+      because its own field lands here.
+  - file: scripts/checks/verification/_manifest.py
+    action: Modify
+    purpose: >-
+      validate_admin_root_premerge_gate imports scripts.roadmap.plan_obligations (validate_admin_root_premerge_gate.py
+      line 24) and globs only scripts/roadmap/plan_obligations.py, so its pre_globs gain scripts/roadmap/plan_lint/**
+      plus the same closure globs as the row above, exactly as validate_pre_glob_closure reports them.
   - file: tests/test_plan_obligations.py
     action: Modify
     purpose: >-
       The six module-level tests the bundled recs' acceptances name: test_near_cap_structural_scope_row_is_reported,
       test_near_cap_report_names_unbuilt_plans_editing_the_same_file,
       test_scoped_import_edge_and_baselined_check_obligate_companions, test_undecidable_bundled_rec_acceptance_is_reported
-      (the reader is monkeypatched), test_class_d_contract_scope_row_obligates_amendment_entry,
+      (the acceptance module's fetch is injected; the report's subprocess call is replaced by a stub), test_class_d_contract_scope_row_obligates_amendment_entry,
       test_registry_shard_naming_a_scoped_test_is_reported. Relief (420 SLOC + about 110): TestDeriveFindingsEdgeCases and
       TestEnforcedElsewherePointerEdgeCases move unchanged to tests/roadmap/plan_obligations/test_edge_cases.py (no shard
-      names either). Shards naming this file stay valid and are kept: plan-obligations-accounting-pointer-reported,
+      names either), with the helpers they use (_base_scope, _write and the patch import), about 107 SLOC out. Shards naming this file stay valid and are kept: plan-obligations-accounting-pointer-reported,
       plan-obligations-grammar-guard-g1, plan-obligations-grammar-guard-g2, plan-obligations-grammar-guard-g3,
       plan-obligations-grammar-guard-g4, plan-obligations-grammar-guard-g5, plan-obligations-live-contract-grammar-clean,
       plan-obligations-workflow-taxonomy-rule.
@@ -116,7 +130,9 @@ scope:
     purpose: Package marker, matching tests/roadmap/plan_document/.
   - file: tests/roadmap/plan_obligations/test_edge_cases.py
     action: Create
-    purpose: The two moved classes, byte-identical bodies (relief for tests/test_plan_obligations.py).
+    purpose: >-
+      The two moved classes with byte-identical bodies, plus copies of the module helpers they call (relief for
+      tests/test_plan_obligations.py).
   - file: tests/roadmap/plan_lint/__init__.py
     action: Create
     purpose: Package marker.
@@ -129,10 +145,12 @@ scope:
   - file: tests/roadmap/plan_lint/test_derivations.py
     action: Create
     purpose: >-
-      Edge cases per derivation on tmp-path fixture repos: pre_glob edge to a not-yet-created module; an already-covered
-      edge gives nothing; a baselined check's module Modify; a contract without amendment_log gives nothing; a shard
-      kept by check_id; NEAR_CAP boundary at exactly 5%; an unbuilt plan older than 30 days is not named; a matching
-      frozen_companions row is named.
+      Edge cases per derivation on tmp-path fixture repos: pre_glob edge to a not-yet-created module (both .py and
+      __init__.py forms); an already-covered edge gives nothing; a baselined check's module Modify; a Class C contract
+      with an amendment_log gives nothing; a shard kept by check_id; NEAR_CAP boundary at exactly 5%; an unbuilt plan
+      older than 30 days is not named, nor is the plan under report; a matching frozen_companions row is named
+      (test_frozen_companion_is_named); the acceptance subprocess timing out gives UNREACHABLE; report=False runs no
+      advisory row.
   - file: tests/roadmap/plan_document/test_scope_new_imports.py
     action: Create
     purpose: new_imports accepted on any schema_version, defaults empty, refuses a non-dotted or non-first-party name.
@@ -145,9 +163,11 @@ scope:
   - file: tests/checks/roadmap/test_validate_plan_scope_closure.py
     action: Modify
     purpose: >-
-      A net-new v4+ plan with a gating derived finding fails the check; an advisory-only finding never does. Shards
-      naming this file are kept: plan-obligations-enforced-elsewhere-never-gates, plan-obligations-grammar-leg-unconditional,
-      plan-scope-closure-accounting-declared.
+      New class TestDerivedFindingsGate: a net-new v4+ plan with a gating derived finding fails the check; an
+      advisory-only finding never does. TestGatingUnchanged's docstring is reworded to say the registration verdict is
+      unchanged and derived gating rows add to it (its assertions hold: its fixture has no derived finding). Shards
+      naming this file are kept: plan-obligations-enforced-elsewhere-never-gates,
+      plan-obligations-grammar-leg-unconditional, plan-scope-closure-accounting-declared.
 bundled_recommendations: [rec-4383, rec-4751, rec-4752, rec-4754]
 followon_recs: []
 infrastructure_dependencies: []
@@ -191,8 +211,10 @@ verification_plan:
       the plan engine; a registry row would duplicate them.
   - step: 2
     phase: pre-deploy
-    action: Row dispatch, containment and per-derivation edge cases.
-    command: bin/venv-python -m pytest -q tests/roadmap/plan_lint tests/roadmap/plan_obligations
+    action: Row dispatch, containment, per-derivation edge cases and the closure seam.
+    command: >-
+      bin/venv-python -m pytest -q tests/roadmap/plan_lint tests/roadmap/plan_obligations
+      tests/checks/deps/validate_pre_glob_closure/test_uncovered_after_edges.py
     expected: exit 0; every test passes and none fails (the count is not pinned).
     fix_if: Fix the code, never the assertion.
     hermetic: true
@@ -211,11 +233,11 @@ verification_plan:
     graduation_waiver_reason: Ordinary unit tests selected by the --pre affected set.
   - step: 4
     phase: pre-deploy
-    action: The closure seam and the gating leg of the plan check.
-    command: >-
-      bin/venv-python -m pytest -q tests/checks/deps/validate_pre_glob_closure
-      tests/checks/roadmap/test_validate_plan_scope_closure.py
-    expected: exit 0; every test passes, including the existing shards' nodes.
+    action: The gating leg of the plan check (one selector, so the graduated registry row holds one node).
+    command: bin/venv-python -m pytest -q "tests/checks/roadmap/test_validate_plan_scope_closure.py::TestDerivedFindingsGate"
+    expected: >-
+      exit 0; every test passes. Red before: the class is absent on main (the existing suites in this file re-run in VP
+      step 6's --pre).
     fix_if: Fix the code, never the assertion.
     hermetic: true
     expected_literals: ["passed"]
@@ -250,10 +272,11 @@ verification_plan:
     action: Lint and format on the changed Python files.
     command: >-
       bin/venv-python -m ruff check scripts/roadmap scripts/checks/deps/validate_pre_glob_closure.py
-      scripts/checks/roadmap/_manifest.py tests/test_plan_obligations.py tests/roadmap tests/checks/deps/validate_pre_glob_closure
-      tests/checks/roadmap/test_validate_plan_scope_closure.py && bin/venv-python -m ruff format --check scripts/roadmap
-      scripts/checks/deps/validate_pre_glob_closure.py tests/test_plan_obligations.py tests/roadmap
-      tests/checks/deps/validate_pre_glob_closure tests/checks/roadmap/test_validate_plan_scope_closure.py
+      scripts/checks/roadmap/_manifest.py scripts/checks/verification/_manifest.py tests/test_plan_obligations.py
+      tests/roadmap tests/checks/deps/validate_pre_glob_closure tests/checks/roadmap/test_validate_plan_scope_closure.py
+      && bin/venv-python -m ruff format --check scripts/roadmap scripts/checks/deps/validate_pre_glob_closure.py
+      scripts/checks/roadmap/_manifest.py scripts/checks/verification/_manifest.py tests/test_plan_obligations.py
+      tests/roadmap tests/checks/deps/validate_pre_glob_closure tests/checks/roadmap/test_validate_plan_scope_closure.py
     expected: exit 0.
     fix_if: Run ruff format and fix lint.
     hermetic: false
@@ -281,17 +304,37 @@ verification_plan:
     graduation: not-applicable
 test_obligations:
   - source: scripts/roadmap/plan_lint/companions.py
-    behavior: The four gating derivations name the companion each forces.
+    behavior: pre_glob_closure and accounting_baseline_strike name the companion each forces.
     verification_step: 1
     test_selector: tests/test_plan_obligations.py::test_scoped_import_edge_and_baselined_check_obligate_companions
     red_green_expectation: red before (node absent on main), green after.
+  - source: scripts/roadmap/plan_lint/companions.py
+    behavior: A Class D contract Modify row owes its amendment_log entry.
+    verification_step: 1
+    test_selector: tests/test_plan_obligations.py::test_class_d_contract_scope_row_obligates_amendment_entry
+    red_green_expectation: red before (node absent on main), green after.
+  - source: scripts/roadmap/plan_lint/companions.py
+    behavior: A graduated shard naming a changed test needs a disposition.
+    verification_step: 1
+    test_selector: tests/test_plan_obligations.py::test_registry_shard_naming_a_scoped_test_is_reported
+    red_green_expectation: red before (node absent on main), green after.
+  - source: scripts/roadmap/plan_lint/companions.py
+    behavior: A scoped source matching a frozen_companions row names its freeze test.
+    verification_step: 2
+    test_selector: tests/roadmap/plan_lint/test_derivations.py::test_frozen_companion_is_named
+    red_green_expectation: red before (module absent on main), green after.
+  - source: docs/contracts/plan-obligations.yaml
+    behavior: Every derived_findings row has a derivation, and its gating flag decides gating versus advisory.
+    verification_step: 2
+    test_selector: tests/roadmap/plan_lint/test_rows_and_dispatch.py
+    red_green_expectation: red before (no derived_findings section or plan_lint on main), green after.
   - source: scripts/roadmap/plan_lint/headroom.py
     behavior: NEAR_CAP for a non-Python governed file and the unbuilt plans editing the same file.
     verification_step: 1
     test_selector: tests/test_plan_obligations.py::test_near_cap_report_names_unbuilt_plans_editing_the_same_file
     red_green_expectation: red before (node absent on main), green after.
   - source: scripts/roadmap/plan_lint/acceptance.py
-    behavior: An undecidable bundled-rec acceptance is reported; a reader failure is UNREACHABLE, never a raise.
+    behavior: An undecidable bundled-rec acceptance is reported through the subprocess; a failure is UNREACHABLE, never a raise.
     verification_step: 1
     test_selector: tests/test_plan_obligations.py::test_undecidable_bundled_rec_acceptance_is_reported
     red_green_expectation: red before (node absent on main), green after.
@@ -308,7 +351,7 @@ test_obligations:
   - source: scripts/roadmap/plan_obligations.py
     behavior: evaluate_plan carries gating derived findings; the report carries the advisory section; the CLI exits 0.
     verification_step: 4
-    test_selector: tests/checks/roadmap/test_validate_plan_scope_closure.py
+    test_selector: tests/checks/roadmap/test_validate_plan_scope_closure.py::TestDerivedFindingsGate
     red_green_expectation: red before (a gating derived finding does not fail the check on main), green after.
   - source: scripts/roadmap/plan_document.py
     behavior: scope[].new_imports accepted and validated.
@@ -317,9 +360,14 @@ test_obligations:
     red_green_expectation: red before (extra="forbid" refuses the key on main), green after.
   - source: scripts/checks/deps/validate_pre_glob_closure.py
     behavior: uncovered_after_edges reports only paths a declared edge newly uncovers.
-    verification_step: 4
+    verification_step: 2
     test_selector: tests/checks/deps/validate_pre_glob_closure/test_uncovered_after_edges.py
     red_green_expectation: red before (seam absent on main), green after.
+  - source: scripts/checks/verification/_manifest.py
+    behavior: validate_admin_root_premerge_gate's pre_globs cover plan_obligations' new import closure.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate --pre
+    red_green_expectation: red before (validate_pre_glob_closure reports the uncovered plan_lint paths without the globs), green after.
   - source: scripts/checks/roadmap/_manifest.py
     behavior: validate_plan_scope_closure's pre_globs cover its new import closure.
     verification_step: 6
@@ -345,11 +393,14 @@ context:
   - "Gating rule: a derived row gates only when its finding follows from the plan's own fields and committed files; anything needing the network (acceptance) stays advisory. The pre_glob row gates only on declared new_imports; an undeclared import still surfaces at build time as today."
   - "Wording check, done by hand on this plan's texts on main ef234dda (sidecar re-verified on b95997c6; no governed file changed): sidecar verify OK; the 22 test modules that read the five governed files, 705 passed; validate --pre exit 0, selection not degraded."
   - "Unbuilt plans on the same files (rec-4752 dogfood): PLAN-plan-fork-line-check (#1769) adds its own Entry to scripts/checks/roadmap/_manifest.py; PLAN-work-graph-edge-model edits validate_plan_documents.py (sibling plan's scope); plan PR #1683 (unmerged) also edits plan_obligations.py. Whichever builds second rebases."
-  - "Alignment: Benjamin 'write the plan' 2026-10-30T23:24Z (cmsg_017w1Kar4nqzb395d2mcyCJJ1L3JGX7xrYhBWJm58hVWdB), answering the request to approve the texts in /mnt/project-files/plan-b/v2/TEXTS-v2.md and its two sidecars (cmsg_017w1Kar4nqzb395d2mcyCJJF2xzVX1AcTqdssr9Z8tQg9)."
+  - "Alignment: Benjamin 'write the plan' 2026-10-30T23:24Z, answering the request to approve the texts in /mnt/project-files/plan-b/v2/TEXTS-v2.md and both sidecars (the approving message ids stay outside the repository, git-ops.yaml approved_text_binding)."
+  - "The sidecar docs/plans/approved/plan-lint.yaml lands in this plan PR and is no build scope row (PLAN-plan-fork-line-check precedent); validate_merge_step reads it from the diff base."
+  - "rec-3545 split: this plan's frozen_companions row is rec-3545's practical fix, but the rec's acceptance greps implement-scope-boundary.yaml, so PLAN-plan-defect-loop bundles and closes it."
   - "red_overlap 2026-10-30: clear (no reds)."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 9}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -367,8 +418,10 @@ execution_steps:
     Write the tests first (scope rows above) and record their red output on main in the PR body; then
     validate_pre_glob_closure's seam, plan_lint, the plan_obligations wiring and the ScopeEntry field.
   - >-
-    Run validate --pre and add to scripts/checks/roadmap/_manifest.py exactly the validate_plan_scope_closure pre_globs
-    validate_pre_glob_closure reports; no repo-wide glob (pre-glob-closure-no-repo-wide-glob-gained).
+    Run validate --pre and add to both manifests exactly the pre_globs validate_pre_glob_closure reports for
+    validate_plan_scope_closure and validate_admin_root_premerge_gate; no repo-wide glob
+    (pre-glob-closure-no-repo-wide-glob-gained). If it reports any executor, ops-portal or DuckLake path, an import
+    of acceptance.py has crept in: remove it rather than glob it.
   - >-
     Run VP steps 1-8; loop until pass; on an unrecoverable failure stop and raise the alarm per the implement skill
     (Decision 55).
