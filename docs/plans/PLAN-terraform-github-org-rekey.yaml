@@ -351,9 +351,15 @@ verification_plan:
       squash-merge sha. If the first command prints nothing (no ADMIN chain), hand steps 11 and 16 to an ADMIN session
       and wait.
     command: >-
-      aws sts get-caller-identity --profile agent_platform_admin --query Arn --output text 2>/dev/null | grep -q 'assumed-role/PlatformAdmin/'
+      bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null | grep -q 'assumed-role/PlatformAdmin/'
       && echo ADMIN_CHAIN_OK && R=/tmp/tfgithub-rekey && mkdir -p "$R" && test -n "$MERGE_SHA"
       && git fetch -q origin main && git merge-base --is-ancestor "$MERGE_SHA" origin/main
+      && git show origin/main:.github/workflows/terraform-github-plan.yml > "$R/plan-workflow.yml"
+      && git show origin/main:terraform/personal/oidc_pipeline_roles.tf > "$R/planner-roles.tf"
+      && grep -qE '^  pull_request:' "$R/plan-workflow.yml" && ! grep -q 'pull_request_target' "$R/plan-workflow.yml"
+      && grep -qF '"repo:${repo}:pull_request",' "$R/planner-roles.tf" && grep -qE 'sid += "TfstateGithubRead"' "$R/planner-roles.tf"
+      && test "$(git grep -l 'backend "s3"' origin/main -- terraform/github)" = "origin/main:terraform/github/main.tf"
+      && echo PR_PLAN_CHANNEL_OK
       && ! aws s3api head-object --bucket agent-platform-data-lake --key tfstate/github/terraform.tfstate.tflock --profile agent_platform_admin >/dev/null 2>&1
       && aws s3api head-object --bucket agent-platform-data-lake --key tfstate/github/terraform.tfstate --profile agent_platform_admin --query VersionId --output text > "$R/rollback-version"
       && test -s "$R/rollback-version"
@@ -362,11 +368,15 @@ verification_plan:
       && git show origin/main:terraform/github/variables.tf > "$R/variables.tf"
       && bin/venv-python -c "import json,re,sys; s=json.load(open(sys.argv[1])); rid=[r['instances'][0]['attributes']['id'] for r in s['resources'] if r.get('mode')=='managed' and r['type']=='github_repository_ruleset'][0]; d=re.search(r'main_protection_ruleset_id.*?default\s*=\s*(\d+)', open(sys.argv[2]).read(), re.S).group(1); assert rid==d, 'ruleset id in state differs from the variable default'; print('RULESET_ID_MATCH')" "$R/state-before.json" "$R/variables.tf"
     expected: >-
-      Prints ADMIN_CHAIN_OK, STATE_KEYED theseus count=5 resources=5 managed=5 and RULESET_ID_MATCH: the merge is on main, no lock
-      object exists, the current state version is saved as the rollback point (never printed or posted), the state is
+      Prints ADMIN_CHAIN_OK, PR_PLAN_CHANNEL_OK, STATE_KEYED theseus count=5 resources=5 managed=5 and RULESET_ID_MATCH:
+      the merge is on main, main's PR-time plan channel is the one this walk relies on (the workflow on pull_request,
+      the planner's PR-sub trust and its tfstate/github read, one backend block in main.tf), no lock object exists, the current state version is saved as the rollback point (never printed or posted), the state is
       still in the pre-re-key shape, and the ruleset import id the variable produces matches the state.
     fix_if: >-
-      No ADMIN_CHAIN_OK: run steps 11 and 16 from an ADMIN session, never with the PlatformDev profile. A lock object:
+      No ADMIN_CHAIN_OK (the helper prints the masked caller ARN): run steps 11 and 16 from an ADMIN session, never with
+      the PlatformDev profile, and never through a raw aws sts get-caller-identity, which the agent proxy re-signs as the
+      agent user (rec-4510). No PR_PLAN_CHANNEL_OK: rec-4638 (S5) or rec-4640 (S4) has landed, or terraform/github's
+      backend block moved; stop before paste A and escalate to the planning thread for an amendment (Decision 238). A lock object:
       someone is mid-operation; wait and ask the operator. count below 5, or managed above 5 (someone adopted the three new resources): the state
       changed since planning; stop and RCA before any paste. RULESET_ID_MATCH fails: the ruleset was recreated; escalate for a plan amendment.
   - step: 12
@@ -427,7 +437,11 @@ verification_plan:
     fix_if: >-
       Any other count, row or attribute: do NOT run paste B; restore per the rollback field and escalate to the
       planning thread. A tree mismatch (main changed terraform/github after the run's head): use a fresh
-      PR touching terraform/github instead of the re-run. A re-run that cannot start: escalate through the coordinator.
+      PR touching terraform/github instead of the re-run; that variant makes the approved gate-2 text ("re-run") untrue,
+      so record it in EVIDENCE.md and get the operator's word on new text through the coordinator before the closure PR
+      opens. A re-run that cannot start: escalate through the coordinator. A re-run that fails at the AWS OIDC step or
+      the state read (rec-4640 landed): no PR-time route is left; restore per the rollback field and escalate (Decision
+      238).
       A re-run that ends without a TF_GITHUB_PLAN_REPORT line (a CI failure before the report, such as a checkout
       error): re-run once more or use a fresh PR touching terraform/github, leaving the state as paste A left it; the
       rollback is for a real count, row or attribute mismatch only.
@@ -455,7 +469,7 @@ verification_plan:
     action: ADMIN, read-only -- verify from the live state object, not from the operator's report.
     command: >-
       aws s3 cp s3://agent-platform-data-lake/tfstate/github/terraform.tfstate - --profile agent_platform_admin --only-show-errors
-      | bin/venv-python -c "import json,sys; w=sys.argv[1]; old=sys.argv[2].split(','); s=json.load(sys.stdin); K={('github_repository','this'):'name',('github_repository_ruleset','main_protection'):'repository',('github_actions_repository_permissions','this'):'repository',('github_workflow_repository_permissions','this'):'repository',('github_repository_environment','tf_gated_apply'):'repository',('github_repository_environment','tf_trusted_plan'):'repository',('github_repository_environment_deployment_policy','tf_trusted_plan_main'):'repository',('github_repository_environment','deployment_approval_probe'):'repository'}; I={('github_repository','this'):w,('github_actions_repository_permissions','this'):w,('github_workflow_repository_permissions','this'):w,('github_repository_environment','tf_gated_apply'):w+':tf-gated-apply',('github_repository_environment','tf_trusted_plan'):w+':tf-trusted-plan',('github_repository_environment','deployment_approval_probe'):w+':deployment-approval-probe'}; F={(r['type'],r['name']):r['instances'][0]['attributes'] for r in s.get('resources',[]) if r.get('mode')=='managed' and (r['type'],r['name']) in K}; ok=[k for k,a in F.items() if a.get(K[k])==w and a.get('id')==I.get(k,a.get('id'))]; st=any(o in str(v) for o in old for a in F.values() for k2,v in a.items() if k2 in ('id','name','repository','full_name') or k2.endswith('_url')); rs=F.get(('github_repository_ruleset','main_protection'),{}); rp=F.get(('github_repository','this'),{}); b=len(rs.get('bypass_actors') or []); n=len(rp.get('security_and_analysis') or []); fn=str(rp.get('full_name','')); m=sum(1 for r in s.get('resources',[]) if r.get('mode')=='managed'); print('STATE_KEYED',w,'count=%d'%len(ok),'resources=%d'%len(F),'managed=%d'%m,'stale' if st else 'clean'); print('STATE_FIELDS bypass_actors=%d security_and_analysis=%d full_name=%s'%(b,n,'match' if fn=='otl-labs/'+w else 'MISMATCH')); assert len(ok)==8 and len(F)==8 and m==8 and not st and b==1 and n==1 and fn=='otl-labs/'+w" ontheloop theseus,benjamin-blake
+      | bin/venv-python -c "import json,sys; w=sys.argv[1]; old=sys.argv[2].split(','); s=json.load(sys.stdin); K={('github_repository','this'):'name',('github_repository_ruleset','main_protection'):'repository',('github_actions_repository_permissions','this'):'repository',('github_workflow_repository_permissions','this'):'repository',('github_repository_environment','tf_gated_apply'):'repository',('github_repository_environment','tf_trusted_plan'):'repository',('github_repository_environment_deployment_policy','tf_trusted_plan_main'):'repository',('github_repository_environment','deployment_approval_probe'):'repository'}; I={('github_repository','this'):w,('github_actions_repository_permissions','this'):w,('github_workflow_repository_permissions','this'):w,('github_repository_environment','tf_gated_apply'):w+':tf-gated-apply',('github_repository_environment','tf_trusted_plan'):w+':tf-trusted-plan',('github_repository_environment','deployment_approval_probe'):w+':deployment-approval-probe'}; F={(r['type'],r['name']):r['instances'][0]['attributes'] for r in s.get('resources',[]) if r.get('mode')=='managed' and (r['type'],r['name']) in K}; PX={('github_repository_environment_deployment_policy','tf_trusted_plan_main'):w+':tf-trusted-plan:'}; ok=[k for k,a in F.items() if a.get(K[k])==w and a.get('id')==I.get(k,a.get('id')) and str(a.get('id')).startswith(PX.get(k,''))]; st=any(o in str(v) for o in old for a in F.values() for k2,v in a.items() if k2 in ('id','name','repository','full_name') or k2.endswith('_url')); rs=F.get(('github_repository_ruleset','main_protection'),{}); rp=F.get(('github_repository','this'),{}); b=len(rs.get('bypass_actors') or []); n=len(rp.get('security_and_analysis') or []); fn=str(rp.get('full_name','')); m=sum(1 for r in s.get('resources',[]) if r.get('mode')=='managed'); print('STATE_KEYED',w,'count=%d'%len(ok),'resources=%d'%len(F),'managed=%d'%m,'stale' if st else 'clean'); print('STATE_FIELDS bypass_actors=%d security_and_analysis=%d full_name=%s'%(b,n,'match' if fn=='otl-labs/'+w else 'MISMATCH')); assert len(ok)==8 and len(F)==8 and m==8 and not st and b==1 and n==1 and fn=='otl-labs/'+w" ontheloop theseus,benjamin-blake
     expected: >-
       Prints STATE_KEYED ontheloop count=8 resources=8 managed=8 clean and STATE_FIELDS bypass_actors=1 security_and_analysis=1
       full_name=match: every instance keyed on ontheloop with the expected ids, no old owner or name left in their
@@ -683,13 +697,22 @@ constraints:
     Out of scope (step 6b decided with notice): the PR-time plan workflow and report script, terraform/github/CLAUDE.md,
     environment-taxonomy.yaml (rec-4538 switches the runbook and the apply_gating row when it revokes the PAT),
     rec-4549, rec-4593, rec-4610.
+  - >-
+    Sequencing (Decision 238): the walk from the build PR's open to E2 (VP step 19) relies on today's PR-time plan
+    channel, terraform-github-plan.yml on pull_request under the planner's PR-sub session (cl.6's accepted interim).
+    rec-4638 (S5) moves that workflow and rec-4640 (S4) deletes the PR-sub trust, so neither merges before E2 passes
+    (the coordinator holds them). The start gate and VP step 11 check the channel; if either has landed, stop for a
+    plan amendment.
   - No rescue agents or workaround loops (Decision 55).
 context:
   - >-
     Decision-scout verdict FLAGS_FOUND. CITE: 218, 172, 126, 77, 119, 83, 101, 201. Decisions triaged: 188 of 188;
     roadmap items intersected 3, CONFLICT 0. NOTE 100 adopted (rollback on the recorded S3 version); NOTE 92 (the
-    taxonomy row names the PAT) deferred to rec-4538 by the operator. Report: /mnt/project-files/rec-4355/scout-report.md.
-  - 'gates: decision-scout=FLAGS_FOUND (two NOTEs, resolved); red_overlap={"verdict": "clear", "reds": []}; plan-critique=PENDING (re-grounding 2026-10-30 on main c7dca7bd; the 2026-10-26 amendment: PROCEED after 2 rounds, swept against Decision 100: no conflict; the original plan: PROCEED after 2 rounds)'
+    taxonomy row names the PAT) deferred to rec-4538 by the operator. Re-grounding sweep 2026-10-30 (Decisions 237-239,
+    decided after the scout): CITE 238 (the E-gates ride cl.6's accepted interim, the planner's PR-sub state read until
+    rec-4640; VP steps 11 and 16 read state as PlatformAdmin, the admin tier outside cl.1's agent-obtainable
+    identities, Decision 126); 237 cl.3 agrees with the ephemeral token lane; 239 does not apply. Report: /mnt/project-files/rec-4355/scout-report.md.
+  - 'gates: decision-scout=FLAGS_FOUND (two NOTEs, resolved); red_overlap={"verdict": "clear", "reds": []}; plan-critique=PENDING (re-grounding 2026-10-30 on main c7dca7bd: round 1 REVISE, fixed (B1, B2, N1, N2, N4, N5; N3 declined: the plan App cannot read bypass_actors, which can show as ruleset drift, and the paste B App re-plan is the out-of-band check); the 2026-10-26 amendment: PROCEED after 2 rounds, swept against Decision 100: no conflict; the original plan: PROCEED after 2 rounds)'
   - >-
     Approval: "yes to all and write the plan" (cmsg_017f94mmYqSe3q2p9o6tPW3UA8nvZJGPJ3jHgH8DR31f9D, 2026-10-25) for
     /mnt/project-files/rec-4355/step6b-presentation.md: F1 A (env-lane app_auth), F2 A (record the code-owner rule as
@@ -726,20 +749,22 @@ context:
     taxonomy and (amended) terraform-github-plan.yml header texts. Precedent: PLAN-terraform-github-state-reconcile.
   - >-
     Gotchas: github-org-transfer.yaml at 499 of 500 effective lines on main c7dca7bd (494 after the build's
-    compaction and rows, 496 after the closure); in a cloud session the ADMIN profile may report the agent user rather
-    than assumed-role/PlatformAdmin (the agent proxy holds the key), so VP 11's ADMIN_CHAIN_OK can fail: follow its fix_if; E0's counts are recorded,
+    compaction and rows, 496 after the closure); VP 11 reads the caller through scripts.aws_identity caller-arn, because the
+    agent proxy re-signs a same-region GetCallerIdentity as the agent user (rec-4510); E0's counts are recorded,
     not gated; $*_REPORT hold reported text, $E*_LOG, $*_COMMENT, $*_BODY and $BUILD_REVIEWS are file paths.
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
-  - Only the plan-cited decision sections (218, 172, 126, 77, 119, 83, 101, 201)
+  - Only the plan-cited decision sections (218, 172, 126, 77, 119, 83, 101, 201, 238)
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
   - No open critical ci_rca rec (ducklake-reads ci_rca_open)
 execution_steps:
   - >-
     Start gate: this plan merged; no open critical ci_rca rec; main's github-org-transfer.yaml reads identity.phase
-    transferred with no staged_phase and the 2026-10-24 prove ledger entry present. Otherwise wait and tell the
+    transferred with no staged_phase and the 2026-10-24 prove ledger entry present; and main's PR-time plan channel is
+    unchanged (VP step 11's PR_PLAN_CHANNEL_OK predicates, from git show origin/main through PR_PLAN_CHANNEL_OK; they
+    need no ADMIN profile). Otherwise wait and tell the
     coordinator. Restart the harness branch from origin/main and set implementation_declared true in this plan.
   - |-
     terraform/github/variables.tf: replace the whole github_token block with exactly:
@@ -979,7 +1004,7 @@ execution_steps:
     mkdir "$X"
     cp "$D"/*.tf "$D/.terraform.lock.hcl" "$X/"
     awk '/^  backend "s3" \{/{skip=1} skip && /^  \}/{skip=0; next} !skip' "$D/main.tf" > "$X/main.tf"
-    if grep -q 'backend "s3"' "$X/main.tf"; then echo BACKEND_NOT_STRIPPED; exit 1; fi
+    if grep -l 'backend "s3"' "$X"/*.tf >/dev/null; then echo BACKEND_NOT_STRIPPED; exit 1; fi
     $TF -chdir="$D" state pull > "$X/terraform.tfstate"
     test -s "$X/terraform.tfstate"
     $TF -chdir="$X" init -input=false -lockfile=readonly >/dev/null
@@ -1106,15 +1131,15 @@ execution_steps:
     APPROVED DIFF closure docs/contracts/github-org-transfer.yaml -- operator-approved wording (context: approval); VP
     step 21 binds the closure PR's added and removed lines to these. Variance: YYYY-MM-DD (the date of the event each
     row records), #NNNN (the build PR), <E0> (VP step 9's counts as "I to import, A to add, C to change, D to destroy",
-    or "a plan error") and <E2> (VP step 19's variant). If E1's ruleset row read no-op (VP step 14), the gate-2 row
-    needs the operator's word on new text first. The amendment_log row goes after the build PR's row (the last row);
+    or "a plan error") and <E2> (VP step 19's variant). If E1's ruleset row read no-op or E1 ran on a fresh PR (VP step
+    14), the gate-2 row needs the operator's word on new text first. The amendment_log row goes after the build PR's row (the last row);
     the ledger rows after the last 2026-10-24 entry.
 
     +  - {date: "YYYY-MM-DD", semantic_break: false, change_class: governance_note_add, summary: "PLAN-terraform-github-org-rekey (rec-4355): phases.prove gate 2 and gate 1's code-owner review recorded in evidence_ledger, the latter with its unproven part named (rec-4625); identity.phase proven and staged_phase cleared."}
     -  phase: transferred
     -  staged_phase: proven
     +  phase: proven
-    +  - {date: "YYYY-MM-DD", phase: prove, gate: "phases.prove gate 2 (breakage_map.terraform_github_root)", observation: "Re-key (rec-4355) with the terraform/github apply App from AWS CloudShell. Before it the PR-time terraform/github plan on #NNNN read <E0>, the state still keyed on theseus. After the #NNNN merge: state rm of the five name-keyed addresses; the PR-time plan, re-run on otl-labs/ontheloop, read 8 to import (the five and three environment resources added since, rec-4636 and rec-4695), 0 to add, 0 to change, 0 to destroy, the ruleset's import also updating bypass_actors alone, which the plan App cannot read; the import-only apply under the App read 8 imported, 0 added, 0 changed, 0 destroyed and its re-plan read No changes; the state then held the eight keyed on ontheloop with the ruleset's bypass_actors and the repository's security_and_analysis. The PR-time plan then read <E2>.", evidence_path: "rec-4355/EVIDENCE.md"}
+    +  - {date: "YYYY-MM-DD", phase: prove, gate: "phases.prove gate 2 (breakage_map.terraform_github_root)", observation: "Re-key (rec-4355) with the terraform/github apply App from AWS CloudShell. Before it the PR-time terraform/github plan on #NNNN read <E0>, the state still keyed on theseus. After the #NNNN merge: state rm of the five name-keyed addresses; the PR-time plan, re-run on otl-labs/ontheloop, read 8 to import (the five, plus three resources for the tf-trusted-plan and deployment-approval-probe environments added since, rec-4636 and rec-4695), 0 to add, 0 to change, 0 to destroy, the ruleset's import also updating bypass_actors alone, which the plan App cannot read; the import-only apply under the App read 8 imported, 0 added, 0 changed, 0 destroyed and its re-plan read No changes; the state then held the eight keyed on ontheloop with the ruleset's bypass_actors and the repository's security_and_analysis. The PR-time plan then read <E2>.", evidence_path: "rec-4355/EVIDENCE.md"}
     +  - {date: "YYYY-MM-DD", phase: prove, gate: "phases.prove gate 1 (code-owner review)", observation: "On otl-labs/ontheloop the main-protection ruleset requires code-owner review (the apply App's No changes plan), the CODEOWNERS errors API is empty, and GitHub's rule-suite insights evaluated the pull_request rule on the merge of #NNNN, a terraform/github change: pass, not bypass, with no review recorded, because a pull request authored by the sole code owner needs none; the operator approved its head in the project thread before the merge. Not proven on the new path: that a pull request by anyone else on a code-owner path waits for the code owner's review (rec-4625).", evidence_path: "rec-4355/EVIDENCE.md"}
   - |-
     APPROVED DIFF closure docs/contracts/account-credential-inventory.yaml -- operator-approved wording (stage_rule
@@ -1137,7 +1162,8 @@ execution_steps:
     +  - {date: "YYYY-MM-DD", row: GH-09, status: proven, evidence: "rec-4355 (docs/plans/PLAN-terraform-github-org-rekey.yaml VP 14): the PR-time terraform/github plan on PR #NNNN authenticated through the otl-labs installation and read the moved repository; uninstalling it from the personal account, making it private and rotating its key stay with rec-4538"}
   - >-
     Closure PR, after VP step 20: restart the harness branch from origin/main; apply execution_steps steps 15 and 16
-    with the placeholders filled from EVIDENCE.md; VP steps 6, 7, 8 and 21; push; open the PR (title: record the
+    with the placeholders filled from EVIDENCE.md (if main added contract lines since and the closure would pass 500
+    effective lines, stop and route a layout-only compaction to the operator first); VP steps 6, 7, 8 and 21; push; open the PR (title: record the
     terraform/github re-key and flip identity.phase to proven, rec-4355); subscribe_pr_activity; code review; squash-merge
     on code review PROCEED and green CI with "Resolves: rec-4355" in the commit body (the approved wording needs no new
     word; any change to it does). Then VP steps 22 and 23 (message the coordinator the moment main reads proven), and
