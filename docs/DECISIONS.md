@@ -6400,6 +6400,8 @@ This Decision is the structural mechanism Decision 145's own reversal conditions
 
 [Amendment 2026-08-17: the commit-subject resolution mechanism this entry describes (`feat({slug})` commit subjects on `git log origin/main..HEAD`) is replaced by an explicit, schema-validated `implementation_declared` boolean on `PlanDocument`, resolved content-keyed via `scripts.checks._common.resolve_declared_plans` (PLAN-plan-resolution-content-keyed, provenance: explicit operator direction given during that plan's authoring). The two-leg model and advisory-SKIP shape this entry describes are unchanged; only the resolution signal moves from commit-message grammar to diff-carried plan content.]
 
+[Amendment 2026-10-31: point 2's resolution order gains `OTL_VENV_PYTHON` ahead of `.venv`. When set, `bin/venv-python` execs that interpreter if it is an executable file, else exits 1 naming the path; it never falls through to `.venv` or the PATH fallback (Decision 55 fail-loud kept). Its only setter is the CI-parity re-exec in `scripts/checks/deps/fast_tier_env.py` (PLAN-fast-tier-ci-parity, rec-4761), so the agent container's `validate --pre` subprocesses stay in the CI-shaped environment. The unset path, the sentinel-and-version fallback, and points 1 and 3 are unchanged.]
+
 ---
 
 ## Decision 147: Respond to Decision 114 reversal trigger by compacting ROADMAP-PLATFORM.yaml terminal content in place (single file preserved) (Decided)
