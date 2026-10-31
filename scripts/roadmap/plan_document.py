@@ -7,9 +7,9 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_serializer, model_validator
 
 from scripts.contract_rules import parse_yaml
 from scripts.roadmap.vp_literals import (
@@ -71,6 +71,16 @@ class ScopeEntry(BaseModel):
     file: str = Field(min_length=1)
     action: ScopeAction
     purpose: str = Field(min_length=1)
+    new_imports: list[Annotated[str, Field(pattern=r"^(scripts|src|tests)(\.[A-Za-z_][A-Za-z0-9_]*)+$")]] = Field(
+        default_factory=list
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_new_imports(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if not data.get("new_imports"):
+            data.pop("new_imports", None)
+        return data
 
 
 class VerificationStep(BaseModel):
