@@ -53,6 +53,11 @@ def test_escalation_choice_requires_an_escalation() -> None:
         GateRound.model_validate(_row(verdict="REVISE", blocking=1, escalation_choice="one more round"))
 
 
+def test_escalation_choice_is_the_five_choice_menu() -> None:
+    with pytest.raises(ValidationError):
+        GateRound.model_validate(_row(verdict="REVISE", blocking=1, escalated=True, escalation_choice="merge"))
+
+
 def test_negative_counts_are_refused() -> None:
     with pytest.raises(ValidationError):
         GateRound.model_validate(_row(nits=-1))

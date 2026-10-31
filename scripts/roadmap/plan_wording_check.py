@@ -144,7 +144,7 @@ def _lower_prose_budgets(tree: Path, sidecar_files: set[str], runner: Runner) ->
     text = path.read_text(encoding="utf-8")
     for key, size in _budget_key_sizes(surfaces, sidecar_files).items():
         pattern = re.compile(rf"^(\s*{re.escape(key)}:\s*)(\d+)", re.MULTILINE)
-        text = pattern.sub(lambda m, s=size: f"{m.group(1)}{min(int(m.group(2)), s)}", text, count=1)
+        text = pattern.sub(lambda m: f"{m.group(1)}{min(int(m.group(2)), size)}", text, count=1)  # noqa: B023
     path.write_text(text, encoding="utf-8")
 
 

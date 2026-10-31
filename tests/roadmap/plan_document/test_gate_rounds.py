@@ -44,7 +44,9 @@ def test_a_full_record_validates() -> None:
         _wording(2),
     ]
     doc = PlanDocument.model_validate(_v5(gate_rounds=rows))
-    assert [(r.gate, r.round, r.verdict) for r in doc.gate_rounds][-1] == ("wording-check", 2, "PASS")
+    critique = [(r.gate, r.round, r.verdict) for r in doc.gate_rounds if r.gate == "plan-critique"]
+    assert critique[-1] == ("plan-critique", 3, "PROCEED")
+    assert doc.gate_rounds[-1].gate == "wording-check"
 
 
 @pytest.mark.parametrize("rounds", [[2], [1, 3], [2, 1], [1, 1]])
