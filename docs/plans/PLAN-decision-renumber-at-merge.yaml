@@ -45,11 +45,14 @@ scope:
     The decision_numbering class, importable and side-effect free at import. Headings are read only through
     scripts.decisions_md.iter_decision_headings (Decision 134 clause 3); file text at a ref via `git show`.
     numbers_at(root, ref) -> set[int] over DECISIONS.md and DECISIONS_ARCHIVE.md at ref. branch_added(root, base) ->
-    list[int]: numbers of heading lines added in `git diff -U0 <base>...HEAD -- docs/DECISIONS.md`.
+    list[int]: numbers with a heading in DECISIONS.md at HEAD that are in neither corpus file at base, so a
+    retitled, compacted or superseded heading of an existing Decision (Decision 177 point 2 stubs) is never "added".
     collisions(root, onto="origin/main") -> dict[int, int]: branch_added against merge-base(onto, HEAD) intersected
     with numbers_at(onto), mapped in ascending order to MAX(numbers_at(onto) | set(branch_added)) + 1, + 2, ...
     (used by merge_step premerge; writes nothing). renumber(root, onto) -> Result(mapping, rewrites, bare): on the
-    rebased working tree, the same mapping with MAX over the working-tree files, applied in ONE simultaneous pass per
+    rebased working tree a collision is a branch_added number (base = the pre-rebase merge-base, recorded by
+    rebase_resolve) that has two headings across the working-tree corpus; the branch's heading is the one on a line
+    `git diff -U0 <onto>...HEAD` reports added. Same ascending mapping with MAX over the working-tree files, applied in ONE simultaneous pass per
     line (a dict lookup, so 240->242 and 241->243 never chain) and only on lines `git diff -U0 <onto>...HEAD` reports
     added, in every changed file. Recognised forms, each anchored so a longer number never matches: the heading;
     envelope `number: N`; `**Warehouse ID:** dec-0NN` (rewritten zero-padded to 3); `Decision N`; a `Decisions` run
@@ -70,11 +73,14 @@ scope:
     Warehouse ID, rewrites a sloc_budgets raise marker, reports a bare token (and never rec-4239 or a date), reports a
     branch-added `"number": <old>` in a non-Decision file (a JSON fixture) and a `+`-joined run as bare and leaves
     them unrewritten, and
-    imports the heading grammar from scripts.decisions_md (no heading regex in the module).
+    imports the heading grammar from scripts.decisions_md (no heading regex in the module). A branch that retitles an
+    existing Decision's heading, or turns it into a `(Superseded by Decision Y)` stub, gets no collision and no
+    renumber (critique round 2, finding 1).
 - file: scripts/session/rebase_resolve.py
   action: Create
   purpose: >-
-    CLI `bin/venv-python -m scripts.session.rebase_resolve` (no arguments; the caller fetches first, per git-ops
+    CLI `bin/venv-python -m scripts.session.rebase_resolve` (no arguments; it acts on `git rev-parse --show-toplevel`
+    of the cwd, never a root derived from __file__; the caller fetches first, per git-ops
     commit_flow_time). load_classes(root) parses docs/contracts/mechanical-conflicts.yaml (the literal basename lives
     here; validate_mechanical_conflicts imports this loader). Refuses (exit 2, `RESOLVE REFUSED <reason>`) a dirty
     tree or a rebase already in progress. Runs `git -c merge.conflictStyle=diff3 rebase origin/main`; at each stop,
@@ -95,7 +101,9 @@ scope:
     commit_message_conventions are unaffected) and whose body carries the printed lines; print one line per
     resolution, renumber and rewrite, then `RESOLVE CLEAN`, exit 0. Not clean: leave the rewrites uncommitted, print each
     `BARE <file>:<line> <token>`, `PARSE <path>: <error>` or `APPROVED-TEXT <message>` line, then `RESOLVE NOT CLEAN`,
-    exit 1. Never pushes, never runs the full tier. Never raises at import. Under 500 SLOC.
+    exit 1. Never pushes, never runs the full tier. Never raises at import. Under 500 SLOC; if it would exceed, the
+    per-hunk resolution moves to a sibling scripts/session/rebase_resolve_hunks.py (with
+    tests/test_session_rebase_resolve_hunks.py, Decision 131) -- stop and report the scope amendment.
 - file: tests/test_session_rebase_resolve.py
   action: Create
   purpose: >-
@@ -106,13 +114,19 @@ scope:
     undeclared file and an excluded file each abort with RESOLVE STOP and leave the branch exactly as before; a
     duplicate key after union prints PARSE and NOT CLEAN; a bare token prints NOT CLEAN with nothing committed; a
     literal old number in a declared plan's sidecar prints APPROVED-TEXT and NOT CLEAN; a dirty tree is refused; no
-    conflict is a clean no-op; nothing is pushed. The real_corpus case (VP 9) runs on `git clone --local` of this
-    repo into tmp_path, a full repo with its own refs (a `git worktree` shares refs, and the case must set
-    origin/main): in the clone, origin/main is moved with `git update-ref` to a commit adding Decision MAX + 1 and a
-    branch adds the same number; install_venv_python links the venv; rebase_resolve runs with the clone as cwd and
-    prints RESOLVE CLEAN with the branch Decision at MAX + 2 and `scripts.decisions_index --check` current in the
-    clone. The test asserts the real repo's docs/DECISIONS.md and docs/decisions-index.json hash the same before and
-    after and its refs/remotes/origin/main is unchanged.
+    conflict is a clean no-op; nothing is pushed. Every rebase_resolve subprocess gets a git identity and no signing
+    through the environment (GIT_AUTHOR_*/GIT_COMMITTER_* and GIT_CONFIG_COUNT=1, GIT_CONFIG_KEY_0=commit.gpgsign,
+    GIT_CONFIG_VALUE_0=false), since CI has no identity and CC-web signs by default. The real_corpus case (VP 9) runs
+    on `git clone --local` of this repo into tmp_path, a full repo with its own refs (a `git worktree` shares refs,
+    and the case must set origin/main). Setup in the clone: copy the working-tree scripts/session/rebase_resolve.py,
+    scripts/session/decision_renumber.py and docs/contracts/mechanical-conflicts.yaml in and commit them as the
+    clone's base (the clone holds committed HEAD only, and the VP loop runs before the Commit Flow); link the venv by
+    creating .venv/bin/python as a symlink to sys.executable directly (not install_venv_python, which rewrites the
+    tracked .gitignore and would trip the dirty-tree refusal); then move origin/main with `git update-ref` to a
+    commit adding Decision MAX + 1, and branch from the base adding the same number. rebase_resolve runs with the
+    clone as cwd and prints RESOLVE CLEAN with the branch Decision at MAX + 2 and `scripts.decisions_index --check`
+    current in the clone. The test asserts the real repo's docs/DECISIONS.md and docs/decisions-index.json hash the
+    same before and after and its refs/remotes/origin/main is unchanged.
 - file: .claude/skills/implement/SKILL.md
   action: Modify
   purpose: >-
@@ -144,7 +158,8 @@ scope:
   action: Modify
   purpose: >-
     New class TestPremergeDecisionCollision: a branch whose Decision number main took fails premerge with the
-    COLLISION line; a non-colliding branch Decision and a branch without one pass that arm.
+    COLLISION line; a non-colliding branch Decision, a branch without one, and a branch that only retitles an
+    existing Decision's heading pass that arm.
 - file: scripts/checks/contracts/validate_mechanical_conflicts.py
   action: Create
   purpose: >-
@@ -205,6 +220,12 @@ scope:
 - file: config/agent/verification_registry/entries/rebase-resolve-tests.yaml
   action: Create
   purpose: Graduated registry row for VP step 2 (test_selector, guard_target scripts/session/rebase_resolve.py).
+- file: config/agent/verification_registry/entries/supersession-duplicate-number-tests.yaml
+  action: Create
+  purpose: >-
+    Graduated registry row for VP step 5 (test_selector, guard_target
+    scripts/checks/decisions/validate_supersession_annotations.py; the existing supersession-envelope-borne-edges row
+    covers only TestEnvelopeBorneEdges).
 - file: config/agent/verification_registry/entries/mechanical-conflicts-check-tests.yaml
   action: Create
   purpose: Graduated registry row for VP step 3 (test_selector, guard_target the new check).
@@ -274,15 +295,16 @@ verification_plan:
     that row from the day it lands; a second row would duplicate it.
 - step: 5
   phase: pre-deploy
-  action: Cross-file duplicate FAIL and retired allowlist key, plus the guard on the real corpus.
+  action: Cross-file duplicate FAIL, retired allowlist key and the accounting declaration (the real corpus runs in
+    VP 10, where the check is in the fast tier).
   command: >-
     bin/venv-python -m pytest "tests/checks/decisions/test_validate_supersession_annotations.py::TestDuplicateNumberSubCheck"
-    "tests/checks/decisions/test_validate_supersession_annotations.py::TestAccounting" -q && bin/venv-python -c "from scripts.checks.decisions.validate_supersession_annotations import
-    validate_supersession_annotations as v; f = []; v(f); assert f == [], f; print('supersession-guard-ok')"
-  expected: All tests pass and the real corpus passes.
-  fix_if: A duplicate on main (none on 52769553) or a failing test.
+    "tests/checks/decisions/test_validate_supersession_annotations.py::TestAccounting" -q
+  expected: All tests pass.
+  fix_if: A failing test.
   hermetic: true
-  graduation: not-applicable
+  graduation: graduate
+  graduation_check_id: supersession-duplicate-number-tests
 - step: 6
   phase: pre-deploy
   action: rec-4323's stored acceptance at the PR head.
@@ -443,9 +465,16 @@ test_obligations:
   waiver_reason: validate_prose_limits in VP 10 fails current != budget either way.
 - source: config/decision_supersession_waivers.yaml
   behavior: The retired live_archive_pair_allowlist key is gone.
-  verification_step: 5
-  test_selector: tests/checks/decisions/test_validate_supersession_annotations.py::TestDuplicateNumberSubCheck
-  red_green_expectation: red before (the real-corpus guard in VP 5 fails on the retired key), green after
+  verification_step: 10
+  command: bin/venv-python -m scripts.validate --pre
+  waiver_reason: >-
+    One-line config removal; validate_supersession_annotations runs on the real waiver file in VP 10 and FAILs while
+    the retired key remains (TestDuplicateNumberSubCheck::test_retired_allowlist_key_fails pins that arm).
+- source: config/agent/verification_registry/entries/supersession-duplicate-number-tests.yaml
+  behavior: The graduated row names VP 5's selectors and the supersession check.
+  verification_step: 10
+  command: bin/venv-python -m scripts.validate --pre
+  waiver_reason: Registry data written by the graduation walk; validate_verification_registry and validate_graduation_completeness in VP 10 check it.
 - source: config/agent/verification_registry/entries/decision-renumber-tests.yaml
   behavior: The graduated row names VP 1's file and scripts/session/decision_renumber.py.
   verification_step: 10
@@ -491,7 +520,7 @@ context:
   (docs/decisions-index.json regenerated, not merged); 131 mirror test paths; 163 SPIRIT (allowlist retired). RELATED
   177, 149, 146, 167, 165, 235, 203, 196, 84, 150; T1.17 (PR #1393 edits the same check: whichever lands second
   rebases)."
-- "gates: decision-scout=FLAGS_FOUND; plan-critique=REVISE (round 1)"
+- "gates: decision-scout=FLAGS_FOUND; plan-critique=REVISE (round 2)"
 - "Operator rulings (Benjamin): 2026-10-30 split D into D1 (this) and D2 (rec-4793, after #1683's build); 2026-10-31
   bundle rec-4323 whole, approvals stand after a clean run, keep the full tier (rec-4794); 2026-10-31 12:34Z wording
   approved and 'write the plan'. Blind Fable consult: agreed on approvals, preferred a full-tier carve-out after a
@@ -509,6 +538,8 @@ context:
   CLEAN on the PR; approvals stand only after a clean run) -- rec-4796, which rec-4794's ten-run revisit also reads;
   the other plain-rebase paths (.claude/commands/plan.md and audit.md step 1, scripts/session/postflight.py
   run_rebase) -- rec-4795. Until rec-4796 lands, merge_step premerge's COLLISION arm is the mechanical backstop."
+- "Recognised-form gap (critique round 2, N-f): a singular `Decision N/M` run and a bare `N/M` run are bare hits,
+  narrower than the contract's wording; it fails safe (NOT CLEAN, human edit)."
 - "Line budget: git-ops.yaml lands at exactly 470 effective lines (simulated); VP 8 has zero slack by design, so
   the rewrap is required, not optional."
 - "Related-work check: scripts.ci_rca.red_overlap verdict clear (no open reds) on 2026-10-31."
@@ -548,7 +579,7 @@ execution_steps:
   validate_supersession_annotations.py (with the examined()/skipped() adoption), its test, the waiver file, the
   check-accounting baseline removal and the decisions _manifest.py comment (VP 5).
 - >-
-  Graduate VP 1-3 into the three registry rows; set implementation_declared true in this plan.
+  Graduate VP 1-3 and VP 5 into the four registry rows; set implementation_declared true in this plan.
 - >-
   Execute the Verification Plan; loop until pass; on unrecoverable failure stop and RCA (Decision 55).
 - 'Commit Flow: the implementation commit carries `Resolves: rec-4323`; full tier + --verify-head (VP 11); push; PR;
@@ -566,4 +597,9 @@ gate_rounds:
   round: 1
   verdict: REVISE
   blocking: 4
+  nits: 6
+- gate: plan-critique
+  round: 2
+  verdict: REVISE
+  blocking: 2
   nits: 6
