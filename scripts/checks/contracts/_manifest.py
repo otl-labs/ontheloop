@@ -315,6 +315,14 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_mechanical_conflicts",
+        module="scripts.checks.contracts.validate_mechanical_conflicts",
+        attr="validate_mechanical_conflicts",
+        pre=True,
+        pre_globs=None,
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_terraform_cc_web_operations",
         module="scripts.checks.contracts.validate_terraform_cc_web_operations",
         attr="validate_terraform_cc_web_operations",

@@ -67,11 +67,13 @@ def test_handoff_full_tier_runs_after_commit_and_rebase() -> None:
     verify_head_line = "bin/venv-python -m scripts.checks.validation_result --verify-head"
     assert (
         commit_flow.index("git commit")
-        < commit_flow.index("git rebase origin/main")
+        < commit_flow.index("scripts.session.rebase_resolve")
         < commit_flow.index(f"\n{_FULL_TIER}\n")
         < commit_flow.index(verify_head_line)
         < commit_flow.index("git push")
     )
+
+    assert "STOP on conflict" not in commit_flow
 
     for text in (skill, command):
         assert "pre-commit HEAD" not in text
