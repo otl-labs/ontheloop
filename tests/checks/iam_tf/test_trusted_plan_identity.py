@@ -2,7 +2,7 @@
 
 The trusted speculative-plan role: one environment- and job_workflow_ref-bound trust statement, exactly
 its pinned Sids over the shared refresh-read surface, no state write or saved-plan read, and both apply-side
-read lists naming it. The planner's TfplanWrite is upload-only.
+read lists naming it. The planner grants nothing on tfplan/*.
 """
 
 from __future__ import annotations
@@ -213,12 +213,13 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _planner_tfplan_actions(text: str) -> list[str]:
+def _planner_tfplan_grants(text: str) -> list[str]:
+    grants: list[str] = []
     for block in _hcl_statement_blocks(text):
         stmt = _parse_hcl_statement(block)
-        if stmt.sid == "TfplanWrite":
-            return stmt.actions
-    raise AssertionError("planner TfplanWrite not found")
+        if stmt.effect == "Allow" and any(_resource_covers(r, "tfplan/") for r in stmt.resources):
+            grants.append(stmt.sid)
+    return grants
 
 
 def test_bootstrap_iam_roles_read_lists_trusted_plan_role() -> None:
@@ -252,8 +253,8 @@ def test_role_has_one_inline_policy_and_no_attachments() -> None:
     assert attachment_counts([_read(p) for p in sorted(_PERSONAL.glob("*.tf"))]) == (1, 0)
 
 
-def test_planner_tfplan_write_is_upload_only() -> None:
-    assert _planner_tfplan_actions(_read(_PERSONAL / "oidc_pipeline_roles.tf")) == ["s3:PutObject"]
+def test_planner_grants_nothing_on_tfplan() -> None:
+    assert _planner_tfplan_grants(_read(_PERSONAL / "oidc_pipeline_roles.tf")) == []
 
 
 def test_red_pr_sub_in_trust() -> None:
@@ -320,10 +321,12 @@ def test_red_attachment_or_second_inline_policy() -> None:
 def test_red_boundary_and_planner_get_object() -> None:
     assert trust_problems(_read(_ROLE_FILE).replace("github-ci-apply-boundary", "other-boundary"))
     planner = _read(_PERSONAL / "oidc_pipeline_roles.tf").replace(
-        'sid       = "TfplanWrite"\n    effect    = "Allow"\n    actions   = ["s3:PutObject"]',
-        'sid       = "TfplanWrite"\n    effect    = "Allow"\n    actions   = ["s3:GetObject", "s3:PutObject"]',
+        'data "aws_iam_policy_document" "github_ci_planner" {',
+        'data "aws_iam_policy_document" "github_ci_planner" {\n  statement {\n    sid       = "TfplanWrite"\n'
+        '    effect    = "Allow"\n    actions   = ["s3:PutObject"]\n'
+        '    resources = ["${aws_s3_bucket.data_lake.arn}/tfplan/personal/*"]\n  }\n',
     )
-    assert _planner_tfplan_actions(planner) != ["s3:PutObject"]
+    assert _planner_tfplan_grants(planner) == ["TfplanWrite"]
 
 
 def test_resolved_policy_follows_nested_sources() -> None:
