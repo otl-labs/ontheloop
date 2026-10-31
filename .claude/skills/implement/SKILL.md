@@ -69,16 +69,16 @@ Acceptance commands prove the code landed (`grep`/`pytest`). Verification comman
    a. Execute the action exactly as described.
    b. Compare actual outcome to expected outcome.
    c. If **PASS**: record the actual output and proceed.
-   d. If **FAIL**: diagnose root cause, fix the code, re-run `pytest` to confirm no regressions, re-attempt. Maximum 3 fix attempts per step. If still failing, STOP and report to the human.
+   d. If **FAIL**: diagnose root cause, fix the code, re-run `pytest` to confirm no regressions, re-attempt. Maximum 3 fix attempts per step. If still failing, STOP (Deviation trigger (c)).
 2. **All verification steps must pass** before proceeding.
 
 ### Nondeterminism rule (VF-08, Decision 55 -- RCA-first, not retry-into-green)
 Track Attempts per step (see VP Compliance Gate below). This rule governs what a re-run is allowed to mean:
 - If a step **FAILS** and is then re-run with an **EMPTY `git diff`** since the prior attempt (i.e. nothing in the tree changed) and the re-run goes green, the step is **NONDETERMINISTIC** -- record it as NONDETERMINISTIC in the VP compliance table, never as PASS. An empty-diff green is evidence the failure was flaky, not fixed, and a silent PASS would hide that.
-- Re-runs stay capped at the existing 3-fix-attempt bound. The nondeterminism rule does not license looping toward green -- it only names what an unexplained green means. On a NONDETERMINISTIC result, STOP and surface to the human (Decision 55: RCA-first, no rescue loops).
+- Re-runs stay capped at the existing 3-fix-attempt bound. The nondeterminism rule does not license looping toward green -- it only names what an unexplained green means. On a NONDETERMINISTIC result, STOP and raise the alarm (Decision 55: RCA-first, no rescue loops).
 - A genuine fix requires a real code change (a **non-empty** `git diff` since the prior attempt). After such a change, the step must pass **two consecutive times** to count as PASS. These two confirmation passes verify an ALREADY-APPLIED fix and are **not** additional fix attempts -- they do not consume the 3-attempt fix budget, which governs diagnose-and-change cycles only.
-- **Interactive-era alarm (now):** while the executor is frozen (Decision 67) a human is present at every `/implement` run, so the alarm is stop-and-surface-to-human; files nothing.
-- **Forward-note (T3.19):** when the executor goes live (CD.17 reversal), this alarm flips to auto-file a rec via `scripts.ops_data_portal` (Decision 84), the executor-era quarantine-that-files-a-rec pattern (CD.29). Tracked as tier_item T3.19 (`deferred_post_mvp`) -- do not implement the auto-file path now.
+- **Interactive-era alarm (now):** while the executor is frozen (Decision 67) the alarm is STOP plus one plan-defect report (`deviation_trigger.escalation`: to the coordinator if one exists, else the human); files nothing.
+- **Forward-note (T3.19, `deferred_post_mvp`):** when the executor goes live (CD.17 reversal) this alarm flips to auto-filing a rec via `scripts.ops_data_portal` (Decision 84; CD.29's quarantine-that-files-a-rec) -- do not build that path now.
 - **Distinguish from declared non-determinism:** a VP step's DETECTED nondeterminism (this rule -- an agent-observed flaky re-run) is not the same thing as a verifier's DECLARED `Hermeticity.NON_HERMETIC_BY_CONSTRUCTION` property (a typed, audited characteristic of the verifier itself). Never silently relabel a detected-flaky VP step as "expected non-hermetic behavior" to justify passing it -- the two are orthogonal, and only the latter is a designed exemption.
 
 ### Deviation trigger
@@ -87,10 +87,10 @@ Three branches for a decision point hit during implementation (full detail:
 (a) in-scope under-specification -- decide inline; consult `model:"fable"` per
 `.claude/skills/overseer/SKILL.md` "## Fable Advice-Consult Protocol" when load-bearing or novel,
 recorded either way.
-(b) scope or contract deviation, or any always-ask surface -- STOP; no consult proceeds past this
-branch.
-(c) repeated failure -- defer to the 3-fix-attempt STOP and VF-08 rules above (cited, not
-restated); T3.19's auto-file-a-rec path stays deferred.
+(b) scope or contract deviation, or any always-ask surface -- STOP and raise the alarm; no consult
+proceeds past this branch.
+(c) repeated failure -- the 3-fix-attempt STOP and VF-08 rules above (cited, not restated), then
+the alarm; T3.19's auto-file-a-rec path stays deferred.
 
 ### Tier-Specific Guidance
 - **V1:** Parse configs, check doc links, confirm formatting. Quick but mandatory.

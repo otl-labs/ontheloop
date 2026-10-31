@@ -12,6 +12,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_serializer, model_validator
 
 from scripts.contract_rules import parse_yaml
+from scripts.roadmap.plan_gate_rounds import _GATE_VERDICTS, GateRound
 from scripts.roadmap.vp_literals import (
     _BACKTICK_LITERAL_RE,
     SELF_SATISFYING_VERDICT,
@@ -27,10 +28,6 @@ _REC_ID_RE = re.compile(r"rec-\d+")
 _DECISION_TOKEN_RE = re.compile(r"dec:[1-9][0-9]*(#[^\s#:]+)?")
 _EDGE_FIELDS = frozenset({"amends", "introduces", "principal"})
 _EDGE_FIELDS_MIN_VERSION = 5
-_GATE_VERDICTS: dict[str, frozenset[str]] = {
-    "decision-scout": frozenset({"NO_FLAGS", "FLAGS_FOUND", "BLOCK"}),
-    "plan-critique": frozenset({"PROCEED", "REVISE"}),
-}
 
 # _partition_command lives in scripts.roadmap.vp_literals (Decision 104 sole-home for the
 # shell-command tokenizer within this package) -- imported back here rather than duplicated.
@@ -228,35 +225,6 @@ class WeakeningDisposition(BaseModel):
     candidate: str = Field(pattern=_WEAKENING_CANDIDATE_RE.pattern)
     disposition: Literal["refactor", "planned-change", "retirement", "growth-safe-pin", "owned-skip", "weakening"]
     cite: str = Field(min_length=1)
-
-
-class GateRound(BaseModel):
-    """One gate round as the planner reports it (planning SKILL.md Step 9 convergence rule).
-
-    Counts only: never a status or approval input, and never a per-finding record (Decision 87 as amended by
-    Decision 205; T4.29 c2 keeps per-finding rows with rec-4434).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    gate: Literal["decision-scout", "plan-critique"]
-    round: int = Field(ge=1)
-    verdict: str
-    blocking: int = Field(default=0, ge=0)
-    nits: int = Field(default=0, ge=0)
-    escalated: bool = False
-    escalation_choice: Literal["accept-with-deferral", "re-scope", "split", "abandon", "one more round"] | None = None
-    gate_run_id: str | None = None
-
-    @model_validator(mode="after")
-    def _verdict_matches_gate(self) -> GateRound:
-        if self.verdict not in _GATE_VERDICTS[self.gate]:
-            raise ValueError(f"{self.gate} verdict must be one of {sorted(_GATE_VERDICTS[self.gate])}, got {self.verdict!r}")
-        if self.gate == "plan-critique" and (self.verdict == "REVISE") != (self.blocking > 0):
-            raise ValueError("a plan-critique REVISE carries at least one blocking finding and a PROCEED carries none")
-        if self.escalation_choice is not None and not self.escalated:
-            raise ValueError("escalation_choice records the human's answer to an escalation; set escalated: true")
-        return self
 
 
 class PlanDocument(BaseModel):
