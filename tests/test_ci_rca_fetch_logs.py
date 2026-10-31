@@ -90,8 +90,8 @@ def test_fallback_is_per_failed_job_and_uses_shared_cap(tmp_path: Path) -> None:
     jobs = json.dumps(
         {
             "jobs": [
-                {"databaseId": 9, "conclusion": "failure", "steps": []},
-                {"databaseId": 2, "conclusion": "failure", "steps": []},
+                {"databaseId": 9, "conclusion": "failure", "steps": [{"name": "s", "conclusion": "failure"}]},
+                {"databaseId": 2, "conclusion": "failure", "steps": [{"name": "s", "conclusion": "failure"}]},
             ]
         }
     )
@@ -148,8 +148,8 @@ def test_partial_fallback_failure_fails_whole_attempt(tmp_path: Path) -> None:
     jobs = json.dumps(
         {
             "jobs": [
-                {"databaseId": 2, "conclusion": "failure", "steps": []},
-                {"databaseId": 9, "conclusion": "failure", "steps": []},
+                {"databaseId": 2, "conclusion": "failure", "steps": [{"name": "s", "conclusion": "failure"}]},
+                {"databaseId": 9, "conclusion": "failure", "steps": [{"name": "s", "conclusion": "failure"}]},
             ]
         }
     )
@@ -182,8 +182,8 @@ def test_fallback_stops_before_query_when_aggregate_cap_is_consumed(tmp_path: Pa
     jobs = json.dumps(
         {
             "jobs": [
-                {"databaseId": 2, "conclusion": "failure", "steps": []},
-                {"databaseId": 9, "conclusion": "failure", "steps": []},
+                {"databaseId": 2, "conclusion": "failure", "steps": [{"name": "s", "conclusion": "failure"}]},
+                {"databaseId": 9, "conclusion": "failure", "steps": [{"name": "s", "conclusion": "failure"}]},
             ]
         }
     )
@@ -220,13 +220,13 @@ class TestStreamingTransport:
         assert exact.truncation_reason is None
         assert exact.tail == ""
         assert over.truncated is True and over.truncation_reason == "head_tail_window"
-        assert over.tail == "bcde"
+        assert over.tail == "e"
 
     def test_line_cap_terminates_on_first_byte_of_next_line(self) -> None:
         result = _run_log([sys.executable, "-c", "import sys;sys.stdout.write('one\\ntwo\\nthree')"], 100, 2)
         assert result.stdout == "one\ntwo\n"
         assert result.truncated is True and result.truncation_reason == "head_tail_window"
-        assert result.tail == "one\ntwo\nthree"
+        assert result.tail == "three"
 
     def test_large_stderr_is_drained_concurrently(self) -> None:
         program = "import sys;sys.stderr.write('x'*200000);sys.stderr.flush();sys.stdout.write('ok')"
@@ -365,7 +365,11 @@ class TestScopeStepTableTotality:
     def test_two_job_scope_keeps_shared_step_index_distinct_per_job(self, tmp_path: Path) -> None:
         """Job A step 3 is unretrieved and job B step 3 is retrieved -- pair keying must not
         collide the two just because they share a positional step_index."""
-        steps_a = [{"name": "a1", "conclusion": "success"}] * 2 + [{"name": "a3", "conclusion": "success"}]
+        steps_a = [
+            {"name": "a1", "conclusion": "failure"},
+            {"name": "a2", "conclusion": "success"},
+            {"name": "a3", "conclusion": "success"},
+        ]
         steps_b = [{"name": "b1", "conclusion": "success"}] * 2 + [{"name": "b3", "conclusion": "failure"}]
         jobs = json.dumps(
             {
@@ -412,3 +416,130 @@ class TestScopeStepTableTotality:
         result = fetch_run_log("1", "owner/repo", out, runner=runner)
         assert result.fetched
         assert "untrusted" not in out.read_text(encoding="utf-8")
+
+
+def _jobs_json(*jobs: tuple[int, str, list[str]]) -> str:
+    return json.dumps(
+        {
+            "jobs": [
+                {"databaseId": job_id, "conclusion": conclusion, "steps": [{"name": "s", "conclusion": c} for c in steps]}
+                for job_id, conclusion, steps in jobs
+            ]
+        }
+    )
+
+
+_UNFINALIZED = ("success", "success", "")
+_RAW_CMD = ["gh", "api", "repos/owner/repo/actions/jobs/7/logs"]
+
+
+class TestUnfinalizedStepMetadata:
+    """rec-4776: a failed job GitHub has not finalized reads its raw job log, never --log-failed."""
+
+    def test_empty_conclusion_is_null_and_raw_log_is_read(self, tmp_path: Path) -> None:
+        runner = Runner([_cp(stdout=_jobs_json((7, "failure", list(_UNFINALIZED)))), _cp(stdout="raw job log\n")])
+        out = tmp_path / "evidence.json"
+        assert fetch_run_log("1", "owner/repo", out, runner=runner).fetched
+        envelope = read_envelope(out)
+        assert runner.calls[1] == _RAW_CMD
+        assert not any("--log-failed" in call for call in runner.calls)
+        assert envelope["retrieval_path"] == "fallback"
+        assert envelope["body"] == "raw job log\n"
+        steps = envelope["scope"][0]["steps"]
+        assert [s["conclusion"] for s in steps] == ["success", "success", None]
+        assert all(s["log_retrieved"] is True for s in steps)
+
+    def test_cancelled_job_with_unstarted_steps_takes_raw_route(self, tmp_path: Path) -> None:
+        jobs = _jobs_json((7, "cancelled", ["success", "cancelled", ""]))
+        runner = Runner([_cp(stdout=jobs), _cp(stdout="cancelled log\n")])
+        assert fetch_run_log("1", "owner/repo", tmp_path / "e.json", runner=runner).fetched
+        assert runner.calls[1] == _RAW_CMD
+
+    def test_mixed_finalized_and_unfinalized_jobs_use_their_own_commands(self, tmp_path: Path) -> None:
+        jobs = _jobs_json((7, "failure", list(_UNFINALIZED)), (9, "failure", ["success", "failure"]))
+        runner = Runner([_cp(stdout=jobs), _cp(stdout="raw\n"), _cp(stdout="split\n")])
+        out = tmp_path / "evidence.json"
+        assert fetch_run_log("1", "owner/repo", out, runner=runner).fetched
+        assert runner.calls[1] == _RAW_CMD
+        assert runner.calls[2] == ["gh", "run", "view", "1", "--repo", "owner/repo", "--job", "9", "--log"]
+        envelope = read_envelope(out)
+        assert envelope["body"] == "raw\nsplit\n"
+        assert all(s["log_retrieved"] for entry in envelope["scope"] for s in entry["steps"])
+
+    def test_failed_job_with_no_steps_takes_raw_route(self, tmp_path: Path) -> None:
+        runner = Runner([_cp(stdout=_jobs_json((7, "failure", []))), _cp(stdout="runner log\n")])
+        assert fetch_run_log("1", "owner/repo", tmp_path / "e.json", runner=runner).fetched
+        assert runner.calls[1] == _RAW_CMD
+
+    def test_finalized_run_keeps_primary_routing(self, tmp_path: Path) -> None:
+        runner = Runner([_cp(stdout=_jobs_json((7, "failure", ["success", "failure"]))), _cp(stdout="primary\n")])
+        assert fetch_run_log("1", "owner/repo", tmp_path / "e.json", runner=runner).fetched
+        assert runner.calls[1][-1] == "--log-failed"
+
+    @pytest.mark.parametrize("result", [_cp(code=1, stderr="HTTP 404"), _cp(stdout="")])
+    def test_failed_or_empty_raw_fetch_fails_loud(self, tmp_path: Path, result) -> None:
+        runner = Runner([_cp(stdout=_jobs_json((7, "failure", list(_UNFINALIZED)))), result])
+        out = tmp_path / "evidence.json"
+        assert not fetch_run_log("1", "owner/repo", out, attempts=1, runner=runner).fetched
+        assert not out.exists()
+
+    def test_fragment_without_transport_tail_is_appended_unwindowed(self, tmp_path: Path) -> None:
+        runner = Runner([_cp(stdout=_jobs_json((7, "failure", list(_UNFINALIZED)))), _cp(stdout="x" * 50 + "\n")])
+        out = tmp_path / "evidence.json"
+        assert fetch_run_log("1", "owner/repo", out, runner=runner, max_bytes=1000).fetched
+        assert read_envelope(out)["body"] == "x" * 50 + "\n"
+
+    def _stream_raw_log(self, tmp_path: Path, monkeypatch, text: str, **limits) -> dict:
+        source = tmp_path / "raw.log"
+        source.write_text(text)
+        jobs = _jobs_json((7, "failure", list(_UNFINALIZED)))
+        monkeypatch.setattr("scripts.ci_rca.fetch_logs.subprocess.run", lambda *_a, **_k: _cp(stdout=jobs))
+        real_popen = subprocess.Popen
+        dump = "import sys,pathlib; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
+        monkeypatch.setattr(
+            "scripts.ci_rca.fetch_logs.subprocess.Popen",
+            lambda _c, **kw: real_popen([sys.executable, "-c", dump, str(source)], **kw),
+        )
+        out = tmp_path / "evidence.json"
+        assert fetch_run_log("1", "owner/repo", out, **limits).fetched
+        return read_envelope(out)
+
+    def test_oversized_raw_log_keeps_tail_anchor_incomplete(self, tmp_path: Path, monkeypatch) -> None:
+        envelope = self._stream_raw_log(tmp_path, monkeypatch, build_log())
+        assert "Failed checks:" in envelope["body"]
+        assert envelope["limits"]["complete"] is False
+
+    def test_fitting_raw_log_is_complete(self, tmp_path: Path, monkeypatch) -> None:
+        envelope = self._stream_raw_log(tmp_path, monkeypatch, "short raw log\nFailed checks:\n")
+        assert envelope["body"] == "short raw log\nFailed checks:\n"
+        assert envelope["limits"]["complete"] is True
+
+
+class TestRunLogTailOverlap:
+    """rec-3002: _run_log's head plus tail never repeats or drops a character."""
+
+    @staticmethod
+    def _emit(text: str, max_bytes: int, max_lines: int = 100):
+        program = f"import sys;sys.stdout.buffer.write({text.encode('utf-8')!r})"
+        return _run_log([sys.executable, "-c", program], max_bytes, max_lines)
+
+    @pytest.mark.parametrize("text, max_bytes", [("abcdefgh", 5), ("abc\u00e9", 4), ("\u20ac\u20ac", 4), ("\u00e9\u00e9", 3)])
+    def test_fitting_stream_is_reconstructed_exactly(self, text: str, max_bytes: int) -> None:
+        result = self._emit(text, max_bytes)
+        assert result.truncated is True
+        assert result.stdout + result.tail == text
+
+    def test_invalid_byte_in_head_does_not_repeat_bytes(self) -> None:
+        program = "import sys;sys.stdout.buffer.write(b'a\\xffbc\\xc3\\xa9d')"
+        result = _run_log([sys.executable, "-c", program], 5, 100)
+        assert result.stdout + result.tail == "abc\u00e9d"
+
+    def test_head_of_only_continuation_bytes_is_kept_whole(self) -> None:
+        program = "import sys;sys.stdout.buffer.write(b'\\x80\\x80\\x80\\x80ab')"
+        result = _run_log([sys.executable, "-c", program], 4, 100)
+        assert result.stdout == "" and result.tail == "ab"
+
+    def test_gap_keeps_last_max_bytes(self) -> None:
+        text = "abcdefghijklmnopqrstuvwxyz"
+        result = self._emit(text, 4)
+        assert result.stdout == "abcd" and result.tail == "wxyz"
