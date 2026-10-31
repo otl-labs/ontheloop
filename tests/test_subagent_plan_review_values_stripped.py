@@ -129,6 +129,20 @@ def test_end_to_end_reviewer_gets_no_value_no_tools_empty_cwd_curated_env(run_re
     assert "[SUBAGENT-REVIEW] stats num_turns=1 permission_denials=0" in result.stderr
 
 
+def test_deferred_document_reaches_the_reviewer_rebuilt_without_values(run_review) -> None:
+    result = run_review()
+    assert result.returncode == 0, result.stderr
+    record: Path = run_review.record
+    stdin = (record / "stdin").read_text(encoding="utf-8")
+    argv = (record / "argv").read_bytes().decode()
+    env = (record / "env").read_text(encoding="utf-8")
+    transcript = (run_review.workdir / "review.json").read_text(encoding="utf-8")
+    assert "rebuilt from deferred read data.aws_iam_policy_document.deferred_reviewer" in stdin
+    assert "Allow +[kinesis:PutRecord]" in stdin
+    for blob in (stdin, argv, env, transcript):
+        assert "SENTINEL" not in blob
+
+
 @pytest.mark.parametrize("context", ["bad`id`", "bad $(id)", "bad ${HOME}", "", "x" * 301, "line\nbreak"])
 def test_context_description_outside_the_allowed_charset_starves_before_any_call(run_review, context: str) -> None:
     result = run_review(context)
