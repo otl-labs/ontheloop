@@ -534,6 +534,11 @@ class TestRunLogTailOverlap:
         result = _run_log([sys.executable, "-c", program], 5, 100)
         assert result.stdout + result.tail == "abc\u00e9d"
 
+    def test_head_of_only_continuation_bytes_is_kept_whole(self) -> None:
+        program = "import sys;sys.stdout.buffer.write(b'\\x80\\x80\\x80\\x80ab')"
+        result = _run_log([sys.executable, "-c", program], 4, 100)
+        assert result.stdout == "" and result.tail == "ab"
+
     def test_gap_keeps_last_max_bytes(self) -> None:
         text = "abcdefghijklmnopqrstuvwxyz"
         result = self._emit(text, 4)
