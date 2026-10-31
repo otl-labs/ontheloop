@@ -43,7 +43,7 @@ import ast
 import fnmatch
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable, Mapping
 
 from scripts.checks import _common, _marker_guard, registry
 from scripts.checks._schema import Entry
@@ -245,6 +245,38 @@ def _unmatched_paths(entry: Entry, view: nx.DiGraph, root: Path) -> list[str]:
     10's per-domain residual measurement and several test call sites."""
     reported, _suppressed = _uncovered_and_suppressed(entry, view, root)
     return reported
+
+
+def uncovered_after_edges(edges: Iterable[tuple[str, str]], new_paths: Mapping[str, str], root: Path) -> dict[str, list[str]]:
+    """Plan-time seam: per gated Entry name, the closure paths no pre_glob matches that the unmodified view does
+    not already report, once each declared (importer, imported) edge is added to a copy of the import view.
+
+    `new_paths` maps a dotted module name absent from the tree to the repo path a plan will create for it
+    (`_module_to_repo_path` returns None for a missing file and would drop it). Read-only; the registered check's
+    behaviour is unchanged.
+    """
+    import networkx as nx  # noqa: PLC0415
+
+    base = _closure_view(root)
+    view = nx.DiGraph(base)
+    view.add_edges_from(edges)
+    found: dict[str, list[str]] = {}
+    for entry in _gated_entries():
+        if entry.module not in view:
+            continue
+        known = set(_unmatched_paths(entry, base, root))
+        globs = entry.pre_globs or ()
+        paths = sorted(
+            {p for p in (_module_to_repo_path(m, root) or new_paths.get(m) for m in _closure_modules(view, entry.module)) if p}
+        )
+        new = [
+            p
+            for p in paths
+            if p not in known and not any(_glob_match(p, g) for g in globs) and not _module_body_is_trivial(p, root)
+        ]
+        if new:
+            found[entry.name] = new
+    return found
 
 
 def _pruned_edges_node(tree: ast.Module) -> ast.AnnAssign | None:

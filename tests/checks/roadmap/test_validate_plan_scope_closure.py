@@ -7,9 +7,10 @@ from unittest.mock import patch
 
 import yaml
 
-from scripts.checks import registry
+from scripts.checks import _common, registry
 from scripts.checks.roadmap.validate_plan_scope_closure import validate_plan_scope_closure
 from scripts.roadmap import plan_obligations
+from tests.fixtures import plan_lint_fixtures as fx
 
 
 def _base_scope() -> dict:
@@ -155,7 +156,8 @@ class TestAccountingDeclaration:
 class TestGatingUnchanged:
     """An enforced_elsewhere entry never reaches `failed` -- the registered check's gating verdict
     is frozen at its pre-change values (Decision 181 CONTENT invariant: never weakened, and never
-    silently strengthened into an unpassable gate either)."""
+    silently strengthened into an unpassable gate either). The registration verdict is unchanged; derived gating rows
+    add to it (TestDerivedFindingsGate)."""
 
     def test_enforced_elsewhere_omission_alone_never_fails(self, tmp_path: Path) -> None:
         path = _write(tmp_path, _base_scope())
@@ -176,3 +178,33 @@ class TestGatingUnchanged:
                 "is a new check module"
             )
         ]
+
+
+class TestDerivedFindingsGate:
+    """Gating derived_findings rows join the registration verdict for a net-new plan; advisory rows never do."""
+
+    def _run(self, tmp_path: Path, plan: dict, gating: dict[str, bool] | None = None) -> list[str]:
+        fx.write_contract(tmp_path, gating=gating)
+        path = _write(tmp_path, plan)
+        failed: list[str] = []
+        with patch.object(plan_obligations, "ROOT", tmp_path):
+            validate_plan_scope_closure(failed, plan_paths=[path])
+        return [f for f in failed if "grammar" not in f]
+
+    def test_gating_derived_finding_fails_the_check(self, tmp_path: Path) -> None:
+        fx.write_class_d(tmp_path, "docs/contracts/d.yaml", with_log=False)
+        failed = self._run(tmp_path, fx.make_plan(("docs/contracts/d.yaml", "Modify", "adds a field")))
+        assert len(failed) == 1 and "amendment_log" in failed[0]
+
+    def test_advisory_only_finding_never_fails(self, tmp_path: Path) -> None:
+        fx.write(tmp_path, "docs/contracts/c.yaml", "a: 1\n")
+        plan = fx.make_plan(("docs/contracts/c.yaml", "Modify", "p"))
+        assert self._run(tmp_path, plan) == []
+
+    def test_a_flipped_row_gates_the_same_finding(self, tmp_path: Path) -> None:
+        fx.write_structural_registry(tmp_path, limit=1)
+        fx.write(tmp_path, "docs/contracts/c.yaml", "a: 1\n")
+        plan = fx.make_plan(("docs/contracts/c.yaml", "Modify", "p"))
+        with patch.object(_common, "ROOT", tmp_path):
+            assert self._run(tmp_path, plan) == []
+            assert len(self._run(tmp_path, plan, gating={"size_headroom": True})) == 1

@@ -6,9 +6,14 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import yaml
 
-from scripts.roadmap import plan_obligations
+from scripts.checks import _common, registry
+from scripts.checks._schema import Entry
+from scripts.roadmap import plan_lint, plan_obligations
+from scripts.roadmap.plan_lint import acceptance
+from tests.fixtures import plan_lint_fixtures as fx
 
 
 def _base_scope() -> dict:
@@ -231,20 +236,6 @@ class TestNetNewV4ImplementationPlanPaths:
         diff = [("A", "docs/plans/README.md")]
         with patch.object(plan_obligations._common, "get_status_aware_diff", return_value=diff):
             assert plan_obligations.net_new_v4_implementation_plan_paths() == []
-
-
-class TestBuildReport:
-    def test_complete_plan_reports_no_findings(self, tmp_path: Path) -> None:
-        path = _write(tmp_path, _base_scope())
-        report = plan_obligations.build_report(path)
-        assert "no unmet registration obligations" in report
-
-    def test_incomplete_plan_reports_each_finding(self, tmp_path: Path) -> None:
-        data = _base_scope()
-        data["scope"] = [r for r in data["scope"] if r["file"] != "config/ci_rca_taxonomy.yaml"]
-        path = _write(tmp_path, data)
-        report = plan_obligations.build_report(path)
-        assert "config/ci_rca_taxonomy.yaml" in report
 
 
 class TestEnforcedElsewherePointerEdgeCases:
@@ -501,3 +492,74 @@ class TestMainCli:
         ).stdout
         assert rc == 0
         assert before == after
+
+
+def _report(tmp_path: Path, plan: dict, *, gating: dict[str, bool] | None = None) -> str:
+    fx.write_contract(tmp_path, gating=gating)
+    path = _write(tmp_path, plan)
+    with patch.object(plan_obligations, "ROOT", tmp_path), patch("scripts.roadmap.plan_lint.ROOT", tmp_path):
+        return plan_obligations.build_report(path)
+
+
+def test_near_cap_structural_scope_row_is_reported(tmp_path: Path) -> None:
+    fx.write_structural_registry(tmp_path, limit=10)
+    fx.write(tmp_path, "docs/contracts/c.yaml", "a: 1\n" * 10)
+    with patch.object(_common, "ROOT", tmp_path):
+        report = _report(tmp_path, fx.make_plan(("docs/contracts/c.yaml", "Modify", "p")))
+    assert "derived findings (advisory" in report
+    assert "docs/contracts/c.yaml: 10 of 10 effective lines (contracts), headroom 0 NEAR_CAP" in report
+
+
+def test_near_cap_report_names_unbuilt_plans_editing_the_same_file(tmp_path: Path) -> None:
+    rows = [{"file": "docs/contracts/c.yaml", "action": "Modify", "purpose": "p"}]
+    fx.write_yaml(tmp_path, "docs/plans/PLAN-other.yaml", {"schema_version": 4, "scope": rows})
+    fx.git_commit(tmp_path)
+    report = _report(tmp_path, fx.make_plan(("docs/contracts/c.yaml", "Modify", "p")))
+    assert "docs/plans/PLAN-other.yaml (unbuilt) also scopes docs/contracts/c.yaml" in report
+
+
+def test_scoped_import_edge_and_baselined_check_obligate_companions(tmp_path: Path) -> None:
+    fx.write_closure_repo(tmp_path)
+    fx.write_baseline(tmp_path, ["validate_thing"])
+    fake = Entry(
+        name="validate_thing",
+        module="scripts.checks.fake.validate_thing",
+        attr="validate_thing",
+        pre=True,
+        pre_globs=("scripts/checks/fake/**",),
+    )
+    module = "scripts/checks/fake/validate_thing.py"
+    plan = fx.make_plan((module, "Modify", "p"))
+    plan["scope"][0]["new_imports"] = ["scripts.hublib"]
+    with patch.object(registry, "_ALL_ENTRIES", {fake.name: fake}):
+        report = _report(tmp_path, plan)
+    assert "scripts/checks/fake/_manifest.py is required in scope" in report
+    assert "config/check_accounting_baseline.yaml is required in scope" in report
+
+
+def test_undecidable_bundled_rec_acceptance_is_reported(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    fetched = ([{"id": "rec-1", "acceptance": "true"}, {"id": "rec-2", "acceptance": "grep -q a b"}], ["rec-3"])
+    assert acceptance.main(["rec-1", "rec-2", "rec-3"], fetch=lambda _ids: fetched) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].startswith("rec-1: acceptance UNDECIDABLE") and lines[1] == "rec-2: acceptance decidable"
+    assert lines[2] == "rec-3: not found by the reader"
+    plan = fx.make_plan(("scripts/x.py", "Modify", "p"), bundled_recommendations=["rec-1"])
+    with patch.dict(plan_lint._DISPATCH, {"acceptance_decidable": lambda _ctx: lines[:1]}):
+        assert lines[0] in _report(tmp_path, plan)
+
+
+def test_class_d_contract_scope_row_obligates_amendment_entry(tmp_path: Path) -> None:
+    fx.write_class_d(tmp_path, "docs/contracts/d.yaml", with_log=False)
+    fx.write_contract(tmp_path)
+    path = _write(tmp_path, fx.make_plan(("docs/contracts/d.yaml", "Modify", "adds a field")))
+    with patch.object(plan_obligations, "ROOT", tmp_path):
+        findings = plan_obligations.evaluate_plan(path)
+    assert len(findings) == 1 and "amendment_log" in findings[0] and findings[0].startswith(path.name)
+
+
+def test_registry_shard_naming_a_scoped_test_is_reported(tmp_path: Path) -> None:
+    rel = fx.write_shard(tmp_path, "keep-me", "tests/test_a.py::TestX::test_y")
+    fx.write_contract(tmp_path)
+    path = _write(tmp_path, fx.make_plan(("tests/test_a.py", "Modify", "p")))
+    with patch.object(plan_obligations, "ROOT", tmp_path):
+        assert rel in plan_obligations.evaluate_plan(path)[0]
