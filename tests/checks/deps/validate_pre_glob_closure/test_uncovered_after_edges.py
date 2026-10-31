@@ -59,3 +59,12 @@ def test_verdict_on_the_live_tree_is_unchanged() -> None:
     failed: list[str] = []
     vpgc.validate_pre_glob_closure(failed)
     assert failed == []
+
+
+def test_entry_whose_module_is_not_in_the_graph_is_skipped(tmp_path: Path) -> None:
+    write_closure_repo(tmp_path)
+    ghost = Entry(
+        name="ghost", module="scripts.checks.fake.gone", attr="gone", pre=True, pre_globs=("scripts/checks/fake/**",)
+    )
+    with patch.object(registry, "_ALL_ENTRIES", {ghost.name: ghost}):
+        assert vpgc.uncovered_after_edges([(_IMPORTER, "scripts.hublib")], {}, tmp_path) == {}
