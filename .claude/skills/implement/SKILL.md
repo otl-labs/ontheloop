@@ -362,15 +362,15 @@ record. The authoritative baseline is still the next planning session's converge
 wake). The gated apply gates the JOB, never from a laptop.
 
 ### Pre-Push Rebase (applies to both flows)
-See `docs/contracts/git-ops.yaml` `rebase_phase_distinction.commit_flow_time`: rebase after the
-commit, before the full tier; once pushed, use `--force-with-lease` (never `--force`).
+See `docs/contracts/git-ops.yaml` `rebase_phase_distinction.commit_flow_time`; once pushed, use
+`--force-with-lease` (never `--force`).
 
 ### IMPLEMENTATION Commit Flow
 ```bash
 git add -A
 git commit -m "feat({slug}): implement {brief-description}" -m "Resolves: rec-NNNN[, rec-MMMM]"   # omit -m when nothing is bundled
 git fetch origin main
-git rebase origin/main   # STOP on conflict
+bin/venv-python -m scripts.session.rebase_resolve   # STOP unless RESOLVE CLEAN
 bin/venv-python -m scripts.validate
 bin/venv-python -m scripts.checks.validation_result --verify-head
 git push -u origin HEAD   # its own tool call
