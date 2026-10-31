@@ -77,26 +77,9 @@
 # the field runs bash from a working directory that is NOT the repo root.
 # Changing the field value is a manual step (out-of-repo).
 #
-# GITHUB MCP (full toolset incl. Actions)
-# The repo-root .mcp.json defines a `github-full` GitHub MCP server (stdio; the
-# github-mcp-server binary installed by step 6 below). It reads its token at
-# runtime from ~/.config/gh-mcp/token. In a Claude Code cloud session the agent
-# proxy substitutes the session's own GitHub credential on every api.github.com
-# request, so that file holds the literal placeholder proxy-injected, never a PAT
-# (retired before the otl-labs transfer; docs/contracts/github-org-transfer.yaml
-# unaffected_bindings). Add this to the PRIVATE "Setup script" field next to the
-# ~/.aws block above:
-#
-#     mkdir -p "$HOME/.config/gh-mcp"
-#     printf 'proxy-injected\n' > "$HOME/.config/gh-mcp/token"
-#     chmod 600 "$HOME/.config/gh-mcp/token"
-#
-# The committed .mcp.json carries no secret. Changes apply to NEW sessions.
-#
 # Responsibility split (post T0.2 refactor):
 #   setup-cloud-env.sh -- snapshot-cached installs plus Codex bootstrap parity for Claude's SessionStart checks.
 #   .claude/hooks/session_start_aws.sh -- reports the assumed-role identity via scripts.aws_identity (every session).
-#   .claude/hooks/session_start_ensure_github_mcp.sh -- self-heals github-mcp-server on stale snapshots (every session).
 #   .claude/hooks/session_start_sync_deps.sh -- self-heals requirements.txt/requirements-dev.txt (and terraform binary) drift on stale snapshots (every session).
 #   .claude/hooks/session_start_terraform_assets.sh -- syncs the Terraform provider mirror in ADMIN sessions (every session; bin/sync-terraform-assets.sh).
 #   .claude/hooks/session_start_precommit.sh -- re-wires the pre-commit .git hook (every session; .git/hooks does not survive a fresh clone).
@@ -112,16 +95,14 @@
 #      drift-install penalty). Steps 3 and 4 are parallelised: AWS CLI download
 #      runs in the background while step 4 runs in the foreground.
 #   5. Waits for the background AWS CLI install (step 3) to finish.
-#   6. Installs the github-mcp-server binary (for the .mcp.json `github-full`
-#      MCP server -- full GitHub toolset incl. Actions: workflow runs / job logs).
-#   7. Pre-builds the pre-commit hook environments into ~/.cache/pre-commit so
+#   6. Pre-builds the pre-commit hook environments into ~/.cache/pre-commit so
 #      the hooks (detect-secrets, ruff, file hygiene) run offline in later sessions,
 #      then runs the remaining checkout-local SessionStart checks used by Claude.
 #
 # What it does NOT do:
-#   - Materialise ~/.aws/config or ~/.config/gh-mcp/token (done by the private "Setup script" field
-#     block above; this script only consumes them).
-#   - Install gh CLI (GitHub access is via MCP -- see github-mcp-server, step 6 -- not gh).
+#   - Materialise ~/.aws/config (done by the private "Setup script" field block above; this script only
+#     consumes it).
+#   - Install gh CLI (GitHub access is via the harness github MCP server, not gh).
 #   - Install terraform unless INSTALL_TERRAFORM=1 (set only in the admin env).
 #   - Sync the Terraform provider mirror or fetch the tfvars (the proxy never signs setup requests; see
 #     .claude/hooks/session_start_terraform_assets.sh and `bash bin/sync-terraform-assets.sh --tfvars`).
@@ -204,25 +185,12 @@ if [ -n "$aws_install_pid" ]; then
     log "aws-cli-install: $((SECONDS - t0))s"
 fi
 
-# 6. github-mcp-server (for the .mcp.json `github-full` MCP server) ------------
-# Idempotent install delegated to bin/ensure-github-mcp-server.sh -- the single
-# source of truth for the version pin + install logic. That script is also run
-# every session by .claude/hooks/session_start_ensure_github_mcp.sh, so a
-# container booted from a snapshot built before this step existed self-heals (the
-# binary lives outside git, so a fresh checkout alone cannot supply it).
-t0=$SECONDS
-if out="$(bash "$REPO_ROOT/bin/ensure-github-mcp-server.sh")"; then
-    log "$out ($((SECONDS - t0))s)"
-else
-    log "WARNING: github-mcp-server install failed (non-fatal); the github-full MCP server stays offline until installed."
-fi
-
-# 7. pre-commit hook environments (snapshot-cached) ---------------------------
+# 6. pre-commit hook environments (snapshot-cached) ---------------------------
 # pre-commit itself is installed via requirements-dev.txt (step 4). This pre-builds
 # the hook repos (pre-commit-hooks, ruff-pre-commit, detect-secrets) into
 # ~/.cache/pre-commit now -- while setup-time network is available -- so they are
 # baked into the snapshot and run offline in later sessions, mirroring the AWS CLI
-# and github-mcp-server caching above. Wire the setup checkout immediately as well;
+# caching above. Wire the setup checkout immediately as well;
 # Claude session startup repeats this for fresh per-session clones.
 t0=$SECONDS
 if [ -x .venv/bin/pre-commit ]; then
@@ -236,7 +204,7 @@ else
 fi
 
 # Codex cloud invokes this tracked setup script instead of .claude/settings.json.
-# The dependency and GitHub MCP SessionStart scripts delegate to the same commands
+# The dependency SessionStart script delegates to the same commands
 # already run above; invoke the remaining checkout-local checks here for parity.
 bash .claude/hooks/session_start_aws.sh
 bash .claude/hooks/session_start_github_readiness.sh

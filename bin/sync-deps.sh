@@ -9,7 +9,7 @@
 # session -- the repo is cloned fresh each session but the venv is baked into
 # the snapshot, so requirements*.txt can be newer than the baked venv).
 #
-# Idempotent and non-fatal (mirrors bin/ensure-github-mcp-server.sh): the
+# Idempotent and non-fatal: the
 # common in-sync case is a fingerprint hash compare (cheap, no reinstall). On
 # any install failure: warn, do NOT write the fingerprint (so the next run
 # retries), and still exit 0 -- a failed sync never aborts a session.

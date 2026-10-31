@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -17,7 +18,6 @@ def test_shared_session_bootstrap_steps_are_ordered_after_prerequisites() -> Non
     script = SETUP_SCRIPT.read_text(encoding="utf-8")
     ordered_commands = (
         'bash "$REPO_ROOT/bin/sync-deps.sh"',
-        'bash "$REPO_ROOT/bin/ensure-github-mcp-server.sh"',
         "bash .claude/hooks/session_start_aws.sh",
         "bash .claude/hooks/session_start_precommit.sh",
         "bash .claude/hooks/session_start_sync_main.sh",
@@ -32,24 +32,28 @@ def test_shared_session_bootstrap_steps_are_ordered_after_prerequisites() -> Non
 def test_setup_contract_uses_delegated_bootstrap_commands() -> None:
     script = SETUP_SCRIPT.read_text(encoding="utf-8")
     assert script.count('bash "$REPO_ROOT/bin/sync-deps.sh"') == 1
-    assert script.count('bash "$REPO_ROOT/bin/ensure-github-mcp-server.sh"') == 1
     assert script.count("bash .claude/hooks/session_start_aws.sh") == 1
     assert script.count("bash .claude/hooks/session_start_precommit.sh") == 1
     assert script.count("bash .claude/hooks/session_start_sync_main.sh") == 1
 
 
-def test_github_readiness_runs_after_mcp_install_and_before_precommit() -> None:
+def test_github_readiness_runs_before_precommit() -> None:
     script = Path("bin/setup-cloud-env.sh").read_text(encoding="utf-8")
-    readiness = script.index("bash .claude/hooks/session_start_github_readiness.sh")
-    assert readiness > script.index("ensure-github-mcp-server.sh")
-    assert readiness < script.index("bash .claude/hooks/session_start_precommit.sh")
+    assert script.index("bash .claude/hooks/session_start_github_readiness.sh") < script.index(
+        "bash .claude/hooks/session_start_precommit.sh"
+    )
 
 
-def test_github_mcp_token_comment_writes_the_proxy_placeholder() -> None:
+def test_github_mcp_server_is_neither_installed_nor_declared() -> None:
     script = SETUP_SCRIPT.read_text(encoding="utf-8")
-    assert "#     printf 'proxy-injected\\n' > \"$HOME/.config/gh-mcp/token\"\n" in script
+    assert "ensure-github-mcp-server" not in script
+    assert "gh-mcp" not in script
     assert "<PAT>" not in script
     assert "GITHUB_MCP_PAT" not in script
+    servers = json.loads(Path(".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+    assert "github-full" not in servers
+    for name, server in servers.items():
+        assert "github-mcp-server" not in " ".join([server.get("command", ""), *server.get("args", [])]), name
 
 
 _PLACEHOLDER_NAME = "aws-proxy-placeholder-credentials"

@@ -5,7 +5,7 @@
 # (pre-commit install-hooks). This hook only writes .git/hooks/pre-commit, which
 # lives inside .git and therefore does NOT survive the fresh per-session clone --
 # so it must be re-applied each session (cheap, offline). Mirrors the self-heal
-# pattern of session_start_ensure_github_mcp.sh.
+# pattern of session_start_sync_deps.sh.
 #
 # Once installed, `git commit` runs detect-secrets, the shape-based never-commit
 # identifier denylist, ruff, and the file-hygiene hooks before the commit lands --
