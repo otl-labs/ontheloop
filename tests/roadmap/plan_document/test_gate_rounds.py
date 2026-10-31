@@ -36,17 +36,15 @@ def test_gate_rounds_is_optional_and_defaults_empty() -> None:
 
 def test_a_full_record_validates() -> None:
     rows = [
+        _wording(1, "FAIL"),
+        _wording(2),
         _row("decision-scout", 1, "FLAGS_FOUND"),
         _row(round_=1, verdict="REVISE", blocking=2, nits=3),
         _row(round_=2, verdict="PROCEED", nits=1),
         _row(round_=3, verdict="PROCEED", gate_run_id="run-3"),
-        _wording(1, "FAIL"),
-        _wording(2),
     ]
     doc = PlanDocument.model_validate(_v5(gate_rounds=rows))
-    critique = [(r.gate, r.round, r.verdict) for r in doc.gate_rounds if r.gate == "plan-critique"]
-    assert critique[-1] == ("plan-critique", 3, "PROCEED")
-    assert doc.gate_rounds[-1].gate == "wording-check"
+    assert [(r.gate, r.round, r.verdict) for r in doc.gate_rounds][-1] == ("plan-critique", 3, "PROCEED")
 
 
 @pytest.mark.parametrize("rounds", [[2], [1, 3], [2, 1], [1, 1]])
