@@ -68,16 +68,20 @@ scope:
       CLI `--slug S --tree T [--sidecar P]` and run(slug, tree, sidecar_path, runner) -> Result. The sidecar defaults
       to docs/plans/approved/<slug>.yaml in this checkout. Checks, in order, each a FAIL with its reason: T's HEAD is an
       ancestor of origin/main (base = that SHA); T's changes against HEAD (git status, ignoring a .venv link) are the
-      sidecar's files plus at most the two generated companions below; scripts.roadmap.approved_text.verify(sidecar,
-      T, base) is empty. Then it brings those companions to what the build commits, each first restored to HEAD:
-      config/prose_budgets.yaml entries covering a sidecar file (its S2/S4/S8 path key, or S1's when the file is a
-      root load-set member) are lowered to the size T measures (scripts.preflight.prose_context.measure_prose_context
-      run in a subprocess with cwd T), never raised, so a grown file still fails --pre (the build's sanctioned
-      prose_budgets_ratchet_down edit); docs/decisions-index.json is rewritten by `scripts.decisions_index --write` in T
-      when docs/DECISIONS.md is a sidecar file (decisions_index_regeneration). Then links this
-      checkout's .venv into T when absent and runs `bin/venv-python -m scripts.validate --pre` with cwd T (the injectable
-      runner; timeout 900 s is a FAIL), and reads T/logs/debug/selection-manifest.json's fallback flag as
-      selection degraded|complete (absent manifest = degraded). Prints `WORDING-CHECK verdict=PASS|FAIL digest=<sha256>
+      sidecar's files plus at most three companions (config/prose_budgets.yaml, config/structural_size_budgets.yaml,
+      docs/decisions-index.json); scripts.roadmap.approved_text.verify(sidecar, T, base) is empty. Then it settles the
+      companions as the build commits them, by line-level edits that keep every inline comment and marker: in either
+      budget file a changed line is kept only when it carries a `# raise-approved: dec-NNN` marker (a planned raise the
+      planner placed, judged in --pre by validate_prose_budget_raises or validate_structural_size_budget_raises), and
+      every other changed line is restored to HEAD; then config/prose_budgets.yaml entries covering a sidecar file (its
+      S2/S4/S8 path key, or S1's when the file is a root load-set member) are lowered to the size T measures
+      (scripts.preflight.prose_context.measure_prose_context run in a subprocess with cwd T), never raised (the build's
+      sanctioned prose_budgets_ratchet_down edit); docs/decisions-index.json is restored to HEAD and, when
+      docs/DECISIONS.md is a sidecar file, rewritten by `scripts.decisions_index --write` in T
+      (decisions_index_regeneration). Then it deletes any T/logs/debug/selection-manifest.json, links this checkout's
+      .venv into T when absent and runs `bin/venv-python -m scripts.validate --pre` with cwd T (the injectable runner;
+      timeout 900 s is a FAIL), and reads the new manifest: selection complete only when its sha equals base and it
+      shows no fallback, capped false and no deferred test, else degraded (absent manifest = degraded). Prints `WORDING-CHECK verdict=PASS|FAIL digest=<sha256>
       base=<sha> selection=<status>`, echoes the runner's last failing lines, and prints the gate_rounds row to paste;
       a FAIL before the fast tier runs prints its reason and no row. Exit 0 only on PASS. Writes no repository file
       outside T (a local --pre budget breach may still file its own rec, scripts/checks/_budget_recs.py, as any local
@@ -92,14 +96,16 @@ scope:
   - file: scripts/roadmap/plan_document.py
     action: Modify
     purpose: >-
-      Imports GateRound from plan_gate_rounds and re-exports it (facade; existing importers unchanged); the 1..N
+      Imports GateRound and _GATE_VERDICTS (which _validate_gate_rounds iterates) from plan_gate_rounds and re-exports
+      GateRound (facade; existing importers unchanged); the 1..N
       numbering rule covers every gate, wording-check included. About 489 (after PLAN-plan-lint's new_imports) -> 463
       SLOC.
   - file: scripts/checks/roadmap/validate_plan_documents.py
     action: Modify
     purpose: >-
-      _wording_check_gaps: a newly-added schema_version >= 5 plan whose docs/plans/approved/<slug>.yaml exists needs a
-      last wording-check row with verdict PASS, selection complete and digest equal to approved_text.digest of that
+      _wording_check_gaps: a schema_version >= 5 plan whose docs/plans/approved/<slug>.yaml the diff adds or changes
+      (approved_text.sidecar_state against the merge base: added | changed, so an Amendment-mode PR that changes a
+      sidecar needs a fresh run, and a build PR, which never changes it, needs none) needs a last wording-check row with verdict PASS, selection complete and digest equal to approved_text.digest of that
       sidecar. Routed exactly like _gate_round_gaps: FAIL on the plan PR, WARN locally and on the push to main
       (Decision 163). About 162 -> 185 SLOC.
   - file: tests/test_plan_decision_projection.py
@@ -118,8 +124,10 @@ scope:
       not on main, an edit outside the sidecar, a verify mismatch, runner non-zero, runner timeout, a git error),
       selection degraded on a fallback manifest and on an absent one, the .venv link created only when absent, the
       echoed runner lines, the printed row, the CLI's exit codes, PASS exit 0; the companion step (a shrunk sidecar
-      file's budget entry lowered in T, a grown one left unraised, a hand-edited companion reset first, the decisions
-      index rewritten only when DECISIONS.md is a sidecar file).
+      file's budget entry lowered in T, a grown one left unraised, an unmarked budget change reset, a marked raise kept
+      in either budget file, inline comments and markers such as plan-critique's dec-75 surviving the edit, the
+      decisions index rewritten only when DECISIONS.md is a sidecar file); a stale manifest deleted before the run, and
+      a manifest whose sha differs from base, capped or with deferred tests read as degraded.
   - file: tests/test_plan_gate_rounds.py
     action: Create
     purpose: >-
@@ -135,7 +143,8 @@ scope:
     action: Modify
     purpose: >-
       TestWordingCheckRecord: fail on the plan PR (no row, last row FAIL, degraded, digest mismatch), warn elsewhere,
-      no requirement without a sidecar, existing plans exempt. 362 SLOC + about 60.
+      no requirement without a sidecar or with an unchanged one, a changed sidecar on an existing plan needs a fresh
+      PASS row. 362 SLOC + about 70.
   - file: tests/test_workflow_skill_antidrift.py
     action: Modify
     purpose: >-
@@ -160,10 +169,10 @@ acceptance_criteria:
   - >-
     plan_wording_check reports FAIL for a placed annotation that overflows a reader's cap, for an edit outside the
     sidecar, for a verify mismatch and for a red fast tier, and prints the digest, base and selection status of every
-    run (rec-4731). VP steps 1 and 2.
+    run that reaches the fast tier (rec-4731). VP steps 1 and 2.
   - >-
-    A gate_rounds wording-check row carries digest, base and selection; validate_plan_documents fails a newly-added
-    plan with a sidecar on its plan PR unless the last wording-check row is PASS, selection complete and matching the
+    A gate_rounds wording-check row carries digest, base and selection; validate_plan_documents fails a plan whose
+    sidecar the PR adds or changes unless the last wording-check row is PASS, selection complete and matching the
     sidecar's digest, and warns elsewhere. VP step 3.
   - >-
     The planning, plan-critique and implement skills and the scope contract carry the alarm, routing, amendment mode
@@ -262,10 +271,12 @@ verification_plan:
     action: Lint and format on the changed Python files.
     command: >-
       bin/venv-python -m ruff check scripts/roadmap scripts/checks/roadmap/validate_plan_documents.py
-      tests/test_plan_decision_projection.py tests/roadmap tests/checks/roadmap/test_validate_plan_documents.py
-      tests/test_workflow_skill_antidrift.py tests/test_scope_boundary_contract.py && bin/venv-python -m ruff format
-      --check scripts/roadmap scripts/checks/roadmap/validate_plan_documents.py tests/test_plan_decision_projection.py
-      tests/roadmap tests/checks/roadmap/test_validate_plan_documents.py tests/test_workflow_skill_antidrift.py
+      tests/test_plan_decision_projection.py tests/test_plan_wording_check.py tests/test_plan_gate_rounds.py tests/roadmap
+      tests/checks/roadmap/test_validate_plan_documents.py tests/test_workflow_skill_antidrift.py
+      tests/test_scope_boundary_contract.py && bin/venv-python -m ruff format --check scripts/roadmap
+      scripts/checks/roadmap/validate_plan_documents.py tests/test_plan_decision_projection.py
+      tests/test_plan_wording_check.py tests/test_plan_gate_rounds.py tests/roadmap
+      tests/checks/roadmap/test_validate_plan_documents.py tests/test_workflow_skill_antidrift.py
       tests/test_scope_boundary_contract.py
     expected: exit 0.
     fix_if: Run ruff format and fix lint.
@@ -299,7 +310,7 @@ test_obligations:
     test_selector: tests/test_plan_decision_projection.py::test_overflowing_annotation_is_reported_before_approval
     red_green_expectation: red before (module absent on main), green after.
   - source: scripts/roadmap/plan_wording_check.py
-    behavior: Generated companions in T are reset, then budgets lowered (never raised) and the decisions index rewritten.
+    behavior: Companions in T keep only marked raises, then budgets are lowered (never raised) and the decisions index rewritten.
     verification_step: 2
     test_selector: tests/test_plan_wording_check.py
     red_green_expectation: red before (module absent on main), green after.
@@ -368,11 +379,12 @@ context:
   - "Decision-scout verdict + CITE list: round 1 FLAGS_FOUND 191/191 (WARN 229, 235; NOTE 90; SPIRIT 163, 135; T4.29); round 2 FLAGS_FOUND on v2 (235 non-loosening, 163 recorded row, 168 re-ratification, 135 selection status) -- all folded in. CITE: 59, 87, 128, 135, 148, 163, 165, 166, 181, 205, 226, 229, 235."
   - "Wording check, done by hand on both plans' texts together on main 91b84e55 (after the ratchet and fork-line builds): both sidecars verify OK; the build's companions placed (three skill budgets lowered to measured); validate --pre exit 0, 113 test modules selected, 2,874 passed, selection complete (no fallback). Digests: plan-lint 201c587a..., plan-defect-loop a0cbc7b9.... Lesson: a scratch worktree needs the checkout's .venv linked, or subprocess tests that call bin/venv-python fail."
   - "Generated companions: the hand wording check on main 91b84e55 failed only validate_prose_limits, because the merged ratchet (#1773) fails an entry measured below budget and the approved texts shrink three skills. The tool therefore applies the build's own sanctioned regenerations in T before the fast tier. Step 8b's approved words (verify, then validate --pre) stay accurate: the companion step adds no wording and no check."
+  - "Stated limit: the wording check runs on origin/main, so a sidecar anchored on text an unbuilt sibling plan adds cannot PASS until that build lands; such a plan waits or re-anchors. Both plan B sidecars anchor on main text only (verified on 91b84e55)."
   - "approved_text.apply is word-level (whitespace lost), so the tool never builds files from the sidecar: the planner places the words, and verify proves the tree holds exactly them."
   - "Sequencing: after PLAN-plan-lint's build (Step 8b points at its report) and the prose-budget-ratchet build (#1763's plan, built in #1773 at 91b84e55: every budget pinned to measured size, implement-scope-boundary.yaml 475 -> 499; every block of this sidecar applies once on that main, contract 499 -> 485). PLAN-merge-race-attestation (unbuilt) adds 16 B to the implement skill; whichever lands second compacts."
   - "This plan predates its own gate: main's GateRound refuses wording-check rows, so its wording-check result lives in this context line, not gate_rounds."
   - "Alignment: Benjamin 'write the plan' 2026-10-30T23:24Z, answering the request to approve the texts in /mnt/project-files/plan-b/v2/TEXTS-v2.md and both sidecars; 'Annotate Decision 229' (card, 2026-10-31T12:18Z) and 'approve' (2026-10-31T12:33Z) for the critique-round texts in /mnt/project-files/plan-b/v2/ROUND1-TEXTS.md (the approving message ids stay outside the repository, git-ops.yaml approved_text_binding)."
-  - "Unbuilt plans on the same files: PLAN-work-graph-edge-model edits scripts/checks/roadmap/validate_plan_documents.py and its test; PLAN-merge-race-attestation adds 16 B to the implement skill. Whichever builds second rebases or compacts."
+  - "Unbuilt plans on the same files: PLAN-work-graph-edge-model edits scripts/checks/roadmap/validate_plan_documents.py and its test, and docs/DECISIONS.md (a new Decision amending 197 and an Amended-by line on 197, not Decision 229); PLAN-merge-race-attestation adds 16 B to the implement skill. Whichever builds second rebases or compacts."
   - "rec-3965's acceptance greps already pass on main (non-discriminating); its residue, the prohibited_field_edits case and the commit subject, is this plan's amendment_procedure text."
   - "The sidecar lands in this plan PR and is no build scope row (PLAN-plan-fork-line-check precedent)."
   - "red_overlap 2026-10-30: clear (no reds)."
@@ -381,6 +393,7 @@ gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 13}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 8}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
