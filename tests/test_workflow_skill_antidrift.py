@@ -67,11 +67,13 @@ def test_handoff_full_tier_runs_after_commit_and_rebase() -> None:
     verify_head_line = "bin/venv-python -m scripts.checks.validation_result --verify-head"
     assert (
         commit_flow.index("git commit")
-        < commit_flow.index("git rebase origin/main")
+        < commit_flow.index("scripts.session.rebase_resolve")
         < commit_flow.index(f"\n{_FULL_TIER}\n")
         < commit_flow.index(verify_head_line)
         < commit_flow.index("git push")
     )
+
+    assert "STOP on conflict" not in commit_flow
 
     for text in (skill, command):
         assert "pre-commit HEAD" not in text
@@ -376,3 +378,33 @@ def test_data_quality_semantics_live_with_their_producer() -> None:
     assert "Two-layer health picture" in runner
     assert "checks_defined > 0" in runner
     assert "last_run.verdict == PASS" in runner
+
+
+def test_planning_skill_carries_step_8b_and_amendment_mode() -> None:
+    """PLAN-plan-defect-loop: the lint-and-wording-check step, Amendment mode and the touched-set clauses."""
+    planning = _PLANNING_SKILL.read_text(encoding="utf-8")
+    assert "## Plan Lint and Wording Check (Workflow Step 8b, before critique)" in planning
+    assert "scripts.roadmap.plan_wording_check" in planning
+    assert "**Amendment mode**" in planning
+    assert "`deviation_trigger.escalation`" in planning
+    assert "plan({slug}): scope amendment -- <reason>" in planning
+    assert "generator-touched files are sanction_rows-covered" in planning
+    assert "A VP touched-set step derives its allowed set from sanction_rows" in planning
+    assert "**Size headroom (Decisions 128, 166):**" in planning
+    assert "new_imports: []" in planning
+
+
+def test_critique_reads_the_recorded_wording_check_row_and_never_reruns_it() -> None:
+    critique = _CRITIQUE_SKILL.read_text(encoding="utf-8")
+    assert "read the last `wording-check` gate row (never re-run it)" in critique
+    assert "REVISE when it is absent, not PASS, its digest differs from `approved_text record`" in critique
+    assert "12n. **Size headroom check (Decisions 128, 166):**" in critique
+    assert "SLOC decompose-by-default check" not in critique
+
+
+def test_implement_alarm_is_stop_plus_one_plan_defect_report() -> None:
+    implement = _IMPLEMENT_SKILL.read_text(encoding="utf-8")
+    assert "the alarm is STOP plus one plan-defect report (`deviation_trigger.escalation`" in implement
+    assert "STOP and raise the alarm" in implement
+    assert "stop-and-surface-to-human" not in implement
+    assert "STOP (Deviation trigger (c))" in implement

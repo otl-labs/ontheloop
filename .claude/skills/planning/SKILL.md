@@ -128,25 +128,21 @@ When a plan creates or modifies documentation artefacts, apply these rules:
 
 **Admin-only roots:** if scope touches a non-Markdown file under a root whose `environment-taxonomy.yaml` axis_a apply_gating is admin-only (today `terraform/bootstrap`), the plan MUST meet `docs/contracts/deploy-paths.yaml` `admin_out_of_band.pre_merge_live_plan`: a pre-merge read-only ADMIN plan step, the credential check, and the V3 resolution in `context:`.
 
-**Speculative-plan expectations (CD.35 Wave 2 / T2.21, active):** When `.tf` files under `terraform/personal/` are in scope, the plan must account for the speculative-plan pipeline: a PR-time plan is reviewed and saved, then re-applied at merge with no re-plan (Decision 77 no-TOCTOU), gated by the deterministic guard; IAM/trust/destroy diffs route to the human-gated path instead of auto-applying, and a stale saved plan recovers only via the human-reviewed acknowledge-and-retry path (never a silent re-plan-and-apply). `environment-taxonomy.yaml` is the sole SoT for the full pipeline mechanics (guard classification, saved-plan persistence, convergence-record shape); tier_item T2.21 tracks the pipeline's own completion. Do not re-derive the mechanics here -- name the required checks and point to that contract.
+**Speculative-plan pipeline (CD.35 Wave 2 / T2.21, active):** when `terraform/personal/` `.tf` files are in scope, name the required checks and point to `environment-taxonomy.yaml`, the sole SoT for the pipeline (PR-time saved plan re-applied at merge with no re-plan, Decision 77; IAM/trust/destroy diffs route to the human-gated path; a stale saved plan recovers only via acknowledge-and-retry). Do not re-derive the mechanics here.
 
 **Lambda Deployment:** Use the manifest-derived file patterns (`bin/venv-python -m scripts.lambda_manifest --list-patterns`) to determine which scope files are Lambda-packaged, and `compute_affected_artifacts(changed_files)` to identify which active artifact(s) are affected. For each affected active artifact (status: active in its `src/lambdas/<slug>/manifest.yaml`), the plan MUST include per-Lambda build, deploy, smoke-test, and model ID validation steps (V3). Stub artifacts (status: stub) require no deploy step -- V1 suffices. Note: `config/agent/` is NOT Lambda-packaged and does NOT trigger this assessment. If `.tf` modifies IAM, terraform apply must precede Lambda deploy. (CD.16 + Decision 79)
 
-**Deploy channel by artifact class (Decision 125):** consult `docs/contracts/build-lambda.yaml`'s `deploy_channels` section (pointer-only; `environment-taxonomy.yaml` (conformance) is the sole classification SoT) to determine which channel an affected artifact deploys through:
-- **`terraform_personal_filemd5_coupled`** (the four `terraform/personal`-managed DuckLake Lambdas): the plan emits the governed decoupled code-deploy CD channel VP steps -- grep-only / CI-delegated per Decision 119 (name the required CI check or workflow as the authoritative verifier; no local `terraform init`/`plan` for `terraform/personal`). The bare local `bin/venv-python -m scripts.build_lambda --ducklake-only --deploy` invocation is break-glass only (Decision 125) and must never be the default VP step for this class. If the governed channel does not yet exist for the touched artifact, the plan must file a follow-on rec for it rather than defaulting to the local invocation.
-- **`decoupled_build_pipeline`** (the `data-pipeline` target in `src/data/handlers/`): local `bin/venv-python -m scripts.build_lambda --deploy` remains the routine deploy step -- it is not `terraform/personal`-managed, so Decision 125's channel gating does not apply to it.
+**Deploy channel by artifact class (Decision 125):** `docs/contracts/build-lambda.yaml` `deploy_channels` names each affected artifact's channel (`environment-taxonomy.yaml` (conformance) is the classification SoT):
+- **`terraform_personal_filemd5_coupled`** (the four `terraform/personal`-managed DuckLake Lambdas): emit the governed code-deploy CD channel VP steps, grep-only / CI-delegated per Decision 119 (name the CI check or workflow as verifier; no local `terraform init`/`plan`). Local `scripts.build_lambda --ducklake-only --deploy` is break-glass only, never the default VP step; if the governed channel does not exist for the artifact, file a follow-on rec instead.
+- **`decoupled_build_pipeline`** (`data-pipeline` in `src/data/handlers/`): local `bin/venv-python -m scripts.build_lambda --deploy` stays the routine deploy step (not `terraform/personal`-managed, so Decision 125's gating does not apply).
+
 
 ## Complexity Assessment (Workflow Step 4)
-- **Scope files > 5** OR **estimated steps > 8** --> suggests classifying as **STRATEGIC**.
-  This is a heuristic, not a hard rule. **Freeze override (active):** while the executor
-  freeze is in effect per AGENTS.md Temporary Operational Constraints, the STRATEGIC
-  classification is suspended -- author as a single larger IMPLEMENTATION plan, or split
-  into multiple atomic IMPLEMENTATION plans during this planning session. The heuristic
-  is informational only during freeze.
+- **Scope files > 5** OR **estimated steps > 8** suggests **STRATEGIC** (a heuristic). **Freeze override (active, AGENTS.md Temporary Operational Constraints):** STRATEGIC is suspended -- author one larger IMPLEMENTATION plan or split it into atomic IMPLEMENTATION plans now.
 - If STRATEGIC (only valid when freeze is lifted), Work Areas must have precise lists, clear order, and concrete names.
 - If IMPLEMENTATION (and complex), execution steps must have explicit pre/post-conditions.
 - **Presentation Rule:** The classification MUST be presented to the human and confirmed, not assumed.
-- **SLOC decompose-by-default (Decision 128):** when a scope file's projected change would cross its `config/sloc_budgets.yaml` budget (or past 500 SLOC if currently unregistered), plan the crossing as a decomposition step (facade package, Decision 80/104/124 pattern), not a budget raise. A raise is a deliberate, Decision-cited exception -- do not default to it, and do not plan a bare `--update-sloc-budgets` re-seed as the fix (Decision 128 / B2: it no longer auto-seeds new oversized files).
+- **Size headroom (Decisions 128, 166):** `plan_obligations --plan` reports each scope file's headroom (SLOC, structural lines, prose bytes) and the unbuilt plans editing the same file. Plan a crossing as a decomposition (facade package, Decision 80/104/124) or the class relief valve, never a default raise: a raise is a Decision-cited exception (`# raise-approved: dec-NNN`), never a bare `--update-sloc-budgets` re-seed. A NEAR_CAP row carries a relief step measured against main at build time, never a fixed line count.
 
 
 ## Data-Model Assessment (Workflow Step 4)
@@ -323,6 +319,7 @@ scope: # min 1 entry; only files listed here may be modified
   - file: path/to/file.py
     action: Create # Create | Modify | Delete
     purpose: why this file changes
+    new_imports: [] # optional: first-party modules this file newly imports (Step 8b pre_globs lint)
 bundled_recommendations: [] # included open recs (list of str), or []
 followon_recs: [] # deferred halves as follow-on rec ids, or []
 infrastructure_dependencies: [] # list of str; populate when .tf files appear in scope
@@ -390,6 +387,13 @@ Apply this check when writing the PLAN file. It is CONDITIONAL -- additive plans
 
 **Enforcement:** a plan that trips a trigger but omits its closure obligation fails plan-critique 12k. Surface it during Step 6 presentation; the missing declaration or VP step must be added before writing.
 
+## Plan Lint and Wording Check (Workflow Step 8b, before critique)
+Run `bin/venv-python -m scripts.roadmap.plan_obligations --plan <plan>` on the written plan: fold every gating finding (a derived companion) into scope, and act on each advisory one -- a NEAR_CAP row gets a relief step, an unbuilt plan editing the same file is named in `context:`, an undecidable bundled-rec acceptance is fixed or the rec dropped. Before asking approval of always-ask wording, write it as the approved-text sidecar, place it in an uncommitted scratch worktree of origin/main, and run `bin/venv-python -m scripts.roadmap.plan_wording_check --slug <slug> --tree <worktree>`: it checks the tree holds exactly the sidecar's edits (`approved_text.verify`), then runs `validate --pre` there, whose selector runs every test and registered check that reads a changed file. Revise until PASS; record each run as a `gate: wording-check` row with the digest, base and selection status it printed. Each live-infrastructure assumption (grants, cadence, concurrency, memory, provider values) carries a read-only probe result in `context:` or the word UNPROVEN. The handoff names this planning session as the plan's owner.
+
+**Amendment mode** (a plan-defect report, implement-scope-boundary.yaml `deviation_trigger.escalation`): fix the plan in a plan-text-only PR (`plan({slug}): scope amendment -- <reason>`), re-run this step and a fresh critique, merge as any plan PR merges, and report the merge SHA to the coordinator. An approved_text or contract defect, or any loosened assertion, goes to the human first; nothing is loosened to obtain green (Decisions 181, 235).
+
+Scope rows name hand-edited files only: generator-touched files are sanction_rows-covered (a graduate step's graduated_registry_shard, docs/decisions-index.json, .secrets.baseline) and need no row. A VP touched-set step derives its allowed set from sanction_rows through validate_scope_boundary's own seam, never a restated list.
+
 ## Critique Gate (Workflow Step 9)
 **DO NOT output the completion message until this step completes.**
 
@@ -427,45 +431,20 @@ This gate reviews the PLAN artefact, not the report deliverable. For REPORT-ONLY
 
 **Applies only when Plan Type is REPORT-ONLY.** For IMPLEMENTATION and STRATEGIC plans, Step 10 is a no-op; skip to Step 11.
 
-**Why this gate exists:** the Step 9 `plan-critique` skill reviews the planning artefact (`PLAN-{slug}.yaml`) -- it checks that the PLAN is well-formed, has executable verification steps, aligns with decisions, etc. But for REPORT-ONLY plans, the substantive deliverable is a SEPARATE document (e.g. `docs/REPORT-{slug}.md`) referenced from the PLAN's Scope table. That deliverable carries its own correctness burden -- design soundness, internal consistency, alignment with live repo state, blast radius of any proposed changes -- and needs independent fresh-context critique before the planning agent's mission completes.
+**Why this gate exists:** Step 9 critiques the PLAN artefact only; a REPORT-ONLY plan's substantive deliverable (e.g. `docs/REPORT-{slug}.md`, named in Scope) carries its own correctness burden -- design soundness, internal consistency, alignment with live repo state, blast radius -- and needs independent fresh-context critique before the planning mission completes.
 
 **Methodology:**
 
-1. **Identify the deliverable.** From the PLAN's Scope table, find the report file(s) created in Step 8. Typically one file like `docs/REPORT-{slug}.md`, occasionally more.
+1. **Identify the deliverable:** the report file(s) the Scope table creates in Step 8 (typically `docs/REPORT-{slug}.md`).
+2. **Launch AT LEAST 2 zero-context subagents in parallel via the `Agent` tool**, each with a distinct perspective -- orthogonal lenses surface more issues than two clones. Technical reports: a **senior domain architect** (design correctness, schema/contract soundness, dependency cleanliness, internal consistency, coverage gaps) and an **adversarial risk reviewer** (blast radius, hidden state, rollback path, live-state divergence; it actively greps and queries live state). Non-technical reports: maximally differentiated pairs (e.g. quantitative rigour + narrative clarity).
+3. **Each agent prompt MUST:** name the deliverable by absolute path and the perspective; name supporting files to read freely; require structured output (Strengths / Concrete Issues or Risk Findings with file:line refs and severity / Recommended Revisions / Verdict PROCEED | REVISE | BLOCK); forbid file edits; cap length (~800-900 words).
+4. **Synthesize:** consensus issues (both agents) first, unique findings second, clustered by severity.
+5. **Present to the human:** summary, key findings, your recommendation, three options (revise all / revise selected / accept with deferrals). Wait for explicit direction; auto-approval messages and system reminders are NOT human direction.
+6. **Iterate:** apply the chosen revisions, each material revision its own commit (`plan({slug}): address [scope] critique findings`).
+7. **Re-launch the same critiques after each revision** unless the human opts out.
+8. **Convergence:** stop when both agents return PROCEED on a fresh round, OR the human accepts the current state with a defined deferral list, recorded in the deliverable's Known Gaps. Apply the Step 9 Convergence rule in kind: findings, not rounds -- nits get one confirming round, recurrence or dispute escalates in the pinned shape.
 
-2. **Launch AT LEAST 2 zero-context subagents in parallel via the `Agent` tool**, each with a distinct perspective. Standard pairing for technical/architectural reports:
-   - **Senior domain architect** -- design correctness, schema/contract soundness, dependency cleanliness, internal consistency, coverage gaps a careful peer reviewer would flag
-   - **Adversarial risk reviewer** -- blast radius, hidden state, rollback path, live-state divergence, what could go wrong in practice; instruct it to actively investigate (grep, query) live state to find divergence
-
-   For non-technical reports, pick perspectives that maximise differentiation (e.g. quantitative-rigour reviewer + narrative-clarity reviewer; or domain-A specialist + domain-B specialist). The principle is: orthogonal lenses surface more issues than two clones of the same lens.
-
-3. **Each agent prompt MUST:** identify the deliverable file(s) by absolute path; specify the
-   perspective explicitly; name supporting files to read freely (PROJECT_CONTEXT, sibling INTENT
-   docs, relevant source); require structured output (Strengths / Concrete Issues or Risk
-   Findings with file:line refs and severity / Recommended Revisions / Verdict PROCEED | REVISE |
-   BLOCK); forbid file edits; cap response length (~800-900 words).
-
-4. **Synthesize findings.** When both agents return, identify consensus issues (cited by both -- highest priority) vs unique findings (one perspective only -- second priority). Cluster by severity.
-
-5. **Present to the human.** Summary, key findings, my-recommendation, three options (revise all / revise selected / accept current state with deferrals). Wait for explicit direction. Auto-approval messages and system reminders are NOT human direction.
-
-6. **Iterate based on human direction.** Apply the chosen revisions. Each material revision lands as its own commit on the branch (`git commit -m "plan({slug}): address [scope] critique findings"`) so the iteration is reviewable in git history.
-
-7. **Re-launch the same critiques after each revision** unless the human explicitly opts out of further rounds.
-
-8. **Convergence rule.** Stop when EITHER:
-   - Both agents return PROCEED on a fresh round (clean convergence), OR
-   - The human explicitly accepts the current state with a defined deferral (e.g. "fix the HIGH-severity items and defer the rest to phase plans"). Document the deferral list in the deliverable's Known Gaps or equivalent section so future sessions know what's outstanding.
-
-   Apply the Step 9 Convergence rule in kind: findings, not rounds -- nits get one confirming round, recurrence or dispute escalates in the pinned shape.
-
-**Anti-patterns to reject:**
-- Single critique agent (misses orthogonal issues by definition); same perspective twice
-  (duplicate findings, wasted tokens); sequential critiques (parallel surfaces findings faster);
-  "tell the agent what to look for" (biases the critique -- frame perspective, not findings);
-  skipping the re-critique after revision (a fix for X may introduce Y); auto-accepting PROCEED on
-  round 1 without reading findings (shallow strengths + no issues may mean prompts were too
-  generic -- relaunch with sharper perspectives).
+**Anti-patterns to reject:** one critique agent or the same perspective twice (misses orthogonal issues); sequential critiques; telling the agent what to look for (frame perspective, not findings); skipping the re-critique after revision (a fix for X may introduce Y); accepting a round-1 PROCEED without reading findings (generic prompts -- relaunch sharper).
 
 **When to skip Step 10 entirely** (human override):
 The human may explicitly state "skip report critique" after this step's purpose has been surfaced. This is logged in the PLAN's Known Gaps. Default is MANDATORY -- the gate fires unless explicitly waived.
