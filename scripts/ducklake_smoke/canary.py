@@ -10,6 +10,7 @@ Lambda.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from typing import Any
@@ -223,7 +224,13 @@ def _lambda_invoke_cli(fn_name: str, payload: dict[str, Any], *, profile: str | 
     return raw
 
 
-def canary_rehearsal(*, profile: str | None = None, region: str = "eu-west-2", json_output: bool = False) -> None:
+def canary_rehearsal(
+    *,
+    profile: str | None = None,
+    region: str = "eu-west-2",
+    json_output: bool = False,
+    project_id: str | None = None,
+) -> None:
     """OQ.12 pre-deploy clone-rehearsal from CC-web (no TCP/5432).
 
     Full orchestration (all AWS API calls over 443; TCP/5432 happens server-side inside Lambda):
@@ -240,6 +247,9 @@ def canary_rehearsal(*, profile: str | None = None, region: str = "eu-west-2", j
     churn_single bypasses the warm-connection cache by design. The CD.33 2000ms budget was calibrated for
     warm steady-state production Lambda containers, not cold-start canaries. The canonical OCC gate is
     lambda_churn (EC8) on the deployed production Lambdas, which have warm cached connections.
+
+    project_id (default: env NEON_PROJECT_ID) skips the org-level project listing, which a project-scoped Neon
+    key cannot make; branch create and delete are already project-scoped.
 
     With json_output=True, emits a JSON dict for VP10 isolation check including torn_down + scratch identifiers.
     Loud-fail (SmokeTestFailure) on any gate miss (Decision 55).
@@ -268,7 +278,15 @@ def canary_rehearsal(*, profile: str | None = None, region: str = "eu-west-2", j
     _progress_file = sys.stderr if json_output else sys.stdout
 
     api_key = neon_api.fetch_api_key(profile=profile)
-    project_id = neon_api.resolve_project_id(api_key)
+    project_id = project_id or os.environ.get("NEON_PROJECT_ID")
+    if not project_id:
+        try:
+            project_id = neon_api.resolve_project_id(api_key)
+        except neon_api.NeonApiError as exc:
+            raise core.SmokeTestFailure(
+                f"canary-rehearsal: cannot list Neon projects ({exc}); pass --project-id or set NEON_PROJECT_ID "
+                "(a project-scoped key cannot list projects)"
+            ) from exc
 
     layer_arns = _publish_candidate_layers(bucket=_bucket, profile=profile, region=region)
     layer_arn_list = list(layer_arns.values())

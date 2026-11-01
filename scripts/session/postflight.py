@@ -10,9 +10,8 @@ Modes:
     --commit "message"   Run git add + commit with pre-commit retry (max 3)
     --push               Push, create PR, poll CI, auto-merge; output JSON
     --metrics            Run session/metrics.py + roadmap/plan_audit.py; return combined output
-    --close              Intent verification + SESSION_LOG entry + pre-commit sanity; output JSON
+    --close              Pre-commit sanity and diff summary; output JSON
     --log-housekeeping   Commit and push uncommitted JSONL log files
-    --close-session      Finalise the active telemetry session opened by --open-session
     --auto "message"     Full session close in one command: close -> evidence -> metrics ->
                           commit -> rebase -> validate -> verify-head -> push -> portal sync
                           (PLAN-handoff-validates-committed-tree: the full tier now runs on the
@@ -26,14 +25,12 @@ Usage:
     python scripts/session/postflight.py --metrics
     python scripts/session/postflight.py --close
     python scripts/session/postflight.py --log-housekeeping
-    python scripts/session/postflight.py --close-session --outcome success
     python scripts/session/postflight.py --auto "feat: implement something" --steps-total 10 --steps-friction 2
 """
 
 from __future__ import annotations
 
 import argparse
-import datetime as _dt
 import json
 import re
 import subprocess  # noqa: F401  (kept: facade byte-stable namespace surface, mirrors decision-80/104 precedent)
@@ -68,7 +65,6 @@ from scripts.postflight._common import (  # noqa: E402, F401
     MAX_COMMIT_RETRIES,
     PYTHON,
     ROOT,
-    TELEMETRY_ACTIVE_SESSION_FILE,
     _current_branch,
     _run,
     clear_checkpoint,
@@ -78,13 +74,13 @@ from scripts.postflight._common import (  # noqa: E402, F401
 from scripts.postflight.housekeeping import (  # noqa: E402, F401
     _load_max_age_days,
     _stage_document_derived_tables,
-    close_telemetry_session,
     prune_telemetry_logs,
     run_log_housekeeping,
     run_metrics,
 )
 from scripts.postflight.remote import run_push  # noqa: E402, F401
 from scripts.session import postflight_evidence  # noqa: E402
+from scripts.telemetry_capture.status_line import emit_status  # noqa: E402
 
 
 def _parse_scope_table(plan_content: str) -> dict[str, str]:
@@ -222,48 +218,17 @@ def run_commit(message: str) -> int:
 
 
 def run_close() -> int:
-    """Intent verification, SESSION_LOG entry, and pre-commit sanity in one shot.
+    """Pre-commit sanity and diff summary in one shot.
 
     Returns JSON with keys:
-      intent_achieved  – True/False or None (no plan)
-      session_log_entry – Markdown string ready to prepend to SESSION_LOG.md
-      sanity_status     – "PASS" | "WARN" | "FAIL"
-      details           – dict with raw sub-results
+      sanity_status – "PASS" | "WARN" | "FAIL"
+      details       – dict with diff_summary and plan_file
     """
-    # ── 1. Intent verification ────────────────────────────────────────────────
     plan_file = _common.find_plan_file()
-    intent_text: str = ""
-    intent_achieved: bool | None = None
-
-    if plan_file and plan_file.exists():
-        content = plan_file.read_text(encoding="utf-8")
-        intent_match = re.search(r"## Intent\s*\n(.+?)(?=\n##|\Z)", content, re.DOTALL)
-        if intent_match:
-            intent_text = intent_match.group(1).strip()
-
     diff_stat = _common._run(["git", "diff", "--stat", "origin/main"])
     diff_summary = diff_stat.stdout.strip() if diff_stat.returncode == 0 else "(git diff unavailable)"
 
-    if intent_text:
-        # Simple heuristic: if there are changed files, mark intent as achieved
-        has_changes = bool(diff_summary and "changed" in diff_summary)
-        intent_achieved = has_changes
-
-    # ── 2. SESSION_LOG entry template ─────────────────────────────────────────
-    today = _dt.date.today().isoformat()
-    branch = _common._current_branch()
-    plan_name = plan_file.name if plan_file else "PLAN.md"
-
-    session_log_entry = (
-        f"## [{today}] — {branch}\n\n"
-        f"**Plan:** {plan_name}  \n"
-        f"**Intent:** {intent_text or '(see plan file)'}  \n"
-        f"**Done:** <!-- fill in -->\n\n"
-        f"### Changes\n\n"
-        f"```\n{diff_summary}\n```\n"
-    )
-
-    # ── 3. Pre-commit sanity ───────────────────────────────────────────────────
+    # Pre-commit sanity
     sanity_result = _common._run([_common.PYTHON, "scripts/session/postflight.py", "--pre-commit-sanity"])
     sanity_status = "FAIL"
     if sanity_result.returncode == 0:
@@ -274,11 +239,8 @@ def run_close() -> int:
             sanity_status = "FAIL"
 
     output: dict = {
-        "intent_achieved": intent_achieved,
-        "session_log_entry": session_log_entry,
         "sanity_status": sanity_status,
         "details": {
-            "intent_text": intent_text,
             "diff_summary": diff_summary,
             "plan_file": str(plan_file) if plan_file else None,
         },
@@ -334,8 +296,6 @@ def run_auto(commit_message: str, steps_total: int = 0, steps_friction: int = 0)
         {
           "close_exit": int,
           "sanity_status": "PASS" | "FAIL" | "UNKNOWN",
-          "intent_achieved": bool | null,
-          "session_log_entry": str,
           "evidence": "PASS",
           "commit": "PASS" | "FAIL",
           "rebase": "ok" | "fetch_failed" | "rebase_failed",
@@ -367,8 +327,6 @@ def run_auto(commit_message: str, steps_total: int = 0, steps_friction: int = 0)
     try:
         close_data = json.loads(close_raw)
         results["sanity_status"] = close_data.get("sanity_status", "UNKNOWN")
-        results["intent_achieved"] = close_data.get("intent_achieved")
-        results["session_log_entry"] = close_data.get("session_log_entry", "")
     except (json.JSONDecodeError, ValueError):
         results["sanity_status"] = "UNKNOWN"
     print(close_raw)
@@ -466,6 +424,24 @@ def run_auto(commit_message: str, steps_total: int = 0, steps_friction: int = 0)
     return 0 if results.get("status") == "merged" else rc
 
 
+def run_evidence(path: str) -> int:
+    """Write and render structured implementation evidence, reporting the outcome as a status line."""
+    try:
+        evidence = json.loads(Path(path).read_text(encoding="utf-8"))
+        postflight_evidence.validate(evidence)
+    except Exception:
+        emit_status("postflight.evidence", "failed", "invalid_evidence")
+        raise
+    try:
+        postflight_evidence.write(evidence)
+        print(postflight_evidence.render(evidence))
+    except Exception:
+        emit_status("postflight.evidence", "failed", "evidence_error")
+        raise
+    emit_status("postflight.evidence", "done")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Post-session automation")
     group = parser.add_mutually_exclusive_group(required=True)
@@ -475,18 +451,12 @@ def main() -> int:
     group.add_argument("--push", action="store_true", help="Push, create PR, poll CI, merge")
     group.add_argument("--metrics", action="store_true", help="Run session metrics + plan audit")
     group.add_argument("--evidence", metavar="JSON_FILE", help="Write and render structured implementation evidence")
-    group.add_argument("--close", action="store_true", help="Intent verification + SESSION_LOG entry + pre-commit sanity")
+    group.add_argument("--close", action="store_true", help="Pre-commit sanity and diff summary")
     group.add_argument(
         "--log-housekeeping",
         action="store_true",
         dest="log_housekeeping",
         help="Commit uncommitted JSONL logs",
-    )
-    group.add_argument(
-        "--close-session",
-        action="store_true",
-        dest="close_session",
-        help="Finalise the active telemetry session opened by --open-session",
     )
     group.add_argument(
         "--auto",
@@ -507,18 +477,6 @@ def main() -> int:
         metavar="M",
         help="Steps with retro-lite friction (forwarded to session_metrics.py).",
     )
-    parser.add_argument(
-        "--outcome",
-        default="success",
-        help="Session outcome for --close-session (success|failure|cancelled)",
-    )
-    parser.add_argument(
-        "--files-changed",
-        type=int,
-        default=0,
-        dest="files_changed",
-        help="Files changed (used with --close-session)",
-    )
 
     args = parser.parse_args()
 
@@ -533,18 +491,11 @@ def main() -> int:
     if args.metrics:
         return housekeeping.run_metrics(args.steps_total, args.steps_friction)
     if args.evidence:
-        evidence = json.loads(Path(args.evidence).read_text(encoding="utf-8"))
-        postflight_evidence.write(evidence)
-        print(postflight_evidence.render(evidence))
-        return 0
+        return run_evidence(args.evidence)
     if args.close:
         return run_close()
     if args.log_housekeeping:
         return housekeeping.run_log_housekeeping()
-    if args.close_session:
-        housekeeping.close_telemetry_session(outcome=args.outcome, files_changed=args.files_changed)
-        print(f"[close-session] outcome={args.outcome}")
-        return 0
     if args.auto:
         return run_auto(args.auto, args.steps_total, args.steps_friction)
 

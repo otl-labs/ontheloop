@@ -213,7 +213,9 @@ def _trigger_lambda(agent_name: str) -> int:
     """
     function_name = "agent-platform-scheduled-agent-dispatcher"
     payload = json.dumps({"force_agent": agent_name})
-    profile = os.environ.get("AWS_PROFILE", "company-aws-profile")
+    from scripts.aws_profile import resolve_aws_profile  # noqa: PLC0415
+
+    profile = resolve_aws_profile()
 
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".json")
     os.close(tmp_fd)
@@ -230,8 +232,7 @@ def _trigger_lambda(agent_name: str) -> int:
             "raw-in-base64-out",
             "--cli-read-timeout",
             "900",
-            "--profile",
-            profile,
+            *(["--profile", profile] if profile else []),
             tmp_path,
         ]
         logger.info("Triggering Lambda %s for agent '%s'", function_name, agent_name)
@@ -316,7 +317,9 @@ def _smoke_test(agent_name: str) -> int:
     # Step 3: Verify fresh S3 log object
     bucket = "agent-platform-agent-logs"
     prefix = f"agents/{agent_name}/"
-    profile = os.environ.get("AWS_PROFILE", "company-aws-profile")
+    from scripts.aws_profile import resolve_aws_profile  # noqa: PLC0415
+
+    profile = resolve_aws_profile()
     region = "eu-west-2"
 
     verify_cmd = [
@@ -329,8 +332,7 @@ def _smoke_test(agent_name: str) -> int:
         prefix,
         "--query",
         "sort_by(Contents, &LastModified)[-1]",
-        "--profile",
-        profile,
+        *(["--profile", profile] if profile else []),
         "--region",
         region,
         "--output",

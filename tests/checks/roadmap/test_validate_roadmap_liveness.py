@@ -402,6 +402,45 @@ class TestLegC:
         assert len(violations) == 1
 
 
+class TestLegCArchivedBase:
+    """Decision 227: a stub-bearing diff base is hydrated leniently from its own archive, read through a
+    PATH-AWARE base reader (the stub-less TestLegC mocks above stay single-valued and untouched)."""
+
+    _TEXT = "This work is blocked on T9.1 before it can land."
+
+    def _violations(self, tmp_path: Path, head_text: str) -> list[str]:
+        record = {**_item("T9.x", status="complete"), "exit_criteria": [_criterion("c1", text=self._TEXT)]}
+        stub = {key: record[key] for key in ("id", "tier", "name", "depends_on", "status")} | {"archived": True}
+        texts = {
+            "docs/ROADMAP-PLATFORM.yaml": yaml.safe_dump(_doc_dict(tier_items=[stub, _item("T9.1")])),
+            "docs/ROADMAP-PLATFORM-ARCHIVE.yaml": yaml.safe_dump(
+                {"archive_of": "docs/ROADMAP-PLATFORM.yaml", "tier_items": [record]}
+            ),
+        }
+        head = {**record, "exit_criteria": [_criterion("c1", text=head_text)]}
+        doc = _build(tier_items=[head, _item("T9.1")])
+        with (
+            patch("scripts.checks._common.ROOT", tmp_path),
+            patch("scripts.checks._marker_guard.default_base_reader", side_effect=texts.get) as reader,
+        ):
+            _write_yaml(tmp_path / "docs" / "contracts" / "roadmap-liveness.yaml", _VALID_CONTRACT)
+            violations = _leg_c_prose_blocking_edges(doc)
+        assert [c.args[0] for c in reader.call_args_list] == [
+            "docs/ROADMAP-PLATFORM.yaml",
+            "docs/ROADMAP-PLATFORM-ARCHIVE.yaml",
+        ]
+        return violations
+
+    def test_an_unchanged_archived_criterion_reports_nothing(self, tmp_path: Path) -> None:
+        assert self._violations(tmp_path, self._TEXT) == []
+
+    def test_an_archived_criterion_whose_text_changed_is_still_evaluated(self, tmp_path: Path) -> None:
+        violations = self._violations(tmp_path, "This work is now blocked on T9.1 before it can land.")
+
+        assert len(violations) == 1
+        assert "T9.x" in violations[0] and "T9.1" in violations[0]
+
+
 class TestInsertionRobustness:
     def test_head_insertion_reports_exactly_one_added_criterion(self, tmp_path: Path) -> None:
         """Inserting a criterion at the head of a bare-string list must report exactly one added

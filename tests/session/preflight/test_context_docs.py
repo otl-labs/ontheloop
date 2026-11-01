@@ -6,7 +6,6 @@ decisions, sessions, recs count), telemetry-health stub and endstate-drift detec
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import subprocess
 from pathlib import Path
@@ -61,7 +60,6 @@ class TestReadContextFiles:
         with (
             patch("scripts.preflight._common.ROADMAP_FILE", roadmap),
             patch("scripts.preflight._common.DECISIONS_FILE", tmp_path / "missing.md"),
-            patch("scripts.preflight._common.SESSION_LOG_FILE", tmp_path / "missing2.md"),
         ):
             result = _preflight.read_context_files()
         assert result["roadmap_phase"] == "Phase 1.5: Schema Flattening"
@@ -70,7 +68,6 @@ class TestReadContextFiles:
         with (
             patch("scripts.preflight._common.ROADMAP_FILE", tmp_path / "missing.md"),
             patch("scripts.preflight._common.DECISIONS_FILE", tmp_path / "missing2.md"),
-            patch("scripts.preflight._common.SESSION_LOG_FILE", tmp_path / "missing3.md"),
         ):
             result = _preflight.read_context_files()
         assert result["roadmap_phase"] == "unknown"
@@ -84,7 +81,6 @@ class TestReadContextFiles:
         with (
             patch("scripts.preflight._common.ROADMAP_FILE", tmp_path / "missing.md"),
             patch("scripts.preflight._common.DECISIONS_FILE", decisions),
-            patch("scripts.preflight._common.SESSION_LOG_FILE", tmp_path / "missing2.md"),
         ):
             result = _preflight.read_context_files()
         # Decision 1 and 3 are open; Decision 2 is Decided
@@ -111,58 +107,23 @@ class TestReadContextFiles:
         result = _preflight.read_context_files()
         assert result["open_decisions_count"] == expected_open
 
-    def test_recent_sessions_extracted(self, tmp_path: Path) -> None:
-        """RE-SHAPED (Decision 181, PLAN-preflight-context-docs-honesty): this case's fixture is
-        OLDEST-FIRST and its index-0 assertion previously pinned the 2026-03-01 header, which
-        ENCODED the positional-slice defect -- recent_sessions returned the oldest entries. The
-        index-0 assertion is inverted to the NEWEST-dated entry and a second assertion pinning the
-        older entry at index 1 is ADDED, so the case constrains strictly more than before; the
-        count assertion is unchanged. Nothing was deleted or weakened.
-        """
-        session_log = tmp_path / "SESSION_LOG.md"
-        session_log.write_text(
-            "## [2026-03-01] -- agent/feature-a\n\n**Done:** Did something\n"
-            "## [2026-03-10] -- agent/feature-b\n\n**Done:** Did another thing\n",
-            encoding="utf-8",
-        )
+    def test_read_context_files_has_no_recent_sessions(self, tmp_path: Path) -> None:
         with (
             patch("scripts.preflight._common.ROADMAP_FILE", tmp_path / "missing.md"),
             patch("scripts.preflight._common.DECISIONS_FILE", tmp_path / "missing2.md"),
-            patch("scripts.preflight._common.SESSION_LOG_FILE", session_log),
         ):
             result = _preflight.read_context_files()
-        assert len(result["recent_sessions"]) == 2
-        assert "2026-03-10" in result["recent_sessions"][0]
-        assert "2026-03-01" in result["recent_sessions"][1]
+        assert "recent_sessions" not in result
 
     def test_missing_files_return_defaults(self, tmp_path: Path) -> None:
         with (
             patch("scripts.preflight._common.ROADMAP_FILE", tmp_path / "missing.md"),
             patch("scripts.preflight._common.DECISIONS_FILE", tmp_path / "missing2.md"),
-            patch("scripts.preflight._common.SESSION_LOG_FILE", tmp_path / "missing3.md"),
         ):
             result = _preflight.read_context_files()
         assert result["roadmap_phase"] == "unknown"
         assert result["open_decisions_count"] == 0
-        assert result["recent_sessions"] == []
         assert result["recommendations_count"] is None
-
-
-class TestOpenTelemetrySession:
-    """open_telemetry_session() writes the active-session state file."""
-
-    def test_open_session_creates_state_file(self, tmp_path: Path) -> None:
-        """open_telemetry_session writes state file with correct schema."""
-        state_file = tmp_path / ".telemetry-active-session.json"
-        with patch("session_preflight.TELEMETRY_ACTIVE_SESSION_FILE", state_file):
-            _preflight.open_telemetry_session(workflow="plan", branch="agent/test")
-
-        assert state_file.exists()
-        data = json.loads(state_file.read_text(encoding="utf-8"))
-        assert "session_id" in data
-        assert data["workflow"] == "plan"
-        assert data["branch"] == "agent/test"
-        assert "started_at" in data
 
 
 class TestReadContextFilesRecsCount:
@@ -173,7 +134,6 @@ class TestReadContextFilesRecsCount:
             patch("scripts.preflight._common._make_reader", return_value=reader),
             patch("scripts.preflight._common.ROADMAP_FILE", tmp_path / "missing.md"),
             patch("scripts.preflight._common.DECISIONS_FILE", tmp_path / "missing2.md"),
-            patch("scripts.preflight._common.SESSION_LOG_FILE", tmp_path / "missing3.md"),
         ):
             return _preflight.read_context_files(**kw)
 

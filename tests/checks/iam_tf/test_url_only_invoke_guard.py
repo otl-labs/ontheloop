@@ -12,20 +12,27 @@ from pathlib import Path
 import pytest
 
 from scripts.checks.iam_tf._read_coverage import _extract_bracket_block, _split_top_level_objects
+from src.lambdas.ducklake_maintenance.catalog_logins import LOGINS, render_login_sql
 from tests.checks.iam_tf._platform_security_hcl import _block_body, _mask, _resource_body, _strip_comments
 from tests.fixtures.terraform_hcl_blocks import tf_dir_file_texts
 
 _ROOT = Path(__file__).resolve().parents[3]
 _PERSONAL = _ROOT / "terraform" / "personal"
 _BOOTSTRAP = _ROOT / "terraform" / "bootstrap"
-_SQL = _ROOT / "src" / "lambdas" / "ducklake_maintenance" / "ducklake_telemetry_writer_role.sql"
+_SCHEMAS = frozenset({"ducklake_ops", "public", "ducklake_smoke", "ducklake_telemetry"})
 _ARN = "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-"
-_BASES = {f"{_ARN}{fn}" for fn in ("writer", "reader", "telemetry-writer")}
-_SIX = _BASES | {f"{b}:*" for b in _BASES}
+_FIVE = ("writer", "reader", "telemetry-writer", "telemetry-writer-smoke", "telemetry-reader")
+_BASES = {f"{_ARN}{fn}" for fn in _FIVE}
+_DEV_BASES = {f"{_ARN}{fn}" for fn in ("writer", "reader", "telemetry-writer", "telemetry-reader")}
+_DEV_FORMS = _DEV_BASES | {f"{b}:*" for b in _DEV_BASES}
+_EXACT = {f"{_ARN}{fn}{suffix}" for fn in ("writer", "reader") for suffix in ("", ":*")}
+_FAMILY = f"{_ARN}telemetry-*"
+_BOUNDARY_FORMS = _EXACT | {_FAMILY}
 _VIA_URL = "lambda:InvokedViaFunctionUrl"
+_NAMES = "writer|reader|telemetry-writer-smoke|telemetry-writer|telemetry-reader"
 _FORMS = (
-    re.compile(r"aws_lambda_function\.ducklake_(writer|reader|telemetry_writer)\.arn\}?(?::\*)?$"),
-    re.compile(r"function:agent-platform-ducklake-(writer|reader|telemetry-writer)(?::\*)?$"),
+    re.compile(rf"aws_lambda_function\.ducklake_({_NAMES.replace('-', '_')})\.arn\}}?(?::\*)?$"),
+    re.compile(rf"function:agent-platform-ducklake-({_NAMES})(?::\*)?$"),
 )
 
 
@@ -86,8 +93,12 @@ def _block_statements(text: str) -> list[dict]:
     return out
 
 
+def _bootstrap(name: str) -> str:
+    return (_ROOT / "terraform" / "bootstrap" / name).read_text(encoding="utf-8")
+
+
 def _function_locals(texts: dict[str, str]) -> dict[str, str]:
-    pattern = re.compile(r'^\s*(\w+)\s*=\s*"agent-platform-ducklake-(writer|reader|telemetry-writer)"\s*$', re.M)
+    pattern = re.compile(rf'^\s*(\w+)\s*=\s*"agent-platform-ducklake-({_NAMES})"\s*$', re.M)
     return {m.group(1): m.group(2) for text in texts.values() for m in pattern.finditer(_strip_comments(text))}
 
 
@@ -122,18 +133,18 @@ def boundary_problems(text: str) -> list[str]:
     deny = {
         "DenyDuckLakeDirectInvoke": (
             {"lambda:InvokeFunction", "lambda:InvokeAsync"},
-            _SIX,
+            _BOUNDARY_FORMS,
             [("BoolIfExists", _VIA_URL, ["false"])],
         ),
         "DenyDuckLakeResourcePolicyEdit": (
             {"lambda:AddPermission", "lambda:RemovePermission", "lambda:PutResourcePolicy", "lambda:DeleteResourcePolicy"},
-            _SIX,
+            _BOUNDARY_FORMS,
             [],
         ),
         "DenyDuckLakeEventSourceMapping": (
             {"lambda:CreateEventSourceMapping", "lambda:UpdateEventSourceMapping"},
             {"*"},
-            [("ArnLike", "lambda:FunctionArn", sorted(_SIX))],
+            [("ArnLike", "lambda:FunctionArn", sorted(_BOUNDARY_FORMS))],
         ),
     }
     problems: list[str] = []
@@ -146,6 +157,24 @@ def boundary_problems(text: str) -> list[str]:
     return problems
 
 
+def _sid_patterns(stmt: dict) -> list[str]:
+    if stmt["sid"] != "DenyDuckLakeEventSourceMapping":
+        return _list(stmt["resources"])
+    return [v for _, key, values in stmt["conditions"] if key == "lambda:FunctionArn" for v in values]
+
+
+def coverage_problems(text: str) -> list[str]:
+    by_sid = {s["sid"]: s for s in _json_statements(text)}
+    problems: list[str] = []
+    for sid in ("DenyDuckLakeDirectInvoke", "DenyDuckLakeResourcePolicyEdit", "DenyDuckLakeEventSourceMapping"):
+        patterns = _sid_patterns(by_sid[sid]) if sid in by_sid else []
+        for fn in _FIVE:
+            for suffix in ("", ":*"):
+                if not any(fnmatch.fnmatchcase(f"{_ARN}{fn}{suffix}", pattern) for pattern in patterns):
+                    problems.append(f"{sid}: {fn}{suffix} matches no resource")
+    return problems
+
+
 def trail_selector_problems(trail_text: str) -> list[str]:
     body = _resource_body(trail_text, "aws_cloudtrail", "platform_security") or ""
     blocks = [_block_body(body, m.end() - 1) for m in re.finditer(r"\bevent_selector\s*\{", _mask(body))]
@@ -155,25 +184,32 @@ def trail_selector_problems(trail_text: str) -> list[str]:
     data_ok = any(
         re.search(r'\btype\s*=\s*"AWS::Lambda::Function"', b) and set(_list(_field(b, "values"))) == _BASES for b in data
     )
-    return (["no Lambda data-event selector for exactly the three functions"] if not data_ok else []) + (
+    return (["no Lambda data-event selector for exactly the five functions"] if not data_ok else []) + (
         ["the All management-event selector is missing"] if not mgmt else []
     )
 
 
-def sql_problems(sql: str) -> list[str]:
+def sql_problems(sql: str, schema: str, owner_role: str | None = None) -> list[str]:
     body = "\n".join(line.split("--")[0] for line in sql.splitlines())
+    foreign = "|".join(sorted(_SCHEMAS - {schema}))
     problems = [
         f"role SQL matches {pattern!r}"
         for pattern in (
             r"(?i)GRANT\s[^;]*CREATE",
             r"(?i)GRANT\s+ALL\b",
-            r"(?i)\b(?:ON|IN)\s+SCHEMA\s+(?:ducklake_ops|public)\b",
+            rf"(?i)\b(?:ON|IN)\s+SCHEMA\s+(?:{foreign})\b",
             r"(?i)\bPASSWORD\b",
         )
         if re.search(pattern, body)
     ]
-    if not re.search(r"(?i)\bON\s+SCHEMA\s+ducklake_smoke\b", body):
-        problems.append("role SQL grants nothing on ducklake_smoke")
+    if owner_role is None and not re.search(rf"(?i)\bON\s+SCHEMA\s+{schema}\b", body):
+        problems.append(f"role SQL grants nothing on {schema}")
+    if owner_role is not None:
+        grants = re.findall(r"(?im)^GRANT\s+(?!CONNECT\b)(\w+)\s+TO\s+\w+", body)
+        if grants != [owner_role]:
+            problems.append(f"role SQL grants {grants}, expected exactly the owner role {owner_role}")
+        if re.search(r"(?i)\bON\s+SCHEMA\b", body):
+            problems.append("role SQL grants on a schema directly instead of through the owner role")
     if not re.search(r"(?i)CONNECTION\s+LIMIT\s+\d+", body):
         problems.append("role SQL sets no CONNECTION LIMIT")
     return problems
@@ -185,18 +221,18 @@ def _sid_resources(text: str, sid: str) -> str:
 
 def _dev_problems(text: str, fn_locals: dict[str, str]) -> list[str]:
     return [
-        f"{sid} does not name all six function ARN forms"
+        f"{sid} does not name all eight function ARN forms"
         for sid in ("DuckLakeInvokeUrl", "DuckLakeInvokeViaUrlOnly")
-        if len(_named_forms(_sid_resources(text, sid), fn_locals)) != 6
+        if len(_named_forms(_sid_resources(text, sid), fn_locals)) != 8
     ]
-
-
-def _bootstrap(name: str) -> str:
-    return (_ROOT / "terraform" / "bootstrap" / name).read_text(encoding="utf-8")
 
 
 def test_real_boundary_carries_the_three_denies() -> None:
     assert boundary_problems(_bootstrap("github_ci_apply_boundary.tf")) == []
+
+
+def test_real_boundary_covers_every_telemetry_function() -> None:
+    assert coverage_problems(_bootstrap("github_ci_apply_boundary.tf")) == []
 
 
 def test_real_identity_grants_are_url_only() -> None:
@@ -224,7 +260,10 @@ def test_real_trail_logs_lambda_data_events() -> None:
 
 
 def test_real_role_sql_is_scoped() -> None:
-    assert sql_problems(_SQL.read_text(encoding="utf-8")) == []
+    assert {login.kind for login in LOGINS.values()} == {"writer", "reader", "maintainer"}
+    for name, login in LOGINS.items():
+        owner = login.owner_role if login.kind == "maintainer" else None
+        assert sql_problems(render_login_sql(name), login.schema, owner) == [], name
 
 
 def test_real_bootstrap_reads_list_the_telemetry_writer_role() -> None:
@@ -262,7 +301,7 @@ def test_real_maintenance_role_reads_the_scoped_secret() -> None:
     assert "aws_secretsmanager_secret.ducklake_telemetry_writer_dsn.arn" in raw
 
 
-_GOOD_BOUNDARY = """
+_BOUNDARY_TMPL = """
 locals { p = jsonencode({ Statement = [
   { Sid = "DenyDuckLakeDirectInvoke", Effect = "Deny", Action = ["lambda:InvokeFunction", "lambda:InvokeAsync"],
     Resource = [%(six)s], Condition = { BoolIfExists = { "lambda:InvokedViaFunctionUrl" = "false" } } },
@@ -273,7 +312,33 @@ locals { p = jsonencode({ Statement = [
     Action = ["lambda:CreateEventSourceMapping", "lambda:UpdateEventSourceMapping"], Resource = "*",
     Condition = { ArnLike = { "lambda:FunctionArn" = [%(six)s] } } },
 ] }) }
-""" % {"six": ", ".join(f'"{a}"' for a in sorted(_SIX))}
+"""
+
+
+def _boundary(forms: set[str]) -> str:
+    return _BOUNDARY_TMPL % {"six": ", ".join(f'"{a}"' for a in sorted(forms))}
+
+
+_GOOD_BOUNDARY = _boundary(_BOUNDARY_FORMS)
+
+
+def _forms_without(name: str) -> set[str]:
+    if name in ("writer", "reader"):
+        return {f for f in _BOUNDARY_FORMS if not f.startswith(f"{_ARN}{name}")}
+    others = [fn for fn in _FIVE if fn.startswith("telemetry-") and fn != name]
+    return (_BOUNDARY_FORMS - {_FAMILY}) | {f"{_ARN}{fn}{s}" for fn in others for s in ("", ":*")}
+
+
+def test_coverage_predicate_is_green_on_the_synthetic_boundary_and_red_on_none() -> None:
+    assert coverage_problems(_GOOD_BOUNDARY) == []
+    assert len(coverage_problems("locals { p = jsonencode({ Statement = [] }) }")) == 30
+
+
+@pytest.mark.parametrize("name", _FIVE)
+def test_coverage_predicate_is_red_for_each_dropped_function(name: str) -> None:
+    problems = coverage_problems(_boundary(_forms_without(name)))
+    assert len(problems) == 6, problems
+    assert all(f": {name}" in p for p in problems), problems
 
 
 def test_boundary_predicate_is_green_on_a_complete_synthetic_boundary_and_red_on_none() -> None:
@@ -292,7 +357,9 @@ def test_boundary_predicate_is_green_on_a_complete_synthetic_boundary_and_red_on
         ('"lambda:DeleteResourcePolicy"', '"lambda:GetResourcePolicy"'),
         ('"lambda:UpdateEventSourceMapping"', '"lambda:ListTags"'),
         ('Resource = "*"', 'Resource = "x"'),
-        (f'"{_ARN}telemetry-writer:*"', '"x"'),
+        (f'"{_FAMILY}"', '"x"'),
+        (f'"{_ARN}reader:*"', '"x"'),
+        (f'"{_ARN}writer"', f'"{_ARN}telemetry-writer"'),
         ('"lambda:FunctionArn" = [', '"lambda:EventSourceArn" = ['),
         ('Effect = "Deny"', 'Effect = "Allow"'),
     ],
@@ -341,16 +408,18 @@ def test_grant_predicate_flags_wildcard_actions_a_conditioned_url_grant_and_json
     assert grant_problems(_json_statements((plain % res).replace("] }] })", f"], {cond} }}] }})")), {}) == []
 
 
-def test_platform_dev_predicate_is_red_when_a_telemetry_writer_form_is_omitted() -> None:
+@pytest.mark.parametrize("name", ["telemetry-writer", "telemetry-reader"])
+def test_platform_dev_predicate_is_red_when_a_telemetry_writer_form_is_omitted(name: str) -> None:
     def stmt(sid: str, forms: list[str]) -> str:
         return f'{{ Sid = "{sid}", Effect = "Allow", Action = ["lambda:InvokeFunction"], Resource = [{", ".join(forms)}] }}'
 
-    full = [f'"{a}"' for a in sorted(_SIX)]
+    full = [f'"{a}"' for a in sorted(_DEV_FORMS)]
     ok = f"Statement = [{stmt('DuckLakeInvokeUrl', full)}, {stmt('DuckLakeInvokeViaUrlOnly', full)}]"
     assert _dev_problems(ok, {}) == []
-    short = [f for f in full if not f.endswith('telemetry-writer:*"')]
+    short = [f for f in full if not f.endswith(f'{name}:*"')]
+    assert len(short) == 7
     red = ok.replace(", ".join(full), ", ".join(short), 1)
-    assert _dev_problems(red, {}) == ["DuckLakeInvokeUrl does not name all six function ARN forms"]
+    assert _dev_problems(red, {}) == ["DuckLakeInvokeUrl does not name all eight function ARN forms"]
     assert len(_dev_problems("Statement = []", {})) == 2
 
 
@@ -377,6 +446,8 @@ resource "aws_cloudtrail" "platform_security" {
     [
         ('type = "AWS::Lambda::Function"', 'type = "AWS::S3::Object"'),
         (f'"{_ARN}telemetry-writer"', f'"{_ARN}telemetry-writer:*"'),
+        (f'"{_ARN}telemetry-writer-smoke"', '"x"'),
+        (f'"{_ARN}telemetry-reader"', '"x"'),
         ("include_management_events = false", "include_management_events = true"),
         ("include_management_events = true", "include_management_events = false"),
     ],
@@ -409,6 +480,44 @@ ALTER DEFAULT PRIVILEGES FOR ROLE ducklake_ops IN SCHEMA ducklake_smoke GRANT SE
     ],
 )
 def test_sql_predicate_is_red_on_each_mutation(old: str, new: str) -> None:
-    assert sql_problems(_SQL_OK) == [], "CREATE ROLE, NOCREATEDB, FOR ROLE ducklake_ops and comments must not false-match"
+    assert sql_problems(_SQL_OK, "ducklake_smoke") == [], (
+        "CREATE ROLE, NOCREATEDB, FOR ROLE ducklake_ops and comments must not false-match"
+    )
     assert old in _SQL_OK
-    assert sql_problems(_SQL_OK.replace(old, new, 1))
+    assert sql_problems(_SQL_OK.replace(old, new, 1), "ducklake_smoke")
+
+
+def test_sql_predicate_checks_each_login_against_its_own_schema() -> None:
+    telemetry = _SQL_OK.replace("ducklake_smoke", "ducklake_telemetry")
+    assert sql_problems(telemetry, "ducklake_telemetry") == []
+    assert sql_problems(telemetry, "ducklake_smoke")
+    assert sql_problems(f"{telemetry}\nGRANT USAGE ON SCHEMA ducklake_smoke TO r;", "ducklake_telemetry")
+
+
+_MAINTAINER = (
+    "GRANT CONNECT ON DATABASE d TO r;\n"
+    "GRANT ducklake_smoke_owner TO r WITH INHERIT TRUE;\n"
+    "ALTER ROLE r LOGIN CONNECTION LIMIT 8;"
+)
+
+
+@pytest.mark.parametrize(
+    "old,new",
+    [
+        ("GRANT ducklake_smoke_owner TO r", "GRANT ducklake_ops TO r"),
+        ("GRANT ducklake_smoke_owner TO r WITH INHERIT TRUE;", ""),
+        (
+            "GRANT ducklake_smoke_owner TO r WITH INHERIT TRUE;",
+            "GRANT ducklake_smoke_owner TO r;\nGRANT ducklake_telemetry_owner TO r;",
+        ),
+        (
+            "GRANT ducklake_smoke_owner TO r WITH INHERIT TRUE;",
+            "GRANT ducklake_smoke_owner TO r;\nGRANT USAGE ON SCHEMA ducklake_smoke TO r;",
+        ),
+        ("LIMIT 8", "PASSWORD 'x'"),
+    ],
+)
+def test_maintainer_sql_predicate_is_red_unless_exactly_one_owner_role_is_granted(old: str, new: str) -> None:
+    assert sql_problems(_MAINTAINER, "ducklake_smoke", "ducklake_smoke_owner") == []
+    assert old in _MAINTAINER
+    assert sql_problems(_MAINTAINER.replace(old, new, 1), "ducklake_smoke", "ducklake_smoke_owner")

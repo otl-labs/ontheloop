@@ -128,6 +128,17 @@ def test_sub_agent_state_from_the_agent_run_pair(case: dict[str, Any], expect: d
     _run(case, expect)
 
 
+_SESSION_END_PREFIXES = ("c_at_rest", "c_mid_turn", "c_producer_close", "c_turn_", "c_blocked_turn", "c_duration_is")
+
+
+def test_session_end_reads_the_latest_turn() -> None:
+    cases = [c for c in _CASES["cases"] if c["id"].startswith(_SESSION_END_PREFIXES)]
+    assert len(cases) >= 10
+    for case in cases:
+        for expect in case["expect"]:
+            _run(case, expect)
+
+
 @pytest.mark.parametrize(("case", "expect"), _expects({"session_process_event_rollup"}))
 def test_process_event_rollup_golden_cases(case: dict[str, Any], expect: dict[str, Any]) -> None:
     _run(case, expect)

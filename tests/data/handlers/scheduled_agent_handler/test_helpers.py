@@ -7,7 +7,7 @@ _invoke_github_models. Split from tests/test_scheduled_agent_handler.py (VERBATI
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -33,19 +33,18 @@ class TestGetGithubPat:
         monkeypatch.delenv("GITHUB_PAT_SECRET_ARN", raising=False)
         assert _get_github_pat() == ""
 
-    def test_fetches_from_secrets_manager_when_arn_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_ignores_secret_arn_and_never_calls_secrets_manager(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("GITHUB_PAT", raising=False)
-        monkeypatch.setenv("GITHUB_PAT_SECRET_ARN", "arn:aws:secretsmanager:eu-west-2:123:secret/pat")
-        mock_client = MagicMock()
-        mock_client.get_secret_value.return_value = {"SecretString": "ghp_from_secrets"}  # pragma: allowlist secret
-        with patch("boto3.client", return_value=mock_client):
+        monkeypatch.setenv("GITHUB_PAT_SECRET_ARN", "placeholder-secret-ref")
+        with patch("boto3.client") as mock_client:
             result = _get_github_pat()
-        assert result == "ghp_from_secrets"
+        assert result == ""
+        mock_client.assert_not_called()
 
-    def test_returns_empty_on_secrets_manager_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_returns_empty_with_only_secret_arn_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("GITHUB_PAT", raising=False)
-        monkeypatch.setenv("GITHUB_PAT_SECRET_ARN", "arn:aws:secretsmanager:eu-west-2:123:secret/pat")
-        with patch("boto3.client", side_effect=Exception("access denied")):
+        monkeypatch.setenv("GITHUB_PAT_SECRET_ARN", "placeholder-secret-ref")
+        with patch("boto3.client", side_effect=Exception("must not be called")):
             result = _get_github_pat()
         assert result == ""
 

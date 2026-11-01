@@ -42,6 +42,13 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_policy_document_plan_time_refs",
+        module="scripts.checks.iam_tf.validate_policy_document_plan_time_refs",
+        attr="validate_policy_document_plan_time_refs",
+        pre=True,
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_ci_refresh_read_coverage",
         module="scripts.checks.iam_tf.validate_ci_refresh_read_coverage",
         attr="validate_ci_refresh_read_coverage",
@@ -70,9 +77,30 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_ci_branch_state_fence",
+        module="scripts.checks.iam_tf.validate_ci_branch_state_fence",
+        attr="validate_ci_branch_state_fence",
+        pre=True,
+        full_segment="full_after_lint",
+    ),
+    Entry(
+        name="validate_planner_secret_value_reads",
+        module="scripts.checks.iam_tf.validate_planner_secret_value_reads",
+        attr="validate_planner_secret_value_reads",
+        pre=True,
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_terraform_try",
         module="scripts.checks.iam_tf.validate_terraform_try",
         attr="validate_terraform_try",
+    ),
+    Entry(
+        name="validate_secret_parameter_grants",
+        module="scripts.checks.iam_tf.validate_secret_parameter_grants",
+        attr="validate_secret_parameter_grants",
+        pre=True,
+        full_segment="full_after_lint",
     ),
     Entry(
         name="validate_secret_material_handling",

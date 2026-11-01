@@ -31,6 +31,8 @@ from typing import Optional
 import yaml
 from pydantic import ValidationError
 
+from scripts.telemetry_capture.status_line import emit_status
+
 # --update-rec fields that thread straight into the update_rec() payload. Keys are
 # argparse dests; values are the corresponding update_rec() field names.
 _UPDATE_REC_FIELD_MAP: dict[str, str] = {
@@ -243,7 +245,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         bump_ci_rca_occurrence,
         enqueue_findings,
         file_decision,
-        file_rec,
+        file_rec_with_outcome,
         find_open_ci_rca_rec_by_fingerprint,
         purge_postmortems_for,
         repair_dependency_tokens,
@@ -270,6 +272,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         missing = [r for r in required if not getattr(args, r, None)]
         if missing:
             print(f"ERROR: --file-rec requires: {', '.join(missing)}", file=sys.stderr)
+            emit_status("ops_portal.file_rec", "failed", "missing_required")
             return 1
         fields: dict = {
             "title": args.title,
@@ -297,14 +300,27 @@ def main(argv: Optional[list[str]] = None) -> int:
                 context_v2_parsed = json.loads(args.context_v2_json)
             except json.JSONDecodeError as exc:
                 print(f"ERROR: --context-v2-json is not valid JSON: {exc}", file=sys.stderr)
+                emit_status("ops_portal.file_rec", "failed", "invalid_context_v2_json")
                 return 1
         try:
-            rec_id = file_rec(fields, context_v2_json=context_v2_parsed, profile=args.profile)
-            print(rec_id)
-            return 0
+            outcome = file_rec_with_outcome(fields, context_v2_json=context_v2_parsed, profile=args.profile)
         except (ValidationError, ValueError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
+            emit_status("ops_portal.file_rec", "failed", "invalid_fields")
             return 1
+        except Exception:
+            emit_status("ops_portal.file_rec", "failed", "writer_error")
+            raise
+        print(outcome.rec_id)
+        if outcome.inserted:
+            emit_status("ops_portal.file_rec", "done")
+        elif outcome.reason == "ci_rca_open_duplicate":
+            emit_status("ops_portal.file_rec", "skipped", "ci_rca_open_duplicate")
+        elif outcome.reason == "ci_rca_stale_rerun":
+            emit_status("ops_portal.file_rec", "skipped", "ci_rca_stale_rerun")
+        else:
+            emit_status("ops_portal.file_rec", "failed", "unknown_outcome")
+        return 0
 
     if args.find_open_ci_rca_rec:
         if not args.fingerprint:
@@ -331,6 +347,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if rejected_flags:
             for flag, reason in rejected_flags:
                 print(f"ERROR: {flag} is {reason}", file=sys.stderr)
+            emit_status("ops_portal.update_rec", "failed", "invalid_update")
             return 1
         updates: dict = {
             field: getattr(args, dest)
@@ -344,14 +361,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         }
         if not updates and not kwargs:
             print("ERROR: --update-rec requires at least one update field (e.g. --status)", file=sys.stderr)
+            emit_status("ops_portal.update_rec", "failed", "invalid_update")
             return 1
         try:
             update_rec(args.update_rec, updates, profile=args.profile, **kwargs)
-            print(f"Updated {args.update_rec}: {', '.join(sorted({*updates, *kwargs}))}")
-            return 0
         except (ValidationError, ValueError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
+            emit_status("ops_portal.update_rec", "failed", "invalid_update")
             return 1
+        except Exception:
+            emit_status("ops_portal.update_rec", "failed", "writer_error")
+            raise
+        print(f"Updated {args.update_rec}: {', '.join(sorted({*updates, *kwargs}))}")
+        emit_status("ops_portal.update_rec", "done")
+        return 0
 
     if args.file_decision:
         required_dec = ["title", "decision_status", "rationale"]
@@ -453,3 +476,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

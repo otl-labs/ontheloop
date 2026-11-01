@@ -354,6 +354,17 @@ def test_producer_side_exemptions_are_recorded_not_evaluated() -> None:
     check_row(TABLE, good(a="anything", b=["x"]), rules, CREATED)
 
 
+def test_glossary_lint_is_a_producer_side_kind() -> None:
+    why = {
+        "class": "repository_state",
+        "reason": "reads the repository tree",
+        "owner": "scripts/ops_portal/write_validators.py",
+    }
+    rules = _extra_rules({"a": {"nullable": True, "write_time_exemptions": {"glossary_lint": why}}})
+    assert list(rules.producer_exemptions) == [("a", "glossary_lint")]
+    check_row(TABLE, good(a="the platform"), rules, CREATED)
+
+
 def test_unknown_keys_and_bad_dates_fail_closed() -> None:
     def project(column):
         return _extra_rules({"c": {"nullable": True, **column}})

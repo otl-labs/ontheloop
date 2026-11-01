@@ -10,12 +10,15 @@ Actions:
   partition_prune_check-- a single-key `current` lookup that touches <=1 bucket-partition.
   read_ops_current     -- production: current projection of an ops_* table (optional single-key filter).
   read_ops_history     -- production: append-history rows of an ops_* table.
-  query_ops            -- production: a read-only SELECT over an ops_* current projection (pushdown).
-  describe             -- production: per-verb parameter schema for every NAMED_READS and EVENT_READS entry (agent-facing).
+  dq_check             -- production: one closed data-quality check over an ops_* table, returning a violation count only.
+  describe             -- production: per-verb parameter schema for every NAMED_READS entry (agent-facing).
 
 PRODUCTION OPS PATH (T2.19 / Decision 81): the reader is the SOLE read authority for the ops_*
 governance tables -- the closed boundary. The read role is S3 GetObject only, so a write attempt is
 denied at IAM/S3. Every ops read transits this URL; there is no escape hatch.
+
+The event-journal verbs are served by agent-platform-ducklake-telemetry-reader on the production telemetry catalog
+(Decision 236 cl.2); this function holds no telemetry slot and answers an event verb name as an unregistered verb.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ import time
 from typing import Any, Callable
 
 from src.common import ducklake_connect_probe as probe
-from src.common import ducklake_event_reads as ev
+from src.common import ducklake_dq_checks as dq
 from src.common import ducklake_handler_errors as handler_errors
 from src.common import ducklake_runtime as rt
 from src.common.ducklake_metrics import log_invocation
@@ -54,9 +57,7 @@ class NamedReadInputError(Exception):
 
 
 def _is_caller_input_error(exc: BaseException) -> bool:
-    return isinstance(exc, ev.EventReadInputError) or any(
-        c.__name__ in _CALLER_INPUT_CLASSES and c.__module__ in _DUCKDB_MODULES for c in type(exc).__mro__
-    )
+    return any(c.__name__ in _CALLER_INPUT_CLASSES and c.__module__ in _DUCKDB_MODULES for c in type(exc).__mro__)
 
 
 def _open_reader_connection() -> Any:
@@ -185,7 +186,7 @@ def action_named_read(event: dict[str, Any], con: Any) -> dict[str, Any]:
     if not isinstance(params, dict):
         raise rt.DuckLakeRuntimeError("named_read 'params' must be an object of named bind values")
     try:
-        rows, version = ev.serve_named_read(con, verb=verb, params=params, limit=event.get("limit"))
+        rows = rt.named_read(con, verb=verb, params=params, limit=event.get("limit"))
     except Exception as exc:
         # The dead-connection check stays first so the reopen-once path is unchanged.
         if rt.is_dead_connection_error(exc) or isinstance(exc, rt.DuckLakeRuntimeError) or not _is_caller_input_error(exc):
@@ -195,7 +196,7 @@ def action_named_read(event: dict[str, Any], con: Any) -> dict[str, Any]:
         "ok": True,
         "verb": verb,
         "registry_version": rt.NAMED_READS_VERSION,
-        "read_version": version,
+        "read_version": rt.read_version(verb),
         "rows": _json_safe(rows),
         "row_count": len(rows),
     }
@@ -207,7 +208,7 @@ def action_describe(event: dict[str, Any], _con: Any) -> dict[str, Any]:
     Connectionless (pure metadata, Decision 88 bounded egress) -- registered in
     _CONNECTIONLESS_ACTIONS so it runs before any connection open.
     """
-    return {"ok": True, "verbs": ev.describe_all()}
+    return {"ok": True, "verbs": rt.describe_named_reads()}
 
 
 def action_read_ops_history(event: dict[str, Any], con: Any) -> dict[str, Any]:
@@ -218,19 +219,23 @@ def action_read_ops_history(event: dict[str, Any], con: Any) -> dict[str, Any]:
     return {"ok": True, "table": table, "rows": _json_safe(rows), "row_count": len(rows)}
 
 
-def action_query_ops(event: dict[str, Any], con: Any) -> dict[str, Any]:
-    """Production: run a read-only SELECT over an ops_* current projection. Use `{tbl}` for the table.
-
-    The SQL is caller-supplied (internal read paths: predicate pushdown). Only the current projection
-    is reachable; the read role is S3-read-only so the boundary holds even for an arbitrary SELECT.
-    """
-    table = event.get("table")
-    _require_ops_table(table)
-    sql = event.get("sql")
-    if not isinstance(sql, str) or not sql.strip():
-        raise rt.DuckLakeRuntimeError("query_ops requires a non-empty 'sql' string referencing {tbl}")
-    rows = rt.query_current(con, table=table, sql=sql, params=event.get("params") or [])
-    return {"ok": True, "table": table, "rows": _json_safe(rows), "row_count": len(rows)}
+def action_dq_check(event: dict[str, Any], con: Any) -> dict[str, Any]:
+    """Production: run one closed DQ check kind (server-owned SQL, bound values) and return its violation count only."""
+    check = dq.validate(event)
+    try:
+        count = dq.run_check(con, check)
+    except Exception as exc:
+        # The dead-connection check stays first so the reopen-once path is unchanged.
+        if rt.is_dead_connection_error(exc) or not _is_caller_input_error(exc):
+            raise
+        raise dq.DqCheckInputError(check.kind, "params", "was refused by the engine (pattern or column type)") from exc
+    return {
+        "ok": True,
+        "check": check.kind,
+        "table": check.table,
+        "violation_count": count,
+        "check_version": dq.check_version(check.kind),
+    }
 
 
 def action_reset_warm_connection(event: dict[str, Any], _con: Any) -> dict[str, Any]:
@@ -287,7 +292,7 @@ _ACTIONS: dict[str, Callable[[dict[str, Any], Any], dict[str, Any]]] = {
     "read_ops_current": action_read_ops_current,
     "read_ops_history": action_read_ops_history,
     "named_read": action_named_read,
-    "query_ops": action_query_ops,
+    "dq_check": action_dq_check,
     "connect_probe": action_connect_probe,
     "reset_warm_connection": action_reset_warm_connection,
     "describe": action_describe,
@@ -352,12 +357,13 @@ def _handle(payload: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
     try:
         if action in _CONNECTIONLESS_ACTIONS:
             return _response(200, fn(payload, None))
+        if action == "dq_check":
+            dq.validate(payload)  # a refused request opens nothing
         # Warm-reuse acquisition (D2): the connection is kept open for the next invocation (NOT closed
         # in a finally). A dead session (Neon scale-to-zero) surfaces as a connection error from the
         # action; reads are idempotent, so reopen ONCE and retry -- the reopen never leaks a 5xx for
         # this expected transient. Any non-connection error reaches handler()'s terminal answer (Decision 55).
-        acquire = ev.acquirer_for(action, payload, _warm_reader_connection, EXTENSION_DIRECTORY)
-        con, conn_meta = acquire()
+        con, conn_meta = _warm_reader_connection()
         payload["_connect_ms"] = conn_meta["connect_ms"]
         payload["_connect_reused"] = conn_meta["reused"]
         meta.update(
@@ -368,12 +374,12 @@ def _handle(payload: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001 -- narrowed immediately to the dead-connection case
             if not rt.is_dead_connection_error(exc):
                 raise
-            con, conn_meta = acquire(force_reopen=True)
+            con, conn_meta = _warm_reader_connection(force_reopen=True)
             payload["_connect_ms"] = conn_meta["connect_ms"]
             payload["_connect_reused"] = conn_meta["reused"]
             meta.update(connect_ms=conn_meta["connect_ms"], connect_reused=conn_meta["reused"], reopened=True)
             return _response(200, fn(payload, con))
-    except (NamedReadInputError, ev.EventReadInputError) as exc:
+    except NamedReadInputError as exc:
         handler_errors.log_named_read_input(
             exc.__cause__ or exc, function="reader", verb=exc.verb, request_id=meta.get("request_id")
         )
@@ -386,6 +392,10 @@ def _handle(payload: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
                 "error_class": exc.error_class,
                 "error": handler_errors.redact(str(exc)),
             },
+        )
+    except dq.DqCheckInputError as exc:
+        return _response(
+            400, {"ok": False, "error_type": "dq_check_input", "check": exc.check, "param": exc.param, "reason": exc.reason}
         )
     except rt.VersionMismatchError as exc:
         return _response(500, {"ok": False, "error_type": "version_mismatch", "error": str(exc)})

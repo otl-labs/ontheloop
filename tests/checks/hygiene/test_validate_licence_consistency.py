@@ -190,6 +190,17 @@ class TestClassASlugHygiene:
         assert any("class-(a) path gone.py does not exist" in f for f in failed)
 
 
+def test_the_archive_inherits_the_roadmap_class_a_pattern(tmp_path: Path) -> None:
+    """Decision 227: retired roadmap records moved to the archive keep the roadmap's class-(a) guard."""
+    pattern = mod._CLASS_A_PATTERNS["docs/ROADMAP-PLATFORM-ARCHIVE.yaml"]
+    assert pattern.pattern == mod._CLASS_A_PATTERNS["docs/ROADMAP-PLATFORM.yaml"].pattern
+    (tmp_path / "archive.yaml").write_text(
+        "tier_items:\n  - id: T0.1\n    intent: benjamin-blake/agent-platform\n", encoding="utf-8"
+    )
+    failed = _run(_tree(tmp_path), {"archive.yaml": pattern})
+    assert any("archive.yaml:3 still references the old repository slug" in f for f in failed)
+
+
 class TestAccountingDeclaration:
     def test_declares_every_file_it_examined(self, tmp_path: Path) -> None:
         (tmp_path / "probe.py").write_text("clean\n", encoding="utf-8")

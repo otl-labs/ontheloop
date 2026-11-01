@@ -6,6 +6,7 @@ import json
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -378,12 +379,60 @@ def test_a_verify_import_failure_leaves_run_silent(
 
 
 def test_verify_builds_the_default_reader_when_none_is_injected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import src.common.ducklake_reader_client as reader_module  # noqa: PLC0415
+    from scripts.telemetry_capture import read_route  # noqa: PLC0415
 
     built: list[str] = []
-    monkeypatch.setattr(reader_module, "make_reader", lambda: built.append("reader") or "reader")
+    monkeypatch.setattr(read_route, "make_routed_reader", lambda: built.append("reader") or "reader")
     _run_verify_with(monkeypatch, tmp_path)
     assert built == ["reader"]
+
+
+def test_verify_builds_the_routed_reader(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from scripts.telemetry_capture import read_route, verify  # noqa: PLC0415
+
+    readers: list[Any] = []
+    monkeypatch.setattr(cli, "run_pass", lambda *a, **k: PassResult("sent", {"verify_due": True}))
+    monkeypatch.setattr(verify, "run_verify", lambda *a, **kw: readers.append(kw["reader"]))
+    argv = ["run", "--event", "Stop", "--transcript", "/t/s.jsonl", "--session-id", "s"]
+    assert cli.main(argv, env={}) == 0 and capsys.readouterr() == ("", "")
+    (reader,) = readers
+    assert isinstance(reader, read_route.RoutedReader) and reader._catalog is None and reader._events is None
+
+
+class _Boto3Session:
+    """Credentials resolve and every API client fails, so the catalog deploy output is unreadable."""
+
+    def __init__(self, profile_name: str | None = None) -> None:
+        self.profile_name = profile_name
+
+    def get_credentials(self) -> Any:
+        return SimpleNamespace(get_frozen_credentials=lambda: None)
+
+    def client(self, service: str, region_name: str) -> Any:
+        raise RuntimeError("no AWS in this test")
+
+
+def test_an_unresolved_catalog_is_a_counted_check_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import boto3  # noqa: PLC0415
+
+    from scripts.telemetry_capture import read_route, verify_due  # noqa: PLC0415
+
+    monkeypatch.setattr(boto3, "Session", _Boto3Session)
+    for name in (read_route.CATALOG_ENV, "AWS_ACCESS_KEY_ID", "AWS_LAMBDA_FUNCTION_NAME"):
+        monkeypatch.delenv(name, raising=False)
+    root = tree(tmp_path)
+    diag = {"event": "Stop", "at": 1, "outcome": "sent", "verify_due": True}
+    monkeypatch.setattr(cli, "run_pass", lambda *a, **k: PassResult("sent", diag))
+    before = time.time()
+    assert cli.main(["run", "--event", "Stop", "--transcript", str(root), "--session-id", SID], env={}) == 0
+    assert capsys.readouterr() == ("", "")
+    (record,) = [line for line in state(root).diagnostics() if line.get("event") == "verify"]
+    assert (record["trigger"], record["status"]) == ("detached", "verify_error:TelemetryCatalogUnresolved")
+    held = state(root).verify_state()
+    assert held["incomplete_streak"] == 1 and held["retry_s"] == 2 * verify_due.VERIFY_RETRY_S
+    assert held["next_attempt_at"] >= before + verify_due.VERIFY_RETRY_S and "verify_catalog" not in held
 
 
 def _run_verify_with(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> int:
@@ -401,3 +450,31 @@ def test_every_alarm_class_has_a_defined_denominator() -> None:
         assert not cli._denominator_met(cls, zero) or cls == "verify_incomplete", cls
         counts = {cli.DENOMINATOR_OF.get(cls, "x"): 1, "rows_equal": 1, "ledger_records": 1, "stored_ledger_tested": 1}
         assert cli._denominator_met(cls, counts), f"{cls} has no denominator rule"
+
+
+def test_run_builds_the_event_wait_and_passes_the_lock_wait(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def fake(path, session_id, event, **kw):
+        seen.append({"event": event, **kw})
+        return PassResult("sent", {})
+
+    monkeypatch.setattr(cli, "run_pass", fake)
+    ticks = [0.0]
+
+    def clock() -> float:
+        ticks[0] += 10.0
+        return ticks[0]
+
+    base = ["run", "--transcript", str(tmp_path / "s.jsonl"), "--session-id", "s", "--lock-wait", "120"]
+    assert cli.main([*base, "--event", "Stop"], env={}, clock=clock, sleep=lambda s: None) == 0
+    assert (
+        cli.main([*base, "--event", "UserPromptSubmit", "--prompt-id", "p1"], env={}, clock=clock, sleep=lambda s: None) == 0
+    )
+    assert cli.main([*base, "--event", "StopFailure"], env={}, clock=clock, sleep=lambda s: None) == 0
+    stop, prompt_call, failure = seen
+    assert stop["lock_wait"] == prompt_call["lock_wait"] == failure["lock_wait"] == 120.0
+    assert (
+        stop["wait"]() == "witness_wait_timeout" and prompt_call["wait"]() == "prompt_wait_timeout" and failure["wait"] is None
+    )
+    assert 750 < stop["budget"].remaining() <= 755 and 725 < prompt_call["budget"].remaining() <= 730

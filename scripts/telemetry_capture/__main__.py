@@ -13,12 +13,14 @@ import hashlib
 import json
 import os
 import sys
+import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from scripts.telemetry_capture import waits
 from scripts.telemetry_capture.runner import STOP_BUDGET_S, ClientFactory, default_client_factory, run_pass
 from scripts.telemetry_capture.state import CaptureState, state_dir
 from scripts.telemetry_capture.transport import MAX_TIMEOUT_S, Budget, CaptureUnavailable
@@ -33,6 +35,7 @@ VERIFY_COUNTS = (
     "r7_boundary_divergence other_generation_rows other_producer_rows root_checked ledger_records stored_ledger_tested "
     "root_calls sync_spawns pinned_absent"
 ).split()
+WAIT_BOUND_S = {"Stop": waits.WITNESS_WAIT_S + waits.SETTLE_BOUND_S, "UserPromptSubmit": waits.PROMPT_WAIT_S}
 COMPARE_CLASSES = ("missing_in_store", "unexpected_in_store", "column_mismatch", "key_mismatch", "duplicate_ref_rows")
 DENOMINATOR_OF = {
     "root_absent": "root_checked",
@@ -51,6 +54,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--session-id", required=True)
     run.add_argument("--final", action="store_true")
     run.add_argument("--lock-wait", type=float, default=0.0)
+    run.add_argument("--prompt-id", default=None)
     for name in ("pass", "status", "probe", "observe", "mark", "clear-halt", "verify"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--tree", required=True, type=Path)
@@ -73,12 +77,26 @@ def _state(tree: Path) -> CaptureState:
     return CaptureState(state_dir(tree, tree.stem))
 
 
+def _event_wait(
+    args: argparse.Namespace, clock: Callable[[], float], sleep: Callable[[float], None]
+) -> Callable[[], str] | None:
+    """Rule RW-1: Stop waits for its witness, UserPromptSubmit for its prompt record; every other event does not wait."""
+    root = Path(args.transcript)
+    if args.event == "Stop":
+        return lambda: waits.wait_for_witness(root, clock, sleep)
+    if args.event == "UserPromptSubmit" and args.prompt_id:
+        return lambda: waits.wait_for_prompt(root, args.prompt_id, clock, sleep)
+    return None
+
+
 def _cmd_run(
     args: argparse.Namespace,
     env: Mapping[str, str],
     repo_root: Path,
     factory: ClientFactory,
     reader_factory: Callable[[], Any] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     try:
         result = run_pass(
@@ -86,11 +104,12 @@ def _cmd_run(
             args.session_id,
             args.event,
             final=args.final,
-            budget=Budget.start(args.lock_wait + STOP_BUDGET_S),
+            budget=Budget.start(WAIT_BOUND_S.get(args.event, 0.0) + args.lock_wait + STOP_BUDGET_S),
             env=env,
             repo_root=repo_root,
             client_factory=factory,
             lock_wait=args.lock_wait,
+            wait=_event_wait(args, clock, sleep),
         )
         if result.diag.get("verify_due") is True:
             _run_check(args, result, reader_factory)
@@ -104,9 +123,9 @@ def _run_check(args: argparse.Namespace, result: Any, reader_factory: Callable[[
     from scripts.telemetry_capture import verify  # noqa: PLC0415
 
     if reader_factory is None:
-        from src.common.ducklake_reader_client import make_reader  # noqa: PLC0415
+        from scripts.telemetry_capture import read_route  # noqa: PLC0415
 
-        reader_factory = make_reader
+        reader_factory = read_route.make_routed_reader
     verify.run_verify(
         Path(args.transcript),
         args.session_id,
@@ -290,9 +309,9 @@ def _cmd_verify(args: argparse.Namespace, reader_factory: Callable[[], Any] | No
         out(f"verify: {args.assert_zero} is not an alarm class")
         return 2
     if reader_factory is None:
-        from src.common.ducklake_reader_client import make_reader  # noqa: PLC0415
+        from scripts.telemetry_capture import read_route  # noqa: PLC0415
 
-        reader_factory = make_reader
+        reader_factory = read_route.make_routed_reader
     reader = reader_factory()
     result = verify.run_verify(
         args.tree,
@@ -341,11 +360,13 @@ def main(
     out: Callable[[str], Any] = print,
     boot_id: Path = BOOT_ID,
     reader_factory: Callable[[], Any] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     args = _parser().parse_args(argv)
     environ = dict(os.environ) if env is None else env
     if args.cmd == "run":
-        return _cmd_run(args, environ, repo_root, client_factory, reader_factory)
+        return _cmd_run(args, environ, repo_root, client_factory, reader_factory, clock, sleep)
     if args.cmd == "pass":
         return _cmd_pass(args, environ, repo_root, client_factory, out)
     if args.cmd == "status":

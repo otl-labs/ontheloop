@@ -143,6 +143,13 @@ resource "aws_iam_role_policy" "ducklake_catalog_dr" {
         Resource = [aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn]
       },
       {
+        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
+        Sid      = "NeonDsnParameterRead"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/ducklake-neon-catalog-dsn"]
+      },
+      {
         Sid      = "DRBucketWrite"
         Effect   = "Allow"
         Action   = ["s3:PutObject"]

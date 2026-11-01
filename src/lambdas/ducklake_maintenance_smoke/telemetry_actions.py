@@ -1,15 +1,14 @@
 """create_telemetry_tables -- the owner-login telemetry DDL verb on the smoke catalog (Decision 216, amends Decision 143).
 
-The telemetry writer's scoped catalog login is DML-only (Decision 213 cl.3) and DuckLake's CREATE TABLE also creates a physical
-Postgres table, so the telemetry tables are created here, under this function's owner login, by the governed deploy pipeline's
-maintenance-smoke stage, before the telemetry gate. The verb is create-or-add-nullable-column (no drop, no rename or
-retype, no row write) (Decision 222, amending Decision 216 clause 2) and reads nothing from the event: its meta schema is
-the function's env pin, and it refuses in code unless that is the smoke schema, so
-this CI-reachable function cannot create tables in another catalog (its Postgres login is still the all-catalog owner; a
-smoke-only migrator login is slice 2c's, rec-4292). It proves the single-owner invariant before and after the DDL, and every
-failure after the env-pin check is a typed DuckLakeRuntimeError naming only the exception class, so the Function URL never
-answers a bare 502 and a catalog host or path never reaches the public CI log.
-"""
+The telemetry writer's scoped catalog login is DML-only (Decision 213 cl.3) and DuckLake's CREATE TABLE also creates a
+physical Postgres table, so the telemetry tables are created here, under this function's owner login, by the governed
+deploy pipeline's maintenance-smoke stage, before the telemetry gate. The verb is create-or-add-nullable-column (no
+drop, no rename or retype, no row write) (Decision 222, amending Decision 216 clause 2) and reads nothing from the
+event: its meta schema is the function's env pin, and it refuses in code unless that is the smoke schema, so this CI-
+reachable function cannot create tables in another catalog (its Postgres login is still the all-catalog owner; a
+smoke-only migrator login is ducklake_smoke_maintainer, Decision 230). It proves the single-owner invariant before and
+after the DDL, and every failure after the env-pin check is a typed DuckLakeRuntimeError naming only the exception
+class, so the Function URL never answers a bare 502 and a catalog host or path never reaches the public CI log."""
 
 from __future__ import annotations
 
@@ -28,12 +27,14 @@ def _check(report: prov.OwnershipReport, stage: str) -> dict[str, Any]:
     fields = {
         "foreign_owned": report.foreign_owned,
         "schema_owner_is_current_user": report.schema_owner_is_current_user,
+        "schema_owner_held": report.schema_owner_held,
+        "schema_owner": report.schema_owner,
         "scoped_create_on_schema": report.scoped_create_on_schema,
         "scoped_create_on_public": report.scoped_create_on_public,
     }
     clean = (
         report.foreign_owned == 0
-        and report.schema_owner_is_current_user
+        and report.schema_owner_held
         and not report.scoped_create_on_schema
         and not report.scoped_create_on_public
     )

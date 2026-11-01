@@ -29,7 +29,7 @@ _ROOT_RE = re.compile(r"terraform/[A-Za-z0-9_-]+")
 
 EXEMPT_SUFFIXES = (".md",)
 GATE_MARKERS = ("terraform", " plan", "-lock=false", "PR_HEAD_SHA")
-ENV_MARKERS = ("get-caller-identity", "ADMIN_CHAIN_OK")
+ENV_MARKERS = ("caller-arn", "ADMIN_CHAIN_OK")
 V3_PREFIX = "V3 resolution:"
 
 

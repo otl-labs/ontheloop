@@ -8,9 +8,10 @@ is an integer (a raw float repr can carry a 12-digit run that a leak scan would 
 EMF: namespace DuckLakeTelemetryWriter, metric RequestCount with dimension set [Verb] (six series; begin_blobs is the
 sixth, plan 4), with the target members `Verb` and `RequestCount` at the line's top level beside the lowercase `verb`
 field. An append_telemetry line also carries OccRetryCount and CommitLatencyMs under an empty dimension set (the series
-part 1's sink already creates), but that directive and its members appear only when the recording sink saw values: a
-directive whose members are absent invalidates the block and drops RequestCount with it. The Lambda text log format is
-required for extraction (the function sets no JSON log format; a test pins that).
+part 1's sink already creates) and under [MetaSchema], read from the function's own TELEMETRY_META_SCHEMA env, never a
+caller value, so a production alarm cannot see another catalog's traffic. That directive and its members appear only
+when the recording sink saw values: a directive whose members are absent invalidates the block and drops RequestCount
+with it. The Lambda text log format is required for extraction (the function sets no JSON log format; a test pins that).
 
 A begin_blobs line carries counts and declared bytes only (items, distinct_keys, existed, granted, stale,
 declared_bytes_total, declared_bytes_max, head_ms); an append_telemetry line carries blob_rows and blob_head_ms. Never a
@@ -20,6 +21,7 @@ presigned URL, key or digest (Decision 101; REVIEW.md C7).
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -43,6 +45,7 @@ BLOB_COUNT_FIELDS = (
     "head_ms",
 )
 _ID_RE = re.compile(r"^[0-9A-Z]{26}$")
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass
@@ -72,6 +75,11 @@ def _clean_id(value: str | None) -> str | None:
     return value if value is not None and _ID_RE.match(value) else None
 
 
+def _meta_schema() -> str:
+    value = os.environ.get("TELEMETRY_META_SCHEMA", "")
+    return value if _IDENTIFIER_RE.match(value) else "unknown"
+
+
 def _emf(verb: str, recorded: dict[str, float]) -> dict[str, Any]:
     directives: list[dict[str, Any]] = [
         {"Namespace": NAMESPACE, "Dimensions": [["Verb"]], "Metrics": [{"Name": "RequestCount", "Unit": "Count"}]}
@@ -85,7 +93,8 @@ def _emf(verb: str, recorded: dict[str, float]) -> dict[str, Any]:
         metrics.append({"Name": "CommitLatencyMs", "Unit": "Milliseconds"})
         members["CommitLatencyMs"] = int(round(recorded["CommitLatencyMs"]))
     if metrics and verb == "append_telemetry":
-        directives.append({"Namespace": NAMESPACE, "Dimensions": [[]], "Metrics": metrics})
+        members["MetaSchema"] = _meta_schema()
+        directives.append({"Namespace": NAMESPACE, "Dimensions": [[], ["MetaSchema"]], "Metrics": metrics})
     else:
         for name in ("OccRetryCount", "CommitLatencyMs"):
             members.pop(name, None)

@@ -514,3 +514,19 @@ def test_ops_slot_storage_is_unchanged(_clean_slots):
     assert rt._warm_connection["con"] is con
     assert rt._warm_connection["key"] == ("s3://x/", "m", "/e")
     assert "ops" not in rt._named_slots
+
+
+def test_open_connection_read_only_adds_the_attach_option(monkeypatch):
+    plain = FakeCon()
+    _patch_duckdb(monkeypatch, plain)
+    rt.open_connection(dsn=_DSN, data_path="s3://x/y/", meta_schema="ducklake_telemetry")
+    plain_attach = next(s for s, _ in plain.executed if s.startswith("ATTACH 'ducklake:postgres:"))
+    assert plain_attach.endswith("(DATA_PATH 's3://x/y/', META_SCHEMA 'ducklake_telemetry')")
+    read_only = FakeCon()
+    _patch_duckdb(monkeypatch, read_only)
+    rt.open_connection(dsn=_DSN, data_path="s3://x/y/", meta_schema="ducklake_telemetry", read_only=True)
+    attach = next(s for s, _ in read_only.executed if s.startswith("ATTACH 'ducklake:postgres:"))
+    assert attach.endswith("(DATA_PATH 's3://x/y/', META_SCHEMA 'ducklake_telemetry', READ_ONLY)")
+    assert rt.TELEMETRY_PROD_META_SCHEMA == "ducklake_telemetry"
+    assert rt.TELEMETRY_PROD_DATA_PATH == "s3://agent-platform-data-lake/ducklake-telemetry/"
+    assert not rt.TELEMETRY_PROD_DATA_PATH.startswith("s3://agent-platform-data-lake/ducklake/")

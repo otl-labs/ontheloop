@@ -3,7 +3,7 @@
 Several tests/session/preflight/ concern-split test modules (post rec-2709 Wave 4 decomposition of
 the former tests/test_session_preflight.py monolith) need `_preflight.main()` plus
 `patch("session_preflight.<name>")` interception to keep working: session_preflight.py's own code
-resolves module-global names (e.g. PREFLIGHT_REPORT, TELEMETRY_ACTIVE_SESSION_FILE, subprocess,
+resolves module-global names (e.g. PREFLIGHT_REPORT, subprocess,
 sys.executable) on ITS OWN module object, while `unittest.mock.patch` resolves the
 "session_preflight.<name>" string via `sys.modules["session_preflight"]` at patch-application time.
 

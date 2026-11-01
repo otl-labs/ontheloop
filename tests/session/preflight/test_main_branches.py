@@ -48,7 +48,10 @@ class TestPytestCurrentTestAbsent:
                 patch("scripts.preflight.env_git.get_git_status", return_value=("claude/test", False, [])),
                 patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
                 patch("scripts.preflight.aws_infra.check_credentials", return_value="unavailable"),
-                patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+                patch(
+                    "scripts.preflight.session_history.read_session_history",
+                    return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+                ),
                 patch("scripts.preflight.recs_cache._count_recommendations_reader", return_value=(0, 0, 0, [])),
                 patch("scripts.preflight.context_docs.read_context_files", return_value={}),
                 patch("scripts.preflight.ci_rca_signals._check_ci_rca_liveness", return_value=None),
@@ -80,7 +83,10 @@ class TestWrongVenvCriticalBranch:
             patch("scripts.preflight.env_git.get_git_status", return_value=("claude/test", False, [])),
             patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="unavailable"),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch("scripts.preflight.recs_cache._count_recommendations_reader", return_value=(0, 0, 0, [])),
             patch("scripts.preflight.context_docs.read_context_files", return_value={}),
             patch("scripts.preflight.ci_rca_signals._check_ci_rca_liveness", return_value=None),
@@ -111,7 +117,10 @@ class TestLogSyncCommittedClearsUncommitted:
             patch("scripts.preflight.env_git.get_git_status", return_value=("claude/test", True, [])),
             patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="unavailable"),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch("scripts.preflight.recs_cache._count_recommendations_reader", return_value=(0, 0, 0, [])),
             patch("scripts.preflight.context_docs.read_context_files", return_value={}),
             patch("scripts.preflight.ci_rca_signals._check_ci_rca_liveness", return_value=None),
@@ -142,7 +151,10 @@ class TestTerraformPendingTupleUnpack:
                 return_value=(True, convergence_health),
             ),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="unavailable"),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch("scripts.preflight.recs_cache._count_recommendations_reader", return_value=(0, 0, 0, [])),
             patch("scripts.preflight.context_docs.read_context_files", return_value={}),
             patch("scripts.preflight.ci_rca_signals._check_ci_rca_liveness", return_value=None),
@@ -170,7 +182,10 @@ class TestWarmSyncExceptionWhenCredsOk:
             patch("scripts.preflight.env_git.get_git_status", return_value=("claude/test", False, [])),
             patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="ok"),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch("scripts.preflight.recs_cache._count_recommendations_reader", return_value=(0, 0, 0, [])),
             patch("scripts.preflight.context_docs.read_context_files", return_value={}),
             patch("scripts.preflight.ci_rca_signals._check_ci_rca_liveness", return_value=None),
@@ -204,7 +219,10 @@ class TestProvisionalContractsEmpty:
             patch("scripts.preflight.env_git.get_git_status", return_value=("claude/test", False, [])),
             patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="unavailable"),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch("scripts.preflight.recs_cache._count_recommendations_reader", return_value=(0, 0, 0, [])),
             patch("scripts.preflight.context_docs.read_context_files", return_value={}),
             patch("scripts.preflight.ci_rca_signals._check_ci_rca_liveness", return_value=None),
@@ -223,20 +241,6 @@ class TestProvisionalContractsEmpty:
         assert "  (none)" in printed
 
 
-class TestOpenTelemetrySessionId:
-    def test_open_session_generates_local_uuid(self, tmp_path: Path) -> None:
-        """open_telemetry_session() must never raise -- it mints a local UUID so the calling
-        workflow (e.g. /implement Step 1) can always proceed."""
-        active_session_file = tmp_path / ".telemetry-active-session.json"
-        with patch("session_preflight.TELEMETRY_ACTIVE_SESSION_FILE", active_session_file):
-            session_id = _preflight.open_telemetry_session(workflow="implement", branch="claude/test")
-        assert session_id
-        # A valid UUID4 string (36 chars, hyphenated).
-        assert len(session_id) == 36
-        assert session_id.count("-") == 4
-        assert json.loads(active_session_file.read_text(encoding="utf-8"))["session_id"] == session_id
-
-
 class TestCiRcaLivenessRenderer:
     """rec-3638: main() renders the ci_rca_liveness_alert payload to stderr at session open."""
 
@@ -248,7 +252,10 @@ class TestCiRcaLivenessRenderer:
             patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="unavailable"),
             patch("scripts.preflight.context_docs.read_context_files", return_value={}),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch("scripts.preflight.recs_cache._count_recommendations_reader", return_value=(0, 0, 0, [])),
             patch("scripts.preflight.ci_rca_signals._check_ci_rca_liveness", return_value=liveness_alert),
             patch("scripts.preflight.ci_rca_signals._check_convergence_sensor_liveness", return_value=None),

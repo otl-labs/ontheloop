@@ -16,6 +16,12 @@ from tests.fixtures.terraform_hcl_blocks import _TERRAFORM_PERSONAL_DIR, find_re
 
 _ALARM_TYPE = "aws_cloudwatch_metric_alarm"
 _TELEMETRY = ("ducklake_telemetry_writer.tf", "ducklake_telemetry_writer_errors", "ducklake_telemetry_writer")
+_TWIN = (
+    "ducklake_telemetry_writer_smoke.tf",
+    "ducklake_telemetry_writer_smoke_errors",
+    "ducklake_telemetry_writer_smoke",
+)
+_READER = ("ducklake_telemetry_reader.tf", "ducklake_telemetry_reader_errors", "ducklake_telemetry_reader")
 _OPS = ("ducklake_lambdas.tf", "ducklake_writer_errors", "ducklake_writer")
 _EXPRESSION = "FILL(m1, 0) + FILL(m2, 0)"
 
@@ -76,12 +82,24 @@ def test_telemetry_writer_alarm_sums_errors_and_url5xx() -> None:
     assert alarm_defects(_real_block(_TELEMETRY), _TELEMETRY[2]) == []
 
 
+def test_twin_and_telemetry_reader_alarms_sum_errors_and_url5xx() -> None:
+    for spec in (_TWIN, _READER):
+        assert alarm_defects(_real_block(spec), spec[2]) == []
+
+
+def test_twin_alarm_is_red_when_pointed_at_the_writer() -> None:
+    block = _real_block(_TWIN).replace(
+        "ducklake_telemetry_writer_smoke.function_name", "ducklake_telemetry_writer.function_name"
+    )
+    assert "m1 not on ducklake_telemetry_writer_smoke" in alarm_defects(block, _TWIN[2])
+
+
 def test_ops_writer_alarm_sums_errors_and_url5xx() -> None:
     assert alarm_defects(_real_block(_OPS), _OPS[2]) == []
 
 
 def test_alarm_expression_fills_both_operands() -> None:
-    for spec in (_TELEMETRY, _OPS):
+    for spec in (_TELEMETRY, _TWIN, _READER, _OPS):
         e1 = _query_block(_real_block(spec), "e1")
         assert "FILL(m1, 0)" in e1 and "FILL(m2, 0)" in e1
 

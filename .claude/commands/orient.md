@@ -61,7 +61,7 @@ See the skill's Deliverable Shape section for the full spec of each, except Sect
 | Preflight signal | Classification | Operator action |
 |---|---|---|
 | `ci_rca_unresolved_recs` null (`recs_read_status` != `ok`) | **HARD BLOCK -- UNAVAILABLE** | Print "CI-RCA UNAVAILABLE"; never render it as clear or zero. The next `/plan` blocks at commitment unless the human overrides. |
-| `ci_rca_unresolved_recs` non-empty | **HARD BLOCK** | List each rec (id, priority, title, its `prior_deferrals` line -- see below). The next `/plan` enforces the block; orient surfaces it. |
+| `ci_rca_unresolved_recs` non-empty | **HARD BLOCK** | List each rec (id, priority, title, its `prior_deferrals` line -- see below). The next `/plan` blocks overlapping work, and all work once a red is past its SLO (`scripts.ci_rca.red_overlap`, Decision 226); orient surfaces it. A High rec is Track A: route it to `docs/contracts/red-main-recovery.yaml` `procedure.fast_lane_repair`, never a zero-th `/plan` prompt. |
 | `ci_rca_likely_resolved_recs` non-empty | **SOFT PROMPT** | "LIKELY RESOLVED -- verify and close." Close-then-stamp: `bin/venv-python -m scripts.ops_data_portal --update-rec <id> --status closed --resolution '...'`, then `bin/venv-python -c "from scripts.ops_portal.ci_rca_lifecycle import stamp_fixed_by_sha; stamp_fixed_by_sha('<id>', '<merge-sha>')"` per `docs/contracts/ci-rca-lifecycle.yaml` `closure_dependency.manual_route`. |
 | `ci_rca_liveness_alert` non-null | **HARD ALERT** | Main CI red >30 min with no rec. Triage immediately. |
 | `forward_fix_recursion_alert` non-null | **HARD ALERT** | 3+ ci-rca recs targeting same file in 24h. Triage immediately. |

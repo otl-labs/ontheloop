@@ -70,6 +70,8 @@ _DUCKLAKE_MAINTENANCE_FUNCTION = "agent-platform-ducklake-maintenance"
 _DUCKLAKE_MAINTENANCE_SMOKE_FUNCTION = "agent-platform-ducklake-maintenance-smoke"
 _DUCKLAKE_CATALOG_DR_FUNCTION = "agent-platform-ducklake-catalog-dr"
 _DUCKLAKE_TELEMETRY_WRITER_FUNCTION = "agent-platform-ducklake-telemetry-writer"
+_DUCKLAKE_TELEMETRY_WRITER_SMOKE_FUNCTION = "agent-platform-ducklake-telemetry-writer-smoke"
+_DUCKLAKE_TELEMETRY_READER_FUNCTION = "agent-platform-ducklake-telemetry-reader"
 _DUCKLAKE_FUNCTION_ZIP_KEYS = {
     _DUCKLAKE_WRITER_FUNCTION: "lambda-packages/ducklake-writer.zip",
     _DUCKLAKE_READER_FUNCTION: "lambda-packages/ducklake-reader.zip",
@@ -77,6 +79,8 @@ _DUCKLAKE_FUNCTION_ZIP_KEYS = {
     _DUCKLAKE_MAINTENANCE_SMOKE_FUNCTION: "lambda-packages/ducklake-maintenance-smoke.zip",
     _DUCKLAKE_CATALOG_DR_FUNCTION: "lambda-packages/ducklake-catalog-dr.zip",
     _DUCKLAKE_TELEMETRY_WRITER_FUNCTION: "lambda-packages/ducklake-telemetry-writer.zip",
+    _DUCKLAKE_TELEMETRY_WRITER_SMOKE_FUNCTION: "lambda-packages/ducklake-telemetry-writer.zip",
+    _DUCKLAKE_TELEMETRY_READER_FUNCTION: "lambda-packages/ducklake-telemetry-reader.zip",
 }
 
 # S3 key prefix for vendored AL2023/x86_64 pg_dump 16 binary + libpq.so.

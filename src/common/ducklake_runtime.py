@@ -47,9 +47,7 @@ from src.common.ducklake_metrics import (  # noqa: F401 -- re-exported facade su
 )
 from src.common.ducklake_named_reads import read_version  # noqa: F401 -- re-exported for the reader handler's per-verb stamp
 from src.common.ducklake_reads import (  # noqa: F401 -- re-exported facade surface (PLAN-sloc-ducklake-layer)
-    assert_read_only_sql,
     named_read,
-    query_current,
     read_current,
     read_history,
 )
@@ -144,6 +142,11 @@ OPS_SLOT = "ops"
 
 # Representative SCD2 smoke-table pair (real ops_* business schema is T2.19).
 SMOKE_DATA_PATH = "s3://agent-platform-data-lake/ducklake-neon-smoke/"
+
+# Production telemetry is its own catalog. Its data prefix is a SIBLING of ducklake/, never inside it, so the ops catalog's
+# catalog-wide orphan cleanup never sees telemetry Parquet.
+TELEMETRY_PROD_META_SCHEMA = "ducklake_telemetry"
+TELEMETRY_PROD_DATA_PATH = "s3://agent-platform-data-lake/ducklake-telemetry/"
 
 # Baked extensions in the Lambda layer: (LOAD/INSTALL name, on-disk file stem). DuckDB publishes
 # the Postgres extension binary as `postgres_scanner.duckdb_extension` even though it INSTALLs and
@@ -258,6 +261,7 @@ def open_connection(
     extension_directory: str | None = None,
     profile: str | None = None,
     alias: str = CATALOG_ALIAS,
+    read_only: bool = False,
     _creds: tuple[str, str, str | None, str] | None = None,
 ) -> Any:
     """Open a DuckDB connection with ducklake/httpfs/postgres loaded and the Neon catalog ATTACHed.
@@ -320,7 +324,11 @@ def open_connection(
     con.execute("SET TimeZone='UTC'")
 
     conninfo = libpq_conninfo(dsn)
-    con.execute(f"ATTACH 'ducklake:postgres:{conninfo}' AS {alias} (DATA_PATH '{data_path}', META_SCHEMA '{meta_schema}')")
+    read_only_option = ", READ_ONLY" if read_only else ""
+    con.execute(
+        f"ATTACH 'ducklake:postgres:{conninfo}' AS {alias} "
+        f"(DATA_PATH '{data_path}', META_SCHEMA '{meta_schema}'{read_only_option})"
+    )
     return con
 
 

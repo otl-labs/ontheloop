@@ -2,12 +2,12 @@
 """DEP-07 saved-plan digest emit/verify helper (T2.46 c2, terraform-apply-chain-consolidation).
 
 Closes the no-TOCTOU integrity gap: a saved tfplan/personal/<pr>/<sha>.bin object persisted by a
-PR's speculative-plan job could previously be overwritten between review and merge-time apply with
+PR's plan job could previously be overwritten between review and merge-time apply with
 no control catching the substitution. This module is the pure, in-process digest primitive both
 sides of that gap share:
 
   emit(path)            -> sha256 hex digest of the plan bytes. Called at persist time
-                            (terraform-apply-sandbox.yml's speculative-plan job) to produce the
+                            (terraform-plan-trusted.yml's plan job) to produce the
                             reference posted as BOTH a PR comment line and a `terraform-plan-digest`
                             commit status on the PR head sha.
   verify(path, reference) -> None on match; raises PlanDigestError (FAIL CLOSED) on any mismatch,
@@ -53,7 +53,7 @@ def verify(path: str | Path, reference: str | None) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint (consumed by .github/actions/fetch-saved-plan and the speculative-plan job).
+    """CLI entrypoint (consumed by .github/actions/fetch-saved-plan and the trusted plan job).
 
     Usage:
       plan_digest.py emit <path>              -- print the sha256 hex digest, exit 0

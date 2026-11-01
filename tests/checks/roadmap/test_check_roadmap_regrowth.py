@@ -262,6 +262,79 @@ class TestUnavailableRoadmapSkips:
         assert unusable_reason(_COMPACT_ROADMAP) is None
 
 
+class TestArchivedRecords:
+    """Decision 227: records moved to the archive sibling are still observed. Their regrowth joins the
+    TERMINAL-ITEM ids, one ARCHIVE line counts them, and every unusable archive shape takes the single
+    skip -- naming the archive -- without raising."""
+
+    @staticmethod
+    def _archive(tmp_path: Path, body: str | bytes) -> None:
+        path = tmp_path / "ROADMAP-PLATFORM-ARCHIVE.yaml"
+        if isinstance(body, bytes):
+            path.write_bytes(body)
+        else:
+            path.write_text(body, encoding="utf-8")
+
+    def test_regrowth_in_an_archived_record_is_reported(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        records = [
+            {"id": "T0.9", "status": "complete", "progress_note": "narrative re-grown in the archive"},
+            {"id": "T0.0", "status": "complete", "intent": "one line"},
+        ]
+        roadmap = _write(tmp_path, _COMPACT_ROADMAP)
+        self._archive(tmp_path, yaml.safe_dump({"archive_of": "docs/ROADMAP-PLATFORM.yaml", "tier_items": records}))
+
+        failed, declaration = _run(roadmap)
+        out = capsys.readouterr().out
+
+        assert failed == []
+        assert declaration is not None and declaration.kind == "examined"
+        assert "  TERMINAL-ITEM terminal=1 regrown=1 ids=['T0.9']" in out
+        assert "  ARCHIVE records=2" in out
+
+    def test_an_absent_archive_is_no_records(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        failed, declaration = _run(_write(tmp_path, _COMPACT_ROADMAP))
+
+        assert failed == []
+        assert declaration is not None and declaration.kind == "examined"
+        assert "  ARCHIVE records=0" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ("body", "fragment"),
+        [
+            (b"\xff\xfe\xfd", "UnicodeDecodeError"),
+            ("tier_items: [unclosed\n", "ParserError"),
+            ("- a\n", "document is not a mapping"),
+            ("tier_items: 3\n", "tier_items is not a list"),
+            ("tier_items: [3]\n", "tier_items holds a non-mapping record"),
+        ],
+    )
+    def test_an_unusable_archive_takes_the_single_skip(self, tmp_path: Path, body: str | bytes, fragment: str) -> None:
+        roadmap = _write(tmp_path, _COMPACT_ROADMAP)
+        self._archive(tmp_path, body)
+
+        failed, declaration = _run(roadmap)
+
+        assert failed == []
+        assert declaration is not None and declaration.kind == "skipped"
+        assert "docs/ROADMAP-PLATFORM-ARCHIVE.yaml unusable" in declaration.reason and fragment in declaration.reason
+
+    def test_an_unreadable_archive_takes_the_single_skip(self, tmp_path: Path) -> None:
+        roadmap = _write(tmp_path, _COMPACT_ROADMAP)
+        (tmp_path / "ROADMAP-PLATFORM-ARCHIVE.yaml").mkdir()
+
+        failed, declaration = _run(roadmap)
+
+        assert failed == []
+        assert declaration is not None and declaration.kind == "skipped"
+        assert "docs/ROADMAP-PLATFORM-ARCHIVE.yaml unusable (IsADirectoryError)" in declaration.reason
+
+    def test_the_live_tree_reports_its_archive_line(self, capsys: pytest.CaptureFixture[str]) -> None:
+        failed, _ = _run(_common.ROOT / "docs" / "ROADMAP-PLATFORM.yaml")
+
+        assert failed == []
+        assert re.search(r"^  ARCHIVE records=\d+$", capsys.readouterr().out, re.M)
+
+
 class TestNonStringStateIsCountedNotRaised:
     """A mapping entry whose `status`/`state` value is itself a YAML list or mapping passes every
     shape gate and then makes a bare `entry.get(...) in <frozenset>` raise TypeError on the

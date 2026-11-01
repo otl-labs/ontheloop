@@ -117,7 +117,10 @@ def print_ci_rca_undetermined_recs(recs: list[dict]) -> None:
         print()
         return
     print("  A self-rated low-confidence or undetermined RCA classification -- review the proximate cause manually.")
-    print("  Advisory only: open ci_rca recs are triaged under Decision 73 L5 into a hard block or a likely-resolved prompt.")
+    print(
+        "  Advisory only: open ci_rca recs are triaged under Decision 73 L5, narrowed by Decision 226, "
+        "into an overlap block or a likely-resolved prompt."
+    )
     for rec in recs[:5]:
         rec_id = rec.get("id", "unknown")
         title = rec.get("title", "")
@@ -526,7 +529,10 @@ def print_ci_rca_recs(recs: list[dict], correlation: dict[str, list[dict]] | Non
 
     if correlation is None:
         # Backward-compat path: all recs are HARD BLOCK.
-        print("  [HARD BLOCK] /plan cannot scope unrelated work while these recs are open.")
+        print(
+            "  [HARD BLOCK] overlapping work blocks, and all new work once a red is past its SLO: run "
+            "bin/venv-python -m scripts.ci_rca.red_overlap --plan <plan> (Decision 226)."
+        )
         for rec in recs:
             rec_id = rec.get("id", "unknown")
             title = rec.get("title", "")
@@ -555,7 +561,10 @@ def print_ci_rca_recs(recs: list[dict], correlation: dict[str, list[dict]] | Non
             )
 
     if unresolved:
-        print("  [HARD BLOCK] /plan cannot scope unrelated work while these recs remain open.")
+        print(
+            "  [HARD BLOCK] overlapping work blocks, and all new work once a red is past its SLO: run "
+            "bin/venv-python -m scripts.ci_rca.red_overlap --plan <plan> (Decision 226)."
+        )
         for rec in unresolved:
             rec_id = rec.get("id", "unknown")
             title = rec.get("title", "")

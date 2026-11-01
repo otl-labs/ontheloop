@@ -50,6 +50,7 @@ from typing import Any, Callable, Optional, cast
 
 import yaml
 
+from scripts import repo_identity
 from scripts.convergence_health.approvals import _make_github_caller
 from scripts.convergence_health.code_drift import _assert_full_history
 from scripts.convergence_health.record import _parse_utc
@@ -66,9 +67,6 @@ from scripts.convergence_health.sensor_liveness_episodes import (
     _same_anchor_best_row,
 )
 from scripts.rec_episode import find_recs
-
-DEFAULT_OWNER = "benjamin-blake"
-DEFAULT_REPO = "theseus"
 
 _WORKFLOWS_DIR = ".github/workflows"
 _REPO_ROOT = Path(__file__).parent.parent.parent
@@ -502,8 +500,8 @@ def detect_stale_loops(
     resolved_recs: Optional[_Rows] = None,
     peers: Optional[dict[str, list[str]]] = None,
     now: Optional[datetime] = None,
-    owner: str = DEFAULT_OWNER,
-    repo: str = DEFAULT_REPO,
+    owner: Optional[str] = None,
+    repo: Optional[str] = None,
     profile: Optional[str] = None,
     dry_run: bool = False,
 ) -> _Info:
@@ -523,6 +521,7 @@ def detect_stale_loops(
     token = os.environ.get("GH_TOKEN", "") or os.environ.get("GITHUB_TOKEN", "")
     caller = gh_caller or _make_github_caller(token)
     runner = git_runner or _default_git_runner
+    owner, repo = repo_identity.resolve(owner, repo)
     api_base = f"https://api.github.com/repos/{owner}/{repo}"
     states = _query_workflow_states(caller, api_base)
 
@@ -580,8 +579,8 @@ def stale_peers_for_probe(
     git_runner: Optional[_GitRunner] = None,
     peers: Optional[dict[str, list[str]]] = None,
     now: Optional[datetime] = None,
-    owner: str = DEFAULT_OWNER,
-    repo: str = DEFAULT_REPO,
+    owner: Optional[str] = None,
+    repo: Optional[str] = None,
 ) -> list[str]:
     """Names of derived peers (or just `workflow`) past their threshold on `leg` ("cadence", the
     unchanged default, or "success"). Backs `--liveness-probe`'s acceptance oracle -- raises on an
@@ -601,6 +600,7 @@ def stale_peers_for_probe(
     token = os.environ.get("GH_TOKEN", "") or os.environ.get("GITHUB_TOKEN", "")
     caller = gh_caller or _make_github_caller(token)
     runner = git_runner or _default_git_runner
+    owner, repo = repo_identity.resolve(owner, repo)
     api_base = f"https://api.github.com/repos/{owner}/{repo}"
 
     if leg == "cadence":

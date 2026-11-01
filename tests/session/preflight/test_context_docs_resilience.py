@@ -283,8 +283,6 @@ class TestContextDocsTotality:
     def test_read_context_files_over_a_bare_root(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr(preflight_common, "ROADMAP_FILE", tmp_path / "absent-roadmap.yaml")
         monkeypatch.setattr(preflight_common, "DECISIONS_FILE", tmp_path / "absent-decisions.md")
-        monkeypatch.setattr(preflight_common, "SESSION_LOG_FILE", tmp_path / "absent-log.md")
         result = context_docs.read_context_files(open_recs_count=0)
         assert result["roadmap_phase"] == "unknown"
-        assert result["recent_sessions"] == []
         assert result["open_decisions_count"] == 0

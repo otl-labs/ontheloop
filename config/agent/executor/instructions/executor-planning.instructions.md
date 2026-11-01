@@ -64,10 +64,12 @@ Place any `from scripts.executor.X import Y` INSIDE the function body that uses 
 def validate_recommendations_schema(failed: list[str]) -> None:
     import sys
     from pathlib import Path
+
     root = str(Path(__file__).parent.parent)
     if root not in sys.path:
         sys.path.insert(0, root)
     from scripts.executor.jsonl_store import Recommendation
+
     ...
 ```
 

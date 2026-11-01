@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from scripts.telemetry_capture import switch
+from src.turn_capture.witness import WITNESS_LINE
 
 REPO = Path(__file__).resolve().parents[2]
 HOOKS = REPO / ".claude" / "hooks"
@@ -130,7 +131,7 @@ def test_switch_off_keeps_every_hook_inert(tmp_path: Path, capfd: pytest.Capture
     assert detached == []
     assert sorted(p.name for p in root.parent.iterdir()) == [root.name]
     out, err = capfd.readouterr()
-    assert (out, err) == ("", "")
+    assert (out, err) == ("", (WITNESS_LINE + "\n") * (len(cases) * 2))
 
 
 GIT_ID = ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]

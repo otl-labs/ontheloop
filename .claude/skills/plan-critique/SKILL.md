@@ -21,13 +21,13 @@ Reject a plan that invents a third validation tier, treats mapped coverage or re
 
 2. Read `docs/PROJECT_CONTEXT.md` in full (for North Star and rules).
 
-3. **Targeted roadmap extraction, not a full-file read:** extract only the `tier_items[]` (from `docs/ROADMAP-PLATFORM.yaml`) the plan's `phase` and `context` fields name, via a `bin/venv-python -c` yaml.safe_load projection -- do not `Read` the file in full (ROADMAP-PLATFORM.yaml alone is >600KB).
+3. **Targeted roadmap extraction, not a full-file read:** extract only the `tier_items[]` (from `docs/ROADMAP-PLATFORM.yaml`) the plan's `phase` and `context` fields name, via a `bin/venv-python -c` yaml.safe_load projection -- do not `Read` the file in full.
 
-4. **Targeted decision extraction + conflict-sweep, not a full-file read:** read only the decision sections named in the plan's context `Decision-scout verdict + CITE list` (locate each via `rg "^## Decision N:" docs/DECISIONS.md`), plus a conflict-sweep: `rg` 2-3 keywords drawn from the plan's approach over `^## Decision` headers in `docs/DECISIONS.md` to catch a contradiction the scout's CITE list omitted. Do not Read the full file -- it is large (near its Decision 134 size ceiling) and the decision-scout gate already paid that cost minutes earlier in the same workflow.
+4. **Targeted decision extraction + conflict-sweep, not a full-file read:** read only the decision sections named in the plan's context `Decision-scout verdict + CITE list` (locate each via `rg "^## Decision N:" docs/DECISIONS.md`), plus a conflict-sweep: `rg` 2-3 keywords drawn from the plan's approach over `^## Decision` headers in `docs/DECISIONS.md` to catch a contradiction the scout's CITE list omitted. Do not Read the full file; the decision-scout gate already paid that cost.
 
 5. **For IMPLEMENTATION plans:** Read the files listed in the plan's `scope` list (the `## Scope` table in legacy .md plans) to verify the plan's accuracy. For STRATEGIC plans, this is not required -- work areas are high-level and do not require file-level verification.
 
-5b. For IMPLEMENTATION plans, run `bin/venv-python -m scripts.roadmap.plan_obligations --plan <plan path>` and fold its report into the scope check above -- it names missing companion registrations mechanically, freeing this gate to judge adequacy, not arithmetic.
+5b. For IMPLEMENTATION plans, run `bin/venv-python -m scripts.roadmap.plan_obligations --plan <plan path>` and fold its report (companions, size headroom, unbuilt plans on the same files, undecidable acceptance) into the scope check above -- arithmetic is the tool's, adequacy is yours. With an approved-text sidecar, read the last `wording-check` gate row (never re-run it): REVISE when it is absent, not PASS, its digest differs from `approved_text record`, or its selection was degraded.
 
 ### Phase 2: Strategic Analysis
 
@@ -70,29 +70,29 @@ Trigger condition 1 -- **Rec-resolving plan**: `bundled_recommendations` is non-
 - If either is missing, recommend REVISE: "Rec-resolving plan omits closure obligation: add bundled_recommendations list and a VP step to verify each rec closed."
 
 Trigger condition 2 -- **Surface-retiring plan**: `scope` carries an `action: Delete` row OR the plan states an X->Y migration/cutover (old path deleted, Lambda retired, write path swapped, config flag removed, backend superseded).
-- Required: at least one VP step that confirms the old surface is unreachable or deleted (grep for call sites, `test -f` for deleted files, import smoke-test, etc.).
+- Required: a VP step proving the old surface dead; for a deleted writer, each caller disposed per `tier-item-lifecycle.yaml#replacement_closure_check` (5).
 - If missing, recommend REVISE: "Surface-retiring plan omits stale-reference sweep VP step: add a VP step that verifies the old surface is dead."
 
 12l. **closes_criteria check (follow-on plans, IMPLEMENTATION only):** If the plan's phase/context names an `in_progress` tier_item, `closes_criteria` MUST be non-empty; each ref must name a criterion carrying `status: open` in `docs/ROADMAP-PLATFORM.yaml`; and `acceptance_criteria` must map 1:1 onto the chosen open criteria. If any of these fail, recommend REVISE: "Follow-on plan omits or misdeclares closes_criteria: [specifics]." A plan targeting no in_progress tier_item is exempt from this check.
 
 12m. **Tier fitness check:** `verification_tier` must satisfy the planning skill's Verification Tier Guidelines, narrowed by an intentional refinement (Decision 48/79) so comment-only `.tf` or docstring-only Python edits are not force-escalated: a **resource-affecting** `.tf` scope file (not comment-only) OR an **active-manifest** Lambda scope file (`status: active` in its manifest -- Decision 79; `status: stub` does not trigger this) => `V3`; any Python source scope file => `>= V2`. A lower declared tier than the qualifying scope requires => recommend REVISE citing the specific scope file and the tier it demands.
 
-12n. **SLOC decompose-by-default check (Decision 128):** For each `scripts/` or `src/` scope file with `action: Modify` (or `Create`), check whether the plan's own description of the change would push the file past its `config/sloc_budgets.yaml` budget (or past 500 SLOC if currently unregistered). If so, the plan MUST include a decomposition step (a facade package, Decision 80/104/124 pattern) OR an explicit, justified budget-raise step carrying a `# raise-approved: dec-NNN` marker citation. A plan that grows a scope file past its budget with neither => recommend REVISE: "Scope file [path] crosses its SLOC budget with no decomposition step and no raise-approved Decision citation -- decompose by default (Decision 128)."
+12n. **Size headroom check (Decisions 128, 166):** For each scope row the 5b report marks over budget or NEAR_CAP, or whose planned change crosses its limit, the plan MUST include a decomposition step (facade package, Decision 80/104/124), a class relief-valve step measured at build time, or a justified raise step citing `# raise-approved: dec-NNN`. With none => REVISE: "Scope file [path] crosses or nears its size limit with no decomposition, relief or cited raise step -- decompose by default."
 
 12o. **Graduation-classification honesty (T3.21, VF-05 enforcement):** For every `phase: pre-deploy` `verification_plan` step, check the `graduation` field (see docs/contracts/vp-red-before.yaml for the three-way classification). Flag each of the following as a REVISE-worthy issue:
    - **Missing disposition:** a pre-deploy step with no `graduation` field at all (only exempt if the plan predates T3.21 and declares zero dispositions anywhere -- a plan authored under this gate must classify every pre-deploy step).
-   - **Suspect `not-applicable`:** a step whose `command` is plainly a single command_exit_zero / grep_count / file_presence / test_selector / command_output_matches / metric_under_threshold shape (see `scripts.verification_checks.CANONICAL_SLOTS`) but is marked `not-applicable` instead of `graduate` -- this is exactly the classification-gaming shape the gate exists to catch, since `not-applicable` carries no downstream registry obligation.
+   - **Suspect `not-applicable`:** a step whose `command` is plainly a single command_exit_zero / grep_count / file_presence / test_selector / command_output_matches / metric_under_threshold shape (see `scripts.verification_checks.CANONICAL_SLOTS`) but is marked `not-applicable` instead of `graduate` -- the classification-gaming shape this gate catches (`not-applicable` carries no registry obligation).
    - **Thin waiver:** a `waive` disposition whose `graduation_waiver_reason` is generic or non-substantive (e.g. "not needed", "skip", "later") rather than naming a concrete reason the check can't be graduated now.
    If any step trips one of these, recommend REVISE citing the step number and which sub-check failed. Otherwise report "graduation dispositions complete and honest."
 
-12p. **Category-consistency verdict (Decision 167 clause 2 -- fresh Decisions and CD ratifications alike):** This is the reviewer-side control that does not exist anywhere else in this gate -- Phase 2's other checks judge scope, tiers, and dispositions, never whether a drafted numbered Decision's claimed significance row actually matches its body.
+12p. **Category-consistency verdict (Decision 167 clause 2 -- fresh Decisions and CD ratifications alike):** No other check here asks whether a drafted numbered Decision's claimed significance row matches its body.
    - **Trigger detection.** Fires when EITHER the plan carries a ratification block (Workflow Step 5b above) OR the plan's `scope` includes a `docs/DECISIONS.md` row AND the plan's drafted text contains a numbered `"## Decision NNN:"` heading. A `docs/DECISIONS.md` scope row that adds ONLY a dated amendment trailer -- no drafted numbered heading -- does NOT fire this check: an amendment carries no significance envelope to adjudicate.
    - **Verdict.** When the trigger fires, locate the drafted entry's claimed `significance.value` (envelope field or narrative Significance marker) and quote VERBATIM the body sentence that satisfies or fails `docs/contracts/decision-entry.yaml` `significance.routing_rule`'s three questions for the claimed row. A claimed-row/body mismatch is REVISE-worthy on its own -- this is a mandatory category-consistency gate, not a discretionary surface-and-defer check the human can wave through.
    - **N/A branch.** When the trigger does not fire, the Phase-3 row emits "Category consistency: N/A -- plan drafts no numbered Decision text", so a silent omission is distinguishable from a pass.
 
 ### Phase 2b: Frame Challenge (MANDATORY)
 
-Phase 2 checks the plan's *details* against the existing frame. This phase challenges the *frame itself*. See Decision 75 (Frame-Lock Anti-Pattern in Architectural Planning) for the failure mode this phase is designed to catch.
+Phase 2 checks the plan's *details* against the existing frame. This phase challenges the *frame itself*. Failure mode: Decision 75 (frame lock).
 
 Ask the following five questions against the plan's chosen approach. For each, write a one-sentence answer. Where the answer surfaces a concrete contradiction with a Decision, a Roadmap item, or a North Star principle, recommend REVISE. Otherwise surface the answer informationally -- the human or downstream planner decides whether to pivot.
 
@@ -154,12 +154,12 @@ Ask the following five questions against the plan's chosen approach. For each, w
 
 **Category Consistency (12p, Decision 167 clause 2):** N/A -- plan drafts no numbered Decision text / PASS -- "[verbatim body quote]" supports claimed [routing row] / REVISE -- claimed [routing row] but body reads: "[verbatim quote]"
 
-**Finding-Origin Attribution:** mechanical (a deterministic check could catch it -- name it) / critic judgement -- tag each finding, with a stable anchor (plan field path or VP step id)
+**Finding-Origin Attribution and severity:** blocking (correctness, safety, scope, a Decision conflict or failed check above; when unsure) or nit (wording, citation form, ordering; never a Frame Challenge contradiction); mechanical (a deterministic check could catch it -- name it) / critic judgement -- tag each finding, with a stable anchor (plan field path or VP step id)
 
-**Recommendation:** PROCEED / REVISE [with specific suggestions if REVISE]
+**Recommendation:** PROCEED (no blocking finding; list nits) / REVISE (any blocking finding) [with specific suggestions if REVISE]
 ```
 
-14. If the recommendation is REVISE, list specific changes needed before implementation should begin.
+14. If REVISE, list the changes needed before implementation. State each measured figure as a hypothesis with the command that produced it: the reviser will re-measure it and dispute, with evidence, any it cannot reproduce.
 
 ---
 

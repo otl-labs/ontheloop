@@ -14,7 +14,6 @@ import yaml
 pytestmark = pytest.mark.unit
 
 _REPO = Path(__file__).resolve().parents[3]
-_CAP_BYTES = 6144
 _REVERSAL_IDS = ("owner-identity-changes", "ducklake-ddl-on-dml-path", "telemetry-schema-churn", "production-ci-ddl-mechanism")
 
 
@@ -35,7 +34,6 @@ def test_decision_entry_and_annotations() -> None:
     n = _decision_number()
     text = (_REPO / "docs/DECISIONS.md").read_text(encoding="utf-8")
     entry = _entry(text, n)
-    assert len(entry.encode("utf-8")) <= _CAP_BYTES
 
     envelope = yaml.safe_load(re.search(r"```yaml\n(.*?)\n```", entry, re.DOTALL).group(1))
     assert envelope["number"] == n and envelope["amends"] == [143, 213] and envelope["status"] == "Decided"

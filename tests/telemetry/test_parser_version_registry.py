@@ -71,6 +71,19 @@ CASES = (
     "resume_segment_closes.json",
     "session_provenance_facts.json",
     "model_call_request_fields.json",
+    "stop_witness_closes.json",
+    "stop_blocked_witness_first.json",
+    "stop_blocked_feedback_first.json",
+    "stop_blocked_then_interrupted.json",
+    "api_error_self_close.json",
+    "stop_witness_not_at_rest.json",
+    "prompt_open_row.json",
+    "workflow_from_skill.json",
+    "subagent_workflow_skills.json",
+    "status_markers.json",
+    "late_startup_group.json",
+    "late_resume_group.json",
+    "resume_hook_twins.json",
 )
 
 
@@ -247,7 +260,7 @@ def test_declared_signature_prefixes_match_the_corpus() -> None:
         for row in load_case(name)[1]:
             if row.get("table") == "telemetry_observations" and row.get("observation_type") == "process_event":
                 emitted.add(row["name"].split(":", 1)[0])
-    assert emitted == set(declared) == {"hook", "gate", "precommit"}
+    assert emitted == set(declared) == {"hook", "gate", "precommit", "status"}
     assert set(declared) <= set(_contract_sources())
 
 

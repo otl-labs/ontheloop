@@ -1,0 +1,614 @@
+schema_version: 5
+implementation_declared: true
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "admin-terraform-assets-session-hook"
+intent: >-
+  Make the ADMIN container's local Terraform provider mirror reliably present by syncing it in an every-session
+  SessionStart hook, and make the tfvars an explicit on-demand fetch. bin/setup-cloud-env.sh runs once per environment
+  snapshot, before environment variables are set, and the agent proxy never signs setup-script requests, so its
+  step-5b mirror sync and tfvars fetch can never authenticate (evidence: /mnt/project-files/credential-proxy/
+  admin-setup-fetch/FINDINGS.md). Executes rec-4747.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-admin-terraform-assets-session-hook.yaml
+phase: >-
+  ad_hoc_rec (soft-warn category; no tier_item claimed, so the Tier Item Freshness Gate is skipped). Follow-on to
+  PLAN-agent-aws-proxy-credentials (rec-4510) VP 11, whose fix_if routes a setup-time signing failure to a rec.
+  Closes no roadmap criterion.
+closes_criteria: []
+scope:
+  - file: bin/sync-terraform-assets.sh
+    action: Create
+    purpose: >-
+      Shared fetch script. Default mode syncs s3://agent-platform-data-lake/tf-provider-mirror/ to $HOME/.terraform-mirror
+      with one command on ONE line, `aws s3 sync "s3://agent-platform-data-lake/tf-provider-mirror/" "$MIRROR_DIR"
+      --exclude "*" --include "registry.terraform.io/kislerdm/*" --only-show-errors --delete --profile agent_platform`
+      before any redirection (the registry grep in setup-cloud-env-mirror-hygiene reads that line). The include filter
+      names exactly the namespaces config/terraform/cc-web.tfrc's filesystem_mirror block routes through the mirror
+      (today only kislerdm/*: about 6.4 MB per cold sync instead of about 166 MB, since hashicorp/* resolves direct). Then
+      it writes RESOLVED_TFRC="$HOME/.terraform-mirror.tfrc" (a sibling file, never inside the mirror dir, rec-2518) from
+      config/terraform/cc-web.tfrc only after a successful non-empty sync, and removes any existing one after a failed or
+      empty sync (EMPTY_MIRROR, exit 1). `--tfvars` mode runs the unchanged
+      .github/actions/materialise-tfvars/materialise_tfvars.sh from the repo root with AWS_PROFILE=agent_platform_admin
+      set and GITHUB_ACTIONS unset for that call only (so no ::add-mask:: line can carry a value into the session); it
+      never runs in default mode. Each AWS call: two attempts, 3 s apart, each under `timeout 25`; NO_CREDENTIALS and
+      NO_REGION are not retried. Output: one line per run, `mirror-sync: OK (<n>s)` or `mirror-sync: WARNING <CLASS>
+      (<n>s)` (tfvars: `tfvars-fetch: ...`), plus on failure at most one error line. The class is read from the WHOLE
+      captured stderr (and timeout's exit 124 for TIMEOUT). The error line is the first non-empty stderr line that is not
+      the delegate's own `materialise-tfvars:` prefix line (that prefix line only when no other line is non-empty),
+      SCRUBBED FIRST and only then truncated to 200 chars: sed replaces `arn:` tokens with [ARN] and AKIA/ASIA key ids
+      with [KEY_ID], then the line passes through scripts.ci.redaction_check.mask_account_ids (the shared rec-4656
+      session-output mask for 12-digit runs and AROA/AIDA unique ids) via bin/venv-python; when that import fails the
+      line is withheld (`detail withheld: mask unavailable`) and only the class prints (fail closed; no second 12-digit
+      mask). The same lines overwrite $HOME/.terraform-mirror.log (tfvars mode writes no log). Classes: NO_CREDENTIALS,
+      NO_REGION, INVALID_TOKEN, EXPIRED_TOKEN, ACCESS_DENIED, NETWORK, TIMEOUT, EMPTY_MIRROR, OTHER. Exit 0 on success,
+      1 on failure. Test-only knobs with these defaults: SYNC_TF_ASSETS_BACKOFF_SECONDS=3,
+      SYNC_TF_ASSETS_ATTEMPT_TIMEOUT=25. set -uo pipefail with explicit checks (inherits no errexit assumption,
+      Decision 162).
+  - file: .claude/hooks/session_start_terraform_assets.sh
+    action: Create
+    purpose: >-
+      Every-session hook in the session_start_sync_deps.sh shape. When ~/.aws/config has no
+      `[profile agent_platform_admin]` line it prints one skip line and makes no AWS call. Otherwise it warns when neither PATH nor
+      $HOME/.local/bin holds a terraform binary (and still syncs), runs bin/sync-terraform-assets.sh in default mode only, prefixes
+      each output line with [session_start_terraform_assets], and always exits 0. Never gates on INSTALL_TERRAFORM.
+  - file: .claude/settings.json
+    action: Modify
+    purpose: >-
+      Register `bash .claude/hooks/session_start_terraform_assets.sh` at the END of the first SessionStart group with
+      `"timeout": 60` (session_start_aws.sh stays first: test_capture_hook_registration's order test).
+  - file: .claude/hooks/hooks.json
+    action: Modify
+    purpose: Re-render with `bin/venv-python .claude/hooks/plugin_hooks.py render` (test_plugin_hooks parity).
+  - file: bin/setup-cloud-env.sh
+    action: Modify
+    purpose: >-
+      Delete step 5b (the INSTALL_TERRAFORM=1 mirror-sync and tfvars block, including #1731's AWS_PROFILE default) and
+      its else line; step 4's sync-deps still installs terraform when INSTALL_TERRAFORM=1. Header: the setup script runs
+      before environment variables are set and the proxy never signs its requests (replaces the "harness is
+      unreliable ... BEFORE or AFTER" sentence, and the ADMIN header block must contain the phrase "the agent proxy never
+      signs its requests" on ONE comment line, since the test joins header lines with newlines); the responsibility split and "What it does" lists name the new hook; the ADMIN template is
+      otherwise unchanged.
+  - file: tests/test_sync_terraform_assets.py
+    action: Create
+    purpose: Behaviour tests for the script with a stub aws and a stub delegate on a temp repo copy (acceptance 1-2).
+  - file: tests/hooks/test_session_start_terraform_assets.py
+    action: Create
+    purpose: Hook gating, exit 0, warnings and registration (acceptance 3).
+  - file: tests/test_setup_cloud_env.py
+    action: Modify
+    purpose: >-
+      Remove TestAdminTfvarsFetch (test_admin_branch_calls_shared_delegate, test_failed_fetch_does_not_abort),
+      _extract_install_terraform_block, _run_admin_block_recording_profile, test_admin_block_defaults_aws_profile_when_unset
+      and test_admin_block_keeps_an_explicit_aws_profile (their behaviour moves to steps 1-2 or is deleted with step 5b);
+      test_placeholder_install_precedes_first_aws_call drops its `aws s3 sync` index; test_admin_template_sets_install_
+      terraform_inline replaces its "BEFORE or AFTER" assertion with one on "the agent proxy never signs its requests".
+      Each is a weakening candidate named here (Decision 235 clause 1) and gets a planned-change disposition citing
+      acceptance_criteria[3]. Add test_setup_fetches_no_terraform_assets (acceptance 4).
+  - file: config/agent/verification_registry/entries/setup-cloud-env-mirror-hygiene.yaml
+    action: Modify
+    purpose: >-
+      guard_target becomes bin/sync-terraform-assets.sh. The command greps that file for
+      `RESOLVED_TFRC="$HOME/.terraform-mirror.tfrc"` and, anchored so agent_platform_admin fails it,
+      `grep -qE 'aws s3 sync "s3://agent-platform-data-lake/tf-provider-mirror/".*--delete --profile agent_platform( |$)'`.
+      Fails on origin/main (file absent), passes on HEAD (Decision 132 VF-06).
+  - file: docs/contracts/terraform-cc-web-operations.yaml
+    action: Modify
+    purpose: Texts T1-T5 in execution step 7, verbatim.
+  - file: docs/contracts/deploy-paths.yaml
+    action: Modify
+    purpose: Texts T5-T6 in execution step 7, verbatim.
+  - file: config/terraform/cc-web.tfrc
+    action: Modify
+    purpose: Comment line 3 becomes text T7.
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: Decision 120 gains annotation T8 after its Related line; its body is unchanged (Decision 177).
+  - file: docs/plans/PLAN-admin-terraform-assets-session-hook.yaml
+    action: Create
+    purpose: This plan.
+bundled_recommendations:
+  - rec-4747
+followon_recs:
+  - rec-4748
+  - rec-4749
+  - rec-4750
+infrastructure_dependencies: []
+acceptance_criteria:
+  - >-
+    Default mode: on success the mirror holds the stub's files, the resolved tfrc names the mirror dir, the output and
+    log read `mirror-sync: OK`, exit 0; the aws call carries `--profile agent_platform` whatever AWS_PROFILE says; a
+    first failure is retried once after the backoff; NO_CREDENTIALS and NO_REGION are not retried; a hung attempt
+    reports TIMEOUT; all attempts failing removes a pre-existing resolved tfrc, prints a WARNING with the class, exits
+    1; an empty sync writes no tfrc, removes a pre-existing one, reports EMPTY_MIRROR and exits 1; the sync carries
+    `--exclude "*"` and one `--include` per namespace cc-web.tfrc routes through the mirror; default mode never runs
+    the delegate.
+  - >-
+    --tfvars mode runs the delegate with AWS_PROFILE=agent_platform_admin even when the ambient profile is
+    agent_platform, prints `tfvars-fetch: OK` on success, and on a delegate failure whose stderr carries an ARN, a
+    12-digit run and an AROA id prints the class and the aws error line (not the delegate's prefix line), scrubbed of
+    all three; same for default mode output and log. A 12-digit run straddling character 200 is still masked (scrub
+    before truncate), and when the shared mask cannot be imported only the class prints.
+  - >-
+    The hook prints one skip line and calls no aws when ~/.aws/config lacks the agent_platform_admin profile; in an
+    ADMIN config it runs default mode only; it exits 0 when the script fails or terraform is absent (with a WARNING);
+    it is registered in .claude/settings.json SessionStart with timeout 60 and hooks.json is the render.
+  - >-
+    bin/setup-cloud-env.sh, outside comments, runs no `aws s3`, `aws secretsmanager`, `aws ssm` or `aws sts` command,
+    no materialise_tfvars call and names no tf-provider-mirror, still runs bin/sync-deps.sh (which installs
+    terraform when INSTALL_TERRAFORM=1), and its ADMIN header block says the agent proxy never signs its requests.
+  - >-
+    The repointed registry entry passes on HEAD and fails on origin/main; validate_terraform_cc_web_operations and the
+    deploy-paths evaluator pass; texts T1-T8 are present verbatim (allowed variance: T5/T8 dates are the build's
+    commit date; line wrapping). VP 5 checks key fragments; code review compares each text in full against execution
+    step 7.
+  - >-
+    Live, in the build's ADMIN container at the CI-green head: the hook syncs the mirror; a scratch-copy terraform init
+    through the mirror installs kislerdm/neon from it; PlatformDev can read the prefix; one on-demand --tfvars run
+    writes a non-empty mode-600 tfvars with clean output, then the file is removed. After merge, in a NEW ADMIN
+    session: the start-up output shows `[session_start_terraform_assets] mirror-sync: OK` and rec-4747 is closed.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Script behaviour, by node.
+    command: >-
+      bin/venv-python -m pytest -q
+      "tests/test_sync_terraform_assets.py::test_mirror_sync_success_writes_resolved_tfrc_and_log"
+      "tests/test_sync_terraform_assets.py::test_mirror_sync_runs_as_platform_dev_whatever_the_ambient_profile"
+      "tests/test_sync_terraform_assets.py::test_failed_attempt_is_retried_once"
+      "tests/test_sync_terraform_assets.py::test_credential_and_region_errors_are_not_retried"
+      "tests/test_sync_terraform_assets.py::test_hung_attempt_reports_timeout"
+      "tests/test_sync_terraform_assets.py::test_failed_sync_removes_resolved_tfrc_and_exits_one"
+      "tests/test_sync_terraform_assets.py::test_empty_sync_removes_the_resolved_tfrc_and_exits_one"
+      "tests/test_sync_terraform_assets.py::test_sync_fetches_only_the_namespaces_the_tfrc_routes_through_the_mirror"
+      "tests/test_sync_terraform_assets.py::test_default_mode_never_runs_the_delegate"
+      "tests/test_sync_terraform_assets.py::test_tfvars_mode_pins_the_admin_profile"
+      "tests/test_sync_terraform_assets.py::test_output_and_log_never_carry_account_id_arn_or_unique_id"
+      "tests/test_sync_terraform_assets.py::test_scrub_runs_before_truncation"
+      "tests/test_sync_terraform_assets.py::test_error_line_withheld_when_the_shared_mask_is_unavailable"
+    expected: >-
+      exit 0; every node passes (the masking node is parametrized over default and --tfvars modes). Each fails before
+      the change (the script does not exist).
+    fix_if: >-
+      Fix the script, never the assertion. A masking failure means raw stderr reached stdout or the log.
+    hermetic: true
+    expected_literals: []
+    graduation: graduate
+    graduation_check_id: sync-terraform-assets-behaviour
+  - step: 2
+    phase: pre-deploy
+    action: Hook gating, exit 0 and registration, by node.
+    command: >-
+      bin/venv-python -m pytest -q
+      "tests/hooks/test_session_start_terraform_assets.py::test_dev_session_skips_without_an_aws_call"
+      "tests/hooks/test_session_start_terraform_assets.py::test_admin_session_runs_the_mirror_sync_only"
+      "tests/hooks/test_session_start_terraform_assets.py::test_failed_sync_still_exits_zero_with_a_warning"
+      "tests/hooks/test_session_start_terraform_assets.py::test_missing_terraform_warns_and_still_syncs"
+      "tests/hooks/test_session_start_terraform_assets.py::test_hook_is_registered_with_a_timeout"
+      "tests/hooks/test_plugin_hooks.py::test_the_committed_hooks_file_is_the_render_of_the_settings"
+    expected: exit 0; six nodes pass; the first five fail before the change.
+    fix_if: Fix the hook or the registration; re-render hooks.json from settings.json, never hand-edit it.
+    hermetic: true
+    expected_literals: []
+    graduation: graduate
+    graduation_check_id: session-start-terraform-assets-hook
+  - step: 3
+    phase: pre-deploy
+    action: Setup no longer fetches terraform assets; the rest of its contract holds.
+    command: bin/venv-python -m pytest -q tests/test_setup_cloud_env.py
+    expected: exit 0; test_setup_fetches_no_terraform_assets passes and fails before the change.
+    fix_if: >-
+      A removed test needs a weakening_dispositions entry (planned-change citing this plan, or refactor citing its
+      successor node in step 1 or 2); never delete an unrelated assertion.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Whole-file re-run of a test file this plan modifies; the existing setup-cloud-session-bootstrap-parity registry
+      row already runs this file as a standing check.
+  - step: 4
+    phase: pre-deploy
+    action: The repointed registry entry admits (fails on origin/main, passes on HEAD).
+    command: >-
+      bin/venv-python -c "import scripts.checks.verification.validate_verification_registry as v; f=[];
+      v.validate_verification_registry(f); assert not f, f; print('REGISTRY_ADMITTED')"
+    expected: exit 0, prints REGISTRY_ADMITTED.
+    fix_if: >-
+      If the entry passes on origin/main, its command still reads bin/setup-cloud-env.sh; point it at the new script.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Duplicates the --pre validate_verification_registry check, and its result depends on this diff's added/modified
+      entry set against origin/main.
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      Governing texts present (whitespace-normalised, so the allowed line wrapping cannot fail or vacuously pass it) and
+      their contract evaluators green.
+    command: >-
+      bin/venv-python -c 'import yaml,re;
+      s=lambda o: " ".join(map(s, o.values() if isinstance(o,dict) else o)) if isinstance(o,(dict,list)) else str(o);
+      n=lambda x: " ".join(x.split());
+      y=lambda p: n(s(yaml.safe_load(open(p))));
+      f=lambda p: n(re.sub(r"(?m)^[ \t]*(?:>|#)[ \t]?", "", open(p).read()));
+      T=y("docs/contracts/terraform-cc-web-operations.yaml"); D=y("docs/contracts/deploy-paths.yaml");
+      R=f("config/terraform/cc-web.tfrc"); M=f("docs/DECISIONS.md");
+      P=yaml.safe_load(open("docs/contracts/terraform-cc-web-operations.yaml"))["referenced_repo_paths"];
+      need=[(T,"The sync cannot run from `bin/setup-cloud-env.sh`: the agent proxy never signs setup-script requests."),
+      (T,"written only after a successful, non-empty sync and removed after a failed one"),
+      (T,"run it on demand through `bash bin/sync-terraform-assets.sh --tfvars`, which pins `AWS_PROFILE=agent_platform_admin` for that call and masks its error output"),
+      (T,"The tfvars this loop needs are never fetched automatically"),
+      (T,"that command is the deliberate operator act Decision 126 asks for"),
+      (T,"PLAN-admin-terraform-assets-session-hook: the provider-mirror sync moves from bin/setup-cloud-env.sh"),
+      (D,"init line names the session-start hook and the inline TF_CLI_CONFIG_FILE prefix in place of bin/setup-cloud-env.sh"),
+      (D,"synced it and wrote $HOME/.terraform-mirror.tfrc; prefix each terraform command with TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc"),
+      (R,"CC-web ADMIN sessions, via the every-session hook .claude/hooks/session_start_terraform_assets.sh (bin/sync-terraform-assets.sh)."),
+      (M,"PLAN-admin-terraform-assets-session-hook):** the mirror sync moved out of `bin/setup-cloud-env.sh`"),
+      (M,"and the reversal condition reads that hook")];
+      gone=[(T,"existence is the authorization"),(T,"Wiring the `materialise_tfvars.sh` delegate call into"),
+      (T,"also wired directly into `bin/setup-cloud-env.sh`"),(D,"bin/setup-cloud-env.sh ran with INSTALL_TERRAFORM=1 and the sync succeeded")];
+      bad=[p for x,p in need if p not in x]+[p for x,p in gone if p in x]
+      +[p for p in (".claude/hooks/session_start_terraform_assets.sh","bin/sync-terraform-assets.sh") if p not in P];
+      assert not bad, bad; print("TEXTS_PRESENT")'
+      && bin/venv-python -m pytest -q tests/test_materialise_tfvars_delegate.py
+      tests/checks/contracts/test_validate_terraform_cc_web_operations.py tests/test_deploy_paths_admin_procedure.py
+      && echo TEXTS_OK
+    expected: exit 0, prints TEXTS_PRESENT then TEXTS_OK.
+    fix_if: Copy the text from execution step 7 verbatim; never reword approved text.
+    hermetic: true
+    expected_literals: ["TEXTS_PRESENT", "TEXTS_OK"]
+    graduation: waive
+    graduation_waiver_reason: >-
+      A registry row would pin approved prose that later approved amendments may legitimately change; the contract
+      evaluators it runs are already standing checks.
+  - step: 6
+    phase: pre-deploy
+    action: Full tier, to completion (handoff evidence).
+    command: bin/venv-python -m scripts.validate
+    expected: exit 0.
+    fix_if: >-
+      In-scope failure: fix on the branch, never skip a test or add a baseline. Out-of-scope failure: a rec via
+      scripts.ops_data_portal (Decision 59).
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: ENVIRONMENT CHECK -- this build runs in an ADMIN session (steps 9-12 need terraform and PlatformAdmin).
+    command: >-
+      bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null
+      | grep -q 'assumed-role/PlatformAdmin/' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT
+    expected: ADMIN_CHAIN_OK.
+    fix_if: ADMIN_CHAIN_ABSENT -- stop before any edit and hand back to the coordinator; never fake the live steps.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: pre-deploy
+    action: Census check on the bundled rec (project rule) -- rec-4747's acceptance classifies probeable on the finished tree.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from scripts.rec_trailer_acceptance import census;
+      e=census(['rec-4747'], profile='agent_platform'); print([(x['rec_id'], x['bucket'], x.get('route')) for x in e]);
+      assert e and e[0]['bucket']=='probeable', e"
+    expected: >-
+      Prints [('rec-4747', 'probeable', 'static')] or the junit route; exit 0. Before the build it reads
+      expected_fail_missing_node (the node does not exist yet).
+    fix_if: >-
+      Still expected_fail_missing_node -- the test node name differs from rec-4747's acceptance; rename the test to the
+      acceptance's node, never re-ground the rec.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: pre-deploy
+    action: >-
+      Live, in this ADMIN container at the CI-green head ($PR_HEAD_SHA), from the branch checkout: the hook syncs the
+      mirror, writes the resolved tfrc and a clean log.
+    command: >-
+      bash .claude/hooks/session_start_terraform_assets.sh
+      ; test -n "$(ls -A "$HOME/.terraform-mirror" 2>/dev/null)" && test -s "$HOME/.terraform-mirror.tfrc"
+      && echo MIRROR_SYNCED || echo MIRROR_MISSING
+      ; grep -qE '[0-9]{12}|arn:' "$HOME/.terraform-mirror.log" && echo LOG_LEAK || echo LOG_CLEAN
+    expected: >-
+      The hook prints `[session_start_terraform_assets] mirror-sync: OK (<n>s)`; then MIRROR_SYNCED and LOG_CLEAN.
+    fix_if: >-
+      WARNING with a class: read the class; NO_CREDENTIALS or INVALID_TOKEN means the network secret or profile chain
+      (run .claude/hooks/session_start_aws.sh); ACCESS_DENIED means PlatformDev lost the prefix (rec-4748). Report the
+      class to Benjamin; never switch the sync to the admin profile. LOG_LEAK: stop, delete the log, tell Benjamin.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: pre-deploy
+    action: >-
+      Live: real init through the mirror on a scratch copy (Decision 120's ADMIN relaxation of Decision 119's VP rule; no
+      backend, lockfile read-only, nothing in the checkout changes).
+    command: >-
+      d=$(mktemp -d) && cp -r terraform/personal "$d/p" && rm -rf "$d/p/.terraform" "$d/p/terraform.personal.tfvars"
+      && (cd "$d/p" && TF_CLI_CONFIG_FILE="$HOME/.terraform-mirror.tfrc" terraform init -backend=false -lockfile=readonly
+      -input=false -no-color > "$d/init.out" 2>&1; echo "init_rc=$?")
+      ; grep -E 'Installed kislerdm/neon|successfully initialized' "$d/init.out"
+      || grep -m1 'Error' "$d/init.out" | sed -E 's/arn:[^ ]*/[ARN]/g; s/[0-9]{12}/[ACCOUNT_ID]/g' | cut -c1-200
+      ; rm -rf "$d"
+    expected: >-
+      init_rc=0, a line "Installed kislerdm/neon v<ver> (unauthenticated)" (filesystem-mirror install; a direct fetch
+      reads "self-signed") and "Terraform has been successfully initialized!". Probed on 2026-10-30 with v0.13.0.
+    fix_if: >-
+      "self-signed" means the mirror config was not used: check the tfrc path and contents. An init error: the scrubbed
+      first Error line is printed; record it, tell Benjamin; never edit the lock file.
+    hermetic: false
+    graduation: not-applicable
+  - step: 11
+    phase: pre-deploy
+    action: >-
+      Live: PlatformDev still reads the mirror prefix (Decision 238 fence awareness).
+    command: >-
+      aws s3 ls s3://agent-platform-data-lake/tf-provider-mirror/ --recursive --profile agent_platform 2>&1
+      | grep -c 'tf-provider-mirror/registry.terraform.io/'
+    expected: a count of at least 3 (9 objects on 2026-10-30).
+    fix_if: AccessDenied or 0 - record it, tell Benjamin, and raise rec-4748's priority; do not widen any grant here.
+    hermetic: false
+    graduation: not-applicable
+  - step: 12
+    phase: pre-deploy
+    action: >-
+      Live: one on-demand tfvars fetch (a read-only PlatformAdmin secret read, approved as one of this plan's live
+      checks), checked without printing it, then removed.
+    command: >-
+      o=$(mktemp); bash bin/sync-terraform-assets.sh --tfvars > "$o" 2>&1; rc=$?
+      ; T=terraform/personal/terraform.personal.tfvars
+      ; echo "rc=$rc"; test -s "$T" && test "$(stat -c %a "$T")" = 600 && echo TFVARS_OK || echo TFVARS_BAD
+      ; grep -qE '[0-9]{12}|arn:' "$o" && echo OUT_LEAK || echo OUT_CLEAN
+      ; rm -f "$T" "$o"
+    expected: rc=0, TFVARS_OK, OUT_CLEAN.
+    fix_if: >-
+      rc=1: read the printed class (never cat the file). OUT_LEAK: stop, delete the output, tell Benjamin (Decision 101).
+    hermetic: false
+    graduation: not-applicable
+  - step: 13
+    phase: post-deploy
+    action: >-
+      After merge, in a NEW ADMIN session (a new project thread; the build asks the coordinator), read that session's own
+      start-up output, then check the files it wrote without re-running the hook.
+    command: >-
+      test -n "$(ls -A "$HOME/.terraform-mirror" 2>/dev/null)" && test -s "$HOME/.terraform-mirror.tfrc"
+      && test "$HOME/.terraform-mirror.tfrc" -nt "$HOME/.aws/config" && echo MIRROR_SYNCED || echo MIRROR_MISSING
+      ; grep -qE '[0-9]{12}|arn:' "$HOME/.terraform-mirror.log" && echo LOG_LEAK || echo LOG_CLEAN
+    expected: >-
+      The start-up output shows a [session_start_terraform_assets] mirror-sync OK line and no [plugin_hooks] drift
+      warning; then MIRROR_SYNCED and LOG_CLEAN. Plan A's VP 11 token MIRROR_SYNCED is met.
+    fix_if: >-
+      No start-up line plus a [plugin_hooks] drift warning: project threads run the installed plugin's hooks.json, which
+      has not picked up the merged render yet; record this step as pending (not failed), tell the coordinator, re-check in
+      a later new session; never run the hook by hand to make the token true. A WARNING with a class: as step 9.
+    hermetic: false
+    graduation: not-applicable
+  - step: 14
+    phase: post-deploy
+    action: >-
+      After the squash-merge with "Resolves: rec-4747", confirm the trailer-closure job closed the rec (closure
+      obligation).
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import
+      fetch_recs_by_ids,make_reader;r,m=fetch_recs_by_ids(make_reader(profile='agent_platform'),['rec-4747']);
+      st=r[0]['status'] if r else None;assert not m and st=='closed', (m, st);print('REC_CLOSED')"
+    expected: REC_CLOSED.
+    fix_if: >-
+      Still open -- read the trailer-closure job log; on a transport or merge-leg refusal use the sanctioned --update-rec
+      fallback; on an acceptance-verdict refusal use only the printed close_proposed command (git-ops.yaml
+      resolves_trailer). Never edit a local cache.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: bin/sync-terraform-assets.sh
+    behavior: Mirror sync as PlatformDev with retry, fail-closed tfrc, masked output; tfvars on demand under the admin profile.
+    verification_step: 1
+    test_selector: tests/test_sync_terraform_assets.py::test_mirror_sync_runs_as_platform_dev_whatever_the_ambient_profile
+    red_green_expectation: red before (script absent), green after
+  - source: .claude/hooks/session_start_terraform_assets.sh
+    behavior: ADMIN-only gate, mirror only, always exit 0.
+    verification_step: 2
+    test_selector: tests/hooks/test_session_start_terraform_assets.py::test_admin_session_runs_the_mirror_sync_only
+    red_green_expectation: red before (hook absent), green after
+  - source: .claude/settings.json
+    behavior: The hook is registered with a 60 s timeout.
+    verification_step: 2
+    test_selector: tests/hooks/test_session_start_terraform_assets.py::test_hook_is_registered_with_a_timeout
+    red_green_expectation: red before, green after
+  - source: .claude/hooks/hooks.json
+    behavior: Plugin hooks file stays the render of settings.json.
+    verification_step: 2
+    test_selector: tests/hooks/test_plugin_hooks.py::test_the_committed_hooks_file_is_the_render_of_the_settings
+    red_green_expectation: green before and after (parity guard; it fails if the render is skipped)
+  - source: bin/setup-cloud-env.sh
+    behavior: Setup makes no terraform-asset fetch.
+    verification_step: 3
+    test_selector: tests/test_setup_cloud_env.py::test_setup_fetches_no_terraform_assets
+    red_green_expectation: red before, green after
+  - source: config/agent/verification_registry/entries/setup-cloud-env-mirror-hygiene.yaml
+    behavior: The mirror-hygiene predicates guard the new script.
+    verification_step: 4
+    command: >-
+      bin/venv-python -c "import scripts.checks.verification.validate_verification_registry as v; f=[];
+      v.validate_verification_registry(f); assert not f, f; print('REGISTRY_ADMITTED')"
+    red_green_expectation: >-
+      red before: the entry's own check fails on origin/main (bin/sync-terraform-assets.sh absent); green on HEAD;
+      VP 4's differential admission proves both
+  - source: config/terraform/cc-web.tfrc
+    behavior: Comment only.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: Comment-only edit; terraform ignores it and step 5 checks the text.
+  - source: docs/contracts/terraform-cc-web-operations.yaml
+    behavior: Approved texts T1-T5 and the contract evaluator.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: Prose amendment; the contract's own evaluator and step 5's text checks cover it.
+  - source: docs/contracts/deploy-paths.yaml
+    behavior: Approved texts T5-T6.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: Prose amendment; the contract's evaluator and step 5 cover it.
+  - source: docs/DECISIONS.md
+    behavior: Decision 120 annotation T8.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: Dated annotation; the Decision validators in the full tier cover its form.
+weakening_dispositions:
+  - candidate: "[assertion-changed] tests/test_setup_cloud_env.py::test_admin_template_sets_install_terraform_inline"
+    disposition: planned-change
+    cite: "acceptance_criteria[3]"
+  - candidate: "[assertion-removed] tests/test_setup_cloud_env.py::test_placeholder_install_precedes_first_aws_call"
+    disposition: planned-change
+    cite: "acceptance_criteria[3]"
+  - candidate: "[test-removed] tests/test_setup_cloud_env.py::TestAdminTfvarsFetch::test_admin_branch_calls_shared_delegate"
+    disposition: planned-change
+    cite: "acceptance_criteria[3]"
+  - candidate: "[test-removed] tests/test_setup_cloud_env.py::TestAdminTfvarsFetch::test_failed_fetch_does_not_abort"
+    disposition: planned-change
+    cite: "acceptance_criteria[3]"
+  - candidate: "[test-removed] tests/test_setup_cloud_env.py::test_admin_block_defaults_aws_profile_when_unset"
+    disposition: planned-change
+    cite: "acceptance_criteria[3]"
+  - candidate: "[test-removed] tests/test_setup_cloud_env.py::test_admin_block_keeps_an_explicit_aws_profile"
+    disposition: planned-change
+    cite: "acceptance_criteria[3]"
+constraints:
+  - No IAM, Terraform-resource or deploy change (Fork 2A); no AWS state change at any step.
+  - materialise_tfvars.sh and tests/test_materialise_tfvars_delegate.py are not modified (SSM cutover and trusted-plan PR 2 own them).
+  - Never print an account id, ARN, unique id or ExternalId; never cat the tfvars (Decision 101, rec-4656).
+  - The tfvars is never fetched by the hook or by setup (Fork 1A).
+  - No session-wide TF_CLI_CONFIG_FILE export; terraform names the tfrc inline.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout verdict FLAGS_FOUND (SPIRIT 126, 224 on automatic tfvars; resolved by Fork 1A). Decisions triaged: 191 of 191. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. CITE: 119, 120, 126, 113, 157, 237, 162, 101, 177, 181."
+  - "gates: decision-scout=FLAGS_FOUND; step-6b=write-the-plan 2026-10-30 11:11Z, V3 waiver approved 11:46Z; plan-critique=PROCEED after 3 round(s); round 3 autonomous"
+  - 'red_overlap (2026-10-30): {"verdict": "clear", "slo_hours": 4, "reds": []}'
+  - "Approvals: Benjamin 'please write the plan', 2026-10-30 11:11Z (cmsg_01Cqz6E4mzSv6kkGCSCub3WMScsmZHzCrP52Ks3Wo6tmWC), on the 6b at /mnt/project-files/credential-proxy/admin-setup-fetch/step6b-presentation.md: Forks 1A and 2A and texts T1-T8 as shown. Allowed variance: T5/T8 dates become the build commit date; line wrapping. Build merges under the standing rule (code review PROCEED + green CI + the V3 resolution's posted live evidence): no IAM, deploy or unapproved wording. V3 run-URL waiver: Benjamin chose 'Approve the waiver', 2026-10-30 11:46Z (card cmsg_01Cqz6E4mzSv6kkGCSCub3WMCsnaU2zquxUS4Jsw35Ymvp)."
+  - "fork: tfvars fetch timing | chosen: on demand (A) | class: asked | precedent: none (answered 2026-10-30)"
+  - "fork: mirror sync identity | chosen: PlatformDev via existing grant, named grant deferred to rec-4748 (A) | class: asked | precedent: Benjamin 2026-10-29 PlatformDev-default rule (rec-4707)"
+  - "Cause evidence: FINDINGS.md (replay; cloud docs: setup runs before env vars are set, proxy never signs setup requests); Fable ADVICE.md."
+  - "Removing step 5b reverses #1731's AWS_PROFILE default one PR later; say so in the PR body."
+  - "Direct terraform init of terraform/personal also works today (rec-4129, open); the mirror remains Decision 120's insurance."
+  - "Order: SSM cutover and this plan both edit terraform-cc-web-operations.yaml and deploy-paths.yaml; this plan edits only store-neutral clauses, so whichever lands second rebases by hand without changing either plan's text."
+  - "Plan A VP 11: MIRROR_SYNCED is met by the hook; TFVARS_PRESENT is retired by design."
+  - >-
+    V3 resolution: the pre-merge evidence for the implement V3 Merge Gate and the code-review V3 check is VP 9-12's
+    output in the implementing ADMIN container at the CI-green head, posted counts-only on the PR with $PR_HEAD_SHA; a
+    new head re-runs it. In-container evidence has no workflow run URL, so the run-URL requirement is waived for this
+    plan in both places that carry it: code-review's V3 run-URL bullet and the implement skill's V3 Merge Gate step 5.
+    The new-session start-up line (VP 13) and rec closure (VP 14) are post-merge acceptance (Decision 48). Approved by
+    Benjamin 2026-10-30 11:46Z (Approvals).
+  - >-
+    Build session: ADMIN (VP 7). Every project thread runs in the ADMIN container today; the check makes that explicit.
+    Project threads run the installed plugin's hooks.json, not the checkout's settings.json, so VP 13 also depends on
+    claude.ai refreshing the plugin after merge (its fix_if).
+  - >-
+    plan-critique r1 REVISE dispositions: F1 V3 gate fixed (VP 7, VP 9-12 pre-merge, V3 resolution; waiver asked);
+    F2 closure obligation fixed (VP 14, Resolves trailer); F3 closure evidence fixed (execution step 11); F4 VP 4 now
+    waive; F5 weakening candidates named in scope; F6 VP 5 normalised; F7 scrub-then-truncate, whole-stderr class and
+    shared mask; F8 predicate anchored; F9 wording fixed. Info: VP 13 plugin precondition and VP 10 error line adopted;
+    cc-web.tfrc:20 left (still true for the CI consumer; unapproved wording).
+  - >-
+    Cost correction to the 6b's "about 1.5 s": every new ADMIN session starts from a snapshot whose mirror dir is empty,
+    so each session start is a cold sync. Filtering to the tfrc-routed namespace makes that about 6.4 MB (kislerdm/neon
+    only) instead of about 166 MB; told to Benjamin with the plan PR.
+  - >-
+    plan-critique r2 REVISE dispositions: 1 sync filtered to the routed namespace (new VP 1 node, cost corrected);
+    2 empty sync removes the tfrc (AC 1, renamed node); 3 waiver approval recorded; 4 seed-workflow comment filed as
+    rec-4750 (followon_recs); 5 step references fixed; 6 VP 5 waiver reason narrowed, full-text comparison assigned to
+    code review. Also: hook appended last in its group, header phrase on one line, VP 12 uses mktemp.
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "ENVIRONMENT CHECK first (VP 7). ADMIN_CHAIN_ABSENT: stop before any edit and hand back to the coordinator."
+  - "Write bin/sync-terraform-assets.sh as scoped (chmod +x)."
+  - "Write the hook; register it in .claude/settings.json; re-render hooks.json with bin/venv-python .claude/hooks/plugin_hooks.py render."
+  - "Edit bin/setup-cloud-env.sh as scoped."
+  - >-
+    Write the two new test files and edit tests/test_setup_cloud_env.py as scoped; record one weakening_dispositions entry
+    per candidate validate_weakening_candidates lists (every removed node AND every changed assertion; scope names them),
+    planned-change citing acceptance_criteria[3].
+  - "Repoint the registry entry."
+  - |
+    Apply these approved texts verbatim (Benjamin, 2026-10-30; allowed variance as stated at the end):
+
+    T1. terraform-cc-web-operations.yaml provider_init_and_mirror.github_egress_relaxation: replace from "and
+    `bin/setup-cloud-env.sh` syncs" through "nothing in the mirror to serve)." with:
+    "and the every-session SessionStart hook `.claude/hooks/session_start_terraform_assets.sh` syncs it locally in ADMIN
+    sessions (those whose `~/.aws/config` holds the `agent_platform_admin` profile), through `bin/sync-terraform-assets.sh`
+    and as `agent_platform`, then resolves `config/terraform/cc-web.tfrc` into `$HOME/.terraform-mirror.tfrc` -- written
+    only after a successful, non-empty sync and removed after a failed one, so no resolved config ever excludes
+    `kislerdm/*` from `direct` with nothing in the mirror to serve. A terraform command uses it by prefixing
+    `TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc`. The sync cannot run from `bin/setup-cloud-env.sh`: the agent proxy
+    never signs setup-script requests."
+
+    T2. Same contract, tfvars_and_remote_state_recovery.recovery_procedure: replace the parenthetical "(Decision 162 R2
+    extraction; also wired directly into `bin/setup-cloud-env.sh`'s `INSTALL_TERRAFORM=1` ADMIN branch -- see
+    `operator_only_break_glass.apply_posture` below)" with:
+    "(Decision 162 R2 extraction; in an ADMIN session, run it on demand through `bash bin/sync-terraform-assets.sh
+    --tfvars`, which pins `AWS_PROFILE=agent_platform_admin` for that call and masks its error output -- see
+    `operator_only_break_glass.scope` below)"
+
+    T3. Same contract, operator_only_break_glass.scope: replace from "Wiring the `materialise_tfvars.sh` delegate call
+    into" to the end of the field with:
+    "The tfvars this loop needs are never fetched automatically: ADMIN sessions are routine (a project's default
+    environment can be ADMIN), so fetching them as PlatformAdmin at every session start would make this loop's
+    prerequisites ambient (Decision 126). Fetch them on demand with `bash bin/sync-terraform-assets.sh --tfvars` only
+    when a human-directed step of this loop needs them; that command is the deliberate operator act Decision 126 asks
+    for. The provider mirror holds no secret and syncs every ADMIN session as `agent_platform`
+    (`provider_init_and_mirror` above)."
+
+    T4. Same contract, referenced_repo_paths: add `.claude/hooks/session_start_terraform_assets.sh` and
+    `bin/sync-terraform-assets.sh` (bin/setup-cloud-env.sh stays: T1 names it).
+
+    T5. amendment_log entries (date = build commit date, semantic_break false, change_class prose_improvement):
+    terraform-cc-web-operations.yaml: "PLAN-admin-terraform-assets-session-hook: the provider-mirror sync moves from
+    bin/setup-cloud-env.sh (whose requests the agent proxy never signs) to the every-session SessionStart hook, as
+    agent_platform; the tfvars are fetched on demand only (bin/sync-terraform-assets.sh --tfvars). github_egress_relaxation,
+    recovery_procedure and operator_only_break_glass.scope amended; two paths join referenced_repo_paths."
+    deploy-paths.yaml: "PLAN-admin-terraform-assets-session-hook: admin_out_of_band.procedure.steps' terraform/personal
+    init line names the session-start hook and the inline TF_CLI_CONFIG_FILE prefix in place of bin/setup-cloud-env.sh."
+
+    T6. deploy-paths.yaml admin_out_of_band.procedure.steps, the terraform/personal line: replace "(Decision 120 --
+    bin/setup-cloud-env.sh ran with INSTALL_TERRAFORM=1 and the sync succeeded, so TF_CLI_CONFIG_FILE is set)" with
+    "(Decision 120 -- the session-start hook .claude/hooks/session_start_terraform_assets.sh synced it and wrote
+    $HOME/.terraform-mirror.tfrc; prefix each terraform command with TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc)".
+    (Today's text is also wrong: the setup export never outlived the setup script.)
+
+    T7. config/terraform/cc-web.tfrc line 3 comment: "#   1. CC-web ADMIN sessions, via the every-session hook
+    .claude/hooks/session_start_terraform_assets.sh (bin/sync-terraform-assets.sh)."
+
+    T8. Decision 120, a dated annotation after its Related line (Decision 177 amendment form; body unchanged):
+    "> **Update (2026-10-30, PLAN-admin-terraform-assets-session-hook):** the mirror sync moved out of
+    > `bin/setup-cloud-env.sh`: that script runs once per environment snapshot and the agent proxy never signs its
+    > requests, so the sync never authenticated there. The every-session SessionStart hook
+    > `.claude/hooks/session_start_terraform_assets.sh` now runs it in ADMIN sessions, as PlatformDev (`agent_platform`;
+    > the mirror holds public provider binaries). The non-empty gate is unchanged: it now governs
+    > `$HOME/.terraform-mirror.tfrc`, which a terraform command names inline, and the reversal condition reads that
+    > hook's gate in place of the setup script's."
+    Allowed variance: the date becomes the build's commit date; line wrapping.
+  - "Run VP 1-5 and VP 8 on the finished tree; loop until pass; on unrecoverable failure stop and RCA (Decision 55)."
+  - >-
+    Code review via a fresh-context code-review subagent with the "V3 resolution:" context line quoted and an
+    instruction to compare each T1-T8 text in full against execution step 7; fix every blocking finding and re-run the
+    affected VP steps.
+  - >-
+    CLOSURE -- separate facts, in order (a)-(e) (implement skill Commit Flows; docs/contracts/git-ops.yaml), each reported
+    on its own. (a) READINESS: bin/venv-python -m scripts.session.github_readiness (unknown is never PASS). (b) Set
+    implementation_declared true, commit, git fetch origin main and git rebase origin/main (STOP on conflict; an SSM
+    cutover conflict in the two contracts is a hand rebase that keeps both plans' approved texts). (c) VP 6 (full tier)
+    on the committed, rebased, clean tree, then bin/venv-python -m scripts.checks.validation_result --verify-head.
+    (d) Write a scratchpad JSON holding exactly the scripts.session.postflight_evidence.CATEGORIES keys, then
+    bin/venv-python -m scripts.session.postflight --evidence that file. (e) Push, open the PR (body: this reverses
+    #1731's AWS_PROFILE default one PR later, and why), request Benjamin's review, subscribe to its activity.
+  - >-
+    At the CI-green head run VP 8-12 in this ADMIN container from the branch checkout and post their tokens counts-only
+    on the PR with $PR_HEAD_SHA (never the tfvars, an id or an ARN); a new head re-runs them. Merge (squash, explicit
+    commit_message whose trailer block reads Resolves: rec-4747) only on code review PROCEED, green CI and that posted
+    evidence.
+  - >-
+    After merge: ask the coordinator for VP 13 in a NEW ADMIN session; run VP 14; post a counts-only comment on the
+    merged PR naming the merged sha.
+  - 'Report: what was implemented, verification results, what remains unproven'

@@ -43,7 +43,9 @@ VERIFY_INCOMPLETE_STREAK = 3
 LOCK_WAIT_S = 30.0
 FILE = "scripts/telemetry_capture/verify.py"
 OBSERVATIONS = "telemetry_observations"
-PER_TREE_SKIPS = frozenset({"no_cursor", "cursor_tail_mismatch", "halted", "parser_version_skip", "non_real_project"})
+PER_TREE_SKIPS = frozenset(
+    {"no_cursor", "cursor_tail_mismatch", "halted", "parser_version_skip", "catalog_skip", "non_real_project"}
+)
 BENIGN = PER_TREE_SKIPS | {"busy", "tree_moved", "superseded_by_pass", "no_credentials"}
 ALARM_CLASSES = frozenset(
     {*compare.ALARM_CLASSES, "root_absent", *ledger.ALARMS, *shape.ALARMS, *stored_ledger.ALARMS, "verify_incomplete"}
@@ -229,6 +231,9 @@ class _Check:
         self.result = VerifyResult("completed", trigger)
         self.counts: Counter[str] = Counter()
         self.vstate: dict[str, Any] = {}
+        self.catalog: str | None = None
+        self.tree_catalog: str | None = None
+        self.view_dropped: tuple[str, ...] = ()
         self.seen_pass: dict[str, Any] | None = None
         self.cursor: Any = None
         self.findings: list[ledger.Finding] = []
@@ -254,8 +259,13 @@ class _Check:
             raise BudgetExhausted
 
     def _load(self) -> None:
-        self.vstate = self.state.verify_state()
         loaded = self.state.load_cursor(FsTree(self.path).read(ROOT) or b"")
+        held = self.state.verify_state()
+        # A lost envelope names no catalog, so the check neither re-keys the verify state nor records a catalog for it.
+        lost = loaded.status == state.LOST
+        self.vstate = dict(held) if lost else state.verify_view(held, loaded.catalog)
+        self.view_dropped = tuple(name for name in state.CATALOG_KEYED if name in held and name not in self.vstate)
+        self.tree_catalog = None if lost else loaded.catalog
         self.seen_pass = _last_pass(self.state.diagnostics())
         token = None
         if self.state.halt() is not None:
@@ -264,6 +274,8 @@ class _Check:
             token = "no_cursor" if loaded.status == state.LOST else "cursor_tail_mismatch"
         elif (loaded.cursor.producer, loaded.cursor.parser_version) != (PRODUCER, PARSER_VERSION):
             token = "parser_version_skip"
+        elif self.catalog is not None and self.catalog != loaded.catalog:
+            token = "catalog_skip"
         elif _non_real(loaded.cursor.project_ref):
             token = "non_real_project"
         elif self.scheduling is not None and not _same_pass(self.seen_pass, self.scheduling):
@@ -406,9 +418,12 @@ class _Check:
             fields["alarm_at"] = {**(fresh.get("alarm_at") or {}), **self.alarm_at}
         if self.trigger == "detached":
             fields.update(self._settlement(fresh))
+            if self.tree_catalog is not None:
+                fields["verify_catalog"] = self.tree_catalog
         owner = CHECK if self.trigger == "detached" else OPERATOR
-        merged = state.merge_verify_state(fresh, {k: v for k, v in fields.items() if v is not None}, owner)
-        self.state.save_verify_state(merged)
+        updates = {k: v for k, v in fields.items() if v is not None}
+        updates.update({name: None for name in self.view_dropped if fields.get(name) is None})
+        self.state.save_verify_state(state.merge_verify_state(fresh, updates, owner))
 
     def _settlement(self, fresh: Mapping[str, Any]) -> dict[str, Any]:
         result, vstate = self.result, self.vstate
@@ -434,6 +449,14 @@ class _Check:
         return out
 
     def run(self) -> VerifyResult:
+        self.vstate = self.state.verify_state()
+        if self.credentials():
+            try:
+                self.catalog = getattr(self.raw_reader, "catalog", None)
+            except Exception as exc:  # noqa: BLE001 -- resolved before the lock: a counted token with a backoff
+                self.result.status = f"verify_error:{type(exc).__name__}"
+                self._finish()
+                return self.result
         if not self._locked(self._step_load):
             self.result.status = "busy"
             return self.result

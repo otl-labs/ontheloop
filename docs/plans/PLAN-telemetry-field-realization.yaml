@@ -1,0 +1,527 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-field-realization
+intent: >-
+  Make the four telemetry contracts honest about who writes each stored column, and make CI keep them honest. rec-4589
+  showed a schema can imply facts nobody records: 28 stored columns across telemetry_sessions, telemetry_observations,
+  telemetry_agents and telemetry_transcripts have no producer, and most populated_by lines name "the write boundary" for
+  values the claude_code producer writes. A table-level realization block records, for every stored column, the producer
+  that writes it (or write_boundary) or its owner when unproduced; a new fast-tier check compares that block with the
+  producer's golden corpus, the producer registry, the generated field semantics and the roadmap, so a declared column
+  with no live producer, or a stale unproduced marker, fails CI. Includes the T3.20 c7 schema-accuracy pass on
+  telemetry_sessions. No column is added or removed, no contract_version changes, the writer projection is
+  byte-identical, and nothing deploys.
+plan_type: IMPLEMENTATION
+implementation_declared: true
+verification_tier: V2
+plan_path: docs/plans/PLAN-telemetry-field-realization.yaml
+phase: >-
+  T3.20 (agent-turn telemetry capture), follow-on plan closing c7 (schema-accuracy pass on the telemetry_sessions surface).
+  Prevention half of rec-4589 together with PLAN-silent-failure-prevention; the retirement half is
+  PLAN-retire-session-cli (rec-4589 plan 1), which builds first.
+closes_criteria:
+  - T3.20:c7
+scope:
+- file: scripts/contracts_schema.py
+  action: Modify
+  purpose: >-
+    Add a closed Realization model (extra="forbid"): produced: dict[str, list[str]] (keys are a producer id or the literal
+    write_boundary) and unproduced: dict[str, list[str]] (keys are owners), default empty. ContractDocument gains
+    realization: Realization | None = None. Its docstring notes it is unrelated to a read-derived field's
+    derivation.realized (which says the write-time derivation is implemented). Shape only; every cross-file rule lives in the check below (Decision 210 cl.3:
+    the contract is the declared source, the check derives from it).
+- file: tests/test_contracts_schema.py
+  action: Modify
+  purpose: >-
+    Pin the model: a document with a well-formed realization block loads; an unknown key inside realization, a non-list
+    value, or a misspelt top-level key (realisation) is refused by extra="forbid".
+- file: docs/contracts/telemetry_sessions.yaml
+  action: Modify
+  purpose: >-
+    (1) Top-level realization block (flow-form lists, at most 3 effective lines): produced.write_boundary = event_id,
+    created_timestamp, tenant_id, project_id, session_id, parent_session_id; produced.claude_code = event_kind,
+    event_timestamp, session_started_at, source_ordinal, external_ref, entity_ref, producer, producer_version,
+    parser_version, workflow, outcome, execution_attempt, branch, failure_reason, model_primary, harness_session_key,
+    checkout_sha, checkout_base_sha, checkout_dirty; unproduced held:feedback-loop-gate = rec_ids, plan_slug, pr_url,
+    ci_outcome, files_changed, lines_added, lines_removed, scope_drift_files (merged-PR facts; REVIEW section 4 item 2
+    holds their owner assignment, so no owner rec is filed; agents never self-report them; rec-4606 owns the
+    in-repo record of the hold); unproduced rec-4599 = steps_total, failure_phase, coverage_before, coverage_after.
+    (2) T3.20 c7 pass: rewrite populated_by on every inline stored field, workflow included (PLAN-retire-session-cli
+    edits workflow's semantics only and leaves its populated_by to this plan), so it starts with the writer its
+    realization entry credits (rule R8): "the claude_code producer, at the open event ..." for workflow, branch,
+    model_primary, execution_attempt and the checkout fields; outcome and failure_reason start "the claude_code producer"
+    and say the close row is optional evidence (Decision 228 cl.3: a root session's state is read from its turns); a
+    write_boundary field starts "the write boundary"; each of the 12 unproduced fields reads "unproduced: <owner> (no
+    producer writes it)". (3) Stale prose: rec_ids' semantics drops the sentence citing TELEMETRY_TABLE_DTYPES and
+    awswrangler null-inference (neither exists in any .py file), and scope_drift_files' semantics drops "(null-inference
+    safety)", which rests on the same retired premise; each field gets one flow-form prose_improvement amendment entry
+    (category 6, contracts_enforcement.check_amendment_for_diff). The contract-level governance_notes KNOWN GAPS entry
+    "rec-4030 (the live legacy UUID4 session_id minter's migration to this contract's derivation model)" becomes
+    "rec-4030 (re-grounding planning_session_ref on this contract's derivation model; the UUID4 minter was retired, not
+    migrated)", matching PLAN-retire-session-cli's session-id.yaml wording; governance_notes is not category-6 prose, so
+    the contract-level amendment line covers it. At build time confirm rec-275 (cited as open in failure_phase and KNOWN
+    GAPS) is still open through recs_by_ids; if closed, drop "(open)" from failure_phase's semantics with its own
+    field-level prose_improvement entry (one more effective line) and drop its KNOWN GAPS entry. Ownership of
+    failure_phase: rec-4599 owns produce-or-retire for the column; rec-275's failure-path code change is one way to
+    produce it, so rec-4599 decides with rec-275 in view and its context names rec-275. workflow's stale
+    "TelemetrySessions.REQUIRED_FIELDS" sentence is removed by PLAN-retire-session-cli's semantics edit (agreed with that
+    thread 2026-10-24); if it survives the rebase, this plan removes it the same way. No other description or semantics
+    edit: field_semantics.yaml is generated without prose (schema_to_field_semantics main and --check use
+    include_prose=False), so prose edits do not touch the writer, but every prose edit costs a category-6 entry and an
+    effective line. (4) One contract-level amendment_log line (governance_note_add, semantic_break false). The populated_by rewrites in
+    all four contracts edit only the leading phrase and keep pinned text: outcome never names session_postflight
+    (tests/telemetry/test_contract_lifecycle_friction.py), billing_shape keeps its rec-4147 sentence
+    (tests/telemetry/test_contract_amendments.py), content_uri keeps "HEAD" and gains no "blob-port put"
+    (tests/checks/contracts/test_telemetry_blob_contracts.py); those suites run in VP 8.
+- file: docs/contracts/telemetry_observations.yaml
+  action: Modify
+  purpose: >-
+    Realization block: produced.write_boundary = event_id, created_timestamp, tenant_id, project_id, session_id,
+    parent_observation_id, observation_id; produced.claude_code = event_kind, event_timestamp, session_started_at,
+    source_ordinal, external_ref, entity_ref, producer, producer_version, parser_version, observation_type, name, sequence,
+    outcome, severity, model, tokens_input, tokens_output, tokens_cache_read, tokens_cache_creation, billing_shape,
+    output_capture, output_bytes, output_sha256, output_lines, reasoning_visibility, reasoning_tokens, usage_final,
+    usage_source, requested_model, reasoning_effort, cache_creation_1h_tokens, cache_creation_5m_tokens, metadata;
+    unproduced held:feedback-loop-gate = rec_id; T4.32:c1 = provider, persona_backend, exit_code; rec-4600 = cost_usd_reported (keep-or-retire against Decisions 199 and 221, never a producer owner by
+    default), attempt, acceptance_passed, time_lost_seconds. The 8 unproduced fields' populated_by take the
+    "unproduced: <owner> (no producer writes it)" form; every inline produced field's populated_by is rewritten to start
+    with its credited writer (R8; e.g. name, sequence and the tokens_* fields start "the claude_code producer"),
+    keeping each populated_by at its current line count. One contract-level amendment_log line. Budget: PLAN-retire-
+    session-cli leaves the file at or under 498 effective lines and this edit adds 4 (three-line block plus amendment
+    line), so compaction is a planned step: fold outcome's 2026-09-24 block-form amendment_log entry into one flow-form
+    line (the contracts class relief valve "compact amendment history"; saves its extra lines), then measure. Never a
+    budget raise.
+- file: docs/contracts/telemetry_agents.yaml
+  action: Modify
+  purpose: >-
+    Realization block: produced.write_boundary = event_id, created_timestamp, tenant_id, project_id, session_id,
+    observation_id, agent_run_id; produced.claude_code = event_kind, event_timestamp, session_started_at, source_ordinal,
+    external_ref, entity_ref, producer, producer_version, parser_version, agent_type, agent_name, model, version, trigger,
+    outcome, error; unproduced T4.32:c1 = provider; T3.22:c5 = lambda_request_id, findings_count, recs_created,
+    queue_entries_written; T3.20:c9 = workflow_run_id. The 6 unproduced fields' populated_by take the unproduced form;
+    every inline produced field's populated_by starts with its credited writer (R8; e.g. agent_name starts "the
+    claude_code producer"). One contract-level amendment_log line.
+- file: docs/contracts/telemetry_transcripts.yaml
+  action: Modify
+  purpose: >-
+    Realization block: produced.write_boundary = event_id, created_timestamp, tenant_id, project_id, observation_id,
+    session_id, transcript_id, content_uri; produced.claude_code = event_kind, event_timestamp, session_started_at,
+    source_ordinal, external_ref, entity_ref, producer, producer_version, parser_version, purpose, origin, content,
+    content_omitted_reason, content_sha256, content_bytes, content_truncated, model; unproduced held:feedback-loop-gate =
+    rec_id; rec-4601 = token_count. content_sha256's populated_by is corrected to the
+    producer (src/turn_capture/transcripts.py computes it; the writer only verifies a blob against it). The 2 unproduced
+    fields take the unproduced form; every inline produced field's populated_by starts with its credited writer (R8;
+    e.g. purpose starts "the claude_code producer", content_uri "the write boundary"). One contract-level amendment_log
+    line.
+- file: tests/fixtures/turn_capture/golden/index.json
+  action: Modify
+  purpose: >-
+    Add normalised_out: [created_timestamp, producer_version, content_sha256, output_sha256], the column list the corpus
+    normalisation drops, as data the check can read without importing tests. No case and no expected_rows change, so the
+    golden digest and the parser_versions.yaml registry are untouched.
+- file: tests/fixtures/turn_capture_corpus.py
+  action: Modify
+  purpose: >-
+    The drop list is read from index.json's normalised_out instead of the literal _SIDE_EFFECT_KEYS tuple, so it has
+    one home; normalise()'s docstring and index.json's purpose text point at normalised_out instead of listing keys. The read is lazy (a functools.cache accessor called inside normalisation), never at module import
+    (AGENTS.md: no exception during import).
+- file: tests/telemetry/test_golden_normalisation_source.py
+  action: Create
+  purpose: >-
+    test_normalisation_drops_exactly_the_index_list: normalising a row carrying every index.json normalised_out key
+    plus one other column removes exactly the listed keys; test_no_literal_drop_list_remains: turn_capture_corpus.py
+    holds no tuple, list or set literal containing any normalised_out column name (ast scan, whatever the variable is
+    called). Red before (index.json has no normalised_out).
+- file: config/telemetry/parser_versions.yaml
+  action: Modify
+  purpose: >-
+    Add golden_index: tests/fixtures/turn_capture/golden/index.json to producers.claude_code (a producer-level key, not
+    a history edit, so append_only_problems is unaffected). The check reads each registered producer's corpus from here,
+    so a second producer (T3.22) declares its own corpus instead of the check hard-coding a path. Header comment gains
+    one line naming the key.
+- file: scripts/checks/contracts/validate_telemetry_field_realization.py
+  action: Create
+  purpose: >-
+    Registered fast-tier check (Decision 169 manifest, Decision 170 accounting via registry.examined(n, unit="fields")).
+    Pure function realization_errors(inputs) over injected parsed inputs, so tests drive it with synthetic documents;
+    the registered wrapper loads the four telemetry contracts, config/telemetry/parser_versions.yaml, each producer's
+    golden index and case files (JSON), config/lambda/ducklake/field_semantics.yaml and docs/ROADMAP-PLATFORM.yaml. Rules,
+    each one error string naming table and field: R1 every stored field (a contract field without derivation.timing
+    read, $ref envelope fields included) is listed under at least one produced key or under exactly one unproduced
+    owner, never both, at most once per key, and never under write_boundary together with a producer key (so a column
+    two registered producers emit is credited to both); an unknown name or a read-derived field listed is an error. R2 a produced key is write_boundary or a key of parser_versions.yaml
+    producers. R3 produced.write_boundary equals the table's role-derived columns in the generated field_semantics
+    entry plus the table's writer-derived content uri column (its table_rules payload uri), as an exact set. R4 every
+    field produced by a registered producer is non-null in at least one of that producer's golden expected_rows for the
+    table, or is in that corpus's normalised_out; a producer with produced fields and no golden_index is an error. R5 no
+    unproduced field is non-null in any registered producer's golden rows for the table (a stale marker). R6 every
+    contract column non-null in a producer's golden rows for the table is listed under that producer or write_boundary
+    (a producer emitting a column the block does not credit). R7 each unproduced owner matches
+    ^(rec-[0-9]+|T-?[0-9]+(\.[0-9]+)*[a-z]?:c[0-9]+|held:feedback-loop-gate)$, and a criterion owner resolves to an
+    exit criterion with status open in docs/ROADMAP-PLATFORM.yaml (rec liveness is not checkable offline: declared
+    residual, see context); a criterion-owner error names the fix ("criterion met: move these columns to produced, or
+    name a new owner"), because a plan flipping that criterion must also update the block. R8 an inline field's
+    populated_by starts with the phrase its entry implies: "the write boundary" for write_boundary; "unproduced:
+    <owner>" with that field's owner; for producer keys, "the <p> producer" for one producer, and "the <p1> and <p2> producers" (or "the <p1>,
+    <p2> and <p3> producers") for several, in registry order, before the first period (e.g. "the claude_code producer,
+    at the open event"). Only the leading phrase is checked. A missing realization block on any of the four contracts is an error. Unreadable inputs fail
+    loudly. Stays under 500 SLOC (Decision 128); imports PyYAML, json and scripts.checks only.
+- file: scripts/checks/contracts/_manifest.py
+  action: Modify
+  purpose: >-
+    Entry for validate_telemetry_field_realization, pre=True, pre_globs: docs/contracts/telemetry_*.yaml,
+    config/telemetry/parser_versions.yaml, tests/fixtures/turn_capture/golden/**, config/lambda/ducklake/field_semantics.yaml,
+    docs/ROADMAP-PLATFORM.yaml, scripts/contracts_schema.py, scripts/checks/contracts/**, scripts/checks/_common.py,
+    scripts/checks/registry.py; full_segment beside validate_write_time_enforcement_conformance.
+- file: tests/checks/contracts/test__manifest.py
+  action: Modify
+  purpose: >-
+    New class TestTelemetryFieldRealizationRegistered (test_is_dispatched_in_pre_and_full, test_pre_globs_cover_the_inputs),
+    the existing per-check pinning pattern, so a missing pre=True or a dropped input glob fails.
+- file: config/ci_rca_taxonomy.yaml
+  action: Modify
+  purpose: "validate_telemetry_field_realization: schema_drift (a consistency-between-artefacts failure, like its write-time sibling)."
+- file: tests/checks/contracts/test_validate_telemetry_field_realization.py
+  action: Create
+  purpose: >-
+    One failing-first case per planted defect for R1-R8 on synthetic inputs (each asserts the specific error), one clean
+    synthetic pass, and a live-repo test that realization_errors over the real contracts, registry, corpus, field
+    semantics and roadmap is empty and that the registered wrapper's examined count equals the number of stored fields
+    counted independently from the four contracts (141 at main 2850f7be).
+- file: config/agent/verification_registry/entries/telemetry-field-realization.yaml
+  action: Create
+  purpose: >-
+    Graduated registry shard for VP step 3 (check_id telemetry-field-realization, primitive_slot test_selector,
+    guard_target the new check module, guard_symbol realization_errors).
+- file: docs/ROADMAP-PLATFORM.yaml
+  action: Modify
+  purpose: >-
+    /implement bookkeeping walk only: flip T3.20 c7 to met (met_by: telemetry-field-realization) on a verified VP pass,
+    with a dated progress_note line. No other roadmap edit.
+bundled_recommendations: []
+followon_recs: [rec-4599, rec-4600, rec-4601, rec-4606]
+infrastructure_dependencies:
+  - >-
+    FREEZE: nothing in this plan builds, pushes or merges until Benjamin says the repository transfer freeze is over
+    (memory PAUSE, 2026-10-20). The build then rebases onto the renamed repository's main.
+  - >-
+    LAMBDA-DEPLOY DEFERRED (CD.16 / Decision 79), per-artifact reasoned disposition: docs/ROADMAP-PLATFORM.yaml is a
+    data-pipeline asset; its zip refreshes at the next governed deploy, as PLAN-telemetry-verification-monitor's same
+    disposition. No Lambda-packaged code changes, no Terraform or IAM.
+acceptance_criteria:
+  - >-
+    T3.20:c7 -- the telemetry_sessions surface is schema-accurate: every stored field is in its realization block exactly
+    once, every inline stored field's populated_by names its real writer (claude_code producer or write boundary) or
+    reads "unproduced: <owner>", and the 12 unproduced fields carry owners; validate_telemetry_field_realization passes
+    on the real repository.
+  - >-
+    All four telemetry contracts carry a realization block, and the check fails, with a message naming table and field,
+    for each of: a missing or duplicated stored field, an unregistered producer, a write_boundary set that differs from
+    the writer-derived columns, a produced field the producer's golden corpus never emits, an unproduced field the
+    corpus emits, a corpus column the block does not credit, a malformed owner or a closed or missing criterion owner,
+    and a populated_by that does not start with the writer or owner its realization entry names.
+  - >-
+    The writer projection is unchanged: bin/venv-python -m scripts.schema_to_field_semantics --check exits 0 and
+    config/lambda/ducklake/field_semantics.yaml has no diff against origin/main; no contract_version changes.
+  - >-
+    No golden case, expected_rows or producer history entry changes (index.json gains only normalised_out, and
+    parser_versions.yaml only golden_index): the golden digest test and the parser_version registry test pass.
+  - Every contract stays at or under 500 effective lines (telemetry_observations at or under 498, the sibling's pin) with no budget raise.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: >-
+      Precondition. PLAN-retire-session-cli's builds have merged and this branch is rebased on main (that plan edits
+      telemetry_sessions.yaml workflow, telemetry_observations.yaml name, parser_versions.yaml and the golden corpus),
+      and the freeze is lifted.
+    command: >-
+      git fetch origin main --quiet && git merge-base --is-ancestor origin/main HEAD && grep -q "def format_status_marker"
+      src/turn_capture/markers.py && ! git grep -q open_telemetry_session -- scripts/ && echo PRECONDITION_OK
+    expected: PRECONDITION_OK.
+    fix_if: >-
+      Main moved: rebase and re-run. A missing formatter or a surviving open_telemetry_session means the sibling builds
+      have not merged: stop and wait for the coordinator.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      A sequencing precondition on a sibling plan's merge, not a behaviour of this change; as a standing guard it would
+      only re-assert that another plan landed.
+  - step: 2
+    phase: pre-deploy
+    action: The schema model accepts a realization block and refuses malformed ones.
+    command: bin/venv-python -m pytest tests/test_contracts_schema.py::TestRealizationBlock -q
+    expected: Every test in the class passes (well-formed block loads; unknown inner key, non-list value and misspelt top-level key refused).
+    fix_if: A malformed block loading means the Realization model is not extra="forbid" or is not wired into ContractDocument.
+    hermetic: true
+    expected_literals: []
+    graduation: waive
+    graduation_waiver_reason: >-
+      validate_contract_drift loads every contract through scripts.contracts.load_contract (ContractDocument) on every
+      PR, so a model regression that refuses the live blocks already reddens a standing guard; the refusal cases are
+      pinned by the class itself in tests/test_contracts_schema.py, which runs in the fast tier.
+  - step: 3
+    phase: pre-deploy
+    action: >-
+      Each rule fails closed on a planted defect: R1 a stored field missing, a field listed twice under one key, a
+      field both produced and unproduced, a field under write_boundary and a producer key, a field under two unproduced
+      owners, an unknown field name, a read-derived field listed, a contract with no realization block (and a field
+      credited to two registered producers, which passes); R2 an unregistered producer; R3 a write_boundary set missing a derived
+      column, one with an extra column; R4 a produced field absent
+      from the corpus, a producer with produced fields and no golden_index; R5 an unproduced field present in the corpus;
+      R4 also the positive case, a normalised_out column (output_sha256) credited to the producer passes; R6 a corpus
+      column not credited; R7 a malformed owner, an owner T9.9:c1 that does not exist, a met-criterion owner
+      T3.20:c1; R8 an unproduced field whose populated_by names a producer, a produced field whose populated_by starts
+      "unproduced", a claude_code field whose populated_by starts "the write boundary", an unproduced field whose
+      populated_by names a different owner, a two-producer field whose populated_by names only one of them.
+    command: >-
+      bin/venv-python -m pytest
+      tests/checks/contracts/test_validate_telemetry_field_realization.py::test_each_rule_fails_closed -q
+    expected: The node passes; it is parametrised over every planted defect and asserts each yields its own error.
+    fix_if: A rule that does not fire, or fires with a message not naming table and field, is a check bug.
+    hermetic: true
+    expected_literals: []
+    graduation: graduate
+    graduation_check_id: telemetry-field-realization
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      The real repository passes the check, the check is registered in both tiers with globs covering its inputs, and it
+      accounts for every stored field it examined.
+    command: >-
+      bin/venv-python -m pytest
+      tests/checks/contracts/test_validate_telemetry_field_realization.py::test_live_repository_passes
+      tests/checks/contracts/test__manifest.py::TestTelemetryFieldRealizationRegistered -q &&
+      bin/venv-python -c "from scripts.checks.contracts.validate_telemetry_field_realization import
+      validate_telemetry_field_realization as v; f=[]; v(f); print('FAILED' if f else 'REALIZATION_OK', len(f))"
+    expected: >-
+      Prints REALIZATION_OK 0 after the check's own PASS line, which reports the number of fields examined across the
+      four tables (141 stored fields at main 2850f7be; the count moves only with a contract field change).
+    fix_if: >-
+      A real failure means a contract's block disagrees with the producer or the writer: correct the block, never the
+      check. A producer field missing from the corpus means the block over-credits the producer; mark it unproduced with
+      an owner.
+    hermetic: true
+    expected_literals: [REALIZATION_OK 0]
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      Discrimination on the real tree: removing one produced field from telemetry_sessions' block, and moving
+      harness_session_key (which the corpus emits) to an unproduced owner, each makes the check fail; restoring the file
+      makes it pass. The mutations are applied in memory to the loaded real inputs and passed to the pure function; the
+      tracked file is never edited.
+    command: >-
+      bin/venv-python -m pytest
+      tests/checks/contracts/test_validate_telemetry_field_realization.py::test_live_contract_mutations_are_caught -q
+    expected: The node passes (it loads the real inputs, applies each mutation in memory and asserts the matching error).
+    fix_if: A mutation that passes the check means R1 or R5 reads a different input than the registered wrapper.
+    hermetic: true
+    expected_literals: []
+    graduation: waive
+    graduation_waiver_reason: >-
+      Covered as a standing guard by the graduated step 3 node plus the registered check itself; registering this
+      second node would duplicate the same rules over live inputs that the check already reads on every PR.
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      The writer projection, the golden digest and the producer registry are unchanged, and every contract is within its
+      size budget.
+    command: >-
+      bin/venv-python -m scripts.schema_to_field_semantics --check && git diff --exit-code origin/main --
+      config/lambda/ducklake/field_semantics.yaml && bin/venv-python -m pytest tests/telemetry/test_parser_version_registry.py
+      tests/telemetry/test_golden_normalisation_source.py -q && bin/venv-python -c "from scripts.checks.structural._classify import effective_lines as e; import glob;
+      n=[(f,e(open(f).read())) for f in glob.glob('docs/contracts/telemetry_*.yaml')]; print(n); assert all(c<=500 for
+      _,c in n); assert dict(n)['docs/contracts/telemetry_observations.yaml']<=498; print('BUDGET_OK')"
+    expected: >-
+      The generator reports no drift, git diff is empty, the registry tests pass, and BUDGET_OK prints (every contract
+      at or under 500, telemetry_observations at or under 498: PLAN-retire-session-cli's standing
+      test_observations_declares_the_status_rows pins that tighter bound).
+    fix_if: >-
+      Generator drift means a description or semantics string was edited: revert it. A size breach means compacting
+      that contract's oldest block-form amendment_log entries, never a raise.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      The realization blocks agree with plan 1's merged state and with the c7 text: no inline stored field on
+      telemetry_sessions still says the write boundary writes a producer value.
+    command: >-
+      bin/venv-python -c "import yaml; d=yaml.safe_load(open('docs/contracts/telemetry_sessions.yaml')); r=d['realization'];
+      cc=set(r['produced']['claude_code']); bad=[k for k,v in d['fields'].items() if k in cc and 'populated_by' in v and
+      'write boundary' in v['populated_by']]; t=' '.join([str(d.get('governance_notes',''))]+[str(v.get(k,'')) for v in
+      d['fields'].values() for k in ('description','semantics','populated_by')]); stale=[w for w in
+      ('REQUIRED_FIELDS','TELEMETRY_TABLE_DTYPES','null-inference','live legacy UUID4') if w in t]; print(bad, stale);
+      assert not bad and not stale; print('C7_OK')"
+    expected: Prints two empty lists and C7_OK.
+    fix_if: >-
+      A field in the first list still names the write boundary for a producer-written value: rewrite its populated_by.
+      A word in the second list survives in live text (field description, semantics or populated_by, or the
+      contract-level governance_notes; amendment_log history is deliberately not scanned): remove that sentence with its
+      category-6 amendment entry.
+    hermetic: true
+    expected_literals: []
+    graduation: waive
+    graduation_waiver_reason: >-
+      Rule R8 in the graduated check enforces the unproduced form; this one-off text sweep for the c7 rewrite is
+      bookkeeping evidence for the criterion flip, not a standing invariant worth its own registry row.
+  - step: 8
+    phase: pre-deploy
+    action: >-
+      Full tier on the committed, rebased, clean tree, then the evidence check for that HEAD (implement skill
+      IMPLEMENTATION Commit Flow; git-ops.yaml handoff_sequence).
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: >-
+      Exit 0 with a final "Validation Summary (scope: all)" PASS (including validate_telemetry_field_realization,
+      validate_contract_drift and the structural size checks), then --verify-head exit 0. Parent-validator evidence
+      only; child output or CI cannot substitute.
+    fix_if: Fix the reported check, commit, rebase and re-run this step.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/contracts_schema.py
+    behavior: ContractDocument accepts a well-formed realization block and refuses malformed ones.
+    verification_step: 2
+    test_selector: tests/test_contracts_schema.py::TestRealizationBlock
+    red_green_expectation: red before (realization key refused by extra="forbid"), green after
+  - source: scripts/checks/contracts/validate_telemetry_field_realization.py
+    behavior: Each realization rule R1-R8 fails closed with a table- and field-naming error.
+    verification_step: 3
+    test_selector: tests/checks/contracts/test_validate_telemetry_field_realization.py::test_each_rule_fails_closed
+    red_green_expectation: red before (module absent), green after
+  - source: tests/fixtures/turn_capture_corpus.py
+    behavior: The normalisation drop list is read from index.json and the golden digest is unchanged.
+    verification_step: 6
+    test_selector: tests/telemetry/test_golden_normalisation_source.py
+    red_green_expectation: red before (no normalised_out in index.json; the literal tuple remains), green after
+  - source: config/telemetry/parser_versions.yaml
+    behavior: The producer entry names its golden corpus and the registry stays append-only.
+    verification_step: 4
+    test_selector: tests/checks/contracts/test_validate_telemetry_field_realization.py::test_live_repository_passes
+    red_green_expectation: red before (module and golden_index absent), green after
+  - source: scripts/checks/contracts/_manifest.py
+    behavior: The check is registered in the fast tier.
+    verification_step: 4
+    test_selector: tests/checks/contracts/test__manifest.py::TestTelemetryFieldRealizationRegistered
+    red_green_expectation: red before (no Entry), green after
+  - source: docs/contracts/telemetry_sessions.yaml
+    behavior: The contract's realization block and populated_by lines agree with the producer corpus and the writer.
+    verification_step: 4
+    test_selector: tests/checks/contracts/test_validate_telemetry_field_realization.py::test_live_repository_passes
+    red_green_expectation: red before (no realization block), green after
+  - source: docs/contracts/telemetry_observations.yaml
+    behavior: The contract's realization block and populated_by lines agree with the producer corpus and the writer.
+    verification_step: 4
+    test_selector: tests/checks/contracts/test_validate_telemetry_field_realization.py::test_live_repository_passes
+    red_green_expectation: red before (no realization block), green after
+  - source: docs/contracts/telemetry_agents.yaml
+    behavior: The contract's realization block and populated_by lines agree with the producer corpus and the writer.
+    verification_step: 4
+    test_selector: tests/checks/contracts/test_validate_telemetry_field_realization.py::test_live_repository_passes
+    red_green_expectation: red before (no realization block), green after
+  - source: docs/contracts/telemetry_transcripts.yaml
+    behavior: The contract's realization block and populated_by lines agree with the producer corpus and the writer.
+    verification_step: 4
+    test_selector: tests/checks/contracts/test_validate_telemetry_field_realization.py::test_live_repository_passes
+    red_green_expectation: red before (no realization block), green after
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: The new check has a failure category.
+    verification_step: 8
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: The taxonomy's completeness check fails full validation for a registered check without a row; a dedicated test would restate it.
+  - source: config/agent/verification_registry/entries/telemetry-field-realization.yaml
+    behavior: VP step 3 is graduated to a standing guard.
+    verification_step: 8
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: validate_graduation_completeness fails full validation when a graduate step has no well-formed shard; a dedicated test would restate it.
+  - source: docs/ROADMAP-PLATFORM.yaml
+    behavior: T3.20 c7 flips to met only on a verified VP pass.
+    verification_step: 8
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: A bookkeeping status flip; validate_platform_roadmap checks the met_by and criterion shape in full validation.
+constraints:
+  - Freeze (Benjamin, 2026-10-24) -- nothing is pushed, PR'd or merged until he lifts the repo-transfer freeze; the build merge needs his word (Class A contract change).
+  - No column added, removed or retyped; no contract_version change; the only description or semantics edits are the stale-prose removals in the telemetry_sessions row, each with its category-6 amendment entry.
+  - No writer, reader, Lambda, parser or golden expected_rows change; no deploy.
+  - No budget raise (Decision 128/166); compact amendment history if a contract crosses 500 effective lines.
+  - Agents never self-report merged-PR facts; those fields stay unproduced under the feedback-loop gate until its owner is assigned.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - >-
+    Decision-scout verdict FLAGS_FOUND; CITE 199, 228, 210, 201, 66, 170, 86. Decisions triaged: 187 of 187. Roadmap items
+    intersected: 12; CONFLICT: 0; RELATED: 10. Flags folded in: 181 (per-surface coverage, below), 166 (size), 221
+    (cost_usd_reported keep-or-retire owner), 65 (plan 2's rec rules).
+  - "gates: decision-scout=FLAGS_FOUND (addressed); plan-critique=PROCEED after 4 round(s) (3 REVISE, confirming PROCEED)"
+  - "red_overlap: {\"verdict\": \"clear\", \"slo_hours\": 4, \"reds\": []} (2026-10-24)"
+  - >-
+    Approval: Benjamin's "write the plans" (2026-10-24, cmsg_012XgaFy8VaDQbxP5D8nC958WHezqzm2qaVW4TZy3avTyU) approved
+    /mnt/project-files/rec-4589/plan-2/step6b-presentation.md (evidence: rec-4589/FINDINGS.md), including: mark the unproduced fields with owners rather
+    than delete (deletion needs a contract_version bump plus column DDL, Decision 222's reversal condition), and the
+    split into this plan and PLAN-silent-failure-prevention. Same message: redundant-field cleanup on the telemetry
+    tables is this project's remit (the produce-or-retire recs are its carriers).
+  - Why table-level -- per-field entries would add 30-48 lines to contracts at 477-498 of 500; R1 and R8 keep the block and populated_by in step.
+  - >-
+    Decision 181 coverage: R1-R8 are mechanically enforced by this check in both tiers. Declared residuals, both owned
+    by rec-4606: whether a rec named as an owner is still open is not checkable offline (the fast tier has no reader);
+    the held:feedback-loop-gate hold is Benjamin's gate (2026-10-12: no feedback-loop work, owner assignment included,
+    until all other telemetry work is done) and has no in-repo record yet. normalised_out columns pass R4 by membership
+    (emission held by the corpus hash assertions and the parser_version registry test).
+  - rec-4589 motivates this plan but is not bundled -- PLAN-retire-session-cli closes it with a Resolves trailer.
+  - Golden corpus is fixture evidence -- R4 proves emission in the producer's golden output, not in live rows (live rows are the telemetry verification monitor's, PLAN-telemetry-verification-monitor under T3.20 c3).
+  - >-
+    Inherited constraint for T3.22 (not_started): R4 makes a registered producer with produced fields carry a golden
+    corpus in this index.json + expected_rows shape (golden_index in parser_versions.yaml). A plan flipping T4.32 c1,
+    T3.22 c5 or T3.20 c9 must move that criterion's columns out of unproduced in the same PR (R7 fails otherwise and
+    its message says so).
+  - >-
+    Overlap: T3.22 c1 (every producer registered before its first row; producer-agnostic row conformance) is the
+    producer-side sibling; this check reads that registry but checks contract-to-corpus coverage, not row conformance.
+    PLAN-retire-session-cli owns workflow's populated_by and the name field; whichever build lands second rebases.
+  - >-
+    Owner recs (filed at plan write, followon_recs): rec-4599 sessions, rec-4600 observations, rec-4601 transcripts --
+    produce or retire each listed column (drop at the next contract_version bump with its DDL migration). Their
+    acceptance greps the unproduced line, so each block is exactly three lines (realization:, produced: {...},
+    unproduced: {...}), each mapping in flow form on one line.
+  - >-
+    Gotchas: golden expected_rows already carry derived ids (event_id, session_id...) computed at normalisation, so R6
+    must treat write_boundary columns as credited; *_ref wire columns (session_ref, observation_ref...) are not contract
+    fields and are ignored. output_sha256 and content_sha256 are producer-written but normalised out.
+pre_implementation_checklist:
+  - Branch confirmed not on main and rebased on origin/main; VP step 1 passes
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 199 (cl.1, cl.4), 210 (cl.2, cl.3), 228 (cl.3), 170 and 128 read, only the cited clauses
+  - The four telemetry contracts, scripts/contracts_schema.py, validate_write_time_enforcement_conformance.py (sibling precedent) and tests/fixtures/turn_capture_corpus.py read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    scripts/contracts_schema.py and tests/test_contracts_schema.py: add the Realization model and the ContractDocument key;
+    test first (red), then the model (green).
+  - >-
+    Golden index and corpus helper: add normalised_out to index.json, read it in turn_capture_corpus.py; run the digest
+    and registry tests (unchanged). Add golden_index to parser_versions.yaml's claude_code entry.
+  - >-
+    Write tests/checks/contracts/test_validate_telemetry_field_realization.py (R1-R8 failing-first, clean pass, live
+    repository, live mutations), then the check module, then the manifest entry, the ci_rca_taxonomy row and the
+    registry shard.
+  - >-
+    Add the realization blocks and the populated_by rewrites to the four contracts, substituting the three
+    produce-or-retire rec ids (rec-4599, rec-4600, rec-4601); write each block as exactly three lines, produced and
+    unproduced each one flow-form line; add one contract-level amendment_log line each; fold observations'
+    outcome 2026-09-24 block-form entry to one flow line (planned, 498 + 4 > 500); measure effective lines and compact
+    further only until every file is at or under 500 and telemetry_observations at or under 498.
+  - Execute the Verification Plan steps 2-7 -- loop until pass; on unrecoverable failure stop and RCA (Decision 55).
+  - /implement bookkeeping walk -- flip T3.20 c7 to met on the verified VP pass.
+  - >-
+    Closure, in the implement skill's IMPLEMENTATION Commit Flow order, each outcome reported separately: readiness
+    check; set implementation_declared true; the postflight evidence file and scripts.session.postflight --evidence;
+    commit; git fetch and rebase on origin/main; VP 8 (full tier then --verify-head on the committed clean tree).
+    While the freeze holds, report push and PR as "not pushed: freeze" and stop. After Benjamin lifts it: push; PR (body: the realization summary, the measured
+    effective-line counts, the Class A contract text for Benjamin's word); CI green on the head; merge only after code
+    review PROCEED, CI green and Benjamin's own word (fetch his message). Squash-merge.
+  - 'Report: what was implemented, verification results, the measured effective-line counts.'
+rollback: >-
+  Revert the commit: the realization key is optional in ContractDocument, so removing the blocks and the check together
+  restores the prior state; nothing was deployed.

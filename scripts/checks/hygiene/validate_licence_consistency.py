@@ -57,6 +57,7 @@ _CLASS_A_PATTERNS: dict[str, re.Pattern[str]] = {
     "scripts/checks/misc/validate_ghas_probe.py": re.compile(r"benjamin-blake/agent-platform"),
     ".github/workflows/ghas-probe.yml": re.compile(r"benjamin-blake/agent-platform"),
     "docs/ROADMAP-PLATFORM.yaml": re.compile(r"benjamin-blake/agent-platform"),
+    "docs/ROADMAP-PLATFORM-ARCHIVE.yaml": re.compile(r"benjamin-blake/agent-platform"),
     # Bare token: a quoted repo NAME with no owner prefix, as a parameter default.
     "scripts/convergence_health/approvals.py": re.compile(r"""repo:\s*str\s*=\s*["']agent-platform["']"""),
     # Context-qualified: the PAT repo-scope comment only. Must not match the checkout path

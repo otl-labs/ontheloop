@@ -182,8 +182,7 @@ locals {
           "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer:*",
           "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader",
           "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader:*",
-          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-writer",
-          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-writer:*",
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-*",
         ]
         Condition = {
           BoolIfExists = {
@@ -210,8 +209,7 @@ locals {
           "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer:*",
           "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader",
           "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader:*",
-          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-writer",
-          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-writer:*",
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-*",
         ]
       },
       {
@@ -233,8 +231,101 @@ locals {
               "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer:*",
               "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader",
               "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader:*",
-              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-writer",
-              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-writer:*",
+              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-*",
+            ]
+          }
+        }
+      },
+      {
+        # Decision 230 cl.5: the production telemetry catalog's data prefix and its blob root are reachable only by
+        # the roles that serve or maintain that catalog. PlatformDev and the CI roles carry this boundary, so their
+        # bucket-wide S3 grants are fenced here without an identity-side edit. The roles may not exist yet, which
+        # IAM accepts.
+        Sid    = "DenyTelemetryProdPrefixIO"
+        Effect = "Deny"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:PutObject",
+          "s3:DeleteObject"
+        ]
+        Resource = [
+          "arn:aws:s3:::agent-platform-data-lake/ducklake-telemetry/*",
+          "arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/ducklake_telemetry/*"
+        ]
+        Condition = {
+          ArnNotLike = {
+            "aws:PrincipalArn" = [
+              "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-writer",
+              "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-reader",
+              "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-maintenance"
+            ]
+          }
+        }
+      },
+      {
+        # Presigned PUTs execute as the signing role, so only the writer and its smoke twin may put a blob.
+        Sid      = "DenyTelemetryBlobPut"
+        Effect   = "Deny"
+        Action   = ["s3:PutObject"]
+        Resource = ["arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/*"]
+        Condition = {
+          ArnNotLike = {
+            "aws:PrincipalArn" = [
+              "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-writer",
+              "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-writer-smoke"
+            ]
+          }
+        }
+      },
+      {
+        # The blob sweep is a plain DeleteObject from the admin maintenance role; the bucket's noncurrent
+        # lifecycle reclaims the bytes.
+        Sid      = "DenyTelemetryBlobDelete"
+        Effect   = "Deny"
+        Action   = ["s3:DeleteObject"]
+        Resource = ["arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/*"]
+        Condition = {
+          ArnNotLike = {
+            "aws:PrincipalArn" = ["arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-maintenance"]
+          }
+        }
+      },
+      {
+        # No bounded identity deletes an object version of telemetry data, so the lifecycle is the only reclaimer.
+        Sid    = "DenyTelemetryVersionDelete"
+        Effect = "Deny"
+        Action = ["s3:DeleteObjectVersion"]
+        Resource = [
+          "arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/*",
+          "arn:aws:s3:::agent-platform-data-lake/ducklake-telemetry/*"
+        ]
+      },
+      {
+        # The CI branch and CI PR roles are reached by agents without review (agent pushes, pull_request jobs) and
+        # never need Terraform state, saved plans or review transcripts, so they may not read, overwrite or delete
+        # them. The branch role's inline Deny is removable by an auto-applied PR; this admin-held copy is not
+        # (Decision 143 cl.1, rec-4645). The condition leaves the apply role, planner, PlatformDev and every other
+        # carrier of this shared boundary untouched.
+        Sid    = "DenyCiAgentRoleStatePlanAndTranscriptIO"
+        Effect = "Deny"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:DeleteObjectVersion"
+        ]
+        Resource = [
+          "arn:aws:s3:::agent-platform-data-lake/tfstate/*",
+          "arn:aws:s3:::agent-platform-data-lake/tfplan/*",
+          "arn:aws:s3:::agent-platform-data-lake/ci-rca-evidence/review-transcripts/*"
+        ]
+        Condition = {
+          ArnLike = {
+            "aws:PrincipalArn" = [
+              "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-branch",
+              "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-pr"
             ]
           }
         }

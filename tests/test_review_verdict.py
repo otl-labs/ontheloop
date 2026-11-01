@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.ci.review_verdict import PROCEED, REVISE, STARVED, classify, main
+from scripts.ci.review_verdict import PROCEED, REVISE, STARVED, classify, main, revise_reason
 
 # ---------------------------------------------------------------------------
 # Envelope builders
@@ -262,3 +262,59 @@ def test_main_stderr_interleaved_transcript_proceed(tmp_path: Path, capsys: pyte
     path = _write(tmp_path, contaminated)
     assert main([path]) == 0
     assert capsys.readouterr().out.strip() == PROCEED
+
+
+# ---------------------------------------------------------------------------
+# revise_reason / --reason
+# ---------------------------------------------------------------------------
+
+
+def test_revise_reason_collapses_multiline() -> None:
+    raw = _success_envelope("REVISE: first line\n\nsecond   line\tthird")
+    assert revise_reason(raw) == "first line second line third"
+
+
+def test_revise_reason_redacts_arn_and_account_id() -> None:
+    acct_a, acct_b = "1" * 12, "2" * 12
+    arn = f"arn:aws:iam::{acct_a}:role/x"
+    out = revise_reason(_success_envelope(f"REVISE role {arn} in account {acct_b}"))
+    assert acct_a not in out and acct_b not in out
+    assert "[ARN]" in out and "[ACCOUNT_ID]" in out
+
+
+@pytest.mark.parametrize("reason", ["::error::boom", "\n::warning::x", "- ::error::y"])
+def test_revise_reason_never_yields_workflow_command_line(reason: str) -> None:
+    out = revise_reason(_success_envelope("REVISE " + reason))
+    assert "\n" not in out
+    assert not out.startswith("::")
+
+
+def test_revise_reason_caps_at_500_with_ellipsis() -> None:
+    out = revise_reason(_success_envelope("REVISE " + "a" * 900))
+    assert len(out) == 500 and out.endswith("...")
+
+
+def test_revise_reason_empty() -> None:
+    assert revise_reason(_success_envelope("REVISE")) == "(no reason given)"
+
+
+def test_revise_reason_raw_text_fallback() -> None:
+    assert revise_reason("noise\nREVISE too broad\n") == "too broad"
+
+
+def test_reason_cli_revise_proceed_and_unreadable(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    rev = _write(tmp_path, _success_envelope("REVISE digest truncated"))
+    assert main(["--reason", rev]) == 0
+    assert capsys.readouterr().out.strip() == "digest truncated"
+    pro = tmp_path / "p.json"
+    pro.write_text(_success_envelope("PROCEED"))
+    assert main(["--reason", str(pro)]) == 0
+    assert capsys.readouterr().out.strip() == "(no reason given)"
+    assert main(["--reason", str(tmp_path / "nope")]) == 0
+    assert capsys.readouterr().out.strip() == "(transcript unreadable)"
+
+
+def test_one_argument_contract_unchanged_with_reason_as_filename(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    path = _write(tmp_path, _success_envelope("REVISE nope"))
+    assert main([path]) == 2
+    assert capsys.readouterr().out.strip() == REVISE

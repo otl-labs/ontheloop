@@ -29,6 +29,10 @@ _INDEXES_SQL = (
     "WHERE n.nspname = %s AND tc.relname = %s"
 )
 _SEQ_SCAN_SQL = "SELECT COALESCE(seq_scan, 0) FROM pg_catalog.pg_stat_user_tables WHERE schemaname = %s AND relname = %s"
+_STATS_ROWS_SQL = (
+    "SELECT c.reltuples::bigint FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE n.nspname = %s AND c.relname = %s AND c.relkind IN ('r', 'p')"
+)
 _STATS_RESET_SQL = "SELECT stats_reset::text FROM pg_catalog.pg_stat_database WHERE datname = current_database()"
 
 
@@ -36,6 +40,16 @@ def catalog_index_schemas(cur: Any) -> list[str]:
     """Every schema holding a ducklake_file_column_stats table, from pg_catalog (never a hard-coded pair)."""
     cur.execute(_SCHEMAS_SQL, [STATS_TABLE])
     return [row[0] for row in cur.fetchall()]
+
+
+def stats_rows_est(cur: Any, meta_schema: str) -> int | None:
+    """Estimated row count of the schema's ducklake_file_column_stats (pg_class.reltuples), or None when the table is
+    absent or never analysed (reltuples is negative from PostgreSQL 14)."""
+    cur.execute(_STATS_ROWS_SQL, [meta_schema, STATS_TABLE])
+    row = cur.fetchone()
+    if not row or row[0] is None or int(row[0]) < 0:
+        return None
+    return int(row[0])
 
 
 def catalog_index_status(cur: Any, meta_schema: str) -> dict[str, Any]:

@@ -171,7 +171,7 @@ If a signal is absent from the preflight cache, mark it UNKNOWN rather than infe
 
 Prioritized work list from the Status Digest:
 
-1. **CI-RCA first**: HARD BLOCK recs appear as item 0 -- they block other work. For each, suggest a `/plan` prompt to resolve it.
+1. **CI-RCA first**: HARD BLOCK recs appear as item 0 -- they block overlapping work. Route each per the command's Section 2 row.
 2. **In_progress follow-on planning (ranked fewest-open-criteria-first)**: in_progress items have momentum and are typically the lowest-activation-cost next step. Rank them fewest-open-criteria-first (closest-to-done). For each, determine which of the three cases applies:
    - **Parked-gated**: see Inputs > In_progress entry fields for the canonical rule -- no prompt is emitted for these items.
    - **Mid-implementing** (a PLAN-*.yaml was authored and is in-flight but not yet acted on): suggest `/implement PLAN-{slug}.yaml` for that item.
@@ -196,7 +196,7 @@ Overlap matrix:
 
 **Keystone-first sequencing**: order prompts so items that unblock the most downstream work appear first. Note explicitly which pairs are safe to run in parallel sessions.
 
-If a HARD BLOCK ci-rca rec exists, prepend a zero-th prompt:
+If a HARD BLOCK Critical rec exists, prepend a zero-th prompt:
 ```
 /plan ci-rca: resolve rec-NNNN (<brief title>)
 ```

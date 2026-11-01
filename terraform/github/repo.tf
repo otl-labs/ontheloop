@@ -35,6 +35,15 @@ resource "github_repository" "this" {
       allow_update_branch,
       delete_branch_on_merge,
       archived,
+      # Deprecated, Default false and never read or imported by the provider: an import leaves it null and the
+      # plan would PATCH the repository to set it (rec-3136).
+      ignore_vulnerability_alerts_during_read,
+      # Never set here, so they plan to the provider defaults; the PR-time plan read them otherwise and
+      # planned a reset. Unmanaged, like the allow_* merge methods above (rec-3136).
+      merge_commit_message,
+      merge_commit_title,
+      squash_merge_commit_message,
+      squash_merge_commit_title,
     ]
   }
 }

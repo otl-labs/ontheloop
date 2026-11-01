@@ -66,13 +66,31 @@ def test_open_connection_builds_connection_from_fetched_dsn():
         with patch.object(h.rt, "open_connection", return_value=fake_con) as mock_open_conn:
             result = h._open_connection()
     assert result is fake_con
-    mock_fetch.assert_called_once_with()
+    mock_fetch.assert_called_once_with(h.DSN_SECRET_ID)
     mock_open_conn.assert_called_once_with(
         dsn={"host": "x"},
         data_path=h.DATA_PATH,
         meta_schema=h.META_SCHEMA,
         extension_directory=h.EXTENSION_DIRECTORY,
     )
+
+
+def test_open_connection_reads_the_secret_named_by_env(monkeypatch):
+    import importlib
+
+    monkeypatch.delenv("DUCKLAKE_DSN_SECRET_ID", raising=False)
+    assert importlib.reload(h).DSN_SECRET_ID == h.rt.DSN_SECRET_ID
+    monkeypatch.setenv("DUCKLAKE_DSN_SECRET_ID", "agent-platform-ducklake-smoke-maintainer-dsn")
+    try:
+        reloaded = importlib.reload(h)
+        assert reloaded.DSN_SECRET_ID == "agent-platform-ducklake-smoke-maintainer-dsn"
+        with patch.object(reloaded.rt, "fetch_dsn", return_value={"host": "x"}) as mock_fetch:
+            with patch.object(reloaded.rt, "open_connection", return_value=object()):
+                reloaded._open_connection()
+        mock_fetch.assert_called_once_with("agent-platform-ducklake-smoke-maintainer-dsn")
+    finally:
+        monkeypatch.delenv("DUCKLAKE_DSN_SECRET_ID", raising=False)
+        importlib.reload(h)
 
 
 def test_handler_ignores_data_path_and_meta_schema_in_event():
@@ -504,7 +522,7 @@ def test_handler_runtime_error_maps_to_500():
 # create_telemetry_tables (Decision 216): owner-login, create-only, smoke-pinned, typed failures
 # ---------------------------------------------------------------------------
 
-CLEAN = prov.OwnershipReport(0, True, False, False)
+CLEAN = prov.OwnershipReport(0, True, False, False, True, "ducklake_smoke_owner")
 NINE = tuple(f"t{i}" for i in range(9))
 
 
@@ -555,10 +573,10 @@ def test_create_telemetry_non_smoke_meta_schema_refuses_before_any_statement(mon
 
 def test_create_telemetry_owner_mismatch_refuses_before_any_ddl():
     for dirty in (
-        prov.OwnershipReport(1, True, False, False),
-        prov.OwnershipReport(0, False, False, False),
-        prov.OwnershipReport(0, True, True, False),
-        prov.OwnershipReport(0, True, False, True),
+        prov.OwnershipReport(1, True, False, False, True, "ducklake_smoke_owner"),
+        prov.OwnershipReport(0, False, False, False, False, "ducklake_ops_other"),
+        prov.OwnershipReport(0, True, True, False, True, "ducklake_smoke_owner"),
+        prov.OwnershipReport(0, True, False, True, True, "ducklake_smoke_owner"),
     ):
         p1, p2, _report, made = _patched(reports=(dirty,))
         con = _Rec()
@@ -567,8 +585,22 @@ def test_create_telemetry_owner_mismatch_refuses_before_any_ddl():
         assert not made.called and con.sql == []
 
 
+def test_create_telemetry_passes_when_the_owner_is_held_through_membership():
+    member = prov.OwnershipReport(0, False, False, False, True, "ducklake_smoke_owner")
+    p1, p2, _report, made = _patched(reports=(member, member))
+    with p1, p2:
+        out = ta.action_create_telemetry_tables({}, _Rec())
+    assert out["ok"] is True and made.called
+    assert out["ownership"]["schema_owner_held"] is True and out["ownership"]["schema_owner_is_current_user"] is False
+    not_held = prov.OwnershipReport(0, True, False, False, False, "ducklake_smoke_owner")
+    p1, p2, _report, made = _patched(reports=(not_held,))
+    with p1, p2, pytest.raises(DuckLakeRuntimeError, match=r"single-owner check failed \(pre-DDL\)"):
+        ta.action_create_telemetry_tables({}, _Rec())
+    assert not made.called
+
+
 def test_create_telemetry_single_owner_violation_raises_with_report_fields_only():
-    p1, p2, _report, made = _patched(reports=(CLEAN, prov.OwnershipReport(2, True, False, True)))
+    p1, p2, _report, made = _patched(reports=(CLEAN, prov.OwnershipReport(2, True, False, True, True, "ducklake_smoke_owner")))
     with p1, p2, pytest.raises(DuckLakeRuntimeError) as info:
         ta.action_create_telemetry_tables({}, _Rec())
     text = str(info.value)
@@ -606,6 +638,8 @@ def test_create_telemetry_response_shape():
     assert out["ownership"] == {
         "foreign_owned": 0,
         "schema_owner_is_current_user": True,
+        "schema_owner_held": True,
+        "schema_owner": "ducklake_smoke_owner",
         "scoped_create_on_schema": False,
         "scoped_create_on_public": False,
     }

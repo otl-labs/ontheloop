@@ -6,10 +6,7 @@ recommendations and appends new ones to ``recommendations/agent-recommendations.
 
 Environment variables
 ---------------------
-GITHUB_PAT_SECRET_ARN : ARN of the Secrets Manager secret containing the
-    GitHub PAT used to call the GitHub Models API for comparison.
-GITHUB_PAT             : Alternatively, the PAT can be set directly as an
-    env var (for local testing).
+GITHUB_PAT             : Local-only GitHub PAT used to call the GitHub Models API for comparison.
 S3_LOG_BUCKET          : S3 bucket name (e.g. ``agent-platform-data-lake``).
 
 S3 key layout
@@ -42,25 +39,8 @@ _COMPARE_PROMPT_PATH = ".github/prompts/scheduled/findings-compare.prompt.md"
 
 
 def _get_github_pat() -> str:
-    """Retrieve the GitHub PAT from Secrets Manager or environment."""
-    pat_env = os.environ.get("GITHUB_PAT", "").strip()
-    if pat_env:
-        return pat_env
-
-    secret_arn = os.environ.get("GITHUB_PAT_SECRET_ARN", "").strip()
-    if not secret_arn:
-        logger.warning("GITHUB_PAT_SECRET_ARN not set; skipping agent comparison step")
-        return ""
-
-    try:
-        import boto3
-
-        client = boto3.client("secretsmanager", region_name="eu-west-2")
-        response = client.get_secret_value(SecretId=secret_arn)
-        return response.get("SecretString", "").strip()
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Failed to retrieve GitHub PAT from Secrets Manager: %s", exc)
-        return ""
+    """Return the local-only GITHUB_PAT env var; the Lambda path has no PAT since rec-4539 (GitHub Models retired)."""
+    return os.environ.get("GITHUB_PAT", "").strip()
 
 
 def _load_compare_prompt() -> str:

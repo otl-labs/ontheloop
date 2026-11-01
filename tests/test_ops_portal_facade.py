@@ -45,6 +45,8 @@ _REQUIRED_PUBLIC = [
     "load_capabilities",
     "compute_automatable",
     "file_rec",
+    "file_rec_with_outcome",
+    "FileRecOutcome",
     "update_rec",
     "propose_or_close_rec",
     "file_decision",

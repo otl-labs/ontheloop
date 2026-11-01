@@ -1,14 +1,12 @@
 """DuckLake closed read-boundary primitives (Decision 84 I-3; split from ducklake_runtime).
 
-Owner concern: every read path over the current/history projections, plus the read-only SQL
-guard that is the application-layer half of the closed reader boundary (OQ.7). Imports the
+Owner concern: every read path over the current/history projections. No caller SQL crosses the reader boundary. Imports the
 named-read registry and table-spec resolver FROM ducklake_scd2_schema (+ stdlib) only, and NEVER
 from the ducklake_runtime facade (Decision 80 acyclic-import discipline).
 """
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from src.common.ducklake_control_tables import is_control_table
@@ -16,7 +14,6 @@ from src.common.ducklake_scd2_schema import (
     CATALOG_ALIAS,
     NAMED_READS,
     DuckLakeRuntimeError,
-    SchemaGateError,
     resolve_table_spec,
 )
 
@@ -88,25 +85,6 @@ def read_history(
     return [dict(zip(col_names, row)) for row in cursor.fetchall()]
 
 
-def assert_read_only_sql(sql: str) -> None:
-    """Loud-fail unless *sql* is a read-only statement (SELECT/WITH only).
-
-    The reader holds the full Neon catalog credential; S3-read-only IAM blocks Parquet writes but NOT
-    Postgres catalog DDL (DROP/ALTER TABLE on the DuckLake metadata). This verb guard is the
-    application-layer half of the closed read boundary (OQ.7): a non-SELECT statement never reaches
-    the catalog. Reject anything whose first keyword is not SELECT or WITH (CTE) -- this also blocks
-    a multi-statement payload (the leading verb of a `SELECT 1; DROP TABLE x` is SELECT, but DuckDB
-    rejects multi-statement in one execute; the guard plus single-statement execution close it).
-    """
-    if not re.match(r"^\s*(?:SELECT|WITH)\b", sql, re.IGNORECASE):
-        raise SchemaGateError(
-            "read-only boundary: only SELECT/WITH statements may execute on the reader path "
-            f"(got {sql.strip()[:60]!r}). Catalog DDL/DML is denied at the closed boundary (OQ.7)."
-        )
-    if ";" in sql.rstrip().rstrip(";"):
-        raise SchemaGateError("read-only boundary: multi-statement SQL is rejected on the reader path (OQ.7).")
-
-
 def named_read(con: Any, *, verb: str, params: dict[str, Any] | None = None, limit: int | None = None) -> list[dict[str, Any]]:
     """Execute a pre-established read verb from the NAMED_READS registry (Decision 84 I-3).
 
@@ -143,27 +121,5 @@ def named_read(con: Any, *, verb: str, params: dict[str, Any] | None = None, lim
         final_sql += f" LIMIT {int(limit)}"
     bound = [supplied[name] for name in entry.params]
     cursor = con.execute(final_sql, bound) if bound else con.execute(final_sql)
-    col_names = [desc[0] for desc in cursor.description]
-    return [dict(zip(col_names, row)) for row in cursor.fetchall()]
-
-
-def query_current(con: Any, *, table: str, sql: str, params: list[Any] | tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-    """Run a read-only *sql* over the current projection of *table*. Use `{tbl}` for the table ref.
-
-    Mirrors the Reader.query semantics: the caller supplies a SELECT referencing `{tbl}`; `?` binds
-    params. The reader Lambda exposes this so the portal/sync read paths can push predicates down.
-    A read-only verb guard (assert_read_only_sql) rejects any non-SELECT/WITH statement BEFORE it
-    reaches the catalog -- catalog DDL is not blocked by the S3-read-only IAM, so the guard is the
-    application-layer half of the closed read boundary (OQ.7 / CD.33 clause 6).
-    """
-    assert_read_only_sql(sql)
-    spec = resolve_table_spec(table)
-    if spec.current_table is None:
-        raise DuckLakeRuntimeError(
-            f"table {spec.table!r} is append_only: query_current is not supported "
-            "(write_mode=append_only has no current write-through projection)"
-        )
-    final_sql = sql.replace("{tbl}", f"{CATALOG_ALIAS}.{spec.current_table}")
-    cursor = con.execute(final_sql, list(params)) if params else con.execute(final_sql)
     col_names = [desc[0] for desc in cursor.description]
     return [dict(zip(col_names, row)) for row in cursor.fetchall()]

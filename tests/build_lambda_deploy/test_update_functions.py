@@ -14,7 +14,9 @@ from scripts.build_lambda_config import (
     _DUCKLAKE_MAINTENANCE_FUNCTION,
     _DUCKLAKE_MAINTENANCE_SMOKE_FUNCTION,
     _DUCKLAKE_READER_FUNCTION,
+    _DUCKLAKE_TELEMETRY_READER_FUNCTION,
     _DUCKLAKE_TELEMETRY_WRITER_FUNCTION,
+    _DUCKLAKE_TELEMETRY_WRITER_SMOKE_FUNCTION,
     _DUCKLAKE_WRITER_FUNCTION,
     _LAMBDA_FUNCTION_NAMES,
 )
@@ -85,14 +87,14 @@ class TestUpdateLambdaFunctions:
         with patch("scripts.build_lambda.subprocess.run") as mock_run:
             mock_run.side_effect = self._side_effects()
 
-            bd.update_lambda_functions("b", "company-aws-profile", "eu-west-2")
+            bd.update_lambda_functions("b", "test-profile", "eu-west-2")
 
             for c in mock_run.call_args_list:
                 cmd = c[0][0]
                 region_idx = cmd.index("--region")
                 assert cmd[region_idx + 1] == "eu-west-2"
                 profile_idx = cmd.index("--profile")
-                assert cmd[profile_idx + 1] == "company-aws-profile"
+                assert cmd[profile_idx + 1] == "test-profile"
 
     def test_update_subprocess_kwargs(self):
         """Windows-safe subprocess kwargs are set on every call."""
@@ -144,7 +146,7 @@ class TestUpdateLambdaFunctions:
 
 class TestUpdateLambdaFunctionsDucklakeOnly:
     # only_ducklake=True call sequence per function (T2.38 c3): update-function-code, THEN
-    # (on success) the deploy-record S3 write -- 2 subprocess.run calls x 6 functions = 12 total
+    # (on success) the deploy-record S3 write -- 2 subprocess.run calls x 8 functions = 16 total
     # (T2.18 c9 split added the maintenance-smoke function). See docs/PROJECT_CONTEXT.md
     # "postflight.py function mock exhaustion" gotcha: a new subprocess.run call added inside
     # update_lambda_functions' only_ducklake branch means every side_effect list feeding it here
@@ -171,11 +173,15 @@ class TestUpdateLambdaFunctionsDucklakeOnly:
                 self._write_response(),
                 self._update_response(),
                 self._write_response(),
+                self._update_response(),
+                self._write_response(),
+                self._update_response(),
+                self._write_response(),
             ]
             bd.update_lambda_functions("b", "p", "eu-west-2", only_ducklake=True)
-        assert mock_run.call_count == 12
+        assert mock_run.call_count == 16
         targeted = []
-        for idx in range(0, 12, 2):
+        for idx in range(0, 16, 2):
             cmd = mock_run.call_args_list[idx][0][0]
             targeted.append(cmd[cmd.index("--function-name") + 1])
         assert set(targeted) == {
@@ -185,6 +191,8 @@ class TestUpdateLambdaFunctionsDucklakeOnly:
             _DUCKLAKE_MAINTENANCE_SMOKE_FUNCTION,
             _DUCKLAKE_CATALOG_DR_FUNCTION,
             _DUCKLAKE_TELEMETRY_WRITER_FUNCTION,
+            _DUCKLAKE_TELEMETRY_WRITER_SMOKE_FUNCTION,
+            _DUCKLAKE_TELEMETRY_READER_FUNCTION,
         }
 
     def test_only_ducklake_update_call_requests_json_output(self):
@@ -203,9 +211,13 @@ class TestUpdateLambdaFunctionsDucklakeOnly:
                 self._write_response(),
                 self._update_response(),
                 self._write_response(),
+                self._update_response(),
+                self._write_response(),
+                self._update_response(),
+                self._write_response(),
             ]
             bd.update_lambda_functions("b", "p", "eu-west-2", only_ducklake=True)
-        for idx in range(0, 12, 2):
+        for idx in range(0, 16, 2):
             cmd = mock_run.call_args_list[idx][0][0]
             assert "--output" in cmd
             assert cmd[cmd.index("--output") + 1] == "json"

@@ -1,0 +1,448 @@
+schema_version: 5
+implementation_declared: true
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "telemetry-causal-chain-probe"
+intent: >-
+  Telemetry slice 5, plan 2 of 2: close T3.2. Build the causal-chain probe, a scheduled synthetic round trip on the
+  production telemetry path (PRODUCE -> TRANSPORT -> PERSIST -> QUERY -> ASSERT): it produces one tiny root session
+  through the real claude_code producer, appends it through the production telemetry writer, proves it readable through
+  the production telemetry reader within an SLA, re-reads earlier probe sessions to catch rows lost or changed after
+  commit (merge, GC), and exits with a distinct code per loss mode, filing one telemetry_verify alarm per class. It is
+  the standing liveness proof of the production pipeline that T3.3 (gate G.8) and CD.17's freeze reversal wait on.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-telemetry-causal-chain-probe.yaml
+phase: >-
+  T3.2 (not_started -> in_progress; all three criteria). depends_on T2.36: T3.2's status flips to complete only once
+  T2.36 is complete (its c2 closes in the production flip's bookkeeping PR); until then the bookkeeping walk flips the
+  criteria and leaves the item in_progress.
+closes_criteria:
+  - T3.2:c1
+  - T3.2:c2
+  - T3.2:c3
+scope:
+  - file: scripts/ducklake_smoke/lambda_telemetry_causal_chain.py
+    action: Create
+    purpose: >-
+      The probe CLI, run as `python -m scripts.ducklake_smoke.lambda_telemetry_causal_chain` (flags --no-alarms,
+      --assert-pass, --require-prior, --profile, --region), beside golden replay because it runs the same producer and
+      deployed engine; scripts/telemetry_verify stays the producer-independent oracle (its AST boundary,
+      tests/telemetry_verify/test_package_boundary.py, forbids producer and transport imports, and is not widened).
+      Engine access reuses golden replay's public surface (Env, live_env, skewed, records_skewed, deploy_paths) and the
+      same producer and transport calls (record_turn on a MemTree, transport.chunk/append_body/encode,
+      blob_delivery.deliver_blobs, read_tree/decode_rows); never its private _Run. Comparisons reuse the oracle's
+      compare.compare_tree (keyed by external_ref, value columns, other parser generations counted apart) and
+      derive.session_state_and_duration. Stages:
+      (0) warm and pair: writer describe (protocol) and one telemetry_health_count read; both must serve the deploy
+      output's catalog (golden's assert_catalog rule). Two failed warm-up reads, a 503 or a credential error ->
+      unavailable before anything is written.
+      (1) register_tenant, then register_project with the fixed ref PROBE_REF = "synthetic:causal-chain-probe"
+      (idempotent per tenant and ref, Decision 200 amendment; purpose synthetic, so real-purpose verbs exclude it).
+      (2) produce: identity first. Actions mode (GITHUB_RUN_ID all digits and a token in GITHUB_TOKEN or GH_TOKEN): run
+      id, run_attempt and run_started_at come from the Actions API for this run; an API failure -> unavailable before
+      anything is written. Local mode (otherwise): run_started_at = now (UTC, whole seconds), run id "local-<epoch>". The
+      transcript is a deterministic function of (PROBE_SHAPE_VERSION, run id, run_attempt, run_started_at) and nothing
+      else: one user prompt, one assistant turn with one tool call whose result is a fixed PROBE_TOOL_RESULT_BYTES
+      constant (claim-check route), and a final assistant message. The builder, PROBE_SHAPE_VERSION and SHAPE_DIGESTS
+      live in the post-persist module (next row), which this module imports, so there is no import cycle. The payload is
+      never sized from describe; stage 2 asserts describe's inline_threshold_bytes < the built tool_result row's
+      content_bytes <= cap_bytes (the value spill_item decides on), else a produce fault
+      (probe_payload_outside_blob_band), so a writer threshold change cannot alter rebuilt prior transcripts. entity_ref "causal-chain-probe:v<PROBE_SHAPE_VERSION>:<run id>.<attempt>"
+      (unique per attempt, Decision 207) and the first record's timestamp = run_started_at; then record_turn(...,
+      session_final=True). A producer exception or an empty result -> produce.
+      (3) transit/persist: deliver blobs (the delivered count is reported as blobs=) and append through the production writer Function URL (SigV4, Decision 213). No
+      HTTP answer (connection error, timeout, a 403/404 from the URL layer) -> transit; a non-200 from the writer on
+      register, begin_blobs or append (422 row_rule or blob_not_verified, 500) -> persist. Retry policy: register and
+      append are retried at most twice with backoff on 0, 429 or 503 (safe: an identical re-send is a no-op, Decision
+      207), begin_blobs keeps deliver_blobs' own retries; a 429 or 503 still standing after that -> unavailable, never
+      persist (Decision 215 cl.2). deliver_blobs' BlobDeliveryError kinds map: transient with no status -> transit;
+      transient with a status (a 429 or 503 from begin_blobs, a PUT 5xx, each still standing after its retries) ->
+      unavailable; proxy -> transit; refused -> persist; defect with a status -> persist; defect with no status (the row
+      integrity check before any call) -> produce.
+      (4) query: from the last append's 200, poll session_tree_rows for the derived root session_id every 10 s until
+      compare_tree(record_turn's own batches, decoded stored rows) reports no missing_in_store or SLA_SECONDS (180)
+      elapse. The reader answered 200 at least once but rows stayed missing -> query; no 200 within the SLA (504
+      read_deadline_exceeded, 503, error) -> unavailable. Once visible, any other compare.ALARM_CLASSES count
+      (unexpected_in_store, column_mismatch, key_mismatch, duplicate_ref_rows) or race_duplicate_rows above zero on the
+      fresh tree, or more than one root session in the tree (a tree collision) -> persist (stored rows differ from the
+      sent rows).
+      (5) projection: session_state_and_duration(session_id, as_of=now) must equal derive.session_state_and_duration over
+      the decoded tree rows (the monitor's comparison) and read state success with a non-null duration; and one
+      sessions_window read spanning the UTC date of run_started_at to today must hold no row of the probe's project (real_window_hits=0, Decision 236 cl.1
+      exclusion, counted in-process from the register_project answer and never printed as an id). Either disagreeing on
+      a 200 answer -> projection; a read that does not answer 200 (504 read_deadline_exceeded, 503, error) -> unavailable,
+      never projection.
+      (6) post-persist, delegated to the next row. It runs whenever the Actions API is reachable (a token in
+      GITHUB_TOKEN or GH_TOKEN), in either identity mode, with prior selection pinned to telemetry-causal-chain.yml;
+      prior_mode=skipped only when no token is present. --require-prior exits 3 when post-persist is skipped, unavailable
+      or checked no prior run (prior_checked=0).
+      Skew: skewed(env, called=(session_state_and_duration, session_tree_rows, sessions_window)) is evaluated after stage
+      0 and again after stage 5; the run is skewed if either says so (golden re-checks after its run). A skewed run still
+      runs every stage and exits with its stage code (a red run stays visible in Actions) but files no alarm of any class
+      (golden replay's "a skewed run files nothing" rule), reported skew=1; under --assert-pass a skewed run exits 1 even
+      when every stage passed (golden's rule: a skewed run never satisfies the assert flag), so no alarm is discharged
+      against mismatched deployed code.
+      Exit codes: 0 pass; 3 unavailable; 10 produce; 11 transit; 12 persist; 13 query; 14 projection; 15
+      post_persist_loss; 1 the run could not complete for another reason. The current probe's
+      failing stage decides the code; post-persist runs whenever the reader is reachable and returns 15 only when the
+      current probe passed; post-persist unavailable with a passing current probe exits 3; --require-prior only turns an
+      otherwise-0 exit into 3 and never masks a loss code. Only loss classes file alarms, so a failed alarm filing
+      leaves the loss code (10-15) standing and the line reports alarm_filing=failed. Every loss class found on an unskewed run is filed through alarms.raise_alarms as causal_chain_<stage> (scope =
+      the short commit, file = this module, alarm_at None); acceptance_for is a dedicated function over module constants
+      (sensor_liveness _probe_acceptance precedent) giving `AWS_PROFILE=agent_platform bin/venv-python -m
+      scripts.ducklake_smoke.lambda_telemetry_causal_chain --no-alarms --assert-pass` for every class, plus
+      --require-prior for causal_chain_post_persist_loss (dischargeable from any shell with AWS credentials and a GitHub
+      token). Unavailable (3) files nothing: a persistent red is already raised as loop_liveness_stale by
+      sensor_liveness's success leg, which derives a 12 h threshold from this cron, so a probe-specific unavailable alarm
+      would double-record one event.
+      Output: one CAUSAL_CHAIN line (stage, exit code, mode, elapsed_s, visible_after_s, reader_calls, writer_calls,
+      blobs, real_window_hits, prior_mode, prior_checked, prior_lost, prior_skipped, skew, alarm_filing) -- counts and
+      class names only, never
+      a session id, project id, ref, URL, row value or body (Decision 101); logging disabled as in the monitor CLI.
+      Decomposed from the start (Decision 128): this module holds the CLI, stages 0-5, classification, alarms and output;
+      the next row holds the Actions API client and post-persist.
+  - file: scripts/ducklake_smoke/lambda_telemetry_causal_chain_prior.py
+    action: Create
+    purpose: >-
+      Actions API and post-persist. this_run(token, run_id) -> run_started_at and run_attempt; successful_runs(token,
+      since) -> this workflow's successful runs on main (id, run_attempt, run_started_at, head_sha), via the REST API
+      with GITHUB_TOKEN (actions: read), the same request shape as scripts.convergence_health.sensor_liveness; any API
+      failure raises a typed ActionsUnavailable that the CLI maps to unavailable, never to a loss class. select_prior:
+      the 4 most recent successful runs plus up to 4 aged 7 to 8 days, current run excluded (spans every 6-hourly merge
+      and the weekly gc_ops, Decision 236 cl.5). It owns the transcript builder, PROBE_SHAPE_VERSION and SHAPE_DIGESTS.
+      shape_version_at(sha): sha must match ^[0-9a-f]{40}$, then `git show <sha>:<this module's path>` (the workflow checks out full history) and an ast literal read of PROBE_SHAPE_VERSION
+      (never exec/eval); a malformed or unreadable sha -> None. post_persist(...): for each selected run whose shape
+      version equals the current one, rebuild its transcript from (run id, attempt, run_started_at), run record_turn over
+      it for the expected batches, recompute its root session_id with derive_entity_key, read session_tree_rows, and
+      compare_tree against those batches. Root session absent, or any compare.ALARM_CLASSES count (missing_in_store,
+      unexpected_in_store, column_mismatch, key_mismatch, duplicate_ref_rows) or race_duplicate_rows above zero -> lost
+      (vanished, changed, re-keyed or duplicated by merge or GC); stored rows of another parser_version than the current
+      PARSER_VERSION (other_generation_rows), another shape version or an unreadable sha -> skipped and counted. A session_tree_rows read that does not
+      answer 200 (504 read_deadline_exceeded, 503, error) -> post-persist unavailable, never lost. A POST_PERSIST_BUDGET_S (600) wall-clock cap stops further
+      reads and counts the rest skipped, so the job stays inside its timeout.
+  - file: tests/ducklake_neon_smoke_test/test_lambda_telemetry_causal_chain.py
+    action: Create
+    purpose: >-
+      Fake writer, reader, blob PUT and Actions client (no network): a passing run exits 0 with one CAUSAL_CHAIN line;
+      each stage's fault yields its own exit code and alarm class (producer raises -> 10; writer connection error -> 11;
+      append 422 and blob_not_verified -> 12; a fresh-tree value mismatch -> 12; reader 200 without the rows past the
+      SLA, with a fake clock -> 13; derived state mismatch -> 14; a probe row in sessions_window -> 14; a 504 on every
+      read and a 503 after retries -> 3 with no alarm); a fresh-tree case per compare class (unexpected_in_store,
+      column_mismatch, key_mismatch, duplicate_ref_rows, race_duplicate_rows) -> 12; a payload outside the blob band ->
+      10; an Actions API failure on this run's lookup -> 3 with nothing written; skew (before or after the stages) runs
+      every stage, exits with the stage code and files nothing, and under --assert-pass a fully passing skewed run exits
+      1; the transcript takes the claim-check route (a begin_blobs call happens, blobs=1); the entity_ref carries shape
+      version, run id and attempt and the first timestamp is run_started_at; local mode with a fake token runs
+      post-persist, local mode with no token skips it and passes --assert-pass, and --require-prior exits 3 on skipped,
+      unavailable or prior_checked=0, and never masks a loss code; a failed alarm filing keeps the loss code and reports
+      alarm_filing=failed; a tree collision -> 12; register and append retry at most twice on 429 and on 503 before unavailable, and a
+      begin_blobs BlobDeliveryError("transient", 429) -> 3; the tree visible and a sessions_window 504 -> 3 with no
+      alarm; each BlobDeliveryError kind maps as stage 3 states (transient without status -> 11, transient with a
+      status -> 3, proxy -> 11, refused -> 12, defect with a status -> 12, defect without a status -> 10);
+      unavailable files nothing; the output line carries no session id, project id, ref,
+      URL or row value (sentinels); the acceptance string per class, read from the acceptance function.
+  - file: tests/ducklake_neon_smoke_test/test_lambda_telemetry_causal_chain_prior.py
+    action: Create
+    purpose: >-
+      Prior-run selection (4 newest plus up to 4 aged 7-8 days, current run excluded); the rebuilt transcript and the
+      session id recomputation equal what the probe derived for the same identity; a shape digest pin: the sha256 of the
+      transcript built for a fixed identity equals SHAPE_DIGESTS[PROBE_SHAPE_VERSION], so a shape edit without a
+      version bump fails, plus an append-only leg against the merge base (every SHAPE_DIGESTS entry present at
+      `git merge-base origin/main HEAD` is unchanged, as tests/telemetry/test_parser_version_registry.py checks its
+      registry), so an entry cannot be rewritten in place; an earlier run's session missing -> lost; one case per
+      compare class (unexpected_in_store, column_mismatch, key_mismatch, duplicate_ref_rows, race_duplicate_rows) ->
+      lost; another parser_version, another shape version, a malformed sha and an unreadable sha -> skipped and counted,
+      never lost; shape_version_at reads the literal without executing the module; an Actions API failure ->
+      ActionsUnavailable, never lost; a session_tree_rows 504 -> unavailable, never lost; the budget cap counts the rest skipped.
+  - file: .github/workflows/telemetry-causal-chain.yml
+    action: Create
+    purpose: >-
+      Scheduled probe, `name: telemetry-causal-chain` (the ci_rca_taxonomy key). on: schedule cron '13 */6 * * *' (every-N-hours shape, sensor_liveness derives the peer from this
+      file, Decision 62) and workflow_dispatch on main only; no push or pull_request trigger, so it can never be a
+      required PR check (Decision 83). permissions {contents: read}; job permissions id-token write, contents read,
+      actions read. concurrency group telemetry-causal-chain, cancel-in-progress false; timeout-minutes 40 (two warm-ups,
+      the 180 s SLA, up to 600 s of post-persist reads and alarm filing). Steps mirror telemetry-golden-replay.yml:
+      checkout with fetch-depth 0 (skew's git diff against the deploy record's commit and shape_version_at's git show
+      need full history; a shallow clone would read every run as skewed), aws-region, Python 3.12 venv install, OIDC
+      assume of agent-platform-github-ci-branch (already holds the telemetry writer and telemetry reader URL grants
+      golden replay uses; no new IAM), resolve and mask the four Function URL roles golden resolves (writer, reader,
+      telemetry_writer, telemetry_reader; alarm filing goes through the ops portal's writer and reader) and each URL's
+      host too (golden masks URLs only), then `.venv/bin/python -m scripts.ducklake_smoke.lambda_telemetry_causal_chain` with GITHUB_TOKEN in env.
+      Inline run bodies stay as small as golden's. Header comment states: alarm not gate (Decision 210 cl.2), never a
+      required check (Decision 83), no terraform/apply/deploy/dispatch, counts only (Decision 101), every 6 h on
+      Benjamin's word with hourly off GitHub owned by rec-4688.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      r3_workflows gains one entry per inline `run:` body of the new workflow, keyed
+      "<workflow-rel-path>::<job-id>::<step-identity>" at its exactly measured effective line count, no padding and no
+      marker (registration, not a raise; precedent: golden replay's three entries, PR #1551).
+  - file: tests/test_telemetry_causal_chain_workflow.py
+    action: Create
+    purpose: >-
+      Parse the workflow (beside tests/test_telemetry_golden_replay_workflow.py): exactly one schedule entry, the
+      every-6-hours cron, which scripts.convergence_health.sensor_liveness.cron_period_seconds classifies as 21600;
+      workflow_dispatch gated to refs/heads/main; no push or pull_request trigger; job permissions include actions read
+      and id-token write and nothing writes contents; checkout fetch-depth 0; the role is agent-platform-github-ci-branch;
+      the URL step resolves the four roles writer, reader, telemetry_writer and telemetry_reader and masks each URL and
+      host; the workflow name is telemetry-causal-chain; the run step invokes
+      `scripts.ducklake_smoke.lambda_telemetry_causal_chain`;
+      timeout-minutes 40; no terraform, aws lambda update or workflow dispatch command appears.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      Add telemetry-causal-chain: tier not_a_gate, ci_rca excluded, owner platform, rationale on the
+      telemetry-verification precedent (it files its own telemetry_verify alarms and loop_liveness_stale backstops a
+      persistent red, so a ci-rca watch would double-record one event).
+  - file: docs/ROADMAP-PLATFORM.yaml
+    action: Modify
+    purpose: >-
+      Plan PR (planning-time re-grounding approved with the approach, freshness-gate stale-reference check): T3.2's
+      files_in_scope moves to the probe module, its post-persist module and the workflow, and its three bare-string
+      criteria become {id, text, status} objects c1-c3 with re-grounded event-journal wording and the 6-hour cadence
+      (Decision 136); the post-persist module's files_in_scope comment records that this re-grounding supersedes T2.15
+      c3's "re-registered in scripts/verifiers" clause (T2.15 itself is not touched; it re-grounds when it is planned).
+      Bookkeeping lands later in a roadmap-only PR after VP 5 and VP 6 pass: c1-c3 -> met with met_by
+      telemetry-causal-chain-probe; status in_progress (complete only once T2.36 is complete); progress_note line.
+  - file: docs/plans/PLAN-telemetry-causal-chain-probe.yaml
+    action: Create
+    purpose: This plan.
+bundled_recommendations: []
+followon_recs:
+  - rec-4688
+  - rec-4689
+infrastructure_dependencies:
+  - >-
+    None new. The probe runs on the existing github_ci_branch OIDC role, which already holds the telemetry writer and
+    telemetry reader Function URL invoke grants (terraform/personal/oidc_ci_roles.tf; golden replay uses both). The
+    claim-check PUT uses the writer-issued grant URL, so no S3 permission is added. No Terraform, IAM or Lambda change.
+  - >-
+    LAMBDA-DEPLOY NOT OWED (CD.16 / Decision 79): compute_affected_artifacts(<this plan's scope>) returns
+    {'data-pipeline': ['docs/ROADMAP-PLATFORM.yaml']}: the live roadmap is a packaged asset of the active data-pipeline
+    artifact. The change to that asset is roadmap data only (T3.2 re-grounding and the bookkeeping flip; no packaged
+    code), deploy-prod-lambdas.yml's path filter excludes it, and the asset refreshes with the artifact's next governed
+    deploy, so no build, deploy or smoke test is owed. No other scope file is Lambda-packaged and no .tf file is in
+    scope. Precedent: PLAN-project-alignment.
+acceptance_criteria:
+  - >-
+    T3.2:c1 -- a dispatched run on main produces, appends and reads back one probe root session (with one claim-check
+    blob) on the production telemetry catalog within SLA_SECONDS and exits 0; the session lives under the explicitly
+    registered synthetic:causal-chain-probe project, the run reports blobs=1, and its own sessions_window check reports
+    real_window_hits=0.
+  - >-
+    T3.2:c2 -- each of produce, transit, persist, query, projection and post-persist loss (an earlier probe session
+    vanished or its stored rows changed, re-keyed or duplicated, by compare_tree) exits with its own code (10-15) and
+    files its own causal_chain_<stage> telemetry_verify alarm; unavailable exits 3 and files no alarm.
+  - >-
+    T3.2:c3 -- .github/workflows/telemetry-causal-chain.yml runs the probe every 6 hours on a GitHub Actions schedule,
+    alarm not gate, with no push or pull_request trigger (so never a required check), and a scheduled run has completed
+    on main with prior_checked >= 1.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: >-
+      Probe unit tests (every stage's fault, exit codes, alarm classes, skew, local and Actions modes, prior-run
+      selection, id recomputation, compare_tree loss, no-leak output).
+    command: >-
+      bin/venv-python -m pytest tests/ducklake_neon_smoke_test/test_lambda_telemetry_causal_chain.py
+      tests/ducklake_neon_smoke_test/test_lambda_telemetry_causal_chain_prior.py -q
+    expected: exit 0; every case passes; the modules do not exist before the change.
+    fix_if: A stage maps to the wrong code or a value leaks - fix the probe modules, never the assertion.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: The unit suites run in every tier and are the permanent guard of the stage taxonomy.
+  - step: 2
+    phase: pre-deploy
+    action: >-
+      Workflow-shape test, and the golden-replay and telemetry_verify suites (shared engine surface and the oracle's
+      package boundary unchanged).
+    command: >-
+      bin/venv-python -m pytest tests/test_telemetry_causal_chain_workflow.py
+      tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py tests/telemetry_verify/ -q
+    expected: exit 0.
+    fix_if: >-
+      A golden-replay or package-boundary case broke - the probe changed a shared surface; move the change into the probe
+      modules, never widen the boundary allowlist.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: The workflow-shape test and the existing suites run in every tier.
+  - step: 3
+    phase: pre-deploy
+    action: Discharge the handoff obligation with a full-tier run to completion.
+    command: bin/venv-python -m scripts.validate
+    expected: >-
+      exit 0 (includes sensor_liveness peer derivation over the new schedule, the R3-workflow shell-body baseline, the
+      ci_rca taxonomy coverage and the roadmap ledger checks).
+    fix_if: >-
+      A failure in scope is fixed on the branch; never skip a test, relax an assertion or add a baseline entry to turn a red check green
+      (the planned r3_workflows registration excepted). A failure
+      outside scope becomes a rec via scripts.ops_data_portal (Decision 59, 55).
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      Local leg on the implementation branch before merge, from a second identity path (agent_platform): the V3
+      merge-gate evidence: every alarm's acceptance command, run with the GitHub tokens unset (pre-merge only). Nothing is deployed by this plan, so the
+      branch exercises the production engine as it stands.
+    command: >-
+      env -u GH_TOKEN -u GITHUB_TOKEN AWS_PROFILE=agent_platform bin/venv-python -m
+      scripts.ducklake_smoke.lambda_telemetry_causal_chain --no-alarms --assert-pass
+    expected: >-
+      Prints one CAUSAL_CHAIN line with stage=pass exit=0 mode=local blobs=1 real_window_hits=0 skew=0
+      prior_mode=skipped; exit 0. The tokens are unset because before merge the workflow is not on the default branch,
+      so its runs endpoint answers 404 (ActionsUnavailable), not an empty list. The line is pasted into the PR as
+      merge-gate evidence.
+    fix_if: >-
+      3 unavailable on a cold reader - re-run once (the first call warms it); still 3 - read the class and RCA (Decision
+      55), rec-4652's cold-start deadline is the known suspect. skew=1 - main moved on a deploy path since the last
+      governed deploy; rebase and wait for that deploy. Any loss code - RCA before any retry; never widen SLA_SECONDS.
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: post-deploy
+    action: After merge, dispatch the workflow on main and read its CAUSAL_CHAIN line.
+    command: >-
+      echo 'DISPATCH VIA MCP: mcp__github__actions_run_trigger(method="run_workflow", owner="otl-labs", repo="ontheloop",
+      workflow_id="telemetry-causal-chain.yml", ref="main"), then mcp__github__actions_get for the run and
+      mcp__github__get_job_logs for its probe job -- never the gh CLI (AGENTS.md Shell invocations)'
+    expected: >-
+      The run concludes success with CAUSAL_CHAIN stage=pass exit=0 mode=actions, visible_after_s below 180, blobs=1,
+      real_window_hits=0 and skew=0; the first run reports prior_checked=0 (no earlier runs).
+    fix_if: >-
+      3 unavailable on a cold reader - re-dispatch once; still 3 - read the class and RCA (Decision 55). Any loss code -
+      RCA before any retry; never widen SLA_SECONDS to pass.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: A scheduled run fires on main and passes with at least one earlier run re-read.
+    command: >-
+      echo 'READ VIA MCP: mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
+      resource_id="telemetry-causal-chain.yml", workflow_runs_filter={"event":"schedule","branch":"main"}), then
+      mcp__github__get_job_logs for the newest completed run'
+    expected: >-
+      The newest scheduled run concluded success with CAUSAL_CHAIN stage=pass exit=0 mode=actions, prior_checked >= 1,
+      prior_lost=0, real_window_hits=0.
+    fix_if: >-
+      No scheduled run within 12 h of merge - check the workflow is enabled and the cron parsed; prior_lost > 0 - RCA
+      the post-persist loss (merge or GC), never retry it away.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/ducklake_smoke/lambda_telemetry_causal_chain.py
+    behavior: Stage taxonomy, exit codes, alarm classes, SLA polling, skew rule, local and Actions modes and no-leak output.
+    verification_step: 1
+    test_selector: tests/ducklake_neon_smoke_test/test_lambda_telemetry_causal_chain.py
+    red_green_expectation: red before (module absent), green after.
+  - source: scripts/ducklake_smoke/lambda_telemetry_causal_chain_prior.py
+    behavior: Prior-run selection, id recomputation, compare_tree loss, skip rules, Actions API failure mapping, budget cap.
+    verification_step: 1
+    test_selector: tests/ducklake_neon_smoke_test/test_lambda_telemetry_causal_chain_prior.py
+    red_green_expectation: red before (module absent), green after.
+  - source: .github/workflows/telemetry-causal-chain.yml
+    behavior: >-
+      Every-6-hours schedule, main-only dispatch, no PR trigger, least privilege, full-history checkout, masked URLs,
+      probe invocation, no deploy verbs.
+    verification_step: 2
+    test_selector: tests/test_telemetry_causal_chain_workflow.py
+    red_green_expectation: red before (workflow absent), green after.
+  - source: config/composite_action_body_baseline.yaml
+    behavior: The new workflow's inline run bodies are registered at their measured sizes.
+    verification_step: 3
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      Ratchet data; the full tier's validate_composite_action_shell_bodies (R3-workflow) fails on an unregistered inline
+      workflow body or one over its ceiling, which is the guard.
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: The new workflow is classified not_a_gate and excluded from ci-rca.
+    verification_step: 3
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      Taxonomy data; the full tier's validate_ci_rca_taxonomy coverage check fails on a workflow with no taxonomy entry,
+      which is the guard.
+  - source: docs/ROADMAP-PLATFORM.yaml
+    behavior: T3.2 criteria are id'd objects that closes_criteria resolves, and the bookkeeping flip records met_by.
+    verification_step: 3
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      Roadmap data guarded by validate_platform_roadmap and the exit-criteria ledger checks in the full tier.
+constraints:
+  - >-
+    No Terraform, IAM, Lambda, Neon, secret or AWS resource change; no admin credentials; no src/common/ducklake_*.py or
+    config/lambda/ducklake/** edit (either would start the governed Lambda deploy channel).
+  - >-
+    scripts/telemetry_verify stays the producer-independent oracle: the probe imports from it (alarms, rows, compare,
+    derive) but nothing is added to it, and tests/telemetry_verify/test_package_boundary.py is not widened.
+  - >-
+    Production writes are limited to the fixed synthetic:causal-chain-probe project, one root session per run attempt,
+    explicitly registered and excluded from real reads (Decision 236 cl.1); no disposable deploy vectors on production.
+  - >-
+    Production is read only through the telemetry reader's named verbs (Decision 236 cl.2, Decision 84 I-3); no content
+    read (Decision 236 cl.3). Post-commit blob object loss is a declared residual owned by the blob-root fence (Decision
+    230 cl.5), not faked with a new S3 grant.
+  - >-
+    Alarm, not gate (Decision 210 cl.2): never a required check (Decision 83). Unavailable is its own loud class (exit
+    3, red run) and never a loss alarm (Decision 215 cl.2); it does not reuse Decision 155's transient-reader tolerance
+    (155 cl.3 confines that to its own call sites), so nothing imports scripts.ops_portal.reader_transient.
+  - >-
+    Unique entity_ref per run attempt (Decision 207: an identical re-send is a no-op and would read back old rows as a
+    false pass); SLA_SECONDS and POST_PERSIST_BUDGET_S are named constants, never widened to make a run pass.
+  - Counts and class names only in logs; mask Function URLs and hosts (Decision 101).
+  - "SLOC: decompose rather than raise any budget (Decision 128); the probe is two modules from the start."
+  - >-
+    PROBE_SHAPE_VERSION is bumped, with a new SHAPE_DIGESTS entry, on any change to the transcript builder; prior runs
+    of another shape version are skipped, never compared.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Approval: Benjamin chose every 6 h on Actions 2026-10-28 16:17Z (cmsg_012XgaFy8VaDQbxP5D8nC958M4fzyyiWcE1SW3L4LYypjd; hourly off GitHub is rec-4688) and said 'write the plan on that basis' (cmsg_012XgaFy8VaDQbxP5D8nC958S6yP7MU3omMGX7Ard61PoF); presentation /mnt/project-files/telemetry-slice5/step6b-presentation.md."
+  - "Why not scripts/verifiers: its REGISTRY entries run inside validate.py (validate_verification_harness), so a registered production probe would write production rows on every PR (Decisions 210 cl.2, 83, 236 cl.1). T2.15 c3 (deferred_post_mvp) still names CausalChainVerifier; untouched. Why not scripts/telemetry_verify (critique round 1): its AST boundary keeps the oracle free of producer and transport code; the probe runs the producer, so it sits beside golden replay in scripts/ducklake_smoke and imports the oracle, never the reverse."
+  - "Why 6 h: matches telemetry merge_ops (every 6 h) and sensor_liveness's 6 h floor and ALARM_MIN_INTERVAL_S; GitHub Actions cron is best-effort (scheduled telemetry runs have landed about 5 h late)."
+  - "Session id = derive_entity_key('telemetry_sessions:session_id', tenant, project, entity_ref, session_started_at): the transcript's first timestamp is the attempt's run_started_at so later runs can recompute it from the Actions API; the transcript is a deterministic function of shape version and run identity, so a prior run's expected rows are rebuilt, not stored."
+  - "Cold reader: rec-4652 (golden replay red on the reader cold-start deadline) and rec-4474 are the known risk; the probe warms first and classes a reader with no 200 inside the SLA as unavailable (3), never as loss. While both stay open G.8 may see exit 3; sensor_liveness raises loop_liveness_stale if no run succeeds for 12 h."
+  - "SLA_SECONDS = 180: Decision 214 measured reader/writer p95 of 26-55 s; a cold re-ATTACH costs about 11 s; 180 s covers a cold start plus polling with margin. Revisit with measured visible_after_s, never to make a failing run pass."
+  - "Growth: about 120 probe sessions and as many small claim-check blobs a month stay in production under the synthetic project (blob deletion is admin-only); accepted with the approach (scout NOTE on Decision 236)."
+  - "Follow-ons: rec-4688 (hourly off GitHub, needs a Decision vs CD.29), rec-4689 (CD.17 / G.8 read T3.2 latest_run.verdict, which nothing produces). T2.15 c3 (deferred_post_mvp) still says CausalChainVerifier is re-registered in scripts/verifiers; T3.2's re-grounded files_in_scope comment names that supersession so the drift is visible from the item T2.15 depends on, and T2.15's own plan re-grounds it (touching T2.15 now would force converting its criteria and shift the secrets-baseline line pins)."
+  - "Unavailable alarm: dropped on critique round 2 -- sensor_liveness's success leg already raises loop_liveness_stale when this workflow has no success for 12 h (twice the 6 h cron), so a probe-specific causal_chain_unavailable class would double-record one event (the same reason the workflow is excluded from ci-rca)."
+  - "Overlap: docs/ROADMAP-PLATFORM.yaml is also edited by the production flip's bookkeeping PR (T2.36) and by PLAN-telemetry-session-log-retirement's bookkeeping (T3.20); different items, the later PR rebases. No code file is shared with the sibling plan."
+  - "Decision-scout: FLAGS_FOUND (236 NOTE on permanent probe blobs: accepted, a few tiny blobs a day, no content read; residual declared). Decisions triaged: 189 of 189; Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. CITE: 236, 210, 83, 62, 199, 207, 200, 228, 213, 55, 88, 205, 136, 101. Report: /mnt/project-files/telemetry-slice5/decision-scout-report-t3-2.md."
+  - "Fable consult: /mnt/project-files/telemetry-slice5/fable-independent-advice.md (F1 b, F2 cut with corrections, F3 adopted then moved from scripts/telemetry_verify to scripts/ducklake_smoke on critique round 1)."
+  - "red_overlap: verdict clear (no reds, SLO 4h) at plan write 2026-10-28."
+  - "Critique: rounds 1-3 REVISE (cap); confirming round 4 REVISE with one fix applied verbatim at 8babf263; round 5 on Benjamin's word (decision card 2026-10-28 19:03Z) PROCEED, its non-blocking notes 1-4 and 10-12 folded verbatim (blob error map, non-200 reads -> unavailable, 429 tests, workflow name, host masking, precedent PR)."
+  - "gates: decision-scout=FLAGS_FOUND; plan-critique=PROCEED after 5 round(s)"
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections (55, 62, 79, 83, 84, 101, 128, 136, 155, 199, 200, 207, 210, 213, 214, 215, 228, 230, 236)
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    Create scripts/ducklake_smoke/lambda_telemetry_causal_chain_prior.py and its tests, then
+    scripts/ducklake_smoke/lambda_telemetry_causal_chain.py and its tests; run VP 1. Post: every stage's fault maps to
+    its code with fakes only.
+  - >-
+    Create the workflow and its shape test, measure and register its inline run bodies in
+    config/composite_action_body_baseline.yaml, add the ci_rca_taxonomy entry; run VP 2.
+  - Run VP 3 (full tier) to completion.
+  - >-
+    Run VP 4 (the local leg against production) on the branch and paste its CAUSAL_CHAIN line into the PR as the V3
+    merge-gate evidence.
+  - >-
+    Closure evidence recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state
+    (bin/venv-python -m scripts.session.github_readiness); parent validator evidence (VP 3 full-tier exit 0 plus
+    bin/venv-python -m scripts.checks.validation_result --verify-head for the pushed HEAD); structured postflight
+    evidence (scripts.session.postflight --evidence); the real outcome -- push, PR, CI green by event-driven wake (never
+    polled), squash-merge under the standing rule (no IAM, spend change beyond the approved cadence, Class A or
+    Decision). The implementation PR does not touch T3.2's criteria.
+  - >-
+    After merge run VP 5 (dispatch); run VP 6 on the first scheduled run that has an earlier run to re-read. Only after
+    VP 5 and VP 6 pass, open a roadmap-only bookkeeping PR: T3.2 c1-c3 -> met with met_by telemetry-causal-chain-probe,
+    status stays in_progress until T2.36 is complete, progress_note line (exit-criteria-ledger status populated on a
+    verified VP pass; precedents PLAN-telemetry-reader-verbs and PLAN-telemetry-production-maintenance #1672).
+  - "Report: what was implemented, verification results, the first runs' CAUSAL_CHAIN lines."
+rollback: >-
+  Revert the PR; the workflow stops and nothing else changes. Probe rows and blobs already written stay in production
+  under the synthetic project (excluded from real reads; blob deletion is admin-only).

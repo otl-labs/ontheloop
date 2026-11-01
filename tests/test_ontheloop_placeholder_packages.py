@@ -110,3 +110,25 @@ def test_no_node_or_rust_toolchain_in_ci() -> None:
         }
     )
     assert hits == []
+
+
+def test_publish_workflow_proof_only_is_fail_safe() -> None:
+    workflow_path = ROOT / ".github" / "workflows" / "publish-ontheloop.yml"
+    workflow = yaml.safe_load(workflow_path.read_text())
+    inputs = workflow[True]["workflow_dispatch"]["inputs"]  # PyYAML reads the bare `on` key as True
+    assert inputs["proof_only"]["type"] == "boolean"
+    assert inputs["proof_only"]["default"] is False
+
+    steps = workflow["jobs"]["publish"]["steps"]
+    build = next(s for s in steps if s["name"] == "Build distribution")
+    publish = next(s for s in steps if s.get("uses", "").startswith("pypa/gh-action-pypi-publish"))
+    assert steps.index(build) < steps.index(publish)
+    assert build["env"]["PROOF_ONLY"] == "${{ inputs.proof_only }}"
+    assert build["run"].count("\n") == 0
+    packages_dir = publish["with"]["packages-dir"]
+    assert build["run"].endswith(f"python -m scripts.ci.pypi_proof_only_guard ontheloop {packages_dir}")
+    assert publish["with"]["skip-existing"] == "${{ inputs.proof_only }}"
+    assert publish["with"]["attestations"] == "${{ !inputs.proof_only }}"
+
+    codeowners = (ROOT / ".github" / "CODEOWNERS").read_text()
+    assert re.search(r"^/scripts/ci/pypi_proof_only_guard\.py\s+@\S+", codeowners, re.M)

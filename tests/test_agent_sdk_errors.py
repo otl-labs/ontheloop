@@ -5,6 +5,7 @@ from __future__ import annotations
 from scripts.agent_sdk.errors import (
     AgentToolError,
     ReaderBoundaryError,
+    ReaderDeadlineError,
     ReaderInputError,
     ReaderRuntimeError,
     ReaderUnavailableError,
@@ -94,3 +95,19 @@ def test_unmapped_maps_to_boundary_error_naming_class_and_request_id():
     mapped = map_reader_error(exc)
     assert isinstance(mapped, ReaderBoundaryError)
     assert "KeyError" in str(mapped) and "req-7" in str(mapped)
+
+
+def test_read_deadline_maps_to_reader_deadline_error():
+    exc = _invoke_error(
+        504,
+        {
+            "ok": False,
+            "error_type": "read_deadline_exceeded",
+            "reason": "reader_deadline",
+            "request_id": "r",
+            "action": "named_read",
+        },
+    )
+    mapped = map_reader_error(exc)
+    assert isinstance(mapped, ReaderDeadlineError)
+    assert "narrow the window" in str(mapped)

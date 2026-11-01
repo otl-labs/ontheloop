@@ -15,7 +15,7 @@ All validation is deferred to explicit model construction inside load_contract /
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -193,6 +193,38 @@ class ContractMeta(BaseModel):
         return self
 
 
+class Realization(BaseModel):
+    """Who writes each stored column of a telemetry table (shape only; cross-file rules live in
+    scripts/checks/contracts/validate_telemetry_field_realization.py).
+
+    `produced` keys are a registered producer id or the literal `write_boundary`; `unproduced` keys are
+    owners. Unrelated to a read-derived field's `derivation.realized`, which says a write-time derivation
+    is implemented.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    produced: dict[str, list[str]] = Field(default_factory=dict)
+    unproduced: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class RunShape(BaseModel):
+    """One declared run shape of a Class A table (telemetry_agents: sub-agent vs top-level run)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: Literal["child", "root"]
+    observation_id: Literal["spawning_tool_call", "null"]
+    entity_ref: str
+    external_ref: str
+    agent_type: str
+    triggers: list[str] = Field(min_length=1)
+    host_run_ref: Literal["null", "required"]
+    rows: str
+    one_run_per: str | None = None
+    state: str | None = None
+
+
 class ContractDocument(BaseModel):
     """A full ritual contract document (INTENT Parts 3C-3E).
 
@@ -205,6 +237,8 @@ class ContractDocument(BaseModel):
 
     contract: ContractMeta
     fields: dict[str, FieldSpec] | None = None
+    realization: Realization | None = None
+    run_shapes: dict[str, RunShape] | None = None
     verbs: dict[str, VerbSpec] | None = None
     governance: ContractGovernance | None = None
     allowed_values: Any | None = None
@@ -217,6 +251,8 @@ class ContractDocument(BaseModel):
     @model_validator(mode="after")
     def _validate_class_shape(self) -> ContractDocument:
         cls = self.contract.class_
+        if self.run_shapes is not None and cls is not ContractClass.A:
+            raise ValueError("run_shapes is allowed on a Class A contract only")
         if cls is ContractClass.A:
             if not self.fields:
                 raise ValueError("Class A contract must define a non-empty `fields` mapping")

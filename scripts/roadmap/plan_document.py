@@ -7,11 +7,12 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_serializer, model_validator
 
+from scripts.contract_rules import parse_yaml
+from scripts.roadmap.plan_gate_rounds import _GATE_VERDICTS, GateRound
 from scripts.roadmap.vp_literals import (
     _BACKTICK_LITERAL_RE,
     SELF_SATISFYING_VERDICT,
@@ -24,6 +25,9 @@ _SUPPORTED_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4, 5})
 _V2_PHASE_ENUM: frozenset[str] = frozenset({"pre-deploy", "post-deploy"})
 _MIN_WAIVER_CHARS = 20
 _REC_ID_RE = re.compile(r"rec-\d+")
+_DECISION_TOKEN_RE = re.compile(r"dec:[1-9][0-9]*(#[^\s#:]+)?")
+_EDGE_FIELDS = frozenset({"amends", "introduces", "principal"})
+_EDGE_FIELDS_MIN_VERSION = 5
 
 # _partition_command lives in scripts.roadmap.vp_literals (Decision 104 sole-home for the
 # shell-command tokenizer within this package) -- imported back here rather than duplicated.
@@ -64,6 +68,16 @@ class ScopeEntry(BaseModel):
     file: str = Field(min_length=1)
     action: ScopeAction
     purpose: str = Field(min_length=1)
+    new_imports: list[Annotated[str, Field(pattern=r"^(scripts|src|tests)(\.[A-Za-z_][A-Za-z0-9_]*)+$")]] = Field(
+        default_factory=list
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_new_imports(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if not data.get("new_imports"):
+            data.pop("new_imports", None)
+        return data
 
 
 class VerificationStep(BaseModel):
@@ -242,6 +256,10 @@ class PlanDocument(BaseModel):
     fallback_reevaluation: FallbackReevaluation | None = None
     implementation_declared: bool = False
     weakening_dispositions: list[WeakeningDisposition] = Field(default_factory=list)
+    amends: list[str] = Field(default_factory=list)
+    introduces: list[str] = Field(default_factory=list)
+    principal: str | None = None
+    gate_rounds: list[GateRound] = Field(default_factory=list)
 
     @field_validator("schema_version")
     @classmethod
@@ -287,6 +305,51 @@ class PlanDocument(BaseModel):
                     "intent belongs on the rec, not in this field"
                 )
         return v
+
+    @field_validator("amends")
+    @classmethod
+    def _amends_tokens(cls, v: list[str]) -> list[str]:
+        for entry in v:
+            if not _DECISION_TOKEN_RE.fullmatch(entry):
+                raise ValueError(f"amends entry {entry!r} is not a valid 'dec:<number>[#<clause-id>]' token")
+        return v
+
+    @field_validator("introduces")
+    @classmethod
+    def _introduces_tokens(cls, v: list[str]) -> list[str]:
+        for entry in v:
+            if not entry or any(ch.isspace() for ch in entry):
+                raise ValueError(f"introduces entry {entry!r} is not a valid name token (non-blank, no whitespace)")
+        return v
+
+    @field_validator("principal")
+    @classmethod
+    def _principal_token(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not v or any(ch.isspace() for ch in v):
+            raise ValueError(f"principal {v!r} is not a valid principal token (non-blank, no whitespace)")
+        if "@" in v:
+            raise ValueError(
+                "principal must not contain '@': an email address is a private identifier (public-repository boundary)"
+            )
+        return v
+
+    def _validate_edge_fields_version(self) -> None:
+        present = sorted(_EDGE_FIELDS & self.model_fields_set)
+        if present and self.schema_version < _EDGE_FIELDS_MIN_VERSION:
+            raise ValueError(
+                f"{', '.join(present)} require schema_version {_EDGE_FIELDS_MIN_VERSION} or above "
+                f"(got schema_version {self.schema_version})"
+            )
+
+    def _validate_gate_rounds(self) -> None:
+        if self.gate_rounds and self.schema_version < _EDGE_FIELDS_MIN_VERSION:
+            raise ValueError(f"gate_rounds requires schema_version {_EDGE_FIELDS_MIN_VERSION} or above")
+        for gate in _GATE_VERDICTS:
+            rounds = [row.round for row in self.gate_rounds if row.gate == gate]
+            if rounds != list(range(1, len(rounds) + 1)):
+                raise ValueError(f"gate_rounds for {gate} must number 1..N in order with no gap, got {rounds}")
 
     def _validate_handoff_policy(self) -> None:
         if self.schema_version in {3, 4, 5}:
@@ -392,6 +455,8 @@ class PlanDocument(BaseModel):
         self._validate_handoff_policy()
         self._validate_test_obligation_links()
         self._validate_expected_literals()
+        self._validate_edge_fields_version()
+        self._validate_gate_rounds()
         return self
 
 
@@ -444,8 +509,7 @@ def load(path: str | Path) -> PlanDocument:
     must be named PLAN-{slug}.yaml.
     """
     path = Path(path)
-    with path.open(encoding="utf-8") as fh:
-        data = yaml.safe_load(fh)
+    data = parse_yaml(path.read_text(encoding="utf-8"))
     doc = PlanDocument.model_validate(data)
     expected_name = f"PLAN-{doc.slug}.yaml"
     if path.name != expected_name:

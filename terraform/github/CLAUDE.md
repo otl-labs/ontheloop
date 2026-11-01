@@ -15,27 +15,28 @@ The `terraform-apply-sandbox.yml` workflow path filter is `terraform/personal/**
 to any auto-apply workflow is FORBIDDEN (Decision 77 / `environment-taxonomy.yaml`):
 `terraform_apply_guard.py` is AWS-IAM-only and cannot inspect `github_*` resource diffs; a
 branch-protection change applied ungated could lock out the push-to-main flow the workflow depends
-on. Apply this module locally, by hand, every time.
+on. Apply this module by hand from AWS CloudShell, every time.
 
 ## Prerequisites
 
 - Terraform 1.10+ (`cat config/terraform-version`)
-- AWS credentials for the `agent_platform` profile (to read the GitHub PAT from Secrets Manager)
+- AWS CloudShell, as an identity that can read the PAT secret and write `tfstate/github/` (a Claude
+  Code cloud session cannot: its proxy swaps the PAT for a token that gets 403).
 - A GitHub admin PAT stored in Secrets Manager. Required scopes: `repo`, `admin:repo_hook`, `read:org`.
 
 ## Apply runbook
 
 ```bash
 # 1. Export the GitHub PAT from Secrets Manager.
-export GITHUB_TOKEN=$(aws secretsmanager get-secret-value \
+export TF_VAR_github_token=$(aws secretsmanager get-secret-value \
+  --region eu-west-2 \
   --secret-id <GITHUB_PAT_SECRET_ARN> \
   --query SecretString \
-  --output text \
-  --profile agent_platform)
+  --output text)
 
 # 2. Resolve the numeric GitHub user ID for the tf-gated-apply reviewer.
 #    benjamin-blake's numeric ID (NOT the login string):
-REVIEWER_ID=$(gh api /user --jq .id)   # run as the reviewer account
+REVIEWER_ID=$(curl -s -H "Authorization: Bearer $TF_VAR_github_token" https://api.github.com/user | jq .id)
 #    Or use the GitHub MCP get_me tool in Claude Code on the web.
 
 # 3. Initialise (S3 backend in agent-platform-data-lake; region and re-init rule: see
@@ -70,11 +71,10 @@ on Environment reviewer approval -- the job does not start until benjamin-blake 
 the GitHub Actions UI.
 
 Key constraints:
-- `prevent_self_review = false`: sole-developer repo; self-approval is intentional.
-- `deployment_branch_policy.protected_branches = true`: the gated job is only reachable from
-  protected branches (main). No custom branch policies.
-- The reviewer user ID is passed via `gated_apply_reviewer_user_ids` at apply time; it is
-  **never** committed with a literal default.
+- `protected_branches = true` may not restrict to main under the ruleset-only main.
+- The reviewer ID comes from `gated_apply_reviewer_user_ids` at apply time, never a literal default.
+
+deployment-approval-probe: inert rec-4695 probe Environment, created in the UI and imported; see its block in `environments.tf` and the workflow header.
 
 ## Lockout recovery
 
@@ -82,13 +82,11 @@ If the ruleset is applied with incorrect required-status-check names and merges 
 1. Use the bypass actor (repo Admin role, actor_id=5) to merge a fix branch directly, OR
 2. Disable the ruleset via the GitHub UI: repo Settings -> Rules -> Rulesets -> main-protection -> Disable.
 
-## First-time import
+## State reconcile (rec-3136)
 
-On a fresh state, import the existing `theseus` repository rather than recreating it, and
-verify the plan shows no replacement:
-```bash
-terraform -chdir=terraform/github import github_repository.this theseus
-```
+State is keyed by repository name. After a rename or transfer, never apply first: run
+`terraform state rm github_repository.this` and every other address, then apply the
+`imports.tf` re-import (one block per resource, 0 to change). Plan: `docs/plans/PLAN-terraform-github-state-reconcile.yaml`.
 
 ## Ruleset check-run names
 

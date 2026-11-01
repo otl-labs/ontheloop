@@ -183,13 +183,11 @@ class TestReconcileScopeSubset:
         )
 
     def test_invalid_reconcile_scope_raises(self) -> None:
-        with pytest.raises(ValueError, match="reconcile_scope"):
-            _enforce_reconcile_pending_subset(
-                "ops_decisions",
-                {"reconcile_scope": "bogus", "pending_reconcile": {}, "reconciled": {}},
-                self._declared(),
-                "scd2",
-            )
+        entry = {"pending_reconcile": {}, "reconciled": {}}
+        with pytest.raises(ValueError, match="telemetry_catalog"):
+            _enforce_reconcile_pending_subset("t", {**entry, "reconcile_scope": "bogus"}, self._declared(), "scd2")
+        with pytest.raises(ValueError, match="scope_reason"):
+            _enforce_reconcile_pending_subset("t", {**entry, "reconcile_scope": "telemetry_catalog"}, self._declared(), "scd2")
 
     def test_undeclared_column_under_pending_reconcile_raises(self) -> None:
         with pytest.raises(ValueError, match="not a declared column"):

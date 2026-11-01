@@ -375,7 +375,7 @@ class TestObservationsPersonaBackend:
         }
         assert expected == {
             "persona_backend": {"litellm", "claude_cli"},
-            "billing_shape": {"metered_marginal", "fixed_non_rollover_allowance"},
+            "billing_shape": {"metered_marginal", "fixed_non_rollover_allowance", "local"},
         }
 
         for name, values in expected.items():
@@ -395,6 +395,7 @@ class TestObservationsPersonaBackend:
         cost_usd = doc.fields["cost_usd"]
         assert "billing_shape" in cost_usd.derivation["inputs"]
         assert "fixed_non_rollover_allowance" in cost_usd.derivation["formula"]
+        assert "'local'" in cost_usd.derivation["formula"]
         assert "cost_usd_reported" in cost_usd.derivation["formula"]
 
 
@@ -506,3 +507,10 @@ def test_capture_provenance_and_usage_columns_are_nullable_and_ruled() -> None:
         entries = [e for e in raw["amendment_log"] if "PLAN-telemetry-column-additions" in e["summary"]]
         assert len(entries) == 1 and entries[0]["semantic_break"] is False, table
         assert entries[0]["change_class"] == "field_add" and entries[0]["migration_story"], table
+
+
+def test_duration_seconds_declares_truncation_toward_zero() -> None:
+    for name in ("telemetry_sessions", "telemetry_agents"):
+        field = _resolved(name)["duration_seconds"]
+        assert "truncate toward zero to whole seconds" in _norm(field.derivation["formula"]), name
+        assert "truncated toward zero to whole seconds" in _norm(field.semantics), name

@@ -24,6 +24,9 @@ def action_catalog_stats(event: dict[str, Any], _con: Any) -> dict[str, Any]:
     the supported measurement path for the neon-egress budget (the DR bucket + direct CloudWatch reads
     are IAM-blocked from the dev role by design). Read-only: no merge/expire/cleanup/orphan.
 
+    The two metrics are the undimensioned ops series, so they are emitted only for the ops catalog; any other schema
+    (a measurement read of ducklake_smoke or ducklake_telemetry) returns the same body and emits nothing.
+
     Expected event: {"action": "catalog_stats", "meta_schema": "ducklake_ops"}
     """
     raw_schema = event.get("meta_schema")
@@ -35,6 +38,8 @@ def action_catalog_stats(event: dict[str, Any], _con: Any) -> dict[str, Any]:
     ops_filter = event.get("ops_table_filter", "ops_%")
     result = maint.catalog_stats(meta_schema=meta_schema, dsn=rt.fetch_dsn(), ops_table_filter=ops_filter)
 
+    if meta_schema != rt.META_SCHEMA:
+        return result
     _shared._emit_maintenance_metric("CatalogMetadataBytes", float(result.get("catalog_metadata_bytes") or 0))
     if result.get("file_column_stats_rows_est") is not None:
         _shared._emit_maintenance_metric("CatalogFileColumnStatsRows", float(result["file_column_stats_rows_est"]))
@@ -86,6 +91,7 @@ def _report_stats_index(dsn: dict[str, str], meta_schema: str) -> dict[str, Any]
             conn.autocommit = True
             with conn.cursor() as cur:
                 report = {s: index_status.catalog_index_status(cur, s) for s in index_status.catalog_index_schemas(cur)}
+                _add_growth(cur, report)
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 -- the message can name the host: class and SQLSTATE only
@@ -96,4 +102,18 @@ def _report_stats_index(dsn: dict[str, str], meta_schema: str) -> dict[str, Any]
         _shared._emit_maintenance_metric("StatsIndexValid", 1.0 if state["valid"] else 0.0, dimensions=dims)
         _shared._emit_maintenance_metric("FileColumnStatsIdxScan", float(state["idx_scan"] or 0), dimensions=dims)
         _shared._emit_maintenance_metric("FileColumnStatsSeqScan", float(state["table_seq_scan"] or 0), dimensions=dims)
+        if state.get("stats_rows_est") is not None:
+            _shared._emit_maintenance_metric("CatalogFileColumnStatsRows", float(state["stats_rows_est"]), dimensions=dims)
     return report
+
+
+def _add_growth(cur: Any, report: dict[str, Any]) -> None:
+    """Stats-row growth estimate for the production telemetry catalog only, inside its own report entry. A failure
+    here records class and SQLSTATE and never reaches the caller's except, which would emit StatsIndexValid=0."""
+    entry = report.get(rt.TELEMETRY_PROD_META_SCHEMA)
+    if entry is None:
+        return
+    try:
+        entry["stats_rows_est"] = index_status.stats_rows_est(cur, rt.TELEMETRY_PROD_META_SCHEMA)
+    except Exception as exc:  # noqa: BLE001 -- class and SQLSTATE only: the message can name the host
+        entry["growth_error"] = {"error_class": type(exc).__name__, "sqlstate": getattr(exc, "pgcode", None)}

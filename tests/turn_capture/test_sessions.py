@@ -8,7 +8,7 @@ from pathlib import Path
 import yaml
 
 from src.turn_capture.record_turn import record_turn
-from src.turn_capture.sessions import AGENT_TYPE, WORKFLOWS, build_agents, build_sessions
+from src.turn_capture.sessions import AGENT_TYPE, WORKFLOW_SKILLS, WORKFLOWS, build_agents, build_sessions
 from src.turn_capture.transcript import MemTree
 from tests.fixtures.turn_capture_corpus import (
     PROJECT_REF,
@@ -29,6 +29,10 @@ from tests.fixtures.turn_capture_corpus import (
     text_block,
     tool_result,
     tool_use_block,
+)
+from tests.fixtures.turn_capture_v6_cases import (
+    subagent_workflow_skills_files,
+    workflow_from_skill_files,
 )
 
 REGISTRY = Path(__file__).resolve().parents[2] / "config" / "agent" / "data_quality" / "source_registry.yaml"
@@ -370,7 +374,7 @@ def test_resume_boundary_derives_the_previous_segment_close() -> None:
     assert by(sessions(mid_tool, final=False), event_kind="close")[0]["outcome"] == "cancelled"
     assert by(sessions(mid_tool, final=False), event_kind="close")[0]["external_ref"] == "a1b#0/close"
     diag: Counter[str] = Counter()
-    early = [*_resumed()[:2], hook("rs", 1, "SessionStart:resume"), *_resumed()[3:]]
+    early = [*_resumed()[:2], hook("n", 5, "Notification"), hook("rs", 4, "SessionStart:resume"), *_resumed()[3:]]
     build_sessions(parse_records(early, None, False), make_ctx(), diag)
     assert diag["resume_before_close"] == 1
     final = sessions(_resumed(), final=True)
@@ -418,3 +422,94 @@ def test_open_and_resume_rows_carry_their_segment_provenance() -> None:
     row = by(rows_of(build_sessions(parse_records(bare, None, True), make_ctx(), diag)), event_kind="open")[0]
     assert not {"harness_session_key", "checkout_sha"} & set(row)
     assert dict(diag) == {"pin_without_checkout": 1, "harness_session_key_absent": 1}
+
+
+SKILLS_DIR = Path(__file__).resolve().parents[2] / ".claude" / "skills"
+
+
+def _opens(files):
+    rows = record_turn(MemTree(files), None, project_ref=PROJECT_REF, session_final=True).sessions
+    return {r["entity_ref"]: r for r in rows if r["event_kind"] == "open"}
+
+
+def _skill_call(uuid, t, tool_id, skill):
+    return assistant(uuid, t, "m" + uuid, [tool_use_block(tool_id, "Skill", {"skill": skill})])
+
+
+def test_command_name_tag_still_wins_for_the_root() -> None:
+    root = [
+        prompt("u1", 1, "p1", cmd("plan")),
+        _skill_call("a1", 2, "tuA", "implement"),
+        tool_result("r1", 3, "tuA", "ok", pid="p1"),
+        assistant("a2", 4, "m2", [text_block("x")]),
+    ]
+    assert by(sessions(root), event_kind="open")[0]["workflow"] == "plan"
+
+
+def test_first_workflow_skill_names_a_relay_root() -> None:
+    opens = _opens(workflow_from_skill_files())
+    assert [r["workflow"] for r in opens.values()] == ["plan"]
+    diag: Counter[str] = Counter()
+    root = [
+        prompt("u1", 1, "p1", "relay"),
+        _skill_call("a1", 2, "tuA", "/Planning"),
+        assistant("a2", 4, "m2", [text_block("x")]),
+    ]
+    rows = rows_of(build_sessions(parse_records(root, None, True), make_ctx(), diag))
+    assert by(rows, event_kind="open")[0]["workflow"] == "plan" and diag["workflow_from_skill"] == 1
+    unknown = [
+        prompt("u1", 1, "p1", "relay"),
+        _skill_call("a1", 2, "tuA", "dataviz"),
+        assistant("a2", 4, "m2", [text_block("x")]),
+    ]
+    assert by(sessions(unknown), event_kind="open")[0]["workflow"] == "claude_code"
+
+
+def test_subagent_reads_its_own_gate_skill() -> None:
+    opens = _opens(subagent_workflow_skills_files())
+    by_key = {key.rsplit(":", 1)[-1]: row["workflow"] for key, row in opens.items()}
+    assert by_key["ag1"] == "code-review" and by_key["ag2"] == "subagent"
+    assert opens[SID]["workflow"] == "implement"
+
+
+def test_child_command_name_tag_is_not_trusted() -> None:
+    opens = _opens(subagent_workflow_skills_files())
+    assert {key.rsplit(":", 1)[-1]: row["workflow"] for key, row in opens.items()}["ag3"] == "subagent"
+
+
+def test_skill_after_the_open_bound_is_ignored() -> None:
+    root = [
+        prompt("u1", 1, "p1", "first"),
+        assistant("a1", 2, "m1", [text_block("x")]),
+        prompt("u2", 4, "p2", "second"),
+        _skill_call("a2", 5, "tuA", "planning"),
+        tool_result("r1", 6, "tuA", "ok", pid="p2"),
+        assistant("a3", 7, "m3", [text_block("y")]),
+    ]
+    assert by(sessions(root), event_kind="open")[0]["workflow"] == "claude_code"
+
+
+def test_workflow_skills_name_real_repo_skills() -> None:
+    for skill, workflow in WORKFLOW_SKILLS.items():
+        assert (SKILLS_DIR / skill).is_dir(), skill
+        assert workflow in WORKFLOWS or workflow == skill, workflow
+
+
+def test_workflow_reads_no_tool_result() -> None:
+    with_result = [
+        prompt("u1", 1, "p1", "relay"),
+        _skill_call("a1", 2, "tuA", "planning"),
+        tool_result("r1", 3, "tuA", "Unknown skill: planning", pid="p1", is_error=True),
+        assistant("a2", 4, "m2", [text_block("x")]),
+    ]
+    without = [rec for rec in with_result if rec["uuid"] != "r1"]
+    assert by(sessions(with_result), event_kind="open") == by(sessions(without), event_kind="open")
+
+
+def test_segment_closes_read_the_effective_boundary() -> None:
+    late = hook("rs", 12, "SessionStart:resume", durationMs=5000)
+    root = [*_resumed()[:2], prompt("u2", 10, "p2", "b"), assistant("a2", 11, "m2", [text_block("y")]), late]
+    root += [prompt("u3", 20, "p3", "c"), assistant("a3", 21, "m3", [text_block("z")])]
+    rows = sessions(root, final=False)
+    assert [r["external_ref"] for r in by(rows, event_kind="close")] == ["a1#0/close"]
+    assert [r["execution_attempt"] for r in by(rows, event_kind="resume")] == [2]

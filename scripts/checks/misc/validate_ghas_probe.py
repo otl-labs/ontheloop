@@ -24,10 +24,10 @@ import os
 import urllib.error
 from urllib.request import Request, urlopen
 
+from scripts import repo_identity
 from scripts.checks import registry
 
 _API_BASE = "https://api.github.com"
-_DEFAULT_REPO = "benjamin-blake/theseus"
 
 
 class ProbeTokenMissing(Exception):
@@ -43,7 +43,7 @@ class ProbeTransportError(Exception):
 
 
 def _repo() -> str:
-    return os.environ.get("GITHUB_REPOSITORY", _DEFAULT_REPO)
+    return repo_identity.full_name()
 
 
 def _headers(token: str) -> dict[str, str]:

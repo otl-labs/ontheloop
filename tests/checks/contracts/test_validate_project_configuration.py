@@ -24,6 +24,7 @@ _COPIED = (
     "docs/contracts/ports.yaml",
     "docs/contracts/inference-provider.yaml",
     "docs/ROADMAP-PLATFORM.yaml",
+    "docs/ROADMAP-PLATFORM-ARCHIVE.yaml",
     "docs/DECISIONS.md",
     "docs/DECISIONS_ARCHIVE.md",
     "scripts/CLAUDE.md",

@@ -4,8 +4,8 @@ Strings only: nothing here runs SQL, reads a file or can raise at import. Placeh
 {idle_seconds}, {rules}, ...) are SQL text rendered server-side by src.common.ducklake_event_reads; every caller value reaches
 the statement as a bound named parameter ($session_id, $as_of, $part_from, $part_to, $meta_schema), never as text.
 
-One rule, one copy: the R4/R5 dedupe, the conflict report and the session/agent-run state rule are each written once here and
-shared by every verb that needs them (a named verb is a serving leaf and never calls another verb).
+One rule, one copy: the R4/R5 dedupe, the conflict report, the session/agent-run state rule and the root turn rule (SE-1..SE-3)
+are each written once here and shared by every verb that needs them (a named verb never calls another verb).
 """
 
 from __future__ import annotations
@@ -88,7 +88,8 @@ _IDLE = "epoch(CAST($as_of AS TIMESTAMPTZ)) - epoch(l.last_event_timestamp) > {i
 
 # Session and agent-run state, written once (telemetry_sessions.yaml state / duration_seconds; telemetry_agents.yaml duration).
 # ROOT: the latest lifecycle row (annotate excluded) by event_timestamp, source_ordinal (NULL first), close last on a tie, then
-# event_id; running unless it is a close, abandoned when not terminal and idle past the threshold.
+# event_id; the root state, outcome and duration are read through ROOT_TURN_CTES (SE-1..SE-3, Decision 224): a producer close
+# stands only while no turn opened after it, else the latest turn's close outcome, else running / abandoned by idleness.
 # SUB-AGENT: its agent-run pair.
 STATE_CTES = (
     "sess AS (SELECT session_id, max(parent_session_id) AS parent_session_id, max(project_id) AS project_id, "
@@ -120,22 +121,58 @@ STATE_CTES = (
     "ORDER BY opened_at DESC NULLS LAST, agent_run_id DESC) = 1)"
 )
 
+# SE-1..SE-3 (telemetry_sessions.yaml state / duration_seconds): the root turn evidence, composed only into the three
+# session-state verbs. Every ordering is event_timestamp, coalesce(source_ordinal, -1), event_id, latest last.
+_TURN_LATEST = (
+    "QUALIFY row_number() OVER (PARTITION BY {k}session_id ORDER BY {k}event_timestamp DESC, "
+    "coalesce({k}source_ordinal, -1) DESC, {k}event_id DESC) = 1"
+)
+ROOT_TURN_CTES = (
+    "t_open AS (SELECT session_id, observation_id, event_timestamp, coalesce(source_ordinal, -1) AS ord FROM o "
+    "WHERE observation_type = 'turn' AND event_kind = 'open' " + _TURN_LATEST.format(k="") + "), "
+    "t_close AS (SELECT c.session_id AS session_id, c.outcome AS outcome FROM o c JOIN t_open ON "
+    "t_open.session_id = c.session_id AND t_open.observation_id = c.observation_id "
+    "WHERE c.observation_type = 'turn' AND c.event_kind = 'close' " + _TURN_LATEST.format(k="c.") + "), "
+    "t_any AS (SELECT session_id, event_timestamp FROM o WHERE observation_type = 'turn' AND event_kind = 'close' "
+    + _TURN_LATEST.format(k="")
+    + "), "
+    "pc AS (SELECT session_id, event_timestamp, coalesce(source_ordinal, -1) AS ord FROM s WHERE event_kind = 'close' "
+    + _TURN_LATEST.format(k="")
+    + ")"
+)
+
+# The producer close stands only while no turn opened after it (not after: a tie keeps the close).
+_PRODUCER_CLOSE_STANDS = (
+    "(lc.event_kind = 'close' AND (t_open.session_id IS NULL OR t_open.event_timestamp < pc.event_timestamp "
+    "OR (t_open.event_timestamp = pc.event_timestamp AND t_open.ord <= pc.ord)))"
+)
+_TURN_AT_REST = "(t_close.session_id IS NOT NULL AND t_close.outcome IS NOT NULL)"
+_TURN_OUTCOME = (
+    "CASE t_close.outcome WHEN 'success' THEN 'success' WHEN 'error' THEN 'failed' WHEN 'interrupted' THEN 'cancelled' "
+    "WHEN 'blocked' THEN 'failed' END"
+)
+
 _STATE_SELECT = (
     "SELECT sess.session_id AS session_id, sess.parent_session_id AS parent_session_id, sess.project_id AS project_id, "
     "sess.session_started_at AS session_started_at, "
-    "CASE WHEN sess.parent_session_id IS NULL THEN CASE WHEN lc.event_kind = 'close' THEN lc.outcome "
+    f"CASE WHEN sess.parent_session_id IS NULL THEN CASE WHEN {_PRODUCER_CLOSE_STANDS} THEN lc.outcome "
+    f"WHEN {_TURN_AT_REST} AND {_IDLE} THEN {_TURN_OUTCOME} WHEN {_TURN_AT_REST} THEN 'running' "
     f"WHEN {_IDLE} THEN 'abandoned' ELSE 'running' END "
     f"WHEN child.session_id IS NULL THEN CASE WHEN {_IDLE} THEN 'abandoned' ELSE 'running' END "
     "ELSE child.state END AS state, "
-    "CASE WHEN sess.parent_session_id IS NULL THEN CASE WHEN lc.event_kind = 'close' THEN lc.outcome END "
+    f"CASE WHEN sess.parent_session_id IS NULL THEN CASE WHEN {_PRODUCER_CLOSE_STANDS} THEN lc.outcome "
+    f"WHEN {_TURN_AT_REST} AND {_IDLE} THEN {_TURN_OUTCOME} END "
     "ELSE child.run_outcome END AS outcome, "
-    "CASE WHEN sess.parent_session_id IS NULL THEN CASE WHEN cl.event_timestamp IS NOT NULL "
-    "THEN CAST(trunc(epoch(cl.event_timestamp) - epoch(sess.session_started_at)) AS BIGINT) END "
+    "CASE WHEN sess.parent_session_id IS NULL THEN CASE WHEN greatest(pc.event_timestamp, t_any.event_timestamp) IS NOT NULL "
+    "THEN CAST(trunc(epoch(greatest(pc.event_timestamp, t_any.event_timestamp)) - epoch(sess.session_started_at)) "
+    "AS BIGINT) END "
     "ELSE child.duration_seconds END AS duration_seconds, "
     "l.last_event_timestamp AS last_event_timestamp, CAST($as_of AS TIMESTAMPTZ) AS as_of, "
     "CAST({idle_seconds} AS BIGINT) AS idle_threshold_seconds, "
     f"{STAMPS_SELECT} "
-    "FROM sess LEFT JOIN lc ON lc.session_id = sess.session_id LEFT JOIN cl ON cl.session_id = sess.session_id "
+    "FROM sess LEFT JOIN lc ON lc.session_id = sess.session_id LEFT JOIN pc ON pc.session_id = sess.session_id "
+    "LEFT JOIN t_open ON t_open.session_id = sess.session_id LEFT JOIN t_close ON t_close.session_id = sess.session_id "
+    "LEFT JOIN t_any ON t_any.session_id = sess.session_id "
     "LEFT JOIN last_ev l ON l.session_id = sess.session_id LEFT JOIN child ON child.session_id = sess.session_id "
     + STAMPS_JOIN.format(sid="sess.session_id")
 )
@@ -143,16 +180,18 @@ _STATE_SELECT = (
 _ALL_TABLES = (SESSIONS, OBSERVATIONS, AGENTS, TRANSCRIPTS)
 _ORDER_WINDOW = " ORDER BY sess.session_started_at, sess.session_id"
 
-SESSION_STATE_SQL = compose(_ALL_TABLES, STATE_CTES + " " + _STATE_SELECT + _ORDER_WINDOW)
+_ROOT_STATE_CTES = STATE_CTES + ", " + ROOT_TURN_CTES
+
+SESSION_STATE_SQL = compose(_ALL_TABLES, _ROOT_STATE_CTES + " " + _STATE_SELECT + _ORDER_WINDOW)
 
 # A window answers root sessions only; the real-purpose variant excludes drill and synthetic projects structurally (a join on
 # the shared project purpose marker), not through an opt-in parameter.
 SESSIONS_WINDOW_ALL_SQL = compose(
-    _ALL_TABLES, STATE_CTES + " " + _STATE_SELECT + " WHERE sess.parent_session_id IS NULL" + _ORDER_WINDOW
+    _ALL_TABLES, _ROOT_STATE_CTES + " " + _STATE_SELECT + " WHERE sess.parent_session_id IS NULL" + _ORDER_WINDOW
 )
 SESSIONS_WINDOW_SQL = compose(
     _ALL_TABLES,
-    STATE_CTES
+    _ROOT_STATE_CTES
     + " "
     + _STATE_SELECT
     + " WHERE sess.parent_session_id IS NULL AND sess.project_id IN (SELECT project_id FROM {projects} WHERE purpose = 'real')"
@@ -203,15 +242,18 @@ AGENT_RUN_TOKEN_ROLLUP_SQL = compose(
     + " ORDER BY ids.session_id",
 )
 
-# Reported cost only (rec-4291 / rec-4031): an allowance-billed call is NULL by contract (Decision 206), a call with no
-# reported cost is unpriced, never 0. The price table is rec-4031's and lands behind this same verb signature.
+# Reported cost only (rec-4291 / rec-4031): an allowance-billed or local call (Decision 206, Decision 234 clause 4) is NULL
+# by contract whatever cost it stores, a call with no reported cost is unpriced, never 0.
+# The price table is rec-4031's and lands behind this same verb signature.
 MODEL_CALL_COST_SQL = compose(
     (SESSIONS, OBSERVATIONS),
     "SELECT o.session_id AS session_id, o.observation_id AS observation_id, o.event_timestamp AS event_timestamp, "
     "o.model AS model, o.provider AS provider, o.billing_shape AS billing_shape, o.tokens_input AS tokens_input, "
     "o.tokens_output AS tokens_output, "
-    "CASE WHEN o.billing_shape = 'fixed_non_rollover_allowance' THEN NULL ELSE o.cost_usd_reported END AS cost_usd, "
+    "CASE WHEN o.billing_shape IN ('fixed_non_rollover_allowance', 'local') THEN NULL "
+    "ELSE o.cost_usd_reported END AS cost_usd, "
     "CASE WHEN o.billing_shape = 'fixed_non_rollover_allowance' THEN 'allowance' "
+    "WHEN o.billing_shape = 'local' THEN 'local' "
     "WHEN o.cost_usd_reported IS NOT NULL THEN 'reported' ELSE 'unpriced' END AS cost_source, "
     + STAMPS_SELECT
     + " FROM o "
@@ -382,4 +424,118 @@ ROOT_SESSIONS_SQL = compose(
     + " WHERE rt.parent_session_id IS NULL AND rt."
     + _REAL
     + " ORDER BY rt.session_started_at, rt.session_id",
+)
+
+
+# Usage verbs (rec-4719, rec-4702, rec-4703): per-tree and per-session derived rows over the deduped scope of one real-purpose
+# window, never a cross-tree sum (Decision 199 cl.1). A tree is the rows sharing (tenant_id, project_id, session_started_at).
+_REAL_PROJECT = "project_id IN (SELECT project_id FROM {projects} WHERE purpose = 'real')"
+_FIRST_OF = ", ".join(f"{_FIRST.format(c=c)} AS {c}" for c in ("workflow", "harness_session_key", "branch"))
+_TREE_USING = " USING (" + _TREE_KEY + ")"
+_USAGE_TREE = (
+    "st AS (SELECT " + _TREE_KEY + ", session_id FROM s UNION SELECT " + _TREE_KEY + ", session_id FROM o), "
+    "ses AS (SELECT " + _TREE_KEY + ", session_id, max(parent_session_id) AS parent_session_id, "
+    "max(parent_session_id) IS NULL AS is_root, " + _FIRST_OF + " FROM s "
+    "WHERE " + _REAL_PROJECT + " GROUP BY " + _TREE_KEY + ", session_id), "
+    "tr AS (SELECT " + _TREE_KEY + ", min(session_id) FILTER (WHERE is_root) AS root_session_id, "
+    "count(*) FILTER (WHERE is_root) AS roots_in_tree FROM st LEFT JOIN ses USING (" + _TREE_KEY + ", session_id) "
+    "WHERE " + _REAL_PROJECT + " GROUP BY " + _TREE_KEY + "), "
+    "tl AS (SELECT " + _TREE_KEY + ", max(event_timestamp) AS last_event_timestamp FROM ("
+    "SELECT " + _TREE_KEY + ", event_timestamp FROM s UNION ALL SELECT " + _TREE_KEY + ", event_timestamp FROM o) "
+    "GROUP BY " + _TREE_KEY + "), "
+    "tg AS (SELECT " + _TREE_KEY + ", list(struct_pack(producer := producer, parser_version := v_star) "
+    "ORDER BY producer, v_star) AS generations FROM (SELECT DISTINCT st.tenant_id, st.project_id, st.session_started_at, "
+    "gen.producer, gen.v_star FROM st JOIN gen USING (session_id)) GROUP BY " + _TREE_KEY + "), "
+    "tc AS (SELECT " + _TREE_KEY + ", list(struct_pack(table_name := table_name, producer := producer, event_id := event_id, "
+    "parser_version := parser_version) ORDER BY table_name, producer, event_id, parser_version) AS conflicted_grain_keys "
+    "FROM conflicts JOIN (SELECT DISTINCT "
+    + _TREE_KEY
+    + ", session_id FROM st) USING (session_id) GROUP BY "
+    + _TREE_KEY
+    + "), "
+    "tx AS (SELECT tr.*, r.harness_session_key AS harness_session_key, r.branch AS branch, r.workflow AS workflow, "
+    "tl.last_event_timestamp AS last_event_timestamp, coalesce(tg.generations, []) AS generations, "
+    "coalesce(tc.conflicted_grain_keys, []) AS conflicted_grain_keys, len(coalesce(tc.conflicted_grain_keys, [])) > 0 "
+    "AS derivation_conflicted FROM tr LEFT JOIN tl"
+    + _TREE_USING
+    + " LEFT JOIN tg"
+    + _TREE_USING
+    + " LEFT JOIN tc"
+    + _TREE_USING
+    + " LEFT JOIN ses r ON (tr.tenant_id, tr.project_id, tr.session_started_at, tr.root_session_id) = "
+    "(r.tenant_id, r.project_id, r.session_started_at, r.session_id))"
+)
+_TREE_COLS = "tx.root_session_id, tx.harness_session_key, tx.branch, tx.session_started_at, tx.roots_in_tree"
+_TREE_STAMPS = "tx.generations, tx.conflicted_grain_keys, tx.derivation_conflicted"
+_AGENT_NAME = (
+    "ag AS (SELECT session_id, arg_max(agent_name, struct_pack(t := event_timestamp, o := coalesce(source_ordinal, -1), "
+    "e := event_id)) FILTER (WHERE agent_name IS NOT NULL) AS agent_name FROM a GROUP BY session_id)"
+)
+_LATEST = "ORDER BY event_timestamp DESC, coalesce(source_ordinal, -1) DESC, event_id DESC"
+_TOKENS = ("tokens_input", "tokens_output", "tokens_cache_read", "tokens_cache_creation")
+
+MODEL_USAGE_ROLLUP_SQL = compose(
+    (SESSIONS, OBSERVATIONS),
+    _USAGE_TREE + ", mu AS (SELECT " + _TREE_KEY + ", model, count(DISTINCT session_id) AS session_count, "
+    "count(*) AS model_call_count, "
+    + ", ".join(f"sum({c}) AS {c}_total" for c in _TOKENS)
+    + ", sum(cache_creation_1h_tokens) AS cache_creation_1h_total, sum(cache_creation_5m_tokens) AS cache_creation_5m_total, "
+    "count(*) FILTER (WHERE tokens_input IS NULL OR tokens_output IS NULL) AS usage_missing_count FROM o "
+    "WHERE observation_type = 'model_call' GROUP BY " + _TREE_KEY + ", model) "
+    "SELECT tx.root_session_id, tx.harness_session_key, tx.branch, tx.workflow, tx.session_started_at, "
+    "tx.last_event_timestamp, tx.roots_in_tree, mu.model, mu.session_count, mu.model_call_count, mu.tokens_input_total, "
+    "mu.tokens_output_total, mu.tokens_cache_read_total, mu.tokens_cache_creation_total, mu.cache_creation_1h_total, "
+    "mu.cache_creation_5m_total, mu.usage_missing_count, "
+    + _TREE_STAMPS
+    + " FROM mu JOIN tx"
+    + _TREE_USING
+    + " ORDER BY tx.session_started_at, tx.root_session_id, tx.project_id, mu.model NULLS LAST",
+)
+
+TOOL_USE_ROLLUP_SQL = compose(
+    (SESSIONS, OBSERVATIONS, AGENTS),
+    _USAGE_TREE + ", " + _AGENT_NAME + ", "
+    "op AS (SELECT " + _TREE_KEY + ", session_id, observation_id, name, "
+    "json_extract_string(metadata, '$.attribution_mcp_server') AS attribution_mcp_server FROM o "
+    "WHERE observation_type = 'tool_call' AND event_kind = 'open' QUALIFY row_number() OVER (PARTITION BY session_id, "
+    "observation_id ORDER BY event_timestamp, coalesce(source_ordinal, -1), event_id) = 1), "
+    "oc AS (SELECT session_id, observation_id, outcome FROM o WHERE observation_type = 'tool_call' "
+    "AND event_kind = 'close' QUALIFY row_number() OVER (PARTITION BY session_id, observation_id " + _LATEST + ") = 1) "
+    "SELECT " + _TREE_COLS + ", coalesce(ses.is_root, FALSE) AS is_root, "
+    "CASE WHEN coalesce(ses.is_root, FALSE) THEN NULL ELSE ag.agent_name END AS agent_name, ses.workflow AS workflow, "
+    "op.name AS tool_name, nullif(regexp_extract(op.name, '^mcp__(.+?)__', 1), '') AS mcp_server, "
+    "op.attribution_mcp_server AS attribution_mcp_server, count(*) AS call_count, "
+    "count(*) FILTER (WHERE oc.outcome = 'error') AS error_count, count(*) FILTER (WHERE oc.outcome = 'blocked') "
+    "AS blocked_count, count(*) FILTER (WHERE oc.outcome = 'interrupted') AS interrupted_count, "
+    "count(DISTINCT op.session_id) AS session_count, "
+    + _TREE_STAMPS
+    + " FROM op JOIN tx"
+    + _TREE_USING
+    + " LEFT JOIN ses ON (ses.tenant_id, ses.project_id, ses.session_started_at, "
+    "ses.session_id) = (op.tenant_id, op.project_id, op.session_started_at, op.session_id) "
+    "LEFT JOIN ag ON ag.session_id = op.session_id LEFT JOIN oc ON (oc.session_id, oc.observation_id) = "
+    "(op.session_id, op.observation_id) GROUP BY ALL ORDER BY tx.session_started_at, tx.root_session_id, "
+    "is_root DESC, agent_name NULLS FIRST, workflow, tool_name, mcp_server, attribution_mcp_server",
+)
+
+STARTUP_BASELINE_SQL = compose(
+    (SESSIONS, OBSERVATIONS, AGENTS),
+    _USAGE_TREE + ", " + _AGENT_NAME + ", "
+    "fc AS (SELECT session_id, count(*) OVER (PARTITION BY session_id) AS n, event_timestamp, model, "
+    + ", ".join(_TOKENS[:1] + _TOKENS[2:])
+    + ", cache_creation_1h_tokens, cache_creation_5m_tokens, tokens_output, tokens_input IS NULL OR tokens_output IS NULL "
+    "AS usage_missing FROM o WHERE observation_type = 'model_call' QUALIFY row_number() OVER (PARTITION BY session_id "
+    "ORDER BY event_timestamp, coalesce(source_ordinal, -1), event_id) = 1) "
+    "SELECT ses.session_id, tx.root_session_id, ses.parent_session_id, ses.is_root, tx.harness_session_key, tx.branch, "
+    "ses.workflow, CASE WHEN ses.is_root THEN NULL ELSE ag.agent_name END AS agent_name, tx.session_started_at, "
+    "tx.roots_in_tree, "
+    "coalesce(fc.n, 0) AS model_call_count, fc.event_timestamp AS first_call_at, fc.model, fc.tokens_input, "
+    "fc.tokens_cache_read, fc.tokens_cache_creation, fc.cache_creation_1h_tokens, fc.cache_creation_5m_tokens, "
+    "fc.tokens_output, fc.usage_missing, "
+    + STAMPS_SELECT
+    + " FROM ses JOIN tx"
+    + _TREE_USING
+    + " LEFT JOIN ag ON ag.session_id = ses.session_id LEFT JOIN fc ON fc.session_id = ses.session_id "
+    + STAMPS_JOIN.format(sid="ses.session_id")
+    + " ORDER BY tx.session_started_at, tx.root_session_id, tx.project_id, ses.is_root DESC, ses.session_id",
 )

@@ -2,7 +2,7 @@
 
 Pure data, no I/O, nothing that can raise at import. Registry data (the idle threshold, the friction rules block, the window
 cap) lives here as versioned Python, hashed into each verb's read_version (event_read_version), so a rule edit re-versions
-exactly the verbs that render it. Imported by the reader only; the ops registry (NAMED_READS) is untouched.
+exactly the verbs that render it. Imported by the telemetry reader only; the ops registry (NAMED_READS) is untouched.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ FRICTION_RULES: Mapping[str, Any] = {
     ),
 }
 
-_SMOKE_ONLY = "Reads the smoke catalog only until slice 2c (rec-4292), so synthetic smoke rows are not real telemetry."
+_PRODUCTION = "Reads the production telemetry catalog through the telemetry reader."
 _IDLE = {"idle_seconds": IDLE_THRESHOLD_SECONDS}
 _ALL = (sql.SESSIONS, sql.OBSERVATIONS, sql.AGENTS, sql.TRANSCRIPTS)
 _NAME = re.compile(r"^[A-Za-z0-9_]+$")
@@ -62,8 +62,13 @@ def render_data(data: Mapping[str, Any]) -> dict[str, str]:
     return out
 
 
+_TREE_NOTE = (
+    f" (one tree is the rows sharing the root's tenant, project and session_started_at), at most {MAX_WINDOW_DAYS} UTC days."
+)
+
+
 def _derived_rows_note(rows: str) -> str:
-    return f"{rows} Derived rows only, never a raw row or transcript content. {_SMOKE_ONLY}"
+    return f"{rows} Derived rows only, never a raw row or transcript content. {_PRODUCTION}"
 
 
 EVENT_READS: dict[str, EventRead] = {
@@ -127,7 +132,8 @@ EVENT_READS: dict[str, EventRead] = {
             binding="session",
             paginable=True,
             description=_derived_rows_note(
-                "Reported cost of each model call of one session with its cost_source (reported, allowance or unpriced); "
+                "Reported cost of each model call of one session with its cost_source "
+                "(reported, allowance, local or unpriced); "
                 "never a 0 standing in for an unknown."
             ),
         ),
@@ -142,6 +148,42 @@ EVENT_READS: dict[str, EventRead] = {
             paginable=True,
             description=_derived_rows_note(
                 f"One derived row per root session of a real-purpose project over at most {MAX_WINDOW_DAYS} UTC days."
+            ),
+        ),
+        EventRead(
+            verb="model_usage_rollup",
+            tables=(sql.OBSERVATIONS, sql.SESSIONS),
+            sql=sql.MODEL_USAGE_ROLLUP_SQL,
+            params=("day_from", "day_to"),
+            binding="window",
+            max_window_days=MAX_WINDOW_DAYS,
+            description=_derived_rows_note(
+                "Per-model token totals, one row per tree and model over the root and every sub-agent session's model calls"
+                + _TREE_NOTE
+            ),
+        ),
+        EventRead(
+            verb="tool_use_rollup",
+            tables=(sql.OBSERVATIONS, sql.SESSIONS, sql.AGENTS),
+            sql=sql.TOOL_USE_ROLLUP_SQL,
+            params=("day_from", "day_to"),
+            binding="window",
+            max_window_days=MAX_WINDOW_DAYS,
+            description=_derived_rows_note(
+                "Tool-call counts, one row per tree, root or sub-agent, agent name, workflow, tool name and MCP server"
+                + _TREE_NOTE
+            ),
+        ),
+        EventRead(
+            verb="session_startup_baseline",
+            tables=(sql.OBSERVATIONS, sql.SESSIONS, sql.AGENTS),
+            sql=sql.STARTUP_BASELINE_SQL,
+            params=("day_from", "day_to"),
+            binding="window",
+            max_window_days=MAX_WINDOW_DAYS,
+            description=_derived_rows_note(
+                "Each session's and sub-agent's first model call and its token classes, one row per session of each tree"
+                + _TREE_NOTE
             ),
         ),
         EventRead(
@@ -171,7 +213,7 @@ EVENT_READS: dict[str, EventRead] = {
                 "One stored transcript row's exact payload bytes by its full grain key (session_id, producer, event_id, "
                 "parser_version), as standard base64 pages of at most 3 MiB: loop while offset + length < content_bytes, "
                 "concatenate the decoded pages, then check the length and SHA-256 against the row. Storage omitted carries "
-                "no data. " + _SMOKE_ONLY
+                "no data. Served by no deployed function: production serves no transcript content (Decision 236 cl.3)."
             ),
         ),
         EventRead(
@@ -186,7 +228,7 @@ EVENT_READS: dict[str, EventRead] = {
                 "Verification only. Every stored row of the one tree holding a root session (the rows sharing its tenant, "
                 "project and session pin) in all four telemetry tables, any parser_version, no dedupe: table_name, the row "
                 "as JSON (compared columns plus created_timestamp, never content or content_uri), total_rows and "
-                f"roots_in_tree, paged by offset and max_rows (at most {MAX_TREE_ROWS}). " + _SMOKE_ONLY
+                f"roots_in_tree, paged by offset and max_rows (at most {MAX_TREE_ROWS}). " + _PRODUCTION
             ),
         ),
         EventRead(
@@ -201,7 +243,7 @@ EVENT_READS: dict[str, EventRead] = {
             description=(
                 "Verification only. Per UTC day and telemetry join of real-purpose projects: child rows, orphaned child rows "
                 "split by whether their tree is quiescent past the idle threshold at as_of, the quiescent and pending tree "
-                f"counts and the conflicted grain-key count, over at most {MAX_WINDOW_DAYS} days. " + _SMOKE_ONLY
+                f"counts and the conflicted grain-key count, over at most {MAX_WINDOW_DAYS} days. " + _PRODUCTION
             ),
         ),
         EventRead(
@@ -215,7 +257,7 @@ EVENT_READS: dict[str, EventRead] = {
             description=(
                 "Verification only. One row per root session of a real-purpose project over at most "
                 f"{MAX_WINDOW_DAYS} UTC days: session_id, entity_ref, harness_session_key, branch, session_started_at, the "
-                "tree's last event and the Decision 207 stamps. " + _SMOKE_ONLY
+                "tree's last event and the Decision 207 stamps. " + _PRODUCTION
             ),
         ),
         EventRead(
@@ -225,7 +267,7 @@ EVENT_READS: dict[str, EventRead] = {
             agent_facing=False,
             description=(
                 "Per-table committed record counts from catalog metadata only (no data file) and the pinned meta schema "
-                "(preflight telemetry-store gauge). " + _SMOKE_ONLY
+                "(preflight telemetry-store gauge). " + _PRODUCTION
             ),
         ),
     )

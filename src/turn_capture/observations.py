@@ -2,7 +2,7 @@
 
 Turn open/close, model_call (one per response, owned by its last record), tool_call open/close (a tool_use
 with no in-span result gets ONE synthetic interrupted close anchored on the tool_use record itself) and one
-process_event per hook attachment. Tool errors are the tool_call close outcome, never process_events.
+process_event per hook run (twins collapse, rule HG-1). Tool errors are the tool_call close outcome, never process_events.
 Rows of a turn are built only once the turn is closed; a row outside any turn is built at once. A tool_call close
 carries output_capture and the raw output identity (output_bytes/sha256/lines); a model_call carries
 reasoning_visibility and the provider-reported reasoning_tokens.
@@ -15,6 +15,7 @@ import re
 from collections import Counter
 from typing import Any
 
+from src.turn_capture import witness
 from src.turn_capture.gate_events import build_gate_events
 from src.turn_capture.markers import SIGNATURE_PATTERN
 from src.turn_capture.refs import model_call_ref, role_ref, turn_entity_ref
@@ -29,7 +30,6 @@ from src.turn_capture.streams import (
     Stream,
     ToolUse,
     Turn,
-    block_base,
     emitting_streams,
 )
 from src.turn_capture.transcript import ROOT, hook_script
@@ -260,45 +260,65 @@ def _tool_rows(
     return rows
 
 
-def _turn_rows(
-    ctx: Ctx, stream: Stream, turn: Turn, diag: Counter[str], sidecars: Sidecars, spawn_usage: dict[str, Any] | None
-) -> list[dict[str, Any]]:
-    tref = turn_entity_ref(stream.session_ref, turn.prompt_id)
+def _turn_open_row(ctx: Ctx, stream: Stream, turn: Turn, tref: str) -> dict[str, Any]:
     first = turn.first
-    rows = [
-        _row(
-            ctx,
-            stream,
-            first,
-            role_ref(first.uuid, 0, "turn_open"),
-            tref,
-            "turn",
-            "open",
-            None,
-            sequence=turn.ordinal,
-            metadata=_meta(
-                is_meta=first.data.get("isMeta") is True,
-                prompt_source=first.data.get("promptSource") if isinstance(first.data.get("promptSource"), str) else None,
-                turn_origin=first.data.get("turnOrigin") if isinstance(first.data.get("turnOrigin"), str) else None,
-            ),
-        )
-    ]
+    return _row(
+        ctx,
+        stream,
+        first,
+        role_ref(first.uuid, 0, "turn_open"),
+        tref,
+        "turn",
+        "open",
+        None,
+        sequence=turn.ordinal,
+        metadata=_meta(
+            is_meta=first.data.get("isMeta") is True,
+            prompt_source=first.data.get("promptSource") if isinstance(first.data.get("promptSource"), str) else None,
+            turn_origin=first.data.get("turnOrigin") if isinstance(first.data.get("turnOrigin"), str) else None,
+        ),
+    )
+
+
+def _boundary_anchor(turn: Turn) -> Rec | None:
+    """Rule WT-5: the turn's last record carrying a uuid and a parseable timestamp."""
+    return next((r for r in reversed(turn.recs) if isinstance(r.data.get("uuid"), str) and r.data["uuid"] and r.ts), None)
+
+
+def _turn_close_rows(ctx: Ctx, stream: Stream, turn: Turn, tref: str) -> list[dict[str, Any]]:
+    """Rules WT-3..WT-6: a close per closing event, plus a boundary close when no event ends the last response."""
+    windows: list[tuple[Rec, int | None]] = [(event, event.line) for event in turn.closes]
     last = turn.last_assistant
-    if last is not None:
+    if last is not None and not any(event.line >= last.line for event in turn.closes):
+        anchor = _boundary_anchor(turn)
+        if anchor is not None:
+            windows.append((anchor, None))
+    rows = []
+    for rec, bound in windows:
+        responses, tools = witness.counts(turn, bound)
         rows.append(
             _row(
                 ctx,
                 stream,
-                last,
-                role_ref(last.uuid, block_base(last.data), "turn_close"),
+                rec,
+                role_ref(rec.uuid, 0, "turn_close"),
                 tref,
                 "turn",
                 "close",
                 None,
                 sequence=turn.ordinal,
-                metadata=_meta(response_count=len(turn.responses), tool_call_count=len(turn.tool_uses)),
+                outcome=witness.turn_outcome(turn, bound),
+                metadata=_meta(response_count=responses, tool_call_count=tools),
             )
         )
+    return rows
+
+
+def _turn_rows(
+    ctx: Ctx, stream: Stream, turn: Turn, diag: Counter[str], sidecars: Sidecars, spawn_usage: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    tref = turn_entity_ref(stream.session_ref, turn.prompt_id)
+    rows = [_turn_open_row(ctx, stream, turn, tref), *_turn_close_rows(ctx, stream, turn, tref)]
     for resp in turn.responses:
         owner, message = resp.owner, resp.owner.data["message"]
         last_of_first = spawn_usage if turn is stream.turns[0] and resp is turn.responses[-1] else None
@@ -407,9 +427,11 @@ def build_observations(parsed: ParsedTree, ctx: Ctx, diag: Counter[str], sidecar
     spawn_usage = _sync_spawn_usage(parsed)
     for stream in emitting_streams(parsed):
         for turn in stream.turns:
+            tref = turn_entity_ref(stream.session_ref, turn.prompt_id)
             if turn.closed:
                 rows += _turn_rows(ctx, stream, turn, diag, sidecars, spawn_usage.get(stream.key))
-                tref = turn_entity_ref(stream.session_ref, turn.prompt_id)
                 rows += build_gate_events(ctx, stream, turn, tref, sidecars, diag, _row)
+            else:
+                rows.append(_turn_open_row(ctx, stream, turn, tref))
         rows += [_hook_row(ctx, stream, rec) for rec in stream.hooks if rec.turn is None or rec.turn.closed]
     return rows

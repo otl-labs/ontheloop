@@ -54,6 +54,27 @@ def test_action_gc_ops_delegates_to_gc_ops_body_and_closes_connection():
     con.close.assert_called_once()
 
 
+def test_gc_ops_on_a_telemetry_catalog_passes_a_catalog_bound_sink():
+    con = MagicMock()
+    with (
+        patch.object(h.rt, "fetch_dsn", return_value=_FULL_DSN),
+        patch.object(h.rt, "open_connection", return_value=con),
+        patch.object(h.gc_ops_body, "gc_ops", return_value={"ok": True}) as gc_ops_mock,
+        patch.object(h, "_emit_maintenance_metric") as mock_emit,
+    ):
+        h.action_gc_ops({"data_path": "s3://b/ducklake-telemetry/", "meta_schema": "ducklake_telemetry"}, None)
+        sink = gc_ops_mock.call_args.kwargs["metric_sink"]
+        sink("GcReferencedMissing", 0.0)
+        sink("GcDebtBytes", 5.0)
+        ops_con = MagicMock()
+        h.rt.open_connection.return_value = ops_con
+        h.action_gc_ops({"data_path": "s3://b/ducklake/", "meta_schema": "ducklake_ops"}, None)
+        assert gc_ops_mock.call_args.kwargs["metric_sink"] is mock_emit
+    assert mock_emit.call_args_list[0].args == ("GcReferencedMissing", 0.0)
+    assert mock_emit.call_args_list[0].kwargs == {"dimensions": {"MetaSchema": "ducklake_telemetry"}}
+    assert len(mock_emit.call_args_list) == 1
+
+
 def test_action_gc_ops_dry_run_flag_propagates():
     con = MagicMock()
     with (

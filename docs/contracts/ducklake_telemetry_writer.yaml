@@ -1,17 +1,25 @@
 ---
 # Class B Lambda verb contract for the agent-platform-ducklake-telemetry-writer function (T2.36, slice 2a-2, plan 3 part 1).
 # The function exists so telemetry identities never reach ops verbs (Decision 143 cl.3, Decision 213): its own role, its own
-# scoped catalog login, env-pinned to the isolated ducklake_smoke catalog. This contract documents the PRODUCTION verb surface
-# only; attach_check and telemetry_probe are gate instrumentation, NOT agent surfaces, and are out of contract scope.
+# scoped catalog login, env-pinned to the production telemetry catalog ducklake_telemetry (Decision 230); its smoke twin runs the
+# same code on ducklake_smoke (Decision 236). This contract documents the PRODUCTION verb surface only; attach_check and
+# telemetry_probe are gate instrumentation, NOT agent surfaces, and are out of contract scope.
 contract:
   id: ducklake_telemetry_writer
   class: B
   contract_version: 1
-  status: provisional_v0
+  status: ratified
+  ratified_at: "2026-10-29"
+  ratified_via: >-
+    Benjamin's approval in the planning thread after the Step 10 multi-perspective critique, then the
+    PLAN-ratify-telemetry-writer-contract merge to main (re_ratification_trigger production_invocations >= 500, observed
+    2026-10-29 at 1,836 invocations; Decision 118)
   description: >-
     Telemetry-scoped DuckLake runtime Lambda invoked over an AWS_IAM (SigV4) Function URL, URL-only (direct invoke is denied
-    in the permissions boundary, Decision 213). Env-pinned to the isolated ducklake_smoke catalog on a scoped catalog login;
-    it takes no catalog selector and never reaches the ops verbs or the production ducklake_ops catalog. Its first verbs
+    in the permissions boundary, Decision 213). Env-pinned to the production telemetry catalog ducklake_telemetry (Decision
+    230) on the production scoped login ducklake_telemetry_writer_prod; the smoke twin
+    (agent-platform-ducklake-telemetry-writer-smoke, Decision 236) holds the ducklake_smoke binding and the disposable
+    deploy proofs. It takes no catalog selector and never reaches the ops verbs or the ducklake_ops catalog. Its first verbs
     verify and seed the telemetry tables (which the catalog owner creates, Decision 216) and register tenants and projects (Decision 200): tenant and project ids are ULIDs minted
     once per request, and the ops_entity_counters row is a lock only. The verbs cover provisioning, registration and
     append_telemetry (slice 2a-2 plan 3 part 2): rows for one project in one transaction, plus begin_blobs (plan 4), the
@@ -25,11 +33,12 @@ contract:
       - PlatformDev
     admin_only_features: []
     write_path: >-
-      ducklake_telemetry_writer Lambda -> run_telemetry_txn (one transaction, bounded OCC retry that also covers the masked commit-cleanup failure) -> the isolated
-      ducklake_smoke catalog: provision_telemetry (verify the nine owner-created tables and seed the two counter rows; no DDL), register_tenant and
+      ducklake_telemetry_writer Lambda -> run_telemetry_txn (one transaction, bounded OCC retry that also covers the masked commit-cleanup failure) -> the production
+      ducklake_telemetry catalog on the ducklake_telemetry_writer_prod login (the smoke twin runs the same path on ducklake_smoke): provision_telemetry (verify the nine owner-created tables and seed the two counter rows; no DDL), register_tenant and
       register_project (SCD2 history MERGE plus current MERGE under a lock-only counter UPDATE); begin_blobs issues grants and
-      writes only a first-sight project registration. The telemetry tables are
-      created under the catalog owner by ducklake_maintenance_smoke's create_telemetry_tables (Decision 216). The function has no
+      writes only a first-sight project registration. The telemetry tables are created under the catalog's owner role:
+      on ducklake_telemetry by the operator-invoked provision_telemetry_catalog (Decision 230 cl.4), on ducklake_smoke by
+      ducklake_maintenance_smoke's create_telemetry_tables (Decision 216). The function has no
       destructive verb by design and holds no CREATE; dropping a table stays on the admin maintenance function.
     id_allocator: >-
       ULIDs (tenant_id, project_id and the write ulid), minted once per request outside the retry loop; the
@@ -40,14 +49,35 @@ contract:
     authored_via: PLAN-telemetry-registration-verbs (T2.36 slice 2a-2 plan 3 part 1)
     rationale: >-
       Class B contracts start provisional_v0: the verb set, error taxonomy and payload shapes are validated against real
-      traffic before ratification. The function has served no production traffic yet (the smoke catalog only).
+      traffic before ratification. Production traffic starts at PLAN-telemetry-production-flip's flip, when the writer binds
+      ducklake_telemetry; before it the function served the smoke catalog only.
     surfacing_note: >-
-      Only the production_invocations condition applies: there is no first production invocation date because the function
-      writes nothing to the production ops catalog. check_re_ratification_trigger schema-validates this block in CI.
+      Only the production_invocations condition applies, counted from the flip's convergence: production_invocations is
+      AWS/Lambda Invocations with FunctionName agent-platform-ducklake-telemetry-writer since the flip (the writer's EMF
+      RequestCount carries only the Verb dimension, so it cannot tell catalogs apart). The telemetry project's coordinator
+      surfaces the re-ratification to Benjamin when it reaches 500. check_re_ratification_trigger schema-validates this
+      block in CI.
     re_ratification_trigger:
       first_of:
         - "production_invocations >= 500"
     re_ratification_owner: "human + Step 10 multi-perspective critique"
+    trigger_observed_at: "2026-10-29"
+    ratification_census: >-
+      Production traffic from the flip (2026-10-27T11:39:15Z) to 2026-10-29: AWS/Lambda Invocations 1,836, Errors 0,
+      Url5xxCount 0, Url4xxCount 13 (9 handler answers and 4 Function URL refusals of the production gate's unsigned probe);
+      1,835 C6 lines against 1,835 REPORT lines, one per invocation that reached the handler (the metric's period-aligned
+      window and the log pull's start at the flip second differ by under a minute). Every contract verb was
+      exercised with 200 answers (append_telemetry 865, describe 750, register_project 156, register_tenant 22, begin_blobs
+      8, provision_telemetry 8), plus 17 instrumentation lines outside the contract (telemetry_probe 13, attach_check 4).
+      Error answers: bad_request 4 on register_tenant and unknown_action 4 before dispatch (no verb), all deliberate
+      probes by the production gate, and append_telemetry tenant_unresolved 1 (the first append after the flip, before registration). Limits: the largest table
+      batch reached the 2,000-row cap, and the largest request was 5,205,449 of the 5,242,880 invoke-byte cap (99.3%).
+      1,259 requests (69%) were PlatformAdmin-signed, attributed to turn capture under the ADMIN environment's AWS_PROFILE;
+      the ratifying plan pins turn capture's writer client to PlatformDev, and sessions on older checkouts keep signing
+      PlatformAdmin until they pick up main. No other declared typed error was answered in production: each is pinned to a
+      named test by TYPED_ERROR_TESTS in tests/checks/contracts/test_telemetry_writer_ratification.py, which also fails when
+      the writer emits an error type no verb declares. This block is historical from ratification: no trigger scan or
+      preflight reads it (they key on status), and surfacing_note's CI-validation sentence no longer applies.
 verbs:
   append_telemetry:
     payload_schema_ref: >-
@@ -66,11 +96,11 @@ verbs:
     response_codes:
       200: "body {ok, tenant_id, project_id, project_registration (created|existing), tables {table: {submitted, collapsed, inserted}}, occ_retries, commit_ms (integer)}; an identical re-send answers 200 with inserted 0"
       400: "bad_request (reason names the rule, incl. writer_derived for a caller content_uri; table and row when known; never a value), write_order (the telemetry_sessions batch is not last), mixed_producer (more than one producer or parser_version in the request)"
-      403: "tenant_unresolved (remedy: register_tenant); project_unregistered (a drill: or synthetic: project_ref that was never registered; remedy: register_project)"
+      403: "tenant_unresolved (remedy: register_tenant); project_unregistered (a drill: or synthetic: project_ref that was never registered; remedy: register_project); missing_caller_identity (no signed caller identity)"
       409: "grain_conflict {table, event_id, row}: a row differs from a stored or earlier row under one (producer, event_id, parser_version) grain key; nothing from the request is written; row is the 0-based index as sent, never an external_ref or a value"
       413: "payload_too_large (measure invoke_bytes), too_many_rows (measure rows_per_table or rows_per_request), too_many_blobs (more than 200 blob rows)"
-      422: "row_rule {table, row, rule, column, exclude_before?}; schema_gate {table, row, column, reason}; blob_not_verified {table, row, reason missing|stale|unknown_project|size_mismatch}; nothing written; never a value"
-      500: "runtime; blob_integrity, blob_grant_self_check or blob_store_access (typed, paged through Url5xxCount); unmapped: any other exception answers 500 {ok, error_type, error_class, request_id, action, elapsed_ms}, never its message"
+      422: "row_rule {table, row, rule, column, exclude_before?}; schema_gate {table, row, column, reason}; blob_not_verified {table, row, reason missing|stale|unknown_project|size_mismatch}; nothing written; never a value; a row_rule or schema_gate raised by the first-sight project registration or the projection's table resolution is a writer or projection defect (does not page, rec-4712) and answers {error_type, error, elapsed_ms}: error names table, column and rule for row_rule, the field for a schema_gate refusal, or the table for an unresolved table spec; no row, never a value"
+      500: "runtime; telemetry_env_unset (a required environment pin is not set); blob_integrity, blob_grant_self_check or blob_store_access (typed, paged through Url5xxCount); unmapped: any other exception answers 500 {ok, error_type, error_class, request_id, action, elapsed_ms}, never its message"
       503: "occ_exhausted: the OCC retry budget was exhausted (retryable); catalog_unavailable: a dead catalog connection (retryable); blob_store_unavailable: S3 throttled, 5xx or timed out (retryable)"
     typed_errors:
       bad_request: "a malformed request or an invalid string; names a reason and a position, never an undeclared name or a value (400)"
@@ -93,6 +123,8 @@ verbs:
       occ_exhausted: "OCC retry budget exhausted; safe to retry (503)"
       unmapped: "an exception no row maps: 500 {error_class, request_id, action}, never the message; one ducklake_unmapped_error log line carries the redacted detail (500)"
       catalog_unavailable: "a dead catalog connection (also after the reopen-once where the handler reopens): retryable, 503 {error_class, request_id, action, reopened}"
+      missing_caller_identity: "no signed caller identity (403)"
+      telemetry_env_unset: "a required environment pin is not set (500)"
   begin_blobs:
     payload_schema_ref: >-
       event envelope {action: "begin_blobs", project_ref, component?, items}. No other key is accepted. items is a non-empty
@@ -105,11 +137,11 @@ verbs:
     response_codes:
       200: "body {ok, tenant_id, project_id, project_registration, protocol_version, items [{existed, upload {method PUT, url, headers, expires_at} | null, duplicate_of}], counts}; the only response that carries a presigned URL"
       400: "bad_request: reason names the rule (below_threshold, above_cap, item_shape, unknown_key, ...), row the item index, never a value"
-      403: "tenant_unresolved; project_unregistered (an unregistered drill: or synthetic: project_ref)"
+      403: "tenant_unresolved; project_unregistered (an unregistered drill: or synthetic: project_ref); missing_caller_identity (no signed caller identity)"
       413: "too_many_blobs: more than 200 items"
-      422: "blob_not_verified {row, reason size_mismatch}: an item's content_bytes is not its object's length, or two items name one object with two sizes; nothing granted or written; never a value"
-      500: "blob_integrity, blob_grant_self_check or blob_store_access; runtime; unmapped: any other exception answers 500 {ok, error_type, error_class, request_id, action, elapsed_ms}, never its message"
-      503: "blob_store_unavailable (retryable); occ_exhausted and catalog_unavailable on a first-sight registration (retryable)"
+      422: "blob_not_verified {row, reason size_mismatch}: an item's content_bytes is not its object's length, or two items name one object with two sizes; nothing granted or written; never a value; row_rule or schema_gate: a writer-built registration record or the bundled projection was refused (a writer or projection defect; does not page, rec-4712); nothing written"
+      500: "blob_integrity, blob_grant_self_check or blob_store_access; runtime; telemetry_env_unset (a required environment pin is not set); projection_defect (the bundled projection declares no payload rule); unmapped: any other exception answers 500 {ok, error_type, error_class, request_id, action, elapsed_ms}, never its message"
+      503: "blob_store_unavailable (retryable); occ_exhausted on a first-sight registration (retryable); catalog_unavailable on a dead catalog connection (retryable)"
     typed_errors:
       bad_request: "a malformed request, an invalid string or an item out of bounds; names a reason and an item index, never a value (400)"
       tenant_unresolved: "the signed caller has no registered tenant (403)"
@@ -122,6 +154,13 @@ verbs:
       blob_store_access: "an S3 client error other than throttling, 5xx or timeout (500)"
       unmapped: "an exception no row maps: 500 {error_class, request_id, action}, never the message; one ducklake_unmapped_error log line carries the redacted detail (500)"
       catalog_unavailable: "a dead catalog connection: retryable, 503 {error_class, request_id, action, reopened}"
+      row_rule: "a contract row rule rejected the writer-built first-sight project registration record: a writer defect no caller change fixes; answered 422, so it does not page (rec-4712); nothing written (422)"
+      schema_gate: "the table schema gate refused the writer-built first-sight project registration record, or the bundled projection does not resolve a registry table: a writer or projection defect no caller change fixes; answered 422, so it does not page (rec-4712); nothing written (422)"
+      runtime: "loud-fail, incl. a missing or duplicated ops_projects counter row on a first-sight registration (500)"
+      occ_exhausted: "OCC retry budget exhausted on a first-sight registration; safe to retry (503)"
+      missing_caller_identity: "no signed caller identity (403)"
+      telemetry_env_unset: "a required environment pin is not set (500)"
+      projection_defect: "the bundled projection declares no transcripts payload rule (threshold and cap): a build defect (500)"
   describe:
     payload_schema_ref: >-
       event envelope {action: "describe"}. Connectionless: returns the sorted action list, the pinned catalog's
@@ -131,23 +170,27 @@ verbs:
     response_codes:
       200: "body {ok, function, actions, verbs, catalog: {meta_schema, data_path_is_smoke}, blob_protocol, schema}"
       403: "missing_caller_identity: the Function URL authorizer context carries no caller identity"
-      500: "telemetry_env_unset: a required environment pin is not set; unmapped: any other exception answers 500 {ok, error_type, error_class, request_id, action, elapsed_ms}, never its message"
+      500: "telemetry_env_unset: a required environment pin is not set; projection_defect: the bundled projection declares no payload rule; unmapped: any other exception answers 500 {ok, error_type, error_class, request_id, action, elapsed_ms}, never its message"
     typed_errors:
       missing_caller_identity: "no signed caller identity (403)"
       telemetry_env_unset: "a required TELEMETRY_* environment variable is not set (500)"
+      projection_defect: "the bundled projection declares no transcripts payload rule (threshold and cap): a build defect (500)"
       unmapped: "an exception no row maps: 500 {error_class, request_id, action}, never the message; one ducklake_unmapped_error log line carries the redacted detail (500)"
   provision_telemetry:
     payload_schema_ref: >-
       event envelope {action: "provision_telemetry", component?}. No other key is accepted (a force_recreate or confirm key
       is refused like any unknown key). component is a str with no U+0000 and no code point in U+D800-U+DFFF. Verify and
       seed only, issuing no DDL: the nine target tables (the four telemetry event tables, the ops_tenants and ops_projects SCD2
-      pairs, ops_entity_counters) are created under the catalog owner by ducklake_maintenance_smoke's create_telemetry_tables
-      (Decision 216) before any write; this verb refuses absent tables by name, checks every target table read-only against its
+      pairs, ops_entity_counters) are created under the catalog owner before any write (on ducklake_telemetry by
+      ducklake_maintenance's operator-invoked provision_telemetry_catalog, Decision 230 cl.4; on ducklake_smoke by
+      ducklake_maintenance_smoke's create_telemetry_tables, Decision 216); this verb refuses absent tables by name, checks every target table read-only against its
       declared partitions and columns, and seeds the ops_tenants and ops_projects counter rows without ever lowering a value.
     response_codes:
       200: "body {ok, tables (the nine physical tables), counters {ops_tenants, ops_projects}}"
       400: "bad_request: an unknown key, or an invalid string with the field named, never the value"
-      500: "runtime: a target table is absent, a half-present SCD2 pair, or a table whose partitions or columns drift from the declared spec; nothing was written; unmapped: any other exception answers 500 {ok, error_type, error_class, request_id, action, elapsed_ms}, never its message"
+      403: "missing_caller_identity: the Function URL authorizer context carries no caller identity"
+      422: "schema_gate: the bundled projection does not resolve a target table spec (a projection defect; does not page, rec-4712); nothing written; body names the table, never a value"
+      500: "telemetry_env_unset: a required environment pin is not set; runtime: a target table is absent, a half-present SCD2 pair, or a table whose partitions or columns drift from the declared spec; nothing was written; unmapped: any other exception answers 500 {ok, error_type, error_class, request_id, action, elapsed_ms}, never its message"
       503: "occ_exhausted: the OCC retry budget was exhausted (retryable); catalog_unavailable: a dead catalog connection (retryable)"
     typed_errors:
       bad_request: "an unknown request key, or a non-str, NUL-bearing or lone-surrogate string; names the field, never the value (400)"
@@ -155,6 +198,9 @@ verbs:
       occ_exhausted: "OCC retry budget exhausted; safe to retry (503)"
       unmapped: "an exception no row maps: 500 {error_class, request_id, action}, never the message; one ducklake_unmapped_error log line carries the redacted detail (500)"
       catalog_unavailable: "a dead catalog connection (also after the reopen-once where the handler reopens): retryable, 503 {error_class, request_id, action, reopened}"
+      schema_gate: "the bundled projection does not resolve a target table spec: a projection defect no caller change fixes; answered 422, so it does not page (rec-4712); nothing written (422)"
+      missing_caller_identity: "no signed caller identity (403)"
+      telemetry_env_unset: "a required environment pin is not set (500)"
   register_tenant:
     payload_schema_ref: >-
       event envelope {action: "register_tenant", component?}. Self only: the tenant is the signed caller's account; any
@@ -163,7 +209,9 @@ verbs:
     response_codes:
       200: "body {ok, tenant_id, created}; never the principal or a hash of it"
       400: "bad_request: an unknown key, or an invalid string with the field named, never the value"
-      500: "runtime: the ops_tenants counter row is not exactly one (run provision_telemetry); unmapped: any other exception answers 500 {ok, error_type, error_class, request_id, action, elapsed_ms}, never its message"
+      403: "missing_caller_identity: the Function URL authorizer context carries no caller identity"
+      422: "schema_gate or row_rule: the writer-built tenant record was refused (a writer or projection defect; does not page, rec-4712); nothing written; body names table, column and rule for row_rule, the field for a schema_gate refusal, or the table for an unresolved table spec; never a value"
+      500: "telemetry_env_unset: a required environment pin is not set; runtime: the ops_tenants counter row is not exactly one (run provision_telemetry); unmapped: any other exception answers 500 {ok, error_type, error_class, request_id, action, elapsed_ms}, never its message"
       503: "occ_exhausted: the OCC retry budget was exhausted (retryable); catalog_unavailable: a dead catalog connection (retryable)"
     typed_errors:
       bad_request: "an unknown request key, or a non-str, NUL-bearing or lone-surrogate string; names the field, never the value (400)"
@@ -171,6 +219,10 @@ verbs:
       occ_exhausted: "OCC retry budget exhausted; safe to retry (503)"
       unmapped: "an exception no row maps: 500 {error_class, request_id, action}, never the message; one ducklake_unmapped_error log line carries the redacted detail (500)"
       catalog_unavailable: "a dead catalog connection (also after the reopen-once where the handler reopens): retryable, 503 {error_class, request_id, action, reopened}"
+      schema_gate: "the writer-built tenant record failed the table schema gate, or the bundled projection does not resolve the table: a writer or projection defect no caller change fixes; answered 422, so it does not page (rec-4712); nothing written (422)"
+      row_rule: "a contract row rule rejected the writer-built tenant record: a writer defect no caller change fixes; answered 422, so it does not page (rec-4712); nothing written (422)"
+      missing_caller_identity: "no signed caller identity (403)"
+      telemetry_env_unset: "a required environment pin is not set (500)"
   register_project:
     payload_schema_ref: >-
       event envelope {action: "register_project", project_ref, name?, remote?, component?}. project_ref, name, remote and
@@ -181,9 +233,9 @@ verbs:
     response_codes:
       200: "body {ok, project_id, created, purpose, registration}"
       400: "bad_request: an unknown key, a missing project_ref, or an invalid string with the field named, never the value"
-      403: "tenant_unresolved: the caller's tenant is not registered (remedy: register_tenant)"
+      403: "tenant_unresolved: the caller's tenant is not registered (remedy: register_tenant); missing_caller_identity: the Function URL authorizer context carries no caller identity"
       422: "schema_gate or row_rule: a contract row rule rejected the record; nothing written; body names table, rule and column, never a value"
-      500: "runtime: the ops_projects counter row is not exactly one (run provision_telemetry); unmapped: any other exception answers 500 {ok, error_type, error_class, request_id, action, elapsed_ms}, never its message"
+      500: "telemetry_env_unset: a required environment pin is not set; runtime: the ops_projects counter row is not exactly one (run provision_telemetry); unmapped: any other exception answers 500 {ok, error_type, error_class, request_id, action, elapsed_ms}, never its message"
       503: "occ_exhausted: the OCC retry budget was exhausted (retryable); catalog_unavailable: a dead catalog connection (retryable)"
     typed_errors:
       bad_request: "an unknown request key, a missing project_ref, or a non-str, NUL-bearing or lone-surrogate string; names the field, never the value (400)"
@@ -194,26 +246,111 @@ verbs:
       occ_exhausted: "OCC retry budget exhausted; safe to retry (503)"
       unmapped: "an exception no row maps: 500 {error_class, request_id, action}, never the message; one ducklake_unmapped_error log line carries the redacted detail (500)"
       catalog_unavailable: "a dead catalog connection (also after the reopen-once where the handler reopens): retryable, 503 {error_class, request_id, action, reopened}"
+      missing_caller_identity: "no signed caller identity (403)"
+      telemetry_env_unset: "a required environment pin is not set (500)"
 audit_invariants:
+  - "Smoke twin (Decision 236 cl.1): agent-platform-ducklake-telemetry-writer-smoke runs this same code and zip with its own role and the smoke scoped login, env-pinned to the fixed smoke locals (never the flipping production pin). It is deployed first and carries the disposable deploy proofs (the --lambda-telemetry-smoke gate); the production telemetry deploy waits on its gates. The twin holds no production prefix, no production secret and no Delete."
   - "append_telemetry writes one request in ONE transaction: a first-sight project registration and every batch commit or roll back together. An identical re-send is a no-op and a differing row writes nothing (Decision 207); a grain conflict is never retried as an OCC collision."
   - "Within a request the data batches precede the telemetry_sessions marker batch. Inside one transaction the order has no visibility effect, so this is a producer tripwire for the cross-request order the producer owns (telemetry-event-envelope.yaml R7)."
   - "The size cap is len(json.dumps(S)), S the request body string as delivered: ASCII-escaped, so it equals the measure Lambda's 6 MiB event limit applies to for an ASCII body and is an upper bound when the body carries non-ASCII (measured 2026-10-09)."
   - "No append_telemetry response or log line carries a caller value (a row value, an undeclared name, principal.ref): errors locate by table, row index, column and reason only."
-  - "Claim-check rule (T2.36 c2/c4, Decision 199 cl.5): a producer PUTs payload bytes only under a begin_blobs grant (single object, content-addressed, SHA-256- and length-bound, at most 15 minutes), issued after the writer resolved the tenant and project and derived the key; append_telemetry verifies the object by HEAD and writes content_uri, so every write stays writer-authorised and writer-committed (Decision 81 cl.7 as read by Decision 213 cl.2) through the content_blobs port (Decision 212 cl.4). The writer never reads, puts or deletes object bytes; a failed append fails loudly and nothing is queued or replayed (Decision 84 I-4); no process ever ingests an object into the catalog; an unreferenced object is deleted by the maintenance sweep (rec-4033), never ingested. Enforced by the writer-bundle S3-surface test (head_object, presigned put_object and list_objects_v2 only); the CI role's bucket-wide S3 write is a named residual owned by rec-4292."
+  - "Claim-check rule (T2.36 c2/c4, Decision 199 cl.5): a producer PUTs payload bytes only under a begin_blobs grant (single object, content-addressed, SHA-256- and length-bound, at most 15 minutes), issued after the writer resolved the tenant and project and derived the key; append_telemetry verifies the object by HEAD and writes content_uri, so every write stays writer-authorised and writer-committed (Decision 81 cl.7 as read by Decision 213 cl.2) through the content_blobs port (Decision 212 cl.4). The writer never reads, puts or deletes object bytes; a failed append fails loudly and nothing is queued or replayed (Decision 84 I-4); no process ever ingests an object into the catalog; an unreferenced object is deleted by the maintenance sweep (rec-4033), never ingested. Enforced by the writer-bundle S3-surface test (head_object, presigned put_object and list_objects_v2 only). The blob-root write fence is Decision 230 cl.5's permissions-boundary deny: only the telemetry writer roles put to the blob root, only the admin maintenance role deletes under it and never by version (DeleteObjectVersion is denied to every bounded principal), and PlatformAdmin stays the unbounded break-glass operator (Decision 144 cl.3)."
   - "A blob row whose object is missing or older than 7 days commits only as the no-op of an identical stored row for a missing or stale object (else 422 blob_not_verified, nothing written), so an identical re-send inserts nothing whatever the object's age or presence; begin_blobs re-grants any missing or stale object and never an integrity fault. The 7 days is a writer mechanism constant cross-pinned to the code by a test; the stored-row check is a commit precondition for an unverifiable blob, not a data rule (Decision 210 cl.2(a))."
   - "Every blob row this writer commits from 2026-10-15 on has content_bytes equal to its object's length: each row is either HEAD-verified on its own declared size or declares the same size as the verified first row of its content_uri, and no earlier row can differ, because the producer helper checks each payload's length before any call and no vector sends a same-object pair with two sizes. An identical re-send therefore never reaches size_mismatch. size_mismatch is decided before the transaction, so it precedes the stored-row grain check: a re-send under a stored grain key with a different content_bytes answers 422 size_mismatch, not 409 grain_conflict. Two rows under one grain key in one request remain the in-batch 409 (Decision 207)."
+  - "Operator writes: an operator object write under the blob prefix must be a checksum-signed PUT under a begin_blobs grant, or it pages: an object stored without its SHA-256 checksum, or with one that differs from its key, answers blob_integrity (500) on its next verify and pages through Url5xxCount."
+  - "Integrity repair: a blob_integrity fault is repaired by a PlatformAdmin inspection that deletes the faulty object version; the producer's next begin_blobs then finds the object missing and grants a fresh upload, which the following append verifies."
   - "begin_blobs touches the catalog only on a binding-cache miss and writes only a first-sight registration. No presigned URL, X-Amz-* credential value, key or digest is ever logged or returned beyond begin_blobs' own response. Blob integrity, grant self-check and blob-store access faults log the C6 line with status 500 and answer a typed 500, which pages through Url5xxCount."
   - "A COMMIT whose error is masked by the no-delete file cleanup (duckdb's TransactionException 'Failed to commit: Could not remove file') is retried within the same bounded attempt budget as an OCC collision, because every telemetry body is idempotent (insert-only MERGE, lookup-first registration, caches written after commit). Only a COMMIT-raised failure with that exact signature is retried; the same text from a body statement, or any other TransactionException, propagates. The count is logged apart as masked_commit_retries (a log field only: no metric, no EMF member); the masked message names the bucket and is never logged or returned; exhaustion answers 503 occ_exhausted. The role keeps no s3:DeleteObject (Decision 216 cl.4); orphan files are the maintenance role's to delete."
-  - "Every answered request emits exactly one C6 log line (verb, component, status, error_type, per-table counts, request and invoke bytes, tenant_id, project_id, occ_retries, commit_ms, masked_commit_retries, caller_role), never an account id, an ARN or a hash of either; the six data verbs' lines carry an Embedded Metric Format block (namespace DuckLakeTelemetryWriter, RequestCount by Verb)."
+  - "Every answered request emits exactly one C6 log line (verb, component, status, error_type, per-table counts, request and invoke bytes, tenant_id, project_id, occ_retries, commit_ms, masked_commit_retries, caller_role), never an account id, an ARN or a hash of either; the six data verbs' lines carry an Embedded Metric Format block (namespace DuckLakeTelemetryWriter, RequestCount by Verb; an append_telemetry line also carries OccRetryCount and CommitLatencyMs under the empty set and under [MetaSchema], the member read from the function's own TELEMETRY_META_SCHEMA env, never a caller value; ducklake-telemetry-writer-occ and ducklake-telemetry-writer-commit-latency read only the MetaSchema=ducklake_telemetry series)."
   - "Telemetry verbs attach only the pinned catalog and take no catalog selector: meta_schema and data_path are never read from the event."
   - "No verb drops, truncates or recreates a table. The telemetry writer issues no Postgres DDL and holds no CREATE on any schema; its tables are created under the catalog owner (Decision 216)."
   - "principal_ref never appears in a response or log, and no response carries a hash of it (Decision 101)."
   - "A rejected request string never appears in a response or log: a refusal names the field, not the value."
-  - "An unknown `action` returns 400 with the sorted action allow-list (no silent no-op). A body that is not valid JSON or not a JSON object returns 400 bad_request."
-  - "No request that reaches the handler answers the Function URL's 502: an exception no row maps answers 500 unmapped {error_class, request_id, action}, never its message; a dead catalog connection answers 503 catalog_unavailable. Enforced by tests/lambdas/ducklake_telemetry_writer/test_handler.py (test_unexpected_exception_is_a_typed_500, test_unmapped_answer_never_echoes_the_message) and live by the post-deploy no-escaped-traceback check; process-level failures (timeout, out of memory, runtime exit) remain the runtime's 502 and count in Errors."
+  - "An unknown `action` returns 400 unknown_action with the sorted action allow-list (no silent no-op). A body that is not valid JSON or not a JSON object returns 400 bad_request. Both are refused before any verb is chosen, so neither answer is attributed to a verb (bad_request is also declared per verb for refusals after dispatch). missing_caller_identity is checked before the body is read and is declared on every verb; it arises only on an invoke without authorizer context (an unsigned Function URL call gets the URL's own 403 with no error_type). Each verb's typed_errors were surveyed against the handler's raise sites and error maps at ratification (2026-10-29); tests/checks/contracts/test_telemetry_writer_ratification.py enforces that the emitted error types equal the declared union and that each origin in its table is declared on every verb that reaches it, not per-verb completeness for every verb-specific raise site."
+  - "Except the declared rec-4317 residual below, no request that reaches the handler answers the Function URL's 502: an exception no row maps answers 500 unmapped {error_class, request_id, action}, never its message; a dead catalog connection answers 503 catalog_unavailable. Enforced by tests/lambdas/ducklake_telemetry_writer/test_handler.py (test_unexpected_exception_is_a_typed_500, test_unmapped_answer_never_echoes_the_message) and live by the post-deploy no-escaped-traceback check; process-level failures (timeout, out of memory, runtime exit) remain the runtime's 502 and count in Errors."
+  - "Declared residual (rec-4317): three handler-level steps run outside any try: the C6 line's emission, the serialisation of the answer, and the fault-mapping code inside _answer's except clauses (the row-rule cut-over lookup and the terminal answer with its redacted log line). An exception in any of them would surface as the runtime 502. Production showed none: 1,835 C6 lines against 1,835 REPORT lines and Errors 0 from the flip to 2026-10-29."
   - "Declared residual: the ducklake_unmapped_error log line carries the exception message redacted and truncated to 300 characters, so a request value inside an unmapped exception's message can reach the log (residual against the rejected-string rule; strictly less than the runtime traceback it replaces)."
   - "Declared residual: the async DuckLake handlers (maintenance, maintenance_smoke, catalog_dr) are EventBridge-invoked and keep Lambda's own retry behaviour for an escaped exception; rec-4303 owns them."
+  - "Declared residual (rec-4492): the connection sets no DuckDB temporary directory, so a query that would spill to disk fails against the read-only package directory and answers 500 unmapped instead of spilling. Production peak memory was 505 of 3,008 MB."
+  - "Declared residual (principal classes): the declared producers are github_ci_branch (caller_role agent-platform-github-ci-branch, CI's ambient credentials) and PlatformDev (caller_role PlatformDev). From this ratification, turn capture's writer client (scripts/telemetry_capture/transport.py make_client) signs with the agent_platform (PlatformDev) profile and ignores AWS_PROFILE; where AWS_ACCESS_KEY_ID or AWS_LAMBDA_FUNCTION_NAME is set it uses the ambient chain. Capture sessions on checkouts older than this ratification still sign PlatformAdmin (69% of the census), and turn capture's read route honours AWS_PROFILE until rec-4707. The handler does not refuse PlatformAdmin, and the C6 line's caller_role shows it. PlatformAdmin is the unbounded operator (Decision 144 cl.3, Decision 230 cl.5); the non-URL invoke path of PlatformAdmin and root is Decision 213's residual, whose alarm open rec-4204 still owes. Admitting another producer identity follows rec-4420 (T3.22 c4)."
+governance_notes: >-
+  ingestion_shape: per_request_commit -- recorded in storage-substrate.yaml tables.telemetry_tables.ingestion_shape (rec-4218),
+  with the production column set beside it in tables.telemetry_tables.production_column_set. This contract holds only the pointer;
+  contract.governance.principal_classes is unchanged.
 amendment_log:
+  - date: "2026-10-29"
+    semantic_break: false
+    change_class: governance_note_add
+    summary: >-
+      PLAN-ratify-telemetry-writer-contract: status provisional_v0 -> ratified after the re-ratification trigger
+      (production_invocations >= 500) was observed on 2026-10-29 at 1,836 invocations, with Benjamin's approval after the
+      Step 10 multi-perspective critique. provisional_v0 keeps its trigger and gains trigger_observed_at and the production
+      census. audit_invariants: the unknown-action line names unknown_action, the pre-dispatch rule and what the test
+      enforces; the no-502 invariant is narrowed to except its existing handler-level steps, declared as the rec-4317
+      residual (no code change); the rec-4492 spill residual; the principal-classes residual (turn capture's writer client
+      now signs as PlatformDev).
+      Ratification adds no mechanical lock beyond tests/checks/contracts/test_telemetry_writer_ratification.py, which pins
+      the verb set and every declared typed error to a named test; the CD.25 drift gate checks only status transitions and
+      description text.
+    migration_story: >-
+      No verb, request, response or error behaviour changes. Turn capture signs as PlatformDev instead of the ambient
+      AWS_PROFILE role; the tenant is the signed account (Decision 200), so rows land in the same tenant and only caller_role
+      changes.
+  - date: "2026-10-29"
+    semantic_break: false
+    change_class: field_add
+    summary: >-
+      PLAN-ratify-telemetry-writer-contract declares 19 (verb, typed_error) pairs the handler already answered:
+      missing_caller_identity (403) and telemetry_env_unset (500) on the five verbs other than describe; projection_defect
+      (500) on describe and begin_blobs; row_rule and schema_gate (422), runtime (500) and occ_exhausted (503) on
+      begin_blobs; row_rule and schema_gate (422) on register_tenant; schema_gate (422) on provision_telemetry. The 422s of
+      writer-built records and the bundled projection are declared as defects that do not page (rec-4712). Each verb's
+      response_codes name them; begin_blobs' 503 line names catalog_unavailable on any dead connection.
+    migration_story: >-
+      Documents existing behaviour: no handler change; the handler already gave these answers, though none occurred in the
+      production census.
+  - date: "2026-10-29"
+    semantic_break: false
+    change_class: prose_improvement
+    summary: >-
+      PLAN-ratify-telemetry-writer-contract: provision_telemetry.payload_schema_ref names both table creators, matching
+      write_path: ducklake_maintenance's operator-invoked provision_telemetry_catalog on ducklake_telemetry (Decision 230
+      cl.4) and ducklake_maintenance_smoke's create_telemetry_tables on ducklake_smoke (Decision 216).
+  - date: "2026-10-26"
+    semantic_break: true
+    change_class: governance_note_add
+    summary: >-
+      PLAN-telemetry-production-flip (T2.36 c2, Decision 230, Decision 236): the function binds the production telemetry
+      catalog ducklake_telemetry on the ducklake_telemetry_writer_prod login (header, description, write_path), with the
+      smoke twin holding the smoke binding; the claim-check invariant's CI-write residual is closed by Decision 230 cl.5's
+      blob-root write fence; two operator audit invariants (checksum-signed operator writes or a page; the PlatformAdmin
+      integrity repair path); provisional_v0 counts production_invocations from the flip as AWS/Lambda Invocations.
+    migration_story: >-
+      No verb, request, response or error changes. The bound catalog changes: rows written after the flip land in
+      ducklake_telemetry (it starts empty, Decision 230 cl.1) and the smoke catalog keeps its earlier rows; capture re-sends
+      each in-flight tree whole to the new catalog (PLAN-telemetry-catalog-aware-capture).
+  - date: "2026-10-25"
+    semantic_break: false
+    change_class: governance_note_add
+    summary: >-
+      PLAN-telemetry-production-maintenance (Decision 236 cl.5): the C6 line's EMF section names the [MetaSchema] set on OccRetryCount
+      and CommitLatencyMs and the two production-series writer alarms (ducklake-telemetry-writer-occ, ducklake-telemetry-writer-commit-latency).
+      No verb, response or principal changes.
+    migration_story: Prose only; RequestCount and the undimensioned series are unchanged.
+  - date: "2026-10-25"
+    semantic_break: false
+    change_class: governance_note_add
+    summary: >-
+      PLAN-telemetry-reader-and-smoke-twin (Decision 236): audit_invariants names the smoke twin (same code, own role and smoke
+      scoped login, deployed first, carries the disposable proofs). No verb, response or principal changes.
+    migration_story: Prose only; no verb, response or error changes with this entry.
+  - date: "2026-10-19"
+    semantic_break: false
+    change_class: governance_note_add
+    summary: >-
+      PLAN-telemetry-production-catalog (Decision 230, rec-4218): adds the governance_notes pointer to the ingestion shape and the
+      production column set recorded in storage-substrate.yaml. No verb, response or principal changes.
+    migration_story: Prose only; no verb, response or error changes with this entry.
   - date: "2026-10-15"
     semantic_break: true
     change_class: field_add

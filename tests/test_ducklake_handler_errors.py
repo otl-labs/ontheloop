@@ -131,6 +131,7 @@ def test_bad_request_and_request_id_helpers():
 
 def test_action_is_registered_or_unknown(monkeypatch, capsys):
     import src.lambdas.ducklake_reader.handler as reader
+    import src.lambdas.ducklake_telemetry_reader.handler as telemetry_reader
     import src.lambdas.ducklake_telemetry_writer.handler as telemetry
     import src.lambdas.ducklake_writer.handler as writer
 
@@ -144,10 +145,12 @@ def test_action_is_registered_or_unknown(monkeypatch, capsys):
     monkeypatch.setattr(reader, "_handle", _raise)
     monkeypatch.setattr(writer, "_handle", _raise)
     monkeypatch.setattr(telemetry, "_parse_body", _raise)
+    monkeypatch.setattr(telemetry_reader, "_handle", _raise)
     for handler, event in (
         (reader.handler, {"body": json.dumps({"action": hostile})}),
         (writer.handler, {"body": json.dumps({"action": hostile})}),
         (telemetry.handler, {**ident, "body": json.dumps({"action": hostile})}),
+        (telemetry_reader.handler, {"body": json.dumps({"action": hostile})}),
     ):
         response = handler(event)
         assert json.loads(response["body"])["action"] == "unknown"
@@ -160,7 +163,9 @@ def test_action_is_registered_or_unknown(monkeypatch, capsys):
     assert hostile not in out
 
 
-@pytest.mark.parametrize("name", ["ducklake_telemetry_writer", "ducklake_reader", "ducklake_writer"])
+@pytest.mark.parametrize(
+    "name", ["ducklake_telemetry_writer", "ducklake_telemetry_reader", "ducklake_reader", "ducklake_writer"]
+)
 def test_serving_contracts_declare_the_terminal_answers(name):
     contract = yaml.safe_load((_CONTRACTS / f"{name}.yaml").read_text(encoding="utf-8"))
     verbs = contract["verbs"]
@@ -171,7 +176,7 @@ def test_serving_contracts_declare_the_terminal_answers(name):
         if verb not in _CONNECTIONLESS:
             assert "catalog_unavailable" in spec["typed_errors"], (name, verb)
             assert 503 in spec["response_codes"] and "catalog_unavailable" in spec["response_codes"][503], (name, verb)
-    if name == "ducklake_reader":
+    if name in ("ducklake_reader", "ducklake_telemetry_reader"):
         assert "named_read_input" in verbs["named_read"]["typed_errors"] and 400 in verbs["named_read"]["response_codes"]
     invariants = " ".join(contract["audit_invariants"])
     assert "502" in invariants and "unmapped" in invariants and "rec-4303" in invariants

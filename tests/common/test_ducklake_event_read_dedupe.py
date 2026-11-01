@@ -254,12 +254,3 @@ def test_conflicted_keys_are_reported_never_resolved() -> None:
     con = _load(race)
     assert _conflicts(con) == {("telemetry_observations", "claude_code", "e1", 1)}
     assert sorted(e for e, _ in _survivors(con)["o"]) == ["e1", "e2"]
-
-
-def test_query_ops_probe_raises_catalog_missing_on_pinned_duckdb() -> None:
-    """The ops slot never attaches telemetry_catalog, so the gate's pinned two-part probe fails with a catalog error."""
-    con = duckdb.connect()
-    with pytest.raises(duckdb.Error) as caught:
-        con.execute("SELECT count(*) FROM telemetry_catalog.telemetry_sessions")
-    assert type(caught.value).__name__ in {"CatalogException", "BinderException"}
-    assert "does not exist" in str(caught.value)

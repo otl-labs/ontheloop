@@ -260,9 +260,9 @@ def lambda_maintenance_create_telemetry(*, profile: str | None = None, region: s
         raise core.SmokeTestFailure(
             "MAINTENANCE_CREATE_TELEMETRY FAIL: a relation in the smoke metadata schema has a foreign owner"
         )
-    if owned.get("schema_owner_is_current_user") is not True:
+    if owned.get("schema_owner_held") is not True:
         raise core.SmokeTestFailure(
-            "MAINTENANCE_CREATE_TELEMETRY FAIL: the smoke metadata schema is not owned by the owner login"
+            "MAINTENANCE_CREATE_TELEMETRY FAIL: the smoke metadata schema's owner role is not held by the session"
         )
     if owned.get("scoped_create_on_schema") is not False or owned.get("scoped_create_on_public") is not False:
         raise core.SmokeTestFailure("MAINTENANCE_CREATE_TELEMETRY FAIL: the scoped login holds CREATE (Decision 216 cl.1)")

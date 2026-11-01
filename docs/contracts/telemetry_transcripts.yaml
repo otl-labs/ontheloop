@@ -132,7 +132,7 @@ fields:
       own row (external_ref '<source_record_id>#<block_index>/full', same observation_ref as the tool_result
       row, origin tool), emitted only when the harness persisted the output and the sidecar is readable; a
       tool_result row holds only what the model saw.
-    populated_by: the write boundary (purpose=...).
+    populated_by: the claude_code producer (purpose=...).
     dq_intent:
       not_null: true
       accepted_values: {values: [prompt, response, thinking, tool_input, tool_result, tool_output, system]}
@@ -163,7 +163,7 @@ fields:
       itself is origin tool; the harness's own injected wrapper text around a tool_result is
       harness) -- this distinction is what lets a reader separate genuine tool output from
       harness-injected framing without parsing content.
-    populated_by: the write boundary (origin=...).
+    populated_by: the claude_code producer (origin=...).
     dq_intent:
       not_null: true
       accepted_values: {values: [human, harness, agent, tool]}
@@ -186,7 +186,7 @@ fields:
       PUTs it under a writer-issued, checksum- and length-bound grant (begin_blobs) and sends a row with no content; the
       writer HEAD-verifies the object and sets content_uri before the row commits. content and content_uri are
       representation-only columns: the identity they carry is compared (content_sha256, content_bytes), not them.
-    populated_by: the write boundary, after credential scrub, when size <= threshold.
+    populated_by: the claude_code producer, after credential scrub, when size <= threshold.
     dq_intent:
       content_inline_threshold_bytes: 65536
       full_output_cap_bytes: 8388608
@@ -246,36 +246,48 @@ fields:
     type: str
     iceberg_type: string
     nullable: true
-    description: Why a payload is stored nowhere. oversize = the storable payload would exceed full_output_cap_bytes.
+    description: Why a payload is stored nowhere. oversize = the storable payload would exceed full_output_cap_bytes; withheld_by_policy = the producer's capture policy for this run says the text is never stored (Decision 238 cl.1 for plan review).
     semantics: >-
-      Set, with content and content_uri both NULL, on a typed omission row. content_sha256/content_bytes are then
+      Set, with content and content_uri both NULL, on a typed omission row. On an oversize omission row content_sha256/content_bytes are then
       the RAW source bytes' identity, streamed, never decoded or scrubbed (nothing is stored), and are not cap-bound; the
       reason can hold even when the raw size is within the cap, because decoding and scrubbing a non-UTF-8 source grows it.
-    populated_by: the producer, when a persisted tool output is above the cap.
-    dq_intent: {accepted_values: {values: [oversize]}}
+      On a withheld_by_policy row nothing about the payload is stored: content_sha256 is the SHA-256 of the empty byte string and
+      content_bytes is 0, because a raw digest of a short output confirms an exact guess.
+    populated_by: the claude_code producer, when a persisted tool output is above the cap (oversize); a CI capture producer whose policy withholds the run's text (withheld_by_policy).
+    dq_intent: {accepted_values: {values: [oversize, withheld_by_policy]}}
     amendment_log:
+      - {date: "2026-10-29", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): description and semantics qualify the raw-source-bytes identity to an oversize omission row and add the withheld clause."}
+      - {date: "2026-10-29", semantic_break: false, change_class: accepted_values_extend, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): withheld_by_policy joins the omission reasons; its rows store the empty digest and zero bytes.", migration_story: "Additive value; no stored row changes."}
       - {date: "2026-10-04", semantic_break: false, change_class: field_add, summary: "PLAN-telemetry-write-conformance (slice 2a-1): new field naming a typed omission."}
   content_sha256:
     type: str
     iceberg_type: string
     nullable: false
-    description: SHA-256 of the ONE stored payload (whichever of content/content_uri is set), hex-encoded; of the raw source bytes on an omission row.
+    description: SHA-256 of the ONE stored payload (whichever of content/content_uri is set), hex-encoded; of the raw source bytes on an oversize omission row, of the empty byte string on a withheld_by_policy row.
     semantics: >-
       Required regardless of tier: the content-addressing key for a spilled blob's content_uri, and
-      an integrity check for an inline payload. On an omission row (content_omitted_reason set) it identifies the raw
-      source bytes, which can confirm an exact guess of a short output; accepted, the rows stay in the customer-owned data plane.
-    populated_by: the write boundary, computed over the payload before storing it.
-    dq_intent: {not_null: true, pattern: "^[0-9a-f]{64}$"}
+      an integrity check for an inline payload. On an oversize omission row it identifies the raw
+      source bytes, which can confirm an exact guess of a short output; accepted, the rows stay in the customer-owned data plane. On a
+      withheld_by_policy row it is the SHA-256 of the empty byte string (write-enforced), never a digest of the withheld text.
+    populated_by: the claude_code producer, computed over the payload before storing it (the writer only verifies a blob against it).
+    dq_intent:
+      not_null: true
+      pattern: "^[0-9a-f]{64}$"
+      pattern_when:
+        - {when: {content_omitted_reason: [withheld_by_policy]}, pattern: "^e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855$"}
     amendment_log:
+      - {date: "2026-10-29", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): the raw-source-bytes identity is qualified to an oversize omission row; a withheld_by_policy row stores the empty-string digest (pattern_when, write-enforced).", migration_story: "No stored row changes."}
       - {date: "2026-10-04", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-write-conformance (slice 2a-1): an omission row's digest identifies the raw source bytes; the lowercase 64-hex pattern is write-enforced.", migration_story: "No v1 row exists; parser_version 2 emits the new semantics."}
   content_bytes:
     type: int
     iceberg_type: bigint
     nullable: false
     description: Size of the ONE stored payload in bytes. Replaces the retired size_bytes column (same concept, computed over the stored payload, not a separate draft field).
-    semantics: Required; used to budget transcript storage and to spot anomalous (empty / huge) blobs, and is the threshold comparand for the inline/blob-port tier choice.
-    populated_by: the write boundary.
-    dq_intent: {not_null: true}
+    semantics: Required; used to budget transcript storage and to spot anomalous (empty / huge) blobs, and is the threshold comparand for the inline/blob-port tier choice. On an oversize omission row it is the raw source size; 0 on a withheld_by_policy row (write-enforced).
+    populated_by: the claude_code producer.
+    dq_intent: {not_null: true, null_or_zero_when: {content_omitted_reason: [withheld_by_policy]}}
+    amendment_log:
+      - {date: "2026-10-29", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): content_bytes is 0 on a withheld_by_policy row (null_or_zero_when, write-enforced).", migration_story: "No stored row changes."}
   content_truncated:
     type: bool
     iceberg_type: boolean
@@ -288,7 +300,7 @@ fields:
     semantics: >-
       A defect detector: a healthy producer writes false on every row and DQ alerts on any true. Whether the harness
       persisted a tool's output is telemetry_observations.output_capture on the tool_call close.
-    populated_by: the write boundary.
+    populated_by: the claude_code producer.
     dq_intent: {not_null: true}
     amendment_log:
       - {date: "2026-10-04", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-write-conformance (slice 2a-1): redefined from 'stored payload is a preview' to a defect detector, per the adopted tool-result consult; the persisted fact moved to output_capture.", migration_story: "No v1 row exists; parser_version 2 writes false on every row."}
@@ -298,7 +310,7 @@ fields:
     nullable: true
     description: Token count of the blob, when computed. NULL if not tokenised.
     semantics: Optional; the blob's token size (distinct from a model_call's usage on telemetry_observations). bigint.
-    populated_by: the write boundary.
+    populated_by: "unproduced: rec-4601 (no producer writes it)"
     dq_intent: {}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded populated_by wording to the write-boundary model; field meaning unchanged."}
@@ -308,7 +320,7 @@ fields:
     nullable: true
     description: The model associated with the blob (e.g. the model that produced the response).
     semantics: Optional attribution, mirroring telemetry_observations.model for this blob's own producing call.
-    populated_by: the write boundary.
+    populated_by: the claude_code producer.
     dq_intent: {}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded populated_by wording to the write-boundary model; field meaning unchanged."}
@@ -318,15 +330,18 @@ fields:
     nullable: true
     description: Recommendation id the blob relates to (e.g. rec-2335). NULL when not applicable.
     semantics: Optional cross-reference to ops_recommendations.id, joined tenant-locally.
-    populated_by: the write boundary.
+    populated_by: "unproduced: held:feedback-loop-gate (no producer writes it)"
     dq_intent: {}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to name tenant-local joining; field meaning unchanged."}
+realization:
+  produced: {write_boundary: [event_id, created_timestamp, tenant_id, project_id, observation_id, session_id, transcript_id, content_uri], claude_code: [event_kind, event_timestamp, session_started_at, source_ordinal, external_ref, entity_ref, producer, producer_version, parser_version, purpose, origin, content, content_omitted_reason, content_sha256, content_bytes, content_truncated, model]}
+  unproduced: {held:feedback-loop-gate: [rec_id], rec-4601: [token_count]}
 governance:
   table_class: event
   partition_by: "history=year(session_started_at), month(session_started_at), day(session_started_at)"
   write_path: >-
-    Not provisioned in production (slice 2c); the telemetry writer's claim-check route (slice 2a-2): the producer PUTs a
+    Provisioned in the production telemetry catalog (Decision 230); production writes begin at PLAN-telemetry-production-flip; the telemetry writer's claim-check route (slice 2a-2): the producer PUTs a
     payload above the threshold under a writer-issued grant (begin_blobs) BEFORE the row write; append_telemetry
     HEAD-verifies the object, sets content_uri and commits the row (orphan sweep for a PUT whose row never commits:
     rec-4033).
@@ -339,7 +354,7 @@ governance_notes: >-
   created_at, ingested_at -- content_uri/content_bytes/event_timestamp/created_timestamp (the
   shared envelope) supersede them. Identity (transcript_id, observation_id, session_id) is derived
   at the write boundary per telemetry-event-envelope.yaml's normative hash spec. NULLABILITY AXES: a column is NOT NULL at write when `nullable` is false or dq_intent declares not_null, unless the field
-  carries `required_when`, which then governs (scripts/field_semantics_event_projection.py _is_not_null); every declared rule is write-enforced (Decision 210); a staged rule is spelled with exclude_before or an owned exemption. Not provisioned in production (slice 2c). KNOWN GAPS: rec-4026 (turn-capture producer), rec-4029 (PII
+  carries `required_when`, which then governs (scripts/field_semantics_event_projection.py _is_not_null); every declared rule is write-enforced (Decision 210); a staged rule is spelled with exclude_before or an owned exemption. Provisioned in the production telemetry catalog (Decision 230). KNOWN GAPS: rec-4026 (turn-capture producer), rec-4029 (PII
   scrubbing/erasure -- begin_blobs re-grants a missing object, so erasing a large payload by object delete is undone by
   the producer's next re-send: erasure must tombstone the key at the writer or erase at the source), rec-4033 (blob
   orphan sweep), rec-4291 (get_blob, slice 2b). claude_code parser_version 3
@@ -347,6 +362,9 @@ governance_notes: >-
   sentinels), tool_output (tool), system (harness: meta and companion records, interrupt sentinels, API-error text) and
   omission rows; attachment-derived system rows are not emitted; a fork's inherited records emit none.
 amendment_log:
+  - {date: "2026-10-29", semantic_break: false, change_class: accepted_values_extend, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): withheld_by_policy omission reason with the empty digest and zero bytes. Per-field changes are on their own fields' logs."}
+  - {date: "2026-10-25", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-production-catalog bookkeeping: the two not-provisioned-in-production statements now say provisioned in the production telemetry catalog (Decision 230); mechanical status edit, no meaning change."}
+  - {date: "2026-10-24", semantic_break: false, change_class: governance_note_add, summary: "PLAN-telemetry-field-realization (T3.20 c7): realization block (who writes each stored column, or who owns its absence); populated_by names the real writer. No column, type or rule change."}
   - {date: "2026-10-15", semantic_break: false, change_class: governance_note_add, summary: "PLAN-telemetry-blob-route (slice 2a-2 plan 4): write_path and the KNOWN GAPS note name the claim-check route and its owners (rec-4033, rec-4291); the content exemption is removed (field entries on content and content_uri)."}
   - {date: "2026-10-14", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-parser-v3 (slice 3b plan P-B): governance note: the claude_code v3 turn-grain transcript row inventory; attachment-derived system rows are not emitted and a fork's inherited records emit none."}
   - {date: "2026-10-05", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-lifecycle-friction-amendment (fork 2 (a)): projects_to, write_path and the governance notes (REPORT-ONLY premise, NULLABILITY AXES) corrected to the projection's actual rule and the not-provisioned-in-production status. Meta and notes only; no field text changed."}

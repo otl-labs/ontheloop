@@ -23,6 +23,7 @@ _DUCKLAKE = (
     "ducklake_maintenance_smoke",
     "ducklake_catalog_dr",
     "ducklake_telemetry_writer",
+    "ducklake_telemetry_reader",
 )
 _WORKFLOW = _ROOT / ".github" / "workflows" / "deploy-ducklake-lambdas.yml"
 

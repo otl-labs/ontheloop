@@ -293,6 +293,11 @@ def _constant_parity_problems(joined: str, texts: dict[str, str]) -> list[str]:
             "ducklake_telemetry_writer_function local",
         ),
         (
+            _const(joined, "ducklake_telemetry_reader_function")
+            == _const(personal_lambdas, "ducklake_telemetry_reader_function"),
+            "ducklake_telemetry_reader_function local",
+        ),
+        (
             _const(joined, "ducklake_prod_data_prefix") == _const(personal_lambdas, "ducklake_prod_data_prefix"),
             "ducklake_prod_data_prefix local",
         ),

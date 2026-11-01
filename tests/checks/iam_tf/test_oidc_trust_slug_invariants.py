@@ -19,6 +19,11 @@ the contraction's own durable successor, replacing what used to be a time-boxed 
      every declared entry must match OWNER@OWNER-ID/REPO@REPO-ID. A legacy name-only entry mints
      nothing post-rename and must never survive a contraction.
 
+Pre-staged state (Decision 218, rec-3902): both lists carry TWO entries -- the current
+benjamin-blake segment and the otl-labs/ontheloop target segment -- until the contract's
+predecessor_removal phase drops the first. TestTargetOwnerSegment pins the target's NAMES and its
+durable repository id, never its owner id (the id lives only in the two lists).
+
 Assertions 1 and 2 pin no COUNT of trusted slugs. Assertion 3 is a FORMAT assertion for the same
 reason: Decision 172 point 2's pre-stage playbook adds a future name's immutable entry additively,
 BEFORE any later rename, so a transient multi-entry state must stay green throughout -- a count
@@ -50,6 +55,8 @@ _EXPECTED_OWNER = "benjamin-blake"
 _EXPECTED_OWNER_ID = "217728084"
 _EXPECTED_REPO = "theseus"
 _EXPECTED_REPO_ID = "1252427466"
+_TARGET_OWNER = "otl-labs"
+_TARGET_REPO = "ontheloop"
 _IMMUTABLE_SEGMENT = f"{_EXPECTED_OWNER}@{_EXPECTED_OWNER_ID}/{_EXPECTED_REPO}@{_EXPECTED_REPO_ID}"
 # The five sub-site suffix TEMPLATES (with the un-substituted `${repo}` token) each expected sub
 # site must declare, and the fully-expanded literal each one yields once `${repo}` resolves to
@@ -165,14 +172,16 @@ class TestImmutableSubjectEntry:
             assert immutable, (
                 f"{path} declares no OWNER@OWNER-ID/REPO@REPO-ID immutable entry in local.github_repos (slugs={slugs})"
             )
-            owner, owner_id, repo, repo_id = immutable[0].groups()
+            current = [m for m in immutable if m.group(1) == _EXPECTED_OWNER]
+            assert len(current) == 1, f"{path} must declare exactly one {_EXPECTED_OWNER} entry (slugs={slugs})"
+            owner, owner_id, repo, repo_id = current[0].groups()
             assert (owner, owner_id, repo, repo_id) == (
                 _EXPECTED_OWNER,
                 _EXPECTED_OWNER_ID,
                 _EXPECTED_REPO,
                 _EXPECTED_REPO_ID,
             ), (
-                f"{path}'s immutable entry is {immutable[0].group(0)!r}, expected "
+                f"{path}'s immutable entry is {current[0].group(0)!r}, expected "
                 f"{_IMMUTABLE_SEGMENT!r} (owner id 217728084 / repo id 1252427466)."
             )
 
@@ -204,3 +213,20 @@ class TestImmutableSubjectEntry:
             rendered = template.replace("${repo}", _IMMUTABLE_SEGMENT)
             expected = f"repo:{_IMMUTABLE_SEGMENT}{suffix}"
             assert rendered == expected  # trivially true; pins the yielded literal for readers
+
+
+class TestTargetOwnerSegment:
+    """Decision 218: the otl-labs owner segment is pre-staged additively beside the current one so the
+    organisation transfer cannot lock CI out. Pins NAMES and the durable repository id, never the owner id."""
+
+    def test_both_roots_stage_the_target_segment(self) -> None:
+        for path in (_PERSONAL_LOCALS, _BOOTSTRAP_APPLY):
+            slugs = _declared_slugs(path)
+            targets = [m for m in (_IMMUTABLE_ENTRY_RE.match(s) for s in slugs) if m and m.group(1) == _TARGET_OWNER]
+            assert len(targets) == 1, f"{path} must declare exactly one {_TARGET_OWNER} entry (slugs={slugs})"
+            owner, owner_id, repo, repo_id = targets[0].groups()
+            assert repo == _TARGET_REPO, f"{path}'s target entry names repository {repo!r}, expected {_TARGET_REPO!r}"
+            assert repo_id == _EXPECTED_REPO_ID, (
+                f"{path}'s target entry carries repository id {repo_id}; expected the durable {_EXPECTED_REPO_ID}"
+            )
+            assert owner_id != _EXPECTED_OWNER_ID, f"{path}'s target entry reuses the current owner id"

@@ -81,6 +81,28 @@ def test_no_write_statement_is_ever_issued():
     assert all(q.lstrip().upper().startswith("SELECT") for q in cur.sql)
 
 
+class _RowsCur:
+    def __init__(self, row: Any) -> None:
+        self.row, self.calls = row, []
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self.calls.append((sql, params))
+
+    def fetchone(self) -> Any:
+        return self.row
+
+
+def test_stats_rows_est_reads_pg_catalog_only():
+    cur = _RowsCur((48000,))
+    assert st.stats_rows_est(cur, "ducklake_telemetry") == 48000
+    assert len(cur.calls) == 1
+    sql, params = cur.calls[0]
+    assert sql.lstrip().upper().startswith("SELECT") and "pg_catalog.pg_class" in sql and "reltuples" in sql
+    assert params == ["ducklake_telemetry", st.STATS_TABLE] and "ducklake_telemetry" not in sql
+    assert st.stats_rows_est(_RowsCur((-1,)), "x") is None
+    assert st.stats_rows_est(_RowsCur(None), "x") is None
+
+
 def test_module_excluded_from_data_pipeline():
     affected = compute_affected_artifacts(["src/common/ducklake_catalog_index_status.py"])
     assert set(affected) == {"ducklake_maintenance", "ducklake_maintenance_smoke"}

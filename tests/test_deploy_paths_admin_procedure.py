@@ -108,6 +108,12 @@ class TestPreMergeLivePlan:
         assert rule[1].lstrip().startswith("ENVIRONMENT CHECK")
         assert rule[2].lstrip().startswith("V3 RESOLUTION")
 
+    def test_environment_check_uses_caller_arn_helper(self) -> None:
+        rule = self._doc()["admin_out_of_band"]["pre_merge_live_plan"]["rule"]
+        env_check = " ".join(rule[1].split())
+        assert "bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin" in env_check
+        assert "get-caller-identity" not in env_check
+
     def test_rule_has_decision_101_counts_only_entry(self) -> None:
         rule = self._doc()["admin_out_of_band"]["pre_merge_live_plan"]["rule"]
         assert any("Decision 101" in entry for entry in rule), "no rule entry names Decision 101"
@@ -136,3 +142,75 @@ class TestPreMergeLivePlan:
         for path in self.SKILL_PATHS:
             text = path.read_text(encoding="utf-8")
             assert "admin_out_of_band.pre_merge_live_plan" in text, f"{path} missing the pointer"
+
+
+def _steps(block: dict) -> list[dict]:
+    steps = block["steps"]
+    assert steps and all(step["command"].strip() and step["check"].strip() for step in steps), (
+        "every step needs a command and a check"
+    )
+    return steps
+
+
+def _index(steps: list[dict], step_id: str) -> int:
+    ids = [step["id"] for step in steps]
+    assert step_id in ids, (step_id, ids)
+    return ids.index(step_id)
+
+
+def test_production_catalog_provisioning_orders_its_two_sittings() -> None:
+    """Decision 230 cl.4: the carve-out's procedure orders each sitting, keeps the two independent, names the operator for the
+    stats verbs, and rolls the smoke switch back through release mode before the deploy hold is released."""
+    doc = yaml.safe_load(CONTRACT_PATH.read_text(encoding="utf-8"))
+    block = doc["admin_out_of_band"]["production_catalog_provisioning"]
+    assert block["record_file"].endswith("ADMIN-SESSION-RECORD.md")
+    assert block["measurement_file"].endswith("MEASUREMENT.md")
+
+    one, two = _steps(block["sitting_1"]), _steps(block["sitting_2"])
+    assert "sitting 2" not in str(block["sitting_1"]).lower() and "sitting_2" not in str(block["sitting_1"])
+    sitting_2_text = str({k: v for k, v in block["sitting_2"].items() if k != "rollback"}).lower()
+    assert "sitting 1" not in sitting_2_text and "sitting_1" not in sitting_2_text
+
+    first = [_index(one, name) for name in ("measurement", "provision_telemetry_catalog", "provision_writer_prod_login")]
+    assert first == sorted(first) and _index(one, "provision_reader_login") < _index(one, "ensure_catalog_indexes")
+    assert _index(one, "provision_telemetry_catalog") < _index(one, "ensure_catalog_indexes")
+    assert _index(one, "bootstrap_apply_and_simulate") < _index(one, "measurement")
+
+    second = [
+        _index(two, name)
+        for name in (
+            "adopt_smoke",
+            "maintainer_login",
+            "merge_switch_pr",
+            "clean_owner_rerun",
+            "narrow_smoke_writer",
+            "release_hold",
+        )
+    ]
+    assert second == sorted(second) and _index(two, "release_hold") < _index(two, "live_proof_deploy")
+
+    every = one + two + block["sitting_2"]["rollback"]
+    for step in every:
+        command = step["command"]
+        if "catalog_stats" in command or "ensure_catalog_indexes" in command:
+            assert step["actor"] == "operator", step["id"]
+        if any(verb in command for verb in ("provision_catalog_owner", "provision_telemetry_catalog", "login_steps_ref")):
+            assert step["actor"] == "admin_agent", step["id"]
+        assert "merge_ops" not in command and "gc_ops" not in command, step["id"]
+        assert step["actor"] in {"operator", "admin_agent", "coordinator"}, step["id"]
+    assert {s["id"]: s["actor"] for s in one}["measurement"] == "operator"
+    assert {s["id"]: s["actor"] for s in one}["ensure_catalog_indexes"] == "operator"
+
+    rollback = block["sitting_2"]["rollback"]
+    ids = [step["id"] for step in rollback]
+    assert ids[0] == "keep_hold" and ids.index("revert_switch_pr") < ids.index("release_mode") < ids.index("green_deploy_run")
+    assert ids.index("green_deploy_run") < ids.index("release_hold_after_rollback")
+    assert '"mode":"release"' in rollback[ids.index("release_mode")]["command"]
+    for gate in (
+        "MAINTENANCE_MERGE",
+        "MAINTENANCE_GC",
+        "MAINTENANCE_BREAKER",
+        "MAINTENANCE_HOT_MERGE",
+        "MAINTENANCE_CREATE_TELEMETRY",
+    ):
+        assert gate in rollback[ids.index("green_deploy_run")]["check"], gate

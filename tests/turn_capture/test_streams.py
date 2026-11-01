@@ -27,10 +27,13 @@ from tests.fixtures.turn_capture_corpus import (
     hook,
     make_files,
     prompt,
+    stop_summary,
     task_notice,
     text_block,
     tool_result,
     tool_use_block,
+    ts,
+    witness,
 )
 from tests.fixtures.turn_capture_v3_cases import (
     fork_branch_copied_head_files,
@@ -429,3 +432,135 @@ def test_background_spawn_completes_at_a_later_resume_boundary() -> None:
     inner = next(sp for sp in deep.spawns if sp.agent_id == "g1")
     assert not inner.complete and not inner.completed_at_boundary
     assert tree.streams[ROOT].resume_ends == {tree.streams[ROOT].resumes[0].line: tree.streams[ROOT].recs[-1].line}
+
+
+def framed(root, final=False, frontier=True):
+    return parse_tree(MemTree(make_files(root)), None, final, frontier=frontier)
+
+
+def test_the_frontier_withholds_an_open_turns_tail_only_when_asked() -> None:
+    root = [
+        prompt("u1", 1, "p1", "go"),
+        assistant("a1", 2, "m1", [text_block("k")]),
+        witness("w1", 3),
+        stop_summary("s1", 3.1),
+        hook("late", 3.2, "Notification", command="bash ./x.sh"),
+    ]
+    kept = framed(root)
+    turn = kept.streams[ROOT].turns[0]
+    assert [r.uuid for r in turn.closes] == ["w1"] and turn.closed and not turn.bounded
+    assert [r.uuid for r in kept.streams[ROOT].recs][-1] == "w1" and kept.diag["frontier_withheld"] == 2
+    assert [h.uuid for h in kept.streams[ROOT].hooks] == ["w1"]
+    whole = framed(root, frontier=False)
+    assert len(whole.streams[ROOT].recs) == 5 and "frontier_withheld" not in whole.diag
+    assert framed(root, final=True).streams[ROOT].turns[0].bounded
+
+
+def test_nothing_is_withheld_without_an_open_last_turn_or_a_tail() -> None:
+    assert framed([hook("h0", 0.5, "SessionStart:startup")]).streams[ROOT].turns == []
+    resumed = [
+        prompt("u1", 1, "p1", "go"),
+        assistant("a1", 2, "m1", [text_block("k")]),
+        hook("rs", 3, "SessionStart:resume", command="bash ./r.sh"),
+        hook("rs2", 3.5, "SessionStart:resume", command="bash ./r.sh"),
+    ]
+    bounded = framed(resumed)
+    assert bounded.streams[ROOT].turns[0].bounded and "frontier_withheld" not in bounded.diag
+    tail = framed([prompt("u1", 1, "p1", "go"), assistant("a1", 2, "m1", [text_block("k")]), witness("w1", 3)])
+    assert "frontier_withheld" not in tail.diag and tail.streams[ROOT].turns[0].closes
+
+
+def test_witness_counters_survive_the_frontier_cut() -> None:
+    pending = [
+        prompt("u1", 1, "p1", "go"),
+        assistant("a1", 2, "m1", [tool_use_block("t1", "Bash", {"command": "ls"})]),
+        witness("w1", 3),
+        tool_result("r1", 4, "t1", "out", pid="p1"),
+    ]
+    cut = framed([witness("w0", 0.5), *pending])
+    assert cut.diag["witness_not_at_rest"] == 1 and cut.diag["witness_outside_turn"] == 1
+    assert cut.diag["frontier_withheld"] == 3 and cut.streams[ROOT].turns[0].closes == []
+    assert not cut.streams[ROOT].turns[0].closed
+
+
+def _two_turns(*tail: dict) -> list[dict]:
+    return [
+        prompt("u1", 1, "p1", "go"),
+        assistant("a1", 2, "m1", [text_block("x")]),
+        prompt("u2", 4, "p2", "again"),
+        assistant("a2", 5, "m2", [text_block("y")]),
+        *tail,
+    ]
+
+
+def _late_resume(uuid: str = "lr", t: float = 9) -> dict:
+    return hook(uuid, t, "SessionStart:resume", durationMs=8000)
+
+
+def test_late_startup_records_attach_to_no_turn() -> None:
+    names = ("SessionStart:startup", "SessionStart:clear", "SessionStart:compact")
+    root = _two_turns(*(hook(f"s{n}", 6 + n, name, toolUseID="ss") for n, name in enumerate(names)))
+    stream = parsed(root).streams[ROOT]
+    verdict = {r.uuid: r.turn for r in stream.hooks}
+    assert verdict["s0"] is None and verdict["s1"] is None and verdict["s2"] is stream.turns[1]
+    assert parsed(root).diag["late_session_start_records"] == 2
+
+
+def test_late_resume_group_closes_no_turn_and_is_still_a_resume() -> None:
+    tree = parsed(_two_turns(_late_resume(), _late_resume("lr2", 9.1), assistant("a3", 10, "m3", [text_block("z")])))
+    stream = tree.streams[ROOT]
+    first, second = stream.turns
+    assert [r.uuid for r in stream.resumes] == ["lr"] and tree.diag["late_resume_group"] == 1
+    assert stream.resume_at == {stream.resumes[0].line: second.first.line} and not second.bounded
+    assert all(r.turn is None for r in stream.hooks) and second.last_assistant.uuid == "a3"
+    assert stream.resume_ends == {stream.resumes[0].line: stream.recs[-1].line}
+
+
+def test_on_time_resume_group_is_unchanged() -> None:
+    tree = parsed(_two_turns(hook("rs", 6, "SessionStart:resume", durationMs=500), prompt("u3", 7, "p3", "more")))
+    stream = tree.streams[ROOT]
+    assert stream.turns[1].bounded and stream.resume_at == {stream.resumes[0].line: stream.resumes[0].line}
+    assert tree.diag["late_resume_group"] == 0
+
+
+def test_background_spawn_completes_at_the_effective_boundary() -> None:
+    tur = {"agentId": "b1", "isAsync": True, "status": "async_launched"}
+    use = assistant("a1", 2, "m1", [tool_use_block("tuA", "Agent", {"subagent_type": "Explore"})])
+    launched = [prompt("u1", 1, "p1", "go"), use, tool_result("r1", 3, "tuA", "x", pid="p1", tur=tur)]
+    tail = [prompt("u2", 4, "p2", "again"), assistant("a2", 5, "m2", [text_block("y")]), _late_resume()]
+    outside = parsed([*launched, *tail], {"b1": _kid("b1")}).spawns[0]
+    assert outside.complete and outside.completed_at_boundary
+    inside = parsed(
+        [
+            *launched[:1],
+            *tail[:2],
+            {**use, "uuid": "a3", "timestamp": ts(6)},
+            tool_result("r2", 7, "tuA", "x", pid="p2", tur=tur),
+            tail[2],
+        ],
+        {"b1": _kid("b1")},
+    ).spawns[0]
+    assert not inside.complete and not inside.completed_at_boundary
+
+
+def test_twins_stay_turnless_across_the_frontier_reassembly() -> None:
+    twin = {"toolUseID": "tw", "command": "c", "durationMs": 7}
+    root = [
+        prompt("u1", 1, "p1", "go"),
+        hook("t1", 1.2, "UserPromptSubmit", **twin),
+        hook("t2", 1.3, "UserPromptSubmit", **twin),
+        assistant("a1", 2, "m1", [text_block("x")]),
+        witness("w1", 3),
+        hook("t3", 3.5, "Notification", **twin),
+        hook("t4", 3.6, "Notification", **twin),
+    ]
+
+    def shape(tree):
+        stream = tree.streams[ROOT]
+        recs = [(r.uuid, r.kind, r.turn.prompt_id if r.turn else None) for r in stream.recs]
+        return recs, [[r.uuid for r in t.recs] for t in stream.turns], [r.uuid for r in stream.hooks]
+
+    cut = framed(root)
+    assert cut.diag["frontier_withheld"] == 2 and shape(cut) == shape(parsed(root[:5]))
+    assert shape(cut)[1] == [["u1", "t1", "a1", "w1"]] and ("t2", "hook_twin", None) in shape(cut)[0]
+    assert cut.diag["hook_twin_records"] == 1

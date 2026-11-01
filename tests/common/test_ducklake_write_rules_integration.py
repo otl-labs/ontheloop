@@ -21,6 +21,7 @@ duckdb = pytest.importorskip("duckdb")
 import scripts.contract_rule_census as census  # noqa: E402
 import scripts.field_semantics_rule_projection as projection  # noqa: E402
 from scripts.contract_rules import declared_rules  # noqa: E402
+from src.common import ducklake_dq_checks as dq  # noqa: E402
 from src.common import ducklake_runtime as rt  # noqa: E402
 from src.common.ducklake_write_rules import RowRuleViolationError  # noqa: E402
 from src.row_rules.rules import RowRuleError, RowRules, check_row  # noqa: E402
@@ -151,9 +152,11 @@ def test_the_census_sql_and_the_engine_agree_row_for_row(con: Any) -> None:
     for rule in declared_rules(TABLE):
         if rule.exemption is not None:
             continue
-        gate = f" AND created_timestamp >= DATE('{rule.exclude_before}')" if rule.exclude_before else ""
-        sql = f"SELECT id FROM {CURRENT} WHERE ({census.violation_condition(rule)}){gate}"
-        census_ids = {r[0] for r in con.execute(sql).fetchall()}
+        params = census.compile_rule(rule).params
+        fragment, binds = dq.row_predicate(rule.kind, rule.table, rule.column, params)
+        gate = " AND created_timestamp >= CAST(? AS DATE)" if rule.exclude_before else ""
+        sql = f"SELECT id FROM {CURRENT} WHERE ({fragment}){gate}"
+        census_ids = {r[0] for r in con.execute(sql, [*binds, *([rule.exclude_before] if gate else [])]).fetchall()}
         assert census_ids == _engine_ids(con, rule), (rule.column, rule.kind)
         compared += 1
     assert compared >= 25

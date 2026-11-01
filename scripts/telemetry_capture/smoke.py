@@ -1,10 +1,14 @@
-"""The c8 proof (rule SM-1): the real Stop and SessionEnd entry points against the live writer under a synthetic: ref.
+"""The c8 proof (rule SM-1): the real Stop, StopFailure, UserPromptSubmit and SessionEnd entry points against the live writer
+under a synthetic: ref.
 
-Registers synthetic:pc-smoke-<8 hex>, writes a synthetic transcript tree (a pinning SessionStart attachment, one tool
-output above 64 KiB in a tool-results sidecar so blob delivery runs, one completed subagent spawn so all four tables carry
-rows) to a temp dir, drives Stop (polling state.json for the detached pass) then SessionEnd with crafted stdin, reads back
-with telemetry_probe and compares per-table rows with what record_turn built. Then deletes the cursor and replays both
-entry points: per table, run 2 submits run 1's total and inserts 0. Prints counts and PASS/FAIL lines only.
+Registers synthetic:pc-smoke-<8 hex>, writes a synthetic transcript tree in stages (a pinning SessionStart attachment, one
+tool output above 64 KiB in a tool-results sidecar so blob delivery runs, one completed subagent spawn so all four tables
+carry rows, a turn closed at its Stop witness, an API-error turn and a trailing prompt with no witness) to a temp dir. It
+drives Stop on the first stage, StopFailure once the error turn is appended, UserPromptSubmit once the trailing prompt is
+appended (each drive polling the diagnostics for its detached pass; every wait is already satisfied) then SessionEnd, all
+with crafted stdin, reads back with telemetry_probe and compares per-table rows with what record_turn built. Then deletes
+the cursor and replays UserPromptSubmit and SessionEnd: per table, run 2 submits run 1's total and inserts 0. Prints counts
+and PASS/FAIL lines only.
 
 The record shapes are copied from tests/fixtures/turn_capture_corpus.py (scripts/ never imports tests/).
 """
@@ -21,6 +25,7 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +36,7 @@ from scripts.telemetry_capture.switch import SMOKE_ENV
 from scripts.telemetry_capture.transport import MAX_TIMEOUT_S, Budget, WriterClient, make_client
 from src.turn_capture.record_turn import TABLES, record_turn
 from src.turn_capture.render import render_datetime
+from src.turn_capture.witness import WITNESS_LINE
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOKS = REPO_ROOT / ".claude" / "hooks"
@@ -38,6 +44,9 @@ SIDECAR = "big1.txt"
 SIDECAR_LINE = "pc smoke sidecar output line\n"
 SIDECAR_LINES = 2600
 POLL_S = 60.0
+STOP_COMMAND = '"$CLAUDE_PROJECT_DIR/bin/venv-python" "$CLAUDE_PROJECT_DIR/.claude/hooks/stop_log_turn.py"'
+TRAILING_PROMPT_ID = "p3"
+WAIT_TIMEOUTS = ("witness_wait_timeout", "settle_timeout", "prompt_wait_timeout")
 Entry = Callable[[str, Mapping[str, str]], object]
 
 
@@ -45,7 +54,7 @@ class SmokeFailure(Exception):
     pass
 
 
-def _records(sid: str, ref: str, start: datetime) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _records(sid: str, ref: str, start: datetime) -> tuple[list[list[dict[str, Any]]], list[dict[str, Any]]]:
     def stamp(seconds: float) -> str:
         return render_datetime(start + timedelta(seconds=seconds))
 
@@ -108,27 +117,61 @@ def _records(sid: str, ref: str, start: datetime) -> tuple[list[dict[str, Any]],
         ),
         reply("a3", 7, "m3", [{"type": "text", "text": "smoke done"}]),
     ]
+    stop_hook = {"type": "hook_success", "hookName": "Stop", "hookEvent": "Stop", "exitCode": 0, "command": STOP_COMMAND}
+    stop_hook.update(stderr=WITNESS_LINE + "\n", stdout="", toolUseID="stop-w1")
+    zero = dict.fromkeys(("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"), 0)
+    error = reply("e1", 11, "me1", [{"type": "text", "text": "API Error: smoke"}], "stop_sequence", isApiErrorMessage=True)
+    error["message"].update(model="<synthetic>", usage=zero)
+    error["error"] = "server_error"
+    stages = [
+        [*root, base("w1", 8, type="attachment", attachment=stop_hook)],
+        [base("u2", 10, type="user", promptId="p2", message={"role": "user", "content": "and again"}), error],
+        [base("u3", 13, type="user", promptId=TRAILING_PROMPT_ID, message={"role": "user", "content": "last"})],
+    ]
     child = {"agentId": "agent1", "isSidechain": True}
     children = [
         base("c1", 4.5, type="user", promptId="p1", message={"role": "user", "content": "task"}, **child),
         reply("c2", 5, "mc1", [{"type": "text", "text": "child work"}], None, **child),
     ]
-    return root, children
+    return stages, children
 
 
-def write_tree(directory: Path, ref: str, *, start: datetime | None = None) -> Path:
-    """The synthetic tree under directory; returns its root .jsonl path."""
+def _lines(records: list[dict[str, Any]]) -> str:
+    return "".join(json.dumps(rec, sort_keys=True) + "\n" for rec in records)
+
+
+@dataclass
+class Tree:
+    """The synthetic tree: stages 1..n of its root file are on disk, advance() appends the next one."""
+
+    root_file: Path
+    stages: list[list[dict[str, Any]]]
+    written: int
+
+    def advance(self) -> None:
+        with self.root_file.open("a", encoding="utf-8") as handle:
+            handle.write(_lines(self.stages[self.written]))
+        self.written += 1
+
+
+def build_tree(directory: Path, ref: str, *, start: datetime | None = None, upto: int | None = None) -> Tree:
+    """The synthetic tree under directory with its first *upto* root stages written (None = all)."""
     sid = str(uuid.uuid4())
-    root, children = _records(sid, ref, start or datetime.now(timezone.utc).replace(microsecond=0))
+    stages, children = _records(sid, ref, start or datetime.now(timezone.utc).replace(microsecond=0))
     session = directory / sid
     (session / "subagents").mkdir(parents=True)
     (session / "tool-results").mkdir()
     (session / "tool-results" / SIDECAR).write_text(SIDECAR_LINE * SIDECAR_LINES, encoding="utf-8")
-    body = "".join(json.dumps(rec, sort_keys=True) + "\n" for rec in children)
-    (session / "subagents" / "agent-agent1.jsonl").write_text(body, encoding="utf-8")
+    (session / "subagents" / "agent-agent1.jsonl").write_text(_lines(children), encoding="utf-8")
     root_file = directory / f"{sid}.jsonl"
-    root_file.write_text("".join(json.dumps(rec, sort_keys=True) + "\n" for rec in root), encoding="utf-8")
-    return root_file
+    count = len(stages) if upto is None else upto
+    root_file.write_text(_lines([rec for stage in stages[:count] for rec in stage]), encoding="utf-8")
+    return Tree(root_file, stages, count)
+
+
+def write_tree(directory: Path, ref: str, *, start: datetime | None = None) -> Path:
+    """The complete synthetic tree under directory; returns its root .jsonl path."""
+    return build_tree(directory, ref, start=start).root_file
 
 
 def expected_by_ref(root_file: Path, ref: str) -> dict[str, dict[str, int]]:
@@ -211,30 +254,68 @@ class Smoke:
         self.client_factory, self.stop, self.session_end, self.env = client_factory, stop, session_end, env
         self.out, self.sleep, self.clock, self.poll_s = out, sleep, clock, poll_s
 
-    def _drive(self, root_file: Path, state: CaptureState) -> list[dict[str, Any]]:
+    def _hook(
+        self, entry: Entry, root_file: Path, state: CaptureState, event: str, *, detached: bool = True, **extra: Any
+    ) -> dict[str, Any]:
+        """Drive one hook entry; a detached one returns the diagnostics line its pass appended (SessionEnd runs inline)."""
         before = len(state.diagnostics())
-        sid = root_file.stem
-        common = {"session_id": sid, "transcript_path": str(root_file), "cwd": str(REPO_ROOT)}
-        self.stop(json.dumps({**common, "hook_event_name": "Stop", "stop_hook_active": False}), self.env)
+        payload = {"session_id": root_file.stem, "transcript_path": str(root_file), "cwd": str(REPO_ROOT)}
+        entry(json.dumps({**payload, "hook_event_name": event, **extra}), self.env)
+        if not detached:
+            _no_halt(state)
+            return {}
         end = self.clock() + self.poll_s
         while len(state.diagnostics()) <= before:
             if self.clock() >= end:
-                raise SmokeFailure("the detached Stop pass did not finish")
+                raise SmokeFailure(f"the detached {event} pass did not finish")
             self.sleep(0.5)
         _no_halt(state)
+        line = state.diagnostics()[before]
+        counted = line.get("diag") or {}
+        for token in WAIT_TIMEOUTS:
+            if counted.get(token):
+                raise SmokeFailure(f"the {event} drive reported {token}")
+        return line
+
+    def _expect(self, line: dict[str, Any], event: str, token: str) -> None:
+        if not (line.get("diag") or {}).get(token):
+            raise SmokeFailure(f"the {event} drive did not report {token}")
+
+    def _prompt(self, tree: Tree, state: CaptureState) -> dict[str, Any]:
+        line = self._hook(self.stop, tree.root_file, state, "UserPromptSubmit", prompt_id=TRAILING_PROMPT_ID)
+        self._expect(line, "UserPromptSubmit", "prompt_seen")
+        return line
+
+    def _end(self, tree: Tree, state: CaptureState) -> None:
+        self._hook(self.session_end, tree.root_file, state, "SessionEnd", detached=False, reason="other")
+
+    def _first_leg(self, tree: Tree, state: CaptureState) -> list[dict[str, Any]]:
+        start = len(state.diagnostics())
+        line = self._hook(self.stop, tree.root_file, state, "Stop", stop_hook_active=False)
+        self._expect(line, "Stop", "witness_seen")
         if not state.state_file.exists():
-            raise SmokeFailure(f"the Stop pass wrote no cursor (outcome {state.diagnostics()[-1].get('outcome')})")
-        self.session_end(json.dumps({**common, "hook_event_name": "SessionEnd", "reason": "other"}), self.env)
-        _no_halt(state)
-        return state.diagnostics()[before:]
+            raise SmokeFailure(f"the Stop pass wrote no cursor (outcome {line.get('outcome')})")
+        tree.advance()
+        self._hook(self.stop, tree.root_file, state, "StopFailure")
+        tree.advance()
+        self._prompt(tree, state)
+        self._end(tree, state)
+        return state.diagnostics()[start:]
+
+    def _replay(self, tree: Tree, state: CaptureState) -> list[dict[str, Any]]:
+        start = len(state.diagnostics())
+        self._prompt(tree, state)
+        self._end(tree, state)
+        return state.diagnostics()[start:]
 
     def run(self, ref: str, directory: Path) -> None:
         client = self.client_factory()
         _ok(client, {"action": "register_tenant"})
         _ok(client, {"action": "register_project", "project_ref": ref, "name": "pc smoke"})
-        root_file = write_tree(directory, ref)
+        tree = build_tree(directory, ref, upto=1)
+        root_file = tree.root_file
         state = CaptureState(state_dir(root_file, root_file.stem))
-        first = self._drive(root_file, state)
+        first = self._first_leg(tree, state)
         cursor = state.cursor_on_disk()
         if cursor is None or not cursor.finalized:
             raise SmokeFailure("the SessionEnd pass did not finalize the cursor")
@@ -264,7 +345,7 @@ class Smoke:
             raise SmokeFailure("no blob row was delivered")
         run1, _ = _submitted(first)
         state.state_file.unlink()
-        run2, inserted = _submitted(self._drive(root_file, state))
+        run2, inserted = _submitted(self._replay(tree, state))
         for table in TABLES:
             self.out(f"{table} replay submitted={run2[table]} first={run1[table]} inserted={inserted[table]}")
             if run2[table] != run1[table] or inserted[table] != 0:

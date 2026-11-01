@@ -41,14 +41,27 @@ locals {
   # SSOT pin: config/lambda/ducklake/version.yaml -- must be try()-wrapped (validate_terraform_try gate)
   ducklake_version = try(yamldecode(file("${path.module}/../../config/lambda/ducklake/version.yaml")).duckdb_version, "")
 
-  # Telemetry (T2.36, slice 2a-2): pinned to the ISOLATED smoke catalog until a Decision moves it (slice 2c). The blob root
-  # is scoped by the catalog it serves, so smoke-era and production blobs never share a root.
-  ducklake_telemetry_meta_schema = "ducklake_smoke"
+  # Telemetry (T2.36): the writer's catalog pin, moved to the production telemetry catalog by Decision 230 (slice 2c's
+  # production flip). The blob root is scoped by the catalog it serves, so smoke-era and production blobs never share a root.
+  ducklake_telemetry_meta_schema = "ducklake_telemetry"
   telemetry_blob_data_prefix     = "telemetry-blobs"
   ducklake_telemetry_blob_root   = "s3://${aws_s3_bucket.data_lake.bucket}/${local.telemetry_blob_data_prefix}/${local.ducklake_telemetry_meta_schema}/"
 
   # Telemetry writer function name; declared here so the pin guard's locals parse sees it.
   ducklake_telemetry_writer_function = "agent-platform-ducklake-telemetry-writer"
+
+  # Production telemetry catalog (Decision 230): a sibling of ducklake/, never inside it, so the ops catalog's
+  # catalog-wide orphan cleanup never sees telemetry Parquet. The writer pin above holds the same value (Decision 230).
+  ducklake_telemetry_data_prefix      = "ducklake-telemetry"
+  ducklake_telemetry_data_path        = "s3://${aws_s3_bucket.data_lake.bucket}/ducklake-telemetry/"
+  ducklake_telemetry_prod_meta_schema = "ducklake_telemetry"
+  ducklake_telemetry_reader_function  = "agent-platform-ducklake-telemetry-reader"
+
+  # Smoke twin of the telemetry writer (Decision 236 cl.1): pinned to the fixed smoke locals below, never to the
+  # flipping ducklake_telemetry_meta_schema, so the flip cannot move it.
+  ducklake_telemetry_writer_smoke_function = "agent-platform-ducklake-telemetry-writer-smoke"
+  ducklake_smoke_meta_schema               = "ducklake_smoke"
+  ducklake_telemetry_smoke_blob_root       = "s3://${aws_s3_bucket.data_lake.bucket}/${local.telemetry_blob_data_prefix}/${local.ducklake_smoke_meta_schema}/"
 }
 
 # ---------------------------------------------------------------------------
@@ -167,6 +180,13 @@ resource "aws_iam_role_policy" "ducklake_writer" {
         Resource = [aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn]
       },
       {
+        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
+        Sid      = "NeonDsnParameterRead"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/ducklake-neon-catalog-dsn"]
+      },
+      {
         # Writer is the SOLE write authority for ops_* (CD.33 clause 4): RW on the production
         # ducklake/ data path AND the retained smoke prefix (T2.17 gates / rollback).
         Sid    = "S3DataReadWrite"
@@ -205,8 +225,8 @@ resource "aws_iam_role_policy" "ducklake_writer" {
 }
 
 # ---------------------------------------------------------------------------
-# Read-scoped execution role: S3 GetObject ONLY on the ducklake/ + smoke prefixes and the catalog-scoped telemetry-blobs/
-# prefix (transcript_content's blob read; no Put/Delete -> writes denied, no List), DSN secret read, logs. No metrics.
+# Read-scoped execution role: S3 GetObject ONLY on the ducklake/ + smoke prefixes (no Put/Delete -> writes denied), DSN
+# secret read, logs. No metrics, and no telemetry grant: event reads are the telemetry reader's (Decision 236).
 # ---------------------------------------------------------------------------
 
 resource "aws_iam_role" "ducklake_reader" {
@@ -237,6 +257,13 @@ resource "aws_iam_role_policy" "ducklake_reader" {
         Resource = [aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn]
       },
       {
+        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
+        Sid      = "NeonDsnParameterRead"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/ducklake-neon-catalog-dsn"]
+      },
+      {
         # GetObject ONLY -- no PutObject/DeleteObject. A DuckLake write (Parquet PutObject) from this
         # role is denied at S3, which is the closed-boundary proof (write_probe -> write_denied=true).
         # Read-only on the production ducklake/ data path AND the retained smoke prefix.
@@ -247,14 +274,6 @@ resource "aws_iam_role_policy" "ducklake_reader" {
           "${aws_s3_bucket.data_lake.arn}/${local.ducklake_prod_data_prefix}/*",
           "${aws_s3_bucket.data_lake.arn}/${local.ducklake_smoke_data_prefix}/*",
         ]
-      },
-      {
-        # transcript_content reads a stored blob object by its full key (HEAD, then a ranged GET). GetObject on the
-        # catalog-scoped blob prefix only: no List (an absent key answers 403), no Put or Delete.
-        Sid      = "TelemetryBlobRead"
-        Effect   = "Allow"
-        Action   = ["s3:GetObject"]
-        Resource = ["${aws_s3_bucket.data_lake.arn}/${local.telemetry_blob_data_prefix}/${local.ducklake_telemetry_meta_schema}/*"]
       },
       {
         Sid      = "S3ListDataPrefix"
@@ -344,9 +363,6 @@ resource "aws_lambda_function" "ducklake_reader" {
       DUCKLAKE_DATA_PATH            = local.ducklake_prod_data_path
       DUCKLAKE_EXTENSION_DIRECTORY  = local.ducklake_extension_dir
       DUCKLAKE_FIELD_SEMANTICS_PATH = "/var/task/config/lambda/ducklake/field_semantics.yaml"
-      TELEMETRY_META_SCHEMA         = local.ducklake_telemetry_meta_schema
-      TELEMETRY_DATA_PATH           = local.ducklake_smoke_data_path
-      TELEMETRY_BLOB_ROOT           = local.ducklake_telemetry_blob_root
     }
   }
 

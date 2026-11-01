@@ -126,3 +126,17 @@ class TestPromotedGateClosures:
     def test_an_unrelated_path_is_not_matched(self, name: str) -> None:
         """Anti-vacuity: the rows above would also pass against a catch-all pattern."""
         assert not self._covered(name, "README.md")
+
+
+class TestStatusLineEmittersRegistered:
+    """validate_status_line_emitters is dispatched in both tiers and runs on every edit."""
+
+    @pytest.mark.parametrize("tier", ["pre", "full"])
+    def test_dispatched(self, tier: str) -> None:
+        sequence = registry.pre_sequence() if tier == "pre" else registry.full_sequence()
+        assert "validate_status_line_emitters" in {step.name for step in sequence if step.kind == "check"}
+
+    def test_ungated_so_every_edit_runs_it(self) -> None:
+        """No pre_globs: the check scans scripts/, src/ and .claude/hooks, which a repo-wide glob may not gain."""
+        entry = next(e for e in _manifest.ENTRIES if e.name == "validate_status_line_emitters")
+        assert entry.pre and not entry.pre_globs

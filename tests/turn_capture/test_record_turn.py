@@ -22,8 +22,9 @@ from src.turn_capture.record_turn import (
 )
 from src.turn_capture.render import render_rows_json
 from src.turn_capture.scrub import scrub_text
-from src.turn_capture.streams import ROOT, parse_tree
+from src.turn_capture.streams import ROOT
 from src.turn_capture.transcript import MemTree
+from tests.fixtures import turn_capture_line_cuts as line_cuts
 from tests.fixtures.telemetry_blob_fakes import as_written
 from tests.fixtures.turn_capture_corpus import (
     PROJECT,
@@ -58,6 +59,9 @@ from tests.fixtures.turn_capture_corpus import (
 from tests.fixtures.turn_capture_ducklake import load_specs
 from tests.fixtures.turn_capture_v3_cases import V3_BUILDERS, check_schedule, keyed
 from tests.fixtures.turn_capture_v4_cases import V4_BUILDERS
+from tests.fixtures.turn_capture_v5_cases import V5_BUILDERS
+from tests.fixtures.turn_capture_v6_cases import V6_BUILDERS
+from tests.fixtures.turn_capture_v7_cases import V7_BUILDERS
 
 SECRET_KINDS = ("aws_access", "aws_secret", "aws_session", "anthropic", "github", "github_pat", "bearer")
 
@@ -114,52 +118,6 @@ def test_sessions_batch_written_last() -> None:
     assert result.next_cursor is not None and result.next_cursor.finalized and result.next_cursor.producer == PRODUCER
 
 
-def _line_counts(files):
-    counts = {ROOT: files[f"{SID}.jsonl"].count("\n")}
-    for rel, body in files.items():
-        if "/subagents/agent-" in rel and rel.endswith(".jsonl"):
-            counts[rel.split("agent-")[1][: -len(".jsonl")]] = body.count("\n")
-    return counts
-
-
-def _rel(key):
-    return f"{SID}.jsonl" if key == ROOT else f"{SID}/subagents/agent-{key}.jsonl"
-
-
-def _cut(files, cut):
-    out = dict(files)
-    for key, n in cut.items():
-        out[_rel(key)] = "".join(files[_rel(key)].splitlines(keepends=True)[:n])
-    return out
-
-
-def _valid(files, cut, full):
-    parsed = parse_tree(MemTree(_cut(files, cut)), None, False)
-    return all(cut[s.agent_id] == full[s.agent_id] for s in parsed.spawns if s.complete)
-
-
-def _paths(files):
-    full = _line_counts(files)
-    keys = list(full)
-    orders = [keys, keys[::-1], "rotate"]
-    for order in orders:
-        cut = dict.fromkeys(keys, 0)
-        cut[ROOT] = fork_boundary(files)
-        path = [dict(cut)]
-        turn = 0
-        while cut != full:
-            prefer = [keys[(turn + i) % len(keys)] for i in range(len(keys))] if order == "rotate" else order
-            turn += 1
-            for key in prefer:
-                if cut[key] < full[key] and _valid(files, {**cut, key: cut[key] + 1}, full):
-                    cut[key] += 1
-                    path.append(dict(cut))
-                    break
-            else:
-                raise AssertionError("no valid step")
-        yield path
-
-
 def test_incremental_equals_full_at_every_line_cut() -> None:
     boundaries = {name: fork_boundary(load_case(name)[0]) for name in case_names()}
     assert boundaries["fork_session_copied_head.json"] > 0 and boundaries["fork_session_nested.json"] > 0
@@ -168,11 +126,11 @@ def test_incremental_equals_full_at_every_line_cut() -> None:
         files, _ = load_case(name)
         with case_cap(name):
             full_rows = keyed(capture(files, final=True))
-            for path in _paths(files):
+            for path in line_cuts.paths(files):
                 cursor, seen = None, {}
                 for index, cut in enumerate(path):
                     last = index == len(path) - 1
-                    result = capture(_cut(files, cut), cursor, final=last)
+                    result = capture(line_cuts.cut(files, cut), cursor, final=last)
                     cursor = result.next_cursor
                     for key, row in keyed(result).items():
                         assert key not in seen, (name, cut, key)
@@ -244,7 +202,7 @@ def test_finalize_then_grow_through_resume_re_emits_nothing() -> None:
     second = capture(after, first.next_cursor, final=True)
     old_keys, new_keys = set(keyed(first)), set(keyed(second))
     assert not old_keys & new_keys
-    assert ("telemetry_sessions", "rs1#0/resume") in new_keys and ("telemetry_observations", "a2#0/turn_close") in new_keys
+    assert ("telemetry_sessions", "rs1#0/resume") in new_keys and ("telemetry_observations", "late#0/turn_close") in new_keys
     assert not any(k[1] == "late#0/tool_call_close" for k in new_keys)
     first_close = ("telemetry_sessions", "a1#0/close")
     assert first_close in old_keys and keyed(first)[first_close]["event_kind"] == "close"
@@ -361,6 +319,9 @@ def test_new_cases_are_built_from_their_builders() -> None:
         "reasoning_visibility_forms.json": reasoning_forms_files,
         **V3_BUILDERS,
         **V4_BUILDERS,
+        **V5_BUILDERS,
+        **V6_BUILDERS,
+        **V7_BUILDERS,
     }
     for name, builder in builders.items():
         assert load_case(name)[0] == builder(), name
@@ -368,7 +329,7 @@ def test_new_cases_are_built_from_their_builders() -> None:
 
 def test_repin_while_nothing_emitted() -> None:
     files = hooks_before_first_record_files()
-    only_queue_op = _cut(files, {ROOT: 1})
+    only_queue_op = line_cuts.cut(files, {ROOT: 1})
     first = capture(only_queue_op)
     assert first.next_cursor is not None and not any(rows for _, rows in first.batches)
     held = first.next_cursor.session_started_at_ms
@@ -495,7 +456,7 @@ def test_fork_boundary_arriving_after_a_pass_halts() -> None:
     for name in ("fork_session_copied_head.json", "fork_session_nested.json"):
         files, _ = load_case(name)
         boundary = fork_boundary(files)
-        early = capture(_cut(files, {ROOT: boundary - 1}), final=True)
+        early = capture(line_cuts.cut(files, {ROOT: boundary - 1}), final=True)
         assert early.next_cursor is not None and early.observations
         copied = {r["external_ref"] for r in early.observations}
         assert "c1#0/turn_open" in copied or "pp1#0/turn_open" in copied
@@ -532,7 +493,23 @@ def test_finalization_cuts_are_recorded_once_and_survive_a_reset() -> None:
     stale = dataclasses.replace(first.next_cursor, parser_version=PARSER_VERSION - 1)
     re_emitted = capture(files, stale, final=True)
     assert [r["event_kind"] for r in re_emitted.sessions].count("close") == 1 and re_emitted.next_cursor.finalize_cuts == cuts
-    assert PRODUCER_VERSION == "turn-capture-4" and PARSER_VERSION == 4
+    assert PRODUCER_VERSION == "turn-capture-7" and PARSER_VERSION == 7
+
+
+def test_resend_tree_re_emits_every_row_keeping_pins_and_cuts() -> None:
+    base = [prompt("u1", 1, "p1", "go"), assistant("a1", 2, "m1", [text_block("hi")])]
+    grown = [prompt("u2", 11, "p2", "back"), assistant("a2", 12, "m2", [text_block("hello again")])]
+    before, after = make_files(base), make_files(base + grown)
+    first = capture(before, final=True)
+    second = capture(after, first.next_cursor)
+    held = second.next_cursor
+    normal = capture(after, held)
+    resent = capture(after, held, resend_tree=True)
+    assert keyed(normal) == {} and keyed(resent) == {**keyed(first), **keyed(second)}
+    full = keyed(capture(after))
+    assert all(keyed(resent)[key] == row for key, row in full.items())
+    assert [key for key in keyed(resent) if key not in full] == [("telemetry_sessions", "a1#0/close")]
+    assert resent.next_cursor == normal.next_cursor and resent.next_cursor.finalize_cuts == held.finalize_cuts == [{ROOT: 2}]
 
 
 def test_a_stream_with_no_assistant_reply_emits_no_row_in_any_table() -> None:

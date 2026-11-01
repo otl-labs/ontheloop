@@ -37,24 +37,6 @@ locals {
 }
 
 # ---------------------------------------------------------------------------
-# GitHub PAT secret (dispatcher / findings-processor GitHub Models API auth). Value set out-of-band
-# via put-secret-value -- never Terraform-managed
-# (docs/contracts/secret-material-handling.yaml SECRET-VALUE-OUT-OF-BAND pattern, Decision 175 --
-# rehomed from the Decision 37 precedent; mirrors inference_credentials.tf). No secret-version
-# resource: key material must never enter Terraform state.
-# ---------------------------------------------------------------------------
-
-resource "aws_secretsmanager_secret" "github_pat" {
-  name        = "agent-platform-github-pat" # pragma: allowlist secret -- public Secrets Manager resource name, not a value
-  description = "GitHub PAT for the scheduled-agent-dispatcher + findings-processor Lambda functions to call the GitHub Models API (T2.43). Value set out-of-band via put-secret-value; never Terraform-managed (Decision 37)."
-
-  tags = {
-    Name    = "Scheduled Agent GitHub PAT"
-    Purpose = "T2.43 scheduled-agent-dispatcher / findings-processor GitHub Models API auth"
-  }
-}
-
-# ---------------------------------------------------------------------------
 # NOTE (T2.43 apply-time correction): no shared dependencies layer is attached to the
 # dispatcher/findings-processor functions -- neither needs one (verified against handler source:
 # the only third-party import is pyyaml). pyyaml is bundled directly into data-pipeline.zip via
@@ -86,8 +68,7 @@ resource "aws_cloudwatch_log_group" "findings_processor" {
 }
 
 # ---------------------------------------------------------------------------
-# Execution role: scheduled-agent-dispatcher. Writes raw findings under agents/, reads the GitHub
-# PAT secret to call the GitHub Models API. Reuses data.aws_iam_policy_document.lambda_assume
+# Execution role: scheduled-agent-dispatcher. Writes raw findings under agents/. Reuses data.aws_iam_policy_document.lambda_assume
 # (defined once in ducklake_lambdas.tf; a module-global data source, not file-scoped).
 # ---------------------------------------------------------------------------
 
@@ -113,12 +94,6 @@ resource "aws_iam_role_policy" "scheduled_agent_dispatcher" {
         Resource = ["${aws_cloudwatch_log_group.scheduled_agent_dispatcher.arn}:*"]
       },
       {
-        Sid      = "GithubPatRead"
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [aws_secretsmanager_secret.github_pat.arn]
-      },
-      {
         Sid      = "S3AgentFindingsWrite"
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject"]
@@ -141,7 +116,7 @@ resource "aws_iam_role_policy" "scheduled_agent_dispatcher" {
 
 # ---------------------------------------------------------------------------
 # Execution role: findings-processor. Reads agents/ raw findings, writes findings/unified.jsonl +
-# recommendations/agent-recommendations.jsonl + priority-queue/, reads the GitHub PAT secret.
+# recommendations/agent-recommendations.jsonl + priority-queue/.
 # ---------------------------------------------------------------------------
 
 resource "aws_iam_role" "findings_processor" {
@@ -164,12 +139,6 @@ resource "aws_iam_role_policy" "findings_processor" {
         Effect   = "Allow"
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
         Resource = ["${aws_cloudwatch_log_group.findings_processor.arn}:*"]
-      },
-      {
-        Sid      = "GithubPatRead"
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [aws_secretsmanager_secret.github_pat.arn]
       },
       {
         Sid    = "S3FindingsReadWrite"
@@ -217,7 +186,6 @@ resource "aws_lambda_function" "scheduled_agent_dispatcher" {
 
   environment {
     variables = {
-      GITHUB_PAT_SECRET_ARN    = aws_secretsmanager_secret.github_pat.arn
       S3_LOG_BUCKET            = aws_s3_bucket.data_lake.id
       SCHEDULED_AGENTS_ENABLED = "false"
     }
@@ -255,8 +223,7 @@ resource "aws_lambda_function" "findings_processor" {
 
   environment {
     variables = {
-      GITHUB_PAT_SECRET_ARN = aws_secretsmanager_secret.github_pat.arn
-      S3_LOG_BUCKET         = aws_s3_bucket.data_lake.id
+      S3_LOG_BUCKET = aws_s3_bucket.data_lake.id
     }
   }
 

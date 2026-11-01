@@ -16,10 +16,10 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from scripts import repo_identity
 from scripts.ops.drain_glue_orphan._world import WorldMovedError
 
-_REPO_OWNER = "benjamin-blake"
-_REPO_NAME = "theseus"
+_REPO_OWNER, _REPO_NAME = repo_identity.owner_and_name()
 _RECONCILE_DISPATCH_FILE = "reconcile.yml"
 _APPLY_SANDBOX_DISPATCH_FILE = "terraform-apply-sandbox.yml"
 _APPLY_SANDBOX_JOB_NAME = "apply-sandbox"

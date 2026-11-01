@@ -80,7 +80,7 @@ compose in the next step.
 ### Step 4: Compose a context_v2_json object
 
 Using the evidence bundle fields and the schema guidance, compose a JSON object conforming
-to CiRcaContext. All of the following fields are required:
+to CiRcaContext. All of the following fields are required, except preventive_action for a Track A red (Decision 226):
 
 ```json
 {
@@ -98,8 +98,9 @@ to CiRcaContext. All of the following fields are required:
     "escape_mode": "<mirror from bundle.escape_mode>"
   },
   "recurrence_class": "<novel|instance_of_known_pattern|regression>",
+  "repair_track": "<test_defect|product_regression>",
   "corrective_action": "<100-600 chars: tactical fix that restores service>",
-  "preventive_action": "<100-800 chars: systemic change that prevents recurrence>",
+  "preventive_action": "<100-800 chars: systemic change that prevents recurrence; omit only for a Track A red>",
   "unobserved_steps": [
     {"job_id": "<int, from retrieval_evidence.scope>", "step_index": "<int, from retrieval_evidence.scope>"}
   ]
@@ -115,6 +116,8 @@ portal INSIDE `file_rec`, after you compose this object, so it does not exist ye
 write `unobserved_steps`. The portal cross-checks your echo against its own computation and
 tags a mismatch; deriving it correctly the first time avoids that tag. A listed step was NOT
 observed -- do not narrate what happened inside it as if you had read its log.
+
+`repair_track` is your diagnosis of the repair: `test_defect` only when the evidence shows the merged product behaviour is right and the corrective changes nothing outside `tests/**` (a stale expected value, a missing test under a coverage floor); otherwise `product_regression`. When unsure, write `product_regression`. The portal treats the red as Track A only when `repair_track` is `test_defect`, the bundle's `workflow_to_tier_resolution` is `CI` and the red is not a regression (Decision 226). Omit `preventive_action` only when `repair_track` is `test_defect`, `workflow_to_tier_resolution` is `CI` and your `recurrence_class` is not `regression`; otherwise it stays required. If the portal then finds a regression you could not see, it files the red Critical and tags the missing preventive rather than refusing it.
 
 Each `why_chain` entry must be **40-400 characters** (schema_version=2 ceiling). The final
 entry MUST contain, verbatim, at least one of these 11 systemic keywords: `gate`, `tier`,
@@ -154,6 +157,7 @@ bin/venv-python -m scripts.ops_data_portal --file-rec \
 ```
 
 Requirements for each field:
+- **--priority**: `Critical`, or `High` for a Track A red (Step 4). The portal re-derives it in code from `repair_track`, `regression_of` and the bundle's workflow tier (Decision 226), so a passed value never overrides the rule.
 - **--file**: Repo-relative path of the primary file implicated by the diagnosis (e.g.
   `.github/workflows/ci.yml`, `scripts/validate.py`). Mandatory for `source=ci_rca`; the
   portal rejects writes with empty `file`.
@@ -199,7 +203,7 @@ a bare mention of a rec id elsewhere in the output does NOT count as filed.
 ## Hard Rules
 
 **Do not propose or execute any autonomous fix.**
-Your sole output is a filed recommendation. The human reviews and acts on it via `/plan`.
+Your sole output is a filed recommendation. A session acts on it via `/plan`, or the fast lane for a red the portal files High (Decision 226).
 If you cannot determine the root cause from the logs, file the rec with your best-effort
 classification and note the ambiguity in the `context` field.
 
@@ -208,7 +212,7 @@ writes with an empty `file` field when `source="ci_rca"`. Always populate `--fil
 the repo-relative path of the primary file implicated by the failure diagnosis.
 
 **`--priority Critical` (capital C).** The argparse choices are capitalized; `--priority
-critical` is rejected.
+critical` is rejected. Pass --priority High instead for a Track A red; either way the portal re-derives priority (Decision 226).
 
 **Graceful degradation.** When the evidence bundle is absent or minimal (taxonomy_fallback,
 apply-failure backstop, unknown category), the agent still files a rec. When the bundle's

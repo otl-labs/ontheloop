@@ -111,8 +111,8 @@ def test_ducklake_reader_retries_transient_502_then_succeeds(monkeypatch):
         [_FakeResp(status_code=502, text="Internal Server Error"), _FakeResp(payload={"rows": [{"v": 1}]})],
         captured,
     )
-    rows = ir.DuckLakeReader().query("ops_recommendations", "SELECT COUNT(*) v FROM {tbl}")
-    assert rows == [{"v": 1}]
+    rows = ir.DuckLakeReader().dq_check("row_count_min", "ops_recommendations", {"min": 1})
+    assert rows == {"rows": [{"v": 1}]}
     assert captured["calls"] == 2  # retried once after the cold-resume 502
     assert len(captured["sleeps"]) == 1
 
@@ -120,9 +120,9 @@ def test_ducklake_reader_retries_transient_502_then_succeeds(monkeypatch):
 def test_ducklake_reader_persistent_502_raises_after_max_attempts(monkeypatch):
     captured: dict = {}
     ir = _patch_dl_invoke_seq(monkeypatch, [_FakeResp(status_code=502, text="boom")] * 3, captured)
-    # query() no longer swallows the loud-fail: the underlying _invoke's ReaderInvokeError propagates.
+    # dq_check() never swallows the loud-fail: the underlying _invoke's ReaderInvokeError propagates.
     with pytest.raises(ir.ReaderInvokeError):
-        ir.DuckLakeReader().query("ops_recommendations", "SELECT 1 FROM {tbl}")
+        ir.DuckLakeReader().dq_check("row_count_min", "ops_recommendations", {"min": 1})
     assert captured["calls"] == 3  # _READER_MAX_ATTEMPTS
     assert len(captured["sleeps"]) == 2  # backoff between the 3 attempts
 
@@ -131,7 +131,7 @@ def test_ducklake_reader_non_transient_500_not_retried(monkeypatch):
     captured: dict = {}
     ir = _patch_dl_invoke_seq(monkeypatch, [_FakeResp(status_code=500, text="boom")], captured)
     with pytest.raises(ir.ReaderInvokeError):
-        ir.DuckLakeReader().query("ops_recommendations", "SELECT 1 FROM {tbl}")
+        ir.DuckLakeReader().dq_check("row_count_min", "ops_recommendations", {"min": 1})
     assert captured["calls"] == 1  # 500 is not transient -> no retry
     assert captured["sleeps"] == []
 
@@ -170,24 +170,31 @@ def test_ducklake_reader_current_state_no_filter(monkeypatch):
     assert _json.loads(captured["body"])["action"] == "read_ops_current"
 
 
-def test_ducklake_reader_query_uses_query_ops(monkeypatch):
-    """The explicit query() path still routes arbitrary read-only SQL through query_ops."""
+def test_ducklake_reader_has_no_caller_sql_method():
+    """Callers send a closed kind and bound params; the client carries no method that takes SQL text."""
+    import src.common.ducklake_reader_client as ir
+
+    assert not hasattr(ir.DuckLakeReader, "query")
+
+
+def test_ducklake_reader_dq_check_sends_the_structured_request(monkeypatch):
     captured: dict = {}
-    ir = _patch_dl_invoke(monkeypatch, _FakeResp(payload={"rows": [{"v": 0}]}), captured)
-    ir.DuckLakeReader().query("ops_recommendations", "SELECT COUNT(*) v FROM {tbl}", params=("x",))
+    ir = _patch_dl_invoke(monkeypatch, _FakeResp(payload={"ok": True, "violation_count": 2, "check_version": "v"}), captured)
+    body = ir.DuckLakeReader().dq_check("not_null", "ops_recommendations", {"column": "title"})
     import json as _json
 
-    body = _json.loads(captured["body"])
-    assert body["action"] == "query_ops"
-    assert body["sql"] == "SELECT COUNT(*) v FROM {tbl}"
-    assert body["params"] == ["x"]
+    sent = _json.loads(captured["body"])
+    assert sent == {"action": "dq_check", "check": "not_null", "table": "ops_recommendations", "params": {"column": "title"}}
+    assert "sql" not in sent and body["violation_count"] == 2
+    ir.DuckLakeReader().dq_check("row_count_min", "ops_decisions")
+    assert _json.loads(captured["body"])["params"] == {}
 
 
-def test_ducklake_reader_query_raises_on_error(monkeypatch):
+def test_ducklake_reader_dq_check_raises_on_error(monkeypatch):
     captured: dict = {}
-    ir = _patch_dl_invoke(monkeypatch, _FakeResp(status_code=500, text="boom"), captured)
+    ir = _patch_dl_invoke(monkeypatch, _FakeResp(status_code=400, text="{}"), captured)
     with pytest.raises(ir.ReaderInvokeError):
-        ir.DuckLakeReader().query("ops_recommendations", "SELECT 1 FROM {tbl}")
+        ir.DuckLakeReader().dq_check("not_null", "ops_recommendations", {"column": "title"})
 
 
 def test_ducklake_reader_latest_snapshot_is_none():

@@ -163,6 +163,22 @@ locals {
         Resource = "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/agent-platform/*"
       },
       {
+        # Decision 237 cl.2: the operator's counterpart of its Secrets Manager admin grant, over the /secret/ family
+        # (the copy tool, rotation, re-minting). Same verb set as SSMParameterProvisioning above.
+        Sid    = "SecretParameterAdmin"
+        Effect = "Allow"
+        Action = [
+          "ssm:PutParameter",
+          "ssm:GetParameter",
+          "ssm:GetParameters",
+          "ssm:DeleteParameter",
+          "ssm:AddTagsToResource",
+          "ssm:RemoveTagsFromResource",
+          "ssm:ListTagsForResource",
+        ]
+        Resource = "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/*"
+      },
+      {
         Sid      = "SSMDescribeParameters"
         Effect   = "Allow"
         Action   = "ssm:DescribeParameters"

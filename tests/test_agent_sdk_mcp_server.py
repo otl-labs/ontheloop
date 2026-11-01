@@ -20,7 +20,11 @@ from mcp import types
 from scripts.agent_sdk import errors as agent_errors
 from scripts.agent_sdk import mcp_server
 from scripts.agent_sdk.mcp_server import _invoke_verb, build_tool_registry, create_server
+from src.common.ducklake_event_read_verbs import EVENT_READS
+from src.common.ducklake_named_reads import NAMED_READS
 from src.common.ducklake_reader_client import ReaderInvokeError
+
+_EVENT_VERB, _OPS_VERB = sorted(EVENT_READS)[0], sorted(NAMED_READS)[0]
 
 
 def _verb_meta(**overrides: Any) -> dict[str, Any]:
@@ -56,6 +60,16 @@ class _StubReader:
         if self._named_error is not None:
             raise self._named_error
         return self._named_result
+
+
+class _CountingOps(_StubReader):
+    def __init__(self, verbs: dict[str, dict]) -> None:
+        super().__init__(verbs, named_result=[{"from": "ops"}])
+        self.describes = 0
+
+    def describe(self) -> dict:
+        self.describes += 1
+        return super().describe()
 
 
 async def _list_tools_via_server(server) -> list[types.Tool]:
@@ -276,6 +290,52 @@ class TestCreateServer:
             anyio.run(mcp_server._run_stdio, server)
         server.run.assert_awaited_once()
         assert server.run.await_args.args[:2] == ("read", "write")
+
+    def _route(self, monkeypatch: pytest.MonkeyPatch, events: Any) -> _CountingOps:
+        from scripts.telemetry_capture import read_route
+
+        ops = _CountingOps({_OPS_VERB: _verb_meta(), _EVENT_VERB: _verb_meta(description="shared")})
+        monkeypatch.setattr(mcp_server, "make_reader", lambda: ops)
+        monkeypatch.setenv(read_route.CATALOG_ENV, "ducklake_telemetry")
+        monkeypatch.setattr(read_route, "TelemetryReader", events)
+        return ops
+
+    def test_default_reader_is_the_routed_reader(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        events = _StubReader({_EVENT_VERB: _verb_meta(description="telemetry")}, named_result=[{"from": "telemetry"}])
+        ops = self._route(monkeypatch, lambda profile=None: events)
+        server = create_server()
+        tools = {tool.name: tool for tool in anyio.run(_list_tools_via_server, server)}
+        assert set(tools) == {_OPS_VERB, _EVENT_VERB} and tools[_EVENT_VERB].description.startswith("telemetry")
+        for verb, reader in ((_EVENT_VERB, events), (_OPS_VERB, ops)):
+            result = anyio.run(_call_tool_via_server, server, verb, {})
+            assert not result.isError and reader.named_calls == [(verb, {})], result.content
+        assert ops.describes == 1
+
+    def test_ops_tools_survive_an_unavailable_event_reader(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from scripts.telemetry_capture import read_route
+
+        class _NoDescribe(_StubReader):
+            def describe(self) -> dict:
+                raise ReaderInvokeError("describe", 502, "upstream text never printed", None)
+
+        failures = (
+            ("TelemetryCatalogUnresolved", read_route.TelemetryReader, read_route.CATALOG_ENV),
+            ("RuntimeError", read_route.TelemetryReader, read_route.READER_URL_ENV),
+            ("ReaderInvokeError", lambda profile=None: _NoDescribe({}), None),
+        )
+        monkeypatch.setattr(read_route, "_parameter", lambda *a, **k: None)
+        monkeypatch.setattr(read_route, "_function_url", lambda *a, **k: None)
+        for cls, events, unset in failures:
+            ops = self._route(monkeypatch, events)
+            if unset is not None:
+                monkeypatch.delenv(unset, raising=False)
+            server = create_server()
+            assert [tool.name for tool in anyio.run(_list_tools_via_server, server)] == [_OPS_VERB]
+            assert anyio.run(_call_tool_via_server, server, _EVENT_VERB, {}).isError and ops.named_calls == []
+            assert not anyio.run(_call_tool_via_server, server, _OPS_VERB, {}).isError and ops.describes == 1
+            assert capsys.readouterr().err == f"{mcp_server.SERVER_NAME}: event tools unavailable class={cls}\n"
 
     def test_main_builds_the_server_and_runs_stdio(self) -> None:
         with (

@@ -171,3 +171,10 @@ def test_dispatch_routes_ensure_catalog_indexes_to_index_actions():
     from src.lambdas.ducklake_maintenance import index_actions
 
     assert h._ACTIONS["ensure_catalog_indexes"] is index_actions.action_ensure_catalog_indexes
+
+
+def test_dispatch_routes_the_catalog_actions_to_catalog_actions():
+    from src.lambdas.ducklake_maintenance import catalog_actions
+
+    assert h._ACTIONS["provision_catalog_owner"] is catalog_actions.action_provision_catalog_owner
+    assert h._ACTIONS["provision_telemetry_catalog"] is catalog_actions.action_provision_telemetry_catalog

@@ -152,3 +152,19 @@ class TestCollectBudgetEpisodes:
             artifact_fetcher=_fetcher_for({1: {"budget": _budget_block()}}),
         )
         assert scan["total_count"] == scan["scanned"] == 1
+
+
+def test_collect_and_ingest_query_the_ci_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example-org/example-repo")
+    captured: list[str] = []
+    inner = _caller_for([_artifact(1)])
+
+    def _capture(url: str) -> object:
+        captured.append(url)
+        return inner(url)
+
+    archives = _fetcher_for({1: {"budget": _budget_block()}})
+    bi.collect_budget_episodes(gh_caller=_capture, artifact_fetcher=archives)
+    bi.ingest_budget_breaches(gh_caller=_capture, artifact_fetcher=archives, open_recs=[], resolved_recs=[], dry_run=True)
+    assert len(captured) == 2
+    assert all("repos/example-org/example-repo/" in url for url in captured)

@@ -431,6 +431,17 @@ class TestCodeDriftConcernSplitRegistration:
         assert result == ROOT / "tests" / "convergence_health" / "code_drift"
 
 
+class TestEventReadsConcernSplitRegistration:
+    """src/common/ducklake_event_reads.py is registered in _CONCERN_SPLIT_TEST_PACKAGES so its coverage target is the
+    concern-split package tests/common/ducklake_event_reads/ (Decision 128) rather than a retired flat mirror file."""
+
+    def test_maps_ducklake_event_reads_to_concern_split_package_directory(self) -> None:
+        source = ROOT / "src" / "common" / "ducklake_event_reads.py"
+        result = map_source_to_test(source)
+        assert result is not None
+        assert result == ROOT / "tests" / "common" / "ducklake_event_reads"
+
+
 class TestBudgetIngestConcernSplitRegistration:
     """scripts/convergence_health/budget_ingest.py (rec-3288 wave-4 fixups) is registered directly
     in _CONCERN_SPLIT_TEST_PACKAGES for the same reason code_drift.py above is: the wave-4 review

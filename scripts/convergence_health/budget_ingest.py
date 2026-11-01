@@ -69,6 +69,7 @@ import urllib.request
 import zipfile
 from typing import Any, Callable, Optional, cast
 
+from scripts import repo_identity
 from scripts.checks._budget_recs import _find_open_budget_breach_rec
 from scripts.convergence_health.approvals import _make_github_caller
 from scripts.rec_episode import find_recs
@@ -94,9 +95,6 @@ RESOLVED_REC_STATUSES: frozenset[str] = frozenset({"closed", "declined", "supers
 # `recs_by_title_prefix` LIKE pattern with the branch as the suffix, so the any-status sweep stays
 # bounded to one branch's recs.
 _BUDGET_TITLE_PREFIX = "Fast-tier budget"
-
-DEFAULT_OWNER = "benjamin-blake"
-DEFAULT_REPO = "theseus"
 
 # One page of the artifacts listing. The endpoint returns newest-first across every workflow, and
 # pr-validate uploads one selection-manifest per PR run, so a single page normally spans the hourly
@@ -229,8 +227,8 @@ def _episode_from(budget: dict[str, Any], artifact: dict[str, Any]) -> dict[str,
 def collect_budget_episodes(
     gh_caller: Optional[Callable[[str], Any]] = None,
     artifact_fetcher: Optional[Callable[[str], bytes]] = None,
-    owner: str = DEFAULT_OWNER,
-    repo: str = DEFAULT_REPO,
+    owner: Optional[str] = None,
+    repo: Optional[str] = None,
     per_page: int = DEFAULT_ARTIFACT_PAGE,
 ) -> dict[str, Any]:
     """Enumerate recent `selection-manifest` artifacts and extract their budget blocks.
@@ -245,6 +243,7 @@ def collect_budget_episodes(
     caller = gh_caller or _make_github_caller(token)
     fetcher = artifact_fetcher or _make_artifact_fetcher(token)
 
+    owner, repo = repo_identity.resolve(owner, repo)
     url = f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts?name={ARTIFACT_NAME}&per_page={per_page}"
     data = caller(url)
     if not data:
@@ -488,8 +487,8 @@ def ingest_budget_breaches(
     portal_caller: Optional[Callable[[str, dict[str, Any]], Any]] = None,
     open_recs: Optional[list[dict[str, Any]]] = None,
     resolved_recs: Optional[list[dict[str, Any]]] = None,
-    owner: str = DEFAULT_OWNER,
-    repo: str = DEFAULT_REPO,
+    owner: Optional[str] = None,
+    repo: Optional[str] = None,
     per_page: int = DEFAULT_ARTIFACT_PAGE,
     profile: Optional[str] = None,
     dry_run: bool = False,

@@ -120,7 +120,10 @@ def test_reader_contracts_document_read_version() -> None:
     assert "read_version" in verbs["describe"]["response_codes"][200]
     invariants = " ".join(reader["audit_invariants"])
     assert (
-        "write_boundary" in invariants and "query_ops" in invariants and "rec-3771" in invariants and "rec-4024" in invariants
+        "write_boundary" in invariants
+        and "No reader action accepts caller-supplied SQL" in invariants
+        and "rec-3771" in invariants
+        and "rec-4024" in invariants
     )
     assert reader["amendment_log"][0]["change_class"] == "field_add" and reader["amendment_log"][0]["date"] == "2026-10-05"
     engine = _text("read-engine")
@@ -201,12 +204,10 @@ def test_dimension_write_paths_name_the_telemetry_writer() -> None:
 def test_substrate_rows_name_the_telemetry_writer() -> None:
     tables = _load("storage-substrate")["tables"]
     telemetry = tables["telemetry_tables"]
-    assert telemetry["status"] == "not_provisioned"  # production residency is slice 2c
     assert _TELEMETRY_WRITER in telemetry["write_boundary"] and "ducklake_writer" not in telemetry["write_boundary"].replace(
         "shared ducklake_writer", ""
     )
-    assert "ducklake_smoke catalog only" in " ".join(telemetry["note"].split())
-    assert "ducklake_smoke" in telemetry["reason"]
+    assert "created and owned in the production telemetry catalog ducklake_telemetry" in " ".join(telemetry["note"].split())
     assert "year(session_started_at), month(session_started_at), day(session_started_at)" in telemetry["disposition"]
     assert "telemetry-event-envelope.yaml" in " ".join(telemetry["contract_ref"]) and "blob port" in _text("storage-substrate")
     counters = tables["ops_entity_counters"]["write_boundary"]
@@ -215,6 +216,16 @@ def test_substrate_rows_name_the_telemetry_writer() -> None:
     assert any(e["date"] == "2026-10-14" and "PLAN-telemetry-owner-provisioning" in e["summary"] for e in substrate_log)
     assert any(e["date"] == "2026-10-12" for e in substrate_log)  # the registration-verbs entry is still present
     assert "create_telemetry_tables" in " ".join(telemetry["note"].split())
+
+
+def test_substrate_row_names_the_production_boundaries() -> None:
+    telemetry = _load("storage-substrate")["tables"]["telemetry_tables"]
+    assert telemetry["status"] == "live"
+    assert "ducklake_telemetry" in telemetry["write_boundary"]
+    for reader in ("agent-platform-ducklake-telemetry-reader", "agent-platform-ducklake-telemetry-content"):
+        assert reader in telemetry["read_boundary"], reader
+    text = " ".join(" ".join(str(telemetry[k]) for k in ("note", "reason", "write_boundary", "read_boundary")).split())
+    assert "empty until" not in text and "no writer emits" not in text
 
 
 def test_ports_pc01_names_the_telemetry_writer_edge() -> None:

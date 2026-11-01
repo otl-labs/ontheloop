@@ -14,8 +14,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from src.turn_capture.hook_groups import RESUME_HOOK, TURNLESS_HOOKS, is_late_session_start, late_resume_start, twin_key
 from src.turn_capture.refs import root_session_ref, subagent_session_ref
 from src.turn_capture.transcript import ROOT, TranscriptTree, inherited_lines, read_lines, record_time
+from src.turn_capture.witness import API_ERROR_FLAG_KEYS, closing_events, frontier, is_api_error, is_witness  # noqa: F401
 
 AGENT_TOOL_NAMES = ("Agent", "Task")
 IGNORED_RECORD_TYPES = ("ai-title", "last-prompt", "atis-latch", "mode", "queue-operation", "cost-state", "system")
@@ -44,14 +46,13 @@ KNOWN_ATTACHMENT_TYPES = (
     "critical_system_reminder",
     "read_truncation_notice",
 )
-RESUME_HOOK = "SessionStart:resume"
+WITNESS_COUNTERS = ("witness_not_at_rest", "witness_outside_turn")
 COMPACT_HOOKS = ("SessionStart:compact", "PreCompact", "PostCompact")
 BACKGROUND_COMPLETION_TAG = "<task-notification>"
 _NOTICE_STATUS = re.compile(r"<status>(.*?)</status>", re.DOTALL)
 _STATUS_TOKEN = re.compile(r"[a-z_]{1,32}")
 HARNESS_INTERRUPT_SENTINELS = ("[Request interrupted by user]", "[Request interrupted by user for tool use]")
 HARNESS_DENIAL_PREFIXES: tuple[str, ...] = ()
-API_ERROR_FLAG_KEYS = ("isApiErrorMessage",)
 TOOL_DENIAL_OUTCOMES = {"permission-rule": "blocked", "user-rejected": "interrupted"}
 
 
@@ -115,6 +116,8 @@ class Turn:
     ordinal: int
     first: Rec
     closed: bool = False
+    bounded: bool = False
+    closes: list[Rec] = field(default_factory=list)
     prompts: list[Rec] = field(default_factory=list)
     companions: list[Rec] = field(default_factory=list)
     recs: list[Rec] = field(default_factory=list)
@@ -137,6 +140,7 @@ class Stream:
     result_by_id: dict[str, Result] = field(default_factory=dict)
     pre_tool_blocks: dict[str, list[int]] = field(default_factory=dict)
     resume_ends: dict[int, int] = field(default_factory=dict)
+    resume_at: dict[int, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -173,10 +177,6 @@ def _content(data: dict[str, Any]) -> Any:
 
 def has_tool_result_block(content: Any) -> bool:
     return isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
-
-
-def is_api_error(data: dict[str, Any]) -> bool:
-    return data.get("type") == "assistant" and any(data.get(key) is True for key in API_ERROR_FLAG_KEYS)
 
 
 def classify(data: dict[str, Any], diag: Counter[str], inherited: bool = False) -> str:
@@ -245,13 +245,20 @@ def _open_turn(stream: Stream, cur: Turn | None, rec: Rec, seen: set[str], diag:
     return cur, "prompt"
 
 
-def _hook_effect(stream: Stream, rec: Rec, cur: Turn | None, groups: dict[str, bool]) -> Turn | None:
-    """Record resume/compact hook groups; the first resume attachment of a group is a turn boundary."""
+def _hook_effect(
+    stream: Stream, rec: Rec, cur: Turn | None, groups: dict[str, bool], latest: datetime | None, diag: Counter[str]
+) -> Turn | None:
+    """Record resume/compact hook groups; an on-time resume group's first record is a turn boundary (rule HG-3/HG-4)."""
     name = str(rec.data["attachment"].get("hookName") or "")
     if name.startswith(RESUME_HOOK):
         if not groups["resume"]:
             stream.resumes.append(rec)
             groups["resume"] = True
+            if late_resume_start(rec.ts, rec.data["attachment"].get("durationMs"), latest):
+                diag["late_resume_group"] += 1
+                stream.resume_at[rec.line] = cur.first.line if cur is not None else rec.line
+                return cur
+            stream.resume_at[rec.line] = rec.line
             if cur is not None:
                 cur.closed = True
             return None
@@ -277,17 +284,34 @@ def _attach_to_turn(rec: Rec, cur: Turn | None) -> None:
 def _walk(stream: Stream, closing: bool, diag: Counter[str]) -> None:
     cur: Turn | None = None
     seen: set[str] = set()
+    twins: set[tuple[Any, ...] | None] = set()
+    latest: datetime | None = None
+    prompted = False
     groups = {"resume": False, "compact": False}
     for rec in stream.recs:
         if rec.kind in ("prompt", "assistant"):
             if groups["resume"]:
                 stream.resume_ends[stream.resumes[-1].line] = rec.line
             groups = {"resume": False, "compact": False}
+            latest = latest if rec.ts is None else rec.ts if latest is None else max(latest, rec.ts)
         if rec.kind == "prompt":
             cur, rec.kind = _open_turn(stream, cur, rec, seen, diag)
-        elif rec.kind == "hook":
-            cur = _hook_effect(stream, rec, cur, groups)
+            prompted = prompted or rec.kind == "prompt"
+        elif rec.kind in ("hook", "hook_twin"):
+            att = rec.data["attachment"]
+            key = twin_key(att)
+            if rec.kind == "hook_twin" or (key is not None and key in twins):
+                rec.kind = "hook_twin"
+                diag["hook_twin_records"] += 1
+                _attach_to_turn(rec, None)
+                continue
+            twins.add(key)
+            cur = _hook_effect(stream, rec, cur, groups, latest, diag)
             stream.hooks.append(rec)
+            if str(att.get("hookName") or "").startswith(TURNLESS_HOOKS):
+                diag["late_session_start_records"] += 1 if is_late_session_start(str(att["hookName"]), prompted) else 0
+                _attach_to_turn(rec, None)
+                continue
         _attach_to_turn(rec, cur)
     if cur is not None and closing:
         cur.closed = True
@@ -376,6 +400,40 @@ def _group_responses(stream: Stream, diag: Counter[str]) -> None:
             rec.turn.responses.append(by_key[key])
 
 
+def _close_turns(stream: Stream, diag: Counter[str]) -> None:
+    """Rules WT-3/WT-4: each turn's closing events (a turn holding one is closed); an unusable witness is counted."""
+    for turn in stream.turns:
+        turn.bounded = turn.closed
+        turn.closes = closing_events(turn)
+        turn.closed = turn.closed or bool(turn.closes)
+    for rec in stream.hooks:
+        if is_witness(rec):
+            if rec.turn is None:
+                diag["witness_outside_turn"] += 1
+            elif all(rec is not close for close in rec.turn.closes):
+                diag["witness_not_at_rest"] += 1
+
+
+def _assemble(
+    key: str, session_ref: str, recs: list[Rec], closing: bool, diag: Counter[str], witnesses: Counter[str] | None = None
+) -> Stream:
+    stream = Stream(key, session_ref, recs)
+    _walk(stream, closing, diag)
+    _index_tools(stream, diag)
+    _group_responses(stream, diag)
+    _close_turns(stream, diag if witnesses is None else witnesses)
+    return stream
+
+
+def _frontier_cut(stream: Stream) -> int | None:
+    """Rule WT-7: the line after which a root's open last turn contributes nothing (None when nothing is withheld)."""
+    last = stream.turns[-1] if stream.turns else None
+    if last is None or last.bounded:
+        return None
+    cut = frontier(last)
+    return cut if stream.recs and cut < stream.recs[-1].line else None
+
+
 def _build_stream(
     tree: TranscriptTree,
     key: str,
@@ -384,6 +442,7 @@ def _build_stream(
     closing: bool,
     diag: Counter[str],
     totals: dict[str, int],
+    frontier: bool = False,
 ) -> Stream | None:
     data = tree.read(key)
     if data is None:
@@ -399,11 +458,18 @@ def _build_stream(
         kind = classify(item.data, diag, item.line in skip)
         if kind != "inherited":
             recs.append(Rec(key, item.line, item.data, record_time(item.data), kind))
-    stream = Stream(key, session_ref, recs)
-    _walk(stream, closing, diag)
-    _index_tools(stream, diag)
-    _group_responses(stream, diag)
-    return stream
+    if not frontier:
+        return _assemble(key, session_ref, recs, closing, diag)
+    probe: Counter[str] = Counter()
+    stream = _assemble(key, session_ref, recs, closing, probe)
+    cut = _frontier_cut(stream)
+    if cut is None:
+        diag.update(probe)
+        return stream
+    diag["frontier_withheld"] += sum(1 for r in recs if r.line > cut)
+    for name in WITNESS_COUNTERS:
+        diag[name] += probe[name]
+    return _assemble(key, session_ref, [r for r in recs if r.line <= cut], closing, diag, Counter())
 
 
 def _completion_text(rec: Rec) -> str | None:
@@ -433,10 +499,11 @@ def notice_status(rec: Rec) -> str | None:
 def _background_spawn(stream: Stream, use: ToolUse, agent_id: str, diag: Counter[str]) -> Spawn:
     notices = [r for r in stream.recs if r.line > use.rec.line and is_background_completion(r, agent_id)]
     spawn = Spawn(stream.key, use, agent_id, bool(notices), notices[0] if notices else None, 0, None, notices)
-    boundary = next((r for r in stream.resumes if r.line > use.rec.line), None) if stream.key == ROOT else None
+    at = stream.resume_at
+    boundary = next((r for r in stream.resumes if at[r.line] > use.rec.line), None) if stream.key == ROOT else None
     if boundary is None:
         return spawn
-    if not notices or notices[0].line > boundary.line:
+    if not notices or notices[0].line > at[boundary.line]:
         spawn.complete, spawn.completed_at_boundary = True, True
         diag["background_completed_at_resume"] += 1
         if notices:
@@ -464,8 +531,11 @@ def _spawns_of(stream: Stream, diag: Counter[str]) -> list[Spawn]:
     return out
 
 
-def parse_tree(tree: TranscriptTree, limits: dict[str, int] | None, final: bool) -> ParsedTree:
-    """Parse the tree at the given per-file line limits (None = every consumable line)."""
+def parse_tree(tree: TranscriptTree, limits: dict[str, int] | None, final: bool, *, frontier: bool = False) -> ParsedTree:
+    """Parse the tree at the given per-file line limits (None = every consumable line).
+
+    *frontier* (rule WT-7, honoured only on a non-final parse) withholds the root's open last turn beyond its frontier.
+    """
     diag: Counter[str] = Counter()
     totals: dict[str, int] = {}
 
@@ -474,7 +544,9 @@ def parse_tree(tree: TranscriptTree, limits: dict[str, int] | None, final: bool)
 
     streams: dict[str, Stream] = {}
     spawns: list[Spawn] = []
-    root = _build_stream(tree, ROOT, limit_of(ROOT), root_session_ref(tree.session_id), final, diag, totals)
+    root = _build_stream(
+        tree, ROOT, limit_of(ROOT), root_session_ref(tree.session_id), final, diag, totals, frontier and not final
+    )
     queue = [root] if root is not None else []
     known = set(tree.agent_ids())
     claimed: set[str] = set()

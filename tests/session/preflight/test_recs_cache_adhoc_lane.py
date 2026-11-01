@@ -161,13 +161,15 @@ def _base_main_patches() -> list:
         ),
         patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
         patch("scripts.preflight.aws_infra.check_credentials", return_value="ok"),
-        patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+        patch(
+            "scripts.preflight.session_history.read_session_history",
+            return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+        ),
         patch(
             "scripts.preflight.context_docs.read_context_files",
             return_value={
                 "roadmap_phase": "Phase 1.5",
                 "open_decisions_count": 0,
-                "recent_sessions": [],
                 "strategic_review_due": False,
                 "recommendations_count": 0,
             },

@@ -25,6 +25,8 @@ import re
 import time
 from typing import Any, Protocol
 
+from src.common.event_usage_fields import MODEL_USAGE_FIELDS, STARTUP_BASELINE_FIELDS, TOOL_USE_FIELDS
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_REGION = "eu-west-2"
@@ -38,13 +40,14 @@ _DUCKLAKE_READER_FUNCTION_NAME = "agent-platform-ducklake-reader"
 _DUCKLAKE_READER_SSM_PATH = "/agent-platform/ducklake/reader_url"
 _DUCKLAKE_WRITER_SSM_PATH = "/agent-platform/ducklake/writer_url"
 
-# Transient reader-invoke resilience: the Neon free-tier catalog scales to zero, so the first
-# read after idle can return a 5xx while the compute resumes (cold-resume). Reader ops are
-# idempotent, so retry transient 5xx with backoff before loud-failing. (HTTP 502 is the observed
-# cold-resume signature; 503/504 covered for completeness.)
+# Transient reader-invoke resilience: reader ops are idempotent, so retry a transient 5xx with backoff before
+# loud-failing. A 502 is a process exit or a deadline overrun, a 503 catalog_unavailable (a dead catalog connection);
+# a typed 504 read_deadline_exceeded is the one answer never retried (the same read overruns again).
 _READER_MAX_ATTEMPTS = 3
 _READER_TRANSIENT_STATUS = frozenset({502, 503, 504})
 _READER_RETRY_BACKOFF_S = (2.0, 4.0)
+# Literal, not imported: the reader-only deadline module is not in this file's data-pipeline bundle.
+_READ_DEADLINE_ERROR_TYPE = "read_deadline_exceeded"
 
 _ORDER_BY_DEFAULT = "last_updated_timestamp"
 
@@ -106,8 +109,8 @@ class Reader(Protocol):
 
     Any implementation must satisfy this protocol without changing call sites (CD.8).
 
-    named(), query() and describe() are deliberately NOT part of this Protocol -- named() and
-    query() were already undeclared DuckLakeReader-only extras before this file added describe(),
+    named(), dq_check() and describe() are deliberately NOT part of this Protocol -- named() was
+    already an undeclared DuckLakeReader-only extra before this file added describe(),
     so widening the Protocol to cover the new method would silently formalise that gap by omission
     rather than by decision. A caller that needs describe() holds a DuckLakeReader (or the
     narrower structural type it needs), not the Reader Protocol.
@@ -257,6 +260,9 @@ VERB_FIELDS: dict[str, tuple[str, ...] | object] = {
         "cost_source",
         *_STAMP_FIELDS,
     ),
+    "model_usage_rollup": (*MODEL_USAGE_FIELDS, *_STAMP_FIELDS),
+    "tool_use_rollup": (*TOOL_USE_FIELDS, *_STAMP_FIELDS),
+    "session_startup_baseline": (*STARTUP_BASELINE_FIELDS, *_STAMP_FIELDS),
     "telemetry_health_count": ("table_name", "record_count", "meta_schema"),
     "session_tree_rows": ("table_name", "row_json", "total_rows", "roots_in_tree"),
     "telemetry_orphan_counts": (
@@ -324,6 +330,16 @@ class ResponseTooLargeError(ReaderInvokeError):
         super().__init__(action, 413, text, body)
         self.bytes = (body or {}).get("bytes")
         self.cap = (body or {}).get("cap")
+
+
+class ReadDeadlineExceededError(ReaderInvokeError):
+    """The reader interrupted an event-journal read at its deadline (HTTP 504 read_deadline_exceeded, rec-4474).
+
+    Never retried: the same read overruns again. Narrow the window.
+    """
+
+    def __init__(self, action: str | None, text: str, body: dict[str, Any] | None) -> None:
+        super().__init__(action, 504, text, body)
 
 
 def _parse_error_body(text: str) -> dict[str, Any] | None:
@@ -418,10 +434,11 @@ class DuckLakeReader:
             last_body = _parse_error_body(resp.text)
             if resp.status_code == 413:
                 raise ResponseTooLargeError(payload.get("action"), last_text, last_body)
+            if resp.status_code == 504 and (last_body or {}).get("error_type") == _READ_DEADLINE_ERROR_TYPE:
+                raise ReadDeadlineExceededError(payload.get("action"), last_text, last_body)
             if resp.status_code in _READER_TRANSIENT_STATUS and attempt < _READER_MAX_ATTEMPTS - 1:
-                # Cold-resume: give Neon time to wake, then re-invoke (reads are idempotent).
                 logger.warning(
-                    "ducklake_reader %r HTTP %d (attempt %d/%d) -- retrying after cold-resume backoff",
+                    "ducklake_reader %r HTTP %d (attempt %d/%d) -- retrying after backoff",
                     payload.get("action"),
                     resp.status_code,
                     attempt + 1,
@@ -489,17 +506,13 @@ class DuckLakeReader:
         body = self._invoke({"action": "named_read", "verb": verb, "params": params})
         return list(body.get("rows", []))
 
-    def query(
-        self,
-        table: str,
-        sql: str,
-        *,
-        params: tuple[Any, ...] = (),
-        snapshot_id: int | None = None,
-    ) -> list[dict]:
-        """Execute *sql* (using `{tbl}`) over the current projection via the reader. Raises on error (Decision 55)."""
-        body = self._invoke({"action": "query_ops", "table": table, "sql": sql, "params": list(params)})
-        return list(body.get("rows", []))
+    def dq_check(self, check: str, table: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Run one closed data-quality check on the reader; returns {check, table, violation_count, check_version, ...}.
+
+        The reader owns the SQL (Decision 84 I-3): the caller names a kind from its fixed vocabulary and binds params.
+        Raises on any non-200 answer (Decision 55); a typed 400 dq_check_input names the refused parameter.
+        """
+        return self._invoke({"action": "dq_check", "check": check, "table": table, "params": params or {}})
 
 
 _MAX_RECS_BY_IDS = 50

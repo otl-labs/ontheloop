@@ -2,9 +2,8 @@
 
 Split out of the former tests/test_ducklake_runtime.py monolith: read_current (smoke + ops-table
 projection/filter, including the structural key_column filter with the NamedReadCon test double),
-read_history, assert_read_only_sql (the closed-boundary read-only verb guard), named_read (the
-NAMED_READS registry dispatch), and query_current -- plus the append_only read_current/
-query_current loud-fail guards.
+read_history and named_read (the NAMED_READS registry dispatch) -- plus the append_only read_current
+loud-fail guard and the select-only check over every registry and dq_check statement.
 """
 
 from __future__ import annotations
@@ -122,65 +121,6 @@ def test_read_history_applies_limit():
     assert "LIMIT 5" in con.sql
 
 
-def test_query_current_substitutes_tbl():
-    class _Cur:
-        description = [("violation",)]
-
-        def __init__(self):
-            self.sql = ""
-
-        def execute(self, sql, params=None):
-            self.sql = sql
-            return self
-
-        def fetchall(self):
-            return [(0,)]
-
-    con = _Cur()
-    out = rt.query_current(con, table="ops_recommendations", sql="SELECT COUNT(*) violation FROM {tbl}")
-    assert "ops_catalog.ops_recommendations_current" in con.sql
-    assert out == [{"violation": 0}]
-
-
-def test_assert_read_only_sql_allows_select_and_with():
-    rt.assert_read_only_sql("SELECT 1 FROM {tbl}")
-    rt.assert_read_only_sql("  with x as (select 1) select * from x")  # case-insensitive, leading ws
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        "DROP TABLE ops_catalog.ops_recommendations_current",
-        "DELETE FROM {tbl}",
-        "ALTER TABLE {tbl} ADD COLUMN x INT",
-        "UPDATE {tbl} SET status='x'",
-        "INSERT INTO {tbl} VALUES (1)",
-    ],
-)
-def test_assert_read_only_sql_rejects_writes(bad):
-    with pytest.raises(rt.SchemaGateError, match="read-only boundary"):
-        rt.assert_read_only_sql(bad)
-
-
-def test_assert_read_only_sql_rejects_multistatement():
-    with pytest.raises(rt.SchemaGateError, match="multi-statement"):
-        rt.assert_read_only_sql("SELECT 1; DROP TABLE x")
-
-
-def test_query_current_enforces_read_only():
-    class _Cur:
-        description = [("v",)]
-
-        def execute(self, sql, params=None):
-            return self
-
-        def fetchall(self):
-            return [(0,)]
-
-    with pytest.raises(rt.SchemaGateError, match="read-only boundary"):
-        rt.query_current(_Cur(), table="ops_recommendations", sql="DROP TABLE {tbl}")
-
-
 def test_named_read_executes_registry_sql():
     con = NamedReadCon(rows=[("rec-1",)])
     rows = rt.named_read(con, verb="rec_by_id", params={"id": "rec-1"})
@@ -227,9 +167,36 @@ def test_named_read_cannot_bind_control_table(monkeypatch):
         rt.named_read(NamedReadCon(), verb="_control_probe", params={})
 
 
-def test_named_read_registry_verbs_are_select_only():
-    for entry in rt.NAMED_READS.values():
-        rt.assert_read_only_sql(entry.sql)
+_DQ_REQUESTS = {
+    "row_count_min": ("ops_recommendations", {"min": 1}),
+    "recency_hours": ("ops_recommendations", {"column": "last_updated_timestamp", "hours": 1}),
+    "not_null": ("ops_recommendations", {"column": "title", "exclude_before": "2026-05-01"}),
+    "accepted_values": ("ops_recommendations", {"column": "status", "values": ["open"]}),
+    "min_length": ("ops_recommendations", {"column": "context", "value": 80}),
+    "pattern": ("ops_decisions", {"column": "id", "value": "^dec-[0-9]+$"}),
+    "array_element_format": ("ops_recommendations", {"column": "tags", "pattern": "^a$"}),
+    "not_before": ("ops_recommendations", {"column": "last_updated_timestamp", "value": "created_timestamp"}),
+    "min_value": ("ops_priority_queue", {"column": "rank", "value": 1}),
+    "unique": ("ops_execution_plans", {"columns": ["rec_id", "revision"], "projection": "history"}),
+    "history_not_ahead_of_current": ("ops_execution_plans", {"column": "revision"}),
+    "key_absent": ("ops_recommendations", {"column": "id", "value": "rec-1"}),
+}
+
+
+def test_registry_sql_is_select_only():
+    """Every NAMED_READS statement and every rendered dq_check statement is one SELECT/WITH (no caller SQL exists)."""
+    import re
+
+    from src.common import ducklake_dq_checks as dq
+
+    def single_select(sql: str) -> bool:
+        return re.match(r"^\s*(?:SELECT|WITH)\b", sql, re.IGNORECASE) is not None and ";" not in sql.rstrip().rstrip(";")
+
+    assert all(single_select(entry.sql) for entry in rt.NAMED_READS.values())
+    assert set(_DQ_REQUESTS) == set(dq.DQ_KINDS)
+    for kind, (table, params) in _DQ_REQUESTS.items():
+        sql, _binds = dq.render(dq.validate({"check": kind, "table": table, "params": params}))
+        assert single_select(sql), kind
 
 
 def test_read_current_rejects_unknown_filter_column():
@@ -251,10 +218,3 @@ def test_read_current_append_only_raises():
     con = FakeCon()
     with pytest.raises(rt.DuckLakeRuntimeError, match="append_only"):
         rt.read_current(con, table="ops_smoke_events")
-
-
-def test_query_current_append_only_raises():
-    """query_current loud-fails for append_only tables (no current write-through projection)."""
-    con = FakeCon()
-    with pytest.raises(rt.DuckLakeRuntimeError, match="append_only"):
-        rt.query_current(con, table="ops_smoke_events", sql="SELECT {tbl}.ulid FROM {tbl}")

@@ -101,6 +101,22 @@ resource "aws_iam_role_policy" "ducklake_maintenance" {
         Resource = [
           aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn,
           aws_secretsmanager_secret.ducklake_telemetry_writer_dsn.arn,
+          aws_secretsmanager_secret.ducklake_telemetry_writer_prod_dsn.arn,
+          aws_secretsmanager_secret.ducklake_telemetry_reader_dsn.arn,
+          aws_secretsmanager_secret.ducklake_smoke_maintainer_dsn.arn,
+        ]
+      },
+      {
+        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
+        Sid    = "NeonDsnParameterRead"
+        Effect = "Allow"
+        Action = ["ssm:GetParameter"]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/ducklake-neon-catalog-dsn",
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-telemetry-writer-dsn",
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-telemetry-writer-prod-dsn",
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-telemetry-reader-dsn",
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-smoke-maintainer-dsn",
         ]
       },
       {
@@ -122,6 +138,26 @@ resource "aws_iam_role_policy" "ducklake_maintenance" {
         Condition = {
           StringLike = {
             "s3:prefix" = ["${local.ducklake_prod_data_prefix}/*"]
+          }
+        }
+      },
+      {
+        # Decision 230: provision_telemetry_catalog seeds the production telemetry catalog's data prefix, and the
+        # telemetry merge and GC read, write and delete there. Object versions are never deleted (no DeleteObjectVersion);
+        # the bucket's noncurrent lifecycle reclaims them. No telemetry-blobs grant here.
+        Sid      = "TelemetryCatalogDataReadWriteDelete"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+        Resource = ["${aws_s3_bucket.data_lake.arn}/${local.ducklake_telemetry_data_prefix}/*"]
+      },
+      {
+        Sid      = "TelemetryCatalogDataList"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket", "s3:GetBucketLocation"]
+        Resource = [aws_s3_bucket.data_lake.arn]
+        Condition = {
+          StringLike = {
+            "s3:prefix" = ["${local.ducklake_telemetry_data_prefix}/*"]
           }
         }
       },

@@ -211,39 +211,6 @@ def check_retro_lite_compliance(
     return violations
 
 
-def check_plan_compliance(
-    invariants: dict[str, bool],
-    session_log_path: Path,
-) -> list[str]:
-    """Check plan-phase invariants (preflight_run, branch_creation, critique_gate).
-
-    These are structural invariants enforced by prompt ordering. A session is
-    considered compliant if a completed entry exists in SESSION_LOG.md.
-
-    Returns a list of violation strings (empty = compliant).
-    """
-    violations: list[str] = []
-    plan_invariants = {"preflight_run", "branch_creation", "critique_gate"}
-    active = {k for k in plan_invariants if invariants.get(k)}
-
-    if not active:
-        return violations
-
-    if not session_log_path.exists():
-        for k in active:
-            violations.append(f"{k}: SESSION_LOG.md not found — cannot verify")
-        return violations
-
-    content = session_log_path.read_text(encoding="utf-8")
-    # A session entry exists if there's any heading-2 or table row in the log
-    has_entry = bool(re.search(r"^\|.*\|", content, re.MULTILINE))
-    if not has_entry:
-        for k in active:
-            violations.append(f"{k}: no completed session entry in SESSION_LOG.md")
-
-    return violations
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Check prompt behavioural invariants against session data.")
     group = parser.add_mutually_exclusive_group(required=True)
@@ -265,7 +232,6 @@ def main() -> None:
 
     retro_log = ROOT / "logs" / ".retro-lite-log.jsonl"
     state_path = ROOT / "logs" / ".execution-state.json"
-    session_log = ROOT / "docs" / "SESSION_LOG.md"
 
     if args.all:
         sources = get_behavioural_invariant_sources()
@@ -292,10 +258,7 @@ def main() -> None:
         if not invariants:
             continue
 
-        step_violations = check_retro_lite_compliance(invariants, retro_entries, execution_state)
-        plan_violations = check_plan_compliance(invariants, session_log)
-        combined = step_violations + plan_violations
-        for v in combined:
+        for v in check_retro_lite_compliance(invariants, retro_entries, execution_state):
             all_violations.append(f"{prompt_file.name}: {v}")
 
     all_violations.extend(layer_violations)

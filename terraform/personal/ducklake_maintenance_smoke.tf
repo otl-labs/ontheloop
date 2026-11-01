@@ -89,7 +89,14 @@ resource "aws_iam_role_policy" "ducklake_maintenance_smoke" {
         Sid      = "NeonDsnRead"
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn]
+        Resource = [aws_secretsmanager_secret.ducklake_smoke_maintainer_dsn.arn]
+      },
+      {
+        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
+        Sid      = "NeonDsnParameterRead"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-smoke-maintainer-dsn"]
       },
       {
         # Smoke prefix ONLY -- no prod prefix. This is the resource-shape half of the blast-radius
@@ -154,6 +161,8 @@ resource "aws_lambda_function" "ducklake_maintenance_smoke" {
   environment {
     variables = {
       DUCKLAKE_DATA_PATH            = local.ducklake_smoke_data_path
+      DUCKLAKE_DSN_SECRET_ID        = aws_secretsmanager_secret.ducklake_smoke_maintainer_dsn.name
+      DUCKLAKE_DSN_PARAMETER        = local.secret_parameter_names.smoke_maintainer_dsn
       DUCKLAKE_META_SCHEMA          = "ducklake_smoke"
       DUCKLAKE_EXTENSION_DIRECTORY  = local.ducklake_extension_dir
       DUCKLAKE_FIELD_SEMANTICS_PATH = "/var/task/config/lambda/ducklake/field_semantics.yaml"

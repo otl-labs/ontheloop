@@ -287,3 +287,12 @@ class TestDiagnoseStuckApprovals:
         diagnose_stuck_approvals(gh_caller=_capture, now=now)
         assert captured, "caller was never invoked"
         assert "status=waiting" not in captured[0], f"diagnose URL must not filter by status: {captured[0]}"
+
+
+@pytest.mark.parametrize("query", [find_stuck_gated_approvals, find_reconcile_runs_since, diagnose_stuck_approvals])
+def test_every_approvals_query_follows_github_repository(monkeypatch: pytest.MonkeyPatch, query: Any) -> None:
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example-org/example-repo")
+    captured: list[str] = []
+    query(gh_caller=lambda url: captured.append(url) or {"workflow_runs": []})
+    assert captured
+    assert all("repos/example-org/example-repo/" in url for url in captured)

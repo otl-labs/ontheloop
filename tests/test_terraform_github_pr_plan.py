@@ -1,8 +1,9 @@
 """rec-4335 acceptance: the PR-time terraform/github plan and its IAM prerequisite.
 
 TestPlannerStateGrant (PLAN-terraform-github-plan-state-grant): the github_ci_planner role reads exactly
-one object under tfstate/github/ and nothing else there. Pure functions of HCL text: no network, terraform
-or AWS.
+one object under tfstate/github/ and nothing else there. The trusted-plan role (PLAN-trusted-plan-identity,
+rec-4636) may hold the same exact grant and nothing else naming that prefix. Pure functions of HCL text: no
+network, terraform or AWS.
 """
 
 from __future__ import annotations
@@ -16,11 +17,14 @@ TF_DIR = REPO_ROOT / "terraform" / "personal"
 
 PLANNER_FILE = "oidc_pipeline_roles.tf"
 PLANNER_DOC = "github_ci_planner"
+TRUSTED_FILE = "oidc_trusted_plan_role.tf"
+TRUSTED_DOC = "github_ci_trusted_plan"
 GRANT_SID = "TfstateGithubRead"
 GRANT_RESOURCE = "${aws_s3_bucket.data_lake.arn}/tfstate/github/terraform.tfstate"
 TARGET_ACTION = "s3:GetObject"
 TARGET_ARN = "arn:aws:s3:::agent-platform-data-lake/tfstate/github/terraform.tfstate"
 LITERAL = "tfstate/github"
+_EXACT_GRANT = (GRANT_SID, "Allow", False, [TARGET_ACTION], [GRANT_RESOURCE])
 
 _DOC_RE = r'data\s+"aws_iam_policy_document"\s+"{name}"\s*\{{'
 _ANY_DOC_RE = re.compile(r'data\s+"aws_iam_policy_document"\s+"(\w+)"\s*\{')
@@ -132,6 +136,9 @@ def _other_document_violations(texts: dict[str, str]) -> list[str]:
     bad = []
     for name in {n for t in texts.values() for n in _ANY_DOC_RE.findall(t)} - {PLANNER_DOC}:
         for s in doc_statements(texts, name):
+            exact = (s["sid"], s["effect"], s["condition"], s["actions"], s["resources"]) == _EXACT_GRANT
+            if name == TRUSTED_DOC and exact:
+                continue
             if any(LITERAL in r for r in s["resources"]) and s["effect"] == "Allow":
                 bad.append(f"document {name} statement {s['sid']} names {LITERAL}")
     return bad
@@ -258,7 +265,21 @@ class TestPlannerStateGrant:
         assert planner_violations(real_texts()) == []
 
     def test_real_hcl_no_other_allow_statement_names_the_state_prefix(self) -> None:
-        assert allow_statements_naming_literal(real_texts()) == [(PLANNER_FILE, GRANT_SID)]
+        assert allow_statements_naming_literal(real_texts()) == [(PLANNER_FILE, GRANT_SID), (TRUSTED_FILE, GRANT_SID)]
+
+    def test_trusted_plan_document_may_hold_only_the_exact_grant(self) -> None:
+        doc = f'data "aws_iam_policy_document" "{TRUSTED_DOC}" {{\n{GRANT_HCL}}}\n'
+        texts = synthetic()
+        texts[TRUSTED_FILE] = strip_comments(doc)
+        assert planner_violations(texts) == []
+        for broad in (
+            doc.replace("terraform.tfstate", "*"),
+            doc.replace('["s3:GetObject"]', '["s3:GetObject", "s3:PutObject"]'),
+        ):
+            texts[TRUSTED_FILE] = strip_comments(broad)
+            assert planner_violations(texts), broad
+        texts[TRUSTED_FILE] = strip_comments(doc.replace(f'"{TRUSTED_DOC}"', '"other_doc"'))
+        assert planner_violations(texts)
 
     def test_real_hcl_refresh_read_still_scoped_to_tfstate_personal(self) -> None:
         stmts = {s["sid"]: s for s in doc_statements(real_texts(), "ci_full_refresh_read")}

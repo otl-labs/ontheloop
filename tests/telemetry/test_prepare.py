@@ -222,3 +222,38 @@ def test_own_site_gate_errors_carry_column_and_reason() -> None:
 
     _locate(kept, "y", 0)
     assert (kept.table, kept.row) == ("x", 9)
+
+
+def test_bundled_projection_admits_billing_shape_local() -> None:
+    from src.common.ducklake_scd2_schema import load_field_semantics  # noqa: PLC0415
+
+    entry = load_field_semantics()["ops_tables"]["telemetry_observations"]
+    spec = EventTableSpec.from_projection("telemetry_observations", entry)
+
+    def model_call(ref: str, shape: str) -> dict[str, Any]:
+        return {
+            "event_kind": "point",
+            "event_timestamp": T0 + timedelta(seconds=5),
+            "session_started_at": T0,
+            "external_ref": ref,
+            "entity_ref": ref,
+            "session_ref": "sess",
+            "producer": "litellm",
+            "producer_version": "t",
+            "parser_version": 1,
+            "observation_type": "model_call",
+            "billing_shape": shape,
+            "tokens_input": 1,
+            "tokens_output": 1,
+            "tokens_cache_read": 0,
+            "tokens_cache_creation": 0,
+            "reasoning_visibility": "none",
+        }
+
+    def run(rows: list[dict[str, Any]]) -> PreparedBatch:
+        return prepare_batch(spec, rows, tenant_id=TENANT, project_id=PROJECT, now=NOW)
+
+    assert run([model_call("m1", "local"), model_call("m2", "metered_marginal")]).submitted == 2
+    with pytest.raises(GateError) as caught:
+        run([model_call("m3", "free")])
+    assert (caught.value.rule, caught.value.column) == ("accepted_values", "billing_shape")

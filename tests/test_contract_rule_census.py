@@ -1,9 +1,9 @@
-"""Mirror test for scripts/contract_rule_census.py (rec-4158 plan A), duckdb-free: rule compilation, the exempt list,
-the exit-code mapping from a stubbed DQ harness, and the whitespace class."""
+"""Mirror test for scripts/contract_rule_census.py (rec-4158 plan A), duckdb-free: rule compilation to dq_check kinds, the
+exempt list and the exit-code mapping from a stubbed DQ harness."""
 
 from __future__ import annotations
 
-import re
+import json
 
 import pytest
 
@@ -20,37 +20,38 @@ def _rule(
     return DeclaredRule("ops_recommendations", column, kind, params or {}, gate, exemption)
 
 
-def _condition(rule: DeclaredRule) -> str:
-    return census.compile_rule(rule).sql
-
-
-def test_each_rule_kind_compiles() -> None:
-    assert census.violation_condition(_rule("not_null")) == "c IS NULL"
-    sql = _condition(_rule("not_null", gate="2026-05-01"))
-    assert sql.endswith("WHERE (c IS NULL) AND created_timestamp >= DATE('2026-05-01')")
-    assert sql.startswith("SELECT COUNT(*) AS violation FROM {tbl} WHERE")
-    values = census.violation_condition(_rule("accepted_values", {"values": ["a", "b'c"]}))
-    assert values == "c IS NOT NULL AND c NOT IN ('a', 'b''c')"
-    length = census.violation_condition(_rule("min_length", {"value": 10}))
-    assert length.startswith("c IS NOT NULL AND LENGTH(regexp_replace(c, '^[") and length.endswith("< 10")
-    assert census.WHITESPACE_CLASS in length
-    assert census.violation_condition(_rule("pattern", {"value": "^a'b$"})) == (
-        "c IS NOT NULL AND NOT regexp_full_match(c, '^a''b$')"
-    )
-    array = census.violation_condition(_rule("array_element_format", {"pattern": "^r$"}))
-    assert array == ("c IS NOT NULL AND len(list_filter(c, x -> x IS NULL OR NOT regexp_full_match(x, '^r$'))) > 0")
-    assert census.violation_condition(_rule("not_before", {"value": "created_timestamp"})) == (
-        "c IS NOT NULL AND created_timestamp IS NOT NULL AND c < created_timestamp"
-    )
+def test_census_compiles_rules_to_dq_kinds() -> None:
+    cases = [
+        (_rule("not_null"), "not_null", {"column": "c"}),
+        (_rule("not_null", gate="2026-05-01"), "not_null", {"column": "c", "exclude_before": "2026-05-01"}),
+        (_rule("accepted_values", {"values": ["a", 7]}), "accepted_values", {"column": "c", "values": ["a", "7"]}),
+        (_rule("min_length", {"value": "10"}), "min_length", {"column": "c", "value": 10}),
+        (_rule("pattern", {"value": "^a'b$"}), "pattern", {"column": "c", "value": "^a'b$"}),
+        (_rule("array_element_format", {"pattern": "^r$"}), "array_element_format", {"column": "c", "pattern": "^r$"}),
+        (_rule("not_before", {"value": "created_timestamp"}), "not_before", {"column": "c", "value": "created_timestamp"}),
+    ]
+    for rule, kind, params in cases:
+        check = census.compile_rule(rule)
+        assert (check.kind, check.params, check.test_type) == (kind, params, kind)
+        assert not hasattr(check, "sql")
     check = census.compile_rule(_rule("min_length", {"value": 3}, gate="2026-09-01"))
-    assert (check.severity, check.enforced, check.exclude_before, check.test_type) == (
-        "error",
-        True,
-        "2026-09-01",
-        "min_length",
-    )
-    with pytest.raises(ValueError, match="no census predicate and no exemption"):
-        census.violation_condition(_rule("acceptance_lint", {"require_discrimination": True}))
+    assert (check.severity, check.enforced, check.exclude_before) == ("error", True, "2026-09-01")
+    with pytest.raises(ValueError, match="no census check kind and no exemption"):
+        census.compile_rule(_rule("acceptance_lint", {"require_discrimination": True}))
+
+
+def test_census_dry_run_prints_requests_not_sql(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(census, "declared_rules", lambda table: (_rule("pattern", {"value": "^x$"}),))
+    code, lines, rows = census.census(("ops_recommendations",), dry_run=True)
+    assert code == 0 and rows == []
+    request = json.loads(lines[-1].splitlines()[-1])
+    assert request == {
+        "action": "dq_check",
+        "check": "pattern",
+        "table": "ops_recommendations",
+        "params": {"column": "c", "value": "^x$"},
+    }
+    assert not any("SELECT" in line for line in lines)
 
 
 def test_exempt_rules_are_listed_not_compiled(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -113,11 +114,3 @@ def test_json_output_lists_each_rule(monkeypatch: pytest.MonkeyPatch, capsys: py
     assert census.main(["--table", "ops_recommendations", "--json"]) == 0
     out = capsys.readouterr().out
     assert '"rule": "not_null"' in out and '"violators": 0' in out
-
-
-def test_whitespace_class_equals_isspace() -> None:
-    parsed: set[int] = set()
-    for lo, hi in re.findall(r"\\x\{([0-9a-f]+)\}(?:-\\x\{([0-9a-f]+)\})?", census.WHITESPACE_CLASS):
-        parsed.update(range(int(lo, 16), int(hi or lo, 16) + 1))
-    assert parsed == {i for i in range(0x110000) if chr(i).isspace()}
-    assert re.sub(r"\\x\{[0-9a-f]+\}(-\\x\{[0-9a-f]+\})?", "", census.WHITESPACE_CLASS) == ""

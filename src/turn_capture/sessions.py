@@ -27,10 +27,22 @@ from src.turn_capture.streams import (
     is_api_error,
     notice_status,
 )
-from src.turn_capture.transcripts import Ctx, is_sentinel, text_of
+from src.turn_capture.transcripts import Ctx, text_of
+from src.turn_capture.witness import interrupted
 
 AGENT_TYPE = "claude-code-subagent"
 WORKFLOWS = ("orient", "plan", "implement", "develop-executor", "audit", "overseer")
+WORKFLOW_SKILLS = {
+    "orient": "orient",
+    "planning": "plan",
+    "implement": "implement",
+    "overseer": "overseer",
+    "audit-prompt": "audit",
+    "plan-critique": "plan-critique",
+    "decision-scout": "decision-scout",
+    "code-review": "code-review",
+    "executor-rca": "executor-rca",
+}
 SESSION_COLUMNS = (
     "event_kind",
     "event_timestamp",
@@ -103,18 +115,38 @@ def _first_model(stream: Stream, bound: int | None = None) -> str | None:
     return None
 
 
-def _workflow(stream: Stream) -> str:
-    first = next((r for r in stream.recs if r.kind == "prompt"), None)
+def _skill_workflow(stream: Stream, bound: int) -> str | None:
+    for use in stream.tool_uses.values():
+        if use.rec.line > bound:
+            continue
+        spec = use.block_body.get("input")
+        skill = spec.get("skill") if isinstance(spec, dict) else None
+        if use.block_body.get("name") == "Skill" and isinstance(skill, str):
+            name = WORKFLOW_SKILLS.get(skill.lower().removeprefix("/"))
+            if name is not None:
+                return name
+    return None
+
+
+def _workflow(stream: Stream, bound: int, root: bool, diag: Counter[str]) -> str:
+    """Rules WA-1..WA-3: the root's first-prompt command tag, else the first workflow Skill call within the open bound."""
+    first = next((r for r in stream.recs if r.kind == "prompt"), None) if root else None
     match = _COMMAND_NAME.search(text_of(first.data["message"]["content"])) if first is not None else None
     name = match.group(1).lower() if match else ""
-    return name if name in WORKFLOWS else "claude_code"
+    if name in WORKFLOWS:
+        return name
+    skilled = _skill_workflow(stream, bound)
+    if skilled is not None:
+        diag["workflow_from_skill"] += 1
+        return skilled
+    return "claude_code" if root else "subagent"
 
 
 def _open_bound(stream: Stream) -> int | None:
-    """The last record line of the first closed assistant-bearing turn (the open row reads nothing later), else None."""
+    """Rule WT-9: the first closing event of the first closed assistant-bearing turn, else that turn's last record line."""
     for turn in stream.turns:
         if turn.closed and turn.last_assistant is not None:
-            return max(r.line for r in turn.recs)
+            return turn.closes[0].line if turn.closes else max(r.line for r in turn.recs)
     return None
 
 
@@ -123,23 +155,9 @@ def stream_due(stream: Stream) -> bool:
     return _open_bound(stream) is not None
 
 
-def _interrupted(turn: Turn) -> bool:
-    prompt = turn.prompts[-1] if turn.prompts else None
-    results = [r for r in turn.recs if r.kind == "tool_result"]
-    info = results[-1].data.get("toolUseResult") if results else None
-    last = turn.last_assistant
-    return (
-        (prompt is not None and is_sentinel(text_of(prompt.data["message"]["content"])))
-        or (bool(results) and results[-1].data.get("toolDenialKind") == "user-rejected")
-        or (isinstance(info, dict) and info.get("interrupted") is True)
-        or any(use.result is None for use in turn.tool_uses)
-        or (last is not None and last.data.get("isAbortedMidStream") is True)
-    )
-
-
 def _close_outcome(turn: Turn, diag: Counter[str]) -> dict[str, str]:
     """Rule C-3: cancelled when the last turn was interrupted, failed on an API-error record, else success."""
-    if _interrupted(turn):
+    if interrupted(turn):
         return {"outcome": "cancelled"}
     last = turn.last_assistant
     if last is not None and is_api_error(last.data):
@@ -188,9 +206,10 @@ def _segment_closes(ctx: Ctx, stream: Stream, diag: Counter[str]) -> list[dict[s
     rows: list[dict[str, Any]] = []
     start = -1
     for boundary in stream.resumes:
-        turns = [t for t in stream.turns if start < t.first.line < boundary.line]
+        effective = stream.resume_at[boundary.line]
+        turns = [t for t in stream.turns if start < t.first.line < effective]
         anchor = next(
-            (r for r in reversed(stream.recs) if r.line < boundary.line and r.data.get("uuid") and r.ts is not None), None
+            (r for r in reversed(stream.recs) if r.line < effective and r.data.get("uuid") and r.ts is not None), None
         )
         if anchor is None or not any(t.last_assistant is not None for t in turns):
             diag["segment_close_skipped"] += 1
@@ -201,7 +220,7 @@ def _segment_closes(ctx: Ctx, stream: Stream, diag: Counter[str]) -> list[dict[s
             )
             if boundary.ts is not None and anchor.ts is not None and boundary.ts < anchor.ts:
                 diag["resume_before_close"] += 1
-        start = boundary.line
+        start = effective - 1
     return rows
 
 
@@ -226,7 +245,7 @@ def build_sessions(parsed: ParsedTree, ctx: Ctx, diag: Counter[str] | None = Non
                 ctx.started,
                 0 if child or pin is None else pin.line,
                 parents.get(stream.key),
-                workflow="subagent" if child else _workflow(stream),
+                workflow=_workflow(stream, bound, root, diag),
                 execution_attempt=1,
                 branch=_branch(stream, bound),
                 model_primary=_first_model(stream, bound),

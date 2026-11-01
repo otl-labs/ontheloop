@@ -6,6 +6,7 @@ ever written here -- secret-shaped strings are assembled at runtime by build_sec
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -22,7 +23,11 @@ PROJECT = "01BX5ZZKBKACTAV9WEVGEMMVRY"
 PROJECT_REF = "example/project"
 GOLDEN_DIR = Path(__file__).parent / "turn_capture" / "golden"
 _EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
-_SIDE_EFFECT_KEYS = ("created_timestamp", "producer_version", "content_sha256", "output_sha256")
+
+
+@functools.cache
+def normalised_out() -> frozenset[str]:
+    return frozenset(json.loads((GOLDEN_DIR / "index.json").read_text(encoding="utf-8"))["normalised_out"])
 
 
 def ts(seconds: float) -> str:
@@ -133,6 +138,42 @@ def hook(
         att["command"] = command
     att.update(extra)
     return _base(uuid, t, type="attachment", attachment=att)
+
+
+STOP_COMMAND = '"$CLAUDE_PROJECT_DIR/bin/venv-python" "$CLAUDE_PROJECT_DIR/.claude/hooks/stop_log_turn.py"'
+WITNESS_STDERR = "[stop_log_turn] turn witness\n"
+ZERO_USAGE = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+
+
+def witness(uuid: str, t: float, event: str = "Stop") -> dict[str, Any]:
+    """The capture shim's exit-0 hook_success attachment at a Stop (SubagentStop when *event* says so, in a child file)."""
+    return hook(uuid, t, event, command=STOP_COMMAND, stderr=WITNESS_STDERR, stdout="", toolUseID="stop-" + uuid)
+
+
+def other_stop_hook(uuid: str, t: float) -> dict[str, Any]:
+    return hook(uuid, t, "Stop", command="bash ./other_stop.sh", stderr="", stdout="", toolUseID="stop-" + uuid)
+
+
+def stop_feedback(uuid: str, t: float, pid: str) -> dict[str, Any]:
+    """The isMeta record a blocking Stop hook leaves: the turn's promptId, the feedback text."""
+    return prompt(uuid, t, pid, "Stop hook feedback:\n[bash ./gate.sh]: not yet", isMeta=True)
+
+
+def blocking_error(uuid: str, t: float) -> dict[str, Any]:
+    return hook(uuid, t, "Stop", a_type="hook_blocking_error", exit_code=2, command="bash ./gate.sh", blockingError="not yet")
+
+
+def stop_summary(uuid: str, t: float) -> dict[str, Any]:
+    return _base(uuid, t, type="system", subtype="stop_hook_summary", hookCount=2, hookErrors=[], toolUseID="stop-" + uuid)
+
+
+def api_error(uuid: str, t: float, kind: str = "server_error") -> dict[str, Any]:
+    rec = assistant(
+        uuid, t, "00000000-0000-4000-8000-0000000000e1", [text_block("API Error: Connection refused")],
+        usage=ZERO_USAGE, model="<synthetic>", isApiErrorMessage=True, error=kind,
+    )  # fmt: skip
+    rec["message"]["stop_reason"] = "stop_sequence"
+    return rec
 
 
 def attachment(uuid: str, t: float, a_type: str, **fields: Any) -> dict[str, Any]:
@@ -440,12 +481,13 @@ def assert_output_identities(files: dict[str, str], batches: list[tuple[str, lis
 
 
 def normalise(batches: list[tuple[str, list[dict[str, Any]]]]) -> list[dict[str, Any]]:
-    """Canonical rows: derived ids added with the fixed test tenant/project; None columns and the excluded columns
-    (created_timestamp, producer_version, content_sha256) dropped; datetimes rendered; sorted by table then event_id."""
+    """Canonical rows: derived ids added with the fixed test tenant/project; None columns and the golden index's
+    normalised_out columns dropped; datetimes rendered; sorted by table then event_id."""
+    dropped = normalised_out()
     out: list[dict[str, Any]] = []
     for table, rows in batches:
         for row in rows:
-            norm = {k: _render(v) for k, v in row.items() if v is not None and k not in _SIDE_EFFECT_KEYS}
+            norm = {k: _render(v) for k, v in row.items() if v is not None and k not in dropped}
             for column, plan in KEY_PLANS[table].items():
                 ref = row.get(plan.ref_field)
                 if ref is not None:

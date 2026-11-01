@@ -191,8 +191,21 @@ class TestProductionGcRuleInvariants:
         assert '"cloudwatch:namespace" = "DuckLakeMaintenance"' in policy_block
         assert '"s3:prefix" = ["${local.ducklake_prod_data_prefix}/*"]' in policy_block
         sids = re.findall(r'Sid\s*=\s*"(\w+)"', policy_block)
-        assert sids == ["Logs", "NeonDsnRead", "S3DataReadWriteDelete", "S3ListDataPrefix", "CloudWatchMetrics"], (
-            f"maintenance role IAM Sid set changed -- gc_ops must not widen it: {sids}"
+        assert sids == [
+            "Logs",
+            "NeonDsnRead",
+            "NeonDsnParameterRead",
+            "S3DataReadWriteDelete",
+            "S3ListDataPrefix",
+            "TelemetryCatalogDataReadWriteDelete",
+            "TelemetryCatalogDataList",
+            "CloudWatchMetrics",
+        ], f"maintenance role IAM Sid set changed -- gc_ops must not widen it: {sids}"
+        telemetry = policy_block[
+            policy_block.index('"TelemetryCatalogDataReadWriteDelete"') : policy_block.index('"CloudWatchMetrics"')
+        ]
+        assert re.findall(r"local\.(\w+)", telemetry) == ["ducklake_telemetry_data_prefix"] * 2, (
+            "the telemetry catalog Sids must name only the telemetry data prefix (Decision 230)"
         )
 
     def test_liveness_alarm_treats_missing_data_as_breaching(self) -> None:

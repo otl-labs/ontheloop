@@ -1,4 +1,4 @@
-"""Vector data for the --lambda-telemetry append gate (T2.36, slice 2a-2, plan 3 part 2). Data and pure builders only: it
+"""Vector data for the --lambda-telemetry-smoke append gate (the twin; T2.36, slice 2a-2). Data and pure builders only: it
 imports nothing from src.telemetry (the gate must not depend on the code it proves), and it does no I/O.
 
 A golden four-table payload in wire form for one session under a given project_ref, the negative cases as (name,
@@ -89,6 +89,15 @@ def observation_row(tag: str, index: int, started: datetime) -> dict[str, Any]:
     }
 
 
+def status_observation_row(tag: str, index: int, started: datetime) -> dict[str, Any]:
+    return {
+        **observation_row(tag, index, started),
+        "observation_type": "process_event",
+        "name": "status:pc_smoke.skipped",
+        "severity": "warning",
+    }
+
+
 def agent_row(tag: str, started: datetime) -> dict[str, Any]:
     return {
         **_common(0, started),
@@ -123,7 +132,7 @@ def request(
 
 
 def golden_body(project_ref: str, tag: str, started: datetime) -> dict[str, Any]:
-    """Four tables, the telemetry_sessions marker batch last, one session, two observation rows."""
+    """Four tables, the telemetry_sessions marker batch last, one session, three observation rows (the last a status event)."""
     return request(
         project_ref,
         [
@@ -131,14 +140,17 @@ def golden_body(project_ref: str, tag: str, started: datetime) -> dict[str, Any]
                 "telemetry_transcripts",
                 [transcript_row(tag, 0, started, "smoke prompt"), transcript_row(tag, 1, started, "smoke response")],
             ),
-            ("telemetry_observations", [observation_row(tag, 0, started), observation_row(tag, 1, started)]),
+            (
+                "telemetry_observations",
+                [observation_row(tag, 0, started), observation_row(tag, 1, started), status_observation_row(tag, 2, started)],
+            ),
             ("telemetry_agents", [agent_row(tag, started)]),
             ("telemetry_sessions", [session_open_row(tag, started)]),
         ],
     )
 
 
-GOLDEN_ROWS = {"telemetry_transcripts": 2, "telemetry_observations": 2, "telemetry_agents": 1, "telemetry_sessions": 1}
+GOLDEN_ROWS = {"telemetry_transcripts": 2, "telemetry_observations": 3, "telemetry_agents": 1, "telemetry_sessions": 1}
 
 
 def _rows(body: dict[str, Any], table: str) -> list[dict[str, Any]]:
@@ -234,9 +246,11 @@ def negative_vectors(tag: str) -> tuple[NegativeVector, ...]:
 
 
 def conflicting_body(body: dict[str, Any]) -> dict[str, Any]:
-    """The golden body with one observation column changed under the same grain key: the 409 vector (row 1)."""
+    """The golden body cut to two observation rows, row 1 changed under the same grain key: the 409 vector."""
     changed = copy.deepcopy(body)
-    _rows(changed, "telemetry_observations")[1]["name"] = "changed-after-first-write"
+    rows = _rows(changed, "telemetry_observations")
+    rows[1]["name"] = "changed-after-first-write"
+    del rows[2:]
     return changed
 
 

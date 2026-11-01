@@ -1,0 +1,338 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "ci-policy-plan-time-lambda-arns"
+intent: >-
+  Make the CI and pipeline role policy documents in terraform/personal readable at plan time: name each Lambda by an ARN
+  built from its function-name local instead of by resource reference, so an in-place Lambda change no longer defers the
+  document read to apply and hides the role policy from the merge-time guard and reviewer as "(known after apply)". A
+  registered check keeps managed-resource references out of every policy document except an enumerated allowlist.
+  Executes rec-4685, which also carries closed rec-4718's preventive action (a --pre iam_tf invariant against deferred
+  CI policy documents).
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-ci-policy-plan-time-lambda-arns.yaml
+phase: >-
+  ad_hoc_rec (soft-warn category; no tier_item claimed, so the Tier Item Freshness Gate is skipped). Executes rec-4685,
+  the root-cause fix behind rec-4718 (ci_rca, sandbox apply REVISE on 00825368, repaired by Reconcile run 40958224365).
+scope:
+  - file: terraform/personal/oidc_ci_roles.tf
+    action: Modify
+    purpose: >-
+      In data.aws_iam_policy_document.github_ci_branch and github_ci_pr only, replace every aws_lambda_function.<n>.arn
+      with "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.<n>_function}" and every
+      "${aws_lambda_function.<n>.arn}:*" with the same string plus ":*" (24 references in github_ci_branch across eight
+      Lambdas, 8 in github_ci_pr). Element order, Sids, actions and conditions stay as they are; no other line changes
+      except one why-comment above the first rewritten statement in each document (rec-4685: a resource reference defers
+      the document read to apply whenever the Lambda changes).
+  - file: terraform/personal/oidc_pipeline_roles.tf
+    action: Modify
+    purpose: >-
+      Same rewrite in data.aws_iam_policy_document.github_ci_planner, statements DuckLakeWriterInvoke and
+      DuckLakeWriterInvokeViaUrlOnly (4 references), with the same one-line why-comment. Nothing else changes.
+  - file: scripts/checks/iam_tf/validate_policy_document_plan_time_refs.py
+    action: Create
+    purpose: >-
+      Registered check validate_policy_document_plan_time_refs (credential-free, --pre and full). Reads terraform/personal
+      with validate_invoke_implies_resolve's _read_root_text, _DATA_BLOCK_RE and _extract_block. Comment stripping is
+      string-aware: #, // and /* */ start a comment only outside a double-quoted string, so "s3://..." or "https://..."
+      never hides the rest of its line. Fails on any managed-resource reference in any data "aws_iam_policy_document"
+      block: aws_* or neon_* type.name, not preceded by a word character or ".", with an optional [index] or [*] and an
+      optional .attr -- so a bare depends_on = [aws_lambda_function.x], an indexed aws_lambda_function.x["k"].arn or
+      x[0].arn, a splat, and a reference inside a "${...}" interpolation all count -- unless its type.name is in
+      ALLOWED_REFERENCES (aws_s3_bucket.data_lake, aws_s3_bucket.ducklake_catalog_dr, aws_dynamodb_table.counters,
+      aws_sns_topic.alerts). Separately fails loud when any of REQUIRED_DOCUMENTS (github_ci_branch, github_ci_pr,
+      github_ci_planner, github_ci_deploy, github_ci_trusted_plan, ci_full_refresh_read, ci_ssm_refresh_read) is not found,
+      so a parser regression cannot pass vacuously. Public surface: reference_problems(text) -> list[str] reports
+      reference problems only, one problem per distinct (document name, type.name) pair however often that reference
+      recurs in the document; missing_required_documents(text) -> list[str] reports absent required documents only; the
+      registered body calls both, plus ALLOWED_REFERENCES and REQUIRED_DOCUMENTS. Calls registry.examined(<documents>,
+      unit="policy_documents") (Decision 170) on every exit path, an unreadable or empty root included (registry
+      surface 7, as validate_invoke_implies_resolve does); a __main__ prints PASS with the document count. Docstring names rec-4685 and
+      rec-4718 and states the allowlist's residual honestly: the four entries are tolerated because they rarely change
+      in place and the refresh-read, branch-fence and writer-isolation verifiers key on their resource form, but any
+      in-place change to one of them (a provider default_tags change, e.g. var.owner_email, updates tags_all on all four
+      at once) still defers every CI document that names it; the PR-time plan check planned separately (context) owns
+      that residual.
+  - file: scripts/checks/iam_tf/_manifest.py
+    action: Modify
+    purpose: Register validate_policy_document_plan_time_refs (pre=True, full_segment full_after_lint), next to validate_invoke_implies_resolve.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: Map validate_policy_document_plan_time_refs to iam_gap, next to validate_invoke_implies_resolve.
+  - file: tests/checks/iam_tf/test_validate_policy_document_plan_time_refs.py
+    action: Create
+    purpose: >-
+      Mirror test. test_live_tree_passes: the live tree passes, its examined count equals the number of parsed
+      aws_iam_policy_document blocks (8 at planning time; not pinned, so a new document does not red it), and every
+      REQUIRED_DOCUMENTS name is among them. test_allowlist_is_pinned asserts ALLOWED_REFERENCES equals the four planned
+      entries, so allowlist growth is a visible two-file change (Decision 235). Red on synthetic HCL for (named
+      test_direct_lambda_reference_fails for the first): a direct aws_lambda_function.x.arn in a statement's resources;
+      the "${aws_lambda_function.x.arn}:*" form; depends_on = [aws_lambda_function.x]; aws_lambda_function.x["k"].arn
+      and aws_lambda_function.x[0].arn; a reference in a condition's values; a reference inside source_policy_documents'
+      inline JSON; a reference on a line that also carries "s3://bucket/key" before it; a reference after a string
+      holding an escaped quote and a # on the same line (e.g. ["a\"b#c", aws_lambda_function.x.arn]); an unlisted aws_s3_bucket
+      reference; a neon_* reference; a missing required document (via missing_required_documents). Green on: an
+      allowlisted reference; data.aws_iam_policy_document.x.json in source_policy_documents; var.aws_region and
+      local.<n> tokens; a reference that appears only in a #, // or /* */ comment; the name-built form. A test feeds the full
+      pre-change data "aws_iam_policy_document" "github_ci_pr" block (literal fixture, 8 references to the reader and
+      writer) to reference_problems and asserts exactly two problems, one per Lambda.
+      test_registered_pre_and_full asserts the check is in registry.pre_sequence() checks with Entry full_segment
+      "full_after_lint".
+  - file: config/agent/verification_registry/entries/policy-document-plan-time-refs.yaml
+    action: Create
+    purpose: Graduation shard for VP step 1 (check_id policy-document-plan-time-refs), shaped like ci-branch-state-fence.yaml.
+bundled_recommendations:
+  - rec-4685
+followon_recs: []
+infrastructure_dependencies:
+  - >-
+    terraform/personal: no resource change. The three documents render byte-identical JSON, so the PR's speculative plan
+    is "No changes" and the merge-time apply-sandbox run applies an empty saved plan (guard PASS, digest with 0
+    actionable entries). Any role-policy line in that plan means the rewrite changed content: stop, never merge.
+  - >-
+    Merge is gated on Benjamin's word (project always-ask: IAM change, even content-identical), typed in the build thread.
+acceptance_criteria:
+  - No data "aws_iam_policy_document" block in terraform/personal references aws_lambda_function; each former reference is the name-built ARN string from that Lambda's function-name local.
+  - validate_policy_document_plan_time_refs is registered (pre and full), passes on the live tree (8 policy documents at planning time), and fails on every red case in its mirror test.
+  - The PR's speculative plan reads "No changes" with predicted guard verdict PASS.
+  - The merge-time apply-sandbox run is green and the convergence record is green at the squash sha.
+  - rec-4685 is closed by the squash-merge Resolves trailer, its acceptance rewritten to node ids that census classes probeable (and, only if it is escape-classified, carrying closure_artifact shard:policy-document-plan-time-refs bound to the squash sha, Decision 186).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Run the mirror test and the manifest test (live tree green, every synthetic red case red).
+    command: bin/venv-python -m pytest tests/checks/iam_tf/test_validate_policy_document_plan_time_refs.py tests/checks/iam_tf/test__manifest.py -q
+    expected: exit 0; every test passes. Before the change the module and test file do not exist.
+    fix_if: The live-tree case fails -- a reference survived the rewrite or a required document moved; fix the HCL, never ALLOWED_REFERENCES.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: graduate
+    graduation_check_id: policy-document-plan-time-refs
+  - step: 2
+    phase: pre-deploy
+    action: Run the registered check directly on the live tree.
+    command: bin/venv-python -m scripts.checks.iam_tf.validate_policy_document_plan_time_refs
+    expected: exit 0 with a PASS line naming the policy document count (8 at planning time).
+    fix_if: Exit 1 -- read the named document and reference; fix the HCL.
+    hermetic: true
+    expected_literals: ["PASS"]
+    graduation: waive
+    graduation_waiver_reason: The same predicate is registered in --pre and full (scope row 4) and step 1 drives it; this is the readable replay.
+  - step: 3
+    phase: pre-deploy
+    action: >-
+      The existing IAM verifiers still see the rewritten grants, non-vacuously: the whole iam_tf test tree passes
+      (including test_grant_predicate_covers_each_reference_form, whose parameters already include the name-built form,
+      and the live-tree test_branch_role_invokes_the_telemetry_functions_url_only), and validate_invoke_implies_resolve
+      prints its non-vacuous PASS line for each of the three rewritten roles (on main at planning time it prints exactly
+      these three, plus two "PASS (vacuous)" lines for github_ci_deploy and github_ci_trusted_plan).
+    command: |-
+      bin/venv-python -m pytest tests/checks/iam_tf -q && bin/venv-python - <<'PY'
+      import contextlib, io
+      from scripts.checks import registry
+      n = "validate_invoke_implies_resolve"
+      failed, buf = [], io.StringIO()
+      with contextlib.redirect_stdout(buf), registry.outcome_scope(n):
+          registry.resolve(n)(failed)
+      out = buf.getvalue()
+      roles = ("github_ci_branch", "github_ci_pr", "github_ci_planner")
+      seen = [r for r in roles if f"PASS: {r} invokes the DuckLake reader/writer" in out]
+      print("NONVACUOUS", len(seen), "FAILED" if failed else "ok")
+      assert seen == list(roles) and not failed, out
+      PY
+    expected: pytest exit 0; then NONVACUOUS 3 ok.
+    fix_if: >-
+      A role drops to "PASS (vacuous)" or a live-tree iam_tf test fails -- a verifier no longer recognises the name-built
+      form; stop and return to the planner (never widen a verifier inside this plan).
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: SLOC budgets hold with no raise.
+    command: >-
+      bin/venv-python -c "from scripts.checks.sloc.sloc_limits import validate_sloc_limits as c; f=[]; c(f); print('SLOC_FAILS', len(f)); assert not f, f"
+    expected: SLOC_FAILS 0; exit 0.
+    fix_if: A file is over budget -- decompose (Decision 128); never raise.
+    hermetic: true
+    expected_literals: ["SLOC_FAILS 0"]
+    graduation: waive
+    graduation_waiver_reason: Replays the registered SLOC check that runs in every tier.
+  - step: 5
+    phase: pre-deploy
+    action: Discharge the handoff obligation with a full-tier run to completion.
+    command: bin/venv-python -m scripts.validate
+    expected: exit 0.
+    fix_if: >-
+      A failure in scope is fixed on the branch; never skip a test, relax an assertion, or add a baseline, allowlist or
+      budget entry. A failure outside scope becomes a rec via scripts.ops_data_portal (Decision 59, 55).
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      vp-red-before.yaml recursion_refusal: a graduated step may not invoke scripts.validate, so the full tier cannot
+      graduate; it runs post-merge on main in every case.
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      On the open PR: the speculative-plan job is green and its comment reads "No changes" with predicted guard verdict
+      PASS and a reviewer digest of 0 actionable entries. Read via the GitHub MCP tools.
+    command: >-
+      mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
+      resource_id="terraform-apply-sandbox.yml", workflow_runs_filter={"event": "pull_request", "branch": "<PR head branch>"})
+      -> newest run for the PR head sha; mcp__github__actions_list(method="list_workflow_jobs", resource_id="<run id>") ->
+      job "speculative-plan" conclusion; mcp__github__pull_request_read(method="get_comments", pullNumber=<PR>) -> the plan
+      comment's change summary, digest line and predicted verdict. Record the run URL and those lines on the PR.
+    expected: >-
+      Job success; the plan reads No changes; the digest line reports 0 actionable entries; predicted verdict PASS.
+    fix_if: >-
+      Any aws_iam_role_policy or data read line -- the rewrite changed content or missed a reference; fix and re-push.
+      Another resource changes -- main moved under the PR; rebase and let the plan re-run. If S3's trusted-plan cutover
+      (rec-4637) has landed first, the PR plan runs in terraform-plan-trusted.yml with names-only output: read the same
+      facts (no aws_iam_role_policy address, 0 actionable, predicted PASS) from that workflow's plan job instead.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      Before the merge word is asked: prove the trailer-closure grammar accepts the new acceptance text on the PR head,
+      then write it to rec-4685 with update_rec (project rule: acceptance must name a file the PR creates and census
+      must class it probeable). In the same status-preserving write, stamp closure_artifact if rec-4685 is
+      escape-classified (Decision 186 refuses a trailer closure of one without a fix-bound artifact; the shard file lands
+      in the squash; at planning time rec-4685 is a manual rec, so none is expected). Only once the PR is ready for the
+      merge word, so an abandoned PR leaves no stale pointer.
+    command: |-
+      bin/venv-python - <<'PY'
+      from scripts.rec_trailer_acceptance import census
+      from scripts.ops_data_portal import update_rec
+      from scripts.ops_portal.closure_gate import is_escape_classified, parse_context_json
+      from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader
+      A = ("bin/venv-python -m pytest"
+           " tests/checks/iam_tf/test_validate_policy_document_plan_time_refs.py::test_live_tree_passes"
+           " tests/checks/iam_tf/test_validate_policy_document_plan_time_refs.py::test_direct_lambda_reference_fails -q")
+      e = census(["x"], rows=[{"id": "x", "acceptance": A}])[0]
+      print(e["bucket"], e.get("route"))
+      assert e["bucket"] == "probeable", e
+      rows, _ = fetch_recs_by_ids(make_reader(), ["rec-4685"])
+      assert [r["id"] for r in rows] == ["rec-4685"], (rows, _)
+      for r in rows:
+          escape = is_escape_classified(parse_context_json(r.get("context_v2_json")))
+          token = "shard:policy-document-plan-time-refs" if escape else None
+          update_rec(r["id"], {"acceptance": A}, closure_artifact=token)
+          print("WRITTEN", r["id"], "artifact" if escape else "no-artifact")
+      PY
+    expected: >-
+      Prints "probeable" with a route of junit or static, then "WRITTEN rec-4685 no-artifact" (or "artifact" if it is
+      escape-classified by then).
+      (On main, before the build, the same census call prints expected_fail_missing_node -- the test file does not
+      exist yet.)
+    fix_if: >-
+      Another bucket -- reshape the command to the junit grammar (one segment of ::node ids) and re-run before writing.
+      update_rec refuses -- read its message (content gate or stampability); never close the rec by hand.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: >-
+      The merge-time apply-sandbox run is green and the convergence record names the squash sha with status green.
+    command: >-
+      mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
+      resource_id="terraform-apply-sandbox.yml", workflow_runs_filter={"event": "push", "branch": "main"}) -> the run whose
+      head_sha is the squash sha -> job "apply-sandbox" conclusion; then
+      aws s3 cp s3://agent-platform-data-lake/convergence/personal/sandbox.json - --profile agent_platform
+    expected: apply-sandbox success; record status green, commit_sha the squash sha.
+    fix_if: >-
+      REVISE or any failure -- stop and report with the step log; never hand-apply, never re-dispatch without Benjamin's
+      word.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: Confirm rec-4685 is closed (the squash-merge Resolves trailer closes it).
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; r,_=fetch_recs_by_ids(make_reader(), ['rec-4685']); [print(x['id'], x['status']) for x in r]"
+    expected: Prints rec-4685 closed.
+    fix_if: >-
+      Still open -- read the ci.yml trailer-census / trailer-acceptance-evaluate / trailer-closure job logs. After a
+      transport failure or a merge-leg refusal only, close with update_rec citing step 8 (git-ops.yaml resolves_trailer
+      fallback); after an acceptance-verdict refusal the manual route is FORBIDDEN -- stop and report.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/checks/iam_tf/validate_policy_document_plan_time_refs.py
+    behavior: Fails on any non-allowlisted managed-resource reference in a terraform/personal policy document, and fails loud when a required CI document is missing.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_validate_policy_document_plan_time_refs.py
+    red_green_expectation: red before (module and test absent; the pre-change text fixture yields two problems), green after.
+  - source: terraform/personal/oidc_ci_roles.tf
+    behavior: github_ci_branch and github_ci_pr name every Lambda by the name-built ARN, never by resource reference.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_validate_policy_document_plan_time_refs.py::test_live_tree_passes
+    red_green_expectation: Red before the rewrite (the live tree carries the Lambda references and the check names them), green after.
+  - source: terraform/personal/oidc_pipeline_roles.tf
+    behavior: github_ci_planner names the DuckLake writer by the name-built ARN, never by resource reference.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_validate_policy_document_plan_time_refs.py::test_live_tree_passes
+    red_green_expectation: Red before the rewrite (the live tree carries the writer references and the check names them), green after.
+  - source: scripts/checks/iam_tf/_manifest.py
+    behavior: The check is registered and dispatched in --pre and full.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_validate_policy_document_plan_time_refs.py::test_registered_pre_and_full
+    red_green_expectation: Red before (no Entry; the test fails), green after.
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: The new check has a ci-rca failure category.
+    verification_step: 5
+    command: bin/venv-python -m scripts.validate
+    red_green_expectation: Red before the row (the taxonomy completeness check names the unmapped check), green after.
+  - source: config/agent/verification_registry/entries/policy-document-plan-time-refs.yaml
+    behavior: Step 1's guard runs as a standing regression check.
+    verification_step: 5
+    command: bin/venv-python -m scripts.validate
+    red_green_expectation: Red before the row (validate_graduation_completeness), green after.
+constraints:
+  - Only the Lambda references in the three named documents change; bucket, table and topic references stay (allowlisted).
+  - No change to the guard, digest, reviewer, environment-taxonomy.yaml, the authority budget or any Decision text.
+  - The rendered policy JSON must not change; a speculative plan with any change blocks the merge.
+  - Never apply by hand or with admin credentials; the merge-time pipeline applies (project critical rule).
+  - Merge only on Benjamin's word in the build thread (IAM always-ask).
+  - Never skip or weaken a test to get green (Decision 55); a verifier that stops seeing a grant is a stop, not a fix.
+context:
+  - "Decision-scout verdict NO_FLAGS (Decisions triaged: 190 of 190; Roadmap items intersected: 4; CONFLICT: 0; RELATED: 4). CITE: Decision 35, 77, 92, 104, 119, 126, 169, 170, 132, 186, 226, 238. Report: project folder ci-policy-plan-time/decision-scout-report.md."
+  - "gates: decision-scout=NO_FLAGS; plan-critique=REVISE round 1 (A-F fixed), REVISE round 2 (G-M fixed, L accepted), PROCEED round 3 confirming (O1, O2, O4, O5, O6 folded in; O3 not taken); round 3 autonomous"
+  - "Why: rec-4685 (filed 2026-10-28 from the narrow deploy retrospective) and rec-4718 (sandbox apply REVISE on 00825368, run 40900875887; repaired by Reconcile run 40958224365). Terraform defers a data source that DIRECTLY references a managed resource with a pending change (read_because_dependency_pending), even when the attribute is known."
+  - "Decision 238: PR plan output may be names and counts only; prove no role-policy change by the absence of aws_iam_role_policy addresses (VP 6). Decision 119: never a local terraform init/plan."
+  - "Decision 170: a missing required document appends to failed (fail loud), never examined(0). Decision 182: keep the check a filesystem-only regex scan."
+  - "Precedent for the ARN form: oidc.tf builds Lambda layer ARNs from var.aws_region and var.account_id (oidc.tf:247-251). Function-name locals: ducklake_lambdas.tf:38-62, ducklake_maintenance_smoke.tf:37, prod_lambdas.tf:35-36."
+  - "Planning evidence: prototype rewrite on main passed all 1,027 tests under tests/checks/iam_tf with unchanged examined counts (invoke-implies-resolve 5, refresh-read coverage 89, writer isolation 22, branch fence 22); prototype check found 11 references on main, 0 after."
+  - "Unproven until the next in-place Lambda change: that a real Lambda edit then plans the CI policies as unchanged (backed by a local Terraform 1.10.5 experiment and Terraform's docs)."
+  - "Sequencing: lands before S4 (rec-4640), which edits the same two .tf files; S4 rebases. PLAN-trusted-plan-cutover (S3, rec-4637, plan PR #1722) PR 4 deletes the planner's TfplanWrite statement in oidc_pipeline_roles.tf (other statements than this plan's); whichever lands second rebases, and REQUIRED_DOCUMENTS keeps github_ci_planner (S3 keeps that document)."
+  - "red-overlap (2026-10-29, main ad596e99, re-run after rec-4718 closed): {\"verdict\": \"clear\", \"slo_hours\": 4, \"reds\": []}. Main is green (Reconcile run 40958224365)."
+  - "rec-4718 is not bundled: Benjamin had it closed by waiver on 2026-10-29 22:44Z (status closed, closure_waiver_category no_premerge_gate_by_design, resolution citing Reconcile run 40958224365 and this plan). Its preventive action (a --pre iam_tf invariant against deferred CI policy documents) is this plan's check. A recurrence of its fingerprint before this plan merges refiles as a Critical regression by design (ci-rca-lifecycle.yaml closure_dependency)."
+  - "Out of scope, planned separately (Benjamin 2026-10-29, coordinator thread 'Block hidden IAM policies before merge'): a failing, non-required PR-time step that reds a PR whose plan shows an IAM policy known only after apply. The apply-time guard routing first proposed (PR-B) was dropped: an apply-time approval re-shows HCL already approved at planning. That step owns this plan's residual: an in-place change to an allowlisted bucket, table or topic (notably a provider default_tags change, which updates tags_all on all four at once) still defers every CI document naming it. If neither a rec nor a merged plan exists for that step when this build merges, the build files one then (Decision 84 I-4 portal write)."
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - Before editing, run VP step 3's command on the unchanged tree and record its output (NONVACUOUS 3 ok on main) as the baseline.
+  - terraform/personal/oidc_ci_roles.tf and oidc_pipeline_roles.tf -- the rewrite in scope rows 1-2; terraform fmt -check.
+  - Create the check, its manifest Entry, taxonomy row, mirror test and graduation shard (scope rows 3-7).
+  - Execute Verification Plan steps 1-5; loop until pass; on an unrecoverable failure stop and RCA (Decision 55).
+  - >-
+    Closure evidence, recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state; parent
+    validator evidence (VP step 5 full-tier exit 0 plus bin/venv-python -m scripts.checks.validation_result --verify-head
+    for the pushed HEAD); structured postflight evidence (write the scripts.session.postflight_evidence.CATEGORIES JSON
+    in the scratchpad, then bin/venv-python -m scripts.session.postflight --evidence <file>); the real outcome -- push, PR,
+    CI green by event-driven wake (never polled), VP steps 6 and 7, Benjamin's merge word, squash-merge with the
+    Resolves trailer below, then VP steps 8 and 9.
+  - >-
+    Open the PR, run step 6, then step 7, then ask Benjamin for the merge word. Squash-merge with
+    mcp__github__merge_pull_request(merge_method="squash") and an explicit commit_message whose body ends with its own
+    Key-value block -- the line "Resolves: rec-4685" directly above the Co-Authored-By and Claude-Session
+    attribution lines (git-ops.yaml resolves_trailer CARRIER and PLACEMENT); the PR body alone does not reach the squash
+    commit.
+  - After merge, run steps 8-9.
+  - 'Report: what was implemented, verification results, the four closure facts'
+rollback: Revert the PR; the revert's plan is also "No changes", so it applies the same way.

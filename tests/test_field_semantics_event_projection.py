@@ -344,7 +344,7 @@ def test_row_rules_projected_from_contracts() -> None:
         },
     }  # fmt: skip
     assert transcripts["columns"]["content_sha256"]["pattern"] == "^[0-9a-f]{64}$"
-    assert transcripts["columns"]["content_omitted_reason"]["accepted_values"] == ["oversize"]
+    assert transcripts["columns"]["content_omitted_reason"]["accepted_values"] == ["oversize", "withheld_by_policy"]
 
 
 def test_amended_telemetry_rules_project() -> None:

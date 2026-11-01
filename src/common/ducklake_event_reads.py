@@ -1,14 +1,14 @@
-"""Event-journal read mechanism for the ducklake_reader Lambda (Decision 199 cl.1, Decision 207, Decision 84 I-3).
+"""Event-journal read mechanism for the ducklake_telemetry_reader Lambda (Decision 199 cl.1, Decision 207, Decision 84 I-3).
 
-The telemetry tables are event journals read through a second, isolated warm connection (the "telemetry" slot) by named
-verbs whose SQL is registry content. This module owns the EventRead type, parameter validation (before any SQL or
-connection), the smoke-pin refusal, the partition binding, the compared-column set behind the conflict report, the
-event_read_version stamp, execution, and the routing helpers the reader handler calls.
+The telemetry tables are event journals read through an isolated warm connection (the "telemetry" slot) by named verbs
+whose SQL is registry content. This module owns the EventRead type, parameter validation (before any SQL or connection),
+the production-pin refusal, the partition binding, the compared-column set behind the conflict report, the
+event_read_version stamp, execution, and the routing helpers the telemetry reader handler calls.
 
-Imported by the reader handler only. Import direction (no cycle): ducklake_event_read_verbs imports EventRead from here at
-module scope; the routing helpers here import EVENT_READS function-locally. Nothing in ducklake_runtime's import closure
-imports this module, so the other DuckLake bundles need no new file. Event reads use src.telemetry.identity/timestamps and
-src.row_rules only, never src.telemetry.append.
+Imported by the telemetry reader handler only; the shared reader serves no event verb (Decision 236). Import direction (no
+cycle): ducklake_event_read_verbs imports EventRead from here at module scope; the routing helpers here import EVENT_READS
+function-locally. Nothing in ducklake_runtime's import closure imports this module, so the other DuckLake bundles need no
+new file. Event reads use src.telemetry.identity/timestamps and src.row_rules only, never src.telemetry.append.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 
+from src.common import ducklake_read_deadline as deadline
 from src.common import ducklake_runtime as rt
 from src.common.ducklake_event_read_sql import AGENTS, OBSERVATIONS, SESSIONS, TRANSCRIPTS
 from src.row_rules.rules import RowRules
@@ -29,6 +30,8 @@ from src.telemetry.timestamps import TimestampError, parse_iso8601_utc
 
 TELEMETRY_SLOT = "telemetry"
 TELEMETRY_MEMORY_LIMIT = "300MB"
+TELEMETRY_TEMP_DIRECTORY = "/tmp/telemetry-spill"
+TELEMETRY_MAX_TEMP_SIZE = "300MB"
 KIND = "event_journal"
 CATALOG = "telemetry"
 
@@ -86,10 +89,6 @@ def _event_reads() -> dict[str, EventRead]:
     return EVENT_READS
 
 
-def is_event_verb(verb: Any) -> bool:
-    return isinstance(verb, str) and verb in _event_reads()
-
-
 # ---------------------------------------------------------------------------
 # Pin, validation and partition binding
 # ---------------------------------------------------------------------------
@@ -100,14 +99,13 @@ def telemetry_pin() -> tuple[str, str]:
     return os.environ.get("TELEMETRY_META_SCHEMA", ""), os.environ.get("TELEMETRY_DATA_PATH", "")
 
 
-def require_smoke_pin() -> tuple[str, str]:
-    """Refuse every event verb unless the pin names the single-tenant smoke catalog (Decision 200 cl.2, rec-4292)."""
+def require_production_pin() -> tuple[str, str]:
+    """Refuse every event verb unless the pin names the production telemetry catalog (Decision 200 cl.2, Decision 236)."""
     meta_schema, data_path = telemetry_pin()
-    if meta_schema != rt.SMOKE_META_SCHEMA or data_path.rstrip("/") != rt.SMOKE_DATA_PATH.rstrip("/"):
+    if meta_schema != rt.TELEMETRY_PROD_META_SCHEMA or data_path.rstrip("/") != rt.TELEMETRY_PROD_DATA_PATH.rstrip("/"):
         raise rt.DuckLakeRuntimeError(
-            "event-journal reads are refused unless TELEMETRY_META_SCHEMA and TELEMETRY_DATA_PATH name the smoke catalog: "
-            "the verbs carry no tenant predicate, so slice 2c lifts this refusal together with tenant-scoped reads (rec-4292, "
-            "Decision 200 cl.2)"
+            "event-journal reads are refused unless TELEMETRY_META_SCHEMA and TELEMETRY_DATA_PATH name the production "
+            "telemetry catalog"
         )
     return meta_schema, data_path
 
@@ -311,51 +309,69 @@ def execute_entry(con: Any, entry: EventRead, params: Any, limit: Any = None) ->
     columns = [desc[0] for desc in cursor.description]
     rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
     if content:
-        from src.common.ducklake_event_content import serve_content  # noqa: PLC0415 -- reader bundle only
+        from src.common.ducklake_event_content import serve_content  # noqa: PLC0415 -- no deployed reader carries it
 
         return serve_content(rows, values)
     return rows
 
 
-def serve_named_read(con: Any, *, verb: str, params: dict[str, Any], limit: Any) -> tuple[list[dict[str, Any]], str]:
-    """Rows and read_version for a named verb: ops verbs through the unchanged runtime path, event verbs through execute."""
-    if is_event_verb(verb):
-        return execute(con, verb=verb, params=params, limit=limit), event_read_version(verb)
-    return rt.named_read(con, verb=verb, params=params, limit=limit), rt.read_version(verb)
+def _telemetry_opener(
+    meta_schema: str, data_path: str, extension_directory: str, dsn_secret_id: str | None = None, read_only: bool = False
+) -> Callable[[], Any]:
+    options: dict[str, Any] = {"read_only": True} if read_only else {}
 
-
-def _telemetry_opener(meta_schema: str, data_path: str, extension_directory: str) -> Callable[[], Any]:
     def opener() -> Any:
         con = rt.open_connection(
-            dsn=rt.fetch_dsn(),
+            dsn=rt.fetch_dsn() if dsn_secret_id is None else rt.fetch_dsn(dsn_secret_id),
             data_path=data_path,
             meta_schema=meta_schema,
             extension_directory=extension_directory,
             alias=rt.TELEMETRY_CATALOG_ALIAS,
+            **options,
         )
         con.execute(f"SET memory_limit='{TELEMETRY_MEMORY_LIMIT}'")
+        con.execute(f"SET temp_directory='{TELEMETRY_TEMP_DIRECTORY}'")
+        con.execute(f"SET max_temp_directory_size='{TELEMETRY_MAX_TEMP_SIZE}'")
         return con
 
     return opener
 
 
-def acquirer_for(
-    action: Any, payload: dict[str, Any], ops: Callable[..., tuple[Any, dict[str, Any]]], extension_directory: str
-) -> Callable[..., tuple[Any, dict[str, Any]]]:
-    """The connection acquirer for this request: the handler's own ops acquirer, unchanged, for everything but an event verb.
+_INTERRUPTED_SLOTS: set[str] = set()
 
-    An event verb first passes the smoke-pin refusal and parameter validation, so a refused request never pays an ATTACH,
-    then binds the telemetry slot (opened lazily on its first verb).
-    """
+
+def _catalog_probe_sql() -> str:
+    return f"SELECT count(*) FROM __ducklake_metadata_{rt.TELEMETRY_CATALOG_ALIAS}.ducklake_metadata"
+
+
+def _deadline_ms(verb: str, payload: dict[str, Any]) -> int | None:
+    value = payload.get("deadline_ms")
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise EventReadInputError(verb, "deadline_ms", "must be a positive integer")
+    return value
+
+
+def deadline_guard(
+    action: Any, payload: dict[str, Any], remaining_ms: Callable[[], float] | None
+) -> Callable[[Any, Callable[[], Any]], Any]:
+    """The deadline runner for this request: armed for a named_read of an event verb, a pass-through for everything else."""
     verb = payload.get("verb") if action == "named_read" else None
     if not isinstance(verb, str) or verb not in _event_reads():
-        return ops
-    meta_schema, data_path = require_smoke_pin()
-    params = payload.get("params")
-    bind_values(_event_reads()[verb], {} if params is None else params)
-    opener = _telemetry_opener(meta_schema, data_path, extension_directory)
+        return deadline.runner(None, None, lambda: None)
+    return deadline.runner(remaining_ms, _deadline_ms(verb, payload), lambda: _INTERRUPTED_SLOTS.add(TELEMETRY_SLOT))
+
+
+def telemetry_acquirer(
+    meta_schema: str, data_path: str, extension_directory: str, *, dsn_secret_id: str | None = None, read_only: bool = False
+) -> Callable[..., tuple[Any, dict[str, Any]]]:
+    """The telemetry-slot acquire callable: opened lazily; the first acquire after a deadline interrupt probes the catalog."""
+    opener = _telemetry_opener(meta_schema, data_path, extension_directory, dsn_secret_id, read_only)
 
     def acquire(force_reopen: bool = False) -> tuple[Any, dict[str, Any]]:
+        probe = _catalog_probe_sql() if TELEMETRY_SLOT in _INTERRUPTED_SLOTS else "SELECT 1"
+        _INTERRUPTED_SLOTS.discard(TELEMETRY_SLOT)
         return rt.get_warm_connection(
             opener=opener,
             data_path=data_path,
@@ -363,10 +379,39 @@ def acquirer_for(
             extension_directory=extension_directory,
             slot=TELEMETRY_SLOT,
             alias=rt.TELEMETRY_CATALOG_ALIAS,
+            probe_sql=probe,
             force_reopen=force_reopen,
         )
 
     return acquire
+
+
+def acquirer_for(
+    action: Any,
+    payload: dict[str, Any],
+    ops: Callable[..., tuple[Any, dict[str, Any]]],
+    extension_directory: str,
+    *,
+    pin: Callable[[], tuple[str, str]],
+    dsn_secret_id: str | None = None,
+    read_only: bool = False,
+) -> Callable[..., tuple[Any, dict[str, Any]]]:
+    """The connection acquirer for this request: the handler's own ops acquirer, unchanged, for everything but an event verb.
+
+    An event verb first passes the caller's declared pin refusal and parameter validation, so a refused request never pays
+    an ATTACH, then binds the telemetry slot (opened lazily on its first verb). The first acquire after a deadline interrupt
+    probes the catalog connection once; a failed probe reopens through get_warm_connection's existing path.
+    """
+    verb = payload.get("verb") if action == "named_read" else None
+    if not isinstance(verb, str) or verb not in _event_reads():
+        if action == "named_read" and payload.get("deadline_ms") is not None:
+            raise rt.DuckLakeRuntimeError("`deadline_ms` is accepted only for event-journal read verbs")
+        return ops
+    meta_schema, data_path = pin()
+    params = payload.get("params")
+    bind_values(_event_reads()[verb], {} if params is None else params)
+    _deadline_ms(verb, payload)
+    return telemetry_acquirer(meta_schema, data_path, extension_directory, dsn_secret_id=dsn_secret_id, read_only=read_only)
 
 
 def _described_params(entry: EventRead) -> dict[str, Any]:

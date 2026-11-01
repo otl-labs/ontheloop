@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from scripts.telemetry_capture import __main__ as cli
-from scripts.telemetry_capture import smoke
+from scripts.telemetry_capture import smoke, waits
 from scripts.telemetry_capture.runner import SnapshotTree
 from scripts.telemetry_capture.transport import Budget, WriterClient
 from src.turn_capture.record_turn import TABLES, record_turn
@@ -63,7 +63,7 @@ class Writer:
                 "ok": True,
                 "actions": ["append_telemetry"],
                 "verbs": {"append_telemetry": {"caps": caps}},
-                "catalog": {"data_path_is_smoke": True},
+                "catalog": {"meta_schema": "ducklake_smoke", "data_path_is_smoke": True},
                 "blob_protocol": {"version": 1, "inline_threshold_bytes": 65536, "cap_bytes": 8388608, "max_items": 200},
             }
         if action in ("register_tenant", "register_project"):
@@ -106,6 +106,17 @@ class Writer:
         return 200, {"ok": True, "tables": tables}
 
 
+def fake_time() -> tuple[Any, Any]:
+    """A clock that advances on every read and a no-op sleep, so no drive waits on the real clock."""
+    ticks = [0.0]
+
+    def clock() -> float:
+        ticks[0] += 0.5
+        return ticks[0]
+
+    return clock, lambda seconds: None
+
+
 def run_smoke(tmp_path: Path, writer: Writer, out: list[str]) -> None:
     def factory(*args: Any, **kw: Any) -> WriterClient:
         budget = args[2] if len(args) > 2 else Budget.start(130)
@@ -113,9 +124,11 @@ def run_smoke(tmp_path: Path, writer: Writer, out: list[str]) -> None:
 
     stop, end = load("stop_log_turn"), load("session_end_log_turn")
 
+    clock, sleep = fake_time()
+
     def stop_entry(stdin_text: str, env: dict[str, str]) -> object:
         def detach(args, environ):
-            return cli.main(["run", *args], env=environ, client_factory=factory)
+            return cli.main(["run", *args], env=environ, client_factory=factory, clock=clock, sleep=sleep)
 
         return stop.main(stdin_text, env=env, detach=detach)
 
@@ -275,11 +288,48 @@ def test_smoke_fails_when_session_end_does_not_finalize(tmp_path: Path) -> None:
         budget = args[2] if len(args) > 2 else Budget.start(130)
         return WriterClient(URL, lambda body: {}, budget, http=writer, sleep=lambda s: None, rng=lambda: 0.0)
 
+    clock, sleep = fake_time()
+
     def stop_entry(stdin_text: str, env: dict[str, str]) -> object:
-        return stop.main(stdin_text, env=env, detach=lambda a, e: cli.main(["run", *a], env=e, client_factory=factory))
+        detach = lambda a, e: cli.main(["run", *a], env=e, client_factory=factory, clock=clock, sleep=sleep)  # noqa: E731
+        return stop.main(stdin_text, env=env, detach=detach)
 
     runner = smoke.Smoke(
         client_factory=factory, stop=stop_entry, session_end=lambda s, e: None, env={smoke.SMOKE_ENV: REF}, out=print
     )
     with pytest.raises(smoke.SmokeFailure, match="did not finalize"):
         runner.run(REF, tmp_path)
+
+
+def test_synthetic_tree_closes_turns_at_witness_and_error_and_opens_the_last(tmp_path: Path) -> None:
+    root = smoke.write_tree(tmp_path, REF)
+    final = record_turn(SnapshotTree(root), None, project_ref=REF, session_final=True)
+    stop = record_turn(SnapshotTree(root), None, project_ref=REF)
+
+    def root_turns(result: Any, kind: str) -> dict[str, dict[str, Any]]:
+        rows = [r for r in result.observations if r["observation_type"] == "turn" and ":" not in r["session_ref"]]
+        return {r["entity_ref"].rsplit("/", 1)[1]: r for r in rows if r["event_kind"] == kind}
+
+    closes = root_turns(final, "close")
+    assert set(closes) == {"p1", "p2"} and closes["p1"]["external_ref"] == "w1#0/turn_close"
+    assert (closes["p1"]["outcome"], closes["p2"]["outcome"]) == ("success", "error")
+    assert closes["p2"]["external_ref"] == "e1#0/turn_close"
+    assert set(root_turns(final, "open")) == {"p1", "p2", "p3"} == set(root_turns(stop, "open"))
+    assert set(root_turns(stop, "close")) == {"p1", "p2"}
+    assert {r["external_ref"] for r in stop.observations} <= {r["external_ref"] for r in final.observations}
+
+
+def test_smoke_fails_when_a_drive_reports_a_wait_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(waits, "wait_for_witness", lambda *args: waits.WITNESS_TIMEOUT)
+    (tmp_path / "a").mkdir()
+    with pytest.raises(smoke.SmokeFailure, match="the Stop drive reported witness_wait_timeout"):
+        run_smoke(tmp_path / "a", Writer(), [])
+    monkeypatch.setattr(waits, "wait_for_witness", lambda *args: "witness_unknown")
+    (tmp_path / "b").mkdir()
+    with pytest.raises(smoke.SmokeFailure, match="the Stop drive did not report witness_seen"):
+        run_smoke(tmp_path / "b", Writer(), [])
+    monkeypatch.undo()
+    monkeypatch.setattr(waits, "wait_for_prompt", lambda *args: waits.PROMPT_TIMEOUT)
+    (tmp_path / "c").mkdir()
+    with pytest.raises(smoke.SmokeFailure, match="the UserPromptSubmit drive reported prompt_wait_timeout"):
+        run_smoke(tmp_path / "c", Writer(), [])

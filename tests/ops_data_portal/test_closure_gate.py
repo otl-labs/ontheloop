@@ -364,3 +364,114 @@ class TestChangedFiles:
         repo, sha = _throwaway_commit(tmp_path)
         assert _fix_commit_touches(["a.txt"], sha, repo) is True
         assert _fix_commit_touches(["this/path/was/never/touched.py"], sha, repo) is False
+
+
+def _commit_paths(tmp_path, paths: list[str]) -> tuple:  # noqa: ANN001
+    """A throwaway repo whose last commit adds exactly `paths` (the fix commit under test)."""
+    import subprocess
+
+    repo = tmp_path / "track_repo"
+    repo.mkdir()
+
+    def _git(args: list[str]) -> str:
+        result = subprocess.run(["git", *args], cwd=str(repo), capture_output=True, text=True, encoding="utf-8")
+        assert result.returncode == 0, f"git {args} failed: {result.stderr}"
+        return result.stdout.strip()
+
+    _git(["init", "-q"])
+    _git(["config", "user.email", "test@example.com"])
+    _git(["config", "user.name", "Test"])
+    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
+    _git(["add", "-A"])
+    _git(["commit", "-q", "-m", "initial"])
+    for rel in paths:
+        target = repo / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x\n", encoding="utf-8")
+    _git(["add", "-A"])
+    _git(["commit", "-q", "-m", "fix"])
+    return repo, _git(["rev-parse", "HEAD"])
+
+
+class TestConfirmedRepairTrack:
+    """Decision 226 cl.1: the confirmed track is read from the fix commit's diff, never from the agent."""
+
+    def test_tests_only_commit_is_test_defect(self, tmp_path) -> None:  # noqa: ANN001
+        from scripts.ops_portal.closure_gate import confirmed_repair_track
+
+        repo, sha = _commit_paths(tmp_path, ["tests/test_a.py", "tests/sub/test_b.py"])
+        assert confirmed_repair_track(sha, repo) == "test_defect"
+
+    def test_bookkeeping_paths_are_ignored(self, tmp_path) -> None:  # noqa: ANN001
+        from scripts.ops_portal.closure_gate import confirmed_repair_track
+
+        repo, sha = _commit_paths(
+            tmp_path, ["tests/test_a.py", "docs/plans/PLAN-x.yaml", "config/agent/verification_registry/entries/x.yaml"]
+        )
+        assert confirmed_repair_track(sha, repo) == "test_defect"
+
+    def test_source_plus_tests_is_product_regression(self, tmp_path) -> None:  # noqa: ANN001
+        from scripts.ops_portal.closure_gate import confirmed_repair_track
+
+        repo, sha = _commit_paths(tmp_path, ["scripts/foo.py", "tests/test_a.py"])
+        assert confirmed_repair_track(sha, repo) == "product_regression"
+
+    def test_plans_only_commit_is_unset(self, tmp_path) -> None:  # noqa: ANN001
+        from scripts.ops_portal.closure_gate import confirmed_repair_track
+
+        repo, sha = _commit_paths(tmp_path, ["docs/plans/PLAN-x.yaml"])
+        assert confirmed_repair_track(sha, repo) is None
+
+    def test_unresolvable_sha_is_unset(self, tmp_path) -> None:  # noqa: ANN001
+        from scripts.ops_portal.closure_gate import confirmed_repair_track
+
+        repo, _ = _commit_paths(tmp_path, ["tests/test_a.py"])
+        assert confirmed_repair_track("0" * 40, repo) is None
+        assert confirmed_repair_track(None, repo) is None
+
+    def test_constants_match_contract(self) -> None:
+        from scripts.ops_portal import closure_gate
+
+        policy = yaml.safe_load((ROOT / "docs/contracts/red-main-recovery.yaml").read_text(encoding="utf-8"))[
+            "recovery_policy"
+        ]
+        assert closure_gate._TEST_PATH_PREFIX == policy["test_path_prefix"]
+        assert list(closure_gate._BOOKKEEPING_PREFIXES) == policy["bookkeeping_prefixes"]
+
+    def test_stamp_only_for_ci_rca(self, tmp_path) -> None:  # noqa: ANN001
+        from scripts.ops_portal.closure_gate import confirmed_track_stamp
+
+        repo, sha = _commit_paths(tmp_path, ["tests/test_a.py"])
+        assert confirmed_track_stamp("ci_rca", sha, repo) == {"repair_track_confirmed": "test_defect"}
+        assert confirmed_track_stamp("executor", sha, repo) == {}
+        assert confirmed_track_stamp("ci_rca", "0" * 40, repo) == {}
+
+    def test_stamp_fixed_by_sha_writes_confirmed_track_in_same_call(self) -> None:
+        from unittest.mock import patch
+
+        from scripts.ops_portal.ci_rca_lifecycle import stamp_fixed_by_sha
+
+        existing = {"id": "rec-1", "context_v2_json": json.dumps({"fingerprint": "a" * 64})}
+        with (
+            patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=existing),
+            patch("scripts.ops_data_portal.update_rec") as mock_update,
+            patch("scripts.ops_portal.ci_rca_lifecycle.confirmed_repair_track", return_value="test_defect"),
+        ):
+            stamp_fixed_by_sha("rec-1", "abc1234")
+        written = json.loads(mock_update.call_args[0][1]["context_v2_json"])
+        assert written["fixed_by_sha"] == "abc1234"
+        assert written["repair_track_confirmed"] == "test_defect"
+
+    def test_stamp_fixed_by_sha_leaves_track_unset_when_unresolvable(self) -> None:
+        from unittest.mock import patch
+
+        from scripts.ops_portal.ci_rca_lifecycle import stamp_fixed_by_sha
+
+        existing = {"id": "rec-1", "context_v2_json": json.dumps({"fingerprint": "a" * 64})}
+        with (
+            patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=existing),
+            patch("scripts.ops_data_portal.update_rec") as mock_update,
+            patch("scripts.ops_portal.ci_rca_lifecycle.confirmed_repair_track", return_value=None),
+        ):
+            stamp_fixed_by_sha("rec-1", "abc1234")
+        assert "repair_track_confirmed" not in json.loads(mock_update.call_args[0][1]["context_v2_json"])

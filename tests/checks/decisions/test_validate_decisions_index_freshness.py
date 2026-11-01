@@ -2,7 +2,7 @@
 
 Mirrors tests/checks/deps/test_validate_dependency_graph_freshness.py's patch-seam pattern,
 but this check's absence behavior is the OPPOSITE of validate_dependency_graph_freshness: the
-decisions index is a REQUIRED committed artifact (Step 6b fork 2), so a missing file FAILS
+decisions index is a REQUIRED committed artifact (project alignment fork 2), so a missing file FAILS
 rather than no-ops.
 """
 

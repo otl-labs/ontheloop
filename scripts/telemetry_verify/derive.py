@@ -2,7 +2,7 @@
 over passed-in rows, no catalog, no SQL).
 
 Written from the Class A contract formulas, never from src/common/ducklake_event_read_sql.py:
-  state, duration_seconds, process_event_total, rework_total, exception_total
+  state (SE-1, SE-2), duration_seconds (SE-3, truncated toward zero), process_event_total, rework_total, exception_total
       docs/contracts/telemetry_sessions.yaml (state; duration_seconds; steps_completed_total; the friction totals)
   run state, duration and the token totals     docs/contracts/telemetry_agents.yaml
   cost                                          docs/contracts/telemetry_observations.yaml (cost_usd), realized subset only:
@@ -15,11 +15,11 @@ verb's three stamps: generations, conflicted_grain_keys and derivation_conflicte
 four for the state and window verbs, sessions and observations for the roll-ups; no contract text states this, so the registry
 is its rule source). The compared-column set behind the conflict report is dedupe.py's default.
 
-Declared conventions with no contract text: duration_seconds (an int whose formula yields a fractional total_seconds()) is
-truncated toward zero to whole seconds until rec-4405 puts that in the contracts; model_call_count, usage_missing_count,
+Declared conventions with no contract text: model_call_count, usage_missing_count,
 label_counts (sorted by label), unmapped_count (facts labelled unmapped_block) and cost_source follow the verb's EVENT_READS
-description, FRICTION_RULES and the committed derivation_cases.yaml (c15) and friction_vectors.yaml expectations. Five further
-output conventions that no contract or committed vector pins were aligned to the verbs' observable behaviour once this module
+description, FRICTION_RULES and the committed derivation_cases.yaml (c15, and c15b: a local row is NULL
+with cost_source local whatever it reports) and friction_vectors.yaml expectations. Five further output conventions
+that no contract or committed vector pins were aligned to the verbs' observable behaviour once this module
 passed the committed cases (declared here, not derived): a roll-up answers one row for every session holding a sessions or
 observations row (zeros, an empty label_counts); a token total is NULL when no model_call carries that count;
 usage_missing_count counts model_calls missing tokens_input or tokens_output; only a severity-error hook is a blocking hook
@@ -148,6 +148,46 @@ def _agent_runs(scope: Scope, session_id: str) -> dict[Any, list[Row]]:
     return runs
 
 
+_TURN_OUTCOMES = {"success": "success", "error": "failed", "interrupted": "cancelled", "blocked": "failed"}
+
+
+def _turn_rows(scope: Scope, session_id: str, kind: str) -> list[Row]:
+    return [r for r in scope.rows(OBSERVATIONS, session_id) if r.get("observation_type") == "turn" and r["event_kind"] == kind]
+
+
+def _root_end(
+    scope: Scope, session_id: str, sessions: list[Row], ordered: list[Row], last: datetime | None, as_of: datetime
+) -> tuple[Any, Any, int | None]:
+    """A root session's state, outcome and duration under SE-1..SE-3 (telemetry_sessions.yaml state, duration_seconds)."""
+    closes = [r for r in sessions if r["event_kind"] == "close"]
+    producer_close = max(closes, key=_close_key, default=None)
+    opens = _turn_rows(scope, session_id, "open")
+    turn_open = max(opens, key=_close_key, default=None)
+    turn_closes = _turn_rows(scope, session_id, "close")
+    own = [r for r in turn_closes if turn_open is not None and r.get("observation_id") == turn_open.get("observation_id")]
+    own_close = max(own, key=_close_key, default=None)
+    any_close = max(turn_closes, key=_close_key, default=None)
+    tip = ordered[-1] if ordered else None
+    idle = _idle_state(last, as_of) == "abandoned"
+    stands = (
+        tip is not None
+        and producer_close is not None
+        and tip["event_kind"] == "close"
+        and (turn_open is None or (turn_open["event_timestamp"], _ordinal(turn_open)) <= _close_key(producer_close)[:2])
+    )
+    if stands and tip is not None:
+        state: Any = tip.get("outcome")
+        outcome: Any = tip.get("outcome")
+    elif own_close is not None and own_close.get("outcome") is not None:
+        mapped = _TURN_OUTCOMES.get(own_close["outcome"])
+        state, outcome = (mapped, mapped) if idle else ("running", None)
+    else:
+        state, outcome = ("abandoned" if idle else "running"), None
+    ends = [r["event_timestamp"] for r in (producer_close, any_close) if r is not None]
+    duration = _whole_seconds(max(ends) - sessions[0]["session_started_at"]) if ends else None
+    return state, outcome, duration
+
+
 def _session_state(scope: Scope, session_id: str, as_of: datetime) -> dict[str, Any] | None:
     sessions = scope.rows(SESSIONS, session_id)
     if not sessions:
@@ -164,15 +204,7 @@ def _session_state(scope: Scope, session_id: str, as_of: datetime) -> dict[str, 
             else {"state": _idle_state(last, as_of), "outcome": None, "duration_seconds": None}
         )
     else:
-        closes = [r for r in sessions if r["event_kind"] == "close"]
-        tip = ordered[-1] if ordered else None
-        if tip is not None and tip["event_kind"] == "close":
-            state, outcome = tip.get("outcome"), tip.get("outcome")
-        else:
-            state, outcome = _idle_state(last, as_of), None
-        started = sessions[0]["session_started_at"]
-        latest_close = max(closes, key=_close_key, default=None)
-        duration = None if latest_close is None else _whole_seconds(latest_close["event_timestamp"] - started)
+        state, outcome, duration = _root_end(scope, session_id, sessions, ordered, last, as_of)
         derived = {"state": state, "outcome": outcome, "duration_seconds": duration}
     return {
         "session_id": session_id,
@@ -338,6 +370,8 @@ def model_call_cost_estimate(tables: Tables, session_id: str) -> list[dict[str, 
     for row in sorted(_model_calls(scope, session_id), key=lambda r: (r["event_timestamp"], r["observation_id"])):
         if row.get("billing_shape") == "fixed_non_rollover_allowance":
             cost, source = None, "allowance"
+        elif row.get("billing_shape") == "local":
+            cost, source = None, "local"
         elif row.get("cost_usd_reported") is not None:
             cost, source = row["cost_usd_reported"], "reported"
         else:

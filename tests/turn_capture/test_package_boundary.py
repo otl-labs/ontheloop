@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "src" / "turn_capture"
-ALLOWED_FIRST_PARTY = ("src.turn_capture", "src.telemetry.timestamps")
+ALLOWED_FIRST_PARTY = ("src.turn_capture", "src.telemetry.timestamps", "src.sensitive_values")
 FORBIDDEN = {
     "scripts",
     "src.common",

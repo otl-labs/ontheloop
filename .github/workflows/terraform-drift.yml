@@ -81,8 +81,8 @@ jobs:
         # T2.49 / DEP-12 (Decision 144): repointed from the retired github_ci_drift role to the
         # merged agent-platform-github-ci-planner (plan+drift, c2). role-session-name is set to
         # the RESERVED value -- it MUST equal local.convergence_writer_session_name in
-        # terraform/personal/oidc.tf verbatim (coupled site 4/4; see that local's comment for the
-        # other 3 sites). This is the ONE session identity the planner's main-sub trust statement
+        # terraform/personal/oidc.tf verbatim (coupled site 4/6; see that local's comment for the
+        # other 5 sites). This is the ONE session identity the planner's main-sub trust statement
         # accepts AND the ONE identity its ConvergenceRecordWrite aws:userid condition allows --
         # a mismatch here fails assume-role loudly rather than silently losing convergence-write.
         # continue-on-error keeps the JOB from dying AT THIS STEP so the classifier below can emit a
@@ -155,38 +155,10 @@ jobs:
 
       - name: Terraform init (S3 backend, sandbox)
         if: steps.oidc_drift.outcome == 'success'
-        working-directory: ${{ env.WORKDIR }}
-        run: |
-          # Bounded retry for transient registry.terraform.io 5xx and provider-download network
-          # resets (parity with _TRANSIENT_INIT_SIGNATURES in scripts/checks/_terraform.py and
-          # the grep -qE site in .github/actions/terraform-init-retry/action.yml).
-          # Signatures: "502", "Bad Gateway", "Gateway Timeout", "could not query provider registry",
-          # "failed after ", "connection reset by peer", "i/o timeout", "TLS handshake timeout",
-          # "unexpected EOF"
-          set +e
-          attempt=1
-          while [ "$attempt" -le 3 ]; do
-            out=$(terraform init -input=false -backend-config=backend-sandbox.hcl 2>&1)
-            rc=$?
-            if [ "$rc" -eq 0 ]; then
-              echo "$out"
-              break
-            fi
-            if echo "$out" | grep -qE '502|Bad Gateway|Gateway Timeout|could not query provider registry|failed after |connection reset by peer|i/o timeout|TLS handshake timeout|unexpected EOF'; then
-              if [ "$attempt" -lt 3 ]; then
-                delay=$(( 2 ** attempt ))
-                echo "terraform init transient error (attempt ${attempt}/3); retrying in ${delay}s..." >&2
-                echo "$out" >&2
-                sleep "$delay"
-                attempt=$(( attempt + 1 ))
-                continue
-              fi
-            fi
-            echo "$out" >&2
-            set -e
-            exit "$rc"
-          done
-          set -e
+        uses: ./.github/actions/terraform-init-retry
+        with:
+          working-directory: ${{ env.WORKDIR }}
+          backend-config: backend-sandbox.hcl
 
       - name: Read current convergence record (prior_status)
         id: prior_status
@@ -235,7 +207,7 @@ jobs:
         run: |
           set +e
           STDERR_FILE=$(mktemp)
-          terraform plan -detailed-exitcode -lock=true -lock-timeout=120s -input=false \
+          bash "$GITHUB_WORKSPACE/scripts/ci/neon_api_key.sh" run -- terraform plan -detailed-exitcode -lock=true -lock-timeout=120s -input=false \
             -var-file=terraform.personal.tfvars -out=tfplan.bin 2>"$STDERR_FILE"
           PLAN_EC=$?
           PLAN_STDERR=$(cat "$STDERR_FILE")

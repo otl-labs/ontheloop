@@ -18,8 +18,11 @@ NEGATIVES proving the four gh-shaped assumptions the predecessor module made are
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
+from scripts.ops.drain_glue_orphan import _github
 from scripts.ops.drain_glue_orphan._github import (
     _APPLY_SANDBOX_JOB_NAME,
     _PLAN_STEP_NAME,
@@ -381,3 +384,13 @@ class TestResolveApplySandboxJob:
     def test_missing_job_fails_closed(self) -> None:
         with pytest.raises(WorldMovedError, match="no job named"):
             resolve_apply_sandbox_job({"jobs": {"jobs": [{"name": "other"}]}})
+
+
+def test_repo_identity_follows_github_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example-org/example-repo")
+    try:
+        reloaded = importlib.reload(_github)
+        assert (reloaded._REPO_OWNER, reloaded._REPO_NAME) == ("example-org", "example-repo")
+    finally:
+        monkeypatch.undo()
+        importlib.reload(_github)

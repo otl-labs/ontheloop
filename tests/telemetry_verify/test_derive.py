@@ -99,6 +99,25 @@ def test_oracle_matches_every_committed_derivation_case(case: dict[str, Any], ex
             assert _same(got[key], value, key), f"{case['id']}/{expect['verb']}/{key}: {got[key]!r} != {value!r}"
 
 
+_SESSION_END_CASES = [
+    c
+    for c in _CASES["cases"]
+    if c["id"].startswith(("c_at_rest", "c_mid_turn", "c_producer_close", "c_turn_", "c_blocked_turn", "c_duration_is"))
+]
+
+
+def test_oracle_session_end_follows_the_contract_branches() -> None:
+    assert len(_SESSION_END_CASES) >= 10
+    for case in _SESSION_END_CASES:
+        for expect in case["expect"]:
+            actual = _oracle(case, expect)
+            wanted = _resolve(expect["rows"], _ids(case))
+            assert len(actual) == len(wanted), f"{case['id']}: {actual}"
+            for got, want in zip(actual, wanted):
+                for key, value in want.items():
+                    assert _same(got[key], value, key), f"{case['id']}/{key}: {got[key]!r} != {value!r}"
+
+
 def _friction_rows(vector: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
     for obs_id, obs_type, kind, name, severity, outcome, parent, t in vector["rows"]:

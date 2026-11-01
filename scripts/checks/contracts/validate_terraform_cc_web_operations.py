@@ -7,10 +7,13 @@ docs/contracts/terraform-cc-web-operations.yaml, and (2) every repo-relative pat
 own `referenced_repo_paths` list declares exists in the working tree.
 
 A third, bidirectional leg (PLAN-tfvars-recovery-contract-closure) closes the tfvars-recovery
-table against the live module: (3a) every no-default variable declared in
+table against the live module: (3a) every no-default, non-ephemeral variable declared in
 terraform/personal/*.tf appears in the contract's `where_values_live` per-variable mapping, and
 (3b) every key listed there is still declared in the module -- catching a stale entry for a
-retired variable, not merely an undocumented new one.
+retired variable, not merely an undocumented new one. Ephemeral no-default variables
+(`ephemeral = true`, plan neon-key-out-of-pr-plans) are never in the tfvars secret: they are
+checked the same two ways against `ephemeral_runtime_vars` and must not appear in
+`where_values_live`.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ _NO_DEFAULT_MODULE_REL_DIR = "terraform/personal"
 
 _VARIABLE_BLOCK_RE = re.compile(r'variable\s+"([A-Za-z0-9_-]+)"\s*\{')
 _DEFAULT_ASSIGNMENT_RE = re.compile(r"^\s*default\s*=")
+_EPHEMERAL_ASSIGNMENT_RE = re.compile(r"^\s*ephemeral\s*=\s*true\b")
 
 
 def _extract_brace_block(text: str, open_index: int) -> tuple[str, int]:
@@ -51,33 +55,44 @@ def _extract_brace_block(text: str, open_index: int) -> tuple[str, int]:
     raise ValueError(f"unbalanced braces starting at index {open_index}")
 
 
-def _has_top_level_default(body: str) -> bool:
-    """True if `body` (a variable block's interior) declares `default = ...` at depth 0.
+def _has_top_level_attr(body: str, pattern: re.Pattern[str]) -> bool:
+    """True if `body` (a variable block's interior) matches `pattern` at depth 0.
 
-    A `default` key nested inside a sub-block (e.g. `validation { ... }`) is never mistaken for
-    the variable's own default -- only a depth-0 line counts.
+    A key nested inside a sub-block (e.g. `validation { ... }`) is never mistaken for the
+    variable's own attribute -- only a depth-0 line counts.
     """
     depth = 0
     for line in body.splitlines():
         stripped = line.strip()
         if stripped.startswith(("#", "//")):
             continue
-        if depth == 0 and _DEFAULT_ASSIGNMENT_RE.match(line):
+        if depth == 0 and pattern.match(line):
             return True
         depth += line.count("{") - line.count("}")
     return False
 
 
-def _declared_no_default_variables(module_dir: Path) -> set[str]:
-    """Return the names of variables declared in `module_dir`/*.tf with no top-level default."""
+def _has_top_level_default(body: str) -> bool:
+    return _has_top_level_attr(body, _DEFAULT_ASSIGNMENT_RE)
+
+
+def _declared_no_default_variables(module_dir: Path, *, ephemeral: bool | None = None) -> set[str]:
+    """Return the names of variables declared in `module_dir`/*.tf with no top-level default.
+
+    `ephemeral` None returns every no-default variable; True only those declaring `ephemeral = true`;
+    False only the rest.
+    """
     no_default: set[str] = set()
     for tf_file in sorted(module_dir.glob("*.tf")):
         text = tf_file.read_text(encoding="utf-8")
         for match in _VARIABLE_BLOCK_RE.finditer(text):
             name = match.group(1)
             body, _ = _extract_brace_block(text, match.end() - 1)
-            if not _has_top_level_default(body):
-                no_default.add(name)
+            if _has_top_level_default(body):
+                continue
+            if ephemeral is not None and _has_top_level_attr(body, _EPHEMERAL_ASSIGNMENT_RE) != ephemeral:
+                continue
+            no_default.add(name)
     return no_default
 
 
@@ -144,8 +159,12 @@ def _validate_recovery_table_coverage(failed: list[str], contract_data: object, 
         print(f"  SKIP: {_NO_DEFAULT_MODULE_REL_DIR}/ not found; recovery-table coverage not checked.")
         return
 
-    declared = _declared_no_default_variables(module_dir)
-    print(f"  Examined {len(declared)} no-default variable(s) declared in {_NO_DEFAULT_MODULE_REL_DIR}/*.tf.")
+    declared = _declared_no_default_variables(module_dir, ephemeral=False)
+    declared_ephemeral = _declared_no_default_variables(module_dir, ephemeral=True)
+    print(
+        f"  Examined {len(declared) + len(declared_ephemeral)} no-default variable(s) declared in "
+        f"{_NO_DEFAULT_MODULE_REL_DIR}/*.tf."
+    )
 
     tfvars_recovery = contract_data.get("tfvars_and_remote_state_recovery") if isinstance(contract_data, dict) else None
     where_values_live = tfvars_recovery.get("where_values_live") if isinstance(tfvars_recovery, dict) else None
@@ -157,10 +176,28 @@ def _validate_recovery_table_coverage(failed: list[str], contract_data: object, 
         )
         return
 
-    listed = {k for k in where_values_live if k != "description"}
-    missing_from_table = sorted(declared - listed)
-    stale_in_table = sorted(listed - declared)
+    ephemeral_runtime_vars = (tfvars_recovery or {}).get("ephemeral_runtime_vars", {})
+    if not isinstance(ephemeral_runtime_vars, dict):
+        failed.append(
+            "terraform-cc-web-operations contract: tfvars_and_remote_state_recovery.ephemeral_runtime_vars "
+            "is not a per-variable mapping"
+        )
+        return
 
+    listed = {k for k in where_values_live if k != "description"}
+    ephemeral_listed = {k for k in ephemeral_runtime_vars if k != "description"}
+    ephemeral_in_tfvars_table = sorted(listed & declared_ephemeral)
+    missing_from_table = sorted(declared - listed)
+    stale_in_table = sorted(listed - declared - set(ephemeral_in_tfvars_table))
+    missing_ephemeral = sorted(declared_ephemeral - ephemeral_listed)
+    stale_ephemeral = sorted(ephemeral_listed - declared_ephemeral)
+
+    if ephemeral_in_tfvars_table:
+        failed.append(
+            "terraform-cc-web-operations contract: where_values_live lists ephemeral variable(s) "
+            f"{ephemeral_in_tfvars_table} -- ephemeral values are never in the tfvars secret; list them under "
+            "ephemeral_runtime_vars"
+        )
     if missing_from_table:
         failed.append(
             "terraform-cc-web-operations contract: where_values_live is missing declared "
@@ -171,5 +208,18 @@ def _validate_recovery_table_coverage(failed: list[str], contract_data: object, 
             "terraform-cc-web-operations contract: where_values_live lists variable(s) no "
             f"longer declared in {_NO_DEFAULT_MODULE_REL_DIR}: {stale_in_table}"
         )
-    if not missing_from_table and not stale_in_table:
-        print(f"  PASS: where_values_live covers exactly the {len(declared)} declared no-default variable(s).")
+    if missing_ephemeral:
+        failed.append(
+            "terraform-cc-web-operations contract: ephemeral_runtime_vars is missing declared "
+            f"ephemeral no-default variable(s): {missing_ephemeral}"
+        )
+    if stale_ephemeral:
+        failed.append(
+            "terraform-cc-web-operations contract: ephemeral_runtime_vars lists variable(s) the module no "
+            f"longer declares as ephemeral in {_NO_DEFAULT_MODULE_REL_DIR}: {stale_ephemeral}"
+        )
+    if not (ephemeral_in_tfvars_table or missing_from_table or stale_in_table or missing_ephemeral or stale_ephemeral):
+        print(
+            f"  PASS: where_values_live covers exactly the {len(declared)} non-ephemeral no-default variable(s); "
+            f"ephemeral_runtime_vars covers the {len(declared_ephemeral)} ephemeral one(s)."
+        )

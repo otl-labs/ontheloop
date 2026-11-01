@@ -17,6 +17,13 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_status_line_emitters",
+        module="scripts.checks.hygiene.validate_status_line_emitters",
+        attr="validate_status_line_emitters",
+        pre=True,
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_test_count_coupling",
         module="scripts.checks.hygiene.validate_test_count_coupling",
         attr="validate_test_count_coupling",

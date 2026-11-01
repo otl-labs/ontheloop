@@ -393,6 +393,27 @@ class TestEvidence:
         red("method check 'lint'", data)
 
 
+def _archived_roadmap(stub_name="Archived item"):
+    record = {"id": "T9.1", "tier": "T9", "name": "Archived item", "depends_on": [], "status": "complete"}
+    record["exit_criteria"] = [{"id": "c1", "text": "structured", "status": "met", "met_by": "a" * 40}]
+    roadmap = copy.deepcopy(_ROADMAP)
+    stub = {k: record[k] for k in ("id", "tier", "depends_on", "status")} | {"name": stub_name, "archived": True}
+    roadmap["tier_items"] = roadmap["tier_items"][:2] + [stub]
+    archive = {"archive_of": "docs/ROADMAP-PLATFORM.yaml", "tier_items": [record]}
+    return {"roadmap": roadmap, "files": {"docs/ROADMAP-PLATFORM-ARCHIVE.yaml": yaml.safe_dump(archive)}}
+
+
+class TestArchivedRoadmapRefs:
+    """Decision 227: _Context.roadmap() hydrates archived stubs, so a ref to an archived item's structured
+    criterion resolves, and a broken archive leaves the roadmap unreadable (fail closed)."""
+
+    def test_a_ref_to_an_archived_structured_criterion_resolves(self, green):
+        green(_evidence(("roadmap", "T9.1:c1")), **_archived_roadmap())
+
+    def test_a_broken_archive_fails_closed(self, red):
+        red("unreadable (fail closed)", _evidence(("roadmap", "T9.1:c1")), **_archived_roadmap(stub_name="Drifted stub"))
+
+
 def _moved(first_of_index, key, value):
     data = _fixture(0)
     data["fixture"]["sunset"]["first_of"][first_of_index][key] = value

@@ -9,21 +9,11 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable
-from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from scripts import decisions_md
 from scripts.preflight import _common
-
-# Session-log block grammar: group 1 is the whole header line, group 2 its date, group 3 the
-# optional Done line. ONE regex serves both call sites so parse_last_session and
-# read_context_files' recent_sessions cannot drift apart again.
-_SESSION_BLOCK_RE = re.compile(r"(## \[(\d{4}-\d{2}-\d{2})\][^\n]*)(?:\n\*\*Done:\*\* ([^\n]+))?")
-
-# A header whose date matches the grammar but not the calendar (e.g. 2026-13-45) sorts OLDEST
-# under this sentinel and is named on stderr -- it can never masquerade as the newest entry.
-_UNPARSEABLE_SESSION_DATE = date.min
 
 # Verdicts that earn an attributed stderr line, drawn from the SIX run verdicts
 # scripts/data_quality_execute.py's run_checks can write to dq-latest.json: its aggregate
@@ -70,87 +60,6 @@ def _unreadable_dq_run(why: str) -> dict[str, Any]:
     }
 
 
-def _session_sort_key(raw: str) -> date:
-    """Parse a session-header date; return the OLDEST-sorting sentinel when it does not parse.
-
-    Returns a date and NEVER a datetime: the sentinel is date.min, and a log that mixes a parseable
-    header with an unparseable one compares the two keys, which raises TypeError for a
-    datetime-versus-date pair. The .date() coercion below removes that by construction rather than
-    leaving it to the matrix cell that would catch it.
-    """
-    try:
-        return datetime.strptime(raw, "%Y-%m-%d").date()
-    except (ValueError, TypeError):
-        return _UNPARSEABLE_SESSION_DATE
-
-
-def _read_session_blocks() -> list[tuple[str, str]]:
-    """Return (header, done_line) pairs from SESSION_LOG_FILE, NEWEST-DATED FIRST.
-
-    The sole reader of docs/SESSION_LOG.md: both parse_last_session and read_context_files'
-    recent_sessions go through it, so the two call sites select by parsed date rather than by
-    file position and cannot disagree.
-
-    Never raises. An absent or unreadable log returns the empty sentinel AND emits one attributed
-    session log UNAVAILABLE line naming the path -- an unavailability owes a visible line, never a
-    silent empty return. The read uses errors="replace" so a single undecodable byte is SALVAGED
-    rather than blanking the whole log; the catch covers UnicodeDecodeError as well as OSError
-    because UnicodeDecodeError subclasses ValueError and NOT OSError.
-
-    Emits the not-newest-first WARN only when the PARSEABLE dates contradict file order: a header
-    whose date does not parse always moves (it sorts OLDEST under _UNPARSEABLE_SESSION_DATE), so
-    including it would misattribute a data defect as a convention violation. Unparseable headers
-    get their own WARN instead. Against a live newest-first log the boundary emits NEITHER line.
-    """
-    path = _common.SESSION_LOG_FILE
-    unavailable = (
-        "[WARN] session log UNAVAILABLE -- {path} {why}; last_session and recent_sessions are empty "
-        "for that reason, not because the log has no entries (run: git status docs/SESSION_LOG.md)"
-    )
-    # The exists() probe sits INSIDE the guard: Path.exists re-raises any OSError whose errno is
-    # outside (ENOENT, ENOTDIR, EBADF, ELOOP), so an unstattable path (ENAMETOOLONG, or EACCES on
-    # docs/ under a non-root runner) would otherwise raise on main()'s thread at session open.
-    try:
-        if not path.exists():
-            print(unavailable.format(path=path, why="does not exist"), file=sys.stderr)
-            return []
-        content = path.read_text(encoding="utf-8", errors="replace")
-    except (OSError, UnicodeDecodeError) as exc:
-        print(unavailable.format(path=path, why=f"could not be read ({_one_line(exc)})"), file=sys.stderr)
-        return []
-
-    entries = [(m.group(2), m.group(1), m.group(3) or "") for m in _SESSION_BLOCK_RE.finditer(content)]
-
-    parseable = [raw for raw, _h, _d in entries if _session_sort_key(raw) != _UNPARSEABLE_SESSION_DATE]
-    if parseable and parseable != sorted(parseable, key=_session_sort_key, reverse=True):
-        print(
-            f"[WARN] {path} is not newest-first -- first={parseable[0]} max={max(parseable, key=_session_sort_key)}; "
-            "entries are selected by parsed date, not by file position (run: re-order the log newest-first)",
-            file=sys.stderr,
-        )
-    unparseable = [raw for raw, _h, _d in entries if _session_sort_key(raw) == _UNPARSEABLE_SESSION_DATE]
-    if unparseable:
-        print(
-            f"[WARN] {path} carries {len(unparseable)} session header date(s) that do not parse -- "
-            f"first={unparseable[0]}; they sort OLDEST and can never be reported as the newest entry",
-            file=sys.stderr,
-        )
-
-    ordered = sorted(entries, key=lambda item: _session_sort_key(item[0]), reverse=True)
-    return [(header, done_line) for _raw, header, done_line in ordered]
-
-
-def parse_last_session() -> str:
-    """Return the NEWEST-DATED session header from SESSION_LOG.md, or the empty string.
-
-    Selection is by parsed date through _read_session_blocks, never by file position: a
-    positional slice returned the OLDEST header whenever the log is newest-first, which is the
-    convention docs/SESSION_LOG.md actually follows.
-    """
-    blocks = _read_session_blocks()
-    return blocks[0][0] if blocks else ""
-
-
 def read_context_files(open_recs_count: int | None = None) -> dict:
     """Read key context documents and return a summary dict for plan.prompt.md.
 
@@ -159,7 +68,7 @@ def read_context_files(open_recs_count: int | None = None) -> dict:
             when unavailable. No reader call is made here (Decision 215).
 
     Returns:
-        Dict with keys: roadmap_phase, open_decisions_count, recent_sessions,
+        Dict with keys: roadmap_phase, open_decisions_count,
         recommendations_count.
     """
     # roadmap_phase: extract current phase header from ROADMAP_FILE (docs/ROADMAP-PLATFORM.yaml).
@@ -184,22 +93,12 @@ def read_context_files(open_recs_count: int | None = None) -> dict:
             if not re.search(r"\(Decided\)|\(Resolved\)|\(Closed\)|\(Done\)", header, re.IGNORECASE):
                 open_decisions_count += 1
 
-    # recent_sessions: the NEWEST 5 session entries, selected by parsed date through the same
-    # _read_session_blocks boundary parse_last_session reads.
-    recent_sessions: list[str] = []
-    for header, done_line in _read_session_blocks()[:5]:
-        entry = header.strip()
-        if done_line:
-            entry += f" -- {done_line.strip()}"
-        recent_sessions.append(entry)
-
     # recommendations_count comes from the tally preflight already fetched; None when unavailable.
     recommendations_count = open_recs_count
 
     return {
         "roadmap_phase": roadmap_phase,
         "open_decisions_count": open_decisions_count,
-        "recent_sessions": recent_sessions,
         "recommendations_count": recommendations_count,
     }
 

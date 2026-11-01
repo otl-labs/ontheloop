@@ -106,7 +106,7 @@ class CiRcaContext(BaseModel):
     recurrence_class: str = Field(pattern=r"^(novel|instance_of_known_pattern|regression)$")
     prior_art_citation: Optional[str] = None  # shape-only; existence check deferred (Phase 2)
     corrective_action: str = Field(min_length=100, max_length=600)
-    preventive_action: str = Field(min_length=100, max_length=800)
+    preventive_action: Optional[str] = Field(default=None, min_length=100, max_length=800)
     evidence_bundle_ref: Optional[_EvidenceBundleRef] = None  # shape-only; S3 check deferred (Phase 2)
     rca_confidence: Optional[str] = Field(
         default=None,
@@ -157,6 +157,11 @@ class CiRcaContext(BaseModel):
         pattern=r"^(stale_no_recurrence|environment_only|no_premerge_gate_by_design|risk_accepted)$",
     )
     closure_waiver_reason: Optional[str] = Field(default=None, min_length=1)
+    # Decision 226: repair_track is the agent's diagnosis; repair_track_confirmed is stamped at fix time from the
+    # fix commit's diff and workflow_tier from the verified bundle -- both portal-derived, never agent-authored.
+    repair_track: Optional[str] = Field(default=None, pattern=r"^(test_defect|product_regression)$")
+    repair_track_confirmed: Optional[str] = Field(default=None, pattern=r"^(test_defect|product_regression)$")
+    workflow_tier: Optional[str] = None
 
     @field_validator("why_chain")
     @classmethod
@@ -190,6 +195,50 @@ class CiRcaContext(BaseModel):
         if errors:
             raise ValueError("; ".join(errors))
         return self
+
+
+def is_track_a(context: dict) -> bool:
+    """Decision 226 cl.1: a tests-only diagnosis counts only on the CI tier with no regression."""
+    return (
+        context.get("repair_track") == "test_defect"
+        and not context.get("regression_of")
+        and context.get("workflow_tier") == "CI"
+    )
+
+
+def preventive_deficiency(context: dict) -> list[str]:
+    if context.get("preventive_action") or is_track_a(context):
+        return []
+    return ["preventive_action is required unless the red is Track A (is_track_a)"]
+
+
+def derive_ci_rca_priority(context: dict) -> str:
+    return "High" if is_track_a(context) else "Critical"
+
+
+_PORTAL_OWNED_KEYS = ("workflow_tier", "repair_track_confirmed", "regression_of")
+
+
+def apply_track_rules(fields: dict, context_v2_json: dict, *, portal_regression: bool, mode: str) -> None:
+    """Derive priority and enforce the conditional preventive_action (Decision 226).
+
+    When the portal itself made the red Track B (it set regression_of, or no verified bundle stamped
+    workflow_tier) the missing preventive is stamped, never raised, so a red is never left unfiled.
+    """
+    fields["priority"] = derive_ci_rca_priority(context_v2_json)
+    deficiency = preventive_deficiency(context_v2_json)
+    if not deficiency:
+        return
+    portal_made_b = context_v2_json.get("repair_track") == "test_defect" and (
+        portal_regression or not context_v2_json.get("workflow_tier")
+    )
+    if portal_made_b:
+        _stamp_warn_mode_reject(context_v2_json, ["preventive_required"])
+        context_v2_json["warn_mode_reject"]["mode_at_write"] = mode
+        return
+    if mode == "strict":
+        raise ValueError("[CI_RCA_SCHEMA] " + "; ".join(deficiency))
+    _stamp_warn_mode_reject(context_v2_json, ["preventive_required"])
 
 
 def _validate_ci_rca_context_v2(context_v2_json: dict) -> list[str]:

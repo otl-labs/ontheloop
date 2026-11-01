@@ -62,14 +62,16 @@ class TestStdoutDoesNotDumpFullJson:
             patch("scripts.preflight.env_git.get_git_status", return_value=("agent/test", False, [])),
             patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="ok"),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch("session_preflight._sync_ops_pull", return_value={}),
             patch(
                 "scripts.preflight.context_docs.read_context_files",
                 return_value={
                     "roadmap_phase": "Phase 1.5",
                     "open_decisions_count": 0,
-                    "recent_sessions": [],
                     "strategic_review_due": False,
                     "recommendations_count": 0,
                 },
@@ -107,14 +109,21 @@ class TestJsonOutputSchema:
             ),
             patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="ok"),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value="## [2026-03-01] -- test"),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={
+                    "status": "ok",
+                    "window_days": 2,
+                    "recent_sessions": ["2026-10-28T09:00Z"],
+                    "last_session": "2026-10-28T09:00Z",
+                },
+            ),
             patch("session_preflight._sync_ops_pull", return_value={}),
             patch(
                 "scripts.preflight.context_docs.read_context_files",
                 return_value={
                     "roadmap_phase": "Phase 1.5",
                     "open_decisions_count": 2,
-                    "recent_sessions": [],
                     "strategic_review_due": False,
                     "recommendations_count": 0,
                 },
@@ -138,6 +147,7 @@ class TestJsonOutputSchema:
             "creds_status",
             "terraform_pending",
             "last_session",
+            "session_history",
             "open_recommendations",
             "aging_recommendations",
             "non_automatable_recommendations",
@@ -174,7 +184,10 @@ class TestJsonOutputSchema:
             ),
             patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="ok"),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch(
                 "scripts.sync.ops.warm_sync",
                 return_value={
@@ -189,7 +202,6 @@ class TestJsonOutputSchema:
                 return_value={
                     "roadmap_phase": "Phase 1.5",
                     "open_decisions_count": 0,
-                    "recent_sessions": [],
                     "strategic_review_due": False,
                     "recommendations_count": 0,
                 },
@@ -240,8 +252,8 @@ class TestMainIncludesPriorityQueue:
                 return_value="ok",
             ),
             patch(
-                "scripts.preflight.context_docs.parse_last_session",
-                return_value="",
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
             ),
             patch(
                 "scripts.preflight.priority_queue.read_priority_queue",
@@ -256,7 +268,6 @@ class TestMainIncludesPriorityQueue:
                 return_value={
                     "roadmap_phase": "Phase 2",
                     "open_decisions_count": 0,
-                    "recent_sessions": [],
                     "strategic_review_due": False,
                     "recommendations_count": 0,
                 },
@@ -307,8 +318,8 @@ class TestMainIncludesPriorityQueue:
                 return_value="ok",
             ),
             patch(
-                "scripts.preflight.context_docs.parse_last_session",
-                return_value="",
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
             ),
             patch(
                 "scripts.preflight.priority_queue.read_priority_queue",
@@ -323,7 +334,6 @@ class TestMainIncludesPriorityQueue:
                 return_value={
                     "roadmap_phase": "Phase 2",
                     "open_decisions_count": 0,
-                    "recent_sessions": [],
                     "strategic_review_due": False,
                     "recommendations_count": 0,
                 },
@@ -390,7 +400,10 @@ class TestPreflightReportDisputeKey:
             patch("scripts.preflight.env_git.get_git_status", return_value=("claude/test", False, [])),
             patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="ok"),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch("scripts.preflight.context_docs.read_context_files", return_value={}),
             patch("scripts.preflight.ci_rca_signals._check_ci_rca_liveness", return_value=None),
             patch("builtins.print"),
@@ -424,14 +437,16 @@ class TestDecisionConditionsGlue:
             patch("scripts.preflight.env_git.get_git_status", return_value=("main", False, [])),
             patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="ok"),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch("session_preflight._sync_ops_pull", return_value={}),
             patch(
                 "scripts.preflight.context_docs.read_context_files",
                 return_value={
                     "roadmap_phase": "Phase 2",
                     "open_decisions_count": 0,
-                    "recent_sessions": [],
                     "strategic_review_due": False,
                     "recommendations_count": 0,
                 },
@@ -471,7 +486,10 @@ class TestDecisionConditionsGlue:
                 patch("scripts.preflight.env_git.get_git_status", return_value=("main", False, [])),
                 patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
                 patch("scripts.preflight.aws_infra.check_credentials", return_value="ok"),
-                patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+                patch(
+                    "scripts.preflight.session_history.read_session_history",
+                    return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+                ),
                 patch("scripts.preflight.priority_queue.read_priority_queue", return_value=[]),
                 patch("session_preflight._sync_ops_pull", return_value={}),
                 patch(
@@ -479,7 +497,6 @@ class TestDecisionConditionsGlue:
                     return_value={
                         "roadmap_phase": "Phase 2",
                         "open_decisions_count": 0,
-                        "recent_sessions": [],
                         "strategic_review_due": False,
                         "recommendations_count": 0,
                     },

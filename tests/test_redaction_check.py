@@ -19,10 +19,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scripts.ci.redaction_check import ACCOUNT_ID_SHAPE, main, redact, scrub_pairs, unscrubbed_labels
+from scripts.ci.redaction_check import ACCOUNT_ID_SHAPE, main, mask_account_ids, redact, scrub_pairs, unscrubbed_labels
 
-WORKFLOW = Path(".github/workflows/terraform-apply-sandbox.yml")
-STEP_NAME = "Build and post PR comment (redacted plan + predicted verdict)"
+WORKFLOW = Path(".github/workflows/terraform-plan-trusted.yml")
+STEP_NAME = "Post the plan comment"
 
 FAKE_ACCT = "123456789012"
 FAKE_DEV = "dev/ext&id=1"
@@ -150,7 +150,7 @@ def test_helpers_ignore_unset_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _step_body() -> str:
     doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    steps = doc["jobs"]["speculative-plan"]["steps"]
+    steps = doc["jobs"]["plan"]["steps"]
     body = next((s["run"] for s in steps if s.get("name") == STEP_NAME), None)
     assert body is not None, f"step {STEP_NAME!r} not found -- its name is the R3 baseline key"
     return body
@@ -158,8 +158,8 @@ def _step_body() -> str:
 
 def test_workflow_step_delegates_to_the_redaction_helper() -> None:
     body = _step_body()
-    assert 'redaction_check.py" redact' in body, "plan text is not redacted via the helper"
     assert 'redaction_check.py" assert-clean' in body, "comment body is not literal-asserted"
+    assert 'redaction_check.py" redact' not in body, "the names-only comment must never carry redacted plan text"
 
 
 def test_workflow_step_no_longer_shape_checks_the_whole_comment() -> None:
@@ -169,8 +169,29 @@ def test_workflow_step_no_longer_shape_checks_the_whole_comment() -> None:
     assert "\\d{12}" not in body, "an inline 12-digit shape regex survives in the workflow body"
 
 
-def test_workflow_step_scrubs_owner_email() -> None:
-    """owner_email rides default_tags onto every resource, so a destroy plan prints it."""
+def test_workflow_step_scrubs_through_the_trusted_env_wrapper() -> None:
+    """The secrets reach the redaction helper only as process environment, via trusted_plan_env.sh --scrub-only."""
     body = _step_body()
-    assert "owner_email)" in body, "owner_email is not extracted from tfvars"
-    assert "_OWNER=" in body, "owner_email is not passed to the redaction helper"
+    assert body.count('trusted_plan_env.sh" --scrub-only') == 2
+    assert "terraform.personal.tfvars" not in body
+
+
+def test_mask_account_ids() -> None:
+    acct = str(10**11 + 7)
+    aroa = "AROA" + "B" * 17
+    aida = "AIDA" + "C" * 16
+    sts = f"arn:aws:sts::{acct}:assumed-role/PlatformDev/s"
+    iam = f"arn:aws:iam::{acct}:role/x"
+    denied = f"AccessDenied: User: {sts} is not authorized"
+    assert mask_account_ids(sts) == "arn:aws:sts::[ACCOUNT_ID]:assumed-role/PlatformDev/s"
+    assert mask_account_ids(iam) == "arn:aws:iam::[ACCOUNT_ID]:role/x"
+    assert (
+        mask_account_ids(denied)
+        == "AccessDenied: User: arn:aws:sts::[ACCOUNT_ID]:assumed-role/PlatformDev/s is not authorized"
+    )
+    assert mask_account_ids(f"id {aroa} and {aida}") == "id [UNIQUE_ID] and [UNIQUE_ID]"
+    keep = ["a" * 40, "ab" * 20, "abc" + str(10**11 + 7) + "def"]
+    for text in keep:
+        assert mask_account_ids(text) == text
+    once = mask_account_ids(denied)
+    assert mask_account_ids(once) == once

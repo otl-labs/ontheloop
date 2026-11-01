@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from scripts.executor.acceptance_lint import lint_acceptance_command
+from scripts.telemetry_capture import read_route
 from scripts.telemetry_verify import __main__ as cli
 from scripts.telemetry_verify import completeness, monitor
 from src.common.ducklake_reader_client import ReaderInvokeError
@@ -28,15 +29,16 @@ MONITOR_LINE = re.compile(
     r"max_response_bytes=\d+ alarms=\S+"
 )
 COMPLETENESS_LINE = re.compile(
-    r"COMPLETENESS judged_day=\d{4}-\d\d-\d\d status=(completed|before_v4|lists_short) listed=\d+ listed_and_captured=\d+ "
-    r"listed_not_captured=\d+ unexplained_not_captured=\d+ captured_not_listed=\d+ listed_unjoinable=\d+ "
-    r"listed_scope_unknown=\d+ captured_without_key=\d+ alarms=\S+"
+    r"COMPLETENESS judged_day=\d{4}-\d\d-\d\d status=(completed|before_v4|before_catalog|lists_short) listed=\d+ "
+    r"listed_and_captured=\d+ listed_not_captured=\d+ unexplained_not_captured=\d+ captured_not_listed=\d+ "
+    r"listed_unjoinable=\d+ listed_scope_unknown=\d+ captured_without_key=\d+ alarms=\S+"
 )
 
 
 @pytest.fixture(autouse=True)
 def _early_v4_day(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(completeness, "V4_FIRST_JUDGED_DAY", "2026-01-01")
+    monkeypatch.setenv(read_route.CATALOG_ENV, read_route.DEFAULT_CATALOG)
 
 
 PLANTED = "PLANTED-body-7f3a https://planted-host.lambda-url.eu-west-2.on.aws"
@@ -233,11 +235,57 @@ def test_a_short_list_is_refused_and_the_entry_point_builds_its_own_reader(
     assert cli.main([*argv, "--no-alarms"], reader=FakeReader(), now=NOW) == 0
     capsys.readouterr()
 
-    import src.common.ducklake_reader_client as client  # noqa: PLC0415
-
-    monkeypatch.setattr(client, "make_reader", lambda *a, **k: FakeReader())
+    monkeypatch.setattr(read_route, "make_routed_reader", lambda *a, **k: FakeReader())
     assert cli.main([*argv, "--no-alarms"], now=NOW) == 0
     monkeypatch.setattr("sys.argv", ["telemetry_verify", *argv, "--no-alarms"])
     with pytest.raises(SystemExit) as exited:
         runpy.run_module("scripts.telemetry_verify", run_name="__main__")
     assert exited.value.code in (0, 1)
+
+
+def test_main_builds_the_routed_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    built: list[Any] = []
+    monkeypatch.setattr(read_route, "make_routed_reader", lambda *a, **k: built.append((a, k)) or FakeReader())
+    assert cli.main(["monitor", "--quiet-day", "2026-01-19", "--no-alarms"], now=NOW) == 0
+    assert MONITOR_LINE.fullmatch(capsys.readouterr().out.strip())
+    assert cli.main(["completeness", "--lists-dir", str(tmp_path), "--judged-day", "2026-01-18"], now=NOW) == 1
+    assert capsys.readouterr().out.startswith("COMPLETENESS_STOP class=") and built == [((), {}), ((), {})]
+
+
+class CatalogReader(FakeReader):
+    catalog = "ducklake_telemetry"
+
+
+def test_completeness_refuses_a_day_before_the_catalogs_first_judged_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = ["completeness", "--judged-day", "2026-01-10", "--no-alarms"]
+    assert cli.main(argv, reader=CatalogReader(), now=NOW) == 2
+    out = capsys.readouterr().out
+    assert "status=before_catalog" in out and COMPLETENESS_LINE.fullmatch(out.strip())
+    monkeypatch.setattr(completeness, "PRODUCTION_FIRST_JUDGED_DAY", "2026-01-11")
+    assert cli.main(argv, reader=CatalogReader(), now=NOW) == 2 and "status=before_catalog" in capsys.readouterr().out
+    monkeypatch.setattr(completeness, "PRODUCTION_FIRST_JUDGED_DAY", "2026-01-10")
+    assert cli.main([*argv, "--lists-dir", str(tmp_path)], reader=CatalogReader(), now=NOW) == 1
+    assert capsys.readouterr().out.startswith("COMPLETENESS_STOP class="), "the judged day passes the gate"
+    monkeypatch.setenv(read_route.CATALOG_ENV, "ducklake_telemetry")
+    monkeypatch.setattr(completeness, "PRODUCTION_FIRST_JUDGED_DAY", None)
+    assert cli.main(argv, reader=FakeReader(), now=NOW) == 2 and "status=before_catalog" in capsys.readouterr().out
+
+
+def test_an_unresolved_catalog_prints_a_class_only_stop_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(read_route.CATALOG_ENV, "ducklake_ops")
+    monkeypatch.setattr(read_route, "make_routed_reader", lambda: read_route.RoutedReader(FakeReader()))
+    stops = {
+        ("monitor", "--quiet-day", "2026-01-19"): "MONITOR_STOP class=TelemetryCatalogUnresolved",
+        ("completeness", "--judged-day", "2026-01-18"): "COMPLETENESS_STOP class=TelemetryCatalogUnresolved",
+    }
+    for argv, line in stops.items():
+        assert cli.main([*argv, "--no-alarms"], now=NOW) == 1
+        assert cli.main([*argv, "--assert-zero", "x"], now=NOW) == 2
+        out = capsys.readouterr().out
+        assert out == f"{line}\n{line}\n" and "ducklake_ops" not in out and "Traceback" not in out

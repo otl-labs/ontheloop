@@ -1,4 +1,4 @@
-"""Session-close housekeeping: telemetry close, log pruning, metrics, log-housekeeping commit/push.
+"""Session-close housekeeping: log pruning, metrics, log-housekeeping commit/push.
 
 Moved verbatim from scripts/session/postflight.py (SLOC decomposition, PLAN-sloc-session-postflight).
 Shared primitives resolve via scripts.postflight._common so the facade's single canonical patch
@@ -12,45 +12,7 @@ import json
 import sys
 
 from scripts.postflight import _common
-
-
-def close_telemetry_session(
-    outcome: str,
-    files_changed: int = 0,
-    lines_added: int = 0,
-    lines_removed: int = 0,
-) -> None:
-    """Finalise the active session opened by ``--open-session``.
-
-    Reads ``logs/.telemetry-active-session.json`` to retrieve the session_id,
-    then removes the state file.  If the state file is missing a warning is
-    logged and the function returns without error so session close is never
-    blocked.
-    """
-    if not _common.TELEMETRY_ACTIVE_SESSION_FILE.exists():
-        print(
-            f"WARNING: close_telemetry_session: no active session file found "
-            f"({_common.TELEMETRY_ACTIVE_SESSION_FILE}). Skipping.",
-            file=sys.stderr,
-        )
-        return
-
-    try:
-        json.loads(_common.TELEMETRY_ACTIVE_SESSION_FILE.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        print(
-            f"WARNING: close_telemetry_session: could not read state file: {exc}",
-            file=sys.stderr,
-        )
-        return
-
-    try:
-        _common.TELEMETRY_ACTIVE_SESSION_FILE.unlink(missing_ok=True)
-    except Exception as exc:  # noqa: BLE001
-        print(
-            f"WARNING: close_telemetry_session: could not remove state file: {exc}",
-            file=sys.stderr,
-        )
+from scripts.telemetry_capture.status_line import emit_status
 
 
 def _load_max_age_days() -> int:
@@ -161,22 +123,32 @@ def prune_telemetry_logs(
 
 def run_metrics(steps_total: int = 0, steps_friction: int = 0) -> int:
     """Run session_metrics.py, plan_audit.py, and telemetry pruning."""
-    metrics_cmd = [_common.PYTHON, "scripts/session/metrics.py"]
-    if steps_total or steps_friction:
-        metrics_cmd += ["--steps-total", str(steps_total), "--steps-friction", str(steps_friction)]
-    metrics_result = _common._run(metrics_cmd)
-    audit_result = _common._run([_common.PYTHON, "scripts/roadmap/plan_audit.py"])
+    try:
+        metrics_cmd = [_common.PYTHON, "scripts/session/metrics.py"]
+        if steps_total or steps_friction:
+            metrics_cmd += ["--steps-total", str(steps_total), "--steps-friction", str(steps_friction)]
+        metrics_result = _common._run(metrics_cmd)
+        audit_result = _common._run([_common.PYTHON, "scripts/roadmap/plan_audit.py"])
 
-    prune_result = prune_telemetry_logs()
+        prune_result = prune_telemetry_logs()
 
-    combined = {
-        "metrics": metrics_result.stdout.strip(),
-        "plan_audit": audit_result.stdout.strip(),
-        "metrics_exit_code": metrics_result.returncode,
-        "audit_exit_code": audit_result.returncode,
-        "telemetry_pruning": prune_result,
-    }
-    print(json.dumps(combined, indent=2))
+        combined = {
+            "metrics": metrics_result.stdout.strip(),
+            "plan_audit": audit_result.stdout.strip(),
+            "metrics_exit_code": metrics_result.returncode,
+            "audit_exit_code": audit_result.returncode,
+            "telemetry_pruning": prune_result,
+        }
+        print(json.dumps(combined, indent=2))
+    except Exception:
+        emit_status("postflight.metrics", "failed", "metrics_error")
+        raise
+    if metrics_result.returncode != 0:
+        emit_status("postflight.metrics", "failed", "metrics_exit_nonzero")
+    elif audit_result.returncode != 0:
+        emit_status("postflight.metrics", "failed", "plan_audit_exit_nonzero")
+    else:
+        emit_status("postflight.metrics", "done")
     return 0
 
 

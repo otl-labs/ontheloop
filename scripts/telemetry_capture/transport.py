@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from scripts.aws_profile import resolve_aws_profile
+from scripts.aws_profile import DEFAULT_SSO_PROFILE, resolve_aws_profile
 from scripts.telemetry_capture.state import CaptureState
 from src.telemetry.blobs import blob_row
 from src.turn_capture.render import render_datetime
@@ -194,7 +194,11 @@ def make_client(
     sleep: Callable[[float], None] = time.sleep,
     rng: Callable[[], float] = random.random,
 ) -> WriterClient:
-    """The production client: botocore SigV4 under resolve_aws_profile(), every botocore call clamped to the budget."""
+    """The production client: botocore SigV4 under the pinned agent_platform profile, every call clamped to the budget.
+
+    The ambient AWS_PROFILE is not honoured, so an ADMIN environment still signs as PlatformDev; environment keys (CI) and
+    Lambda keep the default chain.
+    """
     import boto3  # noqa: PLC0415
     import botocore.session  # noqa: PLC0415
     from botocore.auth import SigV4Auth  # noqa: PLC0415
@@ -213,7 +217,7 @@ def make_client(
     core = botocore.session.get_session()
     core.set_default_client_config(Config(retries={"total_max_attempts": 1}, connect_timeout=timeout, read_timeout=timeout))
     try:
-        session = boto3.Session(botocore_session=core, profile_name=resolve_aws_profile())
+        session = boto3.Session(botocore_session=core, profile_name=resolve_aws_profile(DEFAULT_SSO_PROFILE))
         credentials = session.get_credentials()
         if credentials is None:
             raise CaptureUnavailable("no_credentials")

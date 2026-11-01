@@ -14,7 +14,7 @@ Rules:
       a hyphen or word character).
   R3  no such id appears in the raw text (comments included) of any terraform/**/*.tf or *.hcl
       file, except the default of variable "aws_region" in terraform/bootstrap/variables.tf and
-      terraform/personal/variables.tf, each of which must equal config/aws-region; no
+      terraform/personal/providers.tf, each of which must equal config/aws-region; no
       backend "s3" block or backend*.hcl file sets a region (literal or expression).
   R4  every configure-aws-credentials step's aws-region is either `${{ env.AWS_REGION }}` with an
       earlier ./.github/actions/aws-region step in the same job whose most recent preceding
@@ -53,7 +53,7 @@ _CHECKOUT_PREFIX = "actions/checkout@"
 
 _PINNED_VAR_FILES = {
     "terraform/bootstrap/variables.tf",
-    "terraform/personal/variables.tf",
+    "terraform/personal/providers.tf",
 }
 
 _VAR_AWS_REGION_RE = re.compile(r'variable\s+"aws_region"\s*\{([^}]*)\}', re.DOTALL)

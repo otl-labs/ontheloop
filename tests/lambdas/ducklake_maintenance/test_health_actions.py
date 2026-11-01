@@ -94,6 +94,27 @@ def test_action_catalog_stats_success():
     assert "CatalogFileColumnStatsRows" in metric_names
 
 
+def test_catalog_stats_emits_metrics_only_for_the_ops_catalog():
+    """A measurement read of another catalog returns the same body and adds nothing to the undimensioned ops series."""
+    stats = {"ok": True, "catalog_metadata_bytes": 5, "file_column_stats_rows_est": 9}
+    for schema in ("ducklake_smoke", "ducklake_telemetry"):
+        with (
+            patch.object(ha.rt, "fetch_dsn", return_value=_FULL_DSN),
+            patch.object(ha.maint, "catalog_stats", return_value=stats),
+            patch.object(_shared, "_emit_maintenance_metric") as mock_emit,
+        ):
+            result = ha.action_catalog_stats({"meta_schema": schema}, None)
+        assert result == stats
+        mock_emit.assert_not_called()
+    with (
+        patch.object(ha.rt, "fetch_dsn", return_value=_FULL_DSN),
+        patch.object(ha.maint, "catalog_stats", return_value=stats),
+        patch.object(_shared, "_emit_maintenance_metric") as mock_emit,
+    ):
+        ha.action_catalog_stats({"meta_schema": "ducklake_ops"}, None)
+    assert [c.args[0] for c in mock_emit.call_args_list] == ["CatalogMetadataBytes", "CatalogFileColumnStatsRows"]
+
+
 def test_action_catalog_stats_requires_meta_schema():
     """No-arg invoke is refused -- catalog_stats needs an explicit meta_schema (no production default)."""
     with pytest.raises(DuckLakeRuntimeError, match="meta_schema"):
@@ -157,6 +178,63 @@ def test_report_emits_three_metrics_per_schema_with_the_metaschema_dimension(mon
     assert ("StatsIndexValid", 0.0, {"MetaSchema": "ducklake_smoke"}) in emitted
     assert ("FileColumnStatsIdxScan", 0.0, {"MetaSchema": "ducklake_smoke"}) in emitted
     assert len(emitted) == 6
+
+
+def _telemetry_states() -> dict:
+    return {
+        "ducklake_ops": _state(True, 9, 2),
+        "ducklake_smoke": _state(True, 1, 1),
+        "ducklake_telemetry": _state(True, 3, 1),
+    }
+
+
+def test_control_health_emits_growth_for_the_telemetry_catalog(monkeypatch):
+    emitted = _emit_sink(monkeypatch)
+    _stub_pg(monkeypatch, MagicMock(return_value=_conn()))
+    states = _telemetry_states()
+    monkeypatch.setattr(ha.index_status, "catalog_index_schemas", lambda cur: list(states))
+    monkeypatch.setattr(ha.index_status, "catalog_index_status", lambda cur, s: dict(states[s]))
+    monkeypatch.setattr(ha.index_status, "stats_rows_est", lambda cur, s: 4321)
+
+    report = ha._report_stats_index({"host": _HOST}, "ducklake_telemetry")
+
+    growth = [e for e in emitted if e[0] == "CatalogFileColumnStatsRows"]
+    assert growth == [("CatalogFileColumnStatsRows", 4321.0, {"MetaSchema": "ducklake_telemetry"})]
+    assert report["ducklake_telemetry"]["stats_rows_est"] == 4321 and "stats_rows_est" not in report["ducklake_ops"]
+
+
+def test_growth_estimate_none_emits_nothing(monkeypatch):
+    emitted = _emit_sink(monkeypatch)
+    _stub_pg(monkeypatch, MagicMock(return_value=_conn()))
+    states = _telemetry_states()
+    monkeypatch.setattr(ha.index_status, "catalog_index_schemas", lambda cur: list(states))
+    monkeypatch.setattr(ha.index_status, "catalog_index_status", lambda cur, s: dict(states[s]))
+    monkeypatch.setattr(ha.index_status, "stats_rows_est", lambda cur, s: None)
+
+    ha._report_stats_index({"host": _HOST}, "ducklake_ops")
+
+    assert not [e for e in emitted if e[0] == "CatalogFileColumnStatsRows"]
+
+
+def test_growth_estimate_failure_leaves_stats_index_valid_untouched(monkeypatch):
+    emitted = _emit_sink(monkeypatch)
+    _stub_pg(monkeypatch, MagicMock(return_value=_conn()))
+    states = _telemetry_states()
+    monkeypatch.setattr(ha.index_status, "catalog_index_schemas", lambda cur: list(states))
+    monkeypatch.setattr(ha.index_status, "catalog_index_status", lambda cur, s: dict(states[s]))
+
+    def boom(cur, schema):
+        raise _PgError(f"could not reach {_HOST}", "57014")
+
+    monkeypatch.setattr(ha.index_status, "stats_rows_est", boom)
+
+    report = ha._report_stats_index({"host": _HOST}, "ducklake_ops")
+
+    assert [e for e in emitted if e[0] == "StatsIndexValid"] == [("StatsIndexValid", 1.0, {"MetaSchema": s}) for s in states]
+    assert not [e for e in emitted if e[0] == "CatalogFileColumnStatsRows"]
+    assert report["ducklake_telemetry"]["growth_error"] == {"error_class": "_PgError", "sqlstate": "57014"}
+    assert _HOST not in str(report) and "growth_error" not in report
+    assert "growth_error" not in report["ducklake_ops"]
 
 
 def test_report_failure_is_class_and_sqlstate_only_and_never_raises(monkeypatch):

@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from src.turn_capture.record_turn import record_turn
+from src.turn_capture.witness import is_witness_record
 from tests.fixtures.turn_capture_real import PrefixTree, discover, raw_inherited, snapshot
 
 pytestmark = pytest.mark.integration
@@ -76,3 +77,68 @@ def test_finalize_at_every_resume_boundary_emits_each_row_once(tmp_path: Path) -
         print("schedules: UNPROVEN -- the tree set holds zero SessionStart:resume boundaries")
     if not forks:
         print("schedules: fork-boundary leg UNPROVEN -- the tree set holds no fork")
+
+
+def witness_cuts(root: Path) -> tuple[list[int], int]:
+    """(line limits just after each Stop witness in the root file, how many of them follow a tool result)."""
+    cuts, terminal, last = [], 0, ""
+    for index, raw in enumerate(root.read_bytes().split(b"\n")[:-1]):
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        if is_witness_record(data):
+            cuts.append(index + 1)
+            terminal += last == "tool_result"
+        elif data.get("type") == "assistant":
+            last = "assistant"
+        elif data.get("type") == "user":
+            content = (data.get("message") or {}).get("content")
+            has_result = isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+            )
+            last = "tool_result" if has_result else "prompt"
+    return cuts, terminal
+
+
+def test_a_pass_at_every_stop_witness_emits_each_row_once(tmp_path: Path) -> None:
+    sources = discover()
+    if not sources:
+        pytest.fail(
+            "no real Claude Code transcripts found: set TURN_CAPTURE_REAL_TRANSCRIPTS or run on a machine that has them"
+        )
+    seen_trees = witnesses = terminal_stops = bare = 0
+    for root in snapshot(sources, tmp_path):
+        cuts, terminal = witness_cuts(root)
+        if not cuts:
+            bare += 1
+            continue
+        seen_trees += 1
+        witnesses += len(cuts)
+        terminal_stops += terminal
+        full = _keyed(record_turn(PrefixTree(root, 10**9), None, project_ref=PROJECT_REF))
+        seen: dict[tuple[str, str], dict[str, Any]] = {}
+        cursor, drift = None, 0
+        for limit in [*cuts, 10**9]:
+            step = record_turn(PrefixTree(root, limit), cursor, project_ref=PROJECT_REF)
+            cursor = step.next_cursor if step.next_cursor is not None else cursor
+            drift += sum(
+                step.diagnostics.get(k, 0)
+                for k in (
+                    "prior_content_divergence",
+                    "cut_content_divergence",
+                    "reanchored_close:turn",
+                    "reanchored_close:tool_call",
+                )
+            )
+            for key, row in _keyed(step).items():
+                assert key not in seen, f"a row was emitted twice at witness cut {limit}"
+                seen[key] = row
+        assert drift == 0, "a witness schedule re-keyed or diverged a row"
+        assert set(seen) == set(full) and all(seen[k] == full[k] for k in full), "the union differs from the full parse"
+    print(
+        f"\nwitness schedules: {seen_trees} trees with witnesses ({bare} without, reported not passed); "
+        f"{witnesses} witnesses, {terminal_stops} after a tool result"
+    )

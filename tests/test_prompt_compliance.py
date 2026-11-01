@@ -18,7 +18,6 @@ parse_invariants = _compliance.parse_invariants
 parse_retro_lite_log = _compliance.parse_retro_lite_log
 parse_execution_state = _compliance.parse_execution_state
 check_retro_lite_compliance = _compliance.check_retro_lite_compliance
-check_plan_compliance = _compliance.check_plan_compliance
 _load_instruction_architecture = _compliance._load_instruction_architecture
 get_behavioural_invariant_sources = _compliance.get_behavioural_invariant_sources
 check_layer_compliance = _compliance.check_layer_compliance
@@ -395,29 +394,16 @@ class TestCheckRetroLiteCompliance:
         assert violations == []
 
 
-class TestCheckPlanCompliance:
-    """Tests for check_plan_compliance()."""
-
-    def test_passes_for_completed_session(self, tmp_path: Path) -> None:
-        """No violations when SESSION_LOG.md contains a table row (completed session)."""
-        session_log = tmp_path / "SESSION_LOG.md"
-        session_log.write_text(
-            "# Session Log\n\n| Date | Branch | Done |\n|------|--------|------|\n| 2026-01-01 | agent/foo | Yes |\n",
+class TestMainPromptMode:
+    def test_main_prompt_mode_reports_no_violations(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        skill = tmp_path / "SKILL.md"
+        skill.write_text(
+            "# Skill\n\n## Behavioural Invariants\n\n```yaml\npreflight_run: true\n```\n",
             encoding="utf-8",
         )
-        invariants = {"preflight_run": True}
-        violations = check_plan_compliance(invariants, session_log)
-        assert violations == []
-
-    def test_violation_when_no_session_log(self, tmp_path: Path) -> None:
-        """Violation raised when SESSION_LOG.md does not exist."""
-        invariants = {"preflight_run": True}
-        violations = check_plan_compliance(invariants, tmp_path / "missing_SESSION_LOG.md")
-        assert len(violations) == 1
-        assert "preflight_run" in violations[0]
-
-    def test_passes_when_no_plan_invariants(self, tmp_path: Path) -> None:
-        """No violations when none of the plan invariants are declared."""
-        invariants = {"retro_lite_per_step": True}  # not a plan invariant
-        violations = check_plan_compliance(invariants, tmp_path / "log.md")
-        assert violations == []
+        monkeypatch.setattr(_compliance, "ROOT", tmp_path)
+        monkeypatch.setattr(sys, "argv", ["prompt_compliance", "--prompt", str(skill)])
+        with pytest.raises(SystemExit) as exc:
+            _compliance.main()
+        assert exc.value.code == 0
+        assert "no violations" in capsys.readouterr().out

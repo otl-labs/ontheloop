@@ -1,6 +1,6 @@
 """Reconcile-pending gate (hotfix follow-up to the 2026-07-24 ops_decisions incident).
 
-One module, two entrypoints sharing one predicate:
+One module, three entrypoints sharing one predicate:
   - validate_reconcile_pending_gate(failed): merge-time check, registered in BOTH validate.py
     tiers. Fails closed on an unclassified ops table; fails when a column added IN THE DIFF to
     a docs/contracts/ops_*.yaml contract OR a dormant_ops_tables/smoke_ops_tables columns: block
@@ -9,6 +9,12 @@ One module, two entrypoints sharing one predicate:
   - `--deploy-gate` CLI: exits non-zero while any reconcile_scope=ducklake table has a non-empty
     pending_reconcile. Invoked verbatim by deploy-ducklake-lambdas.yml's reconcile-gate job so
     the merge-time check and the deploy-time refusal can never drift apart.
+  - `--telemetry-hold` CLI: prints held=true|held=false on stdout and never fails on a pending
+    column. A reconcile_scope=telemetry_catalog table (the production telemetry catalog, whose
+    columns arrive only through the owner-login provision_telemetry_catalog re-run) with a
+    non-empty pending_reconcile holds the production telemetry writer and reader in
+    deploy-ducklake-lambdas.yml's deploy-telemetry job, because the writer's MERGE names every
+    declared column. The ops serving gate (--deploy-gate) ignores these tables.
 
 Both entrypoints read _pending_reconcile_map() / _has_pending_reconcile() -- the SAME predicate
 for "does this table have unresolved pending_reconcile columns" (two implementations of the same
@@ -31,7 +37,7 @@ from scripts.checks import _common, registry
 
 _CONTRACTS_SUBDIR = Path("docs") / "contracts"
 _SIDECAR_REL = Path("config") / "lambda" / "ducklake" / "field_semantics.static.yaml"
-_VALID_SCOPES = ("ducklake", "exempt")
+_VALID_SCOPES = ("ducklake", "exempt", "telemetry_catalog")
 
 
 def _load_sidecar(root: Path) -> dict[str, Any]:
@@ -121,6 +127,29 @@ def _blocking_tables(sidecar: dict[str, Any]) -> list[str]:
     return sorted(blocking)
 
 
+def _telemetry_hold_tables(sidecar: dict[str, Any]) -> list[str]:
+    """reconcile_scope=telemetry_catalog tables with a non-empty pending_reconcile -- what --telemetry-hold holds on."""
+    contract_table_ops = sidecar.get("contract_table_ops", {}) or {}
+    pending_map = _pending_reconcile_map(sidecar)
+    held = [
+        table_id
+        for table_id, ops_entry in contract_table_ops.items()
+        if (ops_entry or {}).get("reconcile_scope") == "telemetry_catalog"
+        and _has_pending_reconcile(pending_map.get(table_id, {}))
+    ]
+    return sorted(held)
+
+
+def _stored_fields(doc: dict[str, Any] | None) -> set[str]:
+    """Contract field names that are physical columns: a read-derived field (derivation.timing read) has none."""
+    fields = (doc or {}).get("fields", {}) or {}
+    return {
+        name
+        for name, spec in fields.items()
+        if not isinstance((spec or {}).get("derivation"), dict) or spec["derivation"].get("timing") != "read"
+    }
+
+
 def _old_yaml(root: Path, rel_path: str) -> dict[str, Any] | None:
     result = _common.run(
         ["git", "show", f"origin/main:{rel_path}"], capture_output=True, text=True, encoding="utf-8", cwd=root
@@ -143,12 +172,15 @@ def _diff_added_columns(root: Path) -> dict[str, set[str]] | None:
 
     added: dict[str, set[str]] = {}
 
-    for contract_path in sorted((root / _CONTRACTS_SUBDIR).glob("ops_*.yaml")):
+    contract_paths = sorted((root / _CONTRACTS_SUBDIR).glob("ops_*.yaml")) + sorted(
+        (root / _CONTRACTS_SUBDIR).glob("telemetry_*.yaml")
+    )
+    for contract_path in contract_paths:
         table_id = contract_path.stem
         new_doc = yaml.safe_load(contract_path.read_text(encoding="utf-8"))
-        new_fields = set((new_doc or {}).get("fields", {}) or {})
+        new_fields = _stored_fields(new_doc)
         old_doc = _old_yaml(root, f"{_CONTRACTS_SUBDIR.as_posix()}/{contract_path.name}")
-        old_fields = set((old_doc or {}).get("fields", {}) or {}) if old_doc is not None else set()
+        old_fields = _stored_fields(old_doc) if old_doc is not None else set()
         newly_added = new_fields - old_fields
         if newly_added:
             added.setdefault(table_id, set()).update(newly_added)
@@ -260,15 +292,20 @@ def _check_diff_added_column_gap(
         if required_sides and ops_entry.get("reconcile_scope") == "exempt" and status not in (None, "live"):
             skipped.append(table_id)
             continue
+        remedy = (
+            "then re-run the owner-login provision_telemetry_catalog action (Decision 230 cl.4) to add it to the "
+            "production telemetry catalog and clear it"
+            if ops_entry.get("reconcile_scope") == "telemetry_catalog"
+            else "then run the admin-tier reconcile_columns action against the deployed "
+            "maintenance function to clear it after the maintenance deploy lands"
+        )
         for col in sorted(new_cols):
             for side in required_sides:
                 if col not in pending.get(side, []):
                     failed.append(
                         f"{key} {table_id!r} column {col!r} was added in this diff but is absent from "
                         f"pending_reconcile[{side!r}] -- declare it in "
-                        "config/lambda/ducklake/field_semantics.static.yaml's contract_table_ops before "
-                        "merging, then run the admin-tier reconcile_columns action against the deployed "
-                        "maintenance function to clear it after the maintenance deploy lands."
+                        f"config/lambda/ducklake/field_semantics.static.yaml's contract_table_ops before merging, {remedy}."
                     )
     if skipped:
         print(f"  SKIPPED (reconcile_scope exempt, pre-production -- owe no ALTERs): {sorted(skipped)}")
@@ -300,6 +337,30 @@ def validate_reconcile_pending_gate(failed: list[str]) -> None:
         print(f"  PASS: all {len(table_ids)} ops tables classified; no undeclared columns; no diff-added column gaps.")
 
 
+def _telemetry_hold_cli() -> int:
+    """Always exit 0 with held=true|false on stdout; exit 1 only on an unreadable or malformed sidecar (Decision 55)."""
+    try:
+        sidecar = _load_sidecar(_common.ROOT)
+        if not isinstance(sidecar, dict) or not isinstance(sidecar.get("contract_table_ops"), dict):
+            raise ValueError("contract_table_ops is not a mapping")
+        held = _telemetry_hold_tables(sidecar)
+    except (OSError, ValueError, AttributeError, TypeError, yaml.YAMLError) as exc:
+        print(f"TELEMETRY_HOLD_ERROR: cannot read the sidecar: {type(exc).__name__}", file=sys.stderr)
+        return 1
+    if not held:
+        print("held=false")
+        return 0
+    pending_map = _pending_reconcile_map(sidecar)
+    columns = sorted(
+        f"{table_id}.{column}"
+        for table_id in held
+        for column in set(pending_map[table_id]["history"]) | set(pending_map[table_id]["current"])
+    )
+    print("held=true")
+    print(f"TELEMETRY_PRODUCTION_HOLD pending={len(columns)} columns={columns}", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Reconcile-pending gate (merge-time check + deploy-time refusal).")
     parser.add_argument(
@@ -307,7 +368,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Exit non-zero while any reconcile_scope=ducklake table has a non-empty pending_reconcile.",
     )
+    parser.add_argument(
+        "--telemetry-hold",
+        action="store_true",
+        help="Print held=true|held=false: true while any reconcile_scope=telemetry_catalog table has a pending reconcile.",
+    )
     args = parser.parse_args(argv)
+
+    if args.telemetry_hold:
+        return _telemetry_hold_cli()
 
     if args.deploy_gate:
         sidecar = _load_sidecar(_common.ROOT)

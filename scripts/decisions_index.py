@@ -76,7 +76,7 @@ governance taxonomy.
 
 check_index_freshness(failed) fails on DRIFT (committed != regenerated) OR ABSENCE -- unlike
 scripts.dependency_graph.check_export_freshness (Decision 80 lean posture: no-op when the export
-is absent), this index is a required committed artifact (Step 6b fork 2: committed JSON +
+is absent), this index is a required committed artifact (project alignment fork 2: committed JSON +
 registered drift check, not a gitignored synced cache), so a missing file is itself a failure.
 
 CLI: --write (regenerate docs/decisions-index.json), --check (freshness, exit 1 on fail),

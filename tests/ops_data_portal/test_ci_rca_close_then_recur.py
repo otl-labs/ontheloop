@@ -219,7 +219,8 @@ class TestCiRcaClosedHeadRegression:
         mock_head.assert_called_once()
         written_record = mock_write.call_args[0][1]
         assert written_record["title"] == "Something broke"
-        assert written_record["priority"] == "Medium"
+        assert written_record["priority"] == "Critical"
+        assert "regression_of" not in json.loads(written_record["context_v2_json"])
 
     # -- open-match / closed-head-branch mutual exclusivity (no double-consult) -----------------
 

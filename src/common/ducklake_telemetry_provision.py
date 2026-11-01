@@ -56,6 +56,8 @@ class OwnershipReport:
     schema_owner_is_current_user: bool
     scoped_create_on_schema: bool
     scoped_create_on_public: bool
+    schema_owner_held: bool
+    schema_owner: str
 
 
 @dataclass(frozen=True)
@@ -282,9 +284,9 @@ def provision_telemetry_catalog(con: Any, *, semantics: dict[str, Any]) -> Provi
     absent = [t for t in target_tables(semantics) if t not in existing]
     if absent:
         raise DuckLakeRuntimeError(
-            f"telemetry tables absent: {absent}. Tables are created only under the catalog owner by "
-            "ducklake_maintenance_smoke's create_telemetry_tables (the owner-provisioning Decision), before any write; "
-            "the telemetry writer's scoped login holds no CREATE"
+            f"telemetry tables absent: {absent}. Tables are created only under the catalog owner: "
+            "ducklake_maintenance_smoke's create_telemetry_tables on smoke, ducklake_maintenance's "
+            "provision_telemetry_catalog on production, before any write; the telemetry writer's scoped login holds no CREATE"
         )
     check_existing_tables(con, existing, semantics)
 
@@ -320,21 +322,33 @@ def _pg_row(con: Any, inner_sql: str) -> tuple[Any, ...]:
     return tuple(row)
 
 
-def ownership_report(con: Any, *, meta_schema: str, scoped_login: str = SCOPED_LOGIN) -> OwnershipReport:
-    """Read-only: relations in meta_schema owned by someone other than the schema owner, the schema owner, scoped CREATE."""
-    schema, login = _guard(meta_schema, "meta schema"), _guard(scoped_login, "login")
+def ownership_report(con: Any, *, meta_schema: str, scoped_logins: tuple[str, ...] = (SCOPED_LOGIN,)) -> OwnershipReport:
+    """Read-only: foreign-owned relations, the schema owner (and whether the session holds it), scoped CREATE.
+
+    Each scoped login is resolved with to_regrole, so one that does not exist yet holds no CREATE instead of raising 42704.
+    """
+    schema = _guard(meta_schema, "meta schema")
+    logins = [_guard(login, "login") for login in scoped_logins]
+
+    def holds_create(target: str) -> str:
+        reads = [f"COALESCE(has_schema_privilege(to_regrole('{login}'), {target}, 'CREATE'), false)" for login in logins]
+        return "(" + " OR ".join(reads or ["false"]) + ")"
+
     row = _pg_row(
         con,
         "SELECT "
         "(SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
         f"WHERE n.nspname = '{schema}' AND c.relkind IN ('r', 'p', 'S', 'v', 'm') "
         "AND c.relowner <> n.nspowner) AS foreign_owned, "
-        f"(SELECT n.nspowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) FROM pg_namespace n "
+        "(SELECT n.nspowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) FROM pg_namespace n "
         f"WHERE n.nspname = '{schema}') AS schema_owner_is_current_user, "
-        f"has_schema_privilege('{login}', '{schema}', 'CREATE') AS scoped_create_on_schema, "
-        f"has_schema_privilege('{login}', 'public', 'CREATE') AS scoped_create_on_public",
+        f"{holds_create(f"'{schema}'")} AS scoped_create_on_schema, "
+        f"{holds_create("'public'")} AS scoped_create_on_public, "
+        "COALESCE((SELECT pg_has_role(current_user, n.nspowner, 'SET') FROM pg_namespace n "
+        f"WHERE n.nspname = '{schema}'), false) AS schema_owner_held, "
+        f"COALESCE((SELECT n.nspowner::regrole::text FROM pg_namespace n WHERE n.nspname = '{schema}'), '') AS schema_owner",
     )
-    return OwnershipReport(int(row[0]), bool(row[1]), bool(row[2]), bool(row[3]))
+    return OwnershipReport(int(row[0]), bool(row[1]), bool(row[2]), bool(row[3]), bool(row[4]), str(row[5]))
 
 
 def session_can_create(con: Any, *, meta_schema: str) -> bool:

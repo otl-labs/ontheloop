@@ -1,11 +1,13 @@
-"""Claim-check (blob) live vectors for the --lambda-telemetry gate (T2.36, slice 2a-2, plan 4).
+"""Claim-check (blob) live vectors for the --lambda-telemetry-smoke gate, run against the smoke twin (T2.36, Decision 236).
 
-Called by lambda_telemetry after part 2's append vectors with part 1's registered synthetic project_ref. The delivery
+Called by lambda_telemetry_smoke after part 2's append vectors with part 1's registered synthetic project_ref. The delivery
 vectors run the producer helper (src.telemetry_client.blob_delivery) over the gate's own SigV4 transport, so the helper is
 proven by its first user; the S3 reject vectors PUT directly under a real grant. Each vector is a loud SmokeTestFailure
 (Decision 55).
 
-A final read-back vector reads the rows back through the reader's transcript_content and reassembles each one.
+No vector reads through a reader: no deployed function serves transcript_content after slice 2c (Decision 236), so the
+content read-back is retired (rec-4699 owns re-adding one with the content reader) and blob presence keeps its writer-side
+proof through telemetry_probe's blob_objects.
 
 Output carries markers, integer measurements (blob_grant_ms, blob_put_ms, blob_append_ms) and nothing else: never a
 presigned URL, X-Amz-* name, key, digest, host, account id or project_ref, failure text included. A delivery failure names
@@ -15,16 +17,12 @@ fault.
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from scripts.ducklake_smoke import core
-from scripts.ducklake_smoke import telemetry_append_vectors as base
 from scripts.ducklake_smoke import telemetry_blob_vectors as vec
 from scripts.ducklake_smoke.lambda_telemetry_append_gates import _Gate
 from scripts.ducklake_smoke.lambda_telemetry_gates import _ULID, _body, _diagnostics, _error_type, _expect_ok, _fail
@@ -128,8 +126,7 @@ def _check_delivered(
     if _blob_objects(gate, project_ref, tag) != 1:
         raise _fail("the session's blob prefix does not hold exactly one object")
     print("TELEMETRY_BLOB_DELIVERED_OK")
-    ids = (str(body.get("tenant_id")), str(body.get("project_id")))
-    return append_ms, {"row": row, "wire": delivery.wire_rows, "ids": ids}, tag
+    return append_ms, {"row": row, "wire": delivery.wire_rows}, tag
 
 
 def _check_resend(
@@ -213,70 +210,6 @@ def _check_s3_rejects(gate: _Gate, project_ref: str) -> None:
     print("TELEMETRY_BLOB_S3_REJECTS_OK")
 
 
-def _read_page(gate: _Gate, ids: tuple[str, str], row: dict[str, Any], offset: int) -> tuple[int, Any, dict[str, Any]]:
-    session_id, event_id = vec.content_identity(row, *ids)
-    params = {
-        "session_id": session_id,
-        "producer": row["producer"],
-        "event_id": event_id,
-        "parser_version": row["parser_version"],
-        "offset": offset,
-        "max_bytes": vec.CHUNK_BYTES,
-    }
-    payload = {"action": "named_read", "verb": "transcript_content", "params": params}
-    resp = core._sigv4_invoke(core._function_url("reader"), payload, profile=gate.profile, region=gate.region)
-    return resp.status_code, resp, _body(resp)
-
-
-def _read_back(gate: _Gate, ids: tuple[str, str], row: dict[str, Any], storage: str, calls: int, label: str) -> int:
-    """Reassemble one row through transcript_content and prove it byte-equal to what was written, its length and SHA-256."""
-    expected = row["content"].encode("utf-8")
-    out, offset, made, spent = b"", 0, 0, 0
-    while True:
-        start = time.perf_counter()
-        status, resp, body = _read_page(gate, ids, row, offset)
-        spent += int((time.perf_counter() - start) * 1000)
-        made += 1
-        if status != 200:
-            raise _fail(f"{label} read-back status={status} error_type={_error_type(resp)} reason={body.get('reason')}")
-        rows = body.get("rows")
-        if not isinstance(rows, list) or len(rows) != 1 or rows[0].get("storage") != storage:
-            raise _fail(f"{label} read-back did not answer one {storage} row")
-        page = rows[0]
-        out += base64.b64decode(page["data"])
-        offset += int(page["length"])
-        if offset >= int(page["content_bytes"]) or made > calls + 1:
-            break
-    if made != calls:
-        raise _fail(f"{label} read-back took {made} calls (want {calls})")
-    if out != expected or len(out) != row["content_bytes"] or hashlib.sha256(out).hexdigest() != row["content_sha256"]:
-        raise _fail(f"{label} read-back bytes differ from what was written")
-    return spent
-
-
-def _check_readback(gate: _Gate, timed: _Timed, project_ref: str, protocol: bd.BlobProtocol, sent: dict[str, Any]) -> int:
-    spent = _read_back(gate, sent["ids"], sent["row"], "object", 1, "delivered blob")
-    tag = uuid.uuid4().hex
-    inline = base.transcript_row(tag, 0, gate.started, f"inline read-back {tag}")
-    body = _expect_ok(gate.post(vec.append_body(project_ref, [inline])), "append of an inline read-back row")
-    if _transcripts(body, "inline read-back").get("inserted") != 1:
-        raise _fail("the inline read-back row was not inserted")
-    spent += _read_back(gate, (str(body.get("tenant_id")), str(body.get("project_id"))), inline, "inline", 1, "inline")
-    tag = uuid.uuid4().hex
-    big = vec.blob_transcript_row(tag, 0, gate.started, vec.multi_chunk_content(tag))
-    delivery = _deliver(timed, project_ref, protocol, [big])
-    body = _expect_ok(gate.post(vec.append_body(project_ref, delivery.wire_rows)), "append of a multi-chunk blob row")
-    if _transcripts(body, "multi-chunk read-back").get("inserted") != 1:
-        raise _fail("the multi-chunk read-back row was not inserted")
-    big_ids = (str(body.get("tenant_id")), str(body.get("project_id")))
-    spent += _read_back(gate, big_ids, big, "object", 2, "multi-chunk")
-    status, resp, _ = _read_page(gate, big_ids, big, big["content_bytes"])
-    if status != 400 or _error_type(resp) != "named_read_input":
-        raise _fail(f"an offset at the size status={status} error_type={_error_type(resp)} (want 400 named_read_input)")
-    print("TELEMETRY_BLOB_READBACK_OK")
-    return spent
-
-
 def _check_bounds(gate: _Gate, project_ref: str) -> None:
     tag = uuid.uuid4().hex
     for vector in vec.bounds_vectors(project_ref, tag, gate.started):
@@ -330,8 +263,6 @@ def lambda_telemetry_blob(url: str, project_ref: str, *, profile: str | None = N
     _check_s3_rejects(gate, project_ref)
     _check_bounds(gate, project_ref)
     _check_autoregister(gate)
-    read_ms = _check_readback(gate, timed, project_ref, protocol, sent)
     print(f"blob_grant_ms={timed.grant_ms}")
     print(f"blob_put_ms={timed.put_ms}")
     print(f"blob_append_ms={append_ms}")
-    print(f"blob_read_ms={read_ms}")

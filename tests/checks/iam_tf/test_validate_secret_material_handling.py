@@ -74,8 +74,8 @@ def test_declared_exception_passes(tmp_path: Path) -> None:
     assert failed == [], failed
 
 
-def test_data_source_version_never_flagged(tmp_path: Path) -> None:
-    """A `data` secret-version source only READS a value -- it never writes one into state."""
+def test_data_source_secret_version_fails(tmp_path: Path) -> None:
+    """Decision 237 cl.3: a data source read of a secret puts the value in state, so any such block fails."""
     _write_contract(tmp_path, value_exceptions=[])
     _write_terraform(
         tmp_path,
@@ -83,7 +83,55 @@ def test_data_source_version_never_flagged(tmp_path: Path) -> None:
     )
     failed: list[str] = []
     validate_secret_material_handling(failed, root=tmp_path)
+    assert len(failed) == 1 and "Decision 237" in failed[0]
+
+
+def _ssm(kind: str, name: str, body: str) -> str:
+    return f'{kind} "aws_ssm_parameter" "{name}" {{\n{body}\n}}\n'
+
+
+def test_undeclared_securestring_fails_and_declared_passes(tmp_path: Path) -> None:
+    tf = _ssm("resource", "dsn", '  name = "/secret/dsn"\n  type = "SecureString"\n  value = var.v')
+    _write_terraform(tmp_path, {"personal/p.tf": tf})
+    _write_contract(tmp_path, value_exceptions=[])
+    failed: list[str] = []
+    validate_secret_material_handling(failed, root=tmp_path)
+    assert len(failed) == 1 and "aws_ssm_parameter.dsn" in failed[0]
+
+    _write_contract(tmp_path, value_exceptions=[{"resource": "aws_ssm_parameter.dsn", "file": "x", "reason": "y"}])
+    failed = []
+    validate_secret_material_handling(failed, root=tmp_path)
     assert failed == [], failed
+
+
+def test_non_literal_type_fails_closed_and_plain_string_passes(tmp_path: Path) -> None:
+    _write_contract(tmp_path, value_exceptions=[])
+    _write_terraform(
+        tmp_path,
+        {
+            "personal/a.tf": _ssm("resource", "dyn", '  name = "/x"\n  type = var.kind\n  value = "v"'),
+            "personal/b.tf": _ssm("resource", "plain", '  name = "/agent-platform/x"\n  type = "String"\n  value = "v"'),
+        },
+    )
+    failed: list[str] = []
+    validate_secret_material_handling(failed, root=tmp_path)
+    assert len(failed) == 1 and "aws_ssm_parameter.dyn" in failed[0]
+
+
+def test_data_ssm_parameter_rules(tmp_path: Path) -> None:
+    _write_contract(tmp_path, value_exceptions=[])
+    _write_terraform(
+        tmp_path,
+        {
+            "personal/secret.tf": _ssm("data", "s", '  name = "/secret/neon-api-key"'),
+            "personal/dynamic.tf": _ssm("data", "d", "  name = local.secret_parameter_names.neon"),
+            "personal/ok.tf": _ssm("data", "ok", '  name = "/agent-platform/url"'),
+        },
+    )
+    failed: list[str] = []
+    validate_secret_material_handling(failed, root=tmp_path)
+    assert len(failed) == 2
+    assert not any("data.aws_ssm_parameter.ok" in f for f in failed)
 
 
 def test_missing_contract_skips(tmp_path: Path) -> None:
@@ -130,3 +178,38 @@ def test_contract_mutation_flips_verdict(tmp_path: Path) -> None:
     assert len(failed_after) == 1
     assert "ducklake_neon_catalog_dsn" in failed_after[0]
     assert "github_pat_placeholder" not in failed_after[0]
+
+
+def test_real_contract_names_ssm_pattern_and_both_stores() -> None:
+    real = yaml.safe_load((Path(__file__).resolve().parents[3] / _CONTRACT_REL).read_text(encoding="utf-8"))
+    assert "/secret/" in real["patterns"]["secret_parameter_out_of_band"]
+    assert "SSM Parameter" in real["patterns"]["runtime_fetch"] and "Secrets Manager" in real["patterns"]["runtime_fetch"]
+    assert any("SSM secret parameters" in d for d in real["patterns"]["domains"])
+
+
+def test_interpolated_data_name_and_by_path_data_fail(tmp_path: Path) -> None:
+    _write_contract(tmp_path, value_exceptions=[])
+    _write_terraform(
+        tmp_path,
+        {
+            "personal/interp.tf": _ssm("data", "i", '  name = "${var.root}/neon-api-key"'),
+            "personal/bypath.tf": _ssm("data", "b", '  path = "/secret/"').replace(
+                "aws_ssm_parameter", "aws_ssm_parameters_by_path"
+            ),
+            "personal/ok.tf": _ssm("data", "ok", '  path = "/agent-platform/"').replace(
+                "aws_ssm_parameter", "aws_ssm_parameters_by_path"
+            ),
+        },
+    )
+    failed: list[str] = []
+    validate_secret_material_handling(failed, root=tmp_path)
+    assert len(failed) == 2 and not any("data.aws_ssm_parameters_by_path.ok" in f for f in failed)
+
+
+def test_nested_tags_type_does_not_hide_a_securestring(tmp_path: Path) -> None:
+    _write_contract(tmp_path, value_exceptions=[])
+    body = '  name = "/secret/a"\n  tags = {\n    type = "String"\n  }\n  type = "SecureString"'
+    _write_terraform(tmp_path, {"personal/p.tf": _ssm("resource", "sneaky", body)})
+    failed: list[str] = []
+    validate_secret_material_handling(failed, root=tmp_path)
+    assert len(failed) == 1 and "aws_ssm_parameter.sneaky" in failed[0]

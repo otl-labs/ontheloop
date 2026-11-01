@@ -321,3 +321,8 @@ class TestAuthErrorsAreDistinctFromTransportErrors:
         ):
             assert _ghas_run_cli() != 0
         assert "auth error, cannot verify: HTTP 401" in capsys.readouterr().out
+
+
+def test_malformed_repository_falls_back_to_the_default() -> None:
+    with patch.dict("os.environ", {"GITHUB_REPOSITORY": "not-a-full-name"}):
+        assert _repo() == "benjamin-blake/theseus"

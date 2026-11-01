@@ -23,7 +23,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from scripts.ops_portal._common import ROOT
-from scripts.ops_portal.closure_gate import changed_files, closure_stamps_applicable
+from scripts.ops_portal.ci_rca_schema import _PORTAL_OWNED_KEYS, derive_ci_rca_priority, preventive_deficiency
+from scripts.ops_portal.closure_gate import changed_files, closure_stamps_applicable, confirmed_repair_track
 from scripts.ops_portal.trailer_closure_gate import merge_leg_refuses
 
 logger = logging.getLogger(__name__)
@@ -252,6 +253,9 @@ def stamp_fixed_by_sha(rec_id: str, fixed_by_sha: str, profile: Optional[str] = 
     except (json.JSONDecodeError, TypeError):
         ctx = {}
     ctx["fixed_by_sha"] = fixed_by_sha
+    confirmed = confirmed_repair_track(fixed_by_sha, ROOT)
+    if confirmed is not None:
+        ctx["repair_track_confirmed"] = confirmed
     update_rec(rec_id, {"context_v2_json": json.dumps(ctx)}, profile=profile)
 
 
@@ -288,14 +292,18 @@ def correct_rec_context(
     if not ctx.get("fingerprint"):
         raise RuntimeError(f"correct_rec_context: {rec_id}'s context_v2_json carries no fingerprint -- refusing to write.")
 
+    context_updates = {k: v for k, v in context_updates.items() if k not in _PORTAL_OWNED_KEYS}
+    if context_updates.get("repair_track") == "test_defect" and ctx.get("repair_track") != "test_defect":
+        raise RuntimeError(f"correct_rec_context: {rec_id} can only be re-tracked toward product_regression -- refusing.")
     merged = {**ctx, **context_updates}
-    deficiencies = _validate_ci_rca_context_v2(merged)
+    deficiencies = _validate_ci_rca_context_v2(merged) + preventive_deficiency(merged)
     if deficiencies:
         raise RuntimeError(f"correct_rec_context: merged context_v2_json for {rec_id} fails validation: {deficiencies}")
 
     updates: dict = {"context_v2_json": json.dumps(merged)}
     if row_updates:
         updates.update(row_updates)
+    updates["priority"] = derive_ci_rca_priority(merged)
     update_rec(rec_id, updates, profile=profile)
 
 

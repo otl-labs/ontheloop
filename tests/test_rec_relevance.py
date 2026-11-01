@@ -329,3 +329,92 @@ class TestDeterministicVsSemanticClosureSplit:
         verdict, evidence = evaluate_rec_relevance(rec, recent_commits=commits, repo_root=tmp_path)
         assert verdict == "satisfied"
         assert evidence.startswith("semantic:")
+
+
+class _StubReader:
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+
+    def named(self, verb: str, **kwargs):
+        assert verb == "recs_by_ids"
+        wanted = kwargs["ids"].split(",")
+        return [r for r in self._rows if r["id"] in wanted]
+
+
+def _rec(rec_id: str, **kwargs) -> dict:
+    row = {"id": rec_id, "title": "t", "file": None, "acceptance": None, "context": None, "created_timestamp": None}
+    row.update(kwargs)
+    return row
+
+
+class TestBundledRecNeverClosedBeforeMerge:
+    """rec-4592: the /implement re-check reports; it never closes (the merged trailer does)."""
+
+    def test_deterministic_satisfied_never_writes(self):
+        from scripts.rec_relevance import implement_recheck
+
+        reader = _StubReader([_rec("rec-1", acceptance="echo ok")])
+        with (
+            patch("scripts.rec_relevance._run_acceptance_probe", return_value=True),
+            patch("scripts.ops_data_portal.update_rec") as update,
+            patch("scripts.ops_data_portal.propose_or_close_rec") as propose,
+        ):
+            results = implement_recheck(["rec-1"], reader=reader)
+        assert results[0][0] == "rec-1" and results[0][1] == "satisfied" and results[0][3] is None
+        update.assert_not_called()
+        propose.assert_not_called()
+
+    def test_superseded_yields_non_deterministic_proposal(self):
+        from scripts.rec_relevance import implement_recheck
+
+        reader = _StubReader([_rec("rec-2", file="nonexistent/path.py")])
+        with patch("scripts.ops_data_portal.update_rec") as update:
+            results = implement_recheck(["rec-2"], reader=reader)
+        assert results[0][1] == "stale_target"
+        assert results[0][3] is not None and "--status closed" in results[0][3]
+        update.assert_not_called()
+
+    def test_missing_id_reported(self):
+        from scripts.rec_relevance import implement_recheck
+
+        assert implement_recheck(["rec-9"], reader=_StubReader([])) == [("rec-9", "missing", "", None)]
+
+    def test_default_reader_is_made_lazily(self):
+        from scripts.rec_relevance import implement_recheck
+
+        with patch("src.common.ducklake_reader_client.make_reader", return_value=_StubReader([_rec("rec-3")])):
+            assert implement_recheck(["rec-3"])[0][1] == "unknown"
+
+    def test_cli_prints_one_line_per_rec_and_missing_exits_1(self, capsys):
+        from scripts import rec_relevance
+
+        rows = [_rec("rec-1", file="nonexistent/path.py"), _rec("rec-2")]
+        with patch("src.common.ducklake_reader_client.make_reader", return_value=_StubReader(rows)):
+            code = rec_relevance.main(["--implement-recheck", "rec-1,rec-2,rec-7"])
+        out = capsys.readouterr().out.splitlines()
+        assert code == 1
+        assert out[0].startswith("rec-1 stale_target | target file absent")
+        assert "--status closed" in out[1]
+        assert out[2].startswith("rec-2 unknown |")
+        assert out[3] == "rec-7 missing"
+
+    def test_cli_exit_zero_when_all_present(self, capsys, monkeypatch):
+        from scripts import rec_relevance
+
+        monkeypatch.setattr("sys.argv", ["rec_relevance", "--implement-recheck", "rec-2"])
+        with patch("src.common.ducklake_reader_client.make_reader", return_value=_StubReader([_rec("rec-2")])):
+            assert rec_relevance.main() == 0
+
+    def test_closed_sibling_on_unrelated_file_is_skipped(self, tmp_path):
+        (tmp_path / "a.py").write_text("x", encoding="utf-8")
+        rec = _rec("rec-4", title="same title words here", file="a.py")
+        sibling = {"id": "rec-5", "title": "same title words here", "file": "other/b.py"}
+        verdict, _ = evaluate_rec_relevance(rec, closed_recs=[sibling], decisions=[{"decision_id": "1"}], repo_root=tmp_path)
+        assert verdict == "relevant"
+
+    def test_open_duplicate_on_unrelated_file_is_skipped(self, tmp_path):
+        (tmp_path / "a.py").write_text("x", encoding="utf-8")
+        rec = _rec("rec-4", title="same title words here", file="a.py")
+        other = {"id": "rec-6", "title": "same title words here", "file": "other/b.py"}
+        verdict, _ = evaluate_rec_relevance(rec, open_recs=[other], decisions=[{"decision_id": "1"}], repo_root=tmp_path)
+        assert verdict == "relevant"

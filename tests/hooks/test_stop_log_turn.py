@@ -1,4 +1,4 @@
-"""The Stop and StopFailure shim (rule HK-3): each row sent once per turn, silent detach, stop_hook_active and inertness."""
+"""The Stop, StopFailure and UserPromptSubmit shim (rules HK-3, WT-1): rows once per turn, the witness line, detach."""
 
 from __future__ import annotations
 
@@ -20,7 +20,8 @@ from scripts.telemetry_capture.state import CaptureState, state_dir
 from scripts.telemetry_capture.transport import WriterClient
 from src.turn_capture.record_turn import record_turn
 from src.turn_capture.transcript import FsTree
-from tests.fixtures.turn_capture_corpus import SID, assistant, hook, jsonl, prompt, text_block
+from src.turn_capture.witness import WITNESS_LINE, is_witness_record
+from tests.fixtures.turn_capture_corpus import SID, WITNESS_STDERR, assistant, hook, jsonl, prompt, text_block
 
 ROOT = Path(__file__).resolve().parents[2]
 SHIM = ROOT / ".claude" / "hooks" / "stop_log_turn.py"
@@ -54,7 +55,7 @@ class Writer:
                 "ok": True,
                 "actions": ["append_telemetry"],
                 "verbs": {"append_telemetry": {"caps": caps}},
-                "catalog": {"data_path_is_smoke": True},
+                "catalog": {"meta_schema": "ducklake_smoke", "data_path_is_smoke": True},
                 "blob_protocol": {"version": 1, "inline_threshold_bytes": 65536, "cap_bytes": 8388608, "max_items": 200},
             }
             return 200, json.dumps(body).encode()
@@ -91,8 +92,17 @@ def in_process(writer: Writer, repo_root: Path):
     def factory(env, state, budget, **kw):
         return WriterClient(URL, lambda body: {}, budget, http=writer, sleep=lambda s: None, rng=lambda: 0.0)
 
+    ticks = [0.0]
+
+    def clock() -> float:
+        ticks[0] += 0.5
+        return ticks[0]
+
     def detach(args, env):
-        assert cli.main(["run", *args], env=env, repo_root=repo_root, client_factory=factory) == 0
+        assert (
+            cli.main(["run", *args], env=env, repo_root=repo_root, client_factory=factory, clock=clock, sleep=lambda s: None)
+            == 0
+        )
 
     return detach
 
@@ -129,10 +139,10 @@ def test_turn_rows_written_once_per_turn(tmp_path: Path, capfd: pytest.CaptureFi
         tables = [b["table"] for b in payload["batches"]]
         assert "telemetry_sessions" not in tables[:-1]
     assert state.cursor_on_disk().lines_consumed["root"] == len(turns(2).splitlines())
-    assert capfd.readouterr() == ("", "")
+    assert capfd.readouterr() == ("", (WITNESS_LINE + "\n") * 3)
 
 
-def test_stop_hook_active_malformed_input_and_switch_off_are_inert(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
+def test_malformed_input_and_switch_off_are_inert(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
     shim, calls = load(), []
     root = tmp_path / f"{SID}.jsonl"
     repo_root = on_repo(tmp_path)
@@ -140,7 +150,7 @@ def test_stop_hook_active_malformed_input_and_switch_off_are_inert(tmp_path: Pat
     def detach(args, env):
         calls.append(args)
 
-    for stdin in ("", "not json", "[1]", json.dumps({"hook_event_name": "Stop"}), stop_stdin(root, stop_hook_active=True)):
+    for stdin in ("", "not json", "[1]", json.dumps({"hook_event_name": "Stop"})):
         assert shim.main(stdin, env=ON, repo_root=repo_root, detach=detach) == 0
     assert shim.main(stop_stdin(root), env={}, repo_root=repo_root, detach=detach) == 0
     assert shim.main(stop_stdin(root), env={**ON, "OTL_TURN_CAPTURE": "off"}, repo_root=repo_root, detach=detach) == 0
@@ -152,8 +162,8 @@ def test_stop_hook_active_malformed_input_and_switch_off_are_inert(tmp_path: Pat
     assert shim.main(stop_stdin(root), env=ON, repo_root=repo_root, detach=broken) == 0
     failure = json.dumps({"hook_event_name": "StopFailure", "transcript_path": str(root), "session_id": SID})
     assert shim.main(failure, env=ON, repo_root=repo_root, detach=detach) == 0
-    assert calls == [["--event", "StopFailure", "--transcript", str(root), "--session-id", SID]]
-    assert capfd.readouterr() == ("", "")
+    assert calls == [["--event", "StopFailure", "--transcript", str(root), "--session-id", SID, "--lock-wait", "120"]]
+    assert capfd.readouterr() == ("", (WITNESS_LINE + "\n") * 8)
     source = SHIM.read_text(encoding="utf-8")
     assert shim.RUNNER_MODULE == "scripts.telemetry_capture" and "getenv" not in source and "environ.get" not in source
 
@@ -199,7 +209,7 @@ def test_shim_detaches_silently(tmp_path: Path) -> None:
         timeout=30,
         check=False,
     )
-    assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", WITNESS_LINE + "\n")
     assert time.monotonic() - started < 20
     record = Path(str(root) + ".fake")
     deadline = time.monotonic() + 20
@@ -211,7 +221,7 @@ def test_shim_detaches_silently(tmp_path: Path) -> None:
         os.kill(int(pid), 0)
         assert int(sid) == int(pid) and int(sid) != os.getsid(0)
         assert (fd0, fd1, fd2) == ("/dev/null", "/dev/null", "/dev/null")
-        assert argv == ["run", "--event", "Stop", "--transcript", str(root), "--session-id", SID]
+        assert argv == ["run", "--event", "Stop", "--transcript", str(root), "--session-id", SID, "--lock-wait", "120"]
     finally:
         os.kill(int(pid), signal.SIGKILL)
         for _ in range(100):
@@ -233,5 +243,101 @@ def test_the_default_detach_uses_the_runner_module_and_puts_the_repo_on_the_path
     monkeypatch.setattr(sys, "path", [p for p in sys.path if p != str(ROOT)])
     root, repo_root = tmp_path / f"{SID}.jsonl", on_repo(tmp_path)
     assert shim.main(stop_stdin(root), env=ON, repo_root=repo_root) == 0
-    args = ["--event", "Stop", "--transcript", str(root), "--session-id", SID]
+    args = ["--event", "Stop", "--transcript", str(root), "--session-id", SID, "--lock-wait", "120"]
     assert seen == [(("scripts.telemetry_capture", args, repo_root), {"env": ON})] and str(ROOT) in sys.path
+
+
+def payload(event: str, root: Path, **extra: Any) -> str:
+    return json.dumps({"hook_event_name": event, "transcript_path": str(root), "session_id": SID, **extra})
+
+
+def test_witness_line_is_printed_first_on_every_path(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shim, root, repo_root = load(), tmp_path / f"{SID}.jsonl", on_repo(tmp_path)
+    inputs = [
+        "",
+        "not json",
+        "[1]",
+        json.dumps({"hook_event_name": "Stop"}),
+        stop_stdin(root),
+        stop_stdin(root, stop_hook_active=True),
+    ]
+    inputs += [payload("UserPromptSubmit", root), payload("UserPromptSubmit", root, prompt_id="p-1")]
+    for stdin in inputs:
+        for env in (ON, {}):
+            assert shim.main(stdin, env=env, repo_root=repo_root, detach=lambda args, e: None) == 0
+            assert capfd.readouterr() == ("", WITNESS_LINE + "\n")
+    assert shim.main(stop_stdin(root), env=ON, repo_root=repo_root, detach=lambda a, e: 1 / 0) == 0
+    assert capfd.readouterr() == ("", WITNESS_LINE + "\n")
+
+    seen: list[str] = []
+
+    class Stdin:
+        def read(self) -> str:
+            seen.append(capfd.readouterr().err)
+            return stop_stdin(root)
+
+    monkeypatch.setattr(sys, "stdin", Stdin())
+    assert shim.main(env=ON, repo_root=repo_root, detach=lambda args, e: None) == 0
+    assert seen == [WITNESS_LINE + "\n"]
+
+
+def test_every_stop_and_prompt_detaches_a_pass_with_its_prompt_id(tmp_path: Path) -> None:
+    shim, calls = load(), []
+    root, repo_root = tmp_path / f"{SID}.jsonl", on_repo(tmp_path)
+
+    def detach(args, env):
+        calls.append(args)
+
+    base = ["--transcript", str(root), "--session-id", SID, "--lock-wait", "120"]
+    for stdin in (stop_stdin(root), stop_stdin(root, stop_hook_active=True)):
+        assert shim.main(stdin, env=ON, repo_root=repo_root, detach=detach) == 0
+    assert shim.main(payload("StopFailure", root, stop_hook_active=True), env=ON, repo_root=repo_root, detach=detach) == 0
+    assert shim.main(payload("UserPromptSubmit", root, prompt_id="abc-123"), env=ON, repo_root=repo_root, detach=detach) == 0
+    assert calls == [
+        ["--event", "Stop", *base],
+        ["--event", "Stop", *base],
+        ["--event", "StopFailure", *base],
+        ["--event", "UserPromptSubmit", *base, "--prompt-id", "abc-123"],
+    ]
+    calls.clear()
+    for bad in ({}, {"prompt_id": ""}, {"prompt_id": 7}, {"prompt_id": "has space"}, {"prompt_id": "x" * 65}):
+        assert shim.main(payload("UserPromptSubmit", root, **bad), env=ON, repo_root=repo_root, detach=detach) == 0
+    assert calls == []
+
+
+def test_prompt_path_detaches_without_reading_the_switch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.telemetry_capture.switch as switch  # noqa: PLC0415
+
+    def refuse(*args: Any, **kwargs: Any) -> bool:
+        raise AssertionError("the prompt path must not read the switch")
+
+    monkeypatch.setattr(switch, "capture_allowed", refuse)
+    shim, calls = load(), []
+    root, repo_root = tmp_path / f"{SID}.jsonl", on_repo(tmp_path)
+    off = {"OTL_TURN_CAPTURE": "off"}
+    assert (
+        shim.main(
+            payload("UserPromptSubmit", root, prompt_id="p1"),
+            env=off,
+            repo_root=repo_root,
+            detach=lambda a, e: calls.append(a),
+        )
+        == 0
+    )
+    assert len(calls) == 1
+    assert shim.main(stop_stdin(root), env=ON, repo_root=repo_root, detach=lambda a, e: calls.append(a)) == 0
+    assert len(calls) == 1
+
+
+def test_the_witness_line_equals_the_parser_constant() -> None:
+    assert load().WITNESS_LINE == WITNESS_LINE and WITNESS_STDERR == WITNESS_LINE + "\n"
+    record = hook(
+        "w",
+        1,
+        "Stop",
+        command='"$CLAUDE_PROJECT_DIR/bin/venv-python" "$CLAUDE_PROJECT_DIR/.claude/hooks/stop_log_turn.py"',
+        stderr=WITNESS_LINE + "\n",
+    )
+    assert is_witness_record(record) and not is_witness_record({**record, "type": "user"})

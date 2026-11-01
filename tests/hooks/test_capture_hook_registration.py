@@ -33,9 +33,15 @@ def _capture_entries() -> list[tuple[str, dict[str, Any]]]:
 def test_the_four_capture_hooks_are_registered() -> None:
     capture = [(event, h["command"]) for event, h in _capture_entries()]
     assert sorted(capture) == sorted(
-        [("SessionStart", PIN_CMD), ("Stop", STOP_CMD), ("StopFailure", STOP_CMD), ("SessionEnd", END_CMD)]
+        [
+            ("SessionStart", PIN_CMD),
+            ("Stop", STOP_CMD),
+            ("StopFailure", STOP_CMD),
+            ("UserPromptSubmit", STOP_CMD),
+            ("SessionEnd", END_CMD),
+        ]
     )
-    for event in ("Stop", "StopFailure", "SessionEnd"):
+    for event in ("Stop", "StopFailure", "UserPromptSubmit", "SessionEnd"):
         assert [h["command"] for h in _entries(event)] == [END_CMD if event == "SessionEnd" else STOP_CMD]
     for event, _ in _capture_entries():
         assert all("matcher" not in group for group in _hooks()[event])
@@ -85,5 +91,6 @@ def test_capture_commands_name_their_scripts() -> None:
         "SessionStart": "hook:session_start_log_turn",
         "Stop": "hook:stop_log_turn",
         "StopFailure": "hook:stop_log_turn",
+        "UserPromptSubmit": "hook:stop_log_turn",
         "SessionEnd": "hook:session_end_log_turn",
     }

@@ -4,11 +4,14 @@ negative vector fails exactly as expected through the real handler, edge, gramma
 from __future__ import annotations
 
 import copy
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from scripts.ducklake_smoke import telemetry_append_vectors as vec
 from src.common.ducklake_scd2_schema import load_field_semantics
@@ -32,6 +35,17 @@ def live(monkeypatch: pytest.MonkeyPatch) -> LiveFake:
 
 def send(live: LiveFake, body: dict[str, Any]) -> Any:
     return live.invoke("https://fake.invalid", body)
+
+
+def test_golden_body_carries_an_accepted_status_process_event() -> None:
+    rows = vec._rows(vec.golden_body(REF, TAG, STARTED), "telemetry_observations")
+    status = [r for r in rows if r.get("name", "").startswith("status:")]
+    assert len(status) == 1 and status[0]["observation_type"] == "process_event" and status[0]["severity"] == "warning"
+    path = Path(__file__).resolve().parents[2] / "docs/contracts/telemetry_observations.yaml"
+    contract = yaml.safe_load(path.read_text(encoding="utf-8"))
+    pattern = contract["fields"]["name"]["dq_intent"]["pattern_when"][0]["pattern"]
+    assert re.fullmatch(pattern, status[0]["name"])
+    assert vec.GOLDEN_ROWS["telemetry_observations"] == len(rows)
 
 
 def test_golden_payload_clears_the_kernel() -> None:

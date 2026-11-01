@@ -1,6 +1,7 @@
 """Telemetry-store gauge for session_preflight (T2.36 c3, Decision 215 cl.2).
 
-One `telemetry_health_count` reader call (catalog metadata only, no data file) from the warm-up. The gauge is tri-state:
+One `telemetry_health_count` reader call (catalog metadata only, no data file) from the warm-up, through the reader serving
+the writer's catalog. The gauge is tri-state:
 pass (any of the four journals holds a committed row), unpopulated (all four are known and empty) or unavailable (the read
 failed, was refused, or a table is absent). An unavailable gauge carries null counts, never 0 or [], so an unreachable reader
 never reads as an empty store. Never raises.
@@ -25,7 +26,7 @@ def unavailable_gauge(reason: str, catalog: str | None = None) -> dict[str, Any]
 def check_telemetry_health(reader: Any = None) -> dict[str, Any]:
     """Return {status, catalog, tables} (plus reason when unavailable) from one telemetry_health_count call."""
     try:
-        active: Any = reader if reader is not None else _common._make_reader()
+        active: Any = reader if reader is not None else _common._make_event_reader()
         rows = list(active.named("telemetry_health_count"))
     except Exception as exc:  # noqa: BLE001 -- every failure path is the same loud degraded signal
         logger.warning("telemetry_health: store gauge unavailable: %s", exc)

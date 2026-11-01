@@ -21,6 +21,7 @@ from scripts.ops_portal.ci_rca_schema import (
     _load_and_verify_bundle,
     _stamp_warn_mode_reject,
     _validate_ci_rca_context_v2,
+    preventive_deficiency,
 )
 
 logger = logging.getLogger(__name__)
@@ -208,6 +209,8 @@ def _run_ci_rca_cross_check(
         context_v2_json["fingerprint"] = bundle["fingerprint"]
     if bundle.get("failure_category"):
         context_v2_json["failure_category"] = bundle["failure_category"]
+    if bundle.get("workflow_to_tier_resolution"):
+        context_v2_json["workflow_tier"] = bundle["workflow_to_tier_resolution"]
     # ci-rca-identity-lifecycle: affected_nodeids (v2 junit-parsed cause-group membership) and
     # escape_class (Decision 135 selection-manifest attribution, when the workflow step stamped
     # it onto the bundle) are likewise portal-derived from the verified bundle, never agent-authored.
@@ -396,6 +399,8 @@ def back_validate_ci_rca(
         # since the per-rule stamp site now stamps stable schema_<rule> tags (e.g.
         # schema_why_chain_too_long) that must not double-count as a non_schema_reason.
         non_schema_reasons = [r for r in warn_marker.get("reasons", []) if not r.startswith("schema")]
+        if "preventive_required" not in non_schema_reasons:
+            deficiencies = deficiencies + preventive_deficiency(ctx)
         if deficiencies or non_schema_reasons:
             non_conformant.append({"id": rec_id, "has_context_v2": True, "failing_checks": deficiencies + non_schema_reasons})
         else:

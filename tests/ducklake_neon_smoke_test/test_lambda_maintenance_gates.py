@@ -326,6 +326,8 @@ def test_lambda_maintenance_breaker_missing_breaker_tripped_fails(monkeypatch):
 _CLEAN_OWNERSHIP = {
     "foreign_owned": 0,
     "schema_owner_is_current_user": True,
+    "schema_owner_held": True,
+    "schema_owner": "ducklake_smoke_owner",
     "scoped_create_on_schema": False,
     "scoped_create_on_public": False,
 }
@@ -364,7 +366,8 @@ def test_create_telemetry_gate_passes_on_a_clean_report(monkeypatch, capsys):
     [
         ({"foreign_owned": 3}, "foreign owner"),
         ({"foreign_owned": None}, "foreign owner"),
-        ({"schema_owner_is_current_user": False}, "not owned by the owner login"),
+        ({"schema_owner_held": False}, "owner role is not held"),
+        ({"schema_owner_held": None}, "owner role is not held"),
         ({"scoped_create_on_schema": True}, "scoped login holds CREATE"),
         ({"scoped_create_on_public": True}, "scoped login holds CREATE"),
         ({"scoped_create_on_schema": None}, "scoped login holds CREATE"),
@@ -383,11 +386,16 @@ def test_create_telemetry_foreign_owned_fails(monkeypatch):
 
 
 def test_create_telemetry_schema_owner_mismatch_fails(monkeypatch):
-    _create_gate(
-        monkeypatch, _Resp(200, {**_CREATE_OK, "ownership": {**_CLEAN_OWNERSHIP, "schema_owner_is_current_user": False}})
-    )
-    with pytest.raises(core.SmokeTestFailure, match="schema is not owned by the owner login"):
+    _create_gate(monkeypatch, _Resp(200, {**_CREATE_OK, "ownership": {**_CLEAN_OWNERSHIP, "schema_owner_held": False}}))
+    with pytest.raises(core.SmokeTestFailure, match="owner role is not held by the session"):
         smoke.lambda_maintenance_create_telemetry()
+
+
+def test_create_telemetry_owner_held_through_membership_passes(monkeypatch, capsys):
+    member = {**_CLEAN_OWNERSHIP, "schema_owner_is_current_user": False, "schema_owner_held": True}
+    _create_gate(monkeypatch, _Resp(200, {**_CREATE_OK, "ownership": member}))
+    smoke.lambda_maintenance_create_telemetry()
+    assert capsys.readouterr().out.startswith("MAINTENANCE_CREATE_TELEMETRY OK")
 
 
 def test_create_telemetry_scoped_create_fails(monkeypatch):

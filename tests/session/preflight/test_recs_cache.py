@@ -16,14 +16,6 @@ boto3 = pytest.importorskip("boto3")
 from tests.fixtures.session_preflight_module import preflight as _preflight  # noqa: E402
 
 
-class TestGracefulMissingFiles:
-    def test_missing_session_log(self, tmp_path: Path) -> None:
-        missing = tmp_path / "SESSION_LOG.md"
-        with patch("scripts.preflight._common.SESSION_LOG_FILE", missing):
-            result = _preflight.parse_last_session()
-        assert result == ""
-
-
 class TestNonAutomatableRecommendations:
     def test_non_automatable_fields_in_preflight_output(self, tmp_path: Path) -> None:
         """non_automatable_recommendations and non_automatable_details appear in preflight JSON."""
@@ -33,7 +25,10 @@ class TestNonAutomatableRecommendations:
             patch("scripts.preflight.env_git.get_git_status", return_value=("agent/test", False, [])),
             patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="ok"),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch(
                 "scripts.preflight.recs_cache._count_recommendations_reader",
                 return_value=(2, 0, 1, [{"id": "rec-001", "title": "Manual", "context_excerpt": "ctx"}]),
@@ -44,7 +39,6 @@ class TestNonAutomatableRecommendations:
                 return_value={
                     "roadmap_phase": "Phase 1.5",
                     "open_decisions_count": 0,
-                    "recent_sessions": [],
                     "strategic_review_due": False,
                     "recommendations_count": 0,
                 },
@@ -195,7 +189,10 @@ class TestRecsReadStatusDegradation:
             ),
             patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="ok"),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch("scripts.preflight.recs_cache._count_recommendations_reader", return_value="reader_unreachable"),
             patch("session_preflight._sync_ops_pull", return_value={}),
             patch("scripts.preflight.priority_queue.read_priority_queue", return_value=[]),
@@ -205,7 +202,6 @@ class TestRecsReadStatusDegradation:
                 return_value={
                     "roadmap_phase": "Phase 2",
                     "open_decisions_count": 0,
-                    "recent_sessions": [],
                     "strategic_review_due": False,
                     "recommendations_count": 0,
                 },

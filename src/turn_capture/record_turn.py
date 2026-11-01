@@ -30,8 +30,8 @@ from src.turn_capture.transcript import ROOT, TranscriptTree, read_lines, sessio
 from src.turn_capture.transcripts import Ctx, Sidecars, build_transcripts
 
 PRODUCER = "claude_code"
-PARSER_VERSION = 4
-PRODUCER_VERSION = "turn-capture-4"
+PARSER_VERSION = 7
+PRODUCER_VERSION = "turn-capture-7"
 FULL_OUTPUT_CAP_BYTES = 8388608
 BILLING_SHAPES = ("fixed_non_rollover_allowance",)
 TABLES = ("telemetry_observations", "telemetry_transcripts", "telemetry_agents", "telemetry_sessions")
@@ -99,12 +99,12 @@ class _Emitter:
     def parse(self, limits: dict[str, int] | None, final: bool) -> tuple[Key, ParsedTree]:
         key = (tuple(sorted((limits or {}).items())), final)
         if limits is None:
-            parsed = parse_tree(self._tree, None, final)
+            parsed = parse_tree(self._tree, None, final, frontier=not final)
             key = (tuple(sorted(parsed.lines_total.items())), final)
             if key not in self.parses:
                 self.parses[key] = parsed
         elif key not in self.parses:
-            self.parses[key] = parse_tree(self._tree, limits, final)
+            self.parses[key] = parse_tree(self._tree, limits, final, frontier=not final)
         return key, self.parses[key]
 
     def built(self, key: Key, throwaway: bool = True) -> dict[str, list[dict[str, Any]]]:
@@ -134,17 +134,27 @@ class _Emitter:
         return out
 
 
-def _reanchored(current: Rows, diag: Counter[str]) -> None:
-    closes: Counter[tuple[str, str]] = Counter(
-        (row["observation_type"], row["entity_ref"])
-        for (table, _), row in current.items()
-        if table == "telemetry_observations"
-        and row["event_kind"] == "close"
-        and row["observation_type"] in ("turn", "tool_call")
-    )
-    for (otype, _), n in closes.items():
-        if n > 1:
+def _close_refs(rows: Rows) -> dict[tuple[str, str], set[str]]:
+    """The distinct close external_refs per (observation_type, entity_ref) of a turn or tool_call."""
+    out: dict[tuple[str, str], set[str]] = {}
+    for (table, ref), row in rows.items():
+        if (
+            table == "telemetry_observations"
+            and row["event_kind"] == "close"
+            and row["observation_type"] in ("turn", "tool_call")
+        ):
+            out.setdefault((row["observation_type"], row["entity_ref"]), set()).add(ref)
+    return out
+
+
+def _count_closes(prior: Rows, current: Rows, end_tree: Rows, diag: Counter[str]) -> None:
+    """Rule DG-5: reanchored_close counts entities whose distinct close rows across the prior set and this pass's set
+    outnumber their close rows in the pass's own end-of-tree parse; multi_close_turns counts turns with several there."""
+    ended = _close_refs(end_tree)
+    for (otype, entity), refs in _close_refs({**prior, **current}).items():
+        if len(refs) > len(ended.get((otype, entity), ())):
             diag[f"reanchored_close:{otype}"] += 1
+    diag["multi_close_turns"] += sum(1 for (otype, _), refs in ended.items() if otype == "turn" and len(refs) > 1)
 
 
 def _repin(tree: TranscriptTree, cursor: CaptureCursor, started_ms: int, cap: int) -> CaptureCursor:
@@ -170,7 +180,9 @@ def record_turn(
     project_ref: str,
     billing_shape: str = "fixed_non_rollover_allowance",
     session_final: bool = False,
+    resend_tree: bool = False,
 ) -> CaptureResult:
+    """*resend_tree* re-emits every row of the tree, keeping the cursor's pins and finalization cuts (a catalog reset)."""
     if billing_shape not in BILLING_SHAPES:
         raise ValueError(f"billing_shape must be one of {BILLING_SHAPES}")
     if not project_ref:
@@ -192,7 +204,7 @@ def record_turn(
             billing_shape=billing_shape,
             session_started_at_ms=started_ms,
         )
-        matches = (cursor.producer, cursor.parser_version) == (PRODUCER, PARSER_VERSION)
+        matches = not resend_tree and (cursor.producer, cursor.parser_version) == (PRODUCER, PARSER_VERSION)
         base = cursor if matches else cursor.reset(PARSER_VERSION)
     ctx = Ctx(PRODUCER, PRODUCER_VERSION, PARSER_VERSION, pin, billing_shape, cap)
     diag: Counter[str] = Counter()
@@ -200,6 +212,9 @@ def record_turn(
     emitter = _Emitter(tree, ctx, sidecars, diag)
     key, parsed = emitter.parse(None, session_final)
     end = dict(parsed.lines_total)
+    for held in (base.lines_consumed, *base.finalize_cuts) if base is not None else ():
+        for stream_key, count in held.items():
+            end.setdefault(stream_key, count)
     emitter.built(key, throwaway=False)
     cuts = [dict(cut) for cut in base.finalize_cuts] if base else []
     if session_final and (not cuts or cuts[-1] != end):
@@ -214,7 +229,8 @@ def record_turn(
             fresh[table].append(row)
         elif prior[(table, ref)] != row:
             diag["prior_content_divergence"] += 1
-    _reanchored(current, diag)
+    end_tree = {("telemetry_observations", row["external_ref"]): row for row in emitter.built(key)["telemetry_observations"]}
+    _count_closes(prior, current, end_tree, diag)
     diag.update(parsed.diag)
     diag["parse_passes"] = len(emitter.parses)
     diag["sidecar_reads"] = sidecars.reads

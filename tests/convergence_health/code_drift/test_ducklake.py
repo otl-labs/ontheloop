@@ -25,7 +25,9 @@ from scripts.build_lambda_config import (
     _DUCKLAKE_MAINTENANCE_FUNCTION,
     _DUCKLAKE_MAINTENANCE_SMOKE_FUNCTION,
     _DUCKLAKE_READER_FUNCTION,
+    _DUCKLAKE_TELEMETRY_READER_FUNCTION,
     _DUCKLAKE_TELEMETRY_WRITER_FUNCTION,
+    _DUCKLAKE_TELEMETRY_WRITER_SMOKE_FUNCTION,
     _DUCKLAKE_WRITER_FUNCTION,
 )
 from scripts.convergence_health import (
@@ -42,6 +44,8 @@ _ALL_DUCKLAKE_FUNCTIONS = {
     _DUCKLAKE_MAINTENANCE_SMOKE_FUNCTION,
     _DUCKLAKE_CATALOG_DR_FUNCTION,
     _DUCKLAKE_TELEMETRY_WRITER_FUNCTION,
+    _DUCKLAKE_TELEMETRY_WRITER_SMOKE_FUNCTION,
+    _DUCKLAKE_TELEMETRY_READER_FUNCTION,
 }
 
 
@@ -174,6 +178,11 @@ class TestDetectDucklakeCodeDrift:
         from scripts.convergence_health.code_drift import DUCKLAKE_SOURCE_PATHSPECS
 
         assert "src/lambdas/ducklake_telemetry_writer" in DUCKLAKE_SOURCE_PATHSPECS
+
+    def test_telemetry_reader_source_directory_is_watched(self) -> None:
+        from scripts.convergence_health.code_drift import DUCKLAKE_SOURCE_PATHSPECS
+
+        assert "src/lambdas/ducklake_telemetry_reader" in DUCKLAKE_SOURCE_PATHSPECS
 
     def test_git_runner_receives_ducklake_source_pathspecs(self) -> None:
         stub = GitRunnerStub(head_latest="SHA_OLD", reachable={"SHA_OLD": "SHA_OLD"})

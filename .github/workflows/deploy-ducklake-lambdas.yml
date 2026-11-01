@@ -4,7 +4,7 @@ name: deploy-ducklake-lambdas
 # split added the maintenance-smoke function, bundled Decision amending Decision 81 clause 1).
 #
 # Realizes the Decision 125 "deploy code" verb: writer/reader/maintenance/maintenance-smoke/
-# catalog-dr/telemetry-writer code ships through this scoped, auditable path with post-deploy smoke gates and a
+# catalog-dr/telemetry-writer/telemetry-writer-smoke/telemetry-reader code ships through this scoped, auditable path with post-deploy smoke gates and a
 # deployment record -- retiring the local `bin/venv-python -m scripts.build_lambda --ducklake-only
 # --deploy` break-glass invocation as the ONLY route (it remains available as a genuinely
 # non-default fallback; see docs/contracts/build-lambda.yaml deploy_channels.ducklake_functions).
@@ -15,13 +15,13 @@ name: deploy-ducklake-lambdas
 # Triggers on push to main touching ducklake source, and on workflow_dispatch (operator-triggered
 # redeploy / recovery, e.g. after a stale-code drift alarm).
 #
-# FIVE-JOB SPLIT (hotfix follow-up to the 2026-07-24 ops_decisions incident): reconcile_columns
-# (src/common/ducklake_tables.py) derives its physical ALTER list from the field_semantics.yaml
-# BUNDLED INTO THE DEPLOYED ducklake_maintenance package -- so a serving deploy (writer/reader/telemetry-writer)
+# NINE-JOB TOPOLOGY (Decision 236, on the T2.38 five-job split after the 2026-07-24 ops_decisions incident):
+# reconcile_columns (src/common/ducklake_tables.py) derives its physical ALTER list from the field_semantics.yaml
+# BUNDLED INTO THE DEPLOYED ducklake_maintenance package -- so a serving deploy (writer/reader/telemetry functions)
 # that ships a new column must never land before maintenance has both received that column AND
 # had reconcile_columns run against it. A single ungated `deploy` job that redeployed every
 # function at once let a merged column reach the serving functions before the admin-tier
-# reconcile ever ran, taking ops_decisions hard-down for read AND write. The split:
+# reconcile ever ran, taking ops_decisions hard-down for read AND write. The jobs:
 #   1. deploy-maintenance: ungated (never blocked on the reconcile state -- maintenance must
 #      always ship, since it is what the reconcile ALTERs against). Builds + uploads ALL
 #      artifacts once (every function zip + the three layers), then deploys ONLY the two maintenance functions
@@ -43,18 +43,38 @@ name: deploy-ducklake-lambdas
 #      table).
 #   4. deploy-serving (needs reconcile-gate AND deploy-maintenance -- Actions cannot read a
 #      non-listed job's outputs): `--ducklake-deploy-only` skips build/upload entirely and deploys
-#      writer + reader + catalog-dr + telemetry-writer from the artifacts deploy-maintenance already uploaded (avoids
+#      writer + reader + catalog-dr from the artifacts deploy-maintenance already uploaded (avoids
 #      a double build/upload of the same artifacts, and desynchronising a deploy record's
 #      code_sha256 from the S3 bytes it names).
-#   5. smoke (needs deploy-serving AND maintenance-smoke, with !cancelled() so a red maintenance-smoke still lets the serving
-#      gates run and report; it never overlaps the owner step, and the two jobs never invoke the smoke catalog together): --lambda-attach + --lambda-reader, then --lambda-row-rules (rec-4158 plan B: chained
-#      on the reader step's one-line run body, so the R3 body baseline is untouched), then --lambda-telemetry (the
-#      telemetry writer's URL-only proof, incl. a denied direct invoke), narrowed to the serving functions' deploy records.
+#   5. deploy-telemetry-twin (needs deploy-maintenance): deploys the smoke-pinned telemetry writer twin, ungated on
+#      the reconcile state (it holds only smoke rows) like the maintenance functions.
+#   6. telemetry-twin-smoke (needs deploy-telemetry-twin, maintenance-smoke AND deploy-serving, with !cancelled() and
+#      the twin deployed): --lambda-telemetry-smoke, the twin's URL-only proof and the disposable deploy vectors on the
+#      smoke catalog. It runs after the owner step (Decision 216 cl.2) and never against a mid-update shared reader, whose
+#      smoke slot its blob read-back uses.
+#   7. smoke (needs deploy-serving, maintenance-smoke AND telemetry-twin-smoke, with !cancelled() so a red
+#      maintenance-smoke still lets the serving gates run and report; ordering only for the twin, so two jobs never
+#      write the smoke catalog together): --lambda-attach + --lambda-reader, then --lambda-row-rules (rec-4158 plan B:
+#      chained on the reader step's one-line run body, so the R3 body baseline is untouched), narrowed to the serving
+#      functions' deploy records.
+#   8. deploy-telemetry (needs reconcile-gate, telemetry-twin-smoke, deploy-maintenance, maintenance-smoke AND
+#      deploy-serving; success only): deploys the production telemetry-writer and telemetry-reader. It names
+#      maintenance-smoke and deploy-serving directly because a job's implicit success() sees only its direct needs and
+#      telemetry-twin-smoke runs under !cancelled(): a red maintenance gate or serving deploy therefore blocks the
+#      production telemetry deploy, which previously deployed in deploy-serving independent of the gate; intended:
+#      production telemetry never deploys past a red owner step. It also HOLDS (a green skip, deployed unset, telemetry-smoke
+#      skipped, TELEMETRY_PRODUCTION_HOLD notice) while a reconcile_scope=telemetry_catalog table has a pending column in the
+#      sidecar's pending_reconcile (validate_reconcile_pending_gate --telemetry-hold): the writer's MERGE names every declared
+#      column, so it must not ship before the owner-login provision_telemetry_catalog re-run has added it. Emptying the pending
+#      entry is a sidecar change under config/lambda/ducklake/**, a push path, so the next run ships the held functions.
+#   9. telemetry-smoke (needs deploy-telemetry AND smoke, with !cancelled() and deploy-telemetry deployed):
+#      --lambda-telemetry-production, the production writer's light gate (URL-only, production-bound, no test rows;
+#      PLAN-telemetry-production-flip), then --lambda-telemetry-reader. The heavy vectors run only in telemetry-twin-smoke.
 #
-# deploy-maintenance / deploy-serving:
+# deploy-maintenance / deploy-serving / deploy-telemetry-twin / deploy-telemetry:
 #   - T2.49 / DEP-12 (Decision 144): assumes the merged agent-platform-github-ci-deploy role
-#     (UpdateFunctionCode-only on the function:agent-platform-* prefix, covering all 8 functions
-#     -- the six ducklake + two prod; no lambda-config, no invoke, no terraform, no iam-write).
+#     (UpdateFunctionCode-only on the function:agent-platform-* prefix, covering all 10 functions
+#     -- the eight ducklake + two prod; no lambda-config, no invoke, no terraform, no iam-write).
 #     Shared with deploy-prod-lambdas.yml -- ONE role, ONE provisioning signal (see
 #     DEPLOY_ROLE_PROVISIONED below).
 #   - This role is IAM-SENSITIVE and lands via the human-gated tf-gated-apply Environment
@@ -70,7 +90,7 @@ name: deploy-ducklake-lambdas
 #     record (function -> CodeSha256 -> source git SHA; c3). Emits deployed=true only on a genuine
 #     successful deploy.
 #
-# maintenance-smoke / smoke (Decision 55 false-green avoidance):
+# maintenance-smoke / telemetry-twin-smoke / smoke / telemetry-smoke (Decision 55 false-green avoidance):
 #   - Each runs ONLY when its own deploy leg actually shipped code -- never on a bootstrap-window
 #     no-op.
 #   - Asserts deploy-record freshness (source_git_sha == github.sha) for its OWN function set
@@ -78,7 +98,7 @@ name: deploy-ducklake-lambdas
 #     of letting a skipped/no-op deploy report smoke-green.
 #   - Assumes agent-platform-github-ci-branch (reuses its existing DuckLakeInvokeCI writer+reader
 #     Function-URL invoke grant, plus the T2.18 c9 MaintenanceSmokeInvokeCI grant scoped to the
-#     smoke function ARN only and the TelemetryWriterInvokeCI grant for the telemetry writer -- the scoped deploy role above needs no invoke permission, which
+#     smoke function ARN only and the TelemetryWriterInvokeCI grant for the telemetry writer and its twin and the TelemetryReaderInvokeCI grant -- the scoped deploy role above needs no invoke permission, which
 #     keeps c1's "UpdateFunctionCode-only" literal).
 #   - A failed gate is a loud-fail (Decision 55): stop and RCA, never auto-retry into green.
 #
@@ -349,12 +369,149 @@ jobs:
         run: |
           set -euo pipefail
           python -m scripts.build_lambda --ducklake-only --deploy --ducklake-deploy-only \
-            --ducklake-functions agent-platform-ducklake-writer,agent-platform-ducklake-reader,agent-platform-ducklake-catalog-dr,agent-platform-ducklake-telemetry-writer \
+            --ducklake-functions agent-platform-ducklake-writer,agent-platform-ducklake-reader,agent-platform-ducklake-catalog-dr \
             --profile "" --bucket agent-platform-data-lake
           echo "deployed=true" >> "$GITHUB_OUTPUT"
 
+  deploy-telemetry-twin:
+    needs: deploy-maintenance
+    if: needs.deploy-maintenance.outputs.deployed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      deployed: ${{ steps.deploy_code.outputs.deployed }}
+    permissions:
+      id-token: write  # OIDC token minting for assume-role
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/aws-region
+
+      - name: Configure AWS credentials (OIDC -- merged deploy role, main only)
+        # Same bootstrap-window tolerance as deploy-maintenance, scoped by the SAME
+        # DEPLOY_ROLE_PROVISIONED repo variable (T2.49 / DEP-12, one shared role/signal).
+        id: oidc_deploy
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@v6
+        env:
+          MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Classify assume-role outcome (scope the tolerance to the genuinely-absent role)
+        if: steps.oidc_deploy.outcome != 'success'
+        env:
+          ROLE_PROVISIONED: ${{ vars.DEPLOY_ROLE_PROVISIONED }}
+        run: |
+          set -euo pipefail
+          if [ "$ROLE_PROVISIONED" = "true" ]; then
+            echo "::error::assume-role failed but DEPLOY_ROLE_PROVISIONED=true -- the merged agent-platform-github-ci-deploy role is expected to exist, so this is a real regression (trust/policy/throttle/federation), NOT the bootstrap window. Failing loud (Decision 55) rather than reporting a silent green no-op deploy."
+            exit 1
+          fi
+          echo "::warning::assume-role failed and DEPLOY_ROLE_PROVISIONED is not 'true' -- treating as the pre-provisioning bootstrap window (role genuinely absent). No deploy performed (deployed=false); the operator lands the gated apply and sets DEPLOY_ROLE_PROVISIONED=true to close this window."
+
+      - name: Setup Python 3.12
+        if: steps.oidc_deploy.outcome == 'success'
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install build_lambda runtime deps
+        if: steps.oidc_deploy.outcome == 'success'
+        run: pip install pyyaml pydantic
+
+      - name: Deploy the smoke telemetry writer twin from existing S3 artifacts (--ducklake-deploy-only)
+        # No build/upload here -- deploy-maintenance already built + uploaded all artifacts
+        # this run. Skipping the rebuild avoids the DOUBLE-BUILD hazard (re-uploading identical
+        # bytes and desynchronising a deploy record's code_sha256 from the S3 key it names).
+        id: deploy_code
+        if: steps.oidc_deploy.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python -m scripts.build_lambda --ducklake-only --deploy --ducklake-deploy-only \
+            --ducklake-functions agent-platform-ducklake-telemetry-writer-smoke \
+            --profile "" --bucket agent-platform-data-lake
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+
+  telemetry-twin-smoke:
+    needs: [deploy-telemetry-twin, maintenance-smoke, deploy-serving]
+    if: ${{ !cancelled() && needs.deploy-telemetry-twin.outputs.deployed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write  # OIDC token minting for assume-role
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/aws-region
+
+      - name: Configure AWS credentials (OIDC -- github_ci_branch role, DuckLake telemetry twin invoke)
+        uses: aws-actions/configure-aws-credentials@v6
+        env:
+          MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Assert deploy-record freshness (source_git_sha == github.sha, telemetry twin only)
+        # False-green guard (Decision 55), narrowed to THIS leg's own function set (see the
+        # loop below) -- the maintenance records are maintenance-smoke's concern.
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          for fn in agent-platform-ducklake-telemetry-writer-smoke; do
+            RECORD=$(aws s3 cp "s3://agent-platform-data-lake/deploy-records/ducklake/${fn}.json" - --region "$AWS_REGION")
+            ACTUAL_SHA=$(printf '%s' "$RECORD" | python3 -c "import json,sys; print(json.load(sys.stdin).get('source_git_sha') or '')")
+            if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+              echo "::error::DEPLOY_RECORD_STALE ${fn}: source_git_sha=${ACTUAL_SHA} != github.sha=${EXPECTED_SHA} -- a stale or skipped deploy cannot report smoke-green (Decision 55 false-green guard)." >&2
+              exit 1
+            fi
+            echo "OK ${fn} deploy record fresh: ${ACTUAL_SHA}"
+          done
+
+      - name: Resolve DuckLake telemetry twin Function URLs
+        # ducklake_neon_smoke_test._function_url resolves the Function URL from DUCKLAKE_{role}_URL
+        # env or `terraform output` only -- there is no AWS-API fallback, and this runner has no
+        # terraform-init'd checkout. Resolve the URLs via the AWS API (github_ci_branch holds
+        # lambda:GetFunctionUrlConfig via the branch role invoke grants) and export them for the smoke steps.
+        # The URLs are masked (Decision 101: a Function URL is an attack-surface hostname; keep it
+        # out of public CI logs). AWS_IAM auth still requires SigV4, so the URL alone is not a
+        # credential -- masking is defence-in-depth. (rec-2689)
+        run: |
+          set -euo pipefail
+          for role in telemetry_writer_smoke reader; do
+            URL=$(aws lambda get-function-url-config --function-name "agent-platform-ducklake-${role//_/-}" --region "$AWS_REGION" --query FunctionUrl --output text)
+            if [ -z "$URL" ] || [ "$URL" = "None" ]; then
+              echo "::error::Could not resolve the ${role} Function URL via get-function-url-config." >&2
+              exit 1
+            fi
+            echo "::add-mask::${URL}"
+            echo "DUCKLAKE_${role^^}_URL=${URL}" >> "$GITHUB_ENV"
+            echo "Resolved DUCKLAKE_${role^^}_URL (masked)."
+          done
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies (venv)
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Smoke test -- lambda-telemetry-smoke (telemetry writer twin URL-only proof)
+        run: .venv/bin/python -m scripts.ducklake_neon_smoke_test --lambda-telemetry-smoke
+
   smoke:
-    needs: [deploy-serving, maintenance-smoke]
+    needs: [deploy-serving, maintenance-smoke, telemetry-twin-smoke]
     if: ${{ !cancelled() && needs.deploy-serving.outputs.deployed == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -377,12 +534,12 @@ jobs:
 
       - name: Assert deploy-record freshness (source_git_sha == github.sha, serving functions only)
         # False-green guard (Decision 55), narrowed to THIS leg's own function set (writer,
-        # reader, catalog-dr, telemetry-writer) -- the maintenance records are maintenance-smoke's concern.
+        # reader, catalog-dr) -- the maintenance records are maintenance-smoke's concern.
         env:
           EXPECTED_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          for fn in agent-platform-ducklake-writer agent-platform-ducklake-reader agent-platform-ducklake-catalog-dr agent-platform-ducklake-telemetry-writer; do
+          for fn in agent-platform-ducklake-writer agent-platform-ducklake-reader agent-platform-ducklake-catalog-dr; do
             RECORD=$(aws s3 cp "s3://agent-platform-data-lake/deploy-records/ducklake/${fn}.json" - --region "$AWS_REGION")
             ACTUAL_SHA=$(printf '%s' "$RECORD" | python3 -c "import json,sys; print(json.load(sys.stdin).get('source_git_sha') or '')")
             if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
@@ -396,13 +553,13 @@ jobs:
         # ducklake_neon_smoke_test._function_url resolves the Function URL from DUCKLAKE_{role}_URL
         # env or `terraform output` only -- there is no AWS-API fallback, and this runner has no
         # terraform-init'd checkout. Resolve the URLs via the AWS API (github_ci_branch holds
-        # lambda:GetFunctionUrlConfig via DuckLakeInvokeCI and TelemetryWriterInvokeCI) and export them for the smoke steps.
+        # lambda:GetFunctionUrlConfig via DuckLakeInvokeCI) and export them for the smoke steps.
         # The URLs are masked (Decision 101: a Function URL is an attack-surface hostname; keep it
         # out of public CI logs). AWS_IAM auth still requires SigV4, so the URL alone is not a
         # credential -- masking is defence-in-depth. (rec-2689)
         run: |
           set -euo pipefail
-          for role in writer reader telemetry_writer; do
+          for role in writer reader; do
             URL=$(aws lambda get-function-url-config --function-name "agent-platform-ducklake-${role//_/-}" --region "$AWS_REGION" --query FunctionUrl --output text)
             if [ -z "$URL" ] || [ "$URL" = "None" ]; then
               echo "::error::Could not resolve the ${role} Function URL via get-function-url-config." >&2
@@ -430,5 +587,156 @@ jobs:
       - name: Smoke test -- lambda-reader (EC1/boundary closed reader path)
         run: .venv/bin/python -m scripts.ducklake_neon_smoke_test --lambda-reader && .venv/bin/python -m scripts.ducklake_neon_smoke_test --lambda-row-rules
 
-      - name: Smoke test -- lambda-telemetry (telemetry writer URL-only proof)
-        run: .venv/bin/python -m scripts.ducklake_neon_smoke_test --lambda-telemetry
+  deploy-telemetry:
+    needs: [reconcile-gate, telemetry-twin-smoke, deploy-maintenance, maintenance-smoke, deploy-serving]
+    if: needs.deploy-maintenance.outputs.deployed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      deployed: ${{ steps.deploy_code.outputs.deployed }}
+    permissions:
+      id-token: write  # OIDC token minting for assume-role
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/aws-region
+
+      - name: Configure AWS credentials (OIDC -- merged deploy role, main only)
+        # Same bootstrap-window tolerance as deploy-maintenance, scoped by the SAME
+        # DEPLOY_ROLE_PROVISIONED repo variable (T2.49 / DEP-12, one shared role/signal).
+        id: oidc_deploy
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@v6
+        env:
+          MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Classify assume-role outcome (scope the tolerance to the genuinely-absent role)
+        if: steps.oidc_deploy.outcome != 'success'
+        env:
+          ROLE_PROVISIONED: ${{ vars.DEPLOY_ROLE_PROVISIONED }}
+        run: |
+          set -euo pipefail
+          if [ "$ROLE_PROVISIONED" = "true" ]; then
+            echo "::error::assume-role failed but DEPLOY_ROLE_PROVISIONED=true -- the merged agent-platform-github-ci-deploy role is expected to exist, so this is a real regression (trust/policy/throttle/federation), NOT the bootstrap window. Failing loud (Decision 55) rather than reporting a silent green no-op deploy."
+            exit 1
+          fi
+          echo "::warning::assume-role failed and DEPLOY_ROLE_PROVISIONED is not 'true' -- treating as the pre-provisioning bootstrap window (role genuinely absent). No deploy performed (deployed=false); the operator lands the gated apply and sets DEPLOY_ROLE_PROVISIONED=true to close this window."
+
+      - name: Setup Python 3.12
+        if: steps.oidc_deploy.outcome == 'success'
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install build_lambda runtime deps
+        if: steps.oidc_deploy.outcome == 'success'
+        run: pip install pyyaml pydantic
+
+      - name: Production column hold (a declared telemetry column still awaiting its production add)
+        # The production writer's MERGE names every declared column and its light gate checks live == declared, so the new
+        # writer must not ship before the owner-login provision_telemetry_catalog re-run has added the column. Static and
+        # zero-egress: reads the sidecar's pending_reconcile for reconcile_scope=telemetry_catalog tables. A hold is a GREEN
+        # skip (deployed stays unset, telemetry-smoke skips), so an expected hold never wakes ci-rca; a malformed sidecar is red.
+        id: hold
+        if: steps.oidc_deploy.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python -m scripts.checks.ops_governance.validate_reconcile_pending_gate --telemetry-hold | tee -a "$GITHUB_OUTPUT"
+          if grep -qx 'held=true' "$GITHUB_OUTPUT"; then
+            echo "::notice::TELEMETRY_PRODUCTION_HOLD - the production telemetry writer and reader are not redeployed until the pending column is added (docs/contracts/deploy-paths.yaml, code-deploy recovery)."
+          fi
+
+      - name: Deploy the production telemetry functions from existing S3 artifacts (--ducklake-deploy-only)
+        # No build/upload here -- deploy-maintenance already built + uploaded all artifacts
+        # this run. Skipping the rebuild avoids the DOUBLE-BUILD hazard (re-uploading identical
+        # bytes and desynchronising a deploy record's code_sha256 from the S3 key it names).
+        id: deploy_code
+        if: steps.oidc_deploy.outcome == 'success' && steps.hold.outputs.held == 'false'
+        run: |
+          set -euo pipefail
+          python -m scripts.build_lambda --ducklake-only --deploy --ducklake-deploy-only \
+            --ducklake-functions agent-platform-ducklake-telemetry-writer,agent-platform-ducklake-telemetry-reader \
+            --profile "" --bucket agent-platform-data-lake
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+
+  telemetry-smoke:
+    needs: [deploy-telemetry, smoke]
+    if: ${{ !cancelled() && needs.deploy-telemetry.outputs.deployed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write  # OIDC token minting for assume-role
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/aws-region
+
+      - name: Configure AWS credentials (OIDC -- github_ci_branch role, DuckLake telemetry writer and reader invoke)
+        uses: aws-actions/configure-aws-credentials@v6
+        env:
+          MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Assert deploy-record freshness (source_git_sha == github.sha, production telemetry only)
+        # False-green guard (Decision 55), narrowed to THIS leg's own function set (see the
+        # loop below) -- the maintenance records are maintenance-smoke's concern.
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          for fn in agent-platform-ducklake-telemetry-writer agent-platform-ducklake-telemetry-reader; do
+            RECORD=$(aws s3 cp "s3://agent-platform-data-lake/deploy-records/ducklake/${fn}.json" - --region "$AWS_REGION")
+            ACTUAL_SHA=$(printf '%s' "$RECORD" | python3 -c "import json,sys; print(json.load(sys.stdin).get('source_git_sha') or '')")
+            if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+              echo "::error::DEPLOY_RECORD_STALE ${fn}: source_git_sha=${ACTUAL_SHA} != github.sha=${EXPECTED_SHA} -- a stale or skipped deploy cannot report smoke-green (Decision 55 false-green guard)." >&2
+              exit 1
+            fi
+            echo "OK ${fn} deploy record fresh: ${ACTUAL_SHA}"
+          done
+
+      - name: Resolve DuckLake production telemetry Function URLs
+        # ducklake_neon_smoke_test._function_url resolves the Function URL from DUCKLAKE_{role}_URL
+        # env or `terraform output` only -- there is no AWS-API fallback, and this runner has no
+        # terraform-init'd checkout. Resolve the URLs via the AWS API (github_ci_branch holds
+        # lambda:GetFunctionUrlConfig via the branch role invoke grants) and export them for the smoke steps.
+        # The URLs are masked (Decision 101: a Function URL is an attack-surface hostname; keep it
+        # out of public CI logs). AWS_IAM auth still requires SigV4, so the URL alone is not a
+        # credential -- masking is defence-in-depth. (rec-2689)
+        run: |
+          set -euo pipefail
+          for role in telemetry_writer telemetry_reader reader; do
+            URL=$(aws lambda get-function-url-config --function-name "agent-platform-ducklake-${role//_/-}" --region "$AWS_REGION" --query FunctionUrl --output text)
+            if [ -z "$URL" ] || [ "$URL" = "None" ]; then
+              echo "::error::Could not resolve the ${role} Function URL via get-function-url-config." >&2
+              exit 1
+            fi
+            echo "::add-mask::${URL}"
+            echo "DUCKLAKE_${role^^}_URL=${URL}" >> "$GITHUB_ENV"
+            echo "Resolved DUCKLAKE_${role^^}_URL (masked)."
+          done
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies (venv)
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Smoke test -- lambda-telemetry-production (telemetry writer light production gate)
+        run: .venv/bin/python -m scripts.ducklake_neon_smoke_test --lambda-telemetry-production
+
+      - name: Smoke test -- lambda-telemetry-reader (telemetry reader production-pinned READ_ONLY proof)
+        run: .venv/bin/python -m scripts.ducklake_neon_smoke_test --lambda-telemetry-reader

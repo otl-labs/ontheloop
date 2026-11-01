@@ -21,6 +21,7 @@ _SHA = SHA_PATTERN[1:-1].replace("(", "(?:", 1)
 _PIN_LINE = re.compile(
     rf"\[{PIN_SCRIPT_STEM}\] capture pin checkout=({_SHA}|unknown) base=({_SHA}|unknown) dirty=(true|false|unknown)"
 )
+LATE_PIN_EXEMPT = ("SessionStart:resume", "SessionStart:compact")
 Facts = tuple[str | None, str | None, bool | None]
 NO_FACTS: Facts = (None, None, None)
 
@@ -60,7 +61,12 @@ def _last_pin(recs: list[Rec], root: bool, diag: Counter[str]) -> Facts:
 def open_provenance(stream: Stream, root: bool, diag: Counter[str]) -> Facts:
     """Rule PV-2: the LAST pin attachment before the stream's first prompt record (sub-agents carry none, uncounted)."""
     first = next((r.line for r in stream.recs if r.kind == "prompt"), None)
-    return _last_pin([r for r in stream.hooks if first is None or r.line < first], root, diag)
+    before = [r for r in stream.hooks if first is None or r.line < first]
+    if root and first is not None and not any(_is_pin(r) for r in before):
+        late = (r for r in stream.hooks if r.line > first and _is_pin(r))
+        if any(not str(r.data["attachment"].get("hookName")).startswith(LATE_PIN_EXEMPT) for r in late):
+            diag["pin_after_first_prompt"] += 1
+    return _last_pin(before, root, diag)
 
 
 def resume_provenance(stream: Stream, resume: Rec, root: bool, diag: Counter[str]) -> Facts:

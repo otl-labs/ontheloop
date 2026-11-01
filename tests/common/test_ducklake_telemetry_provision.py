@@ -54,7 +54,7 @@ class FakeCon:
         counts: dict[str, int] | None = None,
         counters: dict[str, list[int]] | None = None,
         extra_tables: tuple[str, ...] = (),
-        pg_row: tuple[Any, ...] = (0, True, False, False),
+        pg_row: tuple[Any, ...] = (0, True, False, False, True, "ducklake_ops"),
     ) -> None:
         self.pg_row = pg_row
         self.sql: list[str] = []
@@ -252,9 +252,9 @@ def test_provision_reports_counters_and_tables() -> None:
 
 
 def test_ownership_report_sql_and_fields() -> None:
-    con = FakeCon(pg_row=(2, False, True, True))
-    report = prov.ownership_report(con, meta_schema="ducklake_smoke", scoped_login="ducklake_telemetry_writer")
-    assert report == prov.OwnershipReport(2, False, True, True)
+    con = FakeCon(pg_row=(2, False, True, True, False, "ducklake_ops"))
+    report = prov.ownership_report(con, meta_schema="ducklake_smoke", scoped_logins=("ducklake_telemetry_writer",))
+    assert report == prov.OwnershipReport(2, False, True, True, False, "ducklake_ops")
     sql = next(s for s in con.sql if "postgres_query" in s)
     assert "''ducklake_smoke''" in sql and "''ducklake_telemetry_writer''" in sql and "relkind IN" in sql
     assert (
@@ -264,7 +264,41 @@ def test_ownership_report_sql_and_fields() -> None:
         and "__ducklake_metadata_ops_catalog" in sql
     )
     clean = prov.ownership_report(FakeCon(), meta_schema="ducklake_smoke")
-    assert clean == prov.OwnershipReport(0, True, False, False)
+    assert clean == prov.OwnershipReport(0, True, False, False, True, "ducklake_ops")
+
+
+def test_ownership_report_names_and_holds_the_owner_through_role_membership() -> None:
+    con = FakeCon(pg_row=(0, False, False, False, True, "ducklake_smoke_owner"))
+    report = prov.ownership_report(con, meta_schema="ducklake_smoke")
+    assert report.schema_owner == "ducklake_smoke_owner"
+    assert report.schema_owner_held is True and report.schema_owner_is_current_user is False
+    sql = next(s for s in con.sql if "postgres_query" in s)
+    assert "pg_has_role(current_user, n.nspowner, ''SET'')" in sql
+    assert "n.nspowner::regrole::text" in sql
+
+
+def test_ownership_report_flags_create_for_any_listed_scoped_login() -> None:
+    con = FakeCon(pg_row=(0, True, True, False, True, "ducklake_ops"))
+    report = prov.ownership_report(
+        con, meta_schema="ducklake_telemetry", scoped_logins=("ducklake_telemetry_writer_prod", "ducklake_telemetry_reader")
+    )
+    assert report.scoped_create_on_schema is True and report.scoped_create_on_public is False
+    sql = next(s for s in con.sql if "postgres_query" in s)
+    for login in ("ducklake_telemetry_writer_prod", "ducklake_telemetry_reader"):
+        assert f"to_regrole(''{login}'')" in sql
+    assert sql.count(" OR ") >= 2
+
+
+def test_ownership_report_treats_an_absent_scoped_login_as_holding_no_create() -> None:
+    con = FakeCon()
+    prov.ownership_report(con, meta_schema="ducklake_telemetry", scoped_logins=("ducklake_telemetry_reader",))
+    sql = next(s for s in con.sql if "postgres_query" in s)
+    assert (
+        "COALESCE(has_schema_privilege(to_regrole(''ducklake_telemetry_reader''), ''ducklake_telemetry'', ''CREATE''), false)"
+        in sql
+    )
+    assert "COALESCE(has_schema_privilege(to_regrole(''ducklake_telemetry_reader''), ''public'', ''CREATE''), false)" in sql
+    assert "has_schema_privilege(''ducklake_telemetry_reader''" not in sql
 
 
 def test_session_can_create_reads_current_user() -> None:
@@ -280,7 +314,7 @@ def test_identifier_guard_refuses_unsafe_names() -> None:
         with pytest.raises(DuckLakeRuntimeError, match="unsafe"):
             prov.ownership_report(con, meta_schema=bad)
         with pytest.raises(DuckLakeRuntimeError, match="unsafe"):
-            prov.ownership_report(con, meta_schema="ducklake_smoke", scoped_login=bad)
+            prov.ownership_report(con, meta_schema="ducklake_smoke", scoped_logins=(bad,))
         with pytest.raises(DuckLakeRuntimeError, match="unsafe"):
             prov.session_can_create(con, meta_schema=bad)
         assert not con.sql

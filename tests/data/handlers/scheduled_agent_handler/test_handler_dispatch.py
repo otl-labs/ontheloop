@@ -323,3 +323,26 @@ class TestHandler:
         mock_gh.assert_not_called()
         assert result["agents_run"] == 0
         assert result["agents_failed"] == 2
+
+
+class TestHandlerGating:
+    """Disabled short-circuit and force_agent selection of handler()."""
+
+    def test_disabled_flag_short_circuits_before_loading_the_manifest(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SCHEDULED_AGENTS_ENABLED", "false")
+        with patch.object(handler_mod, "_load_manifest") as load_manifest:
+            result = handler({}, None)
+        assert result["status"] == "disabled"
+        load_manifest.assert_not_called()
+
+    def test_force_agent_bypasses_the_cron_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SCHEDULED_AGENTS_ENABLED", "true")
+        agents = [{"name": "forced", "enabled": False}, {"name": "other", "enabled": False}]
+        with (
+            patch.object(handler_mod, "_load_manifest", return_value=agents),
+            patch("scripts.run_scheduled_agent.is_agent_due") as is_due,
+        ):
+            result = handler({"force_agent": "forced"}, None)
+        is_due.assert_not_called()
+        assert result["agents_run"] == 0
+        assert result["agents_failed"] == 0

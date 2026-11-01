@@ -1,9 +1,9 @@
 """Live census of the ops contracts' declared rules against the warehouse (rec-4158 plan A).
 
 Compiles every non-exempt rule scripts.contract_rules declares for ops_recommendations and ops_decisions into a DQ
-Check -- the same FROM form and created_timestamp >= DATE gate scripts/data_quality_compile.py's expression branch
-emits -- and runs them through the DQ harness (scripts.data_quality_execute.run_checks; no new reader client). Read
-only. Exit 0 only on a complete all-PASS run with zero violators; exit 1 when any rule has violators; exit 2 for
+Check (a dq_check kind and bound params; the reader owns the SQL and the created_timestamp >= DATE gate) and runs them
+through the DQ harness (scripts.data_quality_execute.run_checks; no new reader client). Read only. Exit 0 only on a
+complete all-PASS run with zero violators; exit 1 when any rule has violators; exit 2 for
 anything that is not a clean answer (SKIP, UNAVAILABLE, ERROR, an empty compiled set, a count mismatch) -- never a
 silent pass (Decision 55). A violator under a declared date is a STOP back to /plan (Decision 210 cl.4).
 """
@@ -17,76 +17,40 @@ from dataclasses import dataclass
 from typing import Any
 
 from scripts.contract_rules import DeclaredRule, declared_rules
-from scripts.data_quality_compile import to_ducklake_sql
 from scripts.data_quality_execute import run_checks
-from scripts.data_quality_models import Check
+from scripts.data_quality_models import Check, dq_request
 
-DATABASE = "agent_platform"
 TABLES = ("ops_recommendations", "ops_decisions")
 EXIT_OK, EXIT_VIOLATIONS, EXIT_UNCLEAN = 0, 1, 2
 
 
-def _whitespace_class() -> str:
-    """The RE2 character-class body equal to exactly the characters str.isspace() accepts."""
-    codes = [i for i in range(0x110000) if chr(i).isspace()]
-    parts: list[str] = []
-    start = prev = codes[0]
-    for code in codes[1:] + [None]:  # type: ignore[list-item]
-        if code is not None and code == prev + 1:
-            prev = code
-            continue
-        parts.append(f"\\x{{{start:x}}}" if start == prev else f"\\x{{{start:x}}}-\\x{{{prev:x}}}")
-        if code is not None:
-            start = prev = code
-    return "".join(parts)
-
-
-WHITESPACE_CLASS = _whitespace_class()
-
-
-def _lit(value: Any) -> str:
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-def _strip_len(column: str) -> str:
-    ws = WHITESPACE_CLASS
-    return f"LENGTH(regexp_replace({column}, {_lit(f'^[{ws}]+|[{ws}]+$')}, '', 'g'))"
-
-
-def _pattern(rule: DeclaredRule) -> str:
-    return rule.params["pattern" if rule.kind == "array_element_format" else "value"]
-
-
-def violation_condition(rule: DeclaredRule) -> str:
-    """The SQL boolean that is TRUE for a row that violates the rule (a NULL value is not_null's concern)."""
-    col = rule.column
-    if rule.kind == "not_null":
-        return f"{col} IS NULL"
+def _kind_params(rule: DeclaredRule) -> dict[str, Any]:
+    """The dq_check params for a declared rule (the reader owns the predicate; a gate rides as exclude_before)."""
+    params: dict[str, Any] = {"column": rule.column}
     if rule.kind == "accepted_values":
-        values = ", ".join(_lit(v) for v in rule.params["values"])
-        return f"{col} IS NOT NULL AND {col} NOT IN ({values})"
-    if rule.kind == "min_length":
-        return f"{col} IS NOT NULL AND {_strip_len(col)} < {int(rule.params['value'])}"
-    if rule.kind == "pattern":
-        return f"{col} IS NOT NULL AND NOT regexp_full_match({col}, {_lit(_pattern(rule))})"
-    if rule.kind == "array_element_format":
-        bad = f"x IS NULL OR NOT regexp_full_match(x, {_lit(_pattern(rule))})"
-        return f"{col} IS NOT NULL AND len(list_filter({col}, x -> {bad})) > 0"
-    if rule.kind == "not_before":
-        other = rule.params["value"]
-        return f"{col} IS NOT NULL AND {other} IS NOT NULL AND {col} < {other}"
-    raise ValueError(f"{rule.table}.{rule.column}: rule kind {rule.kind!r} has no census predicate and no exemption")
+        params["values"] = [str(v) for v in rule.params["values"]]
+    elif rule.kind == "min_length":
+        params["value"] = int(rule.params["value"])
+    elif rule.kind == "pattern":
+        params["value"] = rule.params["value"]
+    elif rule.kind == "array_element_format":
+        params["pattern"] = rule.params["pattern"]
+    elif rule.kind == "not_before":
+        params["value"] = rule.params["value"]
+    elif rule.kind != "not_null":
+        raise ValueError(f"{rule.table}.{rule.column}: rule kind {rule.kind!r} has no census check kind and no exemption")
+    if rule.exclude_before:
+        params["exclude_before"] = rule.exclude_before
+    return params
 
 
 def compile_rule(rule: DeclaredRule) -> Check:
-    gate = f" AND created_timestamp >= DATE('{rule.exclude_before}')" if rule.exclude_before else ""
-    query_table = f"{DATABASE}.{rule.table}_current"
-    sql = f"SELECT COUNT(*) AS violation FROM {query_table} WHERE ({violation_condition(rule)}){gate}"
     return Check(
         table=rule.table,
         column=rule.column,
         test_type=rule.kind,
-        sql=to_ducklake_sql(sql, rule.table, DATABASE),
+        kind=rule.kind,
+        params=_kind_params(rule),
         description=f"{rule.table}.{rule.column}: {rule.kind}",
         severity="error",
         enforced=True,
@@ -130,7 +94,7 @@ def census(tables: tuple[str, ...], *, dry_run: bool = False) -> tuple[int, list
             lines.append(f"EXEMPT  {rule.table}.{rule.column} {rule.kind} class={(rule.exemption or {}).get('class')}")
     if dry_run:
         for plan in plans:
-            lines.extend(f"-- {c.table}.{c.column} {c.test_type}\n{c.sql}" for c in plan.checks)
+            lines.extend(f"-- {c.table}.{c.column} {c.test_type}\n{json.dumps(dq_request(c))}" for c in plan.checks)
         return EXIT_OK, lines, rows
     all_checks = [c for p in plans for c in p.checks]
     run = run_checks(all_checks)
@@ -157,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--table", choices=TABLES, help="census one table (default: both)")
     parser.add_argument("--json", action="store_true", help="print the per-rule results as JSON")
-    parser.add_argument("--dry-run", action="store_true", help="print the compiled SQL; no reader is contacted")
+    parser.add_argument("--dry-run", action="store_true", help="print the dq_check requests; no reader is contacted")
     args = parser.parse_args(argv)
     tables = (args.table,) if args.table else TABLES
     try:

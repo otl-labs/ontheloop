@@ -326,7 +326,10 @@ class TestPreflightReportWiring:
             patch("scripts.preflight.env_git.get_git_status", return_value=("claude/test", False, [])),
             patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="ok"),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch("scripts.preflight.context_docs.read_context_files", return_value={}),
             patch("scripts.preflight.ci_rca_signals._check_ci_rca_liveness", return_value=None),
             patch("builtins.print"),

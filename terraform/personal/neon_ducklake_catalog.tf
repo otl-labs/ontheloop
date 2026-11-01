@@ -32,21 +32,15 @@
 #      the guard fail-closes, so it cannot auto-apply):
 #        terraform apply -target=aws_iam_role_policy.github_ci_apply   # from the admin container
 # After Phase 0, Phase 1 auto-applies cleanly: the neon-api-key secret + the apply-role grant already
-# exist (the provider data source resolves at plan time), and the Neon creates + DSN-secret create
-# return guard exit 0.
+# exist, and the Neon creates + DSN-secret create return guard exit 0.
 
-# The neon provider is pinned in main.tf's required_providers block (Terraform allows only one such
-# block per module). Its checksums are committed in .terraform.lock.hcl (supply-chain control).
+# The neon provider and its pin live in providers.tf (required_providers allows one block per module). Its
+# checksums are committed in .terraform.lock.hcl (supply-chain control).
 #
-# Neon provider API key, read from the out-of-band Secrets Manager secret (Phase 0). This data source
-# resolves at plan time; it is NOT a Terraform-managed resource (no provider->resource cycle).
-data "aws_secretsmanager_secret_version" "neon_api_key" {
-  secret_id = "neon-api-key"
-}
-
-provider "neon" {
-  api_key = data.aws_secretsmanager_secret_version.neon_api_key.secret_string
-}
+# Neon provider API key: the ephemeral input variable var.neon_api_key (providers.tf), supplied per run (trusted CI
+# fetches it with scripts/ci/neon_api_key.sh; the admin loop follows deploy-paths admin_out_of_band;
+# pattern: secret-material-handling provider_credential_ephemeral_input). It is never in state or a saved plan.
+# The provider pin stays at 0.13.0: the configure-time ephemeral spike is valid for that version only.
 
 # ---------------------------------------------------------------------------
 # Neon project -- the catalog. Free tier: 0.5 GB storage, 100 CU-hours/mo, scale-to-zero. pg_version
@@ -117,9 +111,8 @@ resource "aws_secretsmanager_secret" "ducklake_neon_catalog_dsn" {
   }
 }
 
-resource "aws_secretsmanager_secret_version" "ducklake_neon_catalog_dsn" {
-  secret_id = aws_secretsmanager_secret.ducklake_neon_catalog_dsn.id
-  secret_string = jsonencode({
+locals {
+  ducklake_neon_dsn_document = jsonencode({
     dsn         = local.ducklake_neon_dsn
     host        = neon_project.ducklake_catalog.database_host
     dbname      = neon_database.ducklake_ops.name
@@ -128,6 +121,24 @@ resource "aws_secretsmanager_secret_version" "ducklake_neon_catalog_dsn" {
     sslmode     = "require"
     meta_schema = "ducklake_ops"
   })
+}
+
+resource "aws_secretsmanager_secret_version" "ducklake_neon_catalog_dsn" {
+  secret_id     = aws_secretsmanager_secret.ducklake_neon_catalog_dsn.id
+  secret_string = local.ducklake_neon_dsn_document
+}
+
+resource "aws_ssm_parameter" "ducklake_neon_catalog_dsn" {
+  name        = "/secret/ducklake-neon-catalog-dsn"
+  type        = "SecureString"
+  tier        = "Standard"
+  value       = local.ducklake_neon_dsn_document
+  description = "DuckLake Neon catalog DSN (direct endpoint, sslmode=require). ROTATION: quarterly, calendar-reminded -- the Neon role password does not auto-rotate (CD.34 / Decision 37)."
+
+  tags = {
+    Name    = "DuckLake Neon Catalog DSN"
+    Purpose = "DuckLake catalog T2.16b CD.34 -- Lambda/smoke-test runtime-fetch"
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -152,6 +163,42 @@ resource "aws_secretsmanager_secret" "ducklake_telemetry_writer_dsn" {
 }
 
 # ---------------------------------------------------------------------------
+# Production telemetry catalog logins (Decision 230) -- CONTAINERS only, no aws_secretsmanager_secret_version,
+# for the same SECRET-VALUE-OUT-OF-BAND reason as the writer secret above. Each value is written by the admin and
+# applied to its role by provision_telemetry_login.
+# ---------------------------------------------------------------------------
+
+resource "aws_secretsmanager_secret" "ducklake_telemetry_writer_prod_dsn" {
+  name        = "agent-platform-ducklake-telemetry-writer-prod-dsn"
+  description = "DuckLake telemetry writer scoped login for the production telemetry catalog (DML-only on the ducklake_telemetry metadata schema). Value written out of band by the admin. ROTATION: quarterly, manual, via provision_telemetry_login."
+
+  tags = {
+    Name    = "DuckLake Telemetry Writer Prod DSN"
+    Purpose = "Decision 230 scoped catalog login - runtime-fetch by the telemetry writer after the flip"
+  }
+}
+
+resource "aws_secretsmanager_secret" "ducklake_telemetry_reader_dsn" {
+  name        = "agent-platform-ducklake-telemetry-reader-dsn"
+  description = "DuckLake telemetry reader scoped login (SELECT-only on the ducklake_telemetry metadata schema). Value written out of band by the admin. ROTATION: quarterly, manual, via provision_telemetry_login."
+
+  tags = {
+    Name    = "DuckLake Telemetry Reader DSN"
+    Purpose = "Decision 230 scoped catalog login - runtime-fetch by the telemetry reader"
+  }
+}
+
+resource "aws_secretsmanager_secret" "ducklake_smoke_maintainer_dsn" {
+  name        = "agent-platform-ducklake-smoke-maintainer-dsn"
+  description = "DuckLake smoke maintainer scoped login (one owner-role grant for the smoke catalog maintenance function). Value written out of band by the admin. ROTATION: quarterly, manual, via provision_telemetry_login."
+
+  tags = {
+    Name    = "DuckLake Smoke Maintainer DSN"
+    Purpose = "Decision 230 scoped catalog login - runtime-fetch by the smoke maintenance function"
+  }
+}
+
+# ---------------------------------------------------------------------------
 # Outputs -- consumed by the T2.16b smoke test + the T2.17 Lambda runtime.
 # ---------------------------------------------------------------------------
 
@@ -163,4 +210,9 @@ output "ducklake_neon_catalog_dsn_secret_arn" {
 output "ducklake_neon_catalog_host_direct" {
   description = "Neon DIRECT (unpooled) endpoint host for the DuckLake catalog. Catalog writes use this host (multi-statement DuckLake txns vs transaction-mode pooling)."
   value       = neon_project.ducklake_catalog.database_host
+}
+
+output "ducklake_neon_catalog_dsn_parameter_name" {
+  description = "SSM SecureString parameter name of the DuckLake Neon catalog DSN JSON (Decision 237); nothing reads it until secrets-to-ssm-cutover."
+  value       = aws_ssm_parameter.ducklake_neon_catalog_dsn.name
 }

@@ -6,7 +6,6 @@ output, failure text included."""
 
 from __future__ import annotations
 
-import base64
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -31,7 +30,6 @@ MARKERS = (
     "TELEMETRY_BLOB_S3_REJECTS_OK",
     "TELEMETRY_BLOB_BOUNDS_OK",
     "TELEMETRY_BLOB_AUTOREGISTER_OK",
-    "TELEMETRY_BLOB_READBACK_OK",
 )
 LEAKS = (
     r"https?://",
@@ -63,7 +61,6 @@ class Wired:
 def wired(monkeypatch: pytest.MonkeyPatch) -> Wired:
     live = LiveFake().activate(monkeypatch)
     live.register(REF, PROJECT)
-    monkeypatch.setenv("DUCKLAKE_READER_URL", "https://reader.invalid")
     state = Wired(live)
     monkeypatch.setattr(core, "_sigv4_invoke", state.invoke)
     return state
@@ -89,22 +86,24 @@ def test_vectors_pass_on_a_consistent_writer(wired: Wired, capsys: pytest.Captur
     out = gate_output(capsys.readouterr().out)
     for marker in MARKERS:
         assert marker in out, marker
-    for measure in ("blob_grant_ms", "blob_put_ms", "blob_append_ms", "blob_read_ms"):
+    for measure in ("blob_grant_ms", "blob_put_ms", "blob_append_ms"):
         assert re.search(rf"^{measure}=\d+$", out, re.MULTILINE), measure
     begins = [p for p in wired.sent if p["action"] == "begin_blobs"]
     assert begins and sum(1 for p in begins if p["project_ref"].startswith("repo:deploy-smoke-blob-")) == 3
     assert wired.live.store.blobs, "the delivered object is stored"
 
 
-def test_readback_reassembles_on_a_consistent_reader(wired: Wired, capsys: pytest.CaptureFixture[str]) -> None:
+def test_blob_vectors_read_nothing_through_a_reader(
+    wired: Wired, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    resolved: list[str] = []
+    real = core._function_url
+    monkeypatch.setattr(core, "_function_url", lambda role: resolved.append(role) or real(role))
     run()
-    assert "TELEMETRY_BLOB_READBACK_OK" in capsys.readouterr().out
-    reads = [p["params"] for p in wired.sent if p["action"] == "named_read"]
-    assert {p["offset"] for p in reads} >= {0, vec.CHUNK_BYTES} and all(p["max_bytes"] == vec.CHUNK_BYTES for p in reads)
-    assert any(p["offset"] == vec.MULTI_CHUNK_BYTES for p in reads), "an offset at the size is probed"
-    content = vec.multi_chunk_content("t").encode("utf-8")
-    assert len(content) == vec.MULTI_CHUNK_BYTES and content[vec.CHUNK_BYTES - 2 : vec.CHUNK_BYTES + 2].decode("utf-8")
-    assert b"\\" in content and b'"' in content and b"\n" in content
+    out = gate_output(capsys.readouterr().out)
+    assert "READBACK" not in out and "blob_read_ms" not in out
+    assert wired.sent and not [p for p in wired.sent if p["action"] == "named_read"]
+    assert not [role for role in resolved if "reader" in role]
 
 
 def _misdeclared(payload: dict[str, Any]) -> bool:
@@ -180,27 +179,6 @@ def test_put_failure_names_the_s3_code(wired: Wired, monkeypatch: pytest.MonkeyP
     assert "kind=proxy status=403" in failure(wired)
 
 
-def _readback_override(wired: Wired, break_: str) -> Any:
-    def reader_answer(payload: dict[str, Any]) -> Any:
-        if payload["action"] != "named_read" or payload["params"]["offset"] >= vec.MULTI_CHUNK_BYTES:
-            return None
-        if break_ == "readback_pages":
-            return _Resp(500, {"ok": False, "error_type": "blob_integrity", "reason": "checksum_mismatch"})
-        if break_ == "readback_drops_a_chunk" and payload["params"]["offset"] != vec.CHUNK_BYTES:
-            return None
-        body = wired.live.invoke("u", payload).json()
-        page = body["rows"][0]
-        if break_ == "readback_drops_a_chunk":
-            page.update(length=0, data="")
-        else:
-            raw = bytearray(base64.b64decode(page["data"]))
-            raw[0] ^= 1
-            page["data"] = base64.b64encode(bytes(raw)).decode("ascii")
-        return _Resp(200, body)
-
-    return reader_answer
-
-
 @pytest.mark.parametrize(
     ("break_", "needle"),
     [
@@ -215,9 +193,6 @@ def _readback_override(wired: Wired, break_: str) -> Any:
         ("size_mismatch_grants", "size-mismatch begin_blobs status=200"),
         ("bounds_pass", "too_many_items"),
         ("signed_headers", "does not sign exactly"),
-        ("readback_wrong_bytes", "read-back bytes differ"),
-        ("readback_drops_a_chunk", "read-back took"),
-        ("readback_pages", "read-back status=500"),
     ],
 )
 def test_each_divergence_fails_loudly(wired: Wired, monkeypatch: pytest.MonkeyPatch, break_: str, needle: str) -> None:
@@ -271,8 +246,6 @@ def test_each_divergence_fails_loudly(wired: Wired, monkeypatch: pytest.MonkeyPa
         wired.override = lambda payload: (
             _Resp(200, {"ok": True, "items": []}) if payload["action"] == "begin_blobs" and _misdeclared(payload) else None
         )
-    elif break_.startswith("readback_"):
-        wired.override = _readback_override(wired, break_)
     elif break_ == "bounds_pass":
         wired.override = lambda payload: _Resp(200, {"ok": True}) if len(payload.get("items", [])) > 200 else None
     else:

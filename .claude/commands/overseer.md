@@ -90,7 +90,8 @@ regardless.
 
 Apply the skill's Lifecycle and Gates exception path: a slice BLOCKED or FAILED twice routes to the
 `executor-rca` skill and escalates to the human -- never a third silent retry. Apply the
-halt-on-open-ci_rca gate before dispatching any new slice.
+halt-on-open-ci_rca gate (scripts.ci_rca.red_overlap, Decision 226) before every dispatch: --plan <plan> for an
+/implement slice, no arguments for a /plan slice (the global rules only; its Step 8 then checks overlap).
 
 ## Step 7: Aggregate
 

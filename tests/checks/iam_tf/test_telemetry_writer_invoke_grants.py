@@ -1,4 +1,5 @@
-"""CI invoke grants on the telemetry writer (PLAN-telemetry-writer-function).
+"""CI invoke grants on the telemetry writer, its smoke twin and the telemetry reader (PLAN-telemetry-writer-function,
+PLAN-telemetry-reader-and-smoke-twin).
 
 github_ci_branch is the only CI role that may invoke the telemetry writer: InvokeFunctionUrl and GetFunctionUrlConfig in an
 unconditioned statement, InvokeFunction only behind Bool lambda:InvokedViaFunctionUrl = true. github_ci_pr, github_ci_planner
@@ -19,8 +20,19 @@ import pytest
 from tests.fixtures.terraform_hcl_blocks import _TERRAFORM_PERSONAL_DIR, tf_dir_file_texts
 
 _FN = "agent-platform-ducklake-telemetry-writer"
-_ARN = f"arn:aws:lambda:eu-west-2:111:function:{_FN}"
-_FORMS = (_ARN, f"{_ARN}:*")
+_TARGETS = (
+    "agent-platform-ducklake-telemetry-writer",
+    "agent-platform-ducklake-telemetry-writer-smoke",
+    "agent-platform-ducklake-telemetry-reader",
+)
+
+
+def _forms(fn: str) -> tuple[str, str]:
+    arn = f"arn:aws:lambda:eu-west-2:111:function:{fn}"
+    return arn, f"{arn}:*"
+
+
+_FORMS = _forms(_FN)
 _INVOKE_PROBES = ("lambda:invokefunction", "lambda:invokefunctionurl", "lambda:invokeasync")
 _VIA_URL = ("Bool", "lambda:InvokedViaFunctionUrl", ["true"])
 _ALLOWED = "github_ci_branch"
@@ -58,8 +70,7 @@ def _render(token: str, locs: dict[str, str]) -> str:
 
 
 def _fn_arn(ref: str) -> str:
-    name = "ducklake-telemetry-writer" if ref == "ducklake_telemetry_writer" else ref.replace("_", "-")
-    return f"arn:aws:lambda:eu-west-2:111:function:agent-platform-{name}"
+    return f"arn:aws:lambda:eu-west-2:111:function:agent-platform-{ref.replace('_', '-')}"
 
 
 def _list(body: str, key: str) -> list[str]:
@@ -108,8 +119,8 @@ def _document(texts: dict[str, str], name: str, locs: dict[str, str], seen: froz
     raise AssertionError(f"policy document {name!r} not found")
 
 
-def _hits(stmt: dict) -> bool:
-    return any(fnmatchcase(form, r) for form in _FORMS for r in stmt["resources"])
+def _hits(stmt: dict, forms: tuple[str, str] = _FORMS) -> bool:
+    return any(fnmatchcase(form, r) for form in forms for r in stmt["resources"])
 
 
 def _covers(stmt: dict, probe: str) -> bool:
@@ -118,19 +129,22 @@ def _covers(stmt: dict, probe: str) -> bool:
     return any(fnmatchcase(probe, a) for a in stmt["actions"])
 
 
-def _covers_both_forms(stmt: dict) -> bool:
-    return all(any(fnmatchcase(form, r) for r in stmt["resources"]) for form in _FORMS)
+def _covers_both_forms(stmt: dict, forms: tuple[str, str] = _FORMS) -> bool:
+    return all(any(fnmatchcase(form, r) for r in stmt["resources"]) for form in forms)
 
 
-def branch_problems(texts: dict[str, str]) -> list[str]:
+def branch_problems(texts: dict[str, str], fn: str = _FN) -> list[str]:
     locs = _locals(texts)
-    stmts = [s for s in _document(texts, _ALLOWED, locs) if s["effect"] == "Allow" and _hits(s)]
+    forms = _forms(fn)
+    stmts = [s for s in _document(texts, _ALLOWED, locs) if s["effect"] == "Allow" and _hits(s, forms)]
     problems: list[str] = []
     for verb in ("lambda:invokefunctionurl", "lambda:getfunctionurlconfig"):
-        ok = any(_covers_both_forms(s) and _covers(s, verb) and not s["conditions"] for s in stmts)
+        ok = any(_covers_both_forms(s, forms) and _covers(s, verb) and not s["conditions"] for s in stmts)
         if not ok:
             problems.append(f"{_ALLOWED} lacks an unconditioned {verb} grant on both ARN forms")
-    if not any(_covers_both_forms(s) and _covers(s, "lambda:invokefunction") and _VIA_URL in s["conditions"] for s in stmts):
+    if not any(
+        _covers_both_forms(s, forms) and _covers(s, "lambda:invokefunction") and _VIA_URL in s["conditions"] for s in stmts
+    ):
         problems.append(f"{_ALLOWED} lacks a URL-only lambda:invokefunction grant on both ARN forms")
     for s in stmts:
         if _covers(s, "lambda:invokefunction") and _VIA_URL not in s["conditions"]:
@@ -138,12 +152,13 @@ def branch_problems(texts: dict[str, str]) -> list[str]:
     return problems
 
 
-def other_role_problems(texts: dict[str, str]) -> list[str]:
+def other_role_problems(texts: dict[str, str], fn: str = _FN) -> list[str]:
     locs = _locals(texts)
+    forms = _forms(fn)
     problems: list[str] = []
     for role in _OTHERS:
         for s in _document(texts, role, locs):
-            if s["effect"] == "Allow" and _hits(s) and any(_covers(s, p) for p in _INVOKE_PROBES):
+            if s["effect"] == "Allow" and _hits(s, forms) and any(_covers(s, p) for p in _INVOKE_PROBES):
                 problems.append(f"{role} holds an invoke-class action on the telemetry writer")
     return problems
 
@@ -152,12 +167,19 @@ def _real() -> dict[str, str]:
     return tf_dir_file_texts(_TERRAFORM_PERSONAL_DIR)
 
 
-def test_branch_role_invokes_the_telemetry_writer_url_only() -> None:
-    assert branch_problems(_real()) == []
+@pytest.mark.parametrize("fn", _TARGETS)
+def test_branch_role_invokes_the_telemetry_functions_url_only(fn: str) -> None:
+    assert branch_problems(_real(), fn) == []
 
 
-def test_no_other_ci_role_can_invoke_the_telemetry_writer() -> None:
-    assert other_role_problems(_real()) == []
+@pytest.mark.parametrize("fn", _TARGETS)
+def test_no_other_ci_role_can_invoke_the_telemetry_functions(fn: str) -> None:
+    assert other_role_problems(_real(), fn) == []
+
+
+@pytest.mark.parametrize("fn", _TARGETS[1:])
+def test_branch_predicate_red_when_a_function_has_no_grant(fn: str) -> None:
+    assert branch_problems(_tree(_URL_STMTS + _VIA_STMT), fn) != []
 
 
 _ARN_REF = "aws_lambda_function.ducklake_telemetry_writer.arn"

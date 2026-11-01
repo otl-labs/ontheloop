@@ -12,24 +12,9 @@ import src.lambdas.ducklake_reader.handler as h
 from src.common import ducklake_runtime as rt
 from src.common.ducklake_event_read_verbs import EVENT_READS
 from src.common.ducklake_version import pinned_duckdb_version
+from tests.fixtures.ducklake_reader_fakes import CountCon, FakeCon
 
 pytestmark = pytest.mark.unit
-
-
-class FakeCon:
-    def __init__(self):
-        self.executed: list[tuple[str, object]] = []
-        self.closed = False
-
-    def execute(self, sql, params=None):
-        self.executed.append((sql, params))
-        return self
-
-    def fetchall(self):  # liveness-probe support (D2 warm-connection cache)
-        return []
-
-    def close(self):
-        self.closed = True
 
 
 @pytest.fixture(autouse=True)
@@ -177,7 +162,7 @@ def test_open_reader_connection(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# T2.19 production ops read actions: read_ops_current / read_ops_history / query_ops
+# T2.19 production ops read actions: read_ops_current / read_ops_history
 # ---------------------------------------------------------------------------
 
 
@@ -247,17 +232,6 @@ def test_action_read_ops_history(monkeypatch):
     monkeypatch.setattr(rt, "read_history", lambda con, *, table, key, limit: [{"ulid": "01A"}, {"ulid": "01B"}])
     out = h.action_read_ops_history({"table": "ops_decisions", "limit": 5}, FakeCon())
     assert out["row_count"] == 2
-
-
-def test_action_query_ops(monkeypatch):
-    monkeypatch.setattr(rt, "query_current", lambda con, *, table, sql, params: [{"violation": 0}])
-    out = h.action_query_ops({"table": "ops_recommendations", "sql": "SELECT 1 FROM {tbl}"}, FakeCon())
-    assert out["row_count"] == 1
-
-
-def test_action_query_ops_requires_sql():
-    with pytest.raises(rt.DuckLakeRuntimeError, match="non-empty 'sql'"):
-        h.action_query_ops({"table": "ops_recommendations"}, FakeCon())
 
 
 def test_require_ops_table_rejects_unknown():
@@ -411,7 +385,7 @@ def test_connect_probe_in_connectionless_actions():
 def test_action_describe_returns_named_reads_schema():
     out = h.action_describe({}, None)
     assert out["ok"] is True
-    assert set(out["verbs"]) == set(rt.NAMED_READS) | set(EVENT_READS)
+    assert set(out["verbs"]) == set(rt.NAMED_READS) and not set(out["verbs"]) & set(EVENT_READS)
     assert "params" in out["verbs"]["rec_by_id"]
 
 
@@ -471,14 +445,13 @@ _REFUSED_READ_TABLES = (
 
 
 def test_generic_reads_refuse_telemetry_and_registration_tables(monkeypatch):
-    """read_ops_current, read_ops_history and query_ops refuse the six tables by their `table` parameter
+    """read_ops_current and read_ops_history refuse the six tables by their `table` parameter
     with the directed error naming the write_boundary (a 500 under the reader's error map)."""
     monkeypatch.setattr(rt, "read_current", lambda *a, **k: pytest.fail("runtime reached"))
     monkeypatch.setattr(rt, "read_history", lambda *a, **k: pytest.fail("runtime reached"))
-    monkeypatch.setattr(rt, "query_current", lambda *a, **k: pytest.fail("runtime reached"))
     for table in _REFUSED_READ_TABLES:
         boundary = "registration" if table.startswith("ops_") else "telemetry_append"
-        for action in (h.action_read_ops_current, h.action_read_ops_history, h.action_query_ops):
+        for action in (h.action_read_ops_current, h.action_read_ops_history):
             with pytest.raises(rt.DuckLakeRuntimeError, match=rf"write_boundary={boundary}"):
                 action({"table": table, "sql": "SELECT 1"}, FakeCon())
 
@@ -696,3 +669,19 @@ def test_size_guard_failure_is_an_unmapped_500(monkeypatch):
     monkeypatch.setattr(h, "_guard_response_size", lambda *a, **k: (_ for _ in ()).throw(KeyError("guard")))
     r = h.handler({"action": "describe"})
     assert r["statusCode"] == 500 and json.loads(r["body"])["error_class"] == "KeyError"
+
+
+def test_dq_check_dispatch_through_the_handler(monkeypatch):
+    monkeypatch.setattr(h, "_open_reader_connection", lambda: CountCon(2))
+    call = {"action": "dq_check", "check": "row_count_min", "table": "ops_decisions", "params": {"min": 1}}
+    r = h.handler({"body": json.dumps(call)})
+    assert r["statusCode"] == 200 and json.loads(r["body"])["violation_count"] == 2
+    bad = h.handler({"body": json.dumps({**call, "params": {}})})
+    assert bad["statusCode"] == 400 and json.loads(bad["body"])["error_type"] == "dq_check_input"
+    for exc, kind in (
+        (type("InvalidInputException", (Exception,), {"__module__": "_duckdb"})("x"), "dq"),
+        (ValueError("x"), "raw"),
+    ):
+        monkeypatch.setattr(h.dq, "run_check", lambda con, check, e=exc: (_ for _ in ()).throw(e))
+        with pytest.raises(h.dq.DqCheckInputError if kind == "dq" else ValueError):
+            h.action_dq_check(call, CountCon())

@@ -67,11 +67,13 @@ def test_handoff_full_tier_runs_after_commit_and_rebase() -> None:
     verify_head_line = "bin/venv-python -m scripts.checks.validation_result --verify-head"
     assert (
         commit_flow.index("git commit")
-        < commit_flow.index("git rebase origin/main")
+        < commit_flow.index("scripts.session.rebase_resolve")
         < commit_flow.index(f"\n{_FULL_TIER}\n")
         < commit_flow.index(verify_head_line)
         < commit_flow.index("git push")
     )
+
+    assert "STOP on conflict" not in commit_flow
 
     for text in (skill, command):
         assert "pre-commit HEAD" not in text
@@ -106,8 +108,23 @@ def test_planning_enforcement_names_the_critique_check_id() -> None:
     assert "fails plan-critique 12k" in planning
 
 
-def test_plan_workflow_invokes_obligations_once_at_step_6b() -> None:
-    """`plan_obligations` runs once author-side, at Step 6b, against a draft written OUTSIDE the repo.
+def test_closure_obligation_requires_caller_disposition() -> None:
+    """A deleted writer's callers are disposed at the contract and at all three skill surfaces."""
+    lifecycle = yaml.safe_load(Path("docs/contracts/tier-item-lifecycle.yaml").read_text(encoding="utf-8"))
+    closure = " ".join(lifecycle["replacement_closure_check"].split())
+    assert "(5) Dispose of every caller" in closure
+    assert "fails loudly" in closure
+    assert "stub" in closure
+    planning = _PLANNING_SKILL.read_text(encoding="utf-8")
+    assert "every caller of a deleted writer" in planning or "lists every caller" in planning
+    critique = _CRITIQUE_SKILL.read_text(encoding="utf-8")
+    assert "replacement_closure_check` (5)" in critique[critique.index("12k.") : critique.index("12l.")]
+    review = Path(".claude/skills/code-review/SKILL.md").read_text(encoding="utf-8")
+    assert "replacement_closure_check" in review
+
+
+def test_plan_workflow_invokes_obligations_once_at_alignment_sign_off() -> None:
+    """`plan_obligations` runs once author-side, at the alignment sign-off, against a draft written OUTSIDE the repo.
 
     The draft path must stay outside `docs/plans/`: `{slug}` is not derived until Step 7, and a
     Write to the tracked plan path while on `main` is denied by `.claude/hooks/never_on_main.py`
@@ -132,15 +149,109 @@ def test_plan_context_block_cap_is_declared_on_both_surfaces() -> None:
     assert "`commit_message_conventions.change_record_content_rule`" in workflow
 
 
-def test_critique_gate_convergence_is_finding_shaped() -> None:
-    """The Step 9 convergence rule is finding-shaped, not a round count (rec-2944 / B3-R2/R3)."""
+def _step9_convergence() -> str:
     planning = _PLANNING_SKILL.read_text(encoding="utf-8")
+    return planning[
+        planning.index("**Convergence rule -- findings, not rounds:**\n\nEvery round") : planning.index(
+            "## Report Critique Gate"
+        )
+    ]
+
+
+def test_critique_gate_convergence_is_finding_shaped() -> None:
+    """Step 9 converges on findings, never a count, and nits never reach the human (rec-2944, rec-3517)."""
+    planning = _PLANNING_SKILL.read_text(encoding="utf-8")
+    rule = _step9_convergence()
     assert "after 3 REVISE rounds" not in planning
-    assert "Oscillation interrupts, not the count" in planning
-    assert "recurring at a tag+anchor you recorded fixed" in planning
-    assert "tagged findings first" in planning
-    assert "starts a new series" in planning
+    assert "Every round is a full fresh read and no count caps them" in rule
+    assert "REVISE means at least one blocking finding" in rule
+    assert "PROCEED listing nits -> apply them and dispatch ONE fresh confirming round, no card" in rule
+    assert "it ends the loop unless it returns a blocking finding" in rule
+    assert "(oscillation interrupts, not the count)" in rule
+    assert "recurring at a tag+anchor you recorded fixed" in rule
+    assert "a disputed blocking finding" in rule
+    assert "a fix that would change approved scope, tier or a cited Decision" in rule
+    assert "starts a new series" in rule
     assert "Apply the Step 9 Convergence rule in kind" in planning
+
+
+def test_open_escalation_stops_the_loop_and_records_the_answer() -> None:
+    """A posted escalation is a stop, carried in both dispatch modes (rec-2802)."""
+    rule = _step9_convergence()
+    assert "An open escalation is a stop: no round, no plan edit, until the human answers" in rule
+    assert "record the answer as the row's `escalation_choice`" in rule
+    assert "Carrier: AskUserQuestion if held, else chat; dispatched, GATE_REQUEST `open_questions`" in rule
+
+
+def test_decision_scout_convergence_is_finding_shaped() -> None:
+    """The Decision Scout gate uses the critique rule in kind, anchored on the BLOCKing decision id (rec-3526)."""
+    planning = _PLANNING_SKILL.read_text(encoding="utf-8")
+    scout = planning[planning.index("## Decision Scout Gate") : planning.index("## Alignment Sign-off")]
+    assert "Do not loop more than 3 times" not in planning
+    assert planning.count("findings, not rounds") >= 3
+    assert "re-BLOCKed on the same decision id" in scout
+    assert "Carrier (AskUserQuestion, chat or GATE_REQUEST) and stop as in Step 9" in scout
+    assert "(file a rec; record accept-with-deferral)" in scout
+
+
+def test_oscillation_revisit_condition_is_countable() -> None:
+    """Every revisit condition counts something the gate_rounds record holds (rec-3514)."""
+    rule = _step9_convergence()
+    assert "40 cap-hitting plans" not in rule
+    assert "Revisit when 20 plans carry `gate_rounds`" in rule
+    assert "Revisit after 10 contested escalations" in rule
+
+
+def test_contested_residue_consult_names_its_dispatch_carrier() -> None:
+    """The Fable consult names its subagent-dispatch carrier and the canonical model spelling (rec-3515)."""
+    rule = _step9_convergence()
+    consult = rule[rule.index("**Contested-residue consult:**") :]
+    assert "(dispatched: an `open_questions` item of the same GATE_REQUEST)" in consult
+    assert 'model: "fable"' in consult
+    assert 'model:"fable"' not in rule
+
+
+def test_plan_template_records_gate_rounds_not_a_gates_line() -> None:
+    """The structured per-round record replaces the free-text gates line (rec-3041)."""
+    planning = _PLANNING_SKILL.read_text(encoding="utf-8")
+    assert "plan-critique=<verdict> after <N> round(s)" not in planning
+    assert "gate_rounds: # REQUIRED on new plans; one row per gate round (+gate_run_id if dispatched)" in planning
+    assert (
+        "- {gate: decision-scout, round: 1, verdict: NO_FLAGS} # critique rows add blocking, nits; "
+        "escalated: true + escalation_choice when asked"
+    ) in planning
+    assert "**Verdict handling** (add a `gate_rounds` row per scout round):" in planning
+
+
+def test_plan_command_and_overseer_contract_defer_to_the_skill_rule() -> None:
+    """No surface restates a round cap the skill no longer has."""
+    plan_cmd = " ".join(_PLAN_CMD.read_text(encoding="utf-8").split())
+    assert "round 4 runs one autonomous confirming round" not in plan_cmd
+    assert "a PROCEED that lists nits gets them applied and ONE fresh confirming round, with no card" in plan_cmd
+    assert "An open escalation stops the loop until the human answers" in plan_cmd
+    assert "the gates line" not in plan_cmd
+    assert "gate history lives in `gate_rounds`" in plan_cmd
+    dispatch = " ".join(Path("docs/contracts/overseer-dispatch.yaml").read_text(encoding="utf-8").split())
+    assert "3-round" not in dispatch
+    assert "per the planning skill's Decision Scout convergence rule" in dispatch
+    assert "or GATE_REQUEST round=N+1 after a BLOCK pivot" in dispatch
+    assert "On a PROCEED that ends the planning skill's Step 9 loop (no nits, or the confirming round's)" in dispatch
+    assert "On REVISE, or any other PROCEED listing nits: the subagent fixes and re-requests" in dispatch
+
+
+def test_dispatch_contract_relays_an_escalation_instead_of_a_round() -> None:
+    """A dispatched escalation and its Fable consult have a receiver that stops the loop (rec-2802, rec-3515)."""
+    trampoline = yaml.safe_load(Path("docs/contracts/overseer-dispatch.yaml").read_text(encoding="utf-8"))[
+        "gate_request_trampoline"
+    ]
+    escalation = " ".join(trampoline["escalation"].split())
+    assert "with non-empty `open_questions` is the planning skill's convergence escalation, not a round request" in escalation
+    assert "first, relays both to the human verbatim" in escalation
+    assert "dispatches no gate round, and resumes the author with the answer" in escalation
+    assert "any Fable consult it requests (an `open_questions` item) first" in escalation
+    assert "write-ahead-recorded with its `open_questions` as `inputs` and mints no gate_run_id" in escalation
+    assert "on resume it is re-relayed, never re-dispatched as a round" in escalation
+    assert "convergence-rule counter" not in trampoline["request_schema"]
 
 
 def test_critic_tags_every_finding_with_a_stable_anchor() -> None:
@@ -150,6 +261,18 @@ def test_critic_tags_every_finding_with_a_stable_anchor() -> None:
     assert "mechanical (a deterministic check could catch it -- name it)" in critique
     assert "tag each registration-closure finding" not in critique
     assert "mechanical (scripts.roadmap.plan_obligations)" not in critique
+
+
+def test_critic_tags_severity_and_states_figures_as_hypotheses() -> None:
+    """Blocking/nit severity is the critic's call; Frame Challenge is never a nit; figures are re-measured (rec-3742)."""
+    critique = _CRITIQUE_SKILL.read_text(encoding="utf-8")
+    assert "blocking (correctness, safety, scope, a Decision conflict or failed check above; when unsure)" in critique
+    assert "nit (wording, citation form, ordering; never a Frame Challenge contradiction)" in critique
+    assert "**Recommendation:** PROCEED (no blocking finding; list nits) / REVISE (any blocking finding)" in critique
+    assert "State each measured figure as a hypothesis with the command that produced it" in critique
+    assert "the reviser will re-measure it and dispute, with evidence, any it cannot reproduce" in critique
+    assert "600KB" not in critique
+    assert "**Finding-Origin Attribution and severity:**" in critique
 
 
 def test_implementation_branch_asks_the_split_question() -> None:
@@ -255,3 +378,33 @@ def test_data_quality_semantics_live_with_their_producer() -> None:
     assert "Two-layer health picture" in runner
     assert "checks_defined > 0" in runner
     assert "last_run.verdict == PASS" in runner
+
+
+def test_planning_skill_carries_step_8b_and_amendment_mode() -> None:
+    """PLAN-plan-defect-loop: the lint-and-wording-check step, Amendment mode and the touched-set clauses."""
+    planning = _PLANNING_SKILL.read_text(encoding="utf-8")
+    assert "## Plan Lint and Wording Check (Workflow Step 8b, before critique)" in planning
+    assert "scripts.roadmap.plan_wording_check" in planning
+    assert "**Amendment mode**" in planning
+    assert "`deviation_trigger.escalation`" in planning
+    assert "plan({slug}): scope amendment -- <reason>" in planning
+    assert "generator-touched files are sanction_rows-covered" in planning
+    assert "A VP touched-set step derives its allowed set from sanction_rows" in planning
+    assert "**Size headroom (Decisions 128, 166):**" in planning
+    assert "new_imports: []" in planning
+
+
+def test_critique_reads_the_recorded_wording_check_row_and_never_reruns_it() -> None:
+    critique = _CRITIQUE_SKILL.read_text(encoding="utf-8")
+    assert "read the last `wording-check` gate row (never re-run it)" in critique
+    assert "REVISE when it is absent, not PASS, its digest differs from `approved_text record`" in critique
+    assert "12n. **Size headroom check (Decisions 128, 166):**" in critique
+    assert "SLOC decompose-by-default check" not in critique
+
+
+def test_implement_alarm_is_stop_plus_one_plan_defect_report() -> None:
+    implement = _IMPLEMENT_SKILL.read_text(encoding="utf-8")
+    assert "the alarm is STOP plus one plan-defect report (`deviation_trigger.escalation`" in implement
+    assert "STOP and raise the alarm" in implement
+    assert "stop-and-surface-to-human" not in implement
+    assert "STOP (Deviation trigger (c))" in implement

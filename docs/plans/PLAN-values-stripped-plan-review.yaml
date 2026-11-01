@@ -1,0 +1,504 @@
+schema_version: 5
+implementation_declared: true
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "values-stripped-plan-review"
+intent: >-
+  Stop Terraform variable and state values reaching the merge-time subagent plan reviewer, its prompt and its archived
+  transcript: the reviewer gets a names-only digest with per-type detail that prints a value only when it is a literal in
+  the public Terraform source, and runs with no tools, no repo working directory and no AWS credentials. Slice S6 of the
+  trusted plan executor (no agent-controlled identity reads state, saved plans or review transcripts). Executes rec-4639.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-values-stripped-plan-review.yaml
+phase: >-
+  security_advisory (soft-warn category; no tier_item claimed, so the Tier Item Freshness Gate is skipped). Executes
+  rec-4639, slice S6 of the trusted plan executor split.
+scope:
+  - file: scripts/ci/terraform_plan_digest.py
+    action: Create
+    purpose: >-
+      The reviewer digest, moved out of the guard (Decision 128: the guard would pass 500 SLOC with the renderers) and made
+      values-free. Stdlib only (review.sh runs it with the runner's system python3). Imports the guard as
+      `from scripts.terraform_apply_guard import ...  # noqa: E402`, preceded at module level by
+      `if __package__ in (None, ""): sys.path.insert(0, str(Path(__file__).resolve().parents[2]))` so a by-path CLI run
+      from terraform/personal resolves `scripts` (module-level, like scripts/roadmap/plan_audit.py:29-31) while a package
+      import (scripts.ci.terraform_plan_digest, a namespace package like scripts.ci.plan_digest) is unaffected; nothing
+      raises at import. Carries the preamble and truncation marker moved from
+      the guard. CLI: python3 scripts/ci/terraform_plan_digest.py [--literals-from PATH]... <plan.json> (argparse action="append", one
+      PATH per flag, so a following plan.json is never swallowed); exit 0 digest
+      printed, 1 unreadable or non-object plan. build_digest(plan, literals=frozenset(), size_cap=8000) -> str. Iterates
+      changes ONLY through terraform_apply_guard.iter_resource_changes (the verdict's traversal, so the digest can never list
+      a different resource set). Output: the data-not-instructions preamble (extended to say the digest is names-only and
+      values appear only as public literals), "Plan summary: N resource change(s), M output change(s).", one line per
+      change, then one line per output_changes entry ("- output NAME actions=[...]"). A change line is the address with
+      EVERY bracketed instance key (module keys included, quoted keys containing "]" handled) replaced by [*], identical
+      stripped lines merged with " x<count>", the type, actions, and changed top-level attribute NAMES (before != after, or
+      after_unknown true; never a map key or nested name). Per-type detail, each value printed only if it is in `literals`,
+      else "<non-literal>": (a) policy-bearing attributes (policy on aws_iam_role_policy, aws_iam_policy,
+      aws_iam_user_policy, aws_iam_group_policy and every RESOURCE_POLICY_TYPES entry that has one): parse before and after
+      JSON, and per Effect list action tokens added (+) and removed (-) across Action and NotAction (NotAction tokens
+      prefixed "not "); unknown after -> "policy=(known after apply)", unparseable -> "policy=<unparsed>"; (b)
+      aws_lambda_permission principal, action and function_name, always shown even when unchanged (the T2.45 forced-field
+      set), each literal-gated like every other value; (c) aws_lambda_function_url
+      authorization_type. Resources, conditions, Sids, tags, descriptions, names and output values never print. Literal set:
+      every double-quoted string in the given .tf files (a directory means its *.tf, non-recursive) that contains no ${
+      interpolation, unescaped; no --literals-from means an empty set (everything gated prints <non-literal>). _redact
+      (imported from the guard) runs on every line; size cap as before (preamble carved out); the truncation marker is reworded to
+      "... [DIGEST TRUNCATED: size cap reached -- judge only what is shown] ..." (the old text pointed at plan.json).
+  - file: scripts/terraform_apply_guard.py
+    action: Modify
+    purpose: >-
+      Remove the --digest mode and all digest code (module docstring section, _DIGEST_SIZE_CAP through build_digest,
+      _RESOURCE_POLICY_FORCED_FIELDS, _forced_resource_policy_attrs, _summarise_value, _changed_top_level_attrs,
+      _digest_entries, the duplicate _ARN_PATTERN/_ACCOUNT_ID_PATTERN pair in the digest block). Add
+      iter_resource_changes(plan) -> list[dict] (plan.get("resource_changes") or []) and make evaluate_plan use it. The
+      verdict, exit codes and BLOCK messages are unchanged; the redaction comment at :158-159 stops naming --digest mode; usage becomes "terraform_apply_guard.py <plan.json>".
+  - file: .github/actions/subagent-plan-review/review.sh
+    action: Modify
+    purpose: >-
+      (1) Validate CONTEXT_DESCRIPTION against ^[A-Za-z0-9 ().,:_/-]{1,300}$; on mismatch _starved_marker + outcome=starved
+      + exit 1 before any reviewer call. (2) Digest via python3 "${WORKSPACE_ROOT}/scripts/ci/terraform_plan_digest.py"
+      --literals-from . plan.json > plan_digest.txt (same STARVED path on failure). (3) Prompt replaced by exactly: "Review
+      the terraform plan digest below for ${CONTEXT_DESCRIPTION}. It has already passed the deterministic guard (no
+      destroy, no out-of-budget IAM/trust change; may include in-budget IAM inline-policy or attachment UPDATEs on managed
+      boundary-carrying CI roles per T2.25). The digest is names-only by design: it lists addresses, types, actions and
+      changed attribute names, and for IAM policy statements, Lambda permissions and function URLs it shows a value only
+      when that value is a literal in the public Terraform source (anything else reads <non-literal>). You have no tools and
+      no file access. Judge whether the shape of the change is a safe, expected sandbox infrastructure change. Reply with
+      exactly the single token PROCEED on its own line if safe to auto-apply, or REVISE followed by the reason if not." (4)
+      Both reviewer calls (first and same-budget retry) run from REVIEW_CWD=$(mktemp -d) outside WORKSPACE_ROOT (fail
+      STARVED if it is inside), under env -i keeping only PATH, HOME, CLAUDE_CODE_OAUTH_TOKEN and, when set,
+      CLAUDE_P_RETRY_BACKOFF_BASE, TMPDIR and LANG; claude args become --output-format json --tools "" --strict-mcp-config
+      --max-turns "$MAX_TURNS" "$PROMPT" (no --allowedTools; never --bare, which disables OAuth on 2.1.148); transcripts are
+      written by absolute path to the step's working directory (review.json, review_retry.json) so archive_transcripts.sh
+      is unchanged; REVIEW_CWD is removed by an EXIT trap so every exit path cleans it. (5) After classifying each transcript, print one line
+      "[SUBAGENT-REVIEW] stats num_turns=<n> permission_denials=<m>" to stderr (counts only, read from the last result
+      object with python3; missing fields print "unknown"), so the live check reads the job log, not the transcript. MAX_TURNS 5, the pre-written starved outcome, set +e, the single
+      same-budget retry and the case block are unchanged.
+  - file: .github/actions/subagent-plan-review/action.yml
+    action: Modify
+    purpose: Description and step comment name the names-only digest module and the no-tools reviewer; inputs, outputs and steps unchanged.
+  - file: .github/workflows/terraform-apply-sandbox.yml
+    action: Modify
+    purpose: >-
+      Comment-only, no net added lines (the file is at its 550 effective-line budget): the subagent review step's comment
+      stops describing guard --digest and "--allowedTools to Read" and names the names-only digest and no-tools reviewer.
+  - file: .github/workflows/reconcile.yml
+    action: Modify
+    purpose: >-
+      Comment-only, no net added lines: the two places that describe "terraform_apply_guard.py --digest" and "--allowedTools
+      Read" (around :217 and :370) name scripts/ci/terraform_plan_digest.py and the no-tools reviewer.
+  - file: .github/workflows/subagent-review-smoke.yml
+    action: Create
+    purpose: >-
+      Dispatch-only smoke of the real reviewer (fork 3a). Workflow name: subagent-review-smoke (the taxonomy row key). on: workflow_dispatch only; permissions contents: read; no
+      id-token, no AWS step; one job (id smoke), if github.ref == 'refs/heads/main', timeout-minutes 15. Steps: checkout
+      (persist-credentials false), setup-python 3.12, then one step with id run-smoke whose run body is the single line
+      `bash scripts/ci/subagent_review_smoke.sh` with CLAUDE_CODE_OAUTH_TOKEN from secrets in its env. Archival is not run. Dispatched by Benjamin (Decision 205 clause 1: a maintainer-issued dispatch qualifies).
+  - file: scripts/ci/subagent_review_smoke.sh
+    action: Create
+    purpose: >-
+      The smoke body. Copies tests/fixtures/subagent_plan_review/plan.json and source.tf.txt (as main.tf) into a mktemp
+      working dir, runs .github/actions/subagent-plan-review/review.sh there under GitHub's composite argv with a fixed
+      CONTEXT_DESCRIPTION "a smoke test of the plan review gate on a fixture plan", WORKSPACE_ROOT set to the repo root and
+      a temp GITHUB_OUTPUT, tolerating review.sh's exit 1 on REVISE; exits non-zero unless the last outcome written is
+      proceed or revise and no SENTINEL- string occurs in plan_digest.txt, review.json or review_retry.json. Prints only
+      "SMOKE outcome=<o>" and review.sh's stats line, never digest or transcript content.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      r3_workflows entry ".github/workflows/subagent-review-smoke.yml::smoke::run-smoke": 1 (the one-line delegate body,
+      measured as validate_composite_action_shell_bodies counts it).
+  - file: tests/test_subagent_review_smoke.py
+    action: Create
+    purpose: >-
+      Hermetic test of scripts/ci/subagent_review_smoke.sh with the stub claude from the values-stripped test: green on a
+      PROCEED and on a REVISE reply; red on a starved outcome (stub returns max-turns error) and on a SENTINEL- string
+      planted in each of plan_digest.txt, review.json and review_retry.json; stdout holds only the SMOKE and stats lines.
+  - file: docs/contracts/account-credential-inventory.yaml
+    action: Modify
+    purpose: >-
+      ANT-04 location field only: add subagent-review-smoke to the list of workflows consuming CLAUDE_CODE_OAUTH_TOKEN (T4.26
+      c4 enumerates surviving consumers). No other field or row changes.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      Workflows map row "subagent-review-smoke" (tier not_a_gate, ci_rca excluded, owner platform): a maintainer-dispatched
+      smoke whose red run is read by the dispatcher in the build thread, never a gate on main.
+  - file: docs/contracts/composite-action-shape.yaml
+    action: Modify
+    purpose: >-
+      Text-only, the review.sh agent_loop_caps rationale (:247-250): "read a pre-guarded plan digest (optionally the full
+      plan via the Read tool)" becomes "read a pre-guarded, names-only plan digest on stdin with no tools". No other change.
+  - file: tests/fixtures/subagent_plan_review/plan.json
+    action: Create
+    purpose: >-
+      Fixture plan JSON shared by the tests and the smoke: an aws_iam_role_policy update whose policy adds a literal action
+      (s3:GetObject), an interpolated action token "s3:SENTINEL-INTERP-ACTION" and a Resource ARN carrying
+      SENTINEL-RESOURCE; an aws_s3_bucket tags change with tag key SENTINEL-TAG-KEY and value SENTINEL-TAG-VALUE; a resource
+      with a sensitive attribute SENTINEL-SENSITIVE (after_sensitive marked); a for_each instance keyed
+      ["SENTINEL-INSTANCE-KEY"]; an attribute known after apply; an aws_lambda_permission with principal
+      events.amazonaws.com; an output change whose after is SENTINEL-OUTPUT (after_sensitive false, the nonsensitive() shape).
+  - file: tests/fixtures/subagent_plan_review/source.tf.txt
+    action: Create
+    purpose: >-
+      Fixture HCL (kept as .txt so no repo .tf scanner picks it up) whose quoted literals include s3:GetObject, Allow,
+      events.amazonaws.com and lambda:InvokeFunction, and whose only SENTINEL- strings sit inside ${...} interpolations.
+  - file: tests/test_terraform_plan_digest.py
+    action: Create
+    purpose: >-
+      Mirror unit tests of the digest module: key stripping (index, string, quoted-with-bracket, module keys), merge counts,
+      changed-name rules (after_unknown, no map keys), each renderer with literal and non-literal tokens, Action/NotAction
+      add/remove, unknown and unparseable policy, output lines, redaction, preamble survives truncation, empty plan, CLI
+      exit codes, and that the digest lists exactly iter_resource_changes' resources.
+  - file: tests/test_subagent_plan_review_values_stripped.py
+    action: Create
+    purpose: >-
+      rec-4639's acceptance. (a) Over the fixture, build_digest with the fixture literals contains no SENTINEL- string and
+      does contain "+[s3:GetObject" and "events.amazonaws.com". (b) End to end: review.sh under GitHub's exact argv (bash
+      --noprofile --norc -e -o pipefail, Decision 162 R2) with the REAL digest module and real review_verdict.py, decoy
+      plan.json, terraform.personal.tfvars (holding SENTINEL-TFVARS) and plan.bin in the working dir, AWS_ACCESS_KEY_ID and
+      AWS_SECRET_ACCESS_KEY seeded in the env, and a stub claude (paths baked into the stub, since env -i strips the env)
+      that records NUL-separated argv, $PWD, ls -A of $PWD, env and stdin and replies PROCEED. Asserts: outcome=proceed; no
+      SENTINEL- string in recorded stdin, argv, env or review.json; argv contains the pair --tools and the empty string and
+      --strict-mcp-config, the prompt is the last argv element and is not the element after --tools, and no
+      --allowedTools, Read or plan.json; recorded cwd is empty and not under the repo or the
+      working dir and is gone after the run; env has no AWS_ key; review.json lands in the working dir; the stats line is in
+      stderr. (c) A CONTEXT_DESCRIPTION with a backtick or a
+      $ yields outcome=starved and no claude call.
+  - file: tests/test_terraform_apply_guard.py
+    action: Modify
+    purpose: >-
+      Planned change (Decision 181, Decision 235 cl.1 -- shown to Benjamin as part of this plan; the merge also needs his
+      word on the final diff): delete the digest tests (they move, inverted, to tests/test_terraform_plan_digest.py);
+      the "--digest" CLI case becomes a usage-error case; test_digest_resource_policy_reason_redacts_external_principal is
+      an evaluate_plan verdict test despite its name and stays; add a test that evaluate_plan's findings are unchanged across the
+      existing fixtures via iter_resource_changes. No verdict assertion is loosened.
+  - file: tests/test_terraform_apply_guard_sensitive.py
+    action: Delete
+    purpose: >-
+      ONLY if plan D2 (PLAN-secrets-to-ssm-expand) built and merged first and created it: it asserts on the guard's deleted
+      build_digest (retirement disposition, Decision 235 cl.1, citing scripts/terraform_apply_guard.py::build_digest). Its after_sensitive cases move, inverted to "no value at all", into tests/test_terraform_plan_digest.py
+      (the fixture's SENTINEL-SENSITIVE case already covers them). If the file does not exist at build time, this row is a
+      no-op.
+  - file: tests/test_subagent_review_wiring.py
+    action: Modify
+    purpose: >-
+      Keep every errexit/STARVED/retry/archival case green under the new invocation: the python3 shim keys on
+      terraform_plan_digest.py instead of terraform_apply_guard.py, the claude shim's log path is baked into the shim (env
+      -i strips CLAUDE_INVOCATION_LOG), the python3 shim passes any other invocation (the stats line's python3 -c) through to
+      the real interpreter by an absolute path baked into the shim (sys.executable; never python3 from PATH, which would
+      re-enter the shim), and any assertion on the old argv is updated. No case is removed.
+  - file: config/agent/verification_registry/entries/subagent-plan-review-values-stripped.yaml
+    action: Create
+    purpose: Graduation shard for VP step 1 (check_id subagent-plan-review-values-stripped), node_id tests/test_subagent_plan_review_values_stripped.py, guard_target .github/actions/subagent-plan-review/review.sh.
+bundled_recommendations:
+  - rec-4639
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - The reviewer's stdin is a names-only digest; a value prints only for the three per-type renderers and only when it is a literal in the given HCL; every SENTINEL- value in the fixture is absent from digest, argv, env and transcript.
+  - The reviewer runs with --tools "" and --strict-mcp-config, no --allowedTools, from an empty directory outside the checkout, with no AWS_ variable in its environment.
+  - The deterministic guard's verdicts are unchanged on every existing fixture; terraform_apply_guard.py no longer has a --digest mode and nothing references it.
+  - STARVED, REVISE and PROCEED semantics, the same-budget retry and archival are unchanged (wiring tests green).
+  - A dispatched run of subagent-review-smoke.yml on main with the real pinned CLI returns proceed or revise, not starved, with no SENTINEL- string in its outputs.
+  - The first push-to-main apply-sandbox run after the merge passes its review step.
+  - rec-4639 is closed.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-4639's acceptance -- the sentinel and end-to-end tests.
+    command: bin/venv-python -m pytest tests/test_subagent_plan_review_values_stripped.py -q
+    expected: exit 0; every test passes. Before the change the file does not exist.
+    fix_if: A sentinel is found -- fix the digest or review.sh, never the fixture or the assertion.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: graduate
+    graduation_check_id: subagent-plan-review-values-stripped
+  - step: 2
+    phase: pre-deploy
+    action: Digest unit tests, guard tests and review wiring tests.
+    command: bin/venv-python -m pytest tests/test_terraform_plan_digest.py tests/test_terraform_apply_guard.py tests/test_subagent_review_wiring.py tests/test_subagent_review_smoke.py -q
+    expected: exit 0.
+    fix_if: A guard verdict test fails -- the traversal refactor changed behaviour; restore it. A wiring case fails -- fix review.sh, not the case.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: waive
+    graduation_waiver_reason: The mirror and existing suites run in every tier through the affected-test selection; step 1 graduates the new behaviour.
+  - step: 3
+    phase: pre-deploy
+    action: Real-data check -- the digest over the real IAM-update fixture with the live terraform/personal literals renders the added action and nothing else of value.
+    command: >-
+      bin/venv-python scripts/ci/terraform_plan_digest.py --literals-from terraform/personal
+      tests/fixtures/terraform_apply_guard/iam_inline_update_branch.json | tee /dev/stderr | grep -q "Allow +\[s3:GetObject\]"
+      && ! bin/venv-python scripts/ci/terraform_plan_digest.py --literals-from terraform/personal
+      tests/fixtures/terraform_apply_guard/iam_inline_update_branch.json | grep -qE "example-bucket|agent-platform-github-ci-branch|NewPermission"
+      && echo REAL_DATA_OK
+    expected: Prints the digest then REAL_DATA_OK.
+    fix_if: The action is missing -- the literal scan or policy parse is wrong. A role name, Sid or ARN appears -- a renderer prints a non-gated field.
+    hermetic: true
+    expected_literals: ["REAL_DATA_OK"]
+    graduation: waive
+    graduation_waiver_reason: Covered permanently by tests/test_terraform_plan_digest.py; this is the readable replay on real HCL.
+  - step: 4
+    phase: pre-deploy
+    action: Stale-reference sweep for the retired surfaces (guard --digest, Read-allowed reviewer, plan.json prompt sentence).
+    command: >-
+      ! grep -rnE 'terraform_apply_guard\.py"? --digest|allowedTools( to)? "?Read|guard --digest|--digest mode|plan\.json \(Read tool\)|via the Read tool|build_digest' .github scripts tests/test_terraform_apply_guard.py
+      tests/test_subagent_review_wiring.py docs/contracts --include=*.sh --include=*.yml --include=*.yaml --include=*.py | grep -vE 'scripts/ci/terraform_plan_digest\.py|ci-rca\.yml'
+      && echo SWEEP_OK
+    expected: Prints SWEEP_OK (ci-rca.yml's own --allowedTools is a different agent and stays).
+    fix_if: A hit -- update or remove that reference; a live caller of the old --digest mode is a stop-and-report.
+    hermetic: true
+    expected_literals: ["SWEEP_OK"]
+    graduation: waive
+    graduation_waiver_reason: One-time retirement sweep; step 1's argv assertions guard the reviewer invocation going forward.
+  - step: 5
+    phase: pre-deploy
+    action: SLOC budgets hold with no raise.
+    command: >-
+      bin/venv-python -c "from scripts.checks.sloc.sloc_limits import validate_sloc_limits as c; f=[]; c(f); print('SLOC_FAILS', len(f)); assert not f, f"
+    expected: SLOC_FAILS 0; exit 0.
+    fix_if: A file is over budget -- decompose (Decision 128); never raise.
+    hermetic: true
+    expected_literals: ["SLOC_FAILS 0"]
+    graduation: waive
+    graduation_waiver_reason: Replays the registered SLOC check that runs in every tier.
+  - step: 6
+    phase: pre-deploy
+    action: Discharge the handoff obligation with a full-tier run to completion.
+    command: bin/venv-python -m scripts.validate
+    expected: exit 0.
+    fix_if: >-
+      A failure in scope is fixed on the branch; never skip a test, relax an assertion, or add a baseline, allowlist or
+      budget entry. A failure outside scope becomes a rec via scripts.ops_data_portal (Decision 59, 55).
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: >-
+      After the merge, Benjamin dispatches subagent-review-smoke.yml on main once (Actions tab, Run workflow); the build
+      thread asks him and then reads the result via the GitHub MCP tools.
+    command: >-
+      mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
+      resource_id="subagent-review-smoke.yml", workflow_runs_filter={"event": "workflow_dispatch", "branch": "main"}) ->
+      newest run; mcp__github__actions_list(method="list_workflow_jobs", resource_id="<run id>") -> conclusion;
+      mcp__github__get_job_logs(job_id=<id>, return_content=true, tail_lines=60) -> the outcome and num_turns lines.
+    expected: Job success; outcome proceed or revise; num_turns 1; no SENTINEL- string in the log.
+    fix_if: >-
+      outcome starved -- read the reviewer's error class in the log (a rejected flag on 2.1.148 shows as a CLI usage error);
+      fix review.sh by PR before any terraform/personal merge relies on it. Never fix by re-adding Read.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: >-
+      The first push-to-main terraform-apply-sandbox run after the merge (the next terraform/personal merge) passes its
+      subagent review step, and the step's stats line shows a single turn with no tool use (read from the job log, never
+      from the transcript).
+    command: >-
+      mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
+      resource_id="terraform-apply-sandbox.yml", workflow_runs_filter={"event": "push", "branch": "main"}) -> first run
+      created after this plan's build merge -> job apply-sandbox step "Subagent plan review" conclusion;
+      mcp__github__get_job_logs(job_id=<apply-sandbox job id>, return_content=true, tail_lines=400) -> the
+      "[SUBAGENT-REVIEW] stats" line and the "Reviewer verdict" line.
+    expected: "Review step success; num_turns=1; permission_denials=0; the verdict line reads PROCEED."
+    fix_if: >-
+      The step starved or revised -- stop and report to the planning thread with the run URL; the apply is blocked
+      fail-closed and nothing latches red for starved. Never re-run with tools.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: Confirm rec-4639 is closed (the squash-merge Resolves trailer closes it).
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; r,_=fetch_recs_by_ids(make_reader(), ['rec-4639']); print(r[0]['id'], r[0]['status'])"
+    expected: Prints rec-4639 closed.
+    fix_if: Still open -- the ci.yml closure job failed; read its log, fix the cause, and close with update_rec citing step 1's output (Decision 84 I-4).
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/ci/terraform_plan_digest.py
+    behavior: Names-only digest; per-type values only when literal; keys stripped; outputs names only; shared traversal.
+    verification_step: 2
+    test_selector: tests/test_terraform_plan_digest.py
+    red_green_expectation: red before (module missing), green after.
+  - source: scripts/terraform_apply_guard.py
+    behavior: Verdicts unchanged through iter_resource_changes; no --digest mode.
+    verification_step: 2
+    test_selector: tests/test_terraform_apply_guard.py
+    red_green_expectation: red before (iter_resource_changes absent; --digest still accepted), green after.
+  - source: .github/actions/subagent-plan-review/review.sh
+    behavior: No tools, empty cwd outside the checkout, curated env, values-free stdin, CONTEXT_DESCRIPTION gate; STARVED semantics kept.
+    verification_step: 1
+    test_selector: tests/test_subagent_plan_review_values_stripped.py
+    red_green_expectation: red before (argv has --allowedTools Read, cwd is the workdir, AWS_ env present, sentinels in stdin), green after.
+  - source: .github/actions/subagent-plan-review/action.yml
+    behavior: Description only; the composite shape (thin adapter, outputs) is unchanged.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      Text-only edit; validate_composite_action_shell_bodies and the shape-roster checks run in every tier and fail on
+      any change to the adapter shape, which is the guard.
+  - source: .github/workflows/terraform-apply-sandbox.yml
+    behavior: Comment-only edit.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: Comment-only, behaviour-neutral; step 4's sweep proves the stale description is gone and the structural size budget check guards the line count.
+  - source: .github/workflows/reconcile.yml
+    behavior: Comment-only edit.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: Comment-only, behaviour-neutral; step 4's sweep proves the stale description is gone.
+  - source: scripts/ci/subagent_review_smoke.sh
+    behavior: Fails on a starved outcome or any SENTINEL- in the digest or transcripts; prints counts only.
+    verification_step: 2
+    test_selector: tests/test_subagent_review_smoke.py
+    red_green_expectation: red before (script missing), green after.
+  - source: config/composite_action_body_baseline.yaml
+    behavior: The smoke's one-line body is registered.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      A one-row baseline; validate_composite_action_shell_bodies fails on an unregistered workflow body in every tier,
+      which is the red-green proof.
+  - source: docs/contracts/account-credential-inventory.yaml
+    behavior: ANT-04 lists the new token consumer.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      A data-row location edit with no enforced behaviour; the contract's schema checks run in every tier.
+  - source: .github/workflows/subagent-review-smoke.yml
+    behavior: Main-only dispatch smoke of the real reviewer; delegates to the tested script.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      Its behaviour needs the real CLI and the Claude token, which exist only on the runner; the workflow checks in --pre
+      (permissions, pinning, agent safety) guard its shape and step 7 is the live proof.
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: The new workflow has its taxonomy row.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      A one-row mapping; the registered taxonomy-coverage check in every tier fails on an unmapped workflow, which is the
+      red-green proof.
+  - source: docs/contracts/composite-action-shape.yaml
+    behavior: Rationale text only.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: Text-only; step 4's sweep (now over docs/contracts) proves the stale Read-tool wording is gone.
+  - source: tests/fixtures/subagent_plan_review/plan.json
+    behavior: Carries every sentinel class the tests assert against.
+    verification_step: 1
+    test_selector: tests/test_subagent_plan_review_values_stripped.py
+    red_green_expectation: red before (file missing), green after.
+  - source: tests/fixtures/subagent_plan_review/source.tf.txt
+    behavior: Supplies the public literals; sentinels only inside interpolations.
+    verification_step: 1
+    test_selector: tests/test_subagent_plan_review_values_stripped.py
+    red_green_expectation: red before (file missing), green after.
+  - source: config/agent/verification_registry/entries/subagent-plan-review-values-stripped.yaml
+    behavior: Records VP step 1's graduation.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      A registry row is itself an executable check; validate_verification_registry and validate_graduation_completeness
+      run it in every tier and fail on a missing or non-resolving shard, which is the red-green proof.
+weakening_dispositions:
+  - candidate: "[test-removed] tests/test_terraform_apply_guard.py::test_digest_cli_flag_prints_and_exits_zero"
+    disposition: refactor
+    cite: "tests/test_terraform_plan_digest.py::test_cli_exit_codes_and_repeated_literals_flag"
+  - candidate: "[test-removed] tests/test_terraform_apply_guard.py::test_digest_empty_plan"
+    disposition: refactor
+    cite: "tests/test_terraform_plan_digest.py::test_empty_plan"
+  - candidate: "[test-removed] tests/test_terraform_apply_guard.py::test_digest_flag_still_errors_on_malformed_json"
+    disposition: refactor
+    cite: "tests/test_terraform_plan_digest.py::test_cli_exit_codes_and_repeated_literals_flag"
+  - candidate: "[test-removed] tests/test_terraform_apply_guard.py::test_digest_lists_resource_changes_content"
+    disposition: refactor
+    cite: "tests/test_terraform_plan_digest.py::test_digest_lists_exactly_the_resources_the_guard_judged"
+  - candidate: "[test-removed] tests/test_terraform_apply_guard.py::test_digest_preamble_survives_truncation"
+    disposition: refactor
+    cite: "tests/test_terraform_plan_digest.py::test_preamble_survives_truncation_and_marker_is_reworded"
+  - candidate: "[test-removed] tests/test_terraform_apply_guard.py::test_digest_redacts_arn_and_account_id"
+    disposition: refactor
+    cite: "tests/test_terraform_plan_digest.py::test_lines_are_redacted"
+  - candidate: "[test-removed] tests/test_terraform_apply_guard.py::test_digest_resource_policy_reason_redacts_external_principal"
+    disposition: refactor
+    cite: "tests/test_terraform_apply_guard.py::test_resource_policy_reason_redacts_external_principal"
+  - candidate: "[test-removed] tests/test_terraform_apply_guard.py::test_digest_resource_policy_surfaces_principal_even_when_unchanged"
+    disposition: refactor
+    cite: "tests/test_terraform_plan_digest.py::test_lambda_permission_fields_always_shown_and_literal_gated"
+  - candidate: "[test-removed] tests/test_terraform_apply_guard.py::test_digest_reuses_resource_changes_traversal_same_set_as_evaluate_plan"
+    disposition: refactor
+    cite: "tests/test_terraform_plan_digest.py::test_digest_lists_exactly_the_resources_the_guard_judged"
+  - candidate: "[test-removed] tests/test_terraform_apply_guard.py::test_digest_size_cap_truncates_with_marker"
+    disposition: refactor
+    cite: "tests/test_terraform_plan_digest.py::test_preamble_survives_truncation_and_marker_is_reworded"
+  - candidate: "[test-removed] tests/test_terraform_apply_guard.py::test_digest_under_cap_no_truncation_marker"
+    disposition: refactor
+    cite: "tests/test_terraform_plan_digest.py::test_preamble_survives_truncation_and_marker_is_reworded"
+  - candidate: "[test-removed] tests/test_terraform_apply_guard.py::test_forced_resource_policy_attrs_and_summarise_value_edges"
+    disposition: retirement
+    cite: "scripts/terraform_apply_guard.py::_forced_resource_policy_attrs"
+constraints:
+  - No IAM, Terraform or AWS state change. The transcript prefix fences are rec-4632 (S1) and rec-4635 (S1b), not this plan.
+  - Never pass --bare (it disables OAuth on the pinned CLI) and never re-add a file tool to the reviewer.
+  - Do not change claude_p_retry.sh (shared with ci-rca.yml) or the CLI pin.
+  - The guard's verdict logic, exit codes and fail-closed behaviour are untouched (Decision 77, 92 point 1).
+  - No admin-credential use anywhere in this plan (project critical rule); every live check reads GitHub job logs.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Slice map: /mnt/project-files/trusted-plan-executor/SPLIT.md (S6). Consult: /mnt/project-files/values-stripped-plan-review/ADVICE.md. 6b: step6b-presentation.md in the same folder."
+  - "Benjamin 2026-10-27 10:29Z (cmsg_01Cqz6E4mzSv6kkGCSCub3WMWoDmMZGp5ca2K7vCx2JYSz): yes to all -- 1a no tools, empty cwd, curated env; 2d per-type public-literal renderers (his idea, cmsg_01Cqz6E4mzSv6kkGCSCub3WMSpW6QkpBS9cDVDtovHGxLU); 3a dispatch-only smoke he runs once after the merge."
+  - "Why HCL text and not plan.configuration for literals: jsonencode() policies (nine in terraform/personal) carry no constant_value in plan JSON (spike, Terraform 1.10.5); a literal from any public commit leaks nothing, so a tree/plan commit mismatch can only cost a <non-literal>."
+  - "Why a new module: the guard is 433 SLOC unregistered; renderers would pass 500 (Decision 128 decompose). The shared iter_resource_changes keeps the digest-equals-verdict-set property (guard docstring :25-26)."
+  - "Pinned CLI 2.1.148 --help (native binary, 2026-10-26): --tools \"\" disables all tools; --strict-mcp-config exists; --bare forces API-key auth. Running inside the checkout would load CLAUDE.md, .claude/settings.json hooks and .mcp.json servers."
+  - "Residual (accepted): reconcile.yml resolves the review action and guard from the RED_SHA checkout (reconcile.yml:11-23), so replaying a red commit older than this merge runs the old reviewer. The window closes once no pre-merge commit can be the red target."
+  - "Decision 205 clause 2 deferral: the reviewer prompt stays in a composite action until T4.26 (clause 4); T4.26 c3/c5 must carry the no-tools, values-free input and the argv test forward, and c2/c4 must migrate or delete the new subagent-review-smoke.yml token consumer."
+  - "Decision 77 spirit: the review half now judges shape plus literal-gated IAM actions, principals and auth type; resource-policy shapes stay deterministically classified by the guard (T2.45)."
+  - "Decision 143 spirit: the no-tools flags live inside the agent merge loop; values-free input by construction plus the S1/S1b fences are the durable controls."
+  - "Not in scope (critique advisory): CODEOWNERS has /scripts/terraform_apply_guard.py but neither the digest module nor .github/actions/subagent-plan-review/; the build files a rec for that if it agrees."
+  - "Renderers (a) for resource-policy types and (c) only see inert changes (the guard routes other changes on those types to gated-apply, terraform_apply_guard.py:268-303); kept as defence in depth."
+  - "Cross-plan: D2 (PLAN-secrets-to-ssm-expand) masks after_sensitive in the same digest code; whichever lands second amends (execution_steps). Reported to the coordinator at plan merge."
+  - "Gotcha: env -i strips the test shims' env; bake shim paths into the shim files."
+  - "Decision-scout verdict FLAGS_FOUND (NOTE 205; SPIRIT 77, 143); CITE: Decision 77, Decision 55, Decision 92, Decision 158, Decision 162, Decision 181, Decision 101, Decision 48. Decisions triaged: 188 of 188. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 2 (T4.26 CITE, T2.47, T4.23)."
+  - "gates: decision-scout=FLAGS_FOUND; plan-critique=PROCEED after 4 round(s); round 4 autonomous"
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - Re-check rec-4639 relevance per the implement skill's protocol (its acceptance names tests/test_subagent_plan_review_values_stripped.py).
+  - scripts/terraform_apply_guard.py -- add iter_resource_changes, route evaluate_plan through it, delete the digest code and --digest mode.
+  - scripts/ci/terraform_plan_digest.py and tests/test_terraform_plan_digest.py -- the names-only digest and its unit tests.
+  - Fixtures, then tests/test_subagent_plan_review_values_stripped.py; then review.sh and action.yml until it passes; then update tests/test_terraform_apply_guard.py and tests/test_subagent_review_wiring.py.
+  - Comment-only edits in terraform-apply-sandbox.yml and reconcile.yml; create subagent-review-smoke.yml; registry shard.
+  - Run VP steps 1-6; loop until pass; on unrecoverable failure stop and RCA (Decision 55).
+  - >-
+    Closure evidence recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state; parent
+    validator evidence (VP 6 full-tier exit 0 plus bin/venv-python -m scripts.checks.validation_result --verify-head for
+    the pushed HEAD); structured postflight evidence (write the scripts.session.postflight_evidence.CATEGORIES JSON in the
+    scratchpad, then bin/venv-python -m scripts.session.postflight --evidence <file>); the real outcome -- push, PR, CI
+    green by event-driven wake (never polled), squash-merge, then steps 7-9.
+  - >-
+    Ordering with plan D2 (PLAN-secrets-to-ssm-expand, merged, unbuilt), which edits the same guard digest code to mask
+    after_sensitive values and creates tests/test_terraform_apply_guard_sensitive.py. Whichever lands second amends: if
+    D2's build merged first, take the Delete row above and remove its masking code with the rest of the digest code; if
+    this plan merges first, message the coordinator that D2's scripts/terraform_apply_guard.py and
+    tests/test_terraform_apply_guard_sensitive.py scope rows, its acceptance criterion naming that test, its VP 2 pytest
+    selector and its test_obligations entry are superseded (the names-only digest already keeps the DSN out of
+    the reviewer's input) so D2 drops them before building.
+  - >-
+    Ordering with the next terraform/personal merge (its apply runs this reviewer; S1, rec-4632, already merged as #1667
+    on the old reviewer): before merging, ask the coordinator which terraform/personal PRs are close to merge and ask
+    that they wait until step 7's smoke has passed.
+  - 'Open the PR. Merge needs Benjamin''s word on the final diff in the build thread (security change to the apply gate); then squash-merge on code review PROCEED + green CI with a `Resolves: rec-4639` trailer.'
+  - Ask Benjamin to dispatch the smoke (step 7) before the next terraform/personal merge; then steps 8-9. If step 7 or 8 fails, reopen rec-4639 with update_rec citing the failure and stop.
+  - 'Report: what was implemented, verification results'
+rollback: >-
+  Revert PR. The reviewer returns to the value-bearing digest with Read; nothing in AWS changes.

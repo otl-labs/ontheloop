@@ -276,3 +276,13 @@ class TestSecurityDetectorProbe:
         monkeypatch.setattr("boto3.Session", lambda **_: _Session(region=None))
         with pytest.raises(SystemExit):
             probe._make_clients(None)
+
+
+def test_rec_fields_pass_the_portal_gate() -> None:
+    """The probe's automated rec names the platform-security-* family (Decision 202), which the glossary lists."""
+    from scripts.ops_portal.risk_scoring import _derive_computed_fields  # noqa: PLC0415
+    from scripts.ops_portal.write_validators import gate_write  # noqa: PLC0415
+
+    fields = dict(probe.build_rec_fields(["x"]))
+    _derive_computed_fields(fields)
+    gate_write("ops_recommendations", fields, insert=True)

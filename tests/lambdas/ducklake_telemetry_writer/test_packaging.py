@@ -31,7 +31,6 @@ _COMMON_MODULES = (
     "src/common/ducklake_telemetry_handshake.py",
 )
 _KERNEL = ("__init__", "append", "gate", "identity", "timestamps")
-_READER_AND_WRITER = ["ducklake_reader", "ducklake_telemetry_writer"]
 
 
 def _telemetry_manifest() -> dict:
@@ -50,14 +49,18 @@ def test_telemetry_writer_manifest_bundles_the_kernel_and_modules() -> None:
     for rel in ("src/common/ducklake_partition_layout.py", "src/common/ducklake_maintenance_scope.py"):
         assert rel in includes, rel
     assert "src/common/ducklake_maintenance.py" not in includes
-    assert manifest["functions"] == ["agent-platform-ducklake-telemetry-writer"]
+    assert manifest["functions"] == [
+        "agent-platform-ducklake-telemetry-writer",
+        "agent-platform-ducklake-telemetry-writer-smoke",
+    ]
 
 
 def test_new_common_modules_affect_only_the_telemetry_writer() -> None:
-    """Corrected, not loosened (Decision 181): provision and txn also ship in maintenance-smoke (the owner verb)."""
-    both = ["ducklake_maintenance_smoke", "ducklake_telemetry_writer"]
-    assert sorted(compute_affected_artifacts(["src/common/ducklake_telemetry_provision.py"])) == both
-    assert sorted(compute_affected_artifacts(["src/common/ducklake_telemetry_txn.py"])) == both
+    """Corrected, not loosened (Decision 181): provision and txn also ship in maintenance-smoke (the owner verb) and, since
+    Decision 230, in ducklake_maintenance (catalog_actions creates the production telemetry tables)."""
+    three = ["ducklake_maintenance", "ducklake_maintenance_smoke", "ducklake_telemetry_writer"]
+    assert sorted(compute_affected_artifacts(["src/common/ducklake_telemetry_provision.py"])) == three
+    assert sorted(compute_affected_artifacts(["src/common/ducklake_telemetry_txn.py"])) == three
     assert sorted(compute_affected_artifacts(["src/common/ducklake_telemetry_registration.py"])) == [
         "ducklake_telemetry_writer"
     ]
@@ -109,6 +112,7 @@ def test_data_pipeline_excludes_every_ducklake_telemetry_module() -> None:
 
 
 def test_append_modules_bundled_request_shared_with_reader() -> None:
+    """The shared reader stopped bundling request.py with the event verbs (Decision 236 cl.2); the name is history."""
     includes = _telemetry_manifest()["includes"]
     for rel in (
         "src/telemetry/request.py",
@@ -119,11 +123,12 @@ def test_append_modules_bundled_request_shared_with_reader() -> None:
         assert rel in includes, rel
         assert (_ROOT / rel).is_file(), rel
     assert sorted(compute_affected_artifacts(["src/common/ducklake_telemetry_append.py"])) == ["ducklake_telemetry_writer"]
-    assert sorted(compute_affected_artifacts(["src/telemetry/request.py"])) == _READER_AND_WRITER
+    assert sorted(compute_affected_artifacts(["src/telemetry/request.py"])) == ["ducklake_telemetry_writer"]
     assert "append_telemetry" in _telemetry_manifest()["notes"]
 
 
 def test_blob_modules_bundled_adapter_shared_with_reader() -> None:
+    """The shared reader stopped bundling the blob adapter with transcript_content (Decision 236 cl.3); the name is history."""
     manifest = _telemetry_manifest()
     blob_modules = (
         "src/telemetry/blobs.py",
@@ -131,14 +136,12 @@ def test_blob_modules_bundled_adapter_shared_with_reader() -> None:
         "src/common/ducklake_telemetry_blobs.py",
         "src/common/ducklake_telemetry_handshake.py",
     )
-    shared = ("src/telemetry/blobs.py", "src/common/ducklake_telemetry_blobstore.py")
     for rel in blob_modules:
         assert rel in manifest["includes"] and (_ROOT / rel).is_file(), rel
-        want = _READER_AND_WRITER if rel in shared else ["ducklake_telemetry_writer"]
-        assert sorted(compute_affected_artifacts([rel])) == want, rel
+        assert sorted(compute_affected_artifacts([rel])) == ["ducklake_telemetry_writer"], rel
     assert not [rel for rel in manifest["includes"] if rel.startswith("src/telemetry_client")]
     reader = yaml.safe_load((_ROOT / "src" / "lambdas" / "ducklake_reader" / "manifest.yaml").read_text(encoding="utf-8"))
-    for rel in ("src/common/ducklake_telemetry_blobs.py", "src/common/ducklake_telemetry_handshake.py"):
+    for rel in blob_modules:
         assert rel not in reader["includes"], rel
     assert not [rel for rel in reader["includes"] if rel.startswith("src/telemetry_client")]
     assert "begin_blobs" in manifest["notes"]

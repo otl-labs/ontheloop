@@ -13,7 +13,8 @@ for every public and test-patched symbol now defined in the three extracted modu
 Creates these zip artifacts (built by the extracted modules; see them for detail):
   1. data-pipeline.zip                      -- scheduled-agent dispatcher + findings-processor
                                                application code (manifest-driven)
-  2. ducklake-{writer,reader,maintenance,maintenance-smoke,catalog-dr,telemetry-writer}.zip -- T2.17/T2.18 DuckLake
+  2. ducklake-{writer,reader,maintenance,maintenance-smoke,catalog-dr,telemetry-writer,
+                                               telemetry-reader}.zip -- T2.17/T2.18 DuckLake
                                                runtime functions (--ducklake-only)
   3. ducklake-{deps,extensions}-layer.zip   -- duckdb (pinned via config/lambda/ducklake/version.yaml)
                                                + baked extensions (--ducklake-only)
@@ -30,6 +31,7 @@ import tempfile
 import urllib.request  # noqa: F401 -- deliberately-retained patch anchor
 from pathlib import Path
 
+from scripts.aws_profile import resolve_aws_profile
 from scripts.build_lambda_config import (
     _BUILD_CONTRACT_PATH,  # noqa: F401
     _BUILD_CONTRACT_REGISTRY,  # noqa: F401
@@ -56,7 +58,6 @@ from scripts.build_lambda_config import (
 from scripts.build_lambda_deploy import (
     _artifact_s3_key,  # noqa: F401
     _resolve_artifact_sha,  # noqa: F401
-    _resolve_ducklake_profile,  # noqa: F401
     _write_ducklake_deploy_record,  # noqa: F401
     publish_canary_layers,  # noqa: F401
     read_deploy_record,  # noqa: F401
@@ -123,7 +124,6 @@ def _run_ducklake_build(args: argparse.Namespace) -> None:
     without building and uploading the same artifacts twice. Both default to today's behaviour
     when omitted: every existing caller and the Decision 125 break-glass path are byte-identical.
     """
-    args.profile = _resolve_ducklake_profile(args.profile)
     bucket = args.bucket or resolve_bucket(args.profile)
     only_functions = set(args.ducklake_functions.split(",")) if getattr(args, "ducklake_functions", None) else None
 
@@ -149,7 +149,7 @@ def _run_ducklake_build(args: argparse.Namespace) -> None:
 
         print(
             "[1/4] Building ducklake function zips (writer + reader + maintenance + maintenance-smoke + "
-            "catalog-dr + telemetry-writer, manifest-driven)..."
+            "catalog-dr + telemetry-writer + telemetry-reader, manifest-driven)..."
         )
         writer_zip = build_ducklake_function_package(temp_dir, "ducklake_writer", "ducklake-writer.zip")
         reader_zip = build_ducklake_function_package(temp_dir, "ducklake_reader", "ducklake-reader.zip")
@@ -161,12 +161,16 @@ def _run_ducklake_build(args: argparse.Namespace) -> None:
         telemetry_writer_zip = build_ducklake_function_package(
             temp_dir, "ducklake_telemetry_writer", "ducklake-telemetry-writer.zip"
         )
+        telemetry_reader_zip = build_ducklake_function_package(
+            temp_dir, "ducklake_telemetry_reader", "ducklake-telemetry-reader.zip"
+        )
         print(f"  OK ducklake-writer.zip ({round(writer_zip.stat().st_size / 1024 / 1024, 2)} MB)")
         print(f"  OK ducklake-reader.zip ({round(reader_zip.stat().st_size / 1024 / 1024, 2)} MB)")
         print(f"  OK ducklake-maintenance.zip ({round(maintenance_zip.stat().st_size / 1024 / 1024, 2)} MB)")
         print(f"  OK ducklake-maintenance-smoke.zip ({round(maintenance_smoke_zip.stat().st_size / 1024 / 1024, 2)} MB)")
         print(f"  OK ducklake-catalog-dr.zip ({round(catalog_dr_zip.stat().st_size / 1024 / 1024, 2)} MB)")
         print(f"  OK ducklake-telemetry-writer.zip ({round(telemetry_writer_zip.stat().st_size / 1024 / 1024, 2)} MB)")
+        print(f"  OK ducklake-telemetry-reader.zip ({round(telemetry_reader_zip.stat().st_size / 1024 / 1024, 2)} MB)")
 
         print("[2/4] Building ducklake-deps + ducklake-extensions + ducklake-pgclient layers...")
         deps_layer = build_ducklake_deps_layer(temp_dir)
@@ -183,6 +187,7 @@ def _run_ducklake_build(args: argparse.Namespace) -> None:
             maintenance_smoke_zip,
             catalog_dr_zip,
             telemetry_writer_zip,
+            telemetry_reader_zip,
             deps_layer,
             ext_layer,
             pgclient_layer,
@@ -225,7 +230,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build Lambda deployment packages")
     parser.add_argument("--skip-upload", action="store_true", help="Build zips only, skip S3 upload")
     parser.add_argument("--bucket", default="", help="S3 bucket name (default: from terraform output)")
-    parser.add_argument("--profile", default="company-aws-profile", help="AWS CLI profile")
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help="AWS CLI profile (default: $AWS_PROFILE, else agent_platform; none under environment credentials)",
+    )
     parser.add_argument("--region", default="eu-west-2", help="AWS region")
     parser.add_argument(
         "--deploy",
@@ -235,7 +244,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ducklake-only",
         action="store_true",
-        help="Build/upload/deploy ONLY the DuckLake artifacts (6 zips + 3 layers; the "
+        help="Build/upload/deploy ONLY the DuckLake artifacts (7 zips + 3 layers; the "
         "deployed functions are writer, reader, maintenance, maintenance-smoke, "
         "catalog-dr, telemetry-writer); leave data-pipeline untouched (Decision 79).",
     )
@@ -275,13 +284,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.profile is None:
+        args.profile = resolve_aws_profile() or ""
 
     if args.list_bundle:
         list_bundle(args.list_bundle)
         return
 
     if args.ducklake_publish_canary_layers:
-        args.profile = _resolve_ducklake_profile(args.profile)
         bucket = args.bucket or resolve_bucket(args.profile)
         publish_canary_layers(bucket=bucket, profile=args.profile, region=args.region, artifact_sha=_resolve_artifact_sha())
         return

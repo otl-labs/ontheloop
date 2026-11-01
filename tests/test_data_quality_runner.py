@@ -14,13 +14,36 @@ from scripts.data_quality_runner import (
 
 def test_print_results_with_issues(capsys):
     """Covers lines 518-524: Print results issues loop."""
-    check = Check(table="T", column="C", test_type="not_null", sql="S", description="N1", severity="error")
+    check = Check(table="T", column="C", test_type="not_null", kind="not_null", description="N1", severity="error")
     results = [CheckResult(check=check, verdict="FAIL", violation_count=10, detail="10 violations")]
     rr = RunResult(results=results, verdict="FAIL", duration_seconds=1.2)
     _print_results(rr)
     captured = capsys.readouterr().out
     assert "[FAIL] N1" in captured
     assert "10 violations" in captured
+
+
+@patch("scripts.data_quality_runner.load_tombstones", return_value=[])
+@patch("scripts.data_quality_runner._DQ_DIR")
+@patch("scripts.data_quality_runner.load_checks")
+def test_dry_run_prints_dq_check_requests(mock_load, mock_dq_dir, _mock_tombstones, capsys):
+    mock_dq_dir.glob.return_value = [Path("test.yaml")]
+    check = Check("ops_recommendations", "title", "not_null", "not_null", "desc", params={"column": "title"})
+    mock_load.return_value = ([check], {"database": "db"})
+    with (
+        patch("sys.argv", ["runner.py", "--dry-run"]),
+        patch("scripts.data_quality_runner.apply_backend_routing", side_effect=lambda c, d, **k: c),
+    ):
+        assert main() == 0
+    out = capsys.readouterr().out
+    request = json.loads(out.strip().splitlines()[-1])
+    assert request == {
+        "action": "dq_check",
+        "check": "not_null",
+        "table": "ops_recommendations",
+        "params": {"column": "title"},
+    }
+    assert "SELECT" not in out
 
 
 def test_main_no_matching_filters():
@@ -36,7 +59,7 @@ def test_main_no_matching_filters():
 
 
 def test_print_results_json(capsys):
-    c = Check("t", "c", "type", "sql", "desc")
+    c = Check("t", "c", "type", "not_null", "desc")
     results = [CheckResult(c, "PASS")]
     rr = RunResult(results=results, verdict="PASS", duration_seconds=1.2)
     _print_results(rr, as_json=True)
@@ -47,7 +70,7 @@ def test_print_results_json(capsys):
 
 def test_save_latest_result(tmp_path):
     with patch("scripts.data_quality_runner._ROOT", tmp_path):
-        c = Check("t", "c", "type", "sql", "desc")
+        c = Check("t", "c", "type", "not_null", "desc")
         rr = RunResult(results=[CheckResult(c, "PASS")], verdict="PASS", duration_seconds=1.2)
         _save_latest_result(rr)
         assert (tmp_path / "logs" / "debug" / "dq-latest.json").exists()
@@ -58,7 +81,7 @@ def test_save_latest_result(tmp_path):
 @patch("scripts.data_quality_runner.run_checks")
 def test_main_full(mock_run, mock_load, mock_dq_dir):
     mock_dq_dir.glob.return_value = [Path("test.yaml")]
-    mock_load.return_value = ([Check("t", "c", "type", "sql", "desc")], {"database": "db"})
+    mock_load.return_value = ([Check("t", "c", "type", "not_null", "desc")], {"database": "db"})
     mock_run.return_value = RunResult(verdict="PASS")
     # Stub routing: it reads _DQ_DIR/"ops.yaml" which is a MagicMock here; routing has dedicated tests.
     with (
@@ -81,8 +104,8 @@ def test_main_no_files(mock_dq_dir):
 def test_main_severity_error(mock_load, mock_dq_dir, _mock_tombstones):
     mock_dq_dir.glob.return_value = [Path("test.yaml")]
     checks = [
-        Check("t", "c", "type", "sql", "desc", "error"),
-        Check("t", "c", "type", "sql", "desc", "warn"),
+        Check("t", "c", "type", "not_null", "desc", "error"),
+        Check("t", "c", "type", "not_null", "desc", "warn"),
     ]
     mock_load.return_value = (checks, {"database": "db"})
     with (
@@ -100,8 +123,8 @@ def test_main_severity_error(mock_load, mock_dq_dir, _mock_tombstones):
 def test_main_severity_warn(mock_load, mock_dq_dir):
     mock_dq_dir.glob.return_value = [Path("test.yaml")]
     checks = [
-        Check("t", "c", "type", "sql", "desc", "error"),
-        Check("t", "c", "type", "sql", "desc", "warn"),
+        Check("t", "c", "type", "not_null", "desc", "error"),
+        Check("t", "c", "type", "not_null", "desc", "warn"),
     ]
     mock_load.return_value = (checks, {"database": "db"})
     with (
@@ -117,7 +140,7 @@ def test_main_severity_warn(mock_load, mock_dq_dir):
 @patch("scripts.data_quality_runner.load_checks")
 def test_main_json(mock_load, mock_dq_dir):
     mock_dq_dir.glob.return_value = [Path("test.yaml")]
-    mock_load.return_value = ([Check("t", "c", "type", "sql", "desc")], {"database": "db"})
+    mock_load.return_value = ([Check("t", "c", "type", "not_null", "desc")], {"database": "db"})
     with patch("scripts.data_quality_runner.run_checks") as mock_run:
         mock_run.return_value = RunResult(verdict="PASS")
         with (
@@ -150,8 +173,8 @@ def test_save_latest_result_zero_results_no_write(tmp_path):
 def test_save_latest_result_checks_array(tmp_path):
     """_save_latest_result writes checks array with correct schema: table, column, test, verdict."""
     with patch("scripts.data_quality_runner._ROOT", tmp_path):
-        c_table = Check("tbl", None, "row_count", "sql", "desc")
-        c_col = Check("tbl", "col", "not_null", "sql", "desc")
+        c_table = Check("tbl", None, "row_count", "not_null", "desc")
+        c_col = Check("tbl", "col", "not_null", "not_null", "desc")
         results = [
             CheckResult(c_table, "PASS"),
             CheckResult(c_col, "FAIL"),
@@ -179,8 +202,8 @@ def test_save_latest_result_checks_array(tmp_path):
 def test_main_conflicting_workgroup_returns_1(mock_load, mock_dq_dir):
     mock_dq_dir.glob.return_value = [Path("a.yaml"), Path("b.yaml")]
     mock_load.side_effect = [
-        ([Check("t", "c", "type", "sql", "desc")], {"database": "db"}),
-        ([Check("t", "c", "type", "sql", "desc")], {"database": "db"}),
+        ([Check("t", "c", "type", "not_null", "desc")], {"database": "db"}),
+        ([Check("t", "c", "type", "not_null", "desc")], {"database": "db"}),
     ]
     with patch("sys.argv", ["runner.py"]):
         assert main() == 1
@@ -189,7 +212,7 @@ def test_main_conflicting_workgroup_returns_1(mock_load, mock_dq_dir):
 def test_graduation_guard_unenforced_fail_recorded_in_latest_json(tmp_path):
     """_save_latest_result records UNENFORCED_FAIL per-check -- graduation guard reads this to block flip."""
     with patch("scripts.data_quality_runner._ROOT", tmp_path):
-        c = Check("ops_recommendations", "file", "not_null", "sql", "desc", "error", enforced=False)
+        c = Check("ops_recommendations", "file", "not_null", "not_null", "desc", "error", enforced=False)
         rr = RunResult(results=[CheckResult(c, "UNENFORCED_FAIL")], verdict="PASS")
         _save_latest_result(rr)
 
@@ -202,8 +225,8 @@ def test_graduation_guard_unenforced_fail_recorded_in_latest_json(tmp_path):
 def test_save_latest_result_includes_unenforced_fail_count(tmp_path):
     """dq-latest.json aggregate includes unenforced_fail key; failed excludes unenforced."""
     with patch("scripts.data_quality_runner._ROOT", tmp_path):
-        c_enforced = Check("t", "c1", "not_null", "sql", "desc", "error", enforced=True)
-        c_unenforced = Check("t", "c2", "not_null", "sql", "desc", "error", enforced=False)
+        c_enforced = Check("t", "c1", "not_null", "not_null", "desc", "error", enforced=True)
+        c_unenforced = Check("t", "c2", "not_null", "not_null", "desc", "error", enforced=False)
         results = [
             CheckResult(c_enforced, "FAIL"),
             CheckResult(c_unenforced, "UNENFORCED_FAIL"),
@@ -221,7 +244,7 @@ def test_save_latest_result_includes_unenforced_fail_count(tmp_path):
 
 def test_print_results_json_includes_unenforced_fail(capsys):
     """JSON output from _print_results includes unenforced_fail field."""
-    c = Check("t", "c", "not_null", "sql", "desc", "error", enforced=False)
+    c = Check("t", "c", "not_null", "not_null", "desc", "error", enforced=False)
     results = [CheckResult(c, "UNENFORCED_FAIL")]
     rr = RunResult(results=results, verdict="PASS", duration_seconds=1.0)
     _print_results(rr, as_json=True)
@@ -239,7 +262,7 @@ class TestMainExitCodeDegraded:
     @patch("scripts.data_quality_runner.run_checks")
     def test_main_exits_0_on_degraded(self, mock_run, mock_load, mock_dq_dir):
         mock_dq_dir.glob.return_value = [Path("test.yaml")]
-        mock_load.return_value = ([Check("t", "c", "type", "sql", "desc")], {"database": "db"})
+        mock_load.return_value = ([Check("t", "c", "type", "not_null", "desc")], {"database": "db"})
         mock_run.return_value = RunResult(verdict="DEGRADED")
         with (
             patch("sys.argv", ["runner.py"]),
@@ -252,7 +275,7 @@ class TestMainExitCodeDegraded:
     @patch("scripts.data_quality_runner.run_checks")
     def test_main_exits_1_on_fail(self, mock_run, mock_load, mock_dq_dir):
         mock_dq_dir.glob.return_value = [Path("test.yaml")]
-        mock_load.return_value = ([Check("t", "c", "type", "sql", "desc")], {"database": "db"})
+        mock_load.return_value = ([Check("t", "c", "type", "not_null", "desc")], {"database": "db"})
         mock_run.return_value = RunResult(verdict="FAIL")
         with (
             patch("sys.argv", ["runner.py"]),
@@ -265,7 +288,7 @@ class TestMainExitCodeDegraded:
     @patch("scripts.data_quality_runner.run_checks")
     def test_main_exits_1_on_hard_gate(self, mock_run, mock_load, mock_dq_dir):
         mock_dq_dir.glob.return_value = [Path("test.yaml")]
-        mock_load.return_value = ([Check("t", "c", "type", "sql", "desc")], {"database": "db"})
+        mock_load.return_value = ([Check("t", "c", "type", "not_null", "desc")], {"database": "db"})
         mock_run.return_value = RunResult(verdict="HARD_GATE")
         with (
             patch("sys.argv", ["runner.py"]),

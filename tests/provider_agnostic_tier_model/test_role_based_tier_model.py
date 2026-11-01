@@ -28,6 +28,7 @@ DECISION_NUMBER = 173
 ANNOTATION_DATE = "2026-08-19"
 FIXED_ALLOWANCE = "fixed_non_rollover_allowance"
 METERED = "metered_marginal"
+LOCAL = "local"
 PRIMARY_ROLE = "primary"
 FALLBACK_ROLE = "warm_fetched_escape_hatch"
 
@@ -79,14 +80,14 @@ def test_tier_rows_are_role_keyed_with_billing_shape() -> None:
     contract = _load_yaml(CONTRACT_PATH)
     tier_model = contract["tier_model"]
     vocabulary = tier_model["billing_shape_vocabulary"]
-    assert set(vocabulary) == {METERED, FIXED_ALLOWANCE}, vocabulary
+    assert set(vocabulary) == {METERED, FIXED_ALLOWANCE, LOCAL}, vocabulary
 
     rows = tier_model["tiers"]
     assert rows, "tier_model.tiers must not be empty"
     for row in rows:
         for field in ("role", "billing_shape", "cold_start_assertion", "selection_ref"):
             assert field in row, f"tier {row.get('tier')} is missing {field}"
-        assert row["billing_shape"] in vocabulary, row
+        assert row["billing_shape"] in {METERED, FIXED_ALLOWANCE}, f"no tier carries {LOCAL} (Decision 234 clause 4): {row}"
         assert "provider" not in row, f"tier {row['tier']} still names a provider -- identity has one home"
         assert "current_provider" not in row, f"tier {row['tier']} carries a second copy of provider identity"
         assert row["selection_ref"].startswith("model_id_formats.litellm_tier_models."), row["selection_ref"]

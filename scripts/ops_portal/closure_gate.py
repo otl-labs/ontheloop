@@ -199,6 +199,29 @@ def changed_files(sha: Optional[str], root: Path) -> Optional[set[str]]:
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
+_TEST_PATH_PREFIX = "tests/"
+_BOOKKEEPING_PREFIXES = ("docs/plans/", "config/agent/verification_registry/entries/")
+
+
+def confirmed_repair_track(fix_sha: Optional[str], root: Path) -> Optional[str]:
+    """Decision 226 cl.1: the track a fix commit's diff confirms. None when the sha is unresolvable or only
+    plan/registry bookkeeping changed; test_defect when every remaining path is under tests/."""
+    touched = changed_files(fix_sha, root)
+    if not touched:
+        return None
+    remaining = [f for f in touched if not f.startswith(_BOOKKEEPING_PREFIXES)]
+    if not remaining:
+        return None
+    return "test_defect" if all(f.startswith(_TEST_PATH_PREFIX) for f in remaining) else "product_regression"
+
+
+def confirmed_track_stamp(source: Optional[str], fix_sha: Optional[str], root: Path) -> dict:
+    if source != "ci_rca":
+        return {}
+    track = confirmed_repair_track(fix_sha, root)
+    return {"repair_track_confirmed": track} if track else {}
+
+
 def _fix_commit_touches(defining_files: list[str], fix_sha: Optional[str], root: Path) -> bool:
     """True iff fix_sha resolves (via changed_files()) and its changed-file list intersects
     defining_files. Delegates the diff-tree call to changed_files() -- an unresolvable/falsy

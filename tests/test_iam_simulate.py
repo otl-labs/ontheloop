@@ -29,6 +29,7 @@ from scripts.ci.iam_simulate import (
     resolve_placeholders,
     run_fixture,
 )
+from scripts.ci.redaction_check import ACCOUNT_ID_SHAPE
 
 _ACCOUNT = "account-id-placeholder"
 _REGION = "eu-west-2"
@@ -280,6 +281,24 @@ def test_run_fixture_treats_a_raising_simulator_as_a_mismatch() -> None:
     assert "ERROR(RuntimeError: AccessDenied on simulate)" in stream.getvalue()
 
 
+def test_printed_output_masks_account_ids() -> None:
+    account = str(10**11 + 7)
+    target = f"arn:aws:iam::{account}:role/probe"
+    triples = [_triple(id="m", target_arn=target, expected_decision="implicitDeny"), _triple(id="e", target_arn=target)]
+
+    def _simulate(triple: Triple) -> str:
+        if triple.id == "e":
+            raise RuntimeError(f"denied: arn:aws:sts::{account}:assumed-role/R/s")
+        return "allowed"
+
+    stream = io.StringIO()
+    assert run_fixture(triples, _simulate, stream) == 2
+    output = stream.getvalue()
+    assert "[ACCOUNT_ID]" in output
+    assert ":role/probe" in output
+    assert not ACCOUNT_ID_SHAPE.search(output)
+
+
 # ---------------------------------------------------------------------------
 # CLI wiring (AWS seams injected)
 # ---------------------------------------------------------------------------
@@ -351,6 +370,36 @@ def test_main_fails_closed_on_a_malformed_fixture(tmp_path: Path) -> None:
         simulator_factory=lambda profile, region, arn: lambda t: "allowed",
     )
     assert rc == 1
+
+
+def test_main_masks_account_ids_in_error_lines(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    account = str(10**11 + 7)
+
+    def _leaky_identity(profile, region):  # noqa: ANN001, ANN202
+        raise RuntimeError(f"denied for arn:aws:sts::{account}:assumed-role/R/s")
+
+    fixture = _write(tmp_path, _MINIMAL_FIXTURE)
+    rc = main(["--fixture", str(fixture)], identity_fn=_leaky_identity, simulator_factory=lambda p, r, a: lambda t: "allowed")
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "[ACCOUNT_ID]" in err
+    assert not ACCOUNT_ID_SHAPE.search(err)
+
+    wildcard = (
+        'principal:\n  arn_template: "arn:aws:iam::${account_id}:role/r"\n'
+        'triples:\n  - id: w\n    verb: "iam:GetRole"\n'
+        '    target_arn_template: "arn:aws:iam::${account_id}:role/*"\n'
+        '    expected_decision: allowed\n    why: "w"\n'
+    )
+    rc = main(
+        ["--fixture", str(_write(tmp_path, wildcard, "w.yaml"))],
+        identity_fn=lambda profile, region: (account, region or _REGION),
+        simulator_factory=lambda p, r, a: lambda t: "allowed",
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "[ACCOUNT_ID]" in err
+    assert not ACCOUNT_ID_SHAPE.search(err)
 
 
 # ---------------------------------------------------------------------------

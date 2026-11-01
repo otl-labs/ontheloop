@@ -48,7 +48,7 @@ def _write(root: Path, rel: str, content: str) -> None:
 def _base_tree(root: Path, region: str = "eu-west-2") -> None:
     _write(root, "config/aws-region", region + "\n")
     _write(root, "terraform/bootstrap/variables.tf", _GOOD_BOOTSTRAP_VARIABLES)
-    _write(root, "terraform/personal/variables.tf", _GOOD_PERSONAL_VARIABLES)
+    _write(root, "terraform/personal/providers.tf", _GOOD_PERSONAL_VARIABLES)
 
 
 def _run(root: Path) -> list[str]:
@@ -279,21 +279,21 @@ class TestBranchCoverage:
         (tmp_path / "terraform" / "bootstrap").mkdir(parents=True)
         (tmp_path / "terraform" / "bootstrap" / "variables.tf").write_text(_GOOD_BOOTSTRAP_VARIABLES, encoding="utf-8")
         (tmp_path / "terraform" / "personal").mkdir(parents=True)
-        (tmp_path / "terraform" / "personal" / "variables.tf").write_text(_GOOD_PERSONAL_VARIABLES, encoding="utf-8")
+        (tmp_path / "terraform" / "personal" / "providers.tf").write_text(_GOOD_PERSONAL_VARIABLES, encoding="utf-8")
         failed = _run(tmp_path)
         assert any("R1" in f and "missing" in f for f in failed)
 
     def test_pinned_file_with_no_aws_region_variable_block(self, tmp_path: Path) -> None:
         _write(tmp_path, "config/aws-region", "eu-west-2\n")
         _write(tmp_path, "terraform/bootstrap/variables.tf", 'variable "other" {\n  default = "x"\n}\n')
-        _write(tmp_path, "terraform/personal/variables.tf", _GOOD_PERSONAL_VARIABLES)
+        _write(tmp_path, "terraform/personal/providers.tf", _GOOD_PERSONAL_VARIABLES)
         failed = _run(tmp_path)
         assert failed == []
 
     def test_pinned_file_with_no_default_in_block(self, tmp_path: Path) -> None:
         _write(tmp_path, "config/aws-region", "eu-west-2\n")
         _write(tmp_path, "terraform/bootstrap/variables.tf", 'variable "aws_region" {\n  type = string\n}\n')
-        _write(tmp_path, "terraform/personal/variables.tf", _GOOD_PERSONAL_VARIABLES)
+        _write(tmp_path, "terraform/personal/providers.tf", _GOOD_PERSONAL_VARIABLES)
         failed = _run(tmp_path)
         assert failed == []
 

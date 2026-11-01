@@ -1,10 +1,12 @@
 # DuckLake telemetry writer Lambda (T2.36, slice 2a-2, option D part 1; Decision 143 cl.3, Decision 213).
 #
 # Telemetry write verbs get their own function, execution role and AWS_IAM Function URL so telemetry
-# identities never reach ops_* verbs and the shared catalog login. The role reaches S3 only on the
-# isolated ducklake_smoke catalog's data prefix and its fenced blob root, and connects to the catalog as
-# its own scoped login (aws_secretsmanager_secret.ducklake_telemetry_writer_dsn). Mirrors
-# ducklake_maintenance_smoke.tf (the Decision 143 split precedent).
+# identities never reach ops_* verbs and the shared catalog login. The function binds the production
+# telemetry catalog (ducklake_telemetry, Decision 230) and connects as the production scoped login
+# (aws_secretsmanager_secret.ducklake_telemetry_writer_prod_dsn); the smoke binding belongs to the twin
+# (ducklake_telemetry_writer_smoke.tf, Decision 236), so this role holds the production binding's grants only and a
+# pin-back to smoke first reverts PLAN-telemetry-production-flip's narrow PR (else every append is AccessDenied).
+# Mirrors ducklake_maintenance_smoke.tf (the Decision 143 split precedent).
 #
 # ---------------------------------------------------------------------------
 # APPLY POSTURE (environment-taxonomy.yaml guard_classification): the role CREATE and the
@@ -28,7 +30,9 @@ resource "aws_cloudwatch_log_group" "ducklake_telemetry_writer" {
 
 resource "aws_iam_role" "ducklake_telemetry_writer" {
   # Decision 144 (T2.48): mandatory broad-but-bounded exec-identity boundary.
-  name                 = "agent-platform-ducklake-telemetry-writer"
+  name = "agent-platform-ducklake-telemetry-writer"
+  # Stale on purpose since the flip: an aws_iam_role update is outside in_budget_resource_types and would route the apply
+  # to tf-gated-apply.
   description          = "Telemetry writer: S3 Get/Put on the smoke catalog data prefix and fenced blob root only, scoped catalog login read"
   permissions_boundary = "arn:aws:iam::${var.account_id}:policy/agent-platform-github-ci-apply-boundary"
   assume_role_policy   = data.aws_iam_policy_document.lambda_assume.json
@@ -48,18 +52,25 @@ resource "aws_iam_role_policy" "ducklake_telemetry_writer" {
         Resource = ["${aws_cloudwatch_log_group.ducklake_telemetry_writer.arn}:*"]
       },
       {
-        # Scoped catalog login only; never the shared ducklake-neon-catalog-dsn.
+        # The production scoped catalog login only; never the shared ducklake-neon-catalog-dsn or the twin's smoke login.
         Sid      = "TelemetryDsnRead"
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [aws_secretsmanager_secret.ducklake_telemetry_writer_dsn.arn]
+        Resource = [aws_secretsmanager_secret.ducklake_telemetry_writer_prod_dsn.arn]
       },
       {
-        # Smoke catalog data prefix ONLY. No Delete, and never the production ducklake/ prefix.
+        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
+        Sid      = "TelemetryDsnParameterRead"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-telemetry-writer-prod-dsn"]
+      },
+      {
+        # The production telemetry data prefix ONLY. No Delete, and never the ops ducklake/ prefix.
         Sid      = "TelemetryCatalogDataReadWrite"
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject"]
-        Resource = ["${aws_s3_bucket.data_lake.arn}/${local.ducklake_smoke_data_prefix}/*"]
+        Resource = ["${aws_s3_bucket.data_lake.arn}/${local.ducklake_telemetry_data_prefix}/*"]
       },
       {
         Sid      = "TelemetryCatalogDataList"
@@ -68,16 +79,17 @@ resource "aws_iam_role_policy" "ducklake_telemetry_writer" {
         Resource = [aws_s3_bucket.data_lake.arn]
         Condition = {
           StringLike = {
-            "s3:prefix" = ["${local.ducklake_smoke_data_prefix}/*"]
+            "s3:prefix" = ["${local.ducklake_telemetry_data_prefix}/*"]
           }
         }
       },
       {
-        # Fenced to the pinned catalog's blob root. No Delete: orphan deletion belongs to the maintenance role (rec-4033).
+        # Fenced to the production catalog's blob root by its fixed local, so a pin-back cannot widen it. No Delete: orphan
+        # deletion belongs to the maintenance role (rec-4033).
         Sid      = "TelemetryBlobReadWrite"
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject"]
-        Resource = ["${aws_s3_bucket.data_lake.arn}/${local.telemetry_blob_data_prefix}/${local.ducklake_telemetry_meta_schema}/*"]
+        Resource = ["${aws_s3_bucket.data_lake.arn}/${local.telemetry_blob_data_prefix}/${local.ducklake_telemetry_prod_meta_schema}/*"]
       },
       {
         Sid      = "TelemetryBlobList"
@@ -86,7 +98,7 @@ resource "aws_iam_role_policy" "ducklake_telemetry_writer" {
         Resource = [aws_s3_bucket.data_lake.arn]
         Condition = {
           StringLike = {
-            "s3:prefix" = ["${local.telemetry_blob_data_prefix}/${local.ducklake_telemetry_meta_schema}/*"]
+            "s3:prefix" = ["${local.telemetry_blob_data_prefix}/${local.ducklake_telemetry_prod_meta_schema}/*"]
           }
         }
       },
@@ -116,7 +128,8 @@ resource "aws_lambda_function" "ducklake_telemetry_writer" {
   timeout       = 120
   memory_size   = 3008 # The writer's baseline (Decision 82).
 
-  # Bounds catalog sessions to 5 containers (connection budget); slice 2c re-sizes it.
+  # Bounds catalog sessions to 5 containers (2 x 5 within the production login's limit of 10); re-size when Throttles > 0
+  # or OccRetryCount p95 >= 2 over 7 days (PLAN-telemetry-production-catalog).
   reserved_concurrent_executions = 5
 
   s3_bucket = aws_s3_bucket.data_lake.id
@@ -130,11 +143,12 @@ resource "aws_lambda_function" "ducklake_telemetry_writer" {
   environment {
     variables = {
       TELEMETRY_META_SCHEMA         = local.ducklake_telemetry_meta_schema
-      TELEMETRY_DATA_PATH           = local.ducklake_smoke_data_path
+      TELEMETRY_DATA_PATH           = local.ducklake_telemetry_data_path
       TELEMETRY_BLOB_ROOT           = local.ducklake_telemetry_blob_root
       DUCKLAKE_EXTENSION_DIRECTORY  = local.ducklake_extension_dir
       DUCKLAKE_FIELD_SEMANTICS_PATH = "/var/task/config/lambda/ducklake/field_semantics.yaml"
-      TELEMETRY_DSN_SECRET_ID       = aws_secretsmanager_secret.ducklake_telemetry_writer_dsn.name
+      TELEMETRY_DSN_SECRET_ID       = aws_secretsmanager_secret.ducklake_telemetry_writer_prod_dsn.name
+      TELEMETRY_DSN_PARAMETER       = local.secret_parameter_names.telemetry_writer_prod_dsn
     }
   }
 
@@ -169,6 +183,17 @@ resource "aws_ssm_parameter" "ducklake_telemetry_writer_url" {
   tags = {
     Name    = "DuckLake Telemetry Writer URL"
     Purpose = "T2.36 endpoint discovery"
+  }
+}
+
+resource "aws_ssm_parameter" "ducklake_telemetry_catalog" {
+  name  = "/agent-platform/ducklake/telemetry_catalog"
+  type  = "String"
+  value = local.ducklake_telemetry_meta_schema
+
+  tags = {
+    Name    = "DuckLake Telemetry Catalog"
+    Purpose = "T2.36 read routing"
   }
 }
 
@@ -223,6 +248,62 @@ resource "aws_cloudwatch_metric_alarm" "ducklake_telemetry_writer_errors" {
   tags = {
     Name    = "DuckLake Telemetry Writer Errors Alarm"
     Purpose = "T2.36 runtime error alert"
+  }
+}
+
+# Writer alarms on the production MetaSchema series only, so the smoke twin can never trip them. An OccRetryCount of 3
+# is the fourth of OCC_MAX_ATTEMPTS = 5, one attempt short of exhaustion. The warm-wall p95 Decision 214 cl.4 names is unmeasured
+# for this writer (rec-4482 owns it); CommitLatencyMs, the commit that dominates an append, is the alarmed series.
+resource "aws_cloudwatch_metric_alarm" "ducklake_telemetry_writer_occ" {
+  alarm_name          = "ducklake-telemetry-writer-occ"
+  alarm_description   = "DuckLake production telemetry writer is one attempt short of OCC exhaustion on an append. T2.36 c5."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  metric_name         = "OccRetryCount"
+  namespace           = "DuckLakeTelemetryWriter"
+  period              = 3600
+  statistic           = "Maximum"
+  threshold           = 3
+
+  dimensions = {
+    MetaSchema = local.ducklake_telemetry_prod_meta_schema
+  }
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+
+  treat_missing_data = "notBreaching"
+
+  tags = {
+    Name    = "DuckLake Telemetry Writer OCC Alarm"
+    Purpose = "T2.36 c5 production telemetry writer contention"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "ducklake_telemetry_writer_commit_latency" {
+  alarm_name          = "ducklake-telemetry-writer-commit-latency"
+  alarm_description   = "DuckLake production telemetry writer append commit latency is well above its measured baseline. T2.36 c5."
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  datapoints_to_alarm = 3
+  metric_name         = "CommitLatencyMs"
+  namespace           = "DuckLakeTelemetryWriter"
+  period              = 3600
+  extended_statistic  = "p95"
+  threshold           = ceil(2 * local.telemetry_commit_latency_p95_ms_7d / 1000) * 1000
+
+  dimensions = {
+    MetaSchema = local.ducklake_telemetry_prod_meta_schema
+  }
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+
+  treat_missing_data = "notBreaching"
+
+  tags = {
+    Name    = "DuckLake Telemetry Writer Commit Latency Alarm"
+    Purpose = "T2.36 c5 production telemetry writer commit latency"
   }
 }
 

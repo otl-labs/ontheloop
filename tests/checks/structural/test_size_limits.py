@@ -454,10 +454,17 @@ class TestLiveTreeFreezeState:
     def test_frozen_entries_are_recorded_at_their_measured_pin(self) -> None:
         reg = _classify.load_registry()
         frozen = {k: v for k, v in (reg.get("budget_notes") or {}).items() if isinstance(v, dict) and v.get("frozen")}
-        assert frozen
         for path, note in frozen.items():
             assert note["rationale"] and note["retires_when"]
             assert isinstance(reg["budgets"][path], int)
+
+    def test_decision_entry_freeze_is_retired_to_its_class_default(self) -> None:
+        reg = _classify.load_registry()
+        path = "docs/contracts/decision-entry.yaml"
+        assert path not in (reg.get("budgets") or {}) and path not in (reg.get("budget_notes") or {})
+        limit = next(row["limit"] for row in reg["classes"] if row.get("slug") == "contracts")
+        text = (Path(__file__).resolve().parents[3] / path).read_text(encoding="utf-8")
+        assert _classify.effective_lines(text) <= limit
 
     def test_live_registry_is_escape_clean(self) -> None:
         assert escape_violations(_classify.load_registry()) == []

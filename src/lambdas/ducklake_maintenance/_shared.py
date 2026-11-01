@@ -52,3 +52,27 @@ def _emit_maintenance_metric(
         rt.emit_metric(name, value, namespace=namespace, profile=profile, dimensions=dimensions)
     else:
         rt.emit_metric(name, value, namespace=namespace, profile=profile)
+
+
+# The closed set merge_ops, gc_ops and the breaker sink emit for a non-ops catalog (cardinality bound; the ops series
+# stays undimensioned and carries every name).
+CATALOG_METRICS = frozenset(
+    {
+        "MaintenanceBreakerTrip",
+        "GcReferencedMissing",
+        "GcDeletedSnapshots",
+        "GcDeferredFiles",
+        "MergeOpsPassFailed",
+        "MergeOpsTablesCount",
+        "MergeOpsFilesAfterTotal",
+        "MergeOpsDurationMs",
+        "CatalogFileColumnStatsRows",
+    }
+)
+
+
+def catalog_dimensions(meta_schema: Any) -> dict[str, str] | None:
+    """MetaSchema dimension for a non-ops catalog; None for ducklake_ops or anything that is not an identifier."""
+    if not isinstance(meta_schema, str) or not _IDENTIFIER_RE.match(meta_schema) or meta_schema == rt.META_SCHEMA:
+        return None
+    return {"MetaSchema": meta_schema}

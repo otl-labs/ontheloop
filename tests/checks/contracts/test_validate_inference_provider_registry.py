@@ -170,3 +170,31 @@ class TestPassLineOutput:
         out = capsys.readouterr().out
         expected = "  PASS: inference-provider.yaml provider_defaults and retired_providers agree with model_registry.py."
         assert expected in out
+
+
+def test_local_server_rows_state_how_credential_holder_applies() -> None:
+    """Decision 234 clause 4: a self-hosted server may hold no credential, so the axes say how they read for it."""
+    path = Path(__file__).resolve().parents[3] / "docs" / "contracts" / _CONTRACT_NAME
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    axes = doc["vocabulary"]["axes"]
+    holders = axes["credential_holder"]
+    assert "end_user" in holders["values"]
+    meaning = " ".join(holders["reserved_meaning"].split())
+    assert "litellm_local_servers" in meaning and "whether or not the server takes a key" in meaning
+
+    rows = doc["model_id_formats"]["litellm_local_servers"]
+    assert set(rows) == {"ollama", "vllm"}
+    for name, phrase in (("ollama", "no key by default"), ("vllm", "--api-key")):
+        notes = " ".join(rows[name]["notes"].split())
+        assert rows[name]["credential_holder"] == "end_user", name
+        assert "end_user" in notes and phrase in notes, name
+        assert "billing_shape local" in notes and "no tier role" in notes, name
+
+    shape = axes["billing_shape"]
+    assert "local" in shape["values_ref"] or "local" in doc["tier_model"]["billing_shape_vocabulary"]
+    assert "local" in " ".join(shape["reserved_meaning"].split())
+    assert "local never names a local adapter" in " ".join(shape["do_not_use_for"].split())
+
+    failed: list[str] = []
+    validate_inference_provider_registry(failed, contracts_dir=path.parent)
+    assert failed == []

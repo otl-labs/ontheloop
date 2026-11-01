@@ -18,7 +18,7 @@ def test_validate_bucket_exists_success():
     with patch("scripts.build_lambda.subprocess.run") as mock_run:
         mock_run.return_value.returncode = 0
 
-        result = bd.validate_bucket_exists("test-bucket", "company-aws-profile", "eu-west-2")
+        result = bd.validate_bucket_exists("test-bucket", "test-profile", "eu-west-2")
 
         assert result is True
         mock_run.assert_called_once()
@@ -29,7 +29,7 @@ def test_validate_bucket_exists_failure():
     with patch("scripts.build_lambda.subprocess.run") as mock_run:
         mock_run.return_value.returncode = 254
 
-        result = bd.validate_bucket_exists("nonexistent-bucket", "company-aws-profile", "eu-west-2")
+        result = bd.validate_bucket_exists("nonexistent-bucket", "test-profile", "eu-west-2")
 
         assert result is False
         mock_run.assert_called_once()

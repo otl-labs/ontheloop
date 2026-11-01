@@ -12,6 +12,7 @@ import yaml
 from scripts.contract_rules import parse_yaml
 from scripts.platform_roadmap_gate_rules import _INACTIVE_FOR_TIER, GateRuleEvaluator
 from scripts.platform_roadmap_models import _TIER_SHORTCUT_RE, RoadmapDocument, TierItem
+from scripts.roadmap.roadmap_archive import hydrate_from_disk
 
 _CD_REF_RE = re.compile(r"\b(CD\.\d+)\b")
 _CANONICAL_TIER_ORDER: list[str] = ["T-1", "T0", "T1", "T2", "T3", "T4", "T5"]
@@ -77,9 +78,9 @@ def _pending_gating_cds_for_item(
 
 
 def load(path: str | Path) -> RoadmapDocument:
-    """Parse the YAML roadmap at path and return a validated RoadmapDocument."""
+    """Parse the YAML roadmap at path, hydrate its archived stubs (Decision 227), and return a validated RoadmapDocument."""
     data = parse_yaml(Path(path).read_text(encoding="utf-8"))
-    return RoadmapDocument.model_validate(data)
+    return RoadmapDocument.model_validate(hydrate_from_disk(data, Path(path)))
 
 
 def compute_followon_state(doc: RoadmapDocument, plans_dir: Path) -> dict[str, dict[str, Any]]:

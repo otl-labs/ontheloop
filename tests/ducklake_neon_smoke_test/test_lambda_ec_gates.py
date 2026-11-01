@@ -288,18 +288,53 @@ def test_lambda_churn_incontainer_budget_pass_still_no_raise(monkeypatch, capsys
 
 
 _TABLES = ["telemetry_agents", "telemetry_observations", "telemetry_sessions", "telemetry_transcripts"]
-_UNMAPPED_CATALOG = {"ok": False, "error_type": "unmapped", "error_class": "CatalogException"}
 
 
 def _json_resp(status, payload):
     return _Resp(status, payload, text=json.dumps(payload))
 
 
-def _reader_fake(*, health_tables=None, absent_rows=0, bad=None, probe=None, describe_flags=None, window=None):
-    """A consistent reader: ops reads and the write boundary as before, plus the telemetry slot's real answer shapes."""
+def _dq_answer(payload, *, skew=None, drop=None, refuse_table=True, echo=False, rows=False, count=0):
+    """The reader's dq_check answers: a counts-only 200 per kind, and the two typed 400 refusals."""
+    from src.common import ducklake_dq_checks as dq  # noqa: PLC0415
+
+    kind, table, column = payload["check"], payload["table"], payload["params"].get("column")
+    if table == "telemetry_sessions":
+        return (
+            _json_resp(200, {"ok": True, "violation_count": 0})
+            if not refuse_table
+            else _json_resp(400, {"ok": False, "error_type": "dq_check_input", "check": kind, "param": "table"})
+        )
+    if column == "no_such_column_marker":
+        reason = f"unknown {column}" if echo else "must name a column"
+        return _json_resp(
+            400, {"ok": False, "error_type": "dq_check_input", "check": kind, "param": "column", "reason": reason}
+        )
+    if kind == drop:
+        return _json_resp(400, {"ok": False, "error_type": "dq_check_input", "check": kind, "param": "check"})
+    body = {"ok": True, "check": kind, "table": table, "violation_count": count, "check_version": dq.check_version(kind)}
+    if kind == skew:
+        body["check_version"] = "0" * 16
+    if rows:
+        body["rows"] = []
+    return _json_resp(200, body)
+
+
+def _reader_fake(
+    *,
+    dq=None,
+    query_ops=None,
+    serves_events=False,
+    describe_events=False,
+    health=None,
+):
+    """The shared reader: ops reads, the write boundary and dq_check, with every event verb answered as an unregistered
+    verb (Decision 236 cl.2). serves_events=True is a reader that still answers the event verbs (the verification-verb
+    checks' own fake); describe_events and health plant the shared reader's regressions."""
     from src.common.ducklake_event_read_verbs import EVENT_READS  # noqa: PLC0415
 
-    flags = describe_flags or {name: entry.agent_facing for name, entry in EVENT_READS.items()}
+    def unregistered(verb):
+        return _json_resp(500, {"ok": False, "error_type": "runtime", "error": f"unknown read verb {verb!r}"})
 
     def fake_invoke(url, payload, **kw):
         action = payload["action"]
@@ -308,20 +343,29 @@ def _reader_fake(*, health_tables=None, absent_rows=0, bad=None, probe=None, des
         if action == "write_probe":
             return _json_resp(200, {"write_denied": True})
         if action == "describe":
-            return _json_resp(200, {"verbs": {v: {"kind": "event_journal", "agent_facing": f} for v, f in flags.items()}})
+            verbs = {"open_recs_tally": {"agent_facing": True}}
+            if describe_events or serves_events:
+                verbs["sessions_window"] = {"kind": "event_journal", "agent_facing": True}
+            return _json_resp(200, {"verbs": verbs})
+        if action == "dq_check":
+            return _dq_answer(payload, **(dq or {}))
         if action == "query_ops":
-            return probe or _json_resp(500, _UNMAPPED_CATALOG)
+            return query_ops or _json_resp(
+                400, {"ok": False, "error": "unknown action 'query_ops'", "actions": ["describe", "dq_check"]}
+            )
+        if payload["verb"] == "telemetry_health_count" and health is not None:
+            return health
+        if payload["verb"] in EVENT_READS and not serves_events:
+            return unregistered(payload["verb"])
         if payload["verb"] == "telemetry_health_count":
-            rows = [{"table_name": t, "record_count": 0, "meta_schema": "ducklake_smoke"} for t in health_tables or _TABLES]
+            rows = [{"table_name": t, "record_count": 0, "meta_schema": "ducklake_smoke"} for t in _TABLES]
             return _json_resp(200, {"rows": rows, "row_count": len(rows)})
         params = payload["params"]
         if "MARKER" in params.get("session_id", "") or params.get("max_rows") == 0:
-            return bad or _json_resp(
-                400, {"ok": False, "error_type": "named_read_input", "error": "session_id is not canonical"}
-            )
+            return _json_resp(400, {"ok": False, "error_type": "named_read_input", "error": "session_id is not canonical"})
         if payload["verb"] in ("telemetry_orphan_counts", "telemetry_root_sessions"):
-            return window or _json_resp(200, {"ok": True, "rows": [], "row_count": 0})
-        return _json_resp(200, {"rows": [], "row_count": absent_rows})
+            return _json_resp(200, {"ok": True, "rows": [], "row_count": 0})
+        return _json_resp(200, {"rows": [], "row_count": 0})
 
     return fake_invoke
 
@@ -335,7 +379,8 @@ def test_lambda_reader_ok(monkeypatch, capsys):
     _patch_reader(monkeypatch)
     smoke.lambda_reader()
     out = capsys.readouterr().out
-    assert "READER OK rows=3 write_denied=true" in out and "TELEMETRY_READS_OK" in out
+    assert "READER OK rows=3 write_denied=true" in out and "SHARED_READER_NO_TELEMETRY_OK" in out
+    assert "QUERY_OPS_RETIRED" in out and "DQ_CHECK_OK kinds=12" in out
 
 
 def test_telemetry_read_checks_pass_on_a_consistent_reader(monkeypatch, capsys):
@@ -343,7 +388,7 @@ def test_telemetry_read_checks_pass_on_a_consistent_reader(monkeypatch, capsys):
     from scripts.ducklake_smoke import lambda_ec_gates  # noqa: PLC0415
 
     lambda_ec_gates._telemetry_read_checks(profile=None, region="eu-west-2")
-    assert capsys.readouterr().out.strip().endswith("TELEMETRY_READS_OK")
+    assert capsys.readouterr().out.strip().endswith("SHARED_READER_NO_TELEMETRY_OK")
 
 
 def _failing(monkeypatch, match, **kwargs):
@@ -354,41 +399,33 @@ def _failing(monkeypatch, match, **kwargs):
         lambda_ec_gates._telemetry_read_checks(profile=None, region="eu-west-2")
 
 
-def test_telemetry_read_checks_fail_when_query_ops_reaches_telemetry(monkeypatch):
-    _failing(monkeypatch, "query_ops must not reach", probe=_json_resp(200, {"ok": True, "rows": [{"count_star()": 0}]}))
-
-
-def test_isolation_check_needs_the_catalog_exception_not_any_error(monkeypatch):
-    for status, body in (
-        (500, {"error_type": "unmapped", "error_class": "ValueError"}),
-        (500, {"error_type": "runtime", "error_class": "CatalogException"}),
-        (503, {"error_type": "catalog_unavailable"}),
-        (403, {"message": "Forbidden"}),
-    ):
-        _failing(monkeypatch, "query_ops must not reach", probe=_json_resp(status, body))
+def test_reader_gate_fails_when_query_ops_still_answers(monkeypatch, capsys):
     from scripts.ducklake_smoke import lambda_ec_gates  # noqa: PLC0415
 
-    _patch_reader(monkeypatch, probe=_json_resp(500, {"error_type": "unmapped", "error_class": "BinderException"}))
-    lambda_ec_gates._telemetry_read_checks(profile=None, region="eu-west-2")
-
-
-def test_telemetry_read_checks_fail_when_a_bad_id_is_echoed(monkeypatch):
-    _failing(
-        monkeypatch,
-        "malformed session_id",
-        bad=_json_resp(400, {"error_type": "named_read_input", "error": "not-a-session-id-MARKER"}),
-    )
-    _failing(monkeypatch, "malformed session_id", bad=_json_resp(500, {"error_type": "unmapped"}))
+    _patch_reader(monkeypatch)
+    lambda_ec_gates.retired_actions_gate()
+    assert capsys.readouterr().out.strip() == "QUERY_OPS_RETIRED"
+    for answer in (
+        _json_resp(200, {"ok": True, "rows": []}),
+        _json_resp(500, {"error_type": "unmapped"}),
+        _json_resp(400, {"ok": False, "actions": ["describe", "dq_check", "query_ops"]}),
+        _json_resp(400, {"ok": False, "actions": ["describe"]}),
+        _json_resp(400, {"ok": False}),
+    ):
+        _patch_reader(monkeypatch, query_ops=answer)
+        with pytest.raises(core.SmokeTestFailure, match="QUERY_OPS_RETIRED FAIL"):
+            lambda_ec_gates.retired_actions_gate()
 
 
 def test_telemetry_read_checks_fail_on_each_other_regression(monkeypatch):
-    _failing(monkeypatch, "describe does not list", describe_flags={"sessions_window": True})
-    _failing(monkeypatch, "all four tables", health_tables=_TABLES[:2])
-    _failing(monkeypatch, "absent session_id returned rows", absent_rows=2)
+    _failing(monkeypatch, "describe lists event_journal verbs", describe_events=True)
+    _failing(monkeypatch, "must answer 500 runtime", health=_json_resp(200, {"rows": [], "row_count": 0}))
+    _failing(monkeypatch, "must answer 500 runtime", health=_json_resp(504, {"error_type": "read_deadline_exceeded"}))
+    _failing(monkeypatch, "must answer 500 runtime", health=_json_resp(500, {"error_type": "unmapped"}))
+    _failing(monkeypatch, "must answer 500 runtime", health=_Resp(500, {}, text="not json"))
 
 
-def test_telemetry_read_checks_cover_the_verification_verbs(monkeypatch):
-    planted = "PLANTED-ROW-VALUE-7731"
+def test_shared_reader_checks_refuse_event_verbs(monkeypatch, capsys):
     seen: list[str] = []
     base = _reader_fake()
 
@@ -402,32 +439,24 @@ def test_telemetry_read_checks_cover_the_verification_verbs(monkeypatch):
     from scripts.ducklake_smoke import lambda_ec_gates  # noqa: PLC0415
 
     lambda_ec_gates._telemetry_read_checks(profile=None, region="eu-west-2")
-    assert seen.count("session_tree_rows") == 3 and {"telemetry_orphan_counts", "telemetry_root_sessions"} <= set(seen)
-
-    echoing = _json_resp(400, {"ok": False, "error_type": "named_read_input", "error": "not-a-session-id-MARKER"})
-    for kwargs, match in (
-        ({"absent_rows": 2}, "absent session_id returned rows"),
-        ({"bad": _json_resp(500, {"error_type": "unmapped", "rows": [{"x": planted}]})}, "must answer 400"),
-        ({"bad": echoing}, "malformed session_id"),
-        ({"window": _json_resp(500, {"ok": False, "rows": [{"x": planted}]})}, "did not answer over today's window"),
-        ({"window": _json_resp(200, {"ok": False, "rows": [{"x": planted}]})}, "did not answer over today's window"),
-    ):
-        _patch_reader(monkeypatch, **kwargs)
-        with pytest.raises(core.SmokeTestFailure, match=match) as raised:
-            lambda_ec_gates._telemetry_read_checks(profile=None, region="eu-west-2")
-        assert planted not in str(raised.value)
+    assert seen == ["telemetry_health_count"]
+    assert capsys.readouterr().out.strip() == "SHARED_READER_NO_TELEMETRY_OK"
+    _failing(monkeypatch, "SHARED_READER_NO_TELEMETRY FAIL", health=_json_resp(200, {"rows": [{"x": 1}], "row_count": 1}))
 
 
 def test_verification_verb_checks_fail_when_the_tree_verb_misbehaves(monkeypatch):
     from scripts.ducklake_smoke import lambda_ec_gates  # noqa: PLC0415
 
-    base = _reader_fake()
-    monkeypatch.setattr(core, "_function_url", lambda role: f"https://{role}")
+    base = _reader_fake(serves_events=True)
 
-    def wrap(handler):
-        monkeypatch.setattr(
-            core, "_sigv4_invoke", lambda url, payload, **kw: handler(url, payload, **kw) or base(url, payload, **kw)
-        )
+    def fail(reason, detail):
+        raise core.SmokeTestFailure(f"{reason}: {detail}")
+
+    def checks(handler):
+        def call(payload):
+            return handler("https://telemetry-reader", payload) or base("https://telemetry-reader", payload)
+
+        lambda_ec_gates._verification_verb_checks(call, fail)
 
     def tree_has_rows(url, payload, **kw):
         params = payload.get("params") or {}
@@ -440,10 +469,10 @@ def test_verification_verb_checks_fail_when_the_tree_verb_misbehaves(monkeypatch
             return _json_resp(200, {"ok": True, "rows": [], "row_count": 0})
         return None
 
+    checks(lambda url, payload: None)
     for handler, match in ((tree_has_rows, "did not answer zero rows"), (zero_rows_accepted, "max_rows of 0")):
-        wrap(handler)
         with pytest.raises(core.SmokeTestFailure, match=match):
-            lambda_ec_gates._telemetry_read_checks(profile=None, region="eu-west-2")
+            checks(handler)
 
 
 def _warm_reuse_invoker():
@@ -514,3 +543,51 @@ def test_lambda_reader_boundary_broken_fails(monkeypatch):
     monkeypatch.setattr(core, "_sigv4_invoke", fake_invoke)
     with pytest.raises(smoke.SmokeTestFailure, match="READER FAIL"):
         smoke.lambda_reader()
+
+
+def test_dq_check_gate_calls_every_kind_counts_only(monkeypatch, capsys):
+    from scripts.ducklake_smoke import lambda_ec_gates  # noqa: PLC0415
+    from src.common import ducklake_dq_checks as dq  # noqa: PLC0415
+
+    seen: list[str] = []
+    base = _reader_fake(dq={"count": 7})
+
+    def recording(url, payload, **kw):
+        if payload["action"] == "dq_check":
+            seen.append(payload["check"])
+        return base(url, payload, **kw)
+
+    monkeypatch.setattr(core, "_function_url", lambda role: f"https://{role}")
+    monkeypatch.setattr(core, "_sigv4_invoke", recording)
+    lambda_ec_gates.dq_check_gate()
+    out = capsys.readouterr().out
+    assert set(seen) == set(dq.DQ_KINDS) and out.strip() == f"DQ_CHECK_OK kinds={len(dq.DQ_KINDS)}"
+    assert "7" not in out
+
+
+@pytest.mark.parametrize(
+    ("dq_kwargs", "match"),
+    [
+        ({"skew": "pattern"}, "pattern answered a check_version"),
+        ({"drop": "unique"}, "unique did not answer 200"),
+        ({"rows": True}, "answered row data"),
+        ({"count": -1}, "did not answer 200"),
+        ({"refuse_table": False}, "telemetry table"),
+        ({"echo": True}, "without echoing"),
+    ],
+)
+def test_dq_check_gate_fails_on_each_regression(monkeypatch, dq_kwargs, match):
+    from scripts.ducklake_smoke import lambda_ec_gates  # noqa: PLC0415
+
+    _patch_reader(monkeypatch, dq=dq_kwargs)
+    with pytest.raises(core.SmokeTestFailure, match=match):
+        lambda_ec_gates.dq_check_gate()
+
+
+def test_dq_check_gate_fails_when_its_requests_miss_a_kind(monkeypatch):
+    from scripts.ducklake_smoke import lambda_ec_gates  # noqa: PLC0415
+
+    _patch_reader(monkeypatch)
+    monkeypatch.delitem(lambda_ec_gates._DQ_GATE_REQUESTS, "pattern")
+    with pytest.raises(core.SmokeTestFailure, match="does not cover exactly"):
+        lambda_ec_gates.dq_check_gate()

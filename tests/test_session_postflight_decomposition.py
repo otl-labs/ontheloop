@@ -39,6 +39,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from scripts.postflight import _common, housekeeping
+from tests.fixtures.retired_session_cli import RETIRED_POSTFLIGHT_FLAGS
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -67,7 +68,6 @@ FROZEN_EXPORTS = frozenset(
         "DEFAULT_MAX_AGE_DAYS",
         "LOGS_DIR",
         "ARCHIVE_DIR",
-        "TELEMETRY_ACTIVE_SESSION_FILE",
         "_PRUNE_SKIP_NAMES",
         "logger",
         "_run",
@@ -75,7 +75,6 @@ FROZEN_EXPORTS = frozenset(
         "find_plan_file",
         "clear_checkpoint",
         # housekeeping
-        "close_telemetry_session",
         "_load_max_age_days",
         "prune_telemetry_logs",
         "_stage_document_derived_tables",
@@ -201,9 +200,9 @@ class TestResidualPatchSiteClosure:
 
 
 class TestArgparseFlagSurfaceFrozen:
-    """CLI flag surface is exactly the 13 flags frozen by the plan's acceptance criteria."""
+    """CLI flag surface is exactly the 11 surviving flags; every retired flag is absent."""
 
-    def test_help_lists_all_thirteen_flags(self) -> None:
+    def test_help_lists_exactly_the_frozen_flags(self) -> None:
         result = subprocess.run(
             [sys.executable, "-m", "scripts.session.postflight", "--help"],
             capture_output=True,
@@ -221,15 +220,15 @@ class TestArgparseFlagSurfaceFrozen:
             "--push",
             "--metrics",
             "--close",
+            "--evidence",
             "--log-housekeeping",
-            "--close-session",
             "--auto",
             "--steps-total",
             "--steps-friction",
-            "--outcome",
-            "--files-changed",
         ):
             assert flag in result.stdout, f"{flag} missing from --help output"
+        for flag in RETIRED_POSTFLIGHT_FLAGS:
+            assert flag not in result.stdout, f"retired {flag} is back in --help output"
 
 
 class TestSelfReinvocationBehavioural:

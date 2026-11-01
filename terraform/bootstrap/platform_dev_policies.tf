@@ -17,6 +17,7 @@ locals {
   ducklake_writer_function           = "agent-platform-ducklake-writer"
   ducklake_reader_function           = "agent-platform-ducklake-reader"
   ducklake_telemetry_writer_function = "agent-platform-ducklake-telemetry-writer"
+  ducklake_telemetry_reader_function = "agent-platform-ducklake-telemetry-reader"
 
   platform_dev_runtime_policy_json = jsonencode({
     Version = "2012-10-17"
@@ -48,7 +49,7 @@ locals {
       {
         # T2.19 recs cutover: the ops portal runs as PlatformDev at RUNTIME and reaches the closed
         # DuckLake boundary by SigV4-invoking the writer/reader AWS_IAM Function URLs. Decision 213
-        # adds the telemetry writer. Two statements because the permissions boundary denies a direct
+        # adds the telemetry writer and reader. Two statements because the permissions boundary denies a direct
         # invoke (DenyDuckLakeDirectInvoke) and InvokeFunction here carries Bool
         # lambda:InvokedViaFunctionUrl = true, so it authorizes only the URL path.
         Sid    = "DuckLakeInvokeUrl"
@@ -61,6 +62,8 @@ locals {
           "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}:*",
           "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_function}",
           "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_function}:*",
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}",
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}:*",
         ]
       },
       {
@@ -74,6 +77,8 @@ locals {
           "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}:*",
           "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_function}",
           "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_function}:*",
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}",
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}:*",
         ]
         Condition = {
           Bool = {
@@ -87,6 +92,17 @@ locals {
         Action = ["ssm:GetParameter"]
         Resource = [
           "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/agent-platform/ducklake/*",
+        ]
+      },
+      {
+        # Decision 237 (secrets-to-ssm-grants): the agent runtime reads exactly the two inference-key parameters by
+        # literal ARN (the parameters do not exist yet, so no data-source lookup; ARNs are built from variables).
+        Sid    = "InferenceCredentialsParameterRead"
+        Effect = "Allow"
+        Action = ["ssm:GetParameter"]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-deepseek-api-key",
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-anthropic-api-key",
         ]
       },
       {
@@ -144,6 +160,55 @@ locals {
         Effect   = "Deny"
         Action   = ["s3:GetObject"]
         Resource = ["${local.data_lake_bucket_arn}/tfstate/personal/*"]
+      },
+      {
+        # Saved plans embed prior state (catalog passwords, ExternalIds; rec-2768) and tfstate/* covers every
+        # root including tfstate/github and its lock file (rec-4353). Agents have no reason to read or write them.
+        Sid    = "DenyTerraformArtifactRead"
+        Effect = "Deny"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:GetObjectVersionAcl",
+          "s3:GetObjectVersionTagging",
+          "s3:GetObjectVersionAttributes",
+          "s3:GetObjectAttributes",
+        ]
+        Resource = [
+          "${local.data_lake_bucket_arn}/tfstate/*",
+          "${local.data_lake_bucket_arn}/tfplan/*",
+        ]
+      },
+      {
+        Sid    = "DenyTerraformArtifactWrite"
+        Effect = "Deny"
+        Action = ["s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion"]
+        Resource = [
+          "${local.data_lake_bucket_arn}/tfstate/*",
+          "${local.data_lake_bucket_arn}/tfplan/*",
+        ]
+      },
+      {
+        # The plan reviewer reads plan JSON with values and writes these transcripts, and only CI writes this prefix.
+        # convergence/ and the rest of ci-rca-evidence/ stay open on purpose: agents read convergence/personal/sandbox.json
+        # and file ci-rca-evidence/<sha>.json. The bootstrap root state is in another bucket where PlatformDev has no Allow.
+        Sid    = "DenyReviewTranscriptRead"
+        Effect = "Deny"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:GetObjectVersionAcl",
+          "s3:GetObjectVersionTagging",
+          "s3:GetObjectVersionAttributes",
+          "s3:GetObjectAttributes",
+        ]
+        Resource = ["${local.data_lake_bucket_arn}/ci-rca-evidence/review-transcripts/*"]
+      },
+      {
+        Sid      = "DenyReviewTranscriptWrite"
+        Effect   = "Deny"
+        Action   = ["s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion"]
+        Resource = ["${local.data_lake_bucket_arn}/ci-rca-evidence/review-transcripts/*"]
       },
       {
         Sid      = "DataLakeBucketConfigRead"

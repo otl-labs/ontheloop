@@ -49,6 +49,13 @@ string; any other shape is neither terminal nor non-terminal, is counted on the 
 line and reaches no membership test at all. The shapes this module is total over are the ones
 the mirror test's matrix drives (TestUnavailableRoadmapSkips and
 TestNonStringStateIsCountedNotRaised), not a list frozen in prose.
+
+ARCHIVED RECORDS (Decision 227). Retired tier_items moved to the roadmap's archive sibling
+(<stem>-ARCHIVE<suffix>, derived locally so this Entry's import closure stays scripts/checks/) are
+still observed: their regrowth joins the TERMINAL-ITEM ids, and one ARCHIVE line counts them. An
+absent archive means no records; every unusable archive shape (unreadable, undecodable, malformed
+YAML, a non-mapping document, a non-list tier_items, a non-mapping record) routes to the same single
+skipped(reason) exit, with a reason that names the archive.
 """
 
 from __future__ import annotations
@@ -61,6 +68,7 @@ import yaml
 from scripts.checks import _common, registry
 
 _ROADMAP_REL_PATH = "docs/ROADMAP-PLATFORM.yaml"
+_ARCHIVE_REL_PATH = "docs/ROADMAP-PLATFORM-ARCHIVE.yaml"
 _COMPACTION_BASELINE_LINES = 7329  # Decision 147 point 3: 9,996 -> 7,329 lines
 _CEILING_LINES = 10_000  # Decision 114, whose _ROADMAP_MAX_LINES this check leaves untouched
 _ESCALATE_HEADROOM_LINES = 500
@@ -168,6 +176,31 @@ def unusable_reason(document: Any) -> str | None:
     return None
 
 
+def archive_records(roadmap_path: Path) -> tuple[list[Any], str | None]:
+    """The archived records beside roadmap_path, and why they cannot be measured (None when they can).
+
+    A pure reader with no declaration of its own: an absent archive is no records, and every other
+    unusable shape yields a reason the check body routes to its single skipped() exit.
+    """
+    archive_path = roadmap_path.with_name(f"{roadmap_path.stem}-ARCHIVE{roadmap_path.suffix}")
+    try:
+        archive = yaml.safe_load(archive_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return [], None
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        return [], f"{_ARCHIVE_REL_PATH} unusable ({type(exc).__name__}) -- no growth report emitted"
+    records = archive.get("tier_items") if isinstance(archive, dict) else None
+    if not isinstance(archive, dict):
+        detail = "document is not a mapping"
+    elif not isinstance(records, list):
+        detail = "tier_items is not a list"
+    elif not all(isinstance(record, dict) for record in records):
+        detail = "tier_items holds a non-mapping record"
+    else:
+        return records, None
+    return [], f"{_ARCHIVE_REL_PATH} unusable ({detail}) -- no growth report emitted"
+
+
 @registry.register("check_roadmap_regrowth", owner="platform")
 def check_roadmap_regrowth(failed: list[str], roadmap_path: Path | None = None) -> None:
     """Report roadmap growth against the Decision 147 compaction baseline and the terminal
@@ -190,6 +223,8 @@ def check_roadmap_regrowth(failed: list[str], roadmap_path: Path | None = None) 
     if reason is None:
         detail = unusable_reason(document)
         reason = None if detail is None else f"{_ROADMAP_REL_PATH} unusable ({detail}) -- no growth report emitted"
+    archived, archive_reason = archive_records(path)
+    reason = reason or archive_reason
     if reason is not None:
         print(f"  SKIP: {reason}")
         registry.skipped(reason)
@@ -197,7 +232,7 @@ def check_roadmap_regrowth(failed: list[str], roadmap_path: Path | None = None) 
     tier_items = document.get("tier_items") or []
     candidate_decisions = document.get("candidate_decisions") or []
     regrown_cds = terminal_cd_ids(candidate_decisions)
-    regrown_items = terminal_item_ids(tier_items)
+    regrown_items = sorted(set(terminal_item_ids(tier_items)) | set(terminal_item_ids(archived)))
     terminal_cds = [cd for cd in candidate_decisions if _state_of(cd.get("state")) in _TERMINAL_CD_STATES]
     terminal_items = [item for item in tier_items if _state_of(item.get("status")) in _TERMINAL_ITEM_STATUSES]
     malformed = malformed_state_ids(candidate_decisions, "state")
@@ -205,6 +240,7 @@ def check_roadmap_regrowth(failed: list[str], roadmap_path: Path | None = None) 
     print(growth_line(len(text.splitlines())))
     print(f"  TERMINAL-CD terminal={len(terminal_cds)} regrown={len(regrown_cds)} ids={regrown_cds}")
     print(f"  TERMINAL-ITEM terminal={len(terminal_items)} regrown={len(regrown_items)} ids={regrown_items}")
+    print(f"  ARCHIVE records={len(archived)}")
     print(f"  MALFORMED-STATE cds={len(malformed)} items={len(malformed_items)} ids={malformed + malformed_items}")
     print(_REPORT_ONLY_NOTICE)
     registry.examined(len(terminal_cds) + len(terminal_items), unit="terminal_records")

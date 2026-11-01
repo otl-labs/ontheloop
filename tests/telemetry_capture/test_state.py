@@ -1,4 +1,4 @@
-"""Mirror test for scripts/telemetry_capture/state.py (ST-1..ST-4), including the tail-check mismatch."""
+"""Mirror test for scripts/telemetry_capture/state.py (ST-1..ST-6), including the tail-check mismatch."""
 
 from __future__ import annotations
 
@@ -156,3 +156,65 @@ def test_verify_state_fields_are_merged_by_owner() -> None:
         "root_session_id": "S",
         "alarm_at": {"b": 3},
     }
+
+
+def test_state_records_the_catalog_and_reads_absent_as_smoke(tmp_path: Path) -> None:
+    state = CaptureState(tmp_path / "d")
+    assert state.save_cursor(cursor(3), ROOT, Loaded(None, st.LOST), catalog="ducklake_telemetry", reset_at=12.5)
+    envelope = json.loads(state.state_file.read_text())
+    assert (envelope["catalog"], envelope["reset_at"]) == ("ducklake_telemetry", 12.5)
+    assert state.load_cursor(ROOT) == Loaded(cursor(3), st.VALID, "ducklake_telemetry", 12.5)
+    assert state.load_cursor(ROOT.replace(b"u2", b"zz")) == Loaded(None, st.TAIL_MISMATCH, "ducklake_telemetry")
+
+    assert state.save_cursor(cursor(3), ROOT, state.load_cursor(ROOT))
+    envelope = json.loads(state.state_file.read_text())
+    assert envelope["catalog"] == st.DEFAULT_CATALOG == "ducklake_smoke" and "reset_at" not in envelope
+
+    legacy = {key: value for key, value in envelope.items() if key != "catalog"}
+    state.state_file.write_text(json.dumps(legacy))
+    loaded = state.load_cursor(ROOT)
+    assert loaded.valid and (loaded.catalog, loaded.reset_at) == ("ducklake_smoke", None)
+    assert not state.save_cursor(cursor(1), ROOT, loaded, catalog="ducklake_telemetry")
+    assert json.loads(state.state_file.read_text()) == legacy
+
+    for bad in ({"catalog": 7}, {"reset_at": "soon"}, {"reset_at": True}):
+        state.state_file.write_text(json.dumps({**legacy, **bad}))
+        assert state.load_cursor(ROOT) == Loaded(None, st.LOST)
+
+
+def test_verify_view_drops_catalog_keyed_fields_on_a_catalog_change() -> None:
+    held = {"root_session_id": "S", "last_ledger_line": 4, "held_ledger_line": 6, "sent_passes": 3, "settled_at": 1.0}
+    assert st.CATALOG_KEYED == ("root_session_id", "last_ledger_line", "held_ledger_line")
+    assert st.verify_view(held, "ducklake_smoke") == held
+    assert st.verify_view(held, "ducklake_telemetry") == {"sent_passes": 3, "settled_at": 1.0}
+    recorded = {**held, "verify_catalog": "ducklake_telemetry"}
+    assert st.verify_view(recorded, "ducklake_telemetry") == recorded
+    assert st.verify_view(recorded, "ducklake_smoke") == {
+        "sent_passes": 3,
+        "settled_at": 1.0,
+        "verify_catalog": "ducklake_telemetry",
+    }
+    assert st.verify_view(held, "ducklake_smoke") is not held
+
+    assert "verify_catalog" in st.VERIFY_OWNERS[st.CHECK]
+    assert "verify_catalog" not in st.VERIFY_OWNERS[st.OPERATOR] | st.VERIFY_OWNERS[st.RUNNER]
+    assert st.merge_verify_state({}, {"verify_catalog": "ducklake_telemetry"}, st.OPERATOR) == {}
+    assert st.merge_verify_state({}, {"verify_catalog": "ducklake_telemetry"}, st.CHECK) == {
+        "verify_catalog": "ducklake_telemetry"
+    }
+
+
+def test_paired_catalog_accepts_only_a_known_catalog_with_its_data_path() -> None:
+    assert st.KNOWN_CATALOGS == ("ducklake_smoke", "ducklake_telemetry")
+    assert st.paired_catalog({"meta_schema": "ducklake_smoke", "data_path_is_smoke": True}) == "ducklake_smoke"
+    assert st.paired_catalog({"meta_schema": "ducklake_telemetry", "data_path_is_smoke": False}) == "ducklake_telemetry"
+    for bad in (
+        {"meta_schema": "ducklake_smoke", "data_path_is_smoke": False},
+        {"meta_schema": "ducklake_telemetry", "data_path_is_smoke": True},
+        {"meta_schema": "ducklake_telemetry", "data_path_is_smoke": 0},
+        {"meta_schema": "ducklake_ops", "data_path_is_smoke": False},
+        {"data_path_is_smoke": True},
+        None,
+        "ducklake_smoke",
+    ):
+        assert st.paired_catalog(bad) is None
