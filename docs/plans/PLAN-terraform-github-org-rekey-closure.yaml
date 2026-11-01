@@ -169,8 +169,9 @@ verification_plan:
     action: Full tier, then HEAD attestation, before the commit and push (handoff_policy).
     command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
     expected: >-
-      The full tier exits 0 and the validation result attests the current HEAD's tree. Run it in the background with a
-      timeout of at least 30 minutes; a timeout is a block, never a pass.
+      The full tier exits 0 and the validation result attests the current HEAD's tree. Start it backgrounded with a 2 h
+      limit from the top-level session (AGENTS.md; a subagent never receives the completion); a timeout is a block,
+      never a pass.
     fix_if: Fix the named check's finding in the changed files only and rerun from the start; never push on a partial or timed-out run.
     hermetic: false
     graduation: waive
@@ -181,11 +182,15 @@ verification_plan:
     command: >-
       AWS_PROFILE=agent_platform bin/venv-python -c "from scripts.ops_data_portal import _fetch_rec_from_reader as f; r=f('rec-4355');
       print((r or {}).get('status')); assert r and r['status']=='closed', (r or {}).get('status')"
-      && grep -Eq 'default += "otl-labs"' terraform/github/variables.tf && grep -Eq 'default += "ontheloop"' terraform/github/variables.tf
-    expected: Prints closed; both greps hold on main.
+      && test -n "$CLOSURE_MERGE_SHA" && git fetch -q origin main
+      && git show "$CLOSURE_MERGE_SHA:terraform/github/variables.tf" | grep -Eq 'default += "otl-labs"'
+      && git show "$CLOSURE_MERGE_SHA:terraform/github/variables.tf" | grep -Eq 'default += "ontheloop"'
+    expected: >-
+      Prints closed; both greps hold at the closing sha ($CLOSURE_MERGE_SHA, the closure squash-merge sha merge_step
+      readback printed).
     fix_if: >-
       Still open: wait for the trailer-closure job to conclude and read its log (docs/contracts/git-ops.yaml
-      resolves_trailer, Decision 201 as updated 2026-10-30). A trailer that merge_step readback found missing:
+      resolves_trailer v9, 2026-10-30, and Decision 186's update of that date). A trailer that merge_step readback found missing:
       bin/venv-python -m scripts.session.merge_step recover (it closes only with a verdict record), never the manual
       route. A transport failure or a merge-leg refusal: the manual scripts.ops_data_portal --update-rec rec-4355
       --status closed route is sanctioned, citing the closure merge sha and the E2 run URL. An acceptance-verdict
@@ -205,8 +210,12 @@ verification_plan:
     fix_if: The closure has not merged or main was reverted; merge the closure PR first, never message early.
   - step: 8
     phase: post-deploy
-    action: OPERATOR, AWS CloudShell -- remove the working directory (state backup, provider cache) once step 6 passes.
-    command: rm -rf ~/tfgithub && test ! -e ~/tfgithub && echo CLEANED
+    action: >-
+      OPERATOR, AWS CloudShell -- once step 6 passes, shred the state copies and saved plans (the build plan's shred -u
+      practice; CloudShell's home persists), then remove the working directory (provider cache, repository clone).
+    command: >-
+      find "$HOME/tfgithub" -type f \( -name '*.tfstate*' -o -name '*.tfplan' \) -exec shred -u {} +
+      && rm -rf "$HOME/tfgithub" && test ! -e "$HOME/tfgithub" && echo CLEANED
     expected: The operator reports CLEANED.
     fix_if: Re-run it; nothing depends on the directory after closure.
 test_obligations:
@@ -237,9 +246,9 @@ constraints:
     user ids, the S3 version id or any credential.
   - No rescue agents or workaround loops (Decision 55).
 context:
-  - 'gates: decision-scout=FLAGS_FOUND (inherited from the build plan); red_overlap={"verdict": "blocked", "slo_hours": 4, "reds": [{"id": "rec-4797", "rule": "slo_breached", "track": "product_regression", "shared": []}]} (deferral rationale below); plan-critique=PROCEED (round 1, over both plans: PROCEED with 7 nits, applied; round 2, confirming: PROCEED with 3 nits, applied; round 3, re-grounding on d7dfdc9d: @@ROUND3@@)'
+  - 'gates: decision-scout=FLAGS_FOUND (inherited from the build plan); red_overlap={"verdict": "blocked", "slo_hours": 4, "reds": [{"id": "rec-4797", "rule": "slo_breached", "track": "product_regression", "shared": []}]} (deferral rationale below); plan-critique=PROCEED (round 1, over both plans: PROCEED with 7 nits, applied; round 2, confirming: PROCEED with 3 nits, applied; round 3, re-grounding on d7dfdc9d: REVISE, 1 blocking (rollback by revert breaks the append-only inventory) and 9 nits, all fixed; round 4: @@ROUND4@@)'
   - >-
-    Decision-scout: inherited from PLAN-terraform-github-org-rekey, whose scope contains this plan's
+    Decision-scout: inherited from PLAN-terraform-github-org-rekey, whose pre-split scope (#1649) contained this plan's
     (/mnt/project-files/rec-4355/scout-report.md: FLAGS_FOUND, CITE 218, 172, 126, 77, 119, 83, 101, 201; the
     2026-10-30 sweep adds 238; 237 and 239 do not change the closure). Main has since added 240 (naming), no change.
   - >-
@@ -256,9 +265,9 @@ context:
     Live probe 2026-11-01 (read-only, ADMIN environment): agent_platform reads rec-4355 through the reader (open), as
     VP step 6 does. UNPROVEN until the closure PR: the ci.yml trailer-closure job.
   - >-
-    Red overlap deferral (Decision 226): blocked on rec-4797 (Critical ci_rca, a pytest-xdist crash on main's full
-    tier, past SLO, no shared path). This plan PR is plan text only and does not repair it; the closure build waits for
-    its repair (start gate: no open critical ci_rca rec; VP step 5 needs a green full tier).
+    Red overlap (Decision 226): blocked on rec-4797 (Critical ci_rca, a pytest-xdist crash on main's full tier, past
+    SLO, no shared path), deferred by the operator 2026-11-01, "threads can defer it" (cmsg_017f94mmYqSe3q2p9o6tPW3UXxnvKR9ciK4fNALynWyUfC).
+    This plan PR is plan text only; the closure build keeps its own gates (start gate; VP step 5's green full tier).
   - >-
     Approval: the closure texts were approved verbatim with the build plan ("yes to all and write the plan",
     cmsg_017f94mmYqSe3q2p9o6tPW3UA8nvZJGPJ3jHgH8DR31f9D, 2026-10-25) and moved here unchanged; the re-grounded counts:
@@ -291,8 +300,10 @@ execution_steps:
     plan.
   - |-
     APPROVED DIFF closure docs/contracts/github-org-transfer.yaml -- operator-approved wording (context: approval); VP
-    step 1 binds the closure PR's added and removed lines to these. Variance: YYYY-MM-DD (the date of the event each
-    row records), #NNNN (the build PR), <E0> (the build plan's VP step 9 counts as "I to import, A to add, C to change,
+    step 1 binds the closure PR's added and removed lines to these. Variance: YYYY-MM-DD (one UTC date for every row in
+    both files: the day execution_steps steps 2 and 3 are applied, never earlier than the last row already in either
+    ledger, so the inventory's date-order invariant holds; the events' own dates stay in EVIDENCE.md), #NNNN (the build
+    PR), <E0> (the build plan's VP step 9 counts as "I to import, A to add, C to change,
     D to destroy", or "a plan error") and <E2> (the build plan's VP step 19 variant). If E1's ruleset row read no-op or
     E1 ran on a fresh PR (the build plan's VP step 14), the gate-2 row needs the operator's word on new text first. The
     amendment_log row goes at the end of amendment_log (the last row), the ledger rows at the end of evidence_ledger.
@@ -305,8 +316,9 @@ execution_steps:
     +  - {date: "YYYY-MM-DD", phase: prove, gate: "phases.prove gate 1 (code-owner review)", observation: "On otl-labs/ontheloop the main-protection ruleset requires code-owner review (the apply App's No changes plan), the CODEOWNERS errors API is empty, and GitHub's rule-suite insights evaluated the pull_request rule on the merge of #NNNN, a terraform/github change: pass, not bypass, with no review recorded, because a pull request authored by the sole code owner needs none; the operator approved its head in the project thread before the merge. Not proven on the new path: that a pull request by anyone else on a code-owner path waits for the code owner's review (rec-4625).", evidence_path: "rec-4355/EVIDENCE.md"}
   - |-
     APPROVED DIFF closure docs/contracts/account-credential-inventory.yaml -- operator-approved wording (stage_rule
-    flips; context: approval); VP step 1 binds these. Variance: YYYY-MM-DD and #NNNN (the closure PR in the
-    amendment_log row, the build PR in GH-09's ledger row). The amendment_log row goes at the end of amendment_log; the
+    flips; context: approval); VP step 1 binds these. Variance: YYYY-MM-DD (the one date of step 2) and #NNNN (the
+    closure PR in the amendment_log row; in GH-09's ledger row the PR whose terraform-github-plan run E1 used, the build
+    PR or, when E1 ran on a fresh PR, that PR, the build plan's VP step 14). The amendment_log row goes at the end of amendment_log; the
     ledger rows at the end of evidence_ledger.
 
     +  - date: "YYYY-MM-DD"
@@ -329,22 +341,29 @@ execution_steps:
     empty here, so it sweeps the body); push and open the PR (title: record the terraform/github re-key and flip
     identity.phase to proven, rec-4355) to learn its number, which the inventory amendment_log row's #NNNN names (the
     #1607 precedent). That declaration push is docs/plans-only, exempt under git-ops.yaml
-    handoff_evidence_gate.exempt_path_globs, so VP step 5 precedes the only non-exempt push. Then apply execution_steps
-    steps 2 and 3 with every placeholder filled from EVIDENCE.md and that number; VP steps 1 to 4; commit; VP step 5 on
+    handoff_evidence_gate.exempt_path_globs, so VP step 5 precedes the only non-exempt push. Then git fetch origin main
+    and bin/venv-python -m scripts.session.rebase_resolve (stop unless RESOLVE CLEAN), so VP steps 1 and 2 bind and
+    measure against current main (the Commit Flow repeats it after the commit); apply execution_steps steps 2 and 3 with every placeholder filled from EVIDENCE.md and that number; VP steps 1 to 4; commit; VP step 5 on
     the committed clean tree; postflight evidence per the implement skill; push; write the final body with the VP table
     into $CLOSURE_PR_BODY, re-run VP step 3 and update the PR body (mcp__github__update_pull_request);
     subscribe_pr_activity; code review. On code review PROCEED and green CI, Commit Flow step 4: merge_step premerge
     --slug terraform-github-org-rekey-closure --message-file <the squash message, whose trailer block holds Resolves:
     rec-4355 above the Co-Authored-By and Claude-Session lines>, merge_pull_request with that commit_message and the
-    expectedHeadSha premerge printed, then merge_step readback. Then VP steps 6 and 7 (message the coordinator the
-    moment main reads proven), and hand the operator VP step 8.
+    expectedHeadSha premerge printed, then merge_step readback, saving the merge sha into $CLOSURE_MERGE_SHA. Then VP
+    step 7 at once (message the coordinator the moment main reads proven), then VP step 6 (it may wait on the
+    trailer-closure job), and hand the operator VP step 8.
   - >-
     Report: readiness, the validator verdicts (VP steps 1-5), postflight evidence, the code review verdict, the push
     and PR outcome, then the closure merge sha, rec-4355 closed, and the coordinator told.
 rollback: >-
-  Revert the closure PR: identity.phase returns to transferred with staged_phase proven and the rows go; the live state
-  stays re-keyed (it is right for the moved repository). rec-4355 reopens through update_rec on the operator's word.
+  Forward-fix, never a revert: the inventory's evidence_ledger is append-only (invariant 9; rows are never deleted,
+  stage_rule) and the contract's rollback.stance is forward-fix. A correcting PR sets identity.phase back to transferred
+  with staged_phase proven and adds an amendment_log row naming the retraction (the two prove rows stay as history);
+  flips GH-08 and GH-09 back to pre-staged with owner_today founder, appending one pre-staged evidence_ledger entry each
+  and an amendment_log row. Its contract and inventory text needs the operator's word first. The live state stays
+  re-keyed (it is right for the moved repository). rec-4355 reopens through update_rec on the operator's word.
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: plan-critique, round: 1, verdict: PROCEED, blocking: 0, nits: 7}
   - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 3}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 9}
