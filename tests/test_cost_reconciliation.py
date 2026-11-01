@@ -432,10 +432,10 @@ class TestReconcileReportOut:
         assert "Cost reconciliation report" in out_path.read_text(encoding="utf-8")
 
     def test_previous_month_rolls_over_year_boundary(self) -> None:
-        import datetime as _dt
+        import datetime as dt
 
-        assert _previous_month(_dt.date(2026, 1, 15)) == "2025-12"
-        assert _previous_month(_dt.date(2026, 7, 1)) == "2026-06"
+        assert _previous_month(dt.date(2026, 1, 15)) == "2025-12"
+        assert _previous_month(dt.date(2026, 7, 1)) == "2026-06"
 
 
 # ---------------------------------------------------------------------------
