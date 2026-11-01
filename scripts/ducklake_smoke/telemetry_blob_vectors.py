@@ -1,7 +1,7 @@
-"""Vector data for the --lambda-telemetry blob gate (T2.36, slice 2a-2, plan 4). Data and pure builders only: it does no I/O
-and imports nothing from src.telemetry beyond the shared blob protocol constants and the identity derivation: the read-back
-gate derives the grain key of a row it wrote through src.telemetry.identity, the derivation the writer uses. That derivation
-is proven independently by the identity golden vectors, so reusing it proves the read path, not the derivation.
+"""Vector data for the --lambda-telemetry-smoke blob gate (the twin; T2.36, slice 2a-2). Data and pure builders only: no I/O
+and imports nothing from src.telemetry beyond the shared blob protocol constants. The content read-back's chunk vectors left
+with the read-back (no deployed function serves transcript_content after slice 2c, Decision 236;
+rec-4699 owns the blob-tier read-back).
 
 A fresh above-threshold payload per run (a uuid4 inside, so every deploy creates a new content-addressed key) as one
 transcript row in the append vectors' golden wire shape, and the negative cases as (name, build, expected status, error_type,
@@ -19,46 +19,16 @@ from typing import Any
 
 from scripts.ducklake_smoke import telemetry_append_vectors as base
 from src.telemetry.blobs import MAX_BLOB_ITEMS
-from src.telemetry.identity import derive_entity_key, derive_event_id
-from src.telemetry.timestamps import parse_wire_timestamp
 
 THRESHOLD_BYTES = base.INLINE_THRESHOLD_BYTES
 CAP_BYTES = 8 * 1024 * 1024
 BLOB_BYTES = THRESHOLD_BYTES + 4096
-CHUNK_BYTES = 3 * 1024 * 1024
-MULTI_CHUNK_BYTES = CHUNK_BYTES + 4097
 
 
 def fresh_content(tag: str, size: int = BLOB_BYTES) -> str:
     """ASCII content of exactly `size` bytes with a per-call random block inside, so its SHA-256 is new every run."""
     head = f"blob-{tag}-{secrets.token_hex(16)}-"
     return (head * (size // len(head) + 1))[:size]
-
-
-def multi_chunk_content(tag: str) -> str:
-    """CHUNK_BYTES + 4097 UTF-8 bytes: ASCII with heavy quote, backslash and newline runs, apart from one 4-byte character
-    straddling byte CHUNK_BYTES (so a chunk edge splits it). A per-call random block makes its SHA-256 new every run."""
-    unit = f'"q\\\\"\n\\n"{tag}-{secrets.token_hex(16)}"\n\\\\'
-    emoji = "\U0001f600"
-    head_len = CHUNK_BYTES - 2
-    tail_len = MULTI_CHUNK_BYTES - head_len - 4
-    fill = lambda n: (unit * (n // len(unit) + 1))[:n]  # noqa: E731
-    return fill(head_len) + emoji + fill(tail_len)
-
-
-def content_identity(row: dict[str, Any], tenant_id: str, project_id: str) -> tuple[str, str]:
-    """(session_id, event_id) the writer derives for a transcript row: the grain key transcript_content reads it by."""
-    session_id = derive_entity_key(
-        "telemetry_sessions:session_id",
-        tenant_id,
-        project_id,
-        row["session_ref"],
-        parse_wire_timestamp(row["session_started_at"]),
-    )
-    event_id = derive_event_id(
-        "telemetry_transcripts", tenant_id, project_id, row["external_ref"], parse_wire_timestamp(row["event_timestamp"])
-    )
-    return session_id, event_id
 
 
 def blob_transcript_row(tag: str, index: int, started: datetime, content: str) -> dict[str, Any]:

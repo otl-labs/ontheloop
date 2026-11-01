@@ -45,7 +45,7 @@ Decided, not yet built; the build items are `deferred_post_mvp`, and the Decisio
 | Content Type | Current Form | End-state |
 |--------------|-------------|-----------|
 | Agent-instruction files | Markdown (CLAUDE.md, AGENTS.md) | Stays markdown per CD.20 / CD.23 - canonical agent artefacts |
-| Operational decisions, recommendations, session logs | Decisions in git (docs/DECISIONS.md), projected to the lakehouse; recommendations lakehouse-only with no local cache (Decision 215); session log in git (docs/SESSION_LOG.md) | Decisions stay in git in every tier (Decision 196 clause 1); recommendations stay lakehouse-only; the session log's disposition is T3.20's |
+| Operational decisions, recommendations, session logs | Decisions in git (docs/DECISIONS.md), projected to the lakehouse; recommendations lakehouse-only with no local cache (Decision 215) | Decisions stay in git in every tier (Decision 196 clause 1); recommendations stay lakehouse-only; the session log is retired (T3.20 c6): session history is read from telemetry through the telemetry reader |
 | Plans | Schema-validated YAML (docs/plans/PLAN-*.yaml), T1.11 | Stays YAML; the retired .md format is deleted (Decision 85, amended by Decision 174) |
 | Contracts | YAML (docs/contracts/) | Canonical field semantics and enforcement pointers; standing prose-architecture docs are forbidden per Decision 86 |
 | Human portal files | Markdown (README.md, AGENTS.md, SECURITY.md, LICENSING.md, CONTRIBUTING.md, COMMERCIAL-LICENSE.md) | Stays markdown per CD.20 / CD.23 - portal files declare projection status; the licence-and-attribution artefacts are a named permanent prose class (Decision 171) |
@@ -60,7 +60,7 @@ Decided, not yet built; the build items are `deferred_post_mvp`, and the Decisio
 | `scripts/` | Operational scripts - preflight, ops portal, validate, build-lambda |
 | `config/` | Agent-consumed configuration: data quality, executor prompts, lambda manifests |
 | `terraform/` | Infrastructure-as-code for personal AWS account |
-| `docs/` | ROADMAP-PLATFORM.yaml, contracts, plans, decisions, session log |
+| `docs/` | ROADMAP-PLATFORM.yaml, contracts, plans, decisions |
 | `bin/` | Platform helper scripts including venv-python wrapper |
 | `tests/` | Pytest test suite |
 | `.claude/` | Harness artefacts: commands, skills, hooks, settings |

@@ -21,6 +21,7 @@ duckdb = pytest.importorskip("duckdb")
 
 from scripts.ducklake_smoke import lambda_telemetry_golden_gates as gates  # noqa: E402
 from scripts.executor.acceptance_lint import lint_acceptance_command  # noqa: E402
+from scripts.telemetry_capture import read_route  # noqa: E402
 from src.common import ducklake_event_reads as ev  # noqa: E402
 from src.telemetry.append import append_events  # noqa: E402
 from src.telemetry.timestamps import parse_wire_timestamp  # noqa: E402
@@ -30,13 +31,22 @@ from tests.fixtures.turn_capture_corpus import TENANT  # noqa: E402
 
 PLANTED = "PLANTED-VALUE-424242"
 SHA = "abc12345"
+SMOKE, PROD = "ducklake_smoke", "ducklake_telemetry"
 
 
 class Deployment:
     """A fake telemetry writer, reader and deploy records over one in-memory catalog."""
 
-    def __init__(self) -> None:
+    def __init__(self, catalog: str = SMOKE) -> None:
         self.con = db.open_memory_catalog()
+        self.catalog = catalog
+        self.served = {"meta_schema": catalog, "data_path_is_smoke": catalog == SMOKE}
+        self.bound: Any = dict(self.served)
+        self.health = [{"table_name": t, "record_count": 0, "meta_schema": catalog} for t in sorted(gates.HEALTH_TABLES)]
+        self.event_function = (
+            "agent-platform-ducklake-reader" if catalog == SMOKE else "agent-platform-ducklake-telemetry-reader"
+        )
+        self.records: list[str] = []
         self.projects: dict[str, str] = {}
         self.writes: list[str] = []
         self.skew_after_writes: int | None = None
@@ -51,7 +61,7 @@ class Deployment:
         self.writes.append(action)
         if action == "describe":
             protocol = {"version": 1, "inline_threshold_bytes": 10**9, "cap_bytes": 2 * 10**9, "max_items": 8}
-            return 200, {"actions": ["append_telemetry"], "blob_protocol": protocol}
+            return 200, {"actions": ["append_telemetry"], "blob_protocol": protocol, "catalog": self.served}
         if action == "register_tenant":
             return 200, {"tenant_id": TENANT}
         if action == "register_project":
@@ -98,8 +108,13 @@ class Deployment:
     def named(self, verb: str, **params: Any) -> list[dict[str, Any]]:
         if self.reader_error is not None:
             raise self.reader_error
+        if verb == "telemetry_health_count":
+            return copy.deepcopy(self.health)
         rows = ev.execute(self.con, verb=verb, params=params)
         return self.reader_hook(verb, rows) if self.reader_hook else rows
+
+    def binding(self) -> Any:
+        return self.bound
 
     def unchanged(self, sha: str, paths: list[str]) -> bool:
         if self.skew_after_writes is not None and len(self.writes) > self.skew_after_writes:
@@ -107,9 +122,11 @@ class Deployment:
         return sha == SHA and bool(paths)
 
     def env(self) -> gates.Env:
-        return gates.Env(
-            self.writer, self, lambda *a, **k: (200, b""), lambda fn: {"source_git_sha": self.record_sha}, self.unchanged
-        )
+        def record(function: str) -> dict[str, Any]:
+            self.records.append(function)
+            return {"source_git_sha": self.record_sha}
+
+        return gates.Env(self.writer, self, lambda *a, **k: (200, b""), record, self.unchanged, self.catalog)
 
 
 @pytest.fixture
@@ -318,7 +335,12 @@ def test_live_env_resolves_urls_and_reads_deploy_records(monkeypatch: pytest.Mon
     monkeypatch.delenv(gates.READER_URL_ENV, raising=False)
     seen: list[str] = []
     monkeypatch.setattr(core, "_sigv4_invoke", lambda url, payload, **k: seen.append(url) or Resp())
+    monkeypatch.setenv(read_route.CATALOG_ENV, SMOKE)
+    built: list[Any] = []
+    real = read_route.make_routed_reader
+    monkeypatch.setattr(read_route, "make_routed_reader", lambda profile=None: built.append(profile) or real(profile))
     env = gates.live_env("p", "eu-west-2")
+    assert built == ["p"] and env.catalog == SMOKE and isinstance(env.reader, read_route.RoutedReader)
     assert env.writer({"action": "register_tenant"}) == (200, {"tenant_id": "T"})
     assert seen == ["https://telemetry_writer_url.example"] and env.record("f") == {"source_git_sha": "deadbeef"}
     import os  # noqa: PLC0415
@@ -395,10 +417,17 @@ def test_stops_in_registration_blob_delivery_and_reads_are_named_by_class(capsys
                 raise TimeoutError(PLANTED)
             return super().named(verb, **params)
 
+    class FailingTree(Deployment):
+        def named(self, verb: str, **params: Any) -> list[dict[str, Any]]:
+            if verb == gates.TREE_VERB:
+                raise ConnectionError(PLANTED)
+            return super().named(verb, **params)
+
     for deployment, want in (
         (NoProject(), "register_project_failed"),
         (Spilling(), "blob_refused"),
         (FailingVerb(), "reader_TimeoutError"),
+        (FailingTree(), "reader_ConnectionError"),
     ):
         assert _main(deployment, "--no-alarms") == 1
         out = capsys.readouterr().out
@@ -439,3 +468,60 @@ def test_unexpected_failures_in_the_guard_are_named_by_class(capsys: pytest.Capt
     failing.append_status = 500
     assert _main(failing, "--no-alarms") == 1
     assert "GOLDEN_STOP class=append_status_500" in capsys.readouterr().out
+
+
+def _mismatched(field: str, value: Any, catalog: str = SMOKE) -> Deployment:
+    deployment = Deployment(catalog)
+    setattr(deployment, field, value(deployment) if callable(value) else value)
+    return deployment
+
+
+@pytest.mark.parametrize(
+    ("deployment", "want"),
+    [
+        (lambda: _mismatched("served", {"meta_schema": PROD, "data_path_is_smoke": False}), "writer_catalog_mismatch"),
+        (lambda: _mismatched("served", {"meta_schema": SMOKE, "data_path_is_smoke": False}), "writer_catalog_mismatch"),
+        (
+            lambda: _mismatched("health", lambda d: [{**d.health[0], "meta_schema": PROD}, *d.health[1:]]),
+            "reader_catalog_mismatch",
+        ),
+        (lambda: _mismatched("health", []), "reader_catalog_mismatch"),
+        (lambda: _mismatched("health", lambda d: d.health[1:]), "reader_catalog_mismatch"),
+        (lambda: _mismatched("health", lambda d: [*d.health, d.health[0]]), "reader_catalog_mismatch"),
+        (lambda: _mismatched("bound", {"meta_schema": SMOKE, "data_path_is_smoke": True}, PROD), "reader_catalog_mismatch"),
+        (lambda: _mismatched("bound", None, PROD), "reader_catalog_mismatch"),
+    ],
+)
+def test_catalog_mismatches_stop_before_any_registration(
+    deployment: Any, want: str, capsys: pytest.CaptureFixture[str], alarms: list[tuple[str, dict[str, Any]]]
+) -> None:
+    built = deployment()
+    assert _main(built) == 1
+    assert capsys.readouterr().out.startswith(f"GOLDEN_STOP class={want}\n")
+    assert built.writes == ["describe"] and built.projects == {}
+    assert [c[1]["title"] for c in alarms] == ["telemetry verification alarm: golden_replay_error"]
+
+
+def test_deploy_records_follow_the_routed_reader() -> None:
+    for catalog, function in ((SMOKE, "agent-platform-ducklake-reader"), (PROD, "agent-platform-ducklake-telemetry-reader")):
+        deployment = Deployment(catalog)
+        env = deployment.env()
+        assert gates.deploy_functions(env) == (function, gates.WRITER_FUNCTION)
+        stats, skew = gates.run(env)
+        assert skew == 0 and not stats.mismatches and stats.trees > 0
+        assert set(deployment.records) == {function, gates.WRITER_FUNCTION}
+
+
+def test_an_unresolved_catalog_stops_with_a_class_only_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], alarms: list[tuple[str, dict[str, Any]]]
+) -> None:
+    monkeypatch.setattr(gates, "_resolve_urls", lambda profile, region: ("https://w.example", "https://r.example"))
+    monkeypatch.setattr(read_route, "make_routed_reader", lambda profile=None: read_route.RoutedReader(object(), profile))
+    monkeypatch.setenv(read_route.CATALOG_ENV, PLANTED)
+    assert gates.main([]) == 1
+    out, err = capsys.readouterr()
+    stop, filed = out.splitlines()
+    assert (stop, err) == ("GOLDEN_STOP class=catalog_unresolved", "") and filed.startswith("GOLDEN_ALARMS filed=1 ")
+    assert [c[1]["title"] for c in alarms] == ["telemetry verification alarm: golden_replay_error"]
+    assert gates.main(["--no-alarms"]) == 1 and len(alarms) == 1
+    assert capsys.readouterr().out == "GOLDEN_STOP class=catalog_unresolved\n"

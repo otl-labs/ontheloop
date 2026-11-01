@@ -1,0 +1,1015 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "trusted-plan-cutover"
+intent: >-
+  Move the terraform/personal PR-time speculative plan off the PR-run job and onto main's trusted workflow
+  (terraform-plan-trusted.yml on pull_request_target, under agent-platform-github-ci-trusted-plan), so unreviewed agent
+  code never runs beside Terraform state, saved plans or secret values. The PR's Terraform is screened as data before
+  it is evaluated, init is hermetic, secrets stay in process environment, and the PR sees names only. Slice S3 of the
+  trusted plan executor (rec-4637), realising Decision 238 cl.3-cl.5 for terraform/personal.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-trusted-plan-cutover.yaml
+phase: >-
+  ad_hoc_rec (soft-warn category; no tier_item claimed, so the Tier Item Freshness Gate is skipped). Executes rec-4637.
+scope:
+  # ---------------------------------------------------------------- PR 1: providers.tf (terraform/personal, no-op plan)
+  - file: terraform/personal/providers.tf
+    action: Create
+    purpose: >-
+      PR 1. Holds, moved verbatim with their comments: the terraform {} block (required_version, required_providers aws
+      and neon, backend "s3") and provider "aws" from main.tf, provider "neon" from neon_ducklake_catalog.tf, and the
+      four variables a provider block reads (aws_region, aws_profile, owner_email, neon_api_key) from variables.tf, so
+      a PR can change neither their defaults nor their validations. Header comment: this file is main-only; the trusted plan
+      (terraform-plan-trusted.yml) never takes it from a PR, and no other file in this root may declare a terraform,
+      provider or backend block (Decision 238 cl.3, enforced by scripts/ci/terraform_hcl_screen.py). The neon_api_key
+      description drops the "PR speculative plans pass a stub and run -refresh=false" clause (true before and after
+      the cutover without it). The plan is a no-op: moving blocks between files changes nothing Terraform tracks.
+  - file: terraform/personal/main.tf
+    action: Modify
+    purpose: >-
+      PR 1. Remove the terraform {} block and provider "aws" (now in providers.tf); keep the header comment, add one line
+      pointing at providers.tf. Every resource and local stays.
+  - file: terraform/personal/neon_ducklake_catalog.tf
+    action: Modify
+    purpose: >-
+      PR 1. Remove provider "neon" and point its comment block at providers.tf; drop that comment's "PR speculative
+      plans pass a stub with -refresh=false" clause. Resources unchanged. SSM plans also edit this file: rebase if
+      they land first.
+  - file: terraform/personal/variables.tf
+    action: Modify
+    purpose: PR 1. Remove variables aws_region, aws_profile, owner_email and neon_api_key (now in providers.tf). Other variables unchanged.
+  - file: docs/contracts/secret-material-handling.yaml
+    action: Modify
+    purpose: >-
+      PR 1: the domains line "Neon provider API key -- terraform/personal/neon_ducklake_catalog.tf (...)" names
+      terraform/personal/providers.tf instead (rest of the line unchanged). PR 3: in
+      patterns.provider_credential_ephemeral_input replace "PR plans receive a stub and skip refresh." with "The
+      PR-time plan runs in main's trusted workflow (Decision 238) and receives the key the same way." Each PR adds a
+      dated amendment_log row (prose_improvement for PR 1, governance_note_add for PR 3). Wording APPROVED by
+      Benjamin 2026-10-29 22:39Z (context: Approvals).
+  # ---------------------------------------------------------------- PR 2: screen, overlay, wrapper, report (scripts only)
+  - file: scripts/ci/terraform_hcl_screen.py
+    action: Create
+    purpose: >-
+      PR 2. Stdlib-only static screen of a Terraform root, run by path with python3 -I (appends the repo root to
+      sys.path, so the stdlib always wins; never insert at 0). Pure functions over {relative path: text} so tests run on
+      synthetic trees; two CLI verbs. Policy constants live in this module (code-owned): MAIN_ONLY_FILES =
+      {providers.tf, .terraform.lock.hcl, backend-sandbox.hcl}; ALLOWED_DATA_TYPES = {aws_iam_policy_document}
+      (no secret-version or SecureString-reading type ever, Decision 237 cl.3); ALLOWED_RESOURCE_TYPES = the 27 types
+      main declares today (aws_cloudwatch_event_rule ... neon_role, listed explicitly); ALLOWED_FUNCTIONS = the pure
+      functions main calls today (jsonencode, jsondecode, yamldecode, flatten, try, can, length, regex, format, ceil,
+      plus file under the path rule) and any further pure built-ins the build lists explicitly (never a file-family
+      function other than file, never templatefile, never provider::*, never timestamp/uuid); ALLOWED_FILE_PATHS =
+      {"${path.module}/../../config/feature_flags.yaml", "${path.module}/../../config/lambda/ducklake/version.yaml"}.
+      Lexer (purpose-built, AGENTS.md safety rule; never eval): tokenises double-quoted templates (with one level of
+      ${ } interpolation, whose content is lexed as expression tokens), # and // line comments, identifiers, numbers
+      and punctuation; strings are tokenised before comments, so the 55 "/*" ARN wildcards inside strings on main stay
+      strings. Refusals (each a rule id): any byte outside printable ASCII plus \n and \t; a heredoc (<< outside a
+      string); a block comment (/* outside a string); a template directive (%{ anywhere); ${ nested inside an
+      interpolation; an unterminated string or unbalanced brace; a top-level block keyword outside {resource, data,
+      locals, variable, output, moved, removed} (so terraform, provider, backend, module, import, check, ephemeral
+      are refused); a data or resource type outside its allowlist; a function call outside ALLOWED_FUNCTIONS; file()
+      whose single argument is not exactly one ALLOWED_FILE_PATHS template; anything the lexer cannot classify.
+      Data-dependent shape rules (Decision 238 cl.4 keeps plan shape to a few bits; main uses none of these forms
+      today, so they cost nothing): refuse the count and for_each meta-arguments and dynamic blocks; refuse the
+      conditional operator and every comparison and logical operator outside lifecycle precondition/postcondition
+      blocks and variable validation blocks; refuse a for-expression if clause; allow regex and can only inside a
+      variable validation block; allow try only in the fixed form try(yamldecode(file(<ALLOWED_FILE_PATHS
+      entry>))<index or attribute>, <literal>). Each rule has its own rule id and red test. Tree
+      rules: refuse *.tf.json, override.tf, *_override.tf, terraform.tfvars, *.auto.tfvars(.json), any file not ending
+      .tf except the MAIN_ONLY_FILES and README/CLAUDE.md, and a MAIN_ONLY_FILES entry declared outside its own name.
+      Verb "screen --root DIR": prints PASS or one "REFUSED <rule> <file>:<line>" line per finding (the screen reads
+      only public PR text, so locations are safe to print) and exits 1 on any refusal. Verb "backstop --plan-json F":
+      after plan, from plan JSON's configuration section (Terraform's own parser), require provider_config keys
+      exactly {aws, neon} with no alias, no module_calls, every resource and data type allowlisted, no
+      resource_changes entry with importing, and no checks entry whose address kind is check (resource preconditions
+      and variable validations also appear under checks and are allowed, since main has them); prints only
+      "BACKSTOP_OK" or "BACKSTOP_REFUSED <rule>" (no address, no expression). If the module would exceed 500 SLOC, split the lexer into
+      scripts/ci/terraform_hcl_lexer.py rather than raising a budget (Decision 128).
+  - file: scripts/ci/trusted_plan_overlay.py
+    action: Create
+    purpose: >-
+      PR 2. Stdlib, python3 -I, git via subprocess with fixed argv (no shell). Inputs PR_NUMBER and HEAD_SHA from env.
+      Fetches +refs/pull/<n>/merge from origin (public read, no credential) into a local ref; fails closed with a fixed
+      message if it is absent (unmergeable PR), if its second parent is not HEAD_SHA, or if its first parent is not
+      an ancestor of (or equal to) the checked-out main commit. Lists terraform/personal in the merge tree with git
+      ls-tree -z and, before printing anything, refuses any entry whose name is outside ^[A-Za-z0-9._-]+$ (no
+      separator, whitespace, control or markup character can reach the log or the comment), any subtree (040000),
+      and any entry whose mode is not 100644 (symlinks 120000, gitlinks 160000, executables). Refuses
+      when the PR's own change (git diff --name-only <first parent> <merge>) touches a MAIN_ONLY_FILES entry or
+      either ALLOWED_FILE_PATHS target (Benjamin F4-A: those two config files come from main, and a PR changing them
+      gets no saved plan). Then replaces terraform/personal in the working tree with the merge tree's copy (rm the
+      directory, git checkout <merge> -- terraform/personal) and restores every MAIN_ONLY_FILES entry from HEAD (the
+      checked-out main, which can be newer than the merge's first parent; Decision 238 cl.3). Never runs anything
+      from the PR. Prints one line: OVERLAY_OK, or OVERLAY_REFUSED <rule> [<path>] (a path is printed only after it
+      passed the name rule).
+  - file: scripts/ci/trusted_plan_env.sh
+    action: Create
+    purpose: >-
+      PR 2. Usage: trusted_plan_env.sh [--scrub-only] -- CMD [ARGS...]. Reads the tfvars through materialise_tfvars.sh
+      --stdout into a shell variable (a pipe, never a file; that script's masks arrive on stderr, which the runner
+      reads, see below); for each "key = value" line (first-'=' split, same parse as the masking loop) with key
+      matching ^[a-z_][a-z0-9_]*$ and no newline in the value, emits ::add-mask:: for owner_email (the others are
+      masked upstream) on stderr before CMD starts (the runner processes workflow commands on both streams; a $( )
+      caller captures stdout only), exports _ACCT/_DEV/_ADM/_OWNER for
+      scripts/ci/redaction_check.py and, unless --scrub-only, TF_VAR_<key>; any other line shape fails closed with a
+      fixed message (no line text). Then exec CMD. --scrub-only is for the comment step: the report process never
+      holds a TF_VAR_* value. Writes nothing to disk, GITHUB_ENV or GITHUB_OUTPUT and prints no value (Decision 238 cl.4,
+      secret-material-handling provider_credential_ephemeral_input). Decision 162 R2: tested under the literal
+      bash --noprofile --norc -e -o pipefail argv.
+  - file: .github/actions/materialise-tfvars/materialise_tfvars.sh
+    action: Modify
+    purpose: >-
+      PR 2. Add a --stdout mode: same fetch and empty-secret check; the ::add-mask:: loop writes to stderr (so a
+      caller's $( ) capture never swallows the masks and the runner still registers them); then print the tfvars to
+      stdout instead of moving a file into place (no mktemp, no file). The default (no argument) behaviour is
+      unchanged for every existing caller. Keeps one fetch implementation, so the SSM cutover (PLAN-secrets-to-ssm-cutover) switches
+      the trusted job's source with every other caller; whichever lands second rebases.
+  - file: scripts/ci/quiet_run.sh
+    action: Create
+    purpose: >-
+      PR 2. Usage: quiet_run.sh LOG [--stdout FILE] -- CMD [ARGS...]. The innermost wrapper of the trusted plan: runs
+      CMD with stderr redirected to LOG and stdout to FILE when given (else to LOG too), both under $RUNNER_TEMP, and
+      exits with CMD's status, printing nothing. Innermost, so
+      the masks the outer wrappers (trusted_plan_env.sh, neon_api_key.sh run) emit reach the runner and only
+      Terraform's own output goes to the file. Refuses a LOG outside $RUNNER_TEMP. Decision 162 R2 argv.
+  - file: scripts/ci/plan_names_core.py
+    action: Create
+    purpose: >-
+      PR 2. Stdlib root-agnostic core extracted from terraform_github_plan_report.py: action counting
+      (add/change/destroy/replace/import), changed top-level attribute NAMES (schema names, never values), drift rows,
+      and a new normalise_address() that strips every [..] instance key and index from an address (module path
+      included) so no for_each key or count index -- which can be a value (SPLIT.md threat-model gap 2) -- is ever
+      printed. Never reads before/after values except to compare them.
+  - file: scripts/ci/terraform_github_plan_report.py
+    action: Modify
+    purpose: >-
+      PR 2. Imports the shared pieces from plan_names_core.py (sys.path append of the repo root, since it runs by path);
+      its rendered output is byte-identical for the existing fixtures (tests/test_terraform_github_pr_plan.py passes
+      unedited). Its own address rendering is unchanged in S3 (S5, rec-4638, decides it).
+  - file: scripts/ci/terraform_personal_plan_report.py
+    action: Create
+    purpose: >-
+      PR 2. Stdlib, python3 -I. Renders the names-only PR comment for terraform/personal: header "terraform/personal
+      speculative plan (trusted, Decision 238)"; PR head sha; run link; a state line "State: <STATE>" (CHANGES, NO_CHANGES, or one fixed
+      failure category: OVERLAY_REFUSED, SCREEN_REFUSED, ASSUME_FAILED, INIT_FAILED, PLAN_FAILED, BACKSTOP_REFUSED,
+      GUARD_ERROR, PERSIST_FAILED); for a refusal, the screen's or overlay's rule lines verbatim (public PR text only);
+      predicted guard verdict PASS or BLOCKED (BLOCKED = routes to tf-gated-apply at merge); counts; a table of
+      normalised addresses with actions and the union of changed attribute names (no instance-count column: with
+      count and for_each refused it is always 1); changed output NAMES; drifted normalised addresses; the reviewer
+      digest fit as one word, FITS or OVERFLOW (from terraform_plan_digest.py --fit-report, never its byte counts); the
+      plan.bin sha256; and the saved-plan note (or, on any failure, "No saved plan: after merge, apply by a blank
+      workflow_dispatch of terraform-apply-sandbox"). Never prints a value, an instance key, or terraform or provider
+      diagnostic text. --github-output writes state= and verdict=. A --refusal mode for the pre-credential
+      categories (OVERLAY_REFUSED, SCREEN_REFUSED, ASSUME_FAILED) reads only the overlay and screen output files,
+      needs no tfvars, and self-validates its body against a closed grammar (fixed header, the head sha and run link lines, the state
+      line, and "REFUSED <rule-id> <path>:<line>" lines whose path passed the overlay name rule) before printing it; any other
+      line fails closed.
+  # ---------------------------------------------------------------- PR 3: cutover
+  - file: .github/workflows/terraform-plan-trusted.yml
+    action: Modify
+    purpose: >-
+      PR 3. Delete claims-probe, claims-probe-no-env and live-assume (the no-env probe answered: the pull_request
+      subject). Keep on: pull_request_target {types [opened, synchronize, reopened], paths [terraform/personal/**]}
+      and drop workflow_dispatch (the plan needs a PR); top-level permissions {}; per-PR concurrency, cancel-in-progress.
+      One job, plan: if github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == 'main'; environment tf-trusted-plan; runs-on ubuntu-latest; timeout 30;
+      permissions {contents: read, id-token: write, pull-requests: write, statuses: write}; job env PR_NUMBER and
+      HEAD_SHA from the event and TF_VAR_aws_profile "" (event values only in env, never in a run body, predicate e);
+      every non-local action pinned to a full commit SHA. Steps, in order: (1) actions/checkout, no ref/repository,
+      persist-credentials false (main's commit); (2) ./.github/actions/aws-region; (3) step name "Overlay the PR's
+      Terraform": python3 -I scripts/ci/trusted_plan_overlay.py; (4) step name "Screen the PR's Terraform": python3 -I
+      scripts/ci/terraform_hcl_screen.py screen --root terraform/personal -- both BEFORE any credential; (5) step name
+      "Assume the trusted plan role": aws-actions/configure-aws-credentials,
+      role agent-platform-github-ci-trusted-plan, role-session-name tf-trusted-plan, MASK_AWS_ROLE_ID_ACCOUNT_PART
+      in step env, no continue-on-error; (6) hashicorp/setup-terraform with config/terraform-version, wrapper off;
+      (7) aws s3 sync of tf-provider-mirror/ into $RUNNER_TEMP/tf-mirror; (8) ./.github/actions/terraform-init-retry
+      with plugin-dir $RUNNER_TEMP/tf-mirror (hermetic: -plugin-dir, -get=false, -lockfile=readonly) -- its Neon key
+      preflight now runs; (9) plan: bash "$GITHUB_WORKSPACE/scripts/ci/trusted_plan_env.sh" -- bash
+      "$GITHUB_WORKSPACE/scripts/ci/neon_api_key.sh" run -- bash "$GITHUB_WORKSPACE/scripts/ci/quiet_run.sh"
+      "$RUNNER_TEMP/tf-plan.log" -- terraform plan -lock=false -input=false -out=plan.bin (full refresh, no
+      -refresh=false, no -var-file; only Terraform's output goes to the never-printed log, so every mask the
+      wrappers emit reaches the runner); then terraform show -json plan.bin through quiet_run.sh
+      "$RUNNER_TEMP/tf-show.log" --stdout "$RUNNER_TEMP/plan.json" (stdout only reaches plan.json); (10) backstop: python3 -I scripts/ci/terraform_hcl_screen.py backstop; (11) guard: python3
+      -I scripts/terraform_apply_guard.py on plan.json with output to a file, exit code mapped to PASS / BLOCKED /
+      ERROR; (12) persist plan.bin to the data-lake bucket's tfplan/personal/<pr>/<head sha>.bin; (13) post the
+      terraform-plan-digest commit status (python3 -I scripts/ci/plan_digest.py emit, then gh api with --field
+      context=terraform-plan-digest in the run body, as today) on HEAD_SHA, context and description shape unchanged
+      (Decision 77, fetch-saved-plan unchanged); (13b) if PLAN-pr-plan-opaque-iam-policy-check has merged: its
+      plan-time policy check, python3 -I scripts/ci/plan_time_policy_check.py "$RUNNER_TEMP/plan.json", with the
+      digest step's exact if: and no continue-on-error (validate_plan_time_policy_check_wiring requires this in every
+      job that posts the digest; its output is a fixed line plus key-stripped addresses, so names-only holds); (14a) refusal comment, if: always() and
+      the overlay step ran and the assume step did not succeed (a job that fails before the overlay posts no comment):
+      python3 -I scripts/ci/terraform_personal_plan_report.py --refusal with the category (OVERLAY_REFUSED,
+      SCREEN_REFUSED or ASSUME_FAILED), no credential and no tfvars, body self-validated
+      by the closed grammar, then gh pr comment; (14b) plan comment, if: always() and the assume step succeeded: BODY=$(
+      bash trusted_plan_env.sh --scrub-only -- python3 -I scripts/ci/terraform_personal_plan_report.py ...) with the
+      category of the first failing step or the plan result, then printf the body into python3 -I
+      scripts/ci/redaction_check.py assert-clean (which prints nothing on success), and only on exit 0 gh pr comment
+      --body "$BODY" (today's build-assert-post order, terraform-apply-sandbox.yml:731-736). Steps 12-13 run when 9-10
+      succeed, whatever the guard's verdict (PASS, BLOCKED or ERROR), as today: the guard step maps its exit code and
+      never fails, a BLOCKED plan is persisted and its digest posted, and the merge-time guard re-run on the saved
+      plan is authoritative. No plan text, plan JSON or log file is
+      uploaded as an artifact or printed. The job fails (red, advisory, never a
+      required check, Decision 83) on any refusal or error. Header comment: Decision 238, the PR is data, names only;
+      no LLM runs here (Decision 205 cl.2); provider or lockfile changes and new resource types apply by dispatch.
+      Stays under the 500-effective-line ci_workflows default (Decision 166).
+  - file: .github/workflows/terraform-apply-sandbox.yml
+    action: Modify
+    purpose: >-
+      PR 3. Delete the speculative-plan job. Add job ducklake-artifacts (pull_request, same-repo gate, permissions
+      id-token write and contents read only): checkout (PR merge ref, as today), aws-region, configure-aws-credentials
+      as the planner PR-sub with the non-reserved session terraform-plan-pr, id oidc_plan, continue-on-error true plus
+      the existing "Surface a failed assume" warning (validate_oidc_failopen_guards), setup-python, and
+      ./.github/actions/build-ducklake-artifacts mode upload-only with artifact-sha the PR head sha (Decision 154 cl.1
+      and rec-4372's inputs.json keep their producer; Benjamin F1-A). It writes no plan.bin, posts no status or comment
+      and runs no terraform. Header and job comments updated (the PR plan now lives in terraform-plan-trusted.yml);
+      advisory-status, apply-sandbox and gated-apply untouched. Effective lines drop well under the 550 entry.
+  - file: config/structural_size_budgets.yaml
+    action: Modify
+    purpose: PR 3. Lower the terraform-apply-sandbox.yml entry to its new measured count (a decrease is unrestricted).
+  - file: .github/actions/terraform-init-retry/action.yml
+    action: Modify
+    purpose: >-
+      PR 3. New optional input plugin-dir (default empty). The init step gains one env key, TF_CLI_ARGS_init: ${{
+      inputs.plugin-dir != '' && format('-plugin-dir={0} -get=false -lockfile=readonly', inputs.plugin-dir) || '' }},
+      so the run body stays byte-identical to its 24-line baseline (no touch-it-fix-it trigger) and an empty input keeps
+      today's command for every caller (no registry access when set; retries stay harmless). Description updated: the
+      Neon key preflight runs on every trusted job, including pull_request_target, and skips only plain pull_request.
+      Decision 162 R1/R3 hold.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      PR 3 (named rewrite, Decision 235 cl.1). Remove every speculative-plan entry and the claims-probe,
+      claims-probe-no-env and live-assume entries (find them by key, not line number; other plans add and change
+      entries here); add an r3_workflows entry, at its measured size, for each
+      new inline run body of terraform-plan-trusted.yml's plan job and terraform-apply-sandbox.yml's ducklake-artifacts
+      job. The terraform-init-retry entry is unchanged (body untouched).
+  - file: scripts/ci/neon_api_key.sh
+    action: Modify
+    purpose: >-
+      PR 3. check: skip only on pull_request (no pull_request job runs a personal-root plan after the cutover; S5 and
+      S4 revisit it); pull_request_target now fetches. Header comment updated.
+  - file: scripts/checks/iam_tf/validate_planner_secret_value_reads.py
+    action: Modify
+    purpose: >-
+      PR 3 (named loosening/rewrite, Decision 235 cl.1). _PERSONAL_WORKFLOWS gains terraform-plan-trusted.yml;
+      _SPECULATIVE_JOB is deleted; clause (4) becomes "-refresh=false appears on no personal-root terraform plan, and
+      every personal-root terraform plan or apply runs through neon_api_key.sh run --" (the count must be 0, not 1);
+      _TF_CMD_RE accepts an optional bash ...trusted_plan_env.sh -- prefix before the neon wrapper and an optional bash
+      ...quiet_run.sh <log> -- prefix between the neon wrapper and terraform (both named widenings); clause (6) is
+      unchanged in substance (the trusted job uses terraform-init-retry). Docstring (4) rewritten.
+  - file: tests/checks/iam_tf/test_validate_planner_secret_value_reads.py
+    action: Modify
+    purpose: >-
+      PR 3. Fixture tree gains terraform-plan-trusted.yml; the speculative-plan cases become: any -refresh=false on a
+      personal-root plan is red; the trusted plan command without the neon wrapper is red; the real tree is green.
+  - file: scripts/checks/ci_guards/validate_trusted_plan_environment.py
+    action: Modify
+    purpose: >-
+      PR 3. TEMP_NO_ENV_JOBS becomes empty (comment updated). Predicate (g) also fails a governed job whose run bodies
+      contain git fetch or git checkout outside scripts/ci/trusted_plan_overlay.py. Predicate (h) also collects the run
+      bodies and local uses: of every local composite action a governed job uses (one level, then recursively),
+      so scripts a composite runs must be code-owned too; and the static import closure of every executed .py file
+      (an AST walk of its scripts.* and src.* imports, including each package __init__.py on the way), each of which
+      must be code-owned; and no executed .py file inserts the repo root at sys.path position 0 (each appends it,
+      then checks that the imported scripts package resolved under the repo root and exits with a fixed message
+      otherwise). New predicate (i): every non-local uses: in a governed job is
+      pinned to a 40-hex commit SHA. registry.examined goes from 8 to 9; docstring lists (i).
+  - file: tests/checks/ci_guards/test_validate_trusted_plan_environment.py
+    action: Modify
+    purpose: >-
+      PR 3 (named rewrite: the existing cases built on the claims-probe job are re-pointed at job plan). Red cases: a
+      git fetch in a governed run body; an unowned script reached through a composite; an unowned module in an executed
+      script's import closure; an executed script inserting the repo root at sys.path position 0; a tag-pinned
+      action in a governed job; a claims-probe-no-env-style job now fails (d).
+      Real tree green.
+  - file: scripts/checks/iam_tf/_read_coverage.py
+    action: Modify
+    purpose: >-
+      PR 3. Register the trusted role as plan-capable: ROLE_TRUSTED_PLAN = "trusted_plan" mapped to
+      github_ci_trusted_plan in _resolve_role_statements, so validate_ci_refresh_read_coverage checks its refresh-read
+      surface like the planner's (S2 handoff obligation).
+  - file: tests/checks/iam_tf/test__read_coverage_trusted.py
+    action: Create
+    purpose: >-
+      PR 3. The trusted role resolves and is covered on the real tree; a synthetic trusted policy missing a refresh read
+      is red. A new file because test__read_coverage.py sits at exactly 500 SLOC (Decision 128: decompose, never
+      raise).
+  - file: scripts/checks/ci_guards/validate_trusted_plan_screen.py
+    action: Create
+    purpose: >-
+      PR 3. Registered fast-tier check: the repo's own terraform/personal passes terraform_hcl_screen's pure screen
+      (tree rules plus lexer rules; the diff-based overlay rules do not apply). Keeps main inside its own screen: a PR
+      adding a resource type, data type, function or file() path must add it to the screen's allowlist in the same
+      PR (code-owned, so Benjamin reviews it), else every later PR's trusted plan would be refused. Allowlist entries
+      main does not yet use are allowed (a main-first allowlist PR lands before the HCL that needs it). Decision 170
+      examined/skipped counts.
+  - file: tests/checks/ci_guards/test_validate_trusted_plan_screen.py
+    action: Create
+    purpose: PR 3. Real tree green; a synthetic tree with a non-allowlisted type, a provider block outside providers.tf, or a heredoc is red.
+  - file: scripts/checks/ci_guards/_manifest.py
+    action: Modify
+    purpose: PR 3. Register validate_trusted_plan_screen.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      PR 3. Row for validate_trusted_plan_screen; the terraform-plan-trusted workflow row's rationale becomes "Trusted
+      speculative plan for terraform/personal PRs (rec-4637, Decision 238); PR-only, advisory, never on main." (tier
+      and ci_rca unchanged).
+  - file: .github/CODEOWNERS
+    action: Modify
+    purpose: >-
+      PR 3. @benjamin-blake owns every local path the trusted job executes or imports that is not already owned:
+      /scripts/__init__.py, /scripts/ci/__init__.py (absent today; owned before it can exist), /config/terraform-version,
+      /scripts/ci/terraform_hcl_screen.py (and the lexer module if split), /scripts/ci/trusted_plan_overlay.py,
+      /scripts/ci/trusted_plan_env.sh, /scripts/ci/quiet_run.sh, /scripts/ci/neon_api_key.sh, /scripts/ci/plan_names_core.py,
+      /scripts/ci/terraform_personal_plan_report.py, /scripts/ci/terraform_plan_digest.py, /scripts/ci/plan_digest.py,
+      /scripts/ci/redaction_check.py, /scripts/ci/plan_time_policy_check.py (if not already owned by its own plan),
+      /.github/actions/terraform-init-retry/, /.github/actions/materialise-tfvars/
+      (the predicate-h recursion finds whatever else is missing). One comment line: procedural until rec-2827.
+  - file: docs/contracts/terraform-cc-web-operations.yaml
+    action: Modify
+    purpose: >-
+      PR 1: the declared_in of owner_email and neon_api_key becomes terraform/personal/providers.tf (wording APPROVED,
+      context: Approvals). PR 3: speculative_plan_and_apply_the_saved_plan.speculative_plan_job is replaced by the
+      approved row (APPROVED 2026-10-29, context: Approvals; name "plan in terraform-plan-trusted.yml (Decision 238)",
+      seven steps; if PLAN-pr-plan-opaque-iam-policy-check has merged, its approved step sentence about
+      plan_time_policy_check.py is kept verbatim in the new row), plus an eighth step and the capability_split, tfplan_s3_prefix and role_creation_guard_blocked
+      sentences in the addendum wording (APPROVED); PR 4 then deletes the two "until rec-4637's last PR removes it"
+      clauses (APPROVED). A dated amendment_log row per PR. validate_terraform_cc_web_operations stays green.
+      After PLAN-terraform-personal-cd-split, the sections PR 3 and PR 4 edit live in
+      docs/contracts/terraform-personal-cd.yaml (next row).
+  - file: docs/contracts/terraform-personal-cd.yaml
+    action: Modify
+    purpose: >-
+      PR 4: deletes the two "until rec-4637's last PR removes it" clauses (APPROVED, as in the row above) and
+      adds a dated amendment_log row. validate_terraform_personal_cd stays green.
+  - file: docs/contracts/github-actions-evidence.yaml
+    action: Modify
+    purpose: >-
+      PR 3. The terraform-apply-sandbox speculative-plan row becomes the ducklake-artifacts job (critical step id
+      oidc_plan); add a row for terraform-plan-trusted.yml job plan (critical step: the configure-aws-credentials
+      step, by name or id), mirroring the neighbouring rows; validate_actions_evidence stays green.
+  - file: tests/checks/ci_guards/test_terraform_plan_trusted.py
+    action: Create
+    purpose: >-
+      PR 3. rec-4637's acceptance. Parses the real workflows and asserts: trigger and job gate (same-repo AND base
+      main); environment; checkout shape; step order overlay -> screen -> assume -> mirror -> hermetic init -> plan ->
+      backstop -> guard -> persist -> digest status -> (the plan-time policy check, when present) -> comment, with no
+      credential step before the screen; no
+      continue-on-error on the assume; the plan command runs through trusted_plan_env.sh and neon_api_key.sh run,
+      with -lock=false, without -refresh=false or -var-file, and quiet_run.sh is the innermost wrapper (the only
+      redirect wraps terraform, never a wrapper that emits masks); the refusal comment step needs no credential step to
+      have run; the plan comment step builds its body in a variable, runs assert-clean on it, and posts only after;
+      persist and digest do not depend on the guard verdict; no step prints plan text
+      (no terraform show without -json, no cat of a log or plan file) or uploads an artifact; persist key and status
+      use HEAD_SHA; every non-local action SHA-pinned; terraform-apply-sandbox.yml has no speculative-plan job and its
+      ducklake-artifacts job runs no terraform and writes no tfplan; neon_api_key.sh check no longer skips
+      pull_request_target. Each assertion has a red case on a mutated copy.
+  - file: tests/test_plan_review_digest_fit_wiring.py
+    action: Modify
+    purpose: PR 3. Point at the trusted job's comment step (the fit line now comes from terraform_personal_plan_report's input), keep the never-fails property.
+  - file: tests/test_redaction_check.py
+    action: Modify
+    purpose: PR 3. The comment-wiring case reads the trusted job's comment step instead of speculative-plan's.
+  - file: scripts/checks/ci_guards/validate_oidc_failopen_guards.py
+    action: Modify
+    purpose: PR 3. Docstring only. the speculative-plan site is now ducklake-artifacts (same id and negative branch).
+  - file: scripts/ci/ducklake_artifacts.py
+    action: Modify
+    purpose: PR 3. Docstring only. upload-only is the ducklake-artifacts PR job's mode (was the speculative-plan job).
+  - file: scripts/ci/plan_digest.py
+    action: Modify
+    purpose: PR 3. Docstring only. the producer is terraform-plan-trusted.yml's plan job.
+  - file: scripts/ci/terraform_plan_digest.py
+    action: Modify
+    purpose: >-
+      PR 3. The repo-root sys.path entry is appended instead of inserted at 0, so the stdlib always wins in the trusted
+      job, followed by the scripts-package location check (fixed message on a mismatch); behaviour otherwise
+      unchanged (its existing tests pass unedited; the location check gets one red case in its own suite).
+  - file: tests/test_plan_time_policy_check_workflow.py
+    action: Modify
+    purpose: >-
+      PR 3, only if PLAN-pr-plan-opaque-iam-policy-check has merged (it creates this file, pinning the
+      speculative-plan job's internals): re-point it at the trusted plan job's step 13b, or delete it if
+      validate_plan_time_policy_check_wiring plus test_terraform_plan_trusted.py already pin the same facts.
+  - file: tests/test_ci_neon_api_key.py
+    action: Modify
+    purpose: >-
+      PR 3 (named loosening, Decision 235 cl.1: the pull_request_target skip assertion is removed). check skips on
+      pull_request without calling aws, and fetches once on pull_request_target, printing no value.
+  - file: tests/test_secret_parameters_expand.py
+    action: Modify
+    purpose: >-
+      PR 3. _FILES gains .github/workflows/terraform-plan-trusted.yml (the check now reads it), so the copied tree
+      stays complete and the real-tree assertion stays green.
+  # ---------------------------------------------------------------- tests for PR 2
+  - file: tests/test_terraform_hcl_screen.py
+    action: Create
+    purpose: >-
+      PR 2. Main's real terraform/personal passes; one red case per rule (heredoc, block comment, %{, nested ${,
+      non-ASCII, CR, unterminated string, each banned block keyword, data and resource types outside the lists,
+      provider:: and templatefile and fileset calls, file() on a path outside ALLOWED_FILE_PATHS (an absolute path, a
+      ../ escape, a variable path), *.tf.json, override.tf, x_override.tf, *.auto.tfvars, terraform.tfvars, a
+      providers.tf-only keyword in another file, and each data-dependent shape rule: count, for_each, a dynamic block,
+      the conditional operator, a comparison or logical operator outside a condition or validation block, a
+      for-expression if clause, regex or can outside a validation block, try outside the fixed file-read form);
+      "/*" and "<<" and "%{"-free text inside strings stays legal, and main's own preconditions and validations
+      pass; backstop cases over synthetic plan JSON (extra provider alias, module_calls, importing, a check-kind checks
+      entry, a non-allowlisted type) plus one committed fixture generated once from terraform show -json of an offline
+      terraform_data tree with a resource precondition and a variable validation, which must pass; the backstop's
+      output never contains an address or expression.
+  - file: tests/test_trusted_plan_overlay.py
+    action: Create
+    purpose: >-
+      PR 2. Over a temporary git repo: missing merge ref, wrong second parent, first parent not an ancestor, a symlink,
+      a gitlink, an executable file, a subdirectory, a file name outside the name rule (refused before anything is
+      printed, and the refusal line omits it), a PR change to providers.tf / the lockfile / backend-sandbox.hcl /
+      either config file each refuse; a clean PR overlays exactly the merge tree's terraform/personal (deleted files
+      gone, added files present) and a main-only file newer on main than the merge's first parent ends up as main's
+      copy; nothing from the PR is executed (a planted hook or script stays unrun).
+  - file: tests/test_trusted_plan_env.py
+    action: Create
+    purpose: >-
+      PR 2. Under the literal composite argv with a stubbed materialise_tfvars.sh: TF_VAR_* exported to the child,
+      mask lines on stderr only and never on the child's stdout or in the captured tfvars, no file created anywhere
+      under a watched temp dir, no value on stdout, a malformed line fails closed without echoing it; --scrub-only
+      exports the four scrub variables and no TF_VAR_*; materialise_tfvars.sh --stdout masks on stderr, writes no
+      file, and its default mode is unchanged; quiet_run.sh sends only the child's output to the log, keeps its exit
+      status, prints nothing, refuses a log outside $RUNNER_TEMP, and with --stdout a child's stderr line never
+      reaches the stdout file.
+  - file: tests/test_terraform_personal_plan_report.py
+    action: Create
+    purpose: >-
+      PR 2. A fixture plan with for_each keys equal to secret-looking strings, a nonsensitive() output value and a
+      state-valued tag: no key, value or tag reaches the comment; addresses normalise; counts, attribute names, output
+      names, drift and each failure category render; the fit line is exactly FITS or OVERFLOW; assert-clean passes on
+      the result; --refusal renders each pre-credential category from overlay and screen output, needs no tfvars, and
+      fails closed on a line outside its grammar.
+  - file: tests/test_plan_names_core.py
+    action: Create
+    purpose: PR 2. normalise_address over module paths, string and numeric keys and nested modules; counting and changed-name parity with the github reporter.
+  # ---------------------------------------------------------------- PR 4: canary + planner TfplanWrite removal
+  - file: terraform/personal/oidc_pipeline_roles.tf
+    action: Modify
+    purpose: >-
+      PR 4 (IAM, Benjamin F7-A). Delete the planner's TfplanWrite statement (the trusted role is now the only writer of
+      tfplan/personal/*, so a forged terraform-plan-digest status can only name a plan.bin the trusted job wrote).
+      Update the header and PR-sub comments that say PR plans run with a stub key and skip refresh. In-budget inline
+      policy update on a boundary-carrying role: the guard should PASS and auto-apply. This is the first PR planned by
+      the trusted job (the canary).
+  - file: tests/checks/iam_tf/test_trusted_plan_identity.py
+    action: Modify
+    purpose: PR 4. The planner assertion becomes "no planner statement grants any tfplan/* action"; red case re-adds PutObject.
+  - file: config/agent/verification_registry/entries/trusted-plan-screen.yaml
+    action: Create
+    purpose: PR 2. Registry row for VP 1 (graduate).
+  - file: config/agent/verification_registry/entries/trusted-plan-cutover-workflow.yaml
+    action: Create
+    purpose: PR 3. Registry row for VP 5 (graduate).
+  - file: config/agent/verification_registry/entries/trusted-plan-overlay.yaml
+    action: Create
+    purpose: PR 2. Registry row for VP 2 (graduate).
+  - file: config/agent/verification_registry/entries/trusted-plan-env.yaml
+    action: Create
+    purpose: PR 2. Registry row for VP 3 (graduate).
+  - file: config/agent/verification_registry/entries/trusted-plan-report.yaml
+    action: Create
+    purpose: PR 2. Registry row for VP 4 (graduate); its single selector is tests/test_terraform_personal_plan_report.py (the other two files stay in VP 4's command).
+bundled_recommendations:
+  - rec-4637
+followon_recs:
+  - rec-4728
+infrastructure_dependencies:
+  - "S2 landed (rec-4636): agent-platform-github-ci-trusted-plan exists with tfplan/personal Put, mirror read, Neon key and DSN value reads (live assume passed, run 40727966128)."
+  - "SSM expand landed (#1703): the trusted role also holds PlanSecretParameterRead; the SSM cutover moves neon_api_key.sh and materialise_tfvars.sh to SSM for every caller; SSM retire deletes PlanSecretValueRead (S3 never re-adds it)."
+  - "Provider mirror (the data-lake bucket's tf-provider-mirror/ prefix) holds aws 5.100.0 and neon 0.13.0 linux_amd64 zips matching terraform/personal/.terraform.lock.hcl; a provider bump reseeds it by terraform-provider-mirror-seed.yml dispatch."
+  - "Pre-merge vs post-deploy: PR 1's speculative plan is produced by today's job (no-op); PRs 2 and 3 touch no terraform/personal and need no plan; PR 4 is planned by the new trusted job pre-merge and applied by the push run post-merge (in-budget planner inline-policy update, auto-apply)."
+acceptance_criteria:
+  - "A same-repo terraform/personal PR gets its speculative plan only from terraform-plan-trusted.yml under the trusted role; terraform-apply-sandbox.yml has no PR plan job"
+  - "The PR's Terraform is screened before any credential exists in the job; a refused PR gets a names-only refusal and no saved plan"
+  - "Init is hermetic from the mirror with main's lockfile; tfvars and the Neon key exist only as process environment; the plan refreshes fully"
+  - "The PR comment carries names only (no value, instance key, plan text or diagnostic text); the job log carries no value, plan text, or refresh or plan diagnostic (init's own lines, which come from main's providers.tf and the mirror, may print)"
+  - "plan.bin and the terraform-plan-digest status stay keyed by the PR head sha and the merge-time apply consumes them unchanged"
+  - "The DuckLake upload-only build and inputs.json still run per PR head sha, with no terraform and no tfplan write"
+  - "After PR 4 the planner holds no tfplan/* grant; rec-4637 closes on its trailer"
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The static screen accepts main and refuses every banned construct; the backstop refuses a mismatched configuration
+    command: bin/venv-python -m pytest tests/test_terraform_hcl_screen.py -q
+    expected: all pass, real tree green, every red case red
+    fix_if: a real-tree failure -- fix the screen's lexer or lists, never by loosening a refusal rule without the planner
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: trusted-plan-screen
+  - step: 2
+    phase: pre-deploy
+    action: The overlay takes only the merge tree's terraform/personal and refuses each unsafe shape
+    command: bin/venv-python -m pytest tests/test_trusted_plan_overlay.py -q
+    expected: all pass
+    fix_if: fix the overlay script
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: trusted-plan-overlay
+  - step: 3
+    phase: pre-deploy
+    action: Secrets reach the child process as environment only, never a file or output
+    command: bin/venv-python -m pytest tests/test_trusted_plan_env.py -q
+    expected: all pass
+    fix_if: fix trusted_plan_env.sh or materialise_tfvars.sh --stdout
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: trusted-plan-env
+  - step: 4
+    phase: pre-deploy
+    action: The names-only report never prints a value or instance key, and the github reporter is unchanged
+    command: bin/venv-python -m pytest tests/test_terraform_personal_plan_report.py tests/test_plan_names_core.py tests/test_terraform_github_pr_plan.py -q
+    expected: all pass
+    fix_if: fix the report or core module; never edit the github reporter's fixtures
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: trusted-plan-report
+  - step: 5
+    phase: pre-deploy
+    action: The cutover workflow shape holds (rec-4637 acceptance)
+    command: bin/venv-python -m pytest tests/checks/ci_guards/test_terraform_plan_trusted.py -q
+    expected: all pass, each red case red
+    fix_if: fix the workflow, never the assertion
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: trusted-plan-cutover-workflow
+  - step: 6
+    phase: pre-deploy
+    action: The rewritten standing checks hold on the real tree and redden on their breaches
+    command: >-
+      bin/venv-python -m pytest tests/checks/iam_tf/test_validate_planner_secret_value_reads.py
+      tests/checks/ci_guards/test_validate_trusted_plan_environment.py tests/checks/iam_tf/test__read_coverage_trusted.py
+      tests/checks/ci_guards/test_validate_trusted_plan_screen.py tests/test_plan_review_digest_fit_wiring.py
+      tests/test_redaction_check.py tests/checks/iam_tf/test_trusted_plan_identity.py tests/test_ci_neon_api_key.py
+      tests/test_secret_parameters_expand.py tests/test_terraform_plan_digest.py -q
+    expected: all pass
+    fix_if: fix the workflow or tree to satisfy the check
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: These are the registered checks' own suites; validate --pre runs the checks themselves.
+  - step: 7
+    phase: pre-deploy
+    action: PR 1 moved every terraform, provider and backend block into providers.tf and nothing else changed
+    command: >-
+      test "$(grep -lE '^(terraform|provider) ' terraform/personal/*.tf)" = "terraform/personal/providers.tf" &&
+      ! grep -qE '^(terraform|provider) ' terraform/personal/main.tf &&
+      ! grep -q '^provider ' terraform/personal/neon_ducklake_catalog.tf &&
+      ! grep -qE '^variable "(aws_region|aws_profile|owner_email|neon_api_key)"' terraform/personal/variables.tf &&
+      grep -cE '^variable "(aws_region|aws_profile|owner_email|neon_api_key)"' terraform/personal/providers.tf &&
+      terraform fmt -check terraform/personal && echo PROVIDERS_FILE_OK
+    expected: prints 4 then PROVIDERS_FILE_OK
+    fix_if: move the stray block; never edit a resource in PR 1
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: pre-deploy
+    action: PR 1's speculative plan (today's job) is a no-op
+    command: |-
+      test -n "$PR_NUMBER" && bin/venv-python - <<'EOF'
+      import json, os, sys, urllib.request
+      url = f"https://api.github.com/repos/otl-labs/ontheloop/issues/{os.environ['PR_NUMBER']}/comments?per_page=100"
+      bodies = [c["body"] for c in json.load(urllib.request.urlopen(url)) if c["body"].startswith("### Terraform Speculative Plan")]
+      body = bodies[-1] if bodies else ""
+      noop = "No changes." in body and "PASS" in body
+      print("PR1_NOOP" if noop else "PR1_NOT_NOOP")
+      sys.exit(0 if noop else 1)
+      EOF
+    expected: PR1_NOOP (the latest speculative-plan comment says No changes. with predicted verdict PASS)
+    fix_if: any change -- stop; the move altered configuration
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: pre-deploy
+    action: Fast tier, before every push
+    command: bin/venv-python -m scripts.validate --pre
+    expected: exit 0
+    fix_if: fix the reported check
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: pre-deploy
+    action: Stale-reference sweep after PR 3 (the old PR plan surface is gone)
+    command: >-
+      ! grep -rn -- '-refresh=false' .github/workflows/ && ! grep -rn 'pr-speculative-plan-stub' .github/ scripts/ &&
+      ! grep -n 'speculative-plan:' .github/workflows/terraform-apply-sandbox.yml &&
+      ! grep -n 'pull_request_target' scripts/ci/neon_api_key.sh && ! grep -n 'claims-probe' .github/workflows/terraform-plan-trusted.yml &&
+      echo STALE_SWEEP_OK
+    expected: STALE_SWEEP_OK
+    fix_if: remove the remaining reference (comments that describe history are reworded, not left as instructions)
+    hermetic: false
+    graduation: not-applicable
+  - step: 11
+    phase: pre-deploy
+    action: >-
+      LIVE (first trusted run, PR 4 open): the trusted job is green, its comment is names-only, and the digest status
+      exists on the head sha
+    command: |-
+      test -n "$PR_NUMBER" && test -n "$HEAD_SHA" && bin/venv-python - <<'EOF'
+      import json, os, re, sys, urllib.request
+      repo = "otl-labs/ontheloop"
+      def get(path):
+          return json.load(urllib.request.urlopen(f"https://api.github.com/repos/{repo}/{path}"))
+      st = [s for s in get(f"commits/{os.environ['HEAD_SHA']}/status")["statuses"] if s["context"] == "terraform-plan-digest"]
+      body = [c["body"] for c in get(f"issues/{os.environ['PR_NUMBER']}/comments?per_page=100") if "terraform/personal speculative plan (trusted" in c["body"]][-1]
+      bad = [n for n, p in (("12-digit", r"(?<![0-9a-fA-F])\d{12}(?![0-9a-fA-F])"), ("instance key", r"\[[^\]]*\]\s*\|"), ("arn", r"arn:aws:"), ("email", r"@[a-z0-9-]+\.[a-z]")) if re.search(p, body)]
+      ok = bool(st) and st[0]["description"].startswith("sha256:") and re.search(r"^State: CHANGES$", body, re.M) and "aws_iam_role_policy.github_ci_planner" in body and not bad
+      print(json.dumps({"digest_status": bool(st), "leaks": bad, "planner_row": "aws_iam_role_policy.github_ci_planner" in body}))
+      sys.exit(0 if ok else "TRUSTED RUN STOP")
+      EOF
+    expected: >-
+      one JSON line {"digest_status": true, "leaks": [], "planner_row": true}; the comment shows 0 add / 1 change / 0
+      destroy and predicted verdict PASS (read it by eye too); the run is green in the PR's checks
+    fix_if: >-
+      a leak -- stop, delete the comment, and RCA before any re-run (Decision 55); a failed run -- read the step
+      outcome only (never paste the log into the PR), fix forward in a scripts PR, or revert PR 3
+    hermetic: false
+    graduation: not-applicable
+  - step: 12
+    phase: pre-deploy
+    action: LIVE screen refusal on the real job (PR 4, a throwaway commit, then reverted by a second commit)
+    command: |-
+      test -n "$PR_NUMBER" && test -n "$PROBE_SHA" && test -n "$RUN_ID" && bin/venv-python - <<'EOF'
+      import json, os, re, sys, urllib.request
+      repo = "otl-labs/ontheloop"
+      def get(path):
+          return json.load(urllib.request.urlopen(f"https://api.github.com/repos/{repo}/{path}"))
+      steps = {st["name"]: st["conclusion"] for j in get(f"actions/runs/{os.environ['RUN_ID']}/jobs")["jobs"] for st in j["steps"]}
+      digest = [x for x in get(f"commits/{os.environ['PROBE_SHA']}/status")["statuses"] if x["context"] == "terraform-plan-digest"]
+      body = "\n".join(c["body"] for c in get(f"issues/{os.environ['PR_NUMBER']}/comments?per_page=100") if os.environ["PROBE_SHA"] in c["body"])
+      out = {"screen": steps.get("Screen the PR's Terraform"), "assume": steps.get("Assume the trusted plan role"),
+             "digest_status": bool(digest), "refused_comment": bool(re.search(r"^State: SCREEN_REFUSED$", body, re.M))}
+      print(json.dumps(out))
+      sys.exit(0 if out == {"screen": "failure", "assume": "skipped", "digest_status": False, "refused_comment": True} else 1)
+      EOF
+    expected: >-
+      one JSON line {"screen": "failure", "assume": "skipped", "digest_status": false, "refused_comment": true}. Setup
+      (by hand, before the command): on PR 4 push one commit adding a single non-allowlisted data block to
+      oidc_pipeline_roles.tf, set PROBE_SHA to that commit and RUN_ID to its trusted run, then after the command push a
+      revert commit (no force-push) and let VP 11 run on the final head
+    fix_if: the run reached the assume step -- stop and RCA; the screen did not gate
+    hermetic: false
+    graduation: not-applicable
+  - step: 13
+    phase: pre-deploy
+    action: The DuckLake artifacts for PR 4's head still exist (ducklake-artifacts job)
+    command: >-
+      test -n "$HEAD_SHA" && aws s3 ls "s3://agent-platform-data-lake/lambda-packages/${HEAD_SHA}/" --profile agent_platform |
+      awk '{print $4}' | grep -cE '\.zip$|^inputs\.json$'
+    expected: 11 (ten zips plus inputs.json, per scripts/ci/ducklake_artifacts.py's upload-only mode)
+    fix_if: the ducklake-artifacts job failed or skipped -- read its step outcomes; fix before merge
+    hermetic: false
+    graduation: not-applicable
+  - step: 14
+    phase: pre-deploy
+    action: Before the Resolves merge, rec-4637's acceptance is closure-probeable and passes on the PR branch (project rule 2026-10-28)
+    command: >-
+      bin/venv-python -c "from scripts import rec_trailer_acceptance as r; import json;
+      print(json.dumps([{k: e[k] for k in ('bucket', 'route')} for e in r.census(['rec-4637'], profile='agent_platform')]))"
+    expected: >-
+      [{"bucket": "probeable", "route": "junit"}] (or route static), read live, after first rewriting rec-4637's
+      acceptance through update_rec to a node-id pytest command over test_terraform_plan_trusted.py (the whole-file
+      form is out_of_grammar, S2 lesson); then that command passes on the PR branch
+    fix_if: rewrite the acceptance again through scripts.ops_data_portal --update-rec; never merge with an unprobeable acceptance
+    hermetic: false
+    graduation: not-applicable
+  - step: 15
+    phase: post-deploy
+    action: PR 4's push run applied the trusted job's saved plan and the record is green at the merge commit
+    command: >-
+      aws s3 cp s3://agent-platform-data-lake/convergence/personal/sandbox.json - --profile agent_platform |
+      bin/venv-python -c "import json,sys; d=json.load(sys.stdin); print(d.get('status'), (d.get('commit_sha') or '')[:12], bool(d.get('plan_sha')))"
+    expected: green <merge sha prefix> True (plan_sha set means the push path applied a fetched, digest-verified plan.bin)
+    fix_if: red or infra_error -- follow deploy-paths.yaml's reconcile row; never apply by hand (Decision 126)
+    hermetic: false
+    graduation: not-applicable
+  - step: 16
+    phase: post-deploy
+    action: The live planner policy holds no tfplan grant (read-only probe; prints a boolean only)
+    command: >-
+      aws iam get-role-policy --role-name agent-platform-github-ci-planner --policy-name agent-platform-github-ci-planner
+      --profile agent_platform_admin --query PolicyDocument --output json | bin/venv-python -c "import sys;
+      print('TFPLAN_GRANT_ABSENT' if 'tfplan/' not in sys.stdin.read() else 'TFPLAN_GRANT_PRESENT')"
+    expected: TFPLAN_GRANT_ABSENT
+    fix_if: the apply did not run or applied a different plan -- read the push run's outcome
+    hermetic: false
+    graduation: not-applicable
+  - step: 17
+    phase: post-deploy
+    action: rec-4637 closed by the trailer
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader;
+      print(make_reader(profile='agent_platform').named('rec_by_id', id='rec-4637')[0]['status'])"
+    expected: closed
+    fix_if: closure job failed -- read its reason; correct the acceptance through update_rec and re-run closure, never close by hand without Benjamin
+    hermetic: false
+    graduation: not-applicable
+  - step: 18
+    phase: pre-deploy
+    action: Full tier before each handoff push
+    command: bin/venv-python -m scripts.validate
+    expected: exit 0
+    fix_if: fix the reported check
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: terraform/personal/providers.tf
+    behavior: holds every terraform, provider and backend block and the ephemeral neon_api_key declaration
+    verification_step: 7
+    command: test "$(grep -lE '^(terraform|provider) ' terraform/personal/*.tf)" = "terraform/personal/providers.tf"
+    red_green_expectation: red before (blocks live in main.tf and neon_ducklake_catalog.tf), green after
+  - source: terraform/personal/main.tf
+    behavior: no terraform or provider block remains
+    verification_step: 7
+    command: "! grep -qE '^(terraform|provider) ' terraform/personal/main.tf"
+    red_green_expectation: red before, green after
+  - source: terraform/personal/neon_ducklake_catalog.tf
+    behavior: no provider block remains
+    verification_step: 7
+    command: "! grep -q '^provider ' terraform/personal/neon_ducklake_catalog.tf"
+    red_green_expectation: red before, green after
+  - source: terraform/personal/variables.tf
+    behavior: neon_api_key and the provider-read variables are declared only in providers.tf
+    verification_step: 7
+    command: "! grep -qE '^variable \"(aws_region|aws_profile|owner_email|neon_api_key)\"' terraform/personal/variables.tf"
+    red_green_expectation: red before, green after
+  - source: docs/contracts/secret-material-handling.yaml
+    behavior: the Neon key domain names providers.tf, and the ephemeral-input pattern no longer says PR plans use a stub
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Contract prose; validate_secret_material_handling and the contract schema checks in --pre cover its structure.
+  - source: scripts/ci/terraform_hcl_screen.py
+    behavior: refuses every banned construct and accepts main
+    verification_step: 1
+    test_selector: tests/test_terraform_hcl_screen.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/ci/trusted_plan_overlay.py
+    behavior: overlays only the merge tree's terraform/personal and refuses unsafe shapes
+    verification_step: 2
+    test_selector: tests/test_trusted_plan_overlay.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/ci/quiet_run.sh
+    behavior: only the child's output reaches the log; nothing printed; exit status kept
+    verification_step: 3
+    test_selector: tests/test_trusted_plan_env.py
+    red_green_expectation: red before (script absent), green after
+  - source: scripts/ci/trusted_plan_env.sh
+    behavior: secrets reach the child as environment only
+    verification_step: 3
+    test_selector: tests/test_trusted_plan_env.py
+    red_green_expectation: red before (script absent), green after
+  - source: .github/actions/materialise-tfvars/materialise_tfvars.sh
+    behavior: --stdout writes no file; default mode unchanged
+    verification_step: 3
+    test_selector: tests/test_trusted_plan_env.py
+    red_green_expectation: red before (no --stdout mode), green after
+  - source: scripts/ci/plan_names_core.py
+    behavior: instance keys never survive normalisation
+    verification_step: 4
+    test_selector: tests/test_plan_names_core.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/ci/terraform_github_plan_report.py
+    behavior: output unchanged after the extraction
+    verification_step: 4
+    test_selector: tests/test_terraform_github_pr_plan.py
+    red_green_expectation: green before and after (refactor guard; the unedited suite is the oracle)
+  - source: scripts/ci/terraform_personal_plan_report.py
+    behavior: names-only comment, no value or key
+    verification_step: 4
+    test_selector: tests/test_terraform_personal_plan_report.py
+    red_green_expectation: red before (module absent), green after
+  - source: .github/workflows/terraform-plan-trusted.yml
+    behavior: the trusted plan job's gates, order, hermetic init, env-only secrets and names-only output
+    verification_step: 5
+    test_selector: tests/checks/ci_guards/test_terraform_plan_trusted.py
+    red_green_expectation: red before (claims-only skeleton), green after
+  - source: .github/workflows/terraform-apply-sandbox.yml
+    behavior: no PR plan job; ducklake-artifacts builds only
+    verification_step: 5
+    test_selector: tests/checks/ci_guards/test_terraform_plan_trusted.py
+    red_green_expectation: red before (speculative-plan present), green after
+  - source: .github/actions/terraform-init-retry/action.yml
+    behavior: plugin-dir makes init hermetic; empty keeps today's command
+    verification_step: 5
+    test_selector: tests/checks/ci_guards/test_terraform_plan_trusted.py
+    red_green_expectation: red before (no input), green after
+  - source: scripts/ci/neon_api_key.sh
+    behavior: check skips only plain pull_request
+    verification_step: 5
+    test_selector: tests/checks/ci_guards/test_terraform_plan_trusted.py
+    red_green_expectation: red before (pull_request_target skipped), green after
+  - source: scripts/checks/iam_tf/validate_planner_secret_value_reads.py
+    behavior: no -refresh=false on any personal-root plan; the trusted plan is wrapped
+    verification_step: 6
+    test_selector: tests/checks/iam_tf/test_validate_planner_secret_value_reads.py
+    red_green_expectation: red before (expects exactly one -refresh=false), green after
+  - source: tests/checks/iam_tf/test_validate_planner_secret_value_reads.py
+    behavior: fixtures follow the new clause (4)
+    verification_step: 6
+    test_selector: tests/checks/iam_tf/test_validate_planner_secret_value_reads.py
+    red_green_expectation: red before, green after
+  - source: scripts/checks/ci_guards/validate_trusted_plan_environment.py
+    behavior: (g) git-fetch rule, (h) composite recursion, (i) SHA pins, no temp job
+    verification_step: 6
+    test_selector: tests/checks/ci_guards/test_validate_trusted_plan_environment.py
+    red_green_expectation: red before (new red cases pass unnoticed), green after
+  - source: tests/checks/ci_guards/test_validate_trusted_plan_environment.py
+    behavior: red cases for (g), (h) recursion and (i)
+    verification_step: 6
+    test_selector: tests/checks/ci_guards/test_validate_trusted_plan_environment.py
+    red_green_expectation: red before, green after
+  - source: scripts/checks/iam_tf/_read_coverage.py
+    behavior: the trusted role's refresh-read surface is checked
+    verification_step: 6
+    test_selector: tests/checks/iam_tf/test__read_coverage_trusted.py
+    red_green_expectation: red before (role not resolved), green after
+  - source: tests/checks/iam_tf/test__read_coverage_trusted.py
+    behavior: trusted role cases in their own file
+    verification_step: 6
+    test_selector: tests/checks/iam_tf/test__read_coverage_trusted.py
+    red_green_expectation: red before (file absent), green after
+  - source: scripts/ci/terraform_plan_digest.py
+    behavior: repo root appended to sys.path, scripts package location checked; output unchanged
+    verification_step: 6
+    test_selector: tests/checks/ci_guards/test_validate_trusted_plan_environment.py
+    red_green_expectation: red before (predicate h fails an insert at position 0), green after; tests/test_terraform_plan_digest.py stays green
+  - source: tests/test_plan_time_policy_check_workflow.py
+    behavior: pins the plan-time policy check in the surviving job (conditional on the other plan)
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Conditional file owned by PLAN-pr-plan-opaque-iam-policy-check; --pre's affected-set pytest runs it whenever it exists.
+  - source: tests/test_ci_neon_api_key.py
+    behavior: check skips only pull_request and fetches on pull_request_target
+    verification_step: 6
+    test_selector: tests/test_ci_neon_api_key.py
+    red_green_expectation: red before (pull_request_target asserted to skip), green after
+  - source: tests/test_secret_parameters_expand.py
+    behavior: the copied tree includes the trusted workflow
+    verification_step: 6
+    test_selector: tests/test_secret_parameters_expand.py
+    red_green_expectation: green before and after (the edit keeps it green once the check reads the trusted workflow)
+  - source: config/composite_action_body_baseline.yaml
+    behavior: retired bodies removed, new bodies baselined
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Baseline data; validate_composite_action_shell_bodies in --pre fails a missing or stale entry.
+  - source: config/agent/verification_registry/entries/trusted-plan-overlay.yaml
+    behavior: registry row for VP 2
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Registration data; validate_verification_registry and validate_graduation_completeness check it in --pre.
+  - source: config/agent/verification_registry/entries/trusted-plan-env.yaml
+    behavior: registry row for VP 3
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Registration data; validate_verification_registry and validate_graduation_completeness check it in --pre.
+  - source: config/agent/verification_registry/entries/trusted-plan-report.yaml
+    behavior: registry row for VP 4
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Registration data; validate_verification_registry and validate_graduation_completeness check it in --pre.
+  - source: scripts/checks/ci_guards/validate_trusted_plan_screen.py
+    behavior: main always passes its own screen
+    verification_step: 6
+    test_selector: tests/checks/ci_guards/test_validate_trusted_plan_screen.py
+    red_green_expectation: red before (module absent), green after
+  - source: tests/test_plan_review_digest_fit_wiring.py
+    behavior: the fit line rides the trusted comment and never fails it
+    verification_step: 6
+    test_selector: tests/test_plan_review_digest_fit_wiring.py
+    red_green_expectation: red before (job renamed), green after
+  - source: tests/test_redaction_check.py
+    behavior: assert-clean wired into the trusted comment step
+    verification_step: 6
+    test_selector: tests/test_redaction_check.py
+    red_green_expectation: red before (job renamed), green after
+  - source: .github/CODEOWNERS
+    behavior: every path the trusted job executes is code-owned
+    verification_step: 6
+    test_selector: tests/checks/ci_guards/test_validate_trusted_plan_environment.py
+    red_green_expectation: red before (new scripts unowned), green after
+  - source: terraform/personal/oidc_pipeline_roles.tf
+    behavior: the planner holds no tfplan/* grant
+    verification_step: 6
+    test_selector: tests/checks/iam_tf/test_trusted_plan_identity.py
+    red_green_expectation: red before (TfplanWrite present), green after
+  - source: tests/checks/iam_tf/test_trusted_plan_identity.py
+    behavior: planner tfplan assertion tightened
+    verification_step: 6
+    test_selector: tests/checks/iam_tf/test_trusted_plan_identity.py
+    red_green_expectation: red before, green after
+  - source: docs/contracts/terraform-cc-web-operations.yaml
+    behavior: speculative_plan_job describes the trusted job
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Contract prose; validate_terraform_cc_web_operations in --pre checks its structure and referenced paths.
+  - source: docs/contracts/terraform-personal-cd.yaml
+    behavior: PR 4's two clause deletions
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Contract prose; validate_terraform_personal_cd in --pre checks its structure and referenced paths.
+  - source: docs/contracts/github-actions-evidence.yaml
+    behavior: evidence rows follow the renamed and new jobs
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Registry data; validate_actions_evidence in --pre fails a row naming a missing job or step.
+  - source: config/structural_size_budgets.yaml
+    behavior: lowered budget entry
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Budget data; the structural size check in --pre measures it.
+  - source: scripts/checks/ci_guards/_manifest.py
+    behavior: registration only
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Registration data; the manifest consistency check and the new check's own run in --pre prove it.
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: taxonomy rows
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Registration data; validate_ci_rca_taxonomy in --pre fails a registered check without its row.
+  - source: config/agent/verification_registry/entries/trusted-plan-screen.yaml
+    behavior: registry row for VP 1
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Registration data; validate_verification_registry and validate_graduation_completeness check it in --pre.
+  - source: config/agent/verification_registry/entries/trusted-plan-cutover-workflow.yaml
+    behavior: registry row for VP 5
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Registration data; validate_verification_registry and validate_graduation_completeness check it in --pre.
+  - source: scripts/checks/ci_guards/validate_oidc_failopen_guards.py
+    behavior: docstring only
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Docstring-only edit; no behaviour changes.
+  - source: scripts/ci/ducklake_artifacts.py
+    behavior: docstring only
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Docstring-only edit; no behaviour changes.
+  - source: scripts/ci/plan_digest.py
+    behavior: docstring only
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Docstring-only edit; no behaviour changes.
+constraints:
+  - IMPLEMENTATION only (Decision 67); four PRs in order (1, then 2, then 3, then 4); PR 2 may open while PR 1 waits for a merge window
+  - "PRs 2 and 3 touch nothing under terraform/personal (no saved plan could exist for them); PR 1 and PR 4 are the only terraform/personal PRs"
+  - "ADMIN container never bypasses CI deploys; the only admin-credential use is VP 16's read-only get-role-policy probe"
+  - No LLM in the trusted workflow (Decision 205 cl.2, Decision 238 cl.3); the advisory reviewer is deferred to rec-4728
+  - "The trusted job never executes PR content, never prints a value, instance key, plan text or diagnostic text, and never stores plan JSON (Decision 238 cl.4, Decision 101)"
+  - "No trust edit on the trusted role (Decision 223 cl.4); no new grant on any role; PR 4 removes one planner statement only"
+  - "Contract wording is the approved text (speculative_plan_job row) or, once Benjamin gives his word, the Addendum text; allowed variance is whitespace, YAML folding and amendment_log row fields"
+  - No rescue agents or workaround loops (Decision 55); out-of-scope bugs become recs via scripts.ops_data_portal
+context:
+  - "Approvals (Benjamin, 2026-10-29): 'write the plan' 18:43Z, cmsg_01Cqz6E4mzSv6kkGCSCub3WM995TPdiJkaUht2355U8VLp, taking every 6b recommendation (F1-A..F7-A) and the speculative_plan_job text in /mnt/project-files/trusted-plan-executor/s3-executor-cutover/step6b-presentation.md; explanation of F1/F3/F4 given at 18:39Z. Addendum items 1-5 (text in /mnt/project-files/trusted-plan-executor/s3-executor-cutover/contract-addendum.md): 'yes to 1-5' 22:39Z, cmsg_01Cqz6E4mzSv6kkGCSCub3WMEBrfeBNPVh2rusUG4g8bRr. Item 6, the plan-shape rules and residual: 'Keep them' on decision card cmsg_01Cqz6E4mzSv6kkGCSCub3WMV1YaxYVsittbFYvxtXjDgV, 22:39Z, after he weighed it as possibly over-engineering (22:24Z)."
+  - "Addendum (APPROVED 2026-10-29, context: Approvals; PR 1: terraform-cc-web-operations.yaml declared_in of owner_email and neon_api_key becomes terraform/personal/providers.tf, and the secret-material-handling domains line; PR 3, exact text): capability_split's Planner PR-sub sentence becomes 'Planner PR-sub (T2.49 merged plan+drift): since the Decision 238 cutover it only builds the PR's DuckLake artifacts (the ducklake-artifacts job) until rec-4640 deletes it; it keeps tfstate READ and the refresh-read metadata surface meanwhile (accepted interim risk, Decision 238 cl.6), tfplan WRITE until rec-4637's last PR removes it, and no Secrets Manager value read except the tfvars secret.' tfplan_s3_prefix becomes '`s3://agent-platform-data-lake/tfplan/personal/<pr>/<pr-head-sha>.bin` -- written by the trusted plan job under agent-platform-github-ci-trusted-plan (Decision 238); the planner PR-sub statement keeps a write grant until rec-4637's last PR removes it. Read is `github_ci_apply` via its existing `DataLakeObjectIO` bucket-wide grant.' role_creation_guard_blocked's last sentence becomes 'The drift workflow's and the ducklake-artifacts job's `continue-on-error` on the assume-role step covers any residual bootstrap window; the trusted plan job has none.' PR 4 deletes both 'until rec-4637's last PR removes it' clauses (and the 'tfplan WRITE ... ,' phrase)."
+  - "Decision-scout verdict: FLAGS_FOUND (Decisions triaged: 190 of 190; Roadmap items intersected: 4; CONFLICT: 0; RELATED: 4). CITE: 238, 77, 154, 92, 144, 83, 101, 119, 120, 129, 162, 166, 237, 223, 235, 183. Flags resolved: 238 config-overlay WARN by F4-A (config from main, refuse on change; no Decision text change); 205 WARN by deferring the reviewer (F5-A); 77 WARN by F1-A (build stays on the PR-sub, no grant in S3's PRs). Report: /mnt/project-files/trusted-plan-executor/s3-executor-cutover/decision-scout-report.md."
+  - "gates: decision-scout=FLAGS_FOUND; plan-critique=PROCEED (round 1 REVISE, 19 findings folded in; round 2 PROCEED at 069d851d, its 5 low findings folded in)"
+  - "red-overlap (2026-10-29 22:40Z, main ad596e99): {\"verdict\": \"blocked\", \"slo_hours\": 4, \"reds\": [{\"id\": \"rec-4718\", \"rule\": \"slo_breached\", \"track\": \"product_regression\", \"age_hours\": 7.19, \"shared\": []}]} (the first run, at aa702109, gave rule overlap on four transitively selected tests). Deferral rationale: this plan does not repair rec-4718 (the SSM expand push apply stopped at the plan reviewer because github_ci_branch's policy was a deferred data read; a Reconcile run applied it and the convergence record is green, but the rec is still open). No S3 PR opens while rec-4718 is open: the build thread re-runs red_overlap --plan before each PR and waits on blocked. PR 1 also needs main's terraform/personal apply converged (VP 8 expects a no-op plan); re-check the convergence record before opening it."
+  - "Fable consult: /mnt/project-files/trusted-plan-executor/s3-executor-cutover/ADVICE.md; reconciliation in step6b-presentation.md."
+  - "Decision 235 cl.1 named loosenings/rewrites: validate_planner_secret_value_reads (4); its _TF_CMD_RE widened for the trusted_plan_env.sh prefix and the quiet_run.sh inner wrapper; neon_api_key.sh check's pull_request_target skip removed, with test_ci_neon_api_key.py's skip assertion for that event; TEMP_NO_ENV_JOBS emptied; test_validate_trusted_plan_environment.py's claims-probe-based cases re-pointed at job plan; composite_action_body_baseline.yaml loses the retired bodies and gains entries for the new ones; the speculative_plan_job contract row retired."
+  - "Plan-shape residual (APPROVED 2026-10-29, 'Keep them', cmsg_01Cqz6E4mzSv6kkGCSCub3WMV1YaxYVsittbFYvxtXjDgV; Decision 238 cl.4 and rec-4637's context ask for it): with count, for_each, dynamic, conditional, comparison and logical forms refused outside condition and validation blocks, regex and can confined to validation blocks, try fixed to the config file read, no instance-count column and a one-word fit line, what a PR can still learn from a run is whether it succeeded, how long it took, and which allowlisted attributes differ from state. Recorded as the accepted residual; the Decision text is not amended."
+  - "Coordination (2026-10-29 22:57Z, from the 'Block hidden IAM policies before merge' thread): PLAN-pr-plan-opaque-iam-policy-check (approved by Benjamin 22:52Z, not merged at S3 plan time) adds scripts/ci/plan_time_policy_check.py to the speculative-plan job after the digest step, a --pre check validate_plan_time_policy_check_wiring anchored on 'context=terraform-plan-digest' in a run body, and one speculative_plan_job step sentence. If it lands first, PR 3 wires the check into the trusted job (step 13b), keeps that sentence, and keeps the digest post's --field context=terraform-plan-digest in the run body so the wiring check's anchor holds. Follow-on rec-4741 edits terraform_plan_digest.py after PR 3. Full-refresh interaction (from that plan's critique): out-of-band drift on a resource a CI policy document references defers the document, so the check reports OPAQUE on an unrelated PR. No special handling: the merge-time apply consumes that same saved plan and its reviewer would refuse the same opaque line, so the PR-time red predicts a real merge-time failure; the fix is to reconcile the drift first. The job stays advisory (Decision 83), and plan.bin and the digest are already persisted by then."
+  - "Kept, not retired: scripts/ci/oidc_claims_probe.py and its registry shard trusted-plan-oidc-claims-probe.yaml have no caller after PR 3, but the shard is S2's graduated record; S4 (rec-4640) removes them with the other PR-only plumbing."
+  - "Slice map: S1 rec-4632, S1b rec-4635, S2 rec-4636 (landed), S3 rec-4637 (this), S5 rec-4638 (reuses the screen, overlay and plan_names_core), S4 rec-4640 (must re-home the ducklake-artifacts grant when it deletes the planner PR-sub; refinement appended to rec-4640's context 2026-10-29), S6 rec-4639. rec-4686 (real-plan canary) depends on this job shape."
+  - "Gotcha: python3 -I drops the script directory from sys.path, so every new script inserts the repo root itself and never uses -m (predicate h)."
+  - "Gotcha: GitHub Actions logs and artifacts on this public repo are public; the plan log stays in $RUNNER_TEMP and is never echoed."
+  - "Gotcha: terraform/personal is not code-owned, but .github/workflows/terraform-*.yml and CODEOWNERS are, so PR 3 needs Benjamin's code-owner review (his word plus the admin-bypass merge while PRs are authored as him; rec-2827)."
+  - "Coordination: between PR 3's merge and PR 4's post-merge apply, the coordinator holds other terraform/personal merges (PR 4 is the canary), SSM retire's terraform/personal PR included."
+  - "SSM overlap (whichever lands second rebases): PLAN-secrets-to-ssm-cutover shares materialise_tfvars.sh, neon_api_key.sh, neon_ducklake_catalog.tf and both contracts (terraform-cc-web-operations.yaml, secret-material-handling.yaml). PLAN-secrets-to-ssm-retire shares validate_planner_secret_value_reads.py and its test (its rule (1) and ALLOWED_UNCONDITIONED rewrite against this plan's clause (4) and _PERSONAL_WORKFLOWS), oidc_pipeline_roles.tf and test_trusted_plan_identity.py (PR 4's files; retire deletes DriftSessionSecretValueRead and drops PlanSecretValueRead from _EXPECTED_SIDS), terraform-apply-sandbox.yml (comments) and both contracts."
+  - "Shelved fallback (not used): /mnt/project-files/owner-password-out-of-state/SHELVED-forget-fallback.md."
+  - "Critique round 1 (2026-10-29): REVISE, 19 findings, all folded in. Not changed: VP 1-5 stay hermetic false (vp-red-before.yaml hermetic_authoring (v): whole-file re-runs of files this plan creates or modifies); VP 9 and 18 stay not-applicable (a not-applicable step may name scripts.validate)."
+  - "Merge rules: PR 1 on code review PROCEED + green CI + VP 8 no-op + coordinator merge window. PR 2 on code review PROCEED + green CI. PR 3 on code review PROCEED + green CI + Benjamin's word on the final diff (code-owned). PR 4 on code review PROCEED + green CI + VP 11-14 evidence + Benjamin's word on the final diff (IAM) + merge window, squash with 'Resolves: rec-4637'."
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections (238, 77, 154, 205, 235, 237)
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+  - "red_overlap --plan clear and main's terraform/personal apply converged (rec-4718 repaired), else wait"
+  - "Benjamin's word on the Addendum sentences and the plan-shape residual is recorded in the Approvals line (done 2026-10-29); any further change to that text goes back to him"
+execution_steps:
+  - "PR 1: providers.tf, main.tf, neon_ducklake_catalog.tf, variables.tf, the secret-material-handling domains line, the two terraform-cc-web-operations declared_in paths; VP 7, 9, 18; open PR; VP 8 on today's speculative-plan comment; merge on the PR 1 rule; confirm the push apply is a green no-op."
+  - "PR 2: the screen, overlay, env wrapper, quiet_run.sh, materialise_tfvars --stdout, plan_names_core, the github reporter refactor, the personal report, their tests and the VP 1-4 registry rows; VP 1-4, 9, 18; merge on the PR 2 rule. Nothing calls the new scripts yet."
+  - "PR 3 (after PR 1 and PR 2 merged): the workflow body, the apply-sandbox job swap, init-retry input, neon_api_key.sh, the checks and their tests, validate_trusted_plan_screen and registrations, CODEOWNERS, the contracts (approved and addendum text), evidence rows, size budget, docstrings; VP 5, 6, 9, 10, 18; merge on the PR 3 rule. Tell the coordinator to hold other terraform/personal merges."
+  - "PR 4 (after PR 3 merged): oidc_pipeline_roles.tf and test_trusted_plan_identity.py, plus the two contract clause deletions; VP 6, 9, 18; open PR (first trusted run); VP 12 (refusal probe, then revert commit), VP 11 on the final head, VP 13, VP 14 (rewrite rec-4637's acceptance first); merge on the PR 4 rule; then VP 15-17 and tell the coordinator the hold is lifted."
+  - Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)
+  - "Branches: one harness branch per PR, or one session branch restarted from main after each squash-merge (git-ops.yaml merged-PR rule)."
+  - "Closure evidence per PR as four separate facts (implement skill Commit Flows): GitHub readiness, full-tier evidence for the pushed HEAD, structured postflight evidence, the real outcome (CI green by event wake, squash-merge, post-deploy steps)."
+  - "Report: what was implemented, verification results, each PR's closure facts, and the live comment and refusal evidence links."
+work_areas: []
+rollback: >-
+  Before PR 4 merges: revert PR 3 (workflows, scripts and contracts only; no terraform/personal change), which restores the
+  speculative-plan job; providers.tf (PR 1) and the unused scripts (PR 2) can stay. After PR 4: a forward PR re-adding the
+  planner's TfplanWrite statement (in-budget update) before reverting PR 3, since the old job needs that grant.

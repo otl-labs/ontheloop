@@ -57,3 +57,26 @@ def test_emit_maintenance_metric_passes_dimensions_through():
 
 def test_data_path_is_the_env_pinned_default():
     assert _shared.DATA_PATH is None or _shared.DATA_PATH.startswith("s3://")
+
+
+def test_catalog_dimensions_keep_the_ops_series_undimensioned():
+    assert _shared.catalog_dimensions("ducklake_ops") is None
+    assert _shared.catalog_dimensions("bad-name;") is None
+    assert _shared.catalog_dimensions(None) is None
+    assert _shared.catalog_dimensions("ducklake_telemetry") == {"MetaSchema": "ducklake_telemetry"}
+
+
+def test_catalog_metrics_is_the_closed_alarm_input_set():
+    assert _shared.CATALOG_METRICS == frozenset(
+        {
+            "MaintenanceBreakerTrip",
+            "GcReferencedMissing",
+            "GcDeletedSnapshots",
+            "GcDeferredFiles",
+            "MergeOpsPassFailed",
+            "MergeOpsTablesCount",
+            "MergeOpsFilesAfterTotal",
+            "MergeOpsDurationMs",
+            "CatalogFileColumnStatsRows",
+        }
+    )

@@ -107,7 +107,6 @@ def test_historical_records_and_other_recs_files_are_exempt(tmp_path: Path, monk
         "tests/fixtures/payload.json",
         "docs/DECISIONS.md",
         "docs/DECISIONS_ARCHIVE.md",
-        "docs/SESSION_LOG.md",
         "docs/SESSION_LOG_ARCHIVE.md",
         "docs/decisions-index.json",
         "infra/trust.tf",

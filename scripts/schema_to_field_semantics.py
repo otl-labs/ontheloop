@@ -157,8 +157,12 @@ def _enforce_reconcile_pending_subset(
     does not exist -- ScdTableSpec.current_table=None -- so nothing there could ever reconcile).
     """
     scope = ops_entry.get("reconcile_scope")
-    if scope not in ("ducklake", "exempt"):
-        raise ValueError(f"{table_id}: contract_table_ops.reconcile_scope must be 'ducklake' or 'exempt', got {scope!r}")
+    if scope not in ("ducklake", "exempt", "telemetry_catalog"):
+        raise ValueError(f"{table_id}: reconcile_scope must be 'ducklake', 'exempt' or 'telemetry_catalog', got {scope!r}")
+    if scope == "telemetry_catalog" and not (
+        isinstance(ops_entry.get("scope_reason"), str) and ops_entry["scope_reason"].strip()
+    ):
+        raise ValueError(f"{table_id}: a telemetry_catalog reconcile_scope requires a non-empty scope_reason")
 
     for block_name in ("pending_reconcile", "reconciled"):
         block = ops_entry.get(block_name)

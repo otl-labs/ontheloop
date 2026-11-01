@@ -121,7 +121,7 @@ Current constraints are the temporary strategic/executor freeze, telemetry blind
 
 ### Source of truth
 
-Warehouse state is authoritative. The decisions JSONL under `logs/` is a read cache, never a write source; recommendations have no local cache (Decision 215). Recommendations, decisions, priority queue, and execution plans use DuckLake-on-Neon. Session log remains on its legacy path pending disposition; telemetry re-lands as the T2.36 four-table DuckLake model.
+Warehouse state is authoritative. The decisions JSONL under `logs/` is a read cache, never a write source; recommendations have no local cache (Decision 215). Recommendations, decisions, priority queue, and execution plans use DuckLake-on-Neon. Session log retired (T3.20 c6); preflight reads recent sessions from telemetry; telemetry re-lands as the T2.36 four-table DuckLake model.
 
 ### Portal discipline
 
@@ -173,7 +173,7 @@ DuckLake queue
 
 T4.19 owns the loop definition; T4.1 its SFN host and glue. T4.9a owns the MVP GitHub Actions callback handshake. T4.10a owns persona contracts. T4.13/T4.14 add prompt-injection threat modeling and offline prompt/model regression tests.
 
-Persona execution (Decision 234): on user-owned substrate the planning, implementation and consult personas default to a per-run git clone under sandbox-runtime (T4.34, deferred); verdict personas default to Actions. A subscription runs only work its owner initiated; a verdict persona on anyone else's pull request uses a team API key through LiteLLM, or its verdict fails. New core surfaces name a generic change id (ports.yaml PC-09 is the accepted pull-request coupling); local model servers (Ollama, vLLM) use LiteLLM with billing_shape local (vocabulary pending, rec-4561).
+Persona execution (Decision 234): on user-owned substrate the planning, implementation and consult personas default to a per-run git clone under sandbox-runtime (T4.34, deferred); verdict personas default to Actions. A subscription runs only work its owner initiated; a verdict persona on anyone else's pull request uses a team API key through LiteLLM, or its verdict fails. New core surfaces name a generic change id (ports.yaml PC-09 is the accepted pull-request coupling); local model servers (Ollama, vLLM) use LiteLLM with billing_shape local.
 
 Authority increases only when evidence supports it. The end-state minimises routine oversight while preserving human policy control, auditability, escape hatches, and explicit boundaries for high-consequence actions.
 

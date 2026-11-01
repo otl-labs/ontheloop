@@ -45,6 +45,7 @@ _READER_ACTIONS = {
     "logs:CreateLogStream",
     "logs:PutLogEvents",
     "secretsmanager:GetSecretValue",
+    "ssm:GetParameter",
     "s3:GetObject",
     "s3:ListBucket",
     "s3:GetBucketLocation",
@@ -129,7 +130,13 @@ def reader_problems(text: str) -> list[str]:
     problems = _common_problems(role, function)
     statements = _statements(policy)
     sids = {_sid(s) for s in statements}
-    want = {"Logs", "TelemetryReaderDsnRead", "TelemetryCatalogDataRead", "TelemetryCatalogDataList"}
+    want = {
+        "Logs",
+        "TelemetryReaderDsnRead",
+        "TelemetryReaderDsnParameterRead",
+        "TelemetryCatalogDataRead",
+        "TelemetryCatalogDataList",
+    }
     if sids != want:
         problems.append(f"reader statements are {sorted(sids)}")
     for stmt in statements:
@@ -146,6 +153,11 @@ def reader_problems(text: str) -> list[str]:
     secrets = re.findall(r"aws_secretsmanager_secret\.\w+", policy)
     if secrets != [_READER_SECRET]:
         problems.append(f"reader reads secrets {secrets}")
+    parameters = re.findall(r'"arn:aws:ssm:[^"]*:parameter/secret/[^"]*"', policy)
+    if parameters != [
+        '"arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-telemetry-reader-dsn"'
+    ]:
+        problems.append(f"reader reads parameters {parameters}")
     return problems
 
 
@@ -177,8 +189,10 @@ def concurrency_problems(texts: dict[str, str]) -> list[str]:
     problems: list[str] = []
     if 2 * reader > LOGINS["ducklake_telemetry_reader"].connection_limit:
         problems.append("reader concurrency exceeds its login limit")
-    if 2 * (writer + twin) > LOGINS["ducklake_telemetry_writer"].connection_limit:
-        problems.append("writer plus twin concurrency exceeds the smoke writer login limit")
+    if 2 * writer > LOGINS["ducklake_telemetry_writer_prod"].connection_limit:
+        problems.append("writer concurrency exceeds the production writer login limit")
+    if 2 * twin > LOGINS["ducklake_telemetry_writer"].connection_limit:
+        problems.append("twin concurrency exceeds the smoke writer login limit")
     return problems
 
 
@@ -301,5 +315,10 @@ def test_concurrency_predicate_red_when_a_literal_outgrows_its_login() -> None:
     )
     assert "reader concurrency exceeds its login limit" in concurrency_problems(texts)
     texts = _real()
-    texts[_TWIN_FILE] = texts[_TWIN_FILE].replace("reserved_concurrent_executions = 5", "reserved_concurrent_executions = 6")
-    assert "writer plus twin concurrency exceeds the smoke writer login limit" in concurrency_problems(texts)
+    texts[_WRITER_FILE] = texts[_WRITER_FILE].replace(
+        "reserved_concurrent_executions = 5", "reserved_concurrent_executions = 6"
+    )
+    assert concurrency_problems(texts) == ["writer concurrency exceeds the production writer login limit"]
+    texts = _real()
+    texts[_TWIN_FILE] = texts[_TWIN_FILE].replace("reserved_concurrent_executions = 5", "reserved_concurrent_executions = 11")
+    assert concurrency_problems(texts) == ["twin concurrency exceeds the smoke writer login limit"]

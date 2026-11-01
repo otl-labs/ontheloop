@@ -36,6 +36,7 @@ from scripts.preflight import (
     priority_queue,
     prose_context,
     recs_cache,
+    session_history,
     summary,
     telemetry_health,
 )
@@ -52,7 +53,6 @@ from scripts.preflight._common import (  # noqa: F401
     ROADMAP_FILE,
     ROADMAP_PLATFORM_PATH,
     ROOT,
-    SESSION_LOG_FILE,
     STRATEGIC_REVIEW_LOOKBACK_DAYS,
     TERRAFORM_DIR,
     _make_reader,
@@ -117,7 +117,6 @@ from scripts.preflight.context_docs import (  # noqa: F401
     _check_endstate_drift,
     _scan_provisional_contracts,
     check_data_quality_coverage,
-    parse_last_session,
     print_data_quality_health,
     read_context_files,
 )
@@ -207,6 +206,9 @@ def main(roadmap_detail: str = "slim") -> int:
     # then hits the Lambda URL directly rather than re-resolving SSM on each call.
     aws_infra._prime_reader_url(creds_status)
 
+    # Telemetry-backed recent sessions (T3.20 c6): started before warm_sync so its cold read overlaps the serial phases.
+    history_handle = session_history.start_session_history() if creds_status == "ok" else None
+
     # Warm-up sync: pull the small ops tables (decisions, priority queue, execution plans) ONCE and hold the
     # rows in memory; Phase-B signals derive from them with no further reader calls. ops_recommendations is NOT
     # pulled (Decision 215): its inputs are the two bounded named-verb reads in fetch_recs_signal_inputs below.
@@ -227,8 +229,6 @@ def main(roadmap_detail: str = "slim") -> int:
                 print(f"Ops sync: pulled {pulled} rows from the warehouse", file=sys.stderr)
         except Exception:  # noqa: BLE001
             pass  # sync is best-effort
-
-    last_session = context_docs.parse_last_session()
 
     # Recs inputs: two bounded named-verb reads (Decision 215). signal_rows is a list, or None when the
     # reads failed or credentials are down (degrade loudly); Phase-B derivations never re-touch the reader.
@@ -345,6 +345,9 @@ def main(roadmap_detail: str = "slim") -> int:
     decision_conditions.print_decision_conditions(decision_conditions_bucket)
 
     context = context_docs.read_context_files(open_recs_count=open_recommendations)
+    history = history_handle.result() if history_handle is not None else session_history.unavailable("credentials unavailable")
+    print(session_history.format_history(history), file=sys.stderr)
+    context["recent_sessions"] = history["recent_sessions"]
 
     # Dedupe decisions_max_updated: timestamp fetched once in Phase B; reuse for both
     # roadmap compute_state_dict calls rather than re-issuing the verb.
@@ -362,7 +365,8 @@ def main(roadmap_detail: str = "slim") -> int:
         "s3_log_bucket_set": s3_log_bucket_set,
         "terraform_pending": terraform_pending,
         "convergence_health": convergence_health_data,
-        "last_session": last_session,
+        "last_session": history["last_session"],
+        "session_history": {k: history[k] for k in ("status", "window_days", "reason") if k in history},
         "open_recommendations": open_recommendations,
         "aging_recommendations": aging_recommendations,
         "non_automatable_recommendations": non_automatable_count,

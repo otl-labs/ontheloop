@@ -143,3 +143,27 @@ def test_harness_session_key_is_the_first_remote_change_at_or_before_the_bound()
     diag = Counter()
     assert harness_session_key(_stream(_turns()), None, diag) is None and diag["harness_session_key_absent"] == 1
     assert provenance.NO_FACTS == (None, None, None)
+
+
+def test_late_pin_is_counted_never_read_by_the_open_row() -> None:
+    root = _turns()
+    root.append(pin_attachment("late", 5, REF, pin_facts_text("1", "2", "false")))
+    diag: Counter[str] = Counter()
+    assert open_provenance(_stream(root), True, diag) == (None, None, None)
+    assert diag["pin_after_first_prompt"] == 1 and diag["pin_without_checkout"] == 1
+    diag = Counter()
+    open_provenance(_stream(root), False, diag)
+    assert not diag
+
+
+def test_late_resume_pin_is_not_counted_for_the_open_row() -> None:
+    for name in ("SessionStart:resume", "SessionStart:compact"):
+        root = [*_turns(), pin_attachment("late", 5, REF, pin_facts_text(), name)]
+        diag: Counter[str] = Counter()
+        open_provenance(_stream(root), True, diag)
+        assert diag["pin_after_first_prompt"] == 0, name
+    early = _turns(pin_attachment("h0", 0.1, REF, pin_facts_text()))
+    early.append(pin_attachment("late", 5, REF, pin_facts_text()))
+    diag = Counter()
+    open_provenance(_stream(early), True, diag)
+    assert diag["pin_after_first_prompt"] == 0

@@ -27,7 +27,7 @@ See AGENTS.md `## SLOC governance` -- decompose by default, never raise without 
 ## Preflight Constraints (Workflow Step 1)
 When reading `logs/.preflight-report.json`, apply these conditionals:
 - **`venv_ok: false`** -- Verify `bin/venv-python -c "import sys; print(sys.executable)"` resolves to the venv interpreter and rerun preflight. If still false, STOP.
-- **`creds_status: "unavailable"`** -- **Static-key recovery (non-fatal, Decision 60):** the static-key assume-role chain has no interactive login. Verify it with `aws sts get-caller-identity --profile agent_platform`; if the `agent_static` key was rotated, refresh `~/.aws/credentials`. Do NOT block -- continue in degraded mode (credential-dependent verifiers are skipped, emitting SKIPPED). Autonomous executors never attempt recovery.
+- **`creds_status: "unavailable"`** -- **Static-key recovery (non-fatal, Decision 60):** the static-key assume-role chain has no interactive login. Verify it with `bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform`; if the `agent_static` key was rotated, update its network secret. Do NOT block -- continue in degraded mode (credential-dependent verifiers are skipped, emitting SKIPPED). Autonomous executors never attempt recovery.
 - **`uncommitted_changes` non-empty** -- Ask human: resume, stash, or discard? Wait. Continue on all other conditions.
 - **`main_freshness.status == "fetch_failed"`** -- Informational: surface the fetch error and note
   that Step 5 code-review will diff against the stale local main ref and the Scope-overlap check
@@ -46,39 +46,14 @@ If `main_freshness.status != "ok"`, this check cannot run -- surface the fetch f
 
 ## Bundled Recommendation Relevance Re-check (Workflow Step 3 -- fires after plan load)
 
-Before writing any code, re-check every rec in the plan's `bundled_recommendations` field.
-A rec can become stale between `/plan` and `/implement` (target file deleted, decision
-ratified, a sibling plan already satisfied it). Implementing stale work wastes the session.
-
-### Protocol
-For each rec id in `bundled_recommendations`:
-```bash
-bin/venv-python -c "
-from scripts.rec_relevance import evaluate_rec_relevance
-from scripts.ops_data_portal import propose_or_close_rec
-from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader
-rows, _ = fetch_recs_by_ids(make_reader(), ['rec-NNNN'])
-rec = rows[0] if rows else None
-verdict, evidence = evaluate_rec_relevance(rec, run_acceptance_probe=True)
-det = (verdict == 'satisfied' and evidence.startswith('acceptance probe passed:'))
-proposal = propose_or_close_rec('rec-NNNN', verdict, evidence, deterministic=det)
-print(f'verdict={verdict} det={det}')
-if proposal: print('proposal:', proposal)
-"
-```
-
-**Verdict handling:**
-- **`relevant` or `unknown`** -- proceed; implement as planned.
-- **`satisfied` (deterministic -- acceptance probe passed)** -- `propose_or_close_rec` auto-closes
-  the rec via the portal. Remove it from the effective bundled list, skip its implementation step,
-  and record in chat: "rec-NNNN auto-closed as satisfied ([evidence]); skipping implementation."
-- **`satisfied` (semantic)** -- present the proposal command; wait for operator confirmation.
-  Do NOT skip implementation until operator explicitly confirms closure.
-- **`superseded`, `duplicate`, `contradicted`, `stale_target`, `blocked_by_decision`** -- present
-  the proposal command and wait for operator decision before removing from the implementation list.
-
-**Decision 55 compliance:** auto-closure fires ONLY for deterministic `satisfied`. All semantic
-verdicts route to the operator -- the agent never auto-acts on semantic judgment.
+Before writing code, re-check the plan's `bundled_recommendations` (a rec can go stale after /plan):
+`bin/venv-python -m scripts.rec_relevance --implement-recheck rec-NNNN[,rec-MMMM]`. It never closes a rec
+(`docs/contracts/recommendation-relevance.yaml#implement_gate`); the merged trailer does.
+- **`relevant` or `unknown`** -- implement as planned.
+- **`satisfied`** -- the acceptance already passes on this tree; say so in chat. The rec stays bundled.
+- **Any other verdict** -- present the printed proposal command and wait for the operator. A rec the operator closes
+  stays bundled and in the trailer (the closure job skips it); one the operator supersedes or declines leaves
+  `bundled_recommendations` only by a plan amendment PR, never a build edit.
 
 ## Live Verification Protocol (Workflow Step 4 -- MANDATORY)
 After code changes are complete and unit tests pass, the implementing agent MUST execute the Verification Plan from PLAN-{slug}.yaml before proceeding to code review.
@@ -94,16 +69,16 @@ Acceptance commands prove the code landed (`grep`/`pytest`). Verification comman
    a. Execute the action exactly as described.
    b. Compare actual outcome to expected outcome.
    c. If **PASS**: record the actual output and proceed.
-   d. If **FAIL**: diagnose root cause, fix the code, re-run `pytest` to confirm no regressions, re-attempt. Maximum 3 fix attempts per step. If still failing, STOP and report to the human.
+   d. If **FAIL**: diagnose root cause, fix the code, re-run `pytest` to confirm no regressions, re-attempt. Maximum 3 fix attempts per step. If still failing, STOP (Deviation trigger (c)).
 2. **All verification steps must pass** before proceeding.
 
 ### Nondeterminism rule (VF-08, Decision 55 -- RCA-first, not retry-into-green)
 Track Attempts per step (see VP Compliance Gate below). This rule governs what a re-run is allowed to mean:
 - If a step **FAILS** and is then re-run with an **EMPTY `git diff`** since the prior attempt (i.e. nothing in the tree changed) and the re-run goes green, the step is **NONDETERMINISTIC** -- record it as NONDETERMINISTIC in the VP compliance table, never as PASS. An empty-diff green is evidence the failure was flaky, not fixed, and a silent PASS would hide that.
-- Re-runs stay capped at the existing 3-fix-attempt bound. The nondeterminism rule does not license looping toward green -- it only names what an unexplained green means. On a NONDETERMINISTIC result, STOP and surface to the human (Decision 55: RCA-first, no rescue loops).
+- Re-runs stay capped at the existing 3-fix-attempt bound. The nondeterminism rule does not license looping toward green -- it only names what an unexplained green means. On a NONDETERMINISTIC result, STOP and raise the alarm (Decision 55: RCA-first, no rescue loops).
 - A genuine fix requires a real code change (a **non-empty** `git diff` since the prior attempt). After such a change, the step must pass **two consecutive times** to count as PASS. These two confirmation passes verify an ALREADY-APPLIED fix and are **not** additional fix attempts -- they do not consume the 3-attempt fix budget, which governs diagnose-and-change cycles only.
-- **Interactive-era alarm (now):** while the executor is frozen (Decision 67) a human is present at every `/implement` run, so the alarm is stop-and-surface-to-human; files nothing.
-- **Forward-note (T3.19):** when the executor goes live (CD.17 reversal), this alarm flips to auto-file a rec via `scripts.ops_data_portal` (Decision 84), the executor-era quarantine-that-files-a-rec pattern (CD.29). Tracked as tier_item T3.19 (`deferred_post_mvp`) -- do not implement the auto-file path now.
+- **Interactive-era alarm (now):** while the executor is frozen (Decision 67) the alarm is STOP plus one plan-defect report (`deviation_trigger.escalation`: to the coordinator if one exists, else the human); files nothing.
+- **Forward-note (T3.19, `deferred_post_mvp`):** when the executor goes live (CD.17 reversal) this alarm flips to auto-filing a rec via `scripts.ops_data_portal` (Decision 84; CD.29's quarantine-that-files-a-rec) -- do not build that path now.
 - **Distinguish from declared non-determinism:** a VP step's DETECTED nondeterminism (this rule -- an agent-observed flaky re-run) is not the same thing as a verifier's DECLARED `Hermeticity.NON_HERMETIC_BY_CONSTRUCTION` property (a typed, audited characteristic of the verifier itself). Never silently relabel a detected-flaky VP step as "expected non-hermetic behavior" to justify passing it -- the two are orthogonal, and only the latter is a designed exemption.
 
 ### Deviation trigger
@@ -112,10 +87,10 @@ Three branches for a decision point hit during implementation (full detail:
 (a) in-scope under-specification -- decide inline; consult `model:"fable"` per
 `.claude/skills/overseer/SKILL.md` "## Fable Advice-Consult Protocol" when load-bearing or novel,
 recorded either way.
-(b) scope or contract deviation, or any always-ask surface -- STOP; no consult proceeds past this
-branch.
-(c) repeated failure -- defer to the 3-fix-attempt STOP and VF-08 rules above (cited, not
-restated); T3.19's auto-file-a-rec path stays deferred.
+(b) scope or contract deviation, or any always-ask surface -- STOP and raise the alarm; no consult
+proceeds past this branch.
+(c) repeated failure -- the 3-fix-attempt STOP and VF-08 rules above (cited, not restated), then
+the alarm; T3.19's auto-file-a-rec path stays deferred.
 
 ### Tier-Specific Guidance
 - **V1:** Parse configs, check doc links, confirm formatting. Quick but mandatory.
@@ -169,13 +144,13 @@ are a subagent (`SUBAGENT CONTEXT` header, no `Agent` tool, or a nesting error),
 below; gate-request (`gate: code-review`, inputs branch+plan_path) and resume via `SendMessage` on
 verdict. Schema: `docs/contracts/overseer-dispatch.yaml#gate_request_trampoline`.
 
-Dispatch via the `Agent` tool with `subagent_type: "general-purpose"`, instructing the subagent to invoke the `code-review` skill via the Skill tool and return its structured output verbatim (the same idiom the plan.md decision-scout / plan-critique gates use) -- NOT via `bin/venv-python -m scripts.agent_development.run_skill --skill code-review`. The subagent runs in a fresh context window (anti-bias) and has full tool access (read, grep, glob, bash) to inspect the entire branch diff.
+Dispatch via the `Agent` tool with `subagent_type: "general-purpose"`, instructing the subagent to invoke the `code-review` skill via the Skill tool and return its structured output verbatim (the plan.md gates' idiom) -- NOT via `bin/venv-python -m scripts.agent_development.run_skill --skill code-review`. The subagent runs in a fresh context window (anti-bias) and has full tool access (read, grep, glob, bash) to inspect the entire branch diff.
 
 Agent prompt template:
 - Pre-instruct: "Run `git fetch origin main` before any analysis so the diff base is current. The branch may have been open for hours; the local `origin/main` ref may be stale."
 - Identify the branch under review (the diff `git diff origin/main...HEAD` is the artefact under critique). Use `origin/main` (not the local `main` ref, which is only updated by an explicit pull).
 - Identify the plan file (`docs/plans/PLAN-{slug}.yaml`) so the subagent knows the acceptance criteria and intent.
-- Instruction: "Invoke the `code-review` skill via the Skill tool against this branch. Survey the diff, read the plan to understand intent, then return its structured findings report (including the final Verdict line) verbatim. Do not edit files."
+- Instruction: "Invoke the `code-review` skill (`ontheloop:code-review` where listed) via the Skill tool against this branch. Survey the diff, read the plan to understand intent, then return its structured findings report (including the final Verdict line) verbatim. Do not edit files."
 - Forbid file edits.
 - Require structured output: findings grouped by severity (Critical / High / Medium / Low) with file:line references and a one-line rationale per finding.
 - Cap response length (~800-900 words) to keep the report focused.
@@ -358,7 +333,7 @@ Report readiness, validator verdicts, evidence, review, and real push/PR outcome
 Wait for the PR-tier CI (fast `--pre` tier; Decision 73) via subscription, never polling -- the wake mechanism is canonical in `docs/contracts/git-ops.yaml` steps 3-5, not restated here.
 
 **On wake**, always confirm check runs via `mcp__github__pull_request_read` (`get_status` / `get_check_runs`) BEFORE merging, then branch on status:
-   - **All green** -> `mcp__github__merge_pull_request(owner, repo, pullNumber, merge_method="squash")`, then `mcp__github__unsubscribe_pr_activity(...)`. Report the merge. **Carve-out:** for a PR touching `terraform/personal/**`, do NOT unsubscribe here -- defer to the "Hold subscription through apply" section below (the real outcome is the post-merge apply, not the merge).
+   - **All green** -> for an IMPLEMENTATION PR, Commit Flow step 4 (premerge, squash-merge, readback); otherwise `mcp__github__merge_pull_request(owner, repo, pullNumber, merge_method="squash")`. Then `mcp__github__unsubscribe_pr_activity(...)`. Report the merge with its sha. **Carve-out:** for a PR touching `terraform/personal/**`, do NOT unsubscribe here -- defer to the "Hold subscription through apply" section below (the real outcome is the post-merge apply, not the merge).
    - **Any red** -> diagnose, fix, re-run the Commit Flow (re-triggers PR CI). Stay subscribed and end the turn. Per `docs/contracts/ci-rca-lifecycle.yaml` trigger_scope, this failure is uncovered by ci-rca by construction -- no rec is filed, nothing gates; the existing 3-fix-attempt STOP and VF-08 rules above govern the loop (Decision 55). Never weaken a check to obtain green -- `docs/contracts/implement-scope-boundary.yaml`'s CONTENT invariant is canonical; cited here, not restated. `executor-rca` is out of scope here -- Step 8's RCA-First Protocol is separate, session-end friction capture.
    - **Still running** -> end the turn; a later event wakes you.
 
@@ -387,30 +362,36 @@ record. The authoritative baseline is still the next planning session's converge
 wake). The gated apply gates the JOB, never from a laptop.
 
 ### Pre-Push Rebase (applies to both flows)
-See `docs/contracts/git-ops.yaml` `rebase_phase_distinction.commit_flow_time`: rebase after the
-commit, before the full tier; once pushed, use `--force-with-lease` (never `--force`).
+See `docs/contracts/git-ops.yaml` `rebase_phase_distinction.commit_flow_time`; once pushed, use
+`--force-with-lease` (never `--force`).
 
 ### IMPLEMENTATION Commit Flow
 ```bash
 git add -A
-git commit -m "feat({slug}): implement {brief-description}"
+git commit -m "feat({slug}): implement {brief-description}" -m "Resolves: rec-NNNN[, rec-MMMM]"   # omit -m when nothing is bundled
 git fetch origin main
-git rebase origin/main   # STOP on conflict
+bin/venv-python -m scripts.session.rebase_resolve   # STOP unless RESOLVE CLEAN
 bin/venv-python -m scripts.validate
 bin/venv-python -m scripts.checks.validation_result --verify-head
 git push -u origin HEAD   # its own tool call
 ```
 Then via GitHub MCP (owner/repo from `git remote get-url origin`):
-1. Build the PR body. If the plan `bundled_recommendations` list is non-empty, add the `Resolves: rec-NNNN[, rec-MMMM]` trailer in the PR body, which the squash-merge commit body inherits -- per `docs/contracts/git-ops.yaml` (`ci.yml`'s trailer-closure job closes each named rec after merge). If empty, omit it. Under a clear heading (e.g. `## VP Compliance`), append the VP compliance table to the PR body -- the same bounded table produced by the VP Compliance Gate, including the Attempts column and any NONDETERMINISTIC markers -- so the executed proof lands in the PR/merge record instead of vanishing chat (Decision 115: this PR-body table is PR-scoped ephemeral evidence, not the durable record -- the durable record is the tier_item criterion closure in the roadmap, staged by the bookkeeping walk below).
+1. Build the PR body, repeating the commit's `Resolves:` trailer block (`docs/contracts/git-ops.yaml#resolves_trailer`; `ci.yml`'s trailer jobs close each named rec after merge). Under a clear heading (e.g. `## VP Compliance`), append the VP compliance table to the PR body -- the same bounded table produced by the VP Compliance Gate, including the Attempts column and any NONDETERMINISTIC markers -- so the executed proof lands in the PR/merge record instead of vanishing chat (Decision 115: this PR-body table is PR-scoped ephemeral evidence, not the durable record -- the durable record is the tier_item criterion closure in the roadmap, staged by the bookkeeping walk below).
 2. `mcp__github__create_pull_request(owner, repo, head=<this branch>, base="main", title="feat({slug}): {brief-description}", body=<body from step 1>)`
 3. `mcp__github__subscribe_pr_activity(...)`; end the turn (see "Wait-for-CI").
-4. On green wake: `mcp__github__merge_pull_request(..., merge_method="squash")` + `mcp__github__unsubscribe_pr_activity(...)`.
+4. On green wake: write the squash commit message (the implementation commit's body, trailer included) to a file and
+   run `bin/venv-python -m scripts.session.merge_step premerge --slug {slug} --message-file <file>` (add
+   `--expect <digest>` when the operator approved text); fix any red line before merging. Then
+   `mcp__github__merge_pull_request(..., merge_method="squash", commit_message=<that message>,
+   expectedHeadSha=<the HEAD premerge printed>)`, `bin/venv-python -m scripts.session.merge_step readback --slug
+   {slug} --sha <merge sha>`, and unsubscribe.
 5. **Post-merge closeout fallback (Decision 201, conditional).** WAIT for the
    `trailer-closure` job (`mcp__github__actions_list` by merge sha -> `get_job_logs`, never
    `$GITHUB_STEP_SUMMARY`) to CONCLUDE, then follow the conditional fallback in
-   `docs/contracts/git-ops.yaml::resolves_trailer`: a refusal marker naming the rec forbids the
-   fallback (use its `close_proposed` command); a non-refusal per-rec log line permits it;
-   anything else waits.
+   `docs/contracts/git-ops.yaml::resolves_trailer`: an acceptance-verdict refusal takes that clause's
+   route, a Decision 186 refusal stays open and is reported, a merge-leg refusal or a non-refusal
+   per-rec log line permits the fallback, a trailer readback found missing goes to `merge_step
+   recover` (never the fallback); anything else waits.
 
 ### STRATEGIC Commit Flow
 STRATEGIC plans are suspended (Decision 67). When restored, use the same MCP PR/subscribe/merge pattern, committing `docs/plans/briefings/` with a `scope({slug}): ...` message.

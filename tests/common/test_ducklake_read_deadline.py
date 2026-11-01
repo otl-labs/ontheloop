@@ -1,4 +1,4 @@
-"""Read deadline runner for the ducklake_reader event verbs (rec-4474)."""
+"""Read deadline runner for the event verbs, served by the telemetry reader since slice 2c (rec-4474, Decision 236)."""
 
 from __future__ import annotations
 
@@ -11,12 +11,13 @@ import pytest
 import yaml
 
 from src.common import ducklake_event_reads as ev
+from src.common import ducklake_handler_errors as he
 from src.common import ducklake_read_deadline as dl
 from src.common.ducklake_handler_errors import TypedFault
 
 pytestmark = pytest.mark.unit
 
-_CONTRACT = Path(__file__).resolve().parents[2] / "docs" / "contracts" / "ducklake_reader.yaml"
+_CONTRACT = Path(__file__).resolve().parents[2] / "docs" / "contracts" / "ducklake_telemetry_reader.yaml"
 
 
 class InterruptException(Exception):
@@ -146,6 +147,21 @@ def test_contract_declares_the_deadline_answer() -> None:
     text = _CONTRACT.read_text(encoding="utf-8")
     assert "answers 504 read_deadline_exceeded" in text and "remain the runtime's 502" in text
     assert any("telemetry-cold-read-deadline" in str(e.get("summary", "")) for e in contract["amendment_log"])
+
+
+def test_deadline_fault_answers_through_typed_fault(capsys: pytest.CaptureFixture[str]) -> None:
+    fault = dl._deadline_fault()
+    assert isinstance(fault, TypedFault) and fault.status == 504
+    status, body = he.terminal(fault, function="telemetry_reader", action="named_read", request_id="req-1", elapsed_ms=1.0)
+    assert status == 504
+    assert body == {
+        "ok": False,
+        "error_type": "read_deadline_exceeded",
+        "reason": "reader_deadline",
+        "request_id": "req-1",
+        "action": "named_read",
+    }
+    capsys.readouterr()
 
 
 def _walk(node: Any, key: str) -> Any:

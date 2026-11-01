@@ -42,29 +42,48 @@ _IMPORT_RE = re.compile(r"^\s*import\s*\{", re.M)
 _TO_RE = re.compile(r"^\s*to\s*=\s*(\S+)\s*$", re.M)
 _ID_RE = re.compile(r"^\s*id\s*=\s*(.+?)\s*$", re.M)
 _ENVIRONMENT_ARG_RE = re.compile(r'^\s*environment\s*=\s*"([^"]+)"', re.M)
+_ENVIRONMENT_REF_RE = re.compile(
+    r"^\s*environment\s*=\s*github_repository_environment\.([A-Za-z0-9_]+)\.environment\s*$", re.M
+)
 _REFERENCE_RE = re.compile(r"\$\{[^}]*\}|\bvar\.[A-Za-z0-9_]+")
 
 
-def _repository_name_id(_block: str) -> str:
+def _repository_name_id(_block: str, _text: str) -> str:
     return "var.repository_name"
 
 
-def _ruleset_id(_block: str) -> str:
+def _ruleset_id(_block: str, _text: str) -> str:
     return '"${var.repository_name}:${var.main_protection_ruleset_id}"'
 
 
-def _environment_id(block: str) -> str:
+def _environment_id(block: str, _text: str) -> str:
     match = _ENVIRONMENT_ARG_RE.search(block)
     assert match is not None, "github_repository_environment resource declares no environment argument"
     return f'"${{var.repository_name}}:{match.group(1)}"'
 
 
-_EXPECTED_ID_BY_TYPE: dict[str, Callable[[str], str]] = {
+def _deployment_policy_id(block: str, text: str) -> str:
+    literal = _ENVIRONMENT_ARG_RE.search(block)
+    if literal is not None:
+        environment = literal.group(1)
+    else:
+        ref = _ENVIRONMENT_REF_RE.search(block)
+        assert ref is not None, (
+            "deployment policy environment is neither a literal nor a github_repository_environment reference"
+        )
+        environment = _ENVIRONMENT_ARG_RE.search(find_resource_block(text, "github_repository_environment", ref.group(1)))
+        assert environment is not None, f"referenced environment {ref.group(1)} declares no literal environment"
+        environment = environment.group(1)
+    return f'"${{var.repository_name}}:{environment}:${{var.tf_trusted_plan_main_policy_id}}"'
+
+
+_EXPECTED_ID_BY_TYPE: dict[str, Callable[[str, str], str]] = {
     "github_repository": _repository_name_id,
     "github_actions_repository_permissions": _repository_name_id,
     "github_workflow_repository_permissions": _repository_name_id,
     "github_repository_ruleset": _ruleset_id,
     "github_repository_environment": _environment_id,
+    "github_repository_environment_deployment_policy": _deployment_policy_id,
 }
 
 
@@ -126,7 +145,7 @@ def assert_import_ids_match_expected(files: dict[str, str]) -> None:
     for to, id_ in _import_blocks(files):
         rtype, name = to.split(".", 1)
         assert rtype in _EXPECTED_ID_BY_TYPE, f"no expected import id for resource type {rtype!r} ({to})"
-        expected = _EXPECTED_ID_BY_TYPE[rtype](find_resource_block(text, rtype, name))
+        expected = _EXPECTED_ID_BY_TYPE[rtype](find_resource_block(text, rtype, name), text)
         assert id_ == expected, f"{to} import id is {id_!r}, expected {expected!r}"
 
 
@@ -196,6 +215,22 @@ variable "main_protection_ruleset_id" {
 """
 
 
+_SYN_POLICY_RESOURCE = """
+resource "github_repository_environment_deployment_policy" "gate_main" {
+  repository     = github_repository.this.name
+  environment    = github_repository_environment.gate.environment
+  branch_pattern = "main"
+}
+"""
+
+_SYN_POLICY_IMPORT = """
+import {
+  to = github_repository_environment_deployment_policy.gate_main
+  id = "${var.repository_name}:gate-env:${var.tf_trusted_plan_main_policy_id}"
+}
+"""
+
+
 def _synthetic(**overrides: str) -> dict[str, str]:
     files = {"repo.tf": _SYN_RESOURCES, "imports.tf": _SYN_IMPORTS, "variables.tf": _SYN_VARIABLES}
     files.update(overrides)
@@ -250,6 +285,21 @@ class TestTerraformGithubImportBlocks:
         files = _synthetic(extra="import {\n  to = github_repository.ghost\n  id = var.repository_name\n}\n")
         with pytest.raises(AssertionError, match="github_repository.ghost"):
             assert_one_import_per_managed_resource(files, {})
+
+    def test_deployment_policy_id_resolves_the_referenced_environment(self) -> None:
+        files = _synthetic(
+            policy_resources=_SYN_POLICY_RESOURCE,
+            policy_imports=_SYN_POLICY_IMPORT,
+        )
+        assert_import_ids_match_expected(files)
+
+    def test_red_deployment_policy_import_id_carries_a_literal_id(self) -> None:
+        files = _synthetic(
+            policy_resources=_SYN_POLICY_RESOURCE,
+            policy_imports=_SYN_POLICY_IMPORT.replace("${var.tf_trusted_plan_main_policy_id}", "12345"),
+        )
+        with pytest.raises(AssertionError, match="github_repository_environment_deployment_policy.gate_main import id"):
+            assert_import_ids_match_expected(files)
 
     def test_red_import_id_not_expected_expression(self) -> None:
         files = _synthetic(
@@ -307,3 +357,11 @@ class TestTerraformGithubImportBlocks:
         files = _synthetic(**{"repo.tf": _SYN_RESOURCES.replace(f"      {name},\n", "")})
         with pytest.raises(AssertionError, match=name):
             assert_repository_ignores_unread_attributes(files)
+
+
+def test_real_tree_deployment_policy_id_variable_is_a_real_id(real: dict[str, str]) -> None:
+    text = _joined(real)
+    match = re.search(r'^\s*variable\s+"tf_trusted_plan_main_policy_id"\s*\{', text, re.M)
+    assert match is not None, "variable tf_trusted_plan_main_policy_id is not declared"
+    default = re.search(r"^\s*default\s*=\s*(\d+)\s*$", _balanced_block(text, match.end() - 1), re.M)
+    assert default is not None and int(default.group(1)) > 0, "tf_trusted_plan_main_policy_id has no real numeric default"

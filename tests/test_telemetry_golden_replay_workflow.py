@@ -13,6 +13,7 @@ from typing import Any
 import yaml
 
 from scripts.convergence_health.sensor_liveness import cron_period_seconds
+from scripts.telemetry_capture import read_route
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "telemetry-golden-replay.yml"
@@ -91,3 +92,12 @@ def test_the_workflow_name_keys_the_taxonomy_row() -> None:
     rows = next(v for v in taxonomy.values() if isinstance(v, dict) and "telemetry-golden-replay" in v)
     row = rows["telemetry-golden-replay"]
     assert (row["tier"], row["ci_rca"]) == ("not_a_gate", "excluded") and _doc()["name"] == "telemetry-golden-replay"
+
+
+def test_the_telemetry_reader_url_is_resolved_and_masked() -> None:
+    (run,) = [str(s["run"]) for s in _steps() if "get-function-url-config" in str(s.get("run", ""))]
+    loop = re.search(r"for role in ([a-z_ ]+); do", run)
+    assert loop is not None and loop.group(1).split() == ["writer", "reader", "telemetry_writer", "telemetry_reader"]
+    assert '--function-name "agent-platform-ducklake-${role//_/-}"' in run
+    assert run.index('echo "::add-mask::${URL}"') < run.index('>> "$GITHUB_ENV"')
+    assert f"DUCKLAKE_{'telemetry_reader'.upper()}_URL" == read_route.READER_URL_ENV

@@ -123,9 +123,9 @@ def _run_check(args: argparse.Namespace, result: Any, reader_factory: Callable[[
     from scripts.telemetry_capture import verify  # noqa: PLC0415
 
     if reader_factory is None:
-        from src.common.ducklake_reader_client import make_reader  # noqa: PLC0415
+        from scripts.telemetry_capture import read_route  # noqa: PLC0415
 
-        reader_factory = make_reader
+        reader_factory = read_route.make_routed_reader
     verify.run_verify(
         Path(args.transcript),
         args.session_id,
@@ -309,9 +309,9 @@ def _cmd_verify(args: argparse.Namespace, reader_factory: Callable[[], Any] | No
         out(f"verify: {args.assert_zero} is not an alarm class")
         return 2
     if reader_factory is None:
-        from src.common.ducklake_reader_client import make_reader  # noqa: PLC0415
+        from scripts.telemetry_capture import read_route  # noqa: PLC0415
 
-        reader_factory = make_reader
+        reader_factory = read_route.make_routed_reader
     reader = reader_factory()
     result = verify.run_verify(
         args.tree,

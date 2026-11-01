@@ -49,6 +49,13 @@ resource "aws_iam_role_policy" "ducklake_telemetry_writer_smoke" {
         Resource = [aws_secretsmanager_secret.ducklake_telemetry_writer_dsn.arn]
       },
       {
+        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
+        Sid      = "TelemetryDsnParameterRead"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-telemetry-writer-dsn"]
+      },
+      {
         # Smoke catalog data prefix ONLY. No Delete, and never the production ducklake/ or ducklake-telemetry/ prefix.
         Sid      = "TelemetryCatalogDataReadWrite"
         Effect   = "Allow"
@@ -129,6 +136,7 @@ resource "aws_lambda_function" "ducklake_telemetry_writer_smoke" {
       DUCKLAKE_EXTENSION_DIRECTORY  = local.ducklake_extension_dir
       DUCKLAKE_FIELD_SEMANTICS_PATH = "/var/task/config/lambda/ducklake/field_semantics.yaml"
       TELEMETRY_DSN_SECRET_ID       = aws_secretsmanager_secret.ducklake_telemetry_writer_dsn.name
+      TELEMETRY_DSN_PARAMETER       = local.secret_parameter_names.telemetry_writer_dsn
     }
   }
 

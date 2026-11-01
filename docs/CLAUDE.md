@@ -14,8 +14,8 @@ Allowed governance root files: `CLAUDE.md` (this file), `PROJECT_CONTEXT.md`,
 `ROADMAP-PLATFORM-ARCHIVE.yaml`, `ROADMAP-SEMANTO.yaml`).
 
 Grandfathered retiring sets (allowed now, retire on their own schedule -- do not add to them):
-`DECISIONS.md` / `DECISIONS_ARCHIVE.md` (owner T1.5), `SESSION_LOG.md` /
-`SESSION_LOG_ARCHIVE.md` (owner T2.26 / T-1.9).
+`DECISIONS.md` / `DECISIONS_ARCHIVE.md` (owner T1.5), `SESSION_LOG_ARCHIVE.md`
+(owner T2.26 / T-1.9).
 
 ## Class -> home map
 Every non-governance doc class has a subtree home; put new files there, not at the root:
@@ -55,3 +55,7 @@ future, separately-scoped sweep pending upload to the DuckLake warehouse table -
 standing done/not-done classifier in the hot `/plan` and `/implement` load path. Until that lagged
 sweep lands, completed `.yaml` plans remain at the `docs/plans/` root alongside active ones; do
 not hand-move an individual `.yaml` plan out of it outside that sweep.
+
+## Names (Decision 240)
+`docs/contracts/glossary.yaml` holds the names that replace "platform" and "product" in new governed
+text; text older than Decision 240 reads through its read_as rows, never by rewriting it.

@@ -236,6 +236,14 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_glossary",
+        module="scripts.checks.contracts.validate_glossary",
+        attr="validate_glossary",
+        # UNGATED deliberately, as validate_environment_taxonomy is: the check scopes itself to the diff.
+        pre=True,
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_ports_contract",
         module="scripts.checks.contracts.validate_ports_contract",
         attr="validate_ports_contract",
@@ -307,9 +315,25 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_mechanical_conflicts",
+        module="scripts.checks.contracts.validate_mechanical_conflicts",
+        attr="validate_mechanical_conflicts",
+        pre=True,
+        pre_globs=None,
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_terraform_cc_web_operations",
         module="scripts.checks.contracts.validate_terraform_cc_web_operations",
         attr="validate_terraform_cc_web_operations",
+        pre=True,
+        pre_globs=None,
+        full_segment="full_after_lint",
+    ),
+    Entry(
+        name="validate_terraform_personal_cd",
+        module="scripts.checks.contracts.validate_terraform_personal_cd",
+        attr="validate_terraform_personal_cd",
         pre=True,
         pre_globs=None,
         full_segment="full_after_lint",

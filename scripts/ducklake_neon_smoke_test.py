@@ -115,7 +115,7 @@ from scripts.ducklake_smoke.lambda_ops_gates import (  # noqa: F401 -- re-export
     ops_read_your_write,
 )
 from scripts.ducklake_smoke.lambda_telemetry_gates import (  # noqa: F401 -- re-exported package surface
-    lambda_telemetry,
+    lambda_telemetry_production,
     lambda_telemetry_smoke,
 )
 from scripts.ducklake_smoke.lambda_telemetry_reader_gates import (  # noqa: F401 -- re-exported package surface
@@ -151,7 +151,7 @@ _LAMBDA_GATES: dict[str, Callable[..., None]] = {
     "lambda_maintenance_create_telemetry": lambda_maintenance_create_telemetry,
     "connect_probe": connect_probe,
     "lambda_append_only": lambda_append_only,
-    "lambda_telemetry": lambda_telemetry,
+    "lambda_telemetry_production": lambda_telemetry_production,
     "lambda_telemetry_smoke": lambda_telemetry_smoke,
     "lambda_telemetry_reader": lambda_telemetry_reader,
 }
@@ -266,9 +266,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         "assert 1 history row + no current projection",
     )
     group.add_argument(
-        "--lambda-telemetry",
+        "--lambda-telemetry-production",
         action="store_true",
-        help="[post-deploy] telemetry writer URL-only proof",
+        help="[post-deploy] production telemetry writer light gate: URL-only, production-bound, writes no test rows",
     )
     group.add_argument(
         "--lambda-telemetry-smoke",
@@ -286,6 +286,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         dest="canary_rehearsal",
         help="[pre-deploy] OQ.12 full canary rehearsal from CC-web (no TCP/5432): publish candidate layers, "
         "create ephemeral canaries, prove attach + RYW + real-prod read-clone, teardown.",
+    )
+    parser.add_argument(
+        "--project-id",
+        default=None,
+        dest="project_id",
+        help="[--canary-rehearsal] Neon project id; skips the org-level project listing a project-scoped key cannot make "
+        "(default: env NEON_PROJECT_ID)",
     )
     parser.add_argument("--profile", default=None, help="AWS profile override for Secrets Manager / S3 creds")
     parser.add_argument("--region", default="eu-west-2", help="AWS region for SigV4 / metrics")
@@ -319,7 +326,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif args.lambda_warm_reuse_writer:
             lambda_warm_reuse_writer(profile=args.profile, region=args.region, json_output=args.json_output)
         elif args.canary_rehearsal:
-            canary_rehearsal(profile=args.profile, region=args.region, json_output=args.json_output)
+            extra = {"project_id": args.project_id} if args.project_id else {}
+            canary_rehearsal(profile=args.profile, region=args.region, json_output=args.json_output, **extra)
         else:
             gate = _selected_lambda_gate(args)
             gate(profile=args.profile, region=args.region)

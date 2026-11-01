@@ -1,8 +1,10 @@
-"""One capture pass over one transcript tree (rules RN-1..RN-8).
+"""One capture pass over one transcript tree (rules RN-1..RN-10).
 
 lock -> halt check -> cursor load and tail check -> project_ref (cursor pin, else the SessionStart pin, else defer) ->
-record_turn -> describe check -> blob delivery -> chunked appends in record_turn order -> cursor persisted only after every
-request is acknowledged -> one diagnostics line. Nothing is ever printed; diagnostics carry counts and fixed tokens only.
+record_turn -> describe check -> catalog reset or confirm (the whole tree, re-emitted) -> blob delivery -> chunked appends in
+record_turn order -> cursor persisted with describe's catalog only after every request is acknowledged -> one diagnostics
+line. Capture follows the catalog the deployed writer serves; no switch or config file names it. Nothing is ever printed;
+diagnostics carry counts and fixed tokens only.
 """
 
 from __future__ import annotations
@@ -16,13 +18,16 @@ from pathlib import Path
 from typing import Any
 
 from scripts.telemetry_capture import responses, switch, verify_due
-from scripts.telemetry_capture.state import (
+from scripts.telemetry_capture.state import (  # noqa: F401 -- DEFAULT_CATALOG and KNOWN_CATALOGS are re-exported
+    DEFAULT_CATALOG,
+    KNOWN_CATALOGS,
     LOST,
     RUNNER,
     TAIL_MISMATCH,
     CaptureState,
     Loaded,
     merge_verify_state,
+    paired_catalog,
     state_dir,
 )
 from scripts.telemetry_capture.transport import (
@@ -46,11 +51,13 @@ from src.telemetry_client.blob_delivery import (
     protocol_from_describe,
 )
 from src.turn_capture.cursor import CursorError
-from src.turn_capture.record_turn import record_turn
+from src.turn_capture.record_turn import CaptureResult, record_turn
 from src.turn_capture.transcript import ROOT, FsTree, project_ref_pin
 
 TRANSCRIPTS = "telemetry_transcripts"
 STOP_BUDGET_S = 600.0
+RESET_CONFIRM_AFTER_S = 1800
+RESET_CONFLICT = "grain_conflict_after_catalog_reset"
 ClientFactory = Callable[..., WriterClient]
 
 
@@ -88,15 +95,18 @@ def default_client_factory(
     return make_client(env, state, budget, sleep=sleep, rng=rng)
 
 
-def _describe(client: WriterClient) -> BlobProtocol:
-    """RN-5: the writer serves append_telemetry on the smoke catalog with caps no lower than TR-3's and a blob protocol."""
+def _describe(client: WriterClient) -> tuple[BlobProtocol, str]:
+    """RN-5: the writer serves append_telemetry on a known catalog with its paired data path, with caps no lower than TR-3's
+    and a blob protocol. Returns the protocol and the catalog."""
     status, body = client.invoke({"action": "describe"})
+    catalog = None
     try:
         caps = body["verbs"]["append_telemetry"]["caps"]
+        catalog = paired_catalog(body["catalog"])
         ok = (
             status == 200
             and "append_telemetry" in body["actions"]
-            and body["catalog"]["data_path_is_smoke"] is True
+            and catalog is not None
             and caps["max_invoke_body_bytes"] >= MAX_INVOKE_BODY_BYTES
             and caps["max_rows_per_table"] >= MAX_ROWS_PER_TABLE
             and caps["max_rows_per_request"] >= MAX_ROWS_PER_REQUEST
@@ -104,9 +114,9 @@ def _describe(client: WriterClient) -> BlobProtocol:
         protocol = protocol_from_describe(body)
     except (KeyError, TypeError, HandshakeError):
         ok = False
-    if not ok:
+    if not ok or catalog is None:
         raise _Stop("stopped", "describe_mismatch")
-    return protocol
+    return protocol, catalog
 
 
 class _Sender:
@@ -204,7 +214,14 @@ class _Sender:
 
 
 def _verify_hook(
-    state: CaptureState, record: dict[str, Any], cursor: Any, root: bytes, event: str, final: bool, outcome: str
+    state: CaptureState,
+    record: dict[str, Any],
+    cursor: Any,
+    root: bytes,
+    event: str,
+    final: bool,
+    outcome: str,
+    catalog_reset: bool = False,
 ) -> None:
     """Decide whether the in-session source check is due after this pass and schedule it; never changes the outcome.
 
@@ -224,6 +241,8 @@ def _verify_hook(
                 fresh["producer_fingerprint"] = fingerprint
             elif held["producer_fingerprint"] != fingerprint:
                 fresh["producer_changed"] = True
+        if catalog_reset and _checks_today(fresh, now) < verify_due.MAX_CHECKS_PER_TREE_PER_DAY:
+            fresh["scheduled_at"] = now
         due = verify_due.verify_due(cursor, root, fresh, event=event, final=final, outcome=outcome, now=now)
         record["verify_due"] = due
         if due:
@@ -238,6 +257,10 @@ def _verify_hook(
     except Exception as exc:  # noqa: BLE001 -- the check is an alarm, never a gate: the outcome stands
         record.pop("verify_due", None)
         record["verify_due_error"] = type(exc).__name__
+
+
+def _checks_today(verify_state: Mapping[str, Any], now: float) -> int:
+    return int((verify_state.get("checks_by_day") or {}).get(verify_due.utc_day(now), 0))
 
 
 def _finish(state: CaptureState, record: dict[str, Any], outcome: str, diag: Counter) -> PassResult:
@@ -279,42 +302,81 @@ def _locked_pass(
     if smoke_ref is not None and project_ref != smoke_ref:
         diag["smoke_pin_mismatch"] += 1
         return _finish(state, record, "off", diag)
+    now = time.time()
     try:
-        result = record_turn(tree, loaded.cursor, project_ref=project_ref, session_final=final)
+        result = _record(tree, loaded, project_ref, final, record, resend_tree=False)
     except CursorError as exc:
-        halt = {"reason": "producer_error", "error_class": type(exc).__name__}
-        state.write_halt(halt)
-        record["halt"] = halt
-        return _finish(state, record, "halted", diag)
-    record["record_turn"] = result.diagnostics
+        return _producer_halt(state, record, exc, diag)
     if detach_below is not None and budget.remaining() < detach_below:
         return _finish(state, record, "short_budget", diag)
-    rows = sum(len(rows) for _, rows in result.batches)
-    record["rows"] = {table: len(rows) for table, rows in result.batches}
-    if not rows:
-        _persist_and_hook(state, record, result.next_cursor, root, loaded, diag, (event, final, "no_rows"))
+    if not _rows(result, record):
+        kept = (loaded.catalog, loaded.reset_at)
+        _persist_and_hook(state, record, result.next_cursor, root, loaded, diag, (event, final, "no_rows"), kept)
         return _finish(state, record, "no_rows", diag)
     conflict = "grain_conflict_after_cursor_loss" if loaded.status in (LOST, TAIL_MISMATCH) else "grain_conflict"
     sender: _Sender | None = None
     try:
         client = client_factory(env, state, budget, sleep=sleep, rng=rng)
-        protocol = _describe(client)
+        protocol, catalog = _describe(client)
+        reset, confirm, reset_at = _reset_window(loaded, catalog, now)
+        if reset or confirm:
+            if detach_below is not None:
+                diag["catalog_reset_detached"] += 1
+                return _finish(state, record, "short_budget", diag)
+            diag["catalog_reset" if reset else "catalog_reset_confirm"] += 1
+            result, conflict = _record(tree, loaded, project_ref, final, record, resend_tree=True), RESET_CONFLICT
+            _rows(result, record)
         sender = _Sender(client, protocol, project_ref, sleep, diag)
         sender.send(sender.items(result.batches), conflict)
+    except CursorError as exc:
+        return _producer_halt(state, record, exc, diag)
     except CaptureUnavailable as exc:
         diag[exc.reason] += 1
         return _finish(state, record, "stopped", diag)
     except _Stop as stop:
-        diag[stop.reason] += 1
-        if sender is not None:
-            record["requests"] = sender.requests
-        if stop.halt is not None:
-            state.write_halt(stop.halt)
-            record["halt"] = stop.halt
-        return _finish(state, record, stop.outcome, diag)
+        return _stopped(state, record, stop, sender, diag)
     record["requests"] = sender.requests
-    _persist_and_hook(state, record, result.next_cursor, root, loaded, diag, (event, final, "sent"))
+    persisted = (catalog, reset_at)
+    _persist_and_hook(state, record, result.next_cursor, root, loaded, diag, (event, final, "sent", reset), persisted)
     return _finish(state, record, "sent", diag)
+
+
+def _stopped(state: CaptureState, record: dict[str, Any], stop: _Stop, sender: _Sender | None, diag: Counter) -> PassResult:
+    diag[stop.reason] += 1
+    if sender is not None:
+        record["requests"] = sender.requests
+    if stop.halt is not None:
+        state.write_halt(stop.halt)
+        record["halt"] = stop.halt
+    return _finish(state, record, stop.outcome, diag)
+
+
+def _reset_window(loaded: Loaded, catalog: str, now: float) -> tuple[bool, bool, float | None]:
+    """RN-9 and RN-10 for a pass whose writer answered *catalog*: (reset, confirm, the reset_at to persist)."""
+    reset = loaded.valid and catalog != loaded.catalog
+    confirm = not reset and loaded.valid and loaded.reset_at is not None and now - loaded.reset_at >= RESET_CONFIRM_AFTER_S
+    reset_at = now if reset else None if confirm or not loaded.valid else loaded.reset_at
+    return reset, confirm, reset_at
+
+
+def _record(
+    tree: SnapshotTree, loaded: Loaded, project_ref: str, final: bool, record: dict[str, Any], *, resend_tree: bool
+) -> CaptureResult:
+    result = record_turn(tree, loaded.cursor, project_ref=project_ref, session_final=final, resend_tree=resend_tree)
+    record["record_turn"] = result.diagnostics
+    return result
+
+
+def _rows(result: CaptureResult, record: dict[str, Any]) -> int:
+    record["rows"] = {table: len(rows) for table, rows in result.batches}
+    return sum(record["rows"].values())
+
+
+def _producer_halt(state: CaptureState, record: dict[str, Any], exc: CursorError, diag: Counter) -> PassResult:
+    halt = {"reason": "producer_error", "error_class": type(exc).__name__}
+    state.write_halt(halt)
+    record["halt"] = halt
+    return _finish(state, record, "halted", diag)
 
 
 def _persist_and_hook(
@@ -324,14 +386,18 @@ def _persist_and_hook(
     root: bytes,
     loaded: Loaded,
     diag: Counter,
-    pass_kind: tuple[str, bool, str],
+    pass_kind: tuple[Any, ...],
+    persisted: tuple[str, float | None],
 ) -> None:
-    if cursor is not None and _persist(state, cursor, root, loaded, diag):
+    if cursor is not None and _persist(state, cursor, root, loaded, diag, persisted):
         _verify_hook(state, record, cursor, root, *pass_kind)
 
 
-def _persist(state: CaptureState, cursor: Any, root: bytes, loaded: Loaded, diag: Counter) -> bool:
-    if not state.save_cursor(cursor, root, loaded):
+def _persist(
+    state: CaptureState, cursor: Any, root: bytes, loaded: Loaded, diag: Counter, persisted: tuple[str, float | None]
+) -> bool:
+    catalog, reset_at = persisted
+    if not state.save_cursor(cursor, root, loaded, catalog=catalog, reset_at=reset_at):
         diag["cursor_regression"] += 1
         return False
     return True

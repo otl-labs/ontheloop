@@ -100,7 +100,7 @@ def test_evidence_write_error_emits_failed_and_raises(tmp_path: Path, capsys: py
 
 
 def test_auto_stderr_carries_the_metrics_line(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
-    close_out = json.dumps({"intent_achieved": True, "session_log_entry": "x", "sanity_status": "PASS", "details": {}})
+    close_out = json.dumps({"sanity_status": "PASS", "details": {}})
 
     def fake_close() -> int:
         print(close_out)

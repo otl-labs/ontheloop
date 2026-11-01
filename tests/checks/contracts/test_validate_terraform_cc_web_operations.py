@@ -309,3 +309,78 @@ class TestRecoveryTableCoverage:
         validate_terraform_cc_web_operations(failed, repo_root=tmp_path)
 
         assert failed == []
+
+
+_EPHEMERAL_VAR_TF = 'variable "neon_api_key" {\n  type      = string\n  ephemeral = true\n  sensitive = true\n}\n'
+_EPHEMERAL_ENTRY = {"declared_in": "terraform/personal/variables.tf", "source": "fetched at run time"}
+_WIDGET_ENTRY = {"declared_in": "terraform/personal/variables.tf", "source": "state"}
+
+
+def _ephemeral_repo(
+    tmp_path: Path, *, where_values_live: dict, ephemeral_runtime_vars: dict | None, tf: str = _EPHEMERAL_VAR_TF
+) -> Path:
+    recovery: dict = {"where_values_live": {"description": "per-variable recovery source", **where_values_live}}
+    if ephemeral_runtime_vars is not None:
+        recovery["ephemeral_runtime_vars"] = ephemeral_runtime_vars
+    return _write_repo(
+        tmp_path,
+        module_tf_files={"variables.tf": _SIMPLE_NO_DEFAULT_VAR_TF + tf},
+        tfvars_recovery=recovery,
+    )
+
+
+def test_ephemeral_var_listed_under_ephemeral_runtime_vars_passes(tmp_path: Path) -> None:
+    _ephemeral_repo(
+        tmp_path, where_values_live={"widget_id": _WIDGET_ENTRY}, ephemeral_runtime_vars={"neon_api_key": _EPHEMERAL_ENTRY}
+    )
+    failed: list[str] = []
+    validate_terraform_cc_web_operations(failed, repo_root=tmp_path)
+    assert failed == []
+
+
+def test_ephemeral_var_listed_under_where_values_live_fails(tmp_path: Path) -> None:
+    _ephemeral_repo(
+        tmp_path,
+        where_values_live={"widget_id": _WIDGET_ENTRY, "neon_api_key": _EPHEMERAL_ENTRY},
+        ephemeral_runtime_vars={"neon_api_key": _EPHEMERAL_ENTRY},
+    )
+    failed: list[str] = []
+    validate_terraform_cc_web_operations(failed, repo_root=tmp_path)
+    assert any("where_values_live lists ephemeral variable" in f and "neon_api_key" in f for f in failed)
+
+
+def test_ephemeral_var_missing_from_both_fails(tmp_path: Path) -> None:
+    _ephemeral_repo(tmp_path, where_values_live={"widget_id": _WIDGET_ENTRY}, ephemeral_runtime_vars=None)
+    failed: list[str] = []
+    validate_terraform_cc_web_operations(failed, repo_root=tmp_path)
+    assert any("ephemeral_runtime_vars is missing" in f and "neon_api_key" in f for f in failed)
+
+
+def test_stale_ephemeral_runtime_vars_entry_fails(tmp_path: Path) -> None:
+    _ephemeral_repo(
+        tmp_path,
+        where_values_live={"widget_id": _WIDGET_ENTRY},
+        ephemeral_runtime_vars={"neon_api_key": _EPHEMERAL_ENTRY, "retired_key": _EPHEMERAL_ENTRY},
+    )
+    failed: list[str] = []
+    validate_terraform_cc_web_operations(failed, repo_root=tmp_path)
+    assert any("ephemeral_runtime_vars lists variable" in f and "retired_key" in f for f in failed)
+
+
+def test_ephemeral_entry_for_non_ephemeral_variable_fails(tmp_path: Path) -> None:
+    _ephemeral_repo(
+        tmp_path,
+        where_values_live={"widget_id": _WIDGET_ENTRY},
+        ephemeral_runtime_vars={"neon_api_key": _EPHEMERAL_ENTRY},
+        tf='variable "neon_api_key" {\n  type = string\n}\n',
+    )
+    failed: list[str] = []
+    validate_terraform_cc_web_operations(failed, repo_root=tmp_path)
+    assert failed
+
+
+def test_scalar_ephemeral_runtime_vars_fails(tmp_path: Path) -> None:
+    _ephemeral_repo(tmp_path, where_values_live={"widget_id": _WIDGET_ENTRY}, ephemeral_runtime_vars="not a mapping")  # type: ignore[arg-type]
+    failed: list[str] = []
+    validate_terraform_cc_web_operations(failed, repo_root=tmp_path)
+    assert any("ephemeral_runtime_vars is not a per-variable mapping" in f for f in failed)

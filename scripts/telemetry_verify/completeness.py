@@ -18,6 +18,9 @@ from scripts.telemetry_verify.dedupe import parse_timestamp
 # The first UTC day after the day the producer fixes build's PARSER_VERSION 4 commit (12c017fd, 2026-10-17 23:23Z) reached
 # main: a session created before that merge runs the parser_version 3 producer and writes no harness key.
 V4_FIRST_JUDGED_DAY = "2026-10-18"
+# The first full UTC day after PLAN-telemetry-production-flip's flip (8a846418) converged on ducklake_telemetry at
+# 2026-10-27 11:39:15Z (first_full_production_day in that plan's FLIP-RECORD.md).
+PRODUCTION_FIRST_JUDGED_DAY: str | None = "2026-10-28"
 REPOSITORIES = ("benjamin-blake/theseus", "otl-labs/ontheloop")
 THREAD_FILE = "thread_sessions.json"
 SESSIONS_FILE = "sessions.json"
@@ -61,6 +64,15 @@ class CompletenessResult:
 
     def denominators(self) -> dict[str, int]:
         return {"completeness_listed_not_captured": self.listed}
+
+
+def first_judged_day(catalog: str) -> str | None:
+    """The first day completeness judges in *catalog*; None for a catalog with no first day yet or an unknown one."""
+    if catalog == "ducklake_smoke":
+        return V4_FIRST_JUDGED_DAY
+    if catalog == "ducklake_telemetry":
+        return PRODUCTION_FIRST_JUDGED_DAY
+    return None
 
 
 def normalise_key(value: Any) -> str | None:

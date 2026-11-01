@@ -192,7 +192,6 @@ def lambda_churn_incontainer(*, profile: str | None = None, region: str = "eu-we
 
 _ABSENT_SESSION = "01ARZ3NDEKTSV4RRFFQ69G5FAV"  # a canonical ULID no real session derives to (2016 prefix)
 _MALFORMED_MARKER = "not-a-session-id-MARKER"
-_TELEMETRY_TABLES = {"telemetry_sessions", "telemetry_observations", "telemetry_transcripts", "telemetry_agents"}
 
 
 def _verification_verb_checks(call: Any, fail: Any) -> None:
@@ -226,48 +225,29 @@ def _verification_verb_checks(call: Any, fail: Any) -> None:
 
 
 def _telemetry_read_checks(*, profile: str | None, region: str) -> None:
-    """The reader's telemetry slot (rec-4291): describe, health, absent and malformed sessions, verification verbs."""
-    from src.common.ducklake_event_read_verbs import EVENT_READS  # noqa: PLC0415
-
+    """The shared reader serves no event verb after slice 2c's cleanup (Decision 236): describe lists no event_journal row,
+    and an event verb answers as an unregistered verb (500 runtime, no rows). The event reads are gated on the telemetry
+    reader (lambda_telemetry_reader_gates)."""
     url = core._function_url("reader")
 
     def call(payload: dict) -> Any:
         return core._sigv4_invoke(url, payload, profile=profile, region=region)
 
     def fail(reason: str, detail: object) -> None:
-        raise core.SmokeTestFailure(f"TELEMETRY_READS FAIL: {reason}: {detail}")
+        raise core.SmokeTestFailure(f"SHARED_READER_NO_TELEMETRY FAIL: {reason}: {detail}")
 
     verbs = core._ok_json(call({"action": "describe"})).get("verbs", {})
-    for name, entry in EVENT_READS.items():
-        described = verbs.get(name) or {}
-        if described.get("kind") != "event_journal" or described.get("agent_facing") is not entry.agent_facing:
-            fail(f"describe does not list {name} as an event_journal verb with agent_facing={entry.agent_facing}", described)
-    health = core._ok_json(call({"action": "named_read", "verb": "telemetry_health_count", "params": {}}))
-    if {row.get("table_name") for row in health.get("rows", [])} != _TELEMETRY_TABLES:
-        fail("telemetry_health_count did not answer for all four tables", health)
-    as_of = datetime.now(timezone.utc).isoformat()
-    absent = core._ok_json(
-        call(
-            {
-                "action": "named_read",
-                "verb": "session_state_and_duration",
-                "params": {"session_id": _ABSENT_SESSION, "as_of": as_of},
-            }
-        )
-    )
-    if absent.get("row_count") != 0:
-        fail("a well-formed absent session_id returned rows", absent)
-    bad = call(
-        {
-            "action": "named_read",
-            "verb": "session_state_and_duration",
-            "params": {"session_id": _MALFORMED_MARKER, "as_of": as_of},
-        }
-    )
-    if bad.status_code != 400 or _MALFORMED_MARKER in bad.text or "named_read_input" not in bad.text:
-        fail("a malformed session_id must answer 400 named_read_input without echoing the value", bad.status_code)
-    _verification_verb_checks(call, fail)
-    print("TELEMETRY_READS_OK")
+    events = sorted(name for name, row in verbs.items() if isinstance(row, dict) and row.get("kind") == "event_journal")
+    if events:
+        fail("describe lists event_journal verbs", f"count={len(events)}")
+    health = call({"action": "named_read", "verb": "telemetry_health_count", "params": {}})
+    try:
+        body = health.json() if health.status_code == 500 else {}
+    except ValueError:
+        body = {}
+    if health.status_code != 500 or not isinstance(body, dict) or body.get("error_type") != "runtime" or body.get("rows"):
+        fail("telemetry_health_count must answer 500 runtime as an unregistered verb", f"status={health.status_code}")
+    print("SHARED_READER_NO_TELEMETRY_OK")
 
 
 _DQ_GATE_REQUESTS: dict[str, tuple[str, dict[str, Any]]] = {
@@ -337,7 +317,7 @@ def retired_actions_gate(*, profile: str | None = None, region: str = "eu-west-2
 
 
 def lambda_reader(*, profile: str | None = None, region: str = "eu-west-2") -> None:
-    """EC1/boundary: reader returns current rows; the read role cannot write (closed boundary); the telemetry reads answer."""
+    """EC1/boundary: reader returns current rows; the read role cannot write (closed boundary); no event verb is served."""
     read_body = core._ok_json(
         core._sigv4_invoke(
             core._function_url("reader"), {"action": "read_current", "limit": 5}, profile=profile, region=region

@@ -299,12 +299,12 @@ class TestLiveGateEvaluations:
         assert g1 is not None
         assert g1["verdict"] == "pass", f"G.1: T-1.4 and T-1.5 are complete so rule must pass: {g1}"
 
-    def test_g8_fails(self) -> None:
-        # T3.2 is not_started -> first conjunct of G.8 fails -> Kleene AND -> fail
+    def test_g8_defers_on_the_runtime_run_verdict(self) -> None:
+        # T3.2 is complete -> the status conjunct holds and latest_run.verdict is a runtime path (rec-4689) -> deferred
         gates = {g["id"]: g for g in self._result().get("gate_evaluations", [])}
         g8 = gates.get("G.8")
         assert g8 is not None
-        assert g8["verdict"] == "fail", f"G.8: T3.2 not_started so first conjunct must fail: {g8}"
+        assert g8["verdict"] == "deferred" and "latest_run.verdict" in g8["reason"], f"G.8 must defer on the run verdict: {g8}"
 
     def test_g9_non_deferred(self) -> None:
         # T4.2 is not_started -> verdict is fail (not deferred)

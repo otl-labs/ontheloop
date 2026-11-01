@@ -78,7 +78,7 @@ def test_occ_directive_only_when_recorded() -> None:
     directives = full["_aws"]["CloudWatchMetrics"]
     assert directives[1] == {
         "Namespace": "DuckLakeTelemetryWriter",
-        "Dimensions": [[]],
+        "Dimensions": [[], ["MetaSchema"]],
         "Metrics": [{"Name": "OccRetryCount", "Unit": "Count"}, {"Name": "CommitLatencyMs", "Unit": "Milliseconds"}],
     }
     assert (full["OccRetryCount"], full["CommitLatencyMs"], full["occ_retries"], full["commit_ms"]) == (2, 1235, 2, 1235)
@@ -101,6 +101,27 @@ def test_occ_directive_only_when_recorded() -> None:
     assert [m["Name"] for m in partial["_aws"]["CloudWatchMetrics"][1]["Metrics"]] == [
         "OccRetryCount"
     ] and "CommitLatencyMs" not in partial
+
+
+def test_emf_adds_a_meta_schema_series_beside_the_undimensioned_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TELEMETRY_META_SCHEMA", "ducklake_smoke")
+    full = line_for("append_telemetry", recorded=True)
+    first, second = full["_aws"]["CloudWatchMetrics"]
+    assert first["Dimensions"] == [["Verb"]] and [m["Name"] for m in first["Metrics"]] == ["RequestCount"]
+    assert second["Dimensions"] == [[], ["MetaSchema"]]
+    assert full["MetaSchema"] == "ducklake_smoke"
+    assert "MetaSchema" not in line_for("append_telemetry")
+    assert "MetaSchema" not in line_for("register_tenant", recorded=True)
+
+
+@pytest.mark.parametrize("value", [None, "", "bad name;", "1abc"])
+def test_meta_schema_member_is_env_bound_and_checked(monkeypatch: pytest.MonkeyPatch, value: str | None) -> None:
+    if value is None:
+        monkeypatch.delenv("TELEMETRY_META_SCHEMA", raising=False)
+    else:
+        monkeypatch.setenv("TELEMETRY_META_SCHEMA", value)
+    full = line_for("append_telemetry", recorded=True, payload={"meta_schema": "ducklake_telemetry"})
+    assert full["MetaSchema"] == "unknown"
 
 
 def test_line_never_carries_account_id_or_arn(capsys: pytest.CaptureFixture[str]) -> None:

@@ -374,7 +374,7 @@ def test_resume_boundary_derives_the_previous_segment_close() -> None:
     assert by(sessions(mid_tool, final=False), event_kind="close")[0]["outcome"] == "cancelled"
     assert by(sessions(mid_tool, final=False), event_kind="close")[0]["external_ref"] == "a1b#0/close"
     diag: Counter[str] = Counter()
-    early = [*_resumed()[:2], hook("rs", 1, "SessionStart:resume"), *_resumed()[3:]]
+    early = [*_resumed()[:2], hook("n", 5, "Notification"), hook("rs", 4, "SessionStart:resume"), *_resumed()[3:]]
     build_sessions(parse_records(early, None, False), make_ctx(), diag)
     assert diag["resume_before_close"] == 1
     final = sessions(_resumed(), final=True)
@@ -504,3 +504,12 @@ def test_workflow_reads_no_tool_result() -> None:
     ]
     without = [rec for rec in with_result if rec["uuid"] != "r1"]
     assert by(sessions(with_result), event_kind="open") == by(sessions(without), event_kind="open")
+
+
+def test_segment_closes_read_the_effective_boundary() -> None:
+    late = hook("rs", 12, "SessionStart:resume", durationMs=5000)
+    root = [*_resumed()[:2], prompt("u2", 10, "p2", "b"), assistant("a2", 11, "m2", [text_block("y")]), late]
+    root += [prompt("u3", 20, "p3", "c"), assistant("a3", 21, "m3", [text_block("z")])]
+    rows = sessions(root, final=False)
+    assert [r["external_ref"] for r in by(rows, event_kind="close")] == ["a1#0/close"]
+    assert [r["execution_attempt"] for r in by(rows, event_kind="resume")] == [2]

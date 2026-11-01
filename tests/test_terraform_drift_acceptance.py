@@ -214,20 +214,20 @@ def test_drift_workflow_out_of_band_branch_still_gated_behind_marker_absence() -
 
 
 def test_drift_workflow_init_retry_signature_parity() -> None:
-    """The init-retry grep -qE line in terraform-drift.yml must carry every signature in
-    _TRANSIENT_INIT_SIGNATURES, not merely the parity comment above it.
+    """The drift-detect job must take its init retry from the terraform-init-retry composite, which
+    carries every _TRANSIENT_INIT_SIGNATURES entry (pinned by
+    test_terraform_init_retry_action_signature_parity), and must not carry an inline init loop.
 
-    Anchoring on "grep -qE" alone (rather than on a signature substring like "could not
-    query provider registry") is required: the rewritten parity comment also enumerates all
-    eight signatures, so a substring anchor would let the comment satisfy this guard even if
-    the executable grep regressed.
+    Equivalent invariant to the earlier inline grep -qE parity check: the signatures now live only in
+    the composite, so the drift side asserts consumption rather than a second copy of the list.
     """
+    doc = yaml.safe_load(DRIFT_WORKFLOW.read_text(encoding="utf-8"))
+    steps = doc["jobs"]["drift-detect"]["steps"]
+    consumers = [s for s in steps if s.get("uses") == "./.github/actions/terraform-init-retry"]
+    assert len(consumers) == 1, f"expected exactly one terraform-init-retry step, found {len(consumers)}"
     lines = DRIFT_WORKFLOW.read_text(encoding="utf-8").splitlines()
-    grep_lines = [ln for ln in lines if not ln.lstrip().startswith("#") and "grep -qE" in ln]
-    assert len(grep_lines) == 1, f"expected exactly one non-comment grep -qE line, found {len(grep_lines)}"
-    retry_line = grep_lines[0]
-    missing = [sig for sig in _TRANSIENT_INIT_SIGNATURES if sig not in retry_line]
-    assert not missing, f"terraform-drift.yml init-retry grep -qE line is missing signatures: {missing}"
+    inline = [ln for ln in lines if not ln.lstrip().startswith("#") and "terraform init" in ln]
+    assert not inline, f"terraform-drift.yml still carries an inline terraform init: {inline}"
 
 
 def test_terraform_init_retry_action_signature_parity() -> None:

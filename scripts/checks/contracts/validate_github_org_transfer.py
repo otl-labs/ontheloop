@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.checks import _common, registry
+from scripts.checks.ci_guards.validate_trusted_plan_environment import TRUSTED_WORKFLOWS
 from scripts.checks.contracts import _retired_identity
 
 _CONTRACT = "docs/contracts/github-org-transfer.yaml"
@@ -25,6 +26,8 @@ _TRUST_ROOTS = ("terraform/personal/oidc.tf", "terraform/bootstrap/github_ci_app
 _LIST_RE = re.compile(r"github_repos\s*=\s*\[(?P<body>[^\]]*)\]", re.S)
 _ENTRY_RE = re.compile(r"^([A-Za-z0-9_.-]+)@(\d+)/([A-Za-z0-9_.-]+)@(\d+)$")
 _LABEL = "Org transfer contract"
+_TRUSTED_PLAN_ROLE = "terraform/personal/oidc_trusted_plan_role.tf"
+_WORKFLOW_REFS_RE = re.compile(r"^\s*trusted_plan_workflow_refs\s*=\s*\[(?P<body>[^\]]*)\]", re.S | re.M)
 
 
 def load_contract(repo_root: Path) -> dict | None:
@@ -105,8 +108,39 @@ def _evaluate_oidc_trust_segment(contract: dict, repo_root: Path, failed: list[s
         failed.append(f"{_LABEL}: trust segments {sorted(set(seen))} != {sorted(expected)} for phase {governing!r}")
 
 
+def _evaluate_trusted_plan_workflow_ref(contract: dict, repo_root: Path, failed: list[str]) -> None:
+    """job_workflow_ref is name-based, unlike the id-based sub segments: GitHub mints it under the identity of
+    the governing phase -- current before staging, both while pre_staged, target from transferred on."""
+    identity = contract.get("identity") or {}
+    governing = _governing_phase(identity, failed)
+    try:
+        text = (repo_root / _TRUSTED_PLAN_ROLE).read_text(encoding="utf-8")
+    except OSError as exc:
+        failed.append(f"{_LABEL}: {_TRUSTED_PLAN_ROLE} unreadable: {exc}")
+        return
+    match = _WORKFLOW_REFS_RE.search(re.sub(r"#[^\n]*", "", text))
+    if match is None:
+        failed.append(f"{_LABEL}: {_TRUSTED_PLAN_ROLE} declares no trusted_plan_workflow_refs list")
+        return
+    if governing is None:
+        return
+    index = (identity.get("phase_values") or []).index(governing)
+    segments = ["current"] if index == 0 else ["current", "target"] if index == 1 else ["target"]
+    expected = sorted(
+        f"{identity[seg]['owner']}/{identity[seg]['repository']}/.github/workflows/{name}@refs/heads/main"
+        for seg in segments
+        for name in TRUSTED_WORKFLOWS
+    )
+    values = re.findall(r'"([^"]*)"', match.group("body"))
+    if any("*" in v or "?" in v for v in values):
+        failed.append(f"{_LABEL}: trusted_plan_workflow_refs carries a wildcard (exact match only, Decision 172 cl.3)")
+    if sorted(values) != expected:
+        failed.append(f"{_LABEL}: trusted_plan_workflow_refs {sorted(values)} != {expected} for phase {governing!r}")
+
+
 ROW_EVALUATORS: dict[str, Callable[[dict, Path, list[str]], None]] = {
     "oidc_trust_segment": _evaluate_oidc_trust_segment,
+    "trusted_plan_workflow_ref": _evaluate_trusted_plan_workflow_ref,
     **_retired_identity.ROW_EVALUATORS,
 }
 

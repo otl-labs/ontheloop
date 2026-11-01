@@ -32,7 +32,6 @@ _EXEMPT_FILES = frozenset(
     {
         "docs/DECISIONS.md",
         "docs/DECISIONS_ARCHIVE.md",
-        "docs/SESSION_LOG.md",
         "docs/SESSION_LOG_ARCHIVE.md",
         "docs/decisions-index.json",
     }

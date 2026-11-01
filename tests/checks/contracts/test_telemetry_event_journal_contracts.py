@@ -375,7 +375,7 @@ class TestObservationsPersonaBackend:
         }
         assert expected == {
             "persona_backend": {"litellm", "claude_cli"},
-            "billing_shape": {"metered_marginal", "fixed_non_rollover_allowance"},
+            "billing_shape": {"metered_marginal", "fixed_non_rollover_allowance", "local"},
         }
 
         for name, values in expected.items():
@@ -395,6 +395,7 @@ class TestObservationsPersonaBackend:
         cost_usd = doc.fields["cost_usd"]
         assert "billing_shape" in cost_usd.derivation["inputs"]
         assert "fixed_non_rollover_allowance" in cost_usd.derivation["formula"]
+        assert "'local'" in cost_usd.derivation["formula"]
         assert "cost_usd_reported" in cost_usd.derivation["formula"]
 
 

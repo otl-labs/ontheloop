@@ -1,4 +1,4 @@
-"""The six telemetry registry entries stay pre_production and exempt, with the production catalog path named (Decision 230).
+"""The six telemetry registry entries stay pre_production in scope telemetry_catalog, with the production catalog path named.
 
 A failing guard names the missing text -- fix the document, not the test. The status vocabulary for a table in a non-ops
 catalog is rec-4483's; no plan in slice 2c sets live.
@@ -29,9 +29,10 @@ def test_telemetry_registry_stays_pre_production_with_the_production_column_path
     doc = yaml.safe_load(_SIDECAR.read_text(encoding="utf-8"))
     for name in _ENTRIES:
         entry = doc["contract_table_ops"][name]
-        assert entry["status"] == "pre_production" and entry["reconcile_scope"] == "exempt", name
-        reason = " ".join(entry["exempt_reason"].split())
-        for needle in ("ducklake_telemetry", "provision_telemetry_catalog", "rec-4483"):
+        assert entry["status"] == "pre_production" and entry["reconcile_scope"] == "telemetry_catalog", name
+        assert "exempt_reason" not in entry, name
+        reason = " ".join(entry["scope_reason"].split())
+        for needle in ("ducklake_telemetry", "provision_telemetry_catalog", "rec-4483", "--telemetry-hold"):
             assert needle in reason, (name, needle)
         assert "slice 2c" not in reason, name
 
@@ -41,5 +42,6 @@ def test_telemetry_registry_stays_pre_production_with_the_production_column_path
     tenants = yaml.safe_load((_ROOT / "docs/contracts/ops_tenants.yaml").read_text(encoding="utf-8"))
     note = " ".join(tenants["governance_notes"].split())
     assert "rec-4483" in note and "slice 2c" not in note and "pre_production" in note
+    assert "telemetry_catalog" in note and "scope_reason" in note and "exempt_reason" not in note
     for kept in ("rec-4121", "rec-4024", "Decision 181"):
         assert kept in note, kept

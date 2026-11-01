@@ -25,6 +25,8 @@ import re
 import time
 from typing import Any, Protocol
 
+from src.common.event_usage_fields import MODEL_USAGE_FIELDS, STARTUP_BASELINE_FIELDS, TOOL_USE_FIELDS
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_REGION = "eu-west-2"
@@ -258,6 +260,9 @@ VERB_FIELDS: dict[str, tuple[str, ...] | object] = {
         "cost_source",
         *_STAMP_FIELDS,
     ),
+    "model_usage_rollup": (*MODEL_USAGE_FIELDS, *_STAMP_FIELDS),
+    "tool_use_rollup": (*TOOL_USE_FIELDS, *_STAMP_FIELDS),
+    "session_startup_baseline": (*STARTUP_BASELINE_FIELDS, *_STAMP_FIELDS),
     "telemetry_health_count": ("table_name", "record_count", "meta_schema"),
     "session_tree_rows": ("table_name", "row_json", "total_rows", "roots_in_tree"),
     "telemetry_orphan_counts": (

@@ -17,8 +17,9 @@ is its rule source). The compared-column set behind the conflict report is dedup
 
 Declared conventions with no contract text: model_call_count, usage_missing_count,
 label_counts (sorted by label), unmapped_count (facts labelled unmapped_block) and cost_source follow the verb's EVENT_READS
-description, FRICTION_RULES and the committed derivation_cases.yaml (c15) and friction_vectors.yaml expectations. Five further
-output conventions that no contract or committed vector pins were aligned to the verbs' observable behaviour once this module
+description, FRICTION_RULES and the committed derivation_cases.yaml (c15, and c15b: a local row is NULL
+with cost_source local whatever it reports) and friction_vectors.yaml expectations. Five further output conventions
+that no contract or committed vector pins were aligned to the verbs' observable behaviour once this module
 passed the committed cases (declared here, not derived): a roll-up answers one row for every session holding a sessions or
 observations row (zeros, an empty label_counts); a token total is NULL when no model_call carries that count;
 usage_missing_count counts model_calls missing tokens_input or tokens_output; only a severity-error hook is a blocking hook
@@ -369,6 +370,8 @@ def model_call_cost_estimate(tables: Tables, session_id: str) -> list[dict[str, 
     for row in sorted(_model_calls(scope, session_id), key=lambda r: (r["event_timestamp"], r["observation_id"])):
         if row.get("billing_shape") == "fixed_non_rollover_allowance":
             cost, source = None, "allowance"
+        elif row.get("billing_shape") == "local":
+            cost, source = None, "local"
         elif row.get("cost_usd_reported") is not None:
             cost, source = row["cost_usd_reported"], "reported"
         else:

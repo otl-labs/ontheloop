@@ -81,6 +81,9 @@ CASES = (
     "workflow_from_skill.json",
     "subagent_workflow_skills.json",
     "status_markers.json",
+    "late_startup_group.json",
+    "late_resume_group.json",
+    "resume_hook_twins.json",
 )
 
 

@@ -121,7 +121,7 @@ def prefix_problems(text: str) -> list[str]:
         "ducklake_telemetry_data_path": "s3://${aws_s3_bucket.data_lake.bucket}/ducklake-telemetry/",
         "ducklake_telemetry_prod_meta_schema": "ducklake_telemetry",
         "ducklake_telemetry_reader_function": "agent-platform-ducklake-telemetry-reader",
-        "ducklake_telemetry_meta_schema": "ducklake_smoke",
+        "ducklake_telemetry_meta_schema": "ducklake_telemetry",
         "ducklake_prod_data_prefix": "ducklake",
         "ducklake_smoke_data_prefix": "ducklake-neon-smoke",
     }
@@ -246,7 +246,7 @@ def test_production_telemetry_prefix_is_a_sibling_of_the_ops_prefix() -> None:
         ("ducklake_telemetry_data_path", "s3://${aws_s3_bucket.data_lake.bucket}/ducklake/telemetry/"),
         ("ducklake_telemetry_prod_meta_schema", "ducklake_ops"),
         ("ducklake_telemetry_reader_function", "agent-platform-ducklake-reader"),
-        ("ducklake_telemetry_meta_schema", "ducklake_telemetry"),
+        ("ducklake_telemetry_meta_schema", "ducklake_smoke"),
     ):
         assert prefix_problems(_set_local(text, name, value)), name
     assert prefix_problems(_set_local(text, "ducklake_prod_data_prefix", "ducklake-telemetry"))

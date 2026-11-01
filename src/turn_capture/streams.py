@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from src.turn_capture.hook_groups import RESUME_HOOK, TURNLESS_HOOKS, is_late_session_start, late_resume_start, twin_key
 from src.turn_capture.refs import root_session_ref, subagent_session_ref
 from src.turn_capture.transcript import ROOT, TranscriptTree, inherited_lines, read_lines, record_time
 from src.turn_capture.witness import API_ERROR_FLAG_KEYS, closing_events, frontier, is_api_error, is_witness  # noqa: F401
@@ -46,7 +47,6 @@ KNOWN_ATTACHMENT_TYPES = (
     "read_truncation_notice",
 )
 WITNESS_COUNTERS = ("witness_not_at_rest", "witness_outside_turn")
-RESUME_HOOK = "SessionStart:resume"
 COMPACT_HOOKS = ("SessionStart:compact", "PreCompact", "PostCompact")
 BACKGROUND_COMPLETION_TAG = "<task-notification>"
 _NOTICE_STATUS = re.compile(r"<status>(.*?)</status>", re.DOTALL)
@@ -140,6 +140,7 @@ class Stream:
     result_by_id: dict[str, Result] = field(default_factory=dict)
     pre_tool_blocks: dict[str, list[int]] = field(default_factory=dict)
     resume_ends: dict[int, int] = field(default_factory=dict)
+    resume_at: dict[int, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -244,13 +245,20 @@ def _open_turn(stream: Stream, cur: Turn | None, rec: Rec, seen: set[str], diag:
     return cur, "prompt"
 
 
-def _hook_effect(stream: Stream, rec: Rec, cur: Turn | None, groups: dict[str, bool]) -> Turn | None:
-    """Record resume/compact hook groups; the first resume attachment of a group is a turn boundary."""
+def _hook_effect(
+    stream: Stream, rec: Rec, cur: Turn | None, groups: dict[str, bool], latest: datetime | None, diag: Counter[str]
+) -> Turn | None:
+    """Record resume/compact hook groups; an on-time resume group's first record is a turn boundary (rule HG-3/HG-4)."""
     name = str(rec.data["attachment"].get("hookName") or "")
     if name.startswith(RESUME_HOOK):
         if not groups["resume"]:
             stream.resumes.append(rec)
             groups["resume"] = True
+            if late_resume_start(rec.ts, rec.data["attachment"].get("durationMs"), latest):
+                diag["late_resume_group"] += 1
+                stream.resume_at[rec.line] = cur.first.line if cur is not None else rec.line
+                return cur
+            stream.resume_at[rec.line] = rec.line
             if cur is not None:
                 cur.closed = True
             return None
@@ -276,17 +284,34 @@ def _attach_to_turn(rec: Rec, cur: Turn | None) -> None:
 def _walk(stream: Stream, closing: bool, diag: Counter[str]) -> None:
     cur: Turn | None = None
     seen: set[str] = set()
+    twins: set[tuple[Any, ...] | None] = set()
+    latest: datetime | None = None
+    prompted = False
     groups = {"resume": False, "compact": False}
     for rec in stream.recs:
         if rec.kind in ("prompt", "assistant"):
             if groups["resume"]:
                 stream.resume_ends[stream.resumes[-1].line] = rec.line
             groups = {"resume": False, "compact": False}
+            latest = latest if rec.ts is None else rec.ts if latest is None else max(latest, rec.ts)
         if rec.kind == "prompt":
             cur, rec.kind = _open_turn(stream, cur, rec, seen, diag)
-        elif rec.kind == "hook":
-            cur = _hook_effect(stream, rec, cur, groups)
+            prompted = prompted or rec.kind == "prompt"
+        elif rec.kind in ("hook", "hook_twin"):
+            att = rec.data["attachment"]
+            key = twin_key(att)
+            if rec.kind == "hook_twin" or (key is not None and key in twins):
+                rec.kind = "hook_twin"
+                diag["hook_twin_records"] += 1
+                _attach_to_turn(rec, None)
+                continue
+            twins.add(key)
+            cur = _hook_effect(stream, rec, cur, groups, latest, diag)
             stream.hooks.append(rec)
+            if str(att.get("hookName") or "").startswith(TURNLESS_HOOKS):
+                diag["late_session_start_records"] += 1 if is_late_session_start(str(att["hookName"]), prompted) else 0
+                _attach_to_turn(rec, None)
+                continue
         _attach_to_turn(rec, cur)
     if cur is not None and closing:
         cur.closed = True
@@ -474,10 +499,11 @@ def notice_status(rec: Rec) -> str | None:
 def _background_spawn(stream: Stream, use: ToolUse, agent_id: str, diag: Counter[str]) -> Spawn:
     notices = [r for r in stream.recs if r.line > use.rec.line and is_background_completion(r, agent_id)]
     spawn = Spawn(stream.key, use, agent_id, bool(notices), notices[0] if notices else None, 0, None, notices)
-    boundary = next((r for r in stream.resumes if r.line > use.rec.line), None) if stream.key == ROOT else None
+    at = stream.resume_at
+    boundary = next((r for r in stream.resumes if at[r.line] > use.rec.line), None) if stream.key == ROOT else None
     if boundary is None:
         return spawn
-    if not notices or notices[0].line > boundary.line:
+    if not notices or notices[0].line > at[boundary.line]:
         spawn.complete, spawn.completed_at_boundary = True, True
         diag["background_completed_at_resume"] += 1
         if notices:

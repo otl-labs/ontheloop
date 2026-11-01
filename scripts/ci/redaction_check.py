@@ -22,6 +22,8 @@ and replace-based redaction would silently no-op exactly when redaction matters 
 ``owner_email`` is scrubbed alongside the account id and the two ExternalIds because
 ``terraform/personal/main.tf`` sets ``default_tags { Owner = var.owner_email }``, so a destroy plan
 prints it on every tagged resource.
+
+``mask_account_ids`` is the shared shape mask for text that reaches session output (rec-4656).
 """
 
 from __future__ import annotations
@@ -39,6 +41,9 @@ from typing import TextIO
 # digit-boundary-only pattern has a measured ~1.2% hit rate per md5 (~7% across this plan's six),
 # which is the rec-3322 false-positive class re-appearing on the plan text instead of the body.
 ACCOUNT_ID_SHAPE = re.compile(r"(?<![0-9A-Za-z])\d{12}(?![0-9A-Za-z])")
+
+# IAM role and user unique IDs (AROA / AIDA prefixes) encode the account, so they are masked with it.
+UNIQUE_ID_SHAPE = re.compile(r"(?<![0-9A-Za-z])A(?:ROA|IDA)[A-Z0-9]{16,17}(?![0-9A-Za-z])")
 
 _MODES = ("redact", "assert-clean")
 
@@ -93,6 +98,11 @@ def unscrubbed_labels(text: str, pairs: list[tuple[str, str]]) -> list[str]:
     diagnostic line.
     """
     return [_placeholder_label(i) for i, (value, _) in enumerate(pairs) if value and value in text]
+
+
+def mask_account_ids(text: str) -> str:
+    """Replace account-shaped runs and IAM unique IDs, leaving the rest of the text intact."""
+    return UNIQUE_ID_SHAPE.sub("[UNIQUE_ID]", ACCOUNT_ID_SHAPE.sub("[ACCOUNT_ID]", text))
 
 
 def main(argv: list[str]) -> int:

@@ -43,6 +43,7 @@ ENTRIES: tuple[Entry, ...] = (
             "scripts/llm/**",
             "scripts/ops_data_portal.py",
             "scripts/ops_portal/**",
+            "scripts/checks/contracts/_glossary_words.py",
             "scripts/sync/ops.py",
             "src/common/**",
         ),
@@ -70,6 +71,14 @@ ENTRIES: tuple[Entry, ...] = (
         attr="validate_warehouse_write_sources",
         pre=True,
         pre_globs=("scripts/**", "src/**"),
+        full_segment="full_after_lint",
+    ),
+    Entry(
+        name="validate_recs_read_topology",
+        module="scripts.checks.ops_governance.validate_recs_read_topology",
+        attr="validate_recs_read_topology",
+        pre=True,
+        pre_globs=None,
         full_segment="full_after_lint",
     ),
     Entry(

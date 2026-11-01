@@ -22,6 +22,7 @@ session (server restart). The derivation property still holds; freshness is per-
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any, cast
 
 import anyio
@@ -63,7 +64,7 @@ def build_tool_registry(verbs: dict[str, dict[str, Any]]) -> list[types.Tool]:
     ]
 
 
-def _invoke_verb(reader: DuckLakeReader, verb: str, arguments: dict[str, Any]) -> list[dict[str, Any]]:
+def _invoke_verb(reader: Any, verb: str, arguments: dict[str, Any]) -> list[dict[str, Any]]:
     """Call the reader's named() verb, mapping a boundary failure onto a typed exception.
 
     Never swallows an error: a ReaderInvokeError is mapped via errors.map_reader_error and
@@ -75,19 +76,43 @@ def _invoke_verb(reader: DuckLakeReader, verb: str, arguments: dict[str, Any]) -
         raise map_reader_error(exc) from exc
 
 
-def create_server(reader: DuckLakeReader | None = None) -> Server:
-    """Build the MCP server: fetch the verb schema ONCE and register the derived tool surface.
+def _default_surface() -> tuple[Any, dict[str, dict[str, Any]]]:
+    """The routed reader and its merged describe; the ops tools alone when the event route is unavailable.
 
-    Fails loudly (Decision 55): a describe() failure (unreachable reader, credentials, a boundary
-    error) raises here rather than falling back to a hardcoded verb list or starting with a
-    partial surface -- there is no try/except around the describe() call below.
+    The ops describe stays fail-loud. The routed describe reuses it, so on the smoke route a transient failure there cannot
+    drop the event tools the shared reader serves. If the routed describe raises (the catalog deploy output, the telemetry
+    reader's URL or its describe), the server serves the ops describe's non-event verbs, and one stderr line names the
+    failure class only, never a URL or a value (Decision 101).
     """
+    from scripts.telemetry_capture import read_route  # noqa: PLC0415
+
     # make_reader() is annotated -> Reader (the Protocol, which deliberately does not declare
     # describe() -- see src/common/ducklake_reader_client.py's Reader docstring) but only ever
     # constructs a DuckLakeReader in practice; cast narrows the type at this one call site
     # rather than widening the Protocol by omission.
-    active_reader = reader if reader is not None else cast(DuckLakeReader, make_reader())
-    verbs = active_reader.describe()
+    ops = cast(DuckLakeReader, make_reader())
+    ops_verbs = ops.describe()
+    routed = read_route.make_routed_reader(ops=ops, ops_verbs=ops_verbs)
+    try:
+        return routed, routed.describe()
+    except Exception as exc:  # noqa: BLE001 -- the event route degrades; the ops tools stand
+        print(f"{SERVER_NAME}: event tools unavailable class={type(exc).__name__}", file=sys.stderr)
+        return ops, {verb: meta for verb, meta in ops_verbs.items() if verb not in read_route.EVENT_VERBS}
+
+
+def create_server(reader: DuckLakeReader | None = None) -> Server:
+    """Build the MCP server: fetch the verb schema ONCE and register the derived tool surface.
+
+    Fails loudly (Decision 55): an injected reader's describe() failure, or the default ops reader's (unreachable reader,
+    credentials, a boundary error), raises here rather than falling back to a hardcoded verb list. The default path
+    routes event verbs by the writer's catalog (scripts/telemetry_capture/read_route.py) and serves every tool through the
+    routed reader, or serves the ops tools alone when the event route is unavailable (_default_surface).
+    """
+    if reader is not None:
+        active_reader: Any = reader
+        verbs = reader.describe()
+    else:
+        active_reader, verbs = _default_surface()
 
     tools = build_tool_registry(verbs)
     tool_by_name = {tool.name: tool for tool in tools}

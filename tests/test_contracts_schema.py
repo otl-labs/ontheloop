@@ -409,3 +409,64 @@ class TestRealizationBlock:
         doc["realisation"] = {"produced": {}}
         with pytest.raises(ValidationError):
             ContractDocument.model_validate(doc)
+
+
+def _run_shape(**over: object) -> dict:
+    shape: dict = {
+        "session_id": "root",
+        "observation_id": "null",
+        "entity_ref": "<root session entity_ref>/run",
+        "external_ref": "refs",
+        "agent_type": "the registry key",
+        "triggers": ["workflow_run"],
+        "host_run_ref": "required",
+        "rows": "one open and one close row",
+    }
+    shape.update(over)
+    return shape
+
+
+class TestRunShapes:
+    def test_class_a_with_two_run_shapes_parses(self) -> None:
+        doc = _class_a_doc()
+        doc["run_shapes"] = {
+            "sub_agent": _run_shape(session_id="child", observation_id="spawning_tool_call", host_run_ref="null"),
+            "top_level": _run_shape(one_run_per="root session", state="derived"),
+        }
+        loaded = ContractDocument.model_validate(doc)
+        assert loaded.run_shapes is not None
+        assert set(loaded.run_shapes) == {"sub_agent", "top_level"}
+        assert loaded.run_shapes["top_level"].host_run_ref == "required"
+
+    def test_absent_run_shapes_is_none(self) -> None:
+        assert ContractDocument.model_validate(_class_a_doc()).run_shapes is None
+
+    def test_unknown_run_shape_key_refused(self) -> None:
+        doc = _class_a_doc()
+        doc["run_shapes"] = {"top_level": _run_shape(surprise="x")}
+        with pytest.raises(ValidationError):
+            ContractDocument.model_validate(doc)
+
+    def test_session_id_outside_literal_set_refused(self) -> None:
+        doc = _class_a_doc()
+        doc["run_shapes"] = {"top_level": _run_shape(session_id="parent")}
+        with pytest.raises(ValidationError):
+            ContractDocument.model_validate(doc)
+
+    def test_empty_triggers_refused(self) -> None:
+        doc = _class_a_doc()
+        doc["run_shapes"] = {"top_level": _run_shape(triggers=[])}
+        with pytest.raises(ValidationError):
+            ContractDocument.model_validate(doc)
+
+    def test_run_shapes_refused_on_class_b(self) -> None:
+        doc = _class_b_doc()
+        doc["run_shapes"] = {"top_level": _run_shape()}
+        with pytest.raises(ValidationError, match="run_shapes"):
+            ContractDocument.model_validate(doc)
+
+    def test_run_shapes_refused_on_class_c(self) -> None:
+        doc = _class_c_doc()
+        doc["run_shapes"] = {"top_level": _run_shape()}
+        with pytest.raises(ValidationError, match="run_shapes"):
+            ContractDocument.model_validate(doc)

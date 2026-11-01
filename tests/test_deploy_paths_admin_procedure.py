@@ -108,6 +108,12 @@ class TestPreMergeLivePlan:
         assert rule[1].lstrip().startswith("ENVIRONMENT CHECK")
         assert rule[2].lstrip().startswith("V3 RESOLUTION")
 
+    def test_environment_check_uses_caller_arn_helper(self) -> None:
+        rule = self._doc()["admin_out_of_band"]["pre_merge_live_plan"]["rule"]
+        env_check = " ".join(rule[1].split())
+        assert "bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin" in env_check
+        assert "get-caller-identity" not in env_check
+
     def test_rule_has_decision_101_counts_only_entry(self) -> None:
         rule = self._doc()["admin_out_of_band"]["pre_merge_live_plan"]["rule"]
         assert any("Decision 101" in entry for entry in rule), "no rule entry names Decision 101"

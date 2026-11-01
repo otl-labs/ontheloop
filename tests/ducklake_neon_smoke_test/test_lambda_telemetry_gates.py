@@ -1,6 +1,8 @@
 """CONCERN: scripts/ducklake_smoke/lambda_telemetry_gates.py (T2.36 slice 2a-2, deploy wiring).
 
-The six --lambda-telemetry checks, each with a red case, and the Decision 101 leak guards. The URL never appears.
+The --lambda-telemetry-smoke checks against the twin (the heavy gate since the production flip), each with a red case,
+and the Decision 101 leak guards. The URL never appears. The production writer's light gate is in
+test_lambda_telemetry_production_gate.py.
 """
 
 from __future__ import annotations
@@ -20,7 +22,9 @@ from tests.fixtures.telemetry_append_fakes import LiveFake
 FAKE_ACCT = "123456789012"
 FAKE_ARN = "arn:" + f"aws:lambda:eu-west-2:{FAKE_ACCT}:function:agent-platform-ducklake-telemetry-writer"
 FAKE_HOST = "abcdefghij" + ".lambda-url.eu-west-2.on.aws"
-SUCCESS_LINE = "LAMBDA_TELEMETRY OK unsigned=403 describe=200 attach_check=ok unknown_action=400 direct_invoke=denied"
+SUCCESS_LINE = (
+    "LAMBDA_TELEMETRY OK unsigned=403 describe=200 attach_check=ok unknown_action=400 direct_invoke=denied target=twin"
+)
 
 DESCRIBE_OK = {
     "ok": True,
@@ -156,17 +160,17 @@ def wired(monkeypatch):
 
 
 def test_happy_path_prints_fixed_line(wired, capsys):
-    lambda_telemetry_gates.lambda_telemetry()
+    lambda_telemetry_gates.lambda_telemetry_smoke()
     out = capsys.readouterr().out
     assert out.strip().splitlines()[-1] == SUCCESS_LINE
     assert "fake-url" not in out
     assert wired["client"].calls == [
-        {"FunctionName": "agent-platform-ducklake-telemetry-writer", "InvocationType": "DryRun", "Payload": b"{}"}
+        {"FunctionName": "agent-platform-ducklake-telemetry-writer-smoke", "InvocationType": "DryRun", "Payload": b"{}"}
     ]
 
 
 def test_attach_check_sends_decoy_keys(wired):
-    lambda_telemetry_gates.lambda_telemetry()
+    lambda_telemetry_gates.lambda_telemetry_smoke()
     payload = next(p for p, _ in wired["sent"] if p["action"] == "attach_check")
     assert payload["meta_schema"] == "ducklake_ops"
     assert payload["data_path"].startswith("s3://")
@@ -181,8 +185,8 @@ def test_check1_url_failure_propagates(monkeypatch):
 
     monkeypatch.setattr(core, "_function_url", boom)
     with pytest.raises(core.SmokeTestFailure, match="no url"):
-        lambda_telemetry_gates.lambda_telemetry()
-    assert seen == ["telemetry_writer"]
+        lambda_telemetry_gates.lambda_telemetry_smoke()
+    assert seen == ["telemetry_writer_smoke"]
 
 
 @pytest.mark.parametrize(
@@ -212,26 +216,26 @@ def test_check1_url_failure_propagates(monkeypatch):
 def test_red_cases(wired, key, resp, needle):
     wired[key] = resp
     with pytest.raises(core.SmokeTestFailure, match=needle):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 def test_dryrun_success_means_guard_missing(wired):
     wired["client"] = _Client()
     with pytest.raises(core.SmokeTestFailure, match="URL-only guard missing: direct invoke allowed"):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 def test_dryrun_other_code_is_inconclusive(wired):
     wired["client"] = _Client(_denied("ThrottlingException"))
     with pytest.raises(core.SmokeTestFailure, match="direct-invoke probe inconclusive: ThrottlingException"):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 def test_client_error_message_never_leaks(wired, capsys):
     leaky = f"User {FAKE_ACCT} is not authorized on {FAKE_ARN} via https://{FAKE_HOST}/"
     wired["client"] = _Client(_denied("ThrottlingException", leaky))
     with pytest.raises(core.SmokeTestFailure) as info:
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
     captured = capsys.readouterr()
     for text in (str(info.value), captured.out, captured.err):
         assert FAKE_ACCT not in text
@@ -245,21 +249,21 @@ _REQUEST_ID = "7c2a9f4e-1b3d-4e6a-8f50-3a9d2c7e1b64"
 def test_failure_text_carries_error_class_and_request_id(wired):
     wired["attach"] = _Resp(500, {"ok": False, "error_type": "unmapped", "error_class": "KeyError", "request_id": _REQUEST_ID})
     with pytest.raises(core.SmokeTestFailure) as info:
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
     assert f"error_type=unmapped error_class=KeyError request_id={_REQUEST_ID}" in str(info.value)
 
 
 def test_bodyless_502_failure_text_carries_the_runtime_request_id(wired):
     wired["attach"] = _Resp(502, None, text="Internal Server Error", headers={"x-amzn-RequestId": _REQUEST_ID})
     with pytest.raises(core.SmokeTestFailure) as info:
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
     assert f"error_type=none error_class=none request_id={_REQUEST_ID}" in str(info.value)
 
 
 def test_off_shape_diagnostics_print_none(wired):
     wired["attach"] = _Resp(500, {"ok": False, "error_class": f"Bad Class {FAKE_ARN}", "request_id": FAKE_ACCT})
     with pytest.raises(core.SmokeTestFailure) as info:
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
     assert "error_class=none request_id=none" in str(info.value)
     assert FAKE_ACCT not in str(info.value) and "arn:" not in str(info.value)
 
@@ -267,7 +271,7 @@ def test_off_shape_diagnostics_print_none(wired):
 def test_http_body_never_leaks(wired, capsys):
     wired["attach"] = _Resp(500, {"ok": False, "error": f"{FAKE_ACCT} {FAKE_ARN} {FAKE_HOST}"}, text=FAKE_ARN)
     with pytest.raises(core.SmokeTestFailure) as info:
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
     captured = capsys.readouterr()
     for text in (str(info.value), captured.out, captured.err):
         assert FAKE_ACCT not in text
@@ -280,7 +284,7 @@ def _register_project_calls(wired):
 
 
 def test_registration_vectors_pass_on_a_consistent_writer(wired, capsys):
-    lambda_telemetry_gates.lambda_telemetry()
+    lambda_telemetry_gates.lambda_telemetry_smoke()
     out = capsys.readouterr().out
     for marker in MARKERS:
         assert marker in out, marker
@@ -298,19 +302,19 @@ def test_registration_vectors_pass_on_a_consistent_writer(wired, capsys):
 def test_register_tenant_id_drift_fails(wired):
     wired["tenant_ids"] = [TENANT_ID, "01HDRAFT" + "0" * 18]
     with pytest.raises(core.SmokeTestFailure, match="not stable across calls"):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 def test_register_tenant_non_ulid_fails(wired):
     wired["tenant_ids"] = ["not-a-ulid", "not-a-ulid"]
     with pytest.raises(core.SmokeTestFailure, match="canonical uppercase ULID"):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 def test_concurrent_register_project_divergent_ids_fail(wired):
     wired["project_ids"] = lambda n: f"01HDVRGNT{n:017d}"
     with pytest.raises(core.SmokeTestFailure, match="Decision 200 reversal condition"):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 @pytest.mark.parametrize(
@@ -323,7 +327,7 @@ def test_concurrent_register_project_divergent_ids_fail(wired):
 def test_register_project_shape_failures(wired, override, needle):
     wired.update(override)
     with pytest.raises(core.SmokeTestFailure, match=needle):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 def test_every_concurrent_call_claiming_created_fails(wired, monkeypatch):
@@ -337,25 +341,25 @@ def test_every_concurrent_call_claiming_created_fails(wired, monkeypatch):
 
     monkeypatch.setattr(core, "_sigv4_invoke", all_created)
     with pytest.raises(core.SmokeTestFailure, match="created 4 projects"):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 def test_provision_unstable_table_set_fails(wired):
     wired["provision"] = _Resp(200, {"ok": True, "tables": TABLES[:8], "counters": {}})
     with pytest.raises(core.SmokeTestFailure, match="one stable set of nine tables"):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 def test_probe_below_counter_floor_fails(wired):
     wired["probe"] = _Resp(200, {**PROBE_OK, "counters": {"ops_tenants": 2, "ops_projects": 4}})
     with pytest.raises(core.SmokeTestFailure, match="ops_projects counter is below its table count"):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 def test_probe_counter_row_count_fails(wired):
     wired["probe"] = _Resp(200, {**PROBE_OK, "counter_rows": {"ops_tenants": 2, "ops_projects": 1}})
     with pytest.raises(core.SmokeTestFailure, match="ops_tenants counter does not have exactly one row"):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 @pytest.mark.parametrize(
@@ -368,7 +372,7 @@ def test_probe_counter_row_count_fails(wired):
 def test_probe_non_smoke_binding_fails(wired, override):
     wired["probe"] = _Resp(200, {**PROBE_OK, **override})
     with pytest.raises(core.SmokeTestFailure, match="not bound to the smoke catalog"):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 @pytest.mark.parametrize(
@@ -383,53 +387,53 @@ def test_probe_non_smoke_binding_fails(wired, override):
 def test_probe_other_failures(wired, override, needle):
     wired["probe"] = _Resp(200, {**PROBE_OK, **override})
     with pytest.raises(core.SmokeTestFailure, match=needle):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 @pytest.mark.parametrize("value", [True, None])
 def test_probe_can_create_true_fails(wired, value):
     wired["probe"] = _Resp(200, {**PROBE_OK, "can_create": value})
     with pytest.raises(core.SmokeTestFailure, match="can_create is not false"):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 def test_probe_can_create_null_fails(wired):
     probe = {k: v for k, v in PROBE_OK.items() if k != "can_create"}
     wired["probe"] = _Resp(200, probe)
     with pytest.raises(core.SmokeTestFailure, match="can_create is not false"):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 def test_probe_undeclared_partition_fails(wired):
     tables = {**PROBE_OK["tables"], "t3": {"present": True, "partitioned_as_declared": False}, "t4": {"present": False}}
     wired["probe"] = _Resp(200, {**PROBE_OK, "tables": tables})
     with pytest.raises(core.SmokeTestFailure, match="1 tables absent, 2 not partitioned as declared"):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 def test_self_only_violation_fails(wired):
     wired["self_only"] = _Resp(200, {"ok": True, "tenant_id": TENANT_ID, "created": False})
     with pytest.raises(core.SmokeTestFailure, match="self-only register_tenant status=200"):
-        lambda_telemetry_gates.lambda_telemetry()
+        lambda_telemetry_gates.lambda_telemetry_smoke()
 
 
 def test_unrecognised_measurements_print_a_neutral_value(wired, capsys):
     wired["probe"] = _Resp(200, {**PROBE_OK, "catalog_backend": f"{FAKE_HOST}", "catalog_sessions": None})
-    lambda_telemetry_gates.lambda_telemetry()
+    lambda_telemetry_gates.lambda_telemetry_smoke()
     out = capsys.readouterr().out
     assert "catalog_backend=unrecognised" in out and "catalog_sessions=unavailable" in out and FAKE_HOST not in out
 
 
 def test_gate_output_never_contains_an_account_id(wired, capsys):
     wired["probe"] = _Resp(200, {**PROBE_OK, "leak": f"{FAKE_ACCT} {FAKE_ARN} {FAKE_HOST}"})
-    lambda_telemetry_gates.lambda_telemetry()
+    lambda_telemetry_gates.lambda_telemetry_smoke()
     out = capsys.readouterr().out
     assert FAKE_ACCT not in out and "arn:" not in out and "lambda-url" not in out and "fake-url" not in out
     assert not re.search(r"(?<![0-9])[0-9]{12}(?![0-9])", out)
 
 
 def test_append_vectors_run_after_registration_with_the_registered_ref(wired, capsys):
-    lambda_telemetry_gates.lambda_telemetry()
+    lambda_telemetry_gates.lambda_telemetry_smoke()
     out = capsys.readouterr().out
     sent = [p for p, _ in wired["sent"]]
     registered = _register_project_calls(wired)[0]["project_ref"]
@@ -445,7 +449,7 @@ def test_append_vectors_run_after_registration_with_the_registered_ref(wired, ca
 
 
 def test_blob_vectors_run_after_the_append_vectors(wired, capsys):
-    lambda_telemetry_gates.lambda_telemetry()
+    lambda_telemetry_gates.lambda_telemetry_smoke()
     out = capsys.readouterr().out
     sent = [p for p, _ in wired["sent"]]
     registered = _register_project_calls(wired)[0]["project_ref"]
@@ -457,12 +461,12 @@ def test_blob_vectors_run_after_the_append_vectors(wired, capsys):
     for marker in (
         "TELEMETRY_BLOB_PROTOCOL_OK",
         "TELEMETRY_BLOB_AUTOREGISTER_OK",
-        "TELEMETRY_BLOB_READBACK_OK",
         "blob_grant_ms=",
         "blob_put_ms=",
         "blob_append_ms=",
     ):
         assert marker in out, marker
+    assert "READBACK" not in out and "blob_read_ms" not in out
     assert registered not in out and out.strip().splitlines()[-1] == SUCCESS_LINE
 
 
@@ -482,17 +486,7 @@ def test_twin_gate_targets_the_twin_function(wired, monkeypatch, capsys):
     lambda_telemetry_gates.lambda_telemetry_smoke()
     out = capsys.readouterr().out
     assert roles[0] == "telemetry_writer_smoke" and "telemetry_writer" not in roles
-    assert out.strip().splitlines()[-1] == SUCCESS_LINE + " target=twin"
+    assert out.strip().splitlines()[-1] == SUCCESS_LINE
     assert wired["client"].calls == [
         {"FunctionName": "agent-platform-ducklake-telemetry-writer-smoke", "InvocationType": "DryRun", "Payload": b"{}"}
     ]
-
-
-def test_writer_gate_is_unchanged(wired, monkeypatch, capsys):
-    roles = _record_roles(monkeypatch)
-    lambda_telemetry_gates.lambda_telemetry()
-    out = capsys.readouterr().out
-    assert roles[0] == "telemetry_writer" and "telemetry_writer_smoke" not in roles
-    assert out.strip().splitlines()[-1] == SUCCESS_LINE
-    assert "target=" not in out
-    assert [c["FunctionName"] for c in wired["client"].calls] == ["agent-platform-ducklake-telemetry-writer"]

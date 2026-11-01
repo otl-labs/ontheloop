@@ -385,7 +385,7 @@ def test_connect_probe_in_connectionless_actions():
 def test_action_describe_returns_named_reads_schema():
     out = h.action_describe({}, None)
     assert out["ok"] is True
-    assert set(out["verbs"]) == set(rt.NAMED_READS) | set(EVENT_READS)
+    assert set(out["verbs"]) == set(rt.NAMED_READS) and not set(out["verbs"]) & set(EVENT_READS)
     assert "params" in out["verbs"]["rec_by_id"]
 
 

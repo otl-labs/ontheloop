@@ -160,7 +160,7 @@ WRITE_COVERAGE: dict[str, dict] = {
     },
     "aws_secretsmanager_secret": {
         # SecretsManagerMetadataWrite -- none of these verbs can read or overwrite a VALUE
-        # (Decision 129 pt 2). secretsmanager:UpdateSecret is granted separately, ENUMERATED at five
+        # (Decision 129 pt 2). secretsmanager:UpdateSecret is granted separately, ENUMERATED at two
         # ARNs, and PutSecretValue nowhere new.
         "write_actions": ("secretsmanager:CreateSecret", "secretsmanager:DeleteSecret"),
         "resource_marker": _SECRET_PREFIX,

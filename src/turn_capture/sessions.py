@@ -206,9 +206,10 @@ def _segment_closes(ctx: Ctx, stream: Stream, diag: Counter[str]) -> list[dict[s
     rows: list[dict[str, Any]] = []
     start = -1
     for boundary in stream.resumes:
-        turns = [t for t in stream.turns if start < t.first.line < boundary.line]
+        effective = stream.resume_at[boundary.line]
+        turns = [t for t in stream.turns if start < t.first.line < effective]
         anchor = next(
-            (r for r in reversed(stream.recs) if r.line < boundary.line and r.data.get("uuid") and r.ts is not None), None
+            (r for r in reversed(stream.recs) if r.line < effective and r.data.get("uuid") and r.ts is not None), None
         )
         if anchor is None or not any(t.last_assistant is not None for t in turns):
             diag["segment_close_skipped"] += 1
@@ -219,7 +220,7 @@ def _segment_closes(ctx: Ctx, stream: Stream, diag: Counter[str]) -> list[dict[s
             )
             if boundary.ts is not None and anchor.ts is not None and boundary.ts < anchor.ts:
                 diag["resume_before_close"] += 1
-        start = boundary.line
+        start = effective - 1
     return rows
 
 

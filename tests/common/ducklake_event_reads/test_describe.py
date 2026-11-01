@@ -103,7 +103,11 @@ def test_event_verbs_are_described_with_their_class_bounds_and_audience() -> Non
         "telemetry_root_sessions",
         "transcript_content",
     }
-    assert all("smoke catalog" in verbs.EVENT_READS[v].description for v in verbs.EVENT_READS)
+    served = set(verbs.EVENT_READS) - {"transcript_content"}
+    assert all("production telemetry catalog through the telemetry reader" in verbs.EVENT_READS[v].description for v in served)
+    assert "Served by no deployed function" in verbs.EVENT_READS["transcript_content"].description
+    assert not [v for v in verbs.EVENT_READS if "smoke catalog" in verbs.EVENT_READS[v].description]
+    assert not [v for v in verbs.EVENT_READS if "excluded" in verbs.EVENT_READS[v].description]
     assert all(row["read_version"] == ev.event_read_version(v) for v, row in event.items())
     assert event["session_state_and_duration"]["tables"][0] == SESSIONS
 

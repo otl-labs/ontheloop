@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from scripts.platform_roadmap_state import load as load_roadmap
 from src.common.ducklake_telemetry_blobstore import BLOB_COMMIT_MAX_AGE_DAYS
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -67,7 +68,7 @@ def test_writer_contract_carries_begin_blobs_and_the_claim_check() -> None:
         assert needle in invariants, needle
     for needle in (
         "rec-4033",
-        "rec-4292",
+        "only the telemetry writer roles put to the blob root",
         "Decision 81 cl.7",
         "Decision 213 cl.2",
         "Decision 212 cl.4",
@@ -106,16 +107,15 @@ def test_ports_content_blobs_row() -> None:
 
 
 def test_t2_36_c2_c4_name_the_claim_check() -> None:
-    roadmap = load("docs/ROADMAP-PLATFORM.yaml")
-    item = next(i for i in roadmap["tier_items"] if i["id"] == "T2.36")
-    criteria = {c["id"]: norm(c["text"]) for c in item["exit_criteria"]}
+    item = next(i for i in load_roadmap(ROOT / "docs/ROADMAP-PLATFORM.yaml").tier_items if i.id == "T2.36")
+    criteria = {c.id: norm(c.text) for c in item.exit_criteria}
     prefix = "[Re-grounded 2026-10-12, PLAN-telemetry-blob-route:"
-    for name, original in (
-        ("c2", "no telemetry producer stages to S3"),
-        ("c4", "rg 'ops-outbox' finds no active write callers"),
-    ):
+    c4_tail = "rg 'ops-outbox' finds no active write callers"
+    for name, original in (("c2", "no telemetry producer stages to S3"), ("c4", c4_tail)):
         assert criteria[name].startswith(prefix) and "claim-check content route, not staging" in criteria[name], name
         assert original in criteria[name], name
     assert "rec-4292" in criteria["c4"] and "no object is ever ingested into the catalog" in criteria["c4"]
+    annotation = criteria["c4"].split(c4_tail, 1)[1]
+    assert annotation.startswith(" [Annotated ") and "blob-root write fence" in annotation, annotation
     assert "rg finds no staging-writer callers on any telemetry path" in criteria["c2"]
     assert criteria["c1"].startswith("Four telemetry tables") and criteria["c5"].startswith("[Re-grounded 2026-09-24")

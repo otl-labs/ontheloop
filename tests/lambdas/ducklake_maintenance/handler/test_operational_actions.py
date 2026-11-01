@@ -315,6 +315,66 @@ def test_action_merge_ops_emits_metrics():
     assert "MergeOpsTablesCount" in metric_names
 
 
+_TELEMETRY_DISCOVERED = ["telemetry_sessions", "telemetry_agents"]
+
+
+def _telemetry_semantics() -> dict:
+    return {
+        "ops_tables": {},
+        "maintenance_policy": {"append_only": {"merge_ops": {"apply": True, "reason": "standard"}}},
+    }
+
+
+def _run_merge_ops(meta_schema: str):
+    con = MagicMock()
+    con.execute.return_value.fetchall.return_value = [(t,) for t in _TELEMETRY_DISCOVERED]
+    with (
+        patch.object(h.rt, "fetch_dsn", return_value=_FULL_DSN),
+        patch.object(h.rt, "open_connection", return_value=con),
+        patch.object(h.rt, "load_field_semantics", return_value=_merge_ops_semantics()),
+        patch.object(h.scope, "resolve_scope") as resolve,
+        patch.object(h.maint, "_count_files", return_value=3),
+        patch.object(h.maint, "merge_adjacent_files"),
+        patch.object(h, "_emit_maintenance_metric") as mock_emit,
+    ):
+        resolve.return_value = MagicMock(to_merge=list(_TELEMETRY_DISCOVERED), unclassified=[])
+        h.action_merge_ops({"data_path": "s3://b/ducklake-telemetry/", "meta_schema": meta_schema}, None)
+    return mock_emit
+
+
+def test_merge_ops_on_a_telemetry_catalog_dimensions_every_metric():
+    mock_emit = _run_merge_ops("ducklake_telemetry")
+    names = {c.args[0] for c in mock_emit.call_args_list}
+    assert names and names <= h.CATALOG_METRICS
+    assert {"MergeOpsDurationMs", "MergeOpsFilesAfterTotal", "MergeOpsTablesCount", "MergeOpsPassFailed"} <= names
+    assert all(c.kwargs.get("dimensions") == {"MetaSchema": "ducklake_telemetry"} for c in mock_emit.call_args_list)
+
+
+def test_merge_ops_on_ops_calls_the_rebound_emitter_unchanged():
+    mock_emit = _run_merge_ops("ducklake_ops")
+    names = {c.args[0] for c in mock_emit.call_args_list}
+    assert {"MergeOpsFilesBeforeTotal", "MergeOpsUnclassifiedTables"} <= names
+    assert all("dimensions" not in c.kwargs for c in mock_emit.call_args_list)
+
+
+def test_breaker_trip_is_dimensioned_by_catalog():
+    err = h.maint.DuckLakeMaintenanceError("tripped")
+    for event, dims in (
+        ({"action": "merge_ops", "meta_schema": "ducklake_telemetry"}, {"MetaSchema": "ducklake_telemetry"}),
+        ({"action": "merge_ops", "meta_schema": "ducklake_ops"}, None),
+        ({"action": "merge_ops"}, None),
+        ({"action": "merge_ops", "meta_schema": "bad-name;"}, None),
+    ):
+        with (
+            patch.dict(h._ACTIONS, {"merge_ops": MagicMock(side_effect=err)}),
+            patch.object(h, "_emit_maintenance_metric") as mock_emit,
+        ):
+            assert h.handler(event)["statusCode"] == 500
+        (call,) = mock_emit.call_args_list
+        assert call.args == ("MaintenanceBreakerTrip", 1.0)
+        assert call.kwargs.get("dimensions") == dims
+
+
 def test_action_merge_ops_handler_receives_no_connection():
     """Handler dispatches merge_ops with con=None -- the action opens its own connection."""
     action_mock = MagicMock(

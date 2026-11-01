@@ -81,7 +81,7 @@ def test_sessions_declares_workflow_attribution() -> None:
         "a child's command-name tag is never read",
         "a workflow begun after the first turn reads the fallback",
         "read-time join on parent_session_id, never stored",
-        "T3.22 c5 owns the top-level vocabulary",
+        "a top-level run's root reads its agent's source_registry key",
     ):
         assert token in semantics, token
     assert "REQUIRED_FIELDS" not in semantics

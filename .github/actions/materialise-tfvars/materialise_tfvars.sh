@@ -13,7 +13,10 @@
 # separately, and is also called directly from bin/setup-cloud-env.sh's ADMIN bootstrap branch, so
 # CI and the local break-glass loop share ONE implementation.
 #
-# Takes NO arguments -- configuration is env-only ($GITHUB_ACTIONS gates ::add-mask::). Stays
+# Takes at most one argument, --stdout (Decision 238, trusted plan): same fetch and empty-secret check, the
+# ::add-mask:: lines go to STDERR (so a caller's $( ) capture of stdout never swallows them and the runner
+# still registers them), and the tfvars are printed to stdout instead of written to a file (no mktemp, no
+# file). Default (no argument) behaviour is unchanged. Configuration is otherwise env-only ($GITHUB_ACTIONS gates ::add-mask::). Stays
 # profile-free: all four CI apply call sites use OIDC ambient credentials, so hardcoding
 # --profile agent_platform_admin would break them there. A PlatformDev container AccessDenies on
 # this secret by design (per-ARN GetSecretValue enumeration, Decision 157) -- that is the intended
@@ -30,6 +33,51 @@
 # carry survive in the log.
 
 set -uo pipefail
+
+MODE=file
+case "${1:-}" in
+  "") ;;
+  --stdout) MODE=stdout ;;
+  *)
+    echo "materialise-tfvars: BAD_ARGUMENT only --stdout is accepted" >&2
+    exit 2
+    ;;
+esac
+
+mask_values() {
+  local line key value
+  while IFS= read -r line; do
+    key=${line%%=*}
+    value=${line#*=}
+    key=$(printf '%s' "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    value=$(printf '%s' "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"//;s/"$//')
+    case "$key" in
+      account_id | platform_dev_external_id | platform_admin_external_id)
+        if [ -n "$value" ]; then
+          echo "::add-mask::${value}" >&2
+        fi
+        ;;
+    esac
+  done
+}
+
+if [ "$MODE" = stdout ]; then
+  if ! SECRET=$(aws secretsmanager get-secret-value \
+      --secret-id agent-platform-terraform-personal-tfvars \
+      --query SecretString --output text); then
+    echo "materialise-tfvars: FETCH_FAILED could not fetch agent-platform-terraform-personal-tfvars from Secrets Manager" >&2
+    exit 1
+  fi
+  if [ -z "$SECRET" ]; then
+    echo "materialise-tfvars: EMPTY_SECRET the fetched secret value was empty -- refusing to print it (fail-closed)" >&2
+    exit 1
+  fi
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    mask_values <<<"$SECRET"
+  fi
+  printf '%s\n' "$SECRET"
+  exit 0
+fi
 
 DEST="terraform/personal/terraform.personal.tfvars"
 # mktemp INSIDE the destination directory (never $TMPDIR) so the final `mv` is a same-filesystem

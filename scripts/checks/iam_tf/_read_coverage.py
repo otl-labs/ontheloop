@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 
 from scripts.checks.iam_tf import validate_invoke_implies_resolve as _vir
+from scripts.checks.iam_tf._secure_string_coverage import secure_string_findings, type_attr
 
 # ---------------------------------------------------------------------------
 # Coverage map (rec-2702 anti-recurrence, PLAN-ci-apply-grant-coupling).
@@ -127,10 +128,12 @@ def _read_root_text(root_dir: Path) -> str:
 
 ROLE_APPLY = "apply"
 ROLE_PLANNER = "planner"
+ROLE_TRUSTED_PLAN = "trusted_plan"
 # T2.49 / DEP-12 (Decision 144): github_ci_plan + github_ci_drift merged into the single
 # dual-sub github_ci_planner role (c2) -- the plan-capable role set goes 3 (apply/plan/drift)
 # -> 2 (apply/planner). The coverage-parity contract is unchanged, only the role identity is.
 _PLANNER_ROLE_POLICY_NAME = "github_ci_planner"
+_TRUSTED_PLAN_ROLE_POLICY_NAME = "github_ci_trusted_plan"
 
 # ---------------------------------------------------------------------------
 # Bootstrap (jsonencode, capitalized-key) statement parsing.
@@ -341,6 +344,7 @@ def _scan_resources(personal_dir: Path):
                 am = re.search(_ATTR_VALUE_RE_TMPL.format(attr=attr), body)
                 if am:
                     attrs[attr] = am.group(1)
+            attrs.update(type_attr(rtype, body))
             attr_index[(rtype, rname)] = attrs
         for m in _DATA_SECRET_VERSION_RE.finditer(text):
             rname = m.group(1)
@@ -568,8 +572,9 @@ def _check_resource(
     required_actions = all_of_actions or spec["read_actions"]
     quantifier = "ALL of" if all_of_actions else "one of"
 
-    findings = []
-    for role_key, statements in role_statements.items():
+    secure = secure_string_findings(rtype, rname, fname, resolved_name, attr_index.get((rtype, rname)), role_statements, key)
+    findings = list(secure or [])
+    for role_key, statements in ({} if secure is not None else role_statements).items():
         if not _resource_covered(
             rtype,
             rname,
@@ -591,10 +596,13 @@ def _check_resource(
 def _resolve_role_statements(oidc_text: str) -> dict[str, list[dict]] | None:
     docs = _vir._parse_policy_documents(oidc_text)
     role_policy_map = _vir._parse_role_policy_map(oidc_text)
-    result: dict[str, list[dict]] = {}
-    for role_key, doc_resource_name in ((ROLE_PLANNER, _PLANNER_ROLE_POLICY_NAME),):
-        doc_name = role_policy_map.get(doc_resource_name)
-        if not doc_name:
-            return None
-        result[role_key] = _vir._resolve_statements(doc_name, docs)
-    return result
+    # The trusted role is optional here (synthetic roots carry none); test__read_coverage_trusted pins it on the real tree.
+    result = {
+        role_key: _vir._resolve_statements(doc_name, docs)
+        for role_key, policy_name in (
+            (ROLE_PLANNER, _PLANNER_ROLE_POLICY_NAME),
+            (ROLE_TRUSTED_PLAN, _TRUSTED_PLAN_ROLE_POLICY_NAME),
+        )
+        if (doc_name := role_policy_map.get(policy_name))
+    }
+    return result if ROLE_PLANNER in result else None

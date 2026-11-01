@@ -91,6 +91,7 @@ def _report_stats_index(dsn: dict[str, str], meta_schema: str) -> dict[str, Any]
             conn.autocommit = True
             with conn.cursor() as cur:
                 report = {s: index_status.catalog_index_status(cur, s) for s in index_status.catalog_index_schemas(cur)}
+                _add_growth(cur, report)
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 -- the message can name the host: class and SQLSTATE only
@@ -101,4 +102,18 @@ def _report_stats_index(dsn: dict[str, str], meta_schema: str) -> dict[str, Any]
         _shared._emit_maintenance_metric("StatsIndexValid", 1.0 if state["valid"] else 0.0, dimensions=dims)
         _shared._emit_maintenance_metric("FileColumnStatsIdxScan", float(state["idx_scan"] or 0), dimensions=dims)
         _shared._emit_maintenance_metric("FileColumnStatsSeqScan", float(state["table_seq_scan"] or 0), dimensions=dims)
+        if state.get("stats_rows_est") is not None:
+            _shared._emit_maintenance_metric("CatalogFileColumnStatsRows", float(state["stats_rows_est"]), dimensions=dims)
     return report
+
+
+def _add_growth(cur: Any, report: dict[str, Any]) -> None:
+    """Stats-row growth estimate for the production telemetry catalog only, inside its own report entry. A failure
+    here records class and SQLSTATE and never reaches the caller's except, which would emit StatsIndexValid=0."""
+    entry = report.get(rt.TELEMETRY_PROD_META_SCHEMA)
+    if entry is None:
+        return
+    try:
+        entry["stats_rows_est"] = index_status.stats_rows_est(cur, rt.TELEMETRY_PROD_META_SCHEMA)
+    except Exception as exc:  # noqa: BLE001 -- class and SQLSTATE only: the message can name the host
+        entry["growth_error"] = {"error_class": type(exc).__name__, "sqlstate": getattr(exc, "pgcode", None)}

@@ -26,3 +26,18 @@ import {
   to = github_repository_environment.tf_gated_apply
   id = "${var.repository_name}:tf-gated-apply"
 }
+
+import {
+  to = github_repository_environment.tf_trusted_plan
+  id = "${var.repository_name}:tf-trusted-plan"
+}
+
+import {
+  to = github_repository_environment_deployment_policy.tf_trusted_plan_main
+  id = "${var.repository_name}:tf-trusted-plan:${var.tf_trusted_plan_main_policy_id}"
+}
+
+import {
+  to = github_repository_environment.deployment_approval_probe
+  id = "${var.repository_name}:deployment-approval-probe"
+}

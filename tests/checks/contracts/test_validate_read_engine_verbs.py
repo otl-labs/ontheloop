@@ -42,7 +42,7 @@ class TestDriftRedPath:
         failed: list[str] = []
         validate_read_engine_verbs(failed, contracts_dir=tmp_path)
 
-        assert any("NAMED_READS and EVENT_READS derive" in f for f in failed)
+        assert any("NAMED_READS, EVENT_READS and CONTENT_READS derive" in f for f in failed)
 
     def test_mistabled_verb_fails(self, tmp_path: Path) -> None:
         live = _live_verbs()
@@ -158,3 +158,15 @@ class TestWiring:
 
         assert callable(resolved)
         assert resolved is validate_read_engine_verbs
+
+
+def test_fails_when_a_content_verb_is_undeclared(tmp_path: Path) -> None:
+    live = _live_verbs()
+    assert "session_transcript_masked" in live["telemetry_transcripts"]
+    declared = {table: [v for v in verbs if v != "session_transcript_masked"] for table, verbs in live.items()}
+    _write_contract(tmp_path, declared)
+
+    failed: list[str] = []
+    validate_read_engine_verbs(failed, contracts_dir=tmp_path)
+
+    assert any("CONTENT_READS" in f for f in failed)

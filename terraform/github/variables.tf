@@ -22,6 +22,12 @@ variable "main_protection_ruleset_id" {
   default     = 17117072
 }
 
+variable "tf_trusted_plan_main_policy_id" {
+  description = "Numeric id of the tf-trusted-plan main deployment branch policy, used only by its import block. Re-read it from the API after a transfer."
+  type        = number
+  default     = 64562499
+}
+
 variable "admin_bypass_actor_id" {
   description = "GitHub actor ID granted ruleset bypass. Use 5 for the built-in Repository Admin role (anyone with admin permission). Supplied at apply time."
   type        = number

@@ -62,10 +62,14 @@ name: deploy-ducklake-lambdas
 #      maintenance-smoke and deploy-serving directly because a job's implicit success() sees only its direct needs and
 #      telemetry-twin-smoke runs under !cancelled(): a red maintenance gate or serving deploy therefore blocks the
 #      production telemetry deploy, which previously deployed in deploy-serving independent of the gate; intended:
-#      production telemetry never deploys past a red owner step.
+#      production telemetry never deploys past a red owner step. It also HOLDS (a green skip, deployed unset, telemetry-smoke
+#      skipped, TELEMETRY_PRODUCTION_HOLD notice) while a reconcile_scope=telemetry_catalog table has a pending column in the
+#      sidecar's pending_reconcile (validate_reconcile_pending_gate --telemetry-hold): the writer's MERGE names every declared
+#      column, so it must not ship before the owner-login provision_telemetry_catalog re-run has added it. Emptying the pending
+#      entry is a sidecar change under config/lambda/ducklake/**, a push path, so the next run ships the held functions.
 #   9. telemetry-smoke (needs deploy-telemetry AND smoke, with !cancelled() and deploy-telemetry deployed):
-#      --lambda-telemetry against the production writer, unchanged until PLAN-telemetry-production-flip makes it light,
-#      then --lambda-telemetry-reader.
+#      --lambda-telemetry-production, the production writer's light gate (URL-only, production-bound, no test rows;
+#      PLAN-telemetry-production-flip), then --lambda-telemetry-reader. The heavy vectors run only in telemetry-twin-smoke.
 #
 # deploy-maintenance / deploy-serving / deploy-telemetry-twin / deploy-telemetry:
 #   - T2.49 / DEP-12 (Decision 144): assumes the merged agent-platform-github-ci-deploy role
@@ -633,12 +637,26 @@ jobs:
         if: steps.oidc_deploy.outcome == 'success'
         run: pip install pyyaml pydantic
 
+      - name: Production column hold (a declared telemetry column still awaiting its production add)
+        # The production writer's MERGE names every declared column and its light gate checks live == declared, so the new
+        # writer must not ship before the owner-login provision_telemetry_catalog re-run has added the column. Static and
+        # zero-egress: reads the sidecar's pending_reconcile for reconcile_scope=telemetry_catalog tables. A hold is a GREEN
+        # skip (deployed stays unset, telemetry-smoke skips), so an expected hold never wakes ci-rca; a malformed sidecar is red.
+        id: hold
+        if: steps.oidc_deploy.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python -m scripts.checks.ops_governance.validate_reconcile_pending_gate --telemetry-hold | tee -a "$GITHUB_OUTPUT"
+          if grep -qx 'held=true' "$GITHUB_OUTPUT"; then
+            echo "::notice::TELEMETRY_PRODUCTION_HOLD - the production telemetry writer and reader are not redeployed until the pending column is added (docs/contracts/deploy-paths.yaml, code-deploy recovery)."
+          fi
+
       - name: Deploy the production telemetry functions from existing S3 artifacts (--ducklake-deploy-only)
         # No build/upload here -- deploy-maintenance already built + uploaded all artifacts
         # this run. Skipping the rebuild avoids the DOUBLE-BUILD hazard (re-uploading identical
         # bytes and desynchronising a deploy record's code_sha256 from the S3 key it names).
         id: deploy_code
-        if: steps.oidc_deploy.outcome == 'success'
+        if: steps.oidc_deploy.outcome == 'success' && steps.hold.outputs.held == 'false'
         run: |
           set -euo pipefail
           python -m scripts.build_lambda --ducklake-only --deploy --ducklake-deploy-only \
@@ -717,8 +735,8 @@ jobs:
           .venv/bin/pip install --quiet --upgrade pip
           .venv/bin/pip install -r requirements.txt
 
-      - name: Smoke test -- lambda-telemetry (telemetry writer URL-only proof)
-        run: .venv/bin/python -m scripts.ducklake_neon_smoke_test --lambda-telemetry
+      - name: Smoke test -- lambda-telemetry-production (telemetry writer light production gate)
+        run: .venv/bin/python -m scripts.ducklake_neon_smoke_test --lambda-telemetry-production
 
       - name: Smoke test -- lambda-telemetry-reader (telemetry reader production-pinned READ_ONLY proof)
         run: .venv/bin/python -m scripts.ducklake_neon_smoke_test --lambda-telemetry-reader

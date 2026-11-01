@@ -194,6 +194,7 @@ class TestProductionGcRuleInvariants:
         assert sids == [
             "Logs",
             "NeonDsnRead",
+            "NeonDsnParameterRead",
             "S3DataReadWriteDelete",
             "S3ListDataPrefix",
             "TelemetryCatalogDataReadWriteDelete",

@@ -71,4 +71,19 @@ ENTRIES: tuple[Entry, ...] = (
         attr="validate_diff_coverage",
         pre=True,
     ),
+    # PLAN-sensitive-value-detectors: both run every tier (a few hundred regex calls), no pre_globs.
+    Entry(
+        name="validate_detector_ratchet",
+        module="scripts.checks.misc.sensitive_value_detectors",
+        attr="validate_detector_ratchet",
+        pre=True,
+        full_segment="full_after_lint",
+    ),
+    Entry(
+        name="validate_detector_registry_edits",
+        module="scripts.checks.misc.sensitive_value_detectors",
+        attr="validate_detector_registry_edits",
+        pre=True,
+        full_segment="full_after_lint",
+    ),
 )

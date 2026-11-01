@@ -4,9 +4,11 @@
 # the event-journal model at contract_version 2 (Decision 199).
 # Ratified under the CD.25 pre-codegen contract ratification ritual (tier_item T0.12.6).
 #
-# EVENT JOURNAL: an agent RUN is an open+close row pair sharing one derived agent_run_id, keyed to
-# the CHILD session it spawned (session_id) and, when it annotates a specific caller node, the
-# spawning tool_call's observation_id.
+# EVENT JOURNAL: an agent RUN is an open+close row pair sharing one derived agent_run_id. Two run shapes
+# (run_shapes below): a SUB-AGENT run is keyed to the CHILD session it spawned (session_id) and the
+# spawning tool_call's observation_id, with entity_ref the spawning toolUseId; a TOP-LEVEL run (a CI job,
+# a Fargate task, a Lambda, a local unattended run) is keyed to its ROOT session (session_id), carries no
+# observation_id, and has entity_ref '<root session entity_ref>/run' plus host_run_ref.
 contract:
   id: telemetry_agents
   class: A
@@ -16,11 +18,12 @@ contract:
   ratified_via: "PLAN-telemetry-event-journal-contracts merge to main (Decision 199)"
   description: >-
     Class A schema contract for telemetry_agents: an append-only EVENT JOURNAL, one open+close row
-    pair per agent run, keyed by agent_run_id (derived from entity_ref = the spawning tool call's
-    toolUseId). session_id is the CHILD session the run belongs to (NOT NULL -- the fix for the
-    rootless draft telemetry_agent_invocations); observation_id (nullable) is the spawning
-    tool_call, when the run was spawned by one. Token totals are DERIVED via the child session's own
-    model_call observations, not stored on this table.
+    pair per agent run, keyed by agent_run_id (derived from entity_ref). On a sub-agent run entity_ref
+    is the spawning tool call's toolUseId, session_id is the CHILD session the run belongs to (NOT NULL
+    -- the fix for the rootless draft telemetry_agent_invocations) and observation_id (nullable) is the
+    spawning tool_call. On a top-level run (run_shapes) entity_ref is '<root session entity_ref>/run',
+    session_id is the ROOT session itself and observation_id is NULL. Token totals are DERIVED via the
+    run session's own model_call observations, not stored on this table.
   projects_to:
     artifact: config/lambda/ducklake/field_semantics.yaml
     table: telemetry_agents
@@ -52,8 +55,15 @@ fields:
     dq_intent_local: {not_null: true}
   entity_ref:
     $ref: telemetry-event-envelope.yaml#/contract/fields/entity_ref
-    dq_intent_local: {not_null: true}
-    governance_notes_local: The spawning tool call's toolUseId -- the hash input for this row's own agent_run_id.
+    dq_intent_local:
+      not_null: true
+      pattern_when:
+        - {when: {trigger: [workflow_run, workflow_dispatch, push, schedule, eventbridge, manual, smoke_test]}, pattern: "^.+/run$"}
+    governance_notes_local: >-
+      Two shapes (run_shapes): the spawning tool call's toolUseId on a sub-agent run, '<root session entity_ref>/run' on a
+      top-level run (write-enforced by pattern_when on the top-level triggers). Either is the hash input for this row's own agent_run_id.
+    amendment_log:
+      - {date: "2026-10-29", semantic_break: false, change_class: governance_note_add, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): a top-level run's entity_ref is '<root session entity_ref>/run', write-enforced by pattern_when on the top-level trigger values; a sub-agent run's shape is unchanged.", migration_story: "No stored row changes: every stored row is a sub-agent row."}
   producer:
     $ref: telemetry-event-envelope.yaml#/contract/fields/producer
     dq_intent_local: {not_null: true}
@@ -81,16 +91,19 @@ fields:
       telemetry_agent_invocations defect: a scheduled-agent or sub-agent invocation gets its own
       session, and this row roots to it. Tightened NOT NULL (Invariant 5). This row's generation
       is the CHILD session's own (Decision 207 R6): it commits with that child's open-row marker,
-      not the spawning session's.
+      not the spawning session's. On a TOP-LEVEL run (run_shapes) session_id is the ROOT session itself.
     joins:
       - session_id_join_telemetry_sessions_to_agents
     amendment_log:
+      - {date: "2026-10-29", semantic_break: false, change_class: governance_note_add, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): on a top-level run session_id is the root session itself (the child on a sub-agent run).", migration_story: "No stored row changes: every stored row is a sub-agent row."}
       - {date: "2026-09-28", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-grain-and-generations (rec-4061 R6): named this row's generation as the child session's own, committed by the child's open-row marker."}
   observation_id:
     $ref: observation-id.yaml#/contract/fields/observation_id
     governance_notes_local: >-
       Optional FK to the SPAWNING tool_call's observation_id, when this run was spawned by one
-      (vs. a top-level/scheduled invocation with no spawning node). Stays nullable.
+      (vs. a top-level run, where it is NULL -- run_shapes). Stays nullable.
+    amendment_log:
+      - {date: "2026-10-29", semantic_break: false, change_class: governance_note_add, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): observation_id is NULL on a top-level run.", migration_story: "No stored row changes: every stored row is a sub-agent row."}
     joins:
       - observation_id_join_observations_to_agents
   agent_run_id:
@@ -160,11 +173,16 @@ fields:
     type: str
     iceberg_type: string
     nullable: true
-    description: "How the agent run was triggered: eventbridge | manual | smoke_test | cron_workflow."
-    semantics: Run-provenance attribute. The set is open; a closed set would be declared here when ratified (Decision 210 cl.3).
+    description: "How the agent run was triggered: subagent_sync | subagent_background | workflow_run | workflow_dispatch | push | schedule | eventbridge | manual | smoke_test."
+    semantics: >-
+      Run-provenance attribute; the set is CLOSED and write-enforced (Decision 210 cl.3), a new value is a contract widen. The sub-agent
+      values are the claude_code producer's spawn modes; the GitHub Actions values are GITHUB_EVENT_NAME verbatim for the event types the
+      capture allow-list admits; eventbridge, manual and smoke_test are the non-Actions host triggers. cron_workflow is retired (no producer
+      ever wrote it; GitHub's own name is schedule). run_shapes partitions the values between the two run shapes.
     populated_by: the claude_code producer, at the open event.
-    dq_intent: {}
+    dq_intent: {accepted_values: {values: [subagent_sync, subagent_background, workflow_run, workflow_dispatch, push, schedule, eventbridge, manual, smoke_test]}}
     amendment_log:
+      - {date: "2026-10-29", semantic_break: true, change_class: accepted_values_narrow, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): the trigger set is closed to nine values and write-enforced; cron_workflow leaves the documented set (GitHub's name is schedule).", migration_story: "census: 0 violators (2026-10-29): the only telemetry_agents writer is the claude_code producer, and every version since slice 3a (ffc761ee, src/turn_capture/sessions.py _agent_row) writes subagent_sync or subagent_background, so no stored row breaks the rule (source: producer history; no reader verb lists distinct trigger values)."}
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded populated_by wording to the open event; field meaning unchanged."}
       - {date: "2026-10-05", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-lifecycle-friction-amendment (fork 2 (a)): replaced 'enforcement deferred' with the open-set wording. Meaning unchanged."}
   outcome:
@@ -262,7 +280,7 @@ fields:
     nullable: true
     description: Number of findings the agent produced in the run. Stored once, on the close row.
     semantics: Agent-run WORK metric (a scheduled-agent output), observed once at close -- not a roll-up over child rows, so it keeps its plain name (no *_total).
-    populated_by: "unproduced: T3.22:c5 (no producer writes it)"
+    populated_by: "unproduced: rec-4711 (no producer writes it)"
     dq_intent: {}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to name the close-event row this field is stored on; field meaning unchanged."}
@@ -272,7 +290,7 @@ fields:
     nullable: true
     description: Number of recommendations the agent filed in the run. Stored once, on the close row.
     semantics: Agent-run WORK metric; cross-references ops_recommendations rows filed with this agent's source, joined tenant-locally.
-    populated_by: "unproduced: T3.22:c5 (no producer writes it)"
+    populated_by: "unproduced: rec-4711 (no producer writes it)"
     dq_intent: {}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to name tenant-local joining and the close-event row this field is stored on; field meaning unchanged."}
@@ -282,7 +300,7 @@ fields:
     nullable: true
     description: Number of priority-queue entries the agent wrote in the run. Stored once, on the close row.
     semantics: Agent-run WORK metric (rec-curator-style producers).
-    populated_by: "unproduced: T3.22:c5 (no producer writes it)"
+    populated_by: "unproduced: rec-4711 (no producer writes it)"
     dq_intent: {}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to name the close-event row this field is stored on; field meaning unchanged."}
@@ -302,19 +320,62 @@ fields:
     nullable: true
     description: AWS Lambda request id of the invocation, when the agent ran as a Lambda. NULL otherwise.
     semantics: Run provenance (CloudWatch correlation). Null for non-Lambda runs.
-    populated_by: "unproduced: T3.22:c5 (no producer writes it)"
+    populated_by: "unproduced: rec-4711 (no producer writes it)"
     dq_intent: {}
   workflow_run_id:
     type: str
     iceberg_type: string
     nullable: true
     description: GitHub Actions workflow run id, when the agent ran from CI. NULL otherwise.
-    semantics: Run provenance (GitHub Actions correlation). Null for non-CI runs.
+    semantics: Run provenance (GitHub Actions correlation). Null for non-CI runs. Filled, with host_run_ref, by the CI capture producer (owner stays T3.20:c9).
     populated_by: "unproduced: T3.20:c9 (no producer writes it)"
     dq_intent: {}
+    amendment_log:
+      - {date: "2026-10-29", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): semantics notes the CI capture producer fills it with host_run_ref (owner stays T3.20:c9). Meaning unchanged."}
+  host_run_ref:
+    type: str
+    iceberg_type: string
+    nullable: true
+    description: "The host's own identity for a top-level agent run, under an open prefix registry; NULL on a sub-agent run (its root's top-level row carries it)."
+    semantics: >-
+      Per-prefix grammar: gha:<run_id>/<run_attempt>/<job id>/<retry ordinal of the claude -p attempt, from 1>, ecs:<cluster>/<task id>,
+      lambda:<request id>, local:<runtime>/<run id> (Decision 184: a free-tier local run fits). A new host is a new prefix and a contract
+      widen (Decision 210 cl.3). No prefix's character class admits ':' after the prefix, so an ARN cannot match; it never carries an ARN,
+      account id or hostname (Decision 101); the per-host typed columns (workflow_run_id, lambda_request_id) stay as typed join keys.
+      A sub-agent row's host_run_ref is NULL at write (null_or_zero_when on the sub-agent triggers).
+    populated_by: "unproduced: T3.20:c9 (no producer writes it)"
+    dq_intent:
+      pattern: "^(gha:[0-9]{1,20}/[0-9]{1,6}/[A-Za-z0-9_.-]{1,100}/[1-9][0-9]{0,2}|ecs:[A-Za-z0-9_.-]{1,255}/[A-Za-z0-9-]{1,64}|lambda:[A-Za-z0-9-]{1,64}|local:[A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,128})$"
+      null_or_zero_when: {trigger: [subagent_sync, subagent_background]}
+    governance_notes_local: >-
+      No required_when here: Decision 222 cl.1's additive production add refuses a column carrying one, so
+      PLAN-claude-p-capture-adapter adds required_when {trigger: [the top-level values]} after the production add.
+    amendment_log:
+      - {date: "2026-10-29", semantic_break: false, change_class: field_add, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): one generic nullable host_run_ref column with a four-prefix pattern (gha, ecs, lambda, local), NULL on a sub-agent run.", migration_story: "Additive nullable column; no stored row changes. Production add owed (provision_telemetry_catalog, Decision 230 cl.4); until then it is pending_reconcile and the governed deploy holds the production telemetry writer and reader."}
 realization:
   produced: {write_boundary: [event_id, created_timestamp, tenant_id, project_id, session_id, observation_id, agent_run_id], claude_code: [event_kind, event_timestamp, session_started_at, source_ordinal, external_ref, entity_ref, producer, producer_version, parser_version, agent_type, agent_name, model, version, trigger, outcome, error]}
-  unproduced: {T4.32:c1: [provider], T3.22:c5: [lambda_request_id, findings_count, recs_created, queue_entries_written], T3.20:c9: [workflow_run_id]}
+  unproduced: {T4.32:c1: [provider], rec-4711: [lambda_request_id, findings_count, recs_created, queue_entries_written], T3.20:c9: [workflow_run_id, host_run_ref]}
+run_shapes:
+  sub_agent:
+    session_id: child
+    observation_id: spawning_tool_call
+    entity_ref: "<spawning tool call toolUseId>"
+    external_ref: "the producer's spawn and close record refs"
+    agent_type: "the producer's registry key (claude-code-subagent for claude_code)"
+    triggers: [subagent_sync, subagent_background]
+    host_run_ref: "null"
+    rows: "one open row per spawn; one close row per completion notice (rec-4358)"
+  top_level:
+    session_id: root
+    observation_id: "null"
+    entity_ref: "<root session entity_ref>/run"
+    external_ref: "'<root session entity_ref>/run#0/open' and '<root session entity_ref>/run#0/close'"
+    agent_type: "the source_registry key of the agent (e.g. ci_rca)"
+    triggers: [workflow_run, workflow_dispatch, push, schedule, eventbridge, manual, smoke_test]
+    host_run_ref: required
+    rows: "one open row timed at the root's open row and one close row written by the final pass, timed at the root's latest close row, outcome from the host's terminal result"
+    one_run_per: "root session (a claude -p retry attempt is a new session, so a new run with its own retry ordinal)"
+    state: "root state stays derived from the root's own session rows (STATE_CTES, parent_session_id IS NULL); the pair is run provenance, and agent_run_state_and_duration and agent_run_token_rollup over the root return it"
 governance:
   table_class: event
   partition_by: "history=year(session_started_at), month(session_started_at), day(session_started_at)"
@@ -322,7 +383,9 @@ governance:
     Provisioned in the production telemetry catalog (Decision 230); production writes begin at PLAN-telemetry-production-flip; the writer is rec-4024's append verb, the rooted agent writer
     (carrying session_id) on the append_events boundary. Append-only; no SCD2 merge, no in-place mutation.
 governance_notes: >-
-  EVENT JOURNAL: telemetry_agents replaces the ROOTLESS telemetry_agent_invocations -- the
+  TOP-LEVEL RUN: a CI job running claude -p, a Fargate task, a Lambda or a local unattended run is its root session plus one open/close
+  pair here (run_shapes.top_level: session_id the root, observation_id NULL, entity_ref '<root session entity_ref>/run', host_run_ref
+  required); telemetry_sessions.surface tells the five run surfaces apart at read. EVENT JOURNAL: telemetry_agents replaces the ROOTLESS telemetry_agent_invocations -- the
   canonical addition is session_id (+ optional observation_id), rooting every agent row to its
   session, now shaped as an open+close row pair keyed by the DERIVED agent_run_id (Decision 199,
   amending Decision 95 clause 4, Decision 96 clauses 1 and 3, and Decision 97 clauses 1-4). Token
@@ -335,6 +398,8 @@ governance_notes: >-
   carries `required_when`, which then governs (scripts/field_semantics_event_projection.py _is_not_null); every declared rule is write-enforced (Decision 210); a staged rule is spelled with exclude_before or an owned exemption. Provisioned in the production telemetry catalog (Decision 230). KNOWN GAP: rec-2173 (preflight telemetry health) and
   the broader Phase 4 re-provisioning (rec-4024) are CODE follow-ons, not this contract.
 amendment_log:
+  - {date: "2026-10-29", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): contract.description and the header comment name both run shapes (sub-agent and top-level). Meaning of the sub-agent shape unchanged."}
+  - {date: "2026-10-29", semantic_break: false, change_class: field_add, summary: "PLAN-telemetry-top-level-agent-run (rec-4416, Decisions 199, 210, 222): top-level run shape (run_shapes), host_run_ref, closed trigger set, top-level entity_ref rule; lambda_request_id and the three work metrics move to owner rec-4711. Per-field changes are on their own fields' logs.", migration_story: "Additive; no stored row changes (every stored row is a sub-agent row). Production column add owed for host_run_ref."}
   - {date: "2026-10-25", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-production-catalog bookkeeping: the two not-provisioned-in-production statements now say provisioned in the production telemetry catalog (Decision 230); mechanical status edit, no meaning change."}
   - {date: "2026-10-24", semantic_break: false, change_class: governance_note_add, summary: "PLAN-telemetry-field-realization (T3.20 c7): realization block (who writes each stored column, or who owns its absence); populated_by names the real writer. No column, type or rule change."}
   - {date: "2026-10-17", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-capture-producer-fixes (rec-4358): outcome carries a governance note: a claude_code background run's close rows are one per completion notice with the outcome mapped from the notice status.", migration_story: "Note only; no field changes."}

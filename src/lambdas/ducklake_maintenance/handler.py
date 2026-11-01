@@ -40,10 +40,12 @@ from src.common import ducklake_maintenance_scope as scope
 from src.common import ducklake_runtime as rt
 from src.lambdas.ducklake_maintenance import catalog_actions, health_actions, index_actions, login_actions, partition_actions
 from src.lambdas.ducklake_maintenance._shared import (  # noqa: F401 -- DATA_PATH re-bound for existing callers
+    CATALOG_METRICS,
     DATA_PATH,
     EXTENSION_DIRECTORY,
     _emit_maintenance_metric,
     _require_identifier,
+    catalog_dimensions,
 )
 
 # ---------------------------------------------------------------------------
@@ -308,6 +310,20 @@ def action_reconcile_columns(event: dict[str, Any], _con: Any) -> dict[str, Any]
     }
 
 
+def _catalog_sink(meta_schema: Any) -> Any:
+    """Metric emitter for one catalog: the rebound ops emitter itself for ducklake_ops (or an invalid name), else a
+    (name, value) emitter limited to CATALOG_METRICS and dimensioned by MetaSchema."""
+    dims = catalog_dimensions(meta_schema)
+    if dims is None:
+        return _emit_maintenance_metric
+
+    def sink(name: str, value: float) -> None:
+        if name in CATALOG_METRICS:
+            _emit_maintenance_metric(name, value, dimensions=dims)
+
+    return sink
+
+
 def action_merge_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
     """OPERATIONAL: non-destructive merge over the production ops_* catalog, scoped by the declared
     maintenance_policy matrix (compaction-scope-policy-matrix, Decision 191) rather than a naming
@@ -337,6 +353,7 @@ def action_merge_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
             "merge_ops requires an explicit 'meta_schema' (e.g. 'ducklake_ops') -- no default production schema"
         )
     meta_schema = _require_identifier(raw_schema)
+    emit = _catalog_sink(meta_schema)
 
     dsn = rt.fetch_dsn()
     con = rt.open_connection(dsn=dsn, data_path=data_path, meta_schema=meta_schema, extension_directory=EXTENSION_DIRECTORY)
@@ -350,7 +367,7 @@ def action_merge_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
         if not discovered:
             raise rt.DuckLakeRuntimeError(
                 "merge_ops: no tables discovered in the catalog -- verify data_path and meta_schema "
-                "point at the production DuckLake (ducklake_ops @ s3://.../ducklake/)"
+                f"point at the production DuckLake (meta_schema {meta_schema!r})"
             )
 
         semantics = rt.load_field_semantics()
@@ -386,7 +403,7 @@ def action_merge_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
                 # (Decision 188 pt 3, extended by Decision 191) -- see the aggregate raise below.
                 merge_error = str(exc)
                 merge_failures.append({"table": table, "error": merge_error})
-                _emit_maintenance_metric("MergeOpsTableFailure", 1.0)
+                emit("MergeOpsTableFailure", 1.0)
 
             if merge_error is None and not count_unavailable:
                 try:
@@ -418,13 +435,13 @@ def action_merge_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-        _emit_maintenance_metric("MergeOpsDurationMs", elapsed_ms)
+        emit("MergeOpsDurationMs", elapsed_ms)
         if not any_count_unavailable:
-            _emit_maintenance_metric("MergeOpsFilesBeforeTotal", float(files_before_total))
-            _emit_maintenance_metric("MergeOpsFilesAfterTotal", float(files_after_total))
-        _emit_maintenance_metric("MergeOpsTablesCount", float(len(resolution.to_merge)))
-        _emit_maintenance_metric("MergeOpsUnclassifiedTables", float(len(resolution.unclassified)))
-        _emit_maintenance_metric("MergeOpsPassFailed", float(len(merge_failures) + len(resolution.unclassified) > 0))
+            emit("MergeOpsFilesBeforeTotal", float(files_before_total))
+            emit("MergeOpsFilesAfterTotal", float(files_after_total))
+        emit("MergeOpsTablesCount", float(len(resolution.to_merge)))
+        emit("MergeOpsUnclassifiedTables", float(len(resolution.unclassified)))
+        emit("MergeOpsPassFailed", float(len(merge_failures) + len(resolution.unclassified) > 0))
 
         if merge_failures or resolution.unclassified:
             # The per-table error detail is embedded directly in the raised message (not just
@@ -490,7 +507,7 @@ def action_gc_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
             catalog=maint.CATALOG_ALIAS,
             data_path=data_path,
             dry_run=dry_run,
-            metric_sink=_emit_maintenance_metric,
+            metric_sink=_catalog_sink(meta_schema),
         )
     finally:
         con.close()
@@ -554,7 +571,7 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
     try:
         return _response(200, fn(payload, None))
     except maint.DuckLakeMaintenanceError as exc:
-        _emit_maintenance_metric("MaintenanceBreakerTrip", 1.0)
+        _catalog_sink(payload.get("meta_schema"))("MaintenanceBreakerTrip", 1.0)
         return _response(500, {"ok": False, "error_type": "breaker", "breaker_tripped": True, "error": str(exc)})
     except catalog_dr.CatalogDrError as exc:
         return _response(500, {"ok": False, "error_type": "catalog_dr", "error": str(exc)})

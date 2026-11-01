@@ -63,7 +63,7 @@ class Writer:
                 "ok": True,
                 "actions": ["append_telemetry"],
                 "verbs": {"append_telemetry": {"caps": caps}},
-                "catalog": {"data_path_is_smoke": True},
+                "catalog": {"meta_schema": "ducklake_smoke", "data_path_is_smoke": True},
                 "blob_protocol": {"version": 1, "inline_threshold_bytes": 65536, "cap_bytes": 8388608, "max_items": 200},
             }
         if action in ("register_tenant", "register_project"):

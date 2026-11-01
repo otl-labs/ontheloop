@@ -3,7 +3,8 @@
 Asserts docs/contracts/read-engine.yaml's read_surface.named_verbs.verbs {table: [verbs]}
 grouping equals the grouping derived from the live NAMED_READS registry
 (src/common/ducklake_scd2_schema.py) plus the reader-only EVENT_READS registry
-(src/common/ducklake_event_read_verbs.py, grouped under each verb's first table) -- promotes
+(src/common/ducklake_event_read_verbs.py) and the content reader's CONTENT_READS registry
+(src/common/ducklake_content_read_verbs.py), each grouped under a verb's first table -- promotes
 rec-3095's verb-drift finding from a routed debt record (evaluator.none_grandfathered) to a machine-enforced check.
 """
 
@@ -30,6 +31,7 @@ def _dig(data: object, *keys: str) -> object:
 
 
 def _live_verbs() -> dict[str, list[str]]:
+    from src.common.ducklake_content_read_verbs import CONTENT_READS  # noqa: PLC0415
     from src.common.ducklake_event_read_verbs import EVENT_READS  # noqa: PLC0415
     from src.common.ducklake_scd2_schema import NAMED_READS  # noqa: PLC0415
 
@@ -38,6 +40,8 @@ def _live_verbs() -> dict[str, list[str]]:
         grouped[named_read.table].append(verb)
     for verb, event_read in EVENT_READS.items():
         grouped[event_read.tables[0]].append(verb)
+    for verb, content_read in CONTENT_READS.items():
+        grouped[content_read.tables[0]].append(verb)
     return {table: sorted(verbs) for table, verbs in grouped.items()}
 
 
@@ -75,8 +79,12 @@ def validate_read_engine_verbs(failed: list[str], *, contracts_dir: Path | None 
     registry.examined(total, unit="verbs")
     if declared != live:
         failed.append(
-            f"Read-engine verb parity: {_CONTRACT_NAME} declares {declared} but NAMED_READS and EVENT_READS derive {live}"
+            f"Read-engine verb parity: {_CONTRACT_NAME} declares {declared} "
+            f"but NAMED_READS, EVENT_READS and CONTENT_READS derive {live}"
         )
         return
 
-    print(f"  PASS: {_CONTRACT_NAME} matches NAMED_READS and EVENT_READS ({total} verbs across {len(live)} table(s)).")
+    print(
+        f"  PASS: {_CONTRACT_NAME} matches NAMED_READS, EVENT_READS and CONTENT_READS "
+        f"({total} verbs across {len(live)} table(s))."
+    )

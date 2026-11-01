@@ -300,6 +300,35 @@ locals {
           "arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/*",
           "arn:aws:s3:::agent-platform-data-lake/ducklake-telemetry/*"
         ]
+      },
+      {
+        # The CI branch and CI PR roles are reached by agents without review (agent pushes, pull_request jobs) and
+        # never need Terraform state, saved plans or review transcripts, so they may not read, overwrite or delete
+        # them. The branch role's inline Deny is removable by an auto-applied PR; this admin-held copy is not
+        # (Decision 143 cl.1, rec-4645). The condition leaves the apply role, planner, PlatformDev and every other
+        # carrier of this shared boundary untouched.
+        Sid    = "DenyCiAgentRoleStatePlanAndTranscriptIO"
+        Effect = "Deny"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:DeleteObjectVersion"
+        ]
+        Resource = [
+          "arn:aws:s3:::agent-platform-data-lake/tfstate/*",
+          "arn:aws:s3:::agent-platform-data-lake/tfplan/*",
+          "arn:aws:s3:::agent-platform-data-lake/ci-rca-evidence/review-transcripts/*"
+        ]
+        Condition = {
+          ArnLike = {
+            "aws:PrincipalArn" = [
+              "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-branch",
+              "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-pr"
+            ]
+          }
+        }
       }
     ]
   })

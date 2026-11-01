@@ -127,6 +127,34 @@ def classify(raw_output: str) -> str:
     return STARVED
 
 
+_REASON_CAP = 500
+
+
+def revise_reason(raw_output: str) -> str:
+    """One redacted, newline-free line holding the reviewer's text after the REVISE token."""
+    envelope = _last_result_envelope(raw_output)
+    source = raw_output
+    if envelope is not None:
+        result_field = envelope.get("result")
+        source = result_field if isinstance(result_field, str) else ""
+    match = _REVISE_PATTERN.search(source)
+    text = source[match.end() :] if match else ""
+    text = re.sub(r"\s+", " ", text)
+    text = "".join(ch for ch in text if ch.isprintable())
+    text = text.lstrip(" :-").strip()
+    if not text:
+        return "(no reason given)"
+    repo_root = str(Path(__file__).resolve().parents[2])
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from scripts.terraform_apply_guard import _redact
+
+    text = _redact(text).lstrip(" :-")
+    if len(text) > _REASON_CAP:
+        text = text[: _REASON_CAP - 3] + "..."
+    return text or "(no reason given)"
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI entrypoint: read a claude_p_retry.sh output file, print the verdict class, exit.
 
@@ -140,6 +168,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     convergence record for what is an I/O problem, not a plan rejection).
     """
     args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) == 2 and args[0] == "--reason":
+        try:
+            raw_text = Path(args[1]).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            print("(transcript unreadable)")
+            return 0
+        print(revise_reason(raw_text))
+        return 0
     if len(args) != 1:
         print("usage: review_verdict.py <claude-output-file>", file=sys.stderr)
         print(STARVED)

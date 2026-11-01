@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
 from src.common import ducklake_event_reads as ev
 from src.common import ducklake_runtime as rt
 
+DECLARED_PIN = (rt.TELEMETRY_PROD_META_SCHEMA, rt.TELEMETRY_PROD_DATA_PATH)
+
 
 @pytest.fixture
-def smoke_pin(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TELEMETRY_META_SCHEMA", rt.SMOKE_META_SCHEMA)
-    monkeypatch.setenv("TELEMETRY_DATA_PATH", rt.SMOKE_DATA_PATH)
+def declared_pin() -> Callable[[], tuple[str, str]]:
+    """The caller's declared pin: acquirer_for has no default, so every event acquire names the pin it binds."""
+    return lambda: DECLARED_PIN
+
+
+@pytest.fixture
+def refusing_pin() -> Callable[[], tuple[str, str]]:
+    def refuse() -> tuple[str, str]:
+        raise rt.DuckLakeRuntimeError("the declared pin refused")
+
+    return refuse
 
 
 @pytest.fixture(autouse=True)

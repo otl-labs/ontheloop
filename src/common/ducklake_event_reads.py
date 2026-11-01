@@ -1,14 +1,14 @@
-"""Event-journal read mechanism for the ducklake_reader Lambda (Decision 199 cl.1, Decision 207, Decision 84 I-3).
+"""Event-journal read mechanism for the ducklake_telemetry_reader Lambda (Decision 199 cl.1, Decision 207, Decision 84 I-3).
 
-The telemetry tables are event journals read through a second, isolated warm connection (the "telemetry" slot) by named
-verbs whose SQL is registry content. This module owns the EventRead type, parameter validation (before any SQL or
-connection), the smoke-pin refusal, the partition binding, the compared-column set behind the conflict report, the
-event_read_version stamp, execution, and the routing helpers the reader handler calls.
+The telemetry tables are event journals read through an isolated warm connection (the "telemetry" slot) by named verbs
+whose SQL is registry content. This module owns the EventRead type, parameter validation (before any SQL or connection),
+the production-pin refusal, the partition binding, the compared-column set behind the conflict report, the
+event_read_version stamp, execution, and the routing helpers the telemetry reader handler calls.
 
-Imported by the reader handler only. Import direction (no cycle): ducklake_event_read_verbs imports EventRead from here at
-module scope; the routing helpers here import EVENT_READS function-locally. Nothing in ducklake_runtime's import closure
-imports this module, so the other DuckLake bundles need no new file. Event reads use src.telemetry.identity/timestamps and
-src.row_rules only, never src.telemetry.append.
+Imported by the telemetry reader handler only; the shared reader serves no event verb (Decision 236). Import direction (no
+cycle): ducklake_event_read_verbs imports EventRead from here at module scope; the routing helpers here import EVENT_READS
+function-locally. Nothing in ducklake_runtime's import closure imports this module, so the other DuckLake bundles need no
+new file. Event reads use src.telemetry.identity/timestamps and src.row_rules only, never src.telemetry.append.
 """
 
 from __future__ import annotations
@@ -89,10 +89,6 @@ def _event_reads() -> dict[str, EventRead]:
     return EVENT_READS
 
 
-def is_event_verb(verb: Any) -> bool:
-    return isinstance(verb, str) and verb in _event_reads()
-
-
 # ---------------------------------------------------------------------------
 # Pin, validation and partition binding
 # ---------------------------------------------------------------------------
@@ -103,20 +99,8 @@ def telemetry_pin() -> tuple[str, str]:
     return os.environ.get("TELEMETRY_META_SCHEMA", ""), os.environ.get("TELEMETRY_DATA_PATH", "")
 
 
-def require_smoke_pin() -> tuple[str, str]:
-    """Refuse every event verb unless the pin names the single-tenant smoke catalog (Decision 200 cl.2, rec-4292)."""
-    meta_schema, data_path = telemetry_pin()
-    if meta_schema != rt.SMOKE_META_SCHEMA or data_path.rstrip("/") != rt.SMOKE_DATA_PATH.rstrip("/"):
-        raise rt.DuckLakeRuntimeError(
-            "event-journal reads are refused unless TELEMETRY_META_SCHEMA and TELEMETRY_DATA_PATH name the smoke catalog: "
-            "the verbs carry no tenant predicate, so slice 2c lifts this refusal together with tenant-scoped reads (rec-4292, "
-            "Decision 200 cl.2)"
-        )
-    return meta_schema, data_path
-
-
 def require_production_pin() -> tuple[str, str]:
-    """Refuse every event verb unless the pin names the production telemetry catalog (Decision 200 cl.2, rec-4292)."""
+    """Refuse every event verb unless the pin names the production telemetry catalog (Decision 200 cl.2, Decision 236)."""
     meta_schema, data_path = telemetry_pin()
     if meta_schema != rt.TELEMETRY_PROD_META_SCHEMA or data_path.rstrip("/") != rt.TELEMETRY_PROD_DATA_PATH.rstrip("/"):
         raise rt.DuckLakeRuntimeError(
@@ -325,17 +309,10 @@ def execute_entry(con: Any, entry: EventRead, params: Any, limit: Any = None) ->
     columns = [desc[0] for desc in cursor.description]
     rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
     if content:
-        from src.common.ducklake_event_content import serve_content  # noqa: PLC0415 -- reader bundle only
+        from src.common.ducklake_event_content import serve_content  # noqa: PLC0415 -- no deployed reader carries it
 
         return serve_content(rows, values)
     return rows
-
-
-def serve_named_read(con: Any, *, verb: str, params: dict[str, Any], limit: Any) -> tuple[list[dict[str, Any]], str]:
-    """Rows and read_version for a named verb: ops verbs through the unchanged runtime path, event verbs through execute."""
-    if is_event_verb(verb):
-        return execute(con, verb=verb, params=params, limit=limit), event_read_version(verb)
-    return rt.named_read(con, verb=verb, params=params, limit=limit), rt.read_version(verb)
 
 
 def _telemetry_opener(
@@ -415,15 +392,15 @@ def acquirer_for(
     ops: Callable[..., tuple[Any, dict[str, Any]]],
     extension_directory: str,
     *,
-    pin: Callable[[], tuple[str, str]] = require_smoke_pin,
+    pin: Callable[[], tuple[str, str]],
     dsn_secret_id: str | None = None,
     read_only: bool = False,
 ) -> Callable[..., tuple[Any, dict[str, Any]]]:
     """The connection acquirer for this request: the handler's own ops acquirer, unchanged, for everything but an event verb.
 
-    An event verb first passes the pin refusal and parameter validation, so a refused request never pays an ATTACH,
-    then binds the telemetry slot (opened lazily on its first verb). The first acquire after a deadline interrupt probes
-    the catalog connection once; a failed probe reopens through get_warm_connection's existing path.
+    An event verb first passes the caller's declared pin refusal and parameter validation, so a refused request never pays
+    an ATTACH, then binds the telemetry slot (opened lazily on its first verb). The first acquire after a deadline interrupt
+    probes the catalog connection once; a failed probe reopens through get_warm_connection's existing path.
     """
     verb = payload.get("verb") if action == "named_read" else None
     if not isinstance(verb, str) or verb not in _event_reads():

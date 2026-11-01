@@ -2,7 +2,7 @@
 
 Turn open/close, model_call (one per response, owned by its last record), tool_call open/close (a tool_use
 with no in-span result gets ONE synthetic interrupted close anchored on the tool_use record itself) and one
-process_event per hook attachment. Tool errors are the tool_call close outcome, never process_events.
+process_event per hook run (twins collapse, rule HG-1). Tool errors are the tool_call close outcome, never process_events.
 Rows of a turn are built only once the turn is closed; a row outside any turn is built at once. A tool_call close
 carries output_capture and the raw output identity (output_bytes/sha256/lines); a model_call carries
 reasoning_visibility and the provider-reported reasoning_tokens.

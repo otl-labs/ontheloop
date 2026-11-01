@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -121,12 +121,12 @@ def test_values_are_bound_never_interpolated() -> None:
         ev.execute(con, verb="session_state_and_duration", params={"session_id": _SESSION, "as_of": _AS_OF}, limit=1)
 
 
-def test_falsy_non_object_params_are_refused_before_any_acquire(smoke_pin: None) -> None:
+def test_falsy_non_object_params_are_refused_before_any_acquire(declared_pin: Callable[[], tuple[str, str]]) -> None:
     params: Any
     for params in ([], "", 0):
         with pytest.raises(ev.EventReadInputError):
-            ev.acquirer_for("named_read", {"verb": "telemetry_health_count", "params": params}, NO_OPS, "/e")
-    assert callable(ev.acquirer_for("named_read", {"verb": "telemetry_health_count"}, NO_OPS, "/e"))
+            ev.acquirer_for("named_read", {"verb": "telemetry_health_count", "params": params}, NO_OPS, "/e", pin=declared_pin)
+    assert callable(ev.acquirer_for("named_read", {"verb": "telemetry_health_count"}, NO_OPS, "/e", pin=declared_pin))
 
 
 def test_content_params_are_validated_without_echo() -> None:

@@ -41,8 +41,6 @@ class TestAutoMode:
     def _close_output(self, sanity_status: str = "PASS") -> str:
         return json.dumps(
             {
-                "intent_achieved": True,
-                "session_log_entry": "## [2026-04-07] session",
                 "sanity_status": sanity_status,
                 "details": {},
             }
@@ -404,8 +402,6 @@ class TestRetiredDrainBlocks:
     def _close_output(self, sanity_status: str = "PASS") -> str:
         return json.dumps(
             {
-                "intent_achieved": True,
-                "session_log_entry": "## [2026-05-30] session",
                 "sanity_status": sanity_status,
                 "details": {},
             }

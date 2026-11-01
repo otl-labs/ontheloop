@@ -2,7 +2,7 @@
 
 Every verification finding class files or updates exactly one telemetry_verify rec through scripts.rec_episode.run_episode and
 never closes it (an operator or a later plan closes a rec once its cause is fixed). Rec text carries counts, class names, the
-scope label and parser_version only: never a row value, transcript content, session id or ref.
+scope label, parser_version and one fixed sentence only: never a row value, transcript content, session id or ref.
 """
 
 from __future__ import annotations
@@ -16,6 +16,11 @@ from scripts.rec_episode import run_episode
 
 ALARM_SOURCE = "telemetry_verify"
 ALARM_MIN_INTERVAL_S = 21_600
+# Fixed wording, alone longer than the portal's 80-character context floor, so no class or scope can make a context too short.
+_CONTEXT_NOTE = (
+    "A telemetry verification check counted findings of this class in this scope. "
+    "The check updates this rec while they recur and never closes it."
+)
 
 
 @dataclass
@@ -32,7 +37,8 @@ class AlarmOutcome:
 
 def _context(cls: str, count: int, scope: str, parser_version: int | None) -> str:
     text = f"finding_class={cls} count={count} scope={scope}"
-    return text if parser_version is None else f"{text} parser_version={parser_version}"
+    text = text if parser_version is None else f"{text} parser_version={parser_version}"
+    return f"{text} {_CONTEXT_NOTE}"
 
 
 def _matches(cls: str) -> Callable[[dict[str, Any]], bool]:

@@ -298,7 +298,7 @@ def test_tool_result_capture_policy_declared() -> None:
     assert "claim-check route" in _norm(content.semantics) and "begin_blobs" in _norm(content.semantics)
 
     omitted = fields["content_omitted_reason"]
-    assert omitted.nullable is True and omitted.dq_intent["accepted_values"]["values"] == ["oversize"]
+    assert omitted.nullable is True and omitted.dq_intent["accepted_values"]["values"] == ["oversize", "withheld_by_policy"]
     assert "raw source bytes' identity" in _norm(omitted.semantics)
     assert fields["content_sha256"].dq_intent["pattern"] == "^[0-9a-f]{64}$"
     assert "raw source bytes" in _norm(fields["content_sha256"].semantics)

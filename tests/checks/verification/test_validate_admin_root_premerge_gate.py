@@ -24,6 +24,10 @@ _GATE_COMMAND = (
     'test -n "$PR_HEAD_SHA" && terraform -chdir="$W/terraform/bootstrap" plan -input=false -lock=false -var-file=x.tfvars'
 )
 _ENV_COMMAND = (
+    "bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin "
+    "2>/dev/null | grep -q 'assumed-role/PlatformAdmin/' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT"
+)
+_OLD_ENV_COMMAND = (
     "aws sts get-caller-identity --profile agent_platform_admin --query Arn --output text "
     "2>/dev/null | grep -q 'assumed-role/PlatformAdmin/' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT"
 )
@@ -199,14 +203,28 @@ class TestRedCasesByClause:
         validate_admin_root_premerge_gate(failed, plan_paths=[plan], taxonomy_path=taxonomy)
         assert len(failed) == 1 and "ENVIRONMENT CHECK" in failed[0]
 
-    def test_get_caller_identity_without_admin_chain_ok_flags_env_clause(self, tmp_path: Path) -> None:
-        """The precedent's step 11 shape: get-caller-identity appears, but not ADMIN_CHAIN_OK."""
+    def test_caller_arn_without_admin_chain_ok_flags_env_clause(self, tmp_path: Path) -> None:
+        """The caller-arn form appears, but not ADMIN_CHAIN_OK."""
         taxonomy = _taxonomy(tmp_path)
-        partial_env = 'acct = run("sts", "get-caller-identity")["Account"]'
+        partial_env = "bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin"
         data = _base_plan(
             verification_plan=[
                 {"step": 1, "phase": "pre-deploy", "command": _GATE_COMMAND},
                 {"step": 2, "phase": "pre-deploy", "command": partial_env},
+            ]
+        )
+        plan = _write_plan(tmp_path, data)
+        failed: list[str] = []
+        validate_admin_root_premerge_gate(failed, plan_paths=[plan], taxonomy_path=taxonomy)
+        assert len(failed) == 1 and "ENVIRONMENT CHECK" in failed[0]
+
+    def test_old_get_caller_identity_form_alone_is_flagged(self, tmp_path: Path) -> None:
+        """The pre-proxy form (always ADMIN_CHAIN_ABSENT under the agent proxy) no longer satisfies the clause."""
+        taxonomy = _taxonomy(tmp_path)
+        data = _base_plan(
+            verification_plan=[
+                {"step": 1, "phase": "pre-deploy", "command": _GATE_COMMAND},
+                {"step": 2, "phase": "pre-deploy", "command": _OLD_ENV_COMMAND},
             ]
         )
         plan = _write_plan(tmp_path, data)

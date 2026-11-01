@@ -5,8 +5,7 @@ via the configured inference provider, and writes findings to S3.
 
 Environment variables
 ---------------------
-GITHUB_PAT_SECRET_ARN : ARN of the Secrets Manager secret containing the
-    GitHub PAT. Used by ``copilot-sdk`` and ``github-models`` providers.
+GITHUB_PAT             : Local-only GitHub PAT used by the ``github-models`` provider.
 S3_LOG_BUCKET          : S3 bucket name for writing agent findings
     (e.g. ``agent-platform-data-lake``).
 SCHEDULED_AGENT_MODEL  : Optional model override.
@@ -45,28 +44,8 @@ _REPO_ROOT = _HANDLER_DIR.parent.parent.parent  # src/data/handlers -> repo root
 
 
 def _get_github_pat() -> str:
-    """Retrieve the GitHub PAT from Secrets Manager or environment.
-
-    Returns the PAT string, or an empty string if retrieval fails.
-    """
-    pat_env = os.environ.get("GITHUB_PAT", "").strip()
-    if pat_env:
-        return pat_env
-
-    secret_arn = os.environ.get("GITHUB_PAT_SECRET_ARN", "").strip()
-    if not secret_arn:
-        logger.error("GITHUB_PAT_SECRET_ARN not set and GITHUB_PAT not set")
-        return ""
-
-    try:
-        import boto3
-
-        client = boto3.client("secretsmanager", region_name="eu-west-2")
-        response = client.get_secret_value(SecretId=secret_arn)
-        return response.get("SecretString", "").strip()
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Failed to retrieve GitHub PAT from Secrets Manager: %s", exc)
-        return ""
+    """Return the local-only GITHUB_PAT env var; the Lambda path has no PAT since rec-4539 (GitHub Models retired)."""
+    return os.environ.get("GITHUB_PAT", "").strip()
 
 
 def _load_prompt(prompt_path: str) -> str:

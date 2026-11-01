@@ -18,7 +18,8 @@ def check_credentials() -> str:
     default chain on Lambda/CI when resolve_aws_profile returns None). Returns
     "ok" on a clean exit, else "unavailable". There is no "expired" state: the
     static-key chain has no interactive login token -- the PlatformDev/PlatformAdmin
-    STS session auto-refreshes from the long-lived agent_static key.
+    STS session auto-refreshes from the long-lived agent_static key. Exit-code only,
+    so it stays correct under the agent proxy (which re-signs the identity it reports).
     """
     profile = _common.resolve_aws_profile()
     cmd = ["aws", "sts", "get-caller-identity"]
@@ -53,9 +54,9 @@ def _handle_credentials_startup(creds_status: str) -> str:
         profile = _common.resolve_aws_profile() or "<default-chain>"
         print(
             "[WARN] AWS credentials unavailable (static-key assume-role chain did not resolve).\n"
-            f"       Verify the chain: aws sts get-caller-identity --profile {profile}\n"
+            f"       Verify the chain: bin/venv-python -m scripts.aws_identity caller-arn --profile {profile}\n"
             "       There is no interactive login to recover; if the agent_static\n"
-            "       key was rotated, refresh ~/.aws/credentials. Continuing in DEGRADED mode:\n"
+            "       key was rotated, update the environment's AWS network secret. Continuing in DEGRADED mode:\n"
             "       warehouse reads via the DuckLake reader\n"
             "       fall back to the local cache or empty results.",
             file=sys.stderr,

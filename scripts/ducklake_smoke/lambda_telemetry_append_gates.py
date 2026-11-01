@@ -1,10 +1,9 @@
-"""append_telemetry live vectors for the --lambda-telemetry gate (T2.36, slice 2a-2, plan 3 part 2).
+"""append_telemetry live vectors for the --lambda-telemetry-smoke gate, run against the smoke twin (T2.36, Decision 236).
 
-Called by lambda_telemetry after part 1's registration vectors with part 1's freshly registered synthetic project_ref, so
+Called by lambda_telemetry_smoke after part 1's registration vectors with part 1's freshly registered synthetic project_ref, so
 every data vector writes under an explicitly registered synthetic project and the gate never mints a real-looking one.
 The one exception is the auto-registration vector, which sends concurrent first-sight appends to a fresh NON-reserved ref
-and therefore first requires the telemetry writer to be bound to the smoke catalog (2c must replace it before the function
-binds production).
+and therefore runs only against the smoke twin (Decision 236 cl.1), never the production writer.
 
 Each vector is a loud SmokeTestFailure (Decision 55). Output carries markers, ids-free counts and bounded-precision
 measurements only: every *_ms is an integer, every ratio has three decimals, and no project_ref, URL, host, account id or

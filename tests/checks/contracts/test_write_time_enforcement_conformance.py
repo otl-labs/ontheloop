@@ -156,11 +156,30 @@ SCENARIOS: dict[str, list[dict[str, Any]]] = {
             content_sha256=hashlib.sha256(b"hello").hexdigest(),
             content_bytes=5,
             content_truncated=False,
-        )  # fmt: skip
+        ),  # fmt: skip
+        _event(
+            "t#1",
+            observation_ref="turn-1",
+            purpose="prompt",
+            origin="human",
+            content_omitted_reason="withheld_by_policy",
+            content_sha256=hashlib.sha256(b"").hexdigest(),
+            content_bytes=0,
+            content_truncated=False,
+        ),  # fmt: skip
     ],
     "telemetry_agents": [
         _event("a#0", event_kind="open", agent_type="manual"),
         _event("a#1", event_kind="close", agent_type="manual", outcome="success"),
+        _event(
+            "a#2",
+            event_kind="open",
+            agent_type="manual",
+            trigger="workflow_run",
+            entity_ref="a#2/run",
+            host_run_ref="gha:1/1/rca/1",
+        ),  # fmt: skip
+        _event("a#3", event_kind="open", agent_type="manual", trigger="subagent_sync"),
     ],
 }
 
@@ -251,11 +270,15 @@ def outcome(adapter: Any, table: str, record: dict[str, Any]) -> tuple[str, str 
     return None
 
 
-def _bad_text(pattern_ok: Any) -> str:
-    for candidate in ("~", "~ NOT A MATCH ~", "!!", "/abs/path", "a\\b", "x" * 300, "\u00e9\u00fc"):
-        if pattern_ok(candidate) is None:
+def _bad_text(pattern_ok: Any, also_ok: Any = None) -> str:
+    """A string *pattern_ok* refuses; with *also_ok* it must still satisfy that pattern (a conditional rule's mutation)."""
+    for candidate in ("~", "~ NOT A MATCH ~", "!!", "/abs/path", "a\\b", "x" * 300, "\u00e9\u00fc", _SHA):
+        if pattern_ok(candidate) is None and (also_ok is None or also_ok(candidate) is not None):
             return candidate
     raise AssertionError("no candidate violates the pattern")
+
+
+_NONZERO = {"host_run_ref": "gha:1/1/rca/1"}  # a null_or_zero_when string column's breaking value must still match its pattern
 
 
 def matches(row: dict[str, Any], condition: Any) -> bool:
@@ -310,7 +333,8 @@ def mutation(rules: RowRules, row: dict[str, Any], kind: str, column: str) -> di
     elif kind == "pattern_when":
         for condition, pattern in rules.pattern_when[column]:
             if matches(row, condition) and row.get(column) is not None:
-                out[column] = _bad_text(pattern.fullmatch)
+                base = rules.patterns.get(column)
+                out[column] = _bad_text(pattern.fullmatch, base.fullmatch if base else None)
                 return out
         return None
     elif kind == "required_when":
@@ -320,7 +344,7 @@ def mutation(rules: RowRules, row: dict[str, Any], kind: str, column: str) -> di
     elif kind == "null_or_zero_when":
         if not matches(row, rules.null_or_zero_when[column]):
             return None
-        out[column] = 1
+        out[column] = _NONZERO.get(column, 1)
     elif kind == "not_before":
         other = rules.not_before[column]
         if row.get(column) is None or row.get(other) is None:
@@ -344,6 +368,8 @@ def mutation(rules: RowRules, row: dict[str, Any], kind: str, column: str) -> di
             return None
         out[rules.content.sha] = "f" * 64
     elif rules.content is not None and kind in ("uri_above_threshold", "within_cap"):
+        if row.get(rules.content.inline) is None:  # an omission row has no inline payload to move to a uri
+            return None
         threshold, cap = rules.content.threshold, rules.content.cap
         out.update({rules.content.inline: None, rules.content.uri: "s3://placeholder/object"})
         out[rules.content.size] = threshold if kind == "uri_above_threshold" else (cap or threshold) + 1
@@ -392,6 +418,9 @@ _NON_ROW_WRITING: dict[str, dict[str, str]] = {
     },
     "src/lambdas/ducklake_telemetry_reader/handler.py": dict.fromkeys(
         ("attach_check", "describe", "named_read"), "read or probe: the telemetry reader holds no write grant"
+    ),
+    "src/lambdas/ducklake_telemetry_content_reader/handler.py": dict.fromkeys(
+        ("describe", "named_read"), "read: the telemetry content reader holds no write grant"
     ),
     "src/lambdas/ducklake_reader/handler.py": dict.fromkeys(
         (

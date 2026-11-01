@@ -181,6 +181,8 @@ def run_fixture(triples: list[Triple], simulate: Simulator, stream: Optional[Tex
     A raised exception from `simulate` is recorded as a mismatch for that triple rather than
     aborting the run: one unsimulatable verb must not hide the verdicts of the other sixty.
     """
+    from scripts.ci.redaction_check import mask_account_ids  # noqa: PLC0415 -- stdlib-only shared mask
+
     out = stream if stream is not None else sys.stdout
     id_width = max((len(t.id) for t in triples), default=0)
     verb_width = max((len(t.verb) for t in triples), default=0)
@@ -195,21 +197,25 @@ def run_fixture(triples: list[Triple], simulate: Simulator, stream: Optional[Tex
         if not matched:
             mismatches.append((triple, actual))
         print(
-            f"  {'OK      ' if matched else 'MISMATCH'}  {triple.id:<{id_width}}  {triple.verb:<{verb_width}}  "
-            f"expected={triple.expected_decision:<12} actual={actual}",
+            mask_account_ids(
+                f"  {'OK      ' if matched else 'MISMATCH'}  {triple.id:<{id_width}}  {triple.verb:<{verb_width}}  "
+                f"expected={triple.expected_decision:<12} actual={actual}"
+            ),
             file=out,
         )
 
     print(f"\n  {len(triples)} triples simulated, {len(mismatches)} mismatch(es).", file=out)
     for triple, actual in mismatches:
-        print(f"\n  MISMATCH {triple.id}: {triple.verb} on {triple.target_arn}", file=out)
-        print(f"    expected={triple.expected_decision} actual={actual}", file=out)
-        print(f"    why: {triple.why}", file=out)
+        print(mask_account_ids(f"\n  MISMATCH {triple.id}: {triple.verb} on {triple.target_arn}"), file=out)
+        print(mask_account_ids(f"    expected={triple.expected_decision} actual={actual}"), file=out)
+        print(mask_account_ids(f"    why: {triple.why}"), file=out)
         if triple.by_design:
             print(
-                f"    by_design: {triple.by_design}\n"
-                "    A by_design entry that flipped to allowed is a GRANT LEAK -- treat it as a security "
-                "regression, not a fixture error.",
+                mask_account_ids(
+                    f"    by_design: {triple.by_design}\n"
+                    "    A by_design entry that flipped to allowed is a GRANT LEAK -- treat it as a security "
+                    "regression, not a fixture error."
+                ),
                 file=out,
             )
     return len(mismatches)
@@ -271,32 +277,34 @@ def main(
     parser.add_argument("--region", default=None, help=f"AWS region override (default: session region or {DEFAULT_REGION})")
     args = parser.parse_args(argv)
 
+    from scripts.ci.redaction_check import mask_account_ids  # noqa: PLC0415 -- stdlib-only shared mask
+
     try:
         data = load_fixture(Path(args.fixture))
     except Exception as exc:  # noqa: BLE001
-        print(f"iam_simulate: cannot load fixture {args.fixture}: {exc}", file=sys.stderr)
+        print(mask_account_ids(f"iam_simulate: cannot load fixture {args.fixture}: {exc}"), file=sys.stderr)
         return 1
 
     try:
         account_id, region = identity_fn(args.profile, args.region)
     except Exception as exc:  # noqa: BLE001
-        print(f"iam_simulate: cannot resolve the caller identity: {exc}", file=sys.stderr)
+        print(mask_account_ids(f"iam_simulate: cannot resolve the caller identity: {exc}"), file=sys.stderr)
         return 1
 
     try:
         source_arn = principal_arn(data, account_id, region)
         triples = build_triples(data, account_id, region)
     except ValueError as exc:
-        print(f"iam_simulate: malformed fixture: {exc}", file=sys.stderr)
+        print(mask_account_ids(f"iam_simulate: malformed fixture: {exc}"), file=sys.stderr)
         return 1
 
     try:
         simulate = simulator_factory(args.profile, region, source_arn)
     except Exception as exc:  # noqa: BLE001
-        print(f"iam_simulate: cannot build the IAM simulate client: {exc}", file=sys.stderr)
+        print(mask_account_ids(f"iam_simulate: cannot build the IAM simulate client: {exc}"), file=sys.stderr)
         return 1
 
-    print(f"=== IAM simulate gate: {len(triples)} triples against the live policy (region {region}) ===")
+    print(mask_account_ids(f"=== IAM simulate gate: {len(triples)} triples against the live policy (region {region}) ==="))
     mismatches = run_fixture(triples, simulate)
     if mismatches:
         print(

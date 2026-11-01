@@ -399,21 +399,35 @@ locals {
         # Decision 143 clause 1. Critically there is NO boundary intersection available to narrow it:
         # the boundary DataPlaneAllow already carries secretsmanager:*, so this identity statement is
         # the SOLE control -- a secret:agent-platform-* prefix here would be fully effective over the
-        # anthropic + deepseek API keys, the GitHub PAT AND every
+        # anthropic + deepseek API keys AND every
         # future agent-platform-* secret, with no review. It is therefore held to exactly the
         # aws_secretsmanager_secret resources terraform/personal actually declares (the DuckLake Neon
         # DSN keeps its own SecretsManagerDuckLakeNeonDSN Sid above). A NEW secret must be added here
         # deliberately. Accepted residual: UpdateSecret can still overwrite a value on these --
         # marginal rather than a new capability class, since SecretsManagerValueReadEnumerated
-        # already grants GetSecretValue on them -- and it is now bounded to a named, reviewable five.
+        # already grants GetSecretValue on them -- and it is now bounded to a named, reviewable two.
         Sid    = "SecretsManagerUpdateEnumerated"
         Effect = "Allow"
         Action = ["secretsmanager:UpdateSecret"]
         Resource = [
           "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-deepseek-api-key-*",
           "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-anthropic-api-key-*",
-          "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-github-pat-*",
         ]
+      },
+      {
+        # Decision 237 (secrets-to-ssm-grants): the one Terraform-managed secret parameter is the Neon catalog DSN, whose
+        # password Terraform creates (a declared value exception). The write verbs are granted on exactly that ARN;
+        # every out-of-band /secret/ parameter stays unwritable by CI. The parameter does not exist until
+        # secrets-to-ssm-expand, and this grant must be live before that plan merges.
+        Sid    = "SecretParameterDsnWrite"
+        Effect = "Allow"
+        Action = [
+          "ssm:PutParameter",
+          "ssm:DeleteParameter",
+          "ssm:AddTagsToResource",
+          "ssm:RemoveTagsFromResource"
+        ]
+        Resource = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/ducklake-neon-catalog-dsn"]
       },
       {
         # DEP-01 (Decision 144, rec-2757): apply-phase CREATE / MODIFY / DESTROY of the agent-platform-*

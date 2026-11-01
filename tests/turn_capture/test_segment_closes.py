@@ -42,3 +42,31 @@ def test_segment_closes_need_no_finalization_cut() -> None:
     final = _pass(_resumed(), first.next_cursor, final=True)
     assert _closes(final) == ["u3#0/close"]
     assert len(final.next_cursor.finalize_cuts) == 1
+
+
+def _late(*tail):
+    return [
+        prompt("u1", 1, "p1", "first"),
+        assistant("a1", 2, "m1", [text_block("one")]),
+        prompt("u2", 10, "p2", "second"),
+        assistant("a2", 11, "m2", [text_block("two")]),
+        hook("rs1", 12, "SessionStart:resume", durationMs=5000),
+        *tail,
+    ]
+
+
+def test_late_resume_segment_close_is_anchored_before_the_effective_boundary() -> None:
+    files = make_files(_late(prompt("u3", 20, "p3", "third"), assistant("a3", 21, "m3", [text_block("three")])))
+    result = _pass(files)
+    assert _closes(result) == ["a1#0/close"]
+    assert [r["event_kind"] for r in result.sessions].count("resume") == 1 and result.next_cursor.finalize_cuts == []
+
+
+def test_turn_after_a_late_resume_belongs_to_the_next_segment() -> None:
+    tail = [
+        assistant("a3", 13, "m3", [text_block("three")]),
+        hook("rs2", 30, "SessionStart:resume"),
+        prompt("u3", 31, "p3", "third"),
+        assistant("a4", 32, "m4", [text_block("four")]),
+    ]
+    assert _closes(_pass(make_files(_late(*tail)))) == ["a1#0/close", "a3#0/close"]

@@ -1,4 +1,4 @@
-"""Vector data for the --lambda-telemetry append gate (T2.36, slice 2a-2, plan 3 part 2). Data and pure builders only: it
+"""Vector data for the --lambda-telemetry-smoke append gate (the twin; T2.36, slice 2a-2). Data and pure builders only: it
 imports nothing from src.telemetry (the gate must not depend on the code it proves), and it does no I/O.
 
 A golden four-table payload in wire form for one session under a given project_ref, the negative cases as (name,

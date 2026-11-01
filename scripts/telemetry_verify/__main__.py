@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from scripts.rec_episode import find_recs
+from scripts.telemetry_capture import read_route
 from scripts.telemetry_verify import completeness, monitor
 from scripts.telemetry_verify.alarms import ALARM_SOURCE, raise_alarms
 from scripts.telemetry_verify.silent_checks import REPORT_ONLY_CHECKS
@@ -185,6 +186,9 @@ def run_monitor_command(
         print("MONITOR_REFUSED reason=quiet_day_outside_window")
         return 2 if args.assert_zero else 1
     try:
+        # The routed reader resolves its catalog here, so an unresolved one stops by its own class: run_monitor reports a
+        # failing describe as MonitorIncomplete.
+        getattr(reader, "catalog", None)
         report = monitor.run_monitor(
             reader.named,
             reader.describe,
@@ -212,10 +216,12 @@ def run_completeness_command(
 ) -> int:
     judged = args.judged_day or (now.date() - timedelta(days=2)).isoformat()
     empty = completeness.CompletenessResult(judged)
-    if judged < completeness.V4_FIRST_JUDGED_DAY:
-        print(completeness_line(empty, "before_v4", {}))
-        return 2
     try:
+        catalog = getattr(reader, "catalog", None) or read_route.resolve_catalog()
+        first = completeness.first_judged_day(catalog)
+        if first is None or judged < first:
+            print(completeness_line(empty, "before_v4" if catalog == read_route.DEFAULT_CATALOG else "before_catalog", {}))
+            return 2
         lists = completeness.load_lists(Path(args.lists_dir))
         if not completeness.lists_cover(lists, judged):
             print(completeness_line(empty, "lists_short", {}))
@@ -252,9 +258,7 @@ def main(
     logging.disable(logging.CRITICAL)
     when = now or datetime.now(timezone.utc)
     if reader is None:
-        from src.common.ducklake_reader_client import make_reader  # noqa: PLC0415
-
-        reader = make_reader()
+        reader = read_route.make_routed_reader()
     if args.command == "monitor":
         return run_monitor_command(args, reader=reader, now=when, budget=budget, portal=portal)
     return run_completeness_command(args, reader=reader, now=when, portal=portal)

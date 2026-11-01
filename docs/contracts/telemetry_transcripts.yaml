@@ -246,36 +246,48 @@ fields:
     type: str
     iceberg_type: string
     nullable: true
-    description: Why a payload is stored nowhere. oversize = the storable payload would exceed full_output_cap_bytes.
+    description: Why a payload is stored nowhere. oversize = the storable payload would exceed full_output_cap_bytes; withheld_by_policy = the producer's capture policy for this run says the text is never stored (Decision 238 cl.1 for plan review).
     semantics: >-
-      Set, with content and content_uri both NULL, on a typed omission row. content_sha256/content_bytes are then
+      Set, with content and content_uri both NULL, on a typed omission row. On an oversize omission row content_sha256/content_bytes are then
       the RAW source bytes' identity, streamed, never decoded or scrubbed (nothing is stored), and are not cap-bound; the
       reason can hold even when the raw size is within the cap, because decoding and scrubbing a non-UTF-8 source grows it.
-    populated_by: the claude_code producer, when a persisted tool output is above the cap.
-    dq_intent: {accepted_values: {values: [oversize]}}
+      On a withheld_by_policy row nothing about the payload is stored: content_sha256 is the SHA-256 of the empty byte string and
+      content_bytes is 0, because a raw digest of a short output confirms an exact guess.
+    populated_by: the claude_code producer, when a persisted tool output is above the cap (oversize); a CI capture producer whose policy withholds the run's text (withheld_by_policy).
+    dq_intent: {accepted_values: {values: [oversize, withheld_by_policy]}}
     amendment_log:
+      - {date: "2026-10-29", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): description and semantics qualify the raw-source-bytes identity to an oversize omission row and add the withheld clause."}
+      - {date: "2026-10-29", semantic_break: false, change_class: accepted_values_extend, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): withheld_by_policy joins the omission reasons; its rows store the empty digest and zero bytes.", migration_story: "Additive value; no stored row changes."}
       - {date: "2026-10-04", semantic_break: false, change_class: field_add, summary: "PLAN-telemetry-write-conformance (slice 2a-1): new field naming a typed omission."}
   content_sha256:
     type: str
     iceberg_type: string
     nullable: false
-    description: SHA-256 of the ONE stored payload (whichever of content/content_uri is set), hex-encoded; of the raw source bytes on an omission row.
+    description: SHA-256 of the ONE stored payload (whichever of content/content_uri is set), hex-encoded; of the raw source bytes on an oversize omission row, of the empty byte string on a withheld_by_policy row.
     semantics: >-
       Required regardless of tier: the content-addressing key for a spilled blob's content_uri, and
-      an integrity check for an inline payload. On an omission row (content_omitted_reason set) it identifies the raw
-      source bytes, which can confirm an exact guess of a short output; accepted, the rows stay in the customer-owned data plane.
+      an integrity check for an inline payload. On an oversize omission row it identifies the raw
+      source bytes, which can confirm an exact guess of a short output; accepted, the rows stay in the customer-owned data plane. On a
+      withheld_by_policy row it is the SHA-256 of the empty byte string (write-enforced), never a digest of the withheld text.
     populated_by: the claude_code producer, computed over the payload before storing it (the writer only verifies a blob against it).
-    dq_intent: {not_null: true, pattern: "^[0-9a-f]{64}$"}
+    dq_intent:
+      not_null: true
+      pattern: "^[0-9a-f]{64}$"
+      pattern_when:
+        - {when: {content_omitted_reason: [withheld_by_policy]}, pattern: "^e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855$"}
     amendment_log:
+      - {date: "2026-10-29", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): the raw-source-bytes identity is qualified to an oversize omission row; a withheld_by_policy row stores the empty-string digest (pattern_when, write-enforced).", migration_story: "No stored row changes."}
       - {date: "2026-10-04", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-write-conformance (slice 2a-1): an omission row's digest identifies the raw source bytes; the lowercase 64-hex pattern is write-enforced.", migration_story: "No v1 row exists; parser_version 2 emits the new semantics."}
   content_bytes:
     type: int
     iceberg_type: bigint
     nullable: false
     description: Size of the ONE stored payload in bytes. Replaces the retired size_bytes column (same concept, computed over the stored payload, not a separate draft field).
-    semantics: Required; used to budget transcript storage and to spot anomalous (empty / huge) blobs, and is the threshold comparand for the inline/blob-port tier choice.
+    semantics: Required; used to budget transcript storage and to spot anomalous (empty / huge) blobs, and is the threshold comparand for the inline/blob-port tier choice. On an oversize omission row it is the raw source size; 0 on a withheld_by_policy row (write-enforced).
     populated_by: the claude_code producer.
-    dq_intent: {not_null: true}
+    dq_intent: {not_null: true, null_or_zero_when: {content_omitted_reason: [withheld_by_policy]}}
+    amendment_log:
+      - {date: "2026-10-29", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): content_bytes is 0 on a withheld_by_policy row (null_or_zero_when, write-enforced).", migration_story: "No stored row changes."}
   content_truncated:
     type: bool
     iceberg_type: boolean
@@ -350,6 +362,7 @@ governance_notes: >-
   sentinels), tool_output (tool), system (harness: meta and companion records, interrupt sentinels, API-error text) and
   omission rows; attachment-derived system rows are not emitted; a fork's inherited records emit none.
 amendment_log:
+  - {date: "2026-10-29", semantic_break: false, change_class: accepted_values_extend, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): withheld_by_policy omission reason with the empty digest and zero bytes. Per-field changes are on their own fields' logs."}
   - {date: "2026-10-25", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-production-catalog bookkeeping: the two not-provisioned-in-production statements now say provisioned in the production telemetry catalog (Decision 230); mechanical status edit, no meaning change."}
   - {date: "2026-10-24", semantic_break: false, change_class: governance_note_add, summary: "PLAN-telemetry-field-realization (T3.20 c7): realization block (who writes each stored column, or who owns its absence); populated_by names the real writer. No column, type or rule change."}
   - {date: "2026-10-15", semantic_break: false, change_class: governance_note_add, summary: "PLAN-telemetry-blob-route (slice 2a-2 plan 4): write_path and the KNOWN GAPS note name the claim-check route and its owners (rec-4033, rec-4291); the content exemption is removed (field entries on content and content_uri)."}

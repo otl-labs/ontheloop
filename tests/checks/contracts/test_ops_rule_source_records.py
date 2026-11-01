@@ -8,10 +8,11 @@ from pathlib import Path
 
 import yaml
 
+from tests.fixtures.decision_entry import authored_bytes, cap_bytes, decision_entry
+
 _ROOT = Path(__file__).resolve().parents[3]
 _DECISIONS = (_ROOT / "docs" / "DECISIONS.md").read_text(encoding="utf-8")
 _CONTRACTS = _ROOT / "docs" / "contracts"
-_DECISION_CAP_BYTES = 6144
 
 
 def _norm(text: str) -> str:
@@ -34,7 +35,7 @@ def _standard_statement() -> str:
 def test_decision_annotations() -> None:
     number = int(re.match(r"Decision (\d+):", _standard_statement().strip()).group(1))
     body = _section(number)
-    assert len(body.encode("utf-8")) <= _DECISION_CAP_BYTES
+    assert authored_bytes(decision_entry(_DECISIONS, number)) <= cap_bytes()
     annotation = re.search(r"^\[Amendment \d{4}-\d{2}-\d{2}, rec-4158:.*?\]$", body, re.MULTILINE | re.DOTALL)
     assert annotation, f"Decision {number} must end with a dated [Amendment ..., rec-4158: ...] annotation"
     text = _norm(annotation.group(0))

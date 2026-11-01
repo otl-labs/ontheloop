@@ -7,12 +7,14 @@ required check.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from scripts.convergence_health.sensor_liveness import cron_period_seconds
+from scripts.telemetry_capture import read_route
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "telemetry-verification.yml"
@@ -81,3 +83,13 @@ def test_taxonomy_row_is_keyed_by_the_workflow_name() -> None:
     row = rows["telemetry-verification"]
     assert (row["tier"], row["ci_rca"], row["owner"]) == ("not_a_gate", "excluded", "platform")
     assert _doc()["name"] == "telemetry-verification"
+
+
+def test_the_telemetry_reader_url_and_host_are_masked() -> None:
+    (run,) = [str(s["run"]) for s in _steps() if "get-function-url-config" in str(s.get("run", ""))]
+    loop = re.search(r"for role in ([a-z_ ]+); do", run)
+    assert loop is not None and loop.group(1).split() == ["writer", "reader", "telemetry_reader"]
+    assert '--function-name "agent-platform-ducklake-${role//_/-}"' in run
+    written = run.index('>> "$GITHUB_ENV"')
+    assert run.index('echo "::add-mask::${URL}"') < written and run.index('echo "::add-mask::${HOST}"') < written
+    assert f"DUCKLAKE_{'telemetry_reader'.upper()}_URL" == read_route.READER_URL_ENV

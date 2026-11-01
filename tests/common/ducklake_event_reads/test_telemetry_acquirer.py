@@ -1,4 +1,4 @@
-"""telemetry_acquirer and the production pin: the acquire path is unchanged by default and binds a declared secret."""
+"""telemetry_acquirer and the production pin: every event acquire names its pin and may bind a declared secret."""
 
 from __future__ import annotations
 
@@ -41,26 +41,17 @@ def _spy(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return seen
 
 
-def test_telemetry_acquirer_defaults_are_byte_identical(monkeypatch: pytest.MonkeyPatch, smoke_pin: None) -> None:
+def test_acquirer_requires_a_declared_pin(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = _spy(monkeypatch)
-    acquire = ev.acquirer_for("named_read", _PAYLOAD, NO_OPS, "/e")
+    with pytest.raises(TypeError):
+        ev.acquirer_for("named_read", _PAYLOAD, NO_OPS, "/e")  # type: ignore[call-arg]
+    assert seen["fetch"] == [] and seen["open"] == []
+    _production_pin(monkeypatch)
+    acquire = ev.acquirer_for("named_read", _PAYLOAD, NO_OPS, "/e", pin=ev.require_production_pin)
     acquire()
-    assert seen["fetch"] == [((), {})]
     (opened,) = seen["open"]
-    assert "read_only" not in opened and opened["alias"] == rt.TELEMETRY_CATALOG_ALIAS
-    assert opened["meta_schema"] == rt.SMOKE_META_SCHEMA and opened["data_path"] == rt.SMOKE_DATA_PATH
-    statements = [sql for sql, _ in seen["con"].calls]
-    assert statements[0].startswith("SET memory_limit=") and statements[1:] == [
-        "SET temp_directory='/tmp/telemetry-spill'",
-        "SET max_temp_directory_size='300MB'",
-    ]
-    assert seen["warm"][0]["slot"] == ev.TELEMETRY_SLOT and seen["warm"][0]["alias"] == rt.TELEMETRY_CATALOG_ALIAS
-    assert seen["warm"][0]["probe_sql"] == "SELECT 1"
-    ev._INTERRUPTED_SLOTS.add(ev.TELEMETRY_SLOT)
-    acquire()
-    assert "__ducklake_metadata_" in seen["warm"][1]["probe_sql"]
-    acquire()
-    assert seen["warm"][2]["probe_sql"] == "SELECT 1"
+    assert opened["alias"] == rt.TELEMETRY_CATALOG_ALIAS and opened["meta_schema"] == rt.TELEMETRY_PROD_META_SCHEMA
+    assert opened["data_path"] == rt.TELEMETRY_PROD_DATA_PATH and seen["warm"][0]["slot"] == ev.TELEMETRY_SLOT
 
 
 def test_acquirer_takes_a_declared_pin_secret_and_read_only_attach(monkeypatch: pytest.MonkeyPatch) -> None:

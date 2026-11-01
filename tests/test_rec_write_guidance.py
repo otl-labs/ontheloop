@@ -220,3 +220,36 @@ def test_ci_rca_guidance_names_repair_track() -> None:
     fields = get_rec_write_guidance(source="ci_rca")["context_v2_json"]["schema_fields"]
     assert "test_defect" in fields["repair_track"] and "product_regression" in fields["repair_track"]
     assert "omit only for a Track A red" in fields["preventive_action"]
+
+
+class TestGlossaryGuidance:
+    """The glossary projection of get_rec_write_guidance (Decision 240)."""
+
+    def test_glossary_terms_match_contract(self) -> None:
+        from scripts.executor.rec_write_guidance import get_rec_write_guidance
+
+        contract = yaml.safe_load(Path("docs/contracts/glossary.yaml").read_text(encoding="utf-8"))
+        entry = get_rec_write_guidance()["glossary"]
+        assert entry["description"] and entry["semantics"] == contract["relative_words"]["rule"]
+        assert set(entry["terms"]) == set(contract["terms"])
+        assert entry["terms"]["adopter"]["written"] == contract["terms"]["adopter"]["written"]
+        for word in ("platform", "product"):
+            assert entry["relative_words"][word] == contract["relative_words"][word]["say_instead"]
+
+    def test_glossary_path_override(self, tmp_path: Path) -> None:
+        from scripts.executor.rec_write_guidance import get_rec_write_guidance
+
+        contract = {
+            "relative_words": {"rule": "r", "platform": {"say_instead": "a"}, "product": {"say_instead": "b"}},
+            "terms": {"core": {"written": "core", "reserved_meaning": "m", "do_not_use_for": "n", "extra": "dropped"}},
+        }
+        path = tmp_path / "glossary.yaml"
+        path.write_text(yaml.safe_dump(contract), encoding="utf-8")
+        entry = get_rec_write_guidance(glossary_path=path)["glossary"]
+        assert entry["terms"] == {"core": {"written": "core", "reserved_meaning": "m", "do_not_use_for": "n"}}
+        assert entry["relative_words"] == {"platform": "a", "product": "b"} and entry["semantics"] == "r"
+
+    def test_absent_glossary_omits_key(self, tmp_path: Path) -> None:
+        from scripts.executor.rec_write_guidance import get_rec_write_guidance
+
+        assert "glossary" not in get_rec_write_guidance(glossary_path=tmp_path / "absent.yaml")

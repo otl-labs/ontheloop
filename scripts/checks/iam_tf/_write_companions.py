@@ -261,7 +261,7 @@ LIFECYCLE_COMPANIONS: dict[str, dict[str, dict]] = {
         "update": _row(
             "secretsmanager:UpdateSecret",
             _at(_SECRET_PREFIX, *_tag_pair("secretsmanager")),
-            f"{_TAG_DIFF_WHY}; UpdateSecret itself is deliberately ENUMERATED at five ARNs (a worst verb under "
+            f"{_TAG_DIFF_WHY}; UpdateSecret itself is deliberately ENUMERATED at two ARNs (a worst verb under "
             "Decision 143 -- value-capable, no metadata-only variant), so only the metadata companions sit at the prefix",
         ),
         "delete": _row("secretsmanager:DeleteSecret", (), f"{_SINGLE_CALL}, with a 7-30 day recovery window"),

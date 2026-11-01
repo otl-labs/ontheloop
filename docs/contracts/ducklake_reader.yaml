@@ -35,9 +35,10 @@ contract:
       - PlatformAdmin
     registry_path: >-
       src/common/ducklake_named_reads.py (the NAMED_READS registry, re-exported by ducklake_scd2_schema; named_read
-      verb dispatch, Decision 84 I-3) and, for the telemetry event journals, the reader-only EVENT_READS registry
-      (src/common/ducklake_event_read_verbs.py, rec-4291). The response stamps registry_version (the registry-format version) and the served
-      verb's read_version (a per-verb compatibility stamp) for cache-coherence.
+      verb dispatch, Decision 84 I-3). The telemetry EVENT_READS registry (src/common/ducklake_event_read_verbs.py) is served
+      by agent-platform-ducklake-telemetry-reader (ducklake_telemetry_reader.yaml), not by this function. The response stamps
+      registry_version (the registry-format version) and the served verb's read_version (a per-verb compatibility stamp) for
+      cache-coherence.
   provisional_v0:
     authored_at: "2026-06-22"
     authored_via: >-
@@ -96,40 +97,32 @@ verbs:
       catalog_unavailable: "a dead catalog connection (also after the reopen-once where the handler reopens): retryable, 503 {error_class, request_id, action, reopened}"
   named_read:
     payload_schema_ref: >-
-      event envelope {action: "named_read", verb, params?: {..}, limit?, deadline_ms?}. `verb` names a
+      event envelope {action: "named_read", verb, params?: {..}, limit?}. `verb` names a
       pre-established read from the NAMED_READS registry (src/common/ducklake_named_reads.py);
       `params` binds named bind values. No caller SQL crosses the boundary on this path (Decision
       84 I-3). `limit` (T1.16 c1) is an optional server-side integer-cast trailing LIMIT, accepted
       ONLY for a `paginable` verb (e.g. open_recs, recs_by_title_prefix) -- rejected with a
-      DuckLakeRuntimeError for a non-paginable verb. `deadline_ms` (rec-4474, beside `limit`, never inside
-      `params`) is accepted ONLY for an event-journal verb: a positive integer of milliseconds, applied per
-      query attempt, the caller's own deadline in addition to the reader's; on a non-event verb it is a
-      DuckLakeRuntimeError before any connect.
+      DuckLakeRuntimeError for a non-paginable verb. An event-journal verb name is not registered here and
+      answers as any unregistered verb.
     response_codes:
       200: "rows returned; body {ok, verb, registry_version, read_version, rows, row_count}. read_version is an opaque per-verb digest (first 16 hex of sha256 over the verb's canonical definition, SELECT * verbs including their column projection), compared by equality only -- it implies no ordering; registry_version stays the registry-format stamp"
       400: "named_read_input: a bound value or a registry error() guard refused caller input; body {ok: false, error_type, verb, error_class, error} with the redacted DuckDB message (first line, 300 characters); never retried. BinderException, ParserException and every other DuckDB class stay 500 unmapped"
       413: "response_too_large: the Function-URL envelope exceeds MAX_RESPONSE_BYTES (6,000,000); body {ok: false, error_type, action, bytes, cap, hint}; never retried (Decision 215 cl.6)"
-      500: "DuckLakeRuntimeError (empty/unknown verb; non-object params; limit on a non-paginable verb; deadline_ms on a non-event verb) / VersionMismatchError; transcript_content typed faults blob_integrity, grain_conflict and blob_misconfigured answer 500 {ok, error_type, reason, request_id, action}; unmapped: any other exception answers 500 {ok, error_type, error_class, request_id, action, elapsed_ms}, never its message"
-      503: "catalog_unavailable: a dead catalog connection (retryable); transcript_content blob_unavailable (retryable)"
-      504: "read_deadline_exceeded: an event-journal verb still running at its deadline was interrupted; body {ok, error_type, reason: reader_deadline, request_id, action}; never retried"
+      500: "DuckLakeRuntimeError (empty/unknown verb, an event-journal verb name included; non-object params; limit on a non-paginable verb) / VersionMismatchError; unmapped: any other exception answers 500 {ok, error_type, error_class, request_id, action, elapsed_ms}, never its message"
+      503: "catalog_unavailable: a dead catalog connection (retryable)"
     typed_errors:
-      runtime: "missing/unknown verb, params not an object, limit supplied for a non-paginable verb, or deadline_ms supplied for a non-event verb (500)"
-      read_deadline_exceeded: "an event-journal verb still running at the reader's deadline, the Lambda's remaining time when the attempt starts minus 10 s or the caller's deadline_ms if earlier, is interrupted: 504 {error_type, reason: reader_deadline, request_id, action}; never retried; narrow the window"
+      runtime: "missing/unknown verb (an event-journal verb name included), params not an object, or limit supplied for a non-paginable verb (500)"
       version_mismatch: "DuckDB/extension version mismatch (500)"
       response_too_large: "serialised response envelope above the 6,000,000-byte guard (413, typed, never retried); use a narrower named verb or the claim-check export (rec-4237)"
       named_read_input: "a named verb refused caller input (a bound value or an error() guard raised InvalidInputException, ConversionException, OutOfRangeException or TypeMismatchException): 400 {verb, error_class, error} carrying the redacted DuckDB message (first line, 300 characters); never retried"
-      blob_integrity: "transcript_content: a stored object disagrees with its row or cannot be read as one: 500 {error_type, reason, request_id, action}, reason from the closed set in the transcript_content invariant; never retried"
-      grain_conflict: "transcript_content: rows under one grain key differ in a compared column: 500 {error_type, reason: differing_rows, request_id, action}; never retried"
-      blob_misconfigured: "transcript_content: TELEMETRY_BLOB_ROOT unset or invalid, or an unclassified store access error: 500 {error_type, reason, request_id, action}"
-      blob_unavailable: "transcript_content: the object store throttled, answered 5xx or timed out after botocore's retries: retryable, 503 {error_type, reason, request_id, action}"
       unmapped: "an exception no row maps: 500 {error_class, request_id, action}, never the message; one ducklake_unmapped_error log line carries the redacted detail (500)"
       catalog_unavailable: "a dead catalog connection (also after the reopen-once where the handler reopens): retryable, 503 {error_class, request_id, action, reopened}"
   describe:
     payload_schema_ref: >-
       event envelope {action: "describe"}. Agent-facing verb (CD.10 / CD.15): returns the per-verb
-      parameter schema for every NAMED_READS entry and every EVENT_READS entry (table, description, params, paginable,
-      params_schema, read_version, agent_facing; an event-journal row adds kind, tables, catalog, binding, max_window_days). Connectionless -- pure metadata, no Neon connection (Decision 88 bounded
-      egress).
+      parameter schema for every NAMED_READS entry (table, description, params, paginable, params_schema, read_version,
+      agent_facing); no event-journal row is listed (the telemetry reader describes those). Connectionless -- pure metadata,
+      no Neon connection (Decision 88 bounded egress).
     response_codes:
       200: "body {ok, verbs: {<verb>: {table, description, params, paginable, params_schema, read_version, agent_facing}, ...}}; agent_facing (bool, default true) marks whether the verb is projected as an agent tool and is excluded from read_version"
       413: "response_too_large: the Function-URL envelope exceeds MAX_RESPONSE_BYTES (6,000,000); body {ok: false, error_type, action, bytes, cap, hint}; never retried (Decision 215 cl.6)"
@@ -162,16 +155,16 @@ verbs:
 audit_invariants:
   - "Closed boundary: the read role is S3 GetObject only; a write attempt is denied at IAM/S3 (no write path through the reader; write_probe gate)."
   - "named_read executes ONLY pre-established registry SQL keyed by verb name; no caller SQL crosses the boundary on this path (Decision 84 I-3)."
-  - "No reader action accepts caller-supplied SQL; dq_check is the data-quality harness's read path (Decision 84 I-3 follow-up, PLAN-query-ops-retirement). The retired query_ops action answers 400 unknown action, and the dispatcher's allow-list omits it. Every statement the reader runs is registry content (NAMED_READS, EVENT_READS) or a dq_check template owned by src/common/ducklake_dq_checks.py, with values bound and column names drawn from the field-semantics contract."
-  - "Event-journal verbs (rec-4291, registry v6; the reader half of rec-4024): named verbs in the reader-only EVENT_READS registry derive telemetry state, duration, roll-ups, friction, reported cost and a metadata-only health count at read (Decision 199 cl.1) and are served from a second warm connection, the telemetry slot (ATTACHed as telemetry_catalog from TELEMETRY_META_SCHEMA and TELEMETRY_DATA_PATH, opened lazily, reopened on its own dead-session condition); every other action, dq_check included, binds the ops slot and never opens the telemetry slot. Until slice 2c lifts it together with tenant-scoped reads (Decision 200 cl.2, rec-4292), every event verb refuses with a 500 runtime answer naming rec-4292 unless the pin names the smoke catalog; the agent-facing descriptions say they read the smoke catalog only. as_of is required and timezone-aware (the boundary never substitutes server time); session_id must be a canonical 26-character ULID whose time prefix decodes the one calendar-day partition read; a window verb takes day_from and day_to within its declared max_window_days (7 for sessions_window and sessions_window_all_purposes). A refused value answers 400 named_read_input naming the parameter and never echoing the value, before any connection or SQL. Rows are derived, never raw, and carry generations (V* per producer), conflicted_grain_keys and derivation_conflicted: a grain conflict is reported, never resolved (Decision 207). sessions_window excludes drill and synthetic projects structurally; sessions_window_all_purposes and telemetry_health_count are not agent-facing."
-  - "transcript_content (rec-4291; not agent-facing; the content_blobs port's get_blob read): params session_id, producer, event_id, parser_version, offset, max_bytes name one stored transcript row by its full grain key and return one response row {storage, encoding, offset, length, content_bytes, content_sha256, data, omitted_reason}. data is standard base64 of at most MAX_CHUNK_BYTES = 3,145,728 raw bytes, so a split multi-byte character stays exact and the largest envelope stays under the 6,000,000-byte guard. For storage inline or object the caller loops while offset + length < content_bytes, concatenates the decoded pages, then checks the reassembled length and SHA-256 against the row; storage omitted carries no data (length 0, omitted_reason set) and its content_bytes is the raw source size, so the caller stops. An unknown key answers zero rows; a stored row of a non-current parser_version is still served. Each page re-resolves the row."
+  - "No reader action accepts caller-supplied SQL; dq_check is the data-quality harness's read path (Decision 84 I-3 follow-up, PLAN-query-ops-retirement). The retired query_ops action answers 400 unknown action, and the dispatcher's allow-list omits it. Every statement the reader runs is registry content (NAMED_READS) or a dq_check template owned by src/common/ducklake_dq_checks.py, with values bound and column names drawn from the field-semantics contract."
+  - "Event-journal verbs (rec-4291, registry v6; the reader half of rec-4024): named verbs in the EVENT_READS registry derive telemetry state, duration, roll-ups, friction, reported cost and a metadata-only health count at read (Decision 199 cl.1). They are served by agent-platform-ducklake-telemetry-reader (ducklake_telemetry_reader.yaml) on the production telemetry catalog, not by this function, which holds no telemetry slot and answers an event verb name as an unregistered verb (500 runtime, after the ops connection); the verb semantics below stay as the reference for that function (Decision 236 cl.2). as_of is required and timezone-aware (the boundary never substitutes server time); session_id must be a canonical 26-character ULID whose time prefix decodes the one calendar-day partition read; a window verb takes day_from and day_to within its declared max_window_days (7 for sessions_window and sessions_window_all_purposes). A refused value answers 400 named_read_input naming the parameter and never echoing the value, before any connection or SQL. Rows are derived, never raw, and carry generations (V* per producer), conflicted_grain_keys and derivation_conflicted: a grain conflict is reported, never resolved (Decision 207). sessions_window excludes drill and synthetic projects structurally; sessions_window_all_purposes and telemetry_health_count are not agent-facing."
+  - "transcript_content is registered in EVENT_READS but served by no deployed function: this function serves no event verb and the telemetry reader excludes it, so no transcript content is served from production (Decision 236 cl.3; rec-4696 deploys the masked content reader, Decision 239). The transcript_content invariants below are the reference for that reader."
+  - "transcript_content (rec-4291; not agent-facing; the content_blobs port's get_blob read): params session_id, producer, event_id, parser_version, offset, max_bytes name one stored transcript row by its full grain key and return one response row {storage, encoding, offset, length, content_bytes, content_sha256, data, omitted_reason}. data is standard base64 of at most MAX_CHUNK_BYTES = 3,145,728 raw bytes, so a split multi-byte character stays exact and the largest envelope stays under the 6,000,000-byte guard. For storage inline or object the caller loops while offset + length < content_bytes, concatenates the decoded pages, then checks the reassembled length and SHA-256 against the row; storage omitted carries no data (length 0, omitted_reason set) and its content_bytes is the raw source size (0 on a withheld_by_policy row), so the caller stops. An unknown key answers zero rows; a stored row of a non-current parser_version is still served. Each page re-resolves the row."
   - "transcript_content parameters: producer is a non-empty string of at most 200 characters, event_id and session_id are canonical ULIDs, parser_version, offset and max_bytes are JSON integers (parser_version at least 1, offset at least 0, max_bytes at least 1; max_bytes is then clamped to MAX_CHUNK_BYTES). A refused value answers 400 named_read_input naming the parameter and never echoing the value."
   - "transcript_content typed faults, each answering {ok: false, error_type, reason, request_id, action} and one compact ducklake_typed_fault log line carrying only the function, action, error_type, reason, request id and the upstream error's code and HTTP status: 500 blob_integrity {reason} with reason one of uri_malformed, checksum_absent, checksum_mismatch, length_mismatch, changed_during_read, forbidden_or_missing, missing; 500 blob_misconfigured {reason} (not_configured, root_invalid, store_access); 503 blob_unavailable (retryable). Before serving object bytes the reader HEADs the object (stored SHA-256 and length against the row) and reads the range with IfMatch on that ETag. No response or log line carries content_uri, the bucket, a key, a presigned URL, a digest other than the row's content_sha256, an ARN, an account id or an exception message (Decision 101)."
   - "Grain conflict rule (Decision 207): transcript_content refuses rows stored under one grain key that differ in any compared column, payload or not, with 500 grain_conflict {differing_rows} and never serves one of them as the row, because each page re-resolves the row and a per-page choice could splice two stored versions into one payload. Rows that agree on every compared column but store the payload two ways (one inline, one object) serve the inline row. grain_conflict is a catalog condition counted apart from object corruption."
   - "Exception to 'Rows are derived, never raw' above: transcript_content returns one stored row's payload bytes by its full grain key, never caller-chosen columns and never another row. It and session_tree_rows (the next exception) are the only event verbs that do, and neither is agent-facing."
   - "Exception to 'before any connection or SQL' above: transcript_content's offset-at-or-beyond-size refusal needs the row's content_bytes, so it answers 400 named_read_input after the resolve SQL, still naming the parameter and not echoing the value. Every other refusal happens before any connection."
-  - "The reader role's TelemetryBlobRead grant (s3:GetObject on telemetry-blobs/<meta_schema>/* only, no List) is reached only through transcript_content, which checks the row before serving bytes: with query_ops retired no caller SQL can name a table function over s3://, so the blob-object and object-store residuals are closed. rec-4292 keeps the remaining telemetry reader identity and tenant scoping (Decision 143 cl.1)."
-  - "Verification verbs (telemetry slice 4, rec-4025; none agent-facing; smoke catalog only until slice 2c, rec-4292): session_tree_rows(session_id, offset, max_rows) returns every stored row of one tree, the rows sharing the root's tenant_id, project_id and session_started_at (all four tables, every parser_version, no dedupe), as table_name, row_json, total_rows and roots_in_tree, max_rows at most 2000; telemetry_orphan_counts(day_from, day_to, as_of) returns per day and telemetry join the child rows, the orphaned child rows split by whether their tree is quiescent past the idle threshold, the quiescent and pending tree counts and the conflicted grain-key count, over R4/R5-deduped rows of real-purpose projects; telemetry_root_sessions(day_from, day_to) returns each real-purpose root session's session_id, entity_ref, harness_session_key, branch, session_started_at, last_event_timestamp and its Decision 207 stamps. Windows span at most 7 days."
+  - "Verification verbs (telemetry slice 4, rec-4025; none agent-facing; served by agent-platform-ducklake-telemetry-reader, not by this function): session_tree_rows(session_id, offset, max_rows) returns every stored row of one tree, the rows sharing the root's tenant_id, project_id and session_started_at (all four tables, every parser_version, no dedupe), as table_name, row_json, total_rows and roots_in_tree, max_rows at most 2000; telemetry_orphan_counts(day_from, day_to, as_of) returns per day and telemetry join the child rows, the orphaned child rows split by whether their tree is quiescent past the idle threshold, the quiescent and pending tree counts and the conflicted grain-key count, over R4/R5-deduped rows of real-purpose projects; telemetry_root_sessions(day_from, day_to) returns each real-purpose root session's session_id, entity_ref, harness_session_key, branch, session_started_at, last_event_timestamp and its Decision 207 stamps. Windows span at most 7 days."
   - "Exception to 'Rows are derived, never raw' above: session_tree_rows returns the stored rows of exactly one tree, the compared columns plus created_timestamp and never content or content_uri, for verification callers only (the golden replay, the in-session source check and the daily verification monitor on the CI role), which hold the rows in memory for the comparison and never persist them; a page above the envelope guard answers 413 response_too_large and the caller halves max_rows (Decision 215 cl.6). Its callers print counts only."
   - "read_ops_current rejects a malformed `filter` (must carry BOTH column and value) loudly rather than degrading to an unfiltered full-table read (rec-2170 hardening)."
   - "An unknown `action` returns 400 with the sorted action allow-list, and a body that is not valid JSON or not a JSON object returns 400 bad_request (both dispatcher-level; not per-verb outcomes). Reads are idempotent and a dead Neon session is transparently reconnected once; a session that stays dead answers 503 catalog_unavailable."
@@ -179,10 +172,8 @@ audit_invariants:
   - "Response-size guard: every action measures the whole Function-URL envelope (len(json.dumps(response).encode('utf-8')), since the body string is escaped again inside it) and above MAX_RESPONSE_BYTES = 6,000,000 returns 413 {ok: false, error_type: response_too_large, action, bytes, cap, hint} instead of an opaque 502 from the runtime's 6,291,556-byte cap; the measured size is logged as response_bytes on every invocation (200 and 413). Clients never retry a 413."
   - "KNOWN GAP: the current_state single-key filter path has an open correctness rec (rec-2170) where a non-merge-key equality filter can bind against the merge key. The verb semantics here document the intended contract; the fix is a code amendment, not a contract change."
   - "T2.26: a control-class table (read_boundary: none, e.g. ops_entity_counters, docs/contracts/ops_entity_counters.yaml) is not reachable through read_ops_current, read_ops_history, dq_check, or named_read -- registering a table for governance does not by itself grant application read access. It is readable only in-transaction by its owning writer, or via the admin ducklake_maintenance control_health verb (outside this contract's boundary)."
-  - "Generic-read refusal: read_ops_current and read_ops_history REFUSE (500, DuckLakeRuntimeError naming the write_boundary) and dq_check refuses (400 dq_check_input naming the table parameter) a `table` whose ops_tables entry has write_boundary telemetry_append or registration (the four telemetry event tables, ops_tenants, ops_projects); telemetry reads arrive as the event-journal named verbs (rec-4291) and dimension reads as named verbs. This is a narrow refusal list keyed on write_boundary, not a read-capability model: rec-3771 owns that design. The ops warm slot never attaches the telemetry catalog (coverage: tests/lambdas/ducklake_reader/test_event_routing.py::test_dq_check_runs_on_the_ops_slot_only)."
-  - "No request that reaches the handler answers the Function URL's 502 except through a process-level failure: an exception no row maps answers 500 unmapped {error_class, request_id, action}, never its message; a dead catalog connection that survives the reopen-once answers 503 catalog_unavailable; an event-journal read still running at its deadline answers 504 read_deadline_exceeded (rec-4474). Enforced by the nodes of tests/test_ducklake_reader_handler.py named in the plan's verification step 3 (test_named_read_other_duckdb_error_is_unmapped_500, test_dead_connection_after_reopen_is_503, test_invocation_line_on_unparseable_body). Process-level failures (an interrupt that overruns the margin, for example during query bind or planning where DuckDB does not honour it, out of memory, Runtime.ExitError, an init failure) remain the runtime's 502 and count in Errors; rec-4296 owns the reader's process exits."
-  - "Event-journal read deadline (rec-4474): for an event verb the handler runs each query attempt (the first and the reopen-once retry) under a deadline at the earlier of the Lambda's remaining time minus 10 s and the caller's deadline_ms. At the deadline the DuckDB statement is interrupted (re-sent every 50 ms until the call returns, because DuckDB 1.5.4 drops an interrupt sent before execution starts), a deadline already spent never runs the query, and the answer is 504 read_deadline_exceeded, which the client never retries. Ops verbs and every other action run with no deadline. The interrupted telemetry slot is kept; its next acquire runs one catalog probe (a select over __ducklake_metadata_<alias>.ducklake_metadata) and reopens through the existing probe-failure path if it fails, with no per-acquire catalog round trip."
-  - "Telemetry slot threads and spill (rec-4474): every reader connection, the telemetry slot included, runs DuckDB at threads=1. An 8-thread telemetry slot with pg_use_ctid_scan=false was tried on 2026-10-19 and withdrawn: its telemetry_orphan_counts smoke read exceeded the 100 s deadline against the same read passing at 1 thread, so parallelism returns only with measured evidence (the compaction plan). The slot's spill directory is /tmp/telemetry-spill, capped at 300MB inside the function's default 512MB of /tmp, because the function's working directory is read-only (a spill to the default relative .tmp answered 500 unmapped)."
+  - "Generic-read refusal: read_ops_current and read_ops_history REFUSE (500, DuckLakeRuntimeError naming the write_boundary) and dq_check refuses (400 dq_check_input naming the table parameter) a `table` whose ops_tables entry has write_boundary telemetry_append or registration (the four telemetry event tables, ops_tenants, ops_projects); telemetry reads arrive as the event-journal named verbs (rec-4291) on the telemetry reader, and dimension reads as named verbs. This is a narrow refusal list keyed on write_boundary, not a read-capability model: rec-3771 owns that design. The ops warm slot never attaches the telemetry catalog (coverage: tests/lambdas/ducklake_reader/test_event_routing.py::test_dq_check_runs_on_the_ops_slot_only)."
+  - "No request that reaches the handler answers the Function URL's 502 except through a process-level failure: an exception no row maps answers 500 unmapped {error_class, request_id, action}, never its message; a dead catalog connection that survives the reopen-once answers 503 catalog_unavailable. Enforced by the nodes of tests/test_ducklake_reader_handler.py named in the plan's verification step 3 (test_named_read_other_duckdb_error_is_unmapped_500, test_dead_connection_after_reopen_is_503, test_invocation_line_on_unparseable_body). Process-level failures (out of memory, Runtime.ExitError, an init failure) remain the runtime's 502 and count in Errors; rec-4296 owns the reader's process exits."
   - "Declared residual: the ducklake_unmapped_error and ducklake_named_read_input log lines carry the exception message redacted and truncated to 300 characters, so a request value inside an exception's message can reach the log (strictly less than the runtime traceback they replace). The async DuckLake handlers (maintenance, maintenance_smoke, catalog_dr) are EventBridge-invoked and keep Lambda's own retry behaviour; rec-4303 owns them."
 amendment_log:
   - date: "2026-10-05"
@@ -195,6 +186,13 @@ amendment_log:
       telemetry_append and registration tables is stated, with the query_ops FROM residual declared.
     migration_story: >-
       Additive: existing consumers ignore the new key. No consumer pins read_version yet.
+  - date: "2026-10-29"
+    semantic_break: false
+    change_class: prose_improvement
+    summary: >-
+      PLAN-telemetry-top-level-agent-run (rec-4416): the transcript_content audit invariant notes content_bytes is 0 on a withheld_by_policy
+      omission row. Reference prose on an unserved verb; no verb, parameter or response changes.
+    migration_story: Prose only.
   - date: "2026-10-15"
     semantic_break: false
     change_class: field_add
@@ -297,4 +295,40 @@ amendment_log:
       The two callers of query_ops, the data-quality runner and the contract-rule census, moved to dq_check in the same change
       (verified against the deployed reader before the removal). A branch based before this change whose local full tier runs the
       old runner answers ERROR on every check until it rebases. Rollback is a revert of the merge commit, never re-adding caller SQL.
+  - date: "2026-10-27"
+    semantic_break: true
+    change_class: governance_note_add
+    summary: >-
+      PLAN-telemetry-production-flip PR cleanup (Decision 236 cl.2-3): the event-journal verbs leave this function. They are
+      served by agent-platform-ducklake-telemetry-reader (ducklake_telemetry_reader.yaml) on the production telemetry catalog;
+      this function holds no telemetry slot, describe lists NAMED_READS only and an event verb name answers as an unregistered
+      verb. The cold-read deadline rows leave with them: named_read drops deadline_ms (a request that still sends it has the
+      key ignored, never refused), the 504 read_deadline_exceeded answer and the deadline clause of the no-502 invariant,
+      and the read-deadline and telemetry-slot invariants move to ducklake_telemetry_reader.yaml. named_read drops the
+      transcript_content typed faults, since no deployed function serves that verb (rec-4481); the event-journal,
+      transcript_content and verification-verb invariants stay as the reference for the verb semantics. semantic_break=true:
+      verbs leave this function.
+    migration_story: >-
+      Every telemetry read client routes the event verbs through scripts/telemetry_capture/read_route.py to the telemetry
+      reader since the production flip (PLAN-telemetry-catalog-aware-capture), so no caller of this function sends an event
+      verb or deadline_ms; the smoke-routed capture path raises NoEventReaderOnSmoke before any call. Rollback is a revert of
+      the merge commit.
+  - date: "2026-10-27"
+    semantic_break: false
+    change_class: governance_note_add
+    summary: >-
+      PLAN-telemetry-production-flip PR narrow: the reader role's TelemetryBlobRead grant and the function's TELEMETRY_* env
+      are removed (terraform/personal/ducklake_lambdas.tf), so the invariant that described the grant and named its remaining
+      owner is closed and removed. The role reads only the ducklake/ and smoke data prefixes; event reads are the telemetry
+      reader's (Decision 236 cl.2).
+    migration_story: >-
+      No caller changes: the cleanup PR already stopped this function serving any verb that read the blob prefix or the
+      telemetry env. Rollback is a revert of the merge commit, after which the guarded apply restores the grant and env.
+  - date: "2026-10-29"
+    semantic_break: false
+    change_class: prose_improvement
+    summary: >-
+      PLAN-telemetry-content-reader (Decision 239): the transcript_content owner pointer now names rec-4696, which deploys the
+      masked content reader. Provenance only; this function still serves no event verb and no content.
+    migration_story: Pointer swap only; no verb, payload or answer changes.
 previous_versions: []

@@ -1,5 +1,7 @@
 """The deployed-engine leg of the telemetry golden harness (telemetry slice 4, rec-4025): replay the golden transcript trees
-through the deployed telemetry writer and read them back through the deployed reader on the smoke catalog.
+through the deployed telemetry writer and read them back through the reader serving the writer's catalog (the routed reader,
+scripts/telemetry_capture/read_route.py). Before any registration the run asserts that the writer and the reader both serve
+the catalog the deploy output names.
 
 Run by .github/workflows/telemetry-golden-replay.yml after every successful DuckLake deploy and daily. For every replayable
 (tree, pass) of the two derived_golden files it mints one synthetic project (Decision 199 cl.3: a fresh project re-derives
@@ -30,6 +32,7 @@ import yaml
 
 from scripts.ducklake_smoke import core
 from scripts.telemetry_capture import transport
+from scripts.telemetry_capture.state import DEFAULT_CATALOG, paired_catalog
 from scripts.telemetry_verify.alarms import raise_alarms
 from scripts.telemetry_verify.rows import decode_rows, read_tree
 from src.common import ducklake_event_reads as ev
@@ -43,7 +46,8 @@ GOLDEN = ROOT / "tests" / "fixtures" / "turn_capture" / "golden"
 EXPECTATIONS = ("derived_golden_state.yaml", "derived_golden_rollups.yaml")
 EXPECTATION_DIR = ROOT / "tests" / "telemetry" / "fixtures"
 DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy-ducklake-lambdas.yml"
-FUNCTIONS = ("agent-platform-ducklake-reader", "agent-platform-ducklake-telemetry-writer")
+WRITER_FUNCTION = "agent-platform-ducklake-telemetry-writer"
+HEALTH_TABLES = frozenset({"telemetry_sessions", "telemetry_observations", "telemetry_transcripts", "telemetry_agents"})
 RECORD_BUCKET = "agent-platform-data-lake"
 SESSION_VERBS = (
     "session_state_and_duration",
@@ -102,6 +106,7 @@ class Env:
     put: Callable[..., tuple[int, bytes]]
     record: Callable[[str], dict[str, Any]]
     unchanged: Callable[[str, list[str]], bool]
+    catalog: str
     clock: Callable[[], float] = time.monotonic
 
 
@@ -112,10 +117,15 @@ def deploy_paths(workflow: Path = DEPLOY_WORKFLOW) -> list[str]:
     return [str(p) for p in triggers["push"]["paths"]]
 
 
+def deploy_functions(env: Env) -> tuple[str, str]:
+    """The deploy-record pair: the function serving the routed reader's event verbs, and the telemetry writer."""
+    return env.reader.event_function, WRITER_FUNCTION
+
+
 def records_skewed(env: Env) -> bool:
     """True when either deploy record names a commit that differs from this checkout on a deploy path."""
     paths = deploy_paths()
-    return any(not env.unchanged(str(env.record(fn).get("source_git_sha") or ""), paths) for fn in FUNCTIONS)
+    return any(not env.unchanged(str(env.record(fn).get("source_git_sha") or ""), paths) for fn in deploy_functions(env))
 
 
 def skewed(env: Env, called: tuple[str, ...] = CALLED_VERBS) -> bool:
@@ -204,10 +214,31 @@ class _Run:
             self.protocol = bd.protocol_from_describe(body)
         except bd.HandshakeError:
             raise ReplayStop("describe_mismatch") from None
+        self.assert_catalog(body)
         status, body = self.invoke({"action": "register_tenant"})
         if status != 200 or not isinstance(body.get("tenant_id"), str):
             raise ReplayStop("register_tenant_failed")
         self.tenant_id = body["tenant_id"]
+
+    def assert_catalog(self, describe: dict[str, Any]) -> None:
+        """The writer and the reader both serve the deploy output's catalog (RN-5 pairing), before any registration."""
+        catalog = self.env.catalog
+        own_reader = catalog != DEFAULT_CATALOG
+        if paired_catalog(describe.get("catalog")) != catalog:
+            raise ReplayStop("writer_catalog_mismatch")
+        try:
+            rows = self.named("telemetry_health_count")
+            binding = self.env.reader.binding() if own_reader else None
+        except Exception as exc:  # noqa: BLE001 -- the failure's class only, never its message
+            raise ReplayStop("reader_" + type(exc).__name__) from None
+        tables = [row.get("table_name") for row in rows]
+        if (
+            len(tables) != len(HEALTH_TABLES)
+            or set(tables) != HEALTH_TABLES
+            or any(row.get("meta_schema") != catalog for row in rows)
+            or (own_reader and paired_catalog(binding) != catalog)
+        ):
+            raise ReplayStop("reader_catalog_mismatch")
 
     def register_project(self, where: str) -> tuple[str, str]:
         ref = "synthetic:golden-replay-" + uuid.uuid4().hex
@@ -364,9 +395,14 @@ def live_env(profile: str | None, region: str) -> Env:
     import boto3  # noqa: PLC0415
 
     from scripts.aws_profile import resolve_aws_profile  # noqa: PLC0415
-    from src.common.ducklake_reader_client import make_reader  # noqa: PLC0415
+    from scripts.telemetry_capture import read_route  # noqa: PLC0415
 
     writer_url, _ = _resolve_urls(profile, region)
+    reader = read_route.make_routed_reader(profile)
+    try:
+        catalog = reader.catalog
+    except read_route.TelemetryCatalogUnresolved:
+        raise ReplayStop("catalog_unresolved") from None
     s3 = boto3.Session(profile_name=resolve_aws_profile(profile)).client("s3", region_name=region)
 
     def writer(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -381,7 +417,7 @@ def live_env(profile: str | None, region: str) -> Env:
         raw = s3.get_object(Bucket=RECORD_BUCKET, Key=f"deploy-records/ducklake/{function}.json")["Body"].read()
         return dict(json.loads(raw))
 
-    return Env(writer, make_reader(profile=profile), bd.urllib_put, record, _git_unchanged)
+    return Env(writer, reader, bd.urllib_put, record, _git_unchanged, catalog)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -395,7 +431,14 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None, *, env: Env | None = None) -> int:
     args = parser().parse_args(argv)
-    env = env or live_env(args.profile, args.region)
+    if env is None:
+        try:
+            env = live_env(args.profile, args.region)
+        except ReplayStop as stop:
+            print(f"GOLDEN_STOP class={stop.kind}")
+            if not args.no_alarms:
+                file_alarms({"golden_replay_error": 1})
+            return 1
     started = env.clock()
     stats = Stats()
     try:

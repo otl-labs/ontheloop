@@ -27,7 +27,8 @@ def _disable_reader_and_git_fetch(request: pytest.FixtureRequest):
     Reader: every warehouse read in this module transits _make_reader().named(verb)
     (Decision 84 I-3). The default stub returns [] for every verb so read_priority_queue()
     does not sys.exit(1) and the rec counters report empty rather than reaching the network.
-    Tests that need specific rows or failures re-patch scripts.preflight._common._make_reader.
+    Tests that need specific rows or failures re-patch scripts.preflight._common._make_reader. The telemetry
+    gauge's event reader (_make_event_reader) gets the same stub.
 
     Git fetch: check_main_freshness() shells out to ``git fetch origin main``; patch it to
     a deterministic stub for every test except TestCheckMainFreshness (which exercises the
@@ -73,6 +74,9 @@ def _disable_reader_and_git_fetch(request: pytest.FixtureRequest):
 
     with ExitStack() as stack:
         stack.enter_context(patch("scripts.preflight._common._make_reader", return_value=reader_stub))
+        # test_telemetry_health owns the event-reader seam: its main()-level tests patch it with their own reader.
+        if not module_name.endswith("test_telemetry_health"):
+            stack.enter_context(patch("scripts.preflight._common._make_event_reader", return_value=reader_stub))
         stack.enter_context(patch("scripts.sync.ops.sync", return_value={"drained": {}, "pulled": {}}))
         stack.enter_context(patch("scripts.sync.ops.warm_sync", return_value=warm_sync_stub))
         stack.enter_context(patch("session_preflight._sync_ops_pull", return_value={}))

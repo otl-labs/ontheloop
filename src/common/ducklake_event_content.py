@@ -3,7 +3,8 @@
 The verb returns one stored transcript row's exact payload bytes as one standard-base64 page of at most MAX_CHUNK_BYTES, so a
 caller loops while offset + length < content_bytes and checks the reassembled length and SHA-256 against the row. Storage is
 inline (the content column's UTF-8 bytes), object (the content_blobs port's get_blob: HEAD-verified, then a ranged GET bound
-to that HEAD's ETag) or omitted (no data; content_bytes is then the raw source size and the caller stops).
+to that HEAD's ETag) or omitted (no data; content_bytes is then the raw source size (0 on a withheld_by_policy row) and the
+caller stops).
 
 Rows under one grain key that differ in any compared column are refused (500 grain_conflict) rather than served as one, because
 every page re-resolves the row and a per-page choice could splice two stored versions into one reassembled payload. Duplicates

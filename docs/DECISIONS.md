@@ -2,6 +2,325 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 240: One name per thing where On The Loop meets its adopters -- this repository is the upstream source, a release is what adopters install, adopter for the free release and customer for the paid service; "platform" and "product" leave new governed text unqualified (Decided)
+
+```yaml
+number: 240
+status: Decided
+decided_date: "2026-10-30"
+kind:
+  value: direction
+  justification: >-
+    Clause 2 sets whom the free release and the paid service serve; undone, that line and the reading of the
+    Decisions clause 4 maps revert.
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant naming of where On The Loop meets its adopters, setting how wording in Decisions 77, 178, 184, 195,
+    196, 198, 200, 205, 209, 220, 226, 232 and 233 reads. Not field_semantics: it names no data field or config key, and no
+    contract can set how a Decision reads. Not amendment_forms: no single prior entry owns it.
+```
+
+**Status:** Decided
+**Date:** 2026-10-30
+**Warehouse ID:** dec-240 (per Decision 84 backfill)
+
+**Problem:** "Platform" and "product" are relative words: each layer is a platform to the layer above it and a product to the people who build it. The corpus uses "platform" for this repository, for what adopters install, for the decisions that ship (Decision 196), for the operator's infrastructure (Decision 77) and in identifiers; "product" for On The Loop, for what On The Loop Labs builds on it, and for an adopter's own work; and "On The Loop" for the company, what adopters install, this repository and the operator deployment. This repository is governed by On The Loop while it builds On The Loop, so each reading is right from one side and wrong from the other, and an agent cannot tell which side a sentence is written from.
+
+**Intent:** Every governed sentence names one thing, so no agent has to infer whose side it is written from.
+
+**Decision:**
+1. **Names.** docs/contracts/glossary.yaml is the one home for the names On The Loop (what adopters install), On The Loop Labs (the company), core, paid service, this repository, release, deployment, operator deployment, operator, adopter, customer, user, project and adopter product; each carries its reserved meaning and what it never means. Other contracts' vocabulary blocks keep their own axes.
+2. **Adopter and customer.** An adopter runs a release on its own repositories, free; On The Loop Labs is one. A customer pays On The Loop Labs for the paid service. One organisation can be both, and the word follows the relationship the sentence is about. A user is a human, never an organisation.
+3. **Relative words.** New governed text in this repository (contracts, Decisions, plans, skills, agent instruction files and recs) never uses "platform" or "product" unqualified; it uses a glossary name. This is house style (Decision 211 clause 2), so it binds an adopter only through the optional profile. Identifiers keep their spelling; renaming one is its own change.
+4. **Older text is read, never rewritten.** Text older than this entry reads through the glossary's read_as rows (Decision 177; Decision 233 clause 1 is the precedent), and no clause's meaning changes: Decision 196's "platform decisions" (Tier B) are the decisions a release ships, Decision 77's "platform environments" are the operator deployment's, and Decision 178's "platform-only" repository holds only On The Loop's source.
+5. **Enforcement.** validate_glossary checks the contract's shape and fails changed governed text that uses either relative word unqualified. The rec portal refuses a rec title, context or verification whose new text does the same (the producer-side glossary_lint rule in ops_recommendations.yaml), and get_rec_write_guidance carries the glossary so a rec's author sees it first. docs/CLAUDE.md points every agent that reads or writes under docs/ at the glossary. rec-4676 handles existing text.
+
+**Coverage (Decision 181 cl.2):** cl.1, cl.3 and cl.5 -- validate_glossary for files and the portal's glossary_lint rule for rec title, context and verification; cl.3 in rec resolution text and context_v2_json prose -- unenforced residual, since automated writers fill both and a refusal would hold a filing or a close, owned by rec-4768; cl.2's choice between adopter, customer and user -- unenforced residual, being judgement, owned by rec-4762; cl.4 -- the read_as rows; existing text -- rec-4676.
+
+```yaml reversal-conditions
+decision: 240
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: relationship-unnamed
+    kind: manual
+    description: "A relationship the paid service creates (for example a fully hosted customer, Decision 209 clause 2(c)) cannot be named by adopter or customer: re-decide clause 2."
+  - id: lint-noise
+    kind: manual
+    description: "validate_glossary's false positives outnumber its true catches over a quarter: re-decide clause 3's scope."
+  - id: read-as-misread
+    kind: manual
+    description: "An agent misreads the same read_as phrase twice after rec-4676 lands: rewrite that live surface instead of extending clause 4."
+```
+
+**Related:** Decisions 77, 84, 86, 177, 178, 181, 184, 195, 196, 198, 200, 205, 209, 211, 220, 226, 232, 233; rec-3925, rec-4560, rec-4676.
+
+---
+
+## Decision 239: Agents read production transcript text masked, through a dedicated content reader whose code only the operator can deploy (amends Decisions 236, 230, 126, 81 and 91) (Decided)
+
+```yaml
+number: 239
+status: Decided
+decided_date: "2026-10-29"
+amends: [236, 230, 126, 81, 91]
+significance:
+  value: numbered_decision
+  justification: >-
+    Fires Decision 236's content-consumer reversal condition, adds a third reader to the closed production read
+    boundary and a role to Decision 230 cl.5's fence; a contract note cannot amend those clauses.
+```
+
+**Status:** Decided
+**Date:** 2026-10-29
+**Warehouse ID:** dec-239 (per Decision 84 backfill)
+
+**Problem:** The feedback loop needs transcript text to see why agents made mistakes (operator, 2026-10-29), so
+Decision 236 cl.3's named consumer exists. Text an agent reads re-enters its own captured session and can reach a
+public pull request, and an agent that edits the reader could serve itself more. CODEOWNERS does not bind agent pull
+requests (rec-2827), and IAM grants invoke per function, not per verb.
+
+**Decision:**
+1. **Content reader (amends 236 cl.3).** Agents read production transcript text only through
+   agent-platform-ducklake-telemetry-content: masked verbs only (one row, one session tree), no other event verb, no
+   caller SQL; S3 read on the production telemetry data prefix and GetObject on the production blob root; the
+   telemetry reader's SELECT-only login as a second consumer of the same catalog binding (amends 230 cl.3: one login
+   per binding stands; its connection limit is summed across the functions that share it).
+2. **Masking inside the function.** Every served byte is masked inside the deployed function with the shared
+   read_masked profile (src/sensitive_values), over the whole payload before paging. ARNs keep role and resource
+   names, never account ids or session names. A response carries the raw content_sha256, masked_sha256, per-class
+   mask counts and the profile fingerprint, and labels its text untrusted data. Masking done by a caller is never a
+   control.
+3. **Raw content.** Byte-exact reads are a separate function, invocable only by an identity no agent can obtain
+   without review (Decision 238 cl.1), built when the security project names that identity (rec-4697). No
+   agent-reachable role is ever granted it.
+4. **Access log and window.** Each read writes one value-free log line (role name, verb, session, row, byte and mask
+   counts, request id; never an ARN, account id or text) to a log group kept at least 90 days. Reads cover sessions
+   started in the last 90 days. How long storage keeps transcripts is the operator's decision (rec-4698).
+5. **Change lock (amends 126 cl.1).** The content reader's code and configuration change only through a job the
+   operator approves in a reviewer-gated GitHub Environment, under a role bound to that environment and an exact
+   job_workflow_ref on main (Decision 238 cl.2). A permissions-boundary Deny refuses every other identity. The job
+   deploys the digest it built (Decision 154). CODEOWNERS, boundary_patterns, the detector ratchet and a protected-path
+   edit hook are early warnings until rec-2827. rec-4696 delivers the lock and the deploy.
+6. **Residuals.** The telemetry reader, writer and maintenance functions can read inline content and still deploy
+   without review (operator's choice 2026-10-29; owner rec-2827). Admin credentials bypass the boundary (owner: the
+   security project's thread-startup work; an alarm on the access log flags unexpected roles). Masked text re-enters
+   capture, so a detector gap repeats (owner rec-4657). Read-back proves inline rows only until golden replay carries
+   a blob-tier row (owner rec-4699). Pre-flip transcripts on the smoke catalog (owner rec-4694).
+7. **Amendments.** Decision 236 cl.2 and cl.6 and Decision 81 cl.1 and cl.7: production telemetry has two readers, the
+   telemetry reader (no content) and the content reader (masked content only), so the closed read boundary is three
+   readers. Decision 230 cl.5: the fence's exceptions add the content reader's role. Decision 91 cl.1: the content
+   reader has its own verb set.
+
+**Rationale:** Masking in the deployed function and a deploy only the operator approves are the two controls an agent
+holding the operator's GitHub identity cannot satisfy for itself, provided no session token can approve a pending
+deployment (Decision 143 cl.1; rec-4695: the App lacks the grant). Rejected: masking in the client (bypassable); one
+function with a raw verb (IAM cannot split verbs); gating every telemetry function now (daily approvals for paths
+rec-2827 closes anyway).
+
+**Coverage (Decision 181 cl.2):** cl.1 -- the content reader's served-verb and bundle tests, and rec-4696's IAM pins;
+cl.2 -- test_every_served_byte_is_masked and validate_detector_ratchet; cl.3 -- a non-feature held by rec-4696's
+invoke-grant and url-only tests; cl.4 -- test_every_read_writes_an_access_log_row, the window test and rec-4696's
+log-retention pin; cl.5 -- rec-4696's lock tests and the gated deploy's digest check; cl.6 -- owned residuals, none
+enforced; cl.7 -- the bundle tests and rec-4696's boundary tests.
+
+```yaml reversal-conditions
+decision: 239
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: detector-gap
+    kind: manual
+    description: "A value read_masked masks is found in a masked read's output: re-decide clause 2 and widen read_masked first."
+  - id: loop-needs-raw
+    kind: manual
+    description: "The feedback loop cannot work from masked text: re-decide clause 3."
+  - id: codeowners-binds
+    kind: manual
+    description: "rec-2827 closes: re-decide clause 5's scope across every telemetry function."
+  - id: approval-bypass
+    kind: manual
+    description: "A session token can approve a pending deployment (rec-4695): re-decide clause 5."
+  - id: boundary-size
+    kind: manual
+    description: "The permissions boundary passes Decision 230's 5,632 bytes: re-decide where the fence lives."
+```
+
+**Related:** Decisions 236, 230, 126, 81, 91 (amended), 143, 154, 181, 199, 213, 235, 238, 101.
+---
+
+## Decision 238: No agent-controlled identity reads Terraform state or saved plans -- the speculative plan runs from main's workflow on pull_request_target under a dedicated environment- and workflow-bound role and shows names only (amends Decisions 92 and 144) (Decided)
+
+```yaml
+number: 238
+status: Decided
+decided_date: "2026-10-28"
+amends: [92, 144]
+significance:
+  value: numbered_decision
+  justification: >-
+    Replaces the PR-sub planner session T2.49 built on Decision 92's Wave 2 direction, splits the
+    plan-plus-drift role from Decision 144 clause 7's T2.49 consolidation and retires a
+    terraform-cc-web-operations.yaml row; a note in that contract (considered) cannot amend Decision clauses.
+```
+
+**Status:** Decided
+**Date:** 2026-10-28
+**Warehouse ID:** dec-238 (per Decision 84 backfill)
+
+**Problem:** PR-run speculative plans assume the planner's PR-sub session, which reads Terraform state and
+saved plans, while the PR's own code runs in the same job. Unreviewed agent code can therefore open state. N1
+removed the Neon key from that session but not the state read, and every fix to one leak left the channel
+itself in place.
+
+**Decision:**
+1. Principle. No identity an agent can obtain without review (a role trusting pull_request, refs/pull/* or
+agent/* subjects, and PlatformDev) reads or writes Terraform state, saved plans or plan-review transcripts. A
+static check over every role's trust and policy, with iam simulate rows, enforces it.
+2. Trusted identity. The speculative plan runs under agent-platform-github-ci-trusted-plan. It carries the
+mandatory boundary (Decision 144 cl.3) and trusts one subject form: the GitHub Environment tf-trusted-plan (a
+deployment branch policy naming only main, no reviewers, no admin bypass, never destroyed) and a
+job_workflow_ref naming a trusted workflow file at refs/heads/main, exact match. No reviewer gates this
+subject, unlike Decision 94's. Its safety rests on the workflow binding, the main-only branch policy,
+code-owner review of every main path the job executes (procedural until rec-2827's non-bypass merge identity),
+and a repo check: only the named files reference the environment or combine pull_request_target with id-token
+write, and none declares workflow_call.
+3. The PR is data. The job runs main's workflow on pull_request_target, after a same-repo head check and
+before any checkout. Only the root's Terraform files come from the PR. Every script, action, provider and
+backend block and the lockfile come from main. Init is hermetic from the S3 provider mirror. The job is
+deterministic, and no LLM runs in it (Decision 205 cl.2).
+4. Containment. Secrets exist only as process environment, never as files. PR-visible output and errors are
+names only: addresses, actions, counts, attribute and output names. They carry no value, instance key or
+diagnostic text. No plan JSON is stored where an agent identity can read it, and the plan reviewer gets
+values-stripped input. Accepted residual: PR HCL is still evaluated with the job's credentials, so the shape
+of a plan (counts, success, timing) can carry a few bits. Any data source argument the PR writes can also
+carry a value out in the request it sends, even a denied one, to a resource whose owner logs it. So the
+trusted job evaluates only PR HCL that passes a main-side static screen: an allowlist of data source types,
+and no provider, backend or module source from the PR (rec-4637). Catalog passwords stay in state (accepted
+2026-10-26).
+5. Unchanged. Decision 77's same-artifact apply: plan.bin and its digest are keyed by the PR head SHA.
+Decision 154's PR-time Lambda artifact production moves out of the plan job with the cutover; it is not
+retired.
+6. Amends Decision 92's ratified Wave 2 direction: the speculative plan no longer runs under a PR-sub session,
+and the planner keeps its main-sub drift session only. Amends Decision 144 clause 7's T2.49 consolidation: the
+plan half leaves the merged planner role. terraform-cc-web-operations.yaml's PR-run speculative_plan_job row
+retires at the cutover. Later trust edits on the new role are admin split-applies (Decision 223 cl.4). A
+rename or transfer pre-stages the new job_workflow_ref values additively, as Decision 172 cl.2 does for
+subjects. This Decision records the target; it takes effect as rec-4632, rec-4635, rec-4636, rec-4637,
+rec-4638, rec-4639 and rec-4640 land, and until rec-4640 the planner's PR-sub session still reads state
+(accepted interim risk).
+
+**Rationale:** The root cause is identity, not any one secret: a job that runs PR code cannot also hold state
+read. pull_request_target runs main's definition, so the PR supplies data, never steps. Names-only output is
+the only rule that survives nonsensitive() and arbitrary string attributes. Rejected: a third trust statement
+on the planner (at the 2048-character trust limit, about 2031 of 2048, and it widens the session-name
+partition); workflow_run chaining after a secretless pull_request run, the Decision 205 cl.2 pattern (its runs
+do not report on the PR, and it adds a hop that hands data over from the untrusted run); masking values in PR
+output; GitHub OIDC subject customisation (it rewrites every subject repo-wide, and Decision 172 rejected it).
+
+**Coverage (Decision 181 cl.2):** cl.1, the principle check (rec-4640) and the branch-role and PlatformDev
+fence tests (rec-4632, rec-4635); cl.2, test_trusted_plan_identity and the trusted-environment ci_guards
+check; cl.3 and cl.4, test_terraform_plan_trusted (rec-4637) and the values-stripped review fixture
+(rec-4639); cl.5, the existing saved-plan fetch and digest tests.
+
+```yaml reversal-conditions
+decision: 238
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: premises-change
+    kind: manual
+    description: "GitHub changes pull_request_target, environment-claim or job_workflow_ref semantics; AWS stops evaluating job_workflow_ref; names-only output proves insufficient for review in practice; a fork-safe trigger that needs no environment appears."
+```
+
+---
+
+## Decision 237: Secrets live as SSM SecureString parameters under a separate /secret/ root -- value verbs enumerated per parameter, out-of-band values outside Terraform, no secret read by a data source (amends Decision 101 point (b), Decision 213 clause 5 and Decision 230 clause 4) (Decided)
+
+```yaml
+number: 237
+status: Decided
+decided_date: "2026-10-27"
+amends: [101, 213, 230]
+significance:
+  value: numbered_decision
+  justification: >-
+    A name family outside the frozen /agent-platform/* SSM paths (Decision 101 point (b), re-affirmed by 171), a
+    standing IAM verb rule for a second secret store, and amended carve-outs in Decisions 213 and 230.
+    secret-material-handling.yaml (considered) governs value material only and cannot authorise a name family or
+    amend a ratified clause; amending Decision 157 in place would stretch a Secrets Manager rule over another store.
+```
+
+**Status:** Decided
+**Date:** 2026-10-27
+**Warehouse ID:** dec-237 (per Decision 84 backfill)
+
+**Problem:** Nine Secrets Manager secrets cost about USD 4 a month for values SSM Parameter Store holds at no
+charge. SSM has no value-free refresh: the AWS provider decrypts every Terraform-managed SecureString on each
+plan. The branch, PR and planner CI roles, which run PR-branch code, hold ssm:Get* on parameter/agent-platform/*,
+and an IAM wildcard crosses `/`.
+
+**Decision:**
+1. Name family. Secret values live as SSM SecureString parameters named /secret/<name>, where <name> is the
+   secret's Secrets Manager name. /secret/ is authorised as a deliberate exclusion from the frozen /agent-platform/*
+   SSM paths (Decision 101 point (b), re-affirmed by 171), so no grant on that family reaches a secret. A new
+   secret's name carries no environment; existing names are kept.
+2. Value verbs. ssm:GetParameter, GetParameters, GetParametersByPath, GetParameterHistory and PutParameter, and
+   any wildcard covering one, are granted on a /secret/ parameter only by its ARN to a declared consumer, never on
+   a pattern covering /secret/. Exceptions: the permissions boundary (a ceiling, not a grant) and PlatformAdmin's
+   SecretParameterAdmin statement, the operator's counterpart of its Secrets Manager admin grant (Decision 144
+   cl.3). ssm:DescribeParameters and ssm:ListTagsForResource are metadata. On the PR-trusted planner role a value
+   read is conditioned on the drift session, except the terraform-personal tfvars every plan reads.
+3. Values. A secret's value is set out of band by the operator; Terraform holds its name and the ARN it builds for
+   grants. A SecureString is Terraform-managed only as a declared value exception in secret-material-handling.yaml
+   (the Neon catalog DSN, whose password Terraform creates). No Terraform data source reads a secret; a provider
+   credential held in this family reaches Terraform only as an ephemeral input variable.
+4. Key. Parameters use the aws/ssm managed key, the posture of today's aws/secretsmanager key: the parameter grant
+   is the only gate.
+5. Rotation is deferred. No secret here rotates automatically today; the DSNs may return to Secrets Manager if
+   managed rotation is wanted.
+6. Amends Decision 213 cl.5 and Decision 230 cl.4: the scoped-login value an ADMIN-container agent may write under
+   human direction is the login's /secret/ parameter, and the password is never displayed or stored outside it
+   (or, until secrets-to-ssm-retire retires them, the Secrets Manager secret it was copied from).
+
+**Rationale:** A separate root keeps every /agent-platform/* grant away from secrets without re-narrowing five
+statements, and a future broad grant there stays harmless. Out-of-band values stay out of state, plan files and the
+decrypting refresh PR-reachable roles run. Rejected: value_wo (Terraform 1.11, and refresh still decrypts); a
+customer-managed key (about USD 1 a month for a gate the grant already gives); /agent-platform/secret/ (one broad
+grant reopens it).
+
+**Coverage (Decision 181 cl.2):** cl.1 -- tests/test_secret_parameters_expand.py pins the nine names to
+/secret/<Secrets Manager name> (it lands with secrets-to-ssm-expand); the no-environment rule for a new name is an
+unenforced residual; cl.2 -- validate_secret_parameter_grants, validate_planner_secret_value_reads and the post-apply
+simulate rows; cl.3 -- validate_secret_material_handling and the SecureString read and write coverage rules; cl.4 and cl.5 --
+non-features, held by their reversal conditions; cl.6 -- deploy-paths.yaml's scoped-login procedure, unenforced.
+
+```yaml reversal-conditions
+decision: 237
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: managed-rotation-wanted
+    kind: manual
+    description: "A secret needs managed rotation: re-decide clause 5 (return it to Secrets Manager or add rotation)."
+  - id: pattern-grant-needed
+    kind: manual
+    description: "A consumer needs a value verb on a pattern under /secret/: re-decide clause 2."
+  - id: second-gate-wanted
+    kind: manual
+    description: "A second gate on a secret is wanted, such as a customer-managed key policy: re-decide clause 4."
+```
+
+**Related:** Decisions 157, 175, 101, 171, 202, 213, 230, 144, 156, 223.
+
+> **Update (2026-10-29, PLAN-secrets-to-ssm-expand, rec-4683):** the trusted speculative-plan role of Decision 238 is a
+> declared consumer of the Neon key and catalog DSN parameters. Its reads carry no session condition: its one trusted
+> subject is the tf-trusted-plan Environment bound to main's workflow, so clause 2's drift-session condition, written
+> for the planner's PR session, does not apply to it.
+
+---
+
 ## Decision 236: Production telemetry is proved by a smoke canary and read through its own reader -- disposable proofs stay on smoke, production serves no transcript content, read-side tenancy is the function boundary, and maintenance covers the catalog from its first write (amends Decisions 81, 91, 199 and 200) (Decided)
 
 ```yaml
@@ -82,6 +401,8 @@ conditions:
 ```
 
 **Related:** Decisions 230, 81, 91, 199, 200 (amended), 143, 188, 192, 209, 213, 216, 88, 181, 177.
+
+[Amendment 2026-10-29, Decision 239: cl.3's content consumer exists; agents read production transcript text masked, only through the telemetry content reader; cl.2 and cl.6 count two production telemetry readers, so the closed read boundary is three readers.]
 
 ---
 
@@ -190,6 +511,8 @@ conditions:
 **Coverage (Decision 181 cl.2):** the adapter rows and PC-09 -- validate_ports_contract and the graduated shards; T4.34's deferred status -- validate_platform_roadmap; cl.1-3 -- T4.34 c1-c8 and T4.27 c10-c11, residual until built; cl.4's change-id rule -- T4.19 c6, unenforced; its billing_shape local -- rec-4561; cl.3's saved-login contract rows -- rec-4566.
 
 **Related:** Decisions 93, 184, 185, 194, 199, 205, 206, 211, 212, 217; T4.15, T4.27, T4.32, T4.34.
+
+> **Update (2026-10-27):** the Coverage line's billing_shape local (rec-4561) is now held by inference-tier-rows-role-and-billing-shape, inference-local-server-credential-holder, telemetry-writer-admits-billing-shape-local and telemetry-local-cost-derives-null. No clause changes.
 
 ---
 
@@ -439,6 +762,10 @@ conditions:
 
 **Related:** Decision 216, 213, 81, 214, 222, 204, 143, 144, 202, 126, 88, 181.
 
+[Amendment 2026-10-27, Decision 237: cl.4 logins live in /secret/.]
+
+[Amendment 2026-10-29, Decision 239: cl.3's telemetry reader login is shared with the content reader, its connection limit summed across both; cl.5's fence exceptions add the content reader's role.]
+
 ---
 
 ## Decision 229: Persona-first migration -- each persona ships as its own item to an interim coordinator before any loop host, personas never invoke personas, the operator only launches compute-plane personas, and T4.15 becomes implement_agent on Fargate (amends Decision 217 clause 8 and Decision 205 clauses 1 and 6) (Decided)
@@ -529,6 +856,14 @@ App-only push -- residual (T4.15 c14); the interim operator-bypass merge -- resi
 child criteria; the self-review gap -- rec-4476.
 
 **Related:** Decisions 67, 90, 93, 184, 185, 197, 206, 212, 223; CD.17, CD.27; rec-4043, rec-4478.
+
+> **Update (2026-10-31):** PLAN-plan-defect-loop (operator direction): for cl.2, a plan amendment raised
+> by a build's plan-defect report (implement-scope-boundary.yaml `deviation_trigger.escalation`) that
+> fixes a scope companion, VP text or a repeated failure is approved and merged under the human's
+> standing direction: the plan's owning planning session merges it after a fresh critique PROCEED and
+> green CI. Approved wording, contract or Decision text and any loosened assertion still need the
+> human's own approval, and nothing is loosened to obtain green (Decision 235). Hub and spoke is
+> unchanged.
 
 ---
 
@@ -939,6 +1274,8 @@ conditions:
 ```
 
 **Related:** Decision 216, 143, 213, 210, 204, 126, 55, 177, 181, 101.
+
+[Amendment 2026-10-29: coverage -- clause 3's production ordering is pipeline-enforced (PLAN-telemetry-top-level-agent-run): a declared telemetry column stays in its table's pending_reconcile (reconcile_scope telemetry_catalog) until the owner-login provision_telemetry_catalog response lists it as added; the merge-time reconcile-pending gate fails a column added without that entry, and the governed deploy holds the production telemetry writer and reader while any entry is pending (validate_reconcile_pending_gate --telemetry-hold). Clause 2's smoke ordering stays the writer's 422 backstop.]
 
 ---
 
@@ -1548,6 +1885,8 @@ conditions:
 [Amendment 2026-10-14, Decision 216: cl.3's admin step is carved out for the disposable smoke catalog; the reversal condition scoped-login-blocks-verbs fired and was resolved without widening the grant set.]
 
 [Amendment 2026-10-20, Decision 230: cl.1's denies name the telemetry functions by one pattern, cl.3's logins are one per catalog binding from a closed table, cl.5's carve-out covers the two catalog verbs and the four logins, and rec-4205 and rec-4206 concern the shared ops writer and stay with the CI write narrowing plan.]
+
+[Amendment 2026-10-27, Decision 237: cl.5's scoped-login value lives in its /secret/ SecureString parameter; the password is never displayed or stored outside it.]
 
 ---
 
@@ -3600,6 +3939,10 @@ conditions:
 > force-close any bundled rec still open ~5 minutes after merge, which after Decision 201's
 > cutover is exactly a rec either gate refused. Decision 201 hardens that instruction (and
 > `.claude/commands/implement.md`) to route through the printed close_proposed command instead.
+
+> **Update (2026-10-30):** PLAN-merge-step-checks (rec-4443): no job prints a close_proposed command.
+> A Decision 201 refusal takes the route in `docs/contracts/git-ops.yaml` `resolves_trailer`; a rec this
+> decision's gate refuses stays open for the operator (rec-4088). No rule of this decision changes.
 
 ---
 
@@ -6065,6 +6408,8 @@ This Decision is the structural mechanism Decision 145's own reversal conditions
 
 [Amendment 2026-08-17: the commit-subject resolution mechanism this entry describes (`feat({slug})` commit subjects on `git log origin/main..HEAD`) is replaced by an explicit, schema-validated `implementation_declared` boolean on `PlanDocument`, resolved content-keyed via `scripts.checks._common.resolve_declared_plans` (PLAN-plan-resolution-content-keyed, provenance: explicit operator direction given during that plan's authoring). The two-leg model and advisory-SKIP shape this entry describes are unchanged; only the resolution signal moves from commit-message grammar to diff-carried plan content.]
 
+[Amendment 2026-10-31: point 2's resolution order gains `OTL_VENV_PYTHON` ahead of `.venv`. When set, `bin/venv-python` execs that interpreter if it is an executable file, else exits 1 naming the path; it never falls through to `.venv` or the PATH fallback (Decision 55 fail-loud kept). Its only setter is the CI-parity re-exec in `scripts/checks/deps/fast_tier_env.py` (PLAN-fast-tier-ci-parity, rec-4761), so the agent container's `validate --pre` subprocesses stay in the CI-shaped environment. The unset path, the sentinel-and-version fallback, and points 1 and 3 are unchanged.]
+
 ---
 
 ## Decision 147: Respond to Decision 114 reversal trigger by compacting ROADMAP-PLATFORM.yaml terminal content in place (single file preserved) (Decided)
@@ -6340,6 +6685,10 @@ post-merge, never written directly).
 > **Amended by Decision 202 (2026-09-25):** clause 2's re-narrow trigger does NOT fire for the
 > `platform-security-*` detector resources: their non-prefix name is a deliberate exclusion from CI
 > reach, not a coverage gap. See Decision 202 clause 3.
+
+> **Amended by Decision 238 (2026-10-28):** the T2.49 consolidation its clause 7 sequenced loses its
+> plan half to a dedicated trusted-plan role; drift stays on the planner. This body is otherwise
+> unedited; see Decision 238.
 
 ---
 
@@ -7479,6 +7828,8 @@ mutation. `deploy-paths.yaml`'s admin_out_of_band.scoped_login_provisioning inde
 
 [Amendment 2026-10-20, Decision 230: the admin tier admits provision_catalog_owner and provision_telemetry_catalog for an ADMIN-container agent under explicit human direction.]
 
+
+[Amendment 2026-10-29, Decision 239: the telemetry content reader's operator-approved deploy job changes its code and configuration, outside cl.1's UpdateFunctionCode-only scope.]
 ---
 
 ## Decision 125: Ratify decoupling DuckLake Lambda code deploys from terraform/personal infra apply (environment-taxonomy.md section 5 conformance) (Decided)
@@ -7857,6 +8208,14 @@ required terraform-validate CI job, unaffected), Decision 55 (honest convergence
 any record; the mirror is purely an init-time enabler), Decision 127 (the quarantine + sanctioned-
 prose taxonomy recorded above).
 
+> **Update (2026-10-30, PLAN-admin-terraform-assets-session-hook):** the mirror sync moved out of
+> `bin/setup-cloud-env.sh`: that script runs once per environment snapshot and the agent proxy never signs its
+> requests, so the sync never authenticated there. The every-session SessionStart hook
+> `.claude/hooks/session_start_terraform_assets.sh` now runs it in ADMIN sessions, as PlatformDev (`agent_platform`;
+> the mirror holds public provider binaries). The non-empty gate is unchanged: it now governs
+> `$HOME/.terraform-mirror.tfrc`, which a terraform command names inline, and the reversal condition reads that
+> hook's gate in place of the setup script's.
+
 ---
 
 ## Decision 119: CC-web session-class constraint -- third-party terraform provider init is github.com-egress-blocked; validate/plan for such roots is CI-delegated (Decided)
@@ -8151,6 +8510,8 @@ model the auth primitive change preserves).
 > **Update (2026-10-17):** Pattern B's two roles and their inline policies are now declared in terraform/bootstrap/platform_roles.tf and its platform_*_policies.tf siblings (Decision 223), not terraform/personal/platform_roles.tf; the two-principal semantic and the ExternalId conditions are unchanged.
 
 > **Update (2026-10-21):** "company-account (company-aws-profile)" above names the founder's former employer's AWS account, retired in the 2026-05 migration (T2.3; Decision 24's update), per the operator's confirmation of 2026-10-21 (rec-3924). It is not an account of On The Loop Labs Limited (Decision 195). This entry sets no requirement for how that company's accounts authenticate; that stays with this entry's reversal condition and Decision 195 clause 3.
+
+> **Update (2026-10-25):** The agent_static key no longer sits in the containers. Each cloud environment's agent proxy holds it as an AWS network secret and signs requests to the project region's STS host only; `~/.aws` holds placeholder credentials printed by `bin/aws-proxy-placeholder-credentials` (rec-4510, PLAN-agent-aws-proxy-credentials). Because the proxy re-signs every call to that host as the IAM user, identity checks read the assumed role from a second region's STS host (`scripts/aws_identity.py` `caller_arn`). The two roles, their ExternalId conditions and the two-principal semantic are unchanged.
 
 ---
 
@@ -8750,6 +9111,8 @@ is explicitly deferred. This session's only artefacts are this decision and `doc
 **Affected files:**
 `docs/DECISIONS.md` (this decision), `docs/ROADMAP-SEMANTO.yaml` (new third sibling roadmap).
 
+[Amendment 2026-10-27, Decision 237: point (b) gains the /secret/ SSM name family for secret values, a deliberate exclusion from /agent-platform/*.]
+
 ---
 
 ## Decision 100: Managed services own their primitives -- no client-tooling substitution for native operations (Decided)
@@ -9256,6 +9619,10 @@ T5.2 (teardown) was considered but excluded: it is a near-due cost-saver (grace 
 > `pending_codification` marker instead of latching red. This body is otherwise unedited; see
 > Decision 190 for the full derivation, constraints, and reversal conditions.
 
+> **Amended by Decision 238 (2026-10-28):** the Wave 2 speculative plan ratified here as direction
+> no longer runs under a PR-sub planner session; it runs under an environment- and workflow-bound
+> role. This body is otherwise unedited; see Decision 238.
+
 **Problem:**
 CD.35 (Agent-native Terraform CI/CD) specified a five-wave architecture ratified via the log-decision
 path once Wave 1 / T2.20 shipped. Wave 1 is now SHIPPED AND PRODUCTION-PROVEN: the convergence
@@ -9422,6 +9789,8 @@ OQ.15 (resolved to option (a) here), T0.6 (closed via supersession), T0.7a/b/c/T
 is now split into DuckLakeInvokeUrl and DuckLakeInvokeViaUrlOnly, so a direct invoke is no longer authorized.]
 
 [Amendment 2026-10-25, PLAN-telemetry-reader-and-smoke-twin (Decision 236 cl.6): the telemetry reader serves its own verb set, the event verbs minus transcript_content.]
+
+[Amendment 2026-10-29, Decision 239: the telemetry content reader serves its own verb set, transcript_row_masked and session_transcript_masked.]
 
 ---
 
@@ -9926,6 +10295,8 @@ provision_telemetry_login, invocable by an ADMIN-container agent only under expl
 [Amendment 2026-10-20, Decision 230: cl.6's agent carve-outs gain provision_catalog_owner and provision_telemetry_catalog under explicit human direction.]
 
 [Amendment 2026-10-25, PLAN-telemetry-reader-and-smoke-twin (Decision 236 cl.6): runtime artifacts add the smoke telemetry writer twin and the telemetry reader; the closed read boundary is two readers.]
+
+[Amendment 2026-10-29, Decision 239: runtime artifacts add the telemetry content reader; the closed read boundary is three readers.]
 
 ---
 

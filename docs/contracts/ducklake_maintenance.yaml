@@ -22,8 +22,8 @@ contract:
   description: >-
     Singleton DuckLake catalog-maintenance Lambda. SCHEDULED actions are EventBridge-triggered:
     merge (daily) / gc (weekly) / hot_merge (every 6h) run against the SMOKE catalog (ducklake_smoke),
-    and merge_ops (every 6h) / gc_ops (weekly, ENABLED per gc-ops-baseline-gate-and-schedule-enable) run against the PRODUCTION catalog
-    (ducklake_ops, data_path + meta_schema supplied by the EventBridge target). OPERATIONAL actions
+    and merge_ops (every 6h) / gc_ops (weekly, ENABLED per gc-ops-baseline-gate-and-schedule-enable) run against the PRODUCTION catalogs
+    (ducklake_ops, and ducklake_telemetry on its own rules; data_path + meta_schema supplied by the EventBridge target). OPERATIONAL actions
     (catalog_reinit, restore_drill, catalog_stats, reconcile_columns, reconcile_partitions,
     rewrite_partition_layout, provision_telemetry_login, provision_catalog_owner,
     provision_telemetry_catalog) are human-invoked over 443 via `aws lambda
@@ -45,7 +45,7 @@ contract:
       line 192, but no scheduled or operational verb depends on it). SCHEDULED actions are
       EventBridge-triggered (merge daily 04:00 UTC -> smoke; gc weekly 05:00 UTC Sun -> smoke;
       hot_merge cron(0 */6 * * ? *) -> smoke; merge_ops cron(30 */6 * * ? *) -> PRODUCTION
-      ducklake_ops). OPERATIONAL actions (catalog_reinit, restore_drill, catalog_stats,
+      ducklake_ops, cron(50 */6 * * ? *) and gc_ops cron(5 4 ? * SUN *) -> PRODUCTION ducklake_telemetry). OPERATIONAL actions (catalog_reinit, restore_drill, catalog_stats,
       reconcile_columns, reconcile_partitions, rewrite_partition_layout, provision_telemetry_login,
       provision_catalog_owner, provision_telemetry_catalog)
       are human-invoked over 443 via `aws lambda invoke` (AWS_IAM); the two partition verbs
@@ -156,7 +156,9 @@ verbs:
       cron(30 */6 * * ? *) against PRODUCTION ducklake_ops, params supplied by the EventBridge target) AND
       human-invokable. Non-destructive merge scoped by catalog enumeration crossed with a declared
       per-class per-verb maintenance_policy matrix (config/lambda/ducklake/field_semantics.static.yaml,
-      compaction-scope-policy-matrix / Decision 191) -- NOT a naming-convention predicate. Every table
+      compaction-scope-policy-matrix / Decision 191) -- NOT a naming-convention predicate. For a non-ops
+      catalog its metrics carry a MetaSchema dimension and only the CATALOG_METRICS names (the ops series stays
+      undimensioned). Every table
       the catalog enumeration discovers (unfiltered information_schema, no LIKE filter) is classified
       (scd2 | append_only | control | smoke_harness -- the last declared from field_semantics'
       `tables:` block, Decision 191 amendment, never a name pattern) via the field_semantics
@@ -212,7 +214,8 @@ verbs:
       SCHEDULED (EventBridge cron(45 3 ? * SUN *) against PRODUCTION ducklake_ops; rule ENABLED
       per gc-ops-baseline-gate-and-schedule-enable, after the pre-enablement baseline gate and the
       governed CD deploy both cleared -- a re-enabling after any future rollback to DISABLED is
-      gated the same way) AND human-invokable. Production destructive-GC pass
+      gated the same way) AND human-invokable. For a non-ops catalog its metrics and the breaker trip carry a
+      MetaSchema dimension and only the CATALOG_METRICS names. Production destructive-GC pass
       (src/common/ducklake_gc_ops.py): a universal
       catalog live-set collection (every table, no policy input, never scope.resolve_scope), no
       per-table prelude (merge_ops already compacts every table 6-hourly), a PRE-PASS storage
@@ -426,7 +429,7 @@ verbs:
       every catalog schema from pg_catalog and builds catalog_stats_index.sql (one CREATE INDEX CONCURRENTLY), rebuilding an
       INVALID index and leaving a valid or equivalent one alone. No caller-supplied SQL, schema or index name; refuses
       without the confirm token before any connection. Idempotent. catalog_reinit runs the same SQL file on a schema it
-      re-initialises. The index is reported by control_health (StatsIndexValid, FileColumnStatsIdxScan, FileColumnStatsSeqScan).
+      re-initialises. The index is reported by control_health (StatsIndexValid, FileColumnStatsIdxScan, FileColumnStatsSeqScan, and CatalogFileColumnStatsRows for ducklake_telemetry only).
     response_codes:
       200: >-
         {ok, migration_sha256, schemas {name: {existed, valid_before, created, rebuilt, valid_after}}, pushdown_probe
@@ -443,8 +446,18 @@ audit_invariants:
   - "GC (both gc and gc_ops) is guarded by the fail-closed G1-G4 guard set (reachability, retention floor, catalog sanity, an absolute per-pass deletion bound); a G1/G2/G3 trip raises DuckLakeMaintenanceError, emits MaintenanceBreakerTrip=1, and deletes nothing, while a G4 over-budget pass defers the whole destructive step instead. The forced-trip breaker_probe action (out of contract scope) exists to prove G1. gc_ops additionally runs an INDEPENDENT post-pass safety check (referenced_missing against a real storage listing, plus a value-scanning read-path re-read) that G1-G4 do not perform, because gc_ops's live set is UNIVERSAL (every table, no policy input) rather than scoped by maintenance_policy."
   - "Three destructive paths exist: catalog_reinit is CATALOG-STRUCTURE destructive (meta-schema drop + reinit; confirm=<meta_schema>-guarded; IRREVERSIBLE); gc / gc_ops are DATA-FILE destructive (snapshot expiry + orphan-file deletion on the happy path), guarded by the G1-G4 guard set, not a confirm token (gc_ops additionally supports dry_run=true); and rewrite_partition_layout is ROW-PRESERVING but DATA-FILE destructive until snapshot expiry (the legacy-scheme files are superseded, not deleted), confirm=<table>-guarded, history tables only (Decision 204)."
   - "maintenance_policy governs PER-TABLE-SCOPED verbs only -- its production consumers are merge_ops, reconcile_partitions and rewrite_partition_layout (Decision 204); gc_ops NEVER reads it or calls scope.resolve_scope, because a catalog-wide destructive verb takes no policy cell (filtering its live set would narrow what the guards can SEE, never what gets deleted)."
+  - "Telemetry catalog maintenance (Decision 236 cl.5): ten alarms read only the MetaSchema=ducklake_telemetry series (eight maintenance, two writer); the ops series stays undimensioned and receives no telemetry datapoint. G4 headroom: weekly dead files are about 7 x D against G4_MAX_DELETE_FILES 20,000, and above about 2,850 files a day every pass drains partially (GcDeferredFiles, Decision 193). Neon storage growth is detected by the stats-rows alarm on the dominant catalog table and egress driver (Decision 88 cl.1(iii)); no compute cap is claimed for storage (Decision 214 cl.3 caps compute; its Terraform limit is pending under rec-4220)."
   - "An unknown `action` returns 400 with the sorted action allow-list (dispatcher-level; not a per-verb outcome)."
 amendment_log:
+  - date: "2026-10-25"
+    semantic_break: false
+    change_class: prose_improvement
+    summary: >-
+      PLAN-telemetry-production-maintenance (Decision 236 cl.5, T2.36 c5): merge_ops and gc_ops also run on the production telemetry
+      catalog (rules at :50 every 6h and Sun 04:05), their metrics carry MetaSchema with the CATALOG_METRICS names for a non-ops
+      catalog, control_health emits the telemetry stats-rows estimate, and an audit invariant names the ten alarms. No verb, request
+      or response changes.
+    migration_story: Prose only; the ops series and every verb are unchanged.
   - date: "2026-09-13"
     semantic_break: true
     change_class: field_add
@@ -455,29 +468,18 @@ amendment_log:
     semantic_break: true
     change_class: field_add
     summary: >-
-      PLAN-ducklake-partition-layout-remediation (rec-4070, Decision 204): added two OPERATIONAL
-      verbs -- reconcile_partitions (no-op-free live-vs-declared partition ALTER, dry_run default
-      true) and rewrite_partition_layout (row-preserving, digest-proven re-lay of a HISTORY
-      table's legacy-scheme files, confirm=<table>-guarded). Real behaviour, not prose-only: both
-      verbs are additionally invokable by an ADMIN-container agent under explicit human direction
-      (the sole carve-out in Decision 81 cl.6's "no LLM / agent invocation" claim, restated in the
-      description and audit_invariants). The "Two destructive paths" invariant becomes three, and
-      the maintenance_policy invariant now names all three per-table-scoped consumers.
+      PLAN-ducklake-partition-layout-remediation (rec-4070, Decision 204): added two OPERATIONAL verbs -- reconcile_partitions
+      (live-vs-declared partition ALTER, dry_run default true) and rewrite_partition_layout (row-preserving, digest-proven re-lay of a
+      HISTORY table's legacy-scheme files, confirm=<table>-guarded). Real behaviour: both are additionally invokable by an ADMIN-container
+      agent under explicit human direction (the sole carve-out in Decision 81 cl.6). The destructive-paths invariant becomes three.
   - date: "2026-09-28"
     semantic_break: true
     change_class: field_add
     summary: >-
-      PLAN-ducklake-smoke-harness-classification (Decision 191 amendment, rec-3864): the
-      production-resident smoke-harness pair (ducklake_smoke_history / ducklake_smoke_current)
-      joins the classified class universe as smoke_harness, sourced from field_semantics'
-      `tables:` block -- never a name pattern. merge_ops's class list now names it and this verb's
-      metrics field is new (MergeOpsUnclassifiedTables, MergeOpsPassFailed -- the only
-      agent-readable outcome signal for a scheduled async invoke whose 500 body is discarded).
-      reconcile_partitions's response now carries a `skipped` key (READ-ONLY layout + drift for
-      every reconcile_partitions-scoped-out table). rewrite_partition_layout refuses the pair via
-      its own apply=false policy cell (no prose change needed -- the existing control-class
-      refusal prose already generalizes). No destructive-path count or guard-set invariant
-      changed.
+      PLAN-ducklake-smoke-harness-classification (Decision 191 amendment, rec-3864): the production-resident smoke-harness pair joins
+      the classified class universe as smoke_harness, sourced from field_semantics' `tables:` block, never a name pattern. merge_ops's
+      class list names it and gains MergeOpsUnclassifiedTables and MergeOpsPassFailed; reconcile_partitions's response carries a
+      `skipped` key; rewrite_partition_layout refuses the pair via its own apply=false policy cell. No destructive-path count changed.
   - date: "2026-10-09"
     semantic_break: true
     change_class: field_add

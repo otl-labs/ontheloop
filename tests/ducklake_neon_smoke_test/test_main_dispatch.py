@@ -137,17 +137,29 @@ def test_main_lambda_row_rules_dispatch(monkeypatch, capsys):
     assert "LAMBDA_ROW_RULES OK" in capsys.readouterr().out
 
 
-def test_main_lambda_telemetry_dispatch(monkeypatch, capsys):
+def test_main_lambda_telemetry_production_dispatch(monkeypatch, capsys):
     seen = {}
 
     def fake(profile=None, region="eu-west-2"):
         seen.update(profile=profile, region=region)
-        print("LAMBDA_TELEMETRY OK stub")
+        print("LAMBDA_TELEMETRY_PRODUCTION OK stub")
 
-    monkeypatch.setattr(smoke, "lambda_telemetry", fake)
-    assert smoke.main(["--lambda-telemetry", "--profile", "p", "--region", "r"]) == 0
+    assert "lambda_telemetry_production" in smoke._LAMBDA_GATES
+    monkeypatch.setattr(smoke, "lambda_telemetry_production", fake)
+    assert smoke.main(["--lambda-telemetry-production", "--profile", "p", "--region", "r"]) == 0
     assert seen == {"profile": "p", "region": "r"}
-    assert "LAMBDA_TELEMETRY OK" in capsys.readouterr().out
+    assert "LAMBDA_TELEMETRY_PRODUCTION OK" in capsys.readouterr().out
+
+
+def test_main_lambda_telemetry_flag_is_retired(monkeypatch):
+    called = []
+    for attr in ("lambda_telemetry_production", "lambda_telemetry_smoke", "lambda_telemetry_reader"):
+        monkeypatch.setattr(smoke, attr, lambda attr=attr, **kw: called.append(attr))
+    assert not hasattr(smoke, "lambda_telemetry") and "lambda_telemetry" not in smoke._LAMBDA_GATES
+    with pytest.raises(SystemExit) as exc:
+        smoke.main(["--lambda-telemetry"])
+    assert exc.value.code == 2
+    assert called == []
 
 
 def test_create_telemetry_flag_dispatches_the_gate(monkeypatch):

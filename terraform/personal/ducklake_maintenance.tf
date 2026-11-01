@@ -107,6 +107,19 @@ resource "aws_iam_role_policy" "ducklake_maintenance" {
         ]
       },
       {
+        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
+        Sid    = "NeonDsnParameterRead"
+        Effect = "Allow"
+        Action = ["ssm:GetParameter"]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/ducklake-neon-catalog-dsn",
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-telemetry-writer-dsn",
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-telemetry-writer-prod-dsn",
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-telemetry-reader-dsn",
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-smoke-maintainer-dsn",
+        ]
+      },
+      {
         # T2.19: the operational actions write to the PRODUCTION prefix -- catalog_reinit at
         # ducklake/, restore_drill at ducklake/_restore_drill/ (a sub-prefix), merge_ops/
         # reconcile_columns at the caller-supplied production data_path. delete_orphaned_files is

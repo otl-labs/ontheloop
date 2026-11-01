@@ -274,11 +274,21 @@ def test_no_stale_enforcement_premise() -> None:
         assert "closed set would be declared here and enforced at write (decision 210 cl.3)" in text, name
         assert _has(sessions.fields[name].amendment_log, "prose_improvement", False), name
     agents = _doc("telemetry_agents")
-    for name in ("provider", "trigger"):
-        assert "closed set would be declared here when ratified (decision 210 cl.3)" in _norm(agents.fields[name].semantics), (
-            name
-        )
-        assert _has(agents.fields[name].amendment_log, "prose_improvement", False), name
+    assert "closed set would be declared here when ratified (decision 210 cl.3)" in _norm(agents.fields["provider"].semantics)
+    assert _has(agents.fields["provider"].amendment_log, "prose_improvement", False)
+    trigger = agents.fields["trigger"]
+    assert trigger.dq_intent["accepted_values"]["values"] == [
+        "subagent_sync",
+        "subagent_background",
+        "workflow_run",
+        "workflow_dispatch",
+        "push",
+        "schedule",
+        "eventbridge",
+        "manual",
+        "smoke_test",
+    ]
+    assert "closed and write-enforced" in _norm(trigger.semantics)
     observations = _doc("telemetry_observations")
     assert "closed set would be declared here and enforced at write" in _norm(observations.fields["provider"].semantics)
     assert _has(observations.fields["provider"].amendment_log, "prose_improvement", False)
