@@ -66,8 +66,9 @@
 #
 # The ADMIN block's last line passes the flag inline instead of relying on the env-var field:
 #     cd /home/user/ontheloop && INSTALL_TERRAFORM=1 bash bin/setup-cloud-env.sh
-# The CC-web harness is unreliable about whether it sets environment variables BEFORE or AFTER the setup
-# script runs; setting INSTALL_TERRAFORM=1 in the script itself is reliable.
+# The setup script runs once per environment snapshot, before environment variables are set, and
+# the agent proxy never signs its requests, so INSTALL_TERRAFORM=1 is passed inline and the script
+# makes no AWS call: the provider mirror is synced by the every-session ADMIN hook (see the split below).
 #
 # Identity checks: an unpinned `aws sts get-caller-identity` returns the IAM user under the proxy. Use
 # `bin/venv-python -m scripts.aws_identity caller-arn --profile <p>` (reads the identity from a second region).
@@ -97,6 +98,7 @@
 #   .claude/hooks/session_start_aws.sh -- reports the assumed-role identity via scripts.aws_identity (every session).
 #   .claude/hooks/session_start_ensure_github_mcp.sh -- self-heals github-mcp-server on stale snapshots (every session).
 #   .claude/hooks/session_start_sync_deps.sh -- self-heals requirements.txt/requirements-dev.txt (and terraform binary) drift on stale snapshots (every session).
+#   .claude/hooks/session_start_terraform_assets.sh -- syncs the Terraform provider mirror in ADMIN sessions (every session; bin/sync-terraform-assets.sh).
 #   .claude/hooks/session_start_precommit.sh -- re-wires the pre-commit .git hook (every session; .git/hooks does not survive a fresh clone).
 #
 # What it does:
@@ -121,6 +123,8 @@
 #     block above; this script only consumes them).
 #   - Install gh CLI (GitHub access is via MCP -- see github-mcp-server, step 6 -- not gh).
 #   - Install terraform unless INSTALL_TERRAFORM=1 (set only in the admin env).
+#   - Sync the Terraform provider mirror or fetch the tfvars (the proxy never signs setup requests; see
+#     .claude/hooks/session_start_terraform_assets.sh and `bash bin/sync-terraform-assets.sh --tfvars`).
 
 set -euo pipefail
 
@@ -198,69 +202,6 @@ if [ -n "$aws_install_pid" ]; then
     t0=$SECONDS
     wait "$aws_install_pid"
     log "aws-cli-install: $((SECONDS - t0))s"
-fi
-
-# 5b. Terraform provider filesystem_mirror sync (rec-2514, Decision 119 reversal mechanism) -------
-# Terraform binary install (opt-in via INSTALL_TERRAFORM=1) is delegated to
-# bin/sync-deps.sh at step 4 above -- this step only syncs the provider mirror.
-# Only meaningful when terraform is installed (INSTALL_TERRAFORM=1, admin container). Syncs the
-# S3-seeded mirror -- populated out-of-band by the ONLY egress-having actor,
-# .github/workflows/terraform-provider-mirror-seed.yml -- so a proxy-blocked CC-web session can
-# `terraform init` terraform/personal locally without the github.com checksum fetch Decision 119
-# 403s. Resolves config/terraform/cc-web.tfrc's __TF_MIRROR_DIR__ placeholder into a copy at a
-# fixed, deterministic path outside the repo (never mutates the git-tracked template in place).
-#
-# CRITICAL (plan-critique #3): the TF_CLI_CONFIG_FILE export is gated on a successful, NON-EMPTY
-# sync -- exporting it unconditionally would exclude neon from `direct` while the mirror is
-# empty/unsynced, producing a more confusing "provider not found in mirror and excluded from
-# direct" failure than the known github.com 403. On sync failure: warn, do NOT export, do NOT fail
-# the session -- the mirror is an enabler, never a hard session dependency; the pre-mirror
-# CI-delegated posture (terraform/CLAUDE.md) remains the fallback.
-#
-# Per AGENTS.md ("each Bash tool invocation is independent" -- the bin/venv-python pattern): this
-# export only affects this setup script's own process tree, not later independent Bash calls in a
-# session. The resolved tfrc is written to the deterministic path logged below so any later
-# terraform invocation can inline `TF_CLI_CONFIG_FILE=<path>` itself rather than depend on
-# inherited shell state.
-if [ "${INSTALL_TERRAFORM:-0}" = "1" ]; then
-    t0=$SECONDS
-    # The CC-web harness may set the env-var field after the setup script runs, so default the admin profile here;
-    # the mirror sync and the profile-free tfvars delegate below both rely on it.
-    export AWS_PROFILE="${AWS_PROFILE:-agent_platform_admin}"
-    MIRROR_DIR="$HOME/.terraform-mirror"
-    # rec-2518: RESOLVED_TFRC is a sibling FILE of $MIRROR_DIR, not a child of it -- writing the
-    # resolved tfrc inside $MIRROR_DIR would inflate the `ls -A "$MIRROR_DIR"` non-empty gate below
-    # (the tfrc itself would count as mirror content even on an otherwise-empty sync).
-    RESOLVED_TFRC="$HOME/.terraform-mirror.tfrc"
-    # rec-2519: --delete so a shrunk upstream mirror cannot leave stale provider bytes locally.
-    # COUPLED with the RESOLVED_TFRC move above -- do not add --delete while RESOLVED_TFRC still
-    # lives inside $MIRROR_DIR, or this sync would delete the live tfrc on the next run.
-    if aws s3 sync "s3://agent-platform-data-lake/tf-provider-mirror/" "$MIRROR_DIR" --only-show-errors --delete \
-        && [ -n "$(ls -A "$MIRROR_DIR" 2>/dev/null)" ]; then
-        sed "s|__TF_MIRROR_DIR__|${MIRROR_DIR}|g" "$REPO_ROOT/config/terraform/cc-web.tfrc" > "$RESOLVED_TFRC"
-        export TF_CLI_CONFIG_FILE="$RESOLVED_TFRC"
-        log "terraform-mirror-sync: $((SECONDS - t0))s (resolved tfrc: $RESOLVED_TFRC)"
-    else
-        log "WARNING: terraform provider mirror sync produced no local mirror (non-fatal); TF_CLI_CONFIG_FILE not set -- terraform/personal init falls back to the pre-mirror CI-delegated posture (terraform/CLAUDE.md)."
-    fi
-
-    # rec-3977/rec-3978 (Decision 162 R2): calls the SAME delegate the governed CI apply path uses
-    # (.github/actions/materialise-tfvars/materialise_tfvars.sh), so the local ADMIN break-glass
-    # loop and CI share one implementation. Warn-and-continue, like the mirror sync above -- a
-    # missing/stale tfvars file here is non-fatal to the rest of bootstrap (the session_start
-    # hooks below still need to run), and the delegate itself preserves any pre-existing tfvars
-    # file byte-identical on a failed fetch (never truncates before confirming the fetch
-    # succeeded). Profile-free by design (DEP-13, Decision 157): a PlatformDev container
-    # AccessDenies on this secret, which is the intended fail-closed outcome -- re-run from an
-    # ADMIN container.
-    t0=$SECONDS
-    if bash "$REPO_ROOT/.github/actions/materialise-tfvars/materialise_tfvars.sh"; then
-        log "materialise-tfvars: $((SECONDS - t0))s"
-    else
-        log "WARNING: materialise-tfvars fetch failed (non-fatal); terraform/personal/terraform.personal.tfvars may be stale or missing -- any pre-existing file was preserved unchanged. Re-run from an ADMIN container to retry."
-    fi
-else
-    log "Terraform provider mirror sync and tfvars fetch skipped (INSTALL_TERRAFORM != 1)"
 fi
 
 # 6. github-mcp-server (for the .mcp.json `github-full` MCP server) ------------

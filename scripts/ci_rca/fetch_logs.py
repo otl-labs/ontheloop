@@ -65,6 +65,24 @@ def _head_piece(chunk: bytes, head: bytearray, head_lines: int, max_bytes: int, 
     return piece
 
 
+def _complete_prefix_len(data: bytes) -> int:
+    """Length of `data` without a trailing incomplete UTF-8 character (invalid bytes elsewhere still count)."""
+    for back in range(1, min(4, len(data)) + 1):
+        byte = data[-back]
+        if byte & 0xC0 != 0x80:
+            need = 1 if byte < 0xC0 else 2 if byte < 0xE0 else 3 if byte < 0xF0 else 4
+            return len(data) - (back if need > back else 0)
+    return len(data)
+
+
+def _trim_tail_overlap(head: bytes, tail: bytes, total: int) -> bytes:
+    """Drop the leading bytes of `tail` that the decoded head already holds. `tail` covers stream
+    bytes [total - len(tail), total); the decoded head ends at the last complete character it
+    holds, so the cut lands on a character start and never repeats or drops a character."""
+    head_end = _complete_prefix_len(head)
+    return tail[max(0, head_end - (total - len(tail))) :]
+
+
 def _run_log(
     command: list[str],
     max_bytes: int,
@@ -85,7 +103,8 @@ def _run_log(
     child must never poison the exit code). A head-capped-but-fully-drained run is NOT killed:
     truncated=True, truncation_reason="head_tail_window", and the real process returncode is
     preserved. `tail` is populated only when the head was actually capped -- otherwise head IS
-    the complete content and no separate tail is needed.
+    the complete content and no separate tail is needed. The tail is trimmed so head plus tail
+    never duplicates bytes (rec-3002).
     """
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert process.stdout is not None and process.stderr is not None
@@ -162,7 +181,9 @@ def _run_log(
         stderr=bytes(stderr).decode("utf-8", errors="replace"),
         truncated=genuinely_truncated,
         truncation_reason="head_tail_window" if genuinely_truncated else None,
-        tail=bytes(tail).decode("utf-8", errors="ignore") if genuinely_truncated else "",
+        tail=_trim_tail_overlap(bytes(head), bytes(tail), total_drained).decode("utf-8", errors="ignore")
+        if genuinely_truncated
+        else "",
     )
 
 
@@ -196,6 +217,39 @@ def _failed_jobs(payload: str) -> list[dict[str, Any]]:
     return selected
 
 
+_FAILED_STEP_CONCLUSIONS = {"failure", "timed_out", "cancelled"}
+_SKIPPED_PRIMARY = LogResult(returncode=1, stdout="", stderr="", truncated=False, truncation_reason=None)
+
+
+def _is_unfinalized(job: dict[str, Any]) -> bool:
+    steps = [step for step in job.get("steps", []) if isinstance(step, dict)]
+    has_failed_step = any(step.get("conclusion") in _FAILED_STEP_CONCLUSIONS for step in steps)
+    return not has_failed_step or any(not step.get("conclusion") for step in steps)
+
+
+def _unfinalized_job_ids(payload: str, failed_jobs: list[dict[str, Any]]) -> set[int]:
+    """Failed jobs whose step metadata GitHub has not finalized (rec-4776): no failed step, or a
+    step with no conclusion. Their step-split logs omit the unfinished step, so they read the raw job log."""
+    failed_ids = {job["job_id"] for job in failed_jobs}
+    return {
+        job["databaseId"]
+        for job in _decode_jobs_payload(payload)
+        if isinstance(job, dict) and job.get("databaseId") in failed_ids and _is_unfinalized(job)
+    }
+
+
+def _job_log_command(run_id: str, repo: str, job_id: int, unfinalized: bool) -> list[str]:
+    if unfinalized:
+        return ["gh", "api", f"repos/{repo}/actions/jobs/{job_id}/logs"]
+    return ["gh", "run", "view", run_id, "--repo", repo, "--job", str(job_id), "--log"]
+
+
+def _window_fragment(result: Any, remaining: int, remaining_lines: int) -> str:
+    """A fragment is windowed only when the transport returned a tail (head and tail both observed)."""
+    tail = getattr(result, "tail", "")
+    return bound_text_windowed(result.stdout + tail, remaining, remaining_lines)[0] if tail else result.stdout
+
+
 def _step_scope(
     payload: str,
     job_ids: set[int],
@@ -221,7 +275,7 @@ def _step_scope(
         steps = job.get("steps", [])
         entries: list[dict[str, Any]] = []
         for index, step in enumerate(steps, 1):
-            conclusion = step.get("conclusion") if isinstance(step, dict) else None
+            conclusion = (step.get("conclusion") if isinstance(step, dict) else None) or None
             if retrieval_path == "primary":
                 retrieved = conclusion in {"failure", "timed_out", "cancelled"}
             else:
@@ -247,6 +301,7 @@ def _fallback_logs(
     injected_runner: Optional[_Runner],
     max_bytes: int,
     max_lines: int,
+    unfinalized_ids: set[int],
 ) -> tuple[str, list[int], list[str], bool, str | None]:
     fragments: list[str] = []
     queried: list[int] = []
@@ -254,7 +309,7 @@ def _fallback_logs(
     truncated = False
     reason = None
     for job in jobs:
-        command = ["gh", "run", "view", run_id, "--repo", repo, "--job", str(job["job_id"]), "--log"]
+        command = _job_log_command(run_id, repo, job["job_id"], job["job_id"] in unfinalized_ids)
         remaining = max_bytes - len("".join(fragments).encode("utf-8"))
         remaining_lines = max_lines - len("".join(fragments).splitlines(keepends=True))
         if remaining < 1 or remaining_lines < 1:
@@ -266,7 +321,7 @@ def _fallback_logs(
         if result.returncode != 0 or not result.stdout:
             errors.append(result.stderr)
             continue
-        fragments.append(result.stdout)
+        fragments.append(_window_fragment(result, remaining, remaining_lines))
         truncated = truncated or bool(getattr(result, "truncated", False))
         reason = getattr(result, "truncation_reason", None) or reason
     return "".join(fragments), queried, errors, truncated, reason
@@ -299,9 +354,12 @@ def fetch_run_log(
             except (ValueError, json.JSONDecodeError) as exc:
                 diagnostic = f"invalid failed-job metadata: {exc}"
             else:
+                unfinalized_ids = _unfinalized_job_ids(metadata.stdout, jobs)
                 primary_command = ["gh", "run", "view", run_id, "--repo", repo, "--log-failed"]
                 primary = (
-                    _run(injected_runner, primary_command)
+                    _SKIPPED_PRIMARY
+                    if unfinalized_ids
+                    else _run(injected_runner, primary_command)
                     if injected_runner is not None
                     else _run_log(primary_command, max_bytes, max_lines)
                 )
@@ -314,7 +372,7 @@ def fetch_run_log(
                 if not log:
                     retrieval_path = "fallback"
                     log, queried_job_ids, fallback_errors, transport_truncated, transport_reason = _fallback_logs(
-                        run_id, repo, jobs, injected_runner, max_bytes, max_lines
+                        run_id, repo, jobs, injected_runner, max_bytes, max_lines, unfinalized_ids
                     )
                     if fallback_errors:
                         log = ""
@@ -335,7 +393,7 @@ def fetch_run_log(
                     # A reliable window (head AND tail both genuinely observed) needs no
                     # override -- bound_text_windowed's own accurate counts stand. Any other
                     # transport truncation (a killed drain_ceiling primary fetch, or ANY fallback
-                    # truncation, which composes per-job heads only with no tail) means the true
+                    # truncation, which composes per-job windows already cut to budget) means the true
                     # extent is genuinely unknown, matching the pre-existing "unknown" contract.
                     reliable_window = retrieval_path == "primary" and transport_reason == "head_tail_window"
                     if transport_truncated and not reliable_window:

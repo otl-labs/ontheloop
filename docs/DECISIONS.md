@@ -2,6 +2,62 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 240: One name per thing where On The Loop meets its adopters -- this repository is the upstream source, a release is what adopters install, adopter for the free release and customer for the paid service; "platform" and "product" leave new governed text unqualified (Decided)
+
+```yaml
+number: 240
+status: Decided
+decided_date: "2026-10-30"
+kind:
+  value: direction
+  justification: >-
+    Clause 2 sets whom the free release and the paid service serve; undone, that line and the reading of the
+    Decisions clause 4 maps revert.
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant naming of where On The Loop meets its adopters, setting how wording in Decisions 77, 178, 184, 195,
+    196, 198, 200, 205, 209, 220, 226, 232 and 233 reads. Not field_semantics: it names no data field or config key, and no
+    contract can set how a Decision reads. Not amendment_forms: no single prior entry owns it.
+```
+
+**Status:** Decided
+**Date:** 2026-10-30
+**Warehouse ID:** dec-240 (per Decision 84 backfill)
+
+**Problem:** "Platform" and "product" are relative words: each layer is a platform to the layer above it and a product to the people who build it. The corpus uses "platform" for this repository, for what adopters install, for the decisions that ship (Decision 196), for the operator's infrastructure (Decision 77) and in identifiers; "product" for On The Loop, for what On The Loop Labs builds on it, and for an adopter's own work; and "On The Loop" for the company, what adopters install, this repository and the operator deployment. This repository is governed by On The Loop while it builds On The Loop, so each reading is right from one side and wrong from the other, and an agent cannot tell which side a sentence is written from.
+
+**Intent:** Every governed sentence names one thing, so no agent has to infer whose side it is written from.
+
+**Decision:**
+1. **Names.** docs/contracts/glossary.yaml is the one home for the names On The Loop (what adopters install), On The Loop Labs (the company), core, paid service, this repository, release, deployment, operator deployment, operator, adopter, customer, user, project and adopter product; each carries its reserved meaning and what it never means. Other contracts' vocabulary blocks keep their own axes.
+2. **Adopter and customer.** An adopter runs a release on its own repositories, free; On The Loop Labs is one. A customer pays On The Loop Labs for the paid service. One organisation can be both, and the word follows the relationship the sentence is about. A user is a human, never an organisation.
+3. **Relative words.** New governed text in this repository (contracts, Decisions, plans, skills, agent instruction files and recs) never uses "platform" or "product" unqualified; it uses a glossary name. This is house style (Decision 211 clause 2), so it binds an adopter only through the optional profile. Identifiers keep their spelling; renaming one is its own change.
+4. **Older text is read, never rewritten.** Text older than this entry reads through the glossary's read_as rows (Decision 177; Decision 233 clause 1 is the precedent), and no clause's meaning changes: Decision 196's "platform decisions" (Tier B) are the decisions a release ships, Decision 77's "platform environments" are the operator deployment's, and Decision 178's "platform-only" repository holds only On The Loop's source.
+5. **Enforcement.** validate_glossary checks the contract's shape and fails changed governed text that uses either relative word unqualified. The rec portal refuses a rec title, context or verification whose new text does the same (the producer-side glossary_lint rule in ops_recommendations.yaml), and get_rec_write_guidance carries the glossary so a rec's author sees it first. docs/CLAUDE.md points every agent that reads or writes under docs/ at the glossary. rec-4676 handles existing text.
+
+**Coverage (Decision 181 cl.2):** cl.1, cl.3 and cl.5 -- validate_glossary for files and the portal's glossary_lint rule for rec title, context and verification; cl.3 in rec resolution text and context_v2_json prose -- unenforced residual, since automated writers fill both and a refusal would hold a filing or a close, owned by rec-4768; cl.2's choice between adopter, customer and user -- unenforced residual, being judgement, owned by rec-4762; cl.4 -- the read_as rows; existing text -- rec-4676.
+
+```yaml reversal-conditions
+decision: 240
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: relationship-unnamed
+    kind: manual
+    description: "A relationship the paid service creates (for example a fully hosted customer, Decision 209 clause 2(c)) cannot be named by adopter or customer: re-decide clause 2."
+  - id: lint-noise
+    kind: manual
+    description: "validate_glossary's false positives outnumber its true catches over a quarter: re-decide clause 3's scope."
+  - id: read-as-misread
+    kind: manual
+    description: "An agent misreads the same read_as phrase twice after rec-4676 lands: rewrite that live surface instead of extending clause 4."
+```
+
+**Related:** Decisions 77, 84, 86, 177, 178, 181, 184, 195, 196, 198, 200, 205, 209, 211, 220, 226, 232, 233; rec-3925, rec-4560, rec-4676.
+
+---
+
 ## Decision 239: Agents read production transcript text masked, through a dedicated content reader whose code only the operator can deploy (amends Decisions 236, 230, 126, 81 and 91) (Decided)
 
 ```yaml
@@ -800,6 +856,14 @@ App-only push -- residual (T4.15 c14); the interim operator-bypass merge -- resi
 child criteria; the self-review gap -- rec-4476.
 
 **Related:** Decisions 67, 90, 93, 184, 185, 197, 206, 212, 223; CD.17, CD.27; rec-4043, rec-4478.
+
+> **Update (2026-10-31):** PLAN-plan-defect-loop (operator direction): for cl.2, a plan amendment raised
+> by a build's plan-defect report (implement-scope-boundary.yaml `deviation_trigger.escalation`) that
+> fixes a scope companion, VP text or a repeated failure is approved and merged under the human's
+> standing direction: the plan's owning planning session merges it after a fresh critique PROCEED and
+> green CI. Approved wording, contract or Decision text and any loosened assertion still need the
+> human's own approval, and nothing is loosened to obtain green (Decision 235). Hub and spoke is
+> unchanged.
 
 ---
 
@@ -3876,6 +3940,10 @@ conditions:
 > cutover is exactly a rec either gate refused. Decision 201 hardens that instruction (and
 > `.claude/commands/implement.md`) to route through the printed close_proposed command instead.
 
+> **Update (2026-10-30):** PLAN-merge-step-checks (rec-4443): no job prints a close_proposed command.
+> A Decision 201 refusal takes the route in `docs/contracts/git-ops.yaml` `resolves_trailer`; a rec this
+> decision's gate refuses stays open for the operator (rec-4088). No rule of this decision changes.
+
 ---
 
 ## Decision 185: The executor loop is a repo-owned ASL-subset definition; Step Functions is its cloud host; the leash is staged (amends Decision 39 and Decision 117) (Decided)
@@ -6340,6 +6408,8 @@ This Decision is the structural mechanism Decision 145's own reversal conditions
 
 [Amendment 2026-08-17: the commit-subject resolution mechanism this entry describes (`feat({slug})` commit subjects on `git log origin/main..HEAD`) is replaced by an explicit, schema-validated `implementation_declared` boolean on `PlanDocument`, resolved content-keyed via `scripts.checks._common.resolve_declared_plans` (PLAN-plan-resolution-content-keyed, provenance: explicit operator direction given during that plan's authoring). The two-leg model and advisory-SKIP shape this entry describes are unchanged; only the resolution signal moves from commit-message grammar to diff-carried plan content.]
 
+[Amendment 2026-10-31: point 2's resolution order gains `OTL_VENV_PYTHON` ahead of `.venv`. When set, `bin/venv-python` execs that interpreter if it is an executable file, else exits 1 naming the path; it never falls through to `.venv` or the PATH fallback (Decision 55 fail-loud kept). Its only setter is the CI-parity re-exec in `scripts/checks/deps/fast_tier_env.py` (PLAN-fast-tier-ci-parity, rec-4761), so the agent container's `validate --pre` subprocesses stay in the CI-shaped environment. The unset path, the sentinel-and-version fallback, and points 1 and 3 are unchanged.]
+
 ---
 
 ## Decision 147: Respond to Decision 114 reversal trigger by compacting ROADMAP-PLATFORM.yaml terminal content in place (single file preserved) (Decided)
@@ -8137,6 +8207,14 @@ unchanged -- this Decision does not pre-authorize any apply), Decision 92 / Deci
 required terraform-validate CI job, unaffected), Decision 55 (honest convergence -- no force-write of
 any record; the mirror is purely an init-time enabler), Decision 127 (the quarantine + sanctioned-
 prose taxonomy recorded above).
+
+> **Update (2026-10-30, PLAN-admin-terraform-assets-session-hook):** the mirror sync moved out of
+> `bin/setup-cloud-env.sh`: that script runs once per environment snapshot and the agent proxy never signs its
+> requests, so the sync never authenticated there. The every-session SessionStart hook
+> `.claude/hooks/session_start_terraform_assets.sh` now runs it in ADMIN sessions, as PlatformDev (`agent_platform`;
+> the mirror holds public provider binaries). The non-empty gate is unchanged: it now governs
+> `$HOME/.terraform-mirror.tfrc`, which a terraform command names inline, and the reversal condition reads that
+> hook's gate in place of the setup script's.
 
 ---
 
