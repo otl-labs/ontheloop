@@ -28,6 +28,7 @@ SCD2_VOCABULARY = frozenset(
         "array_element_format",
         "array_element_reference",
         "acceptance_lint",
+        "glossary_lint",
         "not_before",
         "write_time_exemptions",
     }
@@ -41,8 +42,13 @@ _SUBKEYS: dict[str, frozenset[str]] = {
     "array_element_format": frozenset({"pattern", "exclude_before"}),
     "array_element_reference": frozenset({"exclude_before"}),
     "acceptance_lint": frozenset({"require_discrimination", "exclude_before"}),
+    "glossary_lint": frozenset({"exclude_before"}),
 }
-PRODUCER_CLASS = {"array_element_reference": "cross_row", "acceptance_lint": "repository_state"}
+PRODUCER_CLASS = {
+    "array_element_reference": "cross_row",
+    "acceptance_lint": "repository_state",
+    "glossary_lint": "repository_state",
+}
 EXEMPTION_CLASSES = frozenset({"cross_row", "repository_state", "temporary"})
 CONTENT_THRESHOLD = "content_inline_threshold_bytes"
 RECS_DATE_FLOOR = "2026-05-01"

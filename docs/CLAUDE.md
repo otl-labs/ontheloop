@@ -55,3 +55,7 @@ future, separately-scoped sweep pending upload to the DuckLake warehouse table -
 standing done/not-done classifier in the hot `/plan` and `/implement` load path. Until that lagged
 sweep lands, completed `.yaml` plans remain at the `docs/plans/` root alongside active ones; do
 not hand-move an individual `.yaml` plan out of it outside that sweep.
+
+## Names (Decision 240)
+`docs/contracts/glossary.yaml` holds the names that replace "platform" and "product" in new governed
+text; text older than Decision 240 reads through its read_as rows, never by rewriting it.

@@ -285,6 +285,50 @@ class TestPremergeApprovedText:
         assert ms.plan_at("HEAD", "list", repo) is None
 
 
+def _decision_text(*numbers: int) -> str:
+    return "# Decisions\n\n" + "".join(f"## Decision {n}: T{n} (Decided)\n\nbody\n\n" for n in sorted(numbers, reverse=True))
+
+
+def _decisions_branch(tmp_path, monkeypatch, main_adds: int | None, branch_adds: int | None) -> Path:
+    repo = fx.make_pr_branch(tmp_path, monkeypatch, SLUG, [])
+    fx.git(repo, "checkout", "main")
+    fx.commit_file(repo, "docs/DECISIONS.md", _decision_text(1, 2))
+    fx.push_main(repo)
+    fx.git(repo, "checkout", "feature")
+    fx.git(repo, "rebase", "main")
+    if main_adds:
+        fx.git(repo, "checkout", "main")
+        fx.commit_file(repo, "docs/DECISIONS.md", _decision_text(1, 2, main_adds))
+        fx.push_main(repo)
+        fx.git(repo, "checkout", "feature")
+    if branch_adds:
+        fx.commit_file(repo, "docs/DECISIONS.md", _decision_text(1, 2, branch_adds))
+    return repo
+
+
+class TestPremergeDecisionCollision:
+    def test_number_main_took_fails_with_the_remedy(self, tmp_path, monkeypatch, capsys):
+        repo = _decisions_branch(tmp_path, monkeypatch, main_adds=3, branch_adds=3)
+        assert _premerge(repo, tmp_path, "feat\n") == 1
+        out = capsys.readouterr().out
+        assert "PREMERGE DECISION COLLISION 3 -> 4: run git fetch origin main && " in out
+        assert "bin/venv-python -m scripts.session.rebase_resolve" in out
+
+    def test_non_colliding_decision_passes(self, tmp_path, monkeypatch, capsys):
+        repo = _decisions_branch(tmp_path, monkeypatch, main_adds=3, branch_adds=4)
+        assert _premerge(repo, tmp_path, "feat\n") == 0
+        assert "DECISION COLLISION" not in capsys.readouterr().out
+
+    def test_branch_without_a_decision_passes(self, tmp_path, monkeypatch):
+        repo = _decisions_branch(tmp_path, monkeypatch, main_adds=3, branch_adds=None)
+        assert _premerge(repo, tmp_path, "feat\n") == 0
+
+    def test_retitled_existing_heading_passes(self, tmp_path, monkeypatch):
+        repo = _decisions_branch(tmp_path, monkeypatch, main_adds=3, branch_adds=None)
+        fx.commit_file(repo, "docs/DECISIONS.md", _decision_text(1, 2).replace("T2 (Decided)", "T2 retitled (Decided)"))
+        assert _premerge(repo, tmp_path, "feat\n") == 0
+
+
 def _stub_recover(monkeypatch, repo: Path, *, junit: bool = False):
     seen: dict = {}
     rows = [{"id": "rec-2", "status": "open", "acceptance": "x"}]

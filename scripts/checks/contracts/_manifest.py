@@ -236,6 +236,14 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_glossary",
+        module="scripts.checks.contracts.validate_glossary",
+        attr="validate_glossary",
+        # UNGATED deliberately, as validate_environment_taxonomy is: the check scopes itself to the diff.
+        pre=True,
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_ports_contract",
         module="scripts.checks.contracts.validate_ports_contract",
         attr="validate_ports_contract",
@@ -302,6 +310,14 @@ ENTRIES: tuple[Entry, ...] = (
         name="validate_git_ops_contract",
         module="scripts.checks.contracts.validate_git_ops_contract",
         attr="validate_git_ops_contract",
+        pre=True,
+        pre_globs=None,
+        full_segment="full_after_lint",
+    ),
+    Entry(
+        name="validate_mechanical_conflicts",
+        module="scripts.checks.contracts.validate_mechanical_conflicts",
+        attr="validate_mechanical_conflicts",
         pre=True,
         pre_globs=None,
         full_segment="full_after_lint",

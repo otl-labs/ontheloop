@@ -187,7 +187,11 @@ def test_producer_side_rules_follow_the_contract_exemptions(tmp_path: Path, clea
         gate_write("ops_recommendations", lone_grep, insert=True)
     _write_validators._producer_params.cache_clear()
 
-    with patch.object(_write_validators, "_producer_handlers", return_value={"acceptance_lint": lambda *a: None}):
+    with patch.object(
+        _write_validators,
+        "_producer_handlers",
+        return_value={"acceptance_lint": lambda *a: None, "glossary_lint": lambda *a: None},
+    ):
         with pytest.raises(ValueError, match="array_element_reference.*fails closed"):
             gate_write("ops_recommendations", ops_rec_fields(), insert=True)
 
@@ -205,6 +209,59 @@ def test_producer_side_rules_follow_the_contract_exemptions(tmp_path: Path, clea
     with patch(_REF, return_value=absent), pytest.raises(ValueError, match="rec-7"):
         gate_write("ops_recommendations", {**existing}, insert=False, existing=None)
     _write_validators._rec_exists_memo.clear()
+
+
+def _refusal(record: dict[str, Any], **kwargs: Any) -> str:
+    with pytest.raises(ValueError, match="unqualified") as exc:
+        gate_write("ops_recommendations", record, **kwargs)
+    return str(exc.value)
+
+
+def test_glossary_lint_refuses_unqualified_title() -> None:
+    message = _refusal({**ops_rec_fields(), "title": "Fix the platform runner for retries"}, insert=True)
+    assert message.startswith('title: unqualified "platform" -- say instead: On The Loop, core')
+    assert "runner for retries" not in message
+    assert "context_v2_json" not in message
+
+
+def test_glossary_lint_update_judges_only_new_sentences() -> None:
+    stored = reader_rec_row(context="The platform runner stalls. " + "x" * 90)
+    kept = {**stored, "context": stored["context"] + " Retry with a bounded delay."}
+    gate_write("ops_recommendations", kept, insert=False, existing=stored)
+    added = {**stored, "context": stored["context"] + " The product hangs too."}
+    assert 'unqualified "product"' in _refusal(added, insert=False, existing=stored)
+
+
+def test_glossary_lint_fails_closed_without_contract(tmp_path: Path) -> None:
+    _write_validators._load_glossary.cache_clear()
+    with patch.object(_write_validators, "_GLOSSARY_PATH", tmp_path / "absent.yaml"):
+        with pytest.raises(ValueError, match="failing closed"):
+            gate_write("ops_recommendations", ops_rec_fields(), insert=True)
+    _write_validators._load_glossary.cache_clear()
+
+
+def test_glossary_lint_covers_verification_not_resolution() -> None:
+    assert 'verification: unqualified "platform"' in _refusal(
+        {**ops_rec_fields(), "verification": "Check the platform runner."}, insert=True
+    )
+    gate_write("ops_recommendations", {**ops_rec_fields(), "resolution": "Fixed the platform runner."}, insert=True)
+
+
+def test_glossary_lint_context_message_names_derivation() -> None:
+    long_context = "The platform runner stalls on retry. " * 4
+    assert "context_v2_json" in _refusal({**ops_rec_fields(), "context": long_context}, insert=True)
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("title", 'Fix the "platform" wording in the runner'),
+        ("title", "Fix agent-platform-data-lake access"),
+        ("verification", None),
+    ],
+)
+def test_glossary_lint_passes_quotes_identifiers_and_none(column: str, value: str | None) -> None:
+    gate_write("ops_recommendations", {**ops_rec_fields(), column: value}, insert=True)
 
 
 # ---------------------------------------------------------------------------

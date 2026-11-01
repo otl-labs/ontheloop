@@ -20,6 +20,7 @@ import yaml
 _ROOT = Path(__file__).parent.parent.parent
 _DEFAULT_REGISTRY = _ROOT / "config" / "agent" / "data_quality" / "source_registry.yaml"
 _DEFAULT_OPS_YAML = _ROOT / "config" / "agent" / "data_quality" / "ops.yaml"
+_DEFAULT_GLOSSARY = _ROOT / "docs" / "contracts" / "glossary.yaml"
 
 
 @lru_cache(maxsize=4)
@@ -56,6 +57,7 @@ def get_rec_write_guidance(
     ops_yaml_path: Path | None = None,
     registry_path: Path | None = None,
     source: str | None = None,
+    glossary_path: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Return field semantics from ops.yaml augmented with registry data for source.
 
@@ -72,6 +74,7 @@ def get_rec_write_guidance(
         registry_path: Override path for source_registry.yaml.
         source: Optional source identifier. Pass 'ci_rca' to return the structured
             context schema fields alongside the standard column semantics.
+        glossary_path: Override path for docs/contracts/glossary.yaml (used in tests).
 
     Returns:
         Dict keyed by column name. Each value has at minimum:
@@ -81,6 +84,7 @@ def get_rec_write_guidance(
             "registered_values": list[str]  -- all canonical_ids from source_registry.yaml
         When source='ci_rca', additionally carries a "context_v2_json" entry with
             "schema_fields": dict  -- CiRcaContext field names mapped to their semantics.
+        When the glossary contract exists, a "glossary" entry projects its terms and relative-word say_instead values.
     """
     # Positional-arg compat: if first arg is a string that is not a file path, treat as source.
     # Supports g('ci_rca') calling convention in VP verification commands.
@@ -233,6 +237,20 @@ def get_rec_write_guidance(
                 "--pre output; the agent value pre is wrong because the check is guarded by a CI-only env var at "
                 "validate.py:87, making pre impossible.'"
             ),
+        }
+
+    glossary = glossary_path or _DEFAULT_GLOSSARY
+    if glossary.is_file():
+        contract = yaml.safe_load(glossary.read_text(encoding="utf-8"))
+        words = contract["relative_words"]
+        guidance["glossary"] = {
+            "description": "Names to use in rec text (docs/contracts/glossary.yaml).",
+            "semantics": words["rule"],
+            "terms": {
+                key: {field: term[field] for field in ("written", "reserved_meaning", "do_not_use_for")}
+                for key, term in contract["terms"].items()
+            },
+            "relative_words": {word: words[word]["say_instead"] for word in ("platform", "product")},
         }
 
     return guidance

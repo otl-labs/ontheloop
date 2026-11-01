@@ -426,3 +426,124 @@ class TestGateRoundRecord:
         data["gate_rounds"] = []
         failed, _ = _validate(tmp_path, data, capsys, added=set())
         assert failed == []
+
+
+class TestWordingCheckRecord:
+    """A plan whose approved-text sidecar the diff adds or changes needs a fresh PASS wording-check row."""
+
+    _DIGEST = "d" * 64
+    _BASE = "e" * 40
+
+    @classmethod
+    def _wording(cls, round_: int = 1, verdict: str = "PASS", selection: str = "complete", digest: str | None = None) -> dict:
+        return {
+            "gate": "wording-check",
+            "round": round_,
+            "verdict": verdict,
+            "digest": digest or cls._DIGEST,
+            "base": cls._BASE,
+            "selection": selection,
+        }
+
+    def _run(self, tmp_path: Path, capsys, monkeypatch, rows: list[dict], *, event: str, digest: str | None = "UNSET"):
+        monkeypatch.setenv("GITHUB_EVENT_NAME", event)
+        monkeypatch.setattr(module._common, "status_diff_base", lambda root=None: "basesha")
+        found = self._DIGEST if digest == "UNSET" else digest
+        monkeypatch.setattr(module, "_changed_sidecar_digest", lambda slug, base: found)
+        data = _plan_with_linked_obligation()
+        data["schema_version"] = 5
+        data["handoff_policy"] = {"full_validation_required_before_commit": True, "timeout_disposition": "blocked"}
+        data["gate_rounds"] = [*_CRITIQUED, *rows]
+        return _validate(tmp_path, data, capsys, added=set())
+
+    @pytest.mark.parametrize(
+        "rows",
+        [
+            [],
+            [
+                {
+                    "gate": "wording-check",
+                    "round": 1,
+                    "verdict": "FAIL",
+                    "digest": "d" * 64,
+                    "base": "e" * 40,
+                    "selection": "complete",
+                }
+            ],
+            [
+                {
+                    "gate": "wording-check",
+                    "round": 1,
+                    "verdict": "PASS",
+                    "digest": "d" * 64,
+                    "base": "e" * 40,
+                    "selection": "degraded",
+                }
+            ],
+            [
+                {
+                    "gate": "wording-check",
+                    "round": 1,
+                    "verdict": "PASS",
+                    "digest": "f" * 64,
+                    "base": "e" * 40,
+                    "selection": "complete",
+                }
+            ],
+        ],
+        ids=["no-row", "last-row-fail", "degraded", "digest-mismatch"],
+    )
+    def test_gaps_fail_on_the_plan_pr(self, tmp_path: Path, capsys, monkeypatch, rows: list[dict]) -> None:
+        failed, output = self._run(tmp_path, capsys, monkeypatch, rows, event="pull_request")
+        assert failed == ["Plan document schema validation"]
+        assert "wording-check rows with a PASS, selection complete" in output
+
+    def test_gaps_only_warn_off_the_plan_pr(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        failed, output = self._run(tmp_path, capsys, monkeypatch, [], event="push")
+        assert failed == []
+        assert (
+            "WARN: PLAN-obligation-fixture.yaml: the diff adds or changes docs/plans/approved/obligation-fixture.yaml"
+            in output
+        )
+
+    def test_a_fresh_pass_row_satisfies_the_plan_pr(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        rows = [self._wording(1, "FAIL"), self._wording(2)]
+        failed, output = self._run(tmp_path, capsys, monkeypatch, rows, event="pull_request")
+        assert failed == []
+        assert "wording-check" not in output
+
+    def test_no_requirement_without_a_changed_sidecar(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        failed, output = self._run(tmp_path, capsys, monkeypatch, [], event="pull_request", digest=None)
+        assert failed == []
+        assert "wording-check" not in output
+
+    def test_an_older_schema_needs_no_row(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+        monkeypatch.setattr(module._common, "status_diff_base", lambda root=None: "basesha")
+        monkeypatch.setattr(module, "_changed_sidecar_digest", lambda slug, base: self._DIGEST)
+        data = _plan_with_linked_obligation()
+        data["schema_version"] = 4
+        del data["gate_rounds"]
+        failed, _ = _validate(tmp_path, data, capsys, added=set())
+        assert failed == []
+
+    def test_an_unresolved_merge_base_warns_once_and_requires_nothing(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+        monkeypatch.setattr(module._common, "status_diff_base", lambda root=None: None)
+        data = _plan_with_linked_obligation()
+        data["schema_version"] = 5
+        data["handoff_policy"] = {"full_validation_required_before_commit": True, "timeout_disposition": "blocked"}
+        data["gate_rounds"] = list(_CRITIQUED)
+        failed, output = _validate(tmp_path, data, capsys, added=set())
+        assert failed == []
+        assert output.count("no merge base resolves") == 1
+
+    def test_the_sidecar_digest_reads_added_and_changed_states_only(self, monkeypatch) -> None:
+        from scripts.roadmap import approved_text
+
+        monkeypatch.setattr(approved_text, "load_sidecar", lambda slug, root: object())
+        monkeypatch.setattr(approved_text, "digest", lambda sidecar: "the-digest")
+        states = {"added": "the-digest", "changed": "the-digest", "unchanged": None, "absent": None, "deleted": None}
+        for state, expected in states.items():
+            monkeypatch.setattr(approved_text, "sidecar_state", lambda slug, root, base, s=state: s)
+            assert module._changed_sidecar_digest("x", "base") == expected
