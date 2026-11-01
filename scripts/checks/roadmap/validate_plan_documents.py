@@ -90,6 +90,37 @@ def _critique_ended(critique: list[Any]) -> bool:
     return last.verdict == "PROCEED" and (last.nits == 0 or confirming)
 
 
+def _changed_sidecar_digest(slug: str, base: str) -> str | None:
+    """The approved-text digest of docs/plans/approved/<slug>.yaml when this diff adds or changes it, else None."""
+    from scripts.roadmap import approved_text  # noqa: PLC0415
+
+    if approved_text.sidecar_state(slug, _common.ROOT, base) not in ("added", "changed"):
+        return None
+    return approved_text.digest(approved_text.load_sidecar(slug, _common.ROOT))
+
+
+def _wording_check_gaps(path: Path, doc: Any, base: str) -> list[str]:
+    """A plan whose approved-text sidecar the diff adds or changes needs a fresh PASS wording-check row.
+
+    The row is the planner's recorded rehearsal (scripts.roadmap.plan_wording_check); it is read here and never re-run.
+    A build PR never changes the sidecar, so it needs none. Routed like _gate_round_gaps (Decision 163).
+    """
+    if doc.schema_version < _MIN_NEW_PLAN_SCHEMA_VERSION:
+        return []
+    digest = _changed_sidecar_digest(doc.slug, base)
+    if digest is None:
+        return []
+    rows = [row for row in doc.gate_rounds if row.gate == "wording-check"]
+    if rows and rows[-1].verdict == "PASS" and rows[-1].selection == "complete" and rows[-1].digest == digest:
+        return []
+    return [
+        (
+            f"{path.name}: the diff adds or changes docs/plans/approved/{doc.slug}.yaml, so gate_rounds must end its "
+            "wording-check rows with a PASS, selection complete, digest equal to the sidecar's (planning SKILL.md Step 8b)"
+        )
+    ]
+
+
 def _is_documentation(file: str) -> bool:
     """True for prose that carries no runtime or agent behavior.
 
@@ -165,6 +196,10 @@ def validate_plan_documents(
         added_names = _added_plan_names() if added_plan_names is None else added_plan_names
         errors: list[str] = []
         advisories: list[str] = []
+        on_plan_pr = os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
+        wording_base = _common.status_diff_base()
+        if wording_base is None:
+            advisories.append("no merge base resolves, so no wording-check row is required (planning SKILL.md Step 8b)")
         for path in plan_paths:
             # One parse per plan feeds both the schema verdict and the semantic gates -- this
             # check rides the --pre tier, so a second load() per passing plan is pure waste.
@@ -176,7 +211,9 @@ def validate_plan_documents(
             errors.extend(_new_plan_version_failures(path, doc, added_names))
             errors.extend(_test_obligation_failures(path, doc))
             gaps = _gate_round_gaps(path, doc, added_names)
-            (errors if os.environ.get("GITHUB_EVENT_NAME") == "pull_request" else advisories).extend(gaps)
+            if wording_base is not None:
+                gaps += _wording_check_gaps(path, doc, wording_base)
+            (errors if on_plan_pr else advisories).extend(gaps)
             if path.name in added_names:
                 span = context_block_lines(path)
                 if span > CONTEXT_BLOCK_LINE_ADVISORY:

@@ -52,12 +52,7 @@ ENTRIES: tuple[Entry, ...] = (
         name="validate_supersession_annotations",
         module="scripts.checks.decisions.validate_supersession_annotations",
         attr="validate_supersession_annotations",
-        # Promoted into --pre. Its module docstring still says "never a pre-merge --pre block"
-        # (both-file parse cost); THIS ENTRY is the authority and the sibling conformance/
-        # immutability checks already parse the same two files in --pre for ~0.04s. The stale
-        # sentence is deliberately left alone: the module is in the check-accounting grandfather
-        # baseline, whose touch-it-fix-it rule turns any edit to it into an examined()/skipped()
-        # adoption -- a separate change.
+        # Promoted into --pre; this Entry is the authority.
         pre=True,
         pre_globs=(
             "docs/DECISIONS.md",

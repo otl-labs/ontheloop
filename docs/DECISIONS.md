@@ -857,6 +857,14 @@ child criteria; the self-review gap -- rec-4476.
 
 **Related:** Decisions 67, 90, 93, 184, 185, 197, 206, 212, 223; CD.17, CD.27; rec-4043, rec-4478.
 
+> **Update (2026-10-31):** PLAN-plan-defect-loop (operator direction): for cl.2, a plan amendment raised
+> by a build's plan-defect report (implement-scope-boundary.yaml `deviation_trigger.escalation`) that
+> fixes a scope companion, VP text or a repeated failure is approved and merged under the human's
+> standing direction: the plan's owning planning session merges it after a fresh critique PROCEED and
+> green CI. Approved wording, contract or Decision text and any loosened assertion still need the
+> human's own approval, and nothing is loosened to obtain green (Decision 235). Hub and spoke is
+> unchanged.
+
 ---
 
 ## Decision 228: A telemetry session's end is read from its turns -- idle at rest reads the last turn's outcome, idle mid-turn reads abandoned, and a producer close row is optional evidence (amends Decision 199 clause 1) (Decided)
@@ -6399,6 +6407,8 @@ This Decision is the structural mechanism Decision 145's own reversal conditions
 **Related:** Decision 132 (the two-leg replay/enforcement model this mirrors), Decision 104 (`_common.py` sole-home discipline, extended here), Decision 76 (the two-PR plan/implement flow whose absence-of-implementation this fix accounts for), Decision 73 (fast-tier budget guards, preserved unchanged), Decision 55 (fail-loud, no silent substitution -- governs both the replay advisory-SKIPs and the wrapper fallback).
 
 [Amendment 2026-08-17: the commit-subject resolution mechanism this entry describes (`feat({slug})` commit subjects on `git log origin/main..HEAD`) is replaced by an explicit, schema-validated `implementation_declared` boolean on `PlanDocument`, resolved content-keyed via `scripts.checks._common.resolve_declared_plans` (PLAN-plan-resolution-content-keyed, provenance: explicit operator direction given during that plan's authoring). The two-leg model and advisory-SKIP shape this entry describes are unchanged; only the resolution signal moves from commit-message grammar to diff-carried plan content.]
+
+[Amendment 2026-10-31: point 2's resolution order gains `OTL_VENV_PYTHON` ahead of `.venv`. When set, `bin/venv-python` execs that interpreter if it is an executable file, else exits 1 naming the path; it never falls through to `.venv` or the PATH fallback (Decision 55 fail-loud kept). Its only setter is the CI-parity re-exec in `scripts/checks/deps/fast_tier_env.py` (PLAN-fast-tier-ci-parity, rec-4761), so the agent container's `validate --pre` subprocesses stay in the CI-shaped environment. The unset path, the sentinel-and-version fallback, and points 1 and 3 are unchanged.]
 
 ---
 
