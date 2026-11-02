@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from scripts.decisions_md import extract_entry_envelope, iter_decision_sections
 from scripts.roadmap.plan_document import PlanDocument
+from tests.fixtures.decision_entry import authored_bytes, cap_bytes
 
 ROOT = Path(__file__).resolve().parents[2]
 DECISIONS = ROOT / "docs" / "DECISIONS.md"
@@ -106,7 +107,7 @@ def test_decision_67_superseded_and_cd17_disposed() -> None:
     number, block = _new_decision()
     envelope = extract_entry_envelope(block)
     assert envelope is not None and envelope["supersedes"] == [67]
-    assert len(block.encode("utf-8")) <= 6144
+    assert authored_bytes(block) <= cap_bytes()
     stub = _sections()[67]
     assert f"Superseded by Decision {number}" in stub and "**Status:** Superseded" in stub
 
