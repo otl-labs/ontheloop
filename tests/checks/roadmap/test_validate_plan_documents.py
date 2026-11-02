@@ -527,16 +527,39 @@ class TestWordingCheckRecord:
         failed, _ = _validate(tmp_path, data, capsys, added=set())
         assert failed == []
 
-    def test_an_unresolved_merge_base_warns_once_and_requires_nothing(self, tmp_path: Path, capsys, monkeypatch) -> None:
+    def _sidecar_plan(self, tmp_path: Path, capsys, monkeypatch, *, sidecar: str | None, base: str | None):
+        root = tmp_path / "root"
+        (root / "docs/plans/approved").mkdir(parents=True)
+        if sidecar is not None:
+            (root / "docs/plans/approved/obligation-fixture.yaml").write_bytes(sidecar)
+        monkeypatch.setattr(module._common, "ROOT", root)
         monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
-        monkeypatch.setattr(module._common, "status_diff_base", lambda root=None: None)
+        monkeypatch.setattr(module._common, "status_diff_base", lambda root=None: base)
         data = _plan_with_linked_obligation()
         data["schema_version"] = 5
         data["handoff_policy"] = {"full_validation_required_before_commit": True, "timeout_disposition": "blocked"}
         data["gate_rounds"] = list(_CRITIQUED)
-        failed, output = _validate(tmp_path, data, capsys, added=set())
+        plans = tmp_path / "plans"
+        plans.mkdir()
+        return _validate(plans, data, capsys, added=set())
+
+    def test_an_unresolved_merge_base_warns_once_and_requires_nothing(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        failed, output = self._sidecar_plan(tmp_path, capsys, monkeypatch, sidecar=b"blocks: []\n", base=None)
         assert failed == []
         assert output.count("no merge base resolves") == 1
+
+    def test_no_merge_base_warn_only_when_a_sidecar_needs_checking(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        failed, output = self._sidecar_plan(tmp_path, capsys, monkeypatch, sidecar=None, base=None)
+        assert failed == [] and "no merge base resolves" not in output
+
+    @pytest.mark.parametrize("raw", [b"blocks: []\n", b"\xff\xfe\x00bad"], ids=["unparseable", "not-utf8"])
+    def test_a_malformed_sidecar_is_a_gap_not_an_exception(self, tmp_path: Path, capsys, monkeypatch, raw: bytes) -> None:
+        from scripts.roadmap import approved_text
+
+        monkeypatch.setattr(approved_text, "sidecar_state", lambda slug, root, base: "added")
+        failed, output = self._sidecar_plan(tmp_path, capsys, monkeypatch, sidecar=raw, base="basesha")
+        assert failed == ["Plan document schema validation"]
+        assert "docs/plans/approved/obligation-fixture.yaml cannot be read: " in output
 
     def test_the_sidecar_digest_reads_added_and_changed_states_only(self, monkeypatch) -> None:
         from scripts.roadmap import approved_text
