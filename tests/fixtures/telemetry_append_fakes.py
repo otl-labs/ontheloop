@@ -218,7 +218,7 @@ class LiveFake(AdapterKit):
         self.install(monkeypatch)
         monkeypatch.setenv("TELEMETRY_META_SCHEMA", "ducklake_smoke")
         monkeypatch.setenv("TELEMETRY_DATA_PATH", rt.SMOKE_DATA_PATH)
-        monkeypatch.setenv("TELEMETRY_DSN_SECRET_ID", "secret")
+        monkeypatch.setenv("TELEMETRY_DSN_PARAMETER", "secret")
         monkeypatch.setattr(
             rt,
             "get_warm_connection",

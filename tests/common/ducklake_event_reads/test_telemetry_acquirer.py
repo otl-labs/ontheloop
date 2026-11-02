@@ -63,7 +63,7 @@ def test_acquirer_takes_a_declared_pin_secret_and_read_only_attach(monkeypatch: 
         order.append("pin")
         return ev.require_production_pin()
 
-    acquire = ev.acquirer_for("named_read", _PAYLOAD, NO_OPS, "/e", pin=pin, dsn_secret_id="reader-secret", read_only=True)
+    acquire = ev.acquirer_for("named_read", _PAYLOAD, NO_OPS, "/e", pin=pin, dsn_parameter="reader-secret", read_only=True)
     assert order == ["pin"] and seen["open"] == []
     acquire()
     assert seen["fetch"] == [(("reader-secret",), {})]

@@ -3,7 +3,7 @@
 TestDelegateBehaviour drives .github/actions/materialise-tfvars/materialise_tfvars.sh under the
 literal GitHub composite argv (Decision 162 R2 -- the exact invocation GitHub uses for a composite
 `shell: bash` step body, `bash --noprofile --norc -e -o pipefail <file>`) with a stubbed `aws` on
-PATH, never touching real Secrets Manager. TestActionWiring / TestDriftWiring / TestBaselineRetired
+PATH, never touching real AWS. TestActionWiring / TestDriftWiring / TestBaselineRetired
 assert the three consuming surfaces (action.yml, terraform-drift.yml, the baseline) are wired
 correctly. TestContractRepoint loads the LIVE docs/contracts/terraform-cc-web-operations.yaml
 (not a tmp_path synthetic) and asserts the recovery-procedure repoint landed.
@@ -46,6 +46,7 @@ FIXTURE_TFVARS = "\n".join(_FIXTURE_LINES) + "\n"
 
 _AWS_STUB = """\
 #!/usr/bin/env bash
+if [ "$1 $2" != "ssm get-parameter" ]; then echo "unexpected aws call: $1 $2" >&2; exit 99; fi
 if [ -n "${AWS_STUB_STDOUT_FILE:-}" ] && [ -f "$AWS_STUB_STDOUT_FILE" ]; then
   cat "$AWS_STUB_STDOUT_FILE"
 fi

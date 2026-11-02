@@ -12,7 +12,7 @@ import urllib.request
 from typing import Any
 
 _NEON_API_BASE = "https://console.neon.tech/api/v2"
-_NEON_SECRET_ID = "neon-api-key"
+_NEON_PARAMETER_NAME = "/secret/neon-api-key"
 
 
 class NeonApiError(RuntimeError):
@@ -20,17 +20,17 @@ class NeonApiError(RuntimeError):
 
 
 def fetch_api_key(profile: str | None = None) -> str:
-    """Read the Neon API key from Secrets Manager (secret id: neon-api-key).
+    """Read the Neon API key from SSM Parameter Store (SecureString /secret/neon-api-key).
 
-    Uses the agent_platform_admin (PlatformDev) assume-role chain -- the orchestrator
-    already holds secretsmanager:GetSecretValue on this secret, so zero new IAM is needed.
+    Needs ssm:GetParameter with decryption on this parameter, which the operator profile
+    (PlatformAdmin, SecretParameterAdmin) holds; PlatformDev does not.
     """
     import boto3  # noqa: PLC0415
 
     session = boto3.Session(profile_name=profile) if profile else boto3.Session()
-    client = session.client("secretsmanager", region_name="eu-west-2")
-    response = client.get_secret_value(SecretId=_NEON_SECRET_ID)
-    secret = response["SecretString"]
+    client = session.client("ssm", region_name="eu-west-2")
+    response = client.get_parameter(Name=_NEON_PARAMETER_NAME, WithDecryption=True)
+    secret = response["Parameter"]["Value"]
     try:
         parsed = json.loads(secret)
         return parsed.get("api_key") or parsed.get("NEON_API_KEY") or secret.strip()

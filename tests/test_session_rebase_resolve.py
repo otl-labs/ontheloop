@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -289,9 +290,45 @@ def _real_git(*args: str, cwd: Path) -> str:
     return done.stdout.strip()
 
 
+def _clone_real_root(dest: Path) -> None:
+    done = subprocess.run(
+        ["git", "clone", "-q", str(REAL_ROOT), str(dest)],
+        cwd=dest.parent,
+        env={**os.environ, "LC_ALL": "C"},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert done.returncode == 0, done.stderr
+
+
+def test_clone_failure_reports_git_stderr(tmp_path: Path) -> None:
+    dest = tmp_path / "clone"
+    dest.mkdir()
+    (dest / "keep.txt").write_text("x", encoding="utf-8")
+    with pytest.raises(AssertionError, match="already exists"):
+        _clone_real_root(dest)
+
+
+def test_real_root_clone_works_across_filesystems() -> None:
+    shm = Path("/dev/shm")
+    if not (shm.is_dir() and os.access(shm, os.W_OK)):
+        pytest.skip("env: /dev/shm is not a writable directory")
+    if shm.stat().st_dev == REAL_ROOT.stat().st_dev:
+        pytest.skip("env: /dev/shm shares the checkout's filesystem")
+    base = Path(tempfile.mkdtemp(dir=shm))
+    try:
+        clone = base / "clone"
+        _clone_real_root(clone)
+        assert _real_git("rev-parse", "HEAD", cwd=clone) == _real_git("rev-parse", "HEAD", cwd=REAL_ROOT)
+        assert (clone / "docs/DECISIONS.md").exists()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def test_real_corpus_race_on_a_local_clone(tmp_path: Path) -> None:
     clone = tmp_path / "clone"
-    subprocess.run(["git", "clone", "--local", "-q", str(REAL_ROOT), str(clone)], check=True, capture_output=True)
+    _clone_real_root(clone)
     watched = [REAL_ROOT / "docs/DECISIONS.md", REAL_ROOT / "docs/decisions-index.json"]
     before = [_sha(p) for p in watched]
     origin_ref = _real_git("rev-parse", "refs/remotes/origin/main", cwd=REAL_ROOT)

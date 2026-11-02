@@ -27,7 +27,7 @@ from src.lambdas.ducklake_maintenance._shared import EXTENSION_DIRECTORY
 
 SMOKE_WRITER = logins.LOGINS["ducklake_telemetry_writer"]
 TELEMETRY_LOGIN = SMOKE_WRITER.name
-TELEMETRY_DSN_SECRET_ID = SMOKE_WRITER.secret_id
+TELEMETRY_DSN_PARAMETER = SMOKE_WRITER.parameter_name
 _NEON_SUPERUSER_QUERY = (
     "SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'neon_superuser') "
     "THEN pg_has_role(current_user, 'neon_superuser', 'member') END"
@@ -79,7 +79,7 @@ def _scope_query(schema: str) -> str:
 def _scoped_dsn(login: logins.Login, owner: dict[str, str]) -> dict[str, str]:
     """Fetch the login's secret and refuse unless it names this role on the owner's host over TLS."""
     try:
-        scoped = rt.fetch_dsn(login.secret_id)
+        scoped = rt.fetch_dsn(login.parameter_name)
     except RuntimeError:
         raise rt.DuckLakeRuntimeError("provision_telemetry_login: the scoped login secret is missing required keys") from None
     wrong = [

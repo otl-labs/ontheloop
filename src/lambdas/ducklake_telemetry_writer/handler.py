@@ -145,11 +145,11 @@ def _warm_connection() -> tuple[Any, dict[str, Any]]:
     """The pinned warm connection on the scoped login; captures the login and backend class from the secret's host only."""
     meta_schema = _env("TELEMETRY_META_SCHEMA")
     data_path = _env("TELEMETRY_DATA_PATH")
-    secret_id = _env("TELEMETRY_DSN_SECRET_ID")
+    parameter_name = _env("TELEMETRY_DSN_PARAMETER")
     extension_directory = os.environ.get("DUCKLAKE_EXTENSION_DIRECTORY") or rt.LAMBDA_EXTENSION_DIRECTORY
 
     def opener() -> Any:
-        dsn = rt.fetch_dsn(secret_id=secret_id)
+        dsn = rt.fetch_dsn(parameter_name=parameter_name)
         _CATALOG_LOGIN["login"] = str(dsn.get("username", ""))
         _CATALOG_LOGIN["backend"] = actions.classify_backend(str(dsn.get("host", "")))
         return rt.open_connection(

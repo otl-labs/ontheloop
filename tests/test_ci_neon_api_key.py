@@ -20,6 +20,7 @@ STUB_KEY = "stub-neon-key-0123456789"  # pragma: allowlist secret
 _STUB_AWS = """\
 #!/usr/bin/env bash
 echo "$*" >> "$AWS_STUB_LOG"
+if [ "$1 $2" != "ssm get-parameter" ]; then echo "unexpected aws call: $1 $2" >&2; exit 99; fi
 case "$AWS_STUB_BEHAVIOR" in
     ok) printf '%s\\n' "$AWS_STUB_VALUE" ;;
     empty) printf '\\n' ;;
@@ -88,7 +89,10 @@ def test_check_on_push_calls_aws_once_and_prints_no_value(env):
     r = _run(env, "check")
     assert r.returncode == 0
     assert len(_calls(env)) == 1
-    assert "get-secret-value" in _calls(env)[0] and "neon-api-key" in _calls(env)[0]
+    call = _calls(env)[0]
+    assert call.startswith("ssm get-parameter")
+    assert "--name /secret/neon-api-key" in call and "--with-decryption" in call
+    assert "secretsmanager" not in call
     assert STUB_KEY not in r.stdout + r.stderr
 
 

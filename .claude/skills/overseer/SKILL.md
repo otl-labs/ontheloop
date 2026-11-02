@@ -2,7 +2,7 @@
 name: overseer
 description: >-
   Deep methodology for the orchestration meta-layer that composes /plan and /implement subagents
-  to drive an entire platform roadmap item or audit to completion largely unattended -- read-nothing
+  to drive an entire roadmap item or audit to completion largely unattended -- read-nothing
   router discipline, the Design-B gate-request trampoline, division of labor, liveness/watchdog
   resilience, autonomy calibration, and the Fable advice-consult protocol. Use when running the
   /overseer workflow. Detail: docs/contracts/overseer-dispatch.yaml.
