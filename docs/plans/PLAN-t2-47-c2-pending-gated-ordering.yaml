@@ -35,10 +35,12 @@ scope:
       when pending_gated is present) and pops pending_codification and stale_gated_approval (Decision 190 pt
       3, marker superseded by the red). (5) prior-red short-circuit predicate: a prior red skips the tick
       EXCEPT a stale_gated_approval red meeting an out_of_band_drift verdict, which falls through to the
-      red-flip. (6) --drift-guard, FAIL-CLOSED: prints false only when it positively clears the green write
+      red-flip. (6) --drift-guard, FAIL-CLOSED (one I/O contract: it appends refused=<true|false> to the file named by
+      $GITHUB_OUTPUT, and on true prints a ::warning:: naming acknowledge-and-retry): refused=false only when it
+      positively clears the green write
       (NoSuchKey / empty record = pass-on-absent; a green record; a red without drift fields; a red whose
       drift_detected_at <= pending_gated.routed_at; a stale_gated_approval red); a non-NoSuchKey read error,
-      an unparseable record, or a missing or malformed timestamp on a drift red prints true. The CLI takes the
+      an unparseable record, or a missing or malformed timestamp on a drift red gives refused=true. The CLI takes the
       read's rc, stdout and stderr (NoSuchKey is recognised from stderr, as the prior_status step does at
       terraform-drift.yml's prior_status step, :163-193, NoSuchKey classification :178-185), so an unclassified read error is never treated as absent.
   - file: tests/test_convergence_classify.py
@@ -99,8 +101,12 @@ scope:
       (apply-sandbox) ROUTED stay as they are. (B)
       gated-apply job (starts about :666): a drift-guard step (id drift_guard, named "Drift guard (refuse green
       over a post-route drift red)" -- no "wake" in the name, validate_dispatch_gated_apply_topology invariant
-      (vii) counts exactly two wake steps) after apply and before the record
-      writer reads the record (passing the read's rc, stdout and stderr to the delegate) and runs
+      (vii) counts exactly two wake steps; if: steps.apply.outcome == 'success'; no continue-on-error, so a
+      guard crash fails the job, leaves refused unset (refused != 'false' blocks the green write) and reaches
+      the existing ci-rca self-dispatch) after apply and before the record
+      writer reads the record with the positionally guarded, rc-preserving capture
+      RC=0; REC_JSON=$(aws s3 cp ... - 2>"$RUNNER_TEMP/drift_guard.err") || RC=$? (no set +e, no unguarded
+      mktemp), passes RC, REC_JSON and the stderr file to the delegate, and runs
       scripts.ci.convergence_classify --drift-guard. The writer is wired fail-closed, refused set to
       steps.apply.outcome == 'success' && steps.drift_guard.outputs.refused != 'false', so an erroring or
       skipped guard can only block a green write, never a red one (Decision 92 pt 2). The comment at about :833
@@ -168,9 +174,13 @@ scope:
       would pass for a non-substantive reason (the class docstring forbids that). Re-point each to a real
       same-shape near-miss in the same job, extracted by step id: apply-sandbox -> the artifact_sha step (its
       VALUE=$(gh api ... || echo "") guard), renamed test_terraform_apply_sandbox_artifact_sha_is_silent;
-      gated-apply -> the new drift_guard step (its guarded S3 read capture), renamed
+      gated-apply -> the new drift_guard step (its REC_JSON=$(...) || RC=$? capture), renamed
       test_terraform_gated_apply_drift_guard_capture_is_silent. Each keeps an in-body anchor assertion (|| echo
-      or set +e present) so a shape change fails loudly. The reconcile.yml wake near-misses (:121-138) are
+      "" for artifact_sha, || RC=$? for drift_guard) so a shape change fails loudly. Both pass for the
+      substantive reason the class docstring requires: _unguarded_assignments finds a real VAR=$( assignment
+      and the positional guard rule clears it (measured 2026-11-02: [] for the || RC=$? shape, ['REC'] for a
+      set +e plus ; RC=$? shape). Neither step is continue-on-error, so the near-miss tests the guard rule on
+      a real body, the same basis as the class's other near-misses. The reconcile.yml wake near-misses (:121-138) are
       untouched.
   - file: scripts/convergence_health/escalate.py
     action: Modify
@@ -186,9 +196,11 @@ scope:
     action: Modify
     purpose: >-
       Graduated 2026-07-22, it greps for the PENDING_GATED_DRIFT literal this plan removes. Re-point its
-      check_spec to the new dispatch (the delegate's pending_gated / pending_gated_flagged actions and the
-      workflow's PR-naming rec); the modified entry fails on origin/main and passes on HEAD, so the
-      differential gate admits it.
+      check_spec to something new on HEAD -- the pending_gated_flagged action literal in
+      scripts/ci/convergence_classify.py, chained with the absence of PENDING_GATED_DRIFT in
+      terraform-drift.yml (the PR-naming rec title already exists on main, so it cannot be the key) -- and
+      move guard_target to scripts/ci/convergence_classify.py; the modified entry fails on origin/main and
+      passes on HEAD, so the differential gate admits it.
   - file: config/composite_action_body_baseline.yaml
     action: Modify
     purpose: >-
@@ -469,9 +481,8 @@ constraints:
     Decision 162: all new branching lives in scripts/ci/convergence_classify.py (stdlib-only, imported by
     workflows that install no dependencies). The handle-drift body must not exceed 116 effective lines
     (removing the green branch offsets the new rec filing); the gated-apply guard body is measured and
-    registered at its size, never raised, with the file's net count still falling (target 3: set +e, the
-    captured S3 read with RC=$? on the same line, the delegate call), so --drift-guard itself appends refused= to $GITHUB_OUTPUT and
-    prints the ::warning::;
+    registered at its size, never raised, with the file's net count still falling (target 2: RC=0; REC_JSON=$(...) || RC=$?, then the delegate call), so --drift-guard itself appends
+    refused= to $GITHUB_OUTPUT and prints the ::warning::;
     no raise-approved marker. write-convergence-record/action.yml is NOT modified (its body sits at its 97
     ceiling); the guard reuses its refused input.
   - >-
@@ -592,9 +603,9 @@ context:
     Re-plan 2026-11-02 (main 05bb51dc): anchors re-measured; apply-sandbox.yml at 435 of 435 effective lines,
     so scope row 5 (A) decomposes the two wake bodies into scripts/ci/apply_wake.py. Siblings: constraints.
   - >-
-    compute_affected_artifacts(scope) reports {data-pipeline: [docs/ROADMAP-PLATFORM.yaml]}: the roadmap is an
-    assets row of that active manifest, not a src/lambdas/** source; a bookkeeping-only edit with no handler or
-    runtime change, discharged by the governed deploy-prod-lambdas.yml channel, so no build/deploy/smoke step.
+    compute_affected_artifacts(scope) = {data-pipeline: [docs/ROADMAP-PLATFORM.yaml]}: an assets row, not a
+    handler source; deploy-prod-lambdas.yml's push paths exclude it and a criterion flip has no runtime consumer
+    (scheduled agents disabled, T4.12); the next data-pipeline deploy carries it -- no build/deploy/smoke step.
   - "fork: escalation rec scope | chosen: the escalated branch files the drift_run_url-carrying rec whether or not pending_gated is present (one code path; the no-marker escalation had the same Decision 190 pt 5 gap) | class: consistency-only | precedent: Decision 190 pt 5; Decision 142; scout WARN Decision 190 | precedent_kind: decision | reversible: yes | persisted: scope terraform-drift.yml"
   - "fork: guard placement | chosen: a gated-apply drift-guard step feeding the writer's existing refused input, not a write-convergence-record edit (its body sits at its 97 R3 ceiling) | class: consistency-only | precedent: Decision 162 R3; Decision 92 pt 2; scout WARN Decision 92 (guard preferred) | precedent_kind: decision | reversible: yes | persisted: scope terraform-apply-sandbox.yml"
 gate_rounds:
@@ -604,6 +615,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 8}
   - {gate: plan-critique, round: 4, verdict: PROCEED, nits: 7}
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 6}
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 1, nits: 5}
   - {gate: wording-check, round: 1, verdict: PASS, digest: ac7326a3e39efa6444904907d2edd9d1481528f0e2a412f2f7d234a16d8f9f2f, base: 390379a11bd0103e5a0396972d3b2c9348a7f9ef, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: PASS, digest: ac7326a3e39efa6444904907d2edd9d1481528f0e2a412f2f7d234a16d8f9f2f, base: 4cfbea16387224a57fac135898047490605499c8, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
@@ -633,8 +645,8 @@ execution_steps:
     against the literals copied from main's two wake bodies); then swap both wake bodies for the delegate call
     and re-point the two wake near-miss tests in tests/checks/ci_guards/test_validate_masked_errexit_steps.py as
     its scope row names (red before: the re-pointed drift_guard test fails until the step exists); the new
-    drift_guard step's rc/stdout/stderr capture has the same shape, so guard every assignment (set +e or || ...)
-    and confirm validate_masked_errexit_steps (run by --pre) reports nothing for it.
+    drift_guard step uses the RC=0; REC_JSON=$(...) || RC=$? capture (scope row 5 (B)); confirm
+    validate_masked_errexit_steps (run by --pre) reports nothing.
   - >-
     .github/workflows/terraform-apply-sandbox.yml: add the gated-apply drift-guard step before the writer and
     feed its output into refused and the wake step's APPLY_OUTCOME; tests/test_gated_apply_drift_guard.py.
