@@ -234,3 +234,15 @@ def test_terraform_init_retry_action_signature_parity() -> None:
     assert not missing, (
         f".github/actions/terraform-init-retry/action.yml init-retry grep -qE line is missing signatures: {missing}"
     )
+
+
+def test_drift_workflow_handle_drift_record_read_fails_loud() -> None:
+    """The Handle-drift record read is the guarded rc-preserving capture: only NoSuchKey is treated as
+    absent, and any other read error exits 1 before any write (never a skeletal default-green record)."""
+    doc = yaml.safe_load(DRIFT_WORKFLOW.read_text(encoding="utf-8"))
+    body = next(s["run"] for s in doc["jobs"]["drift-detect"]["steps"] if s.get("name", "").startswith("Handle drift"))
+    assert '2>/dev/null || echo "{}"' not in body
+    capture = body.index('2>"$RUNNER_TEMP/handle_drift.err") || RC=$?')
+    error = body.index("::error::Convergence record read failed (non-NoSuchKey)", capture)
+    assert body.index("exit 1", error) < body.index("--skip-on-prior-red")
+    assert capture < body.index("aws s3 cp - ")
