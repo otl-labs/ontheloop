@@ -25,7 +25,7 @@ Reject a plan that invents a third validation tier, treats mapped coverage or re
 
 4. **Targeted decision extraction + conflict-sweep, not a full-file read:** read only the decision sections named in the plan's context `Decision-scout verdict + CITE list` (locate each via `rg "^## Decision N:" docs/DECISIONS.md`), plus a conflict-sweep: `rg` 2-3 keywords drawn from the plan's approach over `^## Decision` headers in `docs/DECISIONS.md` to catch a contradiction the scout's CITE list omitted. Do not Read the full file; the decision-scout gate already paid that cost.
 
-5. **For IMPLEMENTATION plans:** Read the files listed in the plan's `scope` list (the `## Scope` table in legacy .md plans) to verify the plan's accuracy. For STRATEGIC plans, this is not required -- work areas are high-level and do not require file-level verification.
+5. **For IMPLEMENTATION plans:** Read the files listed in the plan's `scope` list (the `## Scope` table in legacy .md plans) to verify the plan's accuracy.
 
 5b. For IMPLEMENTATION plans, run `bin/venv-python -m scripts.roadmap.plan_obligations --plan <plan path>` and fold its report (companions, size headroom, unbuilt plans on the same files, undecidable acceptance) into the scope check above -- arithmetic is the tool's, adequacy is yours. With an approved-text sidecar, read the last `wording-check` gate row (never re-run it): REVISE when it is absent, not PASS, its digest differs from `approved_text record`, or its selection was degraded.
 
@@ -35,8 +35,7 @@ Reject a plan that invents a third validation tier, treats mapped coverage or re
 
 7. **Score North Star alignment (1-5):** Does the `## Intent` section directly serve a North Star principle (NS.1-NS.5, `docs/ROADMAP-PLATFORM.yaml`)? A score of 1 means no discernible connection; 5 means it directly advances one. Name it and give a 1-2 sentence justification.
 
-8. **Evaluate Work Area scoping (STRATEGIC plans) or Scope breadth (IMPLEMENTATION plans):**
-   - For STRATEGIC: Are Work Areas well-bounded (one logical concern per area)? Too large (suggest split)? Too small (merge with adjacent area)?
+8. **Evaluate Scope breadth (IMPLEMENTATION plans; a split means child recs or atomic plans, Decision 242):**
    - For IMPLEMENTATION: Are all scope entries necessary? Too large (suggest split)? Does the Scope extend beyond the stated phase?
 
 9. **Check phase dependencies:** Does this plan depend on work from a prior phase that is not yet complete? Cite specific ROADMAP phase entries.
@@ -60,7 +59,7 @@ when a behavior-changing scope file lacks a linked obligation, its test is struc
 does not assert the named behavior, its red/green expectation is absent, or its waiver is thin.
 Presence/link validators are deterministic; adequacy is this fresh-context judgement.
 
-12d. **STRATEGIC plan gate:** If the plan's `## Plan Type` is `STRATEGIC` AND the executor freeze is still active per AGENTS.md Temporary Operational Constraints (pending CD.17 reversal), recommend REVISE with: "STRATEGIC plans are suspended while the executor freeze holds (CD.17): the autonomous executor has no consumer for STRATEGIC-decomposed recommendations. Convert to an IMPLEMENTATION plan, or split into multiple atomic IMPLEMENTATION plans, or wait for CD.17 reversal."
+12d. **Retired (Decision 242):** the plan schema refuses `plan_type: STRATEGIC` and non-empty `work_areas`; an oversized plan is a step 8 split finding.
 
 12k. **Closure obligation check (CONDITIONAL -- IMPLEMENTATION plans only):** VERIFY the plan's own declarations against its scope and VP; do not re-derive the obligation. Additive plans that trip neither condition are exempt.
 
@@ -117,7 +116,7 @@ Ask the following five questions against the plan's chosen approach. For each, w
 
 **Files Read:** [plan path; docs/PROJECT_CONTEXT.md; targeted roadmap items: <ids>; targeted decision sections: <ids>; scope files (IMPLEMENTATION only)] -- count must match the scope entry count
 
-**Plan Type:** STRATEGIC / IMPLEMENTATION / REPORT-ONLY
+**Plan Type:** IMPLEMENTATION / REPORT-ONLY
 
 **Decision Conflicts:** None / [list with decision numbers]
 
@@ -132,7 +131,7 @@ Ask the following five questions against the plan's chosen approach. For each, w
 
 **North Star Alignment:** X/5 -- [1-2 sentence justification]
 
-**Work Area / Scope Evaluation:**
+**Scope Evaluation:**
 - [Area or file 1]: appropriately scoped / too large (suggest split into: X, Y; deferred half filed as a follow-on rec) / too small (merge with: Z)
 - [Area or file 2]: ...
 

@@ -228,7 +228,7 @@ class TestCurrencyProjection:
             37: "superseded_compacted",  # Decision 175 migrate_then_rehome compaction
             80: "superseded_pointer",
             43: "amended",
-            67: "amended",
+            67: "superseded_compacted",
             168: "current",
         }
         for n, want in expected.items():

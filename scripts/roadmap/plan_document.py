@@ -47,7 +47,7 @@ def _argument_selects(argument: str, evidence: str) -> bool:
     return evidence.startswith(directory)
 
 
-PlanType = Literal["IMPLEMENTATION", "STRATEGIC", "REPORT-ONLY"]
+PlanType = Literal["IMPLEMENTATION", "REPORT-ONLY"]
 VerificationTier = Literal["V1", "V2", "V3"]
 ScopeAction = Literal["Create", "Modify", "Delete"]
 Complexity = Literal["XS", "S", "M", "L", "XL"]
@@ -438,10 +438,8 @@ class PlanDocument(BaseModel):
         if dupes:
             raise ValueError(f"verification_plan step ids must be unique; duplicates: {dupes}")
 
-        if self.plan_type == "STRATEGIC" and not self.work_areas:
-            raise ValueError("STRATEGIC plans require a non-empty work_areas list")
-        if self.plan_type != "STRATEGIC" and self.work_areas:
-            raise ValueError(f"work_areas are only valid on STRATEGIC plans (plan_type is {self.plan_type})")
+        if self.work_areas:
+            raise ValueError("work_areas must be empty: the STRATEGIC plan type is retired (Decision 242)")
 
         if self.plan_type == "IMPLEMENTATION" and not self.execution_steps:
             raise ValueError("IMPLEMENTATION plans require non-empty execution_steps")

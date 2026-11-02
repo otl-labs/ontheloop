@@ -106,7 +106,7 @@ class TestEvaluatePlan:
 
     def test_non_implementation_plan_grandfathered(self, tmp_path: Path) -> None:
         data = _base_scope()
-        data["plan_type"] = "STRATEGIC"
+        data["plan_type"] = "REPORT-ONLY"
         data["scope"] = [{"file": "scripts/checks/roadmap/validate_y.py", "action": "Create", "purpose": "p"}]
         path = _write(tmp_path, data)
         assert plan_obligations.evaluate_plan(path) == []

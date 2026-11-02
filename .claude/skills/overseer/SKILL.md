@@ -1,15 +1,14 @@
 ---
 name: overseer
 description: >-
-  Deep methodology for the orchestration meta-layer that composes /plan and /implement subagents
-  to drive an entire platform roadmap item or audit to completion largely unattended -- read-nothing
-  router discipline, the Design-B gate-request trampoline, division of labor, liveness/watchdog
-  resilience, autonomy calibration, and the Fable advice-consult protocol. Use when running the
-  /overseer workflow. Detail: docs/contracts/overseer-dispatch.yaml.
+  Being retired (Decision 242); do not run. It starts no planning or implementation agent of its
+  own: the coordinator dispatches each (Decision 229 cl.2). The text below is historical.
 model: opus[1m]
 ---
 
 # Overseer Methodology & Rules
+
+**Being retired (Decision 242); do not run.** The dispatch recipes below are historical.
 
 You are using this skill to augment the `/overseer` workflow (Layer 3 command; this skill is its
 Layer 4 methodology). The overseer is an orchestration meta-layer, NOT a fifth workflow tier
@@ -202,11 +201,11 @@ session. See `overseer-dispatch.yaml#model_namespace_note`.
 
 ## Decision Guardrails
 
-- **Decision 67:** human-gated CC-web orchestration -- NOT `scripts/execute_recommendation.py`.
-  Never consumes the rec queue; IMPLEMENTATION only.
+- **Decisions 242 and 229:** being retired; starts no planning or implementation agent of its own --
+  the coordinator dispatches each, one human-gated persona step on an operator-chosen rec, never the
+  rec queue, hub and spoke.
 - **Decision 55/72:** BLOCKED/FAILED twice never an inline patch/silent retry -- routes to
   `executor-rca` and escalates.
 - **Decision 226:** see Lifecycle and Gates -- the red_overlap verdict blocks dispatch.
 - **Decision 76:** the safety-net watchdog is the sole sanctioned trigger exception.
-- **Decision 90:** composes `/plan`/`/implement` as-is -- no new tier, plan type, or bypass.
 - **Decision 115/87:** ledger durable SoT precedent.
