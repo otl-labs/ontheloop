@@ -176,16 +176,11 @@ class KnownGap(BaseModel):
     resolution_ref: str | None = None
 
 
-class NorthStarPrinciple(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str
-    principle: str
-    detail: str = ""
-
-
 class NorthStar(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    principles: list[NorthStarPrinciple] = Field(default_factory=list)
+    """The roadmap's north_star key is a pointer to the Tier A contract (Decision 243 clause 1)."""
+
+    model_config = ConfigDict(extra="forbid")
+    source: str = "docs/contracts/north-star.yaml"
 
 
 class FoundationItem(BaseModel):

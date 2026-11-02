@@ -151,10 +151,10 @@ class TestCD25SchemaAmendments:
         assert doc.candidate_decisions[0].state == state
 
     def test_other_classes_still_extra_ignore(self) -> None:
-        # NorthStar uses extra="ignore"; unknown fields are dropped without error.
-        d = _doc(north_star={"principles": [], "bogus_field": "ignored"})
+        # KnownGap uses extra="ignore"; unknown fields are dropped without error.
+        d = _doc(known_gaps=[{"id": "KG.X", "gap": "g", "bogus_field": "ignored"}])
         doc = RoadmapDocument.model_validate(d)
-        assert doc.north_star.principles == []
+        assert doc.known_gaps[0].gap == "g"
 
     def test_live_platform_yaml_bootstrap_exemption_set(self) -> None:
         """Asserts the per-item bootstrap_completion_exempt set in the live YAML
@@ -293,3 +293,23 @@ class TestModelsCoverageTopUp:
 
         with pytest.raises(ValidationError, match="valid list"):
             TierItem(id="X", tier="T0", name="t", exit_criteria=42)  # type: ignore[arg-type]
+
+
+class TestNorthStarPointer:
+    _PATH = "docs/contracts/north-star.yaml"
+
+    def test_default_source_is_contract_path(self) -> None:
+        assert RoadmapDocument.model_validate(_doc()).north_star.source == self._PATH
+
+    @pytest.mark.parametrize(
+        "block",
+        [{"principles": []}, {"source": "docs/contracts/north-star.yaml", "bogus": 1}],
+    )
+    def test_extra_keys_rejected(self, block: dict) -> None:
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="principles|bogus"):
+            RoadmapDocument.model_validate(_doc(north_star=block))
+
+    def test_live_roadmap_carries_the_pointer(self) -> None:
+        assert load(_LIVE_ROADMAP).north_star.source == self._PATH
