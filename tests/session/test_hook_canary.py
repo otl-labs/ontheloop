@@ -44,7 +44,9 @@ def test_hook_prints_one_user_prompt_submit_context_line() -> None:
     assert result.returncode == 0
     assert result.stderr == ""
     assert len(result.stdout.splitlines()) == 1
-    assert json.loads(result.stdout) == {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": LINE}}
+    assert json.loads(result.stdout) == {
+        "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": LINE}
+    }
 
 
 @pytest.mark.parametrize("stdin", ["", "not json {"])
