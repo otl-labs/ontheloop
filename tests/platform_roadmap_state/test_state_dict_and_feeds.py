@@ -356,26 +356,26 @@ class TestLiveGateEvaluations:
 # ---------------------------------------------------------------------------
 
 
-def _install_safe_load_outcome_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Patch scripts.platform_roadmap_state's yaml.safe_load to record each call's outcome
+def _spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Patch scripts.platform_roadmap_state's parse_yaml to record each call's outcome
     while still delegating to the real loader. Must re-raise rather than swallow -- a
-    swallowing spy would record "raised" while safe_load appears to the caller to return
+    swallowing spy would record "raised" while parse_yaml appears to the caller to return
     None, which hits the isinstance-dict branch instead of the except branch."""
     import scripts.platform_roadmap_state as prs
 
     outcomes: list[str] = []
-    real_safe_load = prs.yaml.safe_load
+    real_parse_yaml = prs.parse_yaml
 
-    def _spy(stream: object) -> object:
+    def _record(text: str) -> object:
         try:
-            loaded = real_safe_load(stream)
+            loaded = real_parse_yaml(text)
         except Exception:
             outcomes.append("raised")
             raise
         outcomes.append("returned-dict" if isinstance(loaded, dict) else "returned-non-dict")
         return loaded
 
-    monkeypatch.setattr(prs.yaml, "safe_load", _spy)
+    monkeypatch.setattr(prs, "parse_yaml", _record)
     return outcomes
 
 
@@ -456,13 +456,24 @@ class TestComputeFollowonState:
     def test_malformed_plan_skipped(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         doc = self._make_doc([self._in_progress_item("A", [{"id": "c1", "text": "x", "status": "open"}])])
         # Must carry `closes_criteria` so the line-111 substring pre-filter doesn't
-        # short-circuit before yaml.safe_load is reached, and still fail to parse so the
+        # short-circuit before parse_yaml is reached, and still fail to parse so the
         # except-Exception branch this test exists to cover actually fires.
         (tmp_path / "PLAN-bad.yaml").write_text("closes_criteria: [T-1: {")
-        outcomes = _install_safe_load_outcome_spy(monkeypatch)
+        outcomes = _spy(monkeypatch)
         result = compute_followon_state(doc, tmp_path)
-        assert outcomes == ["raised"], f"expected exactly one raising safe_load call; got: {outcomes}"
+        assert outcomes == ["raised"], f"expected exactly one raising parse_yaml call; got: {outcomes}"
         assert result["A"]["needs_followon_plan"] is True
+
+    def test_plan_corpus_parses_with_libyaml(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from tests.fixtures import yaml_parse_spy
+
+        doc = self._make_doc([self._in_progress_item("A", [{"id": "c1", "text": "x", "status": "open"}])])
+        (tmp_path / "PLAN-keyed.yaml").write_text('closes_criteria: ["A:c1"]\n')
+        log = yaml_parse_spy.install(monkeypatch)
+        compute_followon_state(doc, tmp_path)
+        assert log.pure_entries == []
+        assert len(log.libyaml_sizes) == 1
+        assert any(f.endswith(":compute_followon_state") for f in log.libyaml_frames)
 
     def test_plans_dir_default_is_absolute_repo_anchored(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Default plans_dir resolves to repo-anchored absolute path, not CWD-relative (rec-2349)."""
@@ -520,7 +531,7 @@ class TestComputeFollowonState:
 # ---------------------------------------------------------------------------
 # TestComputeFollowonStateMalformedPlanShapes -- closes coverage gaps in the
 # per-plan-file skip branches of compute_followon_state. Distinct from
-# test_malformed_plan_skipped above (which exercises the OUTER yaml.safe_load
+# test_malformed_plan_skipped above (which exercises the OUTER parse_yaml
 # exception path, e.g. genuine YAML syntax errors): these exercise
 # successfully-PARSED-but-wrong-shaped YAML, which the outer except never sees.
 # ---------------------------------------------------------------------------
@@ -540,12 +551,12 @@ class TestComputeFollowonStateMalformedPlanShapes:
     def test_plan_yaml_top_level_not_dict_skipped(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         # Valid YAML that parses to a list (not a dict) at the top level. Its first entry is
         # the literal `closes_criteria` so the line-111 substring pre-filter doesn't
-        # short-circuit before yaml.safe_load is reached.
+        # short-circuit before parse_yaml is reached.
         doc = self._make_doc([self._in_progress_item("A", [{"id": "c1", "text": "x", "status": "open"}])])
         (tmp_path / "PLAN-list-toplevel.yaml").write_text("- closes_criteria\n- b\n")
-        outcomes = _install_safe_load_outcome_spy(monkeypatch)
+        outcomes = _spy(monkeypatch)
         result = compute_followon_state(doc, tmp_path)
-        assert outcomes == ["returned-non-dict"], f"expected one non-dict-returning safe_load call; got: {outcomes}"
+        assert outcomes == ["returned-non-dict"], f"expected one non-dict-returning parse_yaml call; got: {outcomes}"
         assert result["A"]["needs_followon_plan"] is True
 
     def test_closes_criteria_not_a_list_skipped(self, tmp_path: Path) -> None:
@@ -583,17 +594,8 @@ class TestKeylessPlanSkipsYamlParse:
         return RoadmapDocument.model_validate(d)
 
     def test_plan_without_the_key_is_never_yaml_parsed(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        import scripts.platform_roadmap_state as prs
-
         (tmp_path / "PLAN-unrelated.yaml").write_text("slug: unrelated\nintent: no criteria refs here\n")
-        parsed: list[str] = []
-        real_safe_load = prs.yaml.safe_load
-
-        def _spy(stream: object) -> object:
-            parsed.append(str(stream)[:40])
-            return real_safe_load(stream)
-
-        monkeypatch.setattr(prs.yaml, "safe_load", _spy)
+        parsed = _spy(monkeypatch)
         compute_followon_state(self._doc_with_one_open_criterion(), tmp_path)
         assert parsed == [], f"keyless plan must not be YAML-parsed; parsed: {parsed}"
 
