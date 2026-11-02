@@ -1,0 +1,169 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: decisions-md-clause-qualifier-grammar
+intent: >-
+  Make the shared title-relation grammar (scripts/decisions_md.py _extract_title_relation_targets) read a clause qualifier
+  as owning every number it enumerates, so a clause list such as "cl.1/5/6/7" is never read as Decisions 5, 6 and 7. This
+  removes the 213->5/6/7 false positive that blocks PR #1393 (T1.17 c4) and keeps the decision graph's edges truthful.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-decisions-md-clause-qualifier-grammar.yaml
+phase: >-
+  T1.17 (Decision-log premise-integrity audit follow-ups), prerequisite of criterion c4 (PR #1393). Closes no criterion:
+  c4 closes with #1393's own plan, which after this merges needs only a main merge.
+scope:
+  - file: scripts/decisions_md.py
+    action: Modify
+    purpose: >-
+      Replace _TITLE_RELATION_QUALIFIER_RE and _BARE_NUMBER_BOUNDARY_RE with a shared clause-qualifier grammar: singular
+      qualifiers (clause, cl., point, pt, section, §) own one clause reference, widened only by a range, a slash or a
+      sub-clause suffix; plural qualifiers (clauses, points, pts, sections, §§) also own a comma list closed by at most one
+      final "and N"; the bare-number boundary recognises the same qualifiers. Update the rationale comment block above.
+    new_imports: []
+  - file: tests/decisions_md/test_clause_qualifier.py
+    action: Create
+    purpose: >-
+      New TestClauseEnumerationIsNotAVictim class (a new file: tests/decisions_md/test_parse.py is NEAR_CAP at 493 of 500
+      SLOC): the #1393 repro, Decision 213's body prose, real-corpus headers the old grammar under-reads (199, 215, 230),
+      singular sub-clause and section forms, and green-both guards (plain plural list, open-prose bare number after a
+      clause qualifier, plural clause ranges).
+  - file: docs/contracts/decision-entry.yaml
+    action: Modify
+    purpose: >-
+      field_grammar.title_relation_continuation: add one accepted_forms example for the slash clause list
+      ("amends Decision 81 cl.1/5/6/7, 91 cl.1" -> [81, 91]) and widen the existing qualifier wording to the new
+      qualifier set, so the contract-loaded test (tests/test_decision_field_grammar.py) pins the fix too (CFG-06). Adds a
+      new amendment_log entry (semantic_break false, change_class field_add) naming this plan.
+bundled_recommendations: []
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - >-
+    _extract_title_relation_targets('This amends Decision 213 cl.1/5/6/7 and more.', 'amends') returns [213], and
+    Decision 213's body prose "amends Decision 81 cl.1/5/6/7, 91 cl.1 and 126's admin tier" returns [81, 91].
+  - >-
+    The Decision 199, 215 and 230 headers return [95, 96, 97], [88, 103] and [216, 213, 126, 81]; "supersedes Decisions 5,
+    6 and 7" still returns [5, 6, 7]; "amends Decision 81 clause 6, 2027 planning cycle" still returns [81].
+  - >-
+    parse_decisions_md() amends/title_supersedes edges over the real corpus are identical before and after (155 at plan
+    time), so docs/decisions-index.json does not change.
+  - >-
+    Over every whole decision block in docs/DECISIONS.md and docs/DECISIONS_ARCHIVE.md, the raw grammar loses exactly
+    213->5, 213->6, 213->7 and gains only edges already present in that block's metadata envelope.
+  - TestClauseEnumerationIsNotAVictim fails on main's grammar (6 red cases) and passes after; the full tier passes.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Run the decisions_md test package (incl. the new file) and the contract-loaded field-grammar test.
+    command: bin/venv-python -m pytest tests/decisions_md/ tests/test_decision_field_grammar.py -q
+    expected: Exit 0, every test passes, including TestClauseEnumerationIsNotAVictim and the new contract example.
+    fix_if: >-
+      A failing new case means the qualifier grammar is wrong; fix scripts/decisions_md.py, never the assertion. A
+      failing pre-existing case means the change widened or narrowed an existing form; narrow it back.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Whole-package pytest re-run; pytest already runs these files standing in both tiers, so a registry row adds no
+      independence.
+    expected_literals:
+      - passed
+  - step: 2
+    phase: pre-deploy
+    action: Assert the repro and Decision 213 body prose no longer yield clause numbers as decisions.
+    command: >-
+      bin/venv-python -c "from scripts.decisions_md import _extract_title_relation_targets as f;a=f('This amends Decision
+      213 cl.1/5/6/7 and more.','amends');b=f(\"amends Decision 81 cl.1/5/6/7, 91 cl.1 and 126's admin
+      tier\",'amends');assert a==[213],a;assert b==[81,91],b;print('repro OK')"
+    expected: Exit 0 printing the repro line.
+    fix_if: Any 5, 6 or 7 in the output means the singular qualifier does not own its slash list.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: TestClauseEnumerationIsNotAVictim carries the same two literals and runs standing in both tiers.
+    expected_literals:
+      - repro OK
+  - step: 3
+    phase: pre-deploy
+    action: >-
+      Corpus edge comparison against the merge-base grammar: parse_decisions_md edges unchanged; over every whole decision
+      block the raw grammar loses exactly 213->5/6/7, and every gained edge is already in that block's metadata envelope.
+    command: >-
+      bin/venv-python -c "import subprocess as s,types;from scripts import decisions_md as N;b=s.run(['git','merge-base','HEAD','origin/main'],capture_output=True,text=True,check=True).stdout.strip();O=types.ModuleType('o');O.__file__=N.__file__;exec(compile(s.run(['git','show',b+':scripts/decisions_md.py'],capture_output=True,text=True,check=True).stdout,'o','exec'),O.__dict__);P=lambda M:{(r['decision_id'],k,t) for r in M.parse_decisions_md() for k in ('amends','title_supersedes') for t in (r.get(k) or [])};E=lambda M:{(int(h.group(1)),t) for p in ('docs/DECISIONS.md','docs/DECISIONS_ARCHIVE.md') for h,x in N._iter_decision_sections(open(p,encoding='utf-8').read()) for w in ('amends','supersedes') for t in M._extract_title_relation_targets(x,w) if t!=int(h.group(1))};V={(int(h.group(1)),int(v)) for p in ('docs/DECISIONS.md','docs/DECISIONS_ARCHIVE.md') for h,x in N._iter_decision_sections(open(p,encoding='utf-8').read()) for v in list((N.extract_entry_envelope(x) or {}).get('amends') or [])+list((N.extract_entry_envelope(x) or {}).get('supersedes') or [])};po,pn=P(O),P(N);assert po==pn,(po^pn);eo,en=E(O),E(N);lost,gain=eo-en,en-eo;assert lost=={(213,5),(213,6),(213,7)},lost;assert gain<=V,gain-V;print('corpus OK',len(pn),sorted(gain))"
+    expected: >-
+      Exit 0 printing the corpus line with the parse edge count (155 at plan time) and the gained edges (215->103 and
+      230->81 at plan time). Measured 0.55s.
+    fix_if: >-
+      A parse-edge diff means the fix changed docs/decisions-index.json input -- stop and report. A lost set other than
+      213->5/6/7 means the qualifier now swallows a real target; a gained edge outside the envelope is a new false
+      positive. Fix scripts/decisions_md.py, never this assertion.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Compares against the merge-base copy of scripts/decisions_md.py, transient branch state that is vacuous once
+      merged; the standing guard is TestClauseEnumerationIsNotAVictim plus #1393's real-repo guard.
+test_obligations:
+  - source: scripts/decisions_md.py
+    behavior: >-
+      A clause qualifier owns every number it enumerates (singular: one ref plus range/slash/sub-clause; plural: comma list
+      plus one final "and N"), and the bare-number boundary recognises the same qualifiers.
+    verification_step: 1
+    test_selector: tests/decisions_md/test_clause_qualifier.py::TestClauseEnumerationIsNotAVictim
+    red_green_expectation: >-
+      Red before: 6 cases fail on main (the repro yields [213, 5, 6, 7]; dec-213 body yields [81, 5, 6, 7, 91]; the 199,
+      215 and 230 headers yield [95], [88] and [216]; a sub-clause "clause 3(2), 91" yields [81]). Green after.
+  - source: docs/contracts/decision-entry.yaml
+    behavior: The contract's title_relation_continuation states the slash clause-list form and the widened qualifier set.
+    verification_step: 1
+    test_selector: tests/test_decision_field_grammar.py
+    red_green_expectation: >-
+      Red before: the new accepted_forms example (expected [81, 91]) fails against main's grammar ([81, 5, 6, 7, 91]).
+      Green after.
+constraints:
+  - Touch only the three scope files; the fix is the grammar, never a guard-side pre-filter or a waiver (PR #1393 comment 6400096151).
+  - No change to parse_decisions_md row keys, DecisionPayload or the warehouse columns (Decision 84 boundary).
+  - Do not fold into #1393 or its plan (operator ruling, this session's brief).
+  - No rescue agents or workaround loops (Decision 55)
+context:
+  - >-
+    Decision-scout verdict NO_FLAGS; CITE: 134, 167, 213. RELATED: 84, 177, 168, 128, 131, 160, 55. "Decisions triaged:
+    193 of 193"; "Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2" (T2.54, T4.23 prefix-only).
+  - >-
+    Decision 177: never reword Decision 213's text; the parser is the fix. Decision 160's title (the contract's first
+    accepted_forms example) still yields [145, 134, 146] under the fix (measured in a scratch worktree).
+  - >-
+    The contract's rejected_forms reasons name the qualifier set ("point/cl./clause") and _BARE_NUMBER_BOUNDARY_RE; the
+    symbol keeps its name, but widen the qualifier wording in the same edit.
+  - Prepared fix and measured corpus diff -- PR #1393 comment 6400096151 (local commit 05ed7c11, never pushed).
+  - >-
+    Plan-time measurement (this session): parse_decisions_md title edges 155 -> 155 unchanged (199, 215 and 230 carry
+    envelopes, which win over the title grammar); raw whole-block grammar loses 213->5/6/7 and gains 215->103 and 230->81,
+    both already in those blocks' envelopes, so #1393's guard (text UNION envelope) sees only the 213 drop.
+  - "Contract-first grammar - decision-entry.yaml field_grammar is loaded by tests/test_decision_field_grammar.py (CFG-06)."
+  - "Owner - this planning session (session_01G2j5Rgqsm6r1mpb98tJxb1); implementation runs in a separate session."
+  - "Related-work check (red_overlap at plan write) - verdict clear, reds []."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    scripts/decisions_md.py -- replace the two lines defining _TITLE_RELATION_QUALIFIER_RE and _BARE_NUMBER_BOUNDARY_RE
+    with _CLAUSE_REF / _CLAUSE_QUALIFIER and the two rebuilt patterns, verbatim from PR #1393 comment 6400096151; extend
+    the rationale comment above them (qualifier ownership; singular vs plural). Pre: the repro returns [213, 5, 6, 7].
+    Post: VP step 2 green; SLOC stays under 500.
+  - >-
+    tests/decisions_md/test_clause_qualifier.py -- create TestClauseEnumerationIsNotAVictim with the acceptance-criteria
+    cases (each real-corpus case quoted verbatim from docs/DECISIONS.md, grepped fresh). Pre: run it against the
+    unmodified grammar (git stash the module edit) and confirm exactly the 6 red cases in test_obligations fail. Post:
+    all pass.
+  - >-
+    docs/contracts/decision-entry.yaml -- add the accepted_forms example and amendment_log entry, widen the qualifier
+    wording in the existing reasons; keep under the contracts class line limit. Post: tests/test_decision_field_grammar.py
+    and validate_contract_drift pass.
+  - Execute Verification Plan -- run each step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
+  - 'Report: what was implemented, verification results, the step-3 corpus line'
