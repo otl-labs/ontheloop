@@ -104,7 +104,7 @@ def wiring(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]]:
     }
     monkeypatch.setenv("TELEMETRY_META_SCHEMA", rt.TELEMETRY_PROD_META_SCHEMA)
     monkeypatch.setenv("TELEMETRY_DATA_PATH", rt.TELEMETRY_PROD_DATA_PATH)
-    monkeypatch.setenv("TELEMETRY_DSN_SECRET_ID", SECRET)
+    monkeypatch.setenv("TELEMETRY_DSN_PARAMETER", SECRET)
 
     def open_connection(**kwargs: Any) -> FakeCon:
         state["opened"] += 1
@@ -114,8 +114,8 @@ def wiring(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]]:
         state["cons"].append(con)
         return con
 
-    def fetch_dsn(secret_id: str = "", **_: Any) -> dict[str, str]:
-        state["secrets"].append(secret_id)
+    def fetch_dsn(parameter_name: str = "", **_: Any) -> dict[str, str]:
+        state["secrets"].append(parameter_name)
         return {"username": "ducklake_telemetry_reader"}
 
     monkeypatch.setattr(rt, "open_connection", open_connection)
@@ -255,8 +255,8 @@ def test_acquire_uses_the_reader_secret_and_a_read_only_attach(wiring: dict[str,
     assert decode(body["rows"][0]) == "hello"
 
 
-def test_unset_secret_id_fails_closed_before_any_connect(wiring: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("TELEMETRY_DSN_SECRET_ID")
+def test_unset_parameter_fails_closed_before_any_connect(wiring: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TELEMETRY_DSN_PARAMETER")
     status, body = _call(_row_read(ulid_aged(1)))
     assert status == 500 and body["error_type"] == "runtime" and wiring["opened"] == 0
 
