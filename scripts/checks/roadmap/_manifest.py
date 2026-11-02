@@ -145,6 +145,7 @@ ENTRIES: tuple[Entry, ...] = (
             "docs/DECISIONS.md",
             "src/lambdas/**",
             "scripts/lambda_manifest.py",
+            "scripts/contract_rules.py",
             "scripts/roadmap/**",
             "scripts/checks/roadmap/**",
             "scripts/checks/_common.py",

@@ -158,6 +158,7 @@ _CLOSURE_INPUTS: dict[str, tuple[str, ...]] = {
     ),
     "validate_tier_floor": (
         "scripts/lambda_manifest.py",
+        "scripts/contract_rules.py",
         "scripts/checks/_common.py",
         "scripts/checks/registry.py",
     ),
