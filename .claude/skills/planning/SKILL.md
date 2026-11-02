@@ -65,7 +65,7 @@ Field format and write-time validation for both plan-linkage fields: see
 docs/contracts/exit-criteria-ledger.yaml (plan_closes_criteria, plan_followon_recs). Only
 followon_recs carries a template line below; closes_criteria stays prose-only by design.
 
-## Platform Roadmap Eligibility (Workflow Step 2)
+## Roadmap Eligibility (Workflow Step 2)
 
 Broad orientation -- surfacing `next_eligible`, `strategic_pending`, the eligibility summary, the soft-warn exception category list, and ci-rca triage -- is the responsibility of `/orient`. Run `/orient` before `/plan` to choose what to work on; `/plan` assumes a specific item (or ci-rca rec) has already been selected. The orient skill (`.claude/skills/orient/SKILL.md`) holds the full eligibility display and triage rules.
 
@@ -313,7 +313,7 @@ intent: >- # 1-2 sentences: how this work contributes toward the North Star
 plan_type: IMPLEMENTATION # IMPLEMENTATION | STRATEGIC | REPORT-ONLY
 verification_tier: V2 # V1 | V2 | V3
 plan_path: docs/plans/PLAN-{slug}.yaml # must match the filename slug exactly
-phase: >- # platform tier_item id from docs/ROADMAP-PLATFORM.yaml
+phase: >- # tier_item id from docs/ROADMAP-PLATFORM.yaml
   ...
 scope: # min 1 entry; only files listed here may be modified
   - file: path/to/file.py
@@ -371,7 +371,7 @@ After writing, validate before committing:
 bin/venv-python -m scripts.roadmap.plan_document docs/plans/PLAN-{slug}.yaml
 ```
 
-**Platform compatibility:** commands must be Linux/bash-compatible (AGENTS.md `## Shell invocations`).
+**OS compatibility:** commands must be Linux/bash-compatible (AGENTS.md `## Shell invocations`).
 
 ## Related-Work Check (Workflow Step 8)
 

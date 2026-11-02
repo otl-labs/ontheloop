@@ -12,9 +12,9 @@ Some rules below restate root rules for proximity. Root `CLAUDE.md` is authorita
 
 ## AWS context
 - Region: `eu-west-2`
-- Account: personal platform account (ID supplied via gitignored `terraform/personal/terraform.personal.tfvars`; never committed).
+- Account: personal AWS account (ID supplied via gitignored `terraform/personal/terraform.personal.tfvars`; never committed).
 - Profile: `agent_platform` (PlatformDev, runtime) for agent operations; `agent_platform_admin` (PlatformAdmin) for provisioning (creates IAM + OIDC).
-- Personal-account infra lives in the isolated `terraform/personal/` root module (own provider + state); it is the only live root module. The legacy work-account root's `.tf` files (retained for a while as architectural-evolution artefacts per CD.21, never applied) were removed in the platform cleanse.
+- Personal-account infra lives in the isolated `terraform/personal/` root module (own provider + state); it is the only live root module. The legacy work-account root's `.tf` files (retained for a while as architectural-evolution artefacts per CD.21, never applied) were removed in the Decision 178 cleanse.
 - The personal account has no SCP restricting IAM users or external OIDC (Decisions 36/37 do not apply to this account). OIDC provider + CI roles are created in `terraform/personal/oidc.tf`.
 
 ## Running terraform/personal/ on CC-web

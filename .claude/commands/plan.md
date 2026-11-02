@@ -32,7 +32,7 @@ The report includes `data_quality` (declarative check coverage and last run verd
 Use the preflight JSON `context` field (`roadmap_phase`, `open_decisions_count`, `recent_sessions`). `recent_sessions` comes from telemetry (sessions_window over 2 UTC days) and is null when `session_history.status` is unavailable, so read the status before relying on it; the newest entry may be the current session itself (state running). Read `docs/PROJECT_CONTEXT.md` fully.
 If the request references a recommendation ID, fetch it with the ducklake-reads `recs_by_ids` verb, read briefing files if they exist, and load dependencies.
 
-**Orientation and CI-RCA block:** see the planning skill's Platform Roadmap Eligibility section for orientation responsibility and the HARD BLOCK conditions on open ci-rca recs -- run `/orient` first if no item has been chosen yet.
+**Orientation and CI-RCA block:** see the planning skill's Roadmap Eligibility section for orientation responsibility and the HARD BLOCK conditions on open ci-rca recs -- run `/orient` first if no item has been chosen yet.
 
 **Resume check:** if a `docs/plans/PLAN-*.yaml` matching the stated intent already exists on this branch (committed or not), present it and offer resume-at-step: Step 9 (uncritiqued), Step 11 (approved, unmerged), or discard and restart. Do not re-derive Steps 3-6 for an already-confirmed plan without human direction.
 
