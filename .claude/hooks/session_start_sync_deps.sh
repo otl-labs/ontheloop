@@ -11,7 +11,7 @@
 # millisecond fingerprint-compare no-op; otherwise it self-heals with a
 # reinstall.
 #
-# Mirrors session_start_ensure_github_mcp.sh: advisory only, always exits 0 so a
+# Advisory only, always exits 0 so a
 # failed or network-blocked sync never blocks the session. Delegates to
 # bin/sync-deps.sh (the source of truth shared with bin/setup-cloud-env.sh).
 
