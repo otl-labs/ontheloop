@@ -105,9 +105,9 @@ def _conn(fetches: list) -> tuple[MagicMock, list]:
 def _run(owner_dsn=None, scoped_dsn=None, member=(True,), scoped_fetches=None, event=None, precondition=_PRECONDITION):
     owner, owner_log = _conn([member, precondition])
     scoped, scoped_log = _conn(scoped_fetches if scoped_fetches is not None else [_SCOPE_ROW, (7,)])
-    dsns = {None: owner_dsn or _dsn(), la.TELEMETRY_DSN_SECRET_ID: scoped_dsn or _scoped()}
+    dsns = {None: owner_dsn or _dsn(), la.TELEMETRY_DSN_PARAMETER: scoped_dsn or _scoped()}
     with (
-        patch.object(la.rt, "fetch_dsn", side_effect=lambda secret_id=None, **_: dsns[secret_id]) as fetch,
+        patch.object(la.rt, "fetch_dsn", side_effect=lambda parameter_name=None, **_: dsns[parameter_name]) as fetch,
         patch("psycopg2.connect", side_effect=[owner, scoped]) as connect,
     ):
         out = la.action_provision_telemetry_login(event or {"confirm": la.TELEMETRY_LOGIN}, None)
@@ -166,7 +166,7 @@ def test_refused_secret_never_reaches_alter_role_or_the_scoped_connection() -> N
         patch.object(
             la.rt,
             "fetch_dsn",
-            side_effect=lambda secret_id=None, **_: _dsn() if secret_id is None else _scoped(sslmode="prefer"),
+            side_effect=lambda parameter_name=None, **_: _dsn() if parameter_name is None else _scoped(sslmode="prefer"),
         ),
         patch("psycopg2.connect", side_effect=[owner]) as connect,
         pytest.raises(DuckLakeRuntimeError),
@@ -209,10 +209,10 @@ def test_database_errors_surface_only_the_class_and_sqlstate() -> None:
 
 
 def test_a_missing_scoped_secret_key_is_a_runtime_error_without_the_message() -> None:
-    def fetch(secret_id=None, **_):
-        if secret_id is None:
+    def fetch(parameter_name=None, **_):
+        if parameter_name is None:
             return _dsn()
-        raise RuntimeError(f"DSN secret {secret_id!r} is missing required keys: ['password'] near {_HOST}")
+        raise RuntimeError(f"DSN secret {parameter_name!r} is missing required keys: ['password'] near {_HOST}")
 
     owner, _ = _conn([(True,), _PRECONDITION])
     with patch.object(la.rt, "fetch_dsn", side_effect=fetch), patch("psycopg2.connect", side_effect=[owner]):
@@ -224,12 +224,12 @@ def test_a_missing_scoped_secret_key_is_a_runtime_error_without_the_message() ->
 def _run_login(login: cl.Login, scope_row: tuple | None = None, extra: list | None = None):
     owner, owner_log = _conn([(True,), _PRECONDITION])
     scoped, scoped_log = _conn([scope_row or _scope_row(login), (7,)])
-    dsns = {None: _dsn(), login.secret_id: _scoped(username=login.name)}
+    dsns = {None: _dsn(), login.parameter_name: _scoped(username=login.name)}
     fetched: list = []
 
-    def fetch(secret_id=None, **_):
-        fetched.append(secret_id)
-        return dsns[secret_id]
+    def fetch(parameter_name=None, **_):
+        fetched.append(parameter_name)
+        return dsns[parameter_name]
 
     with (
         patch.object(la.rt, "fetch_dsn", side_effect=fetch),
@@ -244,7 +244,7 @@ def _run_login(login: cl.Login, scope_row: tuple | None = None, extra: list | No
 def test_each_closed_login_uses_its_own_secret_and_template(name: str) -> None:
     login = cl.LOGINS[name]
     out, owner_log, _scoped_log, fetched, connect = _run_login(login)
-    assert fetched == [None, login.secret_id]
+    assert fetched == [None, login.parameter_name]
     assert (cl.render_login_sql(name), None) in owner_log
     assert [(sql, p) for sql, p in owner_log if sql.startswith("ALTER ROLE")] == [(f"ALTER ROLE {name} PASSWORD %s", (_PW,))]
     assert out["login"] == name and out["migration_sha256"] == cl.template_sha256(name)
@@ -324,7 +324,7 @@ def test_reader_login_reports_its_read_only_attach_outcome_without_raising() -> 
         patch.object(
             la.rt,
             "fetch_dsn",
-            side_effect=lambda secret_id=None, **_: _dsn() if secret_id is None else _scoped(username=reader.name),
+            side_effect=lambda parameter_name=None, **_: _dsn() if parameter_name is None else _scoped(username=reader.name),
         ),
         patch("psycopg2.connect", side_effect=[_conn([(True,), _PRECONDITION])[0], _conn([_scope_row(reader), (7,)])[0]]),
         patch.object(la.rt, "open_connection", return_value=opened) as attach,

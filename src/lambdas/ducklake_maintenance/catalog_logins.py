@@ -48,7 +48,7 @@ _SCOPE_FALSE = {
 @dataclass(frozen=True)
 class Login:
     name: str
-    secret_id: str
+    parameter_name: str
     template: str
     schema: str
     owner_role: str
@@ -64,8 +64,10 @@ def _scope(login: str, schema: str, **true_entries: Any) -> Mapping[str, Any]:
     return MappingProxyType(scope)
 
 
-def _login(name: str, secret: str, template: str, schema: str, limit: int, kind: str, **scope_entries: Any) -> Login:
-    return Login(name, secret, template, schema, OWNER_ROLES[schema], limit, kind, _scope(name, schema, **scope_entries))
+def _login(name: str, parameter_name: str, template: str, schema: str, limit: int, kind: str, **scope_entries: Any) -> Login:
+    return Login(
+        name, parameter_name, template, schema, OWNER_ROLES[schema], limit, kind, _scope(name, schema, **scope_entries)
+    )
 
 
 _WRITER = "ducklake_telemetry_writer_role.sql"
@@ -81,7 +83,7 @@ LOGINS: Mapping[str, Login] = MappingProxyType(
         for login in (
             _login(
                 "ducklake_telemetry_writer",
-                "agent-platform-ducklake-telemetry-writer-dsn",
+                "/secret/agent-platform-ducklake-telemetry-writer-dsn",
                 _WRITER,
                 rt.SMOKE_META_SCHEMA,
                 20,
@@ -91,7 +93,7 @@ LOGINS: Mapping[str, Login] = MappingProxyType(
             ),
             _login(
                 "ducklake_telemetry_writer_prod",
-                "agent-platform-ducklake-telemetry-writer-prod-dsn",
+                "/secret/agent-platform-ducklake-telemetry-writer-prod-dsn",
                 _WRITER,
                 rt.TELEMETRY_PROD_META_SCHEMA,
                 10,
@@ -101,7 +103,7 @@ LOGINS: Mapping[str, Login] = MappingProxyType(
             ),
             _login(
                 "ducklake_telemetry_reader",
-                "agent-platform-ducklake-telemetry-reader-dsn",
+                "/secret/agent-platform-ducklake-telemetry-reader-dsn",
                 _READER,
                 rt.TELEMETRY_PROD_META_SCHEMA,
                 10,
@@ -111,7 +113,7 @@ LOGINS: Mapping[str, Login] = MappingProxyType(
             ),
             _login(
                 "ducklake_smoke_maintainer",
-                "agent-platform-ducklake-smoke-maintainer-dsn",
+                "/secret/agent-platform-ducklake-smoke-maintainer-dsn",
                 _MAINTAINER,
                 rt.SMOKE_META_SCHEMA,
                 4,

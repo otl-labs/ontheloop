@@ -16,7 +16,7 @@ from scripts.smoke_test_inference_credentials import _parse_args, main, run
 
 
 def _make_sm_response(secret_string: str) -> dict:
-    return {"SecretString": secret_string}
+    return {"Parameter": {"Value": secret_string}}
 
 
 def _make_litellm_result(content: str) -> SimpleNamespace:
@@ -41,7 +41,7 @@ class TestParseArgs:
             "anthropic",
             "--model",
             "anthropic/claude-opus-4",
-            "--secret-id",
+            "--parameter-name",
             "my-secret",
             "--region",
             "us-east-1",
@@ -57,7 +57,7 @@ class TestParseArgs:
 class TestMain:
     def test_main_calls_run_and_exits(self) -> None:
         sm_client = MagicMock()
-        sm_client.get_secret_value.return_value = _make_sm_response("sk-test")
+        sm_client.get_parameter.return_value = _make_sm_response("sk-test")
         with (
             patch("sys.argv", ["smoke_test_inference_credentials", "--provider", "deepseek"]),
             patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
@@ -74,7 +74,7 @@ class TestMain:
 class TestRunDeepseekSuccess:
     def test_success_returns_zero(self, capsys: pytest.CaptureFixture[str]) -> None:
         sm_client = MagicMock()
-        sm_client.get_secret_value.return_value = _make_sm_response("sk-deepseek-test")
+        sm_client.get_parameter.return_value = _make_sm_response("sk-deepseek-test")
         with (
             patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
             patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
@@ -95,7 +95,7 @@ class TestRunDeepseekSuccess:
 
     def test_model_override(self, capsys: pytest.CaptureFixture[str]) -> None:
         sm_client = MagicMock()
-        sm_client.get_secret_value.return_value = _make_sm_response("sk-deepseek-test")
+        sm_client.get_parameter.return_value = _make_sm_response("sk-deepseek-test")
         with (
             patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
             patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
@@ -109,9 +109,9 @@ class TestRunDeepseekSuccess:
         assert result == 0
         assert mock_completion.call_args.kwargs["model"] == "deepseek/deepseek-reasoner"
 
-    def test_secret_id_override(self) -> None:
+    def test_parameter_name_override(self) -> None:
         sm_client = MagicMock()
-        sm_client.get_secret_value.return_value = _make_sm_response("sk-deepseek-test")
+        sm_client.get_parameter.return_value = _make_sm_response("sk-deepseek-test")
         with (
             patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
             patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
@@ -123,13 +123,15 @@ class TestRunDeepseekSuccess:
             result = run("deepseek", envelope_id="my-custom-secret")
 
         assert result == 0
-        sm_client.get_secret_value.assert_called_once_with(SecretId="my-custom-secret")  # pragma: allowlist secret
+        sm_client.get_parameter.assert_called_once_with(
+            Name="my-custom-secret", WithDecryption=True
+        )  # pragma: allowlist secret
 
 
 class TestRunAnthropicSuccess:
     def test_success_returns_zero(self, capsys: pytest.CaptureFixture[str]) -> None:
         sm_client = MagicMock()
-        sm_client.get_secret_value.return_value = _make_sm_response("sk-ant-test")
+        sm_client.get_parameter.return_value = _make_sm_response("sk-ant-test")
         with (
             patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
             patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
@@ -153,9 +155,9 @@ class TestRunAccessDenied:
         from botocore.exceptions import ClientError
 
         sm_client = MagicMock()
-        sm_client.get_secret_value.side_effect = ClientError(
+        sm_client.get_parameter.side_effect = ClientError(
             {"Error": {"Code": "AccessDeniedException", "Message": "Access denied"}},
-            "GetSecretValue",
+            "GetParameter",
         )
         with (
             patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
@@ -167,15 +169,15 @@ class TestRunAccessDenied:
         assert result == 1
         captured = capsys.readouterr()
         assert "FAIL [deepseek]" in captured.err
-        assert "InferenceCredentialsRead" in captured.err
+        assert "InferenceCredentialsParameterRead" in captured.err
 
     def test_resource_not_found_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
         from botocore.exceptions import ClientError
 
         sm_client = MagicMock()
-        sm_client.get_secret_value.side_effect = ClientError(
-            {"Error": {"Code": "ResourceNotFoundException", "Message": "Not found"}},
-            "GetSecretValue",
+        sm_client.get_parameter.side_effect = ClientError(
+            {"Error": {"Code": "ParameterNotFound", "Message": "Not found"}},
+            "GetParameter",
         )
         with (
             patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
@@ -186,13 +188,13 @@ class TestRunAccessDenied:
 
         assert result == 1
         captured = capsys.readouterr()
-        assert "ResourceNotFoundException" in captured.err or "not found" in captured.err.lower()
+        assert "ParameterNotFound" in captured.err or "not found" in captured.err.lower()
 
 
 class TestRunEmptySecretValue:
     def test_empty_secret_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
         sm_client = MagicMock()
-        sm_client.get_secret_value.return_value = _make_sm_response("")
+        sm_client.get_parameter.return_value = _make_sm_response("")
         with (
             patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
             patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value=None),
@@ -206,7 +208,7 @@ class TestRunEmptySecretValue:
 
     def test_missing_secret_string_key_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
         sm_client = MagicMock()
-        sm_client.get_secret_value.return_value = {}
+        sm_client.get_parameter.return_value = {}
         with (
             patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
             patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value=None),
@@ -222,7 +224,7 @@ class TestRunEmptySecretValue:
 class TestRunLiteLLMFailures:
     def test_litellm_auth_error_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
         sm_client = MagicMock()
-        sm_client.get_secret_value.return_value = _make_sm_response("bad-key")
+        sm_client.get_parameter.return_value = _make_sm_response("bad-key")
         with (
             patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
             patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
@@ -240,7 +242,7 @@ class TestRunLiteLLMFailures:
 
     def test_litellm_generic_error_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
         sm_client = MagicMock()
-        sm_client.get_secret_value.return_value = _make_sm_response("some-key")
+        sm_client.get_parameter.return_value = _make_sm_response("some-key")
         with (
             patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
             patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
@@ -257,7 +259,7 @@ class TestRunLiteLLMFailures:
 
     def test_empty_completion_content_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
         sm_client = MagicMock()
-        sm_client.get_secret_value.return_value = _make_sm_response("sk-test")
+        sm_client.get_parameter.return_value = _make_sm_response("sk-test")
         with (
             patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
             patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
@@ -274,7 +276,7 @@ class TestRunLiteLLMFailures:
 
     def test_whitespace_only_content_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
         sm_client = MagicMock()
-        sm_client.get_secret_value.return_value = _make_sm_response("sk-test")
+        sm_client.get_parameter.return_value = _make_sm_response("sk-test")
         with (
             patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
             patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
@@ -291,7 +293,7 @@ class TestRunLiteLLMFailures:
 
     def test_none_choices_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
         sm_client = MagicMock()
-        sm_client.get_secret_value.return_value = _make_sm_response("sk-test")
+        sm_client.get_parameter.return_value = _make_sm_response("sk-test")
         with (
             patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
             patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
