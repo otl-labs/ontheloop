@@ -115,8 +115,12 @@ def test_decision_67_superseded_and_cd17_disposed() -> None:
     assert cd17["state"] == "superseded" and cd17["gates"] == [] and set(cd17["affects"]) == CD17_AFFECTS
     assert "detail" not in cd17
 
-    with pytest.raises(ValidationError):
-        PlanDocument.model_validate({"plan_type": "STRATEGIC"})
+    plan = yaml.safe_load(
+        (ROOT / "docs/plans/PLAN-retire-strategic-plans-and-legacy-executor.yaml").read_text(encoding="utf-8")
+    )
+    PlanDocument.model_validate(plan)
+    with pytest.raises(ValidationError, match="plan_type"):
+        PlanDocument.model_validate({**plan, "plan_type": "STRATEGIC"})
 
     items = _items()
     for tid, parts in (
