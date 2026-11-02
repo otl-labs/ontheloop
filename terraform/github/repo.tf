@@ -54,12 +54,14 @@ resource "github_repository" "this" {
 # bypass_actors carries an admin escape hatch: actor_id=5 = Repository Admin role so a human
 # always retains an in-band escape from lockout.
 # require_code_owner_review = true (DEP-05 / T2.50 / Decision 144): PRs touching a path
-# scoped in .github/CODEOWNERS now require code-owner review before merge. Path-scoping
+# scoped in .github/CODEOWNERS require code-owner review before merge. Path-scoping
 # comes from CODEOWNERS alone -- required_approving_review_count stays 0 so routine PRs
-# outside those paths remain approval-free and non-wedging (Decision 83); the admin
-# bypass_actors escape hatch above still applies to protected-path PRs too (a deliberate,
-# GitHub-audit-logged bypass, not a hard block -- see rec-2827 for the deferred hard block
-# against the admin identity itself).
+# outside those paths remain approval-free and non-wedging (Decision 83). A PR authored by
+# the sole code owner passes the rule with no review (rule-suite insights for #1534 and #1599:
+# pass, not bypass), so agent PRs, authored as that person, are gated by the operator's typed
+# approval in the project thread, not by this rule (rec-4355; the non-owner proof is rec-4625).
+# The admin bypass_actors escape hatch above stays available (a GitHub-audit-logged bypass,
+# not a hard block -- see rec-2827 for the deferred hard block against the admin identity).
 resource "github_repository_ruleset" "main_protection" {
   repository  = github_repository.this.name
   name        = "main-protection"
@@ -83,6 +85,12 @@ resource "github_repository_ruleset" "main_protection" {
     deletion         = true
     non_fast_forward = true
 
+    # The live rule also serves dismissal_restriction (disabled) and
+    # require_extra_approval_for_unattributed_changes (true), organisation-repository keys that
+    # provider 6.12.1 does not model. An import or a no-op plan leaves them alone, but any update of
+    # this ruleset sends only the modelled keys and can reset both to the API defaults: do not
+    # change this ruleset until a provider release models them (rec-4624; T4.21 c10 needs the
+    # dismissal restriction managed here).
     pull_request {
       dismiss_stale_reviews_on_push     = false
       require_code_owner_review         = true
@@ -130,9 +138,10 @@ resource "github_actions_repository_permissions" "this" {
 # Workflow permissions: default token = read-only; GitHub Actions cannot approve PRs.
 # Restricts the blast radius of a compromised workflow -- the GITHUB_TOKEN cannot
 # self-approve or write without an explicit permissions: block in the workflow file.
-# Note: the GitHub UI "fork pull request approval" policy (require approval from all
-# outside collaborators) is not exposed by this provider attribute; set it manually
-# in repo Settings -> Actions -> Fork pull request workflows from outside collaborators.
+# Note: the "fork pull request approval" policy is not exposed by this provider attribute.
+# Since the transfer the repository has the otl-labs organisation's stricter default
+# (github-org-transfer.yaml evidence_ledger, 2026-10-24); it is set in the organisation's or
+# the repository's Actions settings, never here.
 resource "github_workflow_repository_permissions" "this" {
   repository                       = github_repository.this.name
   default_workflow_permissions     = "read"

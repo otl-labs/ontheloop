@@ -22,8 +22,11 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from scripts.preflight import recs_cache
 from scripts.preflight.recs_signals_source import RecsSignalInputs
+from tests.fixtures import yaml_parse_spy
 from tests.fixtures.session_preflight_module import preflight as _preflight
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -79,16 +82,25 @@ class TestAdHocLaneDerivations:
         assert [r["parent_plan"] for r in result] == ["parent"]
 
     def test_plan_never_naming_the_key_is_never_parsed(self, tmp_path: Path) -> None:
-        """The T-1.23 substring gate skips a plan file before yaml.safe_load ever runs on it."""
+        """The T-1.23 substring gate skips a plan file before parse_yaml ever runs on it."""
         unrelated = tmp_path / "PLAN-unrelated.yaml"
         unrelated.write_text("slug: unrelated\nintent: no followon key here at all\n", encoding="utf-8")
 
-        def _guarded_safe_load(_stream: object) -> None:
+        def _guarded_parse(_text: object) -> None:
             raise AssertionError("substring gate did not skip a plan that never names followon_recs")
 
-        with patch("scripts.preflight.recs_cache.yaml.safe_load", side_effect=_guarded_safe_load):
+        with patch("scripts.preflight.recs_cache.parse_yaml", side_effect=_guarded_parse):
             result = recs_cache._landed_followon_rec_ids(tmp_path)
         assert result == {}
+
+    def test_keyed_plan_parses_through_libyaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _write_plan(tmp_path, "landed-parent", implementation_declared=True, followon_recs=["rec-3001"])
+        log = yaml_parse_spy.install(monkeypatch)
+        result = recs_cache._landed_followon_rec_ids(tmp_path)
+        assert result == {"rec-3001": "landed-parent"}
+        assert log.pure_entries == []
+        assert len(log.libyaml_sizes) == 1
+        assert "preflight/recs_cache.py:_landed_followon_rec_ids" in log.libyaml_frames
 
     def test_both_derivations_never_call_the_reader(self, tmp_path: Path) -> None:
         _write_plan(tmp_path, "landed-parent", implementation_declared=True, followon_recs=["rec-3001"])

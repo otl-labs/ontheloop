@@ -3,7 +3,7 @@ the real tree, so the real review_by dates cannot reach the --pre pytest_diff)."
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +15,7 @@ from scripts.checks.contracts import validate_temporary_exemption_review as chec
 from scripts.checks.contracts._manifest import ENTRIES
 from scripts.checks.contracts._rule_ratchet import FIELD_SEMANTICS_REL
 
-_TODAY = datetime.date(2026, 10, 15)
+_TODAY = dt.date(2026, 10, 15)
 
 
 def _tree(root: Path, exemptions: dict[str, dict[str, Any]]) -> Path:
@@ -38,7 +38,7 @@ def _why(review_by: str, **over: Any) -> dict[str, Any]:
     return {"class": "temporary", "reason": "staged", "owner": "rec-77", "review_by": review_by, **over}
 
 
-def _run(root: Path, today: datetime.date = _TODAY) -> list[str]:
+def _run(root: Path, today: dt.date = _TODAY) -> list[str]:
     failed: list[str] = []
     check.validate_temporary_exemption_review(failed, root=root, today=today)
     return failed
@@ -59,7 +59,7 @@ def test_a_future_or_same_day_review_passes_and_a_later_clock_fails(
     root = _tree(tmp_path, {"c": _why("2027-01-31")})
     assert _run(root) == []
     assert "1 temporary exemption(s), none past review_by" in capsys.readouterr().out
-    assert any("2027-01-31" in f for f in _run(root, datetime.date(2027, 2, 1)))
+    assert any("2027-01-31" in f for f in _run(root, dt.date(2027, 2, 1)))
 
 
 def test_no_temporary_exemption_is_vacuous_and_other_classes_are_ignored(tmp_path: Path) -> None:

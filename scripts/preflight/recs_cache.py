@@ -8,6 +8,7 @@ from typing import cast
 
 import yaml
 
+from scripts.contract_rules import parse_yaml
 from scripts.preflight import _common
 from src.common.ducklake_reader_client import DuckLakeReader
 
@@ -28,7 +29,7 @@ def _landed_followon_rec_ids(plans_dir: Path | None = None) -> dict[str, str]:
 
     Walks docs/plans/PLAN-*.yaml under the T-1.23 substring gate (scripts/platform_roadmap_state.py
     ::compute_followon_state precedent): a document whose text never mentions the key cannot
-    declare one, so it is skipped before yaml.safe_load ever runs -- zero reader call (Decision 88
+    declare one, so it is skipped before parse_yaml (libyaml) ever runs -- zero reader call (Decision 88
     invariant ii). Only a plan carrying `implementation_declared: true` contributes (Fork 1: this
     is a DELIBERATE NARROWING of the adjudicated remedy text, pinned by Decision 148's
     implementation_declared resolution signal) -- a plan whose implementation has not landed marks
@@ -50,7 +51,7 @@ def _landed_followon_rec_ids(plans_dir: Path | None = None) -> dict[str, str]:
         if "followon_recs" not in text:
             continue
         try:
-            plan_data = yaml.safe_load(text)
+            plan_data = parse_yaml(text)
         except yaml.YAMLError:
             continue
         if not isinstance(plan_data, dict):
@@ -153,10 +154,10 @@ def _tally_rec_counts(
                 if isinstance(date_str, str):
                     entry_date = datetime.fromisoformat(date_str.replace("Z", "+00:00")).replace(tzinfo=timezone.utc)
                 else:
-                    import datetime as _dt  # noqa: PLC0415
+                    import datetime as dt  # noqa: PLC0415
 
                     if hasattr(date_str, "timestamp"):
-                        entry_date = _dt.datetime.fromtimestamp(date_str.timestamp(), tz=timezone.utc)
+                        entry_date = dt.datetime.fromtimestamp(date_str.timestamp(), tz=timezone.utc)
                     else:
                         entry_date = now
                 if (now - entry_date).days > 30:

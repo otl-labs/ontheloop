@@ -167,6 +167,22 @@ def _declared(plans_dir: Path | None) -> tuple[list[str], registry._Declaration 
     return failed, registry.pop_declaration(), spy.call_count
 
 
+class TestTierFloorLoader:
+    def test_plans_parse_through_libyaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from scripts.checks.roadmap import validate_tier_floor as _tier_floor_module
+        from tests.fixtures import yaml_parse_spy
+
+        _write_plan(tmp_path, "plan-a")
+        _write_plan(tmp_path, "plan-b", violating=True)
+        monkeypatch.setattr(_tier_floor_module.lambda_manifest, "load_all", lambda *a, **k: {})
+        log = yaml_parse_spy.install(monkeypatch)
+        failed: list[str] = []
+        validate_tier_floor(failed, plans_dir=tmp_path)
+        frame = "checks/roadmap/validate_tier_floor.py:validate_tier_floor"
+        assert [e for e in log.pure_entries if frame in e.stack] == []
+        assert sum(1 for e in log.entries if e.kind == "libyaml" and frame in e.stack) == 2
+
+
 class TestTierFloorAccountingDeclaration:
     """The check declares how many schema_version-2 plans it computed a floor for, so a run records enforced
     with a count that tracks the judged plans -- not a constant, not the plan-file total, and not the violation
