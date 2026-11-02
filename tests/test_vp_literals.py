@@ -130,7 +130,7 @@ class TestV4CorpusInvariance:
     def _v4_and_below_steps(self):
         for path in sorted(_PLANS_DIR.glob("PLAN-*.yaml")):
             try:
-                data = yaml.safe_load(path.read_text(encoding="utf-8"))
+                data = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.CSafeLoader)
             except (OSError, yaml.YAMLError):
                 continue
             if not isinstance(data, dict) or data.get("schema_version", 1) > 4:

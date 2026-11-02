@@ -3,7 +3,8 @@
 Invariant (1): the OIDC trust lists (local.github_repos in both Terraform roots) equal, exactly, the
 trusted_segments of the phase the contract governs by. Invariant (2), every static breakage_map row, is
 extended row by row: this check evaluates the rows in ROW_EVALUATORS, names the rest with their owning
-rec in PENDING_STATIC_ROWS, and fails on any static row it does neither for.
+rec in PENDING_STATIC_ROWS (none today: rec-3903's and rec-4355's rows are evaluated), and fails on any
+static row it does neither for.
 
 PUBLIC EXTENSION INTERFACE (agreed with the literal-sweep and terraform/github plans): load_contract,
 ROW_EVALUATORS, PENDING_STATIC_ROWS. Row evaluators only append to `failed`; the parent declares
@@ -138,15 +139,136 @@ def _evaluate_trusted_plan_workflow_ref(contract: dict, repo_root: Path, failed:
         failed.append(f"{_LABEL}: trusted_plan_workflow_refs {sorted(values)} != {expected} for phase {governing!r}")
 
 
+_TFG_DIR = "terraform/github"
+_TFG_FILES = ("variables.tf", "main.tf", "imports.tf")
+_HEADER_RE = re.compile(r'^[ \t]*(variable|provider|import)\b[ \t]*(?:"[^"\n]*")?[ \t]*\{', re.M)
+_ATTR_RE = re.compile(r"^[ \t]*([A-Za-z_]\w*)[ \t]*=", re.M)
+_STRING_RE = re.compile(r'"([^"\\]*)"')
+_INTERPOLATION_RE = re.compile(r"\$\{[^}]*\}")
+
+
+def _mask_noise(text: str) -> str:
+    """Equal-length copy of `text` with comment bodies and string contents blanked (offsets and quotes preserved)."""
+    out = list(text)
+    i, n = 0, len(text)
+    while i < n:
+        char = text[i]
+        if char == "#" or (char == "/" and i + 1 < n and text[i + 1] == "/"):
+            while i < n and text[i] != "\n":
+                out[i] = " "
+                i += 1
+        elif char == "/" and i + 1 < n and text[i + 1] == "*":
+            while i < n and not (text[i] == "*" and i + 1 < n and text[i + 1] == "/"):
+                if text[i] != "\n":
+                    out[i] = " "
+                i += 1
+            for j in range(i, min(i + 2, n)):
+                out[j] = " "
+            i += 2
+        elif char == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                if text[i] == "\\":
+                    out[i] = " "
+                    i += 1
+                if i < n:
+                    if text[i] != "\n":
+                        out[i] = " "
+                    i += 1
+            i += 1
+        else:
+            i += 1
+    return "".join(out)
+
+
+def _blocks(text: str, kind: str) -> list[tuple[str, str, dict[str, str]]]:
+    """(kind, label, depth-1 attributes) of each top-level `kind` block, scanned over the masked text."""
+    masked = _mask_noise(text)
+    found: list[tuple[str, str, dict[str, str]]] = []
+    for header in _HEADER_RE.finditer(masked):
+        if header.group(1) != kind:
+            continue
+        quoted = text[header.start() : header.end() - 1].split('"')
+        label = quoted[1] if len(quoted) > 2 else ""
+        depth, pos, attrs = 1, header.end(), {}
+        while pos < len(masked) and depth:
+            line_end = masked.find("\n", pos)
+            line_end = len(masked) if line_end < 0 else line_end
+            attr = _ATTR_RE.match(masked, pos, line_end) if depth == 1 else None
+            if attr is not None:
+                attrs[attr.group(1)] = text[attr.end() : line_end].strip()[: len(masked[attr.end() : line_end].strip())]
+            depth += masked.count("{", pos, line_end) - masked.count("}", pos, line_end)
+            pos = line_end + 1
+        found.append((kind, label, attrs))
+    return found
+
+
+def _read_tfg(repo_root: Path, name: str, failed: list[str]) -> str | None:
+    rel = f"{_TFG_DIR}/{name}"
+    try:
+        return (repo_root / rel).read_text(encoding="utf-8")
+    except OSError as exc:
+        failed.append(f"{_LABEL}: terraform_github_root: {rel} unreadable: {exc}")
+        return None
+
+
+def _evaluate_terraform_github_root(contract: dict, repo_root: Path, failed: list[str]) -> None:
+    """terraform/github: owner and name defaults follow the phase, provider owner and import ids are variables."""
+    row = "terraform_github_root"
+    identity = contract.get("identity") or {}
+    scratch: list[str] = []
+    governing = _governing_phase(identity, scratch)
+    values = identity.get("phase_values") or []
+    if governing is None:
+        failed.append(f"{_LABEL}: {row} not evaluated: no governing phase")
+        return
+    if "proven" not in values:
+        failed.append(f"{_LABEL}: {row}: identity.phase_values has no 'proven' value")
+        return
+    seg = identity["current"] if values.index(governing) < values.index("proven") else identity["target"]
+    texts = {name: _read_tfg(repo_root, name, failed) for name in _TFG_FILES}
+    if texts["variables.tf"] is not None:
+        variables = {label: attrs for _, label, attrs in _blocks(texts["variables.tf"], "variable")}
+        for var_name, want in (("github_owner", seg["owner"]), ("repository_name", seg["repository"])):
+            default = (variables.get(var_name) or {}).get("default")
+            match = _STRING_RE.fullmatch(default) if default is not None else None
+            if match is None or match.group(1) != want:
+                failed.append(
+                    f"{_LABEL}: {row}: {_TFG_DIR}/variables.tf variable {var_name} default must be the quoted string"
+                    f" {want!r} for phase {governing!r}, found {default!r}"
+                )
+        for label, attrs in variables.items():
+            if attrs.get("sensitive") == "true" and attrs.get("default", "null") != "null":
+                failed.append(f"{_LABEL}: {row}: {_TFG_DIR}/variables.tf sensitive variable {label} has a non-null default")
+    if texts["main.tf"] is not None:
+        providers = _blocks(texts["main.tf"], "provider")
+        provider = next((attrs for _, label, attrs in providers if label == "github"), None)
+        if provider is None:
+            failed.append(f'{_LABEL}: {row}: {_TFG_DIR}/main.tf declares no provider "github"')
+        elif provider.get("owner") != "var.github_owner":
+            failed.append(f"{_LABEL}: {row}: {_TFG_DIR}/main.tf provider owner must be var.github_owner")
+    if texts["imports.tf"] is not None:
+        imports = _blocks(texts["imports.tf"], "import")
+        if not imports:
+            failed.append(f"{_LABEL}: {row}: {_TFG_DIR}/imports.tf has no import block")
+        retired = {identity[s][k] for s in ("current", "target") for k in ("owner", "repository")}
+        for _, _, attrs in imports:
+            raw = attrs.get("id", "")
+            if "var.repository_name" not in raw:
+                failed.append(f"{_LABEL}: {row}: {_TFG_DIR}/imports.tf import id {raw!r} lacks var.repository_name")
+            literal = _INTERPOLATION_RE.sub("", raw)
+            if any(name in literal for name in retired):
+                failed.append(f"{_LABEL}: {row}: {_TFG_DIR}/imports.tf import id {raw!r} embeds an owner or repository name")
+
+
 ROW_EVALUATORS: dict[str, Callable[[dict, Path, list[str]], None]] = {
     "oidc_trust_segment": _evaluate_oidc_trust_segment,
     "trusted_plan_workflow_ref": _evaluate_trusted_plan_workflow_ref,
+    "terraform_github_root": _evaluate_terraform_github_root,
     **_retired_identity.ROW_EVALUATORS,
 }
 
-PENDING_STATIC_ROWS: dict[str, str] = {
-    "terraform_github_root": "rec-4355",
-}
+PENDING_STATIC_ROWS: dict[str, str] = {}
 
 
 @registry.register("validate_github_org_transfer", owner="platform")

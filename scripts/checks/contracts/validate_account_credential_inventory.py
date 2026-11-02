@@ -8,7 +8,7 @@ append-only growth against the base.
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 import re
 from pathlib import Path
 from typing import Any
@@ -59,9 +59,9 @@ def load_contract(repo_root: Path) -> dict | None:
     return data
 
 
-def _date(value: Any) -> datetime.date | None:
+def _date(value: Any) -> dt.date | None:
     try:
-        return datetime.date.fromisoformat(str(value))
+        return dt.date.fromisoformat(str(value))
     except ValueError:
         return None
 
@@ -169,7 +169,7 @@ def _check_ledger(doc: dict, entries: dict[str, dict], failed: list[str]) -> Non
     statuses = _names(doc.get("status_values"))
     required = _names(doc.get("evidence_required"))
     latest: dict[str, str] = {}
-    previous: datetime.date | None = None
+    previous: dt.date | None = None
     for i, entry in enumerate(_as_list(doc, "evidence_ledger")):
         if not isinstance(entry, dict):
             continue

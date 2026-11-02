@@ -93,6 +93,7 @@ ENTRIES: tuple[Entry, ...] = (
             "scripts/llm/**",
             "scripts/ops_data_portal.py",
             "scripts/ops_portal/**",
+            "scripts/checks/contracts/_glossary_words.py",
             "scripts/rec_episode.py",
             "scripts/s3_log_store.py",
             "scripts/sync/ops.py",

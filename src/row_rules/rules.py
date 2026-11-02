@@ -47,7 +47,7 @@ _DATEABLE_KINDS = frozenset(
     {"not_null", "accepted_values", "min_length", "pattern", "array_element_format", "not_before", "at_most"}
 )
 _TWO_COLUMN_KINDS = frozenset({"not_before", "at_most"})
-PRODUCER_SIDE_KINDS = frozenset({"acceptance_lint", "array_element_reference"})
+PRODUCER_SIDE_KINDS = frozenset({"acceptance_lint", "array_element_reference", "glossary_lint"})
 _TABLE_KEYS = frozenset({"exactly_one_of", "payload"})
 _CONTENT_KEYS = frozenset({"inline", "uri", "sha", "size", "threshold", "cap", "integrity"})
 EXEMPTABLE_LEGS = frozenset({"inline_within_threshold", "uri_above_threshold", "within_cap", "integrity"})

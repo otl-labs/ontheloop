@@ -1,7 +1,8 @@
 """The /implement merge step as checked verbs (docs/contracts/git-ops.yaml push_pr_ci_merge_flow).
 
   premerge --slug S --message-file F [--expect HEX]   gate a squash-merge: trailer, acceptance preview,
-                                                       approved text, stale base; prints the HEAD to merge
+                                                       approved text, Decision-number collision, stale base;
+                                                       prints the HEAD to merge
   readback --slug S --sha SHA                          the merge commit carries the plan's trailer
   recover  --slug S --sha SHA                          verdict-bound close of recs a lost trailer skipped
 
@@ -158,6 +159,18 @@ def _approved_text(slug: str, root: Path, expect: str | None) -> bool:
     return ok
 
 
+def _decision_collisions(root: Path) -> bool:
+    from scripts.session import decision_renumber  # noqa: PLC0415
+
+    found = decision_renumber.collisions(root)
+    for old, new in sorted(found.items()):
+        print(
+            f"PREMERGE DECISION COLLISION {old} -> {new}: run git fetch origin main && "
+            "bin/venv-python -m scripts.session.rebase_resolve, then the full tier, push and wait for CI"
+        )
+    return not found
+
+
 def cmd_premerge(args: argparse.Namespace) -> int:
     root = args.root
     _git(root, "fetch", "origin", "main")
@@ -182,6 +195,7 @@ def cmd_premerge(args: argparse.Namespace) -> int:
                 print(f"  remedy: {remedy}")
     ok = _preview(expected, root, head) and ok
     ok = _approved_text(args.slug, root, args.expect) and ok
+    ok = _decision_collisions(root) and ok
     return 0 if ok else 1
 
 

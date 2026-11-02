@@ -193,7 +193,12 @@ class TestValidateGithubOrgTransfer:
         loaded = module.load_contract(tmp_path)
         assert isinstance(loaded, dict) and loaded["identity"]["phase"] == "p0"
         assert module.load_contract(tmp_path / "absent") is None
-        assert set(module.ROW_EVALUATORS) == {"oidc_trust_segment", "trusted_plan_workflow_ref", *_retired_identity.ROWS}
+        assert set(module.ROW_EVALUATORS) == {
+            "oidc_trust_segment",
+            "trusted_plan_workflow_ref",
+            "terraform_github_root",
+            *_retired_identity.ROWS,
+        }
         assert all(callable(fn) for fn in module.ROW_EVALUATORS.values())
         assert all(rec.startswith("rec-") for rec in module.PENDING_STATIC_ROWS.values())
         assert not set(module.ROW_EVALUATORS) & set(module.PENDING_STATIC_ROWS)
@@ -209,7 +214,8 @@ def test_rec_3903_rows_are_evaluated_not_pending() -> None:
     assert rows == {"dependabot_repository_guard", "owner_literal_defaults", "codeowners", "descriptive_literals"}
     assert rows <= set(module.ROW_EVALUATORS)
     assert not rows & set(module.PENDING_STATIC_ROWS)
-    assert module.PENDING_STATIC_ROWS == {"terraform_github_root": "rec-4355"}
+    assert module.PENDING_STATIC_ROWS == {}
+    assert module.ROW_EVALUATORS["terraform_github_root"] is module._evaluate_terraform_github_root
     assert all(module.ROW_EVALUATORS[rid] is _retired_identity.ROW_EVALUATORS[rid] for rid in rows)
 
 
@@ -290,3 +296,142 @@ class TestTrustedPlanWorkflowRef:
         failed: list[str] = []
         module._evaluate_trusted_plan_workflow_ref(contract, _REAL_ROOT, failed)
         assert failed == []
+
+
+_TFG_PHASES = ["pre_transfer", "pre_staged", "transferred", "proven", "predecessor_removed"]
+
+
+def _tfg_contract(phase: str, staged: str | None) -> dict[str, Any]:
+    identity: dict[str, Any] = {
+        "current": {"owner": "alpha", "repository": "proj"},
+        "target": {"owner": "beta", "repository": "proj2"},
+        "phase": phase,
+        "phase_values": list(_TFG_PHASES),
+    }
+    if staged is not None:
+        identity["staged_phase"] = staged
+    return {"identity": identity, "breakage_map": [{"id": "terraform_github_root", "detection": "static", "rec": "rec-4355"}]}
+
+
+def _tfg_variables(owner: str = '"beta"', repo: str = '"proj2"', extra: str = "") -> str:
+    owner_block = "" if owner is None else f'variable "github_owner" {{\n  type    = string\n  default = {owner}\n}}\n'
+    return (
+        owner_block
+        + f'variable "repository_name" {{\n  type    = string\n  default = {repo}\n}}\n'
+        + 'variable "github_token" {\n  type      = string\n  sensitive = true\n  default   = null\n}\n'
+        + extra
+    )
+
+
+_TFG_MAIN = 'provider "github" {\n  owner = var.github_owner\n  token = var.github_token\n}\n'
+_TFG_IMPORTS = "import {\n  to = github_repository.this\n  id = var.repository_name\n}\n"
+
+
+def _run_tfg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    staged: str | None,
+    variables: str | None,
+    main: str | None = _TFG_MAIN,
+    imports: str | None = _TFG_IMPORTS,
+    contract: dict[str, Any] | None = None,
+) -> list[str]:
+    root = tmp_path / "root"
+    (root / "terraform/github").mkdir(parents=True)
+    for name, text in (("variables.tf", variables), ("main.tf", main), ("imports.tf", imports)):
+        if text is not None:
+            (root / "terraform/github" / name).write_text(text, encoding="utf-8")
+    failed: list[str] = []
+    module._evaluate_terraform_github_root(contract or _tfg_contract(phase, staged), root, failed)
+    return failed
+
+
+class TestTerraformGithubRootRow:
+    @pytest.mark.parametrize(
+        ("phase", "staged", "names", "ok"),
+        [
+            ("transferred", None, "current", True),
+            ("transferred", None, "target", False),
+            ("transferred", "proven", "target", True),
+            ("transferred", "proven", "current", False),
+            ("proven", None, "target", True),
+            ("proven", None, "current", False),
+            ("pre_staged", None, "current", True),
+            ("pre_transfer", None, "target", False),
+            ("predecessor_removed", None, "target", True),
+            ("transferred", "predecessor_removed", "target", False),
+        ],
+    )
+    def test_phase_matrix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str, staged: str | None, names: str, ok: bool
+    ) -> None:
+        owner, repo = ('"alpha"', '"proj"') if names == "current" else ('"beta"', '"proj2"')
+        failed = _run_tfg(tmp_path, monkeypatch, phase, staged, _tfg_variables(owner, repo))
+        assert (failed == []) is ok, failed
+
+    def test_quoted_provider_owner_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        main = _TFG_MAIN.replace("var.github_owner", '"beta"')
+        failed = _run_tfg(tmp_path, monkeypatch, "proven", None, _tfg_variables(), main=main)
+        assert len(failed) == 1 and "provider owner" in failed[0]
+
+    def test_quoted_repository_in_import_id_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        imports = _TFG_IMPORTS + 'import {\n  to = github_repository_ruleset.x\n  id = "${var.repository_name}:proj2"\n}\n'
+        failed = _run_tfg(tmp_path, monkeypatch, "proven", None, _tfg_variables(), imports=imports)
+        assert len(failed) == 1 and "embeds" in failed[0]
+
+    def test_import_id_without_variable_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        imports = 'import {\n  to = github_repository.this\n  id = "fixed"\n}\n'
+        failed = _run_tfg(tmp_path, monkeypatch, "proven", None, _tfg_variables(), imports=imports)
+        assert len(failed) == 1 and "lacks var.repository_name" in failed[0]
+
+    def test_no_import_block_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        failed = _run_tfg(tmp_path, monkeypatch, "proven", None, _tfg_variables(), imports="# nothing\n")
+        assert len(failed) == 1 and "no import block" in failed[0]
+
+    def test_sensitive_variable_with_string_default_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        bad = 'variable "secret" {\n  sensitive = true\n  default   = "x"\n}\n'
+        failed = _run_tfg(tmp_path, monkeypatch, "proven", None, _tfg_variables(extra=bad))
+        assert len(failed) == 1 and "secret" in failed[0]
+
+    @pytest.mark.parametrize("body", ["  sensitive = true\n  default   = null\n", "  sensitive = true\n"])
+    def test_sensitive_variable_without_default_is_green(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+    ) -> None:
+        good = f'variable "secret" {{\n{body}}}\n'
+        assert _run_tfg(tmp_path, monkeypatch, "proven", None, _tfg_variables(extra=good)) == []
+
+    def test_missing_owner_default_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        variables = _tfg_variables().replace('  default = "beta"\n', "")
+        failed = _run_tfg(tmp_path, monkeypatch, "proven", None, variables)
+        assert len(failed) == 1 and "github_owner" in failed[0]
+
+    def test_non_string_default_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        failed = _run_tfg(tmp_path, monkeypatch, "proven", None, _tfg_variables(owner="var.other"))
+        assert len(failed) == 1 and "github_owner" in failed[0]
+
+    def test_unreadable_variables_file_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        failed = _run_tfg(tmp_path, monkeypatch, "proven", None, None)
+        assert len(failed) == 1 and "variables.tf unreadable" in failed[0]
+
+    def test_phase_values_without_proven_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        contract = _tfg_contract("transferred", None)
+        contract["identity"]["phase_values"] = ["pre_transfer", "transferred"]
+        failed = _run_tfg(tmp_path, monkeypatch, "transferred", None, _tfg_variables(), contract=contract)
+        assert len(failed) == 1 and "'proven'" in failed[0]
+
+    def test_comment_with_braces_and_quote_is_green(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        extra = 'variable "noisy" {\n  # a stray { and a lone " here\n  type = string\n}\n'
+        assert _run_tfg(tmp_path, monkeypatch, "proven", None, _tfg_variables(extra=extra)) == []
+
+    def test_block_comment_and_escaped_quote_are_green(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        extra = 'variable "noisy" {\n  /* a stray {\n  and a lone " */\n  description = "say \\"{\\" // not a comment"\n}\n'
+        assert _run_tfg(tmp_path, monkeypatch, "proven", None, _tfg_variables(extra=extra)) == []
+
+    def test_other_block_kinds_are_skipped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        imports = _TFG_IMPORTS + 'variable "unrelated" {\n  type = string\n}\n'
+        assert _run_tfg(tmp_path, monkeypatch, "proven", None, _tfg_variables(), imports=imports) == []
+
+    def test_missing_provider_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        failed = _run_tfg(tmp_path, monkeypatch, "proven", None, _tfg_variables(), main="# no provider\n")
+        assert len(failed) == 1 and "no provider" in failed[0]
