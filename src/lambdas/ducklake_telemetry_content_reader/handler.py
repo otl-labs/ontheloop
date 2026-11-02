@@ -35,13 +35,13 @@ MAX_RESPONSE_BYTES = 6_000_000
 _REFUSED_KEYS = ("deadline_ms", "window", "window_days", "limit")
 
 
-def _secret_id() -> str:
-    secret_id = os.environ.get("TELEMETRY_DSN_SECRET_ID", "")
-    if not secret_id:
+def _dsn_parameter() -> str:
+    parameter = os.environ.get("TELEMETRY_DSN_PARAMETER", "")
+    if not parameter:
         raise rt.DuckLakeRuntimeError(
-            "TELEMETRY_DSN_SECRET_ID is not set: the content reader needs the telemetry reader login"
+            "TELEMETRY_DSN_PARAMETER is not set: the content reader needs the telemetry reader login"
         )
-    return secret_id
+    return parameter
 
 
 def _describe() -> dict[str, Any]:
@@ -132,7 +132,7 @@ def _named_read(payload: dict[str, Any], meta: dict[str, Any], remaining_ms: Cal
             return _response(404, {"ok": False, "error_type": "outside_read_window", "verb": verb})
         meta_schema, data_path = ev.telemetry_pin()
         acquire = ev.telemetry_acquirer(
-            meta_schema, data_path, EXTENSION_DIRECTORY, dsn_secret_id=_secret_id(), read_only=True
+            meta_schema, data_path, EXTENSION_DIRECTORY, dsn_parameter=_dsn_parameter(), read_only=True
         )
         under_deadline = deadline.runner(remaining_ms, None, lambda: ev._INTERRUPTED_SLOTS.add(ev.TELEMETRY_SLOT))
         con, conn_meta = acquire()

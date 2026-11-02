@@ -40,6 +40,7 @@ class GateRound(BaseModel):
     digest: str | None = None
     base: str | None = None
     selection: Literal["complete", "degraded"] | None = None
+    pending_evaluators: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def _verdict_matches_gate(self) -> GateRound:
@@ -53,6 +54,8 @@ class GateRound(BaseModel):
         return self
 
     def _check_run_facts(self) -> None:
+        if self.pending_evaluators is not None and (self.gate != "wording-check" or self.verdict != "PASS"):
+            raise ValueError("pending_evaluators is allowed only on a wording-check PASS row")
         facts = (self.digest, self.base, self.selection)
         if self.gate != "wording-check":
             if any(fact is not None for fact in facts):

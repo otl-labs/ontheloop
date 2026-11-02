@@ -125,7 +125,7 @@ from src.common.ducklake_writes import (  # noqa: F401 -- re-exported facade sur
 
 _PINNED_DUCKDB_VERSION: str | None = None  # resolved lazily via module __getattr__ -> _pinned_duckdb_version()
 
-DSN_SECRET_ID = "ducklake-neon-catalog-dsn"
+DSN_PARAMETER_NAME = "/secret/ducklake-neon-catalog-dsn"
 META_SCHEMA = "ducklake_ops"
 
 # Smoke uses a DEDICATED meta-schema so it can never collide with the production catalog. rec-2099
@@ -204,31 +204,34 @@ def assert_duckdb_version(duckdb_module: Any = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def fetch_dsn(secret_id: str = DSN_SECRET_ID, *, profile: str | None = None) -> dict[str, str]:
-    """Fetch + parse the Neon DSN JSON from Secrets Manager (Decision 37 runtime-fetch).
+def fetch_dsn(parameter_name: str = DSN_PARAMETER_NAME, *, profile: str | None = None) -> dict[str, str]:
+    """Fetch + parse the Neon DSN JSON from an SSM SecureString parameter (Decision 37 runtime-fetch).
 
     Returns a dict with at least host / dbname / username / password (sslmode optional, defaults
-    to require). Raises RuntimeError if the secret is missing a required key.
+    to require). Raises RuntimeError if the document is missing a required key, and ValueError for a
+    name outside /secret/ (a stale Secrets Manager id fails loudly). Store errors propagate unwrapped.
     """
     import boto3  # noqa: PLC0415
 
     from scripts.aws_profile import resolve_aws_profile  # noqa: PLC0415
 
+    if not parameter_name.startswith("/secret/"):
+        raise ValueError(f"DSN parameter name {parameter_name!r} is not under /secret/")
     session = boto3.Session(profile_name=resolve_aws_profile(profile))
-    client = session.client("secretsmanager")
-    resp = client.get_secret_value(SecretId=secret_id)
-    payload = _parse_secret_string(resp["SecretString"])
+    client = session.client("ssm")
+    resp = client.get_parameter(Name=parameter_name, WithDecryption=True)
+    payload = _parse_dsn_document(resp["Parameter"]["Value"])
     missing = [k for k in ("host", "dbname", "username", "password") if not payload.get(k)]
     if missing:
-        raise RuntimeError(f"DSN secret {secret_id!r} is missing required keys: {missing}")
+        raise RuntimeError(f"DSN parameter {parameter_name!r} is missing required keys: {missing}")
     return payload
 
 
-def _parse_secret_string(secret_string: str) -> dict[str, str]:
-    """Parse the Secrets Manager SecretString JSON into a dict."""
+def _parse_dsn_document(document: str) -> dict[str, str]:
+    """Parse the DSN parameter's JSON value into a dict."""
     import json  # noqa: PLC0415
 
-    return json.loads(secret_string)
+    return json.loads(document)
 
 
 def libpq_conninfo(dsn: dict[str, str]) -> str:

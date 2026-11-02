@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import yaml
 
 from scripts.roadmap import plan_wording_check as pwc
+from scripts.roadmap.plan_gate_rounds import GateRound
 
 _BUDGET = "config/prose_budgets.yaml"
 _STRUCT = "config/structural_size_budgets.yaml"
@@ -21,6 +23,12 @@ _BUDGET_TEXT = (
     "S1:\n  root_ambient_load_set: 50\n"
 )
 _STRUCT_TEXT = "a: 1\nb: 2\n"
+_BASELINE = ".secrets.baseline"
+_CONTRACT = "docs/contracts/zz-probe.yaml"
+_CHECK = "validate_zz_probe"
+_MODULE = f"scripts/checks/roadmap/{_CHECK}.py"
+_GATE = "GATE-FAILURE v1 source=gate check="
+_CONTRACT_BODY = f"contract:\n  id: zz\n  class: D\n  evaluator:\n    check: {_CHECK}\n"
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -80,13 +88,26 @@ class FakeRunner:
         surfaces: dict[str, Any] | str | None = None,
         index_rc: int = 0,
         raises: BaseException | None = None,
+        sub_rc: int = 0,
+        sub_out: str = "",
+        hook_steps: list[tuple[int, str | None]] | None = None,
     ) -> None:
+        self.sub_rc, self.sub_out, self.hook_steps = sub_rc, sub_out, list(hook_steps or [])
+        self.timeouts: list[int] = []
         self.calls: list[tuple[list[str], Path]] = []
         self.pre_rc, self.pre_out, self.manifest, self.index_rc, self.raises = pre_rc, pre_out, manifest, index_rc, raises
         self.surfaces = surfaces if surfaces is not None else {}
 
     def __call__(self, cmd: list[str], cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
         self.calls.append((cmd, cwd))
+        self.timeouts.append(timeout)
+        if "scripts.roadmap.wording_check_pending" in cmd:
+            return subprocess.CompletedProcess(cmd, self.sub_rc, self.sub_out, "")
+        if "pre_commit" in cmd:
+            rc, rewrite = self.hook_steps.pop(0)
+            if rewrite is not None:
+                _write(cwd, _BASELINE, rewrite)
+            return subprocess.CompletedProcess(cmd, rc, "hook said no\n" if rc else "", "")
         if self.raises is not None and "scripts.validate" in cmd:
             raise self.raises
         if cmd[1] == "-c":
@@ -151,7 +172,7 @@ class TestRefusals:
         result = _run(tmp_path, tree, FakeRunner())
         assert result.verdict == "FAIL" and "outside the sidecar" in result.reason and "stray.txt" in result.reason
 
-    def test_a_fourth_companion_is_not_allowed(self, tmp_path: Path, tree: Path) -> None:
+    def test_a_fifth_companion_is_not_allowed(self, tmp_path: Path, tree: Path) -> None:
         _place(tree)
         _write(tree, "docs/DECISIONS.md", "changed\n")
         assert "docs/DECISIONS.md" in _run(tmp_path, tree, FakeRunner()).reason
@@ -373,16 +394,6 @@ class TestCli:
         assert "selection=complete" in out
         assert "- {gate: wording-check, round: 1, verdict: PASS, digest: " in out
 
-    def test_the_row_round_follows_the_plan_record(self, tmp_path: Path, tree: Path, monkeypatch, capsys) -> None:
-        plans = tmp_path / "docs" / "plans"
-        plans.mkdir(parents=True)
-        (plans / "PLAN-demo.yaml").write_text("gate_rounds:\n  - {gate: wording-check, round: 1}\n", encoding="utf-8")
-        _place(tree)
-        monkeypatch.setattr(pwc, "default_runner", FakeRunner(surfaces=_surfaces()))
-        monkeypatch.setattr(pwc, "ROOT", tmp_path)
-        pwc.main(["--slug", "demo", "--tree", str(tree), "--sidecar", str(_sidecar(tmp_path))])
-        assert "round: 2," in capsys.readouterr().out
-
     def test_a_red_fast_tier_prints_the_reason_the_echo_and_exits_one(
         self, tmp_path: Path, tree: Path, monkeypatch, capsys
     ) -> None:
@@ -417,3 +428,147 @@ class TestDefaultRunner:
     def test_runs_a_command_in_the_given_directory(self, tmp_path: Path) -> None:
         done = pwc.default_runner(["pwd"], tmp_path, 30)
         assert done.returncode == 0 and Path(done.stdout.strip()).resolve() == tmp_path.resolve()
+
+
+def _plan(*rows: tuple[str, str], rounds: int = 0) -> Any:
+    scope = [SimpleNamespace(file=f, action=a) for f, a in rows]
+    return SimpleNamespace(scope=scope, gate_rounds=[SimpleNamespace(gate="wording-check")] * rounds)
+
+
+_CONTRACT_BLOCKS = [{"id": "c1", "file": _CONTRACT, "before": "", "after": _CONTRACT_BODY}]
+
+
+def _contract_run(
+    tmp_path: Path, tree: Path, monkeypatch: pytest.MonkeyPatch, runner: FakeRunner, action: str = "Create"
+) -> pwc.Result:
+    monkeypatch.setattr(pwc, "_load_plan", lambda path: _plan((_MODULE, action)))
+    _write(tree, _CONTRACT, _CONTRACT_BODY)
+    return _run(tmp_path, tree, runner, blocks=_CONTRACT_BLOCKS)
+
+
+class TestPlanCreatedEvaluator:
+    def test_a_drift_only_red_is_an_attributed_pass(self, tmp_path: Path, tree: Path, monkeypatch) -> None:
+        runner = FakeRunner(pre_rc=1, pre_out=f"{_GATE}validate_contract_drift\n")
+        result = _contract_run(tmp_path, tree, monkeypatch, runner)
+        assert result.verdict == "PASS" and result.pairs == (("zz-probe.yaml", _CHECK, _MODULE),)
+        sub = [cmd for cmd in runner.commands if "scripts.roadmap.wording_check_pending" in cmd][0]
+        assert sub == [
+            "bin/venv-python",
+            "-m",
+            "scripts.roadmap.wording_check_pending",
+            "--pending",
+            f"zz-probe.yaml:{_CHECK}",
+            "--",
+        ]
+        assert runner.timeouts[-1] == pwc.ATTRIBUTION_TIMEOUT_S
+
+    def test_the_attributed_pass_prints_the_count_the_line_and_the_row_field(
+        self, tmp_path: Path, tree: Path, monkeypatch
+    ) -> None:
+        runner = FakeRunner(pre_rc=1, pre_out=f"{_GATE}validate_contract_drift\n")
+        text = pwc._render("demo", _contract_run(tmp_path, tree, monkeypatch, runner))
+        lines = text.splitlines()
+        assert lines[0].startswith("WORDING-CHECK verdict=PASS ") and lines[0].endswith(" pending_evaluators=1")
+        assert "fast tier red only on 1 plan-created evaluator(s); clean with them stood in" in lines
+        assert f"pending: docs/contracts/zz-probe.yaml evaluator {_CHECK} (the plan creates {_MODULE})" in lines
+        assert "pending_evaluators: 1" in lines[-1] and "round: 1," in lines[-1]
+
+    def test_a_reason_from_attribute_is_a_fail(self, tmp_path: Path, tree: Path, monkeypatch) -> None:
+        runner = FakeRunner(pre_rc=1, pre_out=f"{_GATE}validate_contract_drift\n", sub_rc=1, sub_out="still red\n")
+        result = _contract_run(tmp_path, tree, monkeypatch, runner)
+        assert result.verdict == "FAIL" and "fast tier" in result.reason and "still red" in result.reason
+
+    def test_another_red_check_stays_a_fail(self, tmp_path: Path, tree: Path, monkeypatch) -> None:
+        out = f"{_GATE}validate_contract_drift\n{_GATE}ruff\n"
+        result = _contract_run(tmp_path, tree, monkeypatch, FakeRunner(pre_rc=1, pre_out=out))
+        assert result.verdict == "FAIL" and "ruff" in result.reason
+
+    def test_a_modify_row_has_no_pending_pair_and_a_red_stays_a_fail_as_today(
+        self, tmp_path: Path, tree: Path, monkeypatch
+    ) -> None:
+        runner = FakeRunner(pre_rc=1, pre_out=f"{_GATE}validate_contract_drift\n")
+        result = _contract_run(tmp_path, tree, monkeypatch, runner, "Modify")
+        assert result.verdict == "FAIL" and result.reason == "the fast tier (scripts.validate --pre) failed"
+        assert not any("scripts.roadmap.wording_check_pending" in cmd for cmd in runner.commands)
+
+    def test_a_green_fast_tier_records_no_pending_count(self, tmp_path: Path, tree: Path, monkeypatch) -> None:
+        result = _contract_run(tmp_path, tree, monkeypatch, FakeRunner())
+        assert result.verdict == "PASS" and result.pairs == ()
+        assert "pending_evaluators" not in pwc._render("demo", result)
+
+
+@pytest.fixture
+def baseline_tree(repo: Path, tmp_path: Path) -> Path:
+    _write(repo, _BASELINE, '{"results": {}, "generated_at": "t0"}\n')
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "baseline")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    scratch = tmp_path / "scratch_baseline"
+    _git(repo, "worktree", "add", "-q", "--detach", str(scratch), "HEAD")
+    return scratch
+
+
+class TestBaselineCompanion:
+    def test_the_baseline_is_admitted_by_the_scope_rule(self, tmp_path: Path, tree: Path) -> None:
+        _place(tree)
+        _write(tree, _BASELINE, "{}\n")
+        assert _run(tmp_path, tree, FakeRunner()).verdict == "PASS"
+
+    def test_a_settle_reason_is_a_fail_and_runs_no_fast_tier(self, tmp_path: Path, baseline_tree: Path) -> None:
+        _place(baseline_tree)
+        runner = FakeRunner(hook_steps=[(1, None)])
+        result = _run(tmp_path, baseline_tree, runner)
+        assert result.verdict == "FAIL" and "hook rejects the placed words" in result.reason
+        assert not any("scripts.validate" in cmd for cmd in runner.commands)
+        assert runner.timeouts[-1] == pwc.MEASURE_TIMEOUT_S
+
+    def test_a_clean_hook_run_reaches_the_fast_tier(self, tmp_path: Path, baseline_tree: Path) -> None:
+        _place(baseline_tree)
+        runner = FakeRunner(hook_steps=[(0, None)])
+        assert _run(tmp_path, baseline_tree, runner).verdict == "PASS"
+        assert runner.commands[-1] == ["bin/venv-python", "-m", "scripts.validate", "--pre"]
+
+
+class TestRender:
+    def test_printed_row_commits_past_detect_secrets(self) -> None:
+        result = pwc.Result("PASS", digest="a" * 64, base="b" * 40, selection="complete")
+        row = pwc._render("demo", result).splitlines()[-1]
+        assert row.endswith("  # pragma: allowlist secret")
+        parsed = yaml.safe_load(row.removeprefix("  - ").split("  # pragma")[0].replace("{", "{").strip())
+        assert GateRound.model_validate(parsed).verdict == "PASS"
+
+    def test_an_attributed_row_parses_with_its_count(self) -> None:
+        result = pwc.Result("PASS", digest="a" * 64, base="b" * 40, selection="complete", pairs=(("x.yaml", "c", "m.py"),))
+        row = pwc._render("demo", result).splitlines()[-1]
+        parsed = yaml.safe_load(row.split("  # pragma")[0].removeprefix("  - "))
+        assert GateRound.model_validate(parsed).pending_evaluators == 1
+
+
+class TestHardening:
+    def test_measurement_has_its_own_shorter_timeout(self, tmp_path: Path, tree: Path) -> None:
+        _place(tree)
+        runner = FakeRunner(surfaces=_surfaces())
+        _run(tmp_path, tree, runner)
+        measured = [t for (cmd, _), t in zip(runner.calls, runner.timeouts, strict=True) if cmd[1] == "-c"]
+        assert measured == [pwc.MEASURE_TIMEOUT_S] == [120]
+        assert runner.timeouts[-1] == pwc.PRE_TIMEOUT_S
+
+    def test_attribution_has_its_own_timeout(self, tmp_path: Path, tree: Path, monkeypatch) -> None:
+        runner = FakeRunner(pre_rc=1, pre_out=f"{_GATE}validate_contract_drift\n")
+        _contract_run(tmp_path, tree, monkeypatch, runner)
+        assert pwc.ATTRIBUTION_TIMEOUT_S == 600 and runner.timeouts[-1] == 600
+
+    def test_round_comes_from_the_parsed_plan(self, tmp_path: Path, tree: Path, monkeypatch) -> None:
+        monkeypatch.setattr(pwc, "_load_plan", lambda path: _plan(rounds=2))
+        _place(tree)
+        assert _run(tmp_path, tree, FakeRunner(surfaces=_surfaces())).round == 3
+
+    def test_an_unloadable_plan_means_round_one_and_one_stderr_note(self, tmp_path: Path, tree: Path, capsys) -> None:
+        _place(tree)
+        result = pwc.run("demo", tree, _sidecar(tmp_path), FakeRunner(surfaces=_surfaces()), plan_path=tmp_path / "none.yaml")
+        err = capsys.readouterr().err
+        assert result.round == 1 and result.verdict == "PASS" and err.count("note: plan") == 1 and "\n" == err[-1]
+
+    def test_echo_keeps_gate_markers_and_drops_noise(self) -> None:
+        out = f"Error: unrelated noise\n  FAIL: boom\nFailed checks:\n  - ruff\n{_GATE}ruff\nValueError seen\nMore\n"
+        assert pwc._failing_lines(out).splitlines() == ["  FAIL: boom", "Failed checks:", "  - ruff", f"{_GATE}ruff"]

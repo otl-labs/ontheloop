@@ -102,8 +102,10 @@ def build_stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, read_all: bo
     def dsn(user: str) -> dict[str, str]:
         return {"host": host, "dbname": OWNER, "username": user, "password": PASSWORD, "sslmode": "require"}
 
-    by_secret = {login.secret_id: dsn(login.name) for login in cl.LOGINS.values()}
-    monkeypatch.setattr(rt, "fetch_dsn", lambda secret_id=rt.DSN_SECRET_ID, **_: by_secret.get(secret_id) or dsn(OWNER))
+    by_secret = {login.parameter_name: dsn(login.name) for login in cl.LOGINS.values()}
+    monkeypatch.setattr(
+        rt, "fetch_dsn", lambda parameter_name=rt.DSN_PARAMETER_NAME, **_: by_secret.get(parameter_name) or dsn(OWNER)
+    )
 
     opened: list[Any] = []
 
