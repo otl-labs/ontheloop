@@ -100,8 +100,10 @@ verification_plan:
     expected_literals: ["5 passed"]
     graduation: waive
     graduation_waiver_reason: >-
-      The file is itself the standing guard: --pre's selector runs it whenever AGENTS.md, either hook config or the script
-      changes, and agents-md-hook-canary-marker already graduates the AGENTS.md side; a registry row would duplicate it.
+      The file is itself the standing guard: --pre's data-edge selector runs it whenever AGENTS.md, either hook config or
+      the script changes, and pytest runs it in both tiers. agents-md-hook-canary-marker keeps covering the literal in
+      AGENTS.md only; the moved registration-and-print guard is not registry-inventoried, a known gap accepted as low
+      value for a one-line hook.
   - step: 2
     phase: pre-deploy
     action: Run the drift guards this change edits (canary literal, capture registration, plugin render parity).
@@ -147,14 +149,13 @@ verification_plan:
   - step: 5
     phase: pre-deploy
     action: >-
-      Fast tier, then the full tier before handoff (handoff_policy); run the full tier as its own backgrounded run with
-      a 2 h limit from the top-level session.
-    command: >-
-      bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m
-      scripts.checks.validation_result --verify-head
+      Fast tier, then the full tier before handoff (handoff_policy): run bin/venv-python -m scripts.validate --pre in the
+      foreground (exit 0), then bin/venv-python -m scripts.validate as its own backgrounded run with a 2 h limit from the
+      top-level session, and when it completes read its verdict with this step's command.
+    command: bin/venv-python -m scripts.checks.validation_result --verify-head
     expected: >-
-      --pre exit 0; validation_result --verify-head exit 0 for HEAD (the verdict, never the backgrounded run's own exit
-      status)
+      exit 0 for HEAD (the full tier's recorded verdict, never the backgrounded run's own exit status), after --pre
+      exited 0
     fix_if: >-
       validate_prose_limits fails (the S1 budget must equal the measured size); a failure in this plan's files is fixed at
       root and the full tier rerun from the start; a failure only in another open red's tests (for example rec-4797,
@@ -169,7 +170,7 @@ verification_plan:
       the line reached turn-1 context before the first reply, which is the property the canary relies on.
     command: >-
       bin/venv-python -c "import json,os,pathlib; p=pathlib.Path.home()/'.claude/projects/-home-user-ontheloop'/(os.environ['CLAUDE_CODE_SESSION_ID']+'.jsonl');
-      rs=[json.loads(l) for l in p.open()]; a=next(i for i,r in enumerate(rs) if r.get('type')=='assistant');
+      rs=[]; [rs.append(json.loads(l)) for l in p.open() if l.strip().endswith('}')]; a=next(i for i,r in enumerate(rs) if r.get('type')=='assistant');
       c=[i for i,r in enumerate(rs) if (r.get('attachment') or {}).get('type')=='hook_additional_context' and
       '[hook_canary]' in json.dumps(r)]; assert c and c[0]<a, (c,a); print('canary before first reply')"
     expected: prints "canary before first reply"
@@ -215,10 +216,11 @@ test_obligations:
   - source: config/prose_budgets.yaml
     behavior: S1 root_ambient_load_set equals the measured post-edit size.
     verification_step: 5
-    command: bin/venv-python -m scripts.validate --pre
+    command: bin/venv-python -m scripts.checks.validation_result --verify-head
     waiver_reason: >-
-      A budget figure, not behaviour: validate_prose_limits in the fast tier fails it both over and under the measured
-      size, so the existing check is the obligation's evidence and no new test can add to it.
+      A budget figure, not behaviour: validate_prose_limits runs in both tiers and fails it both over and under the
+      measured size; step 5 reads that verdict, so the existing check is the obligation's evidence and no new test can
+      add to it.
 constraints:
   - The AGENTS.md words are operator-approved; place them exactly (sidecar), never re-word. Any other AGENTS.md change is always-ask.
   - Never hand-edit .claude/hooks/hooks.json; regenerate it with plugin_hooks.py render.
@@ -229,6 +231,7 @@ context:
   - "rec-4824 (Low, S). Cause refined at planning (2026-11-02, this thread's own /tmp/claude-code.log): it is not hook slowness. In a project thread 8 of 9 plugin SessionStart hooks finished 3.7 to 10.3 s before the turn-1 prompt (14:08:19.2-14:08:25.8 vs 14:08:29.5) and none of their output reached turn-1 context; it reached the agent's context only with the NEXT prompt (observed in this planning thread's second turn). Matches PLAN-telemetry-late-hook-records (late-loaded plugin SessionStart records written after the first turn). Making hooks faster would not fix it."
   - "Why UserPromptSubmit: its additionalContext is applied before the turn starts. Verified in the same thread for a user-level UserPromptSubmit hook (hook_additional_context attachment before turn 1); for a plugin UserPromptSubmit hook, stop_log_turn's output went through the same parse path at 14:08:29.583, after the user-level hook and before 'turn 1 start' at 14:08:29.631, but it prints only stderr so its context is unobserved. Plugin-hook context delivery is therefore inferred-likely, UNPROVEN until VP step 6."
   - "Departure from rec-4824's suggested fix (a SessionStart-written marker plus a check command): a marker still races the first turn and makes every agent run a command; the prompt-context line needs no agent action and has no race. The rec's acceptance node is kept as named."
+  - "Test placement: tests/session/test_hook_canary.py stays where rec-4824's acceptance command pins it, though hook tests normally live in tests/hooks/ (critique round 3 nit, accepted)."
   - "Stateless by choice: one line (about 12 tokens) per prompt beats per-session state; it also re-proves the hooks after a compaction."
   - "Transition: until the operator updates the claude.ai plugin, project threads keep misfiring exactly as today (status quo, not a regression); top-level sessions read .claude/settings.json and get the line at once. plugin_hooks check reports the drift in the session log."
   - "Guard moved, not loosened: test_registered_session_start_scripts_print_the_canary is removed because the canary no longer reads SessionStart output; the evidence-source guard moves to the acceptance node with the same strictness over both config files. Named to the operator with the wording (Decision 235)."
@@ -243,6 +246,7 @@ gate_rounds:
   - {gate: wording-check, round: 1, verdict: PASS, digest: 30f57c4367a400cafe9ec2736cb4c791694a8f4115737d272dfcb82a9504c639, base: 1f08d2c7a4693b63f33c2547150f26a6e4f2abcc, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: PROCEED, blocking: 0, nits: 5}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 2}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -260,7 +264,7 @@ execution_steps:
   - "Closure evidence, recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state (scripts.session.github_readiness; unknown is unproven, never ready); parent validator evidence (VP 5 full tier plus bin/venv-python -m scripts.checks.validation_result --verify-head for the pushed HEAD); structured postflight evidence (write the scripts.session.postflight_evidence.CATEGORIES JSON in the scratchpad, then bin/venv-python -m scripts.session.postflight --evidence <file>); the real outcome - push, build PR, CI green by event-driven wake (never polled), merge SHA."
   - "The implementation commit message carries the trailer 'Resolves: rec-4824', and merge_pull_request passes an explicit commit_message carrying it too (git-ops.yaml resolves_trailer). The build PR merges only with the operator's OK on the final diff (hooks and AGENTS.md are always-ask)."
   - "After merge: ask the operator for the plugin update (step 6), then the coordinator for the fresh verifying thread; run step 7."
-  - "Report: what was implemented, verification results, merge SHA, step 6 result."
+  - "Report: what was implemented, verification results, merge SHA, step 6 result; until step 6 passes, report rec-4824's closure as provisional."
 work_areas: []
 weakening_dispositions:
   - candidate: "[test-removed] tests/test_agents_md_rules.py::test_registered_session_start_scripts_print_the_canary"
