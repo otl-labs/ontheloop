@@ -40,6 +40,7 @@ _TERM_KEYS = (
 _TERM_FIELDS = ("written", "reserved_meaning", "do_not_use_for")
 _EXTRA_PATHSPECS = (".claude/agents/**/*.md", ".github/prompts/**/*.md", "docs/audit-prompts/*.md")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+_PLACEHOLDER = re.compile(r"\bNNN\b|\bDATE\b|\b(?:YYYY|\d{4})-MM-DD\b")
 
 
 def _text(value: object) -> bool:
@@ -179,16 +180,49 @@ def _defining_range(root: Path, via: str, added: list[tuple[str, int, str]]) -> 
     return range(start, end)
 
 
-def _plan_lines_at(root: Path, base: str) -> set[str]:
+def _substituted(token: str) -> str:
+    """NNN becomes a Decision number; a date placeholder becomes an ISO date, keeping any year the plan fixed."""
+    if token == "NNN":
+        return r"\d+"
+    year = token[:4] if token[0].isdigit() else r"\d{4}"
+    return year + r"-\d{2}-\d{2}"
+
+
+def _template(line: str) -> re.Pattern[str]:
+    """A plan line as the build writes it after substitution: one value per distinct placeholder, the rest verbatim."""
+    parts: list[str] = []
+    groups: dict[str, str] = {}
+    at = 0
+    for found in _PLACEHOLDER.finditer(line):
+        token = found.group()
+        parts.append(re.escape(line[at : found.start()]))
+        if token in groups:
+            parts.append(f"(?P={groups[token]})")
+        else:
+            groups[token] = f"p{len(groups)}"
+            parts.append(f"(?P<{groups[token]}>{_substituted(token)})")
+        at = found.end()
+    parts.append(re.escape(line[at:]))
+    return re.compile("".join(parts))
+
+
+def _plan_lines_at(root: Path, base: str) -> tuple[set[str], list[re.Pattern[str]]]:
+    """Approved plan text on the base: exact lines, and templates for the lines that carry a placeholder."""
     out = _git(root, "grep", "-h", "-I", "-i", "-E", "platform|product", base, "--", ":(glob)docs/plans/PLAN-*.yaml")
-    return {line.strip() for line in out.splitlines()}
+    lines = {line.strip() for line in out.splitlines()}
+    return lines, [_template(line) for line in lines if _PLACEHOLDER.search(line)]
+
+
+def _in_plan(text: str, plan: tuple[set[str], list[re.Pattern[str]]]) -> bool:
+    lines, templates = plan
+    return text in lines or any(t.fullmatch(text) for t in templates)
 
 
 def _lint(data: dict[str, Any], root: Path, base: str) -> tuple[list[str], int]:
     added, removed = _added_lines(root, base, _pathspecs(root))
     known = _glossary_words.identifiers(data)
     defining = _defining_range(root, str(data["contract"]["ratified_via"]), added)
-    plan_lines: set[str] | None = None
+    plan: tuple[set[str], list[re.Pattern[str]]] | None = None
     out: list[str] = []
     for path, number, text in added:
         uses = _glossary_words.unqualified_uses(text, yaml_keys=path.endswith(".yaml"), identifiers=known)
@@ -197,8 +231,8 @@ def _lint(data: dict[str, Any], root: Path, base: str) -> tuple[list[str], int]:
         if path == "docs/DECISIONS.md" and number in defining:
             continue
         if not path.startswith("docs/plans/"):
-            plan_lines = _plan_lines_at(root, base) if plan_lines is None else plan_lines
-            if text.strip() in plan_lines:
+            plan = _plan_lines_at(root, base) if plan is None else plan
+            if _in_plan(text.strip(), plan):
                 continue
         for _, word in uses:
             hint = _glossary_words.say_instead(word, data)

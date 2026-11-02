@@ -16,10 +16,15 @@ from scripts.checks.contracts import validate_glossary as vg
 
 _REPO = Path(__file__).resolve().parents[3]
 _OLD = "The platform runs old."
+_PLAN_HEADER = "## Decision NNN: The platform account moves (amends Decision 106) (Decided)"
+_PLAN_NOTE = "> **Amended by Decision NNN (2026-MM-DD):** the platform moved; Decision NNN holds it."
+_PLAN_UPDATE = "> **Update (DATE):** the product ships."
 _HEADER = "## Decision 240: One name per thing"
 _BASE_FILES = {
     "docs/contracts/other.yaml": "key: value\n",
-    "docs/plans/PLAN-old.yaml": f"slug: old\nnote: >-\n  {_OLD}\n",
+    "docs/plans/PLAN-old.yaml": (
+        f"slug: old\nnote: >-\n  {_OLD}\napproved: |-\n  {_PLAN_HEADER}\n  {_PLAN_NOTE}\n  {_PLAN_UPDATE}\n"
+    ),
     "CLAUDE.md": "# root\n",
     ".claude/skills/x/SKILL.md": "# skill\n",
     ".claude/agents/scheduled/x.md": "# agent\n",
@@ -94,6 +99,9 @@ _PASSING = [
     ("docs/contracts/other.yaml", "owner: platform"),
     ("docs/contracts/other.yaml", "owner=platform"),
     ("docs/DECISIONS.md", _OLD),
+    ("docs/DECISIONS.md", _PLAN_HEADER.replace("NNN", "241")),
+    ("docs/DECISIONS.md", _PLAN_NOTE.replace("NNN", "241").replace("2026-MM-DD", "2026-11-02")),
+    ("docs/DECISIONS.md", _PLAN_UPDATE.replace("DATE", "2026-11-02")),
     ("tests/helper.py", "platform = 'unqualified word in a test'"),
 ]
 _FAILING = [
@@ -108,6 +116,12 @@ _FAILING = [
     (".claude/agents/scheduled/x.md", "The product runs nightly."),
     ("docs/audit-prompts/AUDIT-x.md", "The platform runs nightly."),
     ("docs/DECISIONS.md", "Platform: the runner stalls."),
+    ("docs/DECISIONS.md", _PLAN_HEADER.replace("NNN", "241").replace("106", "107")),
+    ("docs/DECISIONS.md", _PLAN_HEADER.replace("NNN", "241") + " Later."),
+    ("docs/DECISIONS.md", _PLAN_HEADER.replace("NNN", "two hundred")),
+    ("docs/DECISIONS.md", _PLAN_NOTE.replace("NNN", "241", 1).replace("NNN", "242").replace("MM-DD", "11-02")),
+    ("docs/DECISIONS.md", _PLAN_NOTE.replace("NNN", "241").replace("2026-MM-DD", "2025-11-02")),
+    ("docs/DECISIONS.md", _PLAN_UPDATE.replace("DATE", "soon")),
 ]
 
 
