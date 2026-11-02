@@ -1,0 +1,457 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: plan-corpus-walkers-libyaml
+intent: >-
+  Clear the Critical CI-RCA hard block rec-4797 at root cause. The "crashed" xdist worker was pytest-timeout's 120 s
+  thread-method kill: the test ran 119.3 s on main CI run 41204203615, and the bare "node down: Not properly terminated"
+  line is that kill's own signature under xdist (reproduced locally). The test drives preflight main(), which walks the
+  whole docs/plans corpus (658 plans, about 29 MB) twice through PyYAML's pure-Python SafeLoader, and three sibling plan-corpus
+  tests reached 106-117 s of the same cap in the same run. Those plan parses move to the existing libyaml helper
+  scripts.contract_rules.parse_yaml (about 13x faster, same output), the preflight pure-Python YAML byte budget grows to
+  cover both preflight plan walkers, and each walker's loader is pinned by a test. No timeout raise, no skip, no xdist
+  change.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-plan-corpus-walkers-libyaml.yaml
+phase: >-
+  ci_rca (rec-4797, Critical, Track B product_regression; soft-warn category, no tier_item claimed, so the Tier Item
+  Freshness Gate is skipped). Forward fix (Decision 73 cl.3, Decision 226) for the post-merge full tier of #1775
+  (87bc3f56), a plan-only merge that grew the corpus past the cap on a slow runner. Claims, moves and closes no tier_item
+  criterion.
+scope:
+- file: scripts/preflight/recs_cache.py
+  action: Modify
+  purpose: >-
+    _landed_followon_rec_ids parses each plan that passes the followon_recs substring gate through
+    scripts.contract_rules.parse_yaml instead of yaml.safe_load; the yaml.YAMLError catch and every gate stay. The
+    docstring's "before yaml.safe_load ever runs" names the new seam.
+  new_imports:
+  - scripts.contract_rules
+- file: scripts/platform_roadmap_state.py
+  action: Modify
+  purpose: >-
+    compute_followon_state parses each plan that passes the closes_criteria substring gate through parse_yaml (already
+    imported for load()); the now-unused `import yaml` goes.
+  new_imports: []
+- file: scripts/checks/roadmap/validate_tier_floor.py
+  action: Modify
+  purpose: >-
+    validate_tier_floor parses each PLAN-*.yaml through parse_yaml instead of yaml.safe_load on an open file handle, and
+    its now-unused `import yaml` goes; the judged set (schema_version 2 only), the examined() declaration and the
+    messages are unchanged.
+  new_imports:
+  - scripts.contract_rules
+- file: scripts/checks/roadmap/_manifest.py
+  action: Modify
+  purpose: >-
+    The validate_tier_floor Entry's pre_globs gain "scripts/contract_rules.py" (validate_pre_glob_closure requires it once
+    the check imports contract_rules; #1755 added the same glob to validate_plan_documents).
+- file: tests/checks/roadmap/test__manifest.py
+  action: Modify
+  purpose: >-
+    _CLOSURE_INPUTS["validate_tier_floor"] gains "scripts/contract_rules.py", so TestClosureMembersAreCovered pins the
+    new glob directly (a member falling out of coverage reddens its row).
+- file: tests/platform_roadmap_state/test_state_dict_and_feeds.py
+  action: Modify
+  purpose: >-
+    The two yaml.safe_load spies (_install_safe_load_outcome_spy and
+    TestKeylessPlanSkipsYamlParse.test_plan_without_the_key_is_never_yaml_parsed) become one module-level `_spy`
+    helper on prs.parse_yaml (rec-3234), keeping the raised and returned-non-dict outcome assertions (rec-4374's ask).
+    Adds TestComputeFollowonState::test_plan_corpus_parses_with_libyaml (rec-4374's acceptance node): a keyed tmp plan
+    is parsed by the C loader with zero pure-Python constructions (tests/fixtures/yaml_parse_spy.py).
+- file: tests/session/preflight/test_recs_cache_adhoc_lane.py
+  action: Modify
+  purpose: >-
+    test_plan_never_naming_the_key_is_never_parsed guards scripts.preflight.recs_cache.parse_yaml (the old
+    yaml.safe_load target would pass vacuously after the change). Adds
+    TestAdHocLaneDerivations::test_keyed_plan_parses_through_libyaml (spy: one libyaml construction under
+    preflight/recs_cache.py:_landed_followon_rec_ids, zero pure-Python).
+- file: tests/checks/roadmap/test_validate_tier_floor.py
+  action: Modify
+  purpose: >-
+    Adds TestTierFloorLoader::test_plans_parse_through_libyaml: with _tier_floor_module.lambda_manifest.load_all stubbed
+    to {} (this file's existing precedent in TestValidateTierFloor -- the nine src/lambdas manifests are parsed in pure
+    Python by scripts/lambda_manifest.py:53, outside this plan) and the yaml parse spy installed only after the fixture
+    plans are written (this file's _copy_as_plan and _write_plan helpers parse templates in pure Python), every tmp
+    schema_version 2 plan is parsed by the C loader under checks/roadmap/validate_tier_floor.py:validate_tier_floor, and
+    no pure-Python construction carries that frame.
+- file: tests/session/preflight/test_yaml_parse_budget.py
+  action: Modify
+  purpose: >-
+    Adds TestPlanCorpusWalkerBudget::test_plan_walkers_stay_under_budget: the REAL compute_state_dict (not the
+    live_state_dict memo) and the REAL _landed_followon_rec_ids over the live tree, under the yaml parse spy, parse at
+    most PURE_PYTHON_YAML_BUDGET bytes in pure Python and show both walker frames among the libyaml frames. Both real
+    functions are bound at module import, before the package conftest's autouse stubs. The existing node's docstring
+    drops its "rec-4374's cost to fix" carve-out and points at the new node.
+- file: tests/test_vp_literals.py
+  action: Modify
+  purpose: >-
+    TestV4CorpusInvariance._v4_and_below_steps parses each plan with yaml.CSafeLoader (the loader
+    test_validate_tier_floor.py's own counting loop already uses); the set-wise assertion is unchanged.
+bundled_recommendations:
+- rec-4797
+- rec-4374
+- rec-4575
+- rec-3234
+followon_recs:
+- rec-4811
+- rec-4812
+- rec-4813
+infrastructure_dependencies: []
+acceptance_criteria:
+- compute_followon_state, _landed_followon_rec_ids and validate_tier_floor parse plan documents only through
+  scripts.contract_rules.parse_yaml; no yaml.safe_load call remains in those three functions.
+- On the live tree, the two preflight plan walkers parse at most 512 KB of YAML in pure Python (today about 13 MB and
+  15 MB, measured with tests/fixtures/yaml_parse_spy.py).
+- Every docs/plans/PLAN-*.yaml parses to the same document under the C loader and the pure-Python loader, so the three
+  walkers' outputs are unchanged.
+- rec-4797's node and the three sibling plan-corpus tests each finish inside a 10 s pytest timeout without xdist
+  (14-16 s each before the change, measured).
+- The two re-pointed spies keep their raised and returned-non-dict outcome assertions, and exactly one `def _spy(`
+  remains in tests/platform_roadmap_state/test_state_dict_and_feeds.py.
+- No pytest --timeout value, xdist setting, skip or xfail changes and no SLOC budget raise; no check Entry is added or
+  removed -- only validate_tier_floor's pre_globs gain scripts/contract_rules.py.
+- Before merge, rec-4797's context_v2_json carries the corrected proximate_cause, why_chain, corrective_action and
+  preventive_action (execution step 5), its acceptance carries --timeout 10, and closure_artifact
+  pytest:tests/session/preflight/test_yaml_parse_budget.py::TestPlanCorpusWalkerBudget::test_plan_walkers_stay_under_budget
+  (Decision 186), and all four bundled acceptances hold under the trailer probe's isolation (Decision 201).
+- rec-4797, rec-4374, rec-4575 and rec-3234 close through the squash commit's Resolves trailer.
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: compute_followon_state parses keyed plans with the C loader (rec-4374 acceptance node).
+  command: bin/venv-python -m pytest
+    tests/platform_roadmap_state/test_state_dict_and_feeds.py::TestComputeFollowonState::test_plan_corpus_parses_with_libyaml
+    -q
+  expected: exit 0. Before the change the node does not exist (pytest exits 4); written against today's code it fails
+    because the spy records a pure-Python construction.
+  expected_literals:
+  - 1 passed
+  fix_if: A pure-Python construction is recorded -- compute_followon_state still calls yaml.safe_load. No libyaml
+    construction -- the substring gate skipped the fixture plan (give it a closes_criteria key), or the fixture doc
+    carries no in_progress item, so the rec-4007 guard returns before globbing.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: followon-state-plan-parse-libyaml
+- step: 2
+  phase: pre-deploy
+  action: _landed_followon_rec_ids parses keyed plans with the C loader.
+  command: bin/venv-python -m pytest
+    tests/session/preflight/test_recs_cache_adhoc_lane.py::TestAdHocLaneDerivations::test_keyed_plan_parses_through_libyaml
+    -q
+  expected: exit 0. Before the change the node does not exist.
+  expected_literals:
+  - 1 passed
+  fix_if: A pure-Python construction -- the walker still calls yaml.safe_load. The walker is a MagicMock -- the node is
+    outside TestAdHocLaneDerivations, the only class the package conftest leaves unstubbed.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: landed-followon-plan-parse-libyaml
+- step: 3
+  phase: pre-deploy
+  action: validate_tier_floor parses plans with the C loader (rec-4575).
+  command: bin/venv-python -m pytest tests/checks/roadmap/test_validate_tier_floor.py::TestTierFloorLoader -q
+  expected: exit 0. Before the change the class does not exist.
+  expected_literals:
+  - passed
+  fix_if: A pure-Python construction under validate_tier_floor whose stack holds no lambda_manifest.py:load frame -- the
+    yaml.safe_load(fh) call is still there. Pure-Python entries under lambda_manifest.py:load -- the manifest parse is
+    unstubbed (patch _tier_floor_module.lambda_manifest.load_all), not a plan-loader regression. Pure-Python entries with no
+    validate_tier_floor frame -- the spy was installed before the fixture helpers ran.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: tier-floor-plan-parse-libyaml
+- step: 4
+  phase: pre-deploy
+  action: Both preflight plan walkers, run for real over the live tree, stay inside the pure-Python YAML byte budget.
+  command: bin/venv-python -m pytest tests/session/preflight/test_yaml_parse_budget.py -q
+  expected: exit 0, every node in the file passes, including TestPlanCorpusWalkerBudget. Written against today's code the
+    new node fails with about 28 MB of pure-Python parsing across both walker frames (13.4 MB under
+    compute_followon_state, 15.4 MB under _landed_followon_rec_ids, measured at planning time).
+  fix_if: The new node passes against today's code -- it is reaching the memo or the conftest MagicMock instead of the
+    real functions; bind them at module import. An existing node fails -- the walkers' change must not move any other
+    loader.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: A live-tree walk whose cost grows with the corpus, in a boto3-importorskip module that
+    venv-less pr-validate cannot collect (hermetic carve-out iii); steps 1-2 already pin each walker's loader as
+    graduated --pre guards, and this node runs on every full tier on main, where this red was caught.
+- step: 5
+  phase: pre-deploy
+  action: >-
+    Behaviour preservation -- every docs/plans/PLAN-*.yaml parses to the same document under the C loader and the
+    pure-Python loader, which covers all three walkers' inputs.
+  command: >-
+    bin/venv-python -c "import yaml; from pathlib import Path; plans = sorted(Path('docs/plans').glob('PLAN-*.yaml'));
+    load = lambda p, L: yaml.load(p.read_text(encoding='utf-8'), Loader=L); bad = [p.name for p in plans if load(p,
+    yaml.CSafeLoader) != load(p, yaml.SafeLoader)]; assert not bad, bad; print('LOADERS_EQUIVALENT', len(plans))"
+  expected: Prints LOADERS_EQUIVALENT with the plan count (658 at planning time, about 18 s, grows).
+  fix_if: An AssertionError naming plans -- they parse differently under libyaml; name them and stop (Decision 55), never
+    fall back to the pure loader for them silently. A parser error -- that plan is unparseable under one loader; stop.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: A one-off proof over today's corpus that pays the pure-Python parse this plan removes; the
+    standing guards are steps 1-4.
+- step: 6
+  phase: pre-deploy
+  action: rec-4797's node and the three sibling plan-corpus tests finish well inside the cap (rec-4797 and rec-4575
+    acceptance, tightened).
+  command: bin/venv-python -m pytest
+    tests/test_session_preflight_cache_serving.py::TestPhaseBAbsenceOfReaderCalls::test_main_phase_b_makes_no_reader_calls
+    tests/checks/roadmap/test_validate_tier_floor.py::TestTierFloorAccountingDeclaration::test_real_tree_declares_every_judged_plan
+    tests/test_vp_literals.py::TestV4CorpusInvariance
+    tests/platform_roadmap_state/test_state_dict_and_feeds.py::TestComputeFollowonState::test_plans_dir_default_is_absolute_repo_anchored
+    -p no:xdist --timeout 10 --timeout-method=thread --durations=4 -q
+  expected: >-
+    exit 0, 4 passed. Before the change each node takes 14-16 s on CC-web, so the run dies at the first one. The build
+    report records each node's post-fix duration (the margin of rec-4797's strengthened --timeout 10 acceptance and
+    rec-4575's --timeout 8 one on the CI trailer runner; about 3.4, 2.7 and 1.3 s measured by critique with the swap
+    injected).
+  fix_if: A node still takes over 10 s -- profile it (python -m cProfile) and name the pure-Python parse left on its path;
+    never raise the timeout.
+  hermetic: false
+  graduation: not-applicable
+- step: 7
+  phase: pre-deploy
+  action: Touched suites stay green, and the spy helpers are consolidated (rec-3234 acceptance).
+  command: >-
+    bin/venv-python -m pytest tests/platform_roadmap_state/test_state_dict_and_feeds.py
+    tests/session/preflight/test_recs_cache_adhoc_lane.py tests/checks/roadmap/test_validate_tier_floor.py
+    tests/test_vp_literals.py tests/test_session_preflight_cache_serving.py -q && test "$(grep -c 'def _spy('
+    tests/platform_roadmap_state/test_state_dict_and_feeds.py)" = "1" && echo SUITES_OK
+  expected: exit 0 and prints SUITES_OK.
+  fix_if: An outcome-spy node now records nothing -- it still patches yaml.safe_load. Two `def _spy(` remain -- merge
+    them into the one module-level helper.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: Whole-file re-runs of files this plan modifies (hermetic carve-out v), already inside the --pre
+    pytest_diff affected set; steps 1-3 graduate the new behaviour.
+- step: 8
+  phase: pre-deploy
+  action: validate_tier_floor's pre_globs cover its new contract_rules import (live closure and the mirror pin).
+  command: bin/venv-python -m pytest
+    tests/checks/deps/validate_pre_glob_closure/test_blocking_contract.py::TestLiveTreeSmoke::test_runs_clean_on_the_real_tree
+    tests/checks/roadmap/test__manifest.py::TestClosureMembersAreCovered -q
+  expected: exit 0. With the validate_tier_floor import and without the _manifest.py glob both fail naming
+    scripts/contract_rules.py.
+  expected_literals:
+  - passed
+  fix_if: It names scripts/contract_rules.py under validate_tier_floor -- the _manifest.py row is missing. It names another
+    path -- an import beyond scope was added.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: Duplicates the standing validate_pre_glob_closure check, which runs this closure on every tier.
+- step: 9
+  phase: pre-deploy
+  action: >-
+    Before the merge, after execution step 5: rec-4797 carries the corrected narrative and preventive_action, the
+    strengthened acceptance and the fix-bound closure_artifact, and all four bundled acceptances lint decidable, classify
+    probeable and PASS under
+    scripts.backlog_health.probe.run_one -- the isolation the trailer job judges them in (no network, read-only repo
+    mount, 30 s pytest cap).
+  command: >-
+    bin/venv-python -c "import json; from pathlib import Path; from scripts.backlog_health import census, probe; from
+    scripts.executor.acceptance_lint import lint_acceptance_command as lint; from src.common.ducklake_reader_client import
+    fetch_recs_by_ids, make_reader; ids = ['rec-4797', 'rec-4374', 'rec-4575', 'rec-3234']; rows, _ =
+    fetch_recs_by_ids(make_reader(), ids); by_id = {r['id']: r for r in rows}; assert set(by_id) == set(ids), rows; R =
+    Path('.').resolve(); assert probe.isolation_available(R), 'probe isolation unavailable here: not an acceptance
+    verdict'; ctx = json.loads(by_id['rec-4797']['context_v2_json']); assert ctx.get('closure_artifact') ==
+    'pytest:tests/session/preflight/test_yaml_parse_budget.py::TestPlanCorpusWalkerBudget::test_plan_walkers_stay_under_budget',
+    ctx; assert 'TestPlanCorpusWalkerBudget' in ctx.get('preventive_action', ''), ctx; assert
+    ctx.get('proximate_cause', '').startswith('pytest-timeout'), ctx; assert '--timeout 10' in
+    by_id['rec-4797']['acceptance'], by_id['rec-4797']; acc = {i: by_id[i]['acceptance']
+    for i in ids}; assert all(lint(a, require_decidable=True)[0] and census.classify_command(a, repo_root=R) ==
+    census.PROBEABLE for a in acc.values()), acc; v = {i: probe.run_one(a, repo_root=R) for i, a in acc.items()}; assert
+    set(v.values()) == {probe.PASS}, v; print('ACCEPTANCE_HOLDS')"
+  expected: Exit 0 and ACCEPTANCE_HOLDS. At planning time rec-4797's filed acceptance passed in 20.3 s under run_one
+    (its --timeout 10 form fails there before the fix), rec-4575 failed on its 8 s timeout, rec-3234 failed on two
+    `def _spy(`, and rec-4374 classified expected_fail_missing_node.
+  fix_if: >-
+    No closure_artifact, an uncorrected narrative or the filed rec-4797 acceptance -- run execution step 5, then rerun. rec-4797 fails under
+    run_one -- main() wrote inside the repo or reached the network (PREFLIGHT_REPORT must stay patched to tmp_path).
+    rec-4575 times out -- a pure-Python parse is left on validate_tier_floor's path. Never push the trailer while this step
+    is red (Decision 201), and never loosen a filed acceptance to pass.
+  hermetic: false
+  graduation: not-applicable
+- step: 10
+  phase: pre-deploy
+  action: Full validation before handoff, attested for the pushed HEAD (backgrounded, 2 h limit, top-level session).
+  command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+  expected: Exit 0; --verify-head attests HEAD.
+  expected_literals: []
+  fix_if: A failure in scope -- fix on the branch and rerun from the start; never skip a test, relax an assertion or
+    raise a timeout. A failure outside scope becomes a rec via scripts.ops_data_portal (Decisions 55, 59).
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: Invokes scripts.validate (recursion refusal); it is the handoff gate itself.
+- step: 11
+  phase: post-deploy
+  action: The bundled recs closed at the merge.
+  command: >-
+    bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; rows, missing =
+    fetch_recs_by_ids(make_reader(), ['rec-4797', 'rec-4374', 'rec-4575', 'rec-3234']); s = {r['id']: r['status'] for r
+    in rows}; print(s); assert not missing and all(v == 'closed' for v in s.values())"
+  expected: Prints all four ids with status closed.
+  fix_if: A rec is still open -- read the trailer-closure job of the merge's CI run; follow git-ops.yaml resolves_trailer's
+    conditional fallback.
+  hermetic: false
+test_obligations:
+- source: scripts/platform_roadmap_state.py
+  behavior: compute_followon_state parses keyed plans through parse_yaml (libyaml), never the pure-Python loader.
+  verification_step: 1
+  test_selector: tests/platform_roadmap_state/test_state_dict_and_feeds.py::TestComputeFollowonState::test_plan_corpus_parses_with_libyaml
+  red_green_expectation: red before (node absent; against today's code the spy records a pure-Python construction), green
+    after.
+- source: scripts/preflight/recs_cache.py
+  behavior: _landed_followon_rec_ids parses keyed plans through parse_yaml (libyaml).
+  verification_step: 2
+  test_selector: tests/session/preflight/test_recs_cache_adhoc_lane.py::TestAdHocLaneDerivations::test_keyed_plan_parses_through_libyaml
+  red_green_expectation: red before (node absent; against today's code a pure-Python construction), green after.
+- source: scripts/checks/roadmap/validate_tier_floor.py
+  behavior: validate_tier_floor parses plans through parse_yaml (libyaml).
+  verification_step: 3
+  test_selector: tests/checks/roadmap/test_validate_tier_floor.py::TestTierFloorLoader
+  red_green_expectation: red before (class absent; against today's code a pure-Python construction), green after.
+- source: scripts/checks/roadmap/_manifest.py
+  behavior: validate_tier_floor's pre_globs cover every module it imports, including scripts/contract_rules.py.
+  verification_step: 8
+  test_selector: tests/checks/roadmap/test__manifest.py::TestClosureMembersAreCovered
+  red_green_expectation: red once _CLOSURE_INPUTS names scripts/contract_rules.py for validate_tier_floor and the glob is
+    absent, green with it.
+constraints:
+- No pytest --timeout raise, skip, xfail, quarantine or xdist change (Decision 235 -- weakening verification is
+  human-gated; the timeout is the detector, not the defect).
+- Keep both substring gates; build no index or cache over docs/plans/ (rec-4006 corrections 3 and design constraints).
+- Never patch beneath compute_state_dict around a live-path call while the live_state_dict memo may be cold
+  (tests/fixtures/platform_roadmap_state.py warning); the budget node calls the real function directly.
+- No SLOC budget raise, no new check module, no registry entry other than the three graduated shards.
+- No rescue agents or workaround loops (Decision 55); a corpus plan that libyaml parses differently stops the build.
+context:
+- >-
+  Decision-scout verdict + CITE list: FLAGS_FOUND (round 1); CITE Decision 226, Decision 186, Decision 201, Decision 128.
+  "Decisions triaged: 192 of 192". "Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2" (T4.23, T2.54, prefix-only).
+  Flag Decision 226 [NOTE] (cl.5 mandatory preventive_action rests on the misread cause) -- resolved by the operator
+  (2026-11-01): execution step 5 corrects rec-4797's preventive_action, and rec-4811, rec-4812 and rec-4813 are filed.
+- >-
+  Evidence: run 41204203615 job 124545858501 (timeout 120.0 s, thread; node down at 119.3 s; siblings 106.5-117.0 s);
+  green run 41221417642 took 81.9 s. The kill signature reproduces locally (-n 2 --timeout 3, no Timeout banner), so
+  rec-4797's RCA reading is superseded. CC-web: 8.21 -> 0.64 s and 6.57 -> 0.47 s per walker, same results.
+- >-
+  Gotcha: tests/session/preflight/conftest.py stubs _landed_followon_rec_ids outside TestAdHocLaneDerivations and swaps
+  compute_state_dict for the live_state_dict memo, so step 4's node binds the real functions at module import (probed:
+  0 pure-Python bytes after the swap, both walker frames on libyaml). The old spies patched the global yaml module.
+- >-
+  Graduated shards kept (node ids unchanged): contract-suppressor-set-parity, followon-zero-in-progress-guard,
+  orient-adhoc-lane-renders-preflight-rec-keys, preflight-derives-followon-and-critical-rec-keys,
+  preflight-plan-walk-stubbed, preflight-report-carries-adhoc-lane-keys, preflight-yaml-parse-budget,
+  self-satisfying-lint-truth-table, tier-floor-lambda-code-below-v2-fails, tier-floor-tier-waiver-rescues-violation,
+  unsat-guard-historical-regression, v4-corpus-extraction-invariance.
+- >-
+  Size: test_state_dict_and_feeds.py is 470 of 500 SLOC; prototype count about +3 net (spy merge -8, new node +10).
+  Measure at build time; over 500, amend the plan to move TestLiveGateEvaluations (no shard pins it) to a sibling
+  mirror module, never raise a budget. Unbuilt PLAN-work-graph-edge-model also edits both manifest files; whichever
+  builds second rebases.
+- >-
+  rec-4575's "one shared cached parse" half is declined by the no-cache constraint (rec-4006); its libyaml half closes it.
+  Not bundled: rec-4370 (coverage-child cap); rec-3285, rec-4366 (judged schema versions; the judged set is unchanged);
+  rec-4114 (plan-only merges run --pre on main -- the operator's plan-files-as-data direction, with rec-4813).
+- >-
+  Not measured here: preflight's third plan walker, ci_rca_signals._scan_prior_deferrals, still uses yaml.safe_load;
+  its "defer" plus open-ci_rca-rec-id gate bounds it (0 plans for rec-4797, 2 for rec-4427), so the byte budget's "both
+  walkers" means the two ungated ones.
+- "red_overlap verdict (planning time): clear -- rec-4797 rule repairs_this_red, 33.75 h old against the 4 h SLO."
+- "fork: fix layer | chosen: production libyaml loader in the three walkers | class: consistency-only | precedent: PLAN-preflight-yaml-parse-cost fork 1 | precedent_kind: answered-fork | reversible: yes | persisted: scope"
+- "fork: regression guard | chosen: byte budget extended to both preflight plan walkers plus per-walker loader pins | class: consistency-only | precedent: PLAN-preflight-yaml-parse-cost fork 2 | precedent_kind: answered-fork | reversible: yes | persisted: scope"
+- "fork: scope breadth | chosen: evidenced walkers bundling rec-4797, rec-4374, rec-4575 and rec-3234 | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: scope, bundled_recommendations"
+- "fork: preventive disposition | chosen: correct rec-4797's preventive_action and file rec-4811, rec-4812, rec-4813 | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: execution_steps, followon_recs"
+- "fork: plan type | chosen: one IMPLEMENTATION plan | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: plan_type"
+gate_rounds:
+- {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+- {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 6}
+- {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 6}
+- {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 4}
+pre_implementation_checklist:
+- Branch confirmed not on main
+- docs/PROJECT_CONTEXT.md read
+- Only the plan-cited decision sections read
+- All files in scope located and readable
+- Acceptance criteria understood and verifiable
+execution_steps:
+- >-
+  Tests first: edit tests/platform_roadmap_state/test_state_dict_and_feeds.py (one module-level `_spy` wrapping
+  prs.parse_yaml for both former spy sites, outcome assertions intact; add
+  TestComputeFollowonState::test_plan_corpus_parses_with_libyaml with tests.fixtures.yaml_parse_spy.install),
+  tests/session/preflight/test_recs_cache_adhoc_lane.py, tests/checks/roadmap/test_validate_tier_floor.py (stub
+  lambda_manifest.load_all in the new class), tests/checks/roadmap/test__manifest.py,
+  tests/session/preflight/test_yaml_parse_budget.py and tests/test_vp_literals.py as their scope rows say. Confirm each
+  new node (VP steps 1-4) and the new _CLOSURE_INPUTS row fail against today's source, then continue.
+- >-
+  Source swap: compute_followon_state calls parse_yaml(text) where it called yaml.safe_load(text) and the unused
+  `import yaml` goes; _landed_followon_rec_ids gets the same swap through a module-level `from scripts.contract_rules
+  import parse_yaml` (keep `import yaml` for yaml.YAMLError) and its docstring names the new seam; validate_tier_floor
+  reads data = parse_yaml(path.read_text(encoding="utf-8")) and drops its now-unused `import yaml`;
+  scripts/checks/roadmap/_manifest.py adds
+  "scripts/contract_rules.py" to the validate_tier_floor Entry's pre_globs.
+- >-
+  Measure SLOC of every scope file against main at build time (tests/platform_roadmap_state/test_state_dict_and_feeds.py
+  had 30 lines of headroom at planning time); over 500 stops the build for a plan amendment.
+- Execute Verification Plan steps 1-8 -- loop until pass; on an unrecoverable failure stop and RCA (Decision 55).
+- |-
+  Before merge (status-preserving warehouse writes, Decision 186 / Decision 201 / Decision 226), two calls:
+  (a) bin/venv-python -m scripts.ops_data_portal --update-rec rec-4797 --acceptance "bin/venv-python -m pytest tests/test_session_preflight_cache_serving.py::TestPhaseBAbsenceOfReaderCalls::test_main_phase_b_makes_no_reader_calls -p no:xdist --timeout 10 -q"
+  (strengthening only: the filed form has no timeout and passes before the fix).
+  (b) scripts.ops_portal.ci_rca_lifecycle.correct_rec_context("rec-4797", <the mapping below, verbatim>,
+  row_updates={"title": "pytest-timeout killed an xdist worker in test_main_phase_b_makes_no_reader_calls (pure-Python plan-corpus parse)"},
+  profile="agent_platform"). escape_mode, escape_class and detection_gap's gate and escape_mode
+  fields stay as filed (only its gap_explanation narrative changes): they are the verified bundle's escape attribution
+  that Decision 186's closure predicate and the Decision 226 cl.5 class key read, and rec-4811 owns making that
+  classifier right. The mapping was checked against _validate_ci_rca_context_v2 at planning time (no errors).
+  {
+    "proximate_cause": "pytest-timeout's 120 s thread-method kill (log header 'timeout: 120.0s / timeout method: thread') ended tests/test_session_preflight_cache_serving.py::TestPhaseBAbsenceOfReaderCalls::test_main_phase_b_makes_no_reader_calls after 119.3 s on main-validate of run 41204203615; under xdist that kill prints only '[gw2] node down: Not properly terminated' and 'worker crashed', with no stack dump.",
+    "why_chain": [
+      "The full-tier pytest run failed because xdist worker gw2 died while running the node: it started at 13:14:55.22 and gw2 went down at 13:16:54.50, 119.3 s against the 120 s --timeout.",
+      "pytest-timeout's thread method calls os._exit at the cap while pytest's fd capture holds stderr, so the Timeout banner and stack dump are lost and xdist reports a crashed worker (reproduced locally with -n 2 --timeout 3).",
+      "The node drives preflight main(), which walks the whole docs/plans corpus twice with PyYAML's pure-Python SafeLoader (_landed_followon_rec_ids and compute_followon_state): about 15 s on CC-web, 82-119 s under CI -n auto with coverage.",
+      "Systemic gap: no gate bounded the pure-Python YAML the plan-corpus walkers parse, so their runtime grew with every plan merge until a slow runner crossed the tier's 120 s cap (scripts/platform_roadmap_state.py:116, scripts/preflight/recs_cache.py:53)."
+    ],
+    "corrective_action": "Move the plan-corpus parses in compute_followon_state, recs_cache._landed_followon_rec_ids and validate_tier_floor to scripts.contract_rules.parse_yaml (libyaml, about 13x faster with identical results); no timeout raise, skip or xdist change.",
+    "preventive_action": "Corrected by PLAN-plan-corpus-walkers-libyaml: the red was pytest-timeout's 120 s thread-method kill of a test whose preflight main() parsed the whole plan corpus with the pure-Python YAML loader, not a worker crash. Preventive: tests/session/preflight/test_yaml_parse_budget.py::TestPlanCorpusWalkerBudget bounds the pure-Python YAML both preflight plan walkers parse over the live tree at 512 KB, and per-walker loader pins fail if compute_followon_state, _landed_followon_rec_ids or validate_tier_floor return to the pure-Python loader. Class follow-ons: rec-4811 (CI-RCA timeout-kill label), rec-4812 (per-test timeout headroom gauge), rec-4813 (write-time plan checks).",
+    "closure_artifact": "pytest:tests/session/preflight/test_yaml_parse_budget.py::TestPlanCorpusWalkerBudget::test_plan_walkers_stay_under_budget",
+    "detection_gap": {
+      "earliest_viable_gate": "presubmit",
+      "actual_gate_that_caught_it": "CI",
+      "gap_explanation": "No gate bounded the pure-Python YAML the plan-corpus walkers parse and nothing reads per-test durations against the 120 s cap, so corpus growth from plan-only merges, which the --pre diff-aware selection never maps to this node, reached main unseen until a slow runner crossed the cap (scripts/platform_roadmap_state.py:116). escape_mode and escape_class stay as filed; rec-4811 owns the classifier.",
+      "escape_mode": "tier_misplaced"
+    }
+  }
+  Then run VP step 9.
+- >-
+  Code review via a fresh code-review subagent; fix blocking findings and rerun the pre-deploy steps. Every candidate
+  validate_weakening_candidates lists over the diff gets a weakening_dispositions entry (permitted plan bookkeeping): the
+  spy re-points as planned-change citing acceptance_criteria[4]; any other as refactor citing the file.py::name where
+  the same or stronger check now lives.
+- >-
+  Commit Flow per the implement skill: flip this plan's implementation_declared to true and carry "Resolves: rec-4797,
+  rec-4374, rec-4575, rec-3234" as its own paragraph in a branch commit's message (validate_merge_step checks both);
+  rebase; VP step 10 started backgrounded with a 2 h limit from the top-level session (a subagent never receives the
+  completion), its verdict --verify-head, never a pipe's exit status; push, PR, subscribe. Closure evidence, recorded as
+  four SEPARATE facts: GitHub readiness state (bin/venv-python -m scripts.session.github_readiness; unknown is never
+  PASS); parent validator evidence (VP step 10 on the committed, rebased, clean tree, --verify-head attesting the pushed
+  HEAD); structured postflight evidence (bin/venv-python -m scripts.session.postflight --evidence <file>); the real
+  outcome -- CI green by event-driven wake (never polled), code review PROCEED, then write the squash message (with the
+  Resolves paragraph) to a file, run `bin/venv-python -m scripts.session.merge_step premerge --slug
+  plan-corpus-walkers-libyaml --message-file <file>`, fix any red line, merge_pull_request (squash) with that
+  commit_message and the expectedHeadSha premerge printed, then `bin/venv-python -m scripts.session.merge_step readback
+  --slug plan-corpus-walkers-libyaml --sha <merge sha>`; after the merge follow implement.md Step 7's post-merge
+  closeout and run VP step 11.
+- >-
+  Report: what was implemented, verification results (with VP step 6's per-node durations), the rec-4797 correction
+  read-back and the closure outcome.
+rollback: >-
+  Revert the squash commit; the loaders return identical data (VP step 5), so a revert only restores the slower parse. On
+  a revert or an abandoned PR, correct rec-4797's closure_artifact (status-preserving correct_rec_context with a stated
+  reason, Decision 186 pt 8) so it names no node absent on main, and restore its filed acceptance with a
+  status-preserving update_rec (the filed text is in the rec's history); the narrative and preventive_action corrections
+  are factual and stay, and rec-4811, rec-4812 and rec-4813 stay open.
