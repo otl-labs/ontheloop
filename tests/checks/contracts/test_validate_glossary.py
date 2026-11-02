@@ -19,11 +19,14 @@ _OLD = "The platform runs old."
 _PLAN_HEADER = "## Decision NNN: The platform account moves (amends Decision 106) (Decided)"
 _PLAN_NOTE = "> **Amended by Decision NNN (2026-MM-DD):** the platform moved; Decision NNN holds it."
 _PLAN_UPDATE = "> **Update (DATE):** the product ships."
+_PLAN_ROW = "created YYYY-MM-DD for the platform"
+_PLAN_BRACED = "Decision {{N}} ({{DATE}}): the platform holds."
 _HEADER = "## Decision 240: One name per thing"
 _BASE_FILES = {
     "docs/contracts/other.yaml": "key: value\n",
     "docs/plans/PLAN-old.yaml": (
-        f"slug: old\nnote: >-\n  {_OLD}\napproved: |-\n  {_PLAN_HEADER}\n  {_PLAN_NOTE}\n  {_PLAN_UPDATE}\n"
+        f"slug: old\nnote: >-\n  {_OLD}\napproved: |-\n"
+        + "".join(f"  {line}\n" for line in (_PLAN_HEADER, _PLAN_NOTE, _PLAN_UPDATE, _PLAN_ROW, _PLAN_BRACED))
     ),
     "CLAUDE.md": "# root\n",
     ".claude/skills/x/SKILL.md": "# skill\n",
@@ -102,6 +105,8 @@ _PASSING = [
     ("docs/DECISIONS.md", _PLAN_HEADER.replace("NNN", "241")),
     ("docs/DECISIONS.md", _PLAN_NOTE.replace("NNN", "241").replace("2026-MM-DD", "2026-11-02")),
     ("docs/DECISIONS.md", _PLAN_UPDATE.replace("DATE", "2026-11-02")),
+    ("docs/DECISIONS.md", _PLAN_ROW.replace("YYYY-MM-DD", "2026-11-02")),
+    ("docs/DECISIONS.md", _PLAN_BRACED.replace("{{N}}", "241").replace("{{DATE}}", "2026-11-02")),
     ("tests/helper.py", "platform = 'unqualified word in a test'"),
 ]
 _FAILING = [
@@ -122,6 +127,9 @@ _FAILING = [
     ("docs/DECISIONS.md", _PLAN_NOTE.replace("NNN", "241", 1).replace("NNN", "242").replace("MM-DD", "11-02")),
     ("docs/DECISIONS.md", _PLAN_NOTE.replace("NNN", "241").replace("2026-MM-DD", "2025-11-02")),
     ("docs/DECISIONS.md", _PLAN_UPDATE.replace("DATE", "soon")),
+    ("docs/DECISIONS.md", _PLAN_HEADER.replace("NNN", "\u0662\u0664\u0661")),
+    ("docs/DECISIONS.md", _PLAN_ROW.replace("YYYY-MM-DD", "26-11-02")),
+    ("docs/DECISIONS.md", _PLAN_BRACED.replace("{{N}}", "241").replace("DATE", "2026-11-02")),
 ]
 
 

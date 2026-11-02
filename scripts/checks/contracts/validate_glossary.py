@@ -40,7 +40,10 @@ _TERM_KEYS = (
 _TERM_FIELDS = ("written", "reserved_meaning", "do_not_use_for")
 _EXTRA_PATHSPECS = (".claude/agents/**/*.md", ".github/prompts/**/*.md", "docs/audit-prompts/*.md")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
-_PLACEHOLDER = re.compile(r"\bNNN\b|\bDATE\b|\b(?:YYYY|\d{4})-MM-DD\b")
+_ISO_DATE = "[0-9]{4}-[0-9]{2}-[0-9]{2}"
+_FILLS = {"NNN": "[0-9]+", "{{N}}": "[0-9]+", "DATE": _ISO_DATE, "{{DATE}}": _ISO_DATE, "YYYY-MM-DD": _ISO_DATE}
+_PLACEHOLDER = re.compile(r"\{\{N\}\}|\{\{DATE\}\}|\bNNN\b|\bDATE\b|\bYYYY-MM-DD\b|\b[0-9]{4}-MM-DD\b")
+_PlanText = tuple[set[str], list[re.Pattern[str]]]
 
 
 def _text(value: object) -> bool:
@@ -180,12 +183,9 @@ def _defining_range(root: Path, via: str, added: list[tuple[str, int, str]]) -> 
     return range(start, end)
 
 
-def _substituted(token: str) -> str:
-    """NNN becomes a Decision number; a date placeholder becomes an ISO date, keeping any year the plan fixed."""
-    if token == "NNN":
-        return r"\d+"
-    year = token[:4] if token[0].isdigit() else r"\d{4}"
-    return year + r"-\d{2}-\d{2}"
+def _filled(token: str) -> str:
+    """What the build writes for a placeholder: a Decision number or an ISO date; <year>-MM-DD keeps the plan's year."""
+    return _FILLS[token] if token in _FILLS else token[:4] + "-[0-9]{2}-[0-9]{2}"
 
 
 def _template(line: str) -> re.Pattern[str]:
@@ -200,20 +200,20 @@ def _template(line: str) -> re.Pattern[str]:
             parts.append(f"(?P={groups[token]})")
         else:
             groups[token] = f"p{len(groups)}"
-            parts.append(f"(?P<{groups[token]}>{_substituted(token)})")
+            parts.append(f"(?P<{groups[token]}>{_filled(token)})")
         at = found.end()
     parts.append(re.escape(line[at:]))
     return re.compile("".join(parts))
 
 
-def _plan_lines_at(root: Path, base: str) -> tuple[set[str], list[re.Pattern[str]]]:
+def _plan_lines_at(root: Path, base: str) -> _PlanText:
     """Approved plan text on the base: exact lines, and templates for the lines that carry a placeholder."""
     out = _git(root, "grep", "-h", "-I", "-i", "-E", "platform|product", base, "--", ":(glob)docs/plans/PLAN-*.yaml")
     lines = {line.strip() for line in out.splitlines()}
     return lines, [_template(line) for line in lines if _PLACEHOLDER.search(line)]
 
 
-def _in_plan(text: str, plan: tuple[set[str], list[re.Pattern[str]]]) -> bool:
+def _in_plan(text: str, plan: _PlanText) -> bool:
     lines, templates = plan
     return text in lines or any(t.fullmatch(text) for t in templates)
 
@@ -222,7 +222,7 @@ def _lint(data: dict[str, Any], root: Path, base: str) -> tuple[list[str], int]:
     added, removed = _added_lines(root, base, _pathspecs(root))
     known = _glossary_words.identifiers(data)
     defining = _defining_range(root, str(data["contract"]["ratified_via"]), added)
-    plan: tuple[set[str], list[re.Pattern[str]]] | None = None
+    plan: _PlanText | None = None
     out: list[str] = []
     for path, number, text in added:
         uses = _glossary_words.unqualified_uses(text, yaml_keys=path.endswith(".yaml"), identifiers=known)
