@@ -153,10 +153,10 @@ def _tally_rec_counts(
                 if isinstance(date_str, str):
                     entry_date = datetime.fromisoformat(date_str.replace("Z", "+00:00")).replace(tzinfo=timezone.utc)
                 else:
-                    import datetime as _dt  # noqa: PLC0415
+                    import datetime as dt  # noqa: PLC0415
 
                     if hasattr(date_str, "timestamp"):
-                        entry_date = _dt.datetime.fromtimestamp(date_str.timestamp(), tz=timezone.utc)
+                        entry_date = dt.datetime.fromtimestamp(date_str.timestamp(), tz=timezone.utc)
                     else:
                         entry_date = now
                 if (now - entry_date).days > 30:

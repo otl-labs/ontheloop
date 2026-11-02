@@ -263,12 +263,12 @@ def test_control_health_reports_the_index_even_when_an_invariant_raises(monkeypa
 
 
 def test_control_health_result_carries_stats_index_and_is_json_serialisable(monkeypatch):
-    import datetime
+    import datetime as dt
     import json
 
     monkeypatch.setattr(ha.rt, "fetch_dsn", lambda: _FULL_DSN)
     monkeypatch.setattr(ha.rt, "open_connection", lambda **kw: MagicMock())
-    stamp = datetime.datetime(2026, 10, 1, tzinfo=datetime.timezone.utc).isoformat()
+    stamp = dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc).isoformat()
     monkeypatch.setattr(ha, "_report_stats_index", lambda dsn, schema: {"ducklake_ops": {"stats_reset": stamp}})
     monkeypatch.setattr(ha.ducklake_control_health, "control_health", lambda con, metric_sink=None: {"ok": True})
     out = ha.action_control_health({"data_path": "s3://bucket/ducklake/", "meta_schema": "ducklake_ops"}, None)
