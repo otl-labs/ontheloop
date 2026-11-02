@@ -190,8 +190,7 @@ def test_malformed_entries_are_skipped_not_raised() -> None:
 
 @pytest.mark.parametrize(
     "path",
-    sorted(glob.glob(str(ROOT / "tests/fixtures/terraform_apply_guard/*.json")))
-    + [str(ROOT / "tests/fixtures/subagent_plan_review/plan.json")],
+    sorted(glob.glob(str(ROOT / "tests/fixtures/terraform_apply_guard/*.json"))),
 )
 def test_existing_fixtures_are_fits_with_unchanged_line(path: str, capsys: pytest.CaptureFixture[str]) -> None:
     plan = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -199,6 +198,16 @@ def test_existing_fixtures_are_fits_with_unchanged_line(path: str, capsys: pytes
     assert FIT_LINES[0].match(fit_report(plan))
     assert main(["--fit-check", path]) == 0
     assert FIT_LINES[0].match(capsys.readouterr().out.strip())
+
+
+def test_shared_sentinel_fixture_is_opaque_since_it_holds_a_deferred_document() -> None:
+    # Planned-change weakening disposition (PLAN-deferred-policy-digest acceptance_criteria[5]): the shared sentinel fixture
+    # gained a deferred policy document (rec-4741), so the unchanged predicate now reports it OPAQUE instead of FITS.
+    plan = json.loads((ROOT / "tests/fixtures/subagent_plan_review/plan.json").read_text(encoding="utf-8"))
+    assert opaque_entries(plan) == (
+        ["aws_iam_role_policy.deferred_reviewer"],
+        ["data.aws_iam_policy_document.deferred_reviewer"],
+    )
 
 
 def _write(tmp_path: Path, plan: dict, name: str = "plan.json") -> str:

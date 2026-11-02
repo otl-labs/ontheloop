@@ -7,8 +7,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from scripts.contract_rules import parse_yaml
 from scripts.platform_roadmap_gate_rules import _INACTIVE_FOR_TIER, GateRuleEvaluator
 from scripts.platform_roadmap_models import _TIER_SHORTCUT_RE, RoadmapDocument, TierItem
@@ -113,7 +111,7 @@ def compute_followon_state(doc: RoadmapDocument, plans_dir: Path) -> dict[str, d
                 # ~350 of them to read one optional key dominated compute_state_dict's runtime.
                 if "closes_criteria" not in text:
                     continue
-                plan_data = yaml.safe_load(text)
+                plan_data = parse_yaml(text)
                 if not isinstance(plan_data, dict):
                     continue
                 closes = plan_data.get("closes_criteria") or []
