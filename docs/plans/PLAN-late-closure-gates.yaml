@@ -41,7 +41,8 @@ scope:
   - file: scripts/checks/verification/validate_verification_registry.py
     action: Modify
     purpose: >-
-      For an ADDED shard only, whose plan_slug names a plan with a late_closure_route X and whose check_id is one of
+      Add root/changed fixture seams with defaults byte-unchanged (as validate_merge_step has), not a monkeypatched
+      _common.ROOT. For an ADDED shard only, whose plan_slug names a plan with a late_closure_route X and whose check_id is one of
       that plan's graduation_check_ids, run_differential(row, base_ref=X^). Every modified row and every other added
       row keeps origin/main. LateClosureError is a failure naming the plan and the competing commits. Prints the base
       per admitted row.
@@ -75,15 +76,18 @@ scope:
   - file: docs/contracts/verification-registry.yaml
     action: Modify
     purpose: >-
-      A governance note: the differential base is origin/main except the late-closure route's X^; the Decision 176
-      residual (reverting X does not revert its shards; the closure commit is its revert partner). contract_version 6 -> 7
-      with an amendment_log row.
+      A governance note: the differential base is origin/main except the late-closure route's X^; residuals: the
+      Decision 176 revert (reverting X does not revert its shards; the closure commit is its revert partner), HEAD
+      includes main commits after X so admission at X^ does not isolate X, and a second commit with the same trailer set
+      fails closed (LateClosureError). contract_version 6 -> 7 with an amendment_log row.
   - file: scripts/checks/verification/_manifest.py
     action: Modify
     purpose: >-
-      Widen the pre_globs of the validate_merge_step and validate_verification_registry Entries to cover the new helper
-      and its imports (scripts/checks/verification/_implementation_merge.py, scripts/rec_trailer.py,
-      scripts/ops_portal/trailer_closure_gate.py), so a later edit to any of them selects both checks in --pre.
+      Widen pre_globs so a later edit to anything the checks now read selects them in --pre: validate_merge_step gains
+      scripts/ops_portal/trailer_closure_gate.py (scripts/checks/verification/** and scripts/rec_trailer.py already
+      cover it); validate_verification_registry gains scripts/checks/verification/_implementation_merge.py,
+      scripts/rec_trailer.py, scripts/ops_portal/trailer_closure_gate.py and docs/plans/PLAN-*.yaml (it now reads
+      bundled_recommendations and graduation_check_ids).
   - file: tests/checks/verification/test__manifest.py
     action: Modify
     purpose: >-
@@ -123,8 +127,9 @@ acceptance_criteria:
     prints OK for the closure merge and for X once the plan is declared on origin/main.
   - Against the real repository, the resolver finds 6993f383 for PLAN-deferred-policy-digest at origin/main.
   - >-
-    The leg (T) alternate satisfier is the only behaviour change on validate_merge_step and is confined to the
-    late-closure route; Benjamin approved it as a planned change under Decision 235 clause 1 (see context).
+    The two assertion changes are confined to the late-closure route and are both recorded under Decision 235 clause 1
+    (see context): validate_merge_step leg (T)'s alternate satisfier, and validate_verification_registry's differential
+    base X^ in place of origin/main for a late-closure shard. No other row's base changes.
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -170,11 +175,15 @@ verification_plan:
       bin/venv-python -m pytest -q tests/checks/verification/test_validate_merge_step.py
       tests/checks/verification/test_validate_verification_registry.py tests/verification_graduation/test_differential.py
       tests/test_session_merge_step.py tests/checks/verification/test_validate_differential_gate_baseline.py
-    expected: exit 0 with no test edited.
+      tests/checks/verification/test__manifest.py
+    expected: exit 0 with no existing test assertion edited (test__manifest.py may gain appended pre_globs pins only).
     fix_if: A changed existing assertion is a weakening; fix the code.
     hermetic: true
     expected_literals: []
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: >-
+      Re-runs five existing suites that already run in the fast tier through their own manifest selection; a shard
+      for them would duplicate those guards.
   - step: 5
     phase: pre-deploy
     action: Real history resolves the motivating anchor.
@@ -185,23 +194,46 @@ verification_plan:
     expected: Prints ANCHOR 6993f383e62db29953b60c4cc53e339db20c07c8 followed by its parent sha.
     fix_if: Wrong or no anchor means the history scan or a condition is wrong.
     hermetic: false
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: >-
+      Reads the real first-parent history of origin/main, which changes once the deferred-policy-digest closure lands;
+      the fixture-repo resolver tests in step 1 are the graduated guard.
   - step: 6
     phase: pre-deploy
     action: >-
-      Real closure dry run: a scratch worktree of the build head with the PLAN-deferred-policy-digest closure applied
-      (implementation_declared true plus the two shards the coordinating session prepared) committed with no trailer;
-      run both checks there.
-    command: >-
-      bin/venv-python -c "from scripts.checks.verification.validate_verification_registry import
-      validate_verification_registry as a; from scripts.checks.verification.validate_merge_step import
-      validate_merge_step as b; f=[]; a(f); b(f); assert not f, f; print('LATE_CLOSURE_DRY_RUN_OK')"
+      Real closure dry run, self-contained. In a throwaway worktree of the build head (never pushed), apply the
+      PLAN-deferred-policy-digest closure (implementation_declared true plus its two test_selector shards, the same
+      check ids and node ids the coordinating session prepared), commit it with no trailer, and run the whole fast tier
+      there, so every flip-keyed check (validate_verification_registry, validate_merge_step,
+      validate_graduation_completeness, validate_vp_replay, validate_scope_boundary, validate_weakening_dispositions)
+      judges the real case.
+    command: |-
+      R=$(git rev-parse --show-toplevel); WT=/tmp/late-closure-dryrun; git worktree remove --force "$WT" 2>/dev/null; git worktree add --detach "$WT" HEAD && cd "$WT" && "$R/bin/venv-python" - <<'PY'
+      import pathlib, yaml
+      plan = pathlib.Path("docs/plans/PLAN-deferred-policy-digest.yaml")
+      plan.write_text(plan.read_text(encoding="utf-8").rstrip("\n") + "\nimplementation_declared: true\n", encoding="utf-8")
+      assert yaml.safe_load(plan.read_text(encoding="utf-8"))["implementation_declared"] is True
+      shards = {
+          "deferred-policy-digest-rebuild": ("scripts/ci/terraform_plan_policy_rebuild.py", "tests/test_terraform_plan_digest_deferred_statements.py::test_rebuilt_statements_equal_the_provider_json"),
+          "deferred-policy-digest-values-stripped": ("scripts/ci/terraform_plan_digest.py", "tests/test_subagent_plan_review_values_stripped.py::test_deferred_document_reaches_the_reviewer_rebuilt_without_values"),
+      }
+      for cid, (target, node) in shards.items():
+          row = {"check_id": cid, "primitive_slot": "test_selector", "guard_target": target, "plan_slug": "deferred-policy-digest", "graduated_at": "2026-11-02", "graduated_by": "implement-agent", "check_spec": {"node_id": node}}
+          pathlib.Path(f"config/agent/verification_registry/entries/{cid}.yaml").write_text(yaml.safe_dump(row, sort_keys=False), encoding="utf-8")
+      PY
+      git add -A && git -c commit.gpgsign=false commit --no-verify -q -m "dry run: deferred-policy-digest closure" && "$R/bin/venv-python" -m scripts.validate --pre > /tmp/late-closure-dryrun.log 2>&1; rc=$?; grep -q "LATE-CLOSURE" /tmp/late-closure-dryrun.log && grep -q "6993f383" /tmp/late-closure-dryrun.log && grep -q "admitted: deferred-policy-digest-rebuild" /tmp/late-closure-dryrun.log && grep -q "admitted: deferred-policy-digest-values-stripped" /tmp/late-closure-dryrun.log && test $rc -eq 0 && echo LATE_CLOSURE_DRY_RUN_OK; cd "$R"; git worktree remove --force "$WT"
     expected: >-
-      Run inside that worktree: both checks PASS, the registry prints admitted against 6993f383's parent for
-      deferred-policy-digest-rebuild and deferred-policy-digest-values-stripped, merge-step prints LATE-CLOSURE.
-    fix_if: A rejection here means the route does not fit the real case; stop and report.
+      Prints LATE_CLOSURE_DRY_RUN_OK: validate --pre exits 0 in the worktree, the merge-step check prints LATE-CLOSURE
+      naming 6993f383, and the registry prints both shards admitted against 6993f383's parent. If the coordinating
+      session's prepared shards differ in node id or guard_target, use theirs.
+    fix_if: >-
+      A rejection by any check means the route does not fit the real case; stop and report it as a plan defect
+      (amendment mode), never widen the route to fit.
     hermetic: false
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: >-
+      Depends on origin/main still lacking the deferred-policy-digest closure; steps 1-3 carry the graduated fixture
+      guards.
   - step: 7
     phase: pre-deploy
     action: Fast tier.
@@ -245,6 +277,21 @@ test_obligations:
     verification_step: 3
     test_selector: tests/test_session_merge_step_late_closure.py
     red_green_expectation: red before, green after
+  - source: scripts/checks/verification/_manifest.py
+    behavior: The two Entries' pre_globs cover every file the checks now read.
+    verification_step: 4
+    test_selector: tests/checks/verification/test__manifest.py
+    red_green_expectation: red when the mirror pins a glob the Entry lacks, green after widening
+  - source: docs/contracts/git-ops.yaml
+    behavior: resolves_trailer LATE CLOSURE clause and merge_step_coverage split; contract_version 11.
+    verification_step: 7
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Prose contract amendment; the contract-shape and amendment_log validators in the fast tier cover its form.
+  - source: docs/contracts/verification-registry.yaml
+    behavior: Governance note on the late-closure differential base and its residuals; contract_version 7.
+    verification_step: 7
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Prose governance note; the contract-shape and amendment_log validators in the fast tier cover its form.
 constraints:
   - No rescue agents or workaround loops (Decision 55).
   - Normal pre-merge path byte-unchanged; no existing test assertion edited (Decisions 181, 235).
@@ -256,7 +303,7 @@ context:
   - "pr-validate has no AWS credentials (.github/workflows/ci.yml), so the --pre leg is git-only and the rec-status leg is premerge's."
   - "Base precedent: validate_graduation_completeness.py takes push_context_base(root) or origin/main; X^ is a per-row baseline, not a diff base."
   - "Related, not bundled: rec-3776 / rec-2998 (test_selector admitted by file absence) apply to X^ as to origin/main."
-  - "Decision 235 clause 1: Benjamin approved leg (T)'s alternate satisfier as a planned change, 2026-11-02, in this /plan session; acceptance_criteria[5] carries it. No existing test is edited, so no weakening_dispositions row."
+  - "Decision 235 clause 1 (both changes human-confirmed in this plan; acceptance_criteria[5]): (a) leg (T)'s alternate satisfier, approved by Benjamin as a planned change at sign-off, 2026-11-02; (b) the X^ differential base, which Benjamin's own /plan request named (post-merge graduation needs a declared base ref such as the implementation merge's parent, bound to evidence). (b) keeps the assertion's shape, fail-before and pass-after, and moves only its base to the commit before the implementation; today the population is unadmittable, not checked. No existing test is edited, so no weakening_dispositions row."
   - "Scout flags: 235 handled above; 132 preventive half deferred to rec-4841 (A --pre arm plus C closing-end refusal, Fable consult 2026-11-02); 176 revert residual recorded in the verification-registry.yaml note."
   - "fork: preventive control for a trailer merged without the declaration flip | chosen: A+C as follow-on rec-4841 | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: followon_recs"
   - "fork: closure-PR transport | chosen: evidence-bound alternate satisfier, never a second trailer (keeps CARRIER) | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: scope rows validate_merge_step.py, git-ops.yaml"
@@ -266,6 +313,7 @@ context:
   - "Owner: this planning session (session_01G2j5RiqkNwJSkzA9Vk4U6m); coordinator session_01G2j5RhrWVwt8bduvsXQwgW. Sequencing: this plan's build lands before the PLAN-deferred-policy-digest closure."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
