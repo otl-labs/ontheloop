@@ -271,13 +271,18 @@ verification_plan:
   - step: 5
     phase: pre-deploy
     action: Drift workflow order and branches match the new behavior
-    command: bin/venv-python -m pytest tests/test_terraform_drift_acceptance.py -q
-    expected: Passes, including the rewritten ordering and red-flip assertions.
+    command: >-
+      bin/venv-python -m pytest
+      "tests/test_terraform_drift_acceptance.py::test_drift_workflow_pending_gated_read_precedes_generic_rec"
+      "tests/test_terraform_drift_acceptance.py::test_drift_workflow_escalation_files_drift_run_url_rec"
+      "tests/test_terraform_drift_acceptance.py::test_drift_workflow_out_of_band_red_flips_with_pending_gated" -q
+    expected: >-
+      All three pass; the rest of tests/test_terraform_drift_acceptance.py (the kept and rewritten dispositions)
+      runs in step 9's --pre affected set.
     fix_if: The PENDING_GATED_DRIFT green branch survives, or the escalation branch files no rec.
-    hermetic: false
-    graduation: waive
-    graduation_waiver_reason: >-
-      Whole-file re-run of a test file this plan modifies; the file itself is the standing structural guard.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: drift-workflow-routed-pending-dispatch
   - step: 6
     phase: pre-deploy
     action: The gated-apply job wires the drift guard into the writer and touches no other writer
@@ -337,8 +342,8 @@ verification_plan:
     phase: post-deploy
     action: At the next routed-pending episode, confirm the drift rec names the pending PR (operator-observed)
     command: >-
-      echo "During the next tf-gated-apply wait, run the ducklake-reads MCP verb recs_by_title_prefix with
-      'Terraform drift check found a pending-gated' (no shell reader CLI exists; the MCP verb is the check)
+      echo "During the next tf-gated-apply wait, call the ducklake-reads MCP verb
+      recs_by_title_prefix(prefix='Terraform drift check found a pending-gated') (no shell reader CLI exists)
       and confirm the newest rec's context names the pending PR (title prefix exactly as the PR-naming rec
       filed by the pending_gated action)"
     expected: >-
@@ -354,6 +359,16 @@ test_obligations:
     verification_step: 1
     test_selector: tests/test_convergence_classify.py::TestRoutedPending::test_first_tick_flags_pending_gated
     red_green_expectation: red before (returns marked, no flag), green after
+  - source: scripts/ci/convergence_classify.py
+    behavior: escalation on a flagged routed record marks stale_gated_approval and names the pending commit
+    verification_step: 2
+    test_selector: tests/test_convergence_classify.py::TestRoutedPending::test_escalation_marks_stale_gated_approval
+    red_green_expectation: red before (no stale_gated_approval), green after
+  - source: scripts/ci/convergence_classify.py
+    behavior: the fail-closed drift guard blocks only a drift red that postdates the route
+    verification_step: 3
+    test_selector: tests/test_convergence_classify.py::TestDriftGuard
+    red_green_expectation: red before (no --drift-guard), green after
   - source: .github/workflows/terraform-drift.yml
     behavior: the pending_gated action dispatch precedes the generic rec filing
     verification_step: 5
@@ -435,8 +450,9 @@ constraints:
   - >-
     Decision 162: all new branching lives in scripts/ci/convergence_classify.py (stdlib-only, imported by
     workflows that install no dependencies). The handle-drift body must not exceed 116 effective lines
-    (removing the green branch offsets the new rec filing); the gated-apply guard body is at most 3 lines (set
-    +e, the captured S3 read, the delegate call), so --drift-guard itself appends refused= to $GITHUB_OUTPUT and
+    (removing the green branch offsets the new rec filing); the gated-apply guard body is measured and
+    registered at its size, never raised, with the file's net count still falling (target 3: set +e, the
+    captured S3 read with RC=$? on the same line, the delegate call), so --drift-guard itself appends refused= to $GITHUB_OUTPUT and
     prints the ::warning::;
     no raise-approved marker. write-convergence-record/action.yml is NOT modified (its body sits at its 97
     ceiling); the guard reuses its refused input.
@@ -473,7 +489,9 @@ constraints:
     Residual (stated, accepted): the drift workflow runs outside the apply concurrency group (group
     terraform-drift), so a drift red written in the seconds between the gated-apply drift-guard read and the
     writer's overwrite can still be overwritten green; the next drift tick re-measures and red-flips again
-    (Decision 190 pt 1), so the window costs at most one tick.
+    (Decision 190 pt 1), so the window costs at most one tick. An S3 If-Match conditional write would close it
+    and is a candidate for when write-convergence-record is next decomposed (not filed here). rec-4834 should
+    land close to this build so the contract text and the Decision corpus are not out of step for long.
   - >-
     Reusing write-convergence-record's refused input (the action stays frozen at its 97-line R3 ceiling) makes it
     log "Precondition refused on a red record" for a gated-apply refusal and its input description says "Not
@@ -563,6 +581,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 8}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 7, escalated: true, escalation_choice: re-scope}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 8}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, nits: 7}
   - {gate: wording-check, round: 1, verdict: PASS, digest: ac7326a3e39efa6444904907d2edd9d1481528f0e2a412f2f7d234a16d8f9f2f, base: 390379a11bd0103e5a0396972d3b2c9348a7f9ef, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: PASS, digest: ac7326a3e39efa6444904907d2edd9d1481528f0e2a412f2f7d234a16d8f9f2f, base: 4cfbea16387224a57fac135898047490605499c8, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
@@ -581,6 +600,9 @@ execution_steps:
     .github/workflows/terraform-drift.yml: dispatch on the action, file the PR-naming rec on pending_gated,
     file the drift_run_url-carrying rec on escalated, remove the green PENDING_GATED_DRIFT branch, and name
     the routed commit in the out-of-band reason. Keep GH_TOKEN and pull-requests read for the lookup.
+  - >-
+    The handle-drift step reads the record JSON before the prior-red short-circuit (prior_status outputs only a
+    status string, :163-193), so the delegate's short-circuit predicate sees stale_gated_approval.
   - 'tests/test_terraform_drift_acceptance.py: rewrite the ordering and CARRY-2 assertions as scoped.'
   - >-
     scripts/ci/apply_wake.py and tests/test_apply_wake.py first (pre-condition: the byte-parity tests pass
