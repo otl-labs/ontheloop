@@ -32,7 +32,8 @@ scope:
       means no route); bundled_recommendations and graduation_check_ids are read from the plan AT THE BASE, never from
       head; bundled is non-empty; the base..head commits carry no Resolves trailer; and every changed file is the plan
       itself or config/agent/verification_registry/entries/<id>.yaml for an id in the base plan's
-      graduation_check_ids. Never
+      graduation_check_ids. late_closure_route calls find_implementation_merge(..., ref=base), so X is always an ancestor
+      of the base, never a commit on the closure branch. Never
       calls push_context_base and adds no second plan-resolution contract: the flip comes from
       _common.resolve_declared_plans / _plan_declared_at_ref (Decisions 148, 159).
     new_imports: [scripts.checks._common, scripts.rec_trailer, scripts.ops_portal.trailer_closure_gate]
@@ -49,7 +50,8 @@ scope:
       _common.ROOT at call time, never at definition time, so the existing tests that patch it keep their path. Route
       inputs in both checks: base = the check's existing diff base (status_diff_base(root) or origin/main), head =
       HEAD, changed = git diff --name-only base..HEAD; a declaration present only in the working tree prints PENDING and
-      the route is not evaluated. For an ADDED shard only, whose plan_slug names a plan with a late_closure_route X and whose check_id is one of
+      the route is not evaluated; in that state an added shard owned by that plan prints PENDING and skips its
+      differential without failing (the committed run decides; PR CI always sees it committed). VP 2 covers this. For an ADDED shard only, whose plan_slug names a plan with a late_closure_route X and whose check_id is one of
       that plan's graduation_check_ids, run_differential(row, base_ref=X^). Every modified row and every other added
       row keeps origin/main. LateClosureError is a failure naming the plan and the competing commits. Prints the base
       per admitted row.
@@ -74,7 +76,9 @@ scope:
       evaluates it with base = sha^, head = sha (the single squash commit; changed files = diff-tree of sha) and
       prints READBACK OK ... late-closure satisfied-by=X. readback --sha X, once the plan reads declared on
       origin/main and find_implementation_merge at origin/main returns X, prints READBACK OK ... late-closed; every other
-      undeclared case keeps today's UNEXPECTED line and remedy. recover is unchanged.
+      undeclared case keeps today's UNEXPECTED line and remedy. recover gains one refusal: when late_closure_route
+      resolves at the given sha (a closure merge), it prints RECOVER refused: late closure, recs closed by X and exits
+      2, never re-closing a closed rec; otherwise recover is unchanged.
     new_imports: [scripts.checks.verification._implementation_merge]
   - file: docs/contracts/git-ops.yaml
     action: Modify
@@ -82,14 +86,15 @@ scope:
       resolves_trailer gains a LATE CLOSURE clause (the route's conditions; the closure PR carries no trailer, so the
       trailer-census and trailer-closure jobs stay inert and no second closure path exists, Decision 201);
       merge_step_coverage names the git-only mechanical leg and the procedural warehouse leg in premerge, whose residual
-      owner is rec-4755. Any repo path the clause names (scripts/checks/verification/_implementation_merge.py,
+      owner is rec-4755. Measure its effective lines against main at build time (31 of headroom at plan time, shared with two unbuilt plans)
+      and compact within the file, never raise. Any repo path the clause names (scripts/checks/verification/_implementation_merge.py,
       scripts/ops_portal/trailer_closure_gate.py) joins referenced_repo_paths. contract_version 10 -> 11 with an
       amendment_log row.
   - file: docs/contracts/verification-registry.yaml
     action: Modify
     purpose: >-
       A governance note: the differential base is origin/main except the late-closure route's X^; residuals: the
-      Decision 176 revert (reverting X does not revert its shards; the closure commit is its revert partner), HEAD
+      Decision 176 clause 4 atomic revert (reverting X does not revert its shards; the closure commit is its revert partner), HEAD
       includes main commits after X so admission at X^ does not isolate X, a second commit with the same trailer set
       fails closed (LateClosureError), and a test_selector shard whose node is absent at X^ is admitted by absence
       (rec-3776 / rec-2998 shape). contract_version 6 -> 7 with an amendment_log row.
@@ -179,7 +184,9 @@ verification_plan:
     phase: pre-deploy
     action: Session verb premerge and readback.
     command: bin/venv-python -m pytest -q tests/test_session_merge_step_late_closure.py
-    expected: exit 0. Fails before the change. A reader error is a non-zero premerge exit.
+    expected: >-
+      exit 0. Fails before the change. A reader error is a non-zero premerge exit; recover on a closure-merge sha
+      refuses with exit 2.
     fix_if: Fix merge_step; a reader failure must never pass.
     hermetic: true
     expected_literals: []
@@ -218,7 +225,9 @@ verification_plan:
   - step: 6
     phase: pre-deploy
     action: >-
-      Real closure dry run, self-contained. In a throwaway clone (never a worktree, which would share refs with the
+      Real closure dry run, self-contained, run after the local build commit (the clone sees committed state only). In
+      a throwaway clone (with the session's .venv symlinked in, so an interpreter gap is never misread as a plan
+      defect; never a worktree, which would share refs with the
       real repo; never pushed) whose origin/main is moved to the build head, so the build's own changes are the base
       and not the diff, apply the
       PLAN-deferred-policy-digest closure (implementation_declared true plus its two test_selector shards, the same
@@ -227,7 +236,7 @@ verification_plan:
       validate_graduation_completeness, validate_vp_replay, validate_scope_boundary, validate_weakening_dispositions)
       judges the real case.
     command: |-
-      R=$(git rev-parse --show-toplevel); B=$(git rev-parse HEAD); WT=$(mktemp -d)/clone; LOG="$WT.log"; git clone -q --no-hardlinks "$R" "$WT" && cd "$WT" && git checkout -q --detach "$B" && git update-ref refs/remotes/origin/main "$B" && "$R/bin/venv-python" - <<'PY'
+      R=$(git rev-parse --show-toplevel); B=$(git rev-parse HEAD); WT=$(mktemp -d)/clone; LOG="$WT.log"; git clone -q --no-hardlinks "$R" "$WT" && ln -s "$R/.venv" "$WT/.venv" && cd "$WT" && git checkout -q --detach "$B" && git update-ref refs/remotes/origin/main "$B" && "$R/bin/venv-python" - <<'PY'
       import pathlib, yaml
       plan = pathlib.Path("docs/plans/PLAN-deferred-policy-digest.yaml")
       plan.write_text(plan.read_text(encoding="utf-8").rstrip("\n") + "\nimplementation_declared: true\n", encoding="utf-8")
@@ -265,10 +274,13 @@ verification_plan:
     graduation: not-applicable
   - step: 8
     phase: pre-deploy
-    action: Full tier on the committed head.
-    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    action: >-
+      Full tier on the committed, rebased, clean head, started BACKGROUNDED with a 2 h limit from the top-level session
+      (never a subagent; it exceeds the 10-minute foreground cap); on its completion notice, run the verdict command.
+    command: bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head
     expected: >-
-      exit 0 and the final Validation Summary (scope all) reads PASS; verify-head exit 0.
+      The background run ends with the final Validation Summary (scope all) PASS; the verdict is verify-head exit 0
+      for the pushed HEAD, never a pipe's exit status.
     fix_if: Fix and rerun from the start.
     hermetic: false
     graduation: not-applicable
@@ -339,6 +351,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 4}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 9}
   - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 6}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -356,5 +369,20 @@ execution_steps:
     (each rule, check_id, guard_symbol and reason survives; only restatement and narrative go).
   - Widen the two Entries' pre_globs in scripts/checks/verification/_manifest.py and its mirror test.
   - Execute Verification Plan -- run each step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
+  - >-
+    This plan's own closure, in the build PR: run the graduation walk for VP 1-3 (shards late-closure-resolver,
+    late-closure-gates-checks, late-closure-merge-step-session), then set implementation_declared: true, then --pre.
+    bundled_recommendations is empty, so the commits carry no Resolves trailer.
+  - >-
+    Closure evidence, recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state
+    (scripts.session.github_readiness); parent validator evidence (VP 8 full-tier PASS plus --verify-head exit 0 for the
+    pushed HEAD); structured postflight evidence (write the scripts.session.postflight_evidence.CATEGORIES JSON in the
+    scratchpad, then bin/venv-python -m scripts.session.postflight --evidence <file>); the real outcome - push, build PR,
+    CI green by event-driven wake (never polled), Commit Flow step 4 (premerge, squash-merge with an explicit
+    commit_message and expectedHeadSha, readback), merge SHA.
+  - >-
+    Handoff: send the merge SHA and PR URL to the coordinating session (session_01G2j5RhrWVwt8bduvsXQwgW), which lands
+    the PLAN-deferred-policy-digest closure on top; tell it both of that closure's shards are admitted at 6993f383^ by node
+    absence (rec-3776 / rec-2998 shape), so its PR body says so rather than claiming content discrimination.
   - 'Report: what was implemented, verification results'
 work_areas: []
