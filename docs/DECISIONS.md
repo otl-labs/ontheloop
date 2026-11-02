@@ -2,6 +2,59 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 241: The coordination model -- a deterministic engine runs the work graph, a bounded coordinator step handles only what the graph cannot, context travels as notes, streams are epics, and concurrency and WIP climb under human ceilings (amends Decision 229 clause 2) (Decided)
+
+```yaml
+number: 241
+status: Decided
+decided_date: "2026-11-02"
+amends: [229]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable line between deterministic mechanics and LLM judgment in the loop, re-planning T4.1, T4.3, T4.4, T4.8,
+    T4.23, T4.30 and T4.33 if reversed. Not a contract note: no contract owns that line. Not amendment_forms: it
+    refines Decision 229 cl.2 and adds rules no single entry owns.
+```
+
+**Status:** Decided
+**Date:** 2026-11-02
+**Warehouse ID:** dec-241 (per Decision 84 backfill)
+
+**Problem:** Decision 229 cl.2 names the later coordinator only as "a Decision 185 engine". Who judges, what holds the queue, how context reaches a worker, what a stream is and how parallelism rises are undecided; the only working coordinator is the interim one, a standing agent that reads everything.
+
+**Intent:** Loop-host planning starts from one model: mechanics deterministic, judgment only at named events, all state in the store.
+
+**Decision:** Design now, build post-MVP (Decision 197 cl.8).
+1. **Engine.** Deterministic code over the Decision 185 loop definition owns the ready frontier, admission, priority, per-epic WIP, T4.8 leases, T4.10a budgets, persona launch, stall timers, deterministic retry, result and edge recording and approval-ledger lookups. An event with a defined transition routes without an LLM (a red to its item's worker under Decision 226, a merge to edge writes and dependants' wakes, a stall to a nudge); Decision 217 cl.2's rebase escalation rec stands.
+2. **Coordinator step.** Judgment is a stateless step with a persona contract (T4.10a), budgets and a run record (Decision 231), invoked only for an event that maps to no transition, a tie the order cannot break, or a human message. It reads bounded slices through named read verbs, never the whole queue, and writes graph state through a closed verb set the engine enforces; no verb launches a persona, schedules the step or extends its run. On a failure it routes, escalates or files an RCA rec, never repairs (Decision 55). It never approves (Decision 233 cl.4), never sets a loop-policy value (Decisions 185 cl.3, 229 cl.1) and never runs on Actions (Decision 205 cl.1). Decision 229 cl.2's coordinator is this engine plus this step; hub and spoke is unchanged.
+3. **Scopes.** The step has a desk scope, the human's entry point on the T4.33 surface (Decision 232 cl.3): frontier and forks, intake triage (cl.6), cross-epic duplicates and conflicts, gate cards, policy proposals. An epic scope (one epic's frontier, notes and exceptions; it files items only inside its epic) is designed with the same verbs and data, runs in shadow first, and acts for an epic only when a measured trigger fires. The hierarchy is part_of edges. /orient and Decision 90 stand in this repository.
+4. **Notes, not messages.** Context reaches a worker as an append-only work_item_notes event in the work-item store, plus a wake verb; the worker reads unacknowledged notes at fixed points. A note carries no authority; an approval names its ledger row. Events land in the one loop record journal (Decision 221 cl.7); the step attends to a filtered subset.
+5. **Streams are epics.** A stream is an epic-kind work item carrying WIP, budget, declared path ownership and a serves edge; membership is a part_of edge (Decision 197 cl.3-4). One engine serves every stream.
+6. **Concurrency and WIP.** Dispatch concurrency (planning and implementation runs holding leases) starts at 1 (Decisions 55 and 206 cl.6) under a kernel ceiling of 3 that only Decision 185 cl.3's marker moves, and climbs by T4.4 rungs: 2 once T4.8 leases are live, 3 after a clean window, demoted automatically. Verdict jobs take no lease and are rate-limited apart. Per-epic WIP is a loop-policy value under a human ceiling, moved additively up and multiplicatively down on cost per verified merge (Decision 217 cl.4); its transitions use the one ladder transition log (Decision 221).
+7. **Duplicate problems.** Similarity at filing proposes related_to edges and routes close pairs to the desk; the scout sees in-flight neighbours; T4.8 semantic locks are the hard stop; leases stay pessimistic.
+
+**Options considered:** A standing coordinator that reads every event and pushes messages -- rejected: unreplayable, unbudgeted. A planner that becomes a coordinator -- rejected: decomposition is child items (rec-4478). Both scopes live from the first build -- rejected: an extra LLM hop per escalation spends the budget, the binding constraint.
+
+```yaml reversal-conditions
+decision: 241
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: step-adds-nothing
+    kind: manual
+    description: "Over a quarter of loop runs, coordinator-step outputs change fewer outcomes than they cost: re-decide cl.2-3."
+  - id: repair-cheaper-than-wait
+    kind: manual
+    description: "Measured conflict repair costs less than lease waiting at the current ceiling: re-decide cl.7's pessimistic leases."
+```
+
+**Coverage (Decision 181 cl.2):** every clause is residual until built, owned by forward work: cl.1 T4.1; cl.2-3 T4.37, T4.33; cl.4 T4.23; cl.5 T4.23, T4.3; cl.6 T4.4, T4.8; cl.7 T4.23, T4.30, T4.8. tests/decisions/test_coordination_model_decision.py pins each owner's citation.
+
+**Related:** Decisions 55, 84, 90, 93, 185, 197, 205, 206, 217, 221, 226, 229, 231, 232, 233, 235; CD.17, CD.37; rec-4478, rec-4823.
+
+---
+
 ## Decision 240: One name per thing where On The Loop meets its adopters -- this repository is the upstream source, a release is what adopters install, adopter for the free release and customer for the paid service; "platform" and "product" leave new governed text unqualified (Decided)
 
 ```yaml
@@ -871,6 +924,10 @@ child criteria; the self-review gap -- rec-4476.
 > the repo's in-session verdict gates (decision-scout, plan-critique, code-review) or a read-only
 > advice consult as subagents, which gate until their persona flips (cl.4). After a flip, a session
 > runs that gate only as cl.4's outage fallback, so the end state is no nested personas.
+
+> **Amended by Decision 241 (2026-11-02):** cl.2's later coordinator is Decision 241's deterministic engine
+> plus its bounded coordinator step, which writes graph state and never launches a persona. Hub and
+> spoke is unchanged.
 
 ---
 
