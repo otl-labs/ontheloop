@@ -72,3 +72,19 @@ def test_missing_copy_exits_2(repo: Path, tmp_path: Path) -> None:
 
 def test_missing_contract_at_ref_exits_2(repo: Path, tmp_path: Path) -> None:
     assert cc.main(["write", str(tmp_path / "o"), "--ref", "nope"]) == 2
+
+
+def test_check_with_missing_ref_exits_2(repo: Path, tmp_path: Path) -> None:
+    assert cc.main(["check", str(tmp_path / "o"), "--ref", "nope"]) == 2
+
+
+def test_ref_without_the_contract_exits_2(repo: Path, tmp_path: Path) -> None:
+    _git(repo, "rm", "-q", cc.CONTRACT)
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "rm")
+    _git(repo, "tag", "gone")
+    _git(repo, "checkout", "-q", "--orphan", "other")
+    (repo / "x").write_text("x", encoding="utf-8")
+    _git(repo, "add", "x")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "x")
+    assert cc.main(["check", str(tmp_path / "o"), "--ref", "other"]) == 2
+    assert cc.main(["write", str(tmp_path / "o"), "--ref", "other"]) == 2
