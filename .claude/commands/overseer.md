@@ -1,6 +1,6 @@
 ---
 description: >-
-  Being retired (Decision 242); do not run. The coordinator dispatches each planning and
+  Being retired (Decision 243); do not run. The coordinator dispatches each planning and
   implementation agent (Decision 229 cl.2); the text below is historical.
 model: opus[1m]
 argument-hint: [roadmap tier_item id | audit slug | free-form multi-step intent]
@@ -8,7 +8,7 @@ argument-hint: [roadmap tier_item id | audit slug | free-form multi-step intent]
 
 # Overseer Workflow
 
-**Being retired (Decision 242); do not run.** Everything below is historical.
+**Being retired (Decision 243); do not run.** Everything below is historical.
 
 **Intent**: Drive an entire platform roadmap item, audit, or multi-step body of work to completion
 by decomposing it into one or more `/plan` + `/implement` cycles and dispatching each as a
@@ -20,7 +20,7 @@ overseer-dispatched as a fresh sibling, never inline in the author subagent (Des
 *Note: For the full methodology (read-nothing router discipline, the Design-B gate-request
 trampoline, division of labor, liveness/watchdog resilience, bounded hand-back schema, ledger
 schema, overlap-matrix procedure, autonomy-boundary policy, the Fable advice-consult protocol, and
-the Decision 242/229/55/73 guardrails), invoke your `overseer` skill via the Skill tool. This command
+the Decision 243/229/55/73 guardrails), invoke your `overseer` skill via the Skill tool. This command
 is a thin lifecycle sequence; the skill owns HOW.*
 
 ## Step 1: Intake (Gate G0)

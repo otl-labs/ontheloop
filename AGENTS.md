@@ -93,8 +93,8 @@ skills, slash commands -- are optimised for agent loading efficiency, not human 
 
 Decision 90 workflow: `/orient` (read-only; writes nothing; picks the item) -> `/plan` (writes
 `docs/plans/PLAN-{slug}.yaml`) -> `/implement`; the fourth tier is the Decision 185 loop, and the legacy
-`/develop-executor` is retired (Decision 242). Plans are IMPLEMENTATION or REPORT-ONLY: work too large for one plan
-splits into child recs or atomic IMPLEMENTATION plans, each planned on its own (Decision 242). `/audit` composes
+`/develop-executor` is retired (Decision 243). Plans are IMPLEMENTATION or REPORT-ONLY: work too large for one plan
+splits into child recs or atomic IMPLEMENTATION plans, each planned on its own (Decision 243). `/audit` composes
 `docs/audit-prompts/AUDIT-{slug}.md` and audits nothing. `/overseer` is being retired: it is not a fifth tier, never
 bypasses the workflow, and starts no planning or implementation agent of its own -- the coordinator dispatches each,
 one human-gated persona step on an operator-chosen rec, never the recommendation queue, hub and spoke (Decision 229

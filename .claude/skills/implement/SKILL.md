@@ -197,7 +197,7 @@ PARENT's live `bootstrap_completion_exempt` value as the single source of truth 
 resolution that never writes the parent's `decomposition_hints` or the child's flag) lives at
 `docs/contracts/tier-item-lifecycle.yaml#decomposition_hint_inheritance` -- read it in full.
 Canonical examples: T-1.12 is `bootstrap_completion_exempt: true` (inherit `true`, T1.12 is
-`false` (inherit `false`). Children are always IMPLEMENTATION plans (Decision 242).
+`false` (inherit `false`). Children are always IMPLEMENTATION plans (Decision 243).
 
 ### Parallel-with-code-review state machine
 

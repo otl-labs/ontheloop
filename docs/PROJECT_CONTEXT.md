@@ -115,7 +115,7 @@ T2.26 migrated ops queue substrate
   -> T4.12 scheduled-agent re-enable/repoint
 ```
 
-Current constraints are telemetry blindness before T2.36/T3.2/T3.3, the queue producer gap before T4.3, and missing executor evidence. Work too large for one plan decomposes into child items (Decision 242).
+Current constraints are telemetry blindness before T2.36/T3.2/T3.3, the queue producer gap before T4.3, and missing executor evidence. Work too large for one plan decomposes into child items (Decision 243).
 
 ## Operational data architecture
 
@@ -149,7 +149,7 @@ Verification is recursively improvable. Escaped defects, weak tests, missing gua
 
 ### Local executor status
 
-The older local executor is retired (Decision 242); `config/agent/executor/capabilities.yaml` keeps sensitive runtime, verification, infrastructure, workflow, governance, and deployment targets protected until policy delegates them.
+The older local executor is retired (Decision 243); `config/agent/executor/capabilities.yaml` keeps sensitive runtime, verification, infrastructure, workflow, governance, and deployment targets protected until policy delegates them.
 
 ### Executor end-state
 

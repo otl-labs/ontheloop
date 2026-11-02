@@ -35,7 +35,7 @@ Reject a plan that invents a third validation tier, treats mapped coverage or re
 
 7. **Score North Star alignment (1-5):** Does the `## Intent` section directly serve a North Star principle (NS.1-NS.5, `docs/ROADMAP-PLATFORM.yaml`)? A score of 1 means no discernible connection; 5 means it directly advances one. Name it and give a 1-2 sentence justification.
 
-8. **Evaluate Scope breadth (IMPLEMENTATION plans; a split means child recs or atomic plans, Decision 242):**
+8. **Evaluate Scope breadth (IMPLEMENTATION plans; a split means child recs or atomic plans, Decision 243):**
    - For IMPLEMENTATION: Are all scope entries necessary? Too large (suggest split)? Does the Scope extend beyond the stated phase?
 
 9. **Check phase dependencies:** Does this plan depend on work from a prior phase that is not yet complete? Cite specific ROADMAP phase entries.
@@ -59,7 +59,7 @@ when a behavior-changing scope file lacks a linked obligation, its test is struc
 does not assert the named behavior, its red/green expectation is absent, or its waiver is thin.
 Presence/link validators are deterministic; adequacy is this fresh-context judgement.
 
-12d. **Retired (Decision 242):** the plan schema refuses `plan_type: STRATEGIC` and non-empty `work_areas`; an oversized plan is a step 8 split finding.
+12d. **Retired (Decision 243):** the plan schema refuses `plan_type: STRATEGIC` and non-empty `work_areas`; an oversized plan is a step 8 split finding.
 
 12k. **Closure obligation check (CONDITIONAL -- IMPLEMENTATION plans only):** VERIFY the plan's own declarations against its scope and VP; do not re-derive the obligation. Additive plans that trip neither condition are exempt.
 

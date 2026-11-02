@@ -79,10 +79,10 @@ conditions:
 
 ---
 
-## Decision 242: The legacy Python executor is retired and the STRATEGIC plan type is shelved, both for good -- an item too large for one plan is decomposed by its planner into child work items, which ride the parent's approval only through a deterministic check (supersedes Decision 67; amends Decisions 73, 90, 182, 203 and 229) (Decided)
+## Decision 243: The legacy Python executor is retired and the STRATEGIC plan type is shelved, both for good -- an item too large for one plan is decomposed by its planner into child work items, which ride the parent's approval only through a deterministic check (supersedes Decision 67; amends Decisions 73, 90, 182, 203 and 229) (Decided)
 
 ```yaml
-number: 242
+number: 243
 status: Decided
 decided_date: "2026-11-02"
 supersedes: [67]
@@ -98,7 +98,7 @@ significance:
 
 **Status:** Decided
 **Date:** 2026-11-02
-**Warehouse ID:** dec-242 (per Decision 84 backfill)
+**Warehouse ID:** dec-243 (per Decision 84 backfill)
 
 **Problem:** Decision 67 froze the single-process Python executor (scripts/execute_recommendation.py, scripts/executor/)
 and the STRATEGIC plan type it consumed, pending a reversal (CD.17) keyed to T4.2. That executor was a proof of
@@ -144,7 +144,7 @@ also sweeps the live instruction surfaces for a revived freeze or STRATEGIC rule
 interim practice unenforced by design (every child is human-planned); cl.4 -- T4.4.
 
 ```yaml reversal-conditions
-decision: 242
+decision: 243
 review_by: 2027-06-30
 on_trigger: "re-decide via /plan"
 conditions:
@@ -1091,7 +1091,7 @@ child criteria; the self-review gap -- rec-4476.
 > advice consult as subagents, which gate until their persona flips (cl.4). After a flip, a session
 > runs that gate only as cl.4's outage fallback, so the end state is no nested personas.
 
-> **Amended by Decision 242 (2026-11-02):** Clause 1's interim reading is final: the legacy executor and STRATEGIC plans are retired for good, and the /overseer is no longer an interim coordinator: the coordinator alone starts a planning or implementation agent. Clause 4's CD.17 hold is discharged: CD.17 is superseded with no successor trigger.
+> **Amended by Decision 243 (2026-11-02):** Clause 1's interim reading is final: the legacy executor and STRATEGIC plans are retired for good, and the /overseer is no longer an interim coordinator: the coordinator alone starts a planning or implementation agent. Clause 4's CD.17 hold is discharged: CD.17 is superseded with no successor trigger.
 
 ---
 
@@ -2737,7 +2737,7 @@ live (Decision 67 reversal) -- re-derive the per-push cost basis.
 **Related:** 25, 67, 72, 73, 76, 83, 115, 132, 135, 138, 150, 162, 163, 167, 168, 177, 181, 184,
 187, 189. Roadmap refs: rec-4083, rec-4085, rec-4086, rec-4087, T2.54.
 
-> **Amended by Decision 242 (2026-11-02):** Reversal condition (e) reads as the Decision 185 loop going live (T4.2): the legacy executor never returns.
+> **Amended by Decision 243 (2026-11-02):** Reversal condition (e) reads as the Decision 185 loop going live (T4.2): the legacy executor never returns.
 
 ---
 
@@ -4466,7 +4466,7 @@ governed floor, installs a second measured cause.
 
 > **Update (2026-09-26):** Reversal condition (b) fires: PLAN-vp-replay-deadline-from-shared-budget re-derives validate_vp_replay's replay term to MAX_AGGREGATE_SECONDS (120) alone -- a replayed step's deadline is now the remaining share of that aggregate, never a flat per-step cap, so the 30s term this point's 150s figure used to add on top is retired. Re-derived, not reversed: NON_TEST_BUDGET_SECONDS stays 240 against the calibrated 71.766s static worst (120 + 71.766 = 191.766 < 240, headroom rises from 18.2s to 48.2s); CEILING_SECONDS - NON_TEST_BUDGET_SECONDS is unchanged at 1260. The check's own worst-case green maximum TIGHTENS from 150s to 120s. Reversal condition (a)'s measured-series re-check remains open, owned by rec-4093.
 
-> **Amended by Decision 242 (2026-11-02):** Decision 67 never lifts. The planning skill's file-count heuristic now flags decomposition need, not a STRATEGIC plan; replacing it with this measured breadth number is owed when plan_agent decides splits (T4.31).
+> **Amended by Decision 243 (2026-11-02):** Decision 67 never lifts. The planning skill's file-count heuristic now flags decomposition need, not a STRATEGIC plan; replacing it with this measured breadth number is owed when plan_agent decides splits (T4.31).
 
 ---
 
@@ -10064,7 +10064,7 @@ Tier responsibilities:
 
 > **Update (2026-10-19):** Decision 229 cl.1 reads the freeze above, as an interim reading pending rec-4478, as binding STRATEGIC plans and the autonomous queue consumer: before any loop host, an interactive session or the /overseer may dispatch one human-gated persona step on an operator-chosen work item (a rec today) -- plan_agent drafting its plan, every later step on that approved IMPLEMENTATION plan -- never from the rec queue.
 
-> **Amended by Decision 242 (2026-11-02):** The fourth tier is the Decision 185 loop with its personas. `/develop-executor` and the legacy Python executor are retired, STRATEGIC plans are shelved, and `/implement` executes IMPLEMENTATION plans only; the operational state above is no longer a freeze.
+> **Amended by Decision 243 (2026-11-02):** The fourth tier is the Decision 185 loop with its personas. `/develop-executor` and the legacy Python executor are retired, STRATEGIC plans are shelved, and `/implement` executes IMPLEMENTATION plans only; the operational state above is no longer a freeze.
 
 ---
 
@@ -10892,7 +10892,7 @@ Key elements:
 
 > **Amended by Decision 226 (2026-10-18):** Clause 3's fixed priority="critical" becomes track-derived (High for a tests-only repair on a CI-tier workflow), and a manual revert PR is a permitted Track B corrective outside terraform/** and governed deploy paths (automated revert stays excluded). Clause 3's L6 pause and clause 4's plan-time block become the red_overlap overlap block; clause 4 as written now applies only to a red past its repair SLO. Clause 5's rec -> plan -> implement recovery stands for Track B, with Track A on the fast lane (Decision 226 cl.1-4). This supersedes the Decision 217 line above for clause 4.
 
-> **Amended by Decision 242 (2026-11-02):** Clause 4's suspension of mandatory discussion when `non_automatable_recommendations > 0` is permanent: Decision 67 never reverses and the executor it waited on is retired. Counts stay informational.
+> **Amended by Decision 243 (2026-11-02):** Clause 4's suspension of mandatory discussion when `non_automatable_recommendations > 0` is permanent: Decision 67 never reverses and the executor it waited on is retired. Counts stay informational.
 
 ---
 
@@ -11165,9 +11165,9 @@ GitHub branch protection is permanently unavailable for this repository. The mer
 **Status:** Superseded
 **Date:** 2026-05-08
 
-**Decision:** Superseded by Decision 242, which retires the legacy Python executor and shelves the STRATEGIC plan type for good and supersedes CD.17; Decision 79 had already lifted the Lambda-deploy clause (per-Lambda gating, CD.16). Kept live rather than archived because roadmap annotations, code comments and contracts still cite "Decision 67" by name (Decision 146's still-cited-live carve-out; compacted under docs/contracts/decision-entry.yaml's `compaction:` section).
+**Decision:** Superseded by Decision 243, which retires the legacy Python executor and shelves the STRATEGIC plan type for good and supersedes CD.17; Decision 79 had already lifted the Lambda-deploy clause (per-Lambda gating, CD.16). Kept live rather than archived because roadmap annotations, code comments and contracts still cite "Decision 67" by name (Decision 146's still-cited-live carve-out; compacted under docs/contracts/decision-entry.yaml's `compaction:` section).
 
-**Superseded by: Decision 242**
+**Superseded by: Decision 243**
 
 ---
 
