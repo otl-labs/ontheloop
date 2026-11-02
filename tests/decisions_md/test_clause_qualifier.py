@@ -19,8 +19,9 @@ _D215 = (
     "that fail closed (amends Decision 88 clause 1(ii) and Decision 103)"
 )
 _D230 = (
-    "Production telemetry gets its own catalog (amends Decision 216 clauses 1 and 3, Decision 213 "
-    "clauses 1, 3 and 5, Decision 126 and Decision 81 clause 6)"
+    "Production telemetry gets its own catalog -- an owner role per catalog, one login per catalog binding, "
+    "operator admin verbs to create it, and only the telemetry functions on its prefixes (amends Decision 216 "
+    "clauses 1 and 3, Decision 213 clauses 1, 3 and 5, Decision 126 and Decision 81 clause 6)"
 )
 
 _CASES: list[tuple[str, str, list[int]]] = [
