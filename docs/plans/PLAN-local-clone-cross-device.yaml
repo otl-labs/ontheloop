@@ -23,9 +23,13 @@ scope:
       of its `subprocess.run([... "--local" ...], check=True, capture_output=True)` line; every later line and
       assertion of that test is unchanged. (3) Add test_real_root_clone_works_across_filesystems: pick /dev/shm, and
       when it is not a writable directory or shares REAL_ROOT's st_dev, pytest.skip with a reason that starts
-      "env: " (validate_test_skip_citations); else mkdtemp under it, clone with the helper, assert the clone's
-      `git rev-parse HEAD` equals REAL_ROOT's and docs/DECISIONS.md exists in the clone, and rmtree the temp dir in a
-      finally block.
+      "env: " as a plain string literal (or the first literal segment of an f-string, since
+      validate_test_skip_citations and _weakening_ast read only constant parts); else base = mkdtemp(dir="/dev/shm"),
+      clone with the helper into base / "clone" (so the helper's cwd is the mkdtemp dir), assert the clone's
+      `git rev-parse HEAD` equals REAL_ROOT's and docs/DECISIONS.md exists in the clone, and rmtree base in a finally
+      block. (4) Add test_clone_failure_reports_git_stderr: create tmp_path / "clone" holding one file, then
+      `with pytest.raises(AssertionError, match="already exists")` call the helper on it (git refuses a non-empty
+      destination with "already exists and is not an empty directory"), proving git's stderr reaches the failure.
   - file: docs/plans/PLAN-local-clone-cross-device.yaml
     action: Create
     purpose: This plan.
@@ -38,18 +42,23 @@ acceptance_criteria:
     With pytest's temp dir on a different filesystem from the checkout (--basetemp under /dev/shm), the whole of
     tests/test_session_rebase_resolve.py passes; before the change test_real_corpus_race_on_a_local_clone fails there
     with exit status 128.
-  - A failing clone in either test reports git's stderr in the pytest failure output.
+  - A failing clone reports git's stderr in the pytest failure message (test_clone_failure_reports_git_stderr).
   - test_real_corpus_race_on_a_local_clone keeps every assertion it had; only its clone call changes.
-  - test_real_root_clone_works_across_filesystems runs (does not skip) on CC-web and on GitHub-hosted runners, where /dev/shm is tmpfs.
+  - >-
+    test_real_root_clone_works_across_filesystems runs and passes (does not skip) on CC-web, checked by VP step 1. On
+    GitHub-hosted runners, where /dev/shm is tmpfs, it is expected to run; the build checks its own PR's pr-validate
+    log shows the node PASSED, not SKIPPED (execution_steps).
 verification_plan:
   - step: 1
     phase: pre-deploy
     action: >-
       Run the whole test file with pytest's temp dir on another filesystem. This is the CI failure reproduced on any
       host whose /dev/shm is a separate tmpfs: on the pre-change tree the real-corpus test fails with exit status 128.
-    command: bin/venv-python -m pytest -q tests/test_session_rebase_resolve.py --basetemp /dev/shm/otl-local-clone-cross-device
+    command: >-
+      out=$(bin/venv-python -m pytest -q -rs tests/test_session_rebase_resolve.py --basetemp /dev/shm/otl-local-clone-cross-device 2>&1);
+      rc=$?; echo "$out" | tail -5; [ $rc -eq 0 ] && ! echo "$out" | grep -qi skipped
     expected: >-
-      exit 0; every test passes and none is skipped. Measured on the pre-change tree: about 35 s on CC-web, most of it
+      exit 0; every test passes and none is skipped (any skip fails the step). Measured on the pre-change tree: about 35 s on CC-web, most of it
       the real-corpus rebase_resolve run, above the 25% replay authoring target; it is one step and cannot narrow
       further without dropping the corpus case it exists to prove.
     fix_if: >-
@@ -73,10 +82,10 @@ verification_plan:
     graduation_waiver_reason: Whole-file run already covered by the rebase-resolve-tests registry row in every tier.
   - step: 3
     phase: pre-deploy
-    action: The explicit --local flag is gone from the test file, and the helper is the only clone of the real checkout.
+    action: The explicit --local argv token is gone from the test file, and the helper is defined once.
     command: >-
-      ! grep -n -- '"--local"' tests/test_session_rebase_resolve.py && test "$(grep -c '_clone_real_root(' tests/test_session_rebase_resolve.py)" -eq 3
-    expected: exit 0 (no --local match; the helper is defined once and called twice).
+      ! grep -n -- '"--local"' tests/test_session_rebase_resolve.py && test "$(grep -c '^def _clone_real_root(' tests/test_session_rebase_resolve.py)" -eq 1
+    expected: exit 0 (no "--local" argv token; one helper definition).
     fix_if: A leftover --local call or a second clone path - route it through the helper.
     hermetic: true
     expected_literals: []
@@ -98,7 +107,10 @@ verification_plan:
     command: >-
       bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; r,_=fetch_recs_by_ids(make_reader(), ['rec-4837']); print(r[0]['id'], r[0]['status'])"
     expected: Prints rec-4837 closed.
-    fix_if: Still open - read the ci.yml trailer-closure job log; close with update_rec only on a holds verdict (Decision 201).
+    fix_if: >-
+      Still open - read the ci.yml trailer-closure job log; close with update_rec only on a holds verdict (Decision
+      201). If PR #1806 is still red on this test after the merge, read the git stderr the helper now prints before
+      filing a follow-on: the CI root cause is inferred.
     hermetic: false
     graduation: not-applicable
 test_obligations:
@@ -109,6 +121,11 @@ test_obligations:
     red_green_expectation: >-
       red before (the explicit --local clone exits 128 across filesystems; step 1's command fails on the pre-change
       tree), green after.
+  - source: tests/test_session_rebase_resolve.py
+    behavior: A failed clone of the real checkout surfaces git's stderr in the assertion message.
+    verification_step: 1
+    test_selector: tests/test_session_rebase_resolve.py::test_clone_failure_reports_git_stderr
+    red_green_expectation: red before (no helper; the old call raised CalledProcessError with stderr hidden), green after.
 weakening_dispositions: []
 constraints:
   - Test-only change. No production code, contract, Decision, workflow or CI runner configuration changes.
@@ -143,6 +160,7 @@ context:
   - "Owner: planning thread \"Fix the failing local-clone CI test\"; the build reports plan defects to the coordinator, which routes them here."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 3}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -154,14 +172,16 @@ execution_steps:
     Before editing, run VP step 1's command on the unchanged tree and confirm test_real_corpus_race_on_a_local_clone
     fails with exit status 128 (red before). If it passes, /dev/shm shares the checkout's filesystem on this host:
     stop and report to the coordinator.
-  - Edit tests/test_session_rebase_resolve.py as scoped (helper, one call-site swap, one new test).
+  - Edit tests/test_session_rebase_resolve.py as scoped (helper, one call-site swap, two new tests).
   - Run VP steps 1-3; loop until they pass.
   - Add weakening_dispositions entries for any candidate validate_weakening_candidates lists (see context), and flip implementation_declared to true.
   - >-
     Commit with "Resolves: rec-4837" as its own paragraph; start VP step 4 backgrounded with a 2 h limit and read its
     verdict with --verify-head; push, open the PR, merge on code review PROCEED and green CI (squash, Resolves
     trailer in the body); then message the build thread "Build retiring STRATEGIC plans and executor" that the fix
-    has merged, with the merge SHA.
+    has merged, with the merge SHA. Before merging, read this PR's pr-validate log (mcp__github__get_job_logs) and
+    confirm the line for test_real_root_clone_works_across_filesystems reads PASSED, not SKIPPED; a SKIPPED line is a
+    plan defect to report, not a pass.
   - Run VP step 5 after merge.
   - 'Report: what changed, VP results, merge SHA, rec-4837 status.'
 work_areas: []
