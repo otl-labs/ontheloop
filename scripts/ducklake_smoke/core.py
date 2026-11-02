@@ -1,7 +1,7 @@
 """Shared harness plumbing for the DuckLake Neon smoke-test gate package (T2.16b / T2.18 / CD.34).
 
 Owns SmokeTestFailure (the loud-fail signal, Decision 55), the smoke catalog constants
-(DSN_SECRET_ID/SMOKE_DATA_PATH/CATALOG_ALIAS/META_SCHEMA), the Function-URL env names, and the
+(DSN_PARAMETER_NAME/SMOKE_DATA_PATH/CATALOG_ALIAS/META_SCHEMA), the Function-URL env names, and the
 SigV4/JSON Function-URL invocation helpers (_function_url/_sigv4_invoke/_ok_json/_p95). Every
 other scripts.ducklake_smoke module calls these through this module object (core.<name>) rather
 than importing a copy, so each symbol keeps exactly one canonical patch target (Decision 104).
@@ -16,7 +16,7 @@ from typing import Any
 
 from src.common import ducklake_runtime
 
-DSN_SECRET_ID = "ducklake-neon-catalog-dsn"
+DSN_PARAMETER_NAME = "/secret/ducklake-neon-catalog-dsn"
 # Single source of truth: the runtime owns the canonical smoke DATA_PATH. A divergent literal here
 # re-introduces drift and can bind the shared catalog to the wrong path on direct pre-checks.
 SMOKE_DATA_PATH = ducklake_runtime.SMOKE_DATA_PATH

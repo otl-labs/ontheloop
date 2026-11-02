@@ -25,7 +25,7 @@ from src.telemetry.gate import GateError, GrainConflictError, RowRuleGateError
 
 ACCOUNT = "acct-under-test"
 USER_ARN = "arn:aws:sts::acct-under-test:assumed-role/Some/secret-session"
-SECRET_ID = "agent-platform-ducklake-telemetry-writer-dsn"
+SECRET_ID = "/secret/agent-platform-ducklake-telemetry-writer-dsn"
 VERB_NAMES = ["provision_telemetry", "register_project", "register_tenant", "telemetry_probe"]
 _PW = "pass" + "word=hunter2"
 ALL_ACTIONS = sorted(["append_telemetry", "attach_check", "begin_blobs", "describe", *VERB_NAMES])
@@ -35,7 +35,7 @@ ALL_ACTIONS = sorted(["append_telemetry", "attach_check", "begin_blobs", "descri
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TELEMETRY_META_SCHEMA", "ducklake_smoke")
     monkeypatch.setenv("TELEMETRY_DATA_PATH", rt.SMOKE_DATA_PATH)
-    monkeypatch.setenv("TELEMETRY_DSN_SECRET_ID", SECRET_ID)
+    monkeypatch.setenv("TELEMETRY_DSN_PARAMETER", SECRET_ID)
     monkeypatch.setenv("DUCKLAKE_EXTENSION_DIRECTORY", "/opt/ext")
     h._CATALOG_LOGIN.clear()
 
@@ -175,7 +175,7 @@ def test_attach_check_pins_env_and_ignores_event(monkeypatch: pytest.MonkeyPatch
     resp = h.handler(_event({"action": "attach_check", "data_path": "s3://evil/", "meta_schema": "ducklake"}))
     body = _body(resp)
     assert resp["statusCode"] == 200 and body["ok"] is True
-    fetch.assert_called_once_with(secret_id=SECRET_ID)
+    fetch.assert_called_once_with(parameter_name=SECRET_ID)
     kwargs = opened.call_args.kwargs
     assert kwargs["data_path"] == rt.SMOKE_DATA_PATH and kwargs["meta_schema"] == "ducklake_smoke"
     assert kwargs["extension_directory"] == "/opt/ext"
@@ -195,7 +195,7 @@ def test_attach_check_reuse_returns_cached_login(monkeypatch: pytest.MonkeyPatch
     assert fetch.call_count == 1
 
 
-@pytest.mark.parametrize("name", ["TELEMETRY_META_SCHEMA", "TELEMETRY_DATA_PATH", "TELEMETRY_DSN_SECRET_ID"])
+@pytest.mark.parametrize("name", ["TELEMETRY_META_SCHEMA", "TELEMETRY_DATA_PATH", "TELEMETRY_DSN_PARAMETER"])
 def test_unset_env_is_500(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     _patch_runtime(monkeypatch)
     monkeypatch.delenv(name)
@@ -209,7 +209,7 @@ def test_describe_with_env_unset_is_500(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_import_with_env_unset_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("TELEMETRY_META_SCHEMA", "TELEMETRY_DATA_PATH", "TELEMETRY_DSN_SECRET_ID", "DUCKLAKE_EXTENSION_DIRECTORY"):
+    for name in ("TELEMETRY_META_SCHEMA", "TELEMETRY_DATA_PATH", "TELEMETRY_DSN_PARAMETER", "DUCKLAKE_EXTENSION_DIRECTORY"):
         monkeypatch.delenv(name, raising=False)
     importlib.reload(h)
 

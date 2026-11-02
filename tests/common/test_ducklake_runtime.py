@@ -62,9 +62,10 @@ def test_fetch_dsn_success(monkeypatch):
     captured = {}
 
     class _Client:
-        def get_secret_value(self, SecretId):
-            captured["secret_id"] = SecretId
-            return {"SecretString": json.dumps(_DSN)}
+        def get_parameter(self, Name, WithDecryption):
+            captured["parameter_name"] = Name
+            captured["decrypt"] = WithDecryption
+            return {"Parameter": {"Value": json.dumps(_DSN)}}
 
     class _Session:
         def __init__(self, profile_name=None):
@@ -77,16 +78,17 @@ def test_fetch_dsn_success(monkeypatch):
     monkeypatch.setattr(boto3, "Session", _Session)
     out = rt.fetch_dsn(profile="agent_platform")
     assert out["host"] == _DSN["host"]
-    assert captured["secret_id"] == rt.DSN_SECRET_ID
-    assert captured["client"] == "secretsmanager"
+    assert captured["parameter_name"] == rt.DSN_PARAMETER_NAME
+    assert captured["decrypt"] is True
+    assert captured["client"] == "ssm"
 
 
 def test_fetch_dsn_missing_key_raises(monkeypatch):
     bad = {k: v for k, v in _DSN.items() if k != "password"}
 
     class _Client:
-        def get_secret_value(self, SecretId):
-            return {"SecretString": json.dumps(bad)}
+        def get_parameter(self, Name, WithDecryption):
+            return {"Parameter": {"Value": json.dumps(bad)}}
 
     class _Session:
         def __init__(self, profile_name=None):

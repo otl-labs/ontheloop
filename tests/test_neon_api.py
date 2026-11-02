@@ -35,27 +35,27 @@ def test_neon_api_error_is_runtime_error():
 # ---------------------------------------------------------------------------
 
 
-def _make_secretsmanager_stub(secret_string: str):
-    """Return a boto3 SecretsManager client stub that returns secret_string."""
+def _make_ssm_stub(secret_string: str):
+    """Return a boto3 SSM client stub that returns secret_string."""
     stub = MagicMock()
-    stub.get_secret_value.return_value = {"SecretString": secret_string}
+    stub.get_parameter.return_value = {"Parameter": {"Value": secret_string}}
     return stub
 
 
 def test_fetch_api_key_plain_string(monkeypatch):
     """Plain string secret (not JSON) is returned as-is after strip."""
-    client = _make_secretsmanager_stub("  my-api-key  ")
+    client = _make_ssm_stub("  my-api-key  ")
     session = MagicMock()
     session.client.return_value = client
     with patch("boto3.Session", return_value=session):
         key = neon_api.fetch_api_key()
     assert key == "my-api-key"
-    client.get_secret_value.assert_called_once_with(SecretId="neon-api-key")  # pragma: allowlist secret
+    client.get_parameter.assert_called_once_with(Name="/secret/neon-api-key", WithDecryption=True)  # pragma: allowlist secret
 
 
 def test_fetch_api_key_json_api_key_field(monkeypatch):
     """JSON secret with 'api_key' field returns that field."""
-    client = _make_secretsmanager_stub(json.dumps({"api_key": "json-api-key"}))
+    client = _make_ssm_stub(json.dumps({"api_key": "json-api-key"}))
     session = MagicMock()
     session.client.return_value = client
     with patch("boto3.Session", return_value=session):
@@ -65,7 +65,7 @@ def test_fetch_api_key_json_api_key_field(monkeypatch):
 
 def test_fetch_api_key_json_neon_api_key_field(monkeypatch):
     """JSON secret with 'NEON_API_KEY' field returns that field."""
-    client = _make_secretsmanager_stub(json.dumps({"NEON_API_KEY": "upper-api-key"}))
+    client = _make_ssm_stub(json.dumps({"NEON_API_KEY": "upper-api-key"}))
     session = MagicMock()
     session.client.return_value = client
     with patch("boto3.Session", return_value=session):
@@ -75,7 +75,7 @@ def test_fetch_api_key_json_neon_api_key_field(monkeypatch):
 
 def test_fetch_api_key_passes_profile():
     """profile argument is forwarded to boto3.Session."""
-    client = _make_secretsmanager_stub("key-val")
+    client = _make_ssm_stub("key-val")
     session = MagicMock()
     session.client.return_value = client
     with patch("boto3.Session", return_value=session) as mock_session:
@@ -85,7 +85,7 @@ def test_fetch_api_key_passes_profile():
 
 def test_fetch_api_key_no_profile_uses_default_session():
     """No profile uses boto3.Session() with no kwargs."""
-    client = _make_secretsmanager_stub("key-val")
+    client = _make_ssm_stub("key-val")
     session = MagicMock()
     session.client.return_value = client
     with patch("boto3.Session", return_value=session) as mock_session:
@@ -299,6 +299,20 @@ def test_create_branch_no_endpoint_host_deletes_branch_and_loud_fails():
 
     assert "POST" in captured_methods
     assert "DELETE" in captured_methods
+
+
+def test_create_branch_no_endpoint_host_still_raises_when_cleanup_delete_fails():
+    """A failed cleanup DELETE is swallowed so the original no-endpoint error surfaces."""
+    create_body = {"branch": {"id": _FAKE_BRANCH_ID}, "endpoints": []}
+
+    def _urlopen(req):
+        if req.get_method() == "POST":
+            return _mock_urlopen(create_body)
+        raise neon_api.NeonApiError("delete failed")
+
+    with patch("urllib.request.urlopen", side_effect=_urlopen):
+        with pytest.raises(neon_api.NeonApiError, match="no endpoint host"):
+            neon_api.create_branch(_FAKE_API_KEY, _FAKE_PROJECT_ID)
 
 
 def test_create_branch_non_2xx_loud_fails():
