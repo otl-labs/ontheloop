@@ -79,6 +79,16 @@ class TestDrift:
         assert "no results mapping" in wb.drift(_dump(_baseline()), "[]", _SIDE)[0]
 
 
+class TestMalformedShapes:
+    def test_non_dict_entries_compare_by_value(self) -> None:
+        assert _drift(_baseline(["x", "y"]), _baseline(["x"])) == []
+        assert _drift(_baseline(["x"]), _baseline(["z"]))
+
+    def test_a_non_list_entry_for_a_sidecar_file_is_refused(self) -> None:
+        refused = _drift(_baseline("oops"), _baseline("oops"))  # type: ignore[arg-type]
+        assert refused == [f"the entry for {_FILE_A} is not a list"]
+
+
 def _git(cwd: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout
 
@@ -195,3 +205,17 @@ class TestSettle:
 
         reason = _settle(tree, Second([(1, _baseline([_finding(2)]))]))
         assert reason is not None and "timed out" in reason
+
+    @pytest.mark.parametrize("failing", ["checkout", "add"])
+    def test_a_failing_git_step_is_a_reason(self, tree: Path, monkeypatch, failing: str) -> None:
+        real = wb._git
+
+        def fake(tree_: Path, *args: str) -> subprocess.CompletedProcess[str]:
+            if args[0] == failing:
+                return subprocess.CompletedProcess(args, 1, "", "git said no")
+            return real(tree_, *args)
+
+        monkeypatch.setattr(wb, "_git", fake)
+        runner = HookRunner([(1, _baseline([_finding(2)]))])
+        reason = _settle(tree, runner)
+        assert reason is not None and "git said no" in reason
