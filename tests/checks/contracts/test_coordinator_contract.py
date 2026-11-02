@@ -72,3 +72,9 @@ def test_consumer_row_names_the_contract() -> None:
     arch = yaml.safe_load((_ROOT / "docs" / "contracts" / "instruction-architecture.yaml").read_text(encoding="utf-8"))
     consumers = next(v for v in arch.values() if isinstance(v, dict) and "repo_less_coordinator" in v)
     assert "coordinator.yaml" in consumers["repo_less_coordinator"]["notes"]
+
+
+def test_structure_bars_nested_doing_agents_but_allows_gates() -> None:
+    structure = " ".join(_DOC["roles"]["structure"].split())
+    assert "starts no planning or implementation agent of its own (Decision 229 cl.2)" in structure
+    assert "may run the repo's verdict gates and advisor consults as subagents" in structure
