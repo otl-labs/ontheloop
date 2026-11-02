@@ -918,16 +918,16 @@ child criteria; the self-review gap -- rec-4476.
 > human's own approval, and nothing is loosened to obtain green (Decision 235). Hub and spoke is
 > unchanged.
 
+> **Amended by Decision 241 (2026-11-02):** cl.2's later coordinator is Decision 241's deterministic engine
+> plus its bounded coordinator step, which writes graph state and never launches a persona. Hub and
+> spoke is unchanged.
+
 > **Update (2026-11-02):** operator clarification of cl.2's scope. "Personas never invoke personas"
 > binds the doing personas: no session, worker or persona starts a planning or implementation agent of
 > its own; the coordinator dispatches each. It does not bar a planning or build session from running
 > the repo's in-session verdict gates (decision-scout, plan-critique, code-review) or a read-only
 > advice consult as subagents, which gate until their persona flips (cl.4). After a flip, a session
 > runs that gate only as cl.4's outage fallback, so the end state is no nested personas.
-
-> **Amended by Decision 241 (2026-11-02):** cl.2's later coordinator is Decision 241's deterministic engine
-> plus its bounded coordinator step, which writes graph state and never launches a persona. Hub and
-> spoke is unchanged.
 
 ---
 
