@@ -1,0 +1,500 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "wording-check-gate-gaps"
+intent: >-
+  Let a plan whose approved words are sound pass the wording check (scripts/roadmap/plan_wording_check.py) in the two
+  shapes that fail it today for reasons the build itself resolves: a new governed contract whose evaluator check the
+  same plan's build creates (rec-4807), and words that shift a line .secrets.baseline tracks (rec-4809). Both are
+  settled mechanically and fail closed: nothing else is tolerated, no human override is added, and every other red stays
+  red. Folds in the pasted row's allowlist pragma (rec-4808) and two hardening recs on the same code (rec-4801,
+  rec-4800). Unblocks PLAN-north-star-tier-a (PR #1771) and PLAN-glossary-sweep, which wait on this gate.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-wording-check-gate-gaps.yaml
+phase: >-
+  ad_hoc_rec (soft-warn category; no tier_item claimed, so the Tier Item Freshness Gate is skipped). rec-4807 carries
+  the t4-36 tag because PLAN-north-star-tier-a (which creates T4.36) is the first plan it blocks.
+closes_criteria: []
+scope:
+  - file: scripts/roadmap/plan_wording_check.py
+    action: Modify
+    purpose: >-
+      Orchestration only; the new logic lives in the two sibling modules below. (1) `--plan P` (default
+      docs/plans/PLAN-<slug>.yaml in this checkout), loaded once with scripts.roadmap.plan_document.load; an unreadable
+      plan prints one note on stderr (stdout still starts with the WORDING-CHECK line) and means no pending evaluators
+      and round 1, never a FAIL by itself; any new run() parameter is optional and comes after runner, so existing
+      positional callers (tests/test_plan_decision_projection.py) keep working. (2) rec-4809:
+      .secrets.baseline joins _COMPANIONS; after the decisions-index settle and before --pre, call
+      wording_check_baseline.settle and turn a returned reason into a FAIL. (3) rec-4807: before --pre, compute
+      wording_check_pending.pending_pairs; after a red --pre with at least one pair, call wording_check_pending.attribute
+      (it decides admissibility and runs the stand-in sub-run in T through the existing Runner seam): None makes the
+      verdict PASS with pending_evaluators = the pair count; a reason makes it a FAIL carrying that reason. With no
+      pending pair a red --pre is a FAIL exactly as today. (4) Output for an attributed PASS: ` pending_evaluators=N` on
+      the WORDING-CHECK line, the line `fast tier red only on N plan-created evaluator(s); clean with them stood in`, one
+      `pending: docs/contracts/<name>.yaml evaluator <X> (the plan creates <file>)` line per pair, and
+      `pending_evaluators: N` on the row. (5) rec-4808: the printed row line ends with `  # pragma: allowlist secret`.
+      (6) rec-4801: MEASURE_TIMEOUT_S = 120 for the prose measurement and the hook, ATTRIBUTION_TIMEOUT_S = 600 for the
+      sub-run (the fast tier keeps 900); the row's round is 1 + the loaded plan's wording-check gate_rounds; the echo is
+      the run's FAIL lines, its "Failed checks:" block and its GATE-FAILURE markers (no substring "Error" match), capped
+      at the last 20 such lines as today, else the last 20 lines. A hook timeout's reason names the remedy for a cold
+      pre-commit environment (`bin/venv-python -m pre_commit install-hooks`, then re-run).
+    new_imports: [scripts.roadmap.plan_document, scripts.roadmap.wording_check_baseline, scripts.roadmap.wording_check_companions, scripts.roadmap.wording_check_pending]
+  - file: scripts/roadmap/wording_check_baseline.py
+    action: Create
+    purpose: >-
+      rec-4809's settle, a pure comparison plus one hook run. settle(tree, changed, sidecar_files, runner, timeout) ->
+      str | None: when HEAD has .secrets.baseline, restore it from HEAD (index and file, so a planner edit or an earlier
+      run's staging is discarded), run `env PRE_COMMIT_NO_CONCURRENCY=1 bin/venv-python -m pre_commit run
+      detect-secrets --files <changed paths that exist, sorted, minus .secrets.baseline and the .venv link>` with cwd T
+      (the pinned hook the build's commit runs; serial because parallel batches each rewrite the whole baseline and lose
+      each other's updates, rec-4828), then: hook exit 0 -> None; hook non-zero with the baseline unchanged -> the
+      reason "the detect-secrets hook rejects the placed words" with its last lines and the remedy (put `# pragma:
+      allowlist secret` on that line inside the approved words, which the operator re-approves, or reword); baseline
+      rewritten -> drift(HEAD json, T json, sidecar_files), and when that is empty, `git add .secrets.baseline` in T
+      (index only; the pinned hook refuses an unstaged modified baseline, so --pre's pre-commit run needs it staged),
+      then the same hook command once more, which must exit 0 (else the reason "the baseline did not settle" with its
+      last lines and the same pragma-or-reword remedy, since a new secret-shaped string beside a line shift surfaces
+      here), and None. drift(old, new, sidecar_files) ->
+      list[str] admits only a new generated_at, a finding's line_number, and a dropped finding or file entry; it names
+      each refused difference: another top-level key differs, a finding in T that equals no HEAD finding of its file
+      apart from line_number (an added finding; the pinned hook never adds one, so this is a hand edit), or a changed
+      entry for a file outside sidecar_files (so the build's secrets_baseline_regeneration trigger, evaluated on the
+      declared scope, always fires). Unparseable JSON is a refusal, never an exception.
+  - file: scripts/roadmap/wording_check_pending.py
+    action: Create
+    purpose: >-
+      rec-4807's derivation and attribution. pending_pairs(tree, sidecar_files, plan): for each sidecar file
+      docs/contracts/<name>.yaml (depth 1) whose T copy is a mapping with contract.class D and a string
+      contract.evaluator.check X, the pair (<name>.yaml, X, file) is pending when the plan's scope has a Create row
+      whose file starts with scripts/checks/ and is named X.py and T has no such file. Only Create rows count (Decision
+      168: an evaluator whose existing module would gain the basename, or one missing only a registration, stays FAIL).
+      attribute(tree, output, pairs, runner, timeout) -> str | None: the failed names are the checks of the run's gate
+      markers (src.turn_capture.markers.parse_markers, the format's owner; only entries whose source is gate count,
+      status and precommit markers are ignored); admissible only when they include validate_contract_drift (a pending
+      pair always reddens it, so a red without it cannot be the pairs') and are a subset of {validate_contract_drift,
+      pytest_diff}; the failing test files are the paths in the run's FAILED/ERROR summary
+      lines, matched with scripts.checks._pytest_diff._FAILED_SUMMARY_LINE_RE (the fast tier's own grammar; its
+      _attribute_failed_test_files is not reused because it matches against the checkout's runnable list, not T), the
+      part before "::", kept when it exists under tests/ in T; pytest_diff failing with no such file is a reason, never
+      "re-run everything". Then it runs `bin/venv-python -m scripts.roadmap.wording_check_pending --pending
+      <name>.yaml:<X> [...] -- <test files>` with cwd T: exit 0 -> None, anything else -> a reason echoing the
+      sub-run's failing lines. The tree-side CLI (zero pairs allowed, a control run; zero test files allowed, in which
+      case it runs no pytest at all and the drift verdict alone decides, so a drift-only red never collects the whole
+      suite): stand_in(pairs) is a context
+      manager that replaces scripts.checks.contracts._population.resolve_evaluator with a wrapper returning (True,
+      "stood in: the plan creates check <X>") for a listed (contract basename, evaluator.check) pair and delegating
+      every other call unchanged, restoring the original on exit and on exception; inside it, run
+      registry.resolve("validate_contract_drift") on T's real tree, print each label it appends, then, when test files
+      were given, pytest.main([*test files, "-m", "not integration", "-q", "--timeout", "60", "--timeout-method=thread",
+      f"--randomly-seed={_pytest_diff._PYTEST_RANDOMLY_SEED}"]) in process, serial, mirroring the fast tier's per-test
+      timeout and pinned seed (scripts/checks/_pytest_diff.py _PYTEST_FLAGS) except `-n` (xdist workers would not see
+      the stand-in); no `-p no:cacheprovider`, which the `--randomly-seed=last` addopt rejects. Exit 0 only when
+      the drift check appends nothing and pytest (when run) returns 0; 1 otherwise; 2 on a malformed argument. The
+      scripts.checks imports are function-scope, so importing this module from the checkout imports no check. Never
+      imported by scripts/checks, scripts/validate.py or any workflow; never registered.
+    new_imports: [scripts.checks._pytest_diff, scripts.checks.contracts._population, scripts.checks.registry, src.turn_capture.markers]
+  - file: scripts/roadmap/plan_gate_rounds.py
+    action: Modify
+    purpose: >-
+      GateRound gains pending_evaluators: int | None (ge=1), allowed only on a wording-check row whose verdict is PASS;
+      a count, never a per-pair record (Decision 87 as amended by 205). PASS/FAIL vocabulary unchanged, so
+      validate_plan_documents reads an attributed PASS like any PASS. No new import.
+  - file: scripts/checks/roadmap/validate_plan_documents.py
+    action: Modify
+    purpose: >-
+      rec-4800: _changed_sidecar_digest keeps its `str | None` contract; _wording_check_gaps catches ApprovedTextError
+      around its call and turns an unreadable or malformed sidecar into the gap "docs/plans/approved/<slug>.yaml cannot
+      be read: <reason>", routed like every wording-check gap (FAIL on the plan
+      PR, WARN elsewhere; never an exception, never a silent pass, Decision 163); the no-merge-base advisory prints only
+      when some schema_version >= 5 plan has a sidecar file in the tree (this repository has sidecars, so here it still
+      prints when no merge base resolves; the scoping quiets fixtures and sidecar-free trees, rec-4800's literal ask).
+      No new module edge: _wording_check_gaps gains its own function-scope import of approved_text (as
+      _changed_sidecar_digest has) to name ApprovedTextError, and it also catches UnicodeDecodeError, which
+      approved_text's reader does not wrap, so a non-UTF-8 sidecar is a gap too.
+  - file: tests/test_plan_wording_check.py
+    action: Modify
+    purpose: >-
+      Orchestration nodes with FakeRunner: TestPlanCreatedEvaluator (an attributed PASS prints the count, the
+      explanatory line, the pending lines and the row field; a reason from attribute is a FAIL; no pair keeps today's
+      FAIL), TestBaselineCompanion (.secrets.baseline is admitted by the scope rule; a settle reason is a FAIL),
+      TestRender::test_printed_row_commits_past_detect_secrets (rec-4808) and TestHardening (rec-4801):
+      test_measurement_has_its_own_shorter_timeout (the prose measurement and the hook get 120 s),
+      test_attribution_has_its_own_timeout (the sub-run gets 600 s), test_round_comes_from_the_parsed_plan, and
+      test_echo_keeps_gate_markers_and_drops_noise (output holding a "Failed checks:" block, a GATE-FAILURE marker and an
+      unrelated line containing "Error": the block and marker are echoed, the noise line is not; red on main, where the
+      substring rule keeps it). test_the_row_round_follows_the_plan_record is replaced by
+      test_round_comes_from_the_parsed_plan (an unloadable plan now means round 1, not the regex count + 1); record it
+      as a planned-change weakening_disposition citing the rec-4801 acceptance criterion. test_a_fourth_companion_is_not_allowed
+      is renamed test_a_fifth_companion_is_not_allowed with its assertion unchanged (a refactor disposition). Relief in
+      execution step 4 when this file would pass 500 SLOC.
+  - file: tests/test_wording_check_baseline.py
+    action: Create
+    purpose: >-
+      The mapped test home of wording_check_baseline.py (full coverage from this file): drift admits generated_at,
+      line_number and dropped findings and names each refused shape (added finding, other key, non-sidecar file,
+      unparseable JSON); settle with a fake runner covers the serial hook command, hook exit 0, rejection with the
+      baseline untouched (reason carries the pragma remedy), a rewrite that is admitted (the baseline is staged in a real
+      temporary git repository and the confirming run is clean), an admitted rewrite whose confirming run is red (the
+      did-not-settle reason), one that is refused (left unstaged), and the restore of a planner-edited baseline.
+      Baseline-shaped fixtures use low-entropy placeholder values (for example "0" * 40 built at run time), never
+      literal hex, so this file needs no .secrets.baseline entry; an unavoidable literal carries an inline
+      `# pragma: allowlist secret`.
+  - file: tests/test_wording_check_pending.py
+    action: Create
+    purpose: >-
+      The mapped test home of wording_check_pending.py (full coverage from this file): pending_pairs over Create, Modify
+      and absent rows, an existing module, a non-D or malformed contract and a nested path; attribute's admissibility
+      (a third gate marker, no gate marker, a status marker beside the two admitted gate markers, pytest_diff with no
+      FAILED/ERROR file, a sub-run red -> reasons; drift-only and drift-plus-tests -> the sub-run command it builds);
+      stand_in resolves exactly the listed pair, delegates the rest and restores on exit and on exception; with the REAL
+      validate_contract_drift over a fixture contracts tree (the drift tests' own fixture pattern) holding a new Class D
+      file whose evaluator is unregistered, the label appears without the stand-in and not with it; the CLI's exit
+      codes with an injected test runner, including that zero test files never call the test runner; and the isolation pin:
+      no file under scripts/checks/, nor scripts/validate.py, nor .github/workflows/ names wording_check_pending
+      (Decision 235 clause 5 NOTE).
+  - file: tests/test_plan_gate_rounds.py
+    action: Modify
+    purpose: pending_evaluators accepted on a wording-check PASS row; refused on FAIL, on other gates and below 1.
+  - file: tests/checks/roadmap/test_validate_plan_documents.py
+    action: Modify
+    purpose: >-
+      rec-4800's two nodes in TestWordingCheckRecord (about 20 lines; 470 of 500 SLOC on d9de5151, so the relief in
+      execution step 5 applies when the build's main has grown it). The existing
+      test_an_unresolved_merge_base_warns_once_and_requires_nothing asserts one advisory with no sidecar in the tree;
+      under rec-4800 its fixture gains a sidecar file so it still asserts exactly one advisory (record it as a
+      planned-change weakening_disposition citing rec-4800's acceptance criterion). Shard kept:
+      wording-check-row-required-on-plan-pr (it runs the whole class, new nodes included).
+  - file: tests/checks/roadmap/test_validate_plan_documents_schema_floor.py
+    action: Create
+    purpose: >-
+      Conditional relief only (execution step 5): TestSchemaVersionFloorSplit moved verbatim when the parent file
+      would pass 500 SLOC; not created otherwise.
+  - file: scripts/roadmap/wording_check_companions.py
+    action: Create
+    purpose: >-
+      Conditional relief only (execution step 4, Decision 128): when tests/test_plan_wording_check.py would pass 500
+      SLOC, the existing companion settle (_keep_marked_lines, _lower_prose_budgets and the decisions-index settle) moves
+      out of plan_wording_check.py unchanged in behaviour, and plan_wording_check imports it; not created otherwise.
+  - file: tests/test_wording_check_companions.py
+    action: Create
+    purpose: >-
+      Conditional relief only (execution step 4): the mapped test home of wording_check_companions.py, holding
+      TestCompanions moved verbatim from tests/test_plan_wording_check.py (a refactor weakening_disposition), extended
+      only as far as full coverage of the moved code needs; it imports the shared repo and tree fixtures, FakeRunner,
+      _run, _place and _surfaces from tests/test_plan_wording_check.py (no conftest is in scope); not created otherwise.
+implementation_declared: false
+bundled_recommendations: [rec-4807, rec-4809, rec-4808, rec-4801, rec-4800]
+followon_recs: [rec-4828]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - >-
+    rec-4807: a sidecar that creates a Class D contract whose evaluator check the plan's scope Creates PASSes the
+    wording check, with pending_evaluators recorded, when the only red is that evaluator (the drift check and the
+    failing test files pass with exactly that pair stood in); it stays FAIL when any other check fails, when a failure
+    persists with the stand-in, when no failing test file can be named, when the evaluator is a Modify row or absent
+    from scope, or when its module already exists. This is a named tolerance of the gate (Decision 235 clause 1); the
+    build's own --pre still runs validate_contract_drift unchanged. VP steps 1, 6.
+  - >-
+    rec-4809: the detect-secrets hook's rewrite of .secrets.baseline is settled completely (also when several baseline
+    files shift) and staged as the build commits it when the only differences are generated_at, line numbers and
+    dropped findings of sidecar files; an added finding,
+    another key's change, a non-sidecar file's change, or the hook rejecting the placed words is a FAIL with its
+    reason, and the remedy for a secret-shaped string is an inline pragma inside the approved words. VP steps 2, 7.
+  - "rec-4808: the printed gate row ends with the inline allowlist pragma and parses as a valid GateRound. VP step 3."
+  - >-
+    rec-4801: the prose measurement and the hook run under a 120 s timeout and the attribution sub-run under 600 s, the
+    row's round comes from the parsed plan, and the echo keeps the run's FAIL lines, "Failed checks:" block and
+    GATE-FAILURE markers while dropping other lines that merely contain "Error". rec-4800: a malformed sidecar is a
+    reported gap, never an exception, and the no-merge-base advisory prints only when a sidecar needs checking. VP
+    step 4.
+  - >-
+    The stand-in is reachable only from the wording check's sub-run: nothing under scripts/checks/, scripts/validate.py
+    or .github/workflows/ names it, and the sub-run changes no file in the scratch tree. VP steps 1, 6.
+  - Every changed test file's whole suite passes (VP step 5), and each bundled rec is closed after merge (VP step 10).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-4807's acceptance nodes and the stand-in's own suite.
+    command: >-
+      bin/venv-python -m pytest -q tests/test_plan_wording_check.py::TestPlanCreatedEvaluator
+      tests/test_wording_check_pending.py
+    expected: exit 0; every test passes. Red before (class and module absent on main).
+    fix_if: Fix the tool or the stand-in, never the assertion.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: graduate
+    graduation_check_id: wording-check-plan-created-evaluator
+  - step: 2
+    phase: pre-deploy
+    action: rec-4809's acceptance nodes and the settle's own suite.
+    command: >-
+      bin/venv-python -m pytest -q tests/test_plan_wording_check.py::TestBaselineCompanion
+      tests/test_wording_check_baseline.py
+    expected: exit 0; every test passes. Red before (class and module absent on main).
+    fix_if: Fix the settle step, never the assertion.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: graduate
+    graduation_check_id: wording-check-baseline-companion
+  - step: 3
+    phase: pre-deploy
+    action: rec-4808's acceptance node.
+    command: >-
+      bin/venv-python -m pytest -q
+      tests/test_plan_wording_check.py::TestRender::test_printed_row_commits_past_detect_secrets
+    expected: exit 0; the listed node passes. Red before (class absent on main).
+    fix_if: Fix _render, never the assertion.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: waive
+    graduation_waiver_reason: This is rec-4808's filed acceptance command verbatim, which ci.yml's trailer-acceptance job executes at the squash merge, and the node runs as an ordinary test in every full tier; a registry row would add no standing assertion beyond that.
+  - step: 4
+    phase: pre-deploy
+    action: rec-4801's and rec-4800's acceptance nodes (each rec's filed acceptance command) plus the echo and attribution-timeout nodes.
+    command: >-
+      bin/venv-python -m pytest -q
+      tests/test_plan_wording_check.py::TestHardening::test_measurement_has_its_own_shorter_timeout
+      tests/test_plan_wording_check.py::TestHardening::test_round_comes_from_the_parsed_plan
+      tests/test_plan_wording_check.py::TestHardening::test_attribution_has_its_own_timeout
+      tests/test_plan_wording_check.py::TestHardening::test_echo_keeps_gate_markers_and_drops_noise
+      tests/checks/roadmap/test_validate_plan_documents.py::TestWordingCheckRecord::test_a_malformed_sidecar_is_a_gap_not_an_exception
+      tests/checks/roadmap/test_validate_plan_documents.py::TestWordingCheckRecord::test_no_merge_base_warn_only_when_a_sidecar_needs_checking
+    expected: exit 0; every listed node passes (the count is not pinned, so a parametrized node stays valid). Red before (nodes absent on main).
+    fix_if: Fix the tool or the validator, never the assertion.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: waive
+    graduation_waiver_reason: Four of these nodes are rec-4801's and rec-4800's filed acceptance commands, which ci.yml's trailer-acceptance job executes at the squash merge; the two added hardening nodes sit in the same TestHardening class as one-off pins of this change, and all six run as ordinary tests in every full tier; a registry row would add no standing assertion beyond that.
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      Whole suites of every changed or created test file, plus tests/test_plan_decision_projection.py (its registry
+      shard wording-check-reports-overflowing-annotation guards plan_wording_check.run and reads the echo). A
+      conditional relief file from execution step 4 or 5, when created, runs in VP step 9's full tier.
+    command: >-
+      bin/venv-python -m pytest -q tests/test_plan_wording_check.py tests/test_wording_check_baseline.py
+      tests/test_wording_check_pending.py tests/test_plan_gate_rounds.py tests/roadmap/plan_document/test_gate_rounds.py
+      tests/checks/roadmap/test_validate_plan_documents.py tests/test_plan_decision_projection.py
+    expected: exit 0; every test passes and none fails (the count is not pinned).
+    fix_if: Fix the code, never the assertion.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      A whole-suite re-run that duplicates the graduated VP 1 and 2 shards and the existing
+      wording-check-row-required-on-plan-pr and wording-check-reports-overflowing-annotation shards; a registry row
+      would add no new assertion.
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      Run after the build's modules are committed at HEAD (T is a worktree of HEAD). The stand-in against the real tree
+      and the real drift check: a scratch worktree of HEAD gains a new Class D
+      contract whose evaluator is unregistered; the drift tests fail without the stand-in, pass with it, and the two
+      sub-runs change no file in the worktree.
+    command: >-
+      T=$(mktemp -d)/t && git worktree add -q --detach "$T" HEAD && ln -s "$PWD/.venv" "$T/.venv" &&
+      printf 'contract:\n  id: zz-wording-check-probe\n  class: D\n  contract_version: 1\n  status: ratified\n  ratified_via: "PLAN-wording-check-gate-gaps"\n  description: probe\n  subject: zz-wording-check-probe\n  evaluator:\n    check: validate_zz_wording_check_probe\namendment_log:\n  - {date: "2026-11-02", semantic_break: false, change_class: field_add, summary: probe}\n' > "$T/docs/contracts/zz-wording-check-probe.yaml" &&
+      (cd "$T" && S0=$(git status --porcelain) && { bin/venv-python -m scripts.roadmap.wording_check_pending --
+      tests/checks/contracts/validate_contract_drift/test_real_population.py > ../red.txt 2>&1; [ $? -eq 1 ]; } &&
+      grep -q "evaluator does not resolve" ../red.txt &&
+      bin/venv-python -m scripts.roadmap.wording_check_pending --pending
+      zz-wording-check-probe.yaml:validate_zz_wording_check_probe --
+      tests/checks/contracts/validate_contract_drift/test_real_population.py > /dev/null 2>&1 &&
+      [ "$S0" = "$(git status --porcelain)" ]) && echo STAND-IN-OK;
+      rc=$?; git worktree remove --force "$T"; exit $rc
+    expected: >-
+      exit 0; prints STAND-IN-OK (exit 1 and the evaluator label without the pair, green with it, worktree status
+      unchanged). About 3 minutes (two serial drift-test runs).
+    fix_if: >-
+      "No module named scripts.roadmap.wording_check_pending" in ../red.txt means the build is not committed at HEAD
+      (commit, then re-run). An exit other than 1 without the pair means the CLI crashed or refused its arguments (read
+      ../red.txt). Green
+      without the pair means the probe contract is not new or not Class D (check its shape against
+      docs/contracts/contract-population.yaml); red with the pair means the stand-in does not reach the call site (the
+      drift check must call _population.resolve_evaluator through the module attribute); a status change means the
+      sub-run writes into the tree (route the write to a temporary directory).
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      The baseline settle with the real pinned hook: a scratch worktree of HEAD gains one comment line at the top of
+      two .secrets.baseline keys, iam-simulate-fixture.yaml and project-configuration.yaml under docs/contracts, and the
+      settle is given them plus ten docs/contracts files that sort between them (so pre-commit splits them across
+      batches on a multi-core runner); both files' findings move, the baseline is staged, and no refusal is raised.
+    command: >-
+      T=$(mktemp -d)/t && git worktree add -q --detach "$T" HEAD && ln -s "$PWD/.venv" "$T/.venv" &&
+      sed -i '1i # probe line' "$T/docs/contracts/iam-simulate-fixture.yaml" "$T/docs/contracts/project-configuration.yaml" &&
+      bin/venv-python -c "import json, subprocess, sys; from pathlib import Path; from scripts.roadmap import plan_wording_check as p, wording_check_baseline as b; t = Path(sys.argv[1]); c = 'docs/contracts/'; keys = [c + 'iam-simulate-fixture.yaml', c + 'project-configuration.yaml']; fill = sorted(c + x.name for x in (t / c).glob('*.yaml') if keys[0] < c + x.name < keys[1])[:10]; reason = b.settle(t, set(keys + fill), set(keys), p.default_runner, 120); assert reason is None, reason; git = lambda *a: subprocess.run(['git', *a], cwd=t, capture_output=True, text=True); old = json.loads(git('show', 'HEAD:.secrets.baseline').stdout); new = json.loads((t / '.secrets.baseline').read_text()); assert all([e['line_number'] + 1 for e in old['results'][k]] == [e['line_number'] for e in new['results'][k]] for k in keys); assert '.secrets.baseline' in git('diff', '--cached', '--name-only').stdout.split(); print('BASELINE-SETTLED')" "$T";
+      rc=$?; git worktree remove --force "$T"; exit $rc
+    expected: >-
+      exit 0; prints BASELINE-SETTLED (every tracked finding in both files moved down one line, the settle and its
+      confirming hook run raised no reason, and the baseline is staged).
+    fix_if: >-
+      A reason means the comparison refuses a difference the hook legitimately makes, or the baseline did not settle;
+      read it and fix the settle, never the admitted set beyond line_number, generated_at and dropped findings. One
+      file's findings unmoved means the hook ran in parallel batches (the serial environment variable is missing). A
+      hook that cannot start means pre-commit's environment is missing (run `bin/venv-python -m pre_commit
+      install-hooks`).
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: pre-deploy
+    action: Lint and format on the changed Python files (a conditional relief file, when created, is linted by VP 9's full tier).
+    command: >-
+      bin/venv-python -m ruff check scripts/roadmap scripts/checks/roadmap/validate_plan_documents.py
+      tests/test_plan_wording_check.py tests/test_wording_check_baseline.py tests/test_wording_check_pending.py
+      tests/test_plan_gate_rounds.py tests/checks/roadmap/ && bin/venv-python -m ruff format --check scripts/roadmap
+      scripts/checks/roadmap/validate_plan_documents.py tests/test_plan_wording_check.py tests/test_wording_check_baseline.py
+      tests/test_wording_check_pending.py tests/test_plan_gate_rounds.py tests/checks/roadmap/
+    expected: exit 0.
+    fix_if: Run ruff format and fix lint.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: pre-deploy
+    action: >-
+      Discharge the handoff obligation with a full-tier run to completion, run as its own backgrounded run with a 2 h
+      limit from the top-level session.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: >-
+      The full tier completes and validation_result --verify-head exits 0, attesting HEAD's tree (the verdict, never
+      the backgrounded run's own exit status).
+    fix_if: >-
+      A failure in scope is fixed on the branch; never skip a test, relax an assertion or add a baseline. A failure
+      outside scope becomes a rec via scripts.ops_data_portal (Decisions 55, 59).
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: post-deploy
+    action: Confirm the five bundled recs are closed (the squash-merge Resolves trailer closes them).
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader;
+      ids=['rec-4807','rec-4809','rec-4808','rec-4801','rec-4800'];
+      r,m=fetch_recs_by_ids(make_reader(profile='agent_platform'), ids); print(sorted((x['id'], x['status']) for x in r), m)"
+    expected: Prints all five with status closed and an empty missing list.
+    fix_if: Any still open - read the ci.yml closure job log and close it with update_rec (Decision 84 I-4).
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/roadmap/plan_wording_check.py
+    behavior: An attributed red becomes a recorded PASS with its count, and every other red stays FAIL.
+    verification_step: 1
+    test_selector: tests/test_plan_wording_check.py::TestPlanCreatedEvaluator
+    red_green_expectation: red before (class absent on main), green after.
+  - source: scripts/roadmap/plan_wording_check.py
+    behavior: .secrets.baseline is a companion and a settle refusal is a FAIL.
+    verification_step: 2
+    test_selector: tests/test_plan_wording_check.py::TestBaselineCompanion
+    red_green_expectation: red before (class absent on main), green after.
+  - source: scripts/roadmap/plan_wording_check.py
+    behavior: The printed row carries the allowlist pragma and parses as a GateRound.
+    verification_step: 3
+    test_selector: tests/test_plan_wording_check.py::TestRender::test_printed_row_commits_past_detect_secrets
+    red_green_expectation: red before (node absent on main), green after.
+  - source: scripts/roadmap/plan_wording_check.py
+    behavior: rec-4801 hardening - separate measurement and attribution timeouts, the round from the parsed plan, and an echo of FAIL lines, the failed-checks block and gate markers without substring noise.
+    verification_step: 4
+    test_selector: tests/test_plan_wording_check.py::TestHardening::test_echo_keeps_gate_markers_and_drops_noise
+    red_green_expectation: red before (node absent on main, and it fails under the substring rule), green after.
+  - source: scripts/roadmap/wording_check_pending.py
+    behavior: Derives only plan-created pairs, admits only drift and pytest reds, stands in exactly the listed pairs, and is unreachable from checks, validate and CI.
+    verification_step: 1
+    test_selector: tests/test_wording_check_pending.py
+    red_green_expectation: red before (module absent on main), green after.
+  - source: scripts/roadmap/wording_check_baseline.py
+    behavior: Admits only line numbers, generated_at and dropped findings of sidecar files, stages an admitted rewrite, and names every refusal.
+    verification_step: 2
+    test_selector: tests/test_wording_check_baseline.py
+    red_green_expectation: red before (module absent on main), green after.
+  - source: scripts/roadmap/plan_gate_rounds.py
+    behavior: pending_evaluators only on a wording-check PASS row.
+    verification_step: 5
+    test_selector: tests/test_plan_gate_rounds.py
+    red_green_expectation: red before (field refused by extra=forbid on main), green after.
+  - source: scripts/checks/roadmap/validate_plan_documents.py
+    behavior: A malformed sidecar is a reported gap, never an exception.
+    verification_step: 4
+    test_selector: tests/checks/roadmap/test_validate_plan_documents.py::TestWordingCheckRecord::test_a_malformed_sidecar_is_a_gap_not_an_exception
+    red_green_expectation: red before (the sidecar error escapes the check on main), green after.
+  - source: scripts/checks/roadmap/validate_plan_documents.py
+    behavior: The no-merge-base advisory prints only when some schema_version >= 5 plan has a sidecar file in the tree.
+    verification_step: 4
+    test_selector: tests/checks/roadmap/test_validate_plan_documents.py::TestWordingCheckRecord::test_no_merge_base_warn_only_when_a_sidecar_needs_checking
+    red_green_expectation: red before (node absent; main prints the advisory with no sidecar), green after.
+  - source: scripts/roadmap/wording_check_companions.py
+    behavior: Conditional relief only - the existing companion settle moved unchanged out of plan_wording_check.py.
+    verification_step: 5
+    test_selector: tests/test_plan_wording_check.py
+    waiver_reason: >-
+      Created only when execution step 4's relief applies, as a behaviour-preserving move; TestCompanions moves
+      verbatim with it to its mapped home, whose full-coverage check and VP step 9's full tier prove the move, and VP
+      step 5 keeps the orchestration suite that drives it green.
+constraints:
+  - >-
+    Nothing new runs in CI, and no production check changes: validate_contract_drift, the detect-secrets hook and the
+    plan-PR check keep their rules; the stand-in lives only in the wording check's sub-run (Decisions 168, 226, 235).
+  - >-
+    Fail closed: only the two named shapes are settled; any other red, an unparseable run, or a refused baseline
+    difference is a FAIL with its reason. No human override is added (Decision 163).
+  - No governed contract, Decision, skill, AGENTS.md or CLAUDE.md text changes; no sidecar.
+  - No SLOC or prose budget raise (Decision 128); each new module and test file stays under 500 SLOC.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Origin: Benjamin chose 'a' (one planning thread for rec-4807 and rec-4809), 2026-11-02 13:35Z; alignment sign-off 'write the plan, I agree with all recommendations' 2026-11-02 14:36Z (Q1 A, Q2 narrow, Q3 bundle), given on the step-6b presentation (/mnt/project-files/rec-4807-4809/step6b-presentation.md) whose 'Named tolerances' section names both tolerances acceptance_criteria carries (Decision 235 clause 1)."
+  - "Decision-scout r1 FLAGS_FOUND (NOTE 235 cl.5 floor; adopted: tolerances named in acceptance, isolation pin, pragma only in approved words, new secret stays FAIL). Decisions triaged: 192 of 192. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. CITE: 168, 181, 163, 59, 87; RELATED: 73, 135, 170, 104, 55, 226, 229, 128, 85, 201, 159."
+  - "Reproduced on main d9de5151 with the unchanged tool: the north-star sidecar (digest b22d484c) fails validate_contract_drift (one evaluator label) and three drift tests in two files (a different file set from the 2026-11-01 record); the glossary-sweep sidecar (e9e94c00) fails only precommit_changed (baseline line 32 -> 33 plus generated_at)."
+  - "Feasibility probe (2026-11-02, scratch tree, outside the repository): with only (north-star.yaml, validate_north_star) stood in, validate_contract_drift returned [] and the two failing drift files passed 14 of 14 in 86 s; without it, the same label and 3 failed. A settled but unstaged baseline still fails the hook ('Your baseline file is unstaged'), hence the staging step."
+  - "Fable consult 2026-11-02 (read-only, blind; /mnt/project-files/rec-4807-4809/ADVICE.md) recommended A narrowed, PASS plus a count, the pinned hook with (i)+(ii) admitted and new secrets FAIL, the one-line pragma, and a sibling module run inside the tree; its run-free plan-PR re-derivation of the count is not taken: the count is a run fact for the reader, and the build's own --pre runs the real evaluator, so a second derivation in the plan-PR check (whose test file is at 470 of 500 SLOC) adds cost without closing a gap."
+  - "pre-commit runs the detect-secrets hook in parallel batches that each rewrite the whole baseline, so updates are lost (reproduced 2026-11-02: two shifted baseline files, one kept by default, both with PRE_COMMIT_NO_CONCURRENCY=1). The settle runs it serially and confirms with a second run; the source fix (require_serial on the hook) is rec-4828, out of scope here."
+  - "Residual, accepted: a test that flakes red in --pre and passes in the attribution sub-run reads as attributed; bounded because the build's own --pre runs it again. Also accepted: a scope edit after the wording check that drops an evaluator's Create row leaves the digest-keyed PASS valid (nothing re-derives pending_evaluators), so the mismatch surfaces only as the build's --pre red and a plan amendment."
+  - "--pre writes no structured result (validation_result.write_completed runs only on the full tier), so attribution reads the GATE-FAILURE markers and pytest's summary lines; the build's Decision 170 record is not available to it."
+  - "A .secrets.baseline change escalates --pre's pre-commit run to --all-files (scripts/checks/_scaffolding.py:101-134); the build does the same, so the rehearsal keeps that cost."
+  - "The implement PR will surface weakening candidates for edited or moved assertions in the existing test files (tests/test_plan_wording_check.py, tests/checks/roadmap/test_validate_plan_documents.py, and any relief move; Decision 181); record each as the refactor or planned-change disposition its scope row names."
+  - "Unbuilt plans on the same files: PLAN-work-graph-edge-model edits scripts/checks/roadmap/validate_plan_documents.py and its test; the second to build rebases."
+  - "Downstream: after merge the north-star and glossary-sweep planning threads re-run their wording checks (the north-star tree also needs its planned S8 raise placed); a PASS there is the end-to-end proof, owned by those threads."
+  - "fork: rec-4807 approach | chosen: A, mechanical attribution with a stand-in inside the scratch tree (Benjamin, 2026-11-02 14:36Z, all recommendations accepted) | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: this plan scope and acceptance_criteria"
+  - "fork: rec-4809 baseline admission | chosen: line numbers, generated_at and dropped findings of sidecar files; a new secret-shaped string FAILs (Benjamin, 2026-11-02 14:36Z, all recommendations accepted) | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: this plan scope"
+  - "fork: bundle rec-4801 and rec-4800 | chosen: bundle (Benjamin, 2026-11-02 14:36Z, all recommendations accepted) | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: bundled_recommendations"
+  - "fork: how an attributed PASS is recorded | chosen: verdict PASS plus a pending_evaluators count | class: consistency-only | precedent: Decision 87 (as amended by Decision 205, gate rows are counts and run facts) | precedent_kind: decision | reversible: yes | persisted: scripts/roadmap/plan_gate_rounds.py"
+  - "fork: settle the baseline with the pinned hook or a Python re-implementation | chosen: the pinned hook | class: consistency-only | precedent: docs/contracts/implement-scope-boundary.yaml#sanction_rows.secrets_baseline_regeneration (the build commits the hook's own rewrite) | precedent_kind: contract | reversible: yes | persisted: scripts/roadmap/wording_check_baseline.py"
+  - "fork: rec-4808 pragma form | chosen: the one-line row ends with the inline pragma | class: consistency-only | precedent: Decision 235 (the secret-scan floor is never loosened, which rules out a scanner filter; the row keeps its shape) | precedent_kind: decision | reversible: yes | persisted: scripts/roadmap/plan_wording_check.py"
+  - "fork: where the new logic lives | chosen: two sibling modules under scripts/roadmap with their own test homes | class: consistency-only | precedent: Decision 128 (decompose by default) | precedent_kind: decision | reversible: yes | persisted: this plan scope"
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 8}
+  - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 10}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 10}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections (168, 181, 163, 59, 87, 235)
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    scripts/roadmap/plan_gate_rounds.py and tests/test_plan_gate_rounds.py: the pending_evaluators field and its rules
+    (VP 5).
+  - >-
+    scripts/roadmap/wording_check_baseline.py and tests/test_wording_check_baseline.py: drift, then settle (VP 2, 7).
+  - >-
+    scripts/roadmap/wording_check_pending.py and tests/test_wording_check_pending.py: pending_pairs, the stand-in and
+    its CLI, then attribute (VP 1, 6).
+  - >-
+    scripts/roadmap/plan_wording_check.py and tests/test_plan_wording_check.py: --plan, the baseline companion, pending
+    evaluators and attribution, the pragma'd row, and the hardening, in that order (VP 1-4). Relief when needed:
+    measure tests/test_plan_wording_check.py as the new nodes land; if it would pass 500 SLOC, first move the
+    companion settle into scripts/roadmap/wording_check_companions.py and TestCompanions into
+    tests/test_wording_check_companions.py (both conditional scope rows), recorded as a refactor weakening_disposition.
+  - >-
+    scripts/checks/roadmap/validate_plan_documents.py and its test file, rec-4800 (VP 4). Relief first when needed:
+    measure tests/checks/roadmap/test_validate_plan_documents.py on the build's main; if the two new nodes would take it
+    past 500 SLOC, move TestSchemaVersionFloorSplit verbatim into
+    tests/checks/roadmap/test_validate_plan_documents_schema_floor.py, importing the shared _plan, _validate and
+    _FIXTURE_NAME helpers from the parent test module (no conftest is in scope), recorded as a refactor
+    weakening_disposition.
+  - Execute Verification Plan -- run each step; loop until pass; on an unrecoverable failure stop and RCA (Decision 55)
+  - "Report: what was implemented, verification results"
+work_areas: []
+rollback: Revert the implement PR; the tool returns to its #1781 behaviour and no stored data changes.
