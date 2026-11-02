@@ -40,7 +40,7 @@ scope:
       drift_detected_at <= pending_gated.routed_at; a stale_gated_approval red); a non-NoSuchKey read error,
       an unparseable record, or a missing or malformed timestamp on a drift red prints true. The CLI takes the
       read's rc, stdout and stderr (NoSuchKey is recognised from stderr, as the prior_status step does at
-      terraform-drift.yml:200-212), so an unclassified read error is never treated as absent.
+      terraform-drift.yml:167-187), so an unclassified read error is never treated as absent.
   - file: tests/test_convergence_classify.py
     action: Modify
     purpose: >-
@@ -85,21 +85,54 @@ scope:
   - file: .github/workflows/terraform-apply-sandbox.yml
     action: Modify
     purpose: >-
-      gated-apply job: a drift-guard step after apply and before the record writer reads the record (passing
-      the read's rc, stdout and stderr to the delegate) and runs scripts.ci.convergence_classify --drift-guard. The writer is wired
-      fail-closed, refused set to steps.apply.outcome == 'success' && steps.drift_guard.outputs.refused !=
-      'false', so an erroring or skipped guard can only block a green write, never a red one (Decision 92 pt
-      2). The comment at :1012-1018 ("the record cannot go red ... while this job holds the group") is
-      corrected: the drift workflow is outside that group. The wake comment step reports a refusal through an
-      env-only change (APPLY_OUTCOME set to 'refused' when steps.drift_guard.outputs.refused != 'false'; env
-      lines are not R3 run-body lines) so it never says "converged GREEN" when the record stayed red, and the
-      guard step emits a ::warning:: naming the acknowledge-and-retry heal.
+      The file sits at its 435-effective-line structural budget (config/structural_size_budgets.yaml), so the
+      guard is paid for by a decomposition, never a raise (AGENTS.md SLOC governance; Decision 128/166). (A)
+      Decomposition: both jobs' "Best-effort post-merge SHA->PR wake" run bodies (apply-sandbox, R3 13 lines;
+      gated-apply, R3 11 lines) become a single-line call to scripts.ci.apply_wake (--job apply-sandbox |
+      --job gated-apply); the inline ${{ github.sha }} moves to a HEAD_SHA env line; each step's name, if,
+      continue-on-error, GH_TOKEN, REPO, SHA, APPLY_OUTCOME and (apply-sandbox) ROUTED stay as they are. (B)
+      gated-apply job (starts about :666): a drift-guard step (id drift_guard) after apply and before the record
+      writer reads the record (passing the read's rc, stdout and stderr to the delegate) and runs
+      scripts.ci.convergence_classify --drift-guard. The writer is wired fail-closed, refused set to
+      steps.apply.outcome == 'success' && steps.drift_guard.outputs.refused != 'false', so an erroring or
+      skipped guard can only block a green write, never a red one (Decision 92 pt 2). The comment at about :833
+      ("the record cannot go red via the CD path while this job holds the group") is corrected: the drift
+      workflow is outside that group. The gated-apply wake step's APPLY_OUTCOME env becomes 'refused' when
+      steps.apply.outcome == 'success' and steps.drift_guard.outputs.refused != 'false' (else steps.apply.outcome),
+      and scripts.ci.apply_wake renders a refusal message, so the wake never says "converged GREEN" when the
+      record stayed red; the guard step emits a ::warning:: naming the acknowledge-and-retry heal. Net effective
+      lines must fall (measured at build time against main); the budget entry is lowered to the measured count.
+  - file: scripts/ci/apply_wake.py
+    action: Create
+    purpose: >-
+      Decomposition target for scope row 5 (A). Stdlib-only (the jobs install no dependencies) best-effort PR
+      wake: reads REPO, SHA, HEAD_SHA, APPLY_OUTCOME and ROUTED from the environment, resolves the PR through
+      `gh api repos/{REPO}/commits/{SHA}/pulls --jq '.[0].number'`, renders the message and posts it with
+      `gh pr comment`. --job apply-sandbox renders today's three messages (routed, converged GREEN, did NOT
+      converge) byte-for-byte; --job gated-apply renders today's two plus the new refused message (record left
+      red because a drift red postdates the route; heal is acknowledge-and-retry, Decision 183). Every gh error
+      or unresolved PR prints a line and exits 0 (best-effort, matching today's `|| true` and continue-on-error).
+      Under 120 SLOC.
+  - file: tests/test_apply_wake.py
+    action: Create
+    purpose: >-
+      Unit tests for scripts.ci.apply_wake with subprocess.run mocked (and Popen, tests/CLAUDE.md): each
+      job/outcome message equals the literal the workflow body carried before the move (byte-parity, one test
+      per message), the gated-apply refused message never contains "converged GREEN" and names
+      acknowledge-and-retry, no PR resolved posts nothing and exits 0, a gh failure exits 0.
+  - file: config/structural_size_budgets.yaml
+    action: Modify
+    purpose: >-
+      Lower the .github/workflows/terraform-apply-sandbox.yml entry from 435 to its measured post-change count (a
+      decrease is unrestricted; no raise-approved marker). If the measured count is not below 435, the
+      decomposition is incomplete: stop and amend the plan, never raise.
   - file: tests/test_gated_apply_drift_guard.py
     action: Create
     purpose: >-
       Structural mirror for the gated-apply wiring: the drift-guard step exists in gated-apply only, precedes
-      the writer, invokes the delegate, and feeds refused through the fail-closed expression; apply-sandbox,
-      apply-reconcile and gated-apply-reconcile writers are untouched.
+      the writer, invokes the delegate, and feeds refused through the fail-closed expression; the gated-apply
+      wake step's APPLY_OUTCOME carries 'refused' on a guard refusal and both wake steps call
+      scripts.ci.apply_wake; apply-sandbox, apply-reconcile and gated-apply-reconcile writers are untouched.
   - file: scripts/convergence_health/escalate.py
     action: Modify
     purpose: >-
@@ -121,7 +154,9 @@ scope:
     action: Modify
     purpose: >-
       r3_workflows: lower the handle-drift ceiling to its measured size (shrink-only; currently 116) and
-      register the new gated-apply drift-guard body at its measured size (at most 3 effective lines).
+      register the new gated-apply drift-guard body at its measured size (at most 3 effective lines); lower
+      both best-effort-post-merge-sha-pr-wake entries (apply-sandbox 13, gated-apply 11) to their measured
+      single-line size (scope row 5 (A); shrink-only).
   - file: docs/ROADMAP-PLATFORM.yaml
     action: Modify
     purpose: >-
@@ -154,6 +189,10 @@ acceptance_criteria:
   - >-
     The handle-drift inline body is at or below its old 116-line ceiling and the baseline only shrinks or
     gains the new drift-guard entry; validate --pre is green.
+  - >-
+    terraform-apply-sandbox.yml ends below 435 effective lines with its structural budget entry lowered to the
+    measured count (no raise); both wake steps call scripts.ci.apply_wake and every pre-existing wake message
+    is unchanged byte-for-byte.
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -225,6 +264,17 @@ verification_plan:
     hermetic: true
     graduation: graduate
     graduation_check_id: pending-codification-ticket-names-gated-change
+  - step: 11
+    phase: pre-deploy
+    action: The extracted wake delegate keeps every pre-existing message and adds the gated-apply refusal
+    command: bin/venv-python -m pytest tests/test_apply_wake.py -q
+    expected: Passes, including one byte-parity test per pre-existing message and the refused-message test.
+    fix_if: >-
+      A moved message differs from the literal the workflow body carried, the refused message says converged
+      GREEN, or a gh failure exits non-zero.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-file run of a test file this plan creates; the file is the standing guard.
   - step: 8
     phase: pre-deploy
     action: Fast presubmit, including the Decision 162 R3 body ceilings and the scope boundary
@@ -281,6 +331,18 @@ test_obligations:
     verification_step: 6
     test_selector: tests/test_gated_apply_drift_guard.py::test_gated_apply_writer_refused_fed_by_drift_guard
     red_green_expectation: red before (no guard step), green after
+  - source: scripts/ci/apply_wake.py
+    behavior: the wake delegate keeps today's messages and reports a drift-guard refusal instead of GREEN
+    verification_step: 11
+    test_selector: tests/test_apply_wake.py
+    red_green_expectation: red before (module absent), green after
+  - source: config/structural_size_budgets.yaml
+    behavior: the terraform-apply-sandbox.yml budget entry only decreases, to the measured count
+    verification_step: 8
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: >-
+      A ratchet data file with no behavior of its own; the structural size check and validate_sloc_budget_raises
+      (run by --pre) fail on an over-budget file or an unmarked increase.
   - source: scripts/convergence_health/escalate.py
     behavior: pending_codification context names the pending gated change when pending_gated is present
     verification_step: 7
@@ -363,7 +425,7 @@ constraints:
     re-frames a long wait as a process failure on the operator's authority. No Decision edit here; the
     operator may ratify a dated annotation interactively.
   - >-
-    SLOC (Decision 128, measured 2026-10-25): convergence_classify.py 258, test_convergence_classify.py 267,
+    SLOC (Decision 128, re-measured 2026-11-02, unchanged from 2026-10-25): convergence_classify.py 258, test_convergence_classify.py 267,
     escalate.py 230, test_escalate.py 473 (27 below 500, unregistered). The new escalate test must fit that
     headroom (one test); if it would not, amend scope to a new tests/convergence_health/ module before
     implementing (scope boundary), never a budget raise.
@@ -376,7 +438,6 @@ context:
     files a tf_drift rec embedding drift_run_url) and WARN D92 (approval must not green-over a drift red --
     folded: gated-apply drift guard). Decisions triaged: 163 of 163.
     Roadmap items intersected: 2; CONFLICT: 0; RELATED: 1
-  - "gates: decision-scout=FLAGS_FOUND (both WARNs folded); plan-critique=PROCEED after 2 rounds (r1 6f2e8a95 REVISE folded; r2 a41c7d93 PROCEED, M1-M6 folded); 2026-10-25 refresh is anchors/citations only, no r3"
   - >-
     Freshness (T2.47 at 2a374530 plus PR #1383): c2 open after #1383; files_in_scope exist; this plan adds
     escalate.py (c2's health half) and the gated-apply job, both outside the item's listed files; no CD.
@@ -389,7 +450,8 @@ context:
     error.
   - >-
     Defect evidence: PLAN-t2-47-recovery-semantics-closeout VP 8-9 (terraform-drift.yml :282/:290/:313 vs
-    :323 then; :285/:293/:316 vs :326 on main after #1440/#1562; replay pending_codification -> mark ->
+    :323 then; :257/:265/:288 vs :298 on main 05bb51dc, 2026-11-02 (classify, pending_codification branch,
+    its marked-path exit, then the pending_gated read the branch never reaches); replay pending_codification -> mark ->
     escalate -> red with pending_gated kept).
   - >-
     Writers that stay unguarded on purpose: apply-sandbox (push refuses on red; a non-routed ack-retry is the
@@ -400,10 +462,13 @@ context:
     CONVERGENCE_RED refusal file a ci_rca rec that blocks overlapping plans and dispatch, and all of them past
     its 4h SLO; the escalation rec closes that path for this red.
   - >-
-    Refresh 2026-10-25 (main d23f7036): the core targets, registry entry and write-convergence-record are
-    unchanged; c2 still open, same text. #1440/#1562 shifted anchors (drift.yml +3 below :70, apply-sandbox +24;
-    R3 ceilings 116/97 unchanged). Decisions 211-236 triaged: 226 and 235 folded as citations, 223 touches only
-    183 pt 4; no design, scope or verification change, so no r3.
+    Re-plan 2026-11-02 (main 05bb51dc): anchors re-measured; apply-sandbox.yml at 435 of 435 effective lines,
+    so scope row 5 (A) decomposes the two wake bodies into scripts/ci/apply_wake.py. Sibling
+    plans: neon-key-out-of-pr-plans landed (#1654; plan line and drift init retry already on main, no conflict),
+    trusted-plan-cutover PR 3 landed (#1736; speculative-plan job deleted, budget lowered to 435),
+    plan-review-digest-actionable-first landed (#1692); still unbuilt: secrets-to-ssm-retire (comment-only on
+    both workflows) and telemetry-producer-admission-plan-review-capture PR 3 (three new apply-sandbox steps;
+    the second to build re-measures the budget). ROADMAP-PLATFORM.yaml: own Decision 114/147 ceiling.
   - "fork: escalation rec scope | chosen: the escalated branch files the drift_run_url-carrying rec whether or not pending_gated is present (one code path; the no-marker escalation had the same Decision 190 pt 5 gap) | class: consistency-only | precedent: Decision 190 pt 5; Decision 142; scout WARN Decision 190 | precedent_kind: decision | reversible: yes | persisted: scope terraform-drift.yml"
   - "fork: guard placement | chosen: a gated-apply drift-guard step feeding the writer's existing refused input, not a write-convergence-record edit (its body sits at its 97 R3 ceiling) | class: consistency-only | precedent: Decision 162 R3; Decision 92 pt 2; scout WARN Decision 92 (guard preferred) | precedent_kind: decision | reversible: yes | persisted: scope terraform-apply-sandbox.yml"
 pre_implementation_checklist:
@@ -424,8 +489,13 @@ execution_steps:
     the routed commit in the out-of-band reason. Keep GH_TOKEN and pull-requests read for the lookup.
   - 'tests/test_terraform_drift_acceptance.py: rewrite the ordering and CARRY-2 assertions as scoped.'
   - >-
+    scripts/ci/apply_wake.py and tests/test_apply_wake.py first (pre-condition: the byte-parity tests pass
+    against the literals copied from main's two wake bodies); then swap both wake bodies for the delegate call
+    and confirm tests/checks/ci_guards/test_validate_masked_errexit_steps.py still passes unmodified.
+  - >-
     .github/workflows/terraform-apply-sandbox.yml: add the gated-apply drift-guard step before the writer and
-    feed its output into refused; tests/test_gated_apply_drift_guard.py.
+    feed its output into refused and the wake step's APPLY_OUTCOME; tests/test_gated_apply_drift_guard.py.
+    Post-condition: re-measure effective lines and lower config/structural_size_budgets.yaml's entry.
   - scripts/convergence_health/escalate.py and its test.
   - 'config/composite_action_body_baseline.yaml: measured shrink plus the one new entry.'
   - 'config/agent/verification_registry/entries/drift-pending-gated-narrative.yaml: re-point to the new dispatch.'
