@@ -5,7 +5,7 @@ the placed words against the sidecar, settles the companions the build would com
 decisions index), runs `scripts.validate --pre` in T and prints one verdict, its digest/base/selection facts and the
 gate_rounds row to paste. The row is recorded for the plan-PR check and the critic to read, never re-run.
 
-CLI: python -m scripts.roadmap.plan_wording_check --slug S --tree T [--sidecar P]
+CLI: python -m scripts.roadmap.plan_wording_check --slug S --tree T [--sidecar P] [--plan P]
 """
 
 from __future__ import annotations
@@ -20,11 +20,19 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from scripts.roadmap import approved_text
+from scripts.roadmap import approved_text, plan_document, wording_check_baseline, wording_check_pending
 
 ROOT = Path(__file__).resolve().parents[2]
 PRE_TIMEOUT_S = 900
-_COMPANIONS = ("config/prose_budgets.yaml", "config/structural_size_budgets.yaml", "docs/decisions-index.json")
+MEASURE_TIMEOUT_S = 120
+ATTRIBUTION_TIMEOUT_S = 600
+_BASELINE = wording_check_baseline.BASELINE
+_COMPANIONS = (
+    "config/prose_budgets.yaml",
+    "config/structural_size_budgets.yaml",
+    "docs/decisions-index.json",
+    _BASELINE,
+)
 _BUDGET_FILES = _COMPANIONS[:2]
 _INDEX = _COMPANIONS[2]
 _DECISIONS = "docs/DECISIONS.md"
@@ -48,6 +56,8 @@ class Result:
     base: str = ""
     selection: str = ""
     echo: str = ""
+    round: int = 1
+    pairs: tuple[wording_check_pending.Pair, ...] = ()
 
 
 def default_runner(cmd: list[str], cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -136,7 +146,7 @@ def _lower_prose_budgets(tree: Path, sidecar_files: set[str], runner: Runner) ->
     if not path.exists():
         return
     code = "import json; from scripts.preflight.prose_context import measure_prose_context as m; print(json.dumps(m()))"
-    proc = _run(runner, ["bin/venv-python", "-c", code], tree, PRE_TIMEOUT_S)
+    proc = _run(runner, ["bin/venv-python", "-c", code], tree, MEASURE_TIMEOUT_S)
     try:
         surfaces = json.loads(proc.stdout.strip().splitlines()[-1])
     except (IndexError, ValueError) as exc:
@@ -180,13 +190,45 @@ def _selection_status(tree: Path, base: str) -> str:
 
 def _failing_lines(output: str) -> str:
     lines = output.splitlines()
-    failing = [line for line in lines if "FAIL" in line or "Failed checks" in line or "Error" in line]
+    failing: list[str] = []
+    in_block = False
+    for line in lines:
+        if line.strip() == "Failed checks:":
+            in_block = True
+            failing.append(line)
+        elif in_block and line.startswith("  - "):
+            failing.append(line)
+        else:
+            in_block = False
+            if "FAIL" in line:
+                failing.append(line)
     return "\n".join((failing or lines)[-_ECHO_LINES:])
 
 
-def run(slug: str, tree: Path, sidecar_path: Path | None = None, runner: Runner = default_runner) -> Result:
+def _load_plan(plan_path: Path) -> plan_document.PlanDocument | None:
+    try:
+        return plan_document.load(plan_path)
+    except Exception as exc:  # noqa: BLE001 -- any unreadable or invalid plan means no pending evaluators and round 1
+        first = (str(exc).splitlines() or [type(exc).__name__])[0]
+        print(f"note: plan {plan_path} cannot be loaded ({first}); no pending evaluators, round 1", file=sys.stderr)
+        return None
+
+
+def _round_of(plan: plan_document.PlanDocument | None) -> int:
+    return 1 + sum(1 for row in plan.gate_rounds if row.gate == "wording-check") if plan else 1
+
+
+def run(
+    slug: str,
+    tree: Path,
+    sidecar_path: Path | None = None,
+    runner: Runner = default_runner,
+    plan_path: Path | None = None,
+) -> Result:
     """Rehearse the sidecar's words in `tree`; a Result with verdict PASS or FAIL (reason set when FAIL)."""
     digest = base = ""
+    plan = _load_plan(plan_path or ROOT / "docs" / "plans" / f"PLAN-{slug}.yaml")
+    round_ = _round_of(plan)
     try:
         sidecar_file = sidecar_path or ROOT / approved_text.sidecar_rel(slug)
         try:
@@ -204,36 +246,48 @@ def run(slug: str, tree: Path, sidecar_path: Path | None = None, runner: Runner 
         _reset_budget_changes(tree, base)
         _lower_prose_budgets(tree, sidecar_files, runner)
         _settle_decisions_index(tree, sidecar_files, runner)
+        reason = wording_check_baseline.settle(tree, _changed_paths(tree), sidecar_files, runner, MEASURE_TIMEOUT_S)
+        if reason:
+            raise CheckFailure(reason)
+        pairs = tuple(wording_check_pending.pending_pairs(tree, sidecar_files, plan))
         (tree / _MANIFEST).unlink(missing_ok=True)
         proc = _run(runner, ["bin/venv-python", "-m", "scripts.validate", "--pre"], tree, PRE_TIMEOUT_S)
     except CheckFailure as exc:
-        return Result("FAIL", reason=str(exc), digest=digest, base=base)
+        return Result("FAIL", reason=str(exc), digest=digest, base=base, round=round_)
     output = (proc.stdout or "") + (proc.stderr or "")
     selection = _selection_status(tree, base)
-    if proc.returncode != 0:
-        return Result("FAIL", "the fast tier (scripts.validate --pre) failed", digest, base, selection, _failing_lines(output))
-    return Result("PASS", digest=digest, base=base, selection=selection)
-
-
-def _next_round(slug: str) -> int:
-    try:
-        text = (ROOT / "docs" / "plans" / f"PLAN-{slug}.yaml").read_text(encoding="utf-8")
-    except OSError:
-        return 1
-    return len(re.findall(r"gate:\s*wording-check", text)) + 1
+    if proc.returncode == 0:
+        return Result("PASS", digest=digest, base=base, selection=selection, round=round_)
+    reason = "the fast tier (scripts.validate --pre) failed"
+    if pairs:
+        why = wording_check_pending.attribute(tree, output, list(pairs), runner, ATTRIBUTION_TIMEOUT_S)
+        if why is None:
+            return Result("PASS", "", digest, base, selection, "", round_, pairs)
+        reason = f"{reason}; {why}"
+    return Result("FAIL", reason, digest, base, selection, _failing_lines(output), round_)
 
 
 def _render(slug: str, result: Result) -> str:
     if not result.selection:
         return f"WORDING-CHECK verdict=FAIL reason: {result.reason}"
-    lines = [f"WORDING-CHECK verdict={result.verdict} digest={result.digest} base={result.base} selection={result.selection}"]
+    count = f" pending_evaluators={len(result.pairs)}" if result.pairs else ""
+    lines = [
+        f"WORDING-CHECK verdict={result.verdict} digest={result.digest} base={result.base} selection={result.selection}{count}"
+    ]
+    if result.pairs:
+        lines.append(f"fast tier red only on {len(result.pairs)} plan-created evaluator(s); clean with them stood in")
+        lines += [
+            f"pending: docs/contracts/{name} evaluator {check} (the plan creates {module})"
+            for name, check, module in result.pairs
+        ]
     if result.reason:
         lines.append(f"reason: {result.reason}")
     if result.echo:
         lines.append(result.echo)
+    pending = f", pending_evaluators: {len(result.pairs)}" if result.pairs else ""
     lines.append(
-        f"  - {{gate: wording-check, round: {_next_round(slug)}, verdict: {result.verdict}, digest: {result.digest}, "
-        f"base: {result.base}, selection: {result.selection}}}"
+        f"  - {{gate: wording-check, round: {result.round}, verdict: {result.verdict}, digest: {result.digest}, "
+        f"base: {result.base}, selection: {result.selection}{pending}}}  # pragma: allowlist secret"
     )
     return "\n".join(lines)
 
@@ -243,8 +297,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--slug", required=True)
     parser.add_argument("--tree", type=Path, required=True)
     parser.add_argument("--sidecar", type=Path, default=None)
+    parser.add_argument("--plan", type=Path, default=None)
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
-    result = run(args.slug, args.tree, args.sidecar, runner=default_runner)
+    result = run(args.slug, args.tree, args.sidecar, runner=default_runner, plan_path=args.plan)
     print(_render(args.slug, result))
     return 0 if result.verdict == "PASS" else 1
 

@@ -104,3 +104,26 @@ def test_selection_is_complete_or_degraded() -> None:
 def test_a_wording_check_row_carries_no_counts(extra: dict) -> None:
     with pytest.raises(ValidationError, match="no blocking or nits"):
         GateRound.model_validate(_wording(**extra))
+
+
+def test_pending_evaluators_is_a_count_on_a_wording_check_pass_row() -> None:
+    assert GateRound.model_validate(_wording("PASS", pending_evaluators=2)).pending_evaluators == 2
+    assert GateRound.model_validate(_wording("PASS")).pending_evaluators is None
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        _wording("FAIL", pending_evaluators=1),
+        _row(pending_evaluators=1),
+        _row("decision-scout", 1, "NO_FLAGS", pending_evaluators=1),
+    ],
+)
+def test_pending_evaluators_is_refused_outside_a_wording_check_pass(data: dict) -> None:
+    with pytest.raises(ValidationError, match="only on a wording-check PASS row"):
+        GateRound.model_validate(data)
+
+
+def test_pending_evaluators_is_at_least_one() -> None:
+    with pytest.raises(ValidationError):
+        GateRound.model_validate(_wording("PASS", pending_evaluators=0))
