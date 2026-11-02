@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.fixtures.decision_entry import authored_bytes, cap_bytes, decision_entry
+from tests.fixtures.decision_entry import authored, authored_bytes, cap_bytes, decision_entry
 
 pytestmark = pytest.mark.unit
 
@@ -53,5 +53,5 @@ def test_decision_entry_and_annotations() -> None:
         assert re.search(rf"^\[Amendment \d{{4}}-\d{{2}}-\d{{2}}, Decision {n}:", body, re.MULTILINE), amended
         assert body.rstrip().endswith("---")
         if amended == 143:
-            annotation = body.rstrip().removesuffix("---").rstrip().splitlines()[-1]
-            assert annotation.startswith("[Amendment ") and f"Decision {n}:" in annotation, amended
+            annotation = next(t for t in body.splitlines() if t.startswith("[Amendment ") and f"Decision {n}:" in t)
+            assert annotation not in authored(body), amended

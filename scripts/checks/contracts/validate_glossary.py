@@ -1,9 +1,12 @@
-"""Glossary check (Decision 240): shape of docs/contracts/glossary.yaml, its guidance projection, and the added-line lint.
+"""Glossary check (Decision 240): shape of docs/contracts/glossary.yaml, its guidance projection, and three text legs.
 
-Three legs. SHAPE: the contract's keys, the fourteen terms, the relative words, the read_as rows and the ambient pointer in
-docs/CLAUDE.md. GUIDANCE: get_rec_write_guidance() carries the contract's terms and say_instead values. LINT: a governed
-line added on this branch (never text already on the base) fails if it uses "platform" or "product" unqualified; the token
-rule and span exemptions live in _glossary_words, shared with the rec portal.
+SHAPE: the contract's keys, the fourteen terms, the relative words, the read_as rows, records, note and roster, and the
+ambient pointer in docs/CLAUDE.md. GUIDANCE: get_rec_write_guidance() carries the contract's terms and say_instead
+values. When both are clean, three legs run and none gates another. NOTE: each Decision in read_as.noted_decisions
+carries the reads-through note. WHOLE-FILE: no live governed file (the lint pathspecs minus read_as.records) uses
+"platform" or "product" unqualified. LINT: a governed line added on this branch (never text already on the base) fails
+the same rule. The token rule and span exemptions live in _glossary_words, shared with the rec portal; the first two
+legs' helpers live in _glossary_stock.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import yaml
 
 from scripts.checks import _common, registry
 from scripts.checks.contracts import _glossary_words
+from scripts.checks.contracts._glossary_stock import live_hits, unnoted
 from scripts.executor.rec_write_guidance import get_rec_write_guidance
 
 _CONTRACT = "glossary.yaml"
@@ -39,6 +43,10 @@ _TERM_KEYS = (
 )
 _TERM_FIELDS = ("written", "reserved_meaning", "do_not_use_for")
 _EXTRA_PATHSPECS = (".claude/agents/**/*.md", ".github/prompts/**/*.md", "docs/audit-prompts/*.md")
+_RECORD_FILES = frozenset(
+    {"docs/DECISIONS.md", "docs/DECISIONS_ARCHIVE.md", "docs/ROADMAP-PLATFORM.yaml", "docs/ROADMAP-PLATFORM-ARCHIVE.yaml"}
+)
+_RECORD_DIRS = ("docs/plans/", "docs/audit-prompts/")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 _ISO_DATE = "[0-9]{4}-[0-9]{2}-[0-9]{2}"
 _FILLS = {"NNN": "[0-9]+", "{{N}}": "[0-9]+", "DATE": _ISO_DATE, "{{DATE}}": _ISO_DATE, "YYYY-MM-DD": _ISO_DATE}
@@ -121,6 +129,23 @@ def _read_as(block: dict[str, Any]) -> list[str]:
         phrases.add(phrase)
     if not block.get("rows"):
         out.append("read_as.rows is missing or empty")
+    return out + _stock(block)
+
+
+def _stock(block: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    roster = block.get("noted_decisions")
+    ints = isinstance(roster, list) and all(isinstance(n, int) and not isinstance(n, bool) for n in roster)
+    if not (ints and roster and len(set(roster)) == len(roster) and all(n < 240 for n in roster)):
+        out.append("read_as.noted_decisions must be a non-empty list of distinct integers below 240")
+    note = str(block.get("note") or "")
+    if not (note.startswith("> **Update (") and "DATE" in note):
+        out.append("read_as.note must start with > **Update ( and carry the literal DATE")
+    out += [
+        f"read_as.records entry {entry} lies outside the record classes"
+        for entry in block.get("records") or []
+        if not (isinstance(entry, str) and (entry in _RECORD_FILES or entry.startswith(_RECORD_DIRS)))
+    ]
     return out
 
 
@@ -244,7 +269,7 @@ def _lint(data: dict[str, Any], root: Path, base: str) -> tuple[list[str], int]:
 
 @registry.register("validate_glossary", owner="platform")
 def validate_glossary(failed: list[str], root: Path | None = None) -> None:
-    """Fail if the glossary is malformed, unprojected into rec guidance, or a changed governed line uses a relative word."""
+    """Fail if the glossary is malformed, a roster Decision lacks its note, or a live or added line uses a word."""
     print("\n=== Glossary (glossary.yaml) ===")
     base_dir = root if root is not None else _common.ROOT
     path = base_dir / "docs" / "contracts" / _CONTRACT
@@ -258,17 +283,29 @@ def validate_glossary(failed: list[str], root: Path | None = None) -> None:
         print(f"  FAIL: {path}: {exc}")
         registry.skipped(f"{_CONTRACT} not loadable")
         return
-    scanned = 0
+    scanned = files = 0
+    noted = len(data["read_as"].get("noted_decisions") or [])
+    clean = not findings
+    if clean:
+        findings += unnoted(base_dir, data)
+        plan = _plan_lines_at(base_dir, "HEAD")
+        live, files = live_hits(base_dir, data, _pathspecs(base_dir), lambda text: _in_plan(text, plan))
+        findings += live
     base = _common.status_diff_base(root)
     if base is None:
         print("  SKIP: lint leg has no diff base")
-    elif not findings:
+    elif clean:
         lint, scanned = _lint(data, base_dir, base)
-        findings += lint
+        findings += [item for item in lint if item not in findings]
     if findings:
         failed.append(_LABEL)
         for finding in findings:
             print(f"  FAIL: {finding}")
     else:
-        print(f"  PASS: {_CONTRACT} satisfies every rule and {scanned} added governed lines use glossary names.")
-    registry.examined(len(data["terms"]) + len(data["read_as"]["rows"]) + scanned, unit="glossary_items_and_added_lines")
+        print(
+            f"  PASS: {_CONTRACT} satisfies every rule, {noted} noted Decisions carry the note, {files} live files "
+            f"and {scanned} added governed lines use glossary names."
+        )
+    registry.examined(
+        len(data["terms"]) + len(data["read_as"]["rows"]) + noted + files + scanned, unit="glossary_items_and_lines"
+    )
