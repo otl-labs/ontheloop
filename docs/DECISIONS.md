@@ -2,6 +2,83 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 242: The platform AWS account is assigned in place to On The Loop Labs Limited and stays standalone; migrate, not rebuild (amends Decision 106) (Decided)
+
+```yaml
+number: 242
+status: Decided
+decided_date: "2026-11-02"
+amends: [106]
+significance:
+  value: numbered_decision
+  justification: >-
+    Who owns and pays for the platform's AWS account for the life of the platform, and whether
+    moving it re-creates the platform. Not a contract note or an annotation on Decision 106: no
+    contract owns account ownership, and Decision 195 cl.3 asks for a recorded choice between
+    migrate and rebuild that needs its own reversal conditions.
+```
+
+**Status:** Decided
+**Date:** 2026-11-02
+**Warehouse ID:** dec-242 (per Decision 84 backfill)
+
+**Problem:** On The Loop Labs Limited owns the platform (Decision 195), but the AWS account that runs
+it is the founder's: personal root e-mail, contacts, tax identity and payment card. Decision 195 cl.3
+reopened Decision 106's reversal condition (a) without choosing between moving this account and
+rebuilding in a new one. The data is also no longer throwaway: the operational tables are the
+warehouse's sole system of record (Decision 84).
+
+**Decision:**
+1. **Migrate, not rebuild.** The existing account stays the platform account. Its id, buckets, roles,
+   OIDC trusts, secrets and Terraform state do not change, and nothing is re-created. Decision 106's
+   rebuild precedent does not apply to this move.
+2. **Assignment.** The account is assigned to the company under AWS's Account Assignment
+   Requirements: its root e-mail, primary and alternate contacts, tax registration and payment method
+   become the company's. The founder-to-company IP assignment (Decision 195 cl.2) executes first or on
+   the same day; if it cannot, the move proceeds and the gap stands until Decision 195's
+   `assignment-executes` condition fires.
+3. **Standalone.** The account stays standalone. The one-account Organization and the unused IAM
+   Identity Center instance created with it on 2026-05-28, likely residue of the Identity Center
+   preparation Decision 113 superseded and recorded by no Decision, are deleted after billing history is
+   exported, so Decision 144 cl.1's premise holds again. A company Organization with a workload-free
+   management account is Phase 4 work gated on Decision 77's live_full trigger (Decision 144 cl.6) and
+   is not decided here; joining one later re-creates nothing.
+4. **Order, rollback, retirement.** The move runs after the GitHub transfer is proven (Decision 218)
+   and before the Neon move. Every account-level step is the operator's, in the console; agents verify
+   from CloudTrail and from billing pages the operator shows them. A failed detail change is reverted to
+   its previous value, never answered by a rebuild; the two deletions are final. The personal payment
+   method is removed only after the first invoice addressed to the company plus 30 days, as its own
+   step with evidence.
+5. **Names.** "Personal" in internal identifiers (terraform/personal and kin; Decision 101(b), Decision
+   218 cl.1) and in existing prose about this account means this account, whoever owns it; the prose is
+   swept by a follow-on rec after the move. In Decision 113, "personal account" means this account and
+   "company-account" the former employer's account that T5.2 tears down; its reversal condition has not
+   fired.
+
+**Rationale:** A rebuild would re-mint every account-bound identifier (about 200 Terraform references,
+20 workflows, and the data-lake bucket in the DuckLake catalog's data_path) for no ownership gain, while
+AWS supports assigning an account in place. Ownership and payment are complete without an Organization,
+and a new management account now would contradict Decision 77 cl.5 and Decision 144 cl.6 for no gain.
+An independent review reached the same choice (aws-account-path/ADVICE.md).
+
+```yaml reversal-conditions
+decision: 242
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: assignment-refused
+    kind: manual
+    description: "AWS refuses the in-place assignment or requires a new account: re-decide clause 1."
+  - id: move-not-executed
+    kind: manual
+    description: "review_by passes with the account still in the founder's name: re-confirm or withdraw."
+```
+
+**Related:** Decisions 106 (amended), 195 (account-move-decided discharged), 77, 84, 101, 113, 126,
+144, 214, 218; rec-4525, rec-885.
+
+---
+
 ## Decision 241: The coordination model -- a deterministic engine runs the work graph, a bounded coordinator step handles only what the graph cannot, context travels as notes, streams are epics, and concurrency and WIP climb under human ceilings (amends Decision 229 clause 2) (Decided)
 
 ```yaml
@@ -3183,6 +3260,9 @@ keystone of).
 
 > **Update (2026-10-15):** The `org-handle-decided` reversal condition is fully discharged by
 > Decision 218: rec-3905 closes with `docs/contracts/github-org-transfer.yaml`.
+
+> **Update (2026-11-02):** The `account-move-decided` reversal condition is discharged by Decision 242:
+> migrate, not rebuild; the account is assigned in place to the company.
 
 ---
 
@@ -8766,6 +8846,11 @@ guard), Decision 100/75 (managed-service-native preference the Neon choice align
 > owner reopens reversal condition (a) below -- a company-owned AWS account is now a live
 > candidate second destination, pending the gated account-ownership move. This body is otherwise
 > unedited; see Decision 195 for the full derivation.
+
+> **Amended by Decision 242 (2026-11-02):** The company move does not rebuild. Reversal condition (a) is
+> answered by moving this same account to the company, so no second destination exists; condition (b)
+> stays armed for any later move. The account is assigned in place to On The Loop Labs Limited and stays standalone. This
+> body is otherwise unedited.
 
 **Decision:**
 Ratifies CD.6. Realized 2026-05-28 -- Phase B personal-account Terraform re-deploy applied and
