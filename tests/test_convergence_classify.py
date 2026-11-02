@@ -24,17 +24,21 @@ from scripts.ci.convergence_classify import (
     PENDING_CODIFICATION_BOUND_HOURS,
     RED_CAUSE_APPLY_FAILURE,
     RED_CAUSE_OUT_OF_BAND_DRIFT,
+    STALE_GATED_APPROVAL,
     apply_pending_codification_write,
+    build_out_of_band_red_record,
     build_pending_codification_marker,
     classify_plan,
     decide_pending_codification_action,
     derive_red_cause,
+    drift_guard_refuses,
     escalate_stale_pending_codification,
     main,
     pending_codification_is_stale,
     render_convergence_advisory_red_description,
     render_convergence_red_refusal,
     self_clear_pending_codification,
+    should_skip_on_prior_red,
 )
 
 
@@ -328,3 +332,177 @@ def test_module_imports_stdlib_only() -> None:
     # No NEW non-stdlib top-level module should appear solely from importing this module again
     # (it's already imported; this guards against a future edit adding a fresh heavy import).
     assert extra_after == extra
+
+
+_ROUTED = "2026-10-01T00:00:00Z"
+_PENDING = {"routed_at": _ROUTED, "commit_sha": "pendsha", "run_url": "https://x/runs/42"}
+
+
+def _routed_record(**extra) -> dict:
+    return {"status": "green", "commit_sha": "abc", "pending_gated": dict(_PENDING), **extra}
+
+
+class TestRoutedPending:
+    def _write(self, existing: dict, capsys) -> list[str]:
+        env = {"EXISTING": json.dumps(existing), "RUN_URL": "https://x/runs/7"}
+        with patch.dict(os.environ, env, clear=False):
+            assert main(["--pending-codification-write"]) == 0
+        return capsys.readouterr().out.splitlines()
+
+    def test_first_tick_flags_pending_gated(self, capsys) -> None:
+        lines = self._write(_routed_record(), capsys)
+        assert lines[0] == "pending_gated"
+        record = json.loads(lines[1])
+        assert record["pending_gated"]["drift_flagged_at"]
+        assert record["pending_codification"]["first_seen"]
+        assert record["status"] == "green"
+        assert lines[2:4] == ["pendsha", "https://x/runs/42"]
+
+    def test_later_tick_files_nothing(self, capsys) -> None:
+        flagged = _routed_record()
+        flagged["pending_gated"]["drift_flagged_at"] = "2026-10-01T00:30:00Z"
+        lines = self._write(flagged, capsys)
+        assert lines[0] == "pending_gated_flagged"
+        record = json.loads(lines[1])
+        assert record["pending_gated"]["drift_flagged_at"] == "2026-10-01T00:30:00Z"
+        assert "pending_codification" in record
+
+    def test_escalation_marks_stale_gated_approval(self, capsys) -> None:
+        marker = {"first_seen": "2026-10-01T00:10:00Z", "last_seen": "2026-10-01T01:00:00Z", "run_url": "u"}
+        flagged = _routed_record(pending_codification=marker)
+        flagged["pending_gated"]["drift_flagged_at"] = "2026-10-01T00:10:00Z"
+        lines = self._write(flagged, capsys)
+        assert lines[0] == "escalated"
+        record = json.loads(lines[1])
+        assert record["status"] == "red"
+        assert record[STALE_GATED_APPROVAL]
+        assert "pendsha" in record["drift_reason"]
+        assert "pending_codification" not in record
+        assert derive_red_cause(record) == RED_CAUSE_OUT_OF_BAND_DRIFT
+
+    def test_marker_older_than_route_escalates_plain(self) -> None:
+        marker = {"first_seen": "2026-09-30T00:00:00Z"}
+        record = escalate_stale_pending_codification(
+            _routed_record(pending_codification=marker), datetime(2026, 10, 2, tzinfo=timezone.utc), "https://x/e"
+        )
+        assert record["status"] == "red"
+        assert STALE_GATED_APPROVAL not in record
+
+    def test_escalation_without_pending_gated_is_plain(self) -> None:
+        marker = {"first_seen": "2026-10-01T00:00:00Z"}
+        record = escalate_stale_pending_codification(
+            {"status": "green", "pending_codification": marker}, datetime(2026, 10, 2, tzinfo=timezone.utc), "https://x/e"
+        )
+        assert STALE_GATED_APPROVAL not in record
+
+    def test_stale_gated_refusal_is_not_out_of_band_wording(self) -> None:
+        marker = {"first_seen": "2026-10-01T00:10:00Z"}
+        record = escalate_stale_pending_codification(
+            _routed_record(pending_codification=marker), datetime(2026, 10, 2, tzinfo=timezone.utc), "https://x/runs/9"
+        )
+        message = render_convergence_red_refusal(record)
+        assert "MEASURED out-of-band drift" not in message
+        assert "unapproved gated change" in message
+        assert "approve or reject" in message.lower()
+        assert "acknowledge-and-retry" in message
+        description = render_convergence_advisory_red_description(record)
+        assert "out-of-band" not in description
+        assert "unapproved gated change" in description
+        assert len(description) <= 140
+
+    def test_stale_gated_then_drift_falls_through_and_blocks(self) -> None:
+        marker = {"first_seen": "2026-10-01T00:10:00Z"}
+        stale = escalate_stale_pending_codification(
+            _routed_record(pending_codification=marker), datetime(2026, 10, 2, tzinfo=timezone.utc), "https://x/runs/9"
+        )
+        assert should_skip_on_prior_red("red", stale, PENDING_CODIFICATION)
+        assert not should_skip_on_prior_red("red", stale, OUT_OF_BAND_DRIFT)
+        flipped = build_out_of_band_red_record(stale, datetime(2026, 10, 3, tzinfo=timezone.utc), "https://x/runs/10")
+        assert STALE_GATED_APPROVAL not in flipped
+        assert "pendsha" in flipped["drift_reason"]
+        assert drift_guard_refuses(0, json.dumps(flipped), "")
+
+    def test_prior_red_skip_matrix(self) -> None:
+        assert should_skip_on_prior_red("unknown", {}, OUT_OF_BAND_DRIFT)
+        assert should_skip_on_prior_red("red", {}, OUT_OF_BAND_DRIFT)
+        assert not should_skip_on_prior_red("green", {}, OUT_OF_BAND_DRIFT)
+
+    def test_red_flip_pops_pending_codification_and_keeps_pending_gated(self) -> None:
+        record = build_out_of_band_red_record(
+            _routed_record(pending_codification={"first_seen": "x"}), datetime(2026, 10, 3, tzinfo=timezone.utc), "u"
+        )
+        assert "pending_codification" not in record
+        assert record["pending_gated"]
+        assert record["status"] == "red"
+        plain = build_out_of_band_red_record({"status": "green"}, datetime(2026, 10, 3, tzinfo=timezone.utc), "u")
+        assert "gated" not in plain["drift_reason"]
+
+    def test_red_flip_and_skip_commands(self, capsys) -> None:
+        env = {"EXISTING": json.dumps(_routed_record()), "RUN_URL": "u", "PRIOR_STATUS": "red", "VERDICT": OUT_OF_BAND_DRIFT}
+        with patch.dict(os.environ, env, clear=False):
+            assert main(["--red-flip"]) == 0
+            assert json.loads(capsys.readouterr().out)["status"] == "red"
+            assert main(["--skip-on-prior-red"]) == 0
+            assert capsys.readouterr().out.strip() == "skip"
+
+
+def _red(**extra) -> str:
+    return json.dumps({"status": "red", "pending_gated": dict(_PENDING), **extra})
+
+
+class TestDriftGuard:
+    @pytest.mark.parametrize(
+        "rc,text,err",
+        [
+            (0, _red(drift_detected_at="2026-10-01T00:05:00Z", drift_run_url="u"), ""),
+            (0, "{not json", ""),
+            (0, "[1]", ""),
+            (1, "", "An error occurred (AccessDenied)"),
+            (0, _red(drift_detected_at="garbage", drift_run_url="u"), ""),
+            (0, _red(drift_run_url="u"), ""),
+            (0, json.dumps({"status": "red", "drift_detected_at": "2026-10-01T00:05:00Z"}), ""),
+        ],
+    )
+    def test_blocked(self, rc: int, text: str, err: str) -> None:
+        assert drift_guard_refuses(rc, text, err)
+
+    @pytest.mark.parametrize(
+        "rc,text,err",
+        [
+            (0, _red(drift_detected_at="2026-09-30T23:00:00Z", drift_run_url="u"), ""),
+            (0, _red(drift_detected_at=_ROUTED, drift_run_url="u"), ""),
+            (0, _red(drift_detected_at="2026-10-01T00:05:00Z", drift_run_url="u", stale_gated_approval={"a": 1}), ""),
+            (0, json.dumps({"status": "green"}), ""),
+            (0, json.dumps({"status": "red", "commit_sha": "x"}), ""),
+            (0, "", ""),
+            (1, "", "An error occurred (NoSuchKey) when calling the GetObject operation"),
+        ],
+    )
+    def test_not_blocked(self, rc: int, text: str, err: str) -> None:
+        assert not drift_guard_refuses(rc, text, err)
+
+    def test_command_appends_refused_to_github_output(self, tmp_path, capsys) -> None:
+        out = tmp_path / "out"
+        err = tmp_path / "err"
+        err.write_text("boom")
+        env = {"RC": "1", "REC_JSON": "", "ERR_FILE": str(err), "GITHUB_OUTPUT": str(out)}
+        with patch.dict(os.environ, env, clear=False):
+            assert main(["--drift-guard"]) == 0
+        assert out.read_text() == "refused=true\n"
+        assert "acknowledge-and-retry" in capsys.readouterr().out
+
+    def test_command_pass_on_absent(self, tmp_path) -> None:
+        out = tmp_path / "out"
+        err = tmp_path / "err"
+        err.write_text("NoSuchKey")
+        env = {"RC": "1", "REC_JSON": "", "ERR_FILE": str(err), "GITHUB_OUTPUT": str(out)}
+        with patch.dict(os.environ, env, clear=False):
+            main(["--drift-guard"])
+        assert out.read_text() == "refused=false\n"
+
+    def test_command_without_github_output_prints(self, capsys) -> None:
+        env = {"RC": "x", "REC_JSON": "", "ERR_FILE": ""}
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop("GITHUB_OUTPUT", None)
+            main(["--drift-guard"])
+        assert "refused=true" in capsys.readouterr().out

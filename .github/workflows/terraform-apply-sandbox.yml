@@ -456,26 +456,8 @@ jobs:
           SHA: ${{ github.event_name == 'push' && github.sha || github.event.inputs.acknowledge_red_commit }}
           ROUTED: ${{ steps.guard.outputs.routed }}
           APPLY_OUTCOME: ${{ steps.apply.outcome }}
-        run: |
-          PR_NUM=$(gh api "repos/${REPO}/commits/${SHA}/pulls" --jq '.[0].number' 2>/dev/null || echo "")
-          if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
-            echo "No originating PR resolved for ${SHA}; next-planning-session baseline applies."
-            exit 0
-          fi
-          if [ "$ROUTED" = "true" ]; then
-            # Guard exit 2 (out-of-budget IAM / trust / destroy) -> routed to gated-apply job.
-            # The convergence record is NOT touched; the gated-apply job pending reviewer approval
-            # handles the apply. Distinct message so the held subscription knows a human action is
-            # required (T2.22). ${{ github.sha }} (not $SHA, which is the ack'd red commit on a
-            # routed dispatch) is the commit whose fresh plan is pending and this run's
-            # apply-sandbox plan + guard step logs are what to review before approving.
-            MSG="sandbox terraform-apply guard routed ${{ github.sha }} to the tf-gated-apply job (out-of-budget IAM / trust / destroy diff); pending reviewer approval -- review this run's apply-sandbox plan + guard step logs, then approve at: Actions -> gated-apply job. The convergence record is unchanged until the gated apply completes (commit_sha becomes ${{ github.sha }} on success). (Best-effort wake.)"
-          elif [ "$APPLY_OUTCOME" = "success" ]; then
-            MSG="sandbox terraform-apply converged GREEN for ${SHA}; convergence record updated. (Best-effort wake; next planning session re-checks the record.)"
-          else
-            MSG="sandbox terraform-apply did NOT converge (RED) for ${SHA}; ci-rca will file a source=ci_rca rec. After review, unlatch via the workflow_dispatch acknowledge-and-retry path. (Best-effort wake.)"
-          fi
-          gh pr comment "$PR_NUM" --repo "$REPO" --body "$MSG" || true
+          HEAD_SHA: ${{ github.sha }}
+        run: python3 -m scripts.ci.apply_wake --job apply-sandbox
 
       - name: Self-dispatch ci-rca on re-run failure (workflow_run re-run gap)
         # PLAN-gated-apply-rca-trigger: ci-rca.yml triggers SOLELY on the workflow_run:
@@ -820,6 +802,13 @@ jobs:
         working-directory: ${{ env.WORKDIR }}
         run: bash "$GITHUB_WORKSPACE/scripts/ci/neon_api_key.sh" run -- python3 "$GITHUB_WORKSPACE/scripts/ci/stale_plan_signature.py" --wrap -- terraform apply -input=false -lock-timeout=120s plan.bin
 
+      - name: Drift guard (refuse green over a post-route drift red)
+        id: drift_guard
+        if: steps.apply.outcome == 'success'
+        run: |
+          RC=0; REC_JSON=$(aws s3 cp "s3://${CONVERGENCE_BUCKET}/${CONVERGENCE_KEY}" - 2>"$RUNNER_TEMP/drift_guard.err") || RC=$?
+          RC="$RC" REC_JSON="$REC_JSON" ERR_FILE="$RUNNER_TEMP/drift_guard.err" python3 -m scripts.ci.convergence_classify --drift-guard
+
       - name: Write convergence record (always-run, red-on-failure)
         id: record_write
         # Reuses the T2.20 always-run red-on-failure record write. apply-identity-only write.
@@ -829,11 +818,10 @@ jobs:
         # push path; proves the saved plan -- not a re-plan -- was applied).
         #
         # No convergence-record precondition check here (unlike apply-sandbox's hard-block at Step 1):
-        # the shared concurrency group (cancel-in-progress: false) serializes ALL applies on the
-        # same tfstate, so the record cannot go red via the CD path while this job holds the group.
-        # A workflow_dispatch ack run also queues behind this job (same group). This is an implicit
-        # serialization invariant, not an explicit read-then-refuse gate -- accepted design tradeoff
-        # for the gated path where the concurrency group provides the safety guarantee.
+        # the shared concurrency group (cancel-in-progress: false) serializes the CD applies on the
+        # same tfstate. The drift workflow is OUTSIDE that group, so a drift red can arrive during the
+        # approval wait: the drift_guard step above refuses the green write in that case (fail-closed,
+        # Decision 92 pt 2) and the heal is acknowledge-and-retry (Decision 183).
         #
         # Red-write dependency (VP10, 2026-06-22): this step writes the red record using the SAME
         # OIDC apply-role creds configured in the "Configure AWS credentials" step. If the failure
@@ -858,6 +846,7 @@ jobs:
         with:
           sha: ${{ github.sha }}
           apply-outcome: ${{ steps.apply.outcome }}
+          refused: ${{ steps.apply.outcome == 'success' && steps.drift_guard.outputs.refused != 'false' }}
           working-directory: ${{ env.WORKDIR }}
           review-step-outcome: ""
           pre-apply-failure: >-
@@ -877,19 +866,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.event_name == 'push' && github.sha || github.event.inputs.acknowledge_red_commit }}
-          APPLY_OUTCOME: ${{ steps.apply.outcome }}
-        run: |
-          PR_NUM=$(gh api "repos/${REPO}/commits/${SHA}/pulls" --jq '.[0].number' 2>/dev/null || echo "")
-          if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
-            echo "No originating PR resolved for ${SHA}; next-planning-session baseline applies."
-            exit 0
-          fi
-          if [ "$APPLY_OUTCOME" = "success" ]; then
-            MSG="gated-apply converged GREEN for ${{ github.sha }} (IAM/trust/destroy change applied in CD after reviewer approval); convergence record updated with commit_sha and plan_sha. (Best-effort wake; next planning session re-checks the record.)"
-          else
-            MSG="gated-apply did NOT converge (RED) for ${{ github.sha }}; ci-rca will file a source=ci_rca rec. After review, unlatch via the workflow_dispatch acknowledge-and-retry path. (Best-effort wake.)"
-          fi
-          gh pr comment "$PR_NUM" --repo "$REPO" --body "$MSG" || true
+          APPLY_OUTCOME: ${{ steps.apply.outcome == 'success' && steps.drift_guard.outputs.refused != 'false' && 'refused' || steps.apply.outcome }}
+          HEAD_SHA: ${{ github.sha }}
+        run: python3 -m scripts.ci.apply_wake --job gated-apply
 
       - name: Self-dispatch ci-rca on re-run failure (workflow_run re-run gap)
         # PLAN-gated-apply-rca-trigger: confirmed run 28379330706 (gated-apply, run_attempt=2)
