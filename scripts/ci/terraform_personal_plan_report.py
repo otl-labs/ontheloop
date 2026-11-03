@@ -81,7 +81,24 @@ def _resource_rows(plan: dict[str, Any]) -> dict[str, Any]:
     return {"rows": rows, "counts": counts}
 
 
+_ADDR = r"[A-Za-z0-9._\-\[\]*]+"
+_OPAQUE_LINE = re.compile(
+    rf"^Reviewer digest OPAQUE: policies unknown at plan time: ({_ADDR}(?:, {_ADDR})*|none); "
+    rf"deferred documents: ({_ADDR}(?:, {_ADDR})*|none)\. "
+    r"The merge-time review cannot read them: build ARNs from names or split the PR\.$"
+)
+
+
+def opaque_addresses(text: str) -> list[str]:
+    m = _OPAQUE_LINE.match(text)
+    if not m:
+        return []
+    return [a for group in m.groups() if group != "none" for a in group.split(", ")]
+
+
 def fit_word(text: str) -> str:
+    if text.startswith("Reviewer digest OPAQUE:"):
+        return "OPAQUE"
     if "OVERFLOW" in text:
         return "OVERFLOW"
     return "FITS" if text.startswith("Reviewer digest:") else "UNKNOWN"
@@ -122,7 +139,12 @@ def render_plan(args: argparse.Namespace, plan: dict[str, Any] | None) -> tuple[
             lines += ["", "Drift detected outside Terraform: " + ", ".join(f"`{safe(a)}`" for a in drift)]
     if args.fit_file:
         try:
-            lines.append("Reviewer digest fit: " + fit_word(Path(args.fit_file).read_text(encoding="utf-8").strip()))
+            fit_text = Path(args.fit_file).read_text(encoding="utf-8").strip()
+            lines.append("Reviewer digest fit: " + fit_word(fit_text))
+            if fit_word(fit_text) == "OPAQUE":
+                quoted = [f"`{safe(a)}`" for a in opaque_addresses(fit_text)]
+                if quoted:
+                    lines.append("Unknown at plan time: " + ", ".join(quoted))
         except OSError:
             lines.append("Reviewer digest fit: UNKNOWN")
     if args.plan_sha256 and _HEX64.fullmatch(args.plan_sha256):

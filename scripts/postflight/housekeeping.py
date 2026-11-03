@@ -7,7 +7,7 @@ target still intercepts through these moved bodies.
 
 from __future__ import annotations
 
-import datetime as _dt
+import datetime as dt
 import json
 import sys
 
@@ -54,8 +54,8 @@ def prune_telemetry_logs(
     if max_age_days is None:
         max_age_days = _load_max_age_days()
 
-    today = _dt.date.today()
-    cutoff = today - _dt.timedelta(days=max_age_days)
+    today = dt.date.today()
+    cutoff = today - dt.timedelta(days=max_age_days)
     cutoff_str = cutoff.isoformat()
 
     result: dict[str, list[str]] = {

@@ -1,4 +1,4 @@
-# On The Loop - Agentic Software Engineering Platform
+# On The Loop - Agentic Software Engineering Framework
 
 Canonical Layer 2 project knowledge base, loaded on demand by workflows; keep rules in `CLAUDE.md` / `AGENTS.md`, workflow method in `.claude/commands/` and `.claude/skills/`, and machine semantics in `docs/contracts/*.yaml`.
 
@@ -11,13 +11,13 @@ Source stamp: ROADMAP-PLATFORM.yaml @ 8eb0d35afc9a02fa2f660b61176d12aedb395094; 
 - Branching: never edit or commit on `main`. Routine handoff is commit -> PR -> CI -> merge.
 - Terraform and Lambda deploys: agents take the governed path `docs/contracts/deploy-paths.yaml` selects; local apply/deploy is break-glass only, after explicit human direction.
 
-## Platform thesis
+## Thesis
 
-This repository is an agentic software-engineering platform. Its purpose is to let LLM agents plan, build, verify, deploy, monitor, and improve software safely and reliably with minimal human oversight.
+This repository builds On The Loop, an agentic software-engineering framework. Its purpose is to let LLM agents plan, build, verify, deploy, monitor, and improve software safely and reliably with minimal human oversight.
 
-The platform is the governed harness around model intelligence. Models, compute providers, tools, and hosted products are replaceable. The durable product is the control plane that gives agents bounded authority, typed capabilities, reliable state, independent verification, deployment controls, operational memory, and evidence-backed feedback loops.
+It is the governed harness around model intelligence. Models, compute providers, tools, and adopter products are replaceable. What lasts is the control plane that gives agents bounded authority, typed capabilities, reliable state, independent verification, deployment controls, operational memory, and evidence-backed feedback loops.
 
-The platform end-state is a public, agent-first automation platform with:
+On The Loop's end-state is a public, agent-first automation framework with:
 
 1. durable operational data as the source of truth;
 2. swappable models and compute selected by workload;
@@ -27,11 +27,13 @@ The platform end-state is a public, agent-first automation platform with:
 6. warehouse-backed recommendations, decisions, queue state, execution evidence, and telemetry;
 7. causal verification connecting an agent action to its persisted and observed outcome;
 8. a closed improvement loop that can complete one bounded iteration without a human in the critical path;
-9. portability across repositories, products, infrastructure, and regulated domains.
+9. portability across repositories, adopter products, infrastructure, and regulated domains.
+
+North stars and the mission: `docs/contracts/north-star.yaml`.
 
 ## Recursive self-improvement model
 
-The platform is a governed, recursively self-improving software-engineering system. Verification recursively improves, but verification is not the only improvement target.
+On The Loop is a governed, recursively self-improving software-engineering system. Verification recursively improves, but verification is not the only improvement target.
 
 The complete loop is:
 
@@ -47,34 +49,34 @@ observe development and runtime behavior
   -> retain evidence and improve the next iteration
 ```
 
-Telemetry provides learning signals about the whole engineering system: agent behavior, planning quality, review churn, tool failures, context quality, model cost and latency, CI performance, deployment outcomes, monitoring gaps, and incidents. Analysis agents convert those signals into bounded recommendations that may improve verification, prompts and personas, planning and review, tools and orchestration, CI/CD and observability, data architecture, platform implementation, and hosted products. At maturity, outcome telemetry and product metrics improve both the process that produces software and the software it produces.
+Telemetry provides learning signals about the whole engineering system: agent behavior, planning quality, review churn, tool failures, context quality, model cost and latency, CI performance, deployment outcomes, monitoring gaps, and incidents. Analysis agents convert those signals into bounded recommendations that may improve verification, prompts and personas, planning and review, tools and orchestration, CI/CD and observability, data architecture, On The Loop itself, and adopter products. At maturity, outcome telemetry and adopter metrics improve both the process that produces software and the software it produces.
 
 Recursive improvement remains bounded. A signal is not proof, a recommendation is not authority, and a metric movement is not automatically a beneficial outcome. Agents may propose and implement changes, but changes gain authority only through explicit policy and independent evidence. Verification is the safety envelope and admission mechanism for recursive self-improvement, not its scope limit.
 
-## Commercial and product boundary
+## Commercial boundary
 
 The primary category is agentic software-engineering infrastructure, adjacent to AI assurance, autonomous operations, and regulated AI control planes.
 
 The core value proposition is not an agent that writes code but the harness that makes code-writing and operations agents governable, inspectable, testable, portable, and safe enough for production-adjacent work, traceable from work selection through agent action, verification, deployment, and observed outcome to the next improvement.
 
-Hosted products consume but do not define the platform; none is sequenced here, and each keeps its IP, data, domain logic, and risk controls behind its product boundary, outside this platform-only repository (Decision 209 clause 3).
+Adopter products consume but do not define On The Loop; none is sequenced here, and each keeps its IP, data, domain logic, and risk controls behind its own boundary, outside this repository (Decision 209 clause 3).
 
-Open core (Decisions 184, 209, 233): the free tier is customer-owned -- a laptop by default, or the customer's own cloud through the public adapters. Scale is never blocked; the tooling that makes it painless is paid, and "free" is price only (Decision 233 clause 2, rewording 209 clause 1). Approval authority is GitHub; the free tier has no identity system of its own (233 clause 4).
+Core (Decisions 184, 209, 233): the core is adopter-owned -- a laptop by default, or the adopter's own cloud through the public adapters. Scale is never blocked; the tooling that makes it painless is paid, and "free" is price only (Decision 233 clause 2, rewording 209 clause 1). Approval authority is GitHub; the core has no identity system of its own (233 clause 4).
 
 Users and surface (Decision 232, whose clause 1 sets the persona and user-archetype vocabulary): the Signaller, an engineer who supervises the loop and hosts it for a team, is served first through one web UI over the named verbs and GitHub (T4.33); its headline is the milestone-and-gate dependency map (T4.35), whose grammar `docs/contracts/visual-grammar.yaml` owns. Both are deferred.
 
 ## Roadmap sources
 
-- Platform roadmap: `docs/ROADMAP-PLATFORM.yaml`, the sole roadmap source for engineering work here.
+- Roadmap: `docs/ROADMAP-PLATFORM.yaml`, the sole roadmap source for engineering work here.
 - Marketing/comms roadmap: `docs/ROADMAP-SEMANTO.yaml` for the external brand surface, including the On The Loop brand-identity rows S1.10-S1.13. Every item is parked `deferred_post_mvp`; every brand value is a placeholder.
 - Decision rationale: `docs/DECISIONS.md` plus `docs/DECISIONS_ARCHIVE.md`. Pending candidate decisions in the roadmap are binding until ratified or superseded.
 - Contracts: `docs/contracts/*.yaml` and selected `.md` contracts are the preferred source for machine semantics. Do not duplicate contract truth in prose.
 
-## Platform roadmap end-state map
+## Roadmap end-state map
 
 ### Foundation already shipped
 
-The platform is in convergence and hardening rather than bootstrap. Its foundation includes the agent branch workflow, public-repo boundary, GitHub-hosted CI, secret guards, two-tier validation, the Single Portal Invariant, DuckLake reader/writer functions, schema-as-code, CI-RCA, governed deployment, and infrastructure guard classification. T2 is the active center of gravity because durable state and guard hardening block telemetry and executor work.
+This repository is in convergence and hardening rather than bootstrap. Its foundation includes the agent branch workflow, public-repo boundary, GitHub-hosted CI, secret guards, two-tier validation, the Single Portal Invariant, DuckLake reader/writer functions, schema-as-code, CI-RCA, governed deployment, and infrastructure guard classification. T2 is the active center of gravity because durable state and guard hardening block telemetry and executor work.
 
 ### Critical path to the autonomous loop
 
@@ -185,7 +187,7 @@ CI-RCA is one failure-to-work bridge: red main workflows generate evidence, dedu
 
 ## Infrastructure and deployment
 
-The platform currently uses AWS `eu-west-2`, Python 3.12 Lambdas, GitHub-hosted CI with OIDC, DuckLake-on-Neon, and LiteLLM transport, all replaceable implementation choices. Routine production changes use governed GitHub workflows; admin access and local deployment are human-gated, break-glass only.
+The operator deployment currently uses AWS `eu-west-2`, Python 3.12 Lambdas, GitHub-hosted CI with OIDC, DuckLake-on-Neon, and LiteLLM transport, all replaceable implementation choices. Routine production changes use governed GitHub workflows; admin access and local deployment are human-gated, break-glass only.
 
 ## File routing and operational quick reference
 

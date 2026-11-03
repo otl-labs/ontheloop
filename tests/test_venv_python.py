@@ -17,6 +17,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+import pytest
+
 _WRAPPER_SRC = Path(__file__).parent.parent / "bin" / "venv-python"
 _EXEC_BITS = stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH
 
@@ -43,6 +45,13 @@ def _make_fake_interpreter(path: Path, importable: bool) -> None:
         script = "#!/usr/bin/env bash\nexit 1\n"
     path.write_text(script, encoding="utf-8")
     path.chmod(path.stat().st_mode | _EXEC_BITS)
+
+
+@pytest.fixture(autouse=True)
+def _clear_parity_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inside the CI-parity child these are set; the fallback and fail-loud tests must not inherit them."""
+    monkeypatch.delenv("OTL_VENV_PYTHON", raising=False)
+    monkeypatch.delenv("OTL_FAST_TIER_ENV", raising=False)
 
 
 class TestVenvPythonWrapper:
@@ -244,3 +253,54 @@ class TestRequiredMinorPinnedToSources:
         assert pinned, "no setup-python pins found in any workflow"
         off_target = {name: sorted(v) for name, v in pinned.items() if v != {_required_minor()}}
         assert not off_target, f"workflow python-version pins disagree with REQUIRED_PYTHON_MINOR: {off_target}"
+
+
+class TestVenvPythonOverride:
+    def _run(self, wrapper: Path, override: str | None, *args: str) -> subprocess.CompletedProcess[str]:
+        env = {**os.environ}
+        if override is not None:
+            env["OTL_VENV_PYTHON"] = override
+        return subprocess.run([str(wrapper), *args], capture_output=True, text=True, encoding="utf-8", env=env)
+
+    def _present_venv(self, repo: Path) -> None:
+        venv_bin = repo / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        shim = venv_bin / "python"
+        shim.write_text("#!/usr/bin/env bash\necho venv-python-ran\n", encoding="utf-8")
+        shim.chmod(shim.stat().st_mode | _EXEC_BITS)
+
+    def test_override_wins_over_present_venv(self, tmp_path: Path) -> None:
+        wrapper = _install_wrapper(tmp_path)
+        self._present_venv(tmp_path)
+
+        result = self._run(wrapper, sys.executable, "-c", "print('override-ran')")
+
+        assert result.returncode == 0
+        assert result.stdout.strip() == "override-ran"
+
+    def test_non_executable_override_exits_1_without_running_venv(self, tmp_path: Path) -> None:
+        wrapper = _install_wrapper(tmp_path)
+        self._present_venv(tmp_path)
+        missing = str(tmp_path / "nope" / "python")
+
+        result = self._run(wrapper, missing, "-c", "print(1)")
+
+        assert result.returncode == 1
+        assert f"ERROR: OTL_VENV_PYTHON is set but not executable: {missing}" in result.stderr
+        assert "venv-python-ran" not in result.stdout
+
+    def test_unset_override_keeps_venv_resolution(self, tmp_path: Path) -> None:
+        wrapper = _install_wrapper(tmp_path)
+        self._present_venv(tmp_path)
+
+        result = self._run(wrapper, None, "-c", "print(1)")
+
+        assert result.stdout.strip() == "venv-python-ran"
+
+    def test_missing_script_still_exits_1_under_override(self, tmp_path: Path) -> None:
+        wrapper = _install_wrapper(tmp_path)
+
+        result = self._run(wrapper, sys.executable, str(tmp_path / "absent.py"))
+
+        assert result.returncode == 1
+        assert "script not found" in result.stderr

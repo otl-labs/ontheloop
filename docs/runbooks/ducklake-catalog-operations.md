@@ -23,8 +23,7 @@ sections:
     control: CD.33 O-2 as amended by CD.34 / Decision 81 clause 7
 catalog:
   backend: Neon serverless Postgres (DIRECT endpoint, sslmode=require)
-  dsn_secret: ducklake-neon-catalog-dsn
-  dsn_secret_arn_output: ducklake_neon_catalog_dsn_secret_arn
+  dsn_parameter: /secret/ducklake-neon-catalog-dsn
   meta_schema: ducklake_ops
   catalog_alias: ops_catalog
   data_path: s3://agent-platform-data-lake/ducklake-neon-smoke/
@@ -46,8 +45,8 @@ and every write transits `ducklake_writer`. The ONLY sanctioned out-of-band acce
 (e.g. a stuck snapshot, an orphaned-file question, a schema drift investigation).
 
 Authority for the break-glass read is the explicit, named `DuckLakeBreakGlass` inline policy on the
-`PlatformAdmin` role (`terraform/bootstrap/platform_admin_data_policies.tf`): `secretsmanager:GetSecretValue` on the Neon
-DSN ARN + `s3:GetObject`/`s3:ListBucket` on the `ducklake-*` prefixes. It grants READ only -- a break-glass
+`PlatformAdmin` role (`terraform/bootstrap/platform_admin_data_policies.tf`): `s3:GetObject`/`s3:ListBucket` on the
+`ducklake-*` prefixes; the DSN parameter read is PlatformAdmin's `SecretParameterAdmin` Sid on parameter/secret/*. It grants READ only -- a break-glass
 session cannot mutate the catalog data.
 
 ### Preconditions
@@ -65,11 +64,11 @@ The runtime's own connection authority backs the break-glass attach -- there is 
 egress-permitted host, or point `extension_directory` at a local baked copy.
 
 ```bash
-# 1. Confirm the credential is reachable (read the DSN secret under the break-glass grant).
-aws secretsmanager get-secret-value \
-  --secret-id ducklake-neon-catalog-dsn \
+# 1. Confirm the credential is reachable (read the DSN parameter under agent_platform_admin).
+aws ssm get-parameter \
+  --name /secret/ducklake-neon-catalog-dsn --with-decryption \
   --profile agent_platform_admin --region eu-west-2 \
-  --query SecretString --output text >/dev/null && echo "DSN_READABLE"
+  --query Parameter.Value --output text >/dev/null && echo "DSN_READABLE"
 
 # 2. Read-your-write inspect via the smoke test's restore drill (ATTACHes the catalog, verifies a probe).
 bin/venv-python -m scripts.ducklake_neon_smoke_test --restore-drill --profile agent_platform_admin

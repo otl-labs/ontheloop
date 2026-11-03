@@ -18,11 +18,14 @@ case is not vacuous.
 from __future__ import annotations
 
 import copy
+import dataclasses
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
+
+from scripts.checks import registry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = REPO_ROOT / "docs" / "contracts" / "overseer-dispatch.yaml"
@@ -274,3 +277,80 @@ class TestNegativeCases:
         assert mutated != text
         with pytest.raises(AssertionError):
             _assert_dispatched_carrier_is_declared_on_every_surface(mutated)
+
+
+# ---------------------------------------------------------------------------
+# rec-3530: the fork line is a checked record -- the mechanical coverage row, the successor owner of the narrowed
+# residual, and the pointer rules in record_grammar.
+# ---------------------------------------------------------------------------
+
+_FORK_CHECK = "validate_plan_fork_lines"
+_GRAMMAR_TOKENS = ("'Decision NNN'", "docs/contracts/", "'PLAN-<slug> fork <n>'", "bare literal")
+
+
+def _fork_section(doc: dict[str, Any]) -> dict[str, Any]:
+    return doc["autonomy_tiers"]["plan_fork_classification"]
+
+
+def _fork_line_rows(doc: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    rows = _fork_section(doc)["enforcement_coverage"]
+    mechanical = [r for r in rows if r.get("status") == "mechanical" and "context[] fork line" in r["surface"]]
+    residual = [r for r in rows if r.get("status") == "residual_agent_obligation" and "settles that fork" in r["surface"]]
+    assert len(mechanical) == 1 and len(residual) == 1, "expected one mechanical and one residual fork-line row"
+    return mechanical[0], residual[0]
+
+
+def _assert_fork_line_check_is_declared_and_registered(doc: dict[str, Any]) -> None:
+    mechanical, residual = _fork_line_rows(doc)
+    assert mechanical.get("enforced_by") == _FORK_CHECK
+    assert callable(registry.resolve(mechanical["enforced_by"]))
+    for sequence in (registry.pre_sequence(), registry.full_sequence()):
+        assert any(step.kind == "check" and step.name == _FORK_CHECK for step in sequence)
+    assert residual.get("residual_owner") == "rec-4786"
+
+
+def _assert_record_grammar_carries_the_pointer_rules(doc: dict[str, Any]) -> None:
+    grammar = _fork_section(doc)["record_grammar"]
+    for token in _GRAMMAR_TOKENS:
+        assert token in grammar, token
+
+
+class TestForkLineCheckCoverage:
+    def test_mechanical_row_names_a_check_registered_in_both_tiers(self) -> None:
+        _assert_fork_line_check_is_declared_and_registered(_load_contract())
+
+    def test_record_grammar_carries_the_pointer_rules(self) -> None:
+        _assert_record_grammar_carries_the_pointer_rules(_load_contract())
+
+    def test_negative_enforced_by_deleted(self) -> None:
+        doc = _load_contract()
+        del _fork_line_rows(doc)[0]["enforced_by"]
+        with pytest.raises(AssertionError):
+            _assert_fork_line_check_is_declared_and_registered(doc)
+
+    def test_negative_enforced_by_unregistered(self) -> None:
+        doc = _load_contract()
+        _fork_line_rows(doc)[0]["enforced_by"] = "validate_no_such_check"
+        with pytest.raises((AssertionError, registry.UnknownCheckError)):
+            _assert_fork_line_check_is_declared_and_registered(doc)
+
+    def test_negative_owner_reset_to_rec_3530(self) -> None:
+        doc = _load_contract()
+        _fork_line_rows(doc)[1]["residual_owner"] = "rec-3530"
+        with pytest.raises(AssertionError):
+            _assert_fork_line_check_is_declared_and_registered(doc)
+
+    @pytest.mark.parametrize("change", [{"pre": False}, {"full_segment": None}])
+    def test_negative_entry_dropped_from_a_tier(self, monkeypatch: pytest.MonkeyPatch, change: dict[str, Any]) -> None:
+        entry = registry._ALL_ENTRIES[_FORK_CHECK]
+        monkeypatch.setitem(registry._ALL_ENTRIES, _FORK_CHECK, dataclasses.replace(entry, **change))
+        with pytest.raises(AssertionError):
+            _assert_fork_line_check_is_declared_and_registered(_load_contract())
+
+    def test_negative_grammar_token_removed(self) -> None:
+        for token in _GRAMMAR_TOKENS:
+            doc = _load_contract()
+            section = _fork_section(doc)
+            section["record_grammar"] = section["record_grammar"].replace(token, "")
+            with pytest.raises(AssertionError):
+                _assert_record_grammar_carries_the_pointer_rules(doc)

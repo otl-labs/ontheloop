@@ -1,0 +1,122 @@
+terraform {
+  required_providers {
+    aws = { source = "hashicorp/aws", version = "~> 5.0" }
+  }
+}
+
+provider "aws" {
+  region                      = "eu-west-2"
+  skip_credentials_validation = true
+  skip_requesting_account_id  = true
+  skip_metadata_api_check     = true
+}
+
+variable "gen" {
+  type    = string
+  default = "v1"
+}
+
+resource "terraform_data" "dep" {
+  input = var.gen
+}
+
+resource "terraform_data" "fresh" {
+  triggers_replace = var.gen
+  input            = "x"
+}
+
+data "aws_iam_policy_document" "created_doc" {
+  statement {
+    sid       = "CreatedStatement"
+    actions   = ["sqs:SendMessage"]
+    resources = ["arn:aws:sqs:eu-west-2:ACCOUNT-PLACEHOLDER:literal", terraform_data.fresh.id]
+  }
+}
+
+data "aws_iam_policy_document" "dynamic_unknown_doc" {
+  dynamic "statement" {
+    for_each = split(",", terraform_data.dep.output)
+    content {
+      sid       = "Dyn${statement.value}"
+      actions   = ["sqs:ReceiveMessage"]
+      resources = ["*"]
+    }
+  }
+}
+
+data "aws_iam_policy_document" "inner_unrendered_doc" {
+  dynamic "statement" {
+    for_each = split(",", terraform_data.dep.output)
+    content {
+      sid       = "Inner${statement.value}"
+      actions   = ["sns:Publish"]
+      resources = ["*"]
+    }
+  }
+}
+
+data "aws_iam_policy_document" "chained_doc" {
+  source_policy_documents = [data.aws_iam_policy_document.inner_unrendered_doc.json]
+
+  statement {
+    sid       = "ChainedStatement"
+    actions   = ["sns:Subscribe"]
+    resources = [terraform_data.dep.id]
+  }
+}
+
+data "aws_iam_policy_document" "overridden_doc" {
+  override_policy_documents = [data.aws_iam_policy_document.base_doc.json]
+
+  statement {
+    sid       = "OverrideStatement"
+    actions   = ["kms:Decrypt"]
+    resources = [terraform_data.dep.id]
+  }
+}
+
+data "aws_iam_policy_document" "base_doc" {
+  statement {
+    sid       = "BaseStatement"
+    actions   = ["kms:Encrypt"]
+    resources = ["*"]
+  }
+}
+
+data "aws_iam_policy_document" "transformed_doc" {
+  statement {
+    sid       = "TransformedStatement"
+    actions   = ["ssm:GetParameter"]
+    resources = [terraform_data.dep.id]
+  }
+}
+
+resource "aws_iam_role_policy" "created_policy" {
+  name   = "created_policy"
+  role   = "role-placeholder"
+  policy = data.aws_iam_policy_document.created_doc.json
+}
+
+resource "aws_iam_role_policy" "dynamic_unknown_policy" {
+  name   = "dynamic_unknown_policy"
+  role   = "role-placeholder"
+  policy = data.aws_iam_policy_document.dynamic_unknown_doc.json
+}
+
+resource "aws_iam_role_policy" "chained_policy" {
+  name   = "chained_policy"
+  role   = "role-placeholder"
+  policy = data.aws_iam_policy_document.chained_doc.json
+}
+
+resource "aws_iam_role_policy" "overridden_policy" {
+  name   = "overridden_policy"
+  role   = "role-placeholder"
+  policy = data.aws_iam_policy_document.overridden_doc.json
+}
+
+resource "aws_iam_role_policy" "transformed_policy" {
+  name   = "transformed_policy"
+  role   = "role-placeholder"
+  policy = replace(data.aws_iam_policy_document.transformed_doc.json, "ssm:GetParameter", "ssm:GetParameters")
+}

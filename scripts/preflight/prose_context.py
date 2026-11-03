@@ -50,7 +50,7 @@ def _relpath(path: Path) -> str:
         return path.as_posix()
 
 
-def _resolve_s1_root_load_set() -> list[Path]:
+def _resolve_s1_root_load_set(root: Path | None = None) -> list[Path]:
     """Root ambient load-set: root CLAUDE.md + transitive @-imports (cycle-guarded).
 
     Today CLAUDE.md -> @AGENTS.md, so the set is {CLAUDE.md, AGENTS.md} -- resolved
@@ -58,7 +58,7 @@ def _resolve_s1_root_load_set() -> list[Path]:
     """
     resolved: list[Path] = []
     seen: set[Path] = set()
-    queue: list[Path] = [_common.ROOT / "CLAUDE.md"]
+    queue: list[Path] = [(root or _common.ROOT) / "CLAUDE.md"]
     while queue:
         current = queue.pop(0)
         if not current.exists():

@@ -9,7 +9,7 @@ renew review_by with a field amendment entry (governance_note_add) naming the ne
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 from pathlib import Path
 from typing import Any
 
@@ -32,12 +32,12 @@ def temporary_exemptions(root: Path) -> list[tuple[str, str, str, dict[str, Any]
     return found
 
 
-def lapsed_errors(root: Path, today: datetime.date) -> tuple[list[str], int]:
+def lapsed_errors(root: Path, today: dt.date) -> tuple[list[str], int]:
     errors: list[str] = []
     found = temporary_exemptions(root)
     for table, column, kind, why in found:
         try:
-            due = datetime.date.fromisoformat(str(why.get("review_by")))
+            due = dt.date.fromisoformat(str(why.get("review_by")))
         except ValueError:
             errors.append(
                 f"{table}.{column}.{kind}: temporary exemption review_by {why.get('review_by')!r} is not an ISO date"
@@ -53,13 +53,11 @@ def lapsed_errors(root: Path, today: datetime.date) -> tuple[list[str], int]:
 
 
 @registry.register("validate_temporary_exemption_review", owner="platform")
-def validate_temporary_exemption_review(
-    failed: list[str], *, root: Path | None = None, today: datetime.date | None = None
-) -> None:
+def validate_temporary_exemption_review(failed: list[str], *, root: Path | None = None, today: dt.date | None = None) -> None:
     """Fail when a temporary write-time exemption's review_by date is in the past (UTC)."""
     print("\n=== Temporary exemption review ===")
     root = root if root is not None else _common.ROOT
-    today = today if today is not None else datetime.datetime.now(datetime.timezone.utc).date()
+    today = today if today is not None else dt.datetime.now(dt.timezone.utc).date()
     try:
         errors, examined = lapsed_errors(root, today)
     except (OSError, ValueError) as exc:

@@ -16,7 +16,20 @@ TRUSTED = ROOT / ".github" / "workflows" / "terraform-plan-trusted.yml"
 APPLY = ROOT / ".github" / "workflows" / "terraform-apply-sandbox.yml"
 NEON = ROOT / "scripts" / "ci" / "neon_api_key.sh"
 
-ORDER = ["overlay", "screen", "assume", "mirror", "init", "plan", "show", "backstop", "guard", "persist", "digest"]
+ORDER = [
+    "overlay",
+    "screen",
+    "assume",
+    "mirror",
+    "init",
+    "plan",
+    "show",
+    "backstop",
+    "guard",
+    "persist",
+    "digest",
+    "fit_check",
+]
 SHA_RE = re.compile(r"@[0-9a-f]{40}$")
 CREDENTIAL_USES = ("aws-actions/configure-aws-credentials",)
 
@@ -68,7 +81,7 @@ def _trusted_violations(wf: dict[str, Any]) -> list[str]:
     ids = [s.get("id") for s in steps]
     positions = [ids.index(i) if i in ids else -1 for i in ORDER]
     if -1 in positions or positions != sorted(positions):
-        out.append("order: overlay, screen, assume, mirror, init, plan, show, backstop, guard, persist, digest")
+        out.append("order: overlay, screen, assume, mirror, init, plan, show, backstop, guard, persist, digest, fit_check")
     screen_idx = ids.index("screen") if "screen" in ids else len(ids)
     if any(str(s.get("uses", "")).startswith(CREDENTIAL_USES) for s in steps[:screen_idx]):
         out.append("credentials: no credential step before the screen")
@@ -78,6 +91,7 @@ def _trusted_violations(wf: dict[str, Any]) -> list[str]:
     out += _comment_violations(wf)
     out += _persist_violations(wf)
     out += _output_violations(wf)
+    out += _fit_check_violations(wf)
     for step in steps:
         uses = str(step.get("uses", ""))
         if uses and not uses.startswith("./") and not SHA_RE.search(uses.split(" ")[0]):
@@ -119,6 +133,27 @@ def _comment_violations(wf: dict[str, Any]) -> list[str]:
     build, check, post = body.find("BODY=$("), body.find('redaction_check.py" assert-clean'), body.find("gh pr comment")
     if min(build, check, post) < 0 or not build < check < post:
         out.append("comment: build the body, assert-clean, then post")
+    return out
+
+
+FIT_CHECK_RUN = (
+    'python3 -I scripts/ci/terraform_plan_digest.py --literals-from terraform/personal --fit-check "$RUNNER_TEMP/plan.json"'
+)
+
+
+def _fit_check_violations(wf: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    step = _by_id(wf, "fit_check")
+    if str(step.get("run", "")).strip() != FIT_CHECK_RUN:
+        out.append("fit_check: the run body is exactly the one prescribed line")
+    if any(key in step for key in ("if", "continue-on-error", "shell", "working-directory")):
+        out.append("fit_check: no if, continue-on-error, shell or working-directory")
+    ids = [s.get("id") for s in _steps(wf)]
+    names = [s.get("name") for s in _steps(wf)]
+    fit = ids.index("fit_check") if "fit_check" in ids else len(ids)
+    for comment in ("Post the refusal comment", "Post the plan comment"):
+        if comment in names and names.index(comment) < fit:
+            out.append(f"fit_check: must come before {comment!r}")
     return out
 
 
@@ -258,6 +293,26 @@ MUTATIONS: list[tuple[str, Callable[[dict[str, Any]], None], str]] = [
     ("prints plan text", _print_plan, "output:"),
     ("upload artifact", _upload, "output:"),
     ("unpinned action", _unpin, "pin:"),
+    ("fit_check before digest", _swap("digest", "fit_check"), "order:"),
+    ("fit_check removed", lambda wf: _steps(wf).remove(_by_id(wf, "fit_check")), "order:"),
+    ("fit_check body", _set_run("fit_check", "--fit-check", "--fit-report"), "fit_check: the run body"),
+    ("fit_check if", lambda wf: _by_id(wf, "fit_check").__setitem__("if", "always()"), "fit_check: no if"),
+    (
+        "fit_check continue-on-error",
+        lambda wf: _by_id(wf, "fit_check").__setitem__("continue-on-error", True),
+        "fit_check: no if",
+    ),
+    ("fit_check shell", lambda wf: _by_id(wf, "fit_check").__setitem__("shell", "bash"), "fit_check: no if"),
+    (
+        "fit_check working-directory",
+        lambda wf: _by_id(wf, "fit_check").__setitem__("working-directory", "x"),
+        "fit_check: no if",
+    ),
+    (
+        "fit_check after comment",
+        lambda wf: _steps(wf).append(_steps(wf).pop(next(i for i, s in enumerate(_steps(wf)) if s.get("id") == "fit_check"))),
+        "fit_check: must come before",
+    ),
 ]
 
 
