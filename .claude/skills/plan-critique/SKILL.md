@@ -21,13 +21,13 @@ Reject a plan that invents a third validation tier, treats mapped coverage or re
 
 2. Read `docs/PROJECT_CONTEXT.md` in full (for North Star and rules).
 
-3. **Targeted roadmap extraction, not a full-file read:** extract only the `tier_items[]` (from `docs/ROADMAP-PLATFORM.yaml`) the plan's `phase` and `context` fields name, via a `bin/venv-python -c` yaml.safe_load projection -- do not `Read` the file in full (ROADMAP-PLATFORM.yaml alone is >600KB).
+3. **Targeted roadmap extraction, not a full-file read:** extract only the `tier_items[]` (from `docs/ROADMAP-PLATFORM.yaml`) the plan's `phase` and `context` fields name, via a `bin/venv-python -c` yaml.safe_load projection -- do not `Read` the file in full.
 
-4. **Targeted decision extraction + conflict-sweep, not a full-file read:** read only the decision sections named in the plan's context `Decision-scout verdict + CITE list` (locate each via `rg "^## Decision N:" docs/DECISIONS.md`), plus a conflict-sweep: `rg` 2-3 keywords drawn from the plan's approach over `^## Decision` headers in `docs/DECISIONS.md` to catch a contradiction the scout's CITE list omitted. Do not Read the full file -- it is large (near its Decision 134 size ceiling) and the decision-scout gate already paid that cost minutes earlier in the same workflow.
+4. **Targeted decision extraction + conflict-sweep, not a full-file read:** read only the decision sections named in the plan's context `Decision-scout verdict + CITE list` (locate each via `rg "^## Decision N:" docs/DECISIONS.md`), plus a conflict-sweep: `rg` 2-3 keywords drawn from the plan's approach over `^## Decision` headers in `docs/DECISIONS.md` to catch a contradiction the scout's CITE list omitted. Do not Read the full file; the decision-scout gate already paid that cost.
 
 5. **For IMPLEMENTATION plans:** Read the files listed in the plan's `scope` list (the `## Scope` table in legacy .md plans) to verify the plan's accuracy. For STRATEGIC plans, this is not required -- work areas are high-level and do not require file-level verification.
 
-5b. For IMPLEMENTATION plans, run `bin/venv-python -m scripts.roadmap.plan_obligations --plan <plan path>` and fold its report into the scope check above -- it names missing companion registrations mechanically, freeing this gate to judge adequacy, not arithmetic.
+5b. For IMPLEMENTATION plans, run `bin/venv-python -m scripts.roadmap.plan_obligations --plan <plan path>` and fold its report (companions, size headroom, unbuilt plans on the same files, undecidable acceptance) into the scope check above -- arithmetic is the tool's, adequacy is yours. With an approved-text sidecar, read the last `wording-check` gate row (never re-run it): REVISE when it is absent, not PASS, its digest differs from `approved_text record`, or its selection was degraded.
 
 ### Phase 2: Strategic Analysis
 
@@ -77,30 +77,30 @@ Trigger condition 2 -- **Surface-retiring plan**: `scope` carries an `action: De
 
 12m. **Tier fitness check:** `verification_tier` must satisfy the planning skill's Verification Tier Guidelines, narrowed by an intentional refinement (Decision 48/79) so comment-only `.tf` or docstring-only Python edits are not force-escalated: a **resource-affecting** `.tf` scope file (not comment-only) OR an **active-manifest** Lambda scope file (`status: active` in its manifest -- Decision 79; `status: stub` does not trigger this) => `V3`; any Python source scope file => `>= V2`. A lower declared tier than the qualifying scope requires => recommend REVISE citing the specific scope file and the tier it demands.
 
-12n. **SLOC decompose-by-default check (Decision 128):** For each `scripts/` or `src/` scope file with `action: Modify` (or `Create`), check whether the plan's own description of the change would push the file past its `config/sloc_budgets.yaml` budget (or past 500 SLOC if currently unregistered). If so, the plan MUST include a decomposition step (a facade package, Decision 80/104/124 pattern) OR an explicit, justified budget-raise step carrying a `# raise-approved: dec-NNN` marker citation. A plan that grows a scope file past its budget with neither => recommend REVISE: "Scope file [path] crosses its SLOC budget with no decomposition step and no raise-approved Decision citation -- decompose by default (Decision 128)."
+12n. **Size headroom check (Decisions 128, 166):** For each scope row the 5b report marks over budget or NEAR_CAP, or whose planned change crosses its limit, the plan MUST include a decomposition step (facade package, Decision 80/104/124), a class relief-valve step measured at build time, or a justified raise step citing `# raise-approved: dec-NNN`. With none => REVISE: "Scope file [path] crosses or nears its size limit with no decomposition, relief or cited raise step -- decompose by default."
 
 12o. **Graduation-classification honesty (T3.21, VF-05 enforcement):** For every `phase: pre-deploy` `verification_plan` step, check the `graduation` field (see docs/contracts/vp-red-before.yaml for the three-way classification). Flag each of the following as a REVISE-worthy issue:
    - **Missing disposition:** a pre-deploy step with no `graduation` field at all (only exempt if the plan predates T3.21 and declares zero dispositions anywhere -- a plan authored under this gate must classify every pre-deploy step).
-   - **Suspect `not-applicable`:** a step whose `command` is plainly a single command_exit_zero / grep_count / file_presence / test_selector / command_output_matches / metric_under_threshold shape (see `scripts.verification_checks.CANONICAL_SLOTS`) but is marked `not-applicable` instead of `graduate` -- this is exactly the classification-gaming shape the gate exists to catch, since `not-applicable` carries no downstream registry obligation.
+   - **Suspect `not-applicable`:** a step whose `command` is plainly a single command_exit_zero / grep_count / file_presence / test_selector / command_output_matches / metric_under_threshold shape (see `scripts.verification_checks.CANONICAL_SLOTS`) but is marked `not-applicable` instead of `graduate` -- the classification-gaming shape this gate catches (`not-applicable` carries no registry obligation).
    - **Thin waiver:** a `waive` disposition whose `graduation_waiver_reason` is generic or non-substantive (e.g. "not needed", "skip", "later") rather than naming a concrete reason the check can't be graduated now.
    If any step trips one of these, recommend REVISE citing the step number and which sub-check failed. Otherwise report "graduation dispositions complete and honest."
 
-12p. **Category-consistency verdict (Decision 167 clause 2 -- fresh Decisions and CD ratifications alike):** This is the reviewer-side control that does not exist anywhere else in this gate -- Phase 2's other checks judge scope, tiers, and dispositions, never whether a drafted numbered Decision's claimed significance row actually matches its body.
+12p. **Category-consistency verdict (Decision 167 clause 2 -- fresh Decisions and CD ratifications alike):** No other check here asks whether a drafted numbered Decision's claimed significance row matches its body.
    - **Trigger detection.** Fires when EITHER the plan carries a ratification block (Workflow Step 5b above) OR the plan's `scope` includes a `docs/DECISIONS.md` row AND the plan's drafted text contains a numbered `"## Decision NNN:"` heading. A `docs/DECISIONS.md` scope row that adds ONLY a dated amendment trailer -- no drafted numbered heading -- does NOT fire this check: an amendment carries no significance envelope to adjudicate.
    - **Verdict.** When the trigger fires, locate the drafted entry's claimed `significance.value` (envelope field or narrative Significance marker) and quote VERBATIM the body sentence that satisfies or fails `docs/contracts/decision-entry.yaml` `significance.routing_rule`'s three questions for the claimed row. A claimed-row/body mismatch is REVISE-worthy on its own -- this is a mandatory category-consistency gate, not a discretionary surface-and-defer check the human can wave through.
    - **N/A branch.** When the trigger does not fire, the Phase-3 row emits "Category consistency: N/A -- plan drafts no numbered Decision text", so a silent omission is distinguishable from a pass.
 
 ### Phase 2b: Frame Challenge (MANDATORY)
 
-Phase 2 checks the plan's *details* against the existing frame. This phase challenges the *frame itself*. See Decision 75 (Frame-Lock Anti-Pattern in Architectural Planning) for the failure mode this phase is designed to catch.
+Phase 2 checks the plan's *details* against the existing frame. This phase challenges the *frame itself*. Failure mode: Decision 75 (frame lock).
 
 Ask the following five questions against the plan's chosen approach. For each, write a one-sentence answer. Where the answer surfaces a concrete contradiction with a Decision, a Roadmap item, or a North Star principle, recommend REVISE. Otherwise surface the answer informationally -- the human or downstream planner decides whether to pivot.
 
-12e. **Question 1 -- Is the chosen primitive the right primitive?** What if the orchestrator / runtime / data store / interface in this plan wasn't this kind of thing? Could the role be filled by a platform-native primitive (Step Functions, EventBridge, SQS, DynamoDB Streams, Lambda) already in production in this codebase? If the plan introduces a custom orchestrator, scheduler, retry loop, state machine, or queue, name the platform primitive it could be replaced by and explain why it isn't.
+12e. **Question 1 -- Is the chosen primitive the right primitive?** What if the orchestrator / runtime / data store / interface in this plan wasn't this kind of thing? Could the role be filled by a cloud-native primitive (Step Functions, EventBridge, SQS, DynamoDB Streams, Lambda) already in production in this codebase? If the plan introduces a custom orchestrator, scheduler, retry loop, state machine, or queue, name the cloud primitive it could be replaced by and explain why it isn't.
 
 12f. **Question 2 -- Is the decomposition boundary right?** If the plan treats X as a single unit, could X be decomposed into smaller independently-deployable, independently-observable, independently-retryable units? If the plan proposes N independent units, should they collapse into one? The frame-lock case (Decision 75) was a monolithic Python loop that should have been decomposed into per-step Lambdas orchestrated by Step Functions; the corresponding question would have caught it.
 
-12g. **Question 3 -- What existing capability could absorb this custom code?** Enumerate the platform capabilities ratified in `docs/DECISIONS.md` and shipped in `terraform/` that are conceptually adjacent to what the plan proposes. For each, ask why the plan is not using it. Plans that propose custom logic where AWS-native or codebase-native primitives exist must justify the divergence explicitly.
+12g. **Question 3 -- What existing capability could absorb this custom code?** Enumerate the capabilities ratified in `docs/DECISIONS.md` and shipped in `terraform/` that are conceptually adjacent to what the plan proposes. For each, ask why the plan is not using it. Plans that propose custom logic where AWS-native or codebase-native primitives exist must justify the divergence explicitly.
 
 12h. **Question 4 -- Are inherited assumptions still valid?** When the plan cites a constraint of the form "we can't do X because Y," and Y references a Decision older than 30 days (or one that predates a more recent capability-ratifying Decision), surface that Decision and ask whether its premise still holds. CD.11's premise ("Fargate replaces Lambda dispatcher because executor exceeds 15 min") is the canonical example -- it carried forward an assumption that newer decomposition options invalidate.
 
@@ -154,12 +154,12 @@ Ask the following five questions against the plan's chosen approach. For each, w
 
 **Category Consistency (12p, Decision 167 clause 2):** N/A -- plan drafts no numbered Decision text / PASS -- "[verbatim body quote]" supports claimed [routing row] / REVISE -- claimed [routing row] but body reads: "[verbatim quote]"
 
-**Finding-Origin Attribution:** mechanical (a deterministic check could catch it -- name it) / critic judgement -- tag each finding, with a stable anchor (plan field path or VP step id)
+**Finding-Origin Attribution and severity:** blocking (correctness, safety, scope, a Decision conflict or failed check above; when unsure) or nit (wording, citation form, ordering; never a Frame Challenge contradiction); mechanical (a deterministic check could catch it -- name it) / critic judgement -- tag each finding, with a stable anchor (plan field path or VP step id)
 
-**Recommendation:** PROCEED / REVISE [with specific suggestions if REVISE]
+**Recommendation:** PROCEED (no blocking finding; list nits) / REVISE (any blocking finding) [with specific suggestions if REVISE]
 ```
 
-14. If the recommendation is REVISE, list specific changes needed before implementation should begin.
+14. If REVISE, list the changes needed before implementation. State each measured figure as a hypothesis with the command that produced it: the reviser will re-measure it and dispute, with evidence, any it cannot reproduce.
 
 ---
 

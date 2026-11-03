@@ -1,4 +1,4 @@
-# AGENTS.md - On The Loop Platform
+# AGENTS.md - On The Loop
 
 Universal rules. For full project context, see `docs/PROJECT_CONTEXT.md` on demand.
 
@@ -6,13 +6,24 @@ Universal rules. For full project context, see `docs/PROJECT_CONTEXT.md` on dema
 
 This repository is PUBLIC (Decisions 73, 83, 101). Public-content boundary (Decision 101):
 - NEVER publish: AWS account IDs or ARNs, IAM ExternalIds, credentials or API keys, private operational data, or any internal hostname that provides an attack surface.
-- SAFE to publish: platform engineering, infrastructure patterns, tooling, CI/CD design, and general LLM-agent architecture -- publish the engineering, never the operational secrets.
+- SAFE to publish: On The Loop's engineering, infrastructure patterns, tooling, CI/CD design, and general LLM-agent architecture -- publish the engineering, never the operational secrets.
 - Confidential data lives ONLY in: the personal AWS account (Secrets Manager, gitignored tfvars, S3 private prefixes), and gitignored local files (e.g. `terraform/personal/terraform.personal.tfvars`, `~/.aws/credentials`). Nothing confidential is ever committed.
 - The pre-commit `never-commit` hook (shape-pattern) blocks 12-digit AWS account IDs, secret-like strings, and ExternalId patterns from reaching the repo.
 
 ## Role and environment
 You are a Lead Software Developer writing production-quality Python. Primary dev surface: Claude Code on the web
 (CC-web; Ubuntu 24.04). Bash is the primary shell.
+- **Deployment principles (AWS adapter):** one region, from its `project-configuration.yaml` row (today
+  `config/aws-region`, Decision 202); every cloud resource is declared in IaC and CI-applied (Decision 126) -- the
+  only out-of-band acts are secret values (Decision 237) and the operator admin tier (`deploy-paths.yaml`
+  `admin_out_of_band`). A console-created resource is drift to import or file a rec for, never a planning input.
+- **Claims cite evidence:** a status saying something was filed, deployed, sent, approved, merged or verified names
+  its read-back (returned rec id, run id, message id, merge SHA, fresh-session result); otherwise it says started or
+  expected. A cause not verified this session is labelled inferred. A manual step asked of the operator ends with
+  the one check that proves it worked.
+- **Hook canary (top-level interactive CC-web sessions only; not subagents, CI or scheduled agents):** if
+  session-start context has no `[session_start_` line from this repo's hooks, the guards did not load: say "repo
+  hooks not loaded" in your first status and write nothing until the operator resolves it.
 
 ## Code style
 - Python 3.12+, type hints required, `async` for I/O.
@@ -26,7 +37,7 @@ You are a Lead Software Developer writing production-quality Python. Primary dev
 ## Shell invocations
 - Always invoke `bin/venv-python` instead of `python` or `python3`.
 - Each Bash tool invocation is independent -- do not rely on `source .venv/bin/activate` or `source .venv/Scripts/activate`; use `bin/venv-python` directly instead.
-- GitHub access is via the `github` MCP server (`mcp__github__*`) -- the gh CLI and hub CLI are deliberately not installed in either container (DEV or ADMIN); this binds any authored command surface, not merely the git-ops flow -- prefer mcp__github__* over gh in new scripts, checks, and verification-plan commands.
+- GitHub access from a session is via the `github` MCP server (`mcp__github__*`). The gh CLI may ship with the cloud image; new session-side scripts, checks, and verification-plan commands still prefer mcp__github__*, and CI runner steps may use `gh`.
 
 ## Safety
 - Never `eval()` or `exec()`. Parse untrusted expressions with a restricted, purpose-built parser instead.
@@ -46,11 +57,7 @@ You are a Lead Software Developer writing production-quality Python. Primary dev
 - `--update-sloc-budgets` never auto-seeds a newly-oversized, unregistered file -- decompose it, or register it deliberately with the marker.
 
 ## Branching - never edit or commit on `main`
-**Hard rule: do not run `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, or any `git commit` / `git push` command while the current branch is `main`.** If you're on main, the only allowed actions are read-only commands and creating a new branch. See `## Git-ops procedure` for the full branching topology.
-
-- **See current branch**: the statusline at the bottom of the prompt shows it. It will read `WARNING: ON MAIN` if you're on main. Or run `git branch --show-current`.
-- **Create a working branch**: on Claude Code on the web you are already on a harness-assigned session branch -- verify with `git branch --show-current`. Agents never create their own branch; the harness assigns it.
-- A `PreToolUse` hook at `.claude/hooks/never_on_main.py` enforces this at the harness level: it blocks `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, and `Bash(git commit/push ...)` while on `main`. Other Bash commands (e.g. `git status`, `ls`) still run.
+**Hard rule: on `main`, never `Edit`/`Write`/`MultiEdit`/`NotebookEdit` a file inside the repo, or run `git commit` / `git push`.** On CC-web you are already on the harness-assigned session branch (`git branch --show-current`); agents never create their own. The PreToolUse hook `.claude/hooks/never_on_main.py` enforces this; writes outside the repo (memory, scratchpad) and read-only commands pass.
 
 ## Temporary Operational Constraints
 - **STRATEGIC plans suspended (Decision 67):** during this window all plans must be
@@ -59,16 +66,13 @@ You are a Lead Software Developer writing production-quality Python. Primary dev
   or >8 steps) is also suspended -- author the work as a single larger IMPLEMENTATION plan OR
   split it into multiple atomic IMPLEMENTATION plans yourself. Restores when CD.17 / T4.2
   reverses.
-- **Lambda deployment -- per-Lambda gating (Decision 79, CD.16 + CD.24):** gating is per-Lambda,
-  not blanket. Active artifacts (`status: active` in `src/lambdas/<slug>/manifest.yaml`) require
-  build + deploy + smoke-test (V3 tier); stub artifacts do not. `config/agent/` is NOT
-  Lambda-packaged. See the planning skill for the affected-artifact detection method.
+- **Lambda deployment -- per-Lambda gating (Decision 79):** only `status: active` artifacts need
+  build + deploy + smoke-test (V3); see the planning skill's Lambda Deployment assessment.
 
-## Memory policy - CLAUDE.md is canonical persistence
-Do **not** write to the auto-memory system (`~/.claude/projects/.../memory/`) in this project. The user's persistence model is git-tracked CLAUDE.md files (root + per-directory) plus the structured log (`docs/DECISIONS.md`).
-
-- When you learn something durable, **propose** adding it to the appropriate CLAUDE.md and let the user approve. Do not silently save.
-- When the user says "remember this", propose a CLAUDE.md edit - don't reach for auto-memory.
+## Memory policy - AGENTS.md is canonical persistence
+AGENTS.md is canonical: durable knowledge lives in git-tracked AGENTS.md, the per-directory CLAUDE.md files and
+`docs/DECISIONS.md`, never the auto-memory system (`~/.claude/projects/.../memory/`). When you learn something durable
+or are told "remember this", **propose** the edit to the right file and let the user approve; never save silently.
 
 ## Agent-First Repository
 
@@ -93,20 +97,14 @@ skills, slash commands -- are optimised for agent loading efficiency, not human 
 
 ## Skills and slash commands
 
-Decision 90 four-tier workflow (end-goal: /orient -> /plan -> /implement -> /develop-executor; current: /orient -> /plan -> /implement, executor frozen per Decision 67):
-- `/orient` - read-only orientation: surfaces eligible work, CI-RCA triage, ranked what-to-work-on, and up to 5 disjoint `/plan` prompts with an overlap matrix and keystone-first sequencing. Run before `/plan` to choose what to work on. Produces a chat reply only; writes nothing. Invokes the `orient` skill.
-- `/plan` - clarifies intent, runs preflight, produces `docs/plans/PLAN-{slug}.yaml`. Assumes a specific item has been chosen (run `/orient` first). Invokes the `planning` skill.
-- `/implement` - executes an IMPLEMENTATION plan or scopes a STRATEGIC plan into recommendations. Invokes the `implement` and `code-review` skills.
-- `/develop-executor` - supervisor for executor (Lambda) development.
-- `/audit` - composes a self-contained audit prompt (`docs/audit-prompts/AUDIT-{slug}.md`) for a high-capability model to execute in a fresh session; deep recon + zero-context subagent verification happen in the composing session so the expensive model pays only for judgment. Performs no audit itself. Invokes the `audit-prompt` skill.
+Decision 90 four-tier workflow: `/orient` (read-only; writes nothing; picks the item) -> `/plan` (writes
+`docs/plans/PLAN-{slug}.yaml`) -> `/implement` -> `/develop-executor` (frozen, Decision 67). `/audit` composes
+`docs/audit-prompts/AUDIT-{slug}.md` and audits nothing. `/overseer` composes `/plan` and `/implement` subagents to
+drive a roadmap item or audit; it is not a fifth tier, never bypasses the workflow or the Decision 67 freeze, is
+human-gated and IMPLEMENTATION-only, and does not consume the recommendation queue. Each skill's description has
+the rest.
 
-`/overseer` is an orchestration meta-layer, not a fifth tier: it composes the existing `/plan`
-and `/implement` subagents to drive an entire platform roadmap item or audit to completion largely
-unattended, with the human gating intake and completion. It never bypasses the four-tier workflow
-above or the Decision 67 executor freeze -- it is interactive/human-gated, IMPLEMENTATION-only, and
-does not consume the recommendation queue. Invokes the `overseer` skill.
-
-When a slash command instructs you to "apply" or "invoke" a skill, use the `Skill` tool - do **not** manually `Read` `SKILL.md` files. The Skill tool loads them on demand.
+When a slash command instructs you to "apply" or "invoke" a skill, use the `Skill` tool - never `Read` a `SKILL.md`.
 
 ## Operational data governance - Single Portal Invariant
 All recommendation and decision writes go through `python -m scripts.ops_data_portal`. Never `Edit` or `Write` to `logs/.decisions-index.jsonl` directly -- `validate.py` will fail CI. Recommendations have no local cache (Decision 215): read them through the ducklake-reads named verbs. Recommendation IDs are allocated BY THE WRITER atomically with the insert (`file_ops`, Decision 84 I-2) -- never client-side; decision numbering authority is `DECISIONS.md` (callers supply `decision_id`). The local decisions JSONL is a read-only cache.
@@ -114,22 +112,10 @@ All recommendation and decision writes go through `python -m scripts.ops_data_po
 Agent surface is three functions: `file_rec`, `update_rec`, `sync`. Do not call `sync.ops` or any pull CLI directly. Portal calls require the `agent_platform` (PlatformDev) assume-role profile to reach the reader/writer Function URLs. If unreachable, confirm the chain with `bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform` (the session-start hook `.claude/hooks/session_start_aws.sh` reports this each session); a rotated `agent_static` key is updated in the environment's AWS network secret. There is no SSO login in the static-key model. A write that cannot complete FAILS LOUDLY at the call site -- there is no offline outbox (Decision 84 I-4); re-file after restoring connectivity.
 
 ## Warehouse-as-source-of-truth invariant
-This is an append-only lakehouse. The warehouse is the single source of truth for all operational data; local files are never upstream of it.
-
-**Source-of-truth by table (Decision 84 consolidation, 2026-06-11):**
-- **`ops_recommendations`, `ops_decisions`, `ops_priority_queue` = DuckLake-on-Neon, SOLE backend.** Reads transit the closed `ducklake_reader` boundary via NAMED VERBS (Decision 84 I-3; no caller SQL); writes transit `ducklake_writer` (`file_ops` allocates rec ids in-transaction). There is exactly one backend and NO rollback flag (`OPS_STORAGE_BACKEND` retired -- the frozen legacy copy stopped being coherent the day writes moved). `ops_decisions` rebuilds from `DECISIONS.md` via `ops_data_portal --backfill-decisions-md`.
-
-Local files have exactly one valid role:
-
-1. **Read cache** (`logs/.decisions-index.jsonl`) - derivative projection rebuilt FROM the warehouse (the DuckLake reader). Recommendations have none (Decision 215). Downstream of the warehouse, never upstream. There is no staging outbox: a write that cannot reach the warehouse fails loudly (Decision 84 I-4).
-
-**Hard rule: a read cache is never a write source.** Reading any file in `logs/` and replaying it
-back into the warehouse is the CRUD anti-pattern in lakehouse clothing, and the row-resurrection
-failure mode it produces is recorded in Decision 84 -- recs writes go only through the writer.
-
-The legitimate write paths are: (a) `file_rec` / `update_rec` portal calls, and (b) ETL from a non-warehouse source of truth (e.g., `DECISIONS.md` -> `ops_decisions`). Anything else that writes warehouse rows must be reviewed for replay-from-cache violations.
-
-If a clone or runner shows stale data, an operator may rebuild that environment's local cache by running `bin/venv-python -m scripts.sync.ops sync` (which rebuilds the decisions cache from the DuckLake reader). Never fix drift by replaying the local file back upstream.
+This is an append-only lakehouse: the warehouse is the single source of truth for operational data, and local files are never upstream of it.
+- `ops_recommendations`, `ops_decisions`, `ops_priority_queue` live in DuckLake-on-Neon, the SOLE backend (Decision 84; no rollback flag). Reads use the closed `ducklake_reader` NAMED VERBS (no caller SQL); writes use `ducklake_writer`. `ops_decisions` rebuilds from `DECISIONS.md` via `ops_data_portal --backfill-decisions-md`.
+- A local file's only role is a read cache (`logs/.decisions-index.jsonl`, rebuilt from the reader; recs have none). **Hard rule: a read cache is never a write source** -- replaying `logs/` into the warehouse resurrects rows (Decision 84). Legitimate writes: (a) `file_rec` / `update_rec`, (b) ETL from a non-warehouse source of truth (`DECISIONS.md` -> `ops_decisions`); review any other warehouse writer for replay-from-cache.
+- Stale local data: rebuild with `bin/venv-python -m scripts.sync.ops sync`; never replay the local file upstream.
 
 ## Data-modeling default
 Before designing any table, decide **grain first** -- "one row per ___" -- before picking a write
@@ -144,7 +130,6 @@ procedure (branching topology, commit-message conventions, rebase mechanics, wak
 and the CI-credential/OAuth-token runbook); AGENTS.md keeps only the machine-enforced norms and
 one-line triggers below.
 
-- **Branch rule**: work on the harness-assigned session branch; never commit directly to `main`.
 - **Presubmit tier**: see the table below -- fast `--pre` gates PRs, full tier runs pre-handoff (local) + post-merge.
 - **Squash-merge**: `mcp__github__merge_pull_request(..., merge_method="squash")` once CI is green.
 - **Never-poll wake**: event-driven only (`subscribe_pr_activity` plus the CI-green/merge-conflict comment signals) -- never sleep/poll for CI or merge status.
@@ -157,16 +142,14 @@ one-line triggers below.
 | Fast (`--pre`) | PR / edit loop | `bin/venv-python -m scripts.validate --pre` | Authoritative pre-merge gate when run by PR CI (Decision 73); advisory only when run outside CI |
 | Full | Pre-handoff (local) + post-merge on `main` | `bin/venv-python -m scripts.validate` | See `## Merge protocol` (post-merge disposition). |
 
+The full tier runs well past the 10-min foreground cap on CC-web: start it backgrounded with a 2 h limit from the
+top-level session (a subagent never receives the completion) and say it started. Its verdict is
+`bin/venv-python -m scripts.checks.validation_result --verify-head`, never a pipe's exit status.
+
 ### Commit signing (CC-web: SSH-signed via harness signer)
-- CC-web commits ARE SSH-signed (commit.gpgsign=true, gpg.format=ssh, host-held key); GitHub
-  reports them Verified.
-- Local `git log --format=%G?` reads `N`/`B` only because this container cannot verify SSH
-  signatures locally (no ssh-keygen) -- not evidence of a missing signature.
-- `session_start_commit_signing.py` sets `gpg.ssh.allowedSignersFile` so the harness Stop hook's
-  signature check stops false-positiving. If it still fires, check which half: the committer-email
-  half (`%ce != noreply@anthropic.com`) is a real trigger whose remediation is correct.
-- Do NOT reset-author or `git commit --amend -S` to chase the signature flag -- it only churns
-  SHAs.
+CC-web commits are SSH-signed and GitHub shows them Verified; a local `%G?` of `N`/`B` only means this container
+cannot verify SSH signatures. `session_start_commit_signing.py` quiets the Stop hook's signature check; if it still
+fires, only its committer-email half (`%ce != noreply@anthropic.com`) is real. Never reset-author or `--amend -S`.
 
 ## Merge protocol
 - **Post-merge full-tier failure on `main`**: ci-rca files a `source=ci_rca` rec, `priority=critical` unless tests-only (High, fast lane); else `/plan` or a manual revert PR (forward-fix, never auto-revert; no inline workaround -- Decision 226, `red-main-recovery.yaml`).

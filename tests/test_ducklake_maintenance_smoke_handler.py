@@ -66,7 +66,7 @@ def test_open_connection_builds_connection_from_fetched_dsn():
         with patch.object(h.rt, "open_connection", return_value=fake_con) as mock_open_conn:
             result = h._open_connection()
     assert result is fake_con
-    mock_fetch.assert_called_once_with(h.DSN_SECRET_ID)
+    mock_fetch.assert_called_once_with(h.DSN_PARAMETER_NAME)
     mock_open_conn.assert_called_once_with(
         dsn={"host": "x"},
         data_path=h.DATA_PATH,
@@ -78,18 +78,18 @@ def test_open_connection_builds_connection_from_fetched_dsn():
 def test_open_connection_reads_the_secret_named_by_env(monkeypatch):
     import importlib
 
-    monkeypatch.delenv("DUCKLAKE_DSN_SECRET_ID", raising=False)
-    assert importlib.reload(h).DSN_SECRET_ID == h.rt.DSN_SECRET_ID
-    monkeypatch.setenv("DUCKLAKE_DSN_SECRET_ID", "agent-platform-ducklake-smoke-maintainer-dsn")
+    monkeypatch.delenv("DUCKLAKE_DSN_PARAMETER", raising=False)
+    assert importlib.reload(h).DSN_PARAMETER_NAME == h.rt.DSN_PARAMETER_NAME
+    monkeypatch.setenv("DUCKLAKE_DSN_PARAMETER", "/secret/agent-platform-ducklake-smoke-maintainer-dsn")
     try:
         reloaded = importlib.reload(h)
-        assert reloaded.DSN_SECRET_ID == "agent-platform-ducklake-smoke-maintainer-dsn"
+        assert reloaded.DSN_PARAMETER_NAME == "/secret/agent-platform-ducklake-smoke-maintainer-dsn"
         with patch.object(reloaded.rt, "fetch_dsn", return_value={"host": "x"}) as mock_fetch:
             with patch.object(reloaded.rt, "open_connection", return_value=object()):
                 reloaded._open_connection()
-        mock_fetch.assert_called_once_with("agent-platform-ducklake-smoke-maintainer-dsn")
+        mock_fetch.assert_called_once_with("/secret/agent-platform-ducklake-smoke-maintainer-dsn")
     finally:
-        monkeypatch.delenv("DUCKLAKE_DSN_SECRET_ID", raising=False)
+        monkeypatch.delenv("DUCKLAKE_DSN_PARAMETER", raising=False)
         importlib.reload(h)
 
 

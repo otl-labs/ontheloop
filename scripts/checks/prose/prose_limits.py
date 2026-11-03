@@ -17,7 +17,9 @@ never suggest that; they name three different relief valves instead: relocate th
 (docs/PROJECT_CONTEXT.md) or a docs/contracts/*.yaml contract (Decision 86 routing), defer detail
 to an uncapped auxiliary file the surface points at rather than inlines, or take a loud,
 Decision-cited budget raise (Decision 128's marker mechanism, reused here for the raise-gate
-mechanism only -- never for its decompose-by-default relief valve, which is SLOC-specific).
+mechanism only -- never for its decompose-by-default relief valve, which is SLOC-specific). Every
+OVER-budget and unregistered message carries them; an under-budget message instead names the exact
+reseed line, since the ratchet only goes down.
 """
 
 from __future__ import annotations
@@ -31,8 +33,8 @@ from scripts.preflight.prose_context import measure_prose_context
 
 _BUDGETS_REL_PATH = "config/prose_budgets.yaml"
 
-# Deliberately never names "split" / "decompose" -- see module docstring. Every FAIL message
-# below is built with this text so all three relief valves are always present together.
+# Deliberately never names "split" / "decompose" -- see module docstring. Every OVER-budget and
+# unregistered FAIL message below is built with this text so all three relief valves are always present together.
 _RELIEF_VALVE_TEXT = (
     "Relief valves: relocate the content to docs/PROJECT_CONTEXT.md (L2) or a "
     "docs/contracts/*.yaml contract (Decision 86); defer the detail to an uncapped auxiliary "
@@ -61,7 +63,6 @@ def _check_entry(
     current_bytes: int,
     budget: int | None,
     errors: list[str],
-    advisories: list[str],
 ) -> None:
     """Compare one measured (surface, path) entry against its registered budget.
 
@@ -77,9 +78,10 @@ def _check_entry(
     elif current_bytes > budget:
         errors.append(f"{surface} {path}: {current_bytes} bytes exceeds budget {budget}. {_RELIEF_VALVE_TEXT}")
     elif current_bytes < budget:
-        advisories.append(
-            f"{surface} {path}: {current_bytes} bytes below budget {budget}; reseed "
-            f"{_BUDGETS_REL_PATH} to ratchet down (current<=budget stays tight, mirroring the SLOC ratchet)."
+        errors.append(
+            f"{surface} {path}: {current_bytes} bytes below budget {budget}; lower the entry to {current_bytes} in "
+            f"{_BUDGETS_REL_PATH} in this PR (the ratchet only goes down; implement-scope-boundary's "
+            "prose_budgets_ratchet_down row sanctions the edit)."
         )
 
 
@@ -90,7 +92,7 @@ def validate_prose_limits(failed: list[str]) -> None:
     budgets = _load_prose_budgets()
     report: dict[str, Any] = measure_prose_context()
     errors: list[str] = []
-    advisories: list[str] = []
+    examined = 1
 
     s1_data = report.get("S1") or {}
     s1_budgets = budgets.get("S1") or {}
@@ -100,7 +102,6 @@ def validate_prose_limits(failed: list[str]) -> None:
         s1_data.get("prose_bytes", 0),
         s1_budgets.get("root_ambient_load_set"),
         errors,
-        advisories,
     )
     # Split-proof dedup (Decision 114/110): a file counted in the S1 aggregate is never also
     # gated per-file in S2 -- keeps the two passes from ever contradicting each other.
@@ -113,19 +114,17 @@ def validate_prose_limits(failed: list[str]) -> None:
             path = f.get("path")
             if path in s1_member_paths:
                 continue
-            _check_entry(surface, path, f.get("prose_bytes", 0), surface_budgets.get(path), errors, advisories)
+            examined += 1
+            _check_entry(surface, path, f.get("prose_bytes", 0), surface_budgets.get(path), errors)
 
     s8_budgets = budgets.get("S8") or {}
     s8_data = report.get("S8") or {}
     for f in s8_data.get("files", []):
         path = f.get("path")
-        _check_entry("S8", path, f.get("prose_bytes", 0), s8_budgets.get(path), errors, advisories)
+        examined += 1
+        _check_entry("S8", path, f.get("prose_bytes", 0), s8_budgets.get(path), errors)
 
-    if advisories:
-        print("Prose budget advisories (non-blocking):")
-        for a in advisories:
-            print(f"  ~ {a}")
-
+    registry.examined(examined, unit="prose_surfaces")
     if errors:
         print("Prose budget violations:")
         for e in errors:

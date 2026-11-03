@@ -235,7 +235,7 @@ def test_owner_sql_waits_at_most_its_lock_timeout(stage: Any) -> None:
 
 def test_maintainer_peak_sessions_across_the_five_smoke_actions(stage: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     h = smoke_handler
-    monkeypatch.setattr(h, "DSN_SECRET_ID", cl.LOGINS[MAINTAINER].secret_id)
+    monkeypatch.setattr(h, "DSN_PARAMETER_NAME", cl.LOGINS[MAINTAINER].parameter_name)
     monkeypatch.setattr(h, "DATA_PATH", stage.data_paths[SMOKE])
     monkeypatch.setattr(h, "META_SCHEMA", SMOKE)
     monkeypatch.setattr(h, "EXTENSION_DIRECTORY", None)

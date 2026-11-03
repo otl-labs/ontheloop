@@ -9,10 +9,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import yaml
-
 from scripts import lambda_manifest
 from scripts.checks import _common, registry
+from scripts.contract_rules import parse_yaml
 
 _TIER_RANK: dict[str, int] = {"V1": 1, "V2": 2, "V3": 3}
 
@@ -85,8 +84,7 @@ def validate_tier_floor(failed: list[str], plans_dir: Path | None = None) -> Non
     violations: list[str] = []
     judged = 0
     for path in plan_paths:
-        with path.open(encoding="utf-8") as fh:
-            data = yaml.safe_load(fh)
+        data = parse_yaml(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or data.get("schema_version") != 2:
             continue
         judged += 1

@@ -8,7 +8,7 @@ scans every contract for the retired key.
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 import re
 from pathlib import Path
 from typing import Any
@@ -28,6 +28,7 @@ SCD2_VOCABULARY = frozenset(
         "array_element_format",
         "array_element_reference",
         "acceptance_lint",
+        "glossary_lint",
         "not_before",
         "write_time_exemptions",
     }
@@ -41,8 +42,13 @@ _SUBKEYS: dict[str, frozenset[str]] = {
     "array_element_format": frozenset({"pattern", "exclude_before"}),
     "array_element_reference": frozenset({"exclude_before"}),
     "acceptance_lint": frozenset({"require_discrimination", "exclude_before"}),
+    "glossary_lint": frozenset({"exclude_before"}),
 }
-PRODUCER_CLASS = {"array_element_reference": "cross_row", "acceptance_lint": "repository_state"}
+PRODUCER_CLASS = {
+    "array_element_reference": "cross_row",
+    "acceptance_lint": "repository_state",
+    "glossary_lint": "repository_state",
+}
 EXEMPTION_CLASSES = frozenset({"cross_row", "repository_state", "temporary"})
 CONTENT_THRESHOLD = "content_inline_threshold_bytes"
 RECS_DATE_FLOOR = "2026-05-01"
@@ -76,7 +82,7 @@ def iso_date_error(label: str, value: Any, floor: str | None = None) -> str | No
     if not (isinstance(value, str) and _ISO_DATE.match(value)):
         return f"{label} {value!r} is not an ISO date string"
     try:
-        datetime.date.fromisoformat(value)
+        dt.date.fromisoformat(value)
     except ValueError:
         return f"{label} {value!r} is not a real calendar date"
     if floor is not None and value < floor:

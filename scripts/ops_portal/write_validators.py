@@ -3,25 +3,33 @@
 Owner-concern: gate_write runs the DuckLake writer's own pure gate (schema_gate and check_write) over the repo's
 field_semantics.yaml projection of the Class A contract, so file_rec, update_rec, file_decision and update_decision
 refuse early with the rule the writer would apply. It is a derived pre-check, never authoritative: the writer
-re-evaluates every rule (Decision 81 cl.5 as widened by Decision 210 cl.5). The two producer-side rules no
-row-local evaluator can run (acceptance lint, dependency existence) are driven from the contract's own exemptions.
-This path is named by the ops_recommendations contract as the acceptance_lint exemption owner; it must not move.
+re-evaluates every rule (Decision 81 cl.5 as widened by Decision 210 cl.5). The producer-side rules no row-local
+evaluator can run (acceptance lint, dependency existence, and the glossary rule, whose ground is house style the
+repository's profile decides) are driven from the contract's own exemptions. This path is named by the
+ops_recommendations contract as the acceptance_lint and glossary_lint exemption owner; it must not move.
 """
 
 from __future__ import annotations
 
 import copy
 import functools
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, cast
 
+import yaml
+
 from scripts.executor.acceptance_lint import lint_acceptance_command
+from scripts.ops_portal._common import _REPO_ROOT
 from scripts.ops_portal.writer_transport import _project_ops_record
 from src.common.ducklake_scd2_schema import SchemaGateError, resolve_table_spec, schema_gate
 from src.common.ducklake_write_rules import RowRuleViolationError, check_write
 from src.row_rules.rules import RowRules
 
 _PLACEHOLDER_ULID = "0" * 26
+_GLOSSARY_PATH = _REPO_ROOT / "docs" / "contracts" / "glossary.yaml"
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
 
 class RowRuleRejected(ValueError):
@@ -123,8 +131,45 @@ class _ElementReference:
             raise ValueError(f"{column} elements must reference existing recs; absent: {absent!r}")
 
 
-def _producer_handlers() -> dict[str, Callable[[str, object, dict[str, Any]], None]]:
-    return {"acceptance_lint": _acceptance_lint, "array_element_reference": _ElementReference()}
+@functools.lru_cache(maxsize=None)
+def _load_glossary(path: Path) -> dict[str, Any]:
+    try:
+        return cast(dict[str, Any], yaml.safe_load(path.read_text(encoding="utf-8")))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ValueError(f"glossary_lint: {path.name} is not loadable ({type(exc).__name__}); failing closed") from exc
+
+
+class _GlossaryLint:
+    """glossary_lint for one write: refuse a sentence the stored value does not already hold that uses either relative word."""
+
+    def __init__(self, existing: dict[str, Any] | None) -> None:
+        self._existing = existing
+
+    def __call__(self, column: str, value: object, params: dict[str, Any]) -> None:
+        if value is None:
+            return
+        from scripts.checks.contracts import _glossary_words  # noqa: PLC0415
+
+        contract = _load_glossary(_GLOSSARY_PATH)
+        known = _glossary_words.identifiers(contract)
+        held = {s.strip() for s in _SENTENCE_END.split(str((self._existing or {}).get(column) or ""))}
+        for sentence in _SENTENCE_END.split(str(value)):
+            if sentence.strip() in held:
+                continue
+            for _, word in _glossary_words.unqualified_uses(sentence, yaml_keys=False, identifiers=known):
+                derived = " (a short context is built from context_v2_json or dispute evidence)" if column == "context" else ""
+                raise ValueError(
+                    f'{column}: unqualified "{word}" -- say instead: {_glossary_words.say_instead(word, contract)}, '
+                    f"or quote it if it is not the relative word; see docs/contracts/glossary.yaml{derived}"
+                )
+
+
+def _producer_handlers(existing: dict[str, Any] | None) -> dict[str, Callable[[str, object, dict[str, Any]], None]]:
+    return {
+        "acceptance_lint": _acceptance_lint,
+        "array_element_reference": _ElementReference(),
+        "glossary_lint": _GlossaryLint(existing),
+    }
 
 
 def _undated_projection(fields: dict[str, Any]) -> dict[str, Any]:
@@ -159,7 +204,7 @@ def _run_producer_rules(table: str, projected: dict[str, Any], *, insert: bool, 
     exemptions = RowRules.from_projection(resolve_table_spec(table).fields).producer_exemptions
     if not exemptions:
         return
-    params, handlers = _producer_params(table), _producer_handlers()
+    params, handlers = _producer_params(table), _producer_handlers(existing)
     for column, kind in exemptions:
         handler = handlers.get(kind)
         if handler is None:

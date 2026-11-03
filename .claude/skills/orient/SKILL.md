@@ -144,7 +144,7 @@ Classification rows, the `prior_deferrals` render and the close-then-stamp route
 
 Source: `recent_main_commits` from the preflight cache (`logs/.preflight-report.json`). Do not issue a `git log` Bash call -- cache only (Decision 88 egress budget; Decision 84 closed boundary).
 
-Group the recent commits by conventional-prefix slug (`feat`/`plan`/`roadmap`/`scope`) and map each slug to the tier_item it advanced using the Step-2 roadmap projection (Inputs > Roadmap detail). Emit a one-line trajectory read describing which area of the platform saw recent activity.
+Group the recent commits by conventional-prefix slug (`feat`/`plan`/`roadmap`/`scope`) and map each slug to the tier_item it advanced using the Step-2 roadmap projection (Inputs > Roadmap detail). Emit a one-line trajectory read describing which area of the codebase saw recent activity.
 
 **Degradation rule**: when the slug->tier_item mapping is ambiguous (e.g., the commit prefix does not match any tier_item slug or multiple items share a prefix pattern), skip the inferred mapping and emit the raw commit list (sha, date, subject) without any inferred tier_item association.
 
@@ -221,4 +221,4 @@ Ad-hoc lane (non-blocking, cap 3): open Critical recs, ready follow-on recs, pri
 
 ## Scope
 
-v1: platform roadmap only. Product-roadmap orientation is deferred.
+v1: the roadmap only.

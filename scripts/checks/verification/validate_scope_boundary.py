@@ -32,6 +32,12 @@ is what lets a plan's own Verification Plan dispatch the enforcing leg against i
 tree before anything is committed (ambient resolution would see no flip yet, since
 ``implementation_declared`` is set only at the commit-flow step).
 
+The scope_file_is_prose_gated sanction kind (prose_budgets_ratchet_down) sanctions
+config/prose_budgets.yaml only when a prose-gated surface is in declared scope AND the registry's
+base-to-working diff is decrease-only (every entry value <= base, every other byte identical); it
+is inert when the plan declares the registry itself, and never appends to ``failed`` -- a diff it
+declines to sanction falls through to the ordinary out-of-scope STOP.
+
 A malformed contract or plan is a reported finding, never a raise (Decision 55: fail loud via
 ``failed``, not an uncaught exception). A ``sanction_rows`` entry naming a ``trigger.kind`` this
 module does not implement is a loud failure, never a silently-skipped row.
@@ -40,12 +46,14 @@ module does not implement is a loud failure, never a silently-skipped row.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import cast
 
 import yaml
 
-from scripts.checks import _common, registry
+from scripts.checks import _common, _marker_guard, registry
+from scripts.preflight.prose_context import _resolve_s1_root_load_set
 
 CONTRACT_REL_PATH = "docs/contracts/implement-scope-boundary.yaml"
 
@@ -108,6 +116,50 @@ def _secrets_baseline_keys(baseline_rel: str, root: Path, base: str, failed: lis
     return keys
 
 
+_ENTRY_LINE_RE = re.compile(r"^(\s*[^\s#][^#]*?:\s*)\d+(\s*(?:#.*)?)$")
+
+
+def _prose_ratchet_sanction(row: dict, plan_scope_files: set[str], root: Path, base: str) -> list[str]:
+    """Sanctioned path for the scope_file_is_prose_gated kind: the registry, only when the plan's
+    declared scope meets a prose-gated surface and the registry diff is decrease-only. Prints why
+    it declined; never appends to `failed` (the out-of-scope STOP reports the path)."""
+    registry_rel = cast(str, (row.get("trigger") or {}).get("registry_path"))
+    if registry_rel in plan_scope_files:
+        return []
+    working_path = root / registry_rel
+    if not working_path.exists():
+        print(f"  NOTE: {registry_rel} absent in the working tree -- prose_budgets_ratchet_down not applied.")
+        return []
+    working_text = working_path.read_text(encoding="utf-8")
+    extract = _marker_guard.make_flat_extractor("raise-approved")
+    gated = {k for k in extract(working_text) if "/" in k}
+    for member in _resolve_s1_root_load_set(root):
+        try:
+            gated.add(member.resolve().relative_to(root.resolve()).as_posix())
+        except ValueError:
+            print(f"  NOTE: S1 member {member} resolves outside {root} -- skipped.")
+    if not plan_scope_files & gated:
+        return []
+    result = _common.run(["git", "show", f"{base}:{registry_rel}"], capture_output=True, text=True, encoding="utf-8", cwd=root)
+    if result.returncode != 0:
+        print(f"  NOTE: {registry_rel} absent at base ref {base!r} -- prose_budgets_ratchet_down not applied.")
+        return []
+    base_text = result.stdout
+
+    def shape(text: str) -> list[str]:
+        return [_ENTRY_LINE_RE.sub(r"\g<1>#\g<2>", ln) for ln in text.splitlines()]
+
+    base_vals = extract(base_text)
+    working_vals = extract(working_text)
+    lowered_only = shape(base_text) == shape(working_text) and all(
+        k in base_vals and v.value <= base_vals[k].value for k, v in working_vals.items()
+    )
+    if not lowered_only:
+        print(f"  NOTE: prose_budgets_ratchet_down sanctions only lowered values in {registry_rel}; other text changed")
+        return []
+    return [cast(str, (row.get("sanctions") or {}).get("path_template", ""))]
+
+
 def _row_derived_paths(
     kind: str | None,
     row: dict,
@@ -154,6 +206,8 @@ def _row_derived_paths(
         if plan_scope_files & baseline_key_memo[baseline_path]:
             return [sanctions.get("path_template", "")]
         return []
+    if kind == "scope_file_is_prose_gated":
+        return _prose_ratchet_sanction(row, plan_scope_files, root, base)
     return None
 
 

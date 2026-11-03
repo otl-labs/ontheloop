@@ -218,12 +218,6 @@ class TestGraduationDisposition:
         with pytest.raises(ValidationError, match="graduation_check_id requires graduation='graduate'"):
             PlanDocument.model_validate(d)
 
-    def test_historical_plans_all_validate(self) -> None:
-        """No PLAN-*.yaml on disk carries the new field yet -- confirms the field is optional."""
-        from scripts.roadmap.plan_document import main as _main
-
-        assert _main([]) == 0
-
 
 class TestImplementationDeclared:
     """PLAN-plan-resolution-content-keyed: implementation_declared is an additive optional
@@ -248,13 +242,6 @@ class TestImplementationDeclared:
         assert "implementation_declared" not in d
         doc = PlanDocument.model_validate(d)
         assert doc.implementation_declared is False
-
-    def test_historical_plans_all_validate(self) -> None:
-        """No PLAN-*.yaml on disk carries the new field yet -- confirms the field is optional
-        and does not force a schema_version bump or a corpus edit."""
-        from scripts.roadmap.plan_document import main as _main
-
-        assert _main([]) == 0
 
 
 class TestFallbackReevaluation:
@@ -341,7 +328,9 @@ class TestFallbackReevaluation:
 
     def test_all_historical_plans_still_valid_with_field_absent(self) -> None:
         """Decision 85: validate_plan_documents re-validates the whole plans directory against
-        an extra='forbid' model, so an added optional field is a repo-wide event."""
+        an extra='forbid' model, so an added optional field is a repo-wide event. This is the
+        module's one corpus pass: it also covers graduation and implementation_declared, whose
+        own corpus passes it replaced (rec-4777)."""
         paths = sorted((REPO_ROOT / "docs" / "plans").glob("PLAN-*.yaml"))
         assert len(paths) >= 300
         failures = validate_paths(paths)

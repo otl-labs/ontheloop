@@ -43,11 +43,11 @@ def _is_caller_input_error(exc: BaseException) -> bool:
     )
 
 
-def _secret_id() -> str:
-    secret_id = os.environ.get("TELEMETRY_DSN_SECRET_ID", "")
-    if not secret_id:
-        raise rt.DuckLakeRuntimeError("TELEMETRY_DSN_SECRET_ID is not set: the telemetry reader needs its own scoped login")
-    return secret_id
+def _dsn_parameter() -> str:
+    parameter = os.environ.get("TELEMETRY_DSN_PARAMETER", "")
+    if not parameter:
+        raise rt.DuckLakeRuntimeError("TELEMETRY_DSN_PARAMETER is not set: the telemetry reader needs its own scoped login")
+    return parameter
 
 
 def _is_smoke(data_path: str) -> bool:
@@ -78,7 +78,7 @@ def action_attach_check(payload: dict[str, Any], con: Any) -> dict[str, Any]:
         "ok": True,
         "meta_schema": meta_schema,
         "data_path_is_smoke": _is_smoke(data_path),
-        "catalog_login": str(rt.fetch_dsn(_secret_id()).get("username", "")),
+        "catalog_login": str(rt.fetch_dsn(_dsn_parameter()).get("username", "")),
         "read_only": bool(rows and rows[0][0]),
         "connect_ms": round(float(payload.get("_connect_ms", 0.0)), 2),
         "reused": bool(payload.get("_connect_reused", False)),
@@ -153,11 +153,11 @@ def _acquirer(action: str, payload: dict[str, Any]) -> Callable[..., tuple[Any, 
             _no_ops_slot,
             EXTENSION_DIRECTORY,
             pin=ev.require_production_pin,
-            dsn_secret_id=_secret_id(),
+            dsn_parameter=_dsn_parameter(),
             read_only=True,
         )
     meta_schema, data_path = ev.require_production_pin()
-    return ev.telemetry_acquirer(meta_schema, data_path, EXTENSION_DIRECTORY, dsn_secret_id=_secret_id(), read_only=True)
+    return ev.telemetry_acquirer(meta_schema, data_path, EXTENSION_DIRECTORY, dsn_parameter=_dsn_parameter(), read_only=True)
 
 
 def _handle(payload: dict[str, Any], meta: dict[str, Any], remaining_ms: Callable[[], float] | None = None) -> dict[str, Any]:

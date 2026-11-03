@@ -33,27 +33,25 @@ def _rc(
     return entry
 
 
-def _realistic_plan() -> dict:
+def _realistic_plan(opaque: bool = True) -> dict:
+    unknown = {"policy": True} if opaque else {}
+    doc_type = "aws_iam_policy_document" if opaque else "aws_ssm_parameter"
     changes = [
         _rc("aws_lambda_function", ["update"], {"a": 1}, {"a": 2}, address="aws_lambda_function.reader"),
         _rc("aws_lambda_function", ["update"], {"a": 1}, {"a": 2}, address="aws_lambda_function.writer"),
         _rc("aws_lambda_function", ["update"], {"a": 1}, {"a": 2}, address="aws_lambda_function.other"),
+        _rc("aws_iam_role_policy", ["update"], {"x": 1}, {"x": 2}, address="aws_iam_role_policy.ci_a", unknown=unknown),
+        _rc("aws_iam_role_policy", ["update"], {"x": 1}, {"x": 2}, address="aws_iam_role_policy.ci_b", unknown=unknown),
         _rc(
-            "aws_iam_role_policy", ["update"], {"x": 1}, {"x": 2}, address="aws_iam_role_policy.ci_a", unknown={"policy": True}
-        ),
-        _rc(
-            "aws_iam_role_policy", ["update"], {"x": 1}, {"x": 2}, address="aws_iam_role_policy.ci_b", unknown={"policy": True}
-        ),
-        _rc(
-            "aws_iam_policy_document",
+            doc_type,
             ["read"],
-            address="data.aws_iam_policy_document.a",
+            address=f"data.{doc_type}.a",
             reason="read_because_dependency_pending",
         ),
         _rc(
-            "aws_iam_policy_document",
+            doc_type,
             ["read"],
-            address="data.aws_iam_policy_document.b",
+            address=f"data.{doc_type}.b",
             reason="read_because_dependency_pending",
         ),
     ]
@@ -135,7 +133,7 @@ def _fitting_head_bytes(plan: dict) -> int:
 
 @pytest.mark.parametrize("delta", [-2, -1, 0, 1, 2])
 def test_marker_reservation_boundary_and_fit_report_agree(delta: int) -> None:
-    plan = _realistic_plan()
+    plan = _realistic_plan(opaque=False)
     head = _fitting_head_bytes(plan)
     cap = head + len(TRUNCATION_MARKER.encode("utf-8")) + delta
     overflow = delta < 0
@@ -153,7 +151,7 @@ def test_marker_reservation_boundary_and_fit_report_agree(delta: int) -> None:
 
 
 def test_fit_report_lines() -> None:
-    plan = _realistic_plan()
+    plan = _realistic_plan(opaque=False)
     ok = fit_report(plan)
     assert ok.startswith("Reviewer digest: 7 actionable of 146 resource change(s), ")
     assert ok.endswith(f" of {DIGEST_SIZE_CAP} bytes.")
@@ -172,7 +170,15 @@ def test_cli_overflow_exits_3_and_fit_report_exits_0(tmp_path: Path, capsys: pyt
     assert "terraform_plan_digest: digest overflow: actionable content is" in captured.err
     assert main(["--fit-report", str(path)]) == 0
     assert "Reviewer digest OVERFLOW" in capsys.readouterr().out
-    path.write_text(json.dumps(_realistic_plan()))
+    path.write_text(json.dumps(_realistic_plan(opaque=False)))
     assert main(["--fit-report", str(path)]) == 0
     assert capsys.readouterr().out.startswith("Reviewer digest: 7 actionable")
     assert main([str(tmp_path / "missing.json")]) == 1
+
+
+def test_realistic_opaque_plan_fit_report_is_the_opaque_line() -> None:
+    assert fit_report(_realistic_plan()) == (
+        "Reviewer digest OPAQUE: policies unknown at plan time: aws_iam_role_policy.ci_a, aws_iam_role_policy.ci_b; "
+        "deferred documents: data.aws_iam_policy_document.a, data.aws_iam_policy_document.b. "
+        "The merge-time review cannot read them: build ARNs from names or split the PR."
+    )

@@ -51,7 +51,7 @@ def test_ops_recommendations_declares_its_rule_list() -> None:
             "not_null": ({}, None),
             "pattern": ({"value": "^(rec-[0-9]+|agent-[0-9]+|test-[a-z0-9-]+)$"}, None),
         },
-        "title": {"not_null": ({}, None), "min_length": ({"value": 10}, "2026-09-01")},
+        "title": {"not_null": ({}, None), "min_length": ({"value": 10}, "2026-09-01"), "glossary_lint": ({}, None)},
         "source": {"not_null": ({}, _D), "accepted_values": ({"values": registry}, None)},
         "effort": {"not_null": ({}, _D), "accepted_values": ({"values": ["XS", "S", "M", "L", "XL"]}, _D)},
         "priority": {"not_null": ({}, _D), "accepted_values": ({"values": ["Critical", "High", "Medium", "Low"]}, _D)},
@@ -69,12 +69,13 @@ def test_ops_recommendations_declares_its_rule_list() -> None:
                 _D,
             ),
         },
-        "context": {"not_null": ({}, _D), "min_length": ({"value": 80}, _D)},
+        "context": {"not_null": ({}, _D), "min_length": ({"value": 80}, _D), "glossary_lint": ({}, None)},
         "acceptance": {
             "not_null": ({}, _D),
             "min_length": ({"value": 1}, _D),
             "acceptance_lint": ({"require_discrimination": True}, None),
         },
+        "verification": {"glossary_lint": ({}, None)},
         "dependencies": {
             "array_element_format": ({"pattern": "^rec-[0-9]+$"}, None),
             "array_element_reference": ({}, None),
@@ -86,13 +87,16 @@ def test_ops_recommendations_declares_its_rule_list() -> None:
     actual = {col: {kind: _shape(rule) for kind, rule in kinds.items()} for col, kinds in cols.items()}
     assert actual == expected
     assert cols["acceptance"]["acceptance_lint"].exemption["class"] == "repository_state"
+    for column in ("title", "context", "verification"):
+        assert cols[column]["glossary_lint"].exemption["class"] == "repository_state"
+        assert cols[column]["glossary_lint"].exemption["owner"] == "scripts/ops_portal/write_validators.py"
     assert cols["dependencies"]["array_element_reference"].exemption["class"] == "cross_row"
     assert cols["dependencies"]["array_element_reference"].exemption["owner"] == "rec-4166"
     assert all(
         r.exemption is None
         for c in cols.values()
         for k, r in c.items()
-        if k not in ("acceptance_lint", "array_element_reference")
+        if k not in ("acceptance_lint", "array_element_reference", "glossary_lint")
     )
 
 

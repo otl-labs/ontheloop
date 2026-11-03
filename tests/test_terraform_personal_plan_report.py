@@ -223,3 +223,55 @@ def test_overlay_refusal_for_a_config_file_path_is_rendered(tmp_path: Path) -> N
 def test_verdict_not_shown_next_to_a_failure_state(tmp_path: Path) -> None:
     out = run(tmp_path, "--category", "PLAN_FAILED", "--verdict", "PASS").stdout
     assert "Predicted guard verdict" not in out
+
+
+OPAQUE_TEXT = (
+    "Reviewer digest OPAQUE: policies unknown at plan time: aws_iam_role_policy.ci_a[*], aws_iam_role_policy.ci_b; "
+    "deferred documents: data.aws_iam_policy_document.a. "
+    "The merge-time review cannot read them: build ARNs from names or split the PR."
+)
+
+
+def test_opaque_fit_line_is_one_word_and_lists_addresses(tmp_path: Path) -> None:
+    fit = tmp_path / "fit"
+    fit.write_text(OPAQUE_TEXT + "\n", encoding="utf-8")
+    out = run(tmp_path, "--fit-file", str(fit), plan=_plan()).stdout
+    assert "Reviewer digest fit: OPAQUE\n" in out
+    expected = (
+        "Unknown at plan time: `aws_iam_role_policy.ci_a`, `aws_iam_role_policy.ci_b`, `data.aws_iam_policy_document.a`\n"
+    )
+    assert expected in out
+    assert "build ARNs" not in out and "deferred documents" not in out
+
+
+def test_opaque_word_wins_over_overflow_in_an_address(tmp_path: Path) -> None:
+    fit = tmp_path / "fit"
+    fit.write_text(OPAQUE_TEXT.replace("ci_b", "OVERFLOW"), encoding="utf-8")
+    assert "Reviewer digest fit: OPAQUE\n" in run(tmp_path, "--fit-file", str(fit), plan=_plan()).stdout
+
+
+def test_malformed_opaque_text_renders_word_without_address_line(tmp_path: Path) -> None:
+    fit = tmp_path / "fit"
+    fit.write_text("Reviewer digest OPAQUE: policies unknown at plan time: a b c; extra text 9999", encoding="utf-8")
+    out = run(tmp_path, "--fit-file", str(fit), plan=_plan()).stdout
+    assert "Reviewer digest fit: OPAQUE\n" in out
+    assert "Unknown at plan time" not in out and "9999" not in out
+
+
+def test_fits_and_overflow_render_no_address_line(tmp_path: Path) -> None:
+    for text in ("Reviewer digest: 1 actionable of 2 resource change(s), 5 of 8 bytes.", "Reviewer digest OVERFLOW: x"):
+        fit = tmp_path / "fit"
+        fit.write_text(text, encoding="utf-8")
+        assert "Unknown at plan time" not in run(tmp_path, "--fit-file", str(fit), plan=_plan()).stdout
+
+
+def test_opaque_addresses_round_trip_the_producer_line() -> None:
+    from scripts.ci.terraform_personal_plan_report import opaque_addresses
+    from scripts.ci.terraform_plan_digest import _opaque_line
+
+    line = _opaque_line(["aws_iam_role_policy.a[*]", "module.m[*].aws_iam_policy.b"], ["data.aws_iam_policy_document.c"])
+    assert opaque_addresses(line) == [
+        "aws_iam_role_policy.a[*]",
+        "module.m[*].aws_iam_policy.b",
+        "data.aws_iam_policy_document.c",
+    ]
