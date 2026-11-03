@@ -181,8 +181,8 @@ def _load_grammar_config(root: Path) -> dict:
     cfg = data.get("metadata_envelope") if isinstance(data, dict) else None
     if not isinstance(cfg, dict):
         return {}
-    shapes = cfg.get("field_shapes") if isinstance(cfg.get("field_shapes"), dict) else {}
-    serves = shapes.get("serves") if isinstance(shapes.get("serves"), dict) else {}
+    shapes: dict = cfg["field_shapes"] if isinstance(cfg.get("field_shapes"), dict) else {}
+    serves: dict = shapes["serves"] if isinstance(shapes.get("serves"), dict) else {}
     required = [str(f) for f in cfg.get("required_fields") or []]
     optional = [str(f) for f in cfg.get("optional_fields") or []]
     return {
@@ -234,8 +234,9 @@ def _warn_lines(current_entries: dict[int, str], new_number_set: set[int], doc) 
     warnings: list[str] = []
     envelopes = {n: extract_entry_envelope(b) for n, b in current_entries.items() if "serves:" in b or "kind:" in b}
     for n in sorted(envelopes):
-        if n not in new_number_set and envelopes[n]:
-            warnings += envelope_rules.dangling_serves_warnings(n, envelopes[n], ids)
+        envelope = envelopes[n]
+        if n not in new_number_set and envelope:
+            warnings += envelope_rules.dangling_serves_warnings(n, envelope, ids)
     carried = {"mission": doc.mission.carried_by, **{p.id: p.carried_by for p in doc.principles}}
     kinds = {
         n: str(e["kind"]["value"])

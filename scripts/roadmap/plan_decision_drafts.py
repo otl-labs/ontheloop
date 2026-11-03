@@ -160,7 +160,8 @@ def _scan_plan(path: str | Path, root: Path) -> tuple[int, list[Finding]]:
         return 0, [Finding("-", "", "FAIL", "path", f"cannot read {path}: {exc}")]
     if not isinstance(plan, dict):
         return 0, []
-    drafted, findings = 0, []
+    drafted = 0
+    findings: list[Finding] = []
     for text in _strings(plan):
         d, f = _draft_findings(text, root, skip_quoted=True)
         drafted, findings = drafted + d, findings + f
