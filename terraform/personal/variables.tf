@@ -35,7 +35,8 @@ variable "agent_service_account_user_name" {
 #
 # The Neon provider API key is the ephemeral variable neon_api_key (providers.tf).
 #
-# There is no neon_org_id: this is a personal Neon account (no organization).
+# neon_org_id has no default: the organisation id is never committed and comes from the tfvars parameter
+# (rec-4543).
 #
 # There is no neon_catalog_allowed_ips: Neon IP-Allow is a Scale-plan feature (unavailable on the
 # free tier this migration targets) and egress here is dynamic (CC-web + GitHub-hosted runners +
@@ -51,7 +52,7 @@ variable "neon_region_id" {
 }
 
 variable "neon_org_id" {
-  description = "Neon organization ID owning the DuckLake catalog project. Neon's org-based model requires org_id on project creation (it is an identifier, not a secret -- it appears in console URLs). Default is the personal-account default organization."
+  description = "Neon organisation id that owns the DuckLake catalog project, from the tfvars parameter (never committed). Used only when the project is created: neon_project.ducklake_catalog ignores later org_id changes, because the provider would otherwise replace the project."
   type        = string
-  default     = "org-winter-night-78488109"
+  nullable    = false
 }
