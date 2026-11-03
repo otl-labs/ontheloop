@@ -101,8 +101,13 @@ def _comment_columns(lines: list[str], starts: list[int], ranges: list[tuple[int
     return cols
 
 
-def _parse(text: str) -> _Parsed:
-    """Entries per Tier A key; ValueError on any defect (a duplicate key, anchor, alias, tag or shape defect)."""
+class _Scan(NamedTuple):
+    lines: list[str]
+    cols: list[int | None]
+    markers: list[tuple[str, str] | None]
+
+
+def _load(text: str) -> tuple[dict[str, Any], yaml.MappingNode]:
     try:
         for event in yaml.parse(text, Loader=_LOADER):
             if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None) or getattr(event, "tag", None):
@@ -113,6 +118,10 @@ def _parse(text: str) -> _Parsed:
         raise ValueError(f"YAML error: {exc}") from exc
     if not isinstance(data, dict) or not isinstance(root, yaml.MappingNode):
         raise ValueError("the file is not a mapping")
+    return data, root
+
+
+def _scan(text: str, root: yaml.MappingNode) -> _Scan:
     lines = text.split("\n")
     starts = [0]
     for match in re.finditer("\n", text):
@@ -124,40 +133,53 @@ def _parse(text: str) -> _Parsed:
     for number, col in enumerate(cols):
         match = _MARKER_RE.match(lines[number][col:]) if col is not None else None
         markers.append((f"dec-{match.group(1)}", match.group(2).strip()) if match and match.group(2).strip() else None)
+    return _Scan(lines, cols, markers)
+
+
+def _entry(scan: _Scan, value: object, text_from: int, mark_from: int, end: int) -> _Entry:
+    found = [m for m in scan.markers[mark_from : end + 1] if m is not None]
+    kept: list[str] = []
+    for number in range(text_from, end + 1):
+        line = scan.lines[number]
+        if scan.markers[number] is not None and number >= mark_from:
+            line = line[: scan.cols[number]]
+        if line.strip():
+            kept.append(line.strip())
+    try:
+        state = json.dumps({"value": value, "text": " ".join(kept)}, sort_keys=True, default=str)
+    except TypeError as exc:
+        raise ValueError(f"unorderable keys: {exc}") from exc
+    carried = value.get("carried_by") if isinstance(value, dict) else None
+    return _Entry(state, found, carried if isinstance(carried, list) else [])
+
+
+def _principles(scan: _Scan, data: dict[str, Any], node: yaml.Node, line: int, end: int) -> dict[str, _Entry]:
+    items = data["principles"]
+    if not isinstance(items, list) or not isinstance(node, yaml.SequenceNode):
+        raise ValueError("principles is not a list")
+    entries: dict[str, _Entry] = {}
+    for position, item in enumerate(items):
+        ident = item.get("id") if isinstance(item, dict) else None
+        if not isinstance(ident, str) or ident in entries:
+            raise ValueError(f"principles item {position} is not a mapping with a unique string id")
+        first = node.value[position].start_mark.line
+        last = node.value[position + 1].start_mark.line - 1 if position + 1 < len(items) else end
+        entries[ident] = _entry(scan, item, line if position == 0 else first, first, last)
+    return entries
+
+
+def _parse(text: str) -> _Parsed:
+    """Entries per Tier A key; ValueError on any defect (a duplicate key, anchor, alias, tag or shape defect)."""
+    data, root = _load(text)
+    scan = _scan(text, root)
     tops = [(key.value, key.start_mark.line, value) for key, value in root.value]
-
-    def entry(value: object, text_from: int, mark_from: int, end: int) -> _Entry:
-        found = [m for m in markers[mark_from : end + 1] if m is not None]
-        kept: list[str] = []
-        for number in range(text_from, end + 1):
-            line = lines[number]
-            if markers[number] is not None and number >= mark_from:
-                line = line[: cols[number]]  # type: ignore[index]
-            if line.strip():
-                kept.append(line.strip())
-        try:
-            state = json.dumps({"value": value, "text": " ".join(kept)}, sort_keys=True, default=str)
-        except TypeError as exc:
-            raise ValueError(f"unorderable keys: {exc}") from exc
-        carried = value.get("carried_by") if isinstance(value, dict) else None
-        return _Entry(state, found, carried if isinstance(carried, list) else [])
-
     entries: dict[str, _Entry] = {}
     for index, (name, line, node) in enumerate(tops):
-        end = tops[index + 1][1] - 1 if index + 1 < len(tops) else len(lines) - 1
+        end = tops[index + 1][1] - 1 if index + 1 < len(tops) else len(scan.lines) - 1
         if name in ("mission", *_BLOCK):
-            entries[name] = entry(data[name], line, line, end)
+            entries[name] = _entry(scan, data[name], line, line, end)
         elif name == "principles":
-            items = data[name]
-            if not isinstance(items, list) or not isinstance(node, yaml.SequenceNode):
-                raise ValueError("principles is not a list")
-            for position, item in enumerate(items):
-                ident = item.get("id") if isinstance(item, dict) else None
-                if not isinstance(ident, str) or ident in entries:
-                    raise ValueError(f"principles item {position} is not a mapping with a unique string id")
-                first = node.value[position].start_mark.line
-                last = node.value[position + 1].start_mark.line - 1 if position + 1 < len(items) else end
-                entries[ident] = entry(item, line if position == 0 else first, first, last)
+            entries.update(_principles(scan, data, node, line, end))
     log = data.get("amendment_log")
     rows = [json.dumps(row, sort_keys=True, default=str) for row in log] if isinstance(log, list) else []
     return _Parsed(entries, data, rows)
@@ -302,6 +324,20 @@ def _diff_legs(head: _Parsed, base: _Parsed, spec: _marker_guard.RegistrySpec, r
     return out
 
 
+def _base_state(root: Path, ref: str | None) -> tuple[_BaseReader | None, _Parsed | None, str, str | None]:
+    """(reader, parsed base, base text, skip reason)."""
+    reader = _BaseReader(root, ref) if ref else None
+    if reader is None:
+        return None, None, "", "no diff base"
+    if not reader.ok:
+        return reader, None, "", "git cat-file --batch failed"
+    base_text = reader(_REL) or ""
+    try:
+        return reader, (_parse(base_text) if base_text.strip() else _Parsed({}, {}, [])), base_text, None
+    except ValueError:
+        return reader, None, base_text, "base north-star.yaml unparseable"
+
+
 @registry.register("validate_tier_a_amendment_guard", owner="platform")
 def validate_tier_a_amendment_guard(failed: list[str]) -> None:
     """Fail on an unauthorized change to a Tier A entry of docs/contracts/north-star.yaml, or on missing ownership."""
@@ -316,17 +352,7 @@ def validate_tier_a_amendment_guard(failed: list[str]) -> None:
             head = _parse(head_text)
         except ValueError as exc:
             violations.append(f"PARSE: {_REL}: {exc} (fail closed).")
-    ref = _common.status_diff_base(root)
-    reader = _BaseReader(root, ref) if ref else None
-    skip = "no diff base" if reader is None else None if reader.ok else "git cat-file --batch failed"
-    base: _Parsed | None = None
-    base_text = ""
-    if reader is not None and reader.ok:
-        base_text = reader(_REL) or ""
-        try:
-            base = _parse(base_text) if base_text.strip() else _Parsed({}, {}, [])
-        except ValueError:
-            skip = "base north-star.yaml unparseable"
+    reader, base, base_text, skip = _base_state(root, _common.status_diff_base(root))
     if skip:
         print(f"  SKIP: {skip} -- the diff legs did not run (advisory locally, authoritative in CI).")
     spec = _spec(list(head.entries) if head else [])
