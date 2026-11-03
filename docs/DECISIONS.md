@@ -2,6 +2,66 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 243: North stars are a Tier A file -- a mission and nine entries in the Decision 196 shape, each with a failure signal, a binding scope and its carrying Decisions, under a declared partial order (amends Decision 196 clause 3) (Decided)
+
+```yaml
+number: 243
+status: Decided
+decided_date: "2026-11-02"
+kind:
+  value: direction
+  justification: >-
+    Clauses 2 and 3 set what On The Loop is for and which north stars bind this repository and each release; undone, the mission and NS.6-NS.9 revert to the roadmap's five invariants.
+amends: [196]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant change to the direction every plan and agent context reads, re-grounding the
+    north-star references of Decisions 78, 184 and 185. Not a contract note: north-star.yaml holds the entries,
+    not the choice to make Tier A real or where it lives. Not amendment_forms: it amends 196 and binds four plans.
+```
+
+**Status:** Decided
+**Date:** 2026-11-02
+**Warehouse ID:** dec-243 (per Decision 84 backfill)
+
+**Problem:** The five north stars in the roadmap are invariants written before the core existed. None says what On The Loop is or what success is (Decision 196 clause 2); they mix invariants of On The Loop with facts about the operator deployment, which is why their details grew amendment tails; none carries the failure_signal Decision 196 clause 7 requires; and they sit inside the loop's edit scope. Intent recorded since (Decisions 209, 211, 221, 231, 232, 233, 235) has become direction in its own right.
+
+**Intent:** A human authors direction and intent, and every agent reads it first; mechanism is where autonomy is earned.
+
+**Decision:** Amends Decision 196 clause 3; its north-star-shape-diverges condition fired.
+1. **Home.** This repository's Tier A entries live in docs/contracts/north-star.yaml, a Class D contract evaluated by validate_north_star, until T4.24 creates the tracked ontheloop/ root (Decision 211 clause 5, Decision 224 clause 7), where the file moves unchanged. The roadmap's north_star key is a pointer to it; the README's North Star section is a generated headline projection the evaluator checks equal.
+2. **Shape (amends clause 3).** Tier A is a typed entry file, not decision entries: a mission plus numbered entries, each kind: north_star with principle, detail opening with its why, a required failure_signal, binds (repository, release or both, in the terms of docs/contracts/glossary.yaml) with adopters (bound, may_override or set_scale) wherever it binds a release, and carried_by, the Decisions that carry it. North stars are carried by decisions rather than being decisions, so no second decision system exists; clause 3's authority policy stands, and clause 7's failure_signal is schema-enforced for the first time. NS.1-NS.5 keep their ids; new entries append; changes are recorded in the contract's amendment_log. Clause 3's context policy is amended to reading first, not ambient loading: the file would take most of the always-loaded budget (Decision 127), so the decision scout reads it first (clause 8) and docs/PROJECT_CONTEXT.md points to it.
+3. **Content.** The mission and NS.1-NS.9 as the contract records them, confirmed by the operator on 2026-10-30.
+4. **Conflicts.** NS.6 and NS.9 prevail over NS.1 and NS.3; any other conflict between north stars routes to a numbered Decision.
+5. **Promotion, not supersession.** A Decision whose intent became the mission or NS.6-NS.9 stays live and gains a dated append; no pointer moves. Decision 57 stays live with the same append.
+6. **Authority.** Every entry change needs explicit human confirmation. The file joins Decision 117's boundary_patterns and so Decision 185 clause 3's base-ref check (T4.21); Decision 235 clause 5's floor covers its evaluator. rec-3959's guard enforces clause 3 (T4.36).
+7. **Retired checks.** PLAN-north-star-tier-a names the graduated checks the rewrite retires (Decision 235 clause 1).
+8. **Bound now, built in their plans (Decision 197 clause 8).** The decision scout reads this file before the index, feeding its SPIRIT lane only, uses carried_by as a shortlist path, and takes over plan-critique's alignment score. New decision entries carry a required kind: direction or mechanism (docs/contracts/decision-kind.yaml) and an optional serves: [NS.n] (docs/contracts/decision-entry.yaml), forward-only; direction and intent are pinned at human approval on every ladder (NS.8). An advisory detector of emergent north stars starts as a read-only /orient section. The operator_decision kind staged for CD.47 binds at that row's ratification (Decision 221 clause 7).
+9. **Re-grounding.** Decisions 78, 184 and 185 cite north stars by id and keep their meaning; Decision 184 clause 2's reading of NS.3's and NS.5's details is now carried in those entries.
+
+**Coverage (Decision 181 cl.2):** cl.1-4 and cl.6's boundary entry validate_north_star; cl.5-7 this plan; cl.9 roadmap-wording-sweep-north-star-pointer; cl.6 guard and cl.8 T4.36 c3-c7; cl.1's move T4.24 c17.
+
+```yaml reversal-conditions
+decision: 243
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: per-file-split
+    kind: manual
+    description: "T4.24's per-file decision split lands: move the file and re-decide clause 2."
+  - id: entry-churn
+    kind: manual
+    description: "One entry changes three times in a year: it is mechanism, not direction."
+  - id: order-gap
+    kind: manual
+    description: "A Decision settles the same pair of north stars twice: add the pair to clause 4."
+```
+
+**Related:** Decisions 57, 78, 84, 86, 117, 126, 171, 175, 177, 184, 185, 194, 195, 196, 197, 200, 209, 210, 211, 212, 221, 224, 231, 232, 233, 234, 235, 240; T4.21, T4.24, T4.36; rec-3959.
+
+---
+
 ## Decision 242: The platform AWS account is assigned in place to On The Loop Labs Limited and stays standalone; migrate, not rebuild (amends Decision 106) (Decided)
 
 ```yaml
@@ -590,6 +650,8 @@ conditions:
 
 **Related:** Decisions 55, 92, 93, 189; CD.29; T3.4, T3.7, T4.4.
 
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.8 and NS.9 in docs/contracts/north-star.yaml; clauses unchanged.
+
 ---
 
 ## Decision 234: User-owned persona execution -- a sandboxed per-run clone host, owner-only subscriptions and a forge-neutral core (amends Decision 206 clause 2 and Decision 212 clause 5) (Decided)
@@ -700,6 +762,8 @@ conditions:
 
 **Related:** Decisions 81, 84, 177, 184, 194, 196, 209, 210, 212, 217, 224, 232; T4.23, T4.24, T4.33; rec-4558, rec-4559.
 
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as the mission, NS.7 and NS.9 in docs/contracts/north-star.yaml; clauses unchanged.
+
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
@@ -753,6 +817,8 @@ conditions:
 **Coverage (Decision 181 cl.2):** clause 1 -- the inference-provider.yaml vocabulary rows, an advisory residual owned by rec-4560; clauses 3-7 -- T4.33 c1-c7, residual until built; clause 7's Decision 127 reading -- unenforced, as validate_prose_allowlist reads only *.md (T4.33 c1).
 
 **Related:** Decisions 84, 90, 93, 101, 127, 173, 184, 185, 197, 205, 206, 209, 229, 233; CD.42; T2.53, T4.10a, T4.33; rec-4389, rec-4560.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.9 in docs/contracts/north-star.yaml; clauses unchanged.
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
@@ -850,6 +916,8 @@ c1, c10 (cl.3); c6 (cl.4); the parked status -- validate_platform_roadmap.
 
 **Related:** Decisions 55, 59, 67, 84, 93, 117, 143, 185, 189, 201, 205, 206, 207, 210, 217, 221,
 224, 229; rec-4028, rec-4433..rec-4436.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.6 in docs/contracts/north-star.yaml; clauses unchanged.
 
 ---
 
@@ -1592,6 +1660,8 @@ conditions:
 
 > **Amended by Decision 231 (2026-10-19):** Clause 2 extends to the offline persona-evaluation lane (T4.14): its grader is deterministic code, real-outcome replay and the operator's blind adjudication, never an LLM judge, read-isolated with its sealed set from the run under test by IAM and network, never lexically, its paths joining boundary_patterns like the probe's, and that sealed set is sourced apart from this PUBLIC repository. Clause 7's one loop record journal and one register take the lane's records and grader rows; no second mechanism is built.
 
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as the mission and NS.6 in docs/contracts/north-star.yaml; clauses unchanged.
+
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
@@ -2159,6 +2229,8 @@ conditions:
 
 > **Amended by Decision 224 (2026-10-18):** Clause 5's gitignored `.ontheloop/` also holds `.ontheloop/config.yaml`, one clone's machine settings (Decision 224 clause 2); it holds no secret or private value.
 
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.7 and NS.8 in docs/contracts/north-star.yaml; clauses unchanged.
+
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
@@ -2273,6 +2345,8 @@ conditions:
 **Related:** Decisions 57, 84, 101, 111, 127, 171, 178, 184, 194, 196, 197, 198, 199, 200, 205 (101, 178 and 184 clause 1 amended); T4.24; rec-3923 (superseded by this entry), rec-3624, rec-4141.
 
 > **Amended by Decision 220 (2026-10-17):** Clause 3(2)'s first showcase product is named: a UK organisation graph over public money, a project under the operator's tenant in the public products monorepo, importing released platform versions; any public surface stays bound by Decision 101 point (d). Its source ladder, bot-gate stop rule and otl init proving-ground role are Decision 220's.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.7 in docs/contracts/north-star.yaml; clauses unchanged.
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
@@ -2985,6 +3059,8 @@ conditions:
 
 [Amendment 2026-10-25, PLAN-telemetry-reader-and-smoke-twin (Decision 236 cl.4): in a single-tenant data plane read-side tenancy is the function and principal boundary; reopens when a data plane holds a second tenant.]
 
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.7 in docs/contracts/north-star.yaml; clauses unchanged.
+
 ---
 
 ## Decision 198: Theseus and Guerdon retired as external brands; On The Loop Labs Limited and On The Loop supersede the brand hierarchy (amends Decisions 101, 195, 196) (Decided)
@@ -3209,6 +3285,8 @@ conditions:
 > `ontheloop` product/distribution namespace, a separate identifier from the org handle.
 
 > **Amended by Decision 217 (2026-10-14):** When clause 8's per-file split executes, the file slug is the decision identity, existing numbers freeze and new numbers derive from first-parent merge order, clause ids become addressable, and the index is generated into the gitignored runtime root, never committed (Decision 217 clauses 5-7); clause 6 prefixes are unchanged.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.9 in docs/contracts/north-star.yaml. Clause 3 is amended by Decision 243, its north-star-shape-diverges condition having fired; the other clauses are unchanged.
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
@@ -4179,6 +4257,8 @@ conditions:
 
 **Related:** Decision 184 (the boundary this architecture serves), Decision 39 (amended, scoped), Decision 117 (amended), Decisions 55, 75, 83, 100, 128, 143, 173; CD.27, CD.38, CD.44; rec-2827, rec-3218; audits ad02653, 7d57a0d, 842ff92.
 
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.8 in docs/contracts/north-star.yaml; clauses unchanged.
+
 ---
 
 ## Decision 184: Open-core local-first platform -- the free tier is this repository, cloud services are adapters behind ports, GitHub Actions is the verdict plane and never persona compute (Decided)
@@ -4234,6 +4314,8 @@ conditions:
 > **Amended by Decision 209 (2026-09-28):** Clause 1's adapter residency is decided: the AWS and other cloud adapters stay public in this repository and only hosted compute is paid (Decision 209 clause 4). The `adapter-residency` condition is discharged for clause 1 only; its Decision 171 grant leg rests with Decision 194 clause 4 and T4.24 c6. The paid management plane is Decision 209 clause 2's managed control plane (multi-tenant, metadata only), held in the private monorepo of clause 3, importing released versions of the core.
 
 > **Amended by Decision 212 (2026-10-06):** Clause 2's port rule gains a testing model and an inclusion rule: one conformance suite per port against a credential-free oracle or a recorded oracle gap (the oracle is the local adapter, or an emulator harness where one is the standing oracle), cross-port coupling as a defect, the ops store as three ports (catalog, table data, content blobs) under the one DuckLake format, and `ontheloop/platform.yaml` declaring the bundle; verdict_plane and change_surface carry no local-adapter item while clause 3 stands. docs/contracts/ports.yaml is the sole port registry.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as the mission in docs/contracts/north-star.yaml; clauses unchanged.
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
@@ -8043,6 +8125,8 @@ mutation. `deploy-paths.yaml`'s admin_out_of_band.scoped_login_provisioning inde
 
 [Amendment 2026-10-29, Decision 239: the telemetry content reader's operator-approved deploy job changes its code and configuration, outside cl.1's UpdateFunctionCode-only scope.]
 
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.9 in docs/contracts/north-star.yaml; clauses unchanged.
+
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 ---
 
@@ -8556,6 +8640,8 @@ closure session), audits/unclosed-loops-44ef5c6.yaml ULF-05.
 > this Decision's own condition; routed to the operator for the lockstep fix, not resolved here.
 
 > **Amended by Decision 185 (2026-09-04):** the enforcement mechanism is no longer "unchanged from Decision 44": boundary_patterns gain the executor loop kernel path (src/executor_loop/), the rendered ASL, docs/contracts/personas/, docs/contracts/executor-loop-policy.yaml, docs/contracts/executor-personas.yaml, config/agent/executor/personas.yaml, .github/CODEOWNERS and the leash's own implementation (executor_boundary_guard, scripts/checks/executor/); a base-ref required check refuses executor-authored diffs to them (T4.21); validate_executor_boundary is to become diff-seeded and fail-closed (T4.21 c5; rec-3218); and the executor's merge identity must be a GitHub App absent from branch-protection bypass_actors (Decision 83), an invariant of this boundary.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.8 in docs/contracts/north-star.yaml; clauses unchanged.
 
 ---
 
@@ -11017,6 +11103,8 @@ The control-plane intent defines the target loop: execution -> telemetry -> veri
 The architecture review concluded that the design is unusually mature for a sole-developer system, but not fully closed operationally. The missing capability is not another isolated prompt or script; it is an explicit control-plane model that sequences telemetry trust, verification, executor RCA, workflow migration, state-machine events, and recommendation governance.
 
 **Related:** Decision 48 (verification tier), Decision 51 (local-first outbox, superseded by Decision 78), Decision 55 (RCA-first executor), `docs/INTENT-autonomous-improvement-control-plane.md`
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as the mission in docs/contracts/north-star.yaml; clauses unchanged. The INTENT documents it names were retired by Decision 86.
 
 ---
 

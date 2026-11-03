@@ -29,6 +29,8 @@ On The Loop's end-state is a public, agent-first automation framework with:
 8. a closed improvement loop that can complete one bounded iteration without a human in the critical path;
 9. portability across repositories, adopter products, infrastructure, and regulated domains.
 
+North stars and the mission: `docs/contracts/north-star.yaml`.
+
 ## Recursive self-improvement model
 
 On The Loop is a governed, recursively self-improving software-engineering system. Verification recursively improves, but verification is not the only improvement target.

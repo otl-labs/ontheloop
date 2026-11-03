@@ -244,6 +244,14 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_north_star",
+        module="scripts.checks.contracts.validate_north_star",
+        attr="validate_north_star",
+        # UNGATED deliberately, as validate_glossary is: it reads six fixed files and one base copy.
+        pre=True,
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_ports_contract",
         module="scripts.checks.contracts.validate_ports_contract",
         attr="validate_ports_contract",
