@@ -137,6 +137,16 @@ conditions:
 **Related:** Decisions 106 (amended), 195 (account-move-decided discharged), 77, 84, 101, 113, 126,
 144, 214, 218; rec-4525, rec-885.
 
+> **Update (2026-11-03):** Realised. The account carries the company's details, the leftover
+> Organization and Identity Center instance are deleted, and the platform proof passed (green CI on
+> main, a green convergence record, the DuckLake maintenance smoke, a live recommendation write, a
+> Claude Code thread opening a PR). Evidence: aws-account-path/EVIDENCE.md. No tax registration was
+> set: the company is not VAT-registered. The personal payment method was removed on 2026-11-02,
+> before the point clause 4 set (the first invoice addressed to the company plus 30 days), on the
+> operator's decision, so that it could not be forgotten on the account or found there by a future
+> employee; since then the company card has had no fallback. rec-4545 tracks the billing proof (the
+> first invoice addressed to the company); rec-4546 the prose sweep.
+
 ---
 
 ## Decision 241: The coordination model -- a deterministic engine runs the work graph, a bounded coordinator step handles only what the graph cannot, context travels as notes, streams are epics, and concurrency and WIP climb under human ceilings (amends Decision 229 clause 2) (Decided)
