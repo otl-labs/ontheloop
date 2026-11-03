@@ -44,10 +44,10 @@
 
 # ---------------------------------------------------------------------------
 # Neon project -- the catalog. Free tier: 0.5 GB storage, 100 CU-hours/mo, scale-to-zero. pg_version
-# 16 matches the prior RDS engine. org_id is required by Neon's org-based model (every account, incl.
-# personal, has a default organization) -- it is an identifier, not a secret. No allowed_ips (free-tier
-# posture -- see APPLY POSTURE above). The project auto-creates a default branch + endpoint; the scoped
-# role and the catalog database below live on that default branch.
+# 16 matches the prior RDS engine. org_id comes from the tfvars parameter (var.neon_org_id, never
+# committed, rec-4543) and is ignored after creation, because the provider makes it ForceNew. No
+# allowed_ips (free-tier posture -- see APPLY POSTURE above). The project auto-creates a default branch +
+# endpoint; the scoped role and the catalog database below live on that default branch.
 # ---------------------------------------------------------------------------
 
 resource "neon_project" "ducklake_catalog" {
@@ -59,6 +59,12 @@ resource "neon_project" "ducklake_catalog" {
   # 7 days (604800s), the paid Launch plan maximum: the point-in-time window Decisions 88 cl.3 and 107 rely on
   # between weekly dumps. The earlier 21600 (6h) was the free-plan ceiling.
   history_retention_seconds = 604800
+
+  # The catalog is the ops tables' sole system of record (Decision 84): no plan may destroy or replace it.
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [org_id]
+  }
 }
 
 # Scoped, non-owner role for catalog access. Distinct from the project's auto-created owner role so the
@@ -76,6 +82,10 @@ resource "neon_database" "ducklake_ops" {
   branch_id  = neon_project.ducklake_catalog.default_branch_id
   name       = "ducklake_ops"
   owner_name = neon_role.ducklake_ops.name
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # ---------------------------------------------------------------------------
