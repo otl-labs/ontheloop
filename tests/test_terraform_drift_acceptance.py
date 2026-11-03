@@ -137,12 +137,13 @@ def test_drift_workflow_has_lock_skip_branch() -> None:
 
 
 def test_drift_workflow_has_pending_gated_branch() -> None:
-    """DEP-11 (T2.47): terraform-drift.yml must recognise a pending_gated marker on the current
-    convergence record and label the delta as pending-gated (PENDING_GATED_DRIFT), not merely
-    out-of-band drift."""
+    """DEP-11 (T2.47 c2): the Handle-drift step dispatches on the delegate's pending_gated action and
+    files the PR-naming rec under the title VP 11's prefix query reads."""
     content = DRIFT_WORKFLOW.read_text(encoding="utf-8")
-    assert "pending_gated" in content, "terraform-drift.yml is missing the pending_gated recognition branch"
-    assert "PENDING_GATED_DRIFT" in content, "terraform-drift.yml is missing the PENDING_GATED_DRIFT marker"
+    assert re.search(r"^\s+pending_gated\)", content, re.MULTILINE), "missing the pending_gated action dispatch"
+    assert "pending_gated_flagged)" in content, "missing the pending_gated_flagged action dispatch"
+    assert "Terraform drift check found a pending-gated delta (not out-of-band drift)" in content
+    assert "PR #${PENDING_PR}" in content, "the pending_gated rec must name the pending PR"
 
 
 def test_drift_workflow_names_the_pending_pr_via_authenticated_lookup() -> None:
@@ -166,51 +167,38 @@ def test_drift_workflow_permissions_include_pull_requests_read() -> None:
     )
 
 
-def test_drift_workflow_pending_gated_checked_before_out_of_band_flip() -> None:
-    """The pending_gated branch must be evaluated BEFORE the out-of-band red-flip narrative, so an
-    explained (routed-pending) delta never falls through to the out-of-band path."""
+def test_drift_workflow_pending_gated_read_precedes_generic_rec() -> None:
+    """The pending_gated action dispatch (the ACTION check) precedes the generic pending-codification
+    rec filing, so a routed-pending episode never files the generic rec (red on the #1174 order)."""
     content = DRIFT_WORKFLOW.read_text(encoding="utf-8")
-    pending_gated_check_idx = content.index("PENDING_GATED_PRESENT=$(")
-    out_of_band_narrative_idx = content.index("out-of-band infra drift detected by scheduled terraform plan")
-    assert pending_gated_check_idx < out_of_band_narrative_idx, (
-        "pending_gated detection must run before the out-of-band red-flip narrative"
-    )
+    dispatch_idx = content.index('case "$ACTION" in')
+    generic_idx = content.index("Terraform drift check found a pending-codification delta")
+    assert dispatch_idx < content.index("pending_gated)") < generic_idx
 
 
-def test_drift_workflow_pending_gated_branch_never_red_flips() -> None:
-    """CARRY-2: the pending_gated branch must never set status to red -- it stays green with only
-    the marker/rec-filing side effects; only the (separate, marker-absent) out-of-band branch
-    below it is allowed to flip status red."""
+def test_drift_workflow_out_of_band_red_flips_with_pending_gated() -> None:
+    """Decision 190 pt 1 (drift always wins): the out-of-band verdict red-flips through the delegate's
+    record builder whether or not pending_gated is present; the green-keeping branch is gone."""
     content = DRIFT_WORKFLOW.read_text(encoding="utf-8")
-    start = content.index("PENDING_GATED_PRESENT=$(")
-    end = content.index("PENDING_GATED_DRIFT tf_drift rec filed via ops portal.")
-    branch_src = content[start:end]
-    assert "= 'red'" not in branch_src, "pending_gated branch must not assign a red-status literal"
-    assert "existing['status']" not in branch_src, "pending_gated branch must not touch the status field at all"
+    assert "PENDING_GATED_DRIFT" not in content
+    assert "ALREADY_FLAGGED" not in content
+    assert "PENDING_GATED_PRESENT" not in content
+    assert "--red-flip" in content
+    assert content.index("--red-flip") > content.index('if [ "$VERDICT" = "pending_codification" ]; then')
 
 
-def test_drift_workflow_stamps_drift_flagged_at_for_idempotency() -> None:
-    """The pending_gated branch must stamp drift_flagged_at, and check it, so a later tick with
-    the same still-pending marker skips re-filing (one signal per episode, mirroring the existing
-    red/unknown dedup invariant)."""
+def test_drift_workflow_escalation_files_drift_run_url_rec() -> None:
+    """The escalated action files a tf_drift rec embedding the drift_run_url written to the record
+    (Decision 142 dedup key, Decision 190 pt 5), and the prior-red short-circuit consults the delegate."""
     content = DRIFT_WORKFLOW.read_text(encoding="utf-8")
-    assert "drift_flagged_at" in content, "terraform-drift.yml is missing the drift_flagged_at idempotency stamp"
-    assert "ALREADY_FLAGGED" in content, "terraform-drift.yml is missing the already-flagged idempotency check"
-
-
-def test_drift_workflow_out_of_band_branch_still_gated_behind_marker_absence() -> None:
-    """The pre-existing out-of-band red-flip must remain reachable only when no pending_gated
-    marker is present -- the pending_gated branch's `if` must close (via `exit 0` + `fi`) strictly
-    before the absent-marker fallthrough comment that precedes the out-of-band red-flip."""
-    content = DRIFT_WORKFLOW.read_text(encoding="utf-8")
-    start = content.index('if [ "$PENDING_GATED_PRESENT" = "true" ]; then')
-    end = content.index("# Absent marker: existing out-of-band red-flip, unchanged.")
-    assert start < end, "the pending_gated branch must appear before the absent-marker fallthrough"
-    branch_and_gap = content[start:end]
-    assert "exit 0" in branch_and_gap, "the pending_gated branch must exit 0 (never fall through) once handled"
-    assert branch_and_gap.rstrip().endswith("fi"), (
-        "the absent-marker fallthrough comment must appear only after the pending_gated branch's `fi` closes"
-    )
+    start = content.index("escalated)")
+    end = content.index("pending_gated)", start)
+    branch = content[start:end]
+    assert "file_rec" in branch
+    assert "${RUN_URL}" in branch
+    assert "status.: .green" in branch
+    assert "--skip-on-prior-red" in content
+    assert content.index("--skip-on-prior-red") < content.index('case "$ACTION" in')
 
 
 def test_drift_workflow_init_retry_signature_parity() -> None:
@@ -246,3 +234,15 @@ def test_terraform_init_retry_action_signature_parity() -> None:
     assert not missing, (
         f".github/actions/terraform-init-retry/action.yml init-retry grep -qE line is missing signatures: {missing}"
     )
+
+
+def test_drift_workflow_handle_drift_record_read_fails_loud() -> None:
+    """The Handle-drift record read is the guarded rc-preserving capture: only NoSuchKey is treated as
+    absent, and any other read error exits 1 before any write (never a skeletal default-green record)."""
+    doc = yaml.safe_load(DRIFT_WORKFLOW.read_text(encoding="utf-8"))
+    body = next(s["run"] for s in doc["jobs"]["drift-detect"]["steps"] if s.get("name", "").startswith("Handle drift"))
+    assert '2>/dev/null || echo "{}"' not in body
+    capture = body.index('2>"$RUNNER_TEMP/handle_drift.err") || RC=$?')
+    error = body.index("::error::Convergence record read failed (non-NoSuchKey)", capture)
+    assert body.index("exit 1", error) < body.index("--skip-on-prior-red")
+    assert capture < body.index("aws s3 cp - ")

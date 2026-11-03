@@ -143,12 +143,28 @@ def _build_context(verdict: HealthVerdict, condition: str) -> str:
                 f"drift). First observed: {marker.get('first_seen', 'unknown')}."
             )
         ]
-        parts.append(
-            "Resolve via: land the codifying terraform/personal/ change (a plan_ec==0 cycle "
-            "self-clears the marker), or wait for the scheduled drift check -- a marker left "
-            "unresolved past its bounded age escalates to a genuine red automatically. This rec "
-            "closes automatically on the next sensor tick once the marker clears."
-        )
+        gated = verdict.pending_gated if verdict.status == "green" else None
+        if isinstance(gated, dict) and gated:
+            parts = [
+                (
+                    "The sandbox convergence record carries a pending_codification marker while a routed gated "
+                    f"change awaits approval (commit {gated.get('commit_sha', 'unknown')}, run "
+                    f"{gated.get('run_url', 'unknown')}); the delta is that unapproved gated change, not out-of-band "
+                    f"infra drift. First observed: {marker.get('first_seen', 'unknown')}."
+                ),
+                (
+                    "Resolve via: approve or reject the waiting tf-gated-apply run; left unapproved past the bounded "
+                    "age the record turns red (unapproved gated change). This rec closes automatically on the next "
+                    "sensor tick once the marker clears."
+                ),
+            ]
+        else:
+            parts.append(
+                "Resolve via: land the codifying terraform/personal/ change (a plan_ec==0 cycle "
+                "self-clears the marker), or wait for the scheduled drift check -- a marker left "
+                "unresolved past its bounded age escalates to a genuine red automatically. This rec "
+                "closes automatically on the next sensor tick once the marker clears."
+            )
     else:
         parts = [
             f"The sandbox convergence record has been red for {verdict.red_age_hours:.1f} hours.",
