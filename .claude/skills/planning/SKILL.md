@@ -36,7 +36,7 @@ When reading `logs/.preflight-report.json`, apply these conditionals:
 - **`main_freshness.commits_behind > 0`** -- Retain `main_freshness.main_files_changed_since_branch` for the Step 4 Main Divergence Assessment. Non-blocking at this step.
 - **`cron_review_fresh: false`** -- Note to human (non-blocking).
 - **`open_recommendations > 0`** -- Surface counts and ask whether to address. Wait.
-- **`non_automatable_recommendations > 0`** -- Informational. Surface counts; do not require per-rec discussion. Individual review stays suspended for good (Decision 73 cl.4 as amended by Decision 243).
+- **`non_automatable_recommendations > 0`** -- Informational. Surface counts; do not require per-rec discussion. Individual review stays suspended for good (Decision 73 cl.4 as amended by Decision 244).
   - If `non_automatable_softcap_breached` is true (count > 250), surface as a planning context note.
 - **`friction_patterns`, `metrics_anomalies` non-empty** -- Surface as planning context.
 - **`data_quality.last_run.verdict == "FAIL"`** -- Surface as planning context: N failures across
@@ -65,7 +65,7 @@ Field format and write-time validation for both plan-linkage fields: see
 docs/contracts/exit-criteria-ledger.yaml (plan_closes_criteria, plan_followon_recs). Only
 followon_recs carries a template line below; closes_criteria stays prose-only by design.
 
-## Platform Roadmap Eligibility (Workflow Step 2)
+## Roadmap Eligibility (Workflow Step 2)
 
 Broad orientation -- surfacing `next_eligible`, `strategic_pending`, the eligibility summary, the soft-warn exception category list, and ci-rca triage -- is the responsibility of `/orient`. Run `/orient` before `/plan` to choose what to work on; `/plan` assumes a specific item (or ci-rca rec) has already been selected. The orient skill (`.claude/skills/orient/SKILL.md`) holds the full eligibility display and triage rules.
 
@@ -138,7 +138,7 @@ When a plan creates or modifies documentation artefacts, apply these rules:
 
 
 ## Complexity Assessment (Workflow Step 4)
-- **Scope files > 5** OR **estimated steps > 8** suggests the item may be too large for one plan (a heuristic). Plan types are IMPLEMENTATION and REPORT-ONLY only (Decision 243; the schema refuses STRATEGIC): author one larger IMPLEMENTATION plan, or decompose -- file child recs or split into atomic IMPLEMENTATION plans now, each planned on its own.
+- **Scope files > 5** OR **estimated steps > 8** suggests the item may be too large for one plan (a heuristic). Plan types are IMPLEMENTATION and REPORT-ONLY only (Decision 244; the schema refuses STRATEGIC): author one larger IMPLEMENTATION plan, or decompose -- file child recs or split into atomic IMPLEMENTATION plans now, each planned on its own.
 - If IMPLEMENTATION (and complex), execution steps must have explicit pre/post-conditions.
 - **Presentation Rule:** The classification MUST be presented to the human and confirmed, not assumed.
 - **Size headroom (Decisions 128, 166):** `plan_obligations --plan` reports each scope file's headroom (SLOC, structural lines, prose bytes) and the unbuilt plans editing the same file. Plan a crossing as a decomposition (facade package, Decision 80/104/124) or the class relief valve, never a default raise: a raise is a Decision-cited exception (`# raise-approved: dec-NNN`), never a bare `--update-sloc-budgets` re-seed. A NEAR_CAP row carries a relief step measured against main at build time, never a fixed line count.
@@ -312,7 +312,7 @@ intent: >- # 1-2 sentences: how this work contributes toward the North Star
 plan_type: IMPLEMENTATION # IMPLEMENTATION | REPORT-ONLY
 verification_tier: V2 # V1 | V2 | V3
 plan_path: docs/plans/PLAN-{slug}.yaml # must match the filename slug exactly
-phase: >- # platform tier_item id from docs/ROADMAP-PLATFORM.yaml
+phase: >- # tier_item id from docs/ROADMAP-PLATFORM.yaml
   ...
 scope: # min 1 entry; only files listed here may be modified
   - file: path/to/file.py
@@ -357,7 +357,7 @@ execution_steps: # REQUIRED non-empty for IMPLEMENTATION plans
   - Specific file to create/modify -- what it must do
   - Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)
   - 'Report: what was implemented, verification results'
-work_areas: [] # always empty (STRATEGIC retired, Decision 243); omit on new plans
+work_areas: [] # always empty (STRATEGIC retired, Decision 244); omit on new plans
 rollback: optional rollback note # optional str; omit if not applicable
 # fallback_reevaluation: OPTIONAL, only if this plan names a CD.27-gated tier item
 # (validate_fallback_reevaluation); never on an ordinary plan. 4 fields, extra=forbid:
@@ -369,7 +369,7 @@ After writing, validate before committing:
 bin/venv-python -m scripts.roadmap.plan_document docs/plans/PLAN-{slug}.yaml
 ```
 
-**Platform compatibility:** commands must be Linux/bash-compatible (AGENTS.md `## Shell invocations`).
+**OS compatibility:** commands must be Linux/bash-compatible (AGENTS.md `## Shell invocations`).
 
 ## Related-Work Check (Workflow Step 8)
 

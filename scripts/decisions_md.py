@@ -281,7 +281,7 @@ def derive_currency(row: dict, inbound_supersedes: set[int], inbound_amends: set
          target of an inbound supersedes edge (title_supersedes/envelope-supersedes from
          another entry).
       3. 'amended' -- row's number is the target of an inbound amends edge, OR its bold status
-         marker begins with 'Amended' (the residual status-prose band, empty since Decision 243 compacted Decision 67).
+         marker begins with 'Amended' (the residual status-prose band, empty since Decision 244 compacted Decision 67).
       4. 'current' -- none of the above.
 
     Both the status_is_superseded/is_compacted_stub checks above and the 'amended' bold-marker
@@ -311,7 +311,7 @@ def derive_currency(row: dict, inbound_supersedes: set[int], inbound_amends: set
 # continuation, an "and N" or "and Decision(s) N" (_TITLE_RELATION_AND_RE) continuation, or a
 # "+ Decision(s) N" (_TITLE_RELATION_PLUS_RE) continuation (dec-153: "amends Decision 73
 # enforcement + Decision 135") -- optionally preceded by a qualifier on the prior target
-# (_TITLE_RELATION_QUALIFIER_RE: "point P"/"cl.N"/"clause N", or a single bare descriptive word
+# (_TITLE_RELATION_QUALIFIER_RE: a clause qualifier, see _CLAUSE_QUALIFIER, or a single bare descriptive word
 # like "enforcement"; a qualifier is consumed but is never itself a number source, and the bare
 # word alternative explicitly excludes "and" so it never steals that continuation's own
 # keyword). CFG-06 widened the comma and "and" continuations to accept BOTH the bare-number and
@@ -330,8 +330,21 @@ def derive_currency(row: dict, inbound_supersedes: set[int], inbound_amends: set
 # unrecognized trailing prose -- is not a valid continuation and silently ends the scan for that
 # anchor occurrence.
 _TITLE_RELATION_SEED_RE = re.compile(r"\s+Decisions?\s+(\d+)\b", re.IGNORECASE)
-_TITLE_RELATION_QUALIFIER_RE = re.compile(r"\s*(?:point\s+\d+|cl\.\s*\d+|clause\s+\d+|(?!and\b)[A-Za-z]+)", re.IGNORECASE)
-_BARE_NUMBER_BOUNDARY_RE = r"(?=[),;]|\s+(?:and\b|point\s+\d+|cl\.\s*\d+|clause\s+\d+)|\Z)"
+# A clause qualifier owns every number it enumerates, so a clause list is never read as Decision
+# targets (dec-213: "amends Decision 81 cl.1/5/6/7, 91 cl.1" must not yield 5, 6, 7). Singular
+# qualifiers (clause, cl., point, pt, section, the section sign) own ONE clause reference, widened
+# only by a range ("1-2"), a slash list ("1/5/6/7") or a sub-clause suffix ("3(2)", "1(ii)").
+# Plural qualifiers (clauses, points, pts, sections, double section sign) also own a comma list
+# closed by at most one final "and N", so a later target after a plural qualifier must repeat the
+# "Decision" token. The bare-number boundary recognises the same qualifiers.
+_CLAUSE_REF = r"\d+[a-z]?(?:\([^)\s]*\))*(?:\s*[-/]\s*\d+[a-z]?(?:\([^)\s]*\))*)*"
+_CLAUSE_QUALIFIER = (
+    r"(?:(?:clauses|points|pts\.?|sections|\u00a7\u00a7)\s*" + _CLAUSE_REF + r"(?:\s*,\s*" + _CLAUSE_REF + r")*"
+    r"(?:\s*,?\s*(?:and|&)\s*" + _CLAUSE_REF + r")?"
+    r"|(?:clause|cl\.|point|pt\.?|section|\u00a7)\s*" + _CLAUSE_REF + r")"
+)
+_TITLE_RELATION_QUALIFIER_RE = re.compile(r"\s*(?:" + _CLAUSE_QUALIFIER + r"|(?!and\b)[A-Za-z]+)", re.IGNORECASE)
+_BARE_NUMBER_BOUNDARY_RE = r"(?=[),;]|\s+(?:and\b|" + _CLAUSE_QUALIFIER + r")|\Z)"
 _TITLE_RELATION_AND_RE = re.compile(
     r"\s*,?\s*and\s+(Decisions?\s+)?(\d+)\b(?(1)|" + _BARE_NUMBER_BOUNDARY_RE + r")", re.IGNORECASE
 )

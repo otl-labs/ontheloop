@@ -439,7 +439,7 @@ class PlanDocument(BaseModel):
             raise ValueError(f"verification_plan step ids must be unique; duplicates: {dupes}")
 
         if self.work_areas:
-            raise ValueError("work_areas must be empty: the STRATEGIC plan type is retired (Decision 243)")
+            raise ValueError("work_areas must be empty: the STRATEGIC plan type is retired (Decision 244)")
 
         if self.plan_type == "IMPLEMENTATION" and not self.execution_steps:
             raise ValueError("IMPLEMENTATION plans require non-empty execution_steps")

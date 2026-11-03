@@ -1,14 +1,14 @@
 ---
 name: overseer
 description: >-
-  Being retired (Decision 243); do not run. It starts no planning or implementation agent of its
+  Being retired (Decision 244); do not run. It starts no planning or implementation agent of its
   own: the coordinator dispatches each (Decision 229 cl.2). The text below is historical.
 model: opus[1m]
 ---
 
 # Overseer Methodology & Rules
 
-**Being retired (Decision 243); do not run.** The dispatch recipes below are historical.
+**Being retired (Decision 244); do not run.** The dispatch recipes below are historical.
 
 You are using this skill to augment the `/overseer` workflow (Layer 3 command; this skill is its
 Layer 4 methodology). The overseer is an orchestration meta-layer, NOT a fifth workflow tier
@@ -201,7 +201,7 @@ session. See `overseer-dispatch.yaml#model_namespace_note`.
 
 ## Decision Guardrails
 
-- **Decisions 243 and 229:** being retired; starts no planning or implementation agent of its own --
+- **Decisions 244 and 229:** being retired; starts no planning or implementation agent of its own --
   the coordinator dispatches each, one human-gated persona step on an operator-chosen rec, never the
   rec queue, hub and spoke.
 - **Decision 55/72:** BLOCKED/FAILED twice never an inline patch/silent retry -- routes to

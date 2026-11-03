@@ -35,7 +35,7 @@ Reject a plan that invents a third validation tier, treats mapped coverage or re
 
 7. **Score North Star alignment (1-5):** Does the `## Intent` section directly serve a North Star principle (NS.1-NS.5, `docs/ROADMAP-PLATFORM.yaml`)? A score of 1 means no discernible connection; 5 means it directly advances one. Name it and give a 1-2 sentence justification.
 
-8. **Evaluate Scope breadth (IMPLEMENTATION plans; a split means child recs or atomic plans, Decision 243):**
+8. **Evaluate Scope breadth (IMPLEMENTATION plans; a split means child recs or atomic plans, Decision 244):**
    - For IMPLEMENTATION: Are all scope entries necessary? Too large (suggest split)? Does the Scope extend beyond the stated phase?
 
 9. **Check phase dependencies:** Does this plan depend on work from a prior phase that is not yet complete? Cite specific ROADMAP phase entries.
@@ -59,7 +59,7 @@ when a behavior-changing scope file lacks a linked obligation, its test is struc
 does not assert the named behavior, its red/green expectation is absent, or its waiver is thin.
 Presence/link validators are deterministic; adequacy is this fresh-context judgement.
 
-12d. **Retired (Decision 243):** the plan schema refuses `plan_type: STRATEGIC` and non-empty `work_areas`; an oversized plan is a step 8 split finding.
+12d. **Retired (Decision 244):** the plan schema refuses `plan_type: STRATEGIC` and non-empty `work_areas`; an oversized plan is a step 8 split finding.
 
 12k. **Closure obligation check (CONDITIONAL -- IMPLEMENTATION plans only):** VERIFY the plan's own declarations against its scope and VP; do not re-derive the obligation. Additive plans that trip neither condition are exempt.
 
@@ -95,11 +95,11 @@ Phase 2 checks the plan's *details* against the existing frame. This phase chall
 
 Ask the following five questions against the plan's chosen approach. For each, write a one-sentence answer. Where the answer surfaces a concrete contradiction with a Decision, a Roadmap item, or a North Star principle, recommend REVISE. Otherwise surface the answer informationally -- the human or downstream planner decides whether to pivot.
 
-12e. **Question 1 -- Is the chosen primitive the right primitive?** What if the orchestrator / runtime / data store / interface in this plan wasn't this kind of thing? Could the role be filled by a platform-native primitive (Step Functions, EventBridge, SQS, DynamoDB Streams, Lambda) already in production in this codebase? If the plan introduces a custom orchestrator, scheduler, retry loop, state machine, or queue, name the platform primitive it could be replaced by and explain why it isn't.
+12e. **Question 1 -- Is the chosen primitive the right primitive?** What if the orchestrator / runtime / data store / interface in this plan wasn't this kind of thing? Could the role be filled by a cloud-native primitive (Step Functions, EventBridge, SQS, DynamoDB Streams, Lambda) already in production in this codebase? If the plan introduces a custom orchestrator, scheduler, retry loop, state machine, or queue, name the cloud primitive it could be replaced by and explain why it isn't.
 
 12f. **Question 2 -- Is the decomposition boundary right?** If the plan treats X as a single unit, could X be decomposed into smaller independently-deployable, independently-observable, independently-retryable units? If the plan proposes N independent units, should they collapse into one? The frame-lock case (Decision 75) was a monolithic Python loop that should have been decomposed into per-step Lambdas orchestrated by Step Functions; the corresponding question would have caught it.
 
-12g. **Question 3 -- What existing capability could absorb this custom code?** Enumerate the platform capabilities ratified in `docs/DECISIONS.md` and shipped in `terraform/` that are conceptually adjacent to what the plan proposes. For each, ask why the plan is not using it. Plans that propose custom logic where AWS-native or codebase-native primitives exist must justify the divergence explicitly.
+12g. **Question 3 -- What existing capability could absorb this custom code?** Enumerate the capabilities ratified in `docs/DECISIONS.md` and shipped in `terraform/` that are conceptually adjacent to what the plan proposes. For each, ask why the plan is not using it. Plans that propose custom logic where AWS-native or codebase-native primitives exist must justify the divergence explicitly.
 
 12h. **Question 4 -- Are inherited assumptions still valid?** When the plan cites a constraint of the form "we can't do X because Y," and Y references a Decision older than 30 days (or one that predates a more recent capability-ratifying Decision), surface that Decision and ask whether its premise still holds. CD.11's premise ("Fargate replaces Lambda dispatcher because executor exceeds 15 min") is the canonical example -- it carried forward an assumption that newer decomposition options invalidate.
 

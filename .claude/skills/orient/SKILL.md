@@ -144,7 +144,7 @@ Classification rows, the `prior_deferrals` render and the close-then-stamp route
 
 Source: `recent_main_commits` from the preflight cache (`logs/.preflight-report.json`). Do not issue a `git log` Bash call -- cache only (Decision 88 egress budget; Decision 84 closed boundary).
 
-Group the recent commits by conventional-prefix slug (`feat`/`plan`/`roadmap`/`scope`) and map each slug to the tier_item it advanced using the Step-2 roadmap projection (Inputs > Roadmap detail). Emit a one-line trajectory read describing which area of the platform saw recent activity.
+Group the recent commits by conventional-prefix slug (`feat`/`plan`/`roadmap`/`scope`) and map each slug to the tier_item it advanced using the Step-2 roadmap projection (Inputs > Roadmap detail). Emit a one-line trajectory read describing which area of the codebase saw recent activity.
 
 **Degradation rule**: when the slug->tier_item mapping is ambiguous (e.g., the commit prefix does not match any tier_item slug or multiple items share a prefix pattern), skip the inferred mapping and emit the raw commit list (sha, date, subject) without any inferred tier_item association.
 
@@ -177,7 +177,7 @@ Prioritized work list from the Status Digest:
    - **Mid-implementing** (a PLAN-*.yaml was authored and is in-flight but not yet acted on): suggest `/implement PLAN-{slug}.yaml` for that item.
    - **All authored plans actioned / no plan yet** (the common case -- the last plan was implemented and the item still has open criteria): emit a follow-on `/plan <item-id>: <item-name>` prompt. This is the default action for in_progress items. Read `needs_followon_plan` directly from the preflight cache (primary path); degrade to determining mid-implementing status from docs/plans/ and the progress_note only on a stale cache (see Inputs > In_progress entry fields).
 3. **Keystone-first within eligible**: items that unblock the largest downstream depends_on fan-out appear before items with fewer downstream dependents. Fan-out is a reverse query -- count, for each candidate id, how many entries in the Step-2 `depends_index` (Inputs > Roadmap detail) list that id in their `depends_on`; the candidate-scoped projection alone cannot answer this (it only carries the candidates' own forward `depends_on`). A keystone is an item whose completion enables the largest set of currently blocked items.
-4. **Strategic pending**: list separately at the bottom, noted "decompose into child items first (Decision 243)".
+4. **Strategic pending**: list separately at the bottom, noted "decompose into child items first (Decision 244)".
 
 Format: numbered list with a one-line rationale per item citing the keystone/momentum/block reasoning.
 
@@ -221,4 +221,4 @@ Ad-hoc lane (non-blocking, cap 3): open Critical recs, ready follow-on recs, pri
 
 ## Scope
 
-v1: platform roadmap only. Product-roadmap orientation is deferred.
+v1: the roadmap only.

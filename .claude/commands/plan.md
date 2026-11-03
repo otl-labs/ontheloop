@@ -32,7 +32,7 @@ The report includes `data_quality` (declarative check coverage and last run verd
 Use the preflight JSON `context` field (`roadmap_phase`, `open_decisions_count`, `recent_sessions`). `recent_sessions` comes from telemetry (sessions_window over 2 UTC days) and is null when `session_history.status` is unavailable, so read the status before relying on it; the newest entry may be the current session itself (state running). Read `docs/PROJECT_CONTEXT.md` fully.
 If the request references a recommendation ID, fetch it with the ducklake-reads `recs_by_ids` verb, read briefing files if they exist, and load dependencies.
 
-**Orientation and CI-RCA block:** see the planning skill's Platform Roadmap Eligibility section for orientation responsibility and the HARD BLOCK conditions on open ci-rca recs -- run `/orient` first if no item has been chosen yet.
+**Orientation and CI-RCA block:** see the planning skill's Roadmap Eligibility section for orientation responsibility and the HARD BLOCK conditions on open ci-rca recs -- run `/orient` first if no item has been chosen yet.
 
 **Resume check:** if a `docs/plans/PLAN-*.yaml` matching the stated intent already exists on this branch (committed or not), present it and offer resume-at-step: Step 9 (uncritiqued), Step 11 (approved, unmerged), or discard and restart. Do not re-derive Steps 3-6 for an already-confirmed plan without human direction.
 
@@ -46,7 +46,7 @@ Suggest 3-5 open recommendations aligned with the task (`bin/venv-python -m scri
 2. Read those files and check `tests/` for existing test coverage.
 3. Conduct an Infrastructure Assessment if `.tf` files are in scope.
 4. Conduct a Lambda Deployment Assessment if Lambda-packaged files are in scope.
-5. Conduct a Complexity Assessment to decide whether the item fits one plan or decomposes into child recs or atomic plans (Decision 243).
+5. Conduct a Complexity Assessment to decide whether the item fits one plan or decomposes into child recs or atomic plans (Decision 244).
 6. Conduct a Data-Model Assessment (`docs/contracts/data-modeling-standard.yaml`) if a table, field_semantics entry, or warehouse write path is in scope.
 7. Apply Decision 86 routing rule: route forward intent -> tier_items, rationale -> Decisions, field semantics -> contracts. No new standing prose-architecture docs under docs/. Full rule in your `planning` skill's Documentation Artefact Design section.
 *(Apply the exact assessment rules from your `planning` skill).*

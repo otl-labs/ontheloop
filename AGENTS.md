@@ -1,4 +1,4 @@
-# AGENTS.md - On The Loop Platform
+# AGENTS.md - On The Loop
 
 Universal rules. For full project context, see `docs/PROJECT_CONTEXT.md` on demand.
 
@@ -6,7 +6,7 @@ Universal rules. For full project context, see `docs/PROJECT_CONTEXT.md` on dema
 
 This repository is PUBLIC (Decisions 73, 83, 101). Public-content boundary (Decision 101):
 - NEVER publish: AWS account IDs or ARNs, IAM ExternalIds, credentials or API keys, private operational data, or any internal hostname that provides an attack surface.
-- SAFE to publish: platform engineering, infrastructure patterns, tooling, CI/CD design, and general LLM-agent architecture -- publish the engineering, never the operational secrets.
+- SAFE to publish: On The Loop's engineering, infrastructure patterns, tooling, CI/CD design, and general LLM-agent architecture -- publish the engineering, never the operational secrets.
 - Confidential data lives ONLY in: the personal AWS account (Secrets Manager, gitignored tfvars, S3 private prefixes), and gitignored local files (e.g. `terraform/personal/terraform.personal.tfvars`, `~/.aws/credentials`). Nothing confidential is ever committed.
 - The pre-commit `never-commit` hook (shape-pattern) blocks 12-digit AWS account IDs, secret-like strings, and ExternalId patterns from reaching the repo.
 
@@ -22,7 +22,7 @@ You are a Lead Software Developer writing production-quality Python. Primary dev
   expected. A cause not verified this session is labelled inferred. A manual step asked of the operator ends with
   the one check that proves it worked.
 - **Hook canary (top-level interactive CC-web sessions only; not subagents, CI or scheduled agents):** if
-  session-start context has no `[session_start_` line from this repo's hooks, the guards did not load: say "repo
+  the opening context has no `[hook_canary]` line from this repo's hooks, the guards did not load: say "repo
   hooks not loaded" in your first status and write nothing until the operator resolves it.
 
 ## Code style
@@ -93,8 +93,8 @@ skills, slash commands -- are optimised for agent loading efficiency, not human 
 
 Decision 90 workflow: `/orient` (read-only; writes nothing; picks the item) -> `/plan` (writes
 `docs/plans/PLAN-{slug}.yaml`) -> `/implement`; the fourth tier is the Decision 185 loop, and the legacy
-`/develop-executor` is retired (Decision 243). Plans are IMPLEMENTATION or REPORT-ONLY: work too large for one plan
-splits into child recs or atomic IMPLEMENTATION plans, each planned on its own (Decision 243). `/audit` composes
+`/develop-executor` is retired (Decision 244). Plans are IMPLEMENTATION or REPORT-ONLY: work too large for one plan
+splits into child recs or atomic IMPLEMENTATION plans, each planned on its own (Decision 244). `/audit` composes
 `docs/audit-prompts/AUDIT-{slug}.md` and audits nothing. `/overseer` is being retired: it is not a fifth tier, never
 bypasses the workflow, and starts no planning or implementation agent of its own -- the coordinator dispatches each,
 one human-gated persona step on an operator-chosen rec, never the recommendation queue, hub and spoke (Decision 229

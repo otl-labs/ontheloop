@@ -5,7 +5,7 @@ Templates contain `{placeholder}` variables that are filled at runtime with reco
 data, file contents, and plan text. They serve as the **user message** in each CLI call.
 
 **Stable rules and constraints** live in `config/agent/executor/instructions/executor-*.instructions.md`.
-The executor CLI is retired (Decision 243); auto-loading these as system context was the
+The executor CLI is retired (Decision 244); auto-loading these as system context was the
 historical mechanism, not a live one. Do not duplicate rules here.
 
 ## Intended Workflow

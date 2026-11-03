@@ -28,7 +28,6 @@ _MODELS_SYMBOLS = (
     "CrossTierGate",
     "OpenQuestion",
     "KnownGap",
-    "NorthStarPrinciple",
     "NorthStar",
     "FoundationItem",
     "RoadmapDocument",
@@ -52,6 +51,10 @@ class TestFacadeReexports:
         for name in _STATE_SYMBOLS:
             assert hasattr(facade, name), f"facade missing re-export: {name}"
             assert getattr(facade, name) is getattr(state, name), f"{name}: facade object is not the state object"
+
+    def test_north_star_principle_retired(self) -> None:
+        assert not hasattr(facade, "NorthStarPrinciple")
+        assert not hasattr(models, "NorthStarPrinciple")
 
     def test_all_declares_every_public_symbol(self) -> None:
         expected = set(_GATE_RULES_SYMBOLS) | set(_MODELS_SYMBOLS) | set(_STATE_SYMBOLS)

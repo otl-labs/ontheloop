@@ -14,6 +14,7 @@ SETTINGS = ROOT / ".claude" / "settings.json"
 PIN_CMD = 'bash "$CLAUDE_PROJECT_DIR/.claude/hooks/session_start_log_turn.sh" --project-ref=ontheloop'
 STOP_CMD = '"$CLAUDE_PROJECT_DIR/bin/venv-python" "$CLAUDE_PROJECT_DIR/.claude/hooks/stop_log_turn.py"'
 END_CMD = '"$CLAUDE_PROJECT_DIR/bin/venv-python" "$CLAUDE_PROJECT_DIR/.claude/hooks/session_end_log_turn.py"'
+CANARY_CMD = 'bash "$CLAUDE_PROJECT_DIR/.claude/hooks/hook_canary.sh"'
 CAPTURE = ("session_start_log_turn", "stop_log_turn", "session_end_log_turn")
 SID = "aaaaaaaa-0000-4000-8000-000000000001"
 
@@ -41,8 +42,14 @@ def test_the_four_capture_hooks_are_registered() -> None:
             ("SessionEnd", END_CMD),
         ]
     )
-    for event in ("Stop", "StopFailure", "UserPromptSubmit", "SessionEnd"):
-        assert [h["command"] for h in _entries(event)] == [END_CMD if event == "SessionEnd" else STOP_CMD]
+    expected = {
+        "Stop": [STOP_CMD],
+        "StopFailure": [STOP_CMD],
+        "UserPromptSubmit": [STOP_CMD, CANARY_CMD],
+        "SessionEnd": [END_CMD],
+    }
+    for event in expected:
+        assert [h["command"] for h in _entries(event)] == expected[event]
     for event, _ in _capture_entries():
         assert all("matcher" not in group for group in _hooks()[event])
 
