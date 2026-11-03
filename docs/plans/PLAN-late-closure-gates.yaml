@@ -22,11 +22,15 @@ scope:
     action: Create
     purpose: >-
       The one late-closure resolver both gates and the session verb share. find_implementation_merge(plan_rel, root,
-      ref) returns the plan's implementation merge X from git alone: among first-parent commits of `ref` after the
+      ref) returns the plan's implementation merge X from git alone. It returns None BEFORE any history scan when the plan
+      is absent at `ref` or its bundled_recommendations set there is empty (an empty set would match every trailer-less
+      commit). Otherwise: among first-parent commits of `ref` after the
       commit that added the plan file, the commits whose parse_resolves_trailer set equals the plan's (at ref)
-      bundled_recommendations set; exactly one or none (more than one raises LateClosureError). X also must read the plan
-      undeclared, must not be refused by trailer_closure_gate.merge_leg_refuses on its diff-tree, and its diff must
-      intersect the plan's scope files other than the plan itself, else None. late_closure_route(plan_rel, root, base, head)
+      bundled_recommendations set, then filtered: the commit must read the plan undeclared, must not be refused by
+      trailer_closure_gate.merge_leg_refuses on its changed files (taken from scripts.ops_portal.closure_gate.changed_files,
+      the same source the production trailer-closure gate uses), and its diff must intersect the plan's scope files
+      other than the plan itself. The count is taken AFTER these filters: none left is None, more than one raises
+      LateClosureError. late_closure_route(plan_rel, root, base, head)
       returns X only for a CLOSURE-ONLY change: the plan flips to declared against the base; the plan's parsed mapping
       at head equals its parsed mapping at base except that implementation_declared is added or set to true (any other
       field edit, including an added or edited VP step, graduation, graduation_check_id or bundled_recommendations,
@@ -34,8 +38,10 @@ scope:
       head; bundled is non-empty; the base..head commits carry no Resolves trailer; and every changed file is the plan
       itself or config/agent/verification_registry/entries/<id>.yaml for an id in the base plan's
       graduation_check_ids (throughout this plan: the set of the plan's verification_plan[].graduation_check_id values,
-      not a plan field). late_closure_route calls find_implementation_merge(..., ref=base), so X is always an ancestor
-      of the base, never a commit on the closure branch. Never
+      not a plan field). late_closure_route evaluates its cheap closure-only conditions first (flip, mapping equality,
+      changed-file allowlist, no branch trailer, non-empty bundled) and calls find_implementation_merge(..., ref=base)
+      only when all hold, so X is always an ancestor of the base and a LateClosureError can never reach an ordinary
+      implementation PR. Never
       calls push_context_base and adds no second plan-resolution contract: the flip is read
       with _common._plan_declared_at_ref(head) and the mapping compare with git show head:<plan> (head may be a
       historical sha for readback/recover); _common.resolve_declared_plans stays only the checks' working-tree
@@ -45,8 +51,10 @@ scope:
     action: Modify
     purpose: >-
       run_differential gains base_ref: str = "origin/main", passed to make_worktree_revert_runner; the admitted reason
-      names the base ref's full sha. Default call sites are byte-unchanged. If the file's SLOC would exceed 500, decompose (facade
+      names the base ref's full sha on every path (the default path's reason changes from "fails on origin/main" to
+      name the resolved sha; no existing test pins that string). Default call sites' arguments are unchanged. If the file's SLOC would exceed 500, decompose (facade
       package, Decision 128) instead of raising a budget.
+    new_imports: []
   - file: scripts/checks/verification/validate_verification_registry.py
     action: Modify
     purpose: >-
@@ -55,9 +63,10 @@ scope:
       inputs in both checks: base = the diff base status_diff_base(root) or origin/main (newly introduced in this check
       for the route only; _added_entries and _modified_entries keep origin/main), head =
       HEAD, changed = git diff --name-only base..HEAD; a declaration present only in the working tree prints PENDING and
-      the route is not evaluated; in that state, ONLY for a plan where find_implementation_merge(plan_rel, root,
-      ref=base) already returns an X (None on every normal implementation PR), an added shard owned by that plan prints
-      PENDING and skips its differential without failing (the committed run decides; PR CI always sees it committed).
+      the route is not evaluated; in that state, ONLY for a plan where late_closure_route evaluated on the working tree
+      (head = working tree, changed = the working-tree diff against base, branch trailers = base..HEAD) returns an X,
+      which needs a non-empty bundled set and a closure-only diff and is None on every normal implementation PR, an
+      added shard owned by that plan prints PENDING and skips its differential without failing (the committed run decides; PR CI always sees it committed).
       Every other added shard, including a normal-path plan with an uncommitted flip, runs today's origin/main
       differential unchanged. VP 2 covers both. For an ADDED shard only, whose plan_slug names a plan with a late_closure_route X and whose check_id is one of
       that plan's graduation_check_ids, run_differential(row, base_ref=X^). Every modified row and every other added
@@ -143,7 +152,7 @@ infrastructure_dependencies: []
 acceptance_criteria:
   - >-
     find_implementation_merge returns the unique implementation merge and returns None (or raises LateClosureError on
-    two candidates) for each negative condition; late_closure_route refuses a branch trailer, any extra changed file,
+    two filtered candidates) for each negative condition, including an empty bundled set; late_closure_route refuses a branch trailer, any extra changed file,
     and a shard id outside the plan's graduation_check_ids.
   - >-
     validate_verification_registry admits a late-closure shard that fails at X^ and passes at HEAD, still rejects it as
@@ -168,7 +177,8 @@ verification_plan:
       exit 0. Fails before the change (the module does not exist). Covers unique anchor, zero anchors, two anchors
       (raises), plan-only anchor diff, anchor diff outside plan scope, plan declared at the anchor, empty bundled list,
       trailer set unequal to bundled, a trailer on a commit before the plan was added, branch trailer present, extra
-      changed file, foreign shard id, and a closure diff that also edits the plan in any other way (a VP step added, a
+      changed file, foreign shard id, find_implementation_merge itself returning None for an empty-bundled plan with
+      several trailer-less scope-touching commits after it was added, and a closure diff that also edits the plan in any other way (a VP step added, a
       graduation_check_id edited, bundled_recommendations edited, any other field changed), each giving no route.
     fix_if: Fix the resolver; never relax a negative case.
     hermetic: true
@@ -184,8 +194,10 @@ verification_plan:
       the same shard admitted against X^ with it, a modified shard still compared against origin/main, a shard whose id
       the closure PR itself added to the plan's graduation_check_ids still compared against origin/main (rejected), and
       the merge-step leg failing with a branch trailer present or with any plan edit beyond the flip, an uncommitted
-      late-closure flip printing PENDING for its shards, and a normal-path plan with an uncommitted flip still running
-      its added shard's differential against origin/main (rejected when tautological).
+      late-closure flip printing PENDING for its shards, and a normal-path plan with an uncommitted flip, including one
+      with bundled_recommendations empty, still running its added shard's differential against origin/main (rejected
+      when tautological). A named test, test_run_differential_honours_base_ref, asserts run_differential's revert leg
+      uses base_ref and that the default stays origin/main.
     fix_if: Fix the check wiring; never weaken the normal path.
     hermetic: true
     expected_literals: []
@@ -305,7 +317,7 @@ test_obligations:
   - source: scripts/verification_graduation.py
     behavior: run_differential honours base_ref; default stays origin/main.
     verification_step: 2
-    test_selector: tests/checks/verification/test_validate_late_closure.py
+    test_selector: tests/checks/verification/test_validate_late_closure.py::test_run_differential_honours_base_ref
     red_green_expectation: red before (no base_ref parameter), green after
   - source: scripts/checks/verification/validate_verification_registry.py
     behavior: Per-row base; X^ only for an added, plan-owned late-closure shard.
@@ -356,7 +368,7 @@ context:
   - "fork: closure-PR transport | chosen: evidence-bound alternate satisfier, never a second trailer (keeps CARRIER) | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: scope rows validate_merge_step.py, git-ops.yaml"
   - "fork: anchor source | chosen: derived from git only, no plan field | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: scope row _implementation_merge.py"
   - "fork: residual owner of the procedural premerge rec-status leg | chosen: rec-4755 | class: consistency-only | precedent: docs/contracts/git-ops.yaml | precedent_kind: contract | reversible: yes | persisted: git-ops.yaml merge_step_coverage"
-  - "Size: verification_graduation.py 487/500 SLOC and verification-registry.yaml 493/500 effective lines (NEAR_CAP at plan time); measure against main at build time and decompose or compact an existing note, never raise. git-ops.yaml is also scoped by unbuilt PLAN-merge-race-attestation and PLAN-retire-strategic-plans-and-legacy-executor; whichever builds second rebases."
+  - "Size: verification_graduation.py 487/500 SLOC and verification-registry.yaml 493/500 effective lines (NEAR_CAP at plan time); measure against main at build time and decompose or compact an existing note, never raise. git-ops.yaml is also scoped by unbuilt PLAN-merge-race-attestation (which also scopes _manifest.py and test__manifest.py) and PLAN-retire-strategic-plans-and-legacy-executor; whichever builds second rebases."
   - "Owner: this planning session (session_01G2j5RiqkNwJSkzA9Vk4U6m); coordinator session_01G2j5RhrWVwt8bduvsXQwgW. Sequencing: this plan's build lands before the PLAN-deferred-policy-digest closure."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
@@ -366,6 +378,7 @@ gate_rounds:
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 7}
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 4}
   - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 6}
+  - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 6, escalated: true, escalation_choice: one more round}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
