@@ -74,6 +74,36 @@ def _parsed_trailer(message: str) -> list[str]:
     return parse_resolves_trailer(message)
 
 
+def _late_route(slug: str, root: Path, base: str, head: str) -> Any:
+    """The late-closure ImplementationMerge for `slug` at base..head, else None. LateClosureError propagates."""
+    from scripts.checks.verification import _implementation_merge as im  # noqa: PLC0415
+
+    return im.late_closure_route(_plan_rel(slug), root, base, head)
+
+
+def _late_recs_closed(bundled: list[str], merge_sha: str) -> bool:
+    """The warehouse leg the credential-free pr-validate job cannot run: every bundled rec is closed with a
+    resolution naming the implementation merge's full sha. Fails closed on any reader problem."""
+    try:
+        rows = _fetch_rows(bundled)
+    except Exception as exc:  # noqa: BLE001 -- an unreadable warehouse must never pass this leg
+        print(f"PREMERGE LATE-CLOSURE reader unavailable: {exc}")
+        return False
+    by_id = {r.get("id"): r for r in rows}
+    ok = True
+    for rec_id in bundled:
+        row = by_id.get(rec_id)
+        if row is None:
+            print(f"PREMERGE LATE-CLOSURE {rec_id} missing")
+            ok = False
+        elif row.get("status") != "closed" or merge_sha not in str(row.get("resolution") or ""):
+            print(f"PREMERGE LATE-CLOSURE {rec_id} not closed by {merge_sha} (status={row.get('status')})")
+            ok = False
+    if ok:
+        print(f"PREMERGE LATE-CLOSURE OK recs {bundled} closed by {merge_sha}")
+    return ok
+
+
 def _preview(expected: list[str], root: Path, head: str) -> bool:
     if not expected:
         return True
@@ -183,7 +213,18 @@ def cmd_premerge(args: argparse.Namespace) -> int:
     expected = expected_set(plan)
     parsed = _parsed_trailer(Path(args.message_file).read_text(encoding="utf-8"))
     ok = True
-    if set(parsed) != set(expected):
+    base = _git(root, "merge-base", "origin/main", "HEAD").stdout.strip() or "origin/main"
+    try:
+        late = _late_route(args.slug, root, base, "HEAD")
+    except Exception as exc:  # noqa: BLE001 -- LateClosureError: competing implementation merges
+        print(f"PREMERGE LATE-CLOSURE ERROR {exc}")
+        return 1
+    if late is not None:
+        if parsed:
+            print(f"PREMERGE TRAILER MISMATCH late closure must carry no trailer, parsed={parsed}")
+            ok = False
+        ok = _late_recs_closed(expected, late.sha) and ok
+    elif set(parsed) != set(expected):
         ok = False
         if not plan.get("implementation_declared") and parsed:
             print(f"PREMERGE UNDECLARED {undeclared_line(args.slug, 'HEAD')}")
@@ -211,6 +252,29 @@ def _readback_state(slug: str, sha: str, root: Path) -> tuple[list[str], list[st
     return expected, missing, extra, bool(plan.get("implementation_declared"))
 
 
+def _late_readback(args: argparse.Namespace, root: Path, expected: list[str], extra: list[str], declared: bool) -> int | None:
+    """0 for a late-closure OK line, 1 for a LateClosureError, None to fall through to today's verdicts."""
+    from scripts.checks import _common  # noqa: PLC0415
+    from scripts.checks.verification import _implementation_merge as im  # noqa: PLC0415
+
+    sha = _rev(root, args.sha) or args.sha
+    try:
+        if expected and not extra:
+            merge = _late_route(args.slug, root, f"{sha}^", sha)
+            if merge is not None:
+                print(f"READBACK OK {args.sha} recs={expected} late-closure satisfied-by={merge.sha}")
+                return 0
+        elif extra and not declared and _common._plan_declared_at_ref(_plan_rel(args.slug), root, "origin/main"):
+            merge = im.find_implementation_merge(_plan_rel(args.slug), root, "origin/main")
+            if merge is not None and merge.sha == sha:
+                print(f"READBACK OK {args.sha} recs={extra} late-closed")
+                return 0
+    except im.LateClosureError as exc:
+        print(f"READBACK LATE-CLOSURE ERROR {exc}")
+        return 1
+    return None
+
+
 def cmd_readback(args: argparse.Namespace) -> int:
     root = args.root
     _git(root, "fetch", "origin", "main")
@@ -222,6 +286,9 @@ def cmd_readback(args: argparse.Namespace) -> int:
     if not missing and not extra:
         print(f"READBACK OK {args.sha} recs={expected}")
         return 0
+    verdict = _late_readback(args, root, expected, extra, declared)
+    if verdict is not None:
+        return verdict
     if missing:
         print(f"READBACK MISSING {args.sha} missing={missing}")
     if extra:
@@ -237,6 +304,13 @@ def cmd_recover(args: argparse.Namespace) -> int:
 
     rel = _plan_rel(args.slug)
     sha = _rev(root, args.sha) or args.sha
+    try:
+        late = _late_route(args.slug, root, f"{sha}^", sha)
+    except Exception:  # noqa: BLE001 -- an ambiguous anchor is not a closure merge; the checks below decide
+        late = None
+    if late is not None:
+        print(f"RECOVER refused: late closure, recs closed by {late.sha}")
+        return 2
     if not _common._plan_declared_at_ref(rel, root, sha) or _common._plan_declared_at_ref(rel, root, f"{sha}^"):
         print(f"RECOVER refused: {sha} is not the merge that flipped {args.slug} to implementation_declared")
         return 2
