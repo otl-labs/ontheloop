@@ -234,6 +234,7 @@ ENTRIES: tuple[Entry, ...] = (
             "scripts/checks/_common.py",
             "scripts/checks/registry.py",
             "scripts/checks/_marker_guard.py",
+            "scripts/checks/_marker_guard_state_options.py",
             "scripts/checks/_schema.py",
             "scripts/checks/contracts/_population.py",
             "scripts/checks/contracts/_ratchet.py",
