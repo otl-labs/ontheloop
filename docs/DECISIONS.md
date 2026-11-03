@@ -2,10 +2,10 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
-## Decision 244: An agent merge is refused when main has changed, since the PR's base, a file the PR also changes -- a fail-closed presubmit heuristic with no agent override, the post-merge full tier stays the authority (amends Decision 83) (Decided)
+## Decision 245: An agent merge is refused when main has changed, since the PR's base, a file the PR also changes -- a fail-closed presubmit heuristic with no agent override, the post-merge full tier stays the authority (amends Decision 83) (Decided)
 
 ```yaml
-number: 244
+number: 245
 status: Decided
 decided_date: "2026-11-03"
 kind:
@@ -26,7 +26,7 @@ significance:
 
 **Status:** Decided
 **Date:** 2026-11-03
-**Warehouse ID:** dec-244 (per Decision 84 backfill)
+**Warehouse ID:** dec-245 (per Decision 84 backfill)
 
 **Problem:** On 2026-11-03 #1799 merged about 20 hours after its last PR CI, 14 hours after #1805 had merged. Both had shrunk AGENTS.md and made the same S1 budget edit; git folded the two edits into one and the combined main failed the prose ratchet (rec-4866, rec-4869). Required checks can go stale because strict_required_status_checks_policy is false and the agents' merge identity holds the admin bypass (Decision 83), so a PR green on an old main merges untested against the new one. It is the third instance after rec-4372 and rec-4427; in a replay of 38 merges, 22 were behind main and 2 shared a changed file with it.
 
@@ -41,7 +41,7 @@ significance:
 6. **Coverage (Decision 181 cl.2).** Clauses 1 and 3: the gate and its hook tests. Residuals: GitHub UI merges and different-file conflicts (rec-4874, rec-4451), auto-merge enabled before checks finish (rec-4874), merge on red (rec-4080), agent merges outside the two MCP tools, by gh or REST from a shell (rec-2827). docs/contracts/git-ops.yaml records the mechanism.
 
 ```yaml reversal-conditions
-decision: 244
+decision: 245
 review_by: 2027-05-31
 on_trigger: "re-decide via /plan; never add an agent override"
 conditions:
@@ -10532,7 +10532,7 @@ conditions:
 
 **Related:** Decision 89 (premise reversed here; merge-gate design preserved), Decision 76 (foresaw reversal; deferred follow-up now unblocked), Decision 77 (guard rationale preserved -- guard is the plan-CONTENT control, not a branch-protection substitute), Decision 73 (public flip enabling the apply), Decision 75 (sanctioned premise correction).
 
-> **Update (2026-11-03):** Decision 244 clause 3 narrows the non-wedging property for agent merges: a fail-closed gate refuses a merge whose stale base shares a changed file with main. The ruleset configuration above is unchanged.
+> **Update (2026-11-03):** Decision 245 clause 3 narrows the non-wedging property for agent merges: a fail-closed gate refuses a merge whose stale base shares a changed file with main. The ruleset configuration above is unchanged.
 
 ---
 
