@@ -252,6 +252,14 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_tier_a_amendment_guard",
+        module="scripts.checks.contracts.validate_tier_a_amendment_guard",
+        attr="validate_tier_a_amendment_guard",
+        # UNGATED deliberately: a glob-gated guard is one glob edit from not running on its own edit (Decision 187 cl.6).
+        pre=True,
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_ports_contract",
         module="scripts.checks.contracts.validate_ports_contract",
         attr="validate_ports_contract",
