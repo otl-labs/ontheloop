@@ -267,6 +267,9 @@ def run(
     return Result("FAIL", reason, digest, base, selection, _failing_lines(output), round_)
 
 
+_VERBS = {"create": "creates", "modify": "modifies"}
+
+
 def _render(slug: str, result: Result) -> str:
     if not result.selection:
         return f"WORDING-CHECK verdict=FAIL reason: {result.reason}"
@@ -275,10 +278,10 @@ def _render(slug: str, result: Result) -> str:
         f"WORDING-CHECK verdict={result.verdict} digest={result.digest} base={result.base} selection={result.selection}{count}"
     ]
     if result.pairs:
-        lines.append(f"fast tier red only on {len(result.pairs)} plan-created evaluator(s); clean with them stood in")
+        lines.append(f"fast tier red only on {len(result.pairs)} plan-built evaluator(s); clean with them stood in")
         lines += [
-            f"pending: docs/contracts/{name} evaluator {check} (the plan creates {module})"
-            for name, check, module in result.pairs
+            f"pending: docs/contracts/{name} evaluator {check} (the plan {_VERBS[action]} {module})"
+            for name, check, module, action in result.pairs
         ]
     if result.reason:
         lines.append(f"reason: {result.reason}")
