@@ -389,3 +389,5 @@ resource "aws_iam_role_policy" "github_ci_deploy" {
     }
   }
 }
+
+data "aws_region" "vp12_screen_probe" {}
