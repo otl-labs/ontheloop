@@ -8,8 +8,10 @@ from pathlib import Path
 import pytest
 
 from scripts.checks import _common
+from scripts.checks.verification import _implementation_merge as im
 from scripts.checks.verification.validate_merge_step import validate_merge_step
 from scripts.roadmap import approved_text as at
+from tests.fixtures import late_closure_repos as lc
 from tests.fixtures import merge_step_repos as fx
 
 SLUG = "demo"
@@ -156,3 +158,51 @@ def test_real_tree_run_passes():
     failed: list[str] = []
     validate_merge_step(failed)
     assert failed == []
+
+
+def _late_merge(repo) -> list[str]:
+    failed: list[str] = []
+    validate_merge_step(failed, root=repo, base="main", changed=[lc.PLAN], push_base=None)
+    return failed
+
+
+def test_merge_step_passes_a_closure_only_branch_and_names_x(tmp_path, monkeypatch, capsys):
+    repo, x = lc.build_main(tmp_path, monkeypatch)
+    lc.closure_branch(repo)
+    assert _late_merge(repo) == []
+    assert "LATE-CLOSURE" in capsys.readouterr().out
+    assert x in im.late_closure_route(lc.PLAN, repo, "main", "HEAD").sha
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"message": "closure\n\nResolves: rec-1\n"},
+        {"extra_files": {"src/more.py": "y = 1\n"}},
+        {"plan_extra": {"intent": "edited"}},
+    ],
+)
+def test_merge_step_fails_as_today_without_a_route(tmp_path, monkeypatch, kwargs, capsys):
+    repo, _ = lc.build_main(tmp_path, monkeypatch)
+    lc.closure_branch(repo, **kwargs)
+    failed = _late_merge(repo)
+    if kwargs.get("message"):
+        assert failed == []
+    else:
+        assert len(failed) == 1 and "!= bundled_recommendations" in failed[0] and "add a commit whose message" in failed[0]
+    assert "LATE-CLOSURE" not in capsys.readouterr().out
+
+
+def test_merge_step_sidecar_plan_fails_leg_t_as_today(tmp_path, monkeypatch):
+    repo, _ = lc.build_main(tmp_path, monkeypatch, sidecar=True)
+    lc.closure_branch(repo)
+    assert any("!= bundled_recommendations" in f for f in _late_merge(repo))
+
+
+def test_merge_step_fails_on_competing_anchors(tmp_path, monkeypatch):
+    repo, _ = lc.build_main(tmp_path, monkeypatch)
+    fx.write(repo, lc.SRC, "x = 2\n")
+    second = lc.commit_all(repo, "again\n\nResolves: rec-1\n")
+    lc.closure_branch(repo)
+    failed = _late_merge(repo)
+    assert len(failed) == 1 and "late closure" in failed[0] and second in failed[0]
