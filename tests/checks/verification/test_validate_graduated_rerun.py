@@ -1,6 +1,5 @@
 """Mirror of scripts/checks/verification/validate_graduated_rerun.py (standing re-run of graduated records)."""
 
-import os
 import time
 from pathlib import Path
 
@@ -38,11 +37,10 @@ def _listed(root: Path, ids: list[str]) -> None:
 
 def _alive(pid: int) -> bool:
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
         return False
-    stat = Path(f"/proc/{pid}/stat")
-    return not stat.exists() or stat.read_text(encoding="utf-8").rsplit(")", 1)[1].split()[0] != "Z"
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"
 
 
 def _decl() -> registry._Declaration:
