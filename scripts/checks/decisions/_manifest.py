@@ -52,8 +52,7 @@ ENTRIES: tuple[Entry, ...] = (
         name="validate_supersession_annotations",
         module="scripts.checks.decisions.validate_supersession_annotations",
         attr="validate_supersession_annotations",
-        # Promoted into --pre: THIS ENTRY is the authority, and the sibling conformance/immutability
-        # checks already parse the same two files in --pre for ~0.04s.
+        # Promoted into --pre; this Entry is the authority.
         pre=True,
         pre_globs=(
             "docs/DECISIONS.md",

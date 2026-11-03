@@ -104,6 +104,7 @@ env:
   CONVERGENCE_BUCKET: agent-platform-data-lake
   CONVERGENCE_KEY: convergence/personal/sandbox.json
   WORKDIR: terraform/personal
+  MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -117,19 +118,21 @@ jobs:
     outputs:
       actionable: ${{ steps.target.outputs.actionable }}
       commit_sha: ${{ steps.target.outputs.commit_sha }}
+      aws_region: ${{ steps.region.outputs.aws_region }}
     permissions:
       id-token: write
       contents: read
-    env:
-      AWS_DEFAULT_REGION: eu-west-2
     steps:
       - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/aws-region
+        id: region
 
       - name: Configure AWS credentials (OIDC -- branch role, convergence read + DuckLake reader invoke)
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
-          aws-region: eu-west-2
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Python 3.12
         uses: actions/setup-python@v7
@@ -197,7 +200,6 @@ jobs:
       contents: read
       pull-requests: write  # best-effort wake comment on the red commit's originating PR
     env:
-      AWS_DEFAULT_REGION: eu-west-2
       TF_VAR_aws_profile: ""
       RED_SHA: ${{ needs.resolve-target.outputs.commit_sha }}
 
@@ -207,12 +209,12 @@ jobs:
         # the commit plan.bin was planned from, so terraform apply's own state/plan-serial checks
         # operate against the same tree the guard and reviewer inspected (Decision 77 no-TOCTOU).
         # NOT because a DuckLake lambda-zip rebuild needs to reproduce source_code_hash bytes from
-        # this tree -- Decision 154 / rec-2862 replaced that rebuild with fetch_reviewed() below,
-        # and every DuckLake function and layer carries ignore_changes = [source_code_hash]
-        # (ducklake_lambdas.tf:74,94,302,347) regardless, so filemd5() against this checkout was
-        # never load-bearing for the applied diff (see docs/contracts/environment-taxonomy.yaml).
+        # this tree -- Decision 154 / rec-2862 replaced that rebuild with fetch_reviewed() below.
+        # Terraform reads no build artifact (docs/contracts/environment-taxonomy.yaml conformance;
+        # validate_terraform_no_build_artifact_reads), so nothing under lambda-packages/ is a plan
+        # input for this checkout.
         # Any red commit Reconcile is ever dispatched against postdates this plan's merge (Reconcile
-        # cannot meaningfully run before it exists), so scripts/terraform_apply_guard.py --digest,
+        # cannot meaningfully run before it exists), so scripts/ci/terraform_plan_digest.py,
         # scripts/ci/review_verdict.py, and scripts/ci/reconcile_target.py are always present here.
         uses: actions/checkout@v7
         with:
@@ -236,8 +238,8 @@ jobs:
       - name: Configure AWS credentials (OIDC -- apply role, main only)
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-apply
-          aws-region: eu-west-2
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-apply
+          aws-region: ${{ needs.resolve-target.outputs.aws_region }}
 
       - name: Read pinned Terraform version
         id: tfver
@@ -323,11 +325,11 @@ jobs:
         # default "." would still resolve the OLD RED_SHA module and die on the unrecognized
         # --mode argument. Consequence: lambda-packages/ lands under .dispatch-tooling/, NOT at
         # the workspace root -- safe because the fetch path's load-bearing output is the
-        # server-side copy_object onto the fixed key, and every DuckLake function and layer
-        # carries ignore_changes = [source_code_hash] (ducklake_lambdas.tf:74,94,302,347), so the
-        # verbatim saved-plan apply never re-evaluates filemd5 against the local tree -- the local
-        # download itself is dead weight on this call site (~183 MB terraform never reads here),
-        # retained only for call-site symmetry with the sandbox path, not for correctness. No
+        # server-side copy_object onto the fixed key, and Terraform reads no build artifact
+        # (environment-taxonomy.yaml conformance; validate_terraform_no_build_artifact_reads), so
+        # nothing under lambda-packages/ is a plan input -- the local download itself is dead
+        # weight on this call site (~183 MB terraform never reads; rec-4248 makes the fetch
+        # copy-only), retained only for call-site symmetry with the sandbox path. No
         # rebuild here, so no re-assert either -- Decision 77 no-TOCTOU is preserved by the
         # ORIGINAL PR-time byte-identical assert plus this fetch's own fail-closed missing-object
         # check (scripts/ci/ducklake_artifacts.py fetch_reviewed()), not by a second rebuild-assert.
@@ -365,7 +367,7 @@ jobs:
 
       - name: Subagent plan review (digest-fed, JSON-classified) -- saved plan
         # IDENTICAL contract to terraform-apply-sandbox.yml's review step (T2.39): digest on
-        # stdin, --allowedTools Read, --output-format json classified via review_verdict.py, a
+        # stdin, no tools (--tools ""), --output-format json classified via review_verdict.py, a
         # STARVED verdict retries once at the SAME turn budget, and a still-STARVED outcome after
         # the retry is surfaced via steps.review.outputs.outcome for the record-write step below
         # to skip the red write on (Decision 55 anti-masking). Nothing auto-applies here without an
@@ -394,7 +396,7 @@ jobs:
         run: |
           set +e
           STDERR_FILE=$(mktemp)
-          terraform apply -input=false -lock-timeout=120s plan.bin 2>"$STDERR_FILE"
+          bash "$GITHUB_WORKSPACE/.dispatch-tooling/scripts/ci/neon_api_key.sh" run -- terraform apply -input=false -lock-timeout=120s plan.bin 2>"$STDERR_FILE"
           rc=$?
           STDERR_CONTENT=$(cat "$STDERR_FILE")
           rm -f "$STDERR_FILE"
@@ -456,7 +458,7 @@ jobs:
         if: success() && steps.route.outputs.needs_fresh_plan == 'true'
         working-directory: ${{ env.WORKDIR }}
         run: |
-          terraform plan -input=false -lock-timeout=120s -var-file=terraform.personal.tfvars -out=plan.bin
+          bash "$GITHUB_WORKSPACE/.dispatch-tooling/scripts/ci/neon_api_key.sh" run -- terraform plan -input=false -lock-timeout=120s -var-file=terraform.personal.tfvars -out=plan.bin
           terraform show -json plan.bin > plan.json
 
       - name: Deterministic apply guard (fail-closed) -- fresh re-plan
@@ -489,7 +491,7 @@ jobs:
         # reversal conditions: it is a TWO-SITE change).
         if: success() && steps.route.outputs.needs_fresh_plan == 'true' && steps.guard_fresh.outputs.routed != 'true'
         working-directory: ${{ env.WORKDIR }}
-        run: terraform apply -input=false -lock-timeout=120s plan.bin
+        run: bash "$GITHUB_WORKSPACE/.dispatch-tooling/scripts/ci/neon_api_key.sh" run -- terraform apply -input=false -lock-timeout=120s plan.bin
 
       - name: Emit fresh plan.bin sha256 (RECONCILE_FRESH_PLAN_ARTIFACT sha256 job-output EMIT)
         # CARRY-1: the byte-integrity gate that crosses the job boundary to gated-apply-reconcile
@@ -650,7 +652,6 @@ jobs:
       contents: read
       pull-requests: write
     env:
-      AWS_DEFAULT_REGION: eu-west-2
       TF_VAR_aws_profile: ""
       RED_SHA: ${{ needs.resolve-target.outputs.commit_sha }}
 
@@ -678,8 +679,8 @@ jobs:
       - name: Configure AWS credentials (OIDC -- apply role, main only)
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-apply
-          aws-region: eu-west-2
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-apply
+          aws-region: ${{ needs.resolve-target.outputs.aws_region }}
 
       - name: Read pinned Terraform version
         id: tfver
@@ -736,9 +737,9 @@ jobs:
         # a mis-wired working-directory here would break the resolution the whole plan exists to
         # deliver. Consequence: lambda-packages/ lands under .dispatch-tooling/, NOT at the
         # workspace root -- safe because the fetch path's load-bearing output is the server-side
-        # copy_object onto the fixed key, and every DuckLake function and layer carries
-        # ignore_changes = [source_code_hash] (ducklake_lambdas.tf:74,94,302,347), so the
-        # verbatim saved-plan apply never re-evaluates filemd5 against the local tree.
+        # copy_object onto the fixed key, and Terraform reads no build artifact
+        # (environment-taxonomy.yaml conformance; validate_terraform_no_build_artifact_reads), so
+        # nothing under lambda-packages/ is a plan input (rec-4248 makes the fetch copy-only).
         uses: ./.dispatch-tooling/.github/actions/build-ducklake-artifacts
         with:
           mode: fetch
@@ -803,7 +804,7 @@ jobs:
         # Decision 92's Environment-gates-execution security model. Recovery stays the
         # workflow_dispatch acknowledge-and-retry path only.
         working-directory: ${{ env.WORKDIR }}
-        run: python3 "$GITHUB_WORKSPACE/scripts/ci/stale_plan_signature.py" --wrap -- terraform apply -input=false -lock-timeout=120s plan.bin
+        run: bash "$GITHUB_WORKSPACE/.dispatch-tooling/scripts/ci/neon_api_key.sh" run -- python3 "$GITHUB_WORKSPACE/scripts/ci/stale_plan_signature.py" --wrap -- terraform apply -input=false -lock-timeout=120s plan.bin
 
       - name: Write convergence record (always-run, red-on-failure)
         id: record_write
@@ -879,8 +880,8 @@ jobs:
         # resolve-target's own role choice above).
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
-          aws-region: eu-west-2
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
+          aws-region: ${{ needs.resolve-target.outputs.aws_region }}
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v7

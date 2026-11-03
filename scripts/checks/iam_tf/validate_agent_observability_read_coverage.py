@@ -29,6 +29,7 @@ import re
 
 from scripts.checks import _common, registry
 from scripts.checks.iam_tf._read_coverage import (
+    _BOOTSTRAP_DIR_REL,
     _PERSONAL_DIR_REL,
     CHECKED_TYPES,
     ENUMERATED_IAM_TYPES,
@@ -98,17 +99,24 @@ def validate_agent_observability_read_coverage(failed: list[str]) -> None:
     key = "agent-observability-read-coverage:"
 
     personal_dir = _common.ROOT / _PERSONAL_DIR_REL
-    personal_text = _read_root_text(personal_dir)
-    if not personal_text:
-        failed.append(f"{key} cannot read any *.tf file under {personal_dir}")
-        print(f"  FAIL: cannot read terraform/personal HCL under {personal_dir}")
+    bootstrap_dir = _common.ROOT / _BOOTSTRAP_DIR_REL
+    bootstrap_text = _read_root_text(bootstrap_dir)
+    if not bootstrap_text:
+        failed.append(f"{key} cannot read any *.tf file under {bootstrap_dir}")
+        print(f"  FAIL: cannot read terraform/bootstrap HCL under {bootstrap_dir}")
         return
 
-    dev_statements = _parse_bootstrap_statements(personal_text, "platform_dev_runtime")
-    admin_statements = _parse_bootstrap_statements(personal_text, "platform_admin_ops")
+    # DailyOps and AdminOps are read from terraform/bootstrap (PLAN-platform-iam-bootstrap-adopt,
+    # the durable owner) -- _scan_resources below stays on terraform/personal, which still declares
+    # the observability-managed resources (aws_s3_bucket, aws_cloudwatch_log_group).
+    dev_statements = _parse_bootstrap_statements(bootstrap_text, "platform_dev_runtime")
+    admin_statements = _parse_bootstrap_statements(bootstrap_text, "platform_admin_ops")
     if not dev_statements or not admin_statements:
         failed.append(f"{key} could not parse the platform_dev_runtime/platform_admin_ops policy statements")
-        print("  FAIL: could not parse PlatformDev/PlatformAdmin inline policy statements -- has the HCL shape changed?")
+        print(
+            "  FAIL: could not parse PlatformDev/PlatformAdmin inline policy statements in terraform/bootstrap -- "
+            "has the HCL shape changed, or are the policies absent from bootstrap?"
+        )
         return
     role_statements = {"dev": dev_statements, "admin": admin_statements}
 

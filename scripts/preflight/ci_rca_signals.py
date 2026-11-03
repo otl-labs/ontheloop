@@ -28,6 +28,7 @@ def _derive_ci_rca_open(rows: list[dict]) -> list[dict]:
             "priority": r.get("priority", ""),
             "created_timestamp": r.get("created_timestamp"),
             "file": r.get("file", ""),
+            "acceptance": r.get("acceptance"),
         }
         for r in matched[:5]
     ]
@@ -101,10 +102,10 @@ def _derive_ci_rca_since(rows: list[dict], since_ts: str) -> list[dict]:
     return out
 
 
-def _fetch_ci_rca_undetermined_recs(cache_rows: object = _common._READER_SENTINEL) -> list[dict]:
-    """Return all open ci_rca recs with rca_confidence in {low, undetermined} -- from warm cache only."""
+def _fetch_ci_rca_undetermined_recs(cache_rows: object = _common._READER_SENTINEL) -> list[dict] | None:
+    """Open ci_rca recs with rca_confidence in {low, undetermined}; None when the signal rows are unavailable."""
     if cache_rows is not _common._READER_SENTINEL:
-        return [] if cache_rows is None else _derive_ci_rca_undetermined_open(cache_rows)  # type: ignore[arg-type]
+        return None if cache_rows is None else _derive_ci_rca_undetermined_open(cache_rows)  # type: ignore[arg-type]
     return []
 
 
@@ -116,7 +117,10 @@ def print_ci_rca_undetermined_recs(recs: list[dict]) -> None:
         print()
         return
     print("  A self-rated low-confidence or undetermined RCA classification -- review the proximate cause manually.")
-    print("  Advisory only: open ci_rca recs are triaged under Decision 73 L5 into a hard block or a likely-resolved prompt.")
+    print(
+        "  Advisory only: open ci_rca recs are triaged under Decision 73 L5, narrowed by Decision 226, "
+        "into an overlap block or a likely-resolved prompt."
+    )
     for rec in recs[:5]:
         rec_id = rec.get("id", "unknown")
         title = rec.get("title", "")
@@ -128,16 +132,10 @@ def print_ci_rca_undetermined_recs(recs: list[dict]) -> None:
     print()
 
 
-def _fetch_ci_rca_recs(cache_rows: object = _common._READER_SENTINEL) -> list[dict]:
-    """Return up to 5 open CI-RCA recs -- from the warm-pulled cache rows, else the DuckLake reader.
-
-    cache_rows (neon-egress-reduction D4): a supplied row list is served via _derive_ci_rca_open
-    (zero reader call); a supplied None means the warm-up pull failed -> [] (degraded). Omitted
-    (sentinel) -> reader path (back-compat / tests). Returns [] with a loud warning on reader failure
-    (Decision 55 / Decision 81 cl.7: the reader is the sole backend; loud degraded signal).
-    """
+def _fetch_ci_rca_recs(cache_rows: object = _common._READER_SENTINEL) -> list[dict] | None:
+    """Up to 5 open CI-RCA recs from the supplied signal rows (None when unavailable), else the reader verb."""
     if cache_rows is not _common._READER_SENTINEL:
-        return [] if cache_rows is None else _derive_ci_rca_open(cache_rows)  # type: ignore[arg-type]
+        return None if cache_rows is None else _derive_ci_rca_open(cache_rows)  # type: ignore[arg-type]
 
     _reader_exc: Exception | None = None
     try:
@@ -154,16 +152,10 @@ def _fetch_ci_rca_recs(cache_rows: object = _common._READER_SENTINEL) -> list[di
     return []
 
 
-def _fetch_ci_rca_dispute_recs(cache_rows: object = _common._READER_SENTINEL) -> list[dict]:
-    """Return up to 5 open ci_rca_evidence_dispute recs -- from the warm-pulled cache rows only.
-
-    cache_rows (neon-egress-reduction D4 / Decision 88 egress invariant): a supplied row list is
-    served via _derive_ci_rca_dispute_open (zero reader call); a supplied None means the warm-up
-    pull failed -> []. Omitted (sentinel) -> [] (no new DuckLake reader named-verb for dispute recs;
-    the dispute section derives from the same warm cache used by _fetch_ci_rca_recs).
-    """
+def _fetch_ci_rca_dispute_recs(cache_rows: object = _common._READER_SENTINEL) -> list[dict] | None:
+    """Up to 5 open ci_rca_evidence_dispute recs from the supplied signal rows; None when unavailable."""
     if cache_rows is not _common._READER_SENTINEL:
-        return [] if cache_rows is None else _derive_ci_rca_dispute_open(cache_rows)  # type: ignore[arg-type]
+        return None if cache_rows is None else _derive_ci_rca_dispute_open(cache_rows)  # type: ignore[arg-type]
     return []
 
 
@@ -183,15 +175,10 @@ def print_ci_rca_dispute_recs(recs: list[dict]) -> None:
     print()
 
 
-def _fetch_ci_rca_recs_since(ts: str, cache_rows: object = _common._READER_SENTINEL) -> list[dict]:
-    """Return ci_rca recs created after *ts* -- from the warm-pulled cache rows, else the DuckLake reader.
-
-    cache_rows (neon-egress-reduction D4): a supplied row list is served via _derive_ci_rca_since
-    (zero reader call); a supplied None -> []. Omitted (sentinel) -> reader path (back-compat).
-    Returns [] on any failure (Decision 81 cl.7: the reader is the sole backend).
-    """
+def _fetch_ci_rca_recs_since(ts: str, cache_rows: object = _common._READER_SENTINEL) -> list[dict] | None:
+    """ci_rca recs created after *ts* from the supplied signal rows (None when unavailable), else the reader verb."""
     if cache_rows is not _common._READER_SENTINEL:
-        return [] if cache_rows is None else _derive_ci_rca_since(cache_rows, ts)  # type: ignore[arg-type]
+        return None if cache_rows is None else _derive_ci_rca_since(cache_rows, ts)  # type: ignore[arg-type]
     try:
         return cast(DuckLakeReader, _common._make_reader()).named("ci_rca_since", since_ts=ts)
     except Exception:  # noqa: BLE001
@@ -205,11 +192,9 @@ def _check_ci_rca_liveness(creds_status: str, cache_rows: object = _common._READ
     Calls `gh run list` to determine the latest push-to-main ci.yml result.
     Returns None when credentials are unavailable, gh call fails, or conditions are not met.
 
-    cache_rows (neon-egress-reduction D4) is threaded to _fetch_ci_rca_recs_since so the "any ci_rca
-    rec since the red run?" check is served from the warm-pulled rows (zero reader call). The gh CLI
-    call is unaffected (it is the CI-status source, not a warehouse read).
+    Unavailable signal rows (cache_rows is None) raise no alert: unavailability is carried by recs_read_status.
     """
-    if creds_status != "ok":
+    if creds_status != "ok" or cache_rows is None:
         return None
     try:
         result = subprocess.run(
@@ -288,11 +273,10 @@ def _derive_convergence_gap_tracking_since(rows: list[dict], since_ts: str) -> l
     return out
 
 
-def _fetch_convergence_gap_tracking_recs_since(ts: str, cache_rows: object = _common._READER_SENTINEL) -> list[dict]:
-    """Cache-rows-only fetch (Decision 88 egress invariant) for the predicate above -- never a
-    reader call, mirroring _fetch_ci_rca_dispute_recs's cache-only shape."""
+def _fetch_convergence_gap_tracking_recs_since(ts: str, cache_rows: object = _common._READER_SENTINEL) -> list[dict] | None:
+    """Supplied-rows-only fetch for the predicate above (never a reader call); None when unavailable."""
     if cache_rows is not _common._READER_SENTINEL:
-        return [] if cache_rows is None else _derive_convergence_gap_tracking_since(cache_rows, ts)  # type: ignore[arg-type]
+        return None if cache_rows is None else _derive_convergence_gap_tracking_since(cache_rows, ts)  # type: ignore[arg-type]
     return []
 
 
@@ -370,7 +354,7 @@ def _check_convergence_rca_gap(convergence_health: dict | None, cache_rows: obje
     or missing data (rec-2027 pattern -- never crashes preflight).
     """
     try:
-        if not convergence_health or convergence_health.get("status") != "red":
+        if cache_rows is None or not convergence_health or convergence_health.get("status") != "red":
             return None
 
         red_since = convergence_health.get("red_since")
@@ -545,7 +529,10 @@ def print_ci_rca_recs(recs: list[dict], correlation: dict[str, list[dict]] | Non
 
     if correlation is None:
         # Backward-compat path: all recs are HARD BLOCK.
-        print("  [HARD BLOCK] /plan cannot scope unrelated work while these recs are open.")
+        print(
+            "  [HARD BLOCK] overlapping work blocks, and all new work once a red is past its SLO: run "
+            "bin/venv-python -m scripts.ci_rca.red_overlap --plan <plan> (Decision 226)."
+        )
         for rec in recs:
             rec_id = rec.get("id", "unknown")
             title = rec.get("title", "")
@@ -574,7 +561,10 @@ def print_ci_rca_recs(recs: list[dict], correlation: dict[str, list[dict]] | Non
             )
 
     if unresolved:
-        print("  [HARD BLOCK] /plan cannot scope unrelated work while these recs remain open.")
+        print(
+            "  [HARD BLOCK] overlapping work blocks, and all new work once a red is past its SLO: run "
+            "bin/venv-python -m scripts.ci_rca.red_overlap --plan <plan> (Decision 226)."
+        )
         for rec in unresolved:
             rec_id = rec.get("id", "unknown")
             title = rec.get("title", "")

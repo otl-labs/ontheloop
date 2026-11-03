@@ -48,7 +48,7 @@ locals {
       },
       {
         # Consolidated IAM read-quartet for all roles terraform/personal references during plan:
-        # branch, pr, plan, drift, platform, ducklake roles. Separated from write actions
+        # branch, pr, plan, drift, ducklake roles. Separated from write actions
         # (IAMRoleReconcile, IAMRoleCreateBounded, IAMRoleWriteBounded) to keep the write-scope
         # auditable. Literal ARNs per the refresh-read convention (no cross-root dependency edges).
         # rec-2079: IAMCIPlanRoleRead + IAMPlatformRolesRead merged here; no separate Sid for each.
@@ -71,6 +71,8 @@ locals {
         # (ducklake-deploy+prod-deploy) -- so this list shrinks by two entries (net -2, helps the
         # rec-2793 headroom). Same read-only refresh-grant class as the retired roles had; the
         # pipeline does not mint them (admin-provisioned in terraform/personal/oidc.tf).
+        # rec-4049 (Decision 225): the PlatformDev and PlatformAdmin ARNs were pruned under this
+        # rule after terraform/personal's forget converged (2026-10-17, #1540).
         Sid    = "IAMRolesRead"
         Effect = "Allow"
         Action = [
@@ -84,8 +86,9 @@ locals {
           "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-pr",
           "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-planner",
           "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-deploy",
-          "arn:aws:iam::${var.account_id}:role/PlatformDev",
-          "arn:aws:iam::${var.account_id}:role/PlatformAdmin",
+          # Pre-staged ahead of the role's own creation (same precedent as the telemetry-writer entries
+          # below): without it the gated apply's iam:GetRole after the create, and every refresh, fail closed.
+          "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-trusted-plan",
           "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-catalog-dr",
           "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-writer",
           "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-reader",
@@ -103,12 +106,20 @@ locals {
           # in the PassRole-completion PR; the matching oidc.tf planner-read entry is added in the
           # DEP-02 create PR and both entries are removed together in the DEP-02 revert PR.
           "arn:aws:iam::${var.account_id}:role/agent-platform-probe-liveproof-role",
+          # Decision 213: pre-staged ahead of the role's own creation, the same precedent as the
+          # probe-liveproof entry above. PLAN-telemetry-writer-function creates
+          # agent-platform-ducklake-telemetry-writer; without this entry the gated apply's own
+          # iam:GetRole after that create, and every later plan's refresh, fail closed.
+          "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-writer",
+          # Same pre-stage for PLAN-telemetry-reader-and-smoke-twin's creates.
+          "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-writer-smoke",
+          "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-reader",
         ]
       },
       {
         # METADATA half of the deliberate two-Sid READ split (write-symmetry rule 2 / Decision 129
         # pt 2 as amended). SecretsManagerMetadataWrite creates secrets at secret:agent-platform-*
-        # while the value-read Sid below enumerates six ARNs, so before this Sid existed the
+        # while the value-read Sid below enumerates four ARNs, so before this Sid existed the
         # pipeline could CREATE a secret it could not then refresh-READ: the create succeeds and the
         # NEXT plan AccessDenies on DescribeSecret -- a stranded pipeline, not a failed apply.
         #
@@ -147,11 +158,11 @@ locals {
         # VALUE-CAPABLE half of the READ split -- ENUMERATED, NEVER PREFIXED. secretsmanager:
         # GetSecretValue is the only Secrets Manager read that returns secret material, so it is the
         # read Decision 129 pt 2 (as amended) actually constrains: value-capable reads stay
-        # enumerated at exactly the six ARNs below, kept VERBATIM from the pre-split
+        # enumerated at exactly the four ARNs below, kept VERBATIM from the pre-split
         # SecretsManagerReadOnly Sid this replaces. The value-free metadata classes that Sid also
         # carried moved to the prefixed SecretsManagerMetadataRead above; the only net narrowing is
-        # on neon-api-key-* (the one non-agent-platform-* ARN here), whose sole consumer is a
-        # data.aws_secretsmanager_secret_version -- a GetSecretValue call, not a metadata one.
+        # on neon-api-key-* (the one non-agent-platform-* ARN here), whose sole consumer is
+        # scripts/ci/neon_api_key.sh -- a GetSecretValue call, not a metadata one.
         # Each ARN's lifecycle is human-owned / out-of-band
         # (docs/contracts/secret-material-handling.yaml, Decision 175 -- rehomed from the
         # Decision 37 precedent); CI reads these, never writes them. The writable DuckLake Neon
@@ -159,7 +170,6 @@ locals {
         #   neon-api-key-*                              : Neon provider API key (Phase 0 out-of-band).
         #   agent-platform-terraform-personal-tfvars-* : tfvars sourcing at apply time.
         #   agent-platform-deepseek/anthropic-api-key-*: inference credential envelopes (admin-applied).
-        #   agent-platform-github-pat-*                : dispatcher/findings-processor PAT (T2.43).
         Sid    = "SecretsManagerValueReadEnumerated"
         Effect = "Allow"
         Action = ["secretsmanager:GetSecretValue"]
@@ -168,7 +178,20 @@ locals {
           "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-terraform-personal-tfvars-*",
           "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-deepseek-api-key-*",
           "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-anthropic-api-key-*",
-          "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-github-pat-*",
+        ]
+      },
+      {
+        # Decision 237 (secrets-to-ssm-grants): VALUE reads on exactly the three /secret/ parameters the apply role
+        # consumes, each by its own literal ARN (never a pattern; validate_secret_parameter_grants). neon-api-key is
+        # fetched by scripts/ci/neon_api_key.sh, the tfvars by the plan and apply jobs, and the DSN is the one
+        # Terraform-managed SecureString (its refresh decrypts it). The parameters exist only after the later plans.
+        Sid    = "SecretParameterValueRead"
+        Effect = "Allow"
+        Action = ["ssm:GetParameter", "ssm:ListTagsForResource"]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/neon-api-key",
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-terraform-personal-tfvars",
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/ducklake-neon-catalog-dsn",
         ]
       },
       {

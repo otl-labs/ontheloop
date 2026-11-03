@@ -1,0 +1,941 @@
+schema_version: 5
+implementation_declared: true
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-verification-monitor
+intent: >-
+  Telemetry slice 4's closing plan (rec-4025): a daily verification monitor over the real captured sessions. A
+  scheduled GitHub Actions job finds every real root tree of the trailing 28 days that went quiet during the previous
+  UTC day, reads each one, re-derives every session-bound verb's answer independently from the stored rows and compares it
+  with the deployed reader's (and the window verb's rows for those roots), alarms on orphans in quiescent trees
+  (rec-4101; the read trees' start days daily, every window day weekly) and on any orphan the reader under-counts,
+  alarms when it could not read every quiet tree, and runs the four stored-row silent-failure checks
+  Benjamin asked for on 2026-10-17 (harness session key present, checkout facts present, background notice statuses
+  known, every resumed segment closed). A completeness module, run by the project's coordinator with the harness
+  session lists only it can fetch, counts sessions listed and captured, listed but not captured, and captured but not
+  listed. Counts only in public logs; each alarm class files or updates one rec under telemetry_verify (Decision 210
+  cl.2: alarm, not gate). Closes rec-4025 and rec-4101, re-grounds and closes T3.20 c3, re-points the contract notes
+  that name rec-4101 as the monitor's owner, narrows rec-4026, and files the follow-on recs for a durable results
+  table and for the verification coverage residuals.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-telemetry-verification-monitor.yaml
+phase: >-
+  rec-4025 (telemetry slice 4, verification): the fourth and last of its four plans (golden harness, verification
+  verbs, in-session source check, verification monitor), approved by Benjamin's "write the plan" on 2026-10-17
+  (cmsg_012XgaFy8VaDQbxP5D8nC958MdLJawKLhVPEQqyXDX82iS) on the approach in
+  /mnt/project-files/telemetry-slice4/step6b-presentation.md (including its re-point of T3.20 c3 to the verb-based
+  orphan monitor and the coordinator running the completeness fetch). Closes T3.20:c3 and rec-4025 (with rec-4101).
+closes_criteria:
+- T3.20:c3
+scope:
+- file: scripts/telemetry_verify/monitor.py
+  action: Create
+  purpose: >-
+    run_monitor(named, describe, *, quiet_day, as_of, budget, skip_trees=0) returns a MonitorReport of counts, in the
+    order of execution_steps[1], every call under the one start gate of constraints[3]: (1) describe, then
+    telemetry_root_sessions over the trailing 28 days in RUN_LEVEL_WINDOW_DAYS-day calls (default 1, at most the
+    verb's max_window_days of 7), a wider call that fails falling back to one-day calls; a day whose one-day call fails
+    (a 413, or a timeout or 5xx after the client's own attempts) or cannot start is counted run_level_days_unread and
+    its roots are unread; (2) the quiet set is every root whose tree-wide last_event_timestamp plus
+    IDLE_THRESHOLD_SECONDS fell inside quiet_day (a UTC day; default the previous one), so each tree is read once after
+    it goes quiet and again after any resume goes quiet, and run-start jitter leaves no gap; quiet trees are taken in a
+    stable order (root session_started_at, then session_id, never printed), the first skip_trees of them skipped; (3)
+    the day-level calls, one day a call, before any tree is read: telemetry_orphan_counts and sessions_window for each
+    distinct start day of the quiet trees to be read, and telemetry_orphan_counts for the window days a whole number
+    of weeks before quiet_day (four of the 28, so every window day is re-counted weekly); a day-level call that fails
+    or cannot start counts that day in day_level_unread; (4) per quiet tree, self-contained: rows.read_tree, the
+    per-session verb set of execution_steps[1] for at most MAX_SESSIONS_PER_TREE sessions compared column by column
+    with scripts.telemetry_verify.derive at the same as_of, then one one-row re-read of the tree; the tree is tree_moved
+    and excluded from every comparison when the re-read's total_rows or roots_in_tree differs from its read, or when
+    its newest event_timestamp over its live rows (dedupe's retire and collapse across the four tables, the basis the
+    root-sessions verb computes last_event_timestamp on, so a retired generation's row never reads as movement)
+    differs from its run-level last_event_timestamp; a tree whose session_tree_rows read or re-read fails after the
+    client's attempts (read_tree's final 413 included) is tree_read_failed, a tree the start gate stops before its
+    re-read is not_read_budget, and a tree that would need more than MAX_TREE_CALLS = 60 reader calls is
+    tree_too_large, judged from page 1's total_rows (its page count, plus the re-read, plus its at most 14 verb calls)
+    before any further page is read, the monitor's named() wrapper refusing any page call beyond the cap, all
+    uncompared; a per-session verb call that fails
+    after the client's attempts (its 413 included) counts session_verb_failed, apart from the cap's
+    sessions_not_compared, and that session is left out of the verb's compared count; no tree-phase failure ends the
+    run; (5) describe again: a verb whose deployed
+    read_version at the start or at the end differs from the checkout's describe_all() is verb_skew, reported, its
+    comparisons skipped, never an alarm, and a describe that fails ends the run as not completed, filing nothing,
+    because skew is then unknown; (6) the window and orphan comparisons over the unmoved, re-read trees whose start
+    day was not day_level_unread; (7) silent_checks over the compared trees that are neither moved nor collided.
+    Counts, class names, verb names and join ids only.
+- file: scripts/telemetry_verify/monitor_compare.py
+  action: Create
+  purpose: >-
+    The monitor's pure comparisons over plain rows and verb answers: compare_session(verb, deployed_row, derived_row)
+    (column by column, stamps only for a conflicted session), compare_window(deployed_rows, derived_rows, roots) and
+    compare_orphans(verb_counts, independent_counts, discovered_roots_by_day) returning the agreement, mismatch,
+    undercount and rootless counts monitor.py prints. No I/O.
+- file: scripts/telemetry_verify/silent_checks.py
+  action: Create
+  purpose: >-
+    The four stored-row silent-failure checks of execution_steps[2], pure over each tree's live generation (the rows
+    scripts.telemetry_verify.dedupe keeps, so a later generation never double-counts), each reporting a numerator and
+    its denominator (live rows at parser_version 4 or later, the producer fixes plan's first version), and untested
+    when the denominator is zero, never green: harness_key_missing (alarm), checkout_sha_missing (report
+    only, never filed), background_notice_unknown (alarm) and resume_without_prior_close (alarm). Columns read by name
+    from row dicts; a column absent from a row counts toward untested.
+- file: scripts/telemetry_verify/completeness.py
+  action: Create
+  purpose: >-
+    compare_sessions(captured_roots, listed, *, judged_day) per execution_steps[3]: counts listed_and_captured,
+    listed_not_captured, captured_not_listed (the lists' blind spot: counted, never an alarm), listed_unjoinable,
+    listed_scope_unknown and captured_without_key, and unexplained_not_captured = max(0, listed_not_captured -
+    captured_without_key), the count the alarm class completeness_listed_not_captured carries (a keyless capture can be
+    any unjoined listed row, and harness_key_missing already alarms on keyless captures). Pure: it takes any judged
+    day, so tests run it on the golden corpus's 2026-01-01 roots. V4_FIRST_JUDGED_DAY, a module constant the command
+    enforces (scope row __main__.py), is the first UTC day after the day the producer fixes build's PARSER_VERSION 4
+    commit reached main, pinned at build time from git log once VP step 1 passes, because a session created before
+    that merge runs the parser_version 3 producer and writes no key. load_lists(directory) reads the coordinator's two
+    raw files, each a JSON array of the raw page responses in page order: thread_sessions.json pages carry their rows
+    under "sessions" (list_thread_sessions: session_id, created_at, last_activity_at) and sessions.json pages under
+    "ccr" then "data" (list_sessions: id, created_at, updated_at, session_context.sources[].git_repository.url); a page
+    without its recognised row array, or a file that is not such an array, raises, so a misread list never reads as an
+    empty day. load_lists also keeps each file's last-page marker (next_cursor, has_more) and lists_cover(lists,
+    judged_day) is true only when thread_sessions.json reached its last page (no next_cursor; the project's roster is
+    bounded, so it is fetched whole) and sessions.json either reached its last page (has_more false) or holds a row
+    created before 00:00Z on the judged day (list_sessions pages run newest first); the command refuses a run whose
+    lists do not cover the judged day with status=lists_short, exit 1, nothing filed. Pure apart from that read.
+- file: scripts/telemetry_verify/__main__.py
+  action: Create
+  purpose: >-
+    `python -m scripts.telemetry_verify monitor [--quiet-day YYYY-MM-DD] [--skip-trees N] [--no-alarms]
+    [--assert-zero <class>]` (quiet_day default the previous UTC day, validated within the last 28 days; skip_trees a
+    non-negative integer, default 0, for a backfill that finishes what a budget-limited run left; as_of now) and
+    `python -m scripts.telemetry_verify completeness [--lists-dir DIR] [--judged-day YYYY-MM-DD] [--no-alarms]
+    [--assert-zero <class>]` (lists-dir default /mnt/project-files/telemetry-slice4/completeness/latest; judged-day
+    default two UTC days ago, so every session of that day is at least one idle threshold old; a judged day before
+    completeness.V4_FIRST_JUDGED_DAY prints the COMPLETENESS line with status=before_v4, files nothing and exits 2).
+    Each prints one line in the grammar of execution_steps[4] (never a row value, session id, ref or branch, because
+    the monitor's output lands in public Actions logs). Alarm classes go to scripts.telemetry_verify.alarms.raise_alarms
+    (the verification verbs plan's helper) with scope the run's window, alarm_at None, declared the report-only classes,
+    rows one scripts.rec_episode.find_recs read of the open telemetry_verify recs shared by every class, file this
+    module and acceptance_for(class) the same command with its defaults and --no-alarms --assert-zero <class>
+    (static, lint-valid, no literal day). Filing runs after the reads inside the role session's FILING_RESERVE_S share
+    (constraints[3]); a job the timeout ends is a red run, and every class already filed stands,
+    because each filing is one idempotent file-or-update. Exit 0 when the run completed (whatever the findings); 1 when it did not complete (a failed
+    describe or list read included, and a completeness run refused as lists_short) or an alarm filing failed (Decision 84 I-4), printing only the error's class and
+    HTTP status, never its message (a reader error body or a URL host); with --assert-zero, 0 only after a completed
+    run whose class denominator (execution_steps[4]) is above zero and whose class count is zero, else 2. All logging
+    is disabled for the run (logging.disable), because the reader client's and the writer transport's warnings can
+    carry an ARN or a Function URL host.
+- file: scripts/telemetry_verify/__init__.py
+  action: Modify
+  purpose: Facade re-exports monitor, monitor_compare, silent_checks and completeness' public surface.
+- file: .github/workflows/telemetry-verification.yml
+  action: Create
+  purpose: >-
+    name telemetry-verification (the taxonomy key). A daily cron in the every-N-hours shape ('<minute> */24 * * *', a
+    minute no other schedule uses), which scripts/convergence_health/sensor_liveness.py's cron_period_seconds classifies
+    as 86,400 s (it raises on the plain 'M H * * *' daily shape, which would blind loop_liveness_stale for every peer),
+    plus workflow_dispatch with two optional inputs, quiet_day and skip_trees, passed through env and validated by
+    argparse, never inlined into a run body; dispatch runs only on main. One job, timeout-minutes 70 (setup of at
+    most ten minutes plus the role session of constraints[3]), permissions contents read and id-token write,
+    concurrency group telemetry-verification (no cancel); the steps run checkout and the venv install first, then
+    assume agent-platform-github-ci-branch (its 3,600 s session starts there, after setup) with the account-ID masking
+    pattern (PLAN-actions-account-id-masking's guard), resolve and mask the reader and writer Function URLs exactly as
+    deploy-ducklake-lambdas' smoke job does, masking each URL's bare host as well, then run the monitor command. No apply,
+    no deploy, no dispatch of another workflow, never a required check (Decision 83).
+- file: config/ci_rca_taxonomy.yaml
+  action: Modify
+  purpose: >-
+    telemetry-verification: tier not_a_gate, ci_rca excluded, owner platform, rationale: it files its own
+    telemetry_verify recs, and its schedule puts it under loop_liveness_stale, which backstops a persistent red (the
+    security-detector-liveness precedent).
+- file: config/composite_action_body_baseline.yaml
+  action: Modify
+  purpose: >-
+    The new workflow's step-body entries, the counts scripts.checks.ci_guards._workflow_shell_bodies.scan_workflow_bodies()
+    reports for the new file (there is no update command), verified by validate_composite_action_shell_bodies in the
+    full tier.
+- file: docs/ROADMAP-PLATFORM.yaml
+  action: Modify
+  purpose: >-
+    Tier-item freshness re-grounding (tier-item-lifecycle.yaml check 2) of T3.20 c3, keeping its original text whole
+    behind a dated prefix in the T2.36 c5 shape (Decision 181 cl.1), the text in execution_steps[6]. At /implement's
+    bookkeeping walk the closes_criteria flip sets c3 met (met_by telemetry-verification-monitor); the item stays
+    in_progress (c6, c7 and c9 open).
+- file: docs/DECISIONS.md
+  action: Modify
+  purpose: >-
+    One dated Update line appended at the end of Decision 210's section (after its Amendment entries, where Decision
+    207's 2026-10-16 Update sits in its own section): the Coverage line's DQ-side rec-4101 residual is now enforced as
+    tree-scoped parent existence by the reader's telemetry_orphan_counts verb and the daily telemetry-verification
+    workflow (this plan), not by the T1.6 substrate, for trees whose root started within 28 days of their quiet day;
+    the residuals T3.20 c3's prefix and the two contract notes name are the coverage follow-on rec's; older trees are a named residual owned
+    by the coverage follow-on rec, named by its id (filed before the merge, constraints[5]); rec-4063 and rec-4121 item
+    4 are unchanged. No clause changes.
+- file: docs/contracts/parent-observation-id.yaml
+  action: Modify
+  purpose: >-
+    Pointer and provenance update with no change to what the field means (the mechanical contract edits rule,
+    Benjamin 2026-10-16): write_time_validation's "the monitor and its quiescence window are owned by follow-on
+    rec-4101" and governance_notes' "That monitor does not exist yet ... names its owner, follow-on rec-4101, which also
+    owns the quiescence window" become the text of execution_steps[6], which re-points only tree-scoped parent
+    existence to the telemetry_orphan_counts verb and names the same-session gap (a parent in another session of the
+    same tree) as a residual owned by the coverage follow-on rec, keeping the words rec-4101 and quiescent that
+    tests/telemetry/test_contract_amendments.py pins. One field amendment_log entry (prose_improvement, semantic_break
+    false).
+- file: docs/contracts/telemetry_observations.yaml
+  action: Modify
+  purpose: >-
+    The same pointer update in parent_observation_id's governance_notes_local: "its DQ intent belongs to rec-4101
+    (Decision 210 cl.2)" gains the monitor it names and what that monitor does not check ("its DQ intent belongs to
+    rec-4101 (Decision 210 cl.2), whose monitor, the reader's telemetry_orphan_counts verb alarmed daily by the
+    telemetry-verification workflow, checks that the parent exists in the tree; which node a process_event parents to
+    is a residual owned by <coverage rec id>"), keeping the pinned phrase. One field amendment_log entry
+    (prose_improvement, semantic_break false), written as one flow-form line because the file sits near the contracts
+    class's 500-line limit once the column additions land (Decision 166); if it reaches 500, the class relief valve
+    (compaction) applies, never a raise.
+- file: tests/telemetry_verify/test_monitor.py
+  action: Create
+  purpose: >-
+    Mirror tests over the golden chain's in-memory catalog and an in-memory named() that executes verbs through
+    src.common.ducklake_event_reads.execute (module-level duckdb = pytest.importorskip("duckdb")), including rec-4025's
+    acceptance node test_monitor_reports_rederivation_orphan_and_completeness_counts. Nodes in execution_steps[5],
+    parametrized where they iterate trees.
+- file: tests/telemetry_verify/test_monitor_compare.py
+  action: Create
+  purpose: >-
+    Mirror tests for monitor_compare.py over plain rows, duckdb-free:
+    test_compare_session_reports_each_column_and_stamps_only_when_conflicted,
+    test_compare_window_counts_only_the_read_roots and test_compare_orphans_reports_undercount_and_rootless.
+- file: tests/fixtures/telemetry_golden_chain.py
+  action: Modify
+  purpose: >-
+    register_project(con, index) mints and registers one real-purpose project (tenant TENANT, a project_id and a
+    project_ref without a reserved prefix), and record, emit and append_batches take an optional project (project_id,
+    project_ref), default the chain's own, so a test can load several golden trees into one catalog without their
+    shared root ref and pin colliding (17 of the 19 expectation trees share both); existing nodes are unchanged. The in-session
+    source check plan's build adds store_held_back_as_blob to this file first; this build adds the keyword after it.
+- file: tests/telemetry_verify/test_silent_checks.py
+  action: Create
+  purpose: Mirror tests for silent_checks.py over plain rows; nodes in execution_steps[2].
+- file: tests/telemetry_verify/test_completeness.py
+  action: Create
+  purpose: Mirror tests for completeness.py over plain rows and list fixtures; nodes in execution_steps[3].
+- file: tests/telemetry_verify/test_main.py
+  action: Create
+  purpose: >-
+    test_monitor_command_prints_the_pinned_grammar_only, test_completeness_command_prints_the_pinned_grammar_only,
+    test_a_reader_error_prints_class_and_status_only (a planted value in a fake error body, a fake URL host and a
+    writer-transport connection failure carrying a planted host never appear, with logging enabled at the start),
+    test_assert_zero_needs_a_completed_run_and_a_denominator, test_acceptances_lint_as_decidable
+    (lint_acceptance_command(require_decidable=True) over each acceptance_for value), test_a_failed_filing_exits_1 and
+    test_arguments_are_validated (a quiet_day outside the window and a negative skip_trees are refused; a judged day
+    before V4_FIRST_JUDGED_DAY prints status=before_v4 and exits 2).
+- file: tests/telemetry/test_parent_observation_orphan_monitor.py
+  action: Create
+  purpose: >-
+    rec-4101's acceptance node test_orphan_parent_flagged_only_in_quiescent_trees (module-level duckdb =
+    pytest.importorskip("duckdb"), the assignment form the graduation differential recognises): over the golden chain, a child
+    observation whose parent_observation_id matches no observation, inserted directly, is counted pending at an
+    exact-threshold as_of and quiescent and alarmed past it, by the deployed-verb path and the independent count alike;
+    the same holds for parent_session_id and session_id orphans, and a rootless tree is reported as rootless_trees.
+- file: tests/checks/contracts/test_telemetry_verification_contracts.py
+  action: Create
+  purpose: >-
+    test_t3_20_c3_names_the_verb_based_orphan_monitor (the dated prefix present, naming the coverage residuals and the
+    coverage follow-on rec's id, and the original text a suffix of the criterion),
+    test_decision_210_coverage_names_the_discharged_residual (naming the same rec id) and
+    test_rec_4101_owner_notes_name_the_verb_based_monitor (both contract notes name the verb and the workflow, name
+    their residual with the coverage rec's id, and keep the pinned words), outside any duckdb module so the fast tier runs them (the tests/checks/contracts/test_telemetry_blob_contracts.py precedent).
+- file: tests/test_telemetry_verification_workflow.py
+  action: Create
+  purpose: >-
+    Workflow structure guard in the tests/test_security_detector_liveness_workflow.py style: the name, the schedule
+    and dispatch triggers (no push; the quiet_day and skip_trees inputs passed through env, main-only dispatch), the
+    cron classified by sensor_liveness.cron_period_seconds as 86,400 s, timeout-minutes 70, the venv install before the
+    assume step, the permissions block, the ci-branch role with the
+    masked account-ID pattern, masked URL and bare-host resolution, the monitor command, the taxonomy row keyed by the
+    name, and no terraform, deploy or workflow-dispatch step.
+bundled_recommendations:
+- rec-4025
+- rec-4101
+followon_recs:
+- rec-4026
+infrastructure_dependencies:
+- >-
+  No Terraform or IAM: agent-platform-github-ci-branch already invokes the reader Function URL and the ops writer
+  (convergence-health files recs with it) and holds lambda:GetFunctionUrlConfig (the deploy smoke uses it).
+- >-
+  LAMBDA-DEPLOY DEFERRED (CD.16 / Decision 79), per-artifact reasoned disposition: docs/ROADMAP-PLATFORM.yaml is a
+  data-pipeline asset; its zip refreshes at the next governed deploy, as PLAN-telemetry-blob-route's same disposition.
+  No Lambda-packaged code changes.
+- >-
+  Residency: the job pulls real session-tree rows onto a GitHub-hosted runner. They are held in the job's memory only
+  for the comparison, never written to disk or to an artifact, and the job prints counts only; the reader contract's
+  session_tree_rows exception names the CI role's monitor as one of its verification callers (the verification verbs
+  plan's text).
+acceptance_criteria:
+- >-
+  Over the golden chain, the monitor reads every root that went quiet on quiet_day, reports rederivation agreement for
+  every verb of its per-session set on every tree and window agreement for the read roots, and raises no rederivation,
+  window, orphan or coverage class, its silent-check counts equal to what the corpus carries; each planted
+  verb defect (the golden harness's tie-order and idle mutations on inputs selected by property, and a sessions_window
+  mutation) is reported as rederivation_mismatch for its verb; a tree that grows at any point after the run-level calls
+  is counted tree_moved and excluded from every comparison; a verb whose deployed stamp differs from the checkout at
+  the start or the end of the run is verb_skew and never alarmed; quiet trees left unread by the budget, and window
+  days whose root-session call failed, raise monitor_coverage_incomplete, and a run with --skip-trees set to the first
+  run's next_skip reads the remainder; a run that compares no quiet tree raises it too; every call before the closing
+  describe leaves the describe's worst case, so it always runs (a failed one ends the run incomplete); a failed tree
+  read counts tree_read_failed and a failed per-session verb call counts session_verb_failed (apart from the cap's
+  sessions_not_compared), each raising the coverage class and never ending the run; a tree above MAX_TREE_CALLS is
+  tree_too_large and the trees after it are still read; a retired generation's
+  row never reads as movement; orphans are counted for the read trees' start days and, over a week of runs, every
+  window day (VP step 5).
+- >-
+  A planted orphan in a quiet tree is reported as orphan_quiescent for its join and alarmed; the same orphan inside the
+  idle threshold is counted pending and not alarmed; an orphan the independent count finds and the verb does not is
+  orphan_undercount; a rootless tree is reported as rootless_trees, never as a verb defect (VP step 6).
+- >-
+  Each silent-failure check reports its numerator and its parser_version 4 denominator, reports untested when the
+  denominator is zero, and fires its class on a minimal planted row; checkout_sha_missing is reported and never filed
+  (VP step 3).
+- >-
+  The completeness module joins on the harness session key (session_ and cse_ prefixes normalised) before classifying,
+  judges a day only once it is two days old (the command refuses one before V4_FIRST_JUDGED_DAY, and lists that do
+  not reach back to the judged day as lists_short), maps both raw list files and raises on a page without its row
+  array, counts unjoinable, out-of-scope and keyless sessions separately,
+  and alarms only on the listed rows keyless captures cannot explain (VP steps 4 and 7).
+- >-
+  Both commands print the pinned grammar only, never a session id, ref, branch or error body, exit by the stated
+  contract, and their acceptance commands lint as decidable; the workflow runs daily under the ci-branch role with the
+  masked account ID and URLs, the role assumed after setup, a 70-minute timeout, and no apply, deploy or dispatch
+  step (VP steps 7 and 8).
+- >-
+  T3.20 c3 carries the dated re-grounding prefix and its original text whole, Decision 210 carries the dated Update
+  naming the discharged rec-4101 residual and the over-28-day residual, and both contract notes name the verb-based
+  monitor (VP step 9).
+- >-
+  After merge, a run dispatched for a quiet_day that held quiet trees completes green and prints one MONITOR line with
+  trees_read of at least 1 (VP step 13); the coordinator's first completeness run prints one COMPLETENESS line with
+  listed and listed_and_captured each at least 1 (VP step 14); rec-4025 and rec-4101 read closed, rec-4026's
+  acceptance and context are narrowed, and the two follow-on recs exist (VP step 15).
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: >-
+    Precondition. The golden harness, verification verbs, in-session source check and producer fixes (parser_version 4)
+    builds have merged and are on this branch, the verification verbs deploy is green (the deployed reader serves its verbs at the merged read_version),
+    and the branch is on current main.
+  command: >-
+    git fetch origin main --quiet && git merge-base --is-ancestor origin/main HEAD && test -f
+    scripts/telemetry_verify/derive.py && test -f scripts/telemetry_verify/orphans.py && test -f
+    scripts/telemetry_verify/rows.py && test -f scripts/telemetry_verify/alarms.py && test -f
+    scripts/telemetry_verify/compare.py && test -f scripts/telemetry_verify/stored_ledger.py && test -f
+    scripts/telemetry_capture/verify.py && grep -q "session_tree_rows" src/common/ducklake_event_read_verbs.py && grep -q
+    "telemetry_root_sessions" src/common/ducklake_event_read_verbs.py && grep -q "canonical_id: telemetry_verify"
+    config/agent/data_quality/source_registry.yaml && grep -qE "^PARSER_VERSION = [4-9]" src/turn_capture/record_turn.py
+    && AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import make_reader;from
+    src.common import ducklake_event_reads as ev;r=make_reader(profile='agent_platform');d=r._invoke({'action':'describe'})['verbs'];w=ev.describe_all();
+    assert all(d[v]['read_version']==w[v]['read_version'] for v in ('session_tree_rows','telemetry_root_sessions','telemetry_orphan_counts'))"
+    && echo PRECONDITION_OK
+  expected: PRECONDITION_OK.
+  fix_if: >-
+    The ancestry test failing means main moved: rebase and re-run. A missing file or symbol means a sibling build has
+    not merged, and a read_version mismatch means the verbs deploy is not live: stop and wait. A changed shape (a
+    renamed helper, verb or private reader method) means escalate to the coordinator for a plan amendment.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    A sequencing precondition on other plans' builds and deploy, not a behaviour of this change; as a standing guard
+    it would only re-assert that those files and stamps exist.
+- step: 2
+  phase: pre-deploy
+  action: The import boundary holds for the new modules.
+  command: >-
+    bin/venv-python -m pytest
+    tests/telemetry_verify/test_package_boundary.py::test_oracle_has_no_direct_reader_sql_duckdb_streams_or_tests_import -q
+  expected: Exit 0.
+  expected_literals: []
+  fix_if: A boundary failure means a new module imports what constraints[2] forbids; remove the import.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    The same node the golden harness plan graduates as telemetry-verify-oracle-matches-committed-cases; it is green
+    before this change, so a second graduation would duplicate an already-graduated check.
+- step: 3
+  phase: pre-deploy
+  action: The four silent-failure checks and the monitor's pure comparisons.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_verify/test_silent_checks.py::test_each_check_fires_on_a_minimal_planted_row
+    tests/telemetry_verify/test_silent_checks.py::test_each_check_reports_untested_without_v4_rows
+    tests/telemetry_verify/test_silent_checks.py::test_checkout_sha_missing_is_reported_never_filed
+    tests/telemetry_verify/test_monitor_compare.py::test_compare_session_reports_each_column_and_stamps_only_when_conflicted
+    tests/telemetry_verify/test_monitor_compare.py::test_compare_window_counts_only_the_read_roots
+    tests/telemetry_verify/test_monitor_compare.py::test_compare_orphans_reports_undercount_and_rootless -q
+  expected: Exit 0, all six nodes pass. Red before because the modules are absent.
+  expected_literals: []
+  fix_if: >-
+    A check that reads green with a zero denominator hides a silent failure; it must read untested. A comparison that
+    agrees on a planted difference compares too little; fix monitor_compare.py.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-verify-silent-checks
+- step: 4
+  phase: pre-deploy
+  action: The completeness join, windowing and counts.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_verify/test_completeness.py::test_harness_key_join_normalises_both_prefixes
+    tests/telemetry_verify/test_completeness.py::test_join_comes_before_classification
+    tests/telemetry_verify/test_completeness.py::test_only_the_judged_day_is_counted
+    tests/telemetry_verify/test_completeness.py::test_unjoinable_out_of_scope_and_keyless_are_counted_apart
+    tests/telemetry_verify/test_completeness.py::test_both_raw_list_files_map
+    tests/telemetry_verify/test_completeness.py::test_only_listed_not_captured_is_an_alarm
+    tests/telemetry_verify/test_completeness.py::test_keyless_captures_explain_listed_rows
+    tests/telemetry_verify/test_completeness.py::test_a_page_without_its_row_array_raises
+    tests/telemetry_verify/test_completeness.py::test_lists_that_stop_short_of_the_judged_day_are_refused -q
+  expected: Exit 0, all nine nodes pass. Red before because the module is absent.
+  expected_literals: []
+  fix_if: A captured_not_listed alarm misreads the lists' blind spot (project threads are absent from list_sessions).
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-verify-completeness-join
+- step: 5
+  phase: pre-deploy
+  action: Rederivation and window agreement, mutation evidence and the moving-tree rule over the golden chain.
+  command: >-
+    bin/venv-python -m pytest
+    tests/telemetry_verify/test_monitor.py::test_monitor_reports_rederivation_orphan_and_completeness_counts
+    tests/telemetry_verify/test_monitor.py::test_monitor_reports_a_planted_verb_defect_by_verb
+    tests/telemetry_verify/test_monitor.py::test_a_tree_that_grows_during_the_run_is_tree_moved
+    tests/telemetry_verify/test_monitor.py::test_only_trees_that_went_quiet_on_the_quiet_day_are_read
+    tests/telemetry_verify/test_monitor.py::test_budget_overflow_raises_the_coverage_alarm
+    tests/telemetry_verify/test_monitor.py::test_a_failed_run_level_day_is_unread_and_alarmed
+    tests/telemetry_verify/test_monitor.py::test_orphan_days_are_the_read_trees_days_plus_the_weekly_rotation
+    tests/telemetry_verify/test_monitor.py::test_a_skewed_verb_is_reported_never_alarmed
+    tests/telemetry_verify/test_monitor.py::test_every_call_leaves_the_closing_describe_its_worst_case
+    tests/telemetry_verify/test_monitor.py::test_a_failed_tree_call_is_counted_never_ends_the_run
+    tests/telemetry_verify/test_monitor.py::test_a_failed_closing_describe_ends_the_run_incomplete
+    tests/telemetry_verify/test_monitor.py::test_a_retired_generation_row_never_reads_as_moved
+    tests/telemetry_verify/test_monitor.py::test_a_run_that_compares_no_quiet_tree_raises_the_coverage_alarm -q
+  expected: Exit 0, all thirteen nodes pass. Red before because the module is absent.
+  fix_if: >-
+    A disagreement on a golden tree is an oracle or verb defect: the golden harness's expectations decide which; a
+    reader defect is filed and escalated to the coordinator, never fixed here. A surviving mutation means the monitor
+    compares too little; fix the comparison.
+  hermetic: false
+  graduation: graduate
+  graduation_check_id: telemetry-verify-monitor-rederivation
+- step: 6
+  phase: pre-deploy
+  action: rec-4101's orphan monitor node.
+  command: >-
+    bin/venv-python -m pytest
+    tests/telemetry/test_parent_observation_orphan_monitor.py::test_orphan_parent_flagged_only_in_quiescent_trees -q
+  expected: Exit 0. Red before because the module is absent.
+  fix_if: An orphan alarmed inside the idle threshold breaks Decision 199's out-of-order tolerance; fix the split.
+  hermetic: false
+  graduation: graduate
+  graduation_check_id: telemetry-orphan-monitor-quiescent-only
+- step: 7
+  phase: pre-deploy
+  action: Both commands print the pinned grammar only, follow the exit contract, and their acceptances lint as decidable.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_verify/test_main.py::test_monitor_command_prints_the_pinned_grammar_only
+    tests/telemetry_verify/test_main.py::test_completeness_command_prints_the_pinned_grammar_only
+    tests/telemetry_verify/test_main.py::test_a_reader_error_prints_class_and_status_only
+    tests/telemetry_verify/test_main.py::test_assert_zero_needs_a_completed_run_and_a_denominator
+    tests/telemetry_verify/test_main.py::test_acceptances_lint_as_decidable
+    tests/telemetry_verify/test_main.py::test_a_failed_filing_exits_1
+    tests/telemetry_verify/test_main.py::test_arguments_are_validated -q
+  expected: Exit 0, all seven nodes pass. Red before because the module is absent.
+  expected_literals: []
+  fix_if: A session id, ref, branch, error body or URL host in the output is a Decision 101 defect (public Actions logs).
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-verify-commands-counts-only
+- step: 8
+  phase: pre-deploy
+  action: The workflow's structure and its taxonomy row.
+  command: >-
+    bin/venv-python -m pytest tests/test_telemetry_verification_workflow.py::test_workflow_shape
+    tests/test_telemetry_verification_workflow.py::test_taxonomy_row_is_keyed_by_the_workflow_name -q
+  expected: Exit 0, both nodes pass. Red before because the module is absent.
+  expected_literals: []
+  fix_if: A missing masking pattern fails PLAN-actions-account-id-masking's guard too; follow it.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-verification-workflow-structure
+- step: 9
+  phase: pre-deploy
+  action: >-
+    T3.20 c3 is re-grounded with its original text whole, Decision 210 carries the dated Update, and the rec-4101
+    owner notes name the monitor.
+  command: >-
+    bin/venv-python -m pytest
+    tests/checks/contracts/test_telemetry_verification_contracts.py::test_t3_20_c3_names_the_verb_based_orphan_monitor
+    tests/checks/contracts/test_telemetry_verification_contracts.py::test_decision_210_coverage_names_the_discharged_residual
+    tests/checks/contracts/test_telemetry_verification_contracts.py::test_rec_4101_owner_notes_name_the_verb_based_monitor
+    tests/telemetry/test_contract_amendments.py -q
+  expected: Exit 0. The three new nodes are red before because the module is absent; the existing amendment module stays green.
+  expected_literals: []
+  fix_if: A narrowed or rewritten original text breaks Decision 181 cl.1; restore it behind the prefix.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-t3-20-c3-regrounded
+- step: 10
+  phase: pre-deploy
+  action: Coverage. Run pytest-cov directly for the scripts/ modules the coverage checker's map does not reach (rec-2641).
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_verify -m "not integration" --cov=scripts.telemetry_verify.monitor
+    --cov=scripts.telemetry_verify.monitor_compare --cov=scripts.telemetry_verify.silent_checks
+    --cov=scripts.telemetry_verify.completeness --cov=scripts.telemetry_verify.__main__ --cov-report=term-missing
+    --cov-fail-under=100 -q
+  expected: Exit 0 with 100 percent line coverage of the five modules.
+  fix_if: A coverage gap needs a direct assertion in the module's test, never a pragma.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    A whole-module coverage run needing pytest-cov, which the venv-less fast tier lacks; rec-2641 owns mapping
+    scripts/ subpackages into the standing coverage gate.
+- step: 11
+  phase: pre-deploy
+  action: >-
+    The budget-sizing measurement: a local run against the deployed reader for the previous UTC day, without alarms
+    (counts only).
+  command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify monitor --no-alarms
+  expected: >-
+    Exit 0 and one MONITOR line with run_level_days_unread=0, day_level_unread=0, tree_read_failed=0,
+    tree_too_large=0, session_verb_failed=0 and not_read_budget=0. Report it verbatim with its reader_calls, run_level_s, elapsed_s and max_call_s. trees_read may be 0 on a day when no tree went quiet; then re-run with
+    --quiet-day for an earlier day of the window that held quiet trees.
+  fix_if: >-
+    not_read_budget above 0 means the tree phase was short; it gets every second the run-level and day-level calls
+    leave, so widen it in this order and re-run: raise RUN_LEVEL_WINDOW_DAYS (to 7, its one-day fallback kept) when
+    run_level_s is a large share of elapsed_s, then lower MAX_SESSIONS_PER_TREE (to 1, the root only).
+    run_level_days_unread, day_level_unread, tree_read_failed or session_verb_failed above 0 on a healthy reader is a
+    call that does not fit the reader's timeout: lower RUN_LEVEL_WINDOW_DAYS back to 1, or report the failing verb.
+    tree_too_large above 0 means MAX_TREE_CALLS is short for a real tree: report its page count and size the cap. None of these is an
+    environment fact or a finding. MONITOR_BUDGET_S stays inside the role session (constraints[3]); if a root-only run
+    still leaves the day
+    unread, escalate to the coordinator (a shorter window or a sharded job is a plan amendment). Only an unreachable
+    reader (credentials or URL resolution) is an environment fact: report the error class. A rederivation mismatch on
+    real data is a finding: name the verb and report it; the merged workflow's run files it.
+  hermetic: false
+  graduation: not-applicable
+- step: 12
+  phase: pre-deploy
+  action: Lint and run the full tier on the committed, clean tree before the push, as the handoff policy requires.
+  command: >-
+    bin/venv-python -m ruff check scripts/telemetry_verify tests/telemetry_verify tests/telemetry tests/checks/contracts
+    tests/test_telemetry_verification_workflow.py && bin/venv-python -m scripts.validate
+  expected: Exit 0 from both.
+  fix_if: Fix the reported finding at its root (Decision 55); never skip, disable or quarantine a test.
+  hermetic: false
+  graduation: not-applicable
+- step: 13
+  phase: post-deploy
+  action: >-
+    A dispatched run of the merged workflow for a quiet day that held quiet trees (the previous UTC day unless it held
+    none). Dispatch with mcp__github__actions_run_trigger (workflow telemetry-verification.yml, ref main, input
+    quiet_day), read the run's conclusion with mcp__github__actions_get into $RUN_JSON and its job log with
+    mcp__github__get_job_logs into $MONITOR_LOG.
+  command: >-
+    grep -q '"conclusion": *"success"' "$RUN_JSON" && grep -E "MONITOR quiet_day=[0-9-]+ window=[0-9-]+\.\.[0-9-]+
+    roots=[0-9]+ quiet=[1-9][0-9]* skip_trees=0 trees_read=[1-9][0-9]* " "$MONITOR_LOG"
+  expected: The run concluded success and its log carries one MONITOR line in the pinned grammar.
+  fix_if: >-
+    A red run is this plan's to root-cause and fix forward (Decision 55). quiet=0 means that day held no quiet tree:
+    dispatch again for an earlier day within the window. A run whose log carries a session id or row value is a
+    Decision 101 defect: fix it before anything else.
+  hermetic: false
+  graduation: not-applicable
+- step: 14
+  phase: post-deploy
+  action: >-
+    The coordinator's completeness run, no earlier than two days after V4_FIRST_JUDGED_DAY (wait for that date; it is
+    not a blocker to escalate): the coordinator fetches list_thread_sessions and list_sessions into
+    /mnt/project-files/telemetry-slice4/completeness/<day>/ and latest/ (the procedure in execution_steps[3]) and runs
+    the command for a judged day on or after V4_FIRST_JUDGED_DAY, into $COMPLETENESS_LOG.
+  command: >-
+    AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify completeness --lists-dir
+    "/mnt/project-files/telemetry-slice4/completeness/$FETCH_DAY" --judged-day "$JUDGED_DAY" --no-alarms | tee
+    "$COMPLETENESS_LOG" && grep -E "COMPLETENESS judged_day=[0-9-]+ status=completed listed=[1-9][0-9]*
+    listed_and_captured=[1-9][0-9]* " "$COMPLETENESS_LOG"
+  expected: >-
+    One COMPLETENESS line in the pinned grammar with status=completed and listed and listed_and_captured each at least
+    1; report it verbatim.
+  fix_if: >-
+    listed=0 or listed_and_captured=0 means the lists were misread or not fetched for that day: re-check the fetch and
+    the page format, never accept a zero. unexplained_not_captured above zero is a capture finding: report it to the
+    coordinator and file it. A listed_not_captured that captured_without_key fully explains is the key-capture gap
+    harness_key_missing already alarms on, not a capture finding. Never widen the join to make a count zero.
+  hermetic: false
+  graduation: not-applicable
+- step: 15
+  phase: post-deploy
+  action: The rec closures and updates landed (read-back after the Resolves trailer's closure job and the closure's portal calls).
+  command: >-
+    AWS_PROFILE=agent_platform bin/venv-python -c "import os;from src.common.ducklake_reader_client import
+    make_reader,fetch_recs_by_ids;ids=['rec-4025','rec-4101','rec-4026',os.environ['RESULTS_REC'],os.environ['LIVENESS_REC']];
+    rs,missing=fetch_recs_by_ids(make_reader(profile='agent_platform'),ids);by={x['id']:x for x in rs};assert not missing,missing;
+    assert by['rec-4025']['status']=='closed' and by['rec-4101']['status']=='closed';
+    assert 'test_session_denominator' not in by['rec-4026']['acceptance'] and 'PLAN-telemetry-verification-monitor' in by['rec-4026']['context'];
+    assert all(by[i]['status']=='open' for i in ids[3:]);print('RECS_OK')"
+  expected: RECS_OK.
+  fix_if: >-
+    A carrier still open means the trailer's closure job did not run or refused: read its census line and re-run the
+    closure through the portal; never edit a cache.
+  hermetic: false
+  graduation: not-applicable
+test_obligations:
+- source: scripts/telemetry_verify/monitor.py
+  behavior: The monitor reads trees that went quiet, re-derives every per-session verb and the window rows, and compares orphans.
+  verification_step: 5
+  test_selector: tests/telemetry_verify/test_monitor.py::test_monitor_reports_rederivation_orphan_and_completeness_counts
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_verify/monitor_compare.py
+  behavior: Session, window and orphan comparisons report agreement, mismatch, undercount and rootless counts.
+  verification_step: 3
+  test_selector: tests/telemetry_verify/test_monitor_compare.py::test_compare_session_reports_each_column_and_stamps_only_when_conflicted
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_verify/silent_checks.py
+  behavior: Each check fires on a planted row and reads untested without v4 rows.
+  verification_step: 3
+  test_selector: tests/telemetry_verify/test_silent_checks.py::test_each_check_fires_on_a_minimal_planted_row
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_verify/completeness.py
+  behavior: The join normalises both prefixes, windows the listed side and counts the residuals apart.
+  verification_step: 4
+  test_selector: tests/telemetry_verify/test_completeness.py::test_harness_key_join_normalises_both_prefixes
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_verify/__main__.py
+  behavior: Both commands print the pinned grammar only and follow the exit contract.
+  verification_step: 7
+  test_selector: tests/telemetry_verify/test_main.py::test_monitor_command_prints_the_pinned_grammar_only
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_verify/__init__.py
+  behavior: The facade re-exports the new modules.
+  verification_step: 3
+  test_selector: tests/telemetry_verify/test_silent_checks.py::test_each_check_fires_on_a_minimal_planted_row
+  waiver_reason: >-
+    Re-export lines only, no logic; the mirror tests import the new modules through the facade and fail if a name is
+    missing.
+- source: .github/workflows/telemetry-verification.yml
+  behavior: Daily run under the ci-branch role with masked account ID and URLs; no apply, deploy or dispatch.
+  verification_step: 8
+  test_selector: tests/test_telemetry_verification_workflow.py::test_workflow_shape
+  red_green_expectation: red before (module absent), green after
+- source: config/ci_rca_taxonomy.yaml
+  behavior: The workflow is not a gate, files its own recs, and the row is keyed by the workflow name.
+  verification_step: 8
+  test_selector: tests/test_telemetry_verification_workflow.py::test_taxonomy_row_is_keyed_by_the_workflow_name
+  red_green_expectation: red before (module absent), green after
+- source: config/composite_action_body_baseline.yaml
+  behavior: The new workflow's step bodies are baselined.
+  verification_step: 12
+  command: bin/venv-python -m scripts.validate
+  red_green_expectation: the composite-action body check fails before the entries exist, passes after
+- source: docs/ROADMAP-PLATFORM.yaml
+  behavior: T3.20 c3 names the verb-based orphan monitor behind a dated prefix, original text whole.
+  verification_step: 9
+  test_selector: tests/checks/contracts/test_telemetry_verification_contracts.py::test_t3_20_c3_names_the_verb_based_orphan_monitor
+  red_green_expectation: red before (node absent), green after
+- source: docs/contracts/parent-observation-id.yaml
+  behavior: The owner notes name the verb-based monitor and keep the pinned words.
+  verification_step: 9
+  test_selector: tests/checks/contracts/test_telemetry_verification_contracts.py::test_rec_4101_owner_notes_name_the_verb_based_monitor
+  red_green_expectation: red before (node absent), green after
+- source: docs/contracts/telemetry_observations.yaml
+  behavior: parent_observation_id's local note names the verb-based monitor and keeps the pinned phrase.
+  verification_step: 9
+  test_selector: tests/checks/contracts/test_telemetry_verification_contracts.py::test_rec_4101_owner_notes_name_the_verb_based_monitor
+  red_green_expectation: red before (node absent), green after
+- source: docs/DECISIONS.md
+  behavior: Decision 210 carries the dated Update naming the discharged rec-4101 residual.
+  verification_step: 9
+  test_selector: tests/checks/contracts/test_telemetry_verification_contracts.py::test_decision_210_coverage_names_the_discharged_residual
+  red_green_expectation: red before (node absent), green after
+constraints:
+- >-
+  Alarm, not gate (Decision 210 cl.2): the workflow is never a required check, never applies, deploys or dispatches;
+  a finding exits 0. Only a run that could not complete, or whose alarm filing failed, exits 1, which
+  loop_liveness_stale's success leg backstops through the schedule.
+- >-
+  Counts only (Decision 101): the workflow's log, both commands' output and rec text carry counts, class names, verb
+  names and join ids; no session id, entity ref, branch name, row value, transcript content, error body or URL host.
+  The completeness lists are written only under /mnt/project-files (never the repository) and read only by the
+  coordinator's run.
+- >-
+  Imports: the allow-list as the golden harness, verification verbs and in-session plans left it; the new modules add
+  no direct import beyond the package's own modules and the standard library (monitor.py reaches the reader only
+  through an injected named callable; __main__.py builds it from src.common.ducklake_reader_client, which the
+  allow-list already names).
+- >-
+  Bounded reads (Decision 84 I-3, Decision 88 egress, Decision 215 cl.4 and its reader-invocations-doubled reversal
+  condition). Event verbs are not paged: each call returns all its rows in one response, bounded by the reader's 413.
+  Per run: two describe calls; telemetry_root_sessions over 28 days (28 calls at the default one-day window, four at
+  seven); one-day telemetry_orphan_counts and sessions_window calls for the quiet trees' start days, plus four rotation
+  days of telemetry_orphan_counts; per quiet tree its session_tree_rows pages, the per-session verb set for at most
+  MAX_SESSIONS_PER_TREE = 6 sessions (the root and its first five child sessions by their open row's
+  event_timestamp, then session_id; the rest counted sessions_not_compared, reported) and one one-row re-read.
+  Time: the binding envelope is the CI role session, 3,600 s from the assume step (configure-aws-credentials' default
+  duration; the role sets no max_session_duration), which the workflow runs after checkout and the venv install, so
+  the session holds MONITOR_BUDGET_S = 2,000 of reads, FILING_RESERVE_S = 1,450 and a 150 s margin; timeout-minutes 70
+  adds setup. CALL_WORST_CASE_S = 450 is one reader call's worst case (the client's _invoke: two 5xx attempts at the
+  reader's 120 s timeout, its backoff, and a third attempt the client's 180 s request timeout ends without a retry).
+  One start gate, checked before every reader call before the closing describe: the call starts only while two
+  CALL_WORST_CASE_S of MONITOR_BUDGET_S remain (its own and the describe's), so the describe always runs and no read
+  overruns the budget; a call that cannot start, and every call after it, is counted (run_level_days_unread,
+  day_level_unread or not_read_budget), never a silent skip, and stops at MAX_READER_CALLS = 800 the same way. The
+  tree phase therefore gets every second the run-level and day-level calls leave, minus the 900 s gate; each tree is
+  self-contained (its read, its verbs and its re-read), so a stop between trees leaves nothing half-compared. Filing
+  then runs inside FILING_RESERVE_S: one shared find_recs read (450 s at worst) and one idempotent file-or-update per
+  class (an update being a rec_by_id reader read and a retried writer call, about 1,000 s at worst), so the reserve
+  holds the read and one update at their worst cases; a run whose credentials or timeout end it mid-filing is a red
+  run whose filed classes stand. A tree too large for one run (more than MAX_TREE_CALLS = 60 calls) is
+  tree_too_large and passed, so one oversized tree never stops the trees after it or pins a backfill. Unread quiet
+  trees, failed tree reads, failed per-session verb calls (session_verb_failed), oversized trees, unread days and a
+  run that compared no quiet
+  tree for any reason but verb_skew raise the alarm class monitor_coverage_incomplete; a dispatch for the same
+  quiet_day with skip_trees set to the MONITOR line's next_skip reads the remainder in the same stable order. Every
+  constant is a starting value that VP step 11's measurement sizes (planning-facts.md: a two-day sessions_window took
+  103 s cold; the reader Lambda times out at 120 s). The MONITOR line carries reader_calls, run_level_s, elapsed_s,
+  max_call_s and max_response_bytes; the closure report states the first runs' reader_calls, which with the
+  in-session check's per-tree caps are the slice's reader budget; no fleet tripwire is claimed, because only the
+  reader's own log_invocation lines count fleet invocations. If daily reader invocations reach Decision 215's
+  reversal condition, MAX_READER_CALLS, MAX_SESSIONS_PER_TREE and the in-session caps are the levers. The smoke
+  catalog only until slice 2c (rec-4292).
+- >-
+  Defaults decided with notice: cron '<minute> */24 * * *'; a 28-day window in one-day calls; MAX_SESSIONS_PER_TREE =
+  6; RUN_LEVEL_WINDOW_DAYS = 1; MONITOR_BUDGET_S = 2,000; CALL_WORST_CASE_S = 450; FILING_RESERVE_S = 1,450;
+  MAX_READER_CALLS = 800; MAX_TREE_CALLS = 60; the role assumed after setup; timeout-minutes 70; orphans re-counted daily for the read trees' start days and weekly for
+  every window day; completeness judges the day two days back, never before V4_FIRST_JUDGED_DAY; the completeness
+  fetch runs in the coordinator's session once a day (approved in step6b-presentation.md Q2), never as a routine;
+  alarm priority High. The coverage residuals, one list carried verbatim by T3.20 c3's prefix and the coverage
+  follow-on rec, (1) also in the Decision 210 Update and (6) and (7) in the two contract notes: (1) trees whose root started more than 28 days before their quiet day; (2) a quiet day whose scheduled
+  run is dropped, until a dispatch backfills it; (3) a backfill's positional next_skip, where a tree entering or
+  leaving the quiet set between a run and its backfill can shift trees out of both; (4) child sessions past the
+  monitor's per-tree cap; (5) collided trees (roots_in_tree above 1); (6) a parent observation in another session of
+  the same tree, which the tree-scoped verb does not flag; (7) which node a process_event parents to, since the verb
+  checks only that a parent exists; (8) sessions the in-session source check never compares: no resume and fewer
+  than 10 sent passes, past its three checks a day, above its page cap, producer_modified, or never settling.
+  Accepted behaviours, not coverage gaps: a permanent orphan re-alarms on each run that re-counts its day until its
+  tree ages out of the window; a session on a surface that writes no remote_session_change attachment (a local CLI)
+  has no harness key and counts in harness_key_missing, which the rec text names as the first thing to check; a
+  listed session that legitimately stores no row (no closed assistant turn yet, or capture without credentials) counts
+  in unexplained_not_captured, which the rec text names as the first thing to rule out; a late row carrying an old
+  event_timestamp that lands between a day's day-level calls and its tree's read reads as a window or orphan mismatch,
+  which a dispatched re-run clears.
+- >-
+  Recs: the squash body carries Resolves: rec-4025, rec-4101. Before the merge: update rec-4101's file to
+  scripts/telemetry_verify/monitor.py (its acceptance node is created as named), and file, through
+  get_rec_write_guidance() first and at the head of execution_steps[6], the two follow-on recs, so the Decision 210
+  Update, T3.20 c3's prefix and the two contract notes name a real owning rec id (Decision 181 cl.2): a durable verification results table (a new Class A contract, Benjamin's word,
+  once two weeks of monitor output show the grain), naming verb_rederivation_mismatch_rate as per-day counts with
+  numerator and denominator, never a ratio, and the maturity ladder of REPORT-w1-reader-verbs.md (a consecutive
+  history and zero conflicted grain keys), source planning, priority Medium; and the verification coverage residuals
+  of constraints[4] plus the completeness run's liveness (the coordinator's daily run has no scheduler, so this rec
+  owns detecting a missed run), carrying the procedure of execution_steps[3], source planning, priority Medium. After
+  the merge: update rec-4026 through the portal, removing
+  tests/telemetry_capture/test_session_denominator.py::test_denominator_counts_distinct_root_sessions from its
+  acceptance (keeping the durable-halt node) and noting in its context that the denominator moved to this plan's
+  completeness module and the runner-side conformance job to the in-session source check (Benjamin 2026-10-15).
+- >-
+  SLOC: every module under 500; monitor.py orchestrates and monitor_compare.py holds the per-tree, window and orphan
+  comparisons from the start, so neither needs a split later. No change under src/, no Lambda-packaged code, no
+  Terraform, IAM or contract field; the Decision text change is the dated Update of scope (an annotation in the
+  Decision 207 2026-10-16 precedent, no clause change), the two contract notes are pointer updates under the
+  mechanical contract edits rule, and the roadmap edit is a re-grounding prefix approved with the slice approach.
+  Data-model walk not owed.
+context:
+- >-
+  Approval: Benjamin's "write the plan" (2026-10-17, cmsg_012XgaFy8VaDQbxP5D8nC958MdLJawKLhVPEQqyXDX82iS) approved
+  /mnt/project-files/telemetry-slice4/step6b-presentation.md, including its recommended answers: the coordinator runs
+  the completeness fetch once a day, and T3.20 c3 is re-pointed to the verb-based orphan monitor.
+- >-
+  Silent-failure checks (Benjamin, 2026-10-17, relayed from the capture producer fixes thread): six checks; this plan
+  carries 1-4 and 6. Check 5 (per-model output against the cost-state ledger) is the in-session source check's
+  stored-ledger leg, because the ledger exists only in the transcript. The notice vocabulary is the merged
+  PLAN-telemetry-capture-producer-fixes' (#1542): completed to success, timeout to timeout, any other token to failed
+  with error notice_status:<token>, a malformed or absent tag to notice_status:malformed or notice_status:absent.
+- >-
+  Session lists (planning-facts.md): list_sessions leaves out every project thread session; list_thread_sessions
+  leaves out the coordinator; both are agent tools, unreachable from hooks or CI, and neither documents a branch or
+  repository field. Hence the key join from the parser_version 4 deploy on, scope by source, and captured_not_listed
+  counted and never alarmed.
+- >-
+  Decisions cited: 210 cl.2 (alarm, not gate) and its Coverage line, 61 (findings as recs), 62 as amended (scheduled
+  checks on GitHub Actions under the CI role), 83 (never a required check), 84 I-3 and I-4 (named verbs only; a failed
+  write fails loudly), 88 (egress), 101 (counts only), 181 cl.1 (re-grounding keeps the original text), 199 (out-of-order
+  tolerance: orphans alarm only in quiet trees), 205 cl.3 (deterministic schedules stay on Actions; the session-list
+  fetch happens in a project session), 207 (conflicts compare stamps only), 215 (bounded reads and the
+  reader-invocations-doubled reversal condition).
+- "gates: decision-scout=FLAGS_FOUND (resolved by the slice design; /mnt/project-files/telemetry-slice4/decision-scout-report.md); plan-critique=REVISE round 1 (M1-M9, J1-J17 fixed), REVISE round 2 (M1-M6, J1-J7 fixed), REVISE round 3 (M1, M2, J1-J5 fixed), REVISE round 4 (M1-M3, J1-J5 fixed), REVISE round 5 (M1, M2, J1-J4 fixed), REVISE round 6 (J1-J3, N1-N4 fixed), REVISE round 7 (J1, N1 and the oversized-tree risk fixed), PROCEED round 8 (notes N1-N3 applied)"
+- "ci-rca: none open (ci_rca_open returned 0 rows on 2026-10-17)."
+- >-
+  Tier Item Freshness Gate: T3.20 (in_progress, open c3, c6, c7, c9): c3 is re-grounded and closed here; c6, c7 and
+  c9 (added on main by #1550) are outside slice 4 and stay open. T2.36: untouched.
+pre_implementation_checklist:
+- Branch confirmed not on main and rebased on origin/main; VP step 1 passes
+- docs/PROJECT_CONTEXT.md read
+- Decisions 210 (cl.2 and Coverage), 62, 83, 181 (cl.1), 199, 205 (cl.3) and 215 read, only the cited clauses
+- The golden harness, verification verbs and in-session source check modules read, and .github/workflows/convergence-health.yml and security-detector-liveness.yml read as precedents
+- All files in scope located and readable
+- Acceptance criteria understood and verifiable
+execution_steps:
+- >-
+  Confirm VP step 1. Read scripts/telemetry_verify (derive, dedupe, orphans, rows, alarms), the three verbs' registry
+  entries, .github/workflows/convergence-health.yml and security-detector-liveness.yml with
+  tests/test_security_detector_liveness_workflow.py, config/ci_rca_taxonomy.yaml, the account-ID masking guard and
+  scripts/checks/ci_guards/_workflow_shell_bodies.py.
+- >-
+  monitor.py (scope row) with injected named and describe callables. Per-session verb set: the root session gets
+  session_state_and_duration (at as_of), session_process_event_rollup, session_friction_rollup and
+  model_call_cost_estimate (one call each); each compared child session (the first MAX_SESSIONS_PER_TREE - 1 by
+  their open row's event_timestamp, then session_id; every session of a tree shares the root's session_started_at
+  pin) gets agent_run_state_and_duration (at as_of) and agent_run_token_rollup. A session whose stamps
+  report a Decision 207 conflict compares the three stamps only. A tree with roots_in_tree above 1 is counted
+  tree_collision and not compared; a page whose total_rows differs from page 1's, or a re-read that differs from
+  the read, is tree_moved, read from the
+  monitor's own wrapper of named() (which records each page's total_rows and roots_in_tree), never from read_tree's
+  exception class. Orphans: orphan_quiescent:<join_id> is an alarm when the verb reports any quiescent orphan on a
+  counted day; orphan_undercount:<join_id> is an alarm when the independent count over the read, unmoved quiet trees
+  finds more orphans for a (day, join) than the verb reports; when the verb's trees_quiescent plus trees_pending for a
+  day exceed the roots discovered for that day, the difference is rootless_trees (reported, never an alarm, never
+  compared); conflicted_keys is reported per day. Window: the sessions_window rows for the read, unmoved roots compared
+  with derive's window derivation over those roots (rederivation_mismatch:sessions_window on a difference). Skew:
+  deployed_versions from the describe call at the start and the closing one after the last tree, each compared with
+  describe_all() at the checkout. Then tests/telemetry_verify/test_monitor.py (VP step 5).
+- >-
+  silent_checks.py and tests/telemetry_verify/test_silent_checks.py (VP step 3), counts over rows with
+  parser_version >= 4 only: harness_key_missing = root telemetry_sessions open rows with harness_session_key null over
+  root open rows (alarm when the numerator is above 0); checkout_sha_missing = telemetry_sessions open and resume rows
+  with checkout_sha null over those rows (reported only); background_notice_unknown = telemetry_agents close rows whose
+  error is notice_status:absent, notice_status:malformed or notice_status:<token> for a token outside
+  KNOWN_NOTICE_FAILURE_TOKENS = ("failed", "killed") over background close rows (alarm when above 0);
+  resume_without_prior_close = root resume rows with no close row between the previous open or resume and the resume,
+  for a segment holding at least one model_call, over root resume rows (alarm when above 0).
+- >-
+  completeness.py and tests/telemetry_verify/test_completeness.py (VP step 4). Inputs: the captured roots
+  (telemetry_root_sessions over the judged day and one day on each side) and the two raw files the coordinator writes,
+  thread_sessions.json (list_thread_sessions rows: session_id, created_at, last_activity_at; this project's by
+  construction) and sessions.json (list_sessions rows, every page back to the judged day: id, created_at, updated_at
+  and session_context.sources[].git_repository.url as the repository). Order: normalise every id to the suffix after
+  "session_" or "cse_"; join each listed row created on the judged day with the captured roots by harness_session_key
+  normalised the same way (a joined row is listed_and_captured whatever its other fields); then classify only the
+  unjoined rows: a sessions row with no repository is listed_scope_unknown, one naming another repository is dropped as
+  out of scope, an id that normalises to nothing is listed_unjoinable, and every other unjoined row is
+  listed_not_captured. A captured root with a null key is captured_without_key and joins nothing; captured roots of
+  the judged day that no listed row joins are captured_not_listed. The alarm counts unexplained_not_captured, the
+  listed_not_captured rows beyond captured_without_key; the command refuses a judged day before V4_FIRST_JUDGED_DAY
+  (status=before_v4), and compare_sessions itself takes any day. The judged day is at least two days old, so every
+  session created on it has had at least one idle threshold to send its first rows. Procedure (the coordinator's,
+  owned by the coverage follow-on rec): once a day, in the coordinator session (repository checkout and the
+  agent_platform profile), call list_thread_sessions until no next_cursor remains and list_sessions until a page
+  holds a row created before 00:00Z on the judged day or has_more is false (never a fixed span, never a since_ts filter
+  on last_activity_at), write the raw results as
+  thread_sessions.json and sessions.json (each a JSON array of the raw page responses in page order, exactly as the
+  tools returned them, rows under "sessions" and under "ccr" then "data") under /mnt/project-files/telemetry-slice4/completeness/<day>/ and copy them to
+  completeness/latest/, then run the completeness command with its defaults.
+- >-
+  __main__.py and tests/telemetry_verify/test_main.py (VP step 7). Pinned grammar, one line each, fields in this order:
+  MONITOR quiet_day=<day> window=<day>..<day> roots=<n> quiet=<n> skip_trees=<n> trees_read=<n> tree_moved=<n>
+  tree_collision=<n> tree_read_failed=<n> not_read_budget=<n> next_skip=<n> run_level_days_unread=<n>
+  day_level_unread=<n> tree_too_large=<n> sessions_not_compared=<n> session_verb_failed=<n>
+  verb_skew=<n> agree=<verb>:<agreeing>/<compared>,... window_agree=<agreeing>/<compared> orphan_days=<n>
+  orphan_quiescent=<n>/<child_rows>
+  orphan_pending=<n> orphan_undercount=<n>/<independent_child_rows> rootless_trees=<n> conflicted_keys=<n>
+  silent=<check>:<numerator>/<denominator>,... reader_calls=<n> run_level_s=<n> elapsed_s=<n> max_call_s=<n>
+  max_response_bytes=<n> alarms=<classes or none>; COMPLETENESS judged_day=<day> status=<completed, before_v4 or
+  lists_short> listed=<n>
+  listed_and_captured=<n> listed_not_captured=<n> unexplained_not_captured=<n> captured_not_listed=<n> listed_unjoinable=<n> listed_scope_unknown=<n> captured_without_key=<n> alarms=<classes or
+  none>. --assert-zero denominators: rederivation_mismatch:<verb> the sessions compared for that verb;
+  orphan_quiescent:<join_id> that join's child_rows over the counted days; orphan_undercount:<join_id> the
+  independent child rows over the read trees; a silent check its denominator; monitor_coverage_incomplete (count
+  not_read_budget plus tree_read_failed plus tree_too_large plus session_verb_failed plus run_level_days_unread plus
+  day_level_unread, plus one when quiet trees
+  exist and none was
+  compared for any reason but verb_skew) the quiet trees of the day; completeness_listed_not_captured (count
+  unexplained_not_captured) the in-scope listed rows of the judged day. next_skip is skip_trees plus the quiet trees
+  before the first one that is not_read_budget, tree_read_failed or holds a session_verb_failed call for a transient
+  cause (a 5xx or a timeout), or whose root started on a day_level_unread day or on or after the earliest
+  run_level_days_unread day; tree_too_large trees and 413-caused failures, which a backfill would only repeat, are
+  passed (still counted for the coverage alarm), never a stop; so a backfill re-reads every tree this run did not fully compare.
+- >-
+  tests/telemetry_verify/test_monitor.py: test_monitor_reports_rederivation_orphan_and_completeness_counts (every
+  golden corpus tree loaded into one chain catalog, each under its own register_project project because most share
+  one root ref and pin, with as_of past every tree's idle threshold: every verb agrees,
+  window rows agree, orphan counts agree, no rederivation, window, orphan or coverage class is raised, and each
+  silent check's numerator and denominator equal what the corpus carries (harness_key_missing counting the v4 root
+  open rows of trees with no remote_session_change attachment, background_notice_unknown the corpus's unknown
+  notices), so the filed classes are exactly those silent ones; a completeness run over a list fixture naming those roots'
+  keys reports listed_and_captured equal to their count); test_monitor_reports_a_planted_verb_defect_by_verb (the
+  golden harness's tie-order and idle mutations on the inputs that plan selects by property, a close-tie tree at pass
+  final and an exact-threshold as_of on a non-terminal session, plus a sessions_window mutation, each reported as
+  rederivation_mismatch for its verb); test_a_tree_that_grows_during_the_run_is_tree_moved (growth after the window
+  calls as well as between the tree's read and its re-read); test_only_trees_that_went_quiet_on_the_quiet_day_are_read;
+  test_budget_overflow_raises_the_coverage_alarm (MAX_READER_CALLS lowered, and separately a time-budget stop on a
+  fake clock with non-zero per-call costs: the first run leaves trees unread and raises the class; a second run with --skip-trees at its next_skip
+  reads the remainder, and the two runs' compared trees are the quiet set less its moved and collided trees); test_a_failed_run_level_day_is_unread_and_alarmed (a 413 or 5xx on one day's root-session call);
+  test_orphan_days_are_the_read_trees_days_plus_the_weekly_rotation (seven consecutive quiet days count every window
+  day at least once); test_a_skewed_verb_is_reported_never_alarmed (a stamp that differs at the start, and one that
+  changes between the start and the closing describe); test_every_call_leaves_the_closing_describe_its_worst_case
+  (a fake clock with non-zero per-call costs, a slow run-level phase included: no call starts without two worst cases
+  left, and the closing describe runs); test_a_failed_tree_call_is_counted_never_ends_the_run (a 5xx on
+  session_tree_rows and read_tree's final 413 count tree_read_failed (the 413 passed by next_skip, the 5xx a stop), an
+  oversized tree costs no page call past the cap, a failed per-session verb counts
+  session_verb_failed apart from the cap's sessions_not_compared, each raises monitor_coverage_incomplete and stops
+  next_skip, a tree above MAX_TREE_CALLS is tree_too_large and the trees after it are still read, and the run
+  completes); test_a_failed_closing_describe_ends_the_run_incomplete (exit 1, no
+  filing); test_a_retired_generation_row_never_reads_as_moved (a tree holding a later row at a retired
+  parser_version compares as unmoved); test_a_run_that_compares_no_quiet_tree_raises_the_coverage_alarm (every quiet
+  tree moved or collided).
+  The completeness leg of the first node requires at least one golden root carrying harness_session_key (the producer
+  fixes corpus's session_provenance_facts case). Then tests/telemetry/test_parent_observation_orphan_monitor.py (VP step 6).
+- >-
+  First, file the two follow-on recs of constraints[5] through get_rec_write_guidance() and the portal (export their
+  ids as RESULTS_REC and LIVENESS_REC; the coverage rec carries the residual list of constraints[4]); its id is the
+  <coverage rec id> below. Then .github/workflows/telemetry-verification.yml, its taxonomy row, the step-body baseline
+  entries (from scan_workflow_bodies()) and tests/test_telemetry_verification_workflow.py (VP step 8). Then the
+  roadmap re-grounding of T3.20 c3: "[Re-grounded <build day>, PLAN-telemetry-verification-monitor:
+  config/agent/data_quality/ops.yaml's DQ runner cannot read the telemetry tables (relationships checks SKIP on
+  DuckLake; rec-4101). The orphan side is the reader's telemetry_orphan_counts verb over quiescent trees, covering
+  every telemetry join of docs/contracts/_joins.yaml including turn-observation <-> transcript, alarmed daily by the
+  telemetry-verification workflow under source telemetry_verify (alarm-not-gate); the coverage side (rows missing
+  from the store, a transcript missing for its observation) is the in-session source check's missing_in_store and the
+  completeness module's counts. Coverage residuals, owned by <coverage rec id>: <the residual list of
+  constraints[4], verbatim>.]" before the original text; the Decision 210 dated Update naming <coverage rec id>; the
+  two contract notes: in parent-observation-id.yaml, write_time_validation's clause becomes "the monitor is the
+  reader's telemetry_orphan_counts verb, alarmed daily by the telemetry-verification workflow (rec-4101), with the
+  reader registry's IDLE_THRESHOLD_SECONDS as its quiescence window; it matches a parent within the tree, so a parent
+  in another session of the same tree is a residual owned by <coverage rec id>", and governance_notes' "That monitor
+  does not exist yet -- relationships checks SKIP on the DuckLake backend today (scripts/data_quality_execute.py) and
+  carry no session or quiescence scoping -- so this text names its owner, follow-on rec-4101, which also owns the
+  quiescence window" becomes "That monitor is the reader's telemetry_orphan_counts verb over quiescent trees, alarmed
+  daily by the telemetry-verification workflow (rec-4101, closed by PLAN-telemetry-verification-monitor), with the
+  reader registry's IDLE_THRESHOLD_SECONDS as its quiescence window, because relationships checks SKIP on the DuckLake
+  backend (scripts/data_quality_execute.py); it checks parent existence within the tree, and the same-session case is
+  a residual owned by <coverage rec id>"; and telemetry_observations.yaml's phrase as its scope row states; then
+  tests/checks/contracts/test_telemetry_verification_contracts.py (VP step 9), whose prefix node pins the residual
+  list of constraints[4] item by item.
+- Execute VP steps 1-12; loop until each passes.
+- Code review (the code-review skill in a fresh context); fix every blocking finding.
+- >-
+  Closure (implement skill Commit Flows; docs/contracts/git-ops.yaml), each outcome reported separately: the readiness
+  check; set implementation_declared true; the closes_criteria flip of T3.20 c3 at the bookkeeping walk; rebase on
+  origin/main and re-run VP step 1; VP step 12 on the committed, clean tree, then
+  scripts.checks.validation_result --verify-head; the postflight evidence file and scripts.session.postflight
+  --evidence; push; PR; CI green on the head. Before the commit: the rec-4101 update of constraints[5] (the two
+  follow-on recs were filed at the head of execution_steps[6]). Squash body: Resolves: rec-4025, rec-4101. Merge on code review PROCEED
+  and green CI under the standing rule (no deploy, IAM, spend or contract field; the Decision change is a dated
+  annotation in the Decision 207 precedent).
+- >-
+  After the merge: VP step 13 (dispatch the workflow), then the rec-4026 update in constraints[5]; hand the
+  completeness procedure to the coordinator
+  (send it the procedure of execution_steps[3] and the liveness rec id); run VP step 14 with it, then VP step 15.
+- >-
+  Report: what was implemented, each VP step's output (steps 11, 13, 14 and 15 verbatim), every alarm class the real
+  runs raised and the rec it was filed as, the first runs' reader_calls against the Decision 215 baseline, and the two
+  follow-on rec ids.
+rollback: >-
+  Revert the squash commit: the workflow stops, the monitor and completeness commands go, T3.20 c3 returns to open with
+  its original text, and the Decision 210 Update is removed. Recs already filed stay open for triage; no stored row is
+  touched in either direction.

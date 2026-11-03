@@ -18,7 +18,7 @@ _ACTIONS_RE = re.compile(r"\bactions\s*=\s*\[(?P<body>.*?)\]", re.DOTALL)
 _RESOURCES_RE = re.compile(r"\bresources\s*=\s*\[(?P<body>.*?)\]", re.DOTALL)
 _QUOTED_RE = re.compile(r'"([^"]*)"')
 
-_DUCKLAKE_INVOKE_MARKERS = ("ducklake_writer", "ducklake_reader")
+_DUCKLAKE_INVOKE_MARKERS = ("ducklake_writer", "ducklake_reader", "ducklake_telemetry_writer")
 _INVOKE_ACTIONS = {"lambda:InvokeFunction", "lambda:*"}
 _SSM_READ_ACTIONS = {"ssm:Get*", "ssm:*"}
 _SSM_RESOURCE_MARKER = "parameter/agent-platform"

@@ -273,3 +273,71 @@ def test_handler_status_transition_error_maps_422(monkeypatch):
     r = h.handler({"action": "update_ops", "table": "ops_recommendations", "record": {"id": "rec-1", "status": "open"}})
     assert r["statusCode"] == 422
     assert json.loads(r["body"])["error_type"] == "status_transition"
+
+
+def test_row_rule_violation_maps_to_422(monkeypatch):
+    con = FakeCon()
+    monkeypatch.setattr(h, "_open_writer_connection", lambda: con)
+
+    def _raise(c, rec, **kw):
+        raise rt.RowRuleViolationError("ops_recommendations", "min_length", "title", "2026-09-01")
+
+    monkeypatch.setattr(rt, "write_scd2", _raise)
+    monkeypatch.setattr(rt, "make_metric_sink", lambda **kw: lambda n, v: None)
+    r = h.handler({"action": "write", "record": {"rec_id": "r"}})
+    body = json.loads(r["body"])
+    assert r["statusCode"] == 422
+    assert body["ok"] is False and body["error_type"] == "row_rule"
+    assert (body["table"], body["rule"], body["column"], body["exclude_before"]) == (
+        "ops_recommendations",
+        "min_length",
+        "title",
+        "2026-09-01",
+    )
+    assert "row rule min_length violated" in body["error"]
+
+
+def test_handler_unmapped_exception_is_typed_500(monkeypatch, capsys):
+    def _raise():
+        raise KeyError("pass" + "word=hunter2 s3://bucket/key")
+
+    monkeypatch.setattr(h, "_open_writer_connection", _raise)
+    r = h.handler({"action": "attach_check"}, types.SimpleNamespace(aws_request_id="req-9"))
+    body = json.loads(r["body"])
+    assert r["statusCode"] == 500
+    assert (body["error_type"], body["error_class"], body["action"], body["request_id"]) == (
+        "unmapped",
+        "KeyError",
+        "attach_check",
+        "req-9",
+    )
+    assert "hunter2" not in r["body"] and "s3://" not in r["body"]
+    out = capsys.readouterr().out
+    assert '"ducklake_unmapped_error"' in out and "hunter2" not in out
+    assert [json.loads(x)["status"] for x in out.splitlines() if '"ducklake_invocation"' in x] == [500]
+
+
+def test_handler_dead_connection_after_reopen_is_503(monkeypatch):
+    monkeypatch.setattr(h, "_open_writer_connection", lambda: FakeCon())
+    monkeypatch.setattr(
+        rt, "write_scd2", lambda c, rec, **kw: (_ for _ in ()).throw(Exception("server closed the connection"))
+    )
+    monkeypatch.setattr(rt, "make_metric_sink", lambda **kw: lambda n, v: None)
+    r = h.handler({"action": "write", "record": {"rec_id": "r"}})
+    body = json.loads(r["body"])
+    assert r["statusCode"] == 503
+    assert (body["error_type"], body["reopened"]) == ("catalog_unavailable", True)
+    assert "server closed" not in r["body"]
+
+
+def test_handler_unparseable_body_is_400(capsys):
+    r = h.handler({"body": "{not json"})
+    assert r["statusCode"] == 400 and json.loads(r["body"])["error_type"] == "bad_request"
+    line = [json.loads(x) for x in capsys.readouterr().out.splitlines() if '"ducklake_invocation"' in x][0]
+    assert (line["action"], line["status"]) == ("unknown", 400)
+
+
+def test_handler_non_object_body_is_400():
+    for raw in ("[1]", '"text"', "[" * 100000):
+        r = h.handler({"body": raw})
+        assert r["statusCode"] == 400 and json.loads(r["body"])["error_type"] == "bad_request"

@@ -1,7 +1,9 @@
-"""Transcript rows: purpose/origin per block, scrub before hash, empty and binary blocks, sidecar-or-truncated."""
+"""Transcript rows: purpose/origin per block, scrub before hash, empty and binary blocks, model-visible tool results,
+tool_output rows, raw-identity omissions and MCP overflow."""
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from collections import Counter
@@ -32,13 +34,26 @@ from tests.fixtures.turn_capture_corpus import (
 IMG = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}}
 
 
-def build(root, sidecar_files=None, cursor=None, diag=None):
+class GuardedTree(MemTree):
+    """A MemTree that fails the test if a sidecar named in *forbidden* is ever read whole."""
+
+    def __init__(self, files, forbidden=()):
+        super().__init__(files)
+        self.forbidden = set(forbidden)
+
+    def sidecar(self, basename):
+        assert basename not in self.forbidden, f"{basename} was materialised whole"
+        return super().sidecar(basename)
+
+
+def build(root, sidecar_files=None, cursor=None, diag=None, cap=None, forbidden=()):
     files = make_files(root, None, sidecar_files)
-    tree = MemTree(files)
+    tree = GuardedTree(files, forbidden)
     from src.turn_capture.streams import parse_tree
 
     side = Sidecars(tree, cursor)
-    rows = build_transcripts(parse_tree(tree, None, True), make_ctx(), side, diag if diag is not None else Counter())
+    ctx = make_ctx() if cap is None else dataclasses.replace(make_ctx(), full_output_cap_bytes=cap)
+    rows = build_transcripts(parse_tree(tree, None, True), ctx, side, diag if diag is not None else Counter())
     return rows_of(rows), side
 
 
@@ -109,7 +124,23 @@ def test_purpose_origin_owner_and_columns() -> None:
     assert result["source_ordinal"] == 4 and result["session_ref"] == SID and result["producer"] == "claude_code"
 
 
-def test_sidecar_or_truncated_and_pins() -> None:
+def test_tool_result_stores_model_visible_text() -> None:
+    info = {"persistedOutputPath": "/elsewhere/tool-results/big.txt", "persistedOutputSize": 4}
+    root = [
+        prompt("u1", 1, "p1", "go"),
+        assistant("a1", 2, "m1", [tool_use_block("t1", "Bash", {})]),
+        tool_result("r1", 3, "t1", "preview of the output", pid="p1", tur=info),
+    ]
+    rows, _ = build(root, {"big.txt": "FULL OUTPUT"})
+    result = by(rows, purpose="tool_result")[0]
+    assert result["content"] == "preview of the output" and result["content_truncated"] is False
+    assert result["external_ref"] == "r1#0" and result["origin"] == "tool"
+    absent, _ = build(root, None)
+    assert by(absent, purpose="tool_result")[0]["content"] == "preview of the output"
+    assert by(absent, purpose="tool_output") == [] and all(r["content_truncated"] is False for r in absent)
+
+
+def test_tool_output_row_or_omission_for_persisted_output() -> None:
     info = {"persistedOutputPath": "/elsewhere/tool-results/big.txt", "persistedOutputSize": 4}
     root = [
         prompt("u1", 1, "p1", "go"),
@@ -125,18 +156,85 @@ def test_sidecar_or_truncated_and_pins() -> None:
     ]
     diag: Counter[str] = Counter()
     rows, side = build(root, {"big.txt": "FULL OUTPUT"}, diag=diag)
-    full = by(rows, external_ref="r1#0")[0]
-    assert full["content"] == "FULL OUTPUT" and full["content_truncated"] is False and diag["sidecar_size_mismatch"] == 1
-    assert (
-        by(rows, external_ref="r2#0")[0]["content"] == "preview2"
-        and by(rows, external_ref="r2#0")[0]["content_truncated"] is False
-    )
-    assert by(rows, external_ref="r3#0") == []
-    absent, _ = build(root, None)
-    truncated = by(absent, external_ref="r1#0")[0]
-    assert truncated["content"] == "preview" and truncated["content_truncated"] is True
-    assert by(absent, external_ref="r3#0") == []
+    full = by(rows, external_ref="r1#0/full")[0]
+    assert (full["purpose"], full["origin"], full["content"]) == ("tool_output", "tool", "FULL OUTPUT")
+    assert full["entity_ref"] == "r1#0/full" and full["observation_ref"] == "t1" and full["content_truncated"] is False
+    assert full["content_sha256"] == hashlib.sha256(b"FULL OUTPUT").hexdigest() and full["content_bytes"] == 11
+    assert diag["sidecar_size_mismatch"] == 1
+    assert by(rows, external_ref="r2#0")[0]["content"] == "preview2" and by(rows, external_ref="r2#0/full") == []
+    assert by(rows, external_ref="r3#0") == [] and by(rows, external_ref="r3#0/full") == []
     assert side.used["big.txt"] == hashlib.sha256(b"FULL OUTPUT").hexdigest() and side.used["none.txt"] is None
+    over, _ = build(root, {"big.txt": "x" * 40}, cap=30)
+    omitted = by(over, external_ref="r1#0/full")[0]
+    assert "content" not in omitted and omitted["content_omitted_reason"] == "oversize"
+    assert omitted["content_sha256"] == hashlib.sha256(b"x" * 40).hexdigest() and omitted["content_bytes"] == 40
+    assert omitted["content_truncated"] is False and omitted["purpose"] == "tool_output"
+
+
+def test_over_cap_sidecar_is_never_materialised() -> None:
+    root = [
+        prompt("u1", 1, "p1", "go"),
+        assistant("a1", 2, "m1", [tool_use_block("t1", "Bash", {})]),
+        tool_result("r1", 3, "t1", "preview", pid="p1", tur={"persistedOutputPath": "/x/tool-results/huge.txt"}),
+    ]
+    huge = "y" * 200_000
+    rows, side = build(root, {"huge.txt": huge}, cap=100_000, forbidden=("huge.txt",))
+    omitted = by(rows, external_ref="r1#0/full")[0]
+    assert omitted["content_bytes"] == 200_000 and omitted["content_sha256"] == hashlib.sha256(huge.encode()).hexdigest()
+    assert side.output("huge.txt", 100_000).digest.lines == 1 and side.used["huge.txt"] == omitted["content_sha256"]
+
+
+def test_decode_growth_over_cap_is_omitted() -> None:
+    root = [
+        prompt("u1", 1, "p1", "go"),
+        assistant("a1", 2, "m1", [tool_use_block("t1", "Bash", {})]),
+        tool_result("r1", 3, "t1", "preview", pid="p1", tur={"persistedOutputPath": "/x/tool-results/grow.txt"}),
+    ]
+    secret = build_secret("github")
+    body = f"token {secret} " * 3
+    rows, _ = build(root, {"grow.txt": body}, cap=len(body.encode()) - 30)
+    row = by(rows, external_ref="r1#0/full")[0]
+    assert row["content_omitted_reason"] == "oversize" and "content" not in row
+    assert row["content_bytes"] == len(body.encode()) and row["content_sha256"] == hashlib.sha256(body.encode()).hexdigest()
+    fits, _ = build(root, {"grow.txt": body}, cap=len(body.encode()))
+    assert "[REDACTED:GITHUB_TOKEN]" in by(fits, external_ref="r1#0/full")[0]["content"]
+    assert secret not in render_rows_json(rows) + render_rows_json(fits)
+
+
+MCP_TEXT = (
+    "Error: result (9 characters) exceeds maximum allowed tokens. "
+    "Output has been saved to /x/tool-results/mcp.txt\nFormat: json"
+)
+
+
+def test_mcp_overflow_output_is_captured() -> None:
+    root = [
+        prompt("u1", 1, "p1", "go"),
+        assistant("a1", 2, "m1", [tool_use_block("t1", "mcp__s__t", {})]),
+        tool_result("r1", 3, "t1", MCP_TEXT, pid="p1", tur=MCP_TEXT, is_error=True),
+    ]
+    diag: Counter[str] = Counter()
+    rows, _ = build(root, {"mcp.txt": '[{"big": true}]'}, diag=diag)
+    visible = by(rows, external_ref="r1#0")[0]
+    assert (visible["origin"], visible["content"], visible["content_truncated"]) == ("harness", MCP_TEXT, False)
+    full = by(rows, external_ref="r1#0/full")[0]
+    assert (full["purpose"], full["origin"], full["content"]) == ("tool_output", "tool", '[{"big": true}]')
+    assert diag["unmatched_string_tool_use_result"] == 0
+    missing, _ = build(root)
+    assert by(missing, external_ref="r1#0/full") == [] and by(missing, external_ref="r1#0")[0]["origin"] == "harness"
+
+
+def test_unmatched_string_tool_use_result_is_counted() -> None:
+    root = [
+        prompt("u1", 1, "p1", "go"),
+        assistant("a1", 2, "m1", [tool_use_block("t1", "Bash", {}), tool_use_block("t2", "Bash", {})]),
+        tool_result("r1", 3, "t1", "Error: no such file", pid="p1", tur="Error: no such file", is_error=True),
+        tool_result("r2", 3.1, "t2", "x", pid="p1", tur="Output has been saved to dir/"),
+    ]
+    diag: Counter[str] = Counter()
+    rows, _ = build(root, {}, diag=diag)
+    assert diag["unmatched_string_tool_use_result"] == 2 and by(rows, purpose="tool_output") == []
+    assert all(r["origin"] == "tool" for r in by(rows, purpose="tool_result"))
 
 
 def _cursor(sidecars):
@@ -152,13 +250,13 @@ def test_sidecar_pins_are_honoured_and_contradictions_raise() -> None:
     ]
     sha = hashlib.sha256(b"FULL").hexdigest()
     rows, _ = build(root, {"big.txt": "FULL"}, cursor=_cursor({"big.txt": sha}))
-    assert by(rows, purpose="tool_result")[0]["content"] == "FULL"
+    assert by(rows, purpose="tool_output")[0]["content"] == "FULL"
     with pytest.raises(SourceMutated):
         build(root, {"big.txt": "CHANGED"}, cursor=_cursor({"big.txt": sha}))
     with pytest.raises(SourceMutated):
         build(root, None, cursor=_cursor({"big.txt": sha}))
     honoured, _ = build(root, {"big.txt": "FULL"}, cursor=_cursor({"big.txt": None}))
-    assert by(honoured, purpose="tool_result")[0]["content_truncated"] is True
+    assert by(honoured, purpose="tool_output") == [] and by(honoured, purpose="tool_result")[0]["content"] == "preview"
 
 
 def test_unknown_blocks_and_helpers(monkeypatch) -> None:
@@ -215,3 +313,67 @@ def test_orphan_and_late_tool_results() -> None:
     orphan = by(rows, external_ref="r0#0")[0]
     assert (orphan["purpose"], orphan["observation_ref"], orphan["content"]) == ("tool_result", "ghost", "orphan text")
     assert by(rows, external_ref="rl#0") == []
+
+
+def test_sidecar_vanishing_between_size_and_read_is_unavailable() -> None:
+    class Vanishing(MemTree):
+        def sidecar(self, basename):
+            return None
+
+    tree = Vanishing(make_files([prompt("u1", 1, "p1", "go")], None, {"gone.txt": "abc"}))
+    side = Sidecars(tree, None)
+    assert side.output("gone.txt", 100) is None and side.used["gone.txt"] is None
+
+
+def test_harness_origins_and_api_error_system_row() -> None:
+    interrupt = "[Request interrupted by user for tool use]"
+    root = [
+        prompt("u1", 1, "p1", "go"),
+        assistant("a1", 2, "m1", [tool_use_block("t1", "Bash", {}), tool_use_block("t2", "Bash", {})]),
+        tool_result(
+            "r1",
+            3,
+            "t1",
+            "rejected text",
+            pid="p1",
+            is_error=True,
+            tur="User rejected tool use",
+            toolDenialKind="user-rejected",
+        ),
+        tool_result("r2", 3.1, "t2", interrupt, pid="p1", is_error=True),
+        prompt("u2", 4, "p1", [text_block(interrupt)]),
+        prompt("u3", 5, "p2", "hello again"),
+        assistant(
+            "e1",
+            6,
+            "00000000-0000-4000-8000-0000000000e1",
+            [text_block("API Error: x")],
+            model="<synthetic>",
+            isApiErrorMessage=True,
+        ),
+        prompt("u4", 7, "p3", "last"),
+    ]
+    diag: Counter[str] = Counter()
+    rows, _ = build(root, diag=diag)
+    results = {r["external_ref"]: r for r in by(rows, purpose="tool_result")}
+    assert results["r1#0"]["origin"] == "harness" and results["r2#0"]["origin"] == "harness"
+    sentinel = by(rows, external_ref="u2#0")[0]
+    assert (sentinel["purpose"], sentinel["origin"]) == ("system", "harness")
+    assert by(rows, external_ref="u3#0")[0]["origin"] == "human"
+    error = by(rows, external_ref="e1#0")[0]
+    assert (error["purpose"], error["origin"], error["observation_ref"]) == ("system", "harness", f"{SID}/p2")
+    assert "model" not in error and by(rows, purpose="response") == []
+    assert diag["unmatched_string_tool_use_result"] == 0
+
+
+def test_denial_kind_exempts_a_string_tool_use_result_from_the_unmatched_counter() -> None:
+    diag: Counter[str] = Counter()
+    root = [
+        prompt("u1", 1, "p1", "go"),
+        assistant("a1", 2, "m1", [tool_use_block("t1", "Bash", {}), tool_use_block("t2", "Bash", {})]),
+        tool_result("r1", 3, "t1", "x", pid="p1", is_error=True, tur="User rejected tool use", toolDenialKind="user-rejected"),
+        tool_result("r2", 3.1, "t2", "y", pid="p1", is_error=True, tur="Error: other"),
+        prompt("u2", 5, "p2", "next"),
+    ]
+    build(root, diag=diag)
+    assert diag["unmatched_string_tool_use_result"] == 1

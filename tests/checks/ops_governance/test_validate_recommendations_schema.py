@@ -22,7 +22,8 @@ def test_absent_cache_is_recorded_as_skipped(tmp_path: Path) -> None:
     assert failed == []
     assert declaration is not None
     assert declaration.kind == "skipped"
-    assert declaration.reason
+    assert "Decision 215" in declaration.reason
+    assert "rec-4237" in declaration.reason
 
 
 class TestValidateRecommendationsSchema:

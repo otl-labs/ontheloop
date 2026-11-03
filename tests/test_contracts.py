@@ -11,6 +11,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+import scripts.contract_rules
+import scripts.contracts
+import scripts.platform_roadmap_state
+import scripts.preflight.context_docs
 from scripts.contracts import (
     ContractValidationError,
     load_all_contracts,
@@ -19,6 +23,7 @@ from scripts.contracts import (
     resolve_refs,
     validate_status_transition,
 )
+from tests.fixtures.yaml_parse_spy import install as install_yaml_parse_spy
 
 
 def _write(path: Path, data: dict) -> Path:
@@ -231,6 +236,18 @@ class TestRejectsMalformed:
         with pytest.raises(ContractValidationError, match="loosen"):
             resolve_refs(doc, tmp_path)
 
+    def test_loosening_override_rejected_over_a_true_target(self, tmp_path: Path) -> None:
+        target = _class_c_target()
+        target["fields"]["registry_key"]["dq_intent"] = {"not_null": True}
+        _write(tmp_path / "source-lineage.yaml", target)
+        doc = load_contract(_write(tmp_path / "a.yaml", _class_a_with_ref(dq_intent_local={"not_null": {"enforced": False}})))
+        with pytest.raises(ContractValidationError, match="loosen"):
+            resolve_refs(doc, tmp_path)
+        tighter = load_contract(
+            _write(tmp_path / "b.yaml", _class_a_with_ref(dq_intent_local={"not_null": {"exclude_before": "2026-10-01"}}))
+        )
+        assert resolve_refs(tighter, tmp_path)["source"].dq_intent["not_null"] == {"exclude_before": "2026-10-01"}
+
     def test_malformed_ref_no_fragment_rejected(self, tmp_path: Path) -> None:
         doc = load_contract(_write(tmp_path / "a.yaml", _class_a_with_ref(ref="docs/contracts/source-lineage.yaml")))
         with pytest.raises(ContractValidationError, match="no '#'"):
@@ -270,6 +287,39 @@ class TestLoadAll:
         (tmp_path / "list.yaml").write_text("- a\n- b\n", encoding="utf-8")
         loaded = load_all_contracts(tmp_path)
         assert loaded == {}
+
+    def test_each_ritual_yaml_parsed_once(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # rec-2203 / rec-4365: before the fix, load_all_contracts parsed every file once to
+        # check ritual-ness, then load_contract re-read and re-parsed each ritual file --
+        # 3 + 2 = 5 pure-Python parses for these three files. Each file is now parsed exactly
+        # once, with libyaml.
+        _write(tmp_path / "read-engine.yaml", {"version": 3, "engine": "duckdb"})
+        _write(tmp_path / "source-lineage.yaml", _class_c_target())
+        _write(tmp_path / "ops_recommendations.yaml", _class_a_with_ref())
+        log = install_yaml_parse_spy(monkeypatch)
+        loaded = load_all_contracts(tmp_path)
+        assert set(loaded) == {"source-lineage", "ops_recommendations"}
+        assert len(log.entries) == 3
+        assert log.pure_entries == []
+
+
+class TestLibyamlLoader:
+    def test_single_file_loaders_use_libyaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        contract_path = _write(tmp_path / "source-lineage.yaml", _class_c_target())
+        meta_path = _write(tmp_path / "d.yaml", {"contract": _class_d_envelope()})
+        log = install_yaml_parse_spy(monkeypatch)
+        load_contract(contract_path)
+        load_contract_meta(meta_path)
+        assert len(log.entries) == 2
+        assert log.pure_entries == []
+
+    def test_libyaml_loader_builds_like_safe_loader(self) -> None:
+        # Import side effect: any yaml constructor the switched consumers register must be in
+        # view before this comparison, so a registration made on SafeLoader alone fails HERE,
+        # not silently in production.
+        assert all((scripts.contracts, scripts.platform_roadmap_state, scripts.preflight.context_docs, scripts.contract_rules))
+        assert yaml.CSafeLoader.yaml_constructors == yaml.SafeLoader.yaml_constructors
+        assert yaml.CSafeLoader.yaml_implicit_resolvers == yaml.SafeLoader.yaml_implicit_resolvers
 
 
 class TestFieldSpecDerivation:

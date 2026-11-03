@@ -99,13 +99,13 @@ class TestCiRcaEvidenceDispute:
 
         recs_file = tmp_path / "recs.jsonl"
         with (
-            patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-5001"}),
+            patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-5001"}) as mock_write,
             patch("scripts.ops_data_portal._sync_table"),
             patch("scripts.ops_data_portal.RECS_JSONL", recs_file),
         ):
             rec_id = p.file_rec(dict(_DISPUTE_FIELDS), context_v2_json=_VALID_DISPUTE_PAYLOAD)
         assert rec_id == "rec-5001"
-        entry = json.loads(recs_file.read_text(encoding="utf-8").splitlines()[0])
+        entry = mock_write.call_args.args[1]
         assert "context_v2_json" in entry
         stored = json.loads(entry["context_v2_json"])
         assert stored["parent_rec_id"] == "rec-1234"

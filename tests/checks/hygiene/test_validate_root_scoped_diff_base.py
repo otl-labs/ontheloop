@@ -117,6 +117,17 @@ class TestScanFile:
         # not flagged, since it never claims to take root) -- outer() itself makes no bare call.
         assert violations == []
 
+    def test_bare_status_diff_base_call_is_flagged(self, tmp_path: Path) -> None:
+        path = self._write(
+            tmp_path,
+            "i.py",
+            "def f(root):\n    return _common.status_diff_base()\n",
+        )
+        with patch("scripts.checks._common.ROOT", tmp_path):
+            violations, scanned = _scan_file(path)
+        assert len(violations) == 1
+        assert "status_diff_base" in violations[0]
+
     def test_syntax_error_file_yields_no_violations(self, tmp_path: Path) -> None:
         path = self._write(tmp_path, "broken.py", "def f(root):\n    (((\n")
         with patch("scripts.checks._common.ROOT", tmp_path):

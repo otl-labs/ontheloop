@@ -100,6 +100,26 @@ def push_context_base(root: Path | None = None) -> str | None:
     return None
 
 
+def status_diff_base(root: Path | None = None) -> str | None:
+    """The diff base `get_status_aware_diff` resolves against: `push_context_base(root)`, else
+    the merge-base of origin/main and HEAD, else None (Decision 159: no second resolver -- every
+    status-aware-diff caller shares this one base-resolution path rather than recomputing its
+    own merge-base).
+
+    `root` scopes every git probe (cwd defaults to `ROOT` when None).
+    """
+    cwd = root if root is not None else ROOT
+    push_base = push_context_base(root)
+    if push_base is not None:
+        return push_base
+    merge_base_result = run(
+        ["git", "merge-base", "origin/main", "HEAD"], capture_output=True, text=True, encoding="utf-8", cwd=cwd
+    )
+    if merge_base_result.returncode == 0 and merge_base_result.stdout.strip():
+        return merge_base_result.stdout.strip()
+    return None
+
+
 def get_changed_files(root: Path | None = None) -> list[str]:
     """Get files changed vs origin/main, falling back to HEAD. Excludes deleted paths.
 
@@ -149,19 +169,7 @@ def get_status_aware_diff(root: Path | None = None) -> list[tuple[str, str]]:
     cwd = root if root is not None else ROOT
     entries: list[tuple[str, str]] = []
 
-    push_base = push_context_base(root)
-    base_ref: str | None
-    if push_base is not None:
-        base_ref = push_base
-    else:
-        merge_base_result = run(
-            ["git", "merge-base", "origin/main", "HEAD"], capture_output=True, text=True, encoding="utf-8", cwd=cwd
-        )
-        base_ref = (
-            merge_base_result.stdout.strip()
-            if merge_base_result.returncode == 0 and merge_base_result.stdout.strip()
-            else None
-        )
+    base_ref = status_diff_base(root)
 
     diff_result = run(
         ["git", "diff", "--name-status", "--no-renames", base_ref or "HEAD"],

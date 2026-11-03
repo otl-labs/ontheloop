@@ -60,6 +60,19 @@ _VALID_CTX = {
 }
 
 
+def _track_ctx(**extra: object) -> str:
+    return json.dumps({**_VALID_CTX, "repair_track": "test_defect", "workflow_tier": "CI", **extra})
+
+
+def _run_correct(stored: str, context_updates: dict, row_updates: dict | None = None):
+    with (
+        patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value={"id": "rec-1", "context_v2_json": stored}),
+        patch("scripts.ops_data_portal.update_rec") as mock_update,
+    ):
+        correct_rec_context("rec-1", context_updates, row_updates=row_updates)
+    return mock_update
+
+
 class TestCorrectRecContext:
     """PLAN-ci-rca-abstention-and-citation AC12/VP5: the tested route for correcting a
     factually-wrong context_v2_json narrative on an open ci_rca rec, beside stamp_fixed_by_sha."""
@@ -132,3 +145,44 @@ class TestCorrectRecContext:
         with patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=None):
             with pytest.raises(RuntimeError, match="does not exist"):
                 correct_rec_context("rec-nope", {"proximate_cause": "irrelevant"})
+
+    def test_retrack_rederives_priority(self) -> None:
+        stored = _track_ctx()
+        mock_update = _run_correct(stored, {"repair_track": "product_regression"}, row_updates={"priority": "High"})
+        call_args, _ = mock_update.call_args
+        assert call_args[1]["priority"] == "Critical"
+        assert json.loads(call_args[1]["context_v2_json"])["repair_track"] == "product_regression"
+
+    def test_retrack_without_preventive_is_refused(self) -> None:
+        stored = json.dumps({k: v for k, v in json.loads(_track_ctx()).items() if k != "preventive_action"})
+        with (
+            patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value={"id": "rec-1", "context_v2_json": stored}),
+            patch("scripts.ops_data_portal.update_rec") as mock_update,
+        ):
+            with pytest.raises(RuntimeError, match="preventive_action"):
+                correct_rec_context("rec-1", {"repair_track": "product_regression"})
+        mock_update.assert_not_called()
+
+    def test_retrack_cannot_inject_workflow_tier(self) -> None:
+        stored = json.dumps(
+            {**_VALID_CTX, "repair_track": "test_defect", "regression_of": "rec-9", "workflow_tier": "unknown"}
+        )
+        mock_update = _run_correct(
+            stored, {"workflow_tier": "CI", "repair_track_confirmed": "test_defect", "regression_of": None}
+        )
+        call_args, _ = mock_update.call_args
+        written = json.loads(call_args[1]["context_v2_json"])
+        assert written["workflow_tier"] == "unknown"
+        assert written["regression_of"] == "rec-9"
+        assert "repair_track_confirmed" not in written
+        assert call_args[1]["priority"] == "Critical"
+
+    def test_retrack_to_test_defect_refused(self) -> None:
+        stored = json.dumps({**_VALID_CTX, "repair_track": "product_regression", "workflow_tier": "CI"})
+        with (
+            patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value={"id": "rec-1", "context_v2_json": stored}),
+            patch("scripts.ops_data_portal.update_rec") as mock_update,
+        ):
+            with pytest.raises(RuntimeError, match="product_regression"):
+                correct_rec_context("rec-1", {"repair_track": "test_defect"})
+        mock_update.assert_not_called()

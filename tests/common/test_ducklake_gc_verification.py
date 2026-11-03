@@ -94,7 +94,7 @@ class FakeCon:
         self.executed.append(sql)
         self._last = sql
         for table in self._raise_for:
-            if f".{table} AT" in sql:
+            if f".{table} AS t AT" in sql:
                 raise RuntimeError(f"simulated: backing Parquet object missing for table {table!r}")
         return self
 
@@ -106,7 +106,7 @@ class FakeCon:
 
 
 def test_verify_read_path_scans_every_table_at_the_pinned_snapshot():
-    con = FakeCon(fetchone_map={".t1 AT": (10, 111), ".t2 AT": (5, 222)})
+    con = FakeCon(fetchone_map={".t1 AS t AT": (10, 111), ".t2 AS t AT": (5, 222)})
     result = gcver.verify_read_path(con, 42, ["t1", "t2"], catalog="cat")
     assert result["t1"] == {"row_count": 10, "value_aggregate": 111}
     assert result["t2"] == {"row_count": 5, "value_aggregate": 222}

@@ -1,42 +1,60 @@
 # On The Loop
 
-This file is a curated projection of `CLAUDE.md` and `docs/ROADMAP-PLATFORM.yaml` - the canonical sources of truth for this repository. Where this file conflicts with those sources, the canonical sources win. For agent consumption, load those files directly.
+This file is a curated projection of `CLAUDE.md`, `docs/contracts/north-star.yaml`, `docs/ROADMAP-PLATFORM.yaml` and `docs/DECISIONS.md` - the canonical sources of truth for this repository. Where this file conflicts with those sources, the canonical sources win. For agent consumption, load those files directly.
 
 ## North Star
 
-- **NS.1 - Storage is durable; compute is interchangeable.** S3 + open table format at every scale from GB to PB (DuckLake for the operational data plane per Decision 78). Engines are swappable per workload; data is not migrated to swap engines.
-- **NS.2 - Account ownership reflects IP ownership.** Personal AWS account, not shared work account. AUP, IP, and business-continuity reasons; cost is a tiebreaker.
-- **NS.3 - Compute lives where it economically belongs.** Hybrid by design. Cloud for orchestration and state; local rig for CPU-bound batch where home hardware otherwise idles. (cloud tier; the free tier runs orchestration and state locally, Decision 184 clause 2)
-- **NS.4 - The repo is for agents.** Documentation, configuration, and tooling are optimised for agent consumption. Narrative prose is a side effect, not an output.
-- **NS.5 - Self-describing typed tools over HTTPS, schema-as-code.** Agent surface is verbs (log, update, query, describe) exposed via Lambda Function URLs with AWS_IAM auth. Schema is Pydantic; YAML is generated where needed. (cloud-tier adapter; the free tier reaches the same verbs in-process, Decision 184 clause 2)
+<!-- north-star:begin generated from docs/contracts/north-star.yaml by validate_north_star; edit the contract, never this block -->
+The mission, and each entry's why, failure signal and binding scope, live in `docs/contracts/north-star.yaml`.
+
+- **NS.1** - Every substitutable boundary is a port; the vendor is an adapter; table data and blobs never have to be migrated to swap one.
+- **NS.2** - Source-available now, open source on proof.
+- **NS.3** - Every adapter runs where it economically belongs.
+- **NS.4** - The repo is for agents.
+- **NS.5** - The agent surface is named, typed, self-describing verbs.
+- **NS.6** - Improvement is proven, never asserted.
+- **NS.7** - The core is adopter-owned, and scale is never blocked.
+- **NS.8** - Autonomy is earned, never granted.
+- **NS.9** - Humans hold approval authority outside the engine.
+<!-- north-star:end -->
 
 ## What This Repo Is
 
-This is a platform repo, not a product repo. It provides the control plane, automation infrastructure, and governance framework on which products are built. The platform roadmap - tier items, candidate decisions, North Star - lives in `docs/ROADMAP-PLATFORM.yaml`.
+This repository is the upstream source of On The Loop, not of any adopter product. It provides the control plane, automation infrastructure, and governance framework on which adopter products are built. This repository's roadmap - tier items and candidate decisions - lives in `docs/ROADMAP-PLATFORM.yaml`. The north stars live in `docs/contracts/north-star.yaml`.
 
-The operational data plane is a single lakehouse; tenants are distinguished by a `project_id` column, not by separate stores. This is the platform multi-tenancy model.
+Tenancy is Decision 200's (`tenant_id` is the customer boundary, `project_id` repository identity); the planes are Decision 209 clause 2's (a multi-tenant, metadata-only control plane over customer-owned data planes).
 
-## Platform Subsystems
+## Direction
+
+Decided, not yet built; the build items are `deferred_post_mvp`, and the Decisions and tier items are canonical.
+
+- **The Signaller first** - an engineer who supervises the loop and hosts On The Loop for a team (Decision 232 clause 2; Decision 233 clause 3).
+- **One supervision surface** - one web UI over the engine's named verbs and GitHub, CLI plus localhost first (Decision 232 clause 3; T4.33).
+- **Dependency map headline** - work-item dependency mapping at the level of milestones and gates, in a visual language inspired by intuitive relationship mapping and schematic network diagrams; `docs/contracts/visual-grammar.yaml` owns its grammar (Decision 232 clause 5; T4.35).
+- **Adopter-owned core** - scale is never blocked, and the tooling that makes it painless is paid; "free" is price only and sets no licence term (Decision 233 clauses 1-2).
+- **Local sandboxed persona host** - the default local host: each persona run gets its own git clone under the open-source sandbox-runtime on the user's own machine (Decision 234 clause 1; T4.34).
+
+## Subsystems
 
 | Subsystem | Status | Notes |
 |-----------|--------|-------|
 | Recommendation + Decision Governance | [live] | Append-only ops lakehouse; single portal invariant enforced by validate.py |
 | CI / OIDC | [live] | GitHub-hosted runners; OIDC to personal AWS account; validate.py is the single gate |
 | Instruction Architecture (5-layer) | [live] | CLAUDE.md -> PROJECT_CONTEXT.md -> commands -> skills -> executor prompts |
-| Environment Taxonomy | [live] | Platform environments (sandbox/SIT/PROD) and their apply guards; defined by Decision 77 |
+| Environment Taxonomy | [live] | The operator deployment's environments (sandbox/SIT/PROD) and their apply guards; defined by Decision 77 |
 | Autonomous Executor | [partial] | repo-owned loop definition (ASL subset) hosted on Step Functions; executor freeze active pending CD.17 / T4.2 reversal |
 | Scheduled Agents | [partial] | Lambda dispatcher disabled May 2026; migrating to Claude Code scheduled-agent model |
-| Lambda Tooling Platform | [planned - T0.7+] | Per-Lambda manifests, Function URL auth, rendered loop definition per rec on Step Functions |
-| DuckLake Lakehouse | [planned - T2.16+] | DuckDB + DuckLake catalog on Neon; sole backend for the ops query path |
-| Verification / Validation Kernel | [planned - T3.1+] | Cross-session test harness with VP results tracked in ops telemetry |
+| Lambda Tooling | [partial] | Per-Lambda manifests and Function URL auth live (Decision 79); the rendered loop definition on Step Functions is T4.19 / T4.1 |
+| DuckLake Lakehouse | [live] | DuckDB + DuckLake catalog on Neon; sole backend for the ops tables (Decision 84) |
+| Verification / Validation Kernel | [partial] | Typed checks kernel and graduation registry live (T3.1); causal-chain verifier next (T3.2) |
 
 ## Documentation Model
 
 | Content Type | Current Form | End-state |
 |--------------|-------------|-----------|
 | Agent-instruction files | Markdown (CLAUDE.md, AGENTS.md) | Stays markdown per CD.20 / CD.23 - canonical agent artefacts |
-| Operational decisions, recommendations, session logs | Append-only lakehouse (primary); markdown / JSONL cache (derivative) | Governed lakehouse per T5.4 / T1.5 - local files become read-only snapshots |
-| Plans | Markdown (docs/plans/PLAN-*.md) | Schema-validated YAML (docs/plans/PLAN-*.yaml) per T1.11 |
+| Operational decisions, recommendations, session logs | Decisions in git (docs/DECISIONS.md), projected to the lakehouse; recommendations lakehouse-only with no local cache (Decision 215) | Decisions stay in git in every tier (Decision 196 clause 1); recommendations stay lakehouse-only; the session log is retired (T3.20 c6): session history is read from telemetry through the telemetry reader |
+| Plans | Schema-validated YAML (docs/plans/PLAN-*.yaml), T1.11 | Stays YAML; the retired .md format is deleted (Decision 85, amended by Decision 174) |
 | Contracts | YAML (docs/contracts/) | Canonical field semantics and enforcement pointers; standing prose-architecture docs are forbidden per Decision 86 |
 | Human portal files | Markdown (README.md, AGENTS.md, SECURITY.md, LICENSING.md, CONTRIBUTING.md, COMMERCIAL-LICENSE.md) | Stays markdown per CD.20 / CD.23 - portal files declare projection status; the licence-and-attribution artefacts are a named permanent prose class (Decision 171) |
 
@@ -50,22 +68,25 @@ The operational data plane is a single lakehouse; tenants are distinguished by a
 | `scripts/` | Operational scripts - preflight, ops portal, validate, build-lambda |
 | `config/` | Agent-consumed configuration: data quality, executor prompts, lambda manifests |
 | `terraform/` | Infrastructure-as-code for personal AWS account |
-| `docs/` | ROADMAP-PLATFORM.yaml, contracts, plans, decisions, session log |
-| `bin/` | Platform helper scripts including venv-python wrapper |
+| `docs/` | ROADMAP-PLATFORM.yaml, contracts, plans, decisions |
+| `bin/` | Helper scripts including venv-python wrapper |
 | `tests/` | Pytest test suite |
 | `.claude/` | Harness artefacts: commands, skills, hooks, settings |
 | `.github/` | CI workflows and OIDC configuration |
 
 ## Agent Workflow Entry Points
 
-- `/plan` - defined in `.claude/commands/plan.md`; clarifies intent, runs preflight, produces `docs/plans/PLAN-{slug}.md` on the harness-assigned session branch
+- `/orient` - defined in `.claude/commands/orient.md`; read-only orientation that ranks what to work on next
+- `/plan` - defined in `.claude/commands/plan.md`; clarifies intent, runs preflight, produces `docs/plans/PLAN-{slug}.yaml` on the harness-assigned session branch
 - `/implement` - defined in `.claude/commands/implement.md`; reads a completed plan file and executes all steps through verification, code review, and PR merge
 
 ## Canonical Sources
 
 - [CLAUDE.md](CLAUDE.md) - universal agent rules and operational constraints
 - [AGENTS.md](AGENTS.md) - role, environment, code style, safety, and branching rules
-- [docs/ROADMAP-PLATFORM.yaml](docs/ROADMAP-PLATFORM.yaml) - tier items, candidate decisions, North Star, cost projection
+- [docs/contracts/north-star.yaml](docs/contracts/north-star.yaml) - the mission and the north stars, each with its why, failure signal and binding scope
+- [docs/ROADMAP-PLATFORM.yaml](docs/ROADMAP-PLATFORM.yaml) - tier items, candidate decisions, cost projection
+- [docs/DECISIONS.md](docs/DECISIONS.md) - ratified decisions, the rationale behind the Decision numbers cited here
 - [SECURITY.md](SECURITY.md) - vulnerability reporting
 - [EVALUATION-PROMPTS.yaml](EVALUATION-PROMPTS.yaml) - evaluator guided-tour index: 12 architecture/governance questions with answer-loci into canonical sources
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 _ROOT = Path(__file__).resolve().parent.parent
 _DQ_DIR = _ROOT / "config" / "agent" / "data_quality"
@@ -17,12 +18,18 @@ class Check:
     table: str
     column: str | None
     test_type: str
-    sql: str
+    kind: str | None  # a ducklake_dq_checks.DQ_KINDS key; None = not runnable on the reader (SKIP)
     description: str
     severity: str = "error"
     enforced: bool = True
     exclude_before: str | None = None
     backend: str = "ducklake"  # sole backend: the DuckLake closed reader (Decision 84 I-1)
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+def dq_request(check: Check) -> dict[str, Any]:
+    """The dq_check request a check sends to the reader (printed by --dry-run; no SQL exists client-side)."""
+    return {"action": "dq_check", "check": check.kind, "table": check.table, "params": check.params}
 
 
 @dataclass

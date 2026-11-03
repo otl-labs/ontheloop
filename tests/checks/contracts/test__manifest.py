@@ -94,6 +94,8 @@ _CLOSURE_INPUTS: dict[str, tuple[str, ...]] = {
         "config/lambda/ducklake/field_semantics.static.yaml",
         "src/common/ducklake_maintenance_scope.py",
         "src/common/ducklake_scd2_schema.py",
+        "src/common/ducklake_named_reads.py",
+        "src/common/ducklake_write_verbs.py",
         "src/common/ducklake_partition_spec.py",
         "scripts/checks/contracts/validate_maintenance_policy_matrix.py",
         "scripts/checks/_common.py",
@@ -132,6 +134,55 @@ class TestPromotedGateClosures:
         assert not self._covered(name, "terraform/personal/main.tf")
 
 
+class TestRoadmapArchiveGlobs:
+    """Decision 227: both roadmap-reading contracts checks rerun on a diff touching only the archive or
+    only the hydration module their load() import closure now reaches."""
+
+    _NAMES = ("validate_ports_contract", "validate_project_configuration")
+
+    @staticmethod
+    def _globs(name: str) -> tuple[str, ...]:
+        return next(e for e in _manifest.ENTRIES if e.name == name).pre_globs or ()
+
+    @pytest.mark.parametrize("name", _NAMES)
+    @pytest.mark.parametrize("path", ["docs/ROADMAP-PLATFORM-ARCHIVE.yaml", "scripts/roadmap/roadmap_archive.py"])
+    def test_an_archive_only_diff_matches_the_gate(self, name: str, path: str) -> None:
+        assert any(fnmatch(path, glob) for glob in self._globs(name))
+
+    @pytest.mark.parametrize("name", _NAMES)
+    def test_an_unrelated_roadmap_package_path_is_not_matched(self, name: str) -> None:
+        assert not any(fnmatch("scripts/roadmap/plan_audit.py", glob) for glob in self._globs(name))
+
+
+class TestGithubOrgTransferPromotedUngated:
+    """The org-transfer evaluator reads the contract plus both trust files (and, once the literal sweep
+    extends it, every tracked file), so it is ungated like validate_portal_drift."""
+
+    def test_is_dispatched_in_pre_and_full(self) -> None:
+        pre_names = {step.name for step in registry.pre_sequence() if step.kind == "check"}
+        full_names = {step.name for step in registry.full_sequence() if step.kind == "check"}
+        assert "validate_github_org_transfer" in pre_names
+        assert "validate_github_org_transfer" in full_names
+
+    def test_declares_no_pre_globs(self) -> None:
+        entry = next(e for e in _manifest.ENTRIES if e.name == "validate_github_org_transfer")
+        assert entry.pre_globs is None
+
+
+class TestAccountCredentialInventoryPromoted:
+    """The inventory's refs may name any repository YAML file, so the check is ungated like the org-transfer one."""
+
+    def test_is_dispatched_in_pre_and_full(self) -> None:
+        pre_names = {step.name for step in registry.pre_sequence() if step.kind == "check"}
+        full_names = {step.name for step in registry.full_sequence() if step.kind == "check"}
+        assert "validate_account_credential_inventory" in pre_names
+        assert "validate_account_credential_inventory" in full_names
+
+    def test_declares_no_pre_globs(self) -> None:
+        entry = next(e for e in _manifest.ENTRIES if e.name == "validate_account_credential_inventory")
+        assert entry.pre_globs is None
+
+
 class TestPortalDriftPromotedUngated:
     """Promoted into --pre WITHOUT globs, deliberately. Every answer_loci path it resolves comes
     OUT of EVALUATION-PROMPTS.yaml at run time and may name any path in the repo, so no static
@@ -145,3 +196,26 @@ class TestPortalDriftPromotedUngated:
     def test_declares_no_pre_globs(self) -> None:
         entry = next(e for e in _manifest.ENTRIES if e.name == "validate_portal_drift")
         assert entry.pre_globs is None
+
+
+class TestTelemetryFieldRealizationRegistered:
+    """The realization check runs in both tiers and its globs cover every input it reads."""
+
+    def test_is_dispatched_in_pre_and_full(self) -> None:
+        pre_names = {step.name for step in registry.pre_sequence() if step.kind == "check"}
+        full_names = {step.name for step in registry.full_sequence() if step.kind == "check"}
+        assert "validate_telemetry_field_realization" in pre_names
+        assert "validate_telemetry_field_realization" in full_names
+
+    def test_pre_globs_cover_the_inputs(self) -> None:
+        entry = next(e for e in _manifest.ENTRIES if e.name == "validate_telemetry_field_realization")
+        globs = set(entry.pre_globs or ())
+        for needed in (
+            "docs/contracts/telemetry_*.yaml",
+            "config/telemetry/parser_versions.yaml",
+            "tests/fixtures/turn_capture/golden/**",
+            "config/lambda/ducklake/field_semantics.yaml",
+            "docs/ROADMAP-PLATFORM.yaml",
+            "scripts/contracts_schema.py",
+        ):
+            assert needed in globs

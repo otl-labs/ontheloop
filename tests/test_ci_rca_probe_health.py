@@ -28,6 +28,7 @@ from scripts.ci_rca.probe_health import (
     main,
 )
 from scripts.executor.acceptance_lint import lint_acceptance_command
+from scripts.preflight.recs_signals_source import RecsSignalInputs
 
 NOW = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
 
@@ -536,24 +537,54 @@ class TestMain:
         assert main([]) == 2
         assert "usage:" in capsys.readouterr().out
 
-    def test_assert_clear_no_cache_file_returns_0(self, tmp_path) -> None:
-        missing = tmp_path / "does-not-exist.jsonl"
-        with patch("scripts.executor.jsonl_store.RECS_JSONL", missing):
+
+class TestAssertClearReaderBacked:
+    """--assert-clear reads signal rows via fetch_recs_signal_inputs, fails closed, never opens the cache file."""
+
+    _FETCH = "scripts.preflight.recs_signals_source.fetch_recs_signal_inputs"
+
+    @staticmethod
+    def _inputs(status: str, rows: list[dict] | None, error: str | None = None) -> RecsSignalInputs:
+        return RecsSignalInputs(status, {"open_count": 0} if rows is not None else None, rows, error)
+
+    def _undetermined_rows(self) -> list[dict]:
+        now = datetime.now(timezone.utc).isoformat()
+        ctx = json.dumps({"rca_confidence": "undetermined"})
+        return [
+            {"source": "ci_rca", "status": "open", "created_timestamp": now, "context_v2_json": ctx}
+            for _ in range(ABSTENTION_MIN_SAMPLE)
+        ]
+
+    def test_exits_1_when_signal_inputs_unavailable(self, capsys) -> None:
+        with patch(self._FETCH, return_value=self._inputs("unavailable", None, "ReaderInvokeError: down")):
+            assert main(["--assert-clear"]) == 1
+        assert "unavailable" in capsys.readouterr().err
+
+    def test_exits_nonzero_while_abstention_holds(self) -> None:
+        with patch(self._FETCH, return_value=self._inputs("ok", self._undetermined_rows())):
+            assert main(["--assert-clear"]) != 0
+
+    def test_exits_0_when_clear(self) -> None:
+        with patch(self._FETCH, return_value=self._inputs("ok", [])):
             assert main(["--assert-clear"]) == 0
 
-    def test_assert_clear_reads_cache_file(self, tmp_path) -> None:
-        cache_file = tmp_path / "recs.jsonl"
-        now = datetime.now(timezone.utc)
-        rows = []
-        for _ in range(ABSTENTION_MIN_SAMPLE):
-            rows.append(
-                {
-                    "source": "ci_rca",
-                    "status": "open",
-                    "created_timestamp": now.isoformat(),
-                    "context_v2_json": json.dumps({"rca_confidence": "undetermined"}),
-                }
-            )
-        cache_file.write_text("\n".join(json.dumps(r) for r in rows) + "\n\n", encoding="utf-8")
-        with patch("scripts.executor.jsonl_store.RECS_JSONL", cache_file):
-            assert main(["--assert-clear"]) != 0
+    def test_never_opens_the_cache_file(self, tmp_path) -> None:
+        stale = tmp_path / "recs.jsonl"
+        stale.write_text(json.dumps(self._undetermined_rows()[0]) + "\n", encoding="utf-8")
+        with (
+            patch("scripts.executor.jsonl_store.RECS_JSONL", stale),
+            patch(self._FETCH, return_value=self._inputs("ok", [])),
+        ):
+            assert main(["--assert-clear"]) == 0
+
+
+class TestEscapeModeRowAndDefaultNow:
+    def test_row_escape_mode_reads_detection_gap(self) -> None:
+        from scripts.ci_rca.probe_health import _row_escape_mode
+
+        row = {"context_v2_json": json.dumps({"detection_gap": {"escape_mode": "undetermined"}})}
+        assert _row_escape_mode(row) == "undetermined"
+        assert _row_escape_mode({"context_v2_json": json.dumps({"detection_gap": "x"})}) is None
+
+    def test_escape_mode_rate_default_now(self) -> None:
+        assert compute_escape_mode_abstention_rate([]) == (0, 0, 0.0)

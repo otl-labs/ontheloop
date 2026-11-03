@@ -23,7 +23,6 @@ CI_POLL_TIMEOUT_SECONDS = 600  # 10 minutes (CI takes ~4min; allow for startup +
 DEFAULT_MAX_AGE_DAYS = 90
 LOGS_DIR = ROOT / "logs"
 ARCHIVE_DIR = LOGS_DIR / "archive"
-TELEMETRY_ACTIVE_SESSION_FILE = ROOT / "logs" / ".telemetry-active-session.json"
 _PRUNE_SKIP_NAMES = frozenset(
     {
         "transcripts",

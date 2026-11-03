@@ -1,0 +1,1000 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "telemetry-claude-p-capture-adapter"
+intent: >-
+  One shared, host-neutral capture adapter for every `claude -p` run in GitHub Actions, with ci-rca captured live: the
+  shared retry wrapper fixes each attempt's session id and writes a manifest, one composite action reads the GitHub facts
+  and calls one producer command that pins each session with a host-run sidecar and runs a synchronous final pass, and
+  parser_version 8 writes the top-level agent run shape (T3.22 c5). It is the adapter the release's CLI persona backend
+  reuses (Benjamin 2026-10-29, cmsg_012XgaFy8VaDQbxP5D8nC9584BNMSPTp1X5Q7G3F1m3eJ9), not a throwaway. No IAM change.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-telemetry-claude-p-capture-adapter.yaml
+phase: >-
+  T3.20 (in_progress; c9 open, rec-4415). Plan 2 of 3 for c9: c9 names ci-rca AND subagent-plan-review, so it closes
+  with plan 3 (producer admission and plan-review capture, rec-4420), not here. closes_criteria is therefore empty.
+  Bundles rec-4424 (switch).
+closes_criteria: []
+scope:
+  - file: scripts/ci/claude_p_retry.sh
+    action: Modify
+    purpose: >-
+      Per attempt: a fresh uuid (`/proc/sys/kernel/random/uuid`, else `python3 -c 'import uuid;print(uuid.uuid4())'`)
+      passed as `--session-id <uuid>` ahead of the caller's args; append (never truncate) two compact JSON lines to
+      "${OUTPUT_FILE}.sessions.jsonl": BEFORE invoking claude {"attempt": n, "session_id": "<uuid>", "started_at":
+      "<UTC ISO-8601 with milliseconds, Z>"} (`date -u +%Y-%m-%dT%H:%M:%S.%3NZ`) (so a session killed by a step timeout is still found), and after it {"session_id": "<uuid>",
+      "exit": <int>, "transient": <bool>} (attempt counts per wrapper invocation; two invocations in one job, as
+      reconcile does, append to the same file). A manifest write failure is ignored and never changes the exit code. A
+      caller passing --session-id, --resume, --continue, --fork-session or --no-session-persistence (also the -r and -c
+      short forms and any --flag=value spelling) gets the usage exit 1
+      (capture needs one fresh persisted session per attempt). Reads no new environment variable, so it works under
+      review.sh's env -i. Retry and exit semantics unchanged.
+  - file: scripts/telemetry_capture/switch.py
+    action: Modify
+    purpose: >-
+      rec-4424: in switch_state, a `git show` that returns None (timeout or OSError) after its ref resolved returns
+      (False, source) instead of falling through to the next ref or the working tree. New ci_gate(repo_root, *,
+      workflow_path, ref, repository) -> CiGate(mode, entry, source, reason): ONE read of capture.yaml by the SW-3 order
+      (same rec-4424 rule), mode "ci" only when enabled is true AND ci_repository equals repository AND ref ==
+      "refs/heads/main" AND exactly one well-formed ci_workflows entry has workflow == workflow_path; else mode "off"
+      with one reason token (switch_off, repository_mismatch, ref_not_main, not_allow_listed, malformed_entry).
+      switch_mode(env, repo_root, ci=None): with a CiGate, OTL_TURN_CAPTURE=off still wins, the GITHUB_ACTIONS,
+      CLAUDE_CODE_REMOTE and smoke branches are skipped and the gate's mode is returned; without one (every hook
+      caller) behaviour is unchanged, so hook capture stays off in Actions.
+  - file: scripts/telemetry_capture/runner.py
+    action: Modify
+    purpose: >-
+      run_pass gains keyword ci_gate (default None) handed to switch_mode; mode "ci" runs like "on". The pin step uses
+      host_run.resolve_pin (rule P-5) instead of project_ref_pin: a conflict finishes "deferred" with diag pin_conflict,
+      no pin finishes "deferred" with deferred_no_pin (unchanged token). Nothing else changes.
+  - file: scripts/telemetry_capture/ci_pass.py
+    action: Create
+    purpose: >-
+      `ci-pass`: takes the manifest globs and every host fact as arguments (Decision 212: no GITHUB_* read here):
+      --manifest (repeatable glob), --workflow-path, --ref, --repository, --run-id, --run-attempt, --job, --event-name,
+      --sha (the triggering commit), --checkout-sha (optional: the checked-out commit), --projects-dir (default $HOME/.claude/projects), --budget-s (default 180). Validates each fact (run id and
+      attempt digits; job [A-Za-z0-9_.-]{1,100}; event one of the closed Actions trigger values plan 1 declares (workflow_run,
+      workflow_dispatch, push, schedule; any other event is off reason unsupported_event); sha and checkout-sha 40 or 64 hex; workflow path under
+      .github/workflows/), else off reason bad_host_fact. Reads every manifest line (malformed lines counted), merges the start and
+      result lines by session_id (a start line alone is a killed attempt, still captured), and gives each session retry_ordinal = its 1-based rank by (started_at, then manifest order: file order, then line order) across all
+      lines read, so one call per job covers every invocation. ci_gate first; off prints one line and exits 0. Per
+      session: exactly one <projects-dir>/*/<sid>.jsonl (none: transcript_absent; several: transcript_ambiguous);
+      writes <sid>/host-run.json by temp file and os.replace, unless a sidecar exists: identical bytes reuse it,
+      different bytes skip the session as pin_sidecar_conflict (never overwritten). project_ref comes from the one
+      registered home of project.ref (Decision 224): the --project-ref= flag of the session_start_log_turn SessionStart
+      hook in <repo root>/.claude/settings.json, read by the SW-3 order like capture.yaml and parsed with
+      transcript.hook_script and PIN_FLAG; none or several -> off reason no_project_ref. Sidecar = canonical JSON
+      {schema_version: 1, project_ref, agent, content_policy, host: {kind: gha, run_id, run_attempt,
+      job, retry_ordinal, event_name, repository, workflow_path, ref, sha, checkout_sha (absent when not given)}} (the
+      gate's entry supplies agent and
+      content_policy).
+      Then run_pass(event "ci_final", final=True, ci_gate=gate, budget = the remaining total budget). Never runs the
+      in-session source check or any reader call. Prints only counts and fixed tokens (Decision 101: no id, ref, sha,
+      path or content): one `CI_CAPTURE session=<ordinal> outcome=<outcome> rows=<n>` line per session and one
+      `CI_CAPTURE done sessions=<n> sent=<n> no_rows=<n> deferred=<n> stopped=<n> halted=<n> skipped=<n>` line, or
+      `CI_CAPTURE off reason=<token> sessions=<n>`. Exits 0 on every path except argparse usage.
+  - file: scripts/telemetry_capture/__main__.py
+    action: Modify
+    purpose: >-
+      Register the ci-pass subcommand (a thin delegate to ci_pass.main_ci_pass) and name it in the module docstring;
+      _cmd_pass's refusal uses host_run.resolve_pin, so an operator pass works on a sidecar-only tree and refuses a
+      conflicted one with a fixed token.
+  - file: config/telemetry/capture.yaml
+    action: Modify
+    purpose: >-
+      Add ci_repository: otl-labs/ontheloop; ci_workflows: [{workflow: .github/workflows/ci-rca.yml, agent: ci_rca,
+      content_policy: full}] (agent = the source_registry key, which plan 1 makes both agent_type and the root's
+      workflow) (no project_ref: it has one home, .claude/settings.json); ci_uncaptured: [{call_site:
+      .github/actions/subagent-plan-review, reason: "plan review needs the capture role (producer-admission plan)",
+      owner: rec-4420}] (the one pending entry, deleted by plan 3). Header comment gains the CI path: read from
+      origin/main first, so removing an entry (or enabled: false) on main stops CI capture at the next run.
+  - file: .github/actions/telemetry-ci-capture/action.yml
+    action: Create
+    purpose: >-
+      Composite action, no outputs. Inputs: manifests (required; newline-separated globs), aws-access-key-id,
+      aws-secret-access-key, aws-session-token (optional, for plan 3's capture role; a composite never signs in itself,
+      validate_actions_account_id_masking R4). One `shell: bash` step whose env block binds the inputs to
+      CAPTURE_MANIFESTS and CAPTURE_AWS_* and whose run body is only `bash "${{ github.action_path }}/capture.sh"`
+      (Decision 162 R2/R3 shape).
+  - file: .github/actions/telemetry-ci-capture/capture.sh
+    action: Create
+    purpose: >-
+      The tested delegate, TOTAL: `set +e`, exit 0 on every path, never writes GITHUB_OUTPUT, GITHUB_ENV or
+      GITHUB_STEP_SUMMARY. Repo root = three levels above the script's own directory (github.action_path), so a caller
+      can run a main-tooling copy while its root checkout is another commit. Derives the workflow path from
+      GITHUB_WORKFLOW_REF (strip "${GITHUB_REPOSITORY}/" and "@<ref>") and passes GITHUB_REF, GITHUB_REPOSITORY,
+      GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, GITHUB_JOB, GITHUB_EVENT_NAME and GITHUB_SHA (--sha, the triggering commit) as
+      ci-pass arguments, plus --checkout-sha from `git -C "$GITHUB_WORKSPACE" rev-parse HEAD` when that succeeds (for
+      workflow_run, GITHUB_SHA is main's head, not the checked-out failing commit), one
+      --manifest per non-empty CAPTURE_MANIFESTS line. When all three CAPTURE_AWS_* are set, ci-pass runs under `env -u
+      AWS_PROFILE -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN -u AWS_SECURITY_TOKEN` with only
+      those three set. Runs `<root>/bin/venv-python -m scripts.telemetry_capture ci-pass` from <root> under `timeout
+      240`; no executable venv python prints `CI_CAPTURE skipped reason=no_python`; a timeout prints `CI_CAPTURE
+      skipped reason=timeout`. Echoes only ci-pass's CI_CAPTURE lines; a nonzero exit or no CI_CAPTURE line prints `CI_CAPTURE skipped
+      reason=ci_pass_failed` (for example an import failure on old code).
+  - file: .github/workflows/ci-rca.yml
+    action: Modify
+    purpose: >-
+      Job timeout-minutes 20 -> 25; the "Run ci-rca agent" step gains timeout-minutes 17 (keeps today's effective agent
+      budget); a new last step "Capture agent telemetry" with `if: always()`, `continue-on-error: true` (the workspace is
+      the failing commit, which may predate this action: a missing action must never red the job), timeout-minutes 5,
+      `uses: ./.github/actions/telemetry-ci-capture`, `with: manifests: /tmp/ci-rca-output.json.sessions.jsonl`. Runs
+      under the branch role already configured in the job (it holds the writer URL invoke and SSM read; no IAM change).
+      No transcript is ever uploaded as an artifact.
+  - file: src/turn_capture/transcript.py
+    action: Modify
+    purpose: >-
+      TranscriptTree gains host_run() -> bytes | None (HOST_RUN_FILE = "host-run.json"): FsTree reads
+      <session dir>/host-run.json, MemTree reads files["<sid>/host-run.json"]. project_ref_pin is unchanged (the hook pin
+      alone).
+  - file: src/turn_capture/host_run.py
+    action: Create
+    purpose: >-
+      Pure, stdlib only. parse_host_run(bytes) -> HostRun | None (strict schema_version 1 shape and the ci-pass value
+      grammar; anything else None, counted host_run_malformed). render_host_run_ref(host) ->
+      "gha:<run_id>/<run_attempt>/<job>/<retry_ordinal>", checked against the sibling contract's host_run_ref grammar.
+      resolve_pin(tree) -> (project_ref | None, token) implementing rule P-5: hook pin only -> it; sidecar only -> its
+      project_ref; both equal -> it; both differ -> (None, "pin_conflict"); neither -> (None, "no_pin"). A malformed
+      sidecar counts as absent. top_level_agent_rows(parsed, ctx, host, diag): for the ROOT stream once its open row is
+      due (rule D-1), one telemetry_agents open row at session_started_at and, when parsed.final, one close row at the
+      root close anchor with the root close outcome (C-3); shaped as plan 1's run_shapes.top_level: session_ref = the root
+      session ref, entity_ref = "<root session entity_ref>/run", external_ref = "<root session entity_ref>/run#0/open"
+      and "#0/close", no observation_ref (observation_id NULL), agent_type = the sidecar agent, trigger = the host
+      event_name verbatim, workflow_run_id = run_id, host_run_ref from the sidecar, model = the root's first model,
+      version = the first record version. Sub-agent rows are unchanged.
+  - file: src/turn_capture/record_turn.py
+    action: Modify
+    purpose: >-
+      PARSER_VERSION 8, PRODUCER_VERSION "turn-capture-8". Reads tree.host_run() once per pass into the Ctx (host and
+      content_policy, default "full" when no sidecar) and appends top_level_agent_rows to the telemetry_agents batch.
+      billing_shape and persona_backend unchanged (Decision 206 cl.8: CI model_call rows keep persona_backend NULL and
+      billing_shape fixed_non_rollover_allowance).
+  - file: src/turn_capture/transcripts.py
+    action: Modify
+    purpose: >-
+      Ctx gains host and content_policy fields. When content_policy is "withheld", every row that would carry content
+      is a typed omission instead: content_omitted_reason withheld_by_policy, content and content_uri absent,
+      content_sha256 = SHA-256 of the empty byte string and content_bytes 0 (plan 1's write-enforced definition; a raw
+      digest of a short reply is guessable, Decision 238 cl.1); so no
+      blob is delivered for such a tree. "full" is today's behaviour.
+  - file: src/turn_capture/sessions.py
+    action: Modify
+    purpose: >-
+      With a sidecar: the root open row's workflow is the sidecar agent (the source_registry key, plan 1's rule; ahead
+      of WA-1..WA-3); checkout_sha,
+      checkout_base_sha and checkout_dirty come from the hook pin where present, else checkout_sha = the sidecar's
+      checkout_sha when present (counted checkout_from_host_run; never the triggering sha). Without a sidecar: unchanged.
+  - file: config/telemetry/parser_versions.yaml
+    action: Modify
+    purpose: claude_code current 8 and a v8 history entry (date, regenerated golden_digest, reason naming P-5, the sidecar and the top-level rows).
+  - file: tests/fixtures/turn_capture/golden/index.json
+    action: Modify
+    purpose: List the four new v8 cases after the existing 53 (purpose text unchanged).
+  - file: tests/fixtures/turn_capture/golden/ci_rca_hook_pin_and_host_run.json
+    action: Create
+    purpose: Two-turn claude -p root with the repo pin hook attachment and a full-policy sidecar; top-level open and close rows, agent_type and workflow ci_rca (the source_registry key), checkout facts from the hook pin.
+  - file: tests/fixtures/turn_capture/golden/host_run_only_withheld.json
+    action: Create
+    purpose: Hookless root (plan-review shape) with a withheld-policy sidecar; withheld_by_policy omissions (empty-string digest, 0 bytes), checkout_sha from the sidecar checkout_sha.
+  - file: tests/fixtures/turn_capture/golden/host_run_malformed.json
+    action: Create
+    purpose: A hook-pinned root with a malformed sidecar; rows as without a sidecar (no top-level rows), host_run_malformed counted.
+  - file: tests/fixtures/turn_capture/golden/host_run_retry_attempts.json
+    action: Create
+    purpose: A retry's second session (retry_ordinal 2) whose close outcome is failed on an API-error record; host_run_ref ends /2.
+  - file: tests/fixtures/turn_capture_v8_cases.py
+    action: Create
+    purpose: >-
+      Builders for the four v8 cases (the v6 builders' shape). No pin-conflict corpus case: every corpus consumer calls
+      record_turn with a fixed project_ref, and P-5 lives in the runner and pass, so the conflict is proven in
+      test_host_run.py (P-5 table), test_runner.py (deferred pin_conflict) and test_main.py (pass refusal).
+  - file: tests/fixtures/turn_capture/golden/pin_first_record_without_uuid.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/multiblock_response_interleaved_tool_results.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/meta_and_companion_records.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/tool_result_error.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/tool_result_interrupted.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/hook_blocked_tool_call.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/sidecar_present.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/sidecar_absent.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/subagent_sync.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/subagent_background_with_completion.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/subagent_background_without_completion.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/nested_subagent_depth2.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/hooks_resume_and_compact.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/empty_thinking_and_image_blocks.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/orphan_tool_result.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/unknown_record_and_attachment_types.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/trailing_partial_line.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/malformed_line.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/large_tool_result_over_64k.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/observed_real_shapes.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/secrets.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/hooks_before_first_record.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/mcp_overflow_saved_output.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/full_output_omitted_over_cap.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/reasoning_visibility_forms.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/gate_and_precommit_markers.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/close_cancelled_mid_stream.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/close_cancelled_running_tool.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/close_failed_api_error.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/resume_after_interrupt.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/fork_branch_copied_head.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/fork_session_copied_head.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/fork_session_nested.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/hook_command_names.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/no_reply_session.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/subagent_usage_final_and_spawn_correction.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/background_notice_statuses.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/resume_segment_closes.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/session_provenance_facts.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/model_call_request_fields.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/stop_witness_closes.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/stop_blocked_witness_first.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/stop_blocked_feedback_first.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/stop_blocked_then_interrupted.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/api_error_self_close.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/stop_witness_not_at_rest.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/prompt_open_row.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/workflow_from_skill.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/subagent_workflow_skills.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/status_markers.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/late_startup_group.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/late_resume_group.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/fixtures/turn_capture/golden/resume_hook_twins.json
+    action: Modify
+    purpose: Regenerated expected_rows at parser_version 8 (the parser_version field only; no row added or removed).
+  - file: tests/telemetry/fixtures/derived_golden_state.yaml
+    action: Modify
+    purpose: >-
+      Header parser_version 7 -> 8 (test_derive.py pins it). No existing tree's emitted rows change at v8 (no sidecar), so
+      no expectation is re-authored and the new v8 cases get no entries (the oracle reconciliation covers them); the header
+      move cites this plan in its why.
+  - file: tests/telemetry/fixtures/derived_golden_rollups.yaml
+    action: Modify
+    purpose: Header parser_version 7 -> 8, as derived_golden_state.yaml.
+  - file: tests/turn_capture/test_record_turn.py
+    action: Modify
+    purpose: >-
+      Import V8_BUILDERS and add it to test_new_cases_are_built_from_their_builders; the version pin reads
+      turn-capture-8 and 8 (moved with the bump, not weakened).
+  - file: tests/turn_capture/test_transcript.py
+    action: Modify
+    purpose: host_run() on FsTree (file present, absent) and MemTree; project_ref_pin unchanged by a sidecar.
+  - file: tests/turn_capture/test_sessions.py
+    action: Modify
+    purpose: With a sidecar the root open row's workflow is the sidecar agent and checkout_sha falls back to the sidecar checkout_sha (checkout_from_host_run counted), never its triggering sha; the hook pin wins where present.
+  - file: tests/turn_capture/test_transcripts.py
+    action: Modify
+    purpose: content_policy withheld yields withheld_by_policy omissions with the empty-string sha256, content_bytes 0 and no content or content_uri (never the raw digest); full is unchanged.
+  - file: tests/telemetry_capture/test_runner.py
+    action: Modify
+    purpose: >-
+      New nodes test_run_pass_ci_gate_runs_under_github_actions (with a ci gate it runs under GITHUB_ACTIONS; without one it stays off) and
+      test_run_pass_defers_a_pin_conflict (a P-5 conflict finishes deferred with pin_conflict).
+  - file: tests/telemetry_capture/test_main.py
+    action: Modify
+    purpose: ci-pass is registered and delegates; pass accepts a sidecar-only tree and refuses a conflicted one with a fixed token.
+  - file: scripts/telemetry_capture/cursor_tree.py
+    action: Modify
+    purpose: CursorTree.host_run() passes through to the wrapped tree, so verify's expected_rows rebuild sees the same sidecar the producer saw.
+  - file: tests/telemetry_capture/test_cursor_tree.py
+    action: Modify
+    purpose: CursorTree.host_run() returns the wrapped tree's bytes and None when absent.
+  - file: tests/turn_capture/test_host_run.py
+    action: Create
+    purpose: P-5 table, sidecar grammar, host_run_ref rendering, top-level rows (open due rule, close only on final, no observation_ref), withheld omissions (content and content_uri absent, empty-string sha256, content_bytes 0), the P-5 pin_conflict case.
+  - file: docs/contracts/telemetry_agents.yaml
+    action: Modify
+    purpose: >-
+      CLASS A (needs Benjamin's word at build merge). host_run_ref gains dq_intent.required_when: {trigger: [workflow_run, workflow_dispatch, push, schedule, eventbridge, manual, smoke_test]}
+      (plan 1's seven top-level trigger values; a top-level row must carry it), undated: required_when is not a dateable
+      kind (src/row_rules/rules.py _DATEABLE_KINDS), and no producer writes a top-level trigger before parser_version 8
+      (sub-agent rows carry subagent_sync or subagent_background; the deploy smoke vector carries no trigger), so nothing
+      older can trip it; it lands now, after the production column add, because provisioning refuses to add a column
+      that carries a rule (Decision 222). host_run_ref and workflow_run_id populated_by -> claude_code from parser_version 8 (realization:
+      both move from unproduced to produced.claude_code). A governance note: claude_code top-level run rows from v8
+      (rule P-5, the sidecar fields, retry_ordinal ranking). amendment_log entries dated the build day.
+  - file: docs/contracts/telemetry-event-envelope.yaml
+    action: Modify
+    purpose: CLASS A. A PARSER_VERSION 8 governance note after the PARSER_VERSION 7 note (sidecar pin source, rule P-5, top-level run rows, withheld policy, no hook capture in Actions) and its amendment_log entry.
+  - file: docs/contracts/telemetry_transcripts.yaml
+    action: Modify
+    purpose: CLASS A. Note that claude_code writes withheld_by_policy from v8 when a tree's sidecar content_policy is withheld; realization updated; amendment_log.
+  - file: docs/contracts/telemetry_sessions.yaml
+    action: Modify
+    purpose: CLASS A. Note that from v8 a top-level root's workflow is its agent's source_registry key (the allow-list entry's agent) and checkout_sha falls back to the sidecar's host.checkout_sha when present (never host.sha, the triggering commit); the producer still makes no live git call (the sidecar value is a host-recorded fact written before the pass); amendment_log.
+  - file: config/lambda/ducklake/field_semantics.yaml
+    action: Modify
+    purpose: Regenerated from the contracts by the existing generator (never hand-edited); carries the required_when rule to every DuckLake function.
+  - file: tests/telemetry/test_append_host_run_ref.py
+    action: Create
+    purpose: >-
+      Over the generated field_semantics: prepare_batch rejects a top-level telemetry_agents row (trigger
+      workflow_dispatch) without host_run_ref (422 row_rule required_when) and accepts it with one; a sub-agent row
+      (trigger subagent_sync) and the deploy smoke vector's agent row (no trigger) pass without one. A new module, so
+      test_append.py (495 lines) and tests/row_rules/test_rules.py (489) are not grown.
+  - file: src/common/ducklake_event_read_sql.py
+    action: Modify
+    purpose: ROOT_SESSIONS_SQL also returns host_run_ref = the first non-null host_run_ref (by the existing _FIRST ordering) of the root session's own telemetry_agents rows whose observation_id IS NULL; NULL for every interactive root.
+  - file: src/common/ducklake_event_read_verbs.py
+    action: Modify
+    purpose: telemetry_root_sessions description names host_run_ref.
+  - file: src/common/ducklake_reader_client.py
+    action: Modify
+    purpose: VERB_FIELDS["telemetry_root_sessions"] gains host_run_ref.
+  - file: docs/contracts/ducklake_reader.yaml
+    action: Modify
+    purpose: The telemetry_root_sessions verb line names host_run_ref (the root's top-level run identity, NULL for interactive roots); amendment_log.
+  - file: tests/common/test_ducklake_event_verification_verbs.py
+    action: Modify
+    purpose: A root with a top-level agent pair returns its host_run_ref; an interactive root and a sub-agent pair return NULL.
+  - file: scripts/telemetry_verify/completeness.py
+    action: Modify
+    purpose: >-
+      CompletenessResult gains captured_host_runs. A captured root with a non-null host_run_ref counts there and in
+      neither captured_without_key nor captured_not_listed (no harness list holds a CI run, and captured_without_key is
+      subtracted from listed_not_captured, so a CI root would otherwise mask a real gap).
+  - file: scripts/telemetry_verify/__main__.py
+    action: Modify
+    purpose: completeness_line prints captured_host_runs.
+  - file: tests/telemetry_verify/test_main.py
+    action: Modify
+    purpose: >-
+      COMPLETENESS_LINE gains captured_host_runs=\d+ after captured_without_key (moved, not weakened: every existing
+      field stays pinned in place); a new node asserts the printed count for a host-run root.
+  - file: tests/telemetry_verify/test_completeness.py
+    action: Modify
+    purpose: Host-run roots are counted in captured_host_runs and never reduce unexplained_not_captured.
+  - file: scripts/checks/ci_guards/validate_claude_p_retry_wrapper.py
+    action: Modify
+    purpose: >-
+      One check, two rules (the pairing joins the wrapper rule rather than a new check, so no new manifest, accounting
+      or taxonomy row). Rule 1 also scans .github/actions/**/*.{yml,yaml,sh} for unwrapped claude -p. Rule 2 (pairing):
+      a call site is a workflow job whose run bodies invoke claude_p_retry.sh or that uses a local composite action whose
+      files invoke it; every such job holds exactly one step, with if: always() and continue-on-error: true, whose uses
+      path ends with
+      .github/actions/telemetry-ci-capture, unless the job invokes the wrapper in no run body of its own and every
+      claude-invoking action it uses is a ci_uncaptured call_site; a paired job's workflow must be a ci_workflows entry
+      or hold a ci_uncaptured call site (else it would read off not_allow_listed silently); every
+      ci_workflows entry names an existing workflow whose call-site jobs all pair; .github/workflows/claude.yml appears
+      in neither list; every ci_uncaptured entry names an existing call site and a rec-NNNN owner (a stale entry fails).
+      examined counts the files read (unit claude_p_files).
+  - file: tests/checks/ci_guards/test_validate_claude_p_retry_wrapper.py
+    action: Modify
+    purpose: Fixtures for unwrapped calls in actions, a paired job, an unpaired job, a job with two capture steps, a ci_uncaptured exemption, a stale exemption, claude.yml listed, a paired job in an unlisted workflow, a capture step missing if always() and one missing continue-on-error, and the real tree passing. The accounting nodes' unit and count pins move from workflow_files to claude_p_files over workflows and actions -- moved, not weakened.
+  - file: docs/contracts/project-configuration.yaml
+    action: Modify
+    purpose: >-
+      Decision 224 cl.6: a new project-kind row project.telemetry_capture.ci_workflows (the CI capture allow-list: repository,
+      entries, pending exemptions; homes platform_file on every substrate; readers scripts/telemetry_capture/switch.py,
+      scripts/telemetry_capture/ci_pass.py and scripts/checks/ci_guards/validate_claude_p_retry_wrapper.py; set_by user;
+      this_repository current_home config/telemetry/capture.yaml, status open, owning_item T4.24:c16), and the
+      project.ref row's readers gain scripts/telemetry_capture/ci_pass.py. amendment_log entry.
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      PC-01's description gains: scripts/telemetry_capture/ci_pass.py, run in GitHub Actions under a CI role, is a
+      further function_url client of the telemetry writer (through transport.py), so no port row is added. And
+      structural_assumptions SA-03 (location scripts/telemetry_capture/ci_pass.py and
+      .github/actions/telemetry-ci-capture/, owning_item T4.24:c9): the adapter assumes the Claude Code CLI's
+      --session-id flag and the <projects dir>/<cwd slug>/<sid>.jsonl layout, the wrapper manifest line shape, and the
+      GitHub Actions run facts; GITHUB_* is read only in capture.sh (Decision 212) and ci-pass takes them as arguments,
+      so another host (ecs, lambda, local) supplies the same arguments. It also records that ci-pass writes a foreign
+      file (host-run.json) into the CLI's own session directory, which a CLI layout change could collide with.
+  - file: tests/test_ci_claude_p_retry.py
+    action: Modify
+    purpose: Session id per attempt, distinct ids across retries, append-only manifest across two invocations, the refused flags, manifest failure is non-fatal, and a run under env -i.
+  - file: tests/telemetry_capture/test_switch.py
+    action: Modify
+    purpose: >-
+      rec-4424's acceptance node test_switch_show_timeout_after_a_resolved_ref_reads_off, and ci_gate's five off reasons,
+      its main-first read and switch_mode's ci branch (OTL_TURN_CAPTURE=off wins; hooks still off under GITHUB_ACTIONS).
+      The `data == {"enabled": True}` pin (line 42) moves to the new capture.yaml keys: updated, not weakened.
+  - file: tests/telemetry_capture/test_ci_pass.py
+    action: Create
+    purpose: >-
+      Manifest parsing and ranking, transcript discovery, sidecar write-once and conflict, gate off paths, budget split, counts-only output (no uuid, sha or path in any printed line), no verify or reader call, exit 0, and an AST test that no environment read (os.environ[...] / .get, os.getenv, env.get, or a subscript) with a GITHUB_
+      literal key occurs in ci_pass.py, runner.py or
+      src/turn_capture (switch.py's GITHUB_ACTIONS hook veto is the one allowed read).
+  - file: tests/test_telemetry_ci_capture_action.py
+    action: Create
+    purpose: action.yml shape (no outputs, inputs, run body is the delegate only); capture.sh against a fake bin/venv-python recording argv and env (facts mapped, workflow path derived, credential isolation, action_path root, no_python and timeout tokens, exit 0 always, no GITHUB_OUTPUT/ENV write); ci-rca.yml's step (last, if always, continue-on-error, timeouts 25/17/5, manifests path) and no upload-artifact of a transcript.
+  - file: tests/telemetry/test_capture_v8_contract_notes.py
+    action: Create
+    purpose: >-
+      The v8 notes exist in the four Class A contracts and the realization moves; host_run_ref's required_when is exactly
+      the seven top-level trigger values and undated; the telemetry_sessions note names host.checkout_sha and never host.sha; ducklake_reader.yaml's telemetry_root_sessions line names
+      host_run_ref; project-configuration.yaml carries the project.telemetry_capture.ci_workflows row and project.ref's new reader;
+      ports.yaml's PC-01 names ci_pass.py and SA-03 exists with its location and owning_item; each with one amendment_log
+      entry.
+bundled_recommendations:
+  - rec-4424
+followon_recs: []
+infrastructure_dependencies:
+  - >-
+    No Terraform and no IAM: ci-rca's existing branch role (agent-platform-github-ci-branch) already holds the telemetry
+    writer URL invoke grant and SSM /agent-platform/* read (FINDINGS.md section 1).
+  - >-
+    Merge redeploys through governed CI channels only: field_semantics.yaml and src/row_rules consumers -> every DuckLake
+    Lambda (deploy-ducklake-lambdas); ducklake_event_read_sql.py and ducklake_event_read_verbs.py -> the telemetry
+    reader; ducklake_reader_client.py -> data-pipeline (deploy-prod-lambdas). The build re-runs compute_affected_artifacts
+    over its final diff and names every artifact in the PR body. No break-glass deploy, no admin credential.
+acceptance_criteria:
+  - Every claude_p_retry.sh attempt runs under its own --session-id and leaves a start line and a result line in the manifest; two invocations append to one manifest.
+  - ci-pass captures an allow-listed workflow on refs/heads/main of otl-labs/ontheloop and is off, with one fixed token, for every other gate input; no GITHUB_* is read by ci_pass.py, runner.py or src/turn_capture (switch.py's GITHUB_ACTIONS hook veto is the sole exception).
+  - Hook capture stays off in Actions (switch_mode without a gate is unchanged); a switch git-show timeout after a resolved ref reads OFF (rec-4424).
+  - The sidecar is written once and never overwritten with different content; rule P-5 defers a project_ref conflict.
+  - Parser v8 writes one top-level telemetry_agents open/close pair per root session whose tree carries a valid host-run sidecar, with observation_id NULL, host_run_ref, workflow_run_id and trigger; workflow = the source_registry key; withheld policy yields plan 1's withheld_by_policy omissions (empty-string digest, 0 bytes); the golden corpus, registry and digest are at 8.
+  - The writer rejects a top-level telemetry_agents row without host_run_ref and accepts sub-agent rows unchanged.
+  - Completeness counts top-level-run roots as captured_host_runs, never as captured_without_key.
+  - The pairing rule fails an unpaired claude_p_retry.sh call site, a stale exemption and a listed claude.yml, and passes the real tree.
+  - The first post-merge ci-rca run whose agent step succeeded is captured end to end in production, and the capture step does not change the job's conclusion.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: >-
+      Wrapper behaviour: the two new nodes (the whole module, incl. the env -i and refused-flag nodes, runs in execution
+      step 3).
+    command: bin/venv-python -m pytest tests/test_ci_claude_p_retry.py::test_each_attempt_runs_under_its_own_session_id tests/test_ci_claude_p_retry.py::test_manifest_appends_start_and_result_lines_across_invocations -q
+    expected: Both pass; both are absent before the change.
+    fix_if: A retry reuses a session id, a start or result line is missing, the manifest is truncated, or an exit code changes.
+    hermetic: true
+    expected_literals: [passed]
+    graduation: graduate
+    graduation_check_id: claude-p-retry-session-manifest
+  - step: 2
+    phase: pre-deploy
+    action: rec-4424's acceptance node and the CI gate (the whole test_switch.py module runs in execution step 2).
+    command: >-
+      bin/venv-python -m pytest tests/telemetry_capture/test_switch.py::test_switch_show_timeout_after_a_resolved_ref_reads_off
+      tests/telemetry_capture/test_switch.py::test_ci_gate_reads_ci_only_for_an_allow_listed_main_run -q
+    expected: Both pass; both are absent before the change (today the timeout falls through to the working tree).
+    fix_if: A timeout still falls through, a gate input outside the allow-list reads ci, or a hook caller reads on under GITHUB_ACTIONS.
+    hermetic: true
+    expected_literals: [passed]
+    graduation: graduate
+    graduation_check_id: telemetry-capture-ci-gate
+  - step: 3
+    phase: pre-deploy
+    action: ci-pass and the runner's ci mode.
+    command: >-
+      bin/venv-python -m pytest tests/telemetry_capture/test_ci_pass.py tests/telemetry_capture/test_runner.py
+      tests/telemetry_capture/test_main.py tests/telemetry_capture/test_cursor_tree.py -q
+    expected: All pass; test_ci_pass.py is red before (module absent).
+    fix_if: A sidecar is overwritten, a printed line carries an id, sha or path, verify or a reader is called, or a path exits nonzero.
+    hermetic: true
+    expected_literals: [passed]
+    graduation: graduate
+    graduation_check_id: telemetry-capture-ci-pass
+  - step: 4
+    phase: pre-deploy
+    action: The composite action, its delegate and the ci-rca wiring.
+    command: bin/venv-python -m pytest tests/test_telemetry_ci_capture_action.py tests/test_subagent_review_wiring.py -q
+    expected: All pass; red before (action absent).
+    fix_if: capture.sh exits nonzero on any path, writes a GITHUB_* file, leaks ambient AWS_* when credential inputs are set, or the ci-rca step is not last with if always and continue-on-error.
+    hermetic: true
+    expected_literals: [passed]
+    graduation: graduate
+    graduation_check_id: telemetry-ci-capture-action
+  - step: 5
+    phase: pre-deploy
+    action: Parser v8 rules, then the golden corpus at 8, the registry, line-cut purity and the derived layer.
+    command: >-
+      bin/venv-python -m pytest tests/turn_capture/test_host_run.py tests/turn_capture/test_sessions.py
+      tests/turn_capture/test_transcripts.py tests/turn_capture/test_transcript.py
+      tests/turn_capture/test_record_turn.py::test_golden_cases_match_expected_rows
+      tests/turn_capture/test_record_turn.py::test_incremental_equals_full_at_every_line_cut
+      tests/turn_capture/test_record_turn.py::test_finalize_resume_schedules_emit_each_row_once
+      tests/turn_capture/test_record_turn.py::test_new_cases_are_built_from_their_builders
+      tests/telemetry/test_parser_version_registry.py tests/telemetry/test_derived_layer_reconciliation.py
+      tests/telemetry_verify/test_derive.py -q
+    expected: All pass.
+    fix_if: >-
+      Regenerate expected_rows only after test_host_run.py passes. A line-cut failure is a purity defect in a v8 rule,
+      never a test to relax; a change in an existing case other than parser_version is a defect to explain or fix.
+    hermetic: true
+    expected_literals: [passed]
+    graduation: waive
+    graduation_waiver_reason: >-
+      The corpus, line-cut, schedule and registry nodes already belong to graduated standing checks
+      (turn-capture-golden-corpus, turn-capture-r7-incremental-equals-full, the parser version registry); the new cases join
+      them through the index.
+  - step: 6
+    phase: pre-deploy
+    action: Contract notes, the generated projection, the rule engine, the writer and the all-writer conformance check.
+    command: >-
+      bin/venv-python -m pytest tests/telemetry/test_capture_v8_contract_notes.py tests/telemetry/test_append_host_run_ref.py
+      tests/row_rules/test_rules.py tests/telemetry/test_append.py -q &&
+      bin/venv-python -c "from scripts.checks.contracts.validate_write_time_enforcement_conformance import
+      validate_write_time_enforcement_conformance as v;f=[];v(f);assert not f, f;print('CONFORMANCE_OK')"
+    expected: All pass, then CONFORMANCE_OK.
+    fix_if: >-
+      The trigger condition is refused by any rule reader (contract_rules, RowRules.from_projection, the grammar), or the
+      smoke vector or a sub-agent row trips it: STOP and bring the condition back to planning, never weaken a reader.
+    hermetic: true
+    expected_literals: [passed]
+    graduation: graduate
+    graduation_check_id: telemetry-host-run-ref-required
+  - step: 7
+    phase: pre-deploy
+    action: The root-sessions verb, completeness and its printed line (the whole modules run in execution step 9).
+    command: >-
+      bin/venv-python -m pytest tests/common/test_ducklake_event_verification_verbs.py::test_root_sessions_returns_host_run_ref_for_top_level_roots_only
+      tests/telemetry_verify/test_completeness.py::test_host_run_roots_count_as_captured_host_runs
+      tests/telemetry_verify/test_main.py::test_completeness_line_prints_captured_host_runs -q
+    expected: All three pass; all three are absent before the change.
+    fix_if: An interactive root returns a host_run_ref, or a host-run root lowers unexplained_not_captured.
+    hermetic: true
+    expected_literals: [passed]
+    graduation: graduate
+    graduation_check_id: telemetry-completeness-host-runs
+  - step: 8
+    phase: pre-deploy
+    action: The pairing rule on fixtures and on the real tree, and the ports contract.
+    command: >-
+      bin/venv-python -m pytest tests/checks/ci_guards/test_validate_claude_p_retry_wrapper.py -q && bin/venv-python -c
+      "from scripts.checks.ci_guards.validate_claude_p_retry_wrapper import validate_claude_p_retry_wrapper as
+      v;f=[];v(f);assert not f, f;print('PAIRING_OK')" && bin/venv-python -c "from
+      scripts.checks.contracts.validate_ports_contract import validate_ports_contract as v;f=[];v(f);assert not f,
+      f;print('PORTS_OK')"
+    expected: All pass, then PAIRING_OK and PORTS_OK.
+    fix_if: The real tree fails (a call site unpaired or the plan-review exemption stale) or SA-03 is malformed.
+    hermetic: true
+    expected_literals: [passed]
+    graduation: not-applicable
+  - step: 9
+    phase: pre-deploy
+    action: >-
+      Local integration on the pinned CLI (counts only), run AFTER the build commit. Install CLI 2.1.148 into a scratch
+      dir (both npm packages, then node install.cjs by hand, per the probe note), shallow-clone the committed branch into
+      a scratch git dir (so its .claude/settings.json pin hook fires; OTL_TURN_CAPTURE=off keeps the clone's interactive
+      capture hooks from sending the probe sessions to production), run the real wrapper there twice with a one-word
+      prompt against one output file, then run ci-pass with a repository the gate refuses (deterministic before merge,
+      since the gate reads origin/main first), and parse each found tree locally with record_turn and a hand-written
+      sidecar.
+    command: >-
+      S=$(mktemp -d) && npm install -s --prefix "$S/cli" @anthropic-ai/claude-code@2.1.148
+      @anthropic-ai/claude-code-linux-x64@2.1.148 && (cd "$S/cli/node_modules/@anthropic-ai/claude-code" && node
+      install.cjs) && git clone -q --depth 1 "file://$PWD" "$S/repo" && (cd "$S/repo" && for i in 1 2; do printf 'Reply
+      ok.' | env -u CLAUDE_CODE_INCLUDE_PARTIAL_MESSAGES -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_REMOTE_SESSION_ID -u
+      CLAUDE_CODE_CHILD_SESSION OTL_TURN_CAPTURE=off PATH="$S/cli/node_modules/.bin:$PATH" bash scripts/ci/claude_p_retry.sh "$S/out.json" --
+      --output-format json --max-turns 1 >/dev/null 2>&1; done) && wc -l < "$S/out.json.sessions.jsonl" &&
+      bin/venv-python -m scripts.telemetry_capture ci-pass --manifest "$S/out.json.sessions.jsonl" --workflow-path
+      .github/workflows/ci-rca.yml --ref refs/heads/main --repository otl-labs/probe --run-id 1 --run-attempt 1 --job rca
+      --event-name workflow_dispatch --sha "$(git rev-parse HEAD)"
+    expected: >-
+      The manifest has 4 lines (a start and a result line per attempt); ci-pass prints CI_CAPTURE off
+      reason=repository_mismatch sessions=2 and writes nothing. Then, by hand, each session's tree is found under
+      ~/.claude/projects and record_turn at v8 with a full sidecar yields a top-level telemetry_agents open row and a
+      telemetry_sessions open row whose checkout_sha is the clone's HEAD.
+    fix_if: A session id is not honoured on 2.1.148 (fall back to the result JSON session_id and re-plan), or the tree is not found.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: pre-deploy
+    action: Full tier on the committed tree (handoff_policy).
+    command: bin/venv-python -m scripts.validate
+    expected: Exit 0.
+    fix_if: Any check fails; fix the cause, never the check.
+    hermetic: false
+    graduation: not-applicable
+  - step: 11
+    phase: post-deploy
+    action: >-
+      The merge's governed deploys converged: deploy-ducklake-lambdas (writer and its deploy smoke) and
+      deploy-prod-lambdas for the merge commit both concluded success.
+    command: >-
+      mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
+      resource_id="deploy-ducklake-lambdas.yml", workflow_runs_filter={"branch": "main"}) and the same for
+      deploy-prod-lambdas.yml; select the run whose head_sha is the merge commit.
+    expected: Both runs conclusion success at the merge commit (or a later commit that includes it).
+    fix_if: The smoke stage fails on telemetry_agents required_when or a deploy step fails; fix forward on a new PR.
+    hermetic: false
+  - step: 12
+    phase: post-deploy
+    action: >-
+      The first ci-rca run whose failing commit (workflow_run.head_sha) includes the merge and whose rca_agent step succeeded (not
+      dedup-skipped, and not red for filing nothing) is captured end to end (an earlier failing commit lacks the action by design): its job is
+      green, its capture step printed CI_CAPTURE done with sent >= 1 and halted 0, and the production store holds the
+      run's top-level pair. Wait for a natural run (about 0.7 a day); never dispatch ci-rca to manufacture one.
+    command: >-
+      mcp__github__get_job_logs for that run's rca job (grep '^CI_CAPTURE'), then AWS_PROFILE=agent_platform
+      bin/venv-python -c "import sys;from datetime import date,timedelta;from scripts.telemetry_capture import
+      read_route;r=read_route.make_routed_reader();d=date.today();rows=r.named('telemetry_root_sessions',day_from=(d-timedelta(days=1)).isoformat(),day_to=d.isoformat());h=[x
+      for x in rows if (x.get('host_run_ref') or
+      '').startswith('gha:'+sys.argv[1]+'/')];print('host_run_roots',len(h));assert h;import json,collections;t=r.named('session_tree_rows',session_id=h[0]['session_id'],offset=0,max_rows=2000);j=lambda x:x['row_json'] if isinstance(x['row_json'],dict) else
+      json.loads(x['row_json']);print(sorted(collections.Counter((x['table_name'],j(x).get('event_kind'),j(x).get('observation_id') is None) for x in t).items()))" <run_id>
+    expected: >-
+      CI_CAPTURE done sessions>=1 sent>=1 halted=0; host_run_roots >= 1; the tree holds a telemetry_agents open and close
+      with no observation_id, telemetry_sessions open and close, and transcripts rows (full policy).
+    fix_if: >-
+      off reason=<token> (gate inputs), deferred pin_conflict, transcript_absent (session id not honoured on the runner),
+      or a writer refusal: diagnose from the counts, file a rec, fix forward. The ci-rca job itself must never go red.
+    hermetic: false
+  - step: 13
+    phase: post-deploy
+    action: rec-4424 closed by the squash-merge Resolves trailer.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import make_reader,
+      fetch_recs_by_ids;rows,_=fetch_recs_by_ids(make_reader(profile='agent_platform'),['rec-4424']);print(rows[0]['status'])"
+    expected: closed
+    fix_if: Still open after the closure job ran; close it with update_rec citing the merge commit.
+    hermetic: false
+  - step: 14
+    phase: post-deploy
+    action: The next scheduled telemetry-golden-replay run on main replays the v8 corpus (incl. top-level rows) through the deployed writer and reader.
+    command: >-
+      mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
+      resource_id="telemetry-golden-replay.yml", workflow_runs_filter={"branch": "main"}); first run whose head includes the merge.
+    expected: conclusion success.
+    fix_if: A required_when or row-rule refusal on a v8 golden row; fix forward.
+    hermetic: false
+test_obligations:
+  - source: scripts/ci/claude_p_retry.sh
+    behavior: A fresh session id per attempt and append-only start and result manifest lines per attempt, exit codes unchanged.
+    verification_step: 1
+    test_selector: tests/test_ci_claude_p_retry.py::test_each_attempt_runs_under_its_own_session_id
+    red_green_expectation: red before (no --session-id, no manifest), green after
+  - source: scripts/telemetry_capture/switch.py
+    behavior: rec-4424 timeout reads OFF; ci_gate's conditions and off reasons; hooks unchanged.
+    verification_step: 2
+    test_selector: tests/telemetry_capture/test_switch.py::test_switch_show_timeout_after_a_resolved_ref_reads_off
+    red_green_expectation: red before (falls through to the working tree), green after
+  - source: scripts/telemetry_capture/runner.py
+    behavior: ci mode runs like on; P-5 conflict defers with pin_conflict.
+    verification_step: 3
+    test_selector: tests/telemetry_capture/test_runner.py::test_run_pass_ci_gate_runs_under_github_actions
+    red_green_expectation: red before (run_pass has no ci_gate and project_ref_pin ignores the sidecar), green after
+  - source: scripts/telemetry_capture/ci_pass.py
+    behavior: Gate, ranking, discovery, write-once sidecar, final pass, counts-only output, exit 0.
+    verification_step: 3
+    test_selector: tests/telemetry_capture/test_ci_pass.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/telemetry_capture/__main__.py
+    behavior: ci-pass is registered; pass refuses a conflicted tree and accepts a sidecar-only one.
+    verification_step: 3
+    test_selector: tests/telemetry_capture/test_main.py
+    red_green_expectation: red before (subcommand absent), green after
+  - source: config/telemetry/capture.yaml
+    behavior: The ci-rca entry, the repository and the one pending exemption are what the gate and the pairing rule read.
+    verification_step: 8
+    test_selector: tests/checks/ci_guards/test_validate_claude_p_retry_wrapper.py
+    red_green_expectation: red before (no ci_workflows key), green after
+  - source: .github/actions/telemetry-ci-capture/action.yml
+    behavior: No outputs; inputs bound by env; run body is the delegate only.
+    verification_step: 4
+    test_selector: tests/test_telemetry_ci_capture_action.py
+    red_green_expectation: red before (action absent), green after
+  - source: .github/actions/telemetry-ci-capture/capture.sh
+    behavior: Total; facts mapped to arguments; credential isolation (no ambient AWS_* reaches ci-pass when the inputs are set); action_path root.
+    verification_step: 4
+    test_selector: tests/test_telemetry_ci_capture_action.py::test_credential_inputs_replace_every_ambient_aws_variable
+    red_green_expectation: red before (script absent), green after
+  - source: .github/workflows/ci-rca.yml
+    behavior: The capture step is last, always runs, cannot red the job; timeouts 25/17/5.
+    verification_step: 4
+    test_selector: tests/test_telemetry_ci_capture_action.py
+    red_green_expectation: red before (step absent), green after
+  - source: scripts/telemetry_capture/cursor_tree.py
+    behavior: host_run() passthrough.
+    verification_step: 3
+    test_selector: tests/telemetry_capture/test_cursor_tree.py
+    red_green_expectation: red before (method absent), green after
+  - source: src/turn_capture/transcript.py
+    behavior: host_run() on FsTree and MemTree.
+    verification_step: 5
+    test_selector: tests/turn_capture/test_transcript.py
+    red_green_expectation: red before (method absent), green after
+  - source: src/turn_capture/host_run.py
+    behavior: P-5, sidecar grammar, host_run_ref, top-level rows.
+    verification_step: 5
+    test_selector: tests/turn_capture/test_host_run.py
+    red_green_expectation: red before (module absent), green after
+  - source: src/turn_capture/record_turn.py
+    behavior: PARSER_VERSION 8 with the corpus, the registry and the digest.
+    verification_step: 5
+    test_selector: tests/telemetry/test_parser_version_registry.py
+    red_green_expectation: red before (registry current 7 against the new digest), green after
+  - source: src/turn_capture/transcripts.py
+    behavior: withheld policy yields withheld_by_policy omissions with the empty-string digest and 0 bytes.
+    verification_step: 5
+    test_selector: tests/turn_capture/test_transcripts.py
+    red_green_expectation: red before (node absent), green after
+  - source: src/turn_capture/sessions.py
+    behavior: Sidecar workflow key and checkout_sha fallback.
+    verification_step: 5
+    test_selector: tests/turn_capture/test_sessions.py
+    red_green_expectation: red before (node absent), green after
+  - source: config/telemetry/parser_versions.yaml
+    behavior: claude_code current 8 with the v8 digest over the corpus.
+    verification_step: 5
+    test_selector: tests/telemetry/test_parser_version_registry.py
+    red_green_expectation: red before (current 7 against the v8 corpus digest), green after
+  - source: docs/contracts/telemetry_agents.yaml
+    behavior: host_run_ref required_when on the top-level triggers, undated; v8 realization and note.
+    verification_step: 6
+    test_selector: tests/telemetry/test_capture_v8_contract_notes.py
+    red_green_expectation: red before (module absent), green after
+  - source: docs/contracts/telemetry-event-envelope.yaml
+    behavior: PARSER_VERSION 8 governance note after the 7 note.
+    verification_step: 6
+    test_selector: tests/telemetry/test_capture_v8_contract_notes.py
+    red_green_expectation: red before (module absent), green after
+  - source: docs/contracts/telemetry_transcripts.yaml
+    behavior: withheld_by_policy produced by claude_code from v8.
+    verification_step: 6
+    test_selector: tests/telemetry/test_capture_v8_contract_notes.py
+    red_green_expectation: red before (module absent), green after
+  - source: docs/contracts/telemetry_sessions.yaml
+    behavior: Top-level root workflow and checkout_sha fallback note.
+    verification_step: 6
+    test_selector: tests/telemetry/test_capture_v8_contract_notes.py
+    red_green_expectation: red before (module absent), green after
+  - source: docs/contracts/ducklake_reader.yaml
+    behavior: telemetry_root_sessions names host_run_ref.
+    verification_step: 6
+    test_selector: tests/telemetry/test_capture_v8_contract_notes.py
+    red_green_expectation: red before (module absent), green after
+  - source: docs/contracts/project-configuration.yaml
+    behavior: The CI capture allow-list row and project.ref's ci_pass.py reader.
+    verification_step: 6
+    test_selector: tests/telemetry/test_capture_v8_contract_notes.py
+    red_green_expectation: red before (module absent), green after
+  - source: docs/contracts/ports.yaml
+    behavior: PC-01 names ci_pass.py; SA-03 records the adapter's host assumptions.
+    verification_step: 6
+    test_selector: tests/telemetry/test_capture_v8_contract_notes.py
+    red_green_expectation: red before (module absent), green after
+  - source: config/lambda/ducklake/field_semantics.yaml
+    behavior: The generated projection carries host_run_ref's required_when and the writer enforces it on top-level triggers only.
+    verification_step: 6
+    test_selector: tests/telemetry/test_append_host_run_ref.py
+    red_green_expectation: red before (rule absent), green after
+  - source: src/common/ducklake_event_read_sql.py
+    behavior: telemetry_root_sessions returns host_run_ref.
+    verification_step: 7
+    test_selector: tests/common/test_ducklake_event_verification_verbs.py::test_root_sessions_returns_host_run_ref_for_top_level_roots_only
+    red_green_expectation: red before (node absent), green after
+  - source: src/common/ducklake_event_read_verbs.py
+    behavior: Verb description names the column (docstring-level).
+    verification_step: 7
+    test_selector: tests/common/test_ducklake_event_verification_verbs.py::test_root_sessions_returns_host_run_ref_for_top_level_roots_only
+    red_green_expectation: red before (column absent), green after
+  - source: src/common/ducklake_reader_client.py
+    behavior: VERB_FIELDS lists host_run_ref for telemetry_root_sessions.
+    verification_step: 7
+    test_selector: tests/common/test_ducklake_event_verification_verbs.py::test_root_sessions_returns_host_run_ref_for_top_level_roots_only
+    red_green_expectation: red before (field absent), green after
+  - source: scripts/telemetry_verify/completeness.py
+    behavior: captured_host_runs; host-run roots never reduce unexplained_not_captured.
+    verification_step: 7
+    test_selector: tests/telemetry_verify/test_completeness.py::test_host_run_roots_count_as_captured_host_runs
+    red_green_expectation: red before (node absent), green after
+  - source: scripts/telemetry_verify/__main__.py
+    behavior: completeness_line prints captured_host_runs.
+    verification_step: 7
+    test_selector: tests/telemetry_verify/test_main.py::test_completeness_line_prints_captured_host_runs
+    red_green_expectation: red before (field absent), green after
+  - source: scripts/checks/ci_guards/validate_claude_p_retry_wrapper.py
+    behavior: Actions scan and the pairing rule.
+    verification_step: 8
+    test_selector: tests/checks/ci_guards/test_validate_claude_p_retry_wrapper.py
+    red_green_expectation: red before (no pairing rule), green after
+constraints:
+  - No IAM, no Terraform, no admin credential, no break-glass deploy; PlatformDev (--profile agent_platform) for every AWS call the build makes; deploys only through the governed CI channels.
+  - Decision 212 -- GITHUB_* is read only in capture.sh; the producer and ci-pass take host facts as arguments.
+  - Decision 101 -- every CI and operator line is counts and fixed tokens; no transcript is ever a workflow artifact.
+  - Hook capture stays off in Actions; .claude/hooks and .claude/settings.json are not edited (so no plugin_hooks render).
+  - The capture step can never red ci-rca (if always, continue-on-error, total delegate); the agent step's semantics are unchanged.
+  - CI transcripts use the same pre-write scrub (src/turn_capture/scrub.py) as interactive sessions; the content-reader thread's shared detector library upgrades both; do not fork it. Known gap (rec-4657) -- ARNs and account ids that reach a full-policy transcript are stored but not served; this plan neither widens nor closes it.
+  - Every file under 500 SLOC; decompose before any raise (Decision 128). Fast tier stays light.
+  - Never weaken a test or a rule reader to pass (Decision 55); a v8 line-cut failure is a purity defect.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - >-
+    Builds AFTER (start conditions): PLAN-telemetry-top-level-agent-run's build is merged (it defines telemetry_agents.host_run_ref
+    as a plain nullable column with the open prefix registry, the run shape, workflow = allow-list key, trigger =
+    host event name, withheld_by_policy, surface derived at read) AND Benjamin's production column add
+    (provision_telemetry_catalog re-run, Decision 230 cl.4) is done. Build order (coordinator): run-shape plan, his
+    column add, this plan, then producer admission (rec-4420), which adds the plan-review entries, deletes the pending
+    exemption and moves ci-rca to the capture role.
+  - >-
+    Operator rulings: 13:37Z cmsg_012XgaFy8VaDQbxP5D8nC9584BNMSPTp1X5Q7G3F1m3eJ9 (capture both, one DRY adapter);
+    13:40Z card cmsg_012XgaFy8VaDQbxP5D8nC958Xrm4hfVt5a4CiMQ2uezCrr (one generic host_run_ref); 14:02Z
+    cmsg_012XgaFy8VaDQbxP5D8nC9589nCimefm8VULunUCtAJ65e (three plans, "write the plan"). Interface agreed with the
+    producer-admission planning thread 2026-10-29 (credential inputs, append-only manifest, one-call-per-job ranking,
+    action_path root, one pending exemption, agent-keyed entries, start and result manifest lines).
+  - >-
+    Decided with notice: required_when is not dateable (src/row_rules/rules.py _DATEABLE_KINDS), so the rule
+    (required_when on plan 1's top-level triggers) lands undated; completeness reads host_run_ref from the
+    telemetry_root_sessions verb (rec-4713 owns the surface verb); the pairing rule joins validate_claude_p_retry_wrapper.
+  - >-
+    --session-id proven on CLI 2.1.148 locally: /mnt/project-files/ci-agent-telemetry/cli-2.1.148-session-id-probe.md.
+    Design: fable-independent-advice{,-round2}.md, decision-scout-report-round2.md, step6b-presentation.md (same folder).
+  - >-
+    Ramp: ci-rca runs hooks and producer from the FAILING commit; commits before this merge lack the action (the step
+    errors, continue-on-error keeps the job green) and old-code halts are expected for a few runs.
+  - >-
+    Build-merge gate: the Class A texts (telemetry_agents rule and notes, envelope PARSER_VERSION 8 note, transcripts and
+    sessions notes) are pasted inline to Benjamin and need his word naming them; the merge also redeploys every DuckLake
+    Lambda, so the coordinator sequences it, and only after plan 1's production hold clears (column added in production,
+    then its bookkeeping deploy green). The plan PR itself merges under the plan merge gate.
+  - >-
+    closes_criteria empty by Benjamin's 14:02Z acceptance of the three-plan split (c9 closes in plan 3). rec-4415 stays
+    open; plan 3 re-points its stale 'scripts.telemetry_capture pass' grep.
+  - >-
+    Decision-scout: FLAGS_FOUND. CITE 74, 101, 162, 205 (cl.1, cl.2, cl.4), 206 cl.8, 210 (cl.1, cl.3, cl.4), 212 cl.3,
+    222 (cl.1-3), 230 cl.4, 236 (cl.1-3), 79, 126. WARN 224 cl.6 (answered: the allow-list gets a
+    project-configuration.yaml row and carries no project_ref; ci-pass reads project.ref's one home). RELATED 228 (the
+    final pass writes the root close row, so a CI root never reads running), 199, 200, 207, 213, 116, 72, 184, 234, 225.
+    ROADMAP T3.20, T3.22 CITE; T1.13, T2.54, T4.15 RELATED; T4.26 c1/c3 later re-point the wrapper rule. Decisions
+    triaged: 190 of 190. Roadmap items intersected: 14; CONFLICT: 0; RELATED: 12. ci_rca: none open, red_overlap clear.
+  - "gates: decision-scout=FLAGS_FOUND (WARN 224 answered); plan-critique=PROCEED after 4 round(s); round 4 autonomous"
+pre_implementation_checklist:
+  - Branch confirmed not on main; rebased onto main
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 74, 101, 162, 206 cl.8, 210, 212, 222 and 230 cl.4 read (only the cited clauses)
+  - PLAN-telemetry-top-level-agent-run merged and built; the coordinator confirms Benjamin's production column add; otherwise STOP
+  - >-
+    Shape check against the merged telemetry_agents.yaml and telemetry_transcripts.yaml, verbatim: run_shapes.top_level
+    (entity_ref /run, external_ref #0/open and #0/close, observation_id NULL, agent_type), trigger accepted_values (the
+    nine values incl. the seven top-level ones), the host_run_ref pattern, the workflow = source_registry key rule and the
+    withheld_by_policy definition (content and content_uri NULL, content_sha256 = SHA-256 of b"", content_bytes 0); STOP
+    on any mismatch and bring it back to planning
+  - >-
+    Plan 1 taught scripts/telemetry_verify (oracle, derive, dedupe) and the agent_run_* verbs the top-level pair
+    (test_derived_layer_reconciliation.py runs every corpus tree, the new v8 cases included, through them); otherwise
+    STOP and tell the coordinator
+  - PARSER_VERSION is still 7 and the golden index lists 53 cases, and the producer-admission build has not merged; otherwise STOP and tell the coordinator
+  - All files in scope located and readable
+execution_steps:
+  - >-
+    1. Preconditions (checklist). Install CLI 2.1.148 into a scratch dir for VP 9.
+  - >-
+    2. switch.py (rec-4424 first, then ci_gate and the ci branch of switch_mode) with test_switch.py; VP 2.
+  - >-
+    3. claude_p_retry.sh with test_ci_claude_p_retry.py; VP 1.
+  - >-
+    4. transcript.py host_run(), cursor_tree.py, host_run.py, then sessions.py, transcripts.py and record_turn.py (Ctx fields, the
+    top-level rows, withheld) with test_host_run.py and the touched test modules at full line coverage of host_run.py.
+  - >-
+    5. runner.py, ci_pass.py and __main__.py with test_ci_pass.py and test_main.py; VP 3.
+  - >-
+    6. capture.yaml, the composite action and ci-rca.yml with test_telemetry_ci_capture_action.py; VP 4. Then the
+    pairing rule with its tests; VP 8.
+  - >-
+    7. Version and corpus: PARSER_VERSION 8, PRODUCER_VERSION turn-capture-8, the four builders and cases, the index.
+    Only after step 4's tests pass, regenerate every expected_rows and review the diff by kind (parser_version on every
+    row; new rows only in new cases); set the registry v8 entry with the regenerated digest; move the two derived golden
+    headers to 8 (header only: existing trees emit the same rows, and the new cases get no hand-authored entries; the
+    oracle reconciliation covers them). VP 5.
+  - >-
+    8. Contracts: telemetry_agents.yaml (rule, populated_by, realization, note), envelope, transcripts, sessions,
+    ducklake_reader.yaml, ports.yaml SA-03, project-configuration.yaml, each with an amendment_log entry dated the build
+    day; regenerate field_semantics.yaml with the existing generator; test_append_host_run_ref.py and the contract-notes
+    test; VP 6.
+  - >-
+    9. Reader verb SQL, verb description and client fields; completeness and completeness_line; VP 7. Re-run
+    compute_affected_artifacts over the diff and list every artifact in the PR body.
+  - >-
+    10. Commit, then VP 9 (local integration on 2.1.148, against the committed tree) and VP 10. On an unrecoverable
+    failure stop and RCA (Decision 55).
+  - >-
+    11. Closure per the implement skill's Commit Flows and docs/contracts/git-ops.yaml: full validation on the clean
+    tree, push, PR whose body names the artifacts and the exact Class A text; paste that text inline in the thread for
+    Benjamin's word. Merge (squash, body carries "Resolves: rec-4424") only after code review PROCEED, CI green and his
+    word naming the contract text; tell the coordinator before merging so deploys are sequenced.
+  - >-
+    12. Post-deploy: VP 11, VP 13, VP 14, then VP 12 on the first natural ci-rca agent run. Report to the coordinator:
+    what landed, VP results, and the first captured run's counts.
+  - "Report: what was implemented, verification results"
+rollback: >-
+  Fast stop without a deploy: delete the ci-rca entry from ci_workflows (or set enabled: false) on main; ci-pass reads
+  origin/main first, so the next run is off. Full rollback: revert the PR; the writer redeploys without the rule, and the
+  already-written rows stay valid (append-only, nullable column).

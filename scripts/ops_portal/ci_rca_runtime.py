@@ -16,12 +16,12 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-from scripts.executor.jsonl_store import load_all_recommendations
 from scripts.ops_portal.ci_rca_schema import (
     _check_bundle_s3_existence,
     _load_and_verify_bundle,
     _stamp_warn_mode_reject,
     _validate_ci_rca_context_v2,
+    preventive_deficiency,
 )
 
 logger = logging.getLogger(__name__)
@@ -209,6 +209,8 @@ def _run_ci_rca_cross_check(
         context_v2_json["fingerprint"] = bundle["fingerprint"]
     if bundle.get("failure_category"):
         context_v2_json["failure_category"] = bundle["failure_category"]
+    if bundle.get("workflow_to_tier_resolution"):
+        context_v2_json["workflow_tier"] = bundle["workflow_to_tier_resolution"]
     # ci-rca-identity-lifecycle: affected_nodeids (v2 junit-parsed cause-group membership) and
     # escape_class (Decision 135 selection-manifest attribution, when the workflow step stamped
     # it onto the bundle) are likewise portal-derived from the verified bundle, never agent-authored.
@@ -327,9 +329,10 @@ def back_validate_ci_rca(
 ) -> dict:
     """Re-validate warn-period source=ci_rca recs against the current strict-mode schema (T1.13 c2 enabler).
 
-    Reads the warm recommendation cache directly (logs/.recommendations-log.jsonl; Decision 88 --
-    the handler constructs NO DuckLake reader). Every source=ci_rca rec with created_timestamp >=
-    `since` is sorted into exactly one bucket, mirroring what strict-mode file_rec() actually does:
+    Reads the source-scoped current_state(row_filter "source = 'ci_rca'") through the closed
+    DuckLake reader (no local recs cache, Decision 215; a reader failure raises). Every source=ci_rca
+    rec with created_timestamp >= `since` is sorted into exactly one bucket, mirroring what
+    strict-mode file_rec() actually does:
 
       legacy_no_schema -- context_v2_json is absent/empty. Historical rows filed before CIRCA-02
         (strict mode now raises ValueError for a NEW source=ci_rca write with no context_v2_json)
@@ -349,8 +352,7 @@ def back_validate_ci_rca(
     carrying the parent rec id and its failing-checks list. Default is report-only: zero writes.
 
     Args:
-        cache_rows: Injected warm-cache rows (test seam). Defaults to loading
-            logs/.recommendations-log.jsonl via load_all_recommendations() when None.
+        cache_rows: Injected rows (test seam). Defaults to the source-scoped reader read when None.
         since: ISO date/timestamp floor on created_timestamp (inclusive).
         refile_audit: When True, files audit recs for non_conformant entries (capped at `cap`).
         cap: Max audit recs filed in this invocation.
@@ -363,7 +365,9 @@ def back_validate_ci_rca(
         audit rec ids; empty unless refile_audit=True), audit_cap_reached (bool).
     """
     if cache_rows is None:
-        cache_rows = list(load_all_recommendations().values())
+        from src.common.ducklake_reader_client import make_reader  # noqa: PLC0415
+
+        cache_rows = make_reader(profile=profile).current_state("ops_recommendations", row_filter="source = 'ci_rca'") or []
 
     legacy_no_schema: list[dict] = []
     non_conformant: list[dict] = []
@@ -395,6 +399,8 @@ def back_validate_ci_rca(
         # since the per-rule stamp site now stamps stable schema_<rule> tags (e.g.
         # schema_why_chain_too_long) that must not double-count as a non_schema_reason.
         non_schema_reasons = [r for r in warn_marker.get("reasons", []) if not r.startswith("schema")]
+        if "preventive_required" not in non_schema_reasons:
+            deficiencies = deficiencies + preventive_deficiency(ctx)
         if deficiencies or non_schema_reasons:
             non_conformant.append({"id": rec_id, "has_context_v2": True, "failing_checks": deficiencies + non_schema_reasons})
         else:

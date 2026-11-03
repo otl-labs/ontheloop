@@ -32,7 +32,7 @@ _GH_RETRY_SLEEP="${PR_CONFLICT_SIGNAL_RETRY_SLEEP:-5}"
 # matching is retained because it is the only discriminator the producer stamps today -- the tally
 # below is the substitute for an enumerated universe, and is what would have caught the outage
 # that motivated this declaration on the first push after a harness prefix rename.
-_WAKE_HEAD_PREFIXES=("agent/" "claude/")
+_WAKE_HEAD_PREFIXES=("agent/" "claude/" "ccr-")
 # Prefixes inside _WAKE_HEAD_PREFIXES that are retirement candidates: one matching ZERO open PRs
 # this run gets a GITHUB_STEP_SUMMARY notice (observability only, never fails the job). Must stay
 # a subset of _WAKE_HEAD_PREFIXES. Reversal condition: see

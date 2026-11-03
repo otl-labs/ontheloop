@@ -1,7 +1,7 @@
 """Local READ-cache refresh, downstream of the writer -- NEVER a write source (Decision 88 /
 warehouse-as-source-of-truth).
 
-Owner-concern: keeping the local RECS_JSONL / DECISIONS_JSONL read-cache files in sync with
+Owner-concern: keeping the local DECISIONS_JSONL / execution-plans read-cache files in sync (no recs cache, Decision 215) with
 the DuckLake writer's committed rows, either via a full reader pull (_sync_table) or an
 incremental single-row upsert of the just-committed row (_refresh_cache_after_write,
 neon-egress-reduction D4).

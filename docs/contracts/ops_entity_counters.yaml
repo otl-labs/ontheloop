@@ -10,7 +10,7 @@
 # (docs/contracts/data-modeling-standard.yaml write_modes.control): ONE physical table, no
 # history/current SCD2 pair, partitioned on its own key column (counter_name). Writer-internal:
 # read_boundary NONE, write_boundary WRITER_INTERNAL -- never reachable through the generic ops
-# read/write verbs. query_ops / named_read / read_ops_current / read_ops_history refuse it at the
+# read/write verbs. dq_check / named_read / read_ops_current / read_ops_history refuse it at the
 # reader boundary (src/lambdas/ducklake_reader/handler.py's _require_ops_table call sites and
 # src/common/ducklake_reads.py's named_read); write_ops / file_ops / update_ops refuse it via
 # src/common/ducklake_scd2_schema.py resolve_table_spec's directed raise on write_mode=control. It
@@ -45,7 +45,7 @@ contract:
     fails -- the control-class invariants are field_semantics-contract-owned, not Decision-owned).
   description: >-
     Class A schema contract for ops_entity_counters, the writer-owned entity-id allocation counter
-    (Decision 84 I-2). Governs the one control-class table in the platform today: a single
+    (Decision 84 I-2). Governs the one control-class table in the operator deployment today: a single
     physical table (no history/current SCD2 pair) holding one row per writer-keyspace ops table
     (currently ops_recommendations only), partitioned on counter_name. Writer-internal:
     read_boundary none, write_boundary writer_internal -- see the file header comment above for
@@ -66,22 +66,32 @@ fields:
     semantics: >-
       Natural key and row identity. NOT a merge_key in the SCD2 sense (there is no history/current
       pair to merge into) -- it is also the partition column, asserted by control_health to
-      number exactly len(writer-keyspace tables) rows, never more, never fewer.
+      number exactly one row per writer-keyspace table PRESENT in the catalog under check (serial or ulid scheme), never more,
+      never fewer. Live tables are always expected; a pre_production table only once its history table exists in that
+      catalog (otherwise control_health reports it in absent_tables).
     populated_by: >-
       create_ops_tables' control-class branch does not itself insert a row; bootstrap_entity_counter
       (src/common/ducklake_control_tables.py, invoked by create_ops_tables for a writer-keyspace
       table) DELETE+INSERTs the row keyed by the owning table's own name.
     dq_intent:
-      not_null:
-        enforced: true
+      not_null: true
+    amendment_log:
+      - date: "2026-10-05"
+        semantic_break: true
+        change_class: governance_note_add
+        summary: >-
+          PLAN-telemetry-table-registration (slice 2a-2 plan 1): the row grain is one row per writer-keyspace table present in the catalog under check (serial or ulid scheme), not every registered table.
+        migration_story: >-
+          Production keeps exactly one expected row (ops_recommendations): ops_tenants and ops_projects exist in no production catalog.
 
   current_value:
     type: int
     iceberg_type: long
     nullable: false
     description: >-
-      The highest entity id currently allocated (or advanced to) for the owning writer-keyspace
-      table's keyspace.
+      For a serial table: the highest entity id currently allocated (or advanced to) for the owning writer-keyspace
+      table's keyspace. For a ulid-scheme table (id_scheme ulid: ops_tenants, ops_projects): the number of registrations so
+      far -- bookkeeping only, since the id is a ULID; it serves as the registration lock's serialization row.
     semantics: >-
       Serialization point for entity-id allocation (Decision 84 I-2): every file_ops allocation
       and every write_ops caller-keyed advance for the owning table UPDATEs this SAME row, which
@@ -97,19 +107,35 @@ fields:
       caller-keyed id) advances it to the candidate only when the candidate exceeds the stored
       value.
     dq_intent:
-      not_null:
-        enforced: true
+      not_null: true
+    amendment_log:
+      - date: "2026-10-05"
+        semantic_break: true
+        change_class: governance_note_add
+        summary: >-
+          PLAN-telemetry-table-registration (slice 2a-2 plan 1): current_value gains the ulid-scheme meaning (registrations so far; bookkeeping only, the id is a ULID).
+        migration_story: >-
+          Production keeps exactly one expected row (ops_recommendations): ops_tenants and ops_projects exist in no production catalog.
 
 governance:
   table_class: control
   partition_by: counter_name
   write_path: >-
     ducklake_writer Lambda create_ops_tables (control branch) -> src/common/ducklake_tables.py
-    create_control_table (one CREATE + one SET PARTITIONED BY, T2.26). Row-level mutation happens
+    create_control_table (one CREATE + one SET PARTITIONED BY, T2.26). In the ops catalog, row-level mutation happens
     ONLY inside the SAME transaction as a write_scd2/file_scd2 call on a writer-keyspace table
     (src/common/ducklake_writes.py _allocate_entity_id / _advance_entity_counter) -- there is no
-    standalone write path, and the generic write_ops/file_ops/update_ops verbs refuse this table
-    (ducklake_scd2_schema.resolve_table_spec raises a directed error on write_mode=control).
+    standalone write path on the ops verbs, and the generic write_ops/file_ops/update_ops verbs refuse this table
+    (ducklake_scd2_schema.resolve_table_spec raises a directed error on write_mode=control). Read against Decision 213
+    cl.2: the shared writer stays the sole ops_* write authority in ducklake_ops; the telemetry writer
+    (agent-platform-ducklake-telemetry-writer) writes this table in the telemetry catalog only. Its register_tenant and
+    register_project verbs take a lock-only UPDATE of the ops_tenants / ops_projects row inside the registration
+    transaction (Decision 84 I-2, Decision 200 lock arm), and provision_telemetry seeds those two rows (a missing,
+    duplicated or below-floor row is rewritten at the maximum of its values and count(*) of the current table, and an
+    existing row at or above the floor is left alone). Two concurrent provisions on a catalog missing a row can both
+    insert it (DuckLake inserts do not conflict); the duplicate is detected loudly (lock_counter refuses anything but
+    exactly one row) and repaired by the next provision. In the production telemetry catalog the two telemetry counter rows
+    are seeded by provision_telemetry_catalog under the owner login (Decision 230) and later locked by the production writer.
   id_allocator: >-
     None -- this table has no writer-owned entity keyspace of its own (it IS the keyspace
     bookkeeping for other tables). entity_id_prefix / id_keyspace are absent from its
@@ -118,6 +144,7 @@ governance:
   merge_key: counter_name
 
 governance_notes: >-
+  control_health runs on production only; the telemetry catalog's counter rows are read by the telemetry writer's probe.
   dq_scope: exempt. See the file header comment for the full read_boundary/write_boundary/
   dq_scope/health-binding rationale and health.live_file_ceiling: 200
   (src/common/ducklake_maintenance.py CONTROL_LIVE_FILE_CEILING) -- reproduced here since
@@ -126,9 +153,63 @@ governance_notes: >-
   contract: allocation stays writer-owned, inside the write transaction; only the counter
   table's SHAPE, GOVERNANCE and EXPOSURE change.
 audit_invariants:
-  - "Never reachable through query_ops, named_read, read_ops_current, or read_ops_history (read_boundary: none) -- registering this table for governance does not grant application read access (T2.26)."
+  - "Never reachable through dq_check, named_read, read_ops_current, or read_ops_history (read_boundary: none) -- registering this table for governance does not grant application read access (T2.26)."
   - "Never reachable through write_ops, file_ops, or update_ops (write_boundary: writer_internal) -- ducklake_scd2_schema.resolve_table_spec raises a directed SchemaGateError on write_mode=control before any of those verbs could fall through into the SCD2 branch against current_table=None."
   - "dq_scope: exempt -- there is no DQ-runner coverage for this table (no reachable read path); the ducklake_maintenance control_health verb (every 6h) is the health binding that substitutes for it, asserting row count, counter floor, and live-file ceiling as failing conditions (Decision 55), never a report."
-  - "Row count invariant: exactly one row per writer-keyspace ops table (id_keyspace: writer in field_semantics contract_table_ops) -- today ops_recommendations only."
-amendment_log: []
+  - "Row count invariant: exactly one row per writer-keyspace ops table (id_keyspace: writer in field_semantics contract_table_ops) PRESENT in the catalog under check -- a status-live table is always expected, a pre_production table only once its history table exists in that catalog; absent ones are reported in control_health's absent_tables, never silently dropped. Today production expects ops_recommendations only."
+  - "Writer-internal disposition (Decision 210, rec-4158): no caller payload crosses a boundary and every value is computed by the writer; the two not_null rules (nullable false) are enforced by the DDL NOT NULL (Decision 210 cl.5, defence in depth) and the 6-hourly control_health verb, and validate_write_time_enforcement_conformance fails if this control-class contract ever declares more than not_null on a nullable false column."
+  - "Counter floor, per id_scheme: serial -- current_value >= the max allocated numeric id; ulid -- current_value >= the owning current table's row count (tests/test_ducklake_control_health.py::test_control_health_ulid_floor)."
+amendment_log:
+  - {date: "2026-11-02", semantic_break: false, change_class: prose_improvement, summary: "PLAN-glossary-sweep (rec-4676): relative words replaced by glossary names (Decision 240); no field or rule meaning changes."}
+  - date: "2026-10-25"
+    semantic_break: false
+    change_class: governance_note_add
+    summary: >-
+      PLAN-telemetry-production-catalog bookkeeping: governance.write_path notes that the production telemetry catalog's two
+      counter rows are seeded by provision_telemetry_catalog under the owner login (Decision 230). No field meaning changes.
+    migration_story: >-
+      Records the proven production provisioning; no table or row shape changes.
+  - date: "2026-10-05"
+    semantic_break: true
+    change_class: governance_note_add
+    summary: >-
+      PLAN-telemetry-table-registration (slice 2a-2 plan 1): the counter_name grain becomes one row per writer-keyspace table
+      present in the catalog under check (serial or ulid scheme); current_value gains the ulid meaning (registrations so far);
+      control_health's audit invariants name the catalog-aware row count and the ulid floor (current_value >= the owning current
+      table's row count). semantic_break=true: the expected row set now depends on the catalog under check.
+    migration_story: >-
+      Production keeps exactly one expected row (ops_recommendations) because ops_tenants and ops_projects exist in no production
+      catalog; the dimension tables are provisioned only in the isolated ducklake_smoke catalog by plan 3.
+  - date: "2026-10-12"
+    semantic_break: true
+    change_class: governance_note_add
+    summary: >-
+      PLAN-telemetry-registration-verbs (slice 2a-2 plan 3 part 1): governance.write_path gains a second writer in the
+      telemetry catalog only -- the telemetry writer's lock-only UPDATE of the ops_tenants / ops_projects row inside a
+      registration transaction, and provision_telemetry's seed of those two rows -- and narrows the "no standalone write
+      path" clause to the ops verbs. A governance note says control_health runs on production only.
+      semantic_break=true: a second writer now mutates this table.
+    migration_story: >-
+      The production ops catalog is untouched: the shared writer remains its sole writer and the expected row set there is
+      unchanged. The telemetry writer acts only in the isolated ducklake_smoke catalog.
+  - date: "2026-10-15"
+    semantic_break: false
+    change_class: prose_improvement
+    summary: >-
+      PLAN-rule-declarations-and-writer-conformance (rec-4158, Decision 210): the dq_intent `enforced` key is retired
+      from every rule leg. not_null is declared by presence (`true`, or `{exclude_before: D}`); an optional column or a
+      loosest-baseline field carries no not_null leg; the other legs lose the key. A declared rule is an enforced rule.
+    migration_story: >-
+      Declarations re-spelled only. No rule is added, removed or re-dated: the declared rule set, read through
+      scripts.contract_rules, is identical before and after, and the generated field_semantics.yaml projection of
+      this contract is unchanged.
+  - date: "2026-10-19"
+    semantic_break: false
+    change_class: prose_improvement
+    summary: >-
+      PLAN-query-ops-retirement PR B: the two lists of reader verbs that refuse this table name dq_check in place of the
+      retired query_ops. A pointer change only: the table stays unreachable through every reader verb.
+    migration_story: >-
+      No behaviour changes. The reader's dq_check refuses this table as it refused it through query_ops, covered by
+      tests/lambdas/ducklake_reader/test_control_table_refusal.py.
 previous_versions: []

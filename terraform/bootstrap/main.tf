@@ -18,9 +18,9 @@ terraform {
     }
   }
   backend "s3" {
+    # Region comes from AWS_REGION (CI sign-in) or an init-time -backend-config region (rec-4067).
     bucket       = "agent-platform-bootstrap-tfstate"
     key          = "terraform.tfstate"
-    region       = "eu-west-2"
     encrypt      = true
     use_lockfile = true
   }

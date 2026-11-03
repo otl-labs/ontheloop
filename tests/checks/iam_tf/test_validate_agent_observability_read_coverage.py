@@ -10,11 +10,13 @@ from scripts.checks.iam_tf.validate_agent_observability_read_coverage import (
     validate_agent_observability_read_coverage,
 )
 
-_BASE_ROLES = """
+_PERSONAL_LOCALS = """
 locals {
   writer_function = "agent-platform-ducklake-writer"
 }
+"""
 
+_BASE_ROLES = """
 resource "aws_iam_role" "platform_dev" {
   name = "PlatformDev"
 }
@@ -62,8 +64,11 @@ resource "aws_iam_role_policy" "platform_admin_ops" {
 
 def _run(tmp_path: Path, extra_tf: str) -> list[str]:
     personal = tmp_path / "terraform" / "personal"
+    bootstrap = tmp_path / "terraform" / "bootstrap"
     personal.mkdir(parents=True, exist_ok=True)
-    (personal / "roles.tf").write_text(_BASE_ROLES, encoding="utf-8")
+    bootstrap.mkdir(parents=True, exist_ok=True)
+    (bootstrap / "roles.tf").write_text(_BASE_ROLES, encoding="utf-8")
+    (personal / "locals.tf").write_text(_PERSONAL_LOCALS, encoding="utf-8")
     (personal / "resources.tf").write_text(extra_tf, encoding="utf-8")
     failed: list[str] = []
     with patch("scripts.checks._common.ROOT", tmp_path):
@@ -157,8 +162,10 @@ resource "aws_s3_bucket" "dynamic" {
 
 def test_no_resources_discovered_fails_loud(tmp_path: Path) -> None:
     personal = tmp_path / "terraform" / "personal"
+    bootstrap = tmp_path / "terraform" / "bootstrap"
     personal.mkdir(parents=True, exist_ok=True)
-    (personal / "roles.tf").write_text(_BASE_ROLES, encoding="utf-8")
+    bootstrap.mkdir(parents=True, exist_ok=True)
+    (bootstrap / "roles.tf").write_text(_BASE_ROLES, encoding="utf-8")
     failed: list[str] = []
     with (
         patch("scripts.checks._common.ROOT", tmp_path),
@@ -174,6 +181,7 @@ def test_no_resources_discovered_fails_loud(tmp_path: Path) -> None:
 
 def test_no_tf_files_fails_loud(tmp_path: Path) -> None:
     (tmp_path / "terraform" / "personal").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "terraform" / "bootstrap").mkdir(parents=True, exist_ok=True)
     failed: list[str] = []
     with patch("scripts.checks._common.ROOT", tmp_path):
         validate_agent_observability_read_coverage(failed)
@@ -182,8 +190,34 @@ def test_no_tf_files_fails_loud(tmp_path: Path) -> None:
 
 def test_missing_role_policies_fails_loud(tmp_path: Path) -> None:
     personal = tmp_path / "terraform" / "personal"
+    bootstrap = tmp_path / "terraform" / "bootstrap"
     personal.mkdir(parents=True, exist_ok=True)
-    (personal / "roles.tf").write_text('resource "aws_s3_bucket" "x" { bucket = "agent-platform-x" }', encoding="utf-8")
+    bootstrap.mkdir(parents=True, exist_ok=True)
+    (bootstrap / "roles.tf").write_text('resource "aws_s3_bucket" "x" { bucket = "agent-platform-x" }', encoding="utf-8")
+    failed: list[str] = []
+    with patch("scripts.checks._common.ROOT", tmp_path):
+        validate_agent_observability_read_coverage(failed)
+    assert any("could not parse" in f for f in failed)
+
+
+def test_policies_only_under_personal_fails_loud(tmp_path: Path) -> None:
+    """The DailyOps/AdminOps policies must live in terraform/bootstrap -- a personal-only copy
+    (the pre-adoption shape) is not read as coverage."""
+    personal = tmp_path / "terraform" / "personal"
+    bootstrap = tmp_path / "terraform" / "bootstrap"
+    personal.mkdir(parents=True, exist_ok=True)
+    bootstrap.mkdir(parents=True, exist_ok=True)
+    (personal / "roles.tf").write_text(_BASE_ROLES, encoding="utf-8")
+    (personal / "resources.tf").write_text(
+        """
+resource "aws_s3_bucket" "data_lake" {
+  bucket = "agent-platform-data-lake"
+}
+""",
+        encoding="utf-8",
+    )
+    # bootstrap exists but carries none of the role policies -- the pre-adoption shape.
+    (bootstrap / "unrelated.tf").write_text('resource "aws_iam_policy" "unrelated" { name = "x" }', encoding="utf-8")
     failed: list[str] = []
     with patch("scripts.checks._common.ROOT", tmp_path):
         validate_agent_observability_read_coverage(failed)

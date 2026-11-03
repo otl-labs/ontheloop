@@ -1,14 +1,13 @@
 """Unit tests for scripts.ops_data_portal.back_validate_ci_rca (PLAN-ci-rca-back-validate).
 
-All tests inject cache_rows directly (never fetched from the real warm cache) and mock
-file_rec so the --refile-audit path never performs a real write. This mirrors the
-Decision-88 zero-egress convention used by tests/test_ci_rca_back_validation.py.
+Tests inject cache_rows directly (TestDefaultRowsFromReader covers the default source-scoped
+read, Decision 215) and mock file_rec so the --refile-audit path never performs a real write.
 """
 
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -155,6 +154,23 @@ class TestBackValidateBucketRouting:
         ]
         result = back_validate_ci_rca(cache_rows=rows, since="2026-06-15")
         assert result["aggregate"]["total"] == 0
+
+
+class TestDefaultRowsFromReader:
+    def test_default_rows_come_from_source_scoped_read(self) -> None:
+        reader = MagicMock()
+        reader.current_state.return_value = [_rec("rec-1", "2026-06-20T00:00:00+00:00", _VALID_CONTEXT_V2)]
+        with patch("src.common.ducklake_reader_client.make_reader", return_value=reader):
+            result = back_validate_ci_rca(since="2026-06-15")
+        reader.current_state.assert_called_once_with("ops_recommendations", row_filter="source = 'ci_rca'")
+        assert [r["id"] for r in result["conformant"]] == ["rec-1"]
+
+    def test_reader_failure_raises_instead_of_empty_report(self) -> None:
+        reader = MagicMock()
+        reader.current_state.side_effect = RuntimeError("reader down")
+        with patch("src.common.ducklake_reader_client.make_reader", return_value=reader):
+            with pytest.raises(RuntimeError, match="reader down"):
+                back_validate_ci_rca(since="2026-06-15")
 
 
 class TestSinceBoundary:

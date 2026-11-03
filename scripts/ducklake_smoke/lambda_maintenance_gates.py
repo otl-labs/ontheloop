@@ -233,3 +233,41 @@ def lambda_maintenance_hot_merge(*, profile: str | None = None, region: str = "e
         f"MAINTENANCE_HOT_MERGE OK files_before={files_before} files_after={files_after} "
         f"elapsed_ms={body.get('elapsed_ms', 'n/a')}"
     )
+
+
+def lambda_maintenance_create_telemetry(*, profile: str | None = None, region: str = "eu-west-2") -> None:
+    """Decision 216: invoke create_telemetry_tables on maintenance-smoke (owner login) and assert the single-owner report.
+
+    Failure text carries only a status code, an error_type and the report fields; never a response body, URL, host or id
+    (Decision 101). The verb reads nothing from the event, so the payload is the action alone.
+    """
+    resp = core._sigv4_invoke(
+        core._function_url("maintenance_smoke"), {"action": "create_telemetry_tables"}, profile=profile, region=region
+    )
+    try:
+        body = resp.json()
+    except Exception:
+        body = None
+    body = body if isinstance(body, dict) else {}
+    if resp.status_code != 200 or body.get("ok") is not True:
+        error_type = body.get("error_type") if isinstance(body.get("error_type"), str) else "none"
+        raise core.SmokeTestFailure(f"MAINTENANCE_CREATE_TELEMETRY FAIL: status={resp.status_code} error_type={error_type}")
+    tables, owned = body.get("tables"), body.get("ownership")
+    if not isinstance(tables, list) or len(tables) != 9:
+        raise core.SmokeTestFailure("MAINTENANCE_CREATE_TELEMETRY FAIL: the response did not list the nine telemetry tables")
+    owned = owned if isinstance(owned, dict) else {}
+    if owned.get("foreign_owned") != 0:
+        raise core.SmokeTestFailure(
+            "MAINTENANCE_CREATE_TELEMETRY FAIL: a relation in the smoke metadata schema has a foreign owner"
+        )
+    if owned.get("schema_owner_held") is not True:
+        raise core.SmokeTestFailure(
+            "MAINTENANCE_CREATE_TELEMETRY FAIL: the smoke metadata schema's owner role is not held by the session"
+        )
+    if owned.get("scoped_create_on_schema") is not False or owned.get("scoped_create_on_public") is not False:
+        raise core.SmokeTestFailure("MAINTENANCE_CREATE_TELEMETRY FAIL: the scoped login holds CREATE (Decision 216 cl.1)")
+    created, added = body.get("created"), body.get("added")
+    if not isinstance(added, list) or not all(isinstance(a, str) for a in added):
+        raise core.SmokeTestFailure("MAINTENANCE_CREATE_TELEMETRY FAIL: the response did not list added columns")
+    count = len(created) if isinstance(created, list) else 0
+    print(f"MAINTENANCE_CREATE_TELEMETRY OK created={count} added={len(added)} foreign_owned=0 scoped_create=false")

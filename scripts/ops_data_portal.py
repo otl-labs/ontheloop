@@ -2,8 +2,8 @@
 """Unified write gateway for recommendation and decision operations.
 
 All writes to ops_recommendations and ops_decisions MUST go through this
-module. Direct appends to logs/.recommendations-log.jsonl are forbidden and
-caught by validate.py.
+module. Recs have no local read cache (Decision 215): writes never touch
+logs/.recommendations-log.jsonl.
 
 Failure mode (Decision 84 I-4): a write that cannot complete fails LOUDLY at
 the call site -- there is no offline outbox. Entity ids (rec-NNN) are allocated
@@ -46,9 +46,8 @@ from typing import Optional, cast
 import yaml
 
 from scripts.executor.jsonl_store import (
-    _VALID_STATUSES,
     DECISIONS_JSONL,  # noqa: F401 -- imported-name trap; read by decisions.py, re-exported here
-    RECS_JSONL,
+    RECS_JSONL,  # noqa: F401 -- retained patch target (tests patch it); the recs cache is retired (Decision 215)
     Recommendation,
 )
 from scripts.executor.rec_write_guidance import validate_source
@@ -76,6 +75,7 @@ from scripts.ops_portal.ci_rca_runtime import (  # noqa: F401
 )
 from scripts.ops_portal.ci_rca_schema import (  # noqa: F401
     _CI_RCA_VALID_MODES,
+    _PORTAL_OWNED_KEYS,
     CiRcaContext,
     CiRcaEvidenceDispute,
     _classify_schema_deficiency,
@@ -84,6 +84,7 @@ from scripts.ops_portal.ci_rca_schema import (  # noqa: F401
     _stamp_warn_mode_reject,
     _validate_ci_rca_context_v2,
     _validate_ci_rca_dispute,
+    apply_track_rules,
 )
 from scripts.ops_portal.cli import main
 from scripts.ops_portal.closure_gate import (  # noqa: F401
@@ -95,6 +96,7 @@ from scripts.ops_portal.closure_gate import (  # noqa: F401
     assert_acceptance_verdict,
     assert_closure_obligation,
     closure_stamps_applicable,
+    confirmed_track_stamp,
     parse_context_json,
 )
 from scripts.ops_portal.maintenance_ops import (  # noqa: F401
@@ -105,6 +107,7 @@ from scripts.ops_portal.maintenance_ops import (  # noqa: F401
     selftest_read,
     selftest_roundtrip,
 )
+from scripts.ops_portal.outcomes import FileRecOutcome
 from scripts.ops_portal.risk_scoring import (  # noqa: F401
     _compute_risk_score,
     _derive_computed_fields,
@@ -112,13 +115,7 @@ from scripts.ops_portal.risk_scoring import (  # noqa: F401
     compute_risk,
     load_capabilities,
 )
-from scripts.ops_portal.write_validators import (  # noqa: F401
-    _check_not_null,
-    _load_write_time_validators,
-    _validate_context_length,
-    _validate_file_path,
-    _write_time_validators_cache,
-)
+from scripts.ops_portal.write_validators import gate_write  # noqa: F401
 from scripts.ops_portal.writer_transport import (  # noqa: F401
     _ducklake_write,
     _project_ops_record,
@@ -194,12 +191,23 @@ def file_rec(
     profile: Optional[str] = None,
     _migration_int_id: Optional[int] = None,
     _skip_sync: bool = False,
-    _migration_mode: bool = False,
     context_v2_json: Optional[dict] = None,
 ) -> str:
+    """File a new recommendation and return its allocated ID (see file_rec_with_outcome)."""
+    return file_rec_with_outcome(fields, profile, _migration_int_id, _skip_sync, context_v2_json).rec_id
+
+
+def file_rec_with_outcome(
+    fields: dict,
+    profile: Optional[str] = None,
+    _migration_int_id: Optional[int] = None,
+    _skip_sync: bool = False,
+    context_v2_json: Optional[dict] = None,
+) -> FileRecOutcome:
     """File a new recommendation; the ducklake_writer allocates its ID atomically with the insert.
 
-    On success returns the allocated ID (e.g. 'rec-2171'). On any failure the
+    On success returns a FileRecOutcome whose rec_id is the allocated ID (e.g. 'rec-2171'); inserted is False,
+    with a reason, when a ci_rca dedup path returned an existing id instead of inserting. On any failure the
     call raises LOUDLY (Decision 84 I-4) -- there is no offline outbox; the
     transient-5xx retry inside _ducklake_write (idempotent via the per-call
     ULID) is the only retry.
@@ -212,15 +220,7 @@ def file_rec(
             via a caller-keyed write_ops upsert instead of writer allocation. The id
             is formed as f"rec-{n:03d}" (zero-padded under 1000) so dependency /
             priority-queue FKs to padded ids still match. Must not be used elsewhere.
-        _skip_sync: PRIVATE. When True, suppress the per-row _sync_table() flush so
-            a bulk import can call sync() exactly once at the end. Migration-only.
-        _migration_mode: PRIVATE. When True, bypass the write-time CONTENT-quality
-            validation surface (the two explicit calls _validate_file_path /
-            _validate_context_length AND the YAML-loaded _load_write_time_validators loop,
-            which alone now carries acceptance-lint discrimination -- see update_rec)
-            so historical rows that predate later content-rule tightening still import.
-            validate_source and the Recommendation schema (model_validate) remain
-            enforced. Migration-only.
+        _skip_sync: PRIVATE. Accepted for bulk-import callers; a no-op for recs (no local cache).
         context_v2_json: Optional structured CiRcaContext dict for source=ci_rca recs.
             When provided: validated against CiRcaContext in warn mode (deficiencies log
             a structured warning but do NOT raise); a >=80-char human summary is written
@@ -228,7 +228,7 @@ def file_rec(
             warning is logged and the rec is filed with legacy free-text context only.
 
     Returns:
-        Allocated ID string ('rec-NNN'). Raises on failure (no offline mode).
+        FileRecOutcome(rec_id, inserted, reason). Raises on failure (no offline mode).
 
     Raises:
         ValueError: If any required non-empty field is absent or blank.
@@ -266,9 +266,11 @@ def file_rec(
             fields["context"] = summary
 
     # context_v2_json warn-mode validation for source=ci_rca (CI_RCA_STRICT_MODE; INTENT Section 1).
-    # Must run before _validate_context_length so the human summary can satisfy the 80-char floor.
+    # Must run before gate_write so the human summary can satisfy the context min_length floor.
     if fields.get("source") == "ci_rca":
         if context_v2_json is not None:
+            for _owned in _PORTAL_OWNED_KEYS:
+                context_v2_json.pop(_owned, None)
             deficiencies = _validate_ci_rca_context_v2(context_v2_json)
             if deficiencies:
                 mode = get_ci_rca_strict_mode()
@@ -296,7 +298,7 @@ def file_rec(
                 fields["context"] = summary
             elif len(fields["context"].strip()) < 80:
                 fields["context"] = summary
-        elif not _migration_mode:
+        else:
             # CIRCA-02: strict mode rejects a legacy no-context_v2_json write for a NEW rec;
             # warn mode keeps accepting it (rollout window) with the deprecation log. Historical
             # rows filed before this schema landed are grandfathered by back_validate_ci_rca and
@@ -312,7 +314,7 @@ def file_rec(
             )
 
     # Cross-check spine (c10): load local bundle, verify SHA-256, bundle-wins comparison
-    if fields.get("source") == "ci_rca" and context_v2_json is not None and not _migration_mode:
+    if fields.get("source") == "ci_rca" and context_v2_json is not None:
         _run_ci_rca_cross_check(context_v2_json)
 
         # CIRCA-03(c): write-time dedup backstop -- the cross-run race guard. Runs AFTER the
@@ -335,7 +337,7 @@ def file_rec(
                         fingerprint,
                         existing_id,
                     )
-                    return existing_id
+                    return FileRecOutcome(existing_id, False, "ci_rca_open_duplicate")
 
                 # ci-rca-identity-lifecycle: no OPEN match. Status-aware chain: check the
                 # fingerprint's CLOSED head (if any) and run the regression-vs-drop ancestry
@@ -356,7 +358,7 @@ def file_rec(
                             failing_sha,
                             head.rec_id,
                         )
-                        return head.rec_id
+                        return FileRecOutcome(head.rec_id, False, "ci_rca_stale_rerun")
                     fields, context_v2_json = file_regression_record(fields, context_v2_json, head.rec_id)
                     logger.info(
                         "[CI_RCA_LIFECYCLE] fingerprint=%s matches closed %s with no ancestry proof of "
@@ -366,21 +368,21 @@ def file_rec(
                         head.rec_id,
                     )
 
+    if fields.get("source") == "ci_rca" and context_v2_json is not None:
+        apply_track_rules(
+            fields,
+            context_v2_json,
+            portal_regression=bool(context_v2_json.get("regression_of")),
+            mode=get_ci_rca_strict_mode(),
+        )
+
     _derive_computed_fields(fields)
 
-    if not _migration_mode:
-        for _col, _validator in _load_write_time_validators("ops_recommendations"):
-            _validator(fields.get(_col), _col)
-
-    validate_source(fields["source"])
-
-    if not _migration_mode:
-        _validate_file_path(fields["file"])
-        _validate_context_length(fields["context"])
-        # Acceptance-lint discrimination is enforced above via the write_time loop
-        # (write_validators.py::_check_acceptance, require_discrimination=True, rec-3306) --
-        # a redundant explicit call here is unreachable dead code (the loop always raises first
-        # for the identical input) and was removed rather than duplicated.
+    validate_source(fields.get("source", ""))
+    if _migration_int_id is None:
+        gate_write("ops_recommendations", fields, insert=True)
+    else:
+        gate_write("ops_recommendations", {**fields, "id": f"rec-{_migration_int_id:03d}"}, insert=False)
 
     merged = dict(fields)
     if context_v2_json is not None:
@@ -415,8 +417,7 @@ def file_rec(
         merged["id"] = str(rec_id)
 
     logger.info("[PORTAL] Filed %s: %s", rec_id, merged.get("title", ""))
-    _refresh_cache_after_write("ops_recommendations", merged, response, RECS_JSONL, append_only=_skip_sync)
-    return str(rec_id)
+    return FileRecOutcome(str(rec_id), True, None)
 
 
 def _fetch_rec_from_reader(rec_id: str, profile: Optional[str] = None) -> Optional[dict]:
@@ -444,9 +445,6 @@ def _fetch_rec_from_reader(rec_id: str, profile: Optional[str] = None) -> Option
         return None
     coerced = _coerce_ops_rec_row(dict(rows[0]))
     return _sanitize_record(coerced) if coerced is not None else None
-
-
-_UPDATE_CONTENT_VALIDATED_FIELDS = frozenset({"context", "title", "acceptance", "file", "dependencies", "tags"})
 
 
 def update_rec(
@@ -478,8 +476,8 @@ def update_rec(
         True on success.
 
     Raises:
-        ValueError: Invalid status, an updated content-validated field
-            (context/title/acceptance/file/dependencies/tags) failing its write-time gate, or a
+        ValueError: The merged record failing the contract's row rules (gate_write; dated rules are the
+            writer's alone and surface as its 422), or a
             closure_* kwarg supplied for a rec with no existing context_v2_json to stamp into.
         ClosureArtifactRequired: This write closes (bound set: closed/declined/superseded, from a
             not-already-bound status) an escape-classified rec with no resolvable
@@ -491,9 +489,6 @@ def update_rec(
         ValidationError: The merged record fails schema validation.
         RuntimeError: The warehouse is unreachable for the read step or the write fails.
     """
-    if "status" in updates and updates["status"] not in _VALID_STATUSES:
-        raise ValueError(f"Invalid status '{updates['status']}'. Must be one of: {', '.join(sorted(_VALID_STATUSES))}")
-
     # Referential existence (CD.33 cl.8 / D-5): an absent rec loud-fails. This replaces the prior
     # permissive `existing or {}` upsert-on-absent, which silently created a partial record.
     existing = _fetch_rec_from_reader(rec_id, profile=profile)
@@ -514,6 +509,8 @@ def update_rec(
         "fixed_by_sha": closure_fix_sha,
     }
     closure_stamps = {k: v for k, v in closure_stamps.items() if v is not None}
+    if closure_fix_sha:
+        closure_stamps.update(confirmed_track_stamp(merged.get("source"), closure_fix_sha, ROOT))
     if closure_stamps:
         if not closure_stamps_applicable(merged.get("context_v2_json")):
             raise ValueError(
@@ -524,14 +521,12 @@ def update_rec(
         ctx_for_stamp.update(closure_stamps)
         merged["context_v2_json"] = json.dumps(ctx_for_stamp)
 
-    for _col, _validator in _load_write_time_validators("ops_recommendations"):
-        if _col in updates and _col in _UPDATE_CONTENT_VALIDATED_FIELDS:
-            _validator(merged[_col], _col)
+    gate_write("ops_recommendations", merged, insert=False, existing=existing)
 
     Recommendation.model_validate(merged)  # raises on failure
 
-    # Decision 186: the predicate reads existing UNION merged context -- context_v2_json is not in
-    # _UPDATE_CONTENT_VALIDATED_FIELDS and carries no monotonicity guard, so a closing write that
+    # Decision 186: the predicate reads existing UNION merged context -- context_v2_json carries no
+    # contract rule and no monotonicity guard, so a closing write that
     # blanks it must not thereby erase its own obligation. Asserted immediately before the write.
     assert_closure_obligation(
         existing.get("status"),
@@ -544,9 +539,8 @@ def update_rec(
     )
 
     # ops_recommendations always routes to DuckLake (Decision 81 cl.7 / T2.19).
-    response = _ducklake_write("ops_recommendations", merged, action="update_ops", profile=profile)
+    _ducklake_write("ops_recommendations", merged, action="update_ops", profile=profile)
     logger.info("[PORTAL] Updated %s: %s", rec_id, list(updates.keys()))
-    _refresh_cache_after_write("ops_recommendations", merged, response, RECS_JSONL)
     return True
 
 
@@ -600,18 +594,20 @@ def sync(tables: Optional[list] = None) -> dict:
     """Pull the local read-cache fresh from the DuckLake reader (the single flush primitive).
 
     Args:
-        tables: Ops table names to sync. Defaults to ops_recommendations,
-                ops_decisions, ops_priority_queue.
+        tables: Ops table names to sync. Defaults to ops_decisions, ops_priority_queue.
 
     Returns:
         {"pulled": {table: rows}}
 
     Raises:
+        ValueError: ops_recommendations requested (no recs cache, Decision 215).
         RuntimeError: If the reader boundary is unreachable.
     """
     from scripts.sync.ops import _pull_single_table  # noqa: PLC0415
 
-    ops_tables = tables or ["ops_recommendations", "ops_decisions", "ops_priority_queue"]
+    ops_tables = tables or ["ops_decisions", "ops_priority_queue"]
+    if "ops_recommendations" in ops_tables:
+        raise ValueError("ops_recommendations has no local cache (Decision 215): read recs through the named verbs")
 
     # Every migrated table is a live `current` projection behind the atomic catalog commit
     # (Decision 84 I-1): a cache pull per table is the whole job -- no drain/compact/view-refresh.

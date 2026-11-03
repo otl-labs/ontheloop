@@ -28,11 +28,11 @@ _FACADE_MODULE = "scripts.ops_data_portal"
 _MOVED_CALLERS: dict[str, tuple[str, frozenset[str]]] = {
     "file_decision": (
         "scripts.ops_portal.decisions",
-        frozenset({"_ducklake_write", "DECISIONS_JSONL", "_load_write_time_validators", "_refresh_cache_after_write"}),
+        frozenset({"_ducklake_write", "DECISIONS_JSONL", "gate_write", "_refresh_cache_after_write"}),
     ),
     "update_decision": (
         "scripts.ops_portal.decisions",
-        frozenset({"_ducklake_write", "DECISIONS_JSONL", "_refresh_cache_after_write"}),
+        frozenset({"_ducklake_write", "DECISIONS_JSONL", "gate_write", "_refresh_cache_after_write"}),
     ),
     "backfill_decisions_from_md": (
         "scripts.ops_portal.decisions",
@@ -121,6 +121,7 @@ def validate_ops_portal_patch_targets(failed: list[str]) -> None:
     tests_dir = _common.ROOT / "tests"
     paths = sorted(tests_dir.glob("**/*.py"))
     violations = _find_violations(paths)
+    registry.examined(len(paths), unit="test_files")
     if violations:
         print("Stale facade patch targets found:")
         for v in violations:

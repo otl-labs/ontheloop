@@ -73,3 +73,32 @@ def test_decision_entry_and_victim_annotation() -> None:
     assert re.search(rf"^\[Amendment \d{{4}}-\d{{2}}-\d{{2}}, Decision {number}:", victim, re.MULTILINE), (
         f"Decision 81 must carry a dated annotation naming Decision {number}"
     )
+
+
+def test_coverage_sentence_and_decision_annotation_name_the_conformance_check() -> None:
+    _, rule, decisions_text = _load()
+    statement = _norm(rule["statement"])
+    for phrase in (
+        "validate_write_time_enforcement_conformance",
+        "declared equals enforced",
+        "every lambda manifest's handlers",
+        "--lambda-row-rules smoke gate",
+        "contract-less tables -> dormant, refused by the writer until their class a contract lands",
+        "(owners t4.3 c6 and t4.5 c2)",
+        "no enforced key exists",
+        "the class is bound to the exempted kind",
+        "ratchet (validate_ops_rule_source",
+        "census: 0 violators",
+        "a date never moves later or is removed",
+        "rec-4121",
+        "rec-4166",
+        "rec-4167",
+        "the portal -> write_validators.py gate_write, the writer's own gate run as a derived pre-check",
+        "ops.yaml -> dq backstops only",
+    ):
+        assert phrase in statement, phrase
+    section = _norm(_section(decisions_text, _decision_number(rule["statement"])))
+    assert "[amendment 2026-10-15, rec-4158: the writer-conformance residual is closed for row-local rules" in section
+    assert (
+        "(validate_write_time_enforcement_conformance); a declared rule is enforced, so the enforced key is retired" in section
+    )

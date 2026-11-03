@@ -8,7 +8,7 @@
 contract:
   id: recommendation-relevance
   class: D
-  contract_version: 1
+  contract_version: 2
   status: active
   description: >-
     Class D mechanism-contract envelope for this file (migration-step-3-grandfathering, T2.56
@@ -18,6 +18,16 @@ contract:
     check: validate_rec_relevance_contract
 
 amendment_log:
+  - {date: "2026-10-30", semantic_break: true, change_class: field_add, summary: "PLAN-merge-step-checks (rec-4592, rec-2437): added implement_gate (the /implement re-check never closes a bundled rec) and scoped deterministic_auto_close to the post-merge venue; close_proposed.verdicts lists satisfied for the semantic path. Narrows Decision 103 permissive may-auto-close at one venue; no verdict changed. contract_version 1 -> 2."}
+  - date: "2026-10-10"
+    semantic_break: false
+    change_class: prose_improvement
+    summary: >-
+      PLAN-recs-full-cache-retirement (Decision 215, amends Decision 103's warmed-read-cache
+      clause): planning_gate_protocol reads the rec through fetch_recs_by_ids (the recs_by_ids
+      named verb) instead of the retired local recs cache file, and the "never call
+      _make_reader() (Decision 88: use read-cache only)" sentence is replaced by Decision 215's
+      rule. No verdict set, signal definition, or constraint changed.
   - date: "2026-09-12"
     semantic_break: false
     change_class: prose_improvement
@@ -62,11 +72,11 @@ planning_gate_protocol: >-
   scripts/rec_relevance.py. Recs can go stale between filing and the current session (target file
   deleted, decision ratified, sibling plan already fixed it). Protocol: for each candidate rec
   identified via the "Suggest Aligned Recommendations" step, run
-  `bin/venv-python -c "from scripts.rec_relevance import evaluate_rec_relevance; import json,
-  pathlib; cache = pathlib.Path('logs/.recommendations-log.jsonl'); rows = [json.loads(l) for l in
-  cache.read_text().splitlines() if l.strip()]; rec = next((r for r in rows if r.get('id') ==
-  'rec-NNNN'), None); verdict, evidence = evaluate_rec_relevance(rec, run_acceptance_probe=False);
-  print(verdict, '|', evidence[:120])"`. Verdict handling: relevant or unknown -- proceed; offer to
+  `bin/venv-python -c "from scripts.rec_relevance import evaluate_rec_relevance; from
+  src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; rows, missing =
+  fetch_recs_by_ids(make_reader(), ['rec-NNNN']); rec = rows[0] if rows else None; verdict,
+  evidence = evaluate_rec_relevance(rec, run_acceptance_probe=False); print(verdict, '|',
+  evidence[:120])"` (one recs_by_ids call per batch of up to 50 ids; Decision 215). Verdict handling: relevant or unknown -- proceed; offer to
   bundle normally. satisfied -- do NOT bundle; surface the evidence and the proposal command from
   propose_or_close_rec(rec_id, 'satisfied', evidence, deterministic=False) (planning time: never
   deterministic); wait for operator to run the closure command, then proceed without bundling.
@@ -74,7 +84,8 @@ planning_gate_protocol: >-
   the propose_or_close_rec output and wait for operator decision; remove from candidate list
   regardless of outcome. Constraints: run_acceptance_probe=False is mandatory at planning time
   (Decision 55: no auto-closure from semantic judgment); acceptance probes run only at /implement
-  time. Never call _make_reader() inside this gate (Decision 88: use read-cache only).
+  time. Read recs only through fetch_recs_by_ids (Decision 215: no local recs cache exists; one
+  bounded named-verb call per batch, never a per-rec loop or a full-table read).
 
 verdicts:
   - relevant
@@ -91,16 +102,19 @@ closure_split:
     condition: >-
       Acceptance probe passes on main (non-empty acceptance field, run_acceptance_probe=True).
       Auto-closes via update_rec(status=closed, resolution=<proof>). Decision 70 lifecycle.
+      Post-merge venue only (T3.9); never at /implement time (implement_gate below).
     proof_required: true
   close_proposed:
     verdicts:
+      - satisfied
       - superseded
       - duplicate
       - contradicted
       - stale_target
       - blocked_by_decision
     condition: >-
-      Semantic signal or deterministic non-satisfaction verdict.
+      Semantic signal (including a semantic satisfied, e.g. commit correlation) or deterministic
+      non-satisfaction verdict.
       Emits a printed close_proposed command (--update-rec ... --status closed).
       Never auto-closes on semantic or LLM judgement (CD.36 / Decision 55).
   no_action:
@@ -108,6 +122,13 @@ closure_split:
     condition: >-
       No resolution signal detected, or insufficient data to assess.
       Surfaced for operator review; no action is taken automatically.
+implement_gate: >-
+  /implement Workflow Step 3 (`bin/venv-python -m scripts.rec_relevance --implement-recheck`) runs the acceptance
+  probe on each bundled rec but never closes one (rec-4592): a probe that passes on the implementing tree does not
+  prove the work merged (a non-discriminating probe, a drifted premise, or a resumed run's own edits all pass). A
+  satisfied verdict is reported and the rec stays bundled; the Resolves trailer closes it after merge through
+  Decision 201's gate. Every verdict other than relevant, unknown or satisfied prints the close_proposed command
+  (deterministic=False).
 signal_definitions:
   acceptance_probe:
     type: deterministic
@@ -147,4 +168,4 @@ constraints:
     this probe is a local subprocess call with no warehouse round-trip).
   - "Decision 55: semantic verdicts produce close_proposed only; no auto-action."
   - "Decision 70: verdict and lifecycle status are orthogonal; no new status enum value."
-  - "CD.36: deterministic satisfied auto-closes with proof; all else is close_proposed."
+  - "CD.36: deterministic satisfied auto-closes with proof (post-merge venue; never at /implement, see implement_gate); all else is close_proposed."

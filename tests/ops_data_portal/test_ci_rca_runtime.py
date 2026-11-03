@@ -417,13 +417,13 @@ class TestWarnModePerRuleStamping:
         }
         recs_file = tmp_path / "recs.jsonl"
         with (
-            patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-9301"}),
+            patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-9301"}) as mock_write,
             patch("scripts.ops_data_portal._sync_table"),
             patch("scripts.ops_data_portal.RECS_JSONL", recs_file),
         ):
             rec_id = p.file_rec(dict(_CI_RCA_FIELDS), context_v2_json=deficient_ctx)
         assert rec_id == "rec-9301"
-        entry = json.loads(recs_file.read_text(encoding="utf-8").splitlines()[0])
+        entry = mock_write.call_args.args[1]
         stored = json.loads(entry["context_v2_json"])
         assert stored["warn_mode_reject"]["reasons"] == ["schema_why_chain_too_long"]
 

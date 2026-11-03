@@ -8,8 +8,11 @@ Returns (verdict, evidence). Never raises at import time.
 
 from __future__ import annotations
 
+import argparse
+import importlib
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 RELEVANCE_VERDICTS: frozenset[str] = frozenset(
@@ -170,3 +173,48 @@ def evaluate_rec_relevance(
     if not recent_commits and not closed_recs and not decisions:
         return "unknown", "no signals available to assess relevance"
     return "relevant", "no resolution signals detected"
+
+
+def implement_recheck(rec_ids: list[str], *, reader=None) -> list[tuple[str, str, str, str | None]]:  # noqa: ANN001
+    """Re-check bundled recs at /implement time: (rec_id, verdict, evidence, proposal). NEVER closes a rec
+    (rec-4592): no deterministic auto-close and no update_rec; the merged trailer closes. A rec the reader
+    lacks yields verdict "missing". A satisfied rec gets no proposal."""
+    # Loaded by name, not `import`: the contract validator imports this module only for RELEVANCE_VERDICTS, and a
+    # static edge to the portal and reader would widen its pre_globs closure to ~56 unrelated files.
+    portal = importlib.import_module("scripts.ops_data_portal")
+    reader_client = importlib.import_module("src.common.ducklake_reader_client")
+    rows, _missing = reader_client.fetch_recs_by_ids(reader if reader is not None else reader_client.make_reader(), rec_ids)
+    by_id = {r.get("id"): r for r in rows}
+    results: list[tuple[str, str, str, str | None]] = []
+    for rec_id in rec_ids:
+        rec = by_id.get(rec_id)
+        if rec is None:
+            results.append((rec_id, "missing", "", None))
+            continue
+        verdict, evidence = evaluate_rec_relevance(rec, run_acceptance_probe=True)
+        proposal = None
+        if verdict not in ("relevant", "unknown", "satisfied"):
+            proposal = portal.propose_or_close_rec(rec_id, verdict, evidence, deterministic=False)
+        results.append((rec_id, verdict, evidence, proposal))
+    return results
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m scripts.rec_relevance")
+    parser.add_argument("--implement-recheck", required=True, metavar="rec-A[,rec-B]")
+    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+    ids = [i.strip() for i in args.implement_recheck.split(",") if i.strip()]
+    exit_code = 0
+    for rec_id, verdict, evidence, proposal in implement_recheck(ids):
+        if verdict == "missing":
+            print(f"{rec_id} missing")
+            exit_code = 1
+            continue
+        print(f"{rec_id} {verdict} | {evidence[:120]}")
+        if proposal:
+            print(proposal)
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

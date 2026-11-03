@@ -192,6 +192,32 @@ class TestBuildDucklakeDepsLayer:
                 with pytest.raises(SystemExit):
                     bm.build_ducklake_deps_layer(tmp_path)
 
+    def test_prunes_console_scripts_and_only_their_record_rows(self, tmp_path):
+        """rec-4189: pip's wrappers (RECORD rows ../../bin/<name>) go, with only their rows; other bytes stay."""
+        from pathlib import Path
+
+        kept = b"ulid/__init__.py,sha256=abc,6\r\npython_ulid-4.0.1.dist-info/RECORD,,\r\n"
+        other = b"yaml/__init__.py,sha256=def,3\nbin/data.txt,sha256=ghi,2\n"
+
+        def fake_run(cmd, **kw):
+            target = Path(cmd[cmd.index("--target") + 1])
+            for directory in ("bin", "ulid", "python_ulid-4.0.1.dist-info", "pyyaml-6.0.3.dist-info"):
+                (target / directory).mkdir()
+            (target / "bin" / "ulid").write_text("#!/opt/python3\n", encoding="utf-8")
+            (target / "bin" / "data.txt").write_text("kept", encoding="utf-8")
+            (target / "python_ulid-4.0.1.dist-info" / "RECORD").write_bytes(b"../../bin/ulid,sha256=zz,15\r\n" + kept)
+            (target / "pyyaml-6.0.3.dist-info" / "RECORD").write_bytes(other)
+            return types.SimpleNamespace(returncode=0)
+
+        with patch("scripts.build_lambda.subprocess.run", side_effect=fake_run):
+            with patch("scripts.build_lambda_packaging.OUTPUT_DIR", tmp_path):
+                bm.build_ducklake_deps_layer(tmp_path)
+        site_packages = tmp_path / "ducklake-deps" / "python" / "lib" / "python3.12" / "site-packages"
+        assert not (site_packages / "bin" / "ulid").exists()
+        assert (site_packages / "bin" / "data.txt").read_text(encoding="utf-8") == "kept"
+        assert (site_packages / "python_ulid-4.0.1.dist-info" / "RECORD").read_bytes() == kept
+        assert (site_packages / "pyyaml-6.0.3.dist-info" / "RECORD").read_bytes() == other
+
 
 class TestBuildDucklakeExtensionsLayer:
     def test_stages_three_extensions(self, tmp_path):

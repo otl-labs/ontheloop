@@ -177,13 +177,13 @@ class TestCiRcaSchemaEnforcement:
 
         recs_file = tmp_path / "recs.jsonl"
         with (
-            patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-9001"}),
+            patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-9001"}) as mock_write,
             patch("scripts.ops_data_portal._sync_table"),
             patch("scripts.ops_data_portal.RECS_JSONL", recs_file),
         ):
             rec_id = p.file_rec(dict(_CI_RCA_FIELDS), context_v2_json=dict(_VALID_CONTEXT_V2))
         assert rec_id == "rec-9001"
-        entry = json.loads(recs_file.read_text(encoding="utf-8").splitlines()[0])
+        entry = mock_write.call_args.args[1]
         assert "context_v2_json" in entry
         stored = json.loads(entry["context_v2_json"])
         assert stored["schema_version"] == 1
@@ -212,7 +212,7 @@ class TestCiRcaSchemaEnforcement:
         (proximate_cause/corrective_action/preventive_action) -- the composed summary is then
         empty, the short-summary fallback text is appended, and (since fields["context"] is
         also empty) that fallback overwrites it. The fallback text itself stays under 80 chars,
-        so _validate_context_length raises downstream -- this test's purpose is coverage of that
+        so the row-rule gate raises downstream -- this test's purpose is coverage of that
         composition path, not a successful file."""
         import scripts.ops_data_portal as p
 
@@ -220,7 +220,7 @@ class TestCiRcaSchemaEnforcement:
         flags_file = tmp_path / "feature_flags.yaml"
         flags_file.write_text("CI_RCA_STRICT_MODE: warn\n", encoding="utf-8")
         with patch("scripts.ops_data_portal._FEATURE_FLAGS_YAML", flags_file):
-            with pytest.raises(ValueError, match="context must be at least 80"):
+            with pytest.raises(ValueError, match="at least 80 stripped characters"):
                 p.file_rec({**_CI_RCA_FIELDS, "context": ""}, context_v2_json=deficient_ctx)
 
     def test_deficient_context_v2_with_short_context_overwrites_via_elif_branch(self, tmp_path: Path) -> None:
@@ -233,7 +233,7 @@ class TestCiRcaSchemaEnforcement:
         flags_file = tmp_path / "feature_flags.yaml"
         flags_file.write_text("CI_RCA_STRICT_MODE: warn\n", encoding="utf-8")
         with patch("scripts.ops_data_portal._FEATURE_FLAGS_YAML", flags_file):
-            with pytest.raises(ValueError, match="context must be at least 80"):
+            with pytest.raises(ValueError, match="at least 80 stripped characters"):
                 p.file_rec({**_CI_RCA_FIELDS, "context": "too short"}, context_v2_json=deficient_ctx)
 
     def test_legacy_free_text_passes_with_deprecation_warning(self, tmp_path: Path, caplog) -> None:
@@ -319,7 +319,7 @@ class TestCiRcaSchemaEnforcement:
 
         recs_file = tmp_path / "recs.jsonl"
         with (
-            patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-cv2-1"}),
+            patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-cv2-1"}) as mock_write,
             patch("scripts.ops_data_portal._sync_table"),
             patch("scripts.ops_data_portal.RECS_JSONL", recs_file),
         ):
@@ -352,7 +352,7 @@ class TestCiRcaSchemaEnforcement:
         assert rc == 0
         captured = capsys.readouterr()
         assert "rec-cv2-1" in captured.out
-        entry = _json.loads(recs_file.read_text(encoding="utf-8").splitlines()[0])
+        entry = mock_write.call_args.args[1]
         assert "context_v2_json" in entry
         stored = _json.loads(entry["context_v2_json"])
         assert stored["schema_version"] == 1

@@ -19,9 +19,12 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any, Callable
 
+from src.common import ducklake_handler_errors as handler_errors
 from src.common import ducklake_runtime as rt
+from src.common.ducklake_metrics import log_invocation
 from src.lambdas.ducklake_writer.smoke_actions import (
     _AlwaysCollidingConnection,  # noqa: F401 -- re-exported for direct test access (h._AlwaysCollidingConnection)
     _churn_one_single_write,  # noqa: F401 -- re-exported for direct test access (h._churn_one_single_write)
@@ -187,7 +190,7 @@ def action_create_ops_tables(event: dict[str, Any], con: Any) -> dict[str, Any]:
             "counter_seed": None,
         }
 
-    _require_ops_table(table, direction="write")
+    _require_ops_table(table, direction="write", provisioning=True)
     _check_force_recreate_confirm(table, event, force)
     rt.create_scd2_tables(con, table=table, force_recreate=force)
     spec = rt.resolve_table_spec(table)
@@ -214,7 +217,11 @@ def action_describe(event: dict[str, Any], _con: Any) -> dict[str, Any]:
     return {"ok": True, "verbs": rt.describe_write_verbs()}
 
 
-def _require_ops_table(table: Any, *, direction: str) -> None:
+_GENERIC_REFUSED_BOUNDARIES = frozenset({"telemetry_append", "registration"})
+_DORMANT_BOUNDARY = "dormant"
+
+
+def _require_ops_table(table: Any, *, direction: str, provisioning: bool = False) -> None:
     """Loud-fail if *table* is not a configured ops_* table, or is a control-class table not
     reachable through the generic write verbs (closed-boundary table allow-list).
 
@@ -222,13 +229,26 @@ def _require_ops_table(table: Any, *, direction: str) -> None:
     class-specific, never a general per-direction capability field (that is rec-3771, deliberately
     out of this plan) -- so write_ops/file_ops/update_ops loud-fail instead of falling through
     write_scd2 into the SCD2 branch against a spec with current_table=None. create_ops_tables is
-    the one legitimate exception and branches BEFORE ever reaching this function.
+    the one legitimate exception and branches BEFORE ever reaching this function. A dormant table (Decision 210
+    cl.4) is refused by the generic verbs but still provisioned: create_ops_tables passes provisioning=True.
     """
     if rt.is_control_table(table):
         raise WriterActionError(
             f"{table!r} is a control-class table (write_boundary=writer_internal): not reachable "
             f"through the generic {direction} verbs -- provisioned only via create_ops_tables "
             "(docs/contracts/ops_entity_counters.yaml)"
+        )
+    boundary = rt.table_write_boundary(table) if isinstance(table, str) else None
+    if boundary == _DORMANT_BOUNDARY and not provisioning:
+        raise WriterActionError(
+            f"{table!r} is dormant (write_boundary={boundary}): the generic {direction} verbs refuse it until its Class A "
+            "contract lands and its row rules project into field_semantics.yaml (Decision 210 cl.4); create_ops_tables "
+            "still provisions it"
+        )
+    if boundary in _GENERIC_REFUSED_BOUNDARIES:
+        raise WriterActionError(
+            f"{table!r} is not reachable through the generic {direction} verbs: written only by the "
+            f"telemetry verbs (write_boundary={boundary}) -- Decision 55 loud fail"
         )
     if not isinstance(table, str) or table not in rt.ops_table_names():
         raise WriterActionError(f"unknown or missing ops table {table!r}: expected one of {list(rt.ops_table_names())}")
@@ -280,9 +300,8 @@ def _response(status: int, payload: dict[str, Any]) -> dict[str, Any]:
     return {"statusCode": status, "headers": {"Content-Type": "application/json"}, "body": json.dumps(payload)}
 
 
-def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
-    """Writer Lambda entrypoint. Dispatches `action`; loud-fail maps to a 4xx/5xx (no silent drop)."""
-    payload = _parse_event(event)
+def _handle(payload: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    """Writer dispatch. Dispatches `action`; loud-fail maps to a 4xx/5xx (no silent drop)."""
     action = payload.get("action")
     fn = _ACTIONS.get(action)
     if fn is None:
@@ -295,12 +314,16 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
         # the next invocation (NOT closed in a finally). The SELECT-1 liveness probe reopens a closed
         # connection at acquisition; a session that dies mid-statement (Neon scale-to-zero) surfaces as
         # a connection error -- reopen ONCE and retry. The production write actions are replay-safe
-        # under retry (file_ops via the client-replayed idempotency ULID; update_ops/write_ops are
-        # MERGE-idempotent on the merge key), and a connection death aborts the catalog txn so the
-        # first attempt left nothing committed. Any non-connection error still propagates (Decision 55).
+        # under retry (file_ops via the client-replayed idempotency ULID; update_ops/write_ops mint
+        # a fresh write ULID per call, so a replay adds a history row while the current row converges, rec-4121),
+        # and a connection death aborts the catalog txn so the
+        # first attempt left nothing committed. Any non-connection error reaches handler()'s terminal answer (Decision 55).
         con, conn_meta = _warm_writer_connection()
         payload["_connect_ms"] = conn_meta["connect_ms"]
         payload["_connect_reused"] = conn_meta["reused"]
+        meta.update(
+            connect_ms=conn_meta["connect_ms"], connect_reused=conn_meta["reused"], reopened=bool(conn_meta.get("reopened"))
+        )
         try:
             return _response(200, fn(payload, con))
         except Exception as exc:  # noqa: BLE001 -- narrowed immediately to the dead-connection case
@@ -309,7 +332,21 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
             con, conn_meta = _warm_writer_connection(force_reopen=True)
             payload["_connect_ms"] = conn_meta["connect_ms"]
             payload["_connect_reused"] = conn_meta["reused"]
+            meta.update(connect_ms=conn_meta["connect_ms"], connect_reused=conn_meta["reused"], reopened=True)
             return _response(200, fn(payload, con))
+    except rt.RowRuleViolationError as exc:
+        return _response(
+            422,
+            {
+                "ok": False,
+                "error_type": "row_rule",
+                "table": exc.table,
+                "rule": exc.rule,
+                "column": exc.column,
+                "exclude_before": exc.exclude_before,
+                "error": str(exc),
+            },
+        )
     except rt.SchemaGateError as exc:
         return _response(422, {"ok": False, "error_type": "schema_gate", "error": str(exc)})
     except rt.StatusTransitionError as exc:
@@ -324,3 +361,49 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
         return _response(500, {"ok": False, "error_type": "version_mismatch", "error": str(exc)})
     except rt.DuckLakeRuntimeError as exc:
         return _response(500, {"ok": False, "error_type": "runtime", "error": str(exc)})
+
+
+def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
+    """Entrypoint: dispatch, then log exactly one ducklake_invocation line on every path.
+
+    No exception escapes as the runtime's untyped 502: an unparseable or non-object body answers 400 bad_request, an
+    unmapped exception 500 unmapped and a dead catalog connection 503 catalog_unavailable (class and request id only).
+    """
+    started = time.perf_counter()
+    payload: dict[str, Any] = {}
+    meta: dict[str, Any] = {"connect_ms": None, "connect_reused": None, "reopened": False}
+    status = 500
+    try:
+        try:
+            parsed = _parse_event(event)
+        except (ValueError, RecursionError):
+            parsed = None
+        if not isinstance(parsed, dict):
+            status, body = handler_errors.bad_request("writer", "unknown")
+            return _response(status, body)
+        payload = parsed
+        response = _handle(payload, meta)
+        status = response["statusCode"]
+        return response
+    except Exception as exc:
+        action = payload.get("action")
+        status, body = handler_errors.terminal(
+            exc,
+            function="writer",
+            action=action if isinstance(action, str) and action in _ACTIONS else "unknown",
+            request_id=handler_errors.request_id(context),
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            reopened=bool(meta["reopened"]),
+        )
+        return _response(status, body)
+    finally:
+        action = payload.get("action")
+        log_invocation(
+            "writer",
+            action if isinstance(action, str) and action in _ACTIONS else "unknown",
+            status,
+            meta["connect_ms"],
+            meta["connect_reused"],
+            meta["reopened"],
+            (time.perf_counter() - started) * 1000.0,
+        )

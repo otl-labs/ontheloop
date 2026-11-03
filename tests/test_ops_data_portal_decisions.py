@@ -6,7 +6,7 @@ the DynamoDB allocator are retired.
 
 Decision 124 namespace migration: file_decision/update_decision/backfill_decisions_from_md
 and _fetch_decision_from_reader moved to scripts/ops_portal/decisions.py, which imports
-_ducklake_write, DECISIONS_JSONL, _sync_table, and _load_write_time_validators into its OWN
+_ducklake_write, DECISIONS_JSONL, _sync_table, and gate_write into its OWN
 module namespace (a plain `from ... import` creates a separate binding from the facade's
 re-exported copy). Patches therefore target scripts.ops_portal.decisions.<sym> -- the
 namespace decisions.py's callers actually resolve at call time -- not the facade.
@@ -40,7 +40,7 @@ class TestFileDecision:
             patch("scripts.ops_portal.decisions._ducklake_write", return_value={"ok": True}) as mock_write,
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", decisions_jsonl),
             patch("scripts.ops_portal.decisions._sync_table"),
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
+            patch("scripts.ops_portal.decisions.gate_write"),
         ):
             from scripts.ops_data_portal import file_decision
 
@@ -62,7 +62,7 @@ class TestFileDecision:
             patch("scripts.ops_portal.decisions._ducklake_write", return_value={"ok": True}),
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", decisions_jsonl),
             patch("scripts.ops_portal.decisions._sync_table"),
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
+            patch("scripts.ops_portal.decisions.gate_write"),
         ):
             from scripts.ops_data_portal import file_decision
 
@@ -83,7 +83,7 @@ class TestFileDecision:
             patch("scripts.ops_portal.decisions._ducklake_write", return_value={"ok": True}),
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", decisions_jsonl),
             patch("scripts.ops_portal.decisions._sync_table"),
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
+            patch("scripts.ops_portal.decisions.gate_write"),
         ):
             from scripts.ops_data_portal import file_decision
 
@@ -116,7 +116,7 @@ class TestFileDecision:
             ),
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", decisions_jsonl),
             patch("scripts.ops_portal.decisions._sync_table"),
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
+            patch("scripts.ops_portal.decisions.gate_write"),
         ):
             from scripts.ops_data_portal import file_decision
 
@@ -313,7 +313,7 @@ class TestBackfillFidelityTripwire:
             patch("scripts.ops_portal.decisions._ducklake_write", return_value={"ok": True}),
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", decisions_jsonl),
             patch("scripts.ops_portal.decisions._sync_table"),
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
+            patch("scripts.ops_portal.decisions.gate_write"),
             patch("scripts.ops_portal.decisions._fetch_decision_from_reader", return_value=None),
             patch("scripts.ops_portal.decisions._assert_no_orphaned_current_rows"),
         ):
@@ -338,7 +338,7 @@ class TestBackfillFidelityTripwire:
             patch("scripts.ops_portal.decisions._ducklake_write", return_value={"ok": True}),
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", decisions_jsonl),
             patch("scripts.ops_portal.decisions._sync_table"),
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
+            patch("scripts.ops_portal.decisions.gate_write"),
             patch("scripts.ops_portal.decisions._fetch_decision_from_reader", return_value=None),
             patch("scripts.ops_portal.decisions._live_decision_ids", return_value={99999}),
             patch("scripts.decisions_md.parse_decisions_md", return_value=[regressed_entry]),
@@ -362,7 +362,7 @@ class TestBackfillFidelityTripwire:
             patch("scripts.ops_portal.decisions._ducklake_write", return_value={"ok": True}),
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", decisions_jsonl),
             patch("scripts.ops_portal.decisions._sync_table"),
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
+            patch("scripts.ops_portal.decisions.gate_write"),
             patch("scripts.ops_portal.decisions._fetch_decision_from_reader", return_value=None),
             patch("scripts.ops_portal.decisions._live_decision_ids", return_value={63}),
             patch("scripts.decisions_md.parse_decisions_md", return_value=[baselined_entry]),
@@ -388,7 +388,7 @@ class TestBackfillFidelityTripwire:
             patch("scripts.ops_portal.decisions._ducklake_write") as mock_write,
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", decisions_jsonl),
             patch("scripts.ops_portal.decisions._sync_table"),
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
+            patch("scripts.ops_portal.decisions.gate_write"),
             patch("scripts.ops_portal.decisions._live_decision_ids", return_value=set()),
             patch("scripts.decisions_md.parse_decisions_md", return_value=unkeyed_entries),
             patch("scripts.ops_portal.decisions._assert_no_orphaned_current_rows"),
@@ -409,7 +409,7 @@ class TestBackfillFidelityTripwire:
             patch("scripts.ops_portal.decisions._ducklake_write", side_effect=RuntimeError("writer down")),
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", decisions_jsonl),
             patch("scripts.ops_portal.decisions._sync_table"),
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
+            patch("scripts.ops_portal.decisions.gate_write"),
             patch("scripts.ops_portal.decisions._fetch_decision_from_reader", return_value=None),
             patch("scripts.ops_portal.decisions._live_decision_ids", return_value=set()),
             patch("scripts.decisions_md.parse_decisions_md", return_value=[entry]),
@@ -445,7 +445,7 @@ class TestBackfillContentHashSkipGate:
             patch("scripts.ops_portal.decisions._ducklake_write") as mock_write,
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", decisions_jsonl),
             patch("scripts.ops_portal.decisions._sync_table"),
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
+            patch("scripts.ops_portal.decisions.gate_write"),
             patch("scripts.ops_portal.decisions._fetch_decision_from_reader", return_value=existing_row),
             patch("scripts.ops_portal.decisions._live_decision_ids", return_value=set()),
             patch("scripts.decisions_md.parse_decisions_md", return_value=[entry]),
@@ -467,7 +467,7 @@ class TestBackfillContentHashSkipGate:
             patch("scripts.ops_portal.decisions._ducklake_write", return_value={"ok": True}) as mock_write,
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", decisions_jsonl),
             patch("scripts.ops_portal.decisions._sync_table"),
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
+            patch("scripts.ops_portal.decisions.gate_write"),
             patch("scripts.ops_portal.decisions._fetch_decision_from_reader", return_value=existing_row),
             patch("scripts.ops_portal.decisions._live_decision_ids", return_value=set()),
             patch("scripts.decisions_md.parse_decisions_md", return_value=[entry]),
@@ -489,7 +489,7 @@ class TestBackfillContentHashSkipGate:
             patch("scripts.ops_portal.decisions._ducklake_write", return_value={"ok": True}) as mock_write,
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", decisions_jsonl),
             patch("scripts.ops_portal.decisions._sync_table"),
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
+            patch("scripts.ops_portal.decisions.gate_write"),
             patch("scripts.ops_portal.decisions._fetch_decision_from_reader", return_value=None),
             patch("scripts.ops_portal.decisions._live_decision_ids", return_value=set()),
             patch("scripts.decisions_md.parse_decisions_md", return_value=[entry]),
@@ -538,7 +538,7 @@ class TestIntentBackfillColumn:
             patch("scripts.ops_portal.decisions.file_decision", return_value="dec-001") as mock_file_decision,
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", decisions_jsonl),
             patch("scripts.ops_portal.decisions._sync_table"),
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
+            patch("scripts.ops_portal.decisions.gate_write"),
             patch("scripts.ops_portal.decisions._fetch_decision_from_reader", return_value=None),
             patch("scripts.ops_portal.decisions._live_decision_ids", return_value=set()),
             patch("scripts.decisions_md.parse_decisions_md", return_value=[entry]),

@@ -1,14 +1,12 @@
 """Decision 131 mirror home for scripts/ops_data_portal.py's update_rec write-boundary changes in
-PLAN-ops-portal-enforcement-gaps: dependencies joins _UPDATE_CONTENT_VALIDATED_FIELDS (rec-3307),
+PLAN-ops-portal-enforcement-gaps: dependencies is gated on update (rec-3307),
 and update_rec's YAML-driven acceptance lint now requires a discriminating probe shape too,
 matching file_rec (rec-3306 core).
 
 Module-level test functions (not class-nested) so the node ids match the plan's Verification Plan
 commands verbatim (tests/ops_data_portal/test_update_rec_content_validation.py::test_<name>).
 
-Defines its own minimal valid-fields fixture locally rather than importing
-tests/fixtures/ops_portal_records.VALID_FIELDS, following the local-fixture precedent in
-tests/ops_data_portal/test_acceptance_discrimination.py.
+The existing-row fixture is the shared reader-shaped, rule-clean factory in tests/fixtures/ops_rec_rows.py.
 
 No `duckdb = pytest.importorskip("duckdb")` guard: _fetch_rec_from_reader / _ducklake_write /
 _sync_table are mocked throughout, so this module never touches a real DuckLake connection and
@@ -26,26 +24,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-_EXISTING = {
-    "id": "rec-4001",
-    "title": "Existing recommendation under test for the update_rec content boundary",
-    "file": "scripts/ops_data_portal.py",
-    "context": "A sufficiently long context string so the write-time content validators are satisfied here.",
-    "acceptance": "grep -q ops_data_portal scripts/ops_data_portal.py && grep -q update_rec scripts/ops_data_portal.py",
-    "effort": "XS",
-    "priority": "Low",
-    "source": "planning",
-    "risk": "low",
-    "status": "open",
-    "automatable": True,
-    "dependencies": None,
-    "date": "2026-01-01",
-}
+from tests.fixtures.ops_rec_rows import reader_rec_row, writer_stand_in
+
+_EXISTING = reader_rec_row()
 
 
 def test_dependencies_reject_malformed_element(tmp_path: Path) -> None:
-    """dependencies joins _UPDATE_CONTENT_VALIDATED_FIELDS -- an update setting a malformed
-    element is rejected through update_rec's write-time gate (rec-3307)."""
+    """an update setting a malformed dependencies element is rejected through update_rec's
+    write-time gate (rec-3307)."""
     recs_file = tmp_path / "recs.jsonl"
     with (
         patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=dict(_EXISTING)),
@@ -145,12 +131,14 @@ def test_dependency_on_closed_rec_is_accepted(tmp_path: Path) -> None:
 
 
 def test_update_rec_rejects_nonconforming_tag(tmp_path: Path) -> None:
-    """tags joins _UPDATE_CONTENT_VALIDATED_FIELDS -- a non-conforming tag element is rejected
-    through update_rec's write-time gate (Decision 181 clause 2)."""
+    """A non-conforming tag element is refused on update (Decision 181 clause 2). The tags format leg is dated, so the
+    portal's update pre-check skips it; the writer binds it because the column changes. The shared fake writer runs the
+    writer's own check_write with the stored row as prior and stores nothing on refusal."""
     recs_file = tmp_path / "recs.jsonl"
+    fake_writer = writer_stand_in([_EXISTING])
     with (
         patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=dict(_EXISTING)),
-        patch("scripts.ops_data_portal._ducklake_write") as mock_write,
+        patch("scripts.ops_data_portal._ducklake_write", fake_writer),
         patch("scripts.ops_data_portal._sync_table"),
         patch("scripts.ops_data_portal.RECS_JSONL", recs_file),
     ):
@@ -158,7 +146,7 @@ def test_update_rec_rejects_nonconforming_tag(tmp_path: Path) -> None:
 
         with pytest.raises(ValueError, match="tags"):
             update_rec("rec-4001", {"tags": ["T2.56"]})
-    mock_write.assert_not_called()
+    assert fake_writer.writes == []
 
 
 def test_legacy_nonconforming_tag_still_updates(tmp_path: Path) -> None:
@@ -299,7 +287,7 @@ def test_named_artifact_absent_is_refused(tmp_path: Path) -> None:
 def test_closing_write_that_blanks_context_is_still_refused(tmp_path: Path) -> None:
     """D-B3: a closing write that also blanks context_v2_json in the SAME update_rec call is
     still refused -- the predicate reads existing UNION merged, so the write cannot erase the
-    classification that gates it (context_v2_json is not in _UPDATE_CONTENT_VALIDATED_FIELDS and
+    classification that gates it (context_v2_json carries no contract rule and
     carries no monotonicity guard)."""
     recs_file = tmp_path / "recs.jsonl"
     with (

@@ -16,13 +16,11 @@ _ROADMAP_MAX_LINES = 10_000  # Decision 114 (raised from KG.11's 2500)
 _ROADMAP_REL_PATH = "docs/ROADMAP-PLATFORM.yaml"
 
 
-def _roadmap_size_issues(text: str, ceiling: int = _ROADMAP_MAX_LINES) -> list[str]:
-    """Return a one-item FAIL list if text exceeds ceiling lines, else []."""
+def _roadmap_size_issues(text: str, ceiling: int = _ROADMAP_MAX_LINES, rel_path: str = _ROADMAP_REL_PATH) -> list[str]:
+    """Return a one-item FAIL list if text exceeds ceiling lines, else [] (each file on its own, Decision 227)."""
     line_count = len(text.splitlines())
     if line_count > ceiling:
-        return [
-            f"  FAIL: docs/ROADMAP-PLATFORM.yaml is {line_count} lines, exceeding the {ceiling}-line ceiling (Decision 114)"
-        ]
+        return [f"  FAIL: {rel_path} is {line_count} lines, exceeding the {ceiling}-line ceiling (Decision 114)"]
     return []
 
 
@@ -87,12 +85,18 @@ def validate_platform_roadmap(failed: list[str]) -> None:
     try:
         from pydantic import ValidationError  # noqa: PLC0415
 
+        from scripts.roadmap import roadmap_archive  # noqa: PLC0415
         from scripts.roadmap.platform_roadmap import ExitCriterion, load  # noqa: PLC0415
 
         doc = load(roadmap_path)
         issues: list[str] = []
         roadmap_text = roadmap_path.read_text(encoding="utf-8")
         issues += _roadmap_size_issues(roadmap_text)
+        issues += [
+            m
+            for a in roadmap_archive.archive_texts(roadmap_path)
+            for m in _roadmap_size_issues(a, rel_path=roadmap_archive.ARCHIVE_REL_PATH)
+        ]
 
         # (i) met criterion met_by resolves to a real plan file OR a 40-hex sha
         plans_root = _common.ROOT / "docs" / "plans"
@@ -131,6 +135,7 @@ def validate_platform_roadmap(failed: list[str]) -> None:
                                     f"but still has bare-string criteria -- convert to ExitCriterion objects"
                                 )
                                 break
+        issues += roadmap_archive.criterion_ii_archive_issues(roadmap_path, default_base_reader)
 
         # (iii) every PLAN-*.yaml closes_criteria ref resolves to a real item:criterion
         item_criteria: dict[str, set[str]] = {}

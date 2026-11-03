@@ -1,0 +1,1068 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-stop-turn-close
+intent: >-
+  Every Claude Code turn's telemetry rows land at that turn's own Stop (claude_code parser_version 4 -> 5), so a cloud
+  session that is never resumed keeps its last turn and a one-turn session lands at all (rec-4407: the SessionEnd pass
+  cannot reach the writer because Claude Code stops its egress proxy first). Each turn closes on a witness the capture
+  Stop shim leaves in the transcript, turn closes carry their outcome, and each turn's open row lands once its prompt is
+  on disk, which gives PLAN-telemetry-read-side-session-end the evidence to tell a session at rest from one that died
+  mid-turn. Telemetry is the learning signal of the recursive self-improvement loop (PROJECT_CONTEXT); lost last turns
+  and unreadable session ends would teach it the wrong lessons.
+plan_type: IMPLEMENTATION
+implementation_declared: true
+verification_tier: V3
+plan_path: docs/plans/PLAN-telemetry-stop-turn-close.yaml
+phase: >-
+  ad_hoc_rec (the producer half of rec-4407's direction, chosen by Benjamin on 2026-10-17); related tier item T3.20
+  (agent-turn telemetry capture). Closes no exit criterion and affects none (c9, CI agent capture, is rec-4415's: in
+  GitHub Actions the prompt hook spawns a runner that exits off; c3 is slice 4's orphan monitor; c6 and c7 are outside
+  capture correctness). Precondition: PLAN-telemetry-capture-producer-fixes's build merged (parser_version 4; the same
+  modules). V3 because the build proves the new rows against the live smoke-catalog writer (c8 smoke); nothing here is
+  Lambda-packaged and nothing deploys. PLAN-telemetry-read-side-session-end builds after this one and closes rec-4407.
+scope:
+- file: src/turn_capture/witness.py
+  action: Create
+  purpose: >-
+    Pure (stdlib plus src.turn_capture: transcript.hook_script, as test_package_boundary allows). It never imports
+    streams at module level (streams.py imports it): the streams types it annotates come in under TYPE_CHECKING only,
+    and is_api_error with API_ERROR_FLAG_KEYS moves here from streams.py, which re-exports both so sessions.py and
+    transcripts.py import them unchanged. WITNESS_LINE = "[stop_log_turn] turn witness"; is_witness_record(data) (the raw-record predicate waits.py shares)
+    and is_witness(rec) (rule WT-2);
+    at_rest(turn, line) (WT-3's usable test); closing_events(turn) (usable witnesses and API-error records, in file
+    order, WT-3/WT-4); frontier(turn) (WT-7); close_window(turn, event) (the turn's records before the event, WT-3);
+    the close-row content helpers observations.py calls (counts and outcome over a window, WT-6). Keeps streams.py and
+    observations.py inside their budgets (Decision 128).
+- file: src/turn_capture/streams.py
+  action: Modify
+  purpose: >-
+    Turn gains closes (its usable closing events) and frontier. parse_tree gains a keyword `frontier: bool = False`;
+    WT-7 runs only when it is true, and record_turn's emitter passes frontier=True for every non-final parse, so direct
+    parse_tree callers and their tests (test_streams.py, test_sessions.py) keep today's non-final parse unchanged.
+    WT-7 applies to the ROOT stream only: when its last turn has no later boundary, the root's records after that turn's frontier are dropped and the
+    root is walked again over the kept records, so every collection _walk builds (stream.hooks, stream.compacts,
+    stream.resumes, turn.recs, turn.prompts, turn.companions, turn.last_assistant) and the later tool indexing and
+    response grouping see only kept records (the re-walk counts each record's classification diagnostics once). closed
+    is true when the turn has a later boundary, the pass closes the
+    stream, or the turn holds a usable closing event. Sub-agent streams are unchanged. Witnesses keep kind "hook" (one
+    process_event each, as every hook attachment). Stays under 500 SLOC.
+- file: src/turn_capture/observations.py
+  action: Modify
+  purpose: >-
+    Turn rows: every turn close is keyed on the record that ends its window, role_ref(<that record's uuid>, 0,
+    "turn_close"): a usable witness (WT-3), an API-error record (WT-4), or, for the boundary close, the turn's last
+    record carrying a uuid and a parseable timestamp before its boundary or eof (WT-5, the SC-1 and session-close anchor
+    rule; it replaces v3's last-assistant key), so a key always fixes its content. The boundary close is emitted only
+    when the turn holds an assistant record and no usable closing event lies at or after its last one; a turn holding
+    no assistant record carries no close, as in v4. Outcome on every turn close (WT-6);
+    a turn that is not closed emits its open row only (WT-8). metadata keys unchanged (response_count, tool_call_count,
+    over the close's window).
+- file: src/turn_capture/sessions.py
+  action: Modify
+  purpose: >-
+    _open_bound becomes the first close bound of the stream's first closed assistant-bearing turn: its first usable
+    closing event's line, else its last record line when a boundary closed it (WT-9), so the open row's content (and
+    v4's PV-4 harness_session_key read at or before the bound) cannot move while that turn continues.
+- file: src/turn_capture/record_turn.py
+  action: Modify
+  purpose: >-
+    PARSER_VERSION 5, PRODUCER_VERSION "turn-capture-5". Counters (rule DG-5): reanchored_close:<type> counts entities
+    whose distinct close rows across the cursor's prior set and the pass's emitted union (prior plus current) outnumber
+    their close rows in the pass's own end-of-tree parse (closes left behind by a recorded cut, a child-file append
+    after completion evidence or a superseded API-error-frontier synthetic tool close: R7's declared exceptions, all
+    counted; every witness close is in the end-of-tree parse, so none counts); multi_close_turns counts turns with more than
+    one close row in the end-of-tree parse (witness closes, an API-error self-close, a boundary close after a continued
+    turn). The parser's witness counters reach the pass diagnostics.
+- file: .claude/hooks/stop_log_turn.py
+  action: Modify
+  purpose: >-
+    Rule WT-1: main() writes WITNESS_LINE (a literal in the shim, equal to witness.WITNESS_LINE) to stderr as its FIRST
+    action, before reading stdin or checking the switch, on every path, exit 0, nothing on stdout (the module loads only
+    the stdlib, as today). Then for Stop and StopFailure (stop_hook_active true included), when capture_allowed holds,
+    it detaches `run` with --lock-wait LOCK_WAIT_S; for UserPromptSubmit it detaches `run` with --prompt-id (the
+    payload's prompt_id when it matches ^[A-Za-z0-9-]{1,64}$, else nothing is detached) and --lock-wait WITHOUT reading
+    the switch (the runner's own capture_mode check decides, before any state is touched), so the prompt waits only for
+    the interpreter's start, never for v4's git reads. The docstring's "prints nothing" becomes "prints the witness line
+    only".
+- file: .claude/settings.json
+  action: Modify
+  purpose: >-
+    Registers the same shim command for UserPromptSubmit (a new hooks key appended after the existing ones), no matcher,
+    no timeout, not async (rule HK-1's shape).
+- file: scripts/telemetry_capture/waits.py
+  action: Create
+  purpose: >-
+    Rules RW-1..RW-4, stdlib plus src.turn_capture.witness (pure, src.turn_capture only): wait_for_witness(root_file, clock,
+    sleep) reads the root once, then only appended newline-terminated lines, every 0.2 s, until the root holds a
+    witness (witness.is_witness_record, the ONE raw-record predicate streams.py's witness test also uses) later than
+    both its last prompt record and its last assistant record, bound WITNESS_WAIT_S 30 s, then a settle (root unchanged
+    for 1 s, bound 5 s); wait_for_prompt(root_file, prompt_id, clock, sleep) waits the same way for a root prompt record
+    carrying prompt_id, bound PROMPT_WAIT_S 10 s. Each returns a fixed token (witness_seen, witness_wait_timeout,
+    settle_timeout, prompt_seen, prompt_wait_timeout). No offset is needed: a witness already present (the smoke's
+    synthetic trees, a pass that starts late) satisfies the wait at once, and an earlier Stop's witness never does,
+    because a later prompt or assistant record follows it. Never parses content beyond type, attachment, message
+    stop_reason presence and promptId keys.
+- file: scripts/telemetry_capture/runner.py
+  action: Modify
+  purpose: >-
+    run_pass gains an OPT-IN keyword `wait: Callable[[], str] | None = None`, run after the capture_mode and smoke_ref
+    checks (a switch-off prompt pass exits off without polling) and before the lock, inside the same budget; its token
+    and lock_waited (the lock was acquired after waiting) are counted in the pass's diag (the diagnostics line's diag
+    map); a lock timeout stays outcome busy with no diagnostics line, as today. A
+    wait timeout still runs the pass. Every existing caller that passes no wait (the SessionEnd hook, the operator
+    `pass` command, tests/telemetry_capture/test_runner.py's helper) behaves exactly as today. No other behaviour
+    changes.
+- file: scripts/telemetry_capture/__main__.py
+  action: Modify
+  purpose: >-
+    _cmd_run builds the wait from --event (RW-1: Stop -> wait_for_witness; UserPromptSubmit -> wait_for_prompt with
+    --prompt-id; StopFailure, SessionEnd and anything else -> None) and passes it to run_pass; run gains --prompt-id
+    (optional); main(argv, ...) gains keyword-only clock and sleep (defaults time.monotonic, time.sleep) handed to the
+    wait, so an in-process caller can bound it; budget = wait bounds + lock wait + STOP_BUDGET_S. Silent, exit 0, as
+    today.
+- file: scripts/telemetry_capture/smoke.py
+  action: Modify
+  purpose: >-
+    The c8 synthetic tree gains a witness attachment closing a turn with a tool call, an API-error turn and a trailing
+    prompt with no witness, so the live read-back proves the writer accepts witness-keyed closes with outcome and an
+    open row without its close. The tree is written in stages so every wait is satisfied at once, as on a real
+    session: a Stop drive on the tree ending at its witness (witness_seen), a StopFailure drive after the API-error turn
+    is appended (no wait), and a UserPromptSubmit drive after the trailing prompt is appended (prompt_seen); then the
+    SessionEnd drive as today. The replay leg (cursor deleted, the finished tree re-driven) drives the UserPromptSubmit
+    entry with the trailing prompt's id (prompt_seen at once), so no drive waits. Each drive's diagnostics line must
+    carry its token (witness_seen for the Stop drive, prompt_seen for each UserPromptSubmit drive) and none may carry
+    witness_wait_timeout, settle_timeout or prompt_wait_timeout, else SmokeFailure naming the token. Counts only, as
+    today.
+- file: config/telemetry/parser_versions.yaml
+  action: Modify
+  purpose: >-
+    claude_code current 5; history entry v5 (date, the new golden_digest, full_output_cap_bytes 8388608,
+    signature_prefixes [hook, gate, precommit], reason naming this plan and rules WT-1..WT-9). Past entries untouched.
+- file: docs/contracts/telemetry_observations.yaml
+  action: Modify
+  purpose: >-
+    Governance notes (Class A; the build merge needs Benjamin's word): the outcome field note gains that claude_code turn
+    closes carry outcome from parser_version 5 (success | error | interrupted; still optional at write, no new value,
+    no required_when, so the writer and its field_semantics are unchanged, Decision 210); the turn's close rule (one
+    close per usable Stop witness keyed on the witness record, an API-error record closes its own turn, the boundary
+    close keyed on the turn's last uuid and timestamp record and only when no usable closing event lies at or after its
+    last assistant record, each close keyed on the record that ends its window; a boundary close's timestamp now
+    includes the turn's trailing records, such as Stop summaries and compaction groups before the next prompt, so
+    turn open-to-close durations of re-emitted history shift) and
+    the early open row go in the observation_type field note. Amendment_log entries. Stays inside the contracts class's
+    500 effective lines (493 today) by execution step 7's relief order.
+- file: docs/contracts/telemetry_sessions.yaml
+  action: Modify
+  purpose: >-
+    Governance notes (Class A): the outcome field note's no-reply rule names what a closed turn is from parser_version 5
+    (a later boundary, a final pass or a usable Stop witness) and the open row's bound (WT-9). The v4 residual note on
+    the last segment's close row is left for PLAN-telemetry-read-side-session-end. Amendment_log entry.
+- file: docs/contracts/telemetry-event-envelope.yaml
+  action: Modify
+  purpose: >-
+    R7 qualified in place (Class C; the build merge needs Benjamin's word): the emission set of a non-final pass reads an
+    open root turn only up to its frontier (its last usable Stop witness or API-error record, else its first prompt
+    record); a turn closes at each usable closing event and, when none lies at or after its last assistant record, at
+    its boundary; every turn close is keyed on the record that ends its window (its witness, its API-error record, or
+    the turn's last uuid and timestamp record before the boundary or eof), so a key fixes its content and a
+    blocked-and-continued turn carries one close per Stop by construction (counted multi_close_turns, never a declared
+    exception); a final-pass close later superseded by a longer window keeps being the declared reanchored_close, which
+    counts (DG-5, over the prior and current emitted sets) closes that exist because of a recorded cut, and also covers a record appended to a child file after
+    its completion evidence (it re-keys that child turn's close; 0 of 11 local child files had one) and a synthetic
+    tool close at an API-error frontier later superseded by a real result; finalization cuts arise only at
+    final passes (SessionEnd on /clear, interactive /resume and local exits). Amendment_log entry.
+- file: docs/contracts/ports.yaml
+  action: Modify
+  purpose: >-
+    SA-02's assumption text extends to the Claude Code shapes this relies on (scout CITE Decision 212): an exit-0 Stop
+    hook's stderr line recorded as a root hook_success attachment at every Stop, the API-error assistant record
+    (isApiErrorMessage) written before StopFailure runs, UserPromptSubmit running before its prompt record is written
+    and its payload's prompt_id equalling that record's promptId (assumed; a mismatch only times the prompt wait out),
+    every record of a root response being on disk before Stop hooks run (measured in 2.1.302: 224 of 224 root assistant
+    records, 92 of 92 intermediate ones, carry a string stop_reason, so WT-3's stop_reason test cannot detect a late
+    root record; the order is what makes a response unable to straddle a usable witness), and the egress proxy stopping
+    before SessionEnd hooks in cloud sessions; amendment_log entry. No new port.
+- file: tests/turn_capture/test_witness.py
+  action: Create
+  purpose: >-
+    Mirror test for witness.py (the coverage checker measures witness.py through it): test_witness_matches_only_the_capture_shim_line_at_stop
+    (hookEvent, stem, line, root only, a SubagentStop attachment in a child file is not one),
+    test_witness_is_usable_only_when_the_turn_is_at_rest (a pending tool_use, a stop_reason null last record, no
+    assistant record), test_closing_events_frontier_and_windows (closing_events, frontier, close_window, response
+    membership by any record before the event) and test_close_outcome_branches (success, error, interrupted).
+- file: tests/turn_capture/test_witness_closes.py
+  action: Create
+  purpose: >-
+    The behaviour nodes: test_last_turn_lands_at_its_own_stop (a one-turn tree with a witness: a non-final pass emits the
+    session open row and every row of the turn, no finalization cut recorded), test_blocked_stop_gives_one_close_per_stop_in_either_hook_order,
+    test_witness_close_reads_only_records_before_it, test_terminal_tool_stop_closes_at_its_witness,
+    test_api_error_record_closes_its_turn, test_boundary_close_only_without_a_later_usable_witness (and no close for a
+    turn holding no assistant record),
+    test_boundary_close_is_keyed_on_the_turns_last_record (a final cut between the last assistant record and its tool
+    result gives a close under a different key from the full parse's, counted reanchored_close, never two contents
+    under one key), test_superseded_closes_are_counted_reanchored (DG-5 over prior plus current: a record appended to a
+    child file after its completion evidence, and an API-error frontier's synthetic tool close later superseded by its
+    real result, each count reanchored_close once on the superseding pass; a witness multi-close counts none),
+    test_unusable_witness_waits_for_the_boundary_and_is_counted, test_turn_open_row_lands_with_its_prompt,
+    test_session_open_bound_is_the_first_close and test_every_witness_schedule_emits_each_row_once (a pass at every
+    usable witness, no final: each row once, the union equals the full parse, cut_content_divergence and
+    reanchored_close zero, multi_close_turns equal to the turns with more than one close row in the full parse) and
+    test_continuation_hook_rows_wait_for_their_tool (a PostToolUse hook keyed on a continuation's tool_use past the
+    frontier is not emitted until the tool_use is kept, so its parent never changes between passes).
+- file: tests/turn_capture/test_streams.py
+  action: Modify
+  purpose: >-
+    Coverage-only nodes for streams.py's new lines if the mirror's existing nodes leave one uncovered (the checker
+    measures streams.py through this file); no existing assertion changes, because parse_tree's frontier is opt-in.
+    Stays under 500 SLOC (374 today).
+- file: tests/turn_capture/test_sessions.py
+  action: Modify
+  purpose: >-
+    Coverage-only nodes for sessions.py's WT-9 bound if the mirror's existing nodes leave a line uncovered; no
+    existing assertion changes. Stays under 500 SLOC (359 today).
+- file: tests/turn_capture/test_record_turn.py
+  action: Modify
+  purpose: >-
+    test_new_cases_are_built_from_their_builders registers V5_BUILDERS. SANCTIONED ASSERTION CHANGE:
+    test_finalization_cuts_are_recorded_once_and_survive_a_reset pins PRODUCER_VERSION "turn-capture-5" and
+    PARSER_VERSION 5; test_finalize_then_grow_through_resume_re_emits_nothing's pinned ("telemetry_observations",
+    "a2#0/turn_close") becomes ("telemetry_observations", "late#0/turn_close") (WT-5: turn p2's last uuid and timestamp
+    record is the late tool_result), its property unchanged. A new node only if coverage needs one, keeping the file
+    under 500 SLOC (479 today).
+- file: tests/turn_capture/test_observations.py
+  action: Modify
+  purpose: >-
+    Touched only where a node pins a turn close row (SANCTIONED ASSERTION CHANGE: the row gains outcome, and its
+    external_ref moves to the turn's last uuid and timestamp record when that is not the last assistant record); every
+    other assertion unchanged. Coverage-only nodes for observations.py's new call sites are allowed, keeping the file
+    under 500 SLOC (462 today).
+- file: tests/turn_capture/test_real_transcript_schedules.py
+  action: Modify
+  purpose: >-
+    Integration (local only): adds the "witness" schedule kind (a pass at every usable witness) over this machine's real
+    trees and prints how many terminal-tool Stops closed at their witness; the existing properties are unchanged.
+- file: tests/turn_capture/test_real_transcript_coverage.py
+  action: Modify
+  purpose: >-
+    Integration (local only; created by the v4 build). Touched only if its PV-4 check reads the open row's bound, which
+    WT-9 moves to the first close; its property (harness_session_key present whenever the raw stream carries the
+    attachment at or before the bound) is unchanged.
+- file: tests/hooks/test_stop_log_turn.py
+  action: Modify
+  purpose: >-
+    SANCTIONED ASSERTION CHANGES: the shim's stderr is now exactly the witness line on every path (was empty: the
+    capfd assertions and test_shim_detaches_silently's subprocess result.stderr == ""); a stop_hook_active Stop now detaches a pass; the exact detach argv assertions (today's lines 155,
+    214 and 237) gain --lock-wait; the in_process helper hands cli.main a clock that ends the witness wait at once (or
+    its tree carries each turn's witness), so test_turn_rows_written_once_per_turn keeps its assertions without real
+    waits. Every other property (exit 0, nothing on stdout, switch off detaches nothing for Stop, detached fully) is
+    unchanged. New nodes test_witness_line_is_printed_first_on_every_path,
+    test_every_stop_and_prompt_detaches_a_pass_with_its_prompt_id, test_prompt_path_detaches_without_reading_the_switch
+    and test_the_witness_line_equals_the_parser_constant.
+- file: tests/hooks/test_capture_hook_registration.py
+  action: Modify
+  purpose: >-
+    SANCTIONED ASSERTION CHANGE: test_the_four_capture_hooks_are_registered (name kept) and
+    test_capture_commands_name_their_scripts expect a fifth capture hook, ("UserPromptSubmit", STOP_CMD) named
+    hook:stop_log_turn; every other property unchanged.
+- file: tests/telemetry_capture/test_switch.py
+  action: Modify
+  purpose: >-
+    SANCTIONED ASSERTION CHANGE: test_switch_off_keeps_every_hook_inert's capfd assertion now expects stderr to be
+    exactly one witness line per Stop and StopFailure shim call (WT-1 prints it before the switch check); stdout stays
+    empty, nothing is detached for Stop and StopFailure, and no state is written. Its other properties are unchanged.
+- file: tests/telemetry_capture/test_runner_waits.py
+  action: Create
+  purpose: >-
+    Mirror test for waits.py and the runner's use of it, with an injected clock and sleep (no real waits):
+    test_stop_pass_waits_for_its_own_witness (a file that grows during the wait; an earlier Stop's witness does not
+    satisfy it), test_wait_timeout_still_runs_the_pass_and_is_counted, test_stop_failure_pass_does_not_wait,
+    test_prompt_pass_waits_for_its_prompt_record, test_stop_and_prompt_passes_wait_for_the_lock (a held lock released
+    mid-wait), test_a_pass_without_a_wait_is_unchanged and test_switch_off_pass_returns_off_before_waiting (under
+    GITHUB_ACTIONS and under OTL_TURN_CAPTURE=off, a prompt pass handed a wait callable that fails if called returns
+    off and creates no state directory). A new module because test_runner.py is near its budget.
+- file: tests/telemetry_capture/test_main.py
+  action: Modify
+  purpose: New node test_run_builds_the_event_wait_and_passes_the_lock_wait.
+- file: tests/telemetry_capture/test_smoke.py
+  action: Modify
+  purpose: >-
+    New nodes test_synthetic_tree_closes_turns_at_witness_and_error_and_opens_the_last and
+    test_smoke_fails_when_a_drive_reports_a_wait_timeout. SANCTIONED HELPER CHANGE:
+    run_smoke and test_smoke_fails_when_session_end_does_not_finalize hand cli.main a fake clock and sleep (the
+    test_stop_log_turn in_process pattern), so no drive waits on the real clock; every assertion is unchanged.
+- file: tests/telemetry/test_parser_version_registry.py
+  action: Modify
+  purpose: CASES gains the new golden cases after the existing ones.
+- file: tests/telemetry/test_stop_turn_close_contract_notes.py
+  action: Create
+  purpose: >-
+    test_r7_declares_witness_closes_and_the_frontier, test_observations_declares_turn_close_outcome_per_stop and
+    test_sessions_declares_the_first_close_open_bound: the amended texts carry their rule tokens and amendment_log
+    entries.
+- file: tests/fixtures/turn_capture_corpus.py
+  action: Modify
+  purpose: >-
+    Helpers for a Stop witness attachment (toolUseID), another Stop hook's hook_success, the isMeta "Stop hook
+    feedback" record, a hook_blocking_error attachment, a stop_hook_summary system record and an API-error assistant
+    record. Synthetic values only (Decision 101). If the module nears 500 SLOC, the new helpers go to
+    turn_capture_v5_cases.py instead.
+- file: tests/fixtures/turn_capture_v5_cases.py
+  action: Create
+  purpose: Builders for the seven new golden cases and V5_BUILDERS.
+- file: tests/telemetry/fixtures/derived_golden_state.yaml
+  action: Modify
+  purpose: >-
+    Re-authored by hand at parser_version 5 (PLAN-telemetry-golden-harness constraints): the header moves to 5 and any
+    value the v5 rows change is re-derived from the contract formulas on main at build time, never copied from verb or
+    oracle output; each changed entry's why cites this plan.
+- file: tests/telemetry/fixtures/derived_golden_rollups.yaml
+  action: Modify
+  purpose: Re-authored by hand at parser_version 5 under the same rule.
+- file: tests/fixtures/turn_capture/golden/index.json
+  action: Modify
+  purpose: Lists the seven new cases after the existing 40.
+- file: tests/fixtures/turn_capture/golden/stop_witness_closes.json
+  action: Create
+  purpose: >-
+    Two turns closed at their witnesses (one ending on assistant text with a stop_hook_summary, one ending on a terminal
+    tool's result with no summary), a later prompt (boundary) adding no close, and a child file whose SubagentStop
+    attachment yields a process_event only.
+- file: tests/fixtures/turn_capture/golden/stop_blocked_witness_first.json
+  action: Create
+  purpose: >-
+    A blocked Stop in the D2 order of STOP-WITNESS-CHECK.md (witness, then the exit-2 feedback record, then the summary),
+    and a continuation that runs a tool with a PreToolUse and a PostToolUse hook attachment keyed on its toolUseID,
+    then its own witness: two closes with their own windows, and the hook process_events parented to the tool at every
+    line cut (rule WT-7's re-walk).
+- file: tests/fixtures/turn_capture/golden/stop_blocked_feedback_first.json
+  action: Create
+  purpose: >-
+    The same in the D1/B order with a JSON block (feedback, hook_blocking_error, then witness): the same two closes as
+    stop_blocked_witness_first in content shape.
+- file: tests/fixtures/turn_capture/golden/stop_blocked_then_interrupted.json
+  action: Create
+  purpose: >-
+    A blocked Stop whose continuation is interrupted before its Stop, then a new prompt: the witness close (success) and
+    a boundary close keyed on the continuation's last assistant record (interrupted), with a synthetic tool close.
+- file: tests/fixtures/turn_capture/golden/api_error_self_close.json
+  action: Create
+  purpose: >-
+    A turn ending on an API-error record followed by a later prompt, and a final turn ending on one with nothing after:
+    one close each, keyed on the error record, outcome error.
+- file: tests/fixtures/turn_capture/golden/stop_witness_not_at_rest.json
+  action: Create
+  purpose: >-
+    A witness written before the turn's tool result and one after a stop_reason null record: both unusable and counted;
+    the turn closes at its boundary.
+- file: tests/fixtures/turn_capture/golden/prompt_open_row.json
+  action: Create
+  purpose: >-
+    A tree whose last record is a new prompt with no Stop: at a non-final pass only that turn's open row is new; it
+    grows through its Stop with no re-emission.
+- file: tests/fixtures/turn_capture/golden/pin_first_record_without_uuid.json
+  action: Modify
+  purpose: expected_rows regenerated at v5 (every one of the 40 existing cases; each listed below).
+- file: tests/fixtures/turn_capture/golden/multiblock_response_interleaved_tool_results.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/meta_and_companion_records.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/tool_result_error.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/tool_result_interrupted.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/hook_blocked_tool_call.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/sidecar_present.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/sidecar_absent.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/subagent_sync.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/subagent_background_with_completion.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/subagent_background_without_completion.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/nested_subagent_depth2.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/hooks_resume_and_compact.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/empty_thinking_and_image_blocks.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/orphan_tool_result.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/unknown_record_and_attachment_types.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/trailing_partial_line.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/malformed_line.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/large_tool_result_over_64k.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/observed_real_shapes.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/secrets.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/hooks_before_first_record.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/mcp_overflow_saved_output.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/full_output_omitted_over_cap.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/reasoning_visibility_forms.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/gate_and_precommit_markers.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/close_cancelled_mid_stream.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/close_cancelled_running_tool.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/close_failed_api_error.json
+  action: Modify
+  purpose: expected_rows regenerated at v5 (its API-error turn now closes on the error record, rule WT-4).
+- file: tests/fixtures/turn_capture/golden/resume_after_interrupt.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/fork_branch_copied_head.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/fork_session_copied_head.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/fork_session_nested.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/hook_command_names.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/no_reply_session.json
+  action: Modify
+  purpose: expected_rows regenerated at v5 (still empty, rule D-1).
+- file: tests/fixtures/turn_capture/golden/subagent_usage_final_and_spawn_correction.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/background_notice_statuses.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/resume_segment_closes.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/session_provenance_facts.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+- file: tests/fixtures/turn_capture/golden/model_call_request_fields.json
+  action: Modify
+  purpose: expected_rows regenerated at v5.
+bundled_recommendations: []
+followon_recs: []
+closes_criteria: []
+infrastructure_dependencies:
+- >-
+  Precondition: PLAN-telemetry-capture-producer-fixes's build merged (parser_version 4); this build rebases on it and
+  bumps to 5. If it has not merged, stop and tell the coordinator.
+- >-
+  No Terraform, IAM, Lambda or workflow change; src/turn_capture is excluded from the data-pipeline bundle (registry
+  check turn-capture-excluded-from-data-pipeline), so the merge deploys nothing. Outcome on turn closes uses existing
+  accepted values and stays optional at write, so the live writer's rules are unchanged (Decision 210).
+- >-
+  Sessions pick the code up at their next rebase or new session (hooks load from the checkout). Claude Code snapshots
+  hook registrations at session start, so a rebased running session prints witnesses at its next Stop but runs no
+  prompt pass until a new session starts. The build session's own
+  Stop passes run the working-tree producer while it changes; those rows are untrusted, so the build records its root
+  session ref and harness_session_key in the PR body and the coordinator handoff for slice 4 to exclude (the v4 build's
+  rule).
+acceptance_criteria:
+- >-
+  A turn's rows land at its own Stop: a non-final pass over a tree whose last turn ends in a usable witness emits every
+  row of that turn and, for a one-turn tree, the session open row, with no finalization cut (VP 2).
+- >-
+  A blocked-and-continued turn carries one close per Stop, each keyed on its witness with content from its own window, in
+  either hook order; an API-error record closes its own turn with outcome error; a turn with no usable witness after its
+  last assistant record closes at its boundary as today (VP 2).
+- >-
+  An open turn contributes only records up to its frontier, its open row lands once its prompt is on disk, the session
+  open row's bound is the first close, and a pass at every witness emits each row once (VP 3, VP 6).
+- >-
+  The shim prints the witness line first on every path and detaches a pass at every Stop, StopFailure and prompt; the
+  Stop pass waits for its own witness, the prompt pass for its prompt, and both wait for the lock (VP 1, VP 4).
+- >-
+  The golden corpus is regenerated at parser_version 5 with the registry bumped, the graduated turn-capture checks still
+  pass, and real transcripts close at their witnesses (VP 5, VP 6, VP 8).
+- The amended contracts carry the new rules and the c8 smoke lands witness and error closes on the live smoke writer (VP 9, VP 12).
+- >-
+  A session started on the merged main lands its first turn at that turn's Stop, and the first golden replay after the
+  merge passes on the deployed reader and writer (VP 13, VP 14).
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: The witness is recognised only in its exact shape, and the shim prints it first on every path and detaches every Stop.
+  command: >-
+    bin/venv-python -m pytest tests/turn_capture/test_witness.py::test_witness_matches_only_the_capture_shim_line_at_stop
+    tests/turn_capture/test_witness.py::test_witness_is_usable_only_when_the_turn_is_at_rest
+    tests/turn_capture/test_witness.py::test_closing_events_frontier_and_windows
+    tests/turn_capture/test_witness.py::test_close_outcome_branches
+    tests/hooks/test_stop_log_turn.py::test_witness_line_is_printed_first_on_every_path
+    tests/hooks/test_stop_log_turn.py::test_every_stop_and_prompt_detaches_a_pass_with_its_prompt_id
+    tests/hooks/test_stop_log_turn.py::test_prompt_path_detaches_without_reading_the_switch
+    tests/hooks/test_stop_log_turn.py::test_the_witness_line_equals_the_parser_constant -q
+  expected: Exit 0, every node passes. Red before because witness.py, its test and the shim nodes are absent.
+  fix_if: A SubagentStop or non-shim attachment reads as a witness, a pending tool reads at rest, or the shim prints after an import.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: turn-capture-stop-witness
+- step: 2
+  phase: pre-deploy
+  action: >-
+    Turns close at their own Stop: one close per usable witness keyed on the witness, content from its window, API-error
+    self-close, boundary close only when no usable witness follows; the last turn lands without a final pass.
+  command: >-
+    bin/venv-python -m pytest tests/turn_capture/test_witness_closes.py::test_last_turn_lands_at_its_own_stop
+    tests/turn_capture/test_witness_closes.py::test_blocked_stop_gives_one_close_per_stop_in_either_hook_order
+    tests/turn_capture/test_witness_closes.py::test_witness_close_reads_only_records_before_it
+    tests/turn_capture/test_witness_closes.py::test_terminal_tool_stop_closes_at_its_witness
+    tests/turn_capture/test_witness_closes.py::test_api_error_record_closes_its_turn
+    tests/turn_capture/test_witness_closes.py::test_boundary_close_only_without_a_later_usable_witness
+    tests/turn_capture/test_witness_closes.py::test_boundary_close_is_keyed_on_the_turns_last_record
+    tests/turn_capture/test_witness_closes.py::test_superseded_closes_are_counted_reanchored
+    tests/turn_capture/test_witness_closes.py::test_unusable_witness_waits_for_the_boundary_and_is_counted -q
+  expected: Exit 0, every node passes. Red before because test_witness_closes.py is absent.
+  fix_if: >-
+    Two passes build different content under one close key (a window reading past its witness), a turn ending at rest
+    also gets a boundary close, or the last turn emits nothing without a final pass.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: turn-capture-witness-closes
+- step: 3
+  phase: pre-deploy
+  action: >-
+    The frontier, the early open row and the first-close open bound keep every row a prefix-stable function of the tree.
+  command: >-
+    bin/venv-python -m pytest tests/turn_capture/test_witness_closes.py::test_turn_open_row_lands_with_its_prompt
+    tests/turn_capture/test_witness_closes.py::test_session_open_bound_is_the_first_close
+    tests/turn_capture/test_witness_closes.py::test_every_witness_schedule_emits_each_row_once
+    tests/turn_capture/test_witness_closes.py::test_continuation_hook_rows_wait_for_their_tool
+    tests/telemetry_capture/test_smoke.py::test_synthetic_tree_closes_turns_at_witness_and_error_and_opens_the_last
+    tests/telemetry_capture/test_smoke.py::test_smoke_fails_when_a_drive_reports_a_wait_timeout -q
+  expected: Exit 0, every node passes. Red before because test_witness_closes.py and the smoke node are absent.
+  fix_if: >-
+    A row is emitted twice or differs between passes (a frontier reading a record after the open turn's last usable
+    witness), or the open row's provenance moves after its first close.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: turn-capture-witness-frontier
+- step: 4
+  phase: pre-deploy
+  action: The runner waits for its own witness or prompt, never waits at StopFailure, and waits for the lock instead of exiting busy.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_capture/test_runner_waits.py::test_stop_pass_waits_for_its_own_witness
+    tests/telemetry_capture/test_runner_waits.py::test_wait_timeout_still_runs_the_pass_and_is_counted
+    tests/telemetry_capture/test_runner_waits.py::test_stop_failure_pass_does_not_wait
+    tests/telemetry_capture/test_runner_waits.py::test_prompt_pass_waits_for_its_prompt_record
+    tests/telemetry_capture/test_runner_waits.py::test_stop_and_prompt_passes_wait_for_the_lock
+    tests/telemetry_capture/test_runner_waits.py::test_a_pass_without_a_wait_is_unchanged
+    tests/telemetry_capture/test_runner_waits.py::test_switch_off_pass_returns_off_before_waiting
+    tests/telemetry_capture/test_main.py::test_run_builds_the_event_wait_and_passes_the_lock_wait -q
+  expected: Exit 0, every node passes. Red before because waits.py, its test and the node are absent.
+  fix_if: >-
+    A pass exits busy while a lock wait remains, a timeout skips the pass, a StopFailure pass waits, a switch-off pass
+    polls, or a caller that passes no wait now waits.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: capture-runner-waits-for-its-witness
+- step: 5
+  phase: pre-deploy
+  action: >-
+    The golden corpus at v5 and the registry: every case matches, the bump is recorded, the hook registration includes
+    UserPromptSubmit, and the resume schedules and incremental-equals-full properties hold over every case.
+  command: >-
+    bin/venv-python -m pytest tests/turn_capture/test_record_turn.py::test_golden_cases_match_expected_rows
+    tests/turn_capture/test_record_turn.py::test_finalize_resume_schedules_emit_each_row_once
+    tests/turn_capture/test_record_turn.py::test_incremental_equals_full_at_every_line_cut
+    tests/turn_capture/test_record_turn.py::test_finalize_equals_virtual_prompt_at_eof
+    tests/turn_capture/test_record_turn.py::test_new_cases_are_built_from_their_builders
+    tests/turn_capture/test_record_turn.py::test_rows_use_only_caller_known_columns
+    tests/hooks/test_capture_hook_registration.py tests/telemetry/test_parser_version_registry.py -q
+  expected: Exit 0, every node passes.
+  fix_if: >-
+    Regenerate expected_rows from record_turn only after steps 1-4 pass; a schedule failure is a purity defect in a WT
+    rule (most likely a close window or the frontier reading a later record), never a test to relax.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    Its nodes are already graduated standing checks (turn-capture-golden-corpus, turn-capture-r7-incremental-equals-full,
+    turn-capture-finalize-resume-emits-each-row-once, telemetry-parser-version-registry) or existing fast-tier
+    registration nodes; their red state comes from the regenerated corpus and the sanctioned changes, not a new behaviour.
+- step: 6
+  phase: pre-deploy
+  action: The golden harness at v5 -- the re-authored derived_golden files reconcile, the oracle agrees with the verbs.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_verify tests/telemetry/test_derived_layer_reconciliation.py -m "not
+    integration" -q
+  expected: >-
+    Exit 0, every node passes, the golden harness's header check, golden reconcile, oracle agreement and mutation nodes
+    included.
+  fix_if: >-
+    Re-derive a failing authored value by hand from the formula, never by copying verb or oracle output. Any golden
+    harness file other than the two derived_golden files needing a change means stop and escalate to the coordinator.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    Its nodes are the golden harness's graduated rows, which the full tier runs; a whole-module run measured above
+    validate_vp_replay's 120 s aggregate (the v4 plan's VP 15 precedent, rec-4421).
+- step: 7
+  phase: pre-deploy
+  action: Every golden case loads into a local DuckLake and every FK resolves.
+  command: >-
+    bin/venv-python -m pytest tests/turn_capture/test_capture_ducklake_integration.py
+    tests/telemetry/test_derived_layer_reconciliation.py::test_golden_fixtures_reconcile_on_local_ducklake -m integration -q -rs 2>&1 | tee
+    "${TMPDIR:-/tmp}/capture_ducklake.log" && ! grep -Eq "[0-9]+ (skipped|failed|error)" "${TMPDIR:-/tmp}/capture_ducklake.log"
+    && grep -Eq "[0-9]+ passed" "${TMPDIR:-/tmp}/capture_ducklake.log"
+  expected: Exit 0 with every node passing and none skipped; the log goes in the PR description.
+  fix_if: A witness close fails the kernel's type or rule check; fix the producer value, never the rule.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: Needs the pinned ducklake extension download (network), which no CI tier provides until rec-4071.
+- step: 8
+  phase: pre-deploy
+  action: >-
+    On this machine's real transcript trees (the build session's own tree carries witnesses once the working-tree shim
+    runs), a pass at every usable witness emits each row once and terminal-tool Stops close at their witness.
+  command: >-
+    bin/venv-python -m pytest tests/turn_capture/test_real_transcript_conformance.py
+    tests/turn_capture/test_real_transcript_coverage.py tests/turn_capture/test_real_transcript_schedules.py -m
+    integration -q -s
+  expected: >-
+    Exit 0; the output prints, per schedule kind, the trees and witnesses seen and how many terminal-tool Stops closed at
+    their witness; a tree with no witness is reported, never counted as a pass. Counts only; the PR records them.
+  fix_if: >-
+    A witness schedule emits a row twice or differs from the full parse: a purity defect; fix the rule.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: Needs this machine's real transcripts, which no CI tier has.
+- step: 9
+  phase: pre-deploy
+  action: The amended contract texts carry the new rules and pass the drift, ports and size gates.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry/test_stop_turn_close_contract_notes.py -q && bin/venv-python -c "from
+    scripts.checks.contracts.validate_contract_drift import validate_contract_drift as v;f=[];v(f);assert not f,
+    f;print('CONTRACTS_OK')" && bin/venv-python -c "from scripts.checks.contracts.validate_ports_contract import
+    validate_ports_contract as v;f=[];v(f);assert not f, f;print('PORTS_OK')" && bin/venv-python -c "from
+    scripts.checks.structural.size_limits import validate_structural_size_limits as v;f=[];v(f);assert not f,
+    f;print('SIZE_OK')"
+  expected: The contract-notes nodes pass, then CONTRACTS_OK, PORTS_OK and SIZE_OK.
+  fix_if: >-
+    Fix the amendment_log shape or the text the node names; a size failure takes the next relief in execution step 7's
+    order, never a budget raise or a split.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    A one-time text check of the amended contracts plus three standing validators that scripts.validate already runs.
+- step: 10
+  phase: pre-deploy
+  action: Each changed module reaches 100% coverage from its mapped test; lint, imports and the 500-SLOC limit hold.
+  command: >-
+    bin/venv-python -m scripts.test_coverage_checker --check-tests --check-coverage --files src/turn_capture/witness.py
+    src/turn_capture/streams.py src/turn_capture/observations.py src/turn_capture/sessions.py
+    src/turn_capture/record_turn.py && bin/venv-python -m pytest tests/telemetry_capture/test_runner_waits.py
+    tests/telemetry_capture/test_main.py tests/telemetry_capture/test_smoke.py tests/telemetry_capture/test_runner.py -q
+    --cov=scripts/telemetry_capture --cov-report= && bin/venv-python -m coverage report
+    --include=scripts/telemetry_capture/waits.py --fail-under=100 && bin/venv-python -m coverage report -m
+    --include=scripts/telemetry_capture/runner.py,scripts/telemetry_capture/__main__.py,scripts/telemetry_capture/smoke.py
+    && bin/venv-python -m ruff check
+    src/turn_capture scripts/telemetry_capture .claude/hooks tests/turn_capture tests/telemetry_capture tests/telemetry
+    tests/hooks tests/fixtures && .venv/bin/lint-imports && bin/venv-python -c "from scripts.checks.sloc.sloc_limits
+    import validate_sloc_limits as v;f=[];v(f);assert not f, f;print('SLOC_OK')"
+  expected: >-
+    Exit 0 from each; waits.py at 100%; the -m report shows no line this plan adds to runner.py, __main__.py or smoke.py
+    as missed (the checker does not map scripts/telemetry_capture, so this coverage run measures them); then SLOC_OK.
+  fix_if: >-
+    Cover the new branches in the mirror tests (test_witness.py for witness.py; coverage-only nodes are allowed in
+    test_streams.py, test_sessions.py and test_observations.py under 500 SLOC); fix lint at its source; move logic
+    into witness.py or waits.py when a module nears 500 SLOC.
+  hermetic: false
+  graduation: not-applicable
+- step: 11
+  phase: pre-deploy
+  action: Fast tier, then the full tier before handoff.
+  command: bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate
+  expected: Exit 0 on a completed full run; a timeout is not a pass (handoff_policy).
+  fix_if: Fix the named check; never skip or weaken one.
+  hermetic: false
+  graduation: not-applicable
+- step: 12
+  phase: pre-deploy
+  action: >-
+    Live proof against the smoke-catalog writer: the c8 smoke with the v5 synthetic tree (a fresh synthetic project, so
+    the build session's own untrusted rows play no part).
+  command: bin/venv-python -m scripts.telemetry_capture.smoke
+  expected: >-
+    Ends "PC_SMOKE PASS": every table read back at the counts record_turn built from the v5 tree, the blob row delivered,
+    the replay inserting 0; the smoke itself fails unless its Stop and prompt drives' diagnostics lines carry
+    witness_seen and prompt_seen (a staged tree), never a wait timeout. Counts only.
+  fix_if: >-
+    Any failure: STOP and RCA (Decision 55); never clear a halt and retry.
+  hermetic: false
+  graduation: not-applicable
+- step: 13
+  phase: post-deploy
+  action: >-
+    A session STARTED on the merged main lands its first turn at that turn's own Stop: run in its second turn, after turn
+    1's Stop pass; the first Stop pass sent with witness_seen, and the prompt passes report prompt_seen.
+  command: >-
+    T="$(ls -t ~/.claude/projects/*/*.jsonl | head -1)" && AWS_PROFILE=agent_platform bin/venv-python -m
+    scripts.telemetry_capture status --tree "$T" && AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_capture
+    probe --tree "$T" --require telemetry_observations,telemetry_sessions && bin/venv-python -c "import sys,json;from
+    pathlib import Path;from scripts.telemetry_capture.state import CaptureState,state_dir;from src.turn_capture.record_turn
+    import PARSER_VERSION;t=Path(sys.argv[1]);d=CaptureState(state_dir(t,t.stem)).diagnostics();stops=[x for x in d if
+    x.get('event')=='Stop'];print('v',PARSER_VERSION,'prompt_passes',sum(1 for x in d if
+    x.get('event')=='UserPromptSubmit'),'prompt_seen',sum(1 for x in d if x.get('event')=='UserPromptSubmit' and
+    x.get('diag',{}).get('prompt_seen')),'stop_passes',len(stops),'witness_seen',sum(1 for x in stops if
+    x.get('diag',{}).get('witness_seen')),'sent',sum(1 for x in stops if x.get('outcome')=='sent'));assert PARSER_VERSION==5
+    and stops and stops[0].get('outcome')=='sent' and stops[0].get('diag',{}).get('witness_seen')" "$T"
+  expected: >-
+    The status line, the probe's per-table rows above zero with no halt, then one counts line with parser 5 and the first
+    Stop pass sent with witness_seen. Counts only.
+  fix_if: >-
+    The first Stop pass sent nothing or timed out on its witness: compare the tree's witness records with the shim's line
+    (a Claude Code change is the likeliest cause); file a rec and fix forward.
+  hermetic: false
+- step: 14
+  phase: post-deploy
+  action: >-
+    The first telemetry-golden-replay run on a main that contains this merge (its daily schedule, or a dispatch once no
+    DuckLake deploy is in flight) replays the v5 golden trees and the re-authored derived_golden files through the
+    deployed writer and reader; its job log (mcp__github__get_job_logs) is saved to $REPLAY_LOG and its checkout SHA
+    confirmed to contain the merge.
+  command: grep -E "GOLDEN_SMOKE trees=[1-9][0-9]* expectations=[1-9][0-9]* .*mismatches=0" "$REPLAY_LOG"
+  expected: One matching GOLDEN_SMOKE line from a run that concluded success; report it verbatim.
+  fix_if: >-
+    A mismatch with the local golden harness green is an engine or transport defect: name the tree and verb, file it
+    through the portal and fix forward; never relax an expectation.
+  hermetic: false
+weakening_dispositions:
+- candidate: '[assertion-changed] tests/hooks/test_capture_hook_registration.py::test_capture_commands_name_their_scripts'
+  disposition: planned-change
+  cite: acceptance_criteria[3]
+- candidate: '[assertion-changed] tests/hooks/test_capture_hook_registration.py::test_the_four_capture_hooks_are_registered'
+  disposition: planned-change
+  cite: acceptance_criteria[3]
+- candidate: '[assertion-changed] tests/hooks/test_stop_log_turn.py::test_shim_detaches_silently'
+  disposition: planned-change
+  cite: acceptance_criteria[3]
+- candidate: '[assertion-changed] tests/hooks/test_stop_log_turn.py::test_turn_rows_written_once_per_turn'
+  disposition: planned-change
+  cite: acceptance_criteria[3]
+- candidate: '[assertion-changed] tests/telemetry_capture/test_switch.py::test_switch_off_keeps_every_hook_inert'
+  disposition: planned-change
+  cite: acceptance_criteria[3]
+- candidate: '[assertion-changed] tests/turn_capture/test_record_turn.py::test_finalization_cuts_are_recorded_once_and_survive_a_reset'
+  disposition: planned-change
+  cite: acceptance_criteria[4]
+- candidate: '[assertion-changed] tests/turn_capture/test_record_turn.py::test_finalize_then_grow_through_resume_re_emits_nothing'
+  disposition: planned-change
+  cite: test_obligations[3]
+- candidate: '[constant-changed] src/turn_capture/record_turn.py::PARSER_VERSION'
+  disposition: planned-change
+  cite: acceptance_criteria[4]
+- candidate: '[test-removed] tests/hooks/test_stop_log_turn.py::test_stop_hook_active_malformed_input_and_switch_off_are_inert'
+  disposition: planned-change
+  cite: acceptance_criteria[3]
+rollback: >-
+  Revert in a new PR and bump parser_version to 6 with the v4 behaviour, never back to 4 (the registry is append-only;
+  envelope R5). The UserPromptSubmit registration and the shim's line revert with the code; sessions pick the revert up
+  at their next rebase. Stored v5 rows stay valid (no column or accepted value changed).
+test_obligations:
+- source: src/turn_capture/witness.py
+  behavior: WT-2 witness recognition and the at-rest test.
+  verification_step: 1
+  test_selector: tests/turn_capture/test_witness.py::test_witness_is_usable_only_when_the_turn_is_at_rest
+  red_green_expectation: red before (module and test absent), green after
+- source: .claude/hooks/stop_log_turn.py
+  behavior: The witness line first on every path; every Stop, StopFailure and prompt detaches a pass.
+  verification_step: 1
+  test_selector: tests/hooks/test_stop_log_turn.py::test_witness_line_is_printed_first_on_every_path
+  red_green_expectation: red before (node absent; the shim prints nothing), green after
+- source: src/turn_capture/streams.py
+  behavior: An open turn keeps only records up to its frontier; usable closing events close a turn.
+  verification_step: 3
+  test_selector: tests/turn_capture/test_witness_closes.py::test_every_witness_schedule_emits_each_row_once
+  red_green_expectation: red before (module absent), green after
+- source: src/turn_capture/observations.py
+  behavior: One close per usable witness keyed on it, content from its window, outcome on every turn close.
+  verification_step: 2
+  test_selector: tests/turn_capture/test_witness_closes.py::test_blocked_stop_gives_one_close_per_stop_in_either_hook_order
+  red_green_expectation: red before (module absent), green after
+- source: src/turn_capture/sessions.py
+  behavior: The session open row's bound is the first close.
+  verification_step: 3
+  test_selector: tests/turn_capture/test_witness_closes.py::test_session_open_bound_is_the_first_close
+  red_green_expectation: red before (module absent), green after
+- source: src/turn_capture/record_turn.py
+  behavior: Version 5; DG-5's multi_close_turns and reanchored_close counters.
+  verification_step: 3
+  test_selector: tests/turn_capture/test_witness_closes.py::test_every_witness_schedule_emits_each_row_once
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_capture/waits.py
+  behavior: RW-1..RW-4 waits and their tokens.
+  verification_step: 4
+  test_selector: tests/telemetry_capture/test_runner_waits.py::test_stop_pass_waits_for_its_own_witness
+  red_green_expectation: red before (module and test absent), green after
+- source: scripts/telemetry_capture/runner.py
+  behavior: The event's wait runs before the lock, and Stop and prompt passes wait for the lock.
+  verification_step: 4
+  test_selector: tests/telemetry_capture/test_runner_waits.py::test_stop_and_prompt_passes_wait_for_the_lock
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_capture/__main__.py
+  behavior: run builds the event's wait (opt-in) and passes the prompt id and the lock wait.
+  verification_step: 4
+  test_selector: tests/telemetry_capture/test_main.py::test_run_builds_the_event_wait_and_passes_the_lock_wait
+  red_green_expectation: red before (node absent), green after
+- source: scripts/telemetry_capture/smoke.py
+  behavior: The synthetic tree closes turns at a witness and an error record and opens the last.
+  verification_step: 3
+  test_selector: tests/telemetry_capture/test_smoke.py::test_synthetic_tree_closes_turns_at_witness_and_error_and_opens_the_last
+  red_green_expectation: red before (node absent), green after
+- source: .claude/settings.json
+  behavior: The shim is registered for UserPromptSubmit (a fifth capture hook).
+  verification_step: 5
+  test_selector: tests/hooks/test_capture_hook_registration.py::test_the_four_capture_hooks_are_registered
+  red_green_expectation: red once the sanctioned assertion expects UserPromptSubmit and before the registration lands, green after
+- source: config/telemetry/parser_versions.yaml
+  behavior: v5 is recorded with the regenerated corpus digest.
+  verification_step: 5
+  test_selector: tests/telemetry/test_parser_version_registry.py::test_registry_matches_producer
+  red_green_expectation: red after the producer bump until the entry lands, green after
+- source: docs/contracts/telemetry-event-envelope.yaml
+  behavior: R7 declares witness closes and the frontier.
+  verification_step: 9
+  test_selector: tests/telemetry/test_stop_turn_close_contract_notes.py::test_r7_declares_witness_closes_and_the_frontier
+  red_green_expectation: red before (module absent), green after
+- source: docs/contracts/telemetry_observations.yaml
+  behavior: Turn closes per Stop and their outcome are declared.
+  verification_step: 9
+  test_selector: tests/telemetry/test_stop_turn_close_contract_notes.py::test_observations_declares_turn_close_outcome_per_stop
+  red_green_expectation: red before (module absent), green after
+- source: docs/contracts/telemetry_sessions.yaml
+  behavior: The closed-turn definition and the first-close open bound are declared.
+  verification_step: 9
+  test_selector: tests/telemetry/test_stop_turn_close_contract_notes.py::test_sessions_declares_the_first_close_open_bound
+  red_green_expectation: red before (module absent), green after
+- source: docs/contracts/ports.yaml
+  behavior: SA-02 names the Claude Code shapes relied on and the ports validator passes.
+  verification_step: 9
+  command: bin/venv-python -c "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as v;f=[];v(f);assert not f, f;print('PORTS_OK')"
+  waiver_reason: Prose extension of an existing assumption row; the standing ports validator is its only mechanical check.
+constraints:
+- >-
+  Purity (envelope R7, Decision 207): every row is a function of the records at or before its own closing event or
+  frontier, so any pass that emits it emits the same content; every close is keyed on the record that ends its window,
+  so a close key is never shared by two windows. A row built
+  differently by two passes is a defect here, never a test to relax.
+- >-
+  The witness is a tree fact: the shim prints it before the switch check, so trees captured with capture on or off
+  re-derive alike. No git, environment, clock or hook-payload value enters src/turn_capture; the runner's waits decide
+  only when a pass runs, never what it emits.
+- >-
+  Typed columns only (Benjamin, 2026-10-17): no new metadata key; outcome uses telemetry_observations' existing accepted
+  values and stays optional at write (no required_when), so the writer is unchanged (Decision 210).
+- >-
+  Graduated checks (turn-capture-*, telemetry-parser-version-registry) keep resolving and are never weakened; the only
+  assertion changes are the sanctioned ones in scope, each keeping or tightening its property.
+- >-
+  No file crosses 500 SLOC, tests included (Decision 128/130): new logic goes to witness.py and waits.py, new nodes to
+  the new test modules named in scope; never a budget raise.
+- >-
+  Public repository (Decision 101): fixtures are synthetic; the integration, smoke and probe steps print counts only.
+- No rescue agents or workaround loops (Decision 55); a failed live step stops for RCA.
+context:
+- >-
+  Decision-scout: NO_FLAGS (run over both plans; /mnt/project-files/rec-4382/decision-scout-report.md). CITE 199, 207,
+  210, 212, 79, 126, 177, 167, 128, 101. RELATED 84, 55, 95-97, 81, 213/216/222, 211, 184, 100/75, 88, 118, 150/151/181,
+  189/132, 201, 67, 139, 125/48/163. Decisions triaged: 174 of 174. Roadmap items intersected: 6; CONFLICT: 0; RELATED: 6.
+- 'gates: decision-scout=NO_FLAGS; plan-critique=PROCEED after 4 round(s) (r1-r3 REVISE, every finding fixed; r4 nits N1-N9 folded in; extra confirming rounds decided with notice)'
+- >-
+  Direction: Benjamin chose "Both" on the rec-4382 card (cmsg_012XgaFy8VaDQbxP5D8nC958YcCLjLhZdjssAAu1qjyoUv) and
+  confirmed the plans on the card in this thread (cmsg_012XgaFy8VaDQbxP5D8nC958QDfeXHjM9zx5fgEYgCqZWJ). Carrier rec-4407
+  (High); it closes with PLAN-telemetry-read-side-session-end. The build merge needs his word (Class A and C notes).
+- >-
+  Evidence: /mnt/project-files/rec-4382/ FINDINGS.md (cause), STOP-WITNESS-CHECK.md (hermetic check: the witness lands
+  at every Stop; hooks write as each finishes, so a witness can precede or follow a block by seconds; StopFailure and
+  UserPromptSubmit write nothing), PLAN-ADVICE.md (Fable consult on the forks: Q1-Q3 and Q6 adopted, Q4 asked).
+- >-
+  Rules WT-1..WT-9 and RW-1..RW-4 are pinned in execution steps 2-6; the Claude Code shapes they rely on go in ports.yaml
+  SA-02 (Decision 212), and witness_not_at_rest / witness_wait_timeout are the first counters to move if Claude Code
+  changes record order.
+- >-
+  Not bundled: rec-4414 (SessionEnd reason; the SessionEnd hook is untouched here), rec-4352 and rec-4306 (the SessionEnd
+  path keeps working on /clear, interactive /resume and local exits; their pressure drops but does not vanish).
+- >-
+  Slice 4 coordination (through the coordinator): turns sent back by a blocking Stop hook carry several closes, so a
+  metric counting turns counts turn entities, never close rows; v4's resume-segment closes (monitor check 4) are unchanged.
+- >-
+  File overlap with approved, unbuilt slice 4 plans: PLAN-telemetry-in-session-source-check also modifies runner.py,
+  __main__.py (_cmd_run after run_pass), tests/telemetry_capture/test_main.py and ports.yaml, and its text says a Stop
+  pass that finds the lock held returns busy as today, which this plan turns into a 120 s lock wait (its expected_rows
+  go through record_turn, so the frontier carries over); PLAN-telemetry-verification-monitor adds one flow-form line to
+  telemetry_observations.yaml, near the contracts class limit. Build order: this plan first; whichever build lands
+  second rebases and reconciles (the coordinator sequences them).
+- >-
+  Decision timing: Decision 199 cl.1 says a span is an open+close pair; one close per Stop for a continued turn rides
+  contract notes, as v3's re-anchored closes and v4's per-notice and per-resume closes did. The numbered Decision whose
+  clause 3 names this producer obligation is drafted in PLAN-telemetry-read-side-session-end, which merges after this
+  plan; no row here changes meaning for a reader.
+- >-
+  Load (Decision 88, decided with notice): a prompt pass adds one small append per turn (the new turn's open row and
+  the previous Stop group's trailing hook rows), and a turn a Stop hook sends back adds one pass per extra Stop, so
+  writer appends roughly double per turn while rows per session barely change; VP 13 reports prompt and Stop passes
+  per session as the first measurement. The prompt hook skips the switch read, so a prompt waits only for the
+  interpreter's start.
+- >-
+  ci_rca at planning (2026-10-18): rec-4427 (Critical) is open; the v4 bump's hard-coded parser_version in
+  tests/common/test_ducklake_event_verification_verbs.py escaped --pre because that file is outside the fast tier.
+  #1556 fixed it on main; execution step 1's rebase picks it up, and VP 11's full tier on the rebased head guards this
+  v5 bump against the same escape. Unrelated to this plan's design, so it does not hold the plan.
+pre_implementation_checklist:
+- Branch confirmed not on main
+- docs/PROJECT_CONTEXT.md read
+- envelope R7, telemetry_observations outcome and observation_type, telemetry_sessions outcome read
+- PLAN-telemetry-capture-producer-fixes's build merged and this branch rebased on it
+- /mnt/project-files/rec-4382/STOP-WITNESS-CHECK.md and PLAN-ADVICE.md read
+- All files in scope located and readable
+- Acceptance criteria understood and verifiable
+execution_steps:
+- >-
+  1. Precondition: confirm PLAN-telemetry-capture-producer-fixes's build is on main (PARSER_VERSION 4 in
+  src/turn_capture/record_turn.py); rebase onto main. If not, STOP and tell the coordinator. Then confirm the v4 names
+  this plan relies on exist as merged: tests/turn_capture/test_segment_closes.py, tests/turn_capture/test_real_transcript_coverage.py,
+  the DG-1 counter names, PV-4 reading sessions._open_bound (PV-2 reads pins before the first prompt), the 40-case
+  golden index; on any divergence from the
+  v4 plan's text, STOP and tell the coordinator before writing code. Note whether
+  PLAN-telemetry-read-side-session-end's build has merged (it should not have; if it has, step 8's derived_golden values
+  follow its state rule).
+- >-
+  2. WT-1, WT-2 (shim, witness.py). The shim's main() writes WITNESS_LINE plus a newline to stderr as its first action,
+  before reading stdin or checking the switch. A witness is a ROOT-stream record of kind hook whose attachment.type is hook_success, hookEvent is Stop,
+  hook_script(command)'s stem is stop_log_turn and whose stderr's first line equals WITNESS_LINE; it attaches to the
+  current turn (a witness outside any turn is counted witness_outside_turn and ignored).
+- >-
+  3. WT-3..WT-6 (witness.py, observations.py). A witness is USABLE iff the turn holds an assistant record before it, the
+  last such record is an API-error record or carries a string message.stop_reason, and every tool_use of the turn before
+  the witness has its tool_result before the witness; otherwise counted witness_not_at_rest and ignored. A turn's
+  closing events are its usable witnesses and its API-error assistant records, in file order. Each closing event e
+  yields one turn close row: key role_ref(<e's uuid>, 0, "turn_close") for a witness or an API-error record;
+  event_timestamp and source_ordinal from e's record; metadata response_count (responses with at least one record
+  before e) and tool_call_count (tool_uses before e) over the turn's records before e (an API-error record's window
+  includes it); outcome per C-3's tests over the same window: interrupted when C-3 reads interrupted, error when
+  the window's last assistant record is an API-error record, else success. The boundary close (a later boundary, or
+  a final pass's eof) is keyed role_ref(<anchor uuid>, 0, "turn_close") on the turn's last record carrying a uuid and a
+  parseable timestamp before the boundary or eof (it replaces v3's last-assistant key, whose window C-3's outcome would
+  read past: the round-2 probe found 18 case cuts where the same key would carry interrupted at a cut and success in
+  full), takes event_timestamp and source_ordinal from that anchor, keeps whole-turn counts, gains outcome by the same
+  tests over the whole turn, and is emitted only when the turn holds an assistant record and no closing event lies at
+  or after its last one (a turn holding no assistant record carries no close, as in v4). A final-pass close whose turn later grows is superseded under a later anchor (the declared reanchored_close). A blocked-and-continued turn
+  therefore carries one close per usable Stop, the latest being its current disposition (the observations outcome
+  note). Rule DG-5 (record_turn.py): reanchored_close:<type> counts entities whose distinct close rows across the
+  cursor's prior set and the pass's emitted union outnumber their close rows in the pass's own end-of-tree parse (so a
+  cut-only close, a child-file append after completion evidence and a superseded API-error-frontier synthetic tool
+  close all count); multi_close_turns counts turns with more than
+  one close row in that parse. So a witness close plus a later boundary close (stop_blocked_then_interrupted, or a
+  resume-schedule cut between two witnesses) is multi_close_turns, never reanchored_close, and the resume leg's
+  reanchored_close:turn == 0 assertion (tests/fixtures/turn_capture_v3_cases.py check_schedule) keeps holding.
+- >-
+  4. WT-7, WT-8 (streams.py, witness.py). ROOT stream only, in a non-final parse that record_turn requests with
+  parse_tree(..., frontier=True) (direct callers keep frontier=False and today's parse): after _walk, when the root's last turn
+  has no later boundary, its frontier is the line of its last closing event, else the line of its first prompt record;
+  the root's records after the frontier are dropped (counted frontier_withheld) and the root is walked again over the
+  kept records, so stream.hooks, stream.compacts, stream.resumes, turn.recs, turn.prompts, turn.companions and
+  turn.last_assistant hold only kept records before _index_tools and _group_responses run (a hook keyed on a tool_use
+  past the frontier is then never emitted early with a different parent). Such a turn is closed iff it has a closing
+  event. A turn that is not closed emits its turn open row only (built from its first prompt
+  record; D-1 still holds the whole stream until its first closed assistant-bearing turn). Sub-agent streams are
+  unchanged: they emit on completion evidence, which lies in the root at or before its frontier. A final pass drops
+  nothing (unchanged).
+- >-
+  5. WT-9 (sessions.py). _open_bound = the line of the first closing event of the stream's first closed turn holding an
+  assistant record, else that turn's last record line when a boundary or a final pass closed it. Every value the open
+  row reads with "at or before the bound" (branch, model_primary, v4's PV-4) reads up to it.
+- >-
+  6. RW-1..RW-4 (waits.py, runner.py, __main__.py, the shim, settings.json). The shim detaches every Stop and StopFailure
+  when capture_allowed holds, with --lock-wait 120, and every UserPromptSubmit with a valid prompt_id without reading the
+  switch, with --prompt-id and --lock-wait 120. _cmd_run builds the wait (opt-in; run_pass's wait keyword): Stop: wait
+  until the root holds a witness later than both its last prompt record and its last assistant record, poll 0.2 s,
+  bound 30 s (witness_seen | witness_wait_timeout), then settle until the root is unchanged for 1 s, bound 5 s
+  (settle_timeout). StopFailure: no wait. UserPromptSubmit: wait for a root prompt record carrying --prompt-id, bound
+  10 s (prompt_seen | prompt_wait_timeout). The wait runs after run_pass's capture_mode and smoke_ref checks. Then the
+  lock, waited up to --lock-wait (lock_waited counted when acquired after waiting; a timeout is outcome busy with no
+  diagnostics line, as today), then the pass. A wait timeout still runs the pass. Callers that pass no wait (the
+  SessionEnd hook, the operator CLI, in-process tests) are unchanged.
+- >-
+  7. Contracts: the four notes as their scope rows pin, each with an amendment_log entry dated the build day; ports.yaml
+  SA-02. Structural size (Decision 166 contracts class: 500 effective lines, 2,000-character lines;
+  telemetry_observations.yaml is at 493): new amendment_log entries take the one-line flow form and notes extend
+  existing lines where they can; if a file still exceeds 500, compact its remaining block-form amendment_log entries
+  to the one-line form (the git-ops.yaml precedent, #1535), then join older multi-line folded notes into one line each
+  under 2,000 characters. The envelope's R7 qualification goes on new physical lines of its folded scalar (line 381 is
+  already 1,653 characters), never extending a line past 2,000. Wording never changes; never a budget raise and never
+  a split. Run step 9.
+- >-
+  8. Tests and fixtures: the scope rows' new nodes, modules and sanctioned changes; corpus helpers; the seven new golden
+  cases. Run steps 1-4 until green BEFORE regenerating any expected_rows; then regenerate every case's expected_rows from
+  record_turn, review the diff by kind (outcome on every turn close; the boundary close re-keyed to the turn's last
+  uuid and timestamp record, block index 0, with that record's event_timestamp, source_ordinal and event_id, in the
+  existing cases where it is not the last assistant record -- round 3's prototype found 18 of 40, e.g. tool_result_error
+  a1 -> r1, hooks_resume_and_compact a2 -> cp3, multiblock a3#2 -> a3#0; close_failed_api_error's turn closed on its
+  error record; witness closes and witness process_events in the new cases only) and confirm no other row changed; set the
+  registry's v5 entry from the new golden_digest; re-author both derived_golden files by hand (parser_version moves on
+  every row; expected moves at pass stop: corpus:resume_after_interrupt's last_event_timestamp moves from 7 to 10
+  through WT-8's early turn open row for u3, its state (running) and duration (3) unchanged, the entry's why citing
+  WT-8; corpus:subagent_background_with_completion's stop-pass entries lose agent:agent2, whose completion evidence lies
+  after the last witness, so its stop tree in derived_golden_rollups.yaml is removed or given a non-empty expect,
+  never an empty one, which the harness rejects with a TypeError;
+  tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py reads the same files and is green once they
+  are); run steps 5 and 6.
+- >-
+  9. Execute the Verification Plan steps 7-12; loop until each passes; on an unrecoverable V3 failure stop and RCA
+  (Decision 55).
+- >-
+  10. Send the coordinator: this build session's root session ref and harness_session_key (its v5 rows are untrusted),
+  the VP 8 counts, the note for slice 4 in the context, and the request to start, once the merge lands, a fresh session
+  on the merged main to run step 13 in its second turn.
+- >-
+  11. Closure (implement skill Commit Flows; docs/contracts/git-ops.yaml), each outcome reported separately: the
+  readiness check (scripts.session.github_readiness); the coverage diagnostic; set implementation_declared true; rebase
+  on origin/main; step 11 (the full tier) on the committed, clean tree, then --verify-head; the postflight evidence file
+  and scripts.session.postflight --evidence; push; PR (body: the rules, VP 7/8/12 logs and counts, this session's own
+  root session ref and harness_session_key, the contract notes for Benjamin's word); CI green on the head. Merge only
+  after code review PROCEED, CI green and Benjamin's own word on the contract notes (fetch his message before merging).
+  Squash-merge; no Resolves trailer (rec-4407 closes with PLAN-telemetry-read-side-session-end).
+- '12. Step 13 runs in the session the coordinator starts on the merged main and step 14 on the first golden replay after the merge; post both as one counts-only comment on the merged PR.'
+- 'Report: what was implemented, verification results (counts), and what PLAN-telemetry-read-side-session-end now builds on.'
+work_areas: []

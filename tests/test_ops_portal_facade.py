@@ -45,6 +45,8 @@ _REQUIRED_PUBLIC = [
     "load_capabilities",
     "compute_automatable",
     "file_rec",
+    "file_rec_with_outcome",
+    "FileRecOutcome",
     "update_rec",
     "propose_or_close_rec",
     "file_decision",
@@ -70,10 +72,7 @@ _REQUIRED_PRIVATE = [
     "_DetectionGap",
     "_compute_risk_score",
     "_derive_computed_fields",
-    "_load_write_time_validators",
-    "_validate_file_path",
-    "_validate_context_length",
-    "_check_not_null",
+    "gate_write",
     "_run_ci_rca_cross_check",
     "_validate_ci_rca_context_v2",
     "_validate_ci_rca_dispute",
@@ -85,7 +84,6 @@ _REQUIRED_PRIVATE = [
     "_append_to_local_jsonl",
     "_fetch_rec_from_reader",
     "_fetch_decision_from_reader",
-    "_write_time_validators_cache",
     "_print_ci_rca_back_validation_report",
     "_FEATURE_FLAGS_YAML",
 ]
@@ -242,7 +240,7 @@ class TestPatchInterception:
             assert _facade.update_rec("rec-042", {"status": "closed"}) is True
 
         assert mock_write.call_args.kwargs["action"] == "update_ops"
-        mock_refresh.assert_called_once()
+        mock_refresh.assert_not_called()
 
 
 class TestCliContractStability:

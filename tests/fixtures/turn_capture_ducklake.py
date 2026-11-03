@@ -2,8 +2,9 @@
 
 duckdb is imported lazily inside the functions, never at module scope (fast-tier importers must not pay for
 it). The four tables are built from the RATIFIED contracts (load_contract + resolve_refs +
-_project_contract_table + EventTableSpec.from_projection), partitioned by the calendar-day triple, UTC before
-ATTACH, inlining off. The helper FAILS, never skips, when the ducklake extension is unavailable (rec-4071).
+_project_contract_table + EventTableSpec.from_projection), so every spec carries the contract-derived row rules
+and compare exclusions (Decision 210) and every append through it exercises them; partitioned by the calendar-day
+triple, UTC before ATTACH, inlining off. The helper FAILS, never skips, when the ducklake extension is unavailable (rec-4071).
 """
 
 from __future__ import annotations

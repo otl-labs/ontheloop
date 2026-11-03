@@ -2,6 +2,2239 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 243: North stars are a Tier A file -- a mission and nine entries in the Decision 196 shape, each with a failure signal, a binding scope and its carrying Decisions, under a declared partial order (amends Decision 196 clause 3) (Decided)
+
+```yaml
+number: 243
+status: Decided
+decided_date: "2026-11-02"
+kind:
+  value: direction
+  justification: >-
+    Clauses 2 and 3 set what On The Loop is for and which north stars bind this repository and each release; undone, the mission and NS.6-NS.9 revert to the roadmap's five invariants.
+amends: [196]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant change to the direction every plan and agent context reads, re-grounding the
+    north-star references of Decisions 78, 184 and 185. Not a contract note: north-star.yaml holds the entries,
+    not the choice to make Tier A real or where it lives. Not amendment_forms: it amends 196 and binds four plans.
+```
+
+**Status:** Decided
+**Date:** 2026-11-02
+**Warehouse ID:** dec-243 (per Decision 84 backfill)
+
+**Problem:** The five north stars in the roadmap are invariants written before the core existed. None says what On The Loop is or what success is (Decision 196 clause 2); they mix invariants of On The Loop with facts about the operator deployment, which is why their details grew amendment tails; none carries the failure_signal Decision 196 clause 7 requires; and they sit inside the loop's edit scope. Intent recorded since (Decisions 209, 211, 221, 231, 232, 233, 235) has become direction in its own right.
+
+**Intent:** A human authors direction and intent, and every agent reads it first; mechanism is where autonomy is earned.
+
+**Decision:** Amends Decision 196 clause 3; its north-star-shape-diverges condition fired.
+1. **Home.** This repository's Tier A entries live in docs/contracts/north-star.yaml, a Class D contract evaluated by validate_north_star, until T4.24 creates the tracked ontheloop/ root (Decision 211 clause 5, Decision 224 clause 7), where the file moves unchanged. The roadmap's north_star key is a pointer to it; the README's North Star section is a generated headline projection the evaluator checks equal.
+2. **Shape (amends clause 3).** Tier A is a typed entry file, not decision entries: a mission plus numbered entries, each kind: north_star with principle, detail opening with its why, a required failure_signal, binds (repository, release or both, in the terms of docs/contracts/glossary.yaml) with adopters (bound, may_override or set_scale) wherever it binds a release, and carried_by, the Decisions that carry it. North stars are carried by decisions rather than being decisions, so no second decision system exists; clause 3's authority policy stands, and clause 7's failure_signal is schema-enforced for the first time. NS.1-NS.5 keep their ids; new entries append; changes are recorded in the contract's amendment_log. Clause 3's context policy is amended to reading first, not ambient loading: the file would take most of the always-loaded budget (Decision 127), so the decision scout reads it first (clause 8) and docs/PROJECT_CONTEXT.md points to it.
+3. **Content.** The mission and NS.1-NS.9 as the contract records them, confirmed by the operator on 2026-10-30.
+4. **Conflicts.** NS.6 and NS.9 prevail over NS.1 and NS.3; any other conflict between north stars routes to a numbered Decision.
+5. **Promotion, not supersession.** A Decision whose intent became the mission or NS.6-NS.9 stays live and gains a dated append; no pointer moves. Decision 57 stays live with the same append.
+6. **Authority.** Every entry change needs explicit human confirmation. The file joins Decision 117's boundary_patterns and so Decision 185 clause 3's base-ref check (T4.21); Decision 235 clause 5's floor covers its evaluator. rec-3959's guard enforces clause 3 (T4.36).
+7. **Retired checks.** PLAN-north-star-tier-a names the graduated checks the rewrite retires (Decision 235 clause 1).
+8. **Bound now, built in their plans (Decision 197 clause 8).** The decision scout reads this file before the index, feeding its SPIRIT lane only, uses carried_by as a shortlist path, and takes over plan-critique's alignment score. New decision entries carry a required kind: direction or mechanism (docs/contracts/decision-kind.yaml) and an optional serves: [NS.n] (docs/contracts/decision-entry.yaml), forward-only; direction and intent are pinned at human approval on every ladder (NS.8). An advisory detector of emergent north stars starts as a read-only /orient section. The operator_decision kind staged for CD.47 binds at that row's ratification (Decision 221 clause 7).
+9. **Re-grounding.** Decisions 78, 184 and 185 cite north stars by id and keep their meaning; Decision 184 clause 2's reading of NS.3's and NS.5's details is now carried in those entries.
+
+**Coverage (Decision 181 cl.2):** cl.1-4 and cl.6's boundary entry validate_north_star; cl.5-7 this plan; cl.9 roadmap-wording-sweep-north-star-pointer; cl.6 guard and cl.8 T4.36 c3-c7; cl.1's move T4.24 c17.
+
+```yaml reversal-conditions
+decision: 243
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: per-file-split
+    kind: manual
+    description: "T4.24's per-file decision split lands: move the file and re-decide clause 2."
+  - id: entry-churn
+    kind: manual
+    description: "One entry changes three times in a year: it is mechanism, not direction."
+  - id: order-gap
+    kind: manual
+    description: "A Decision settles the same pair of north stars twice: add the pair to clause 4."
+```
+
+**Related:** Decisions 57, 78, 84, 86, 117, 126, 171, 175, 177, 184, 185, 194, 195, 196, 197, 200, 209, 210, 211, 212, 221, 224, 231, 232, 233, 234, 235, 240; T4.21, T4.24, T4.36; rec-3959.
+
+---
+
+## Decision 242: The platform AWS account is assigned in place to On The Loop Labs Limited and stays standalone; migrate, not rebuild (amends Decision 106) (Decided)
+
+```yaml
+number: 242
+status: Decided
+decided_date: "2026-11-02"
+amends: [106]
+significance:
+  value: numbered_decision
+  justification: >-
+    Who owns and pays for the platform's AWS account for the life of the platform, and whether
+    moving it re-creates the platform. Not a contract note or an annotation on Decision 106: no
+    contract owns account ownership, and Decision 195 cl.3 asks for a recorded choice between
+    migrate and rebuild that needs its own reversal conditions.
+```
+
+**Status:** Decided
+**Date:** 2026-11-02
+**Warehouse ID:** dec-242 (per Decision 84 backfill)
+
+**Problem:** On The Loop Labs Limited owns the platform (Decision 195), but the AWS account that runs
+it is the founder's: personal root e-mail, contacts, tax identity and payment card. Decision 195 cl.3
+reopened Decision 106's reversal condition (a) without choosing between moving this account and
+rebuilding in a new one. The data is also no longer throwaway: the operational tables are the
+warehouse's sole system of record (Decision 84).
+
+**Decision:**
+1. **Migrate, not rebuild.** The existing account stays the platform account. Its id, buckets, roles,
+   OIDC trusts, secrets and Terraform state do not change, and nothing is re-created. Decision 106's
+   rebuild precedent does not apply to this move.
+2. **Assignment.** The account is assigned to the company under AWS's Account Assignment
+   Requirements: its root e-mail, primary and alternate contacts, tax registration and payment method
+   become the company's. The founder-to-company IP assignment (Decision 195 cl.2) executes first or on
+   the same day; if it cannot, the move proceeds and the gap stands until Decision 195's
+   `assignment-executes` condition fires.
+3. **Standalone.** The account stays standalone. The one-account Organization and the unused IAM
+   Identity Center instance created with it on 2026-05-28, likely residue of the Identity Center
+   preparation Decision 113 superseded and recorded by no Decision, are deleted after billing history is
+   exported, so Decision 144 cl.1's premise holds again. A company Organization with a workload-free
+   management account is Phase 4 work gated on Decision 77's live_full trigger (Decision 144 cl.6) and
+   is not decided here; joining one later re-creates nothing.
+4. **Order, rollback, retirement.** The move runs after the GitHub transfer is proven (Decision 218)
+   and before the Neon move. Every account-level step is the operator's, in the console; agents verify
+   from CloudTrail and from billing pages the operator shows them. A failed detail change is reverted to
+   its previous value, never answered by a rebuild; the two deletions are final. The personal payment
+   method is removed only after the first invoice addressed to the company plus 30 days, as its own
+   step with evidence.
+5. **Names.** "Personal" in internal identifiers (terraform/personal and kin; Decision 101(b), Decision
+   218 cl.1) and in existing prose about this account means this account, whoever owns it; the prose is
+   swept by a follow-on rec after the move. In Decision 113, "personal account" means this account and
+   "company-account" the former employer's account that T5.2 tears down; its reversal condition has not
+   fired.
+
+**Rationale:** A rebuild would re-mint every account-bound identifier (about 200 Terraform references,
+20 workflows, and the data-lake bucket in the DuckLake catalog's data_path) for no ownership gain, while
+AWS supports assigning an account in place. Ownership and payment are complete without an Organization,
+and a new management account now would contradict Decision 77 cl.5 and Decision 144 cl.6 for no gain.
+An independent review reached the same choice (aws-account-path/ADVICE.md).
+
+```yaml reversal-conditions
+decision: 242
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: assignment-refused
+    kind: manual
+    description: "AWS refuses the in-place assignment or requires a new account: re-decide clause 1."
+  - id: move-not-executed
+    kind: manual
+    description: "review_by passes with the account still in the founder's name: re-confirm or withdraw."
+```
+
+**Related:** Decisions 106 (amended), 195 (account-move-decided discharged), 77, 84, 101, 113, 126,
+144, 214, 218; rec-4525, rec-885.
+
+---
+
+## Decision 241: The coordination model -- a deterministic engine runs the work graph, a bounded coordinator step handles only what the graph cannot, context travels as notes, streams are epics, and concurrency and WIP climb under human ceilings (amends Decision 229 clause 2) (Decided)
+
+```yaml
+number: 241
+status: Decided
+decided_date: "2026-11-02"
+amends: [229]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable line between deterministic mechanics and LLM judgment in the loop, re-planning T4.1, T4.3, T4.4, T4.8,
+    T4.23, T4.30 and T4.33 if reversed. Not a contract note: no contract owns that line. Not amendment_forms: it
+    refines Decision 229 cl.2 and adds rules no single entry owns.
+```
+
+**Status:** Decided
+**Date:** 2026-11-02
+**Warehouse ID:** dec-241 (per Decision 84 backfill)
+
+**Problem:** Decision 229 cl.2 names the later coordinator only as "a Decision 185 engine". Who judges, what holds the queue, how context reaches a worker, what a stream is and how parallelism rises are undecided; the only working coordinator is the interim one, a standing agent that reads everything.
+
+**Intent:** Loop-host planning starts from one model: mechanics deterministic, judgment only at named events, all state in the store.
+
+**Decision:** Design now, build post-MVP (Decision 197 cl.8).
+1. **Engine.** Deterministic code over the Decision 185 loop definition owns the ready frontier, admission, priority, per-epic WIP, T4.8 leases, T4.10a budgets, persona launch, stall timers, deterministic retry, result and edge recording and approval-ledger lookups. An event with a defined transition routes without an LLM (a red to its item's worker under Decision 226, a merge to edge writes and dependants' wakes, a stall to a nudge); Decision 217 cl.2's rebase escalation rec stands.
+2. **Coordinator step.** Judgment is a stateless step with a persona contract (T4.10a), budgets and a run record (Decision 231), invoked only for an event that maps to no transition, a tie the order cannot break, or a human message. It reads bounded slices through named read verbs, never the whole queue, and writes graph state through a closed verb set the engine enforces; no verb launches a persona, schedules the step or extends its run. On a failure it routes, escalates or files an RCA rec, never repairs (Decision 55). It never approves (Decision 233 cl.4), never sets a loop-policy value (Decisions 185 cl.3, 229 cl.1) and never runs on Actions (Decision 205 cl.1). Decision 229 cl.2's coordinator is this engine plus this step; hub and spoke is unchanged.
+3. **Scopes.** The step has a desk scope, the human's entry point on the T4.33 surface (Decision 232 cl.3): frontier and forks, intake triage (cl.6), cross-epic duplicates and conflicts, gate cards, policy proposals. An epic scope (one epic's frontier, notes and exceptions; it files items only inside its epic) is designed with the same verbs and data, runs in shadow first, and acts for an epic only when a measured trigger fires. The hierarchy is part_of edges. /orient and Decision 90 stand in this repository.
+4. **Notes, not messages.** Context reaches a worker as an append-only work_item_notes event in the work-item store, plus a wake verb; the worker reads unacknowledged notes at fixed points. A note carries no authority; an approval names its ledger row. Events land in the one loop record journal (Decision 221 cl.7); the step attends to a filtered subset.
+5. **Streams are epics.** A stream is an epic-kind work item carrying WIP, budget, declared path ownership and a serves edge; membership is a part_of edge (Decision 197 cl.3-4). One engine serves every stream.
+6. **Concurrency and WIP.** Dispatch concurrency (planning and implementation runs holding leases) starts at 1 (Decisions 55 and 206 cl.6) under a kernel ceiling of 3 that only Decision 185 cl.3's marker moves, and climbs by T4.4 rungs: 2 once T4.8 leases are live, 3 after a clean window, demoted automatically. Verdict jobs take no lease and are rate-limited apart. Per-epic WIP is a loop-policy value under a human ceiling, moved additively up and multiplicatively down on cost per verified merge (Decision 217 cl.4); its transitions use the one ladder transition log (Decision 221).
+7. **Duplicate problems.** Similarity at filing proposes related_to edges and routes close pairs to the desk; the scout sees in-flight neighbours; T4.8 semantic locks are the hard stop; leases stay pessimistic.
+
+**Options considered:** A standing coordinator that reads every event and pushes messages -- rejected: unreplayable, unbudgeted. A planner that becomes a coordinator -- rejected: decomposition is child items (rec-4478). Both scopes live from the first build -- rejected: an extra LLM hop per escalation spends the budget, the binding constraint.
+
+```yaml reversal-conditions
+decision: 241
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: step-adds-nothing
+    kind: manual
+    description: "Over a quarter of loop runs, coordinator-step outputs change fewer outcomes than they cost: re-decide cl.2-3."
+  - id: repair-cheaper-than-wait
+    kind: manual
+    description: "Measured conflict repair costs less than lease waiting at the current ceiling: re-decide cl.7's pessimistic leases."
+```
+
+**Coverage (Decision 181 cl.2):** every clause is residual until built, owned by forward work: cl.1 T4.1; cl.2-3 T4.37, T4.33; cl.4 T4.23; cl.5 T4.23, T4.3; cl.6 T4.4, T4.8; cl.7 T4.23, T4.30, T4.8. tests/decisions/test_coordination_model_decision.py pins each owner's citation.
+
+**Related:** Decisions 55, 84, 90, 93, 185, 197, 205, 206, 217, 221, 226, 229, 231, 232, 233, 235; CD.17, CD.37; rec-4478, rec-4823.
+
+---
+
+## Decision 240: One name per thing where On The Loop meets its adopters -- this repository is the upstream source, a release is what adopters install, adopter for the free release and customer for the paid service; "platform" and "product" leave new governed text unqualified (Decided)
+
+```yaml
+number: 240
+status: Decided
+decided_date: "2026-10-30"
+kind:
+  value: direction
+  justification: >-
+    Clause 2 sets whom the free release and the paid service serve; undone, that line and the reading of the
+    Decisions clause 4 maps revert.
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant naming of where On The Loop meets its adopters, setting how wording in Decisions 77, 178, 184, 195,
+    196, 198, 200, 205, 209, 220, 226, 232 and 233 reads. Not field_semantics: it names no data field or config key, and no
+    contract can set how a Decision reads. Not amendment_forms: no single prior entry owns it.
+```
+
+**Status:** Decided
+**Date:** 2026-10-30
+**Warehouse ID:** dec-240 (per Decision 84 backfill)
+
+**Problem:** "Platform" and "product" are relative words: each layer is a platform to the layer above it and a product to the people who build it. The corpus uses "platform" for this repository, for what adopters install, for the decisions that ship (Decision 196), for the operator's infrastructure (Decision 77) and in identifiers; "product" for On The Loop, for what On The Loop Labs builds on it, and for an adopter's own work; and "On The Loop" for the company, what adopters install, this repository and the operator deployment. This repository is governed by On The Loop while it builds On The Loop, so each reading is right from one side and wrong from the other, and an agent cannot tell which side a sentence is written from.
+
+**Intent:** Every governed sentence names one thing, so no agent has to infer whose side it is written from.
+
+**Decision:**
+1. **Names.** docs/contracts/glossary.yaml is the one home for the names On The Loop (what adopters install), On The Loop Labs (the company), core, paid service, this repository, release, deployment, operator deployment, operator, adopter, customer, user, project and adopter product; each carries its reserved meaning and what it never means. Other contracts' vocabulary blocks keep their own axes.
+2. **Adopter and customer.** An adopter runs a release on its own repositories, free; On The Loop Labs is one. A customer pays On The Loop Labs for the paid service. One organisation can be both, and the word follows the relationship the sentence is about. A user is a human, never an organisation.
+3. **Relative words.** New governed text in this repository (contracts, Decisions, plans, skills, agent instruction files and recs) never uses "platform" or "product" unqualified; it uses a glossary name. This is house style (Decision 211 clause 2), so it binds an adopter only through the optional profile. Identifiers keep their spelling; renaming one is its own change.
+4. **Older text is read, never rewritten.** Text older than this entry reads through the glossary's read_as rows (Decision 177; Decision 233 clause 1 is the precedent), and no clause's meaning changes: Decision 196's "platform decisions" (Tier B) are the decisions a release ships, Decision 77's "platform environments" are the operator deployment's, and Decision 178's "platform-only" repository holds only On The Loop's source.
+5. **Enforcement.** validate_glossary checks the contract's shape and fails changed governed text that uses either relative word unqualified. The rec portal refuses a rec title, context or verification whose new text does the same (the producer-side glossary_lint rule in ops_recommendations.yaml), and get_rec_write_guidance carries the glossary so a rec's author sees it first. docs/CLAUDE.md points every agent that reads or writes under docs/ at the glossary. rec-4676 handles existing text.
+
+**Coverage (Decision 181 cl.2):** cl.1, cl.3 and cl.5 -- validate_glossary for files and the portal's glossary_lint rule for rec title, context and verification; cl.3 in rec resolution text and context_v2_json prose -- unenforced residual, since automated writers fill both and a refusal would hold a filing or a close, owned by rec-4768; cl.2's choice between adopter, customer and user -- unenforced residual, being judgement, owned by rec-4762; cl.4 -- the read_as rows; existing text -- rec-4676.
+
+```yaml reversal-conditions
+decision: 240
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: relationship-unnamed
+    kind: manual
+    description: "A relationship the paid service creates (for example a fully hosted customer, Decision 209 clause 2(c)) cannot be named by adopter or customer: re-decide clause 2."
+  - id: lint-noise
+    kind: manual
+    description: "validate_glossary's false positives outnumber its true catches over a quarter: re-decide clause 3's scope."
+  - id: read-as-misread
+    kind: manual
+    description: "An agent misreads the same read_as phrase in a record twice: give that record a dated Update in glossary names, or re-decide clause 4's records."
+```
+
+**Related:** Decisions 77, 84, 86, 177, 178, 181, 184, 195, 196, 198, 200, 205, 209, 211, 220, 226, 232, 233; rec-3925, rec-4560, rec-4676.
+
+> **Update (2026-11-02):** clause 4's older text is now the records: the files glossary.yaml's read_as.records lists (Decision bodies older than this entry, plans, audit prompts, the roadmap below its header, the two archives), amendment_log rows, and recs filed before this entry. Records keep their wording and read through the read_as rows. PLAN-glossary-sweep (rec-4676) rewrote the rest to glossary names, README.md and the roadmap's header included; no other clause's meaning changes. Coverage: the reads-through note on each Decision in read_as.noted_decisions -- validate_glossary's note leg; clause 3's other files -- its whole-file leg; records -- the read_as rows. The reversal stanza's read-as-misread was re-armed to match.
+
+---
+
+## Decision 239: Agents read production transcript text masked, through a dedicated content reader whose code only the operator can deploy (amends Decisions 236, 230, 126, 81 and 91) (Decided)
+
+```yaml
+number: 239
+status: Decided
+decided_date: "2026-10-29"
+amends: [236, 230, 126, 81, 91]
+significance:
+  value: numbered_decision
+  justification: >-
+    Fires Decision 236's content-consumer reversal condition, adds a third reader to the closed production read
+    boundary and a role to Decision 230 cl.5's fence; a contract note cannot amend those clauses.
+```
+
+**Status:** Decided
+**Date:** 2026-10-29
+**Warehouse ID:** dec-239 (per Decision 84 backfill)
+
+**Problem:** The feedback loop needs transcript text to see why agents made mistakes (operator, 2026-10-29), so
+Decision 236 cl.3's named consumer exists. Text an agent reads re-enters its own captured session and can reach a
+public pull request, and an agent that edits the reader could serve itself more. CODEOWNERS does not bind agent pull
+requests (rec-2827), and IAM grants invoke per function, not per verb.
+
+**Decision:**
+1. **Content reader (amends 236 cl.3).** Agents read production transcript text only through
+   agent-platform-ducklake-telemetry-content: masked verbs only (one row, one session tree), no other event verb, no
+   caller SQL; S3 read on the production telemetry data prefix and GetObject on the production blob root; the
+   telemetry reader's SELECT-only login as a second consumer of the same catalog binding (amends 230 cl.3: one login
+   per binding stands; its connection limit is summed across the functions that share it).
+2. **Masking inside the function.** Every served byte is masked inside the deployed function with the shared
+   read_masked profile (src/sensitive_values), over the whole payload before paging. ARNs keep role and resource
+   names, never account ids or session names. A response carries the raw content_sha256, masked_sha256, per-class
+   mask counts and the profile fingerprint, and labels its text untrusted data. Masking done by a caller is never a
+   control.
+3. **Raw content.** Byte-exact reads are a separate function, invocable only by an identity no agent can obtain
+   without review (Decision 238 cl.1), built when the security project names that identity (rec-4697). No
+   agent-reachable role is ever granted it.
+4. **Access log and window.** Each read writes one value-free log line (role name, verb, session, row, byte and mask
+   counts, request id; never an ARN, account id or text) to a log group kept at least 90 days. Reads cover sessions
+   started in the last 90 days. How long storage keeps transcripts is the operator's decision (rec-4698).
+5. **Change lock (amends 126 cl.1).** The content reader's code and configuration change only through a job the
+   operator approves in a reviewer-gated GitHub Environment, under a role bound to that environment and an exact
+   job_workflow_ref on main (Decision 238 cl.2). A permissions-boundary Deny refuses every other identity. The job
+   deploys the digest it built (Decision 154). CODEOWNERS, boundary_patterns, the detector ratchet and a protected-path
+   edit hook are early warnings until rec-2827. rec-4696 delivers the lock and the deploy.
+6. **Residuals.** The telemetry reader, writer and maintenance functions can read inline content and still deploy
+   without review (operator's choice 2026-10-29; owner rec-2827). Admin credentials bypass the boundary (owner: the
+   security project's thread-startup work; an alarm on the access log flags unexpected roles). Masked text re-enters
+   capture, so a detector gap repeats (owner rec-4657). Read-back proves inline rows only until golden replay carries
+   a blob-tier row (owner rec-4699). Pre-flip transcripts on the smoke catalog (owner rec-4694).
+7. **Amendments.** Decision 236 cl.2 and cl.6 and Decision 81 cl.1 and cl.7: production telemetry has two readers, the
+   telemetry reader (no content) and the content reader (masked content only), so the closed read boundary is three
+   readers. Decision 230 cl.5: the fence's exceptions add the content reader's role. Decision 91 cl.1: the content
+   reader has its own verb set.
+
+**Rationale:** Masking in the deployed function and a deploy only the operator approves are the two controls an agent
+holding the operator's GitHub identity cannot satisfy for itself, provided no session token can approve a pending
+deployment (Decision 143 cl.1; rec-4695: the App lacks the grant). Rejected: masking in the client (bypassable); one
+function with a raw verb (IAM cannot split verbs); gating every telemetry function now (daily approvals for paths
+rec-2827 closes anyway).
+
+**Coverage (Decision 181 cl.2):** cl.1 -- the content reader's served-verb and bundle tests, and rec-4696's IAM pins;
+cl.2 -- test_every_served_byte_is_masked and validate_detector_ratchet; cl.3 -- a non-feature held by rec-4696's
+invoke-grant and url-only tests; cl.4 -- test_every_read_writes_an_access_log_row, the window test and rec-4696's
+log-retention pin; cl.5 -- rec-4696's lock tests and the gated deploy's digest check; cl.6 -- owned residuals, none
+enforced; cl.7 -- the bundle tests and rec-4696's boundary tests.
+
+```yaml reversal-conditions
+decision: 239
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: detector-gap
+    kind: manual
+    description: "A value read_masked masks is found in a masked read's output: re-decide clause 2 and widen read_masked first."
+  - id: loop-needs-raw
+    kind: manual
+    description: "The feedback loop cannot work from masked text: re-decide clause 3."
+  - id: codeowners-binds
+    kind: manual
+    description: "rec-2827 closes: re-decide clause 5's scope across every telemetry function."
+  - id: approval-bypass
+    kind: manual
+    description: "A session token can approve a pending deployment (rec-4695): re-decide clause 5."
+  - id: boundary-size
+    kind: manual
+    description: "The permissions boundary passes Decision 230's 5,632 bytes: re-decide where the fence lives."
+```
+
+**Related:** Decisions 236, 230, 126, 81, 91 (amended), 143, 154, 181, 199, 213, 235, 238, 101.
+---
+
+## Decision 238: No agent-controlled identity reads Terraform state or saved plans -- the speculative plan runs from main's workflow on pull_request_target under a dedicated environment- and workflow-bound role and shows names only (amends Decisions 92 and 144) (Decided)
+
+```yaml
+number: 238
+status: Decided
+decided_date: "2026-10-28"
+amends: [92, 144]
+significance:
+  value: numbered_decision
+  justification: >-
+    Replaces the PR-sub planner session T2.49 built on Decision 92's Wave 2 direction, splits the
+    plan-plus-drift role from Decision 144 clause 7's T2.49 consolidation and retires a
+    terraform-cc-web-operations.yaml row; a note in that contract (considered) cannot amend Decision clauses.
+```
+
+**Status:** Decided
+**Date:** 2026-10-28
+**Warehouse ID:** dec-238 (per Decision 84 backfill)
+
+**Problem:** PR-run speculative plans assume the planner's PR-sub session, which reads Terraform state and
+saved plans, while the PR's own code runs in the same job. Unreviewed agent code can therefore open state. N1
+removed the Neon key from that session but not the state read, and every fix to one leak left the channel
+itself in place.
+
+**Decision:**
+1. Principle. No identity an agent can obtain without review (a role trusting pull_request, refs/pull/* or
+agent/* subjects, and PlatformDev) reads or writes Terraform state, saved plans or plan-review transcripts. A
+static check over every role's trust and policy, with iam simulate rows, enforces it.
+2. Trusted identity. The speculative plan runs under agent-platform-github-ci-trusted-plan. It carries the
+mandatory boundary (Decision 144 cl.3) and trusts one subject form: the GitHub Environment tf-trusted-plan (a
+deployment branch policy naming only main, no reviewers, no admin bypass, never destroyed) and a
+job_workflow_ref naming a trusted workflow file at refs/heads/main, exact match. No reviewer gates this
+subject, unlike Decision 94's. Its safety rests on the workflow binding, the main-only branch policy,
+code-owner review of every main path the job executes (procedural until rec-2827's non-bypass merge identity),
+and a repo check: only the named files reference the environment or combine pull_request_target with id-token
+write, and none declares workflow_call.
+3. The PR is data. The job runs main's workflow on pull_request_target, after a same-repo head check and
+before any checkout. Only the root's Terraform files come from the PR. Every script, action, provider and
+backend block and the lockfile come from main. Init is hermetic from the S3 provider mirror. The job is
+deterministic, and no LLM runs in it (Decision 205 cl.2).
+4. Containment. Secrets exist only as process environment, never as files. PR-visible output and errors are
+names only: addresses, actions, counts, attribute and output names. They carry no value, instance key or
+diagnostic text. No plan JSON is stored where an agent identity can read it, and the plan reviewer gets
+values-stripped input. Accepted residual: PR HCL is still evaluated with the job's credentials, so the shape
+of a plan (counts, success, timing) can carry a few bits. Any data source argument the PR writes can also
+carry a value out in the request it sends, even a denied one, to a resource whose owner logs it. So the
+trusted job evaluates only PR HCL that passes a main-side static screen: an allowlist of data source types,
+and no provider, backend or module source from the PR (rec-4637). Catalog passwords stay in state (accepted
+2026-10-26).
+5. Unchanged. Decision 77's same-artifact apply: plan.bin and its digest are keyed by the PR head SHA.
+Decision 154's PR-time Lambda artifact production moves out of the plan job with the cutover; it is not
+retired.
+6. Amends Decision 92's ratified Wave 2 direction: the speculative plan no longer runs under a PR-sub session,
+and the planner keeps its main-sub drift session only. Amends Decision 144 clause 7's T2.49 consolidation: the
+plan half leaves the merged planner role. terraform-cc-web-operations.yaml's PR-run speculative_plan_job row
+retires at the cutover. Later trust edits on the new role are admin split-applies (Decision 223 cl.4). A
+rename or transfer pre-stages the new job_workflow_ref values additively, as Decision 172 cl.2 does for
+subjects. This Decision records the target; it takes effect as rec-4632, rec-4635, rec-4636, rec-4637,
+rec-4638, rec-4639 and rec-4640 land, and until rec-4640 the planner's PR-sub session still reads state
+(accepted interim risk).
+
+**Rationale:** The root cause is identity, not any one secret: a job that runs PR code cannot also hold state
+read. pull_request_target runs main's definition, so the PR supplies data, never steps. Names-only output is
+the only rule that survives nonsensitive() and arbitrary string attributes. Rejected: a third trust statement
+on the planner (at the 2048-character trust limit, about 2031 of 2048, and it widens the session-name
+partition); workflow_run chaining after a secretless pull_request run, the Decision 205 cl.2 pattern (its runs
+do not report on the PR, and it adds a hop that hands data over from the untrusted run); masking values in PR
+output; GitHub OIDC subject customisation (it rewrites every subject repo-wide, and Decision 172 rejected it).
+
+**Coverage (Decision 181 cl.2):** cl.1, the principle check (rec-4640) and the branch-role and PlatformDev
+fence tests (rec-4632, rec-4635); cl.2, test_trusted_plan_identity and the trusted-environment ci_guards
+check; cl.3 and cl.4, test_terraform_plan_trusted (rec-4637) and the values-stripped review fixture
+(rec-4639); cl.5, the existing saved-plan fetch and digest tests.
+
+```yaml reversal-conditions
+decision: 238
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: premises-change
+    kind: manual
+    description: "GitHub changes pull_request_target, environment-claim or job_workflow_ref semantics; AWS stops evaluating job_workflow_ref; names-only output proves insufficient for review in practice; a fork-safe trigger that needs no environment appears."
+```
+
+---
+
+## Decision 237: Secrets live as SSM SecureString parameters under a separate /secret/ root -- value verbs enumerated per parameter, out-of-band values outside Terraform, no secret read by a data source (amends Decision 101 point (b), Decision 213 clause 5 and Decision 230 clause 4) (Decided)
+
+```yaml
+number: 237
+status: Decided
+decided_date: "2026-10-27"
+amends: [101, 213, 230]
+significance:
+  value: numbered_decision
+  justification: >-
+    A name family outside the frozen /agent-platform/* SSM paths (Decision 101 point (b), re-affirmed by 171), a
+    standing IAM verb rule for a second secret store, and amended carve-outs in Decisions 213 and 230.
+    secret-material-handling.yaml (considered) governs value material only and cannot authorise a name family or
+    amend a ratified clause; amending Decision 157 in place would stretch a Secrets Manager rule over another store.
+```
+
+**Status:** Decided
+**Date:** 2026-10-27
+**Warehouse ID:** dec-237 (per Decision 84 backfill)
+
+**Problem:** Nine Secrets Manager secrets cost about USD 4 a month for values SSM Parameter Store holds at no
+charge. SSM has no value-free refresh: the AWS provider decrypts every Terraform-managed SecureString on each
+plan. The branch, PR and planner CI roles, which run PR-branch code, hold ssm:Get* on parameter/agent-platform/*,
+and an IAM wildcard crosses `/`.
+
+**Decision:**
+1. Name family. Secret values live as SSM SecureString parameters named /secret/<name>, where <name> is the
+   secret's Secrets Manager name. /secret/ is authorised as a deliberate exclusion from the frozen /agent-platform/*
+   SSM paths (Decision 101 point (b), re-affirmed by 171), so no grant on that family reaches a secret. A new
+   secret's name carries no environment; existing names are kept.
+2. Value verbs. ssm:GetParameter, GetParameters, GetParametersByPath, GetParameterHistory and PutParameter, and
+   any wildcard covering one, are granted on a /secret/ parameter only by its ARN to a declared consumer, never on
+   a pattern covering /secret/. Exceptions: the permissions boundary (a ceiling, not a grant) and PlatformAdmin's
+   SecretParameterAdmin statement, the operator's counterpart of its Secrets Manager admin grant (Decision 144
+   cl.3). ssm:DescribeParameters and ssm:ListTagsForResource are metadata. On the PR-trusted planner role a value
+   read is conditioned on the drift session, except the terraform-personal tfvars every plan reads.
+3. Values. A secret's value is set out of band by the operator; Terraform holds its name and the ARN it builds for
+   grants. A SecureString is Terraform-managed only as a declared value exception in secret-material-handling.yaml
+   (the Neon catalog DSN, whose password Terraform creates). No Terraform data source reads a secret; a provider
+   credential held in this family reaches Terraform only as an ephemeral input variable.
+4. Key. Parameters use the aws/ssm managed key, the posture of today's aws/secretsmanager key: the parameter grant
+   is the only gate.
+5. Rotation is deferred. No secret here rotates automatically today; the DSNs may return to Secrets Manager if
+   managed rotation is wanted.
+6. Amends Decision 213 cl.5 and Decision 230 cl.4: the scoped-login value an ADMIN-container agent may write under
+   human direction is the login's /secret/ parameter, and the password is never displayed or stored outside it
+   (or, until secrets-to-ssm-retire retires them, the Secrets Manager secret it was copied from).
+
+**Rationale:** A separate root keeps every /agent-platform/* grant away from secrets without re-narrowing five
+statements, and a future broad grant there stays harmless. Out-of-band values stay out of state, plan files and the
+decrypting refresh PR-reachable roles run. Rejected: value_wo (Terraform 1.11, and refresh still decrypts); a
+customer-managed key (about USD 1 a month for a gate the grant already gives); /agent-platform/secret/ (one broad
+grant reopens it).
+
+**Coverage (Decision 181 cl.2):** cl.1 -- tests/test_secret_parameters_expand.py pins the nine names to
+/secret/<Secrets Manager name> (it lands with secrets-to-ssm-expand); the no-environment rule for a new name is an
+unenforced residual; cl.2 -- validate_secret_parameter_grants, validate_planner_secret_value_reads and the post-apply
+simulate rows; cl.3 -- validate_secret_material_handling and the SecureString read and write coverage rules; cl.4 and cl.5 --
+non-features, held by their reversal conditions; cl.6 -- deploy-paths.yaml's scoped-login procedure, unenforced.
+
+```yaml reversal-conditions
+decision: 237
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: managed-rotation-wanted
+    kind: manual
+    description: "A secret needs managed rotation: re-decide clause 5 (return it to Secrets Manager or add rotation)."
+  - id: pattern-grant-needed
+    kind: manual
+    description: "A consumer needs a value verb on a pattern under /secret/: re-decide clause 2."
+  - id: second-gate-wanted
+    kind: manual
+    description: "A second gate on a secret is wanted, such as a customer-managed key policy: re-decide clause 4."
+```
+
+**Related:** Decisions 157, 175, 101, 171, 202, 213, 230, 144, 156, 223.
+
+> **Update (2026-10-29, PLAN-secrets-to-ssm-expand, rec-4683):** the trusted speculative-plan role of Decision 238 is a
+> declared consumer of the Neon key and catalog DSN parameters. Its reads carry no session condition: its one trusted
+> subject is the tf-trusted-plan Environment bound to main's workflow, so clause 2's drift-session condition, written
+> for the planner's PR session, does not apply to it.
+
+---
+
+## Decision 236: Production telemetry is proved by a smoke canary and read through its own reader -- disposable proofs stay on smoke, production serves no transcript content, read-side tenancy is the function boundary, and maintenance covers the catalog from its first write (amends Decisions 81, 91, 199 and 200) (Decided)
+
+```yaml
+number: 236
+status: Decided
+decided_date: "2026-10-25"
+amends: [81, 91, 199, 200]
+significance:
+  value: numbered_decision
+  justification: >-
+    Adds two runtime functions to Decision 81's closed boundary, changes the content tier Decision 199 cl.5
+    reserves to a numbered Decision, and rules on read-side tenancy; ducklake_reader.yaml and
+    ducklake_telemetry_writer.yaml notes (considered) cannot amend those clauses or re-ground T2.36 c5.
+```
+
+**Status:** Decided
+**Date:** 2026-10-25
+**Warehouse ID:** dec-236 (per Decision 84 backfill)
+
+**Problem:** Slice 2c moves telemetry to its own production catalog (Decision 230). One writer runs both the
+heavy deploy proofs (fault, near-cap and 2,000-row vectors, first-sight auto-registration) and real capture on
+the disposable smoke catalog, the shared reader serves telemetry from smoke only because its verbs carry no
+tenant predicate (rec-4292), and T2.36 c5 names a maintenance breaker Decision 188 retired.
+
+**Decision:**
+1. Proof shape. A smoke-pinned twin of the telemetry writer (agent-platform-ducklake-telemetry-writer-smoke:
+   same code, its own role on the smoke prefixes and blob root, the smoke scoped login) is deployed first and
+   carries every disposable proof (Decision 143 cl.1, cl.3); the production telemetry deploy waits on its
+   gates. Once the writer binds production, its deploy gate writes no test rows and keeps Decision 213's direct-invoke
+   denial and Decision 216's can_create check on every deploy. Golden replay writes tagged synthetic projects
+   into production, registered explicitly and excluded from real reads.
+2. Production reads. Production telemetry is read only through its own function
+   (agent-platform-ducklake-telemetry-reader, the Decision 213 cl.2 pattern): the event verbs except
+   transcript_content, no caller SQL and no ops verb, a SELECT-only login on ducklake_telemetry (Decision 230),
+   S3 read on the production telemetry data prefix only and none on the blob root. The shared reader never
+   binds the production telemetry catalog.
+3. Content tier (amends Decision 199 cl.5). Production serves no transcript content until a named consumer
+   needs it; content then gets a dedicated reader with an access log (rec-4481), by a later Decision.
+4. Tenancy (amends Decision 200 cl.2). In a single-tenant data plane (Decision 209 cl.2(c)) read-side
+   tenancy is the function and principal boundary: no tenant predicate is built into the read verbs.
+5. Maintenance (re-grounds T2.36 c5). merge_ops every 6 hours and guarded weekly gc_ops (G1-G4, Decision 188)
+   run on ducklake_telemetry before its first event row; telemetry-catalog maintenance metrics carry a
+   MetaSchema dimension and the ops series stays undimensioned (T2.18). The retired breaker's growth role is
+   taken by alarms on files after merge and catalog stats rows for the telemetry catalog, sized from the
+   pre-create measurement (Decision 88 cl.2), beside breach, liveness and merge-failure alarms. Not weaker:
+   the guards still refuse an unsafe delete, and growth is now detected where the breaker never looked.
+6. Amends Decision 81 cl.1 (runtime artifacts add the twin and the telemetry reader) and cl.7 (the closed read
+   boundary is two readers: ops through the shared reader, production telemetry through its own), and
+   Decision 91 cl.1 (the telemetry reader has its own verb set).
+
+**Rationale:** Disposable proofs on a production catalog leave permanent rows and mint a real project per
+deploy. A tenant predicate isolates nothing in one tenant. Scoping by function and login holds outside the
+handler (Decision 143). Rejected: heavy vectors on production; a dated exception for the shared reader; a
+smoke read path on the telemetry reader (one role would reach both catalogs).
+
+**Coverage (Decision 181 cl.2):** cl.1 -- test_ducklake_deploy_map_wiring and the twin's deploy gate; cl.2 --
+test_telemetry_reader_and_twin_pins and the telemetry reader handler and gate; cl.3 -- the reader bundle test
+and served-verb test; cl.4 -- a non-feature, held by its reversal condition; cl.5 --
+test_telemetry_production_maintenance_tf, the metric-dimension tests and the post-deploy merge reading.
+
+```yaml reversal-conditions
+decision: 236
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: second-tenant
+    kind: manual
+    description: "A data plane holds a second tenant, or a principal outside the house tenant gets telemetry reader invoke: re-decide clause 4."
+  - id: content-consumer
+    kind: manual
+    description: "A named consumer needs transcript content from production: re-decide clause 3 (rec-4481)."
+  - id: canary-blind-spot
+    kind: manual
+    description: "A production writer fault the twin's gates passed: review clause 1."
+  - id: growth-alarm-recurs
+    kind: manual
+    description: "A telemetry growth alarm fires twice in 30 days with merge green: re-decide clause 5 and the ingestion shape."
+```
+
+**Related:** Decisions 230, 81, 91, 199, 200 (amended), 143, 188, 192, 209, 213, 216, 88, 181, 177.
+
+[Amendment 2026-10-29, Decision 239: cl.3's content consumer exists; agents read production transcript text masked, only through the telemetry content reader; cl.2 and cl.6 count two production telemetry readers, so the closed read boundary is three readers.]
+
+---
+
+## Decision 235: Verification weakening is human-gated at entry and earns autonomy on a ladder lane behind a shadow step, out-of-loop redundancy evidence and an irreducible floor (amends Decision 181 clause 1 and Decision 187 clauses 3-5) (Decided)
+
+```yaml
+number: 235
+status: Decided
+decided_date: "2026-10-23"
+amends: [181, 187]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant change to who may authorize weakening verification. Not a
+    contract note: implement-scope-boundary.yaml owns the CONTENT surfaces, not Decision 187's
+    authorization form. Not amendment_forms: one annotation cannot amend two entries.
+```
+
+**Status:** Decided
+**Date:** 2026-10-23
+**Warehouse ID:** dec-235 (per Decision 84 backfill)
+
+**Problem:** A change that weakens verification -- removing a check, demoting it to a weaker tier, loosening an assertion -- has only human authorization forms: a human-confirmed plan, or a Decision naming the check (Decision 187 clauses 3-5). The loop can never earn the right to retire a check it proved redundant, and "it never failed" proves nothing: a rare-regression tripwire never fails either.
+
+**Intent:** The system may one day remove a check autonomously, only after meticulous evidence it was not needed, and never a check that judges it.
+
+**Decision:**
+1. **Class and entry rung.** The class is every change that weakens a surface of implement-scope-boundary.yaml's CONTENT map, needs a down-direction or loosening token of marker-grammar.yaml, or leaves a candidate whose only truthful disposition is `weakening`; size-budget raises stay under Decisions 128/165 and plan-field edits stay forbidden. Every in-class change needs a human's approval: a human-confirmed plan naming it, or a Decision its marker cites. A fast-lane repair (Decision 226 cl.2) carrying one routes to that gate. Weakening to obtain green stays forbidden at every rung: a check red on the change is never eligible.
+2. **Ladder lane.** Autonomy for the class is earned on one lane of the review ladder (read_all, sampled, spot_check, anomaly_triggered) on the one controller and transition log (Decision 221 cl.7), binding when CD.46 ratifies; read_all is clause 1's gate. The operator approves every promotion; demotion is automatic; the lane's rung never exceeds its evidence producers' rungs, and the executor's T4.4 gate is necessary, never sufficient. A removal taking measured verification-boundary coverage below the current gate's floor is ineligible (Decision 211 cl.4).
+3. **Shadow step.** Removal runs blocking, then shadow, then removed. A shadowed check never blocks but still runs and records each verdict as its own record kind in the one loop record journal (CD.12's alarm-not-gate posture; not Decision 231's shadow runs); only runs that examined something count (Decision 170) and a run gap voids the window. A shadowed check that fails where every blocking check passed is restored, and the lane returns to read_all.
+4. **Redundancy evidence.** A drop needs positive evidence the check is subsumed -- every mutant it kills on its own target is killed by a retained blocking check (T3.7's mutation-on-target kind) -- computed by deterministic code outside the loop's edit scope: the producer's paths join Decision 117's boundary_patterns and Decision 185 cl.3's base-ref check, as Decision 221 cl.2 does for the judge. A clean history alone is never evidence, nor is an empty kill set; a target mutation does not reach keeps clause 1's gate until a per-hunk or per-key revert operator exists at the base ref (T3.7 c8). Windows and thresholds are pre-registered (Decision 221 cl.4) under T4.4 c2.
+5. **Irreducible floor.** Outside the lane at every rung, derived at the base ref and never enumerated (Decision 187 cl.1): any check guarding a Decision 117 boundary_patterns path, the judge among them (Decisions 221 cl.2, 231); every hook the base ref's pre-commit configuration declares, secret scanning among them; and the ladder's own checks -- every check a marker-grammar.yaml token lists in used_by, every enforcer the CONTENT map names, and the lane's controller, recorder and producer once built. A floor change keeps clause 1's gate forever.
+6. **Amendments.** Decision 181 cl.1: its routing and its "to obtain green" bar stand; at an earned rung the lane's evidence, not a per-change human, approves executing a routed weakening of any kind, each held to clause 4's bar. Decision 187 cl.3-4: a second authorization kind, an evidence record naming the check, resolvable at the base ref, bound through the shared marker guard (cl.7) and meeting Decision 165's authorization bar; it counts toward reversal c1 and c3. Cl.5: at an earned rung mark-then-drop becomes blocking, shadow, drop, and dropping a shadowed check needs that record; below it cl.5 stands. Decision 163 point 1 is unchanged: the lane adds no exception path to an exceptionless floor, and a lane removal meets the skip-citation floor by citing its work item.
+7. **Sequencing.** Design now, build later (Decision 197 cl.8), not frame-lock (Decision 75): the build starts once rec-4413's re-measure (from 2027-01-18) reports and an evidence producer outside the edit scope exists (T3.7, deferred). Until then clause 1's gate is the only rung, which is today's state.
+
+**Coverage (Decision 181 cl.2):** none enforced. Homes: cl.1-2 T3.4 c3 and T4.4 c7-c8; cl.3-4 and cl.6 T3.7 c8 (deferred); cl.5 implement-scope-boundary.yaml invariants.content.earned_autonomy.
+
+```yaml reversal-conditions
+decision: 235
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: unique-catch
+    kind: manual
+    description: "A shadowed or dropped check uniquely caught a regression: audit the producer before any drop."
+  - id: cd46-reshaped
+    kind: manual
+    description: "CD.46 is rejected or reshaped: re-decide clause 2's ladder."
+  - id: remeasure-slip
+    kind: manual
+    description: "rec-4413's re-measure finds a weakening slipped past review: re-decide clause 1 first."
+```
+
+**Related:** Decisions 55, 92, 93, 189; CD.29; T3.4, T3.7, T4.4.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.8 and NS.9 in docs/contracts/north-star.yaml; clauses unchanged.
+
+---
+
+## Decision 234: User-owned persona execution -- a sandboxed per-run clone host, owner-only subscriptions and a forge-neutral core (amends Decision 206 clause 2 and Decision 212 clause 5) (Decided)
+
+```yaml
+number: 234
+status: Decided
+decided_date: "2026-10-23"
+amends: [206, 212]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant execution and credential rule for user-owned substrate. Not a
+    contract note: ports.yaml registers adapters, never rules. Not amendment_forms: it amends two
+    entries.
+```
+
+**Status:** Decided
+**Date:** 2026-10-23
+**Warehouse ID:** dec-234 (per Decision 84 backfill)
+
+**Problem:** Decision 206 clause 5 names no OS sandbox and persona_compute_host has no container-free adapter for a user's own machine; Claude Code's built-in sandbox covers its shell commands only. Decision 206 clause 2 lets one person's subscription run verdict personas on others' work; Decision 212 clause 5 orders no forge after GitHub.
+
+**Intent:** A persona runs on its owner's machine in a sandbox applied from outside, whatever the model; a subscription never pays for another person's work; the core assumes no one forge.
+
+**Decision:**
+1. Adapter. The default local persona_compute_host adapter is a per-run git clone plus Anthropic's open-source sandbox-runtime (srt; Apache-2.0; research preview) wrapping the WHOLE persona process (Decision 206 clause 5), for any persona_backend: sandbox_runtime (macOS, Linux, WSL2) is supported, sandbox_runtime_windows (alpha upstream) experimental (Decision 212 clause 7). srt is pinned to an exact version. It is write-scoping plus network control, not containment: reads are not isolated across sandboxed sessions. On Windows, OS-TLS tools cannot make HTTPS calls inside it: Decision 205 clause 2 keeps GitHub work in the shell, and an in-persona package restore is an experimental limit. WSL2, containers (local_container) and remote hosts stay the stronger tiers. On user-owned substrate the planning, implementation and consult personas default here; Decision 205 clause 1's verdict personas default to GitHub Actions and may be configured here, still posting a check run.
+2. Conformance. Both adapters run persona_compute_host's one gating suite against its local_container oracle (Decision 212 clauses 1-2), plus deterministic confinement legs -- a write outside the workspace is denied, a direct egress connection is denied -- with no LLM or credentials on GitHub-hosted Linux, macOS and Windows runners (Decision 205 clause 3, Decision 212 clause 2(a)), the Windows legs alarm-not-gate while experimental; their minutes count in T4.15 c10. A pin bump runs the suite. The provisional run_image verb generalises to a pinned runtime reference when these adapters land. Parity here is T4.27 c7's suite, not the one-digest rule (Decision 205 clause 2, T4.2 c13, T4.32 c1), which binds the Actions shell, twin and compute plane.
+3. Subscription rule (Decision 206 clause 2). A subscription runs only work its owner initiated: a run the owner starts, the owner's own unattended queue included (Decision 206 clause 6), never one another person's action triggers. A subscription-backed verdict persona on GitHub Actions runs only on a pull request its owner authored: the thin shell checks the pull request's author and the run's triggering actor against the subscription owner, and any other pull request runs on a team API key (byok) through LiteLLM or the verdict fails, never skips (Decision 205 clause 2). The backend runs on per-run state signed in by a credential passed by name (Decision 206 clause 2's setup-token), never the owner's own configuration. The vendor's terms of service still apply. First-party operator use (Decision 184 clause 4) is unchanged.
+4. Forge hedge (Decision 212 clause 5). GitHub first. On demand the candidate order is a self-hosted forge (Forgejo or Gitea: one binary, built-in reviews, Actions-compatible CI), then GitLab, then bare git, each first needing Decision 184 clause 3 and Decision 205 clause 2 re-decided (coupling PC-02); no adapter row is registered before demand (Decision 212 clause 7). Core surfaces specified after this Decision reference a generic change id, never a pull request number; the existing pull-request coupling (ports.yaml PC-09) is accepted while the repository bootstraps. Local model servers (Ollama, vLLM) are reached through LiteLLM, no port (Decision 212 clause 6); their calls carry billing_shape local -- tokens stored, cost derived at read (Decision 199 clause 1, Decision 217 clause 4) -- the vocabulary change being rec-4561.
+5. Timing. The adapters are post-MVP (T4.34, Decision 93).
+
+**Options considered:** Claude Code on the web as persona compute -- parked: vendor platform risk (a vendor may restrict such a lane at scale even where currently permitted), never load-bearing. A linked worktree -- rejected: its commits write the owner's shared .git. Containers by default -- rejected: heavier to install.
+
+```yaml reversal-conditions
+decision: 234
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: srt-preview-ends
+    kind: manual
+    description: "srt leaves preview with breaking changes, relicenses or is abandoned: re-pin, fork or replace it."
+  - id: confinement-fails
+    kind: manual
+    description: "A confinement leg fails on a supported OS at the pinned version: demote that adapter to experimental."
+  - id: forge-or-local-versioning
+    kind: manual
+    description: "A non-GitHub forge is needed, fully local product work starts in earnest, or demand forces local versioning: plan clause 4's next candidate; re-decide PC-09."
+```
+
+**Coverage (Decision 181 cl.2):** the adapter rows and PC-09 -- validate_ports_contract and the graduated shards; T4.34's deferred status -- validate_platform_roadmap; cl.1-3 -- T4.34 c1-c8 and T4.27 c10-c11, residual until built; cl.4's change-id rule -- T4.19 c6, unenforced; its billing_shape local -- rec-4561; cl.3's saved-login contract rows -- rec-4566.
+
+**Related:** Decisions 93, 184, 185, 194, 199, 205, 206, 211, 212, 217; T4.15, T4.27, T4.32, T4.34.
+
+> **Update (2026-10-27):** the Coverage line's billing_shape local (rec-4561) is now held by inference-tier-rows-role-and-billing-shape, inference-local-server-credential-holder, telemetry-writer-admits-billing-shape-local and telemetry-local-cost-derives-null. No clause changes.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+---
+
+## Decision 233: The open core is customer-owned -- scale is never blocked and the tooling that makes it painless is paid, the free tier is a framework with no identity system of its own and GitHub holds approval authority, champion first (amends Decision 209 clause 1 and Decision 184 clauses 1-2) (Decided)
+
+```yaml
+number: 233
+status: Decided
+decided_date: "2026-10-23"
+amends: [184, 209]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant product-boundary commitment re-reading Decision 184's local-first
+    and rewording Decision 209 clause 1, plus the free tier's identity and approval model. Not a
+    contract note: no docs/contracts file owns the commercial boundary or approval authority. Not
+    amendment_forms: it amends two entries and adds clauses neither carries.
+```
+
+**Status:** Decided
+**Date:** 2026-10-23
+**Warehouse ID:** dec-233 (per Decision 84 backfill)
+
+**Problem:** Decision 184's "local-first" reads as laptop-only, though Decision 209 clause 4 keeps a customer's own cloud free. Decision 209 clause 1 lists multi-repository operation as paid, which reads as blocking scale. No entry says who may read data or approve a change when several people share one free-tier install.
+
+**Intent:** Anyone runs On The Loop at any scale on substrate they own, free; On The Loop charges for the tooling that makes scale painless and for carrying risk.
+
+**Decision:**
+1. **Customer-owned.** Decision 184's "local-first" (its title) and "locally" (its Intent) read "customer-owned": the free tier of its clauses 1-2 runs on substrate the customer owns, a laptop by default (Decision 224 clause 4) and the customer's own cloud through the public adapters; clause 2's local adapters stay the default and its module boundary stays literal. Decision 184's title is never rewritten (Decision 177's append-only dialect).
+2. **Scale is never blocked; the tooling that makes scale painless is paid.** Decision 209 clause 1 is reworded, not reversed. Running the governed loop on any number of repositories, self-hosted through the public adapters, is free. Paid: the multi-tenant control plane and what it carries -- cross-repository DAG aggregation, org-wide distribution of north stars and Tier C overrides, fleet dashboards, SSO/RBAC, audit and retention policy -- and operating it for you, On The Loop-hosted compute being one paid option. At least one paid capability stays absent from the core (Decision 194 condition (b)). Durable paid value: fleet learning over allow-listed metadata (Decision 209 clause 2(b); Decision 209 clause 5(ii)'s routing add-on is a candidate) and risk transfer (SLA, support). "Free" here is price only: the Additional Use Grant stays with Decision 194 clause 4 and T4.24 c6, and this clause sets no licence term.
+3. **Champion first.** Go-to-market starts with a champion, Decision 232's Signaller, who installs and hosts On The Loop for a team; a managed trial comes much later and is undefined.
+4. **A framework, no identity system.** Like dbt Core, the free tier has no identity system of its own. Data access is the shared store's own permissions (Postgres roles, bucket IAM). Approval authority is GitHub (branch protection, required reviewers, Environments): the UI acts under the user's own GitHub identity, beside the free-tier write token (Decision 217 clause 3), and approve or deny is never an engine verb. Each user's UI is a thin display over one shared store. Several users need a Postgres catalog plus object storage, since the local file catalog is single-user; a generic Postgres catalog is an adapter row beside docs/contracts/ports.yaml's neon_postgres, not a new port (Decision 212).
+5. **Open; nothing decided.** (i) With several engines writing directly to one store, the closed named-verb boundary (Decision 84 I-3) and the single write chokepoint of Decision 81 clauses 5 and 7 hold by trust, and Decision 210 clause 5's write-boundary rule has no single enforcement point, unless the writer runs as a service: rec-4558. (ii) Writer-allocated ids (Decision 84 I-2) are unproven with several writers: rec-4559.
+
+**Options considered:** An identity system in the free tier -- rejected: it duplicates GitHub and the store's own permissions, and SSO/RBAC is paid. Approve or deny as an engine verb -- rejected: a second approval authority beside branch protection. Multi-repository operation itself paid -- rejected: it blocks scale.
+
+```yaml reversal-conditions
+decision: 233
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: multi-writer-unsafe
+    kind: manual
+    description: "rec-4558 or rec-4559 finds several direct writers cannot hold the named-verb boundary or writer-allocated ids: re-decide clause 4 with a writer service."
+  - id: approval-authority-absent
+    kind: manual
+    description: "A supported change surface lacks GitHub-grade approval controls: re-decide clause 4's approval authority."
+```
+
+**Coverage (Decision 181 cl.2):** clause 4 -- T4.33 c3 and c8, residual until built; clause 5 -- rec-4558 and rec-4559.
+
+**Related:** Decisions 81, 84, 177, 184, 194, 196, 209, 210, 212, 217, 224, 232; T4.23, T4.24, T4.33; rec-4558, rec-4559.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as the mission, NS.7 and NS.9 in docs/contracts/north-star.yaml; clauses unchanged.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+---
+
+## Decision 232: User archetypes and one human surface -- a persona is an AI role and a user archetype a human target user, the Signaller is served first, and one web UI supervises the loop over the named verbs and GitHub, CLI plus localhost first (Decided)
+
+```yaml
+number: 232
+status: Decided
+decided_date: "2026-10-23"
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant product commitment: who On The Loop serves first and the one
+    surface humans supervise through, which T4.33 builds. Not a contract note:
+    inference-provider.yaml carries the vocabulary rows, never the audience or the surface. Not
+    amendment_forms: no prior entry owns either.
+```
+
+**Status:** Decided
+**Date:** 2026-10-23
+**Warehouse ID:** dec-232 (per Decision 84 backfill)
+
+**Problem:** "Persona" names both AI roles and imagined human users. No entry says whom the product serves first, or how a human steers, watches and approves the loop, so human surfaces could multiply per role.
+
+**Intent:** One kind of human, the Signaller, supervises the loop through one surface that leads with intent and evidence, never with a diff.
+
+**Decision:**
+1. **Vocabulary.** "Persona" names an AI role only (plan-critique, implementation, consult, ...). A human target-user type is a "user archetype", always two words, reserved in inference-provider.yaml's vocabulary. A user archetype is not the buyer (the organisation).
+2. **Archetypes.** (a) The Signaller, after a railway signaller who watches a live line diagram and sets signals at junctions but never drives the train: an engineer moving into supervision who watches the dependency map, steers intent and approves or denies at gates; also the champion who installs and hosts On The Loop, with local admin rights. Served first. (b) A non-technical lead, product manager or founder without admin rights: served later through a champion-hosted setup, much later through a managed trial (undefined). These are the product's target users; Decision 101 point (f)'s marketing-surface audience stands until rec-4389's successor reconciles the two.
+3. **One human surface for supervising the loop.** A web UI to steer, watch, get interrupted and approve or deny. Every read and write it makes goes through the engine's API, the closed named-verb surface (Decision 84 I-3, Decision 184 clause 2), except approve or deny, which it sends to GitHub under the user's own identity (Decision 233 clause 4). Analytical, docs and marketing pages are not supervision surfaces. Steering writes intent and work items, never a loop-policy value past the kernel ceilings (Decision 185 clause 3). v1 is the CLI plus that UI on localhost, with no localhost assumption, so it can be served anywhere later; no desktop app. It is free-tier core (Decision 209 clause 3(1)'s single-project dashboards). The operator's own CC-web /plan -> /implement workflow (Decision 90, Decision 184 clause 4) and Decision 229's interim coordinator are unchanged.
+4. **Gate cards and altitude.** A gate card leads with the intent, the criteria met in plain language with evidence, contested options with a recommendation, and what the change unblocks; never a diff first. Altitude zooms intent -> work item -> plan -> PR -> diff, so an engineer can always drop to code.
+5. **Headline: the dependency map.** Work-item dependency mapping over Decision 197's work-item model, drawn in a transit-map, schematic network-diagram visual language inspired by intuitive relationship mapping; a later contract owns its grammar.
+6. **Grounded Q&A and comment intake.** Q&A runs a read-only persona contract (T4.10a) on the same persona backend selection as any persona (Decisions 173 and 206; API keys go through LiteLLM), so a subscription-only champion gets it too; every answer cites a receipt (check run, PR, Decision), and an answer with none is withheld. A human review comment becomes a proposed work item visibly: a bot reply links it, it is deduplicated into the Signaller's triage inbox, and none enters the queue untriaged. Intake keeps Decision 205 clauses 1-2: any LLM step in it is verdict-shaped and never calls the GitHub API, and non-persona code posts the reply.
+7. **Presentation boundary.** CD.42's (a), (c) and (e) bind the UI, restated here because CD.42 stays unratified until T2.53's verdict: business semantics stay in the server-side named verbs and the UI owns only presentation; its reads call named read verbs only, never caller SQL; its build output is data, so no build artefact is tracked and a failed refresh never shows false zeroes or replaces the last good view. It is the fresh Decision CD.42's scope fence requires for an operational-control UI. Decision 127 clause 1 binds by audience-of-record, not file extension (T2.53 c5's principled reading): a UI page is code rendering a query result on request, outside the taxonomy whatever its extension while it holds no standing narrative for a human reader; a page that holds one is inside it. T2.53 c5 records this; its amendment question stays T2.53's.
+8. **Timing.** Post-MVP (Decision 93): T4.33 tracks the build.
+
+```yaml reversal-conditions
+decision: 232
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: signaller-unvalidated
+    kind: manual
+    description: "Two quarters after the first free-tier release, no champion matching clause 2(a) runs On The Loop for a team: re-decide the first archetype."
+  - id: named-verbs-insufficient
+    kind: manual
+    description: "A UI view needs data no named verb can serve: re-decide clause 3 before adding any other data path."
+```
+
+**Coverage (Decision 181 cl.2):** clause 1 -- the inference-provider.yaml vocabulary rows, an advisory residual owned by rec-4560; clauses 3-7 -- T4.33 c1-c7, residual until built; clause 7's Decision 127 reading -- unenforced, as validate_prose_allowlist reads only *.md (T4.33 c1).
+
+**Related:** Decisions 84, 90, 93, 101, 127, 173, 184, 185, 197, 205, 206, 209, 229, 233; CD.42; T2.53, T4.10a, T4.33; rec-4389, rec-4560.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.9 in docs/contracts/north-star.yaml; clauses unchanged.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+---
+
+## Decision 231: Persona evaluation is an offline lane -- a persona run is the unit of record, graded by code, real outcomes and blind operator ratings and never by an LLM, on point-in-time inputs (amends Decision 221 clauses 2 and 7) (Decided)
+
+```yaml
+number: 231
+status: Decided
+decided_date: "2026-10-19"
+amends: [221]
+significance:
+  value: numbered_decision
+  justification: >-
+    One position spans Decision 221 cl.2 and cl.7, T4.14 and the capture recs rec-4433..rec-4436:
+    the unit, grader, input and spend rules of persona evaluation. Not a contract note: no eval
+    contract exists, and telemetry_agents.yaml owns capture fields, not a grader. Not
+    amendment_forms: an annotation on 221 cannot bar an LLM grader or re-scope T4.14.
+```
+
+**Status:** Decided
+**Date:** 2026-10-19
+**Warehouse ID:** dec-231 (per Decision 84 backfill)
+
+**Problem:** A persona or skill edit ships unmeasured: T4.14 targets the frozen executor's
+prompts (Decision 67) behind T4.2, the live feedback loop has no persona-run unit, and nothing
+bars an LLM grader or a fixture this PUBLIC repository already published.
+
+**Decision:**
+1. **Offline lane, run records.** Persona evaluation is a lane apart from the live feedback loop,
+   by offline replay or by shadow runs beside live work (not Decision 229 cl.4's dual-run stage,
+   which has its own flag). Its unit of record is one persona run, never a whole work item and
+   never a concurrency limit: runs may execute in parallel at any concurrency. A shadow run never
+   binds live work (the coordinator consumes only the incumbent's hand-back), never files a rec
+   and never writes through the portal. Each record names its model; an ensemble (several models
+   on one input at a pinned SHA) is one record per arm, and cross-model agreement may label a
+   point settled or contested, but agreement is not truth and the human gate stays. No run is
+   dropped or sampled at write (Decision 210's validity rules still apply); records are one kind
+   in the one loop record journal, each grader takes a Goodhart register row (staged CD.47,
+   CD.46), and there is no second journal, register or filer (Decision 221 cl.7).
+2. **Grader.** A grade comes from deterministic code checks, real-outcome replay and the
+   operator's blind adjudication (attribution revealed only after marking), never from an LLM
+   judge: Decision 59's deterministic checks, with Decision 55's bar on LLM judgement extended
+   from recovery to this lane's grading. It grades outcomes, never trajectories (Decision 206 cl.4); raw
+   reasoning is captured, never graded. A persona with no such grader is not evaluated.
+3. **Faithful, sealed inputs.** A replay is point-in-time: snapshotted inputs, no live AWS in
+   the agent step, rec state through an as_of read on the named reader verbs (rec-4504) inside
+   Decision 84's boundary, never a local cache. The sealed set (Decision 221 cl.2) is sourced
+   apart from this PUBLIC repository; the grader and sealed set are read-isolated from the run
+   under test by IAM and network (Decision 143), never lexically. The grader's paths join
+   Decision 117's boundary_patterns once built, and a candidate harness edit lands only through
+   the governed change process, never as an executor-authored diff (Decision 185 cl.3).
+4. **Roster and spend.** The doing personas are plan_agent, plan_critic, implement_agent,
+   code_reviewer and decision_scout; the judgment personas, whose output steers later work, are
+   the advice consult and CI-RCA, and their high leverage and low volume can justify a more
+   capable model selection or an ensemble, which does not transfer to the doing personas. Eval
+   spend is measured on offline_eval_llm_tokens (rec-4436), never in loop_llm_tokens, and adds no
+   budget: an operator-initiated replay or shadow outside the loop is never capped, while a
+   shadow arm beside a loop-dispatched run stays under Decision 217 cl.4's per-rec and per-day
+   API-lane caps (an eval arm, not 217's subscription-lane shadow dollars). The operator starts
+   every eval run and enables every shadow arm. The lane is post-MVP: T4.14 is parked deferred_post_mvp.
+
+**Rationale:** Reinforcement learning with the harness -- skills, CLAUDE.md layers, hooks,
+persona contracts -- as the parameters instead of model weights, which train only under Decision
+221 cl.6's learned-components path: reward hacking (the register), a train/test split (the sealed
+set), noisy reward (a defect in 1 of k runs is noise), credit assignment ('confounded' by
+default). Prior art: Harness^2 (arXiv 2610.14224; its code is Apache-2.0); its adopted ideas are
+T4.14 c7.
+
+**Options considered:** An LLM judge, blind LLM selection or LLM pairwise judging -- rejected:
+Decision 55, and the score does not reproduce. A lexical grader guard -- rejected: in a Harness^2
+validation run a networked agent downloaded its task's public rubric (Harness^2's docs/EXPERIMENTS.md).
+Editable guardrails as a security boundary -- rejected: the loop could edit its own judge
+(Decision 221 cl.2). A new eval budget -- rejected: operator initiation and the loop's caps bound it.
+
+```yaml reversal-conditions
+decision: 231
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: grader-insufficient
+    kind: manual
+    description: "A persona's grader cannot tell a known-worse definition from the incumbent: that persona waits; re-decide clause 2 only if every target waits."
+  - id: vendor-model-change
+    kind: manual
+    description: "A vendor model version changes mid-comparison: void its curves or re-pin, as Decision 221 does."
+  - id: eval-spend-unabsorbed
+    kind: manual
+    description: "Uncapped eval spend outside the loop outgrows what the operator absorbs: re-decide clause 4's no-cap rule."
+```
+
+**Coverage (Decision 181 cl.2):** none enforced today. Homes: T4.14 c4 (cl.1); c5, c8, c9 (cl.2);
+c1, c10 (cl.3); c6 (cl.4); the parked status -- validate_platform_roadmap.
+
+**Related:** Decisions 55, 59, 67, 84, 93, 117, 143, 185, 189, 201, 205, 206, 207, 210, 217, 221,
+224, 229; rec-4028, rec-4433..rec-4436.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.6 in docs/contracts/north-star.yaml; clauses unchanged.
+
+---
+
+## Decision 230: Production telemetry gets its own catalog -- an owner role per catalog, one login per catalog binding, operator admin verbs to create it, and only the telemetry functions on its prefixes (amends Decision 216 clauses 1 and 3, Decision 213 clauses 1, 3 and 5, Decision 126 and Decision 81 clause 6) (Decided)
+
+```yaml
+number: 230
+status: Decided
+decided_date: "2026-10-20"
+amends: [81, 126, 213, 216]
+significance:
+  value: numbered_decision
+  justification: "Durable catalog-identity and data-plane commitments amending Decisions 216, 126, 213 and 81; ducklake_maintenance.yaml and deploy-paths.yaml can index the procedures but cannot widen a ratified rule or carve-out, nor can an amendment_forms annotation (Decision 204 cl.4 precedent)."
+```
+
+**Status:** Decided
+**Date:** 2026-10-20
+**Warehouse ID:** dec-230 (per Decision 84 backfill)
+
+**Problem:** Real sessions land in the disposable smoke catalog; production needs its own, but Decision 216 left creating it an operator step with no carve-out, names one owner login that reaches every catalog, and leaves that login with the CI-reachable smoke maintenance function.
+
+**Decision:**
+1. Catalog. Production telemetry is its own DuckLake catalog: schema ducklake_telemetry in the existing catalog database, data under ducklake-telemetry/ (a sibling of ducklake/, never inside it) and blobs under telemetry-blobs/ducklake_telemetry/. It starts empty; smoke keeps its rows.
+2. Owner per catalog (amends Decision 216 cl.1 for two catalogs). ducklake_telemetry and ducklake_smoke are each owned, schema and every relation, by a NOLOGIN role (ducklake_telemetry_owner, ducklake_smoke_owner); ducklake_ops keeps the shared owner login. That login is a member of each role; the owner verbs and their deploy-paths re-runs normalise relations to the role, and a per-catalog DDL login takes it as its session role. ducklake_maintenance_smoke moves to ducklake_smoke_maintainer, a member of the smoke role only, closing Decision 216's CI-path residual at the database layer.
+3. One login per catalog binding (amends Decision 213 cl.3): ducklake_telemetry_writer for the smoke binding (the writer until the flip, then its smoke twin) and ducklake_telemetry_writer_prod for production each hold, on their own schema only, the DML measured from the writer verbs (rec-4297; no UPDATE or DELETE on catalog structure, so a DuckLake DROP TABLE fails); ducklake_telemetry_reader holds SELECT on ducklake_telemetry only, read-only. Each has its own secret and connection limit, rendered from one closed table of versioned SQL templates.
+4. Admin verbs (amends Decision 126's admin tier, Decision 216 cl.3, Decision 213 cl.5 and, for these verbs, Decision 81 cl.6): ducklake_maintenance gains provision_catalog_owner (create or adopt a catalog's owner role, the two catalogs only; a ducklake_smoke-only release mode returns that schema to the shared owner login, the switch's rollback) and provision_telemetry_catalog (ducklake_telemetry only: owner role, DuckLake initialisation, create_telemetry_tables, counter seed, ownership report; never the stats index, Decision 214 cl.2); provision_telemetry_login serves the closed table. Re-running provision_telemetry_catalog is Decision 222 cl.3's production column add. All are operator-invoked; an ADMIN-container agent may write a login's secret and invoke them (never catalog_stats or ensure_catalog_indexes) only under explicit human direction, presenting each mutation (Decision 204 cl.2 shape).
+5. Data-plane fence (amends Decision 213 cl.1's naming). The permissions boundary denies object reads, writes and deletes under the production telemetry prefixes to every bounded principal except the telemetry writer, telemetry reader and admin maintenance roles; PutObject under telemetry-blobs/ to all but the telemetry writer roles; DeleteObject there to all but admin maintenance; and DeleteObjectVersion under both to all. Decision 213 cl.1's denies name every telemetry function by one agent-platform-ducklake-telemetry-* pattern. PlatformAdmin stays the unbounded operator (Decision 144 cl.3). Decision 213's "before 2c" residuals rec-4205 and rec-4206 concern the shared ops writer, not this path; the CI write narrowing plan owns them.
+
+**Rationale:** An owner role per catalog makes "which catalog can this credential change" a Postgres fact, not an env pin (Decision 143 cl.1), and membership keeps owner-login paths working without pg_read_all_data. The boundary is the layer every bounded principal, PlatformDev included, carries and agents cannot edit; a bucket-policy Deny is editable in the merge loop and risks lockout.
+
+**Coverage (Decision 181 cl.2):** owner rule -- the ownership report on every smoke deploy and in provision_telemetry_catalog's response; production ownership after an extension migration -- the rerun of the owner verb, unenforced between runs; logins -- the per-login scope probe and tests/common/test_ducklake_telemetry_writer_least_privilege.py (real Postgres, run before merge; unenforced in CI until rec-4071); fence -- tests/checks/iam_tf/test_telemetry_prefix_fence.py and the post-apply simulate rows; a production column add -- unenforced until the flip's light gate checks drift.
+
+```yaml reversal-conditions
+decision: 230
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: owner-role-refused
+    kind: manual
+    description: "The catalog provider refuses the owner-role membership, ownership transfer or session-role default for a non-superuser owner: the shared owner login owns ducklake_telemetry with default privileges to its logins, dated on Decision 216."
+  - id: measured-grants-drift
+    kind: manual
+    description: "A DuckLake extension bump changes the statements a writer verb issues: re-measure clause 3's grants before the bump merges."
+  - id: boundary-headroom
+    kind: manual
+    description: "The boundary's minified size passes 5,632 bytes: re-decide where clause 5's fence lives."
+```
+
+**Related:** Decision 216, 213, 81, 214, 222, 204, 143, 144, 202, 126, 88, 181.
+
+[Amendment 2026-10-27, Decision 237: cl.4 logins live in /secret/.]
+
+[Amendment 2026-10-29, Decision 239: cl.3's telemetry reader login is shared with the content reader, its connection limit summed across both; cl.5's fence exceptions add the content reader's role.]
+
+---
+
+## Decision 229: Persona-first migration -- each persona ships as its own item to an interim coordinator before any loop host, personas never invoke personas, the operator only launches compute-plane personas, and T4.15 becomes implement_agent on Fargate (amends Decision 217 clause 8 and Decision 205 clauses 1 and 6) (Decided)
+
+```yaml
+number: 229
+status: Decided
+decided_date: "2026-10-19"
+amends: [205, 217]
+significance:
+  value: numbered_decision
+  justification: >-
+    One delivery position spans Decisions 205 cl.1/cl.6 and 217 cl.8, CD.27's ESB-04
+    precondition, T4.15 and T4.2's shape, and adds launch-identity and hub-and-spoke rules. Not a
+    contract note: ports.yaml can hold the coupling, not the choice to ship ahead of the host. Not
+    amendment_forms: an annotation cannot re-scope T4.15. Sequencing routes to roadmap rows.
+```
+
+**Status:** Decided
+**Date:** 2026-10-19
+**Warehouse ID:** dec-229 (per Decision 84 backfill)
+
+**Problem:** T4.2 is one XL item behind T4.1 and T4.15, so no persona serves anyone before the loop
+host, and the in-session gates it would replace let a branch editing .claude/skills/code-review
+review its own edit. T4.15's decision_scout-vehicle spike was abandoned, unrecorded, once only
+Fargate and Actions met the criteria (GitHub-run planning or implementation trips its anti-abuse
+terms: Decision 205 cl.6's split).
+
+**Decision:**
+1. **Incremental delivery.** Each of T4.2's five personas ships as its own item, consumable by
+   interactive CC-web sessions and the /overseer before any loop host exists; no MVP persona item
+   depends on T4.1 or T4.22. Those sessions are the interim coordinator: each run is one human-gated
+   persona step on an operator-chosen work item (a rec today) -- plan_agent drafting its plan, every
+   later step on that approved IMPLEMENTATION plan -- never fed from the rec queue, bounded by its
+   contract's budgets (T4.10a c1), awaited event-driven (subscribe_pr_activity), with no loop-policy
+   value in session text. Interim reading, pending rec-4478: Decision 67's freeze binds STRATEGIC
+   plans and the autonomous queue consumer. The loop definition and its two engines (Decision 185
+   cl.1) are unchanged.
+2. **Hub and spoke.** Personas never invoke personas. The coordinator -- the interim one now, a
+   Decision 185 engine later -- dispatches each persona independently. The plan file on its draft
+   plan PR, verified by the scout and critique verdicts and approved and merged by the human, is the
+   sole planning-to-implementation handoff. An implementation persona in trouble escalates to the
+   coordinator, which may route to planning, never to the planning persona (as the overseer's author
+   never runs a gate inline).
+3. **Compute plane.** plan_agent and implement_agent (Decision 205 cl.6) start through the
+   persona_compute_host port under the operator's AWS identity, PlatformDev as launcher only:
+   ecs:RunTask plus iam:PassRole to a separate executor task role, so the executor never holds the
+   shared key (T4.2 c15). That grant is a terraform/bootstrap admin-only apply (Decision 223 cl.2)
+   made before T4.15's first live run. The non-bypass executor App pushes the output PR through file_pr
+   (Decisions 185 cl.3, 217 cl.3), a T4.15 prerequisite; the operator identity never does, which
+   would bypass the base-ref leash. Actions never dispatches a compute-plane persona (the rejected
+   option below); the loop host later becomes the port's second caller. T4.15 keeps its id and becomes
+   implement_agent on Fargate: its first live run is the long_running_container confirmation that
+   Decision 205 cl.6 and CD.27's ESB-04 precondition owe it, with implement_agent as the live vehicle,
+   so ESB-04, ESB-06 and ESB-01 still discharge against T4.15; the ASL-subset launch path and the host's identities defer to T4.1.
+4. **Umbrella and strangler.** T4.2 stays an umbrella: it completes when its children and the loop
+   host behind its kept T4.1 edge complete. That is sequencing; CD.17's trigger text stands until
+   rec-4478's plan disposes of it. No child inherits the T4.1 or T4.15 edge. A verdict persona
+   replaces its in-session gate by add, dual-run (advisory while the in-session subagent gates;
+   CD.12 alarm-not-gate), flip, remove; a per-persona flag rolls back, the in-session subagent is
+   the outage fallback, and the self-review gap closes at flip. The scout runs on a draft plan PR
+   and re-runs when its scout-input fingerprint (T4.32 c4) changes, so every head SHA is covered by
+   a scout verdict over an identical scout-input fingerprint (Decision 217 cl.8); plan-critique runs
+   from ready_for_review on the head SHA. T4.25's post-MVP scope re-enters MVP as those flips.
+
+**Options considered:** A GitHub workflow_dispatch front door -- rejected: an extra hop, and the IAM
+question moves to an OIDC role. A planning persona that starts its own implementation persona --
+rejected: an unverified handoff.
+
+```yaml reversal-conditions
+decision: 229
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: session-start-ungovernable
+    kind: manual
+    description: "Session-originated Fargate starts prove ungovernable on IAM or cost: adopt the rejected GitHub-event front door."
+  - id: actions-terms-flag
+    kind: manual
+    description: "Decision 205's actions-policy condition fires: re-decide cl.4's verdict-persona flips with it."
+```
+
+**Coverage (Decision 181 cl.2):** cl.1's edge rule -- validate_roadmap_liveness (T4.1, T4.9a, T4.2 are toxic)
+and validate_platform_roadmap (T4.22 is deferred, Decision 93); cl.1's run bounds once
+PlatformDev can RunTask -- residual (T4.15 c12-c13, rec-4479); cl.2 -- T4.10a c8, residual until
+built; Actions dispatching no compute-plane persona -- T4.32 c1's check, residual until built; the
+App-only push -- residual (T4.15 c14); the interim operator-bypass merge -- residual (rec-2827); the coupling -- validate_ports_contract (PC-08); cl.4's strangler order -- the
+child criteria; the self-review gap -- rec-4476.
+
+**Related:** Decisions 67, 90, 93, 184, 185, 197, 206, 212, 223; CD.17, CD.27; rec-4043, rec-4478.
+
+> **Update (2026-10-31):** PLAN-plan-defect-loop (operator direction): for cl.2, a plan amendment raised
+> by a build's plan-defect report (implement-scope-boundary.yaml `deviation_trigger.escalation`) that
+> fixes a scope companion, VP text or a repeated failure is approved and merged under the human's
+> standing direction: the plan's owning planning session merges it after a fresh critique PROCEED and
+> green CI. Approved wording, contract or Decision text and any loosened assertion still need the
+> human's own approval, and nothing is loosened to obtain green (Decision 235). Hub and spoke is
+> unchanged.
+
+> **Amended by Decision 241 (2026-11-02):** cl.2's later coordinator is Decision 241's deterministic engine
+> plus its bounded coordinator step, which writes graph state and never launches a persona. Hub and
+> spoke is unchanged.
+
+> **Update (2026-11-02):** operator clarification of cl.2's scope. "Personas never invoke personas"
+> binds the doing personas: no session, worker or persona starts a planning or implementation agent of
+> its own; the coordinator dispatches each. It does not bar a planning or build session from running
+> the repo's in-session verdict gates (decision-scout, plan-critique, code-review) or a read-only
+> advice consult as subagents, which gate until their persona flips (cl.4). After a flip, a session
+> runs that gate only as cl.4's outage fallback, so the end state is no nested personas.
+
+---
+
+## Decision 228: A telemetry session's end is read from its turns -- idle at rest reads the last turn's outcome, idle mid-turn reads abandoned, and a producer close row is optional evidence (amends Decision 199 clause 1) (Decided)
+
+```yaml
+number: 228
+status: Decided
+decided_date: "2026-10-18"
+amends: [199]
+significance:
+  value: numbered_decision
+  justification: >-
+    Redefines terminal and abandoned for a root session, Decision 199 cl.1's read-derived state, whose
+    2026-10-16 update requires a numbered Decision for later clause-1 changes; a telemetry_sessions.yaml
+    note (considered) cannot also bind the producer's turn evidence and the reader's verbs.
+```
+
+**Status:** Decided
+**Date:** 2026-10-18
+**Warehouse ID:** dec-228 (per Decision 84 backfill)
+
+**Problem:** rec-4407. A cloud session's producer close row cannot be sent (Claude Code stops its egress
+proxy before SessionEnd hooks; a reclaimed container runs none), and any session can resume, so 0 of 28
+root sessions read terminal on 2026-10-15..16 and state and duration were unusable.
+
+**Decision:**
+1. A ROOT session's state is read from its own evidence in order: a producer close that is the latest
+   lifecycle row with no turn opened after it gives its stored outcome; else a latest turn with a close and
+   an outcome is at rest and, idle past the governed threshold, reads that outcome (error -> failed,
+   interrupted -> cancelled), else running; else a latest turn with an open and no close stopped mid-turn
+   and reads abandoned past the threshold, else running; else (no outcome-bearing turn close and no open
+   turn) it reads abandoned past the threshold, else running. A later turn or resume makes the session
+   running again; nothing is stored. A turn continued after a Stop (a blocking Stop hook, a wake) already
+   has a close; if it dies before its next Stop it reads that close's outcome, not abandoned, a residual
+   slice 4 measures (rec-4025).
+2. duration_seconds is the later of the latest producer close and the latest close of any root turn, minus
+   session_started_at, truncated toward zero; sub-agent sessions keep their agent-run rule.
+3. A producer close row is optional evidence: no reader rule requires it; the producer's obligation is
+   turn evidence, an open row once the prompt is on disk and a close with outcome at each Stop
+   (PLAN-telemetry-stop-turn-close).
+4. The idle threshold stays the reader registry's one governed value (24 h), so a finished session reads
+   running for that long; a shorter at-rest threshold is a later Decision.
+
+**Rationale:** End events fired at teardown are unreliable for clients that can vanish; sessionization
+practice derives the end from inactivity, and abandoned now means stopped mid-turn before the turn's first
+close. Rejected: a producer close at every Stop (reads a session closed while its next turn runs, one
+lifecycle row per Stop); relying on an upstream SessionEnd fix (a VM can stop with no hook).
+
+**Coverage (Decision 181 cl.2):** the rule -- derivation_cases.yaml through
+tests/common/test_ducklake_event_read_verbs.py (full tier) and the oracle (tests/telemetry_verify,
+graduated); the deployed reader -- the golden replay against derived_golden_state.yaml; the producer
+evidence -- turn-capture-witness-closes; real sessions -- slice 4's monitor (rec-4025), a residual until it
+lands.
+
+```yaml reversal-conditions
+decision: 228
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: resume-after-threshold
+    kind: manual
+    description: "Slice 4 finds at-rest sessions resuming after the threshold often enough that terminal readings mislead: re-decide clause 4."
+  - id: turn-evidence-lost
+    kind: manual
+    description: "Claude Code stops recording the Stop witness and turn closes stop landing: re-decide clause 1."
+  - id: upstream-session-end
+    kind: manual
+    description: "Claude Code runs SessionEnd hooks with egress in cloud sessions: review clause 3."
+```
+
+**Related:** Decisions 199 (amended), 207, 210, 212, 84, 101, 181, 177.
+
+---
+
+## Decision 227: Retired roadmap tier_items move to docs/ROADMAP-PLATFORM-ARCHIVE.yaml behind dependency-resolving stubs -- lifecycle archival, Decision 147's named valve (amends Decision 114 and Decision 147) (Decided)
+
+```yaml
+number: 227
+status: Decided
+decided_date: "2026-10-18"
+amends: [114, 147]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant change to the roadmap's storage shape: a second roadmap file, its size
+    authorization, and an amendment to Decision 114's single-file clause and Decision 147's single-file norm.
+    Not a contract note: docs/contracts/tier-item-lifecycle.yaml carries the archival walk, never the choice of
+    shape (Decision 176). Not amendment_forms: it amends two entries and authorizes a new path.
+```
+
+**Status:** Decided
+**Date:** 2026-10-18
+**Warehouse ID:** dec-227 (per Decision 84 backfill)
+
+**Problem:** docs/ROADMAP-PLATFORM.yaml sits inside the check_roadmap_regrowth escalation band below its Decision 114 ceiling, and Decision 147's compact form is already applied to every retired record, so it frees nothing more. Decision 147's reversal conditions and Decision 197 clause 8 leave two valves: lifecycle archival or a consciously-cited raise. The operator declined the raise.
+
+**Decision:**
+1. Archive. docs/ROADMAP-PLATFORM-ARCHIVE.yaml holds the full records of retired (status complete or reserved) tier_items, moved byte-for-byte out of docs/ROADMAP-PLATFORM.yaml. It is one file, never split per tier (Decision 197 clause 8). Candidate decisions and every non-retired item stay in the live file.
+2. Stubs. Each archived item keeps a stub in its original place in the live file: the record's own id, tier, name, depends_on, status and completed_at lines (intent instead of completed_at for a reserved item) plus `archived: true`. No id is removed or reordered, so the live file alone still resolves dependencies, eligibility and the tier-id set.
+3. One loader. scripts.platform_roadmap_state.load hydrates every stub from the archive before schema validation, so each RoadmapDocument consumer sees every record where it was. A stub that differs from its record, a record without a stub, or a stub without a record fails the load and validate_platform_roadmap. Raw readers of retired content hydrate through scripts.roadmap.roadmap_archive.
+4. Which and when. An item whose content a live test or registry record reads stays live, declared with its pin in docs/contracts/tier-item-lifecycle.yaml archival_exceptions (Decision 146's still-cited rule). Archival runs in operator-disposed waves or in the edit that retires an item, and un-archiving moves a record back to its stub's place, dropping the stub and the archive entry in the same edit. Archival itself is not enforced (residual, rec-4458).
+5. Size. docs/ROADMAP-PLATFORM-ARCHIVE.yaml defers in config/structural_size_budgets.yaml to validate_platform_roadmap, which applies the unchanged Decision 114 ceiling to each file on its own. This amends Decision 114's "retained as a single file" and Decision 147's single-file norm (point 4) for retired content only. The live file's ceiling is unchanged and no per-tier split is admitted.
+
+**Options considered:** A consciously-cited temporary raise (the Decision 145 precedent) -- declined by the operator. A third in-place trim into retired exit_criteria -- rejected: Decision 147's reversal clause forbids another ad hoc trim, and validate_platform_roadmap resolves those criteria for met_by and closes_criteria. A per-tier split -- forbidden (Decisions 114, 197 clause 8). Stubs with id and status only -- rejected: raw readers and agents would reassemble records, the N-file cost Decision 114 names. One-line flow stubs -- rejected: line-joining gameability (rec-3028).
+
+**Coverage (Decision 181 cl.2):** clauses 1-3 and 5 -- validate_platform_roadmap (stub and archive integrity, both ceilings, criterion (ii) over edited archive records) and check_roadmap_regrowth (archived records, a report-only observation); the archive's whole-file absence phrases -- the graduated roadmap-archive-absence-guards record; clause 4's pins -- archival_exceptions; clause 4's when and future absence guards -- advisory residuals, owner rec-4458.
+
+```yaml reversal-conditions
+decision: 227
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: archived-records-reassembled
+    kind: manual
+    description: "Agents or checks keep needing retired records the stubs omit: re-decide the stub fields or archival itself."
+  - id: live-ceiling-breach-after-archival
+    kind: manual
+    description: "docs/ROADMAP-PLATFORM.yaml nears its ceiling again with retired content archived: the live non-retired set needs the structural fix (Decision 197's work-item migration)."
+```
+
+**Related:** Decisions 84, 86, 110, 114, 128, 136, 145, 146, 147, 149, 166, 176, 177, 181, 189, 197; rec-3960, rec-4131, rec-4458, rec-3028.
+
+---
+
+## Decision 226: Red-main recovery is priced by repair track, halts only overlapping work, runs to an SLO, and owes a preventive only for a recurring class (amends Decisions 72, 73 and 217) (Decided)
+
+```yaml
+number: 226
+status: Decided
+decided_date: "2026-10-18"
+amends: [72, 73, 217]
+significance:
+  value: numbered_decision
+  justification: >-
+    One recovery policy changes ratified clauses in three entries (72's fixed Critical, 73 cl.3-5,
+    217 cl.1's trigger). Not a contract note: docs/contracts/red-main-recovery.yaml holds the values
+    and field semantics, not whether a red halts work or owes a preventive. Not amendment_forms lines: an
+    annotation cannot change a ratified clause's meaning, and one policy spans three entries.
+```
+
+**Status:** Decided
+**Date:** 2026-10-18
+**Warehouse ID:** dec-226 (per Decision 84 backfill)
+
+**Problem:** Decision 73 merges optimistically and accepts a red main, then prices every red as a
+product regression: a Critical rec, a halt on all new plans and dispatch, and a mandatory
+preventive_action in a plan cycle. In the 61 days to 2026-10-18 main went red 39 times (38 filed
+Critical) at about 11 merges a day. rec-4427, a tests-only repair (#1556), still halted dispatch for
+its 11.7-hour red window and drew a preventive plan for a misread cause.
+
+**Decision:**
+1. **Two repair tracks.** Track A: the corrective changes only `tests/**` and leaves merged product
+   behaviour as it is. The ci-rca agent records that diagnosis as `repair_track`; code accepts it only
+   on a test-bearing workflow (the verified evidence bundle's CI tier) with no regression, and files
+   the red High. Every other red, an unaccepted A diagnosis included, is Track B, filed Critical. When
+   the fix lands, code stamps the confirmed track from the fix commit's diff; only that is tallied.
+2. **Fast lane for A**, with no plan cycle (an exception to Decision 72's /plan consumption).
+   Whichever session picks the red up opens a tests-only PR. It runs the failing tests, the fast
+   tier and the full tier (Decision 163), and code review disposes of every weakening candidate
+   (Decision 181). An A rec owes no preventive_action. A repair needing non-test code is Track B.
+3. **The halt narrows to overlap**: Decision 217 cl.1, pulled forward by its red-window-growth
+   condition. An unresolved red blocks a new plan or dispatch only when the work's affected set
+   overlaps the red's (Decision 135's channels), computed by `scripts/ci_rca/red_overlap.py`. An
+   undeterminable red, a selector fallback or a failed read blocks (Decision 215). An A red blocks
+   nothing inside its SLO, and a red never blocks the plan that bundles it as its
+   repair. Decision 73 cl.3's unbuilt L6 pause follows this rule.
+4. **Repair SLO.** A red is repaired within 4 hours of filing, agent-owned; past it, it blocks all
+   new plans and dispatch except a plan repairing an open red (Decision 73 cl.4) until it closes. Forward-fix stays the default. For B,
+   a manual revert PR of the culprit is permitted when the fix is not obvious, unless the culprit
+   touched `terraform/**` or a governed deploy path. The revert PR lands the Decision 186 closure
+   artifact itself. Automated revert stays excluded.
+5. **A preventive only for a recurring class.** preventive_action is owed only when at least two
+   source=ci_rca recs in the window share a class key computed in code from the verified bundle
+   (the failing check and its escape attribution). The key, window and threshold live in
+   red-main-recovery.yaml. When owed it is one class-level rec per key, never a red's corrective.
+   Until the tally lands (rec-4441, after rec-4428), Track B keeps a mandatory preventive_action.
+
+**Rationale:** Optimistic merge with post-merge testing pairs with cheap, time-bounded recovery:
+culprit-owned repair or rollback under an SLO, tree closure only where a red can mask work, and deep
+analysis reserved for recurring classes (Google TAP, Chromium sheriffing, LLVM revert-to-green, the
+SRE workbook). Falling back to Decision 73 cl.4 past the SLO keeps each change no worse than today.
+A build reaching handoff during a red still needs a green full tier (Decision 163). A revert PR
+appends to main like a forward-fix, so Decision 73's worktree objection binds only automated revert.
+Rejected: a heavier PR tier or a merge queue (neither lowers recovery cost); automated revert.
+
+**Coverage (Decision 181 cl.2):** the cl.1, cl.3 and cl.4 verdicts -- the tests
+docs/contracts/red-main-recovery.yaml names; priority is re-derived in file_rec and correct_rec_context.
+Instruction-enforced residuals: cl.2's fast-lane eligibility, dispositions and full-tier run
+(validate_handoff_full_tier reads plans only) (rec-4442); the /plan and overseer calls to red_overlap,
+cl.4's revert eligibility and direct update_rec writes of portal-owned keys (rec-4444). Past the SLO,
+preflight's likely-resolved split and Step 8's logged deferral still apply, as under Decision 73 cl.4
+today (rec-4444). cl.5: rec-4441. cl.3 inherits the selector's misses (rec-4429).
+
+```yaml reversal-conditions
+decision: 226
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: track-a-misuse
+    kind: manual
+    description: "A confirmed Track A repair weakened a test, or more than two A diagnoses in 90 days confirm as B: re-decide cl.1-2."
+  - id: overlap-miss
+    kind: manual
+    description: "Work the overlap check cleared is masked by, or lands on, an open red: re-decide cl.3."
+  - id: slo-breach-rate
+    kind: manual
+    description: "More than half of the reds in 90 days breach the SLO: re-decide cl.4."
+  - id: slow-recurrence
+    kind: manual
+    description: "A class recurs just outside the window with no preventive owed: re-decide cl.5's window."
+  - id: promotion-lands
+    kind: manual
+    description: "SIT/PROD promotion (Decision 73 cl.5) goes live: re-decide the entry."
+```
+
+**Related:** Decision 72, 73, 217, 55, 90, 135, 142, 163, 181, 186, 210, 215.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+---
+
+## Decision 225: CI identities hold no IAM grant on PlatformDev or PlatformAdmin (elects Decision 180 reversal condition (a)'s re-narrow ahead of its trigger; amends Decision 180 clauses 1-2) (Decided)
+
+```yaml
+number: 225
+status: Decided
+decided_date: "2026-10-18"
+amends: [180]
+significance:
+  value: numbered_decision
+  justification: >-
+    Elects a ratified entry's reversal response before its literal trigger (the Decision 176
+    clause 2 shape; Decision 179 clause 2 also elected a condition early) and adds a standing rule
+    with a guard and reversal conditions. A dated Update on Decision 180 alone is rejected: its Problem already refused
+    amendment_forms for this scope class, and docs/contracts/iam-simulate-fixture.yaml records
+    expected decisions but cannot re-decide a grant.
+```
+
+**Status:** Decided
+**Date:** 2026-10-18
+**Warehouse ID:** dec-225 (per Decision 84 backfill)
+
+**Problem:** rec-4049. Decision 223 moved PlatformDev and PlatformAdmin to terraform/bootstrap; the
+forget applied on 2026-10-17 and neither role is in terraform/personal state. Three CI grants still
+named them: IAMRoleMetadataWrite's PlatformDev entry (four metadata verbs, Decision 180 clauses 1-2)
+and the IAM read quartet on both roles, in the apply role's IAMRolesRead and the planner's
+IAMPlatformRolesRead. None has a consumer: no CI-applied root declares either role and no workflow
+calls IAM on them. The reads are not inert: iam:GetRole returns each role's trust document, with its
+sts:ExternalId condition, and iam:GetRolePolicy returns PlatformAdmin's AdminOps text. Decision 180's
+reversal condition (a), "PlatformDev leaves terraform management", has not fired as written:
+PlatformDev is Terraform-managed in terraform/bootstrap, and Decision 223 clause 3 left the ruling to
+rec-4049's plan.
+
+**Decision:**
+1. **Rule.** No CI identity (the apply, planner, branch, pr and deploy roles) holds an `iam:` Allow,
+   write or read, whose Resource matches PlatformDev or PlatformAdmin.
+2. **Amends Decision 180 clauses 1-2.** The metadata risk class is `role/agent-platform-*` plus the
+   enumerated boundary-carrying non-prefixed roles that a CI-applied root declares. That set is empty
+   today, so IAMRoleMetadataWrite's Resource is `role/agent-platform-*` alone, and clause 2's four
+   verbs no longer reach PlatformDev. Clause 3 (PlatformAdmin permanently excluded) and clause 4 (the
+   boundary, not the name, decides coverage) stand; this clause adds only that the enumeration lists
+   roles a CI-applied root declares.
+3. **Reversal condition (a): ruled by election, not reinterpretation.** (a) is not declared fired.
+   Its response, the re-narrow, is elected ahead of the trigger, as Decision 176 clause 2 did: the
+   grant's purpose, CI reconciling PlatformDev's metadata in terraform/personal (Decision 180's
+   Problem and clause 6), ended with Decision 223. Condition (b) is untouched.
+4. **Reads retire now.** Both roles leave IAMRolesRead and IAMPlatformRolesRead under the RETIREMENT
+   ORDERING RULE in terraform/bootstrap/github_ci_apply_reads.tf, since the forget (standing in for
+   the rule's destroy) has applied. If rec-3358's scheduled bootstrap plan runs as a CI identity, it
+   gets its reads in its own plan, never by keeping these.
+5. **Guard.** tests/checks/iam_tf/test_platform_role_metadata_admin_scope.py pins the Resource to
+   exactly {role/agent-platform-*}, keeps the PlatformAdmin negative, and fails any Allow statement,
+   in every terraform/personal file (all of it CI-applied) or the apply role's two policy files in
+   terraform/bootstrap, that carries an `iam:` action on a Resource matching either role; the
+   boundary is a ceiling, not a grant, and is not scanned. docs/contracts/iam-simulate-fixture.yaml
+   expects implicitDeny for the four verbs on PlatformDev, iam:GetRole on PlatformDev and
+   iam:GetRolePolicy on PlatformAdmin; its two PlatformAdmin negatives stand.
+6. **Delivery.** CI applies terraform/personal's planner change at merge. The apply role's two
+   policies live in terraform/bootstrap, which CI never applies (Decision 126; the T2.23 self-grant
+   break), so that half is a human-directed admin apply of merged code.
+
+**Rationale:** Least privilege is measured against consumers, not names. A grant whose only consumer
+left with Decision 223 is standing authority with nothing behind it, and the read quartet exposed
+trust documents and admin policy text to CI principals. Retiring both closes the loose ends Decision
+223's Coverage assigns to rec-4049.
+
+**Coverage (Decision 181 cl.2):** clauses 1-2 in HCL -- the clause 5 guard, in the full tier and when
+--pre selects it; live -- the apply role by the post-apply simulate whenever a bootstrap apply changes
+its grant surface, and both CI roles once by rec-4049's post-merge policy reads; a CI identity declared
+in terraform/bootstrap other than the apply role (such as a rec-3358 bootstrap planner) -- unenforced
+residual owned by rec-3358.
+
+```yaml reversal-conditions
+decision: 225
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan; update or re-arm this stanza"
+conditions:
+  - id: ci-root-declares-platform-role
+    kind: manual
+    description: "A CI-applied root again declares either role (Decision 223 rollback): re-decide clause 1 with that rollback; the read quartet returns in the same PR, before any plan runs."
+  - id: bootstrap-plan-under-ci-identity
+    kind: manual
+    description: "rec-3358's scheduled bootstrap plan runs as a CI identity: grant its reads in its own plan and Decision, scoped to that identity, never by re-adding them here."
+  - id: non-prefixed-role-in-ci-root
+    kind: manual
+    description: "A CI-applied root declares a boundary-carrying non-prefixed role: re-arm clause 2's enumeration for that role, never for one terraform/bootstrap owns."
+```
+
+**Related:** Decisions 180 (amended), 223, 202, 144, 126, 143, 176, 179, 177, 181; rec-4049, rec-3358,
+rec-4043.
+
+---
+
+## Decision 224: One home per kind of user-set configuration -- project settings in ontheloop/platform.yaml, secret values never tracked and resolved by name, per-clone choices in .ontheloop/, one registry (amends Decision 211 clause 5 and Decision 212 clause 8) (Decided)
+
+```yaml
+number: 224
+status: Decided
+decided_date: "2026-10-18"
+amends: [211, 212]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant product commitment binding otl init and every later setting, widening
+    Decision 211 clause 5 and Decision 212 clause 8. Not a contract note:
+    docs/contracts/project-configuration.yaml carries the rows, never the rule.
+    Not amendment_forms: it amends two entries, and the kinds, homes and precedence clear the bar alone.
+```
+
+**Status:** Decided
+**Date:** 2026-10-18
+**Warehouse ID:** dec-224 (per Decision 84 backfill)
+
+**Problem:** A user who runs `otl init` needs one predictable place to set the platform's configuration, and nothing names one. Decision 212 clause 8's `ontheloop/platform.yaml` names the adapter per port only, and T4.24 c2 says only "by environment-variable convention". This repository spreads its own settings over about ten homes with no registry, among them committed config files, about 90 ad hoc environment variables, tfvars from Secrets Manager and hand-set GitHub secrets and variables (rec-4403).
+
+**Intent:** A setting's kind tells a user and an agent where it lives. Local is the default, and moving a port to the cloud is an edit to one tracked file, not a second install.
+
+**Decision:**
+1. Kinds. Every user-set setting is one kind: project (not secret, shared by everyone on the repository), secret (a credential), private (not a credential, but never published from a public repository: an account id, an email, an ExternalId) or machine (one clone's own choice: a profile name, a path override). Not configuration, so no row: runtime state (Decision 211 clause 5), values CI or a vendor runtime sets on its own, values a deploy writes for the runtime to discover, and platform-owned version pins (Decision 99's pattern).
+2. Homes. project: the tracked `ontheloop/platform.yaml`, each setting under the adapter that reads it, or under `clouds.<vendor>` when one cloud's adapters share it (the AWS region is `clouds.aws.region`), or under `project` when no adapter reads it. machine: the gitignored, per-clone `.ontheloop/config.yaml`. secret and private: never in a tracked file, a log, telemetry or a file under the working tree; platform.yaml names the variable and the secrets port resolves it by name -- locally from the process environment, then a user-level env file outside the working tree that `otl init` creates with names only and mode 0600; in CI from GitHub Actions secrets; in the cloud by runtime fetch (secret-material-handling.yaml). A credential Decision 206 clause 2 governs keeps that clause's homes and is never read by On The Loop code.
+3. Precedence. A project or machine setting resolves from a command-line flag, then its declared `OTL_` override variable, then `.ontheloop/config.yaml`, then platform.yaml, then the built-in default; only a row that declares an override variable has one. Vendor variables such as AWS_REGION are exported from the resolved value, never read as input; `otl doctor` warns when an ambient one disagrees.
+4. Local first. `otl init` writes every port on its local adapter, or its supported default where ports.yaml registers none, and no clouds block. Choosing a cloud adapter is an edit to platform.yaml that adds the adapter's settings and the names of its secrets, checked by `otl doctor` (Decision 212 clause 8). A setting is required only when its row's adapter or cloud is selected.
+5. One file for CI and cloud too. CI jobs read platform.yaml through one shared read step (PLAN-project-region-single-source's pattern); cloud functions get non-secret settings as deploy-time parameters written from it. A GitHub repository variable is never a project setting's home; it may carry a deploy output or GitHub-side gating.
+6. One registry. `docs/contracts/project-configuration.yaml` is the sole registry: one row per setting with its kind, home per substrate, variables, readers, who sets it, defaults and where this repository holds it today. A change that adds or moves a setting updates its row.
+7. This repository adopts it too. Its settings move to these homes once T4.24 creates `ontheloop/`, the region first (config/aws-region, rec-4067); until then each row records the current home.
+
+**Options considered:** One file for everything -- rejected: secrets cannot be tracked. Twelve-factor environment variables for everything -- kept at the process edge only. A gitignored `.env` in the repository -- rejected: agents read the working tree, and init characterises code with no credentials (Decision 211 clause 3). GitHub repository variables -- rejected: CI-only, withheld from fork pull requests, set by hand. The OS keychain -- deferred: absent in containers and CI.
+
+**Coverage (Decision 181 cl.2):** the registry's shape, kinds and homes, and that no secret or private row names a tracked home -- validate_project_configuration; clauses 2-5 in otl init, otl doctor and CI -- T4.24 c15; clauses 5 and 7 here -- T4.24 c16, the region's read step meanwhile -- validate_project_region. Advisory residuals, owner rec-4410: clause 5's cloud half and clause 6's "updates its row".
+
+```yaml reversal-conditions
+decision: 224
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: environment-cannot-carry-secrets
+    kind: manual
+    description: "A supported substrate cannot deliver secret values by variable name: re-decide clause 2's secret home."
+  - id: platform-file-hotspot
+    kind: manual
+    description: "ontheloop/platform.yaml becomes a merge-conflict or review hotspot: re-decide one tracked file versus one per port."
+```
+
+**Related:** Decisions 99, 101, 173, 181, 184, 196, 197, 200, 202, 206, 211, 212, 217, 220; T4.23, T4.24, T4.27; rec-4067, rec-4403.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+---
+
+## Decision 222: The smoke catalog's owner-login table step may add a declared nullable column an existing telemetry table lacks (amends Decision 216 clauses 2 and 3) (Decided)
+
+```yaml
+number: 222
+status: Decided
+decided_date: "2026-10-17"
+amends: [216]
+significance:
+  value: numbered_decision
+  justification: "Widens Decision 216 cl.2's ratified create-if-absent DDL scope and cl.3's smoke carve-out from creating tables to adding columns; Decision 216's own justification records that an amendment_forms annotation cannot widen a ratified scope or carve-out (the Decision 204 cl.4 precedent), and no contract owns cross-function DDL scope."
+```
+
+**Status:** Decided
+**Date:** 2026-10-17
+**Warehouse ID:** dec-222 (per Decision 84 backfill)
+
+**Problem:** Telemetry contracts gain columns (PLAN-telemetry-column-additions: the session provenance and model_call usage columns the slice 4 review found missing), but create_telemetry_tables only creates absent tables and its drift check refuses any column difference, so a contract column add reds the deploy's maintenance-smoke stage and telemetry gate. The only other path is an admin drop of the smoke tables, which loses the captured sessions and puts a human in the deploy path.
+
+**Decision:**
+1. On the disposable smoke catalog, create_telemetry_tables also adds, under the owner login and inside its one transaction, every declared column an existing telemetry event table lacks, provided the contract leaves it optional (nullable, with no not-null or conditional-requiredness rule): ALTER TABLE ADD COLUMN, declared type, no default. It is non-destructive, additive-only and confined to the smoke catalog, so agent-autonomous under Decision 143 cl.3 as Decision 216 cl.2 is. Any other drift -- a live column the contract does not declare, a missing NOT NULL column, a partition drift, a half-present dimension pair, any drift on a dimension or counter table -- still fails loud before any DDL. It never drops, renames or retypes a column and writes no row; Decision 143 cl.2's dispatch set is unchanged.
+2. A telemetry column ships contract first, as a nullable field_add, through the governed deploy, and no producer emits it before that deploy is green: the writer refuses undeclared columns (Decision 210 cl.4 applied to columns).
+3. On a production telemetry catalog (slice 2c onward) adding a column stays an admin step under the owner login (Decision 216 cl.3); the telemetry-schema-churn condition keeps counting production changes only.
+
+**Rationale:** A nullable addition is the one schema change that keeps every stored row valid and every reader and writer path unchanged. DuckLake supports ADD COLUMN (the ops precedent, ducklake_tables.reconcile_table_columns) and owner ALTERs keep the scoped login's access through default privileges (Decision 216's measurement, re-run here). Rejected: an admin drop and re-create of the smoke tables; a JSON metadata column (values unchecked at write; the operator's choice, 2026-10-17); a separate maintenance verb (widens the exact dispatch set for nothing).
+
+**Coverage (Decision 181 cl.2):** the additive leg and its refusals -- tests/common/test_ducklake_telemetry_provision.py (fast tier, graduated); DuckLake's ADD COLUMN on a partitioned telemetry table with rows -- tests/common/test_ducklake_telemetry_column_add_integration.py, run before merge, an unenforced CI residual until rec-4071; the scoped login after an owner ADD COLUMN -- tests/common/test_ducklake_telemetry_catalog_ownership.py, the same residual; the live smoke catalog -- the maintenance-smoke step's added list and the telemetry gate's exact drift check on every deploy; clause 2's ordering -- the writer's undeclared-column 422 schema_gate is the loud backstop, and the ordering itself is a coordinator- and instruction-enforced residual (production additions: rec-4316).
+
+```yaml reversal-conditions
+decision: 222
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: ducklake-alter-breaks-table
+    kind: manual
+    description: "A DuckLake version's ADD COLUMN corrupts, blocks or re-partitions a telemetry table: re-decide clause 1."
+  - id: change-beyond-additive
+    kind: manual
+    description: "A telemetry contract needs a column renamed, retyped or dropped: a new migration Decision, never this clause."
+  - id: production-additive-path
+    kind: manual
+    description: "Slice 2c needs CI to add columns to a production catalog: re-decide clause 3 together with rec-4316."
+```
+
+**Related:** Decision 216, 143, 213, 210, 204, 126, 55, 177, 181, 101.
+
+[Amendment 2026-10-29: coverage -- clause 3's production ordering is pipeline-enforced (PLAN-telemetry-top-level-agent-run): a declared telemetry column stays in its table's pending_reconcile (reconcile_scope telemetry_catalog) until the owner-login provision_telemetry_catalog response lists it as added; the merge-time reconcile-pending gate fails a column added without that entry, and the governed deploy holds the production telemetry writer and reader while any entry is pending (validate_reconcile_pending_gate --telemetry-hold). Clause 2's smoke ordering stays the writer's 422 backstop.]
+
+---
+
+## Decision 223: One Terraform state per applier -- PlatformDev, PlatformAdmin and their inline policies move to the admin-only terraform/bootstrap root (amends Decision 180 clause 6 and Decision 183 point 4) (Decided)
+
+```yaml
+number: 223
+status: Decided
+decided_date: "2026-10-17"
+amends: [180, 183]
+significance:
+  value: numbered_decision
+  justification: >-
+    Reverses a recorded rejection (Decision 180 clause 6) and narrows Decision 183 point 4,
+    with a standing guard and reversal conditions; amendment_forms cannot carry a re-decision
+    spanning two entries (Decision 183 and 217 precedent).
+```
+
+**Status:** Decided
+**Date:** 2026-10-17
+**Warehouse ID:** dec-223 (per Decision 84 backfill)
+
+**Problem:** rec-3838. PlatformDev and PlatformAdmin, the two identities whose trust and inline
+policies the CI apply role cannot write by design (Decision 180 clauses 2-3; it holds four
+metadata-write verbs on PlatformDev and the read quartet on both), were declared in
+terraform/personal, the root CI plans and applies. Every inline-policy change to them forced the
+operator split-apply (Decision 183 point 4), whose window red-latched the sandbox
+convergence record twice in nine days and blocked three merges' applies on 2026-09-13
+(rec-3797). Decision 180 clause 6 recorded the relocation as a rejected alternative "for now"
+under Decision 144 clause 3.
+
+**Intent:**
+A Terraform root's state holds only what its applier may mutate (a rule in clause 1, direction in clause 4).
+
+**Decision:**
+1. **Rule.** A managed IAM role whose inline policies the CI apply role cannot write by design
+   is declared in terraform/bootstrap, never in a CI-applied root. Of the roles terraform/personal
+   declared, that was exactly PlatformDev and PlatformAdmin (Decision 180 clauses 2-3); the apply
+   role and the Decision 202 roles already live in terraform/bootstrap. The general principle is
+   direction only; clause 4 names what terraform/personal still declares that CI cannot execute.
+2. **Placement.** PlatformDev, PlatformAdmin and their five inline policies (DailyOps, AdminOps,
+   PlatformDataLakeProvisioning, BootstrapStateProvisioning, DuckLakeBreakGlass) are declared
+   and owned by terraform/bootstrap. terraform/personal keeps only their `removed` blocks with
+   `destroy = false`; never `state rm`, never a cross-backend `state mv`. A change to any of the
+   seven is a terraform/bootstrap admin apply under Decision 126's human-gated tier, with no
+   `-target`.
+3. **Amends Decision 180 clause 6.** The rejected alternative is adopted in full. Decision 144
+   clause 3 is preserved: PlatformDev still declares the mandatory boundary, now in the same root
+   as the boundary policy; PlatformAdmin stays boundary-free. Clauses 1-5 are unchanged in text.
+   Reversal condition (a) is not adjudicated here: PlatformDev has left the CI-applied root and
+   remains Terraform-managed (Decision 180 clause 4's premise); whether that fires (a) and licenses
+   re-narrowing IAMRoleMetadataWrite is rec-4049's plan.
+4. **Amends Decision 183 point 4.** The admin split-apply no longer arises for the seven
+   addresses. The same split still applies to terraform/personal's remaining by-design
+   CI-unexecutable actions, including trust on agent-platform-* roles other than branch and pr,
+   OIDC provider lifecycle and the alerts subscription's Unsubscribe; rec-3583 owns flagging them
+   at plan time, not re-homing them. Reversal (b)'s terraform/CLAUDE.md recovery row was amended.
+5. **Guard.** tests/checks/iam_tf/test_platform_iam_admin_root_only.py holds clause 2:
+   terraform/personal declares no PlatformDev or PlatformAdmin role, inline policy, attachment
+   or exclusive set, and each relocated address has exactly one `destroy = false` removed block.
+6. **Not Decision 98's Path C.** Decision 98 point 1 (amended by Decision 144 clause 4) keeps
+   agent-platform-* peer CI roles in terraform/personal, where the CI apply role writes their
+   inline policies and only trust (beyond branch and pr) is admin-tier. That class is disjoint
+   from clause 1's;
+   Decision 98 stands.
+
+**Rationale:** Managing the split procedurally (Decision 183 point 4) kept a standing race
+between an operator `-target` apply and CI's saved plan; moving ownership to the root whose
+applier may write removes that race at its source and makes the admin tier (Decision 126) the
+single path for these identities. Drift detection for the two roles rests on Decision
+202's detector until rec-3358's scheduled bootstrap plan lands.
+
+**Coverage (Decision 181 cl.2):** clause 1 for the two names and clause 2 in terraform/personal
+-- the clause 5 guard, in the full tier and when --pre selects it;
+bootstrap ownership -- the adopt plan's TestBootstrapOwnsPlatformIam; live parity -- the release
+plan's before/after IAM snapshot (one-time); a future clause 1 member the guard does not name --
+unenforced residual until rec-3583's verdict. Owned loose ends: CI's read-quartet ARNs on the two
+roles (IAMRolesRead, IAMPlatformRolesRead) and its metadata-write grant on PlatformDev (rec-4049);
+the three trust variables still in terraform/personal (rec-4048); Decision 113's shared-principal
+Pattern B (rec-4043).
+
+```yaml reversal-conditions
+decision: 223
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan; update or re-arm this stanza"
+conditions:
+  - id: ci-writable-again
+    kind: manual
+    description: "A ratified Decision lets CI write either identity's trust or inline policies: re-decide clause 2's placement with it."
+  - id: bootstrap-drift-undetected
+    kind: manual
+    description: "A change to any of the seven is seen neither by Decision 202's detector nor by a scheduled bootstrap plan (rec-3358) within 24 h: re-examine clause 2."
+  - id: separate-admin-principal
+    kind: manual
+    description: "rec-4043 lands a separate admin principal: re-check clause 2 and place any new managed role per clause 1."
+```
+
+**Related:** Decisions 180, 183 (amended), 98, 113, 126, 144, 181, 202; rec-3838, rec-4044;
+PLAN-platform-iam-bootstrap-adopt, PLAN-platform-iam-personal-release.
+
+> **Update (2026-10-18):** The Coverage loose ends rec-4049 owned (CI's read quartet on both roles and its metadata grant on PlatformDev) are retired by Decision 225, which also makes clause 3's deferred reversal (a) ruling.
+
+---
+
+## Decision 221: Recursive self-improvement is proven against a judge the loop cannot edit -- three metric layers, a frozen control arm, pre-registration and public receipts on the designed feedback loop (Decided)
+
+```yaml
+number: 221
+status: Decided
+decided_date: "2026-10-17"
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant commitment on what proves the loop improves itself, apart from
+    Decision 220 by subject. Not a contract note: no journal table or contract exists yet. Not an
+    amendment_forms line: it spans Decisions 117, 196, 200 and staged rows.
+```
+
+**Status:** Decided
+**Date:** 2026-10-17
+**Warehouse ID:** dec-221 (per Decision 84 backfill)
+
+**Problem:** The designed feedback loop is introspective: its components measure this repository's own sessions (docs/plans/reports/REPORT-w2-feedback-loop-synthesis.md:352-361), product outcomes enter only at maturity (docs/PROJECT_CONTEXT.md, Recursive self-improvement model), small effects are unprovable at this session rate (docs/plans/reports/REPORT-w1-back-validation.md:610-612) and no frozen arm exists. A self-improvement claim on that evidence is unfalsifiable.
+
+**Intent:** The claim is governed recursive improvement of the operating process, its verifiers and the learned components the loop owns, with frontier models as replaceable inputs; the labs improve the model itself.
+
+**Decision:**
+1. **Three layers.** OUTCOME: coverage, freshness lag, accuracy on a sealed gold set, reconciliation against external totals, defect escape into the API. PROCESS: time to heal, unattended-fix rate, tokens and GB-seconds per verified merge, rework rate, autonomy rung; dollars derive at read and are never stored or published (Decisions 199 clause 1, 217 clause 4; docs/plans/reports/REPORT-w3-feedback-loop-staging.md:380-382, hereafter REPORT-w3). RECURSIVE: count and effect size of agent-authored changes to the loop itself (prompts, verifiers, contracts, routing) and whether each moved the other layers. OUTCOME enters an adopting repository as a user-authored Tier A north star with a failure_signal (Decisions 196 clause 7, 211 clause 5) whose detector takes a Goodhart register row.
+2. **Judge.** An independent probe with its own credentials computes OUTCOME. The gold set is sealed, refreshed only by a human and held out from training as well as editing. Once the probe exists its paths join Decision 117's boundary_patterns and Decision 185 clause 3's base-ref check; the released-version rule (T4.24 c3) keeps the loop off the kernel that judges it.
+3. **Control arm.** One project, one kernel (T4.24 c3); Decision 200's tenant and project ids never key an arm. Connectors hash into two arms per pre-registered epoch: one admits process improvements, one runs the epoch-start ref of its ontheloop/ artefacts and stamps, self-healing only. Arm and stamps are logged at admission in the loop journal, one ladder lane per arm (REPORT-w3:290, 611); difference-in-differences at the sampled rung (REPORT-w3:619).
+4. **Pre-registration.** Metrics, arm design and stopping rule are committed before a run, curves after; ROADMAP-SEMANTO S1.7-S1.8 hold the external-subject arm.
+5. **Public receipts.** The product site shows day-aggregate curves derived at read: a curated projection (Decision 111) of what the egress allow-list lets cross (Decision 209 clause 2(b); staged CD.51 unruled, REPORT-w3:423), never per-change receipts or commits; Decision 88's egress invariants bind every reader. Receipts carry no financial figure (Decision 101 point (d)): tokens and GB-seconds are published, dollars never (clause 1). Arm curves cross the allow-list only as a closed enum rec-4141 admits; until then clause 4's pre-registered protocol reports the arm comparison, never the live receipts.
+6. **Learned components.** The loop may own learned components, open-weight models in the LiteLLM lane fine-tuned on verified traces (training is not inference; Decision 205 clause 4 stands) and its routing policy. Only verified rows train; a retrain is a stamp bump back to read_all; the loop runs a released model, never the one in training; a run pins frontier versions or uses an operator-controlled open-weight model; the arms become two-by-two.
+7. **One mechanism each.** One ladder controller and transition log (REPORT-w3:627), one allow-list, one journal, one filer. Recursive aggregates are read-only views over the staged loop record journal, and back-validation stays the only proposer of a PROOF close (REPORT-w3:359). An init-attempt record, one row per attempt (Decision 207; fields in rec-4388), joins that journal; init determinism is the first probe metric. A clause leaning on a staged row (REPORT-w3:274-470) binds only at that row's ratification.
+8. **Open.** The receipts consumer is rec-4386, dependent on rec-4141; Decision 209 clause 5(i) is not amended.
+
+**Coverage:** none enforced today. Homes: cl.1 T4.24 c8; cl.2 T4.21; cl.3 T3.4 (CD.46) and rec-4388 (pinned ref); cl.4 S1.7 c1 (external-subject arm) and rec-4386 (product arm); cl.5 rec-4386; cl.6 T3.4 (CD.46); cl.7 rec-4388.
+
+**Rationale:** Recording the destination unbuilt follows Decision 197 clause 8, not frame-lock (Decision 75). Detail: docs/plans/reports/REPORT-showcase-product-and-rsi-proof.md:196-290.
+
+```yaml reversal-conditions
+decision: 221
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: journal-ratified
+    kind: manual
+    description: "CD.47 (REPORT-w3) is ratified: confirm clause 7 binds as written."
+  - id: sampled-rung-exists
+    kind: manual
+    description: "A loop component reaches the sampled rung: start clause 3's arms or record why not."
+  - id: vendor-model-change
+    kind: manual
+    description: "A vendor model changes mid-run: void that run's curves or re-pin (clause 6)."
+  - id: product-abandoned
+    kind: manual
+    description: "Decision 220 is reversed or its product abandoned: re-decide clauses 3 and 5."
+```
+
+**Related:** Decisions 101, 117, 196, 197, 199, 200, 205, 207, 209, 211, 217, 220; T4.24; rec-4141, rec-4386, rec-4388.
+
+> **Amended by Decision 231 (2026-10-19):** Clause 2 extends to the offline persona-evaluation lane (T4.14): its grader is deterministic code, real-outcome replay and the operator's blind adjudication, never an LLM judge, read-isolated with its sealed set from the run under test by IAM and network, never lexically, its paths joining boundary_patterns like the probe's, and that sealed set is sourced apart from this PUBLIC repository. Clause 7's one loop record journal and one register take the lane's records and grader rows; no second mechanism is built.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as the mission and NS.6 in docs/contracts/north-star.yaml; clauses unchanged.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+---
+
+## Decision 220: First showcase product -- a UK organisation graph over public money, a source ladder that stops at any bot gate, and the first otl init proving ground (amends Decision 209 clause 3(2)) (Decided)
+
+```yaml
+number: 220
+status: Decided
+decided_date: "2026-10-17"
+amends: [209]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant product-boundary commitment, apart from Decision 221 by subject:
+    it reverses on product and market facts. Not a contract note: no docs/contracts file owns a
+    product boundary. Not an amendment_forms line on Decision 209: only the instance touches
+    clause 3(2); the ladder, stop rule and proving ground have no prior owner.
+```
+
+**Status:** Decided
+**Date:** 2026-10-17
+**Warehouse ID:** dec-220 (per Decision 84 backfill)
+
+**Problem:** Decision 209 clause 3(2) names no showcase product, and nothing says which sources this operator's agents may pull from; the first instinct recorded was that agents can fill CAPTCHAs.
+
+**Intent:** Here the product is the platform's metadata source and proof population: it shows how the platform works and performs and proves governed recursive self-improvement in public (Decision 221); it is also the first otl init target and bootstrapping probe (the intended first real fixture for T4.24 c2) and a revenue hedge sold by scale (Decision 209 clause 1). It is a sanctioned bootstrapping exception to Decision 178's platform-only rule, bounded to that purpose and the selection rationale below; the product's own direction and growth live in its repository.
+
+**Decision:**
+1. **Instance.** Decision 209 clause 3(2)'s first showcase product is a UK organisation graph over public money: Companies House as the entity spine; Find a Tender and TED notices and awards; English council and NHS spend files; regulator registers linked to one supplier identity; full revision history. Entity resolution is the asset. It lives in the public products monorepo as a project under the operator's tenant (Decision 200 clause 1). Any public surface stays bound by Decision 101 point (d); its host is the product's own decision.
+2. **Source ladder.** Agents under this operator's loop take sources in tiers: one, mandated open data (OGL, non-adversarial); two, fragmented or semi-structured sources with some anti-bot friction, planning data only as a non-personal projection; three, adversarial sources, only after a legal review and only where receipts cannot be poisoned. Unprotected portals are crawled politely: robots.txt, rate limits, an identifiable agent string, a contact header.
+3. **Stop rule.** A CAPTCHA or equivalent bot gate is the publisher's explicit withdrawal of consent to automated access. The loop never solves or evades one: it stops and switches route (whitelisting, a licensed bulk extract under FOIA's dataset provisions, a partner, a bought feed). This reverses the instinct that agents may fill CAPTCHAs, because a loop optimising a signal its adversary controls converges on garbage; provider acceptable-use terms bar bypassing security controls, risking the sole inference lane (Decision 205 clause 4); the buyer is a compliance function; and an evasion patch is a workaround with no owned root cause (Decision 55). Legal exposure is the tier-three review's question, not settled here.
+4. **Proving ground.** The product repository is the first otl init target and a fourth adoption case beside Decision 211 clause 6's three, never one of them. It declines the house-style profile (211 clause 2) and is built and burned: code and history kept (211 clause 1), the ontheloop/ and .ontheloop/ roots deleted (211 clause 5), init re-run and its boundary map and verification registry diffed.
+5. **No dependency.** Its telemetry reaches the platform as evidence through the Decision 209 clause 2(b) allow-list, never as instruction; the platform never imports product code and its tests never need the product tree (Decision 212 clause 3).
+6. **Product inputs.** Product detail at docs/plans/reports/REPORT-showcase-product-and-rsi-proof.md:291-342 (sell-scale mechanics, hosting, data rules, source order, taste, legal terms, channels) is provisional input, not a ruling: at init the product repository adopts or supersedes it as its own Tier A north stars, each with a failure_signal (Decision 196 clause 7), or Tier C decisions, and keeps its day-one work items in its own store (Decision 211 clause 2; Decision 197 clause 1).
+7. **Open.** Trademark class coverage for a data service: rec-4385.
+
+**Coverage:** none enforced today. Homes: cl.1, 6 the product repository at init (T4.24 c8); cl.2-3 unenforced residual, owner rec-4387; cl.4 rec-4388; cl.5 .importlinter, owner rec-4391.
+
+**Rationale:** Chosen for compounding history nobody can backfill, a clean oracle (published totals) to judge self-healing against, mandated openly licensed data, small human-maintained incumbents, and a population giving the loop statistical power its own sessions lack: REPORT-showcase-product-and-rsi-proof.md:97-140. Rejected: an adversarial scraper (clause 3), a tenders bid pipeline (kept as the linkage layer), job-posting history, connectors as a service, brownfield-first (211 clause 6 stands): REPORT-showcase-product-and-rsi-proof.md:35-96, 131-140.
+
+```yaml reversal-conditions
+decision: 220
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: first-paying-customer
+    kind: manual
+    description: "The product's first paying customer: the burn window closes; re-decide clause 4's build-and-burn."
+  - id: tier-one-gates-bots
+    kind: manual
+    description: "A tier-one source starts gating bots: re-place it on clause 2's ladder under clause 3."
+  - id: row-grain-chosen
+    kind: manual
+    description: "CD.51 k4 chooses a row grain: re-read clause 5 and Decision 221 clause 5."
+  - id: product-abandoned
+    kind: manual
+    description: "Product abandoned: re-home clause 3 unless rec-4387 has landed."
+```
+
+**Related:** Decisions 55, 101, 178, 196, 197, 200, 205, 209, 211, 212, 221; T4.24; CD.51 (staged); rec-4385, rec-4387, rec-4388, rec-4391.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+---
+
+## Decision 218: The repository moves to otl-labs/ontheloop in one transfer-and-rename, and Decision 172's pre-stage playbook covers the owner half (amends Decisions 171, 172, 198) (Decided)
+
+```yaml
+number: 218
+status: Decided
+decided_date: "2026-10-15"
+amends: [171, 172, 198]
+significance:
+  value: numbered_decision
+  justification: >-
+    The repository's public identity and the owner half of every CI trust subject change for the
+    life of the repository. Not a contract note: github-org-transfer.yaml owns the procedure, but
+    Decision 171 cl.1 named the repository by an explicit Decision, and Decision 198 cl.3's
+    identifier map is a ratified set an annotation cannot widen.
+```
+
+**Status:** Decided
+**Date:** 2026-10-15
+**Warehouse ID:** dec-218 (per Decision 84 backfill)
+
+**Problem:** On The Loop Labs Limited owns the platform (Decision 195) and its GitHub organisation
+is `otl-labs` (Decision 198 cl.3), but the repository still lives at `benjamin-blake/theseus`, a
+personal account and a retired brand. Decision 172 cl.2's playbook assumes the numeric ids are
+permanent; a transfer changes the OWNER half, login and id, which the playbook never covered.
+
+**Decision:**
+1. **Identity.** The repository is transferred to `otl-labs` and renamed `theseus` -> `ontheloop`
+   in ONE operation, so the immutable OIDC subject changes once. Decision 198 cl.3's identifier
+   map gains the repository row `otl-labs/ontheloop`. Every other Decision 101(b) internal
+   identifier stays FROZEN, as Decision 171 cl.1 re-affirmed.
+2. **Owner half (amends 172 cl.2).** Only the REPOSITORY numeric id is durable. Before any
+   transfer, the target owner's segment, login and numeric id, is pre-staged additively in both
+   roots' `local.github_repos`, exact match (172 cl.3); the old segment is removed only after
+   live proof under the new one (172 cl.4).
+3. **Procedure.** `docs/contracts/github-org-transfer.yaml` holds the prerequisites, breakage
+   map, phases, rollback stance and predecessor removal; rollback is forward-fix with every
+   predecessor live until proof, never a transfer back.
+
+**Rationale:** One combined identity change halves the trust edits, freezes and sweeps (rec-3925)
+and retires the last external use of the Theseus brand (Decision 198 cl.1).
+
+```yaml reversal-conditions
+decision: 218
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: transfer-not-executed
+    kind: manual
+    description: "review_by passes with the repository still under the personal account: re-confirm or withdraw clause 1."
+  - id: org-handle-reopened
+    kind: manual
+    description: "Decision 198's org-handle-reopened condition fires: re-decide clause 1 before any pre-stage."
+```
+
+**Related:** Decisions 171, 172, 198 (amended), 195, 101, 94, 77, 92, 126, 177; rec-3905,
+rec-3915, rec-3902, rec-3903, rec-3136, rec-4335, rec-3925.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+---
+
+## Decision 217: Scale-readiness commitments gated on executor concurrency above 1 (amends Decisions 73, 196, 205, 206) (Decided)
+
+```yaml
+number: 217
+status: Decided
+decided_date: "2026-10-14"
+amends: [73, 196, 205, 206]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant commitments about system shape spanning Decisions 73, 196, 205 and
+    206. Not a contract governance note: they set direction, not field semantics, and git-ops.yaml
+    owns procedure. Not amendment_forms lines: one gated set spans four entries and needs one
+    monitored stanza.
+```
+
+**Status:** Decided
+**Date:** 2026-10-14
+**Warehouse ID:** dec-217 (per Decision 84 backfill)
+
+**Problem:** Anthropic's post "Redesigning source control at Anthropic" (2026-10-13,
+https://www.anthropic.com/engineering/redesigning-source-control) reports that once merges grew
+tenfold, infrastructure built for human scale became the bottleneck. Its transferable conclusions
+(no global merge lock, post-merge testing, agents own textual conflicts, humans review intent,
+derived data computed on demand) match Decision 73. A review of this repository against it
+(https://claude.ai/code/session_011cfEwz5UxFbXnqycRhnXbL, 2026-10-14) agreed commitments not
+actionable at rec-level concurrency 1 and with no roadmap home.
+
+**Intent:**
+Scale-readiness direction is recorded with triggers, so it self-surfaces when concurrency rises.
+
+**Decision:**
+1. **No global merge enforcer for red main.** Above concurrency 1, Decision 73 cl.4's plan-time
+   block on an open ci-rca rec becomes an overlap block between the plan's and the red's affected
+   sets (Decision 135's import-closure and data-edge channels, scripts/checks/deps/affected_tests.py).
+   A red whose file set cannot be determined still blocks (Decision 215). Until then cl.4 stands.
+2. **Textual conflicts.** Once the git-ops procedure of rec-4323 lands, the implementing agent
+   resolves three mechanical classes (derived files by regeneration, rosters by union, the
+   numbering race by renumbering) under the existing structural handoff gate (full tier on the
+   rebased tree) and stops only for judgment conflicts. Above concurrency 1, a bounded rebase step
+   owns every textual conflict, two failures escalate via a rec, and semantic conflicts not
+   excluded by CD.37's semantic locks (T4.8) stay post-merge (Decision 73).
+3. **Identity.** Interactive sessions keep the operator's identity (the CC-web proxy acts as the
+   operator). The executor lane is ONE non-bypass GitHub App (confirms Decisions 185 cl.3 and
+   205), persona as metadata (branch prefix, label, trailer); per-persona Apps wait on a measured
+   rate-limit breach. The free tier uses a repository-scoped fine-grained token.
+4. **Budget grain.** Tokens by kind are facts; dollars derive via the telemetry contract's
+   effective-dated price table. The governor acts on each lane's binding unit: API lane, a dollar
+   cap per rec and per day; subscription lane, turns and wall-clock plus Decision 206 cl.6's
+   plan-limit pause. Cost per verified merge is top-line; shadow dollars are never a spend.
+5. **Decision identity.** When Decision 196 cl.8's per-file split executes, the file slug is the
+   identity and the index generator derives the sequence number from first-parent merge order for
+   new entries only; existing numbers freeze and Decision 196 cl.6 prefixes are unchanged. Until
+   then numbers stay max-plus-one with the re-check.
+6. **Non-atomic.** With the split, clause ids become addressable in the decision-entry grammar and
+   a supersession edge may target a clause.
+7. **Index.** With the split, the index is generated into the gitignored runtime root (Decision
+   211 cl.5) at session start and in CI, never committed.
+8. **Review.** The pre-merge scout on every plan PR head SHA (Decision 205 cl.1, T4.25 c1) is
+   unchanged and never sampled. Above concurrency 1, extending Decision 205 cl.1's eligible list, a
+   push-to-main scout audits merged Tier C entries against Tier A and files a rec on a hit; human
+   review of Tier C is sampled, ratcheted with the T4.4 gates.
+
+**Coverage:** none enforced today. Homes: cl.1-2, 8 T4.4 (cl.1-2 also T4.8); cl.3
+T4.1/T4.2/T4.9a; cl.4 T4.11 (Decision 185 cl.3 ceilings); cl.5-7 T4.24 c7; cl.8 T4.25.
+Measurement: rec-4321, rec-4322.
+
+**Rationale:** Recording the destination unbuilt follows Decision 197 cl.8 and is not frame-lock
+(Decision 75): behaviour is unchanged until each trigger fires.
+
+```yaml reversal-conditions
+decision: 217
+review_by: 2027-03-31
+on_trigger: "re-plan the gated clause via /plan; review_by backstops the manual conditions"
+conditions:
+  - id: concurrency-raised
+    kind: manual
+    description: "Executor concurrency is configured above 1 (the T4.4 A2+ ratchet): clauses 1, 2 and 8."
+  - id: split-executing
+    kind: repo_state
+    predicate: roadmap_items_complete
+    params:
+      items: [T4.24]
+    description: "T4.24 complete: confirm clauses 5-7 landed with the split."
+  - id: rate-limit-breach
+    kind: manual
+    description: "A GitHub primary or secondary rate limit is hit by agent traffic: clause 3."
+  - id: red-window-growth
+    kind: manual
+    description: "Red-main window times merge rate grows until unrelated PRs routinely land on a red base: clause 1 early."
+```
+
+**Related:** Decisions 73, 196, 205, 206 (amended), 135, 215, 177, 167, 197, 75, 211, 185, 86;
+CD.37.
+
+> **Amended by Decision 226 (2026-10-18):** Clause 1's overlap block is pulled forward to executor concurrency 1 by the red-window-growth condition (Decision 226 cl.3: rec-4427's 11.7-hour red window at about 11 merges a day), so the concurrency-raised trigger no longer gates clause 1, and past the repair SLO Decision 226 cl.4 restores the global plan and dispatch block; clauses 2-8 are unchanged.
+
+> **Amended by Decision 229 (2026-10-19):** Clause 8's T4.25 c1 pointer and its Coverage home (cl.8 T4.25) are now T4.30's flip (T4.25 is reserved); its pre-merge scout means every plan PR head SHA is covered by a scout verdict over an identical scout-input fingerprint (T4.32 c4); never sampled.
+
+---
+
+## Decision 216: One owner per DuckLake metadata schema -- scoped catalog logins never hold CREATE, and telemetry tables are created under the owner login, by CI on the disposable smoke catalog (amends Decision 143 clause 2 and Decision 213 clause 3) (Decided)
+
+```yaml
+number: 216
+status: Decided
+decided_date: "2026-10-14"
+amends: [143, 213]
+significance:
+  value: numbered_decision
+  justification: "Durable identity-scope commitment with reversal conditions: widens Decision 143 cl.2's exact CI-reachable dispatch set and carves the smoke catalog out of Decision 213 cl.3's admin step; an amendment_forms annotation cannot widen a ratified exact set or add a carve-out (the Decision 204 cl.4 precedent), and no contract owns cross-function identity scope."
+```
+
+**Status:** Decided
+**Date:** 2026-10-14
+**Warehouse ID:** dec-216 (per Decision 84 backfill)
+
+**Problem:** DuckLake's CREATE TABLE also creates a physical Postgres table per table even with inlining off, so provisioning needs CREATE on the metadata schema; the telemetry writer's DML-only login could not run provision_telemetry (rec-4294's trigger), firing Decision 213's reversal condition scoped-login-blocks-verbs.
+
+**Decision:**
+1. Single owner: every object in a DuckLake metadata schema is owned by that schema's owner and all DuckLake-level DDL (create, alter, partition, extension migration) runs under the owner login; a scoped login never holds CREATE on any schema, public included.
+2. Smoke: ducklake_maintenance_smoke gains create_telemetry_tables (create-if-absent DDL for the declared telemetry tables, read-only drift checks, no row writes, no drop, nothing read from the event), run by the governed deploy pipeline's maintenance-smoke stage before the telemetry gate. Amends Decision 143 cl.2: its dispatch set is EXACTLY {merge, gc, breaker_probe, hot_merge, create_telemetry_tables}; reversible and disposable, so agent-autonomous under cl.3.
+3. Amends Decision 213 cl.3: creating a telemetry table is a schema migration. On the disposable smoke catalog it runs as clause 2's CI verb; on a production telemetry catalog it stays an admin step under the owner login, operator-invoked (Decision 126 admin tier), and an ADMIN-container agent path needs its own carve-out (rec-4292). CI-run creation through a production-scoped migrator login is the preferred end state but is not justified now (rec-4316). The telemetry writer keeps provision_telemetry as DML only (verify presence and drift, seed the counter rows), so ops_entity_counters keeps one write path.
+4. Decision 213's scoped-login-blocks-verbs condition fired and is resolved by moving the verb, not by widening the grant set. "DML-only" contains which catalog a scoped login reaches, not DuckLake-level verbs: metadata DML already permits a DuckLake DROP TABLE, so verb containment stays the closed verb set, S3 without DeleteObject and the nightly dump (rec-4297 narrows the grants by measurement).
+
+**Rationale:** Measured on Postgres 16 with a Neon-shaped non-superuser owner: when the scoped login creates DuckLake's physical tables it owns them, and the owner login's reader, nightly DR dump and maintenance can read them only through neon_superuser's pg_read_all_data -- without it all three failed; a CREATE grant also lets the login plant tables and functions (the CVE-2018-1058 class). Postgres has no CREATE OR REPLACE privilege; replacing or dropping needs ownership. Owner-created tables stay reachable by the scoped login through default privileges, including after owner ALTERs. An independent review (2026-10-14) reached the same design. Rejected: granting CREATE; owner membership in the scoped role; an owner credential or SET ROLE for the writer (its worst verb becomes everything, Decision 143 cl.1); hand-run admin creation on smoke (a human in the deploy path, which Decision 143's rationale rejected).
+
+**Coverage (Decision 181 cl.2):** the smoke catalog -- the maintenance-smoke step's ownership report (foreign-owned relations, schema owner, scoped CREATE on the metadata schema and public; other schemas are an unenforced residual, the role SQL granting none) and the telemetry gate's can_create check from the writer's own session, on every deploy; the role SQL and DuckLake's DDL behaviour -- tests/common/test_ducklake_telemetry_catalog_ownership.py, run before merge and an unenforced CI residual until rec-4071 gates it; a production telemetry catalog -- an unenforced residual until slice 2c (rec-4292); DuckLake-level DROP through metadata DML -- a residual (rec-4297); the owner-login reader and a restore without pg_read_all_data -- a residual (rec-4300); the CI path's catalog identity -- the all-catalog owner login, smoke-pinned in code only (env pin and refusal, unit-tested) -- an unenforced residual until 2c's smoke-only migrator login (rec-4292).
+
+```yaml reversal-conditions
+decision: 216
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: owner-identity-changes
+    kind: manual
+    description: "The catalog owner login is replaced, or a provider move changes ownership semantics: re-derive clause 1, with 2c's per-catalog owner role (rec-4292)."
+  - id: ducklake-ddl-on-dml-path
+    kind: manual
+    description: "A DuckLake version issues Postgres DDL on an append, registration or verify path, which tests/common/test_ducklake_telemetry_catalog_ownership.py detects: re-decide clause 1 for that path."
+  - id: telemetry-schema-churn
+    kind: manual
+    description: "Three or more production telemetry schema changes (new tables or columns) in any 90 days: re-decide clause 3 toward rec-4316's CI path."
+  - id: production-ci-ddl-mechanism
+    kind: manual
+    description: "A CI-invokable, production-scoped DDL identity (for example a per-catalog migrator login) exists for any other catalog, making clause 3's admin step the costlier path: re-decide clause 3 and consider bundling rec-4316 into that work."
+```
+
+**Related:** Decision 143, 213, 126, 204, 81, 107, 55, 177, 181, 101.
+
+[Amendment 2026-10-17, Decision 222: cl.2 and cl.3 also cover adding declared nullable columns on the smoke catalog.]
+
+[Amendment 2026-10-20, Decision 230: for ducklake_smoke and ducklake_telemetry, cl.1's owner is a NOLOGIN owner role per catalog and cl.3's production step is provision_telemetry_catalog under a carve-out, the CI-path residual closed by ducklake_smoke_maintainer.]
+
+---
+
+## Decision 215: The full local recommendations cache is retired; completeness reads are bounded named verbs that fail closed (amends Decision 88 clause 1(ii) and Decision 103) (Decided)
+
+```yaml
+number: 215
+status: Decided
+decided_date: "2026-10-10"
+amends: [88, 103]
+significance:
+  value: numbered_decision
+  justification: "Replaces an invariant held across two entries (88 cl.1(ii), 103's warmed-cache clause) and sets a fail-closed rule with reversal conditions; a contract note or amendment_forms annotation cannot carry a replaced invariant across two entries (Decision 214 precedent)."
+```
+
+**Status:** Decided
+**Date:** 2026-10-10
+**Warehouse ID:** dec-215 (per Decision 84 backfill)
+
+**Problem:** The full ops_recommendations pull exceeds the Lambda 6 MB synchronous response cap, so every sync fails and preflight silently degrades its CI-RCA hard block to an empty list (rec-4232).
+
+**Decision:**
+1. No full-table ops_recommendations pull on any application path; logs/.recommendations-log.jsonl is no longer produced and both sync paths remove a stale copy. Rejected: prioritised truncation (Decision 55's false zero with a better order); keyset pagination of the full table (it rebuilds the same complete local copy, loads agent context, and pays per-query egress on every page); a RESPONSE_STREAM Function URL (the Python managed runtime cannot stream, and a streamed full table is still a full copy).
+2. Completeness reads are bounded named verbs, complete by construction or disclosing complete/total; a missing signal is null/unavailable, never []. An unavailable CI-RCA signal blocks plan commitment unless the human overrides, including when credentials are unavailable (tightens Decision 73 cl.4).
+3. Relevance reads are lookup/search verbs (interim recs_for_files; graph-aware ranking rec-4235); bulk export, if any, is a claim check outside the response body (rec-4237); verbs that are not agent tools declare agent_facing false.
+4. Replaces 88 cl.1(ii) for ops_recommendations: preflight's recs read model is exactly two bounded calls per session, counted and sized by recs_read (calls; re-serialised row bytes). Write-path fetch-before-update reads and the three small-table syncs are outside it; steady state is five reader invocations per session, plus one per open escalation episode, observable through the reader's log_invocation response_bytes.
+5. Replaces 103's warmed-read-cache clause: relevance gates read named verbs, one call per batch.
+6. The reader returns a typed 413 response_too_large, never retried.
+7. rec_by_id is deprecated in favour of recs_by_ids and removed by rec-4240 once this deploy is verified.
+
+**Coverage (Decision 181):** enforced by plan steps 1-15 of PLAN-recs-full-cache-retirement; residuals rec-4235 (cache-reference CI ban, open_recs fate, audit dedup instructions), rec-4236 (executor and other residual readers, status- or source-scoped full-column reads the 413 now makes loud, nine open recs whose acceptance greps the retired cache: rec-219..rec-227, rec-3228), rec-4237 (export, schema scan), rec-4240 (rec_by_id removal).
+
+```yaml reversal-conditions
+decision: 215
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: signal-rows-over-budget
+    kind: manual
+    description: "preflight_signal_rows re-serialised bytes above 3,000,000 (791,827 at planning); move the arithmetic server-side."
+  - id: recs-read-calls-drift
+    kind: manual
+    description: "recs_read.calls other than two."
+  - id: scoped-full-column-read-over-budget
+    kind: manual
+    description: "Any status- or source-scoped full-column recs read above 4,500,000 envelope bytes (75% of the 6,000,000 guard); the backlog_health census measured 3,051,101 at planning and rec-4236 moves it to a bounded verb."
+  - id: reader-invocations-doubled
+    kind: manual
+    description: "Daily reader invocations more than twice the 7-day pre-merge baseline (log_invocation count)."
+  - id: cheap-full-pull-transport
+    kind: manual
+    description: "A streaming or claim-check transport makes a full pull cheap and safe."
+  - id: fail-closed-blocks-frequent
+    kind: manual
+    description: "More than three fail-closed planning blocks caused by reader outages in 30 days."
+```
+
+**Related:** Decision 88 cl.1(ii), 103, 73 cl.4, 84 I-3, 55, 155 cl.2, 177, 181, 214; rec-4232, rec-4235, rec-4236, rec-4237, rec-4240.
+
+> **Amended (2026-10-12, PLAN-recs-related-verb / rec-4235, mints no new Decision number):** clause 3's graph-aware
+> ranking shipped as the `recs_related` reader verb (registry v5, agent_facing false) behind `scripts.recs_related`; the
+> planning surfaces read it in place of the interim `recs_for_files`. `recs_for_files` and `open_recs` are deprecated and
+> removed by rec-4240. The Coverage residuals rec-4235 owned (the cache-reference CI ban and the audit dedup
+> instructions) now belong to rec-4279 (Decision 181 point 2). This body is otherwise unedited.
+
+> **Update (2026-10-16):** clause 4's five reader invocations per session became six when PLAN-telemetry-reader-verbs (#1496) added preflight's creds-gated telemetry_health_count gauge; recs_read stays two calls, and a 1.2x rise is short of reader-invocations-doubled. The count is observed through log_invocation, not restated here: later changes to it are not annotated.
+
+---
+
+## Decision 214: The DuckLake catalog stays on Neon, tuned now and capped next, with measured triggers to move (amends Decision 107 and Decision 88) (Decided)
+
+```yaml
+number: 214
+status: Decided
+decided_date: "2026-10-09"
+amends: [107, 88]
+significance:
+  value: numbered_decision
+  justification: "Resets Decision 107's swap-back triggers and adds a standing invariant to Decision 88, with reversal conditions -- a commitment no contract note or amendment_forms annotation can carry; ducklake_maintenance.yaml carries the verb's field semantics."
+```
+
+**Status:** Decided
+**Date:** 2026-10-09
+**Warehouse ID:** dec-214 (per Decision 84 backfill)
+
+**Problem:** The operator proposed a pre-emptive move to RDS (cost ~$10/month and rising with agents, cold starts, egress). An independent review found the measured pain has cheaper causes: Lambda p95 26-55 s and commit p95 5.5 s against a 2,000 ms budget, with DuckLake's fix for the per-query stats scan (#859, PR #1147) inert because its index was never created; Terraform pins 6 h PITR while Decisions 88 and 107 assume 7 days.
+
+**Decision:**
+1. RDS is deferred, not rejected. Its reviewed design is kept on rec-4223, and a move stays a metadata dump, restore and secret flip because the runtime uses only plain Postgres.
+2. The stats index is created and kept by the operator-only ensure_catalog_indexes verb on every catalog schema and re-created by catalog_reinit on a re-initialised schema, both from one SQL file (no other path creates, drops or rebuilds this index). Decision 88 gains invariant (v): the stats index is present and valid on every catalog schema, reported by control_health every 6 hours (StatsIndexValid), with its alarm owned by rec-4220.
+3. Neon history is 7 days (ruling on Decision 107 cond. 2's RPO question); the compute moves into Terraform with a pinned maximum under rec-4220, so the bill cannot rise with agent count.
+4. Per-invocation wall time is the latency signal: the writer's warm per-invocation wall p95 against Decision 82's 2,000 ms (its pinned term and subject), and cold attach p95 against 3 s; commit latency is attribution.
+5. A file catalog (DuckDB file on S3 under conditional-write CAS) is adopted only when peak commit rate x swap time < 0.1, swap time < 1 s, maintenance commits reliably under CAS, a version-copy restore drill passes, and only after telemetry 2c.
+
+**Rationale:** Fix the measured cause before paying for a backend change.
+
+```yaml reversal-conditions
+decision: 214
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: capped-bill-exceeds-rds
+    kind: manual
+    description: "Neon above ~$20/month for two billing cycles once rec-4220's cap is in place."
+  - id: wall-p95-over-budget-after-tuning
+    kind: manual
+    description: "The writer's warm per-invocation wall p95 above 2,000 ms, or cold attach p95 above 3 s, for two consecutive 7-day windows after index and compute tuning."
+  - id: neon-tier-or-terms-change
+    kind: manual
+    description: "Neon's tier or terms change so that clause 3's history or the capped bill no longer holds."
+  - id: private-network-required
+    kind: manual
+    description: "A requirement for private networking that Neon cannot meet."
+  - id: file-catalog-conditions-met
+    kind: manual
+    description: "All clause 5 conditions are met."
+```
+
+**Related:** Decision 107, 88, 82, 81 cl.6, 84, 143, 191, 200, 204, 212; rec-4170, rec-4220, rec-4221, rec-4223.
+
+---
+
+## Decision 213: An identity-trusting Lambda is reachable only through its AWS_IAM Function URL, enforced in the permissions boundary; telemetry writes get their own function and their own scoped catalog login (amends Decision 81 clauses 1, 5, 6 and 7, Decision 91 clause 1 and Decision 126) (Decided)
+
+```yaml
+number: 213
+status: Decided
+decided_date: "2026-10-09"
+amends: [81, 91, 126]
+significance:
+  value: numbered_decision
+  justification: "Durable IAM and runtime-artifact commitments with reversal conditions: amends Decision 81 cl.1/5/6/7, 91 cl.1 and 126's admin tier; a governance note in ducklake_writer.yaml cannot carry a cross-function boundary invariant, and amendment_forms annotations cannot add the URL-only rule, the login model or an admin carve-out."
+```
+
+**Status:** Decided
+**Date:** 2026-10-09
+**Warehouse ID:** dec-213 (per Decision 84 backfill)
+
+**Problem:** A direct lambda:Invoke delivers the caller's raw payload as the event, so any holder of lambda:InvokeFunction can forge requestContext.authorizer.iam. Telemetry derives the tenant from that field (Decision 200 cl.1). Telemetry verbs were headed for the shared ops writer, which every agent and CI identity can invoke and which carries production-destructive verbs, and every catalog-connecting Lambda shares one database login (created through the Neon API, so likely a neon_superuser member) that reaches both catalogs' metadata.
+
+**Decision:**
+1. URL-only invariant. A handler may trust requestContext.authorizer.iam only when every non-URL path to it is closed. The permissions boundary carries three Deny statements naming by ARN each function whose handler trusts that field (today the telemetry writer) and, as defence in depth, the shared writer and reader: lambda:InvokeFunction / InvokeAsync unless lambda:InvokedViaFunctionUrl is true; lambda:AddPermission / RemovePermission / PutResourcePolicy / DeleteResourcePolicy; and lambda:Create/UpdateEventSourceMapping on lambda:FunctionArn. Every bounded identity's grant of lambda:InvokeFunction on such a function also carries the condition. A new identity-trusting function is named in the boundary, by a human-applied bootstrap change, before it ships.
+2. Telemetry write verbs run on agent-platform-ducklake-telemetry-writer under Decision 143 cl.3. Its role reaches S3 only on the telemetry catalog's data prefix and its fenced blob root, never the production ducklake/ prefix; it never carries a destructive or drop verb. The shared writer stays the sole ops_* write authority and keeps refusing telemetry boundaries. Amends Decision 81: cl.1's runtime artifacts are writer, reader, maintenance, maintenance_smoke, catalog_dr and telemetry_writer (catalog_dr was never listed); cl.5 (as widened by Decision 210) and cl.7 read as one write-time enforcement chokepoint per table, the closed boundary covering both writers. Amends Decision 91 cl.1: an identity-scoped verb set may live on its own function; OQ.15's thin-verb Lambdas are not reopened.
+3. Scoped catalog logins. The telemetry writer connects as its own SQL-created Postgres role, DML-only on its catalog's metadata schema, with a connection limit and its own secret; the role is defined in a version-controlled migration that the RDS swap re-runs. Schema migrations stay an admin step under the owner login.
+4. Detection. CloudTrail data events are logged for the named functions on the Decision 202 trail.
+5. Amends Decision 126's admin tier and, for this verb only, Decision 81 cl.6: an ADMIN-container agent may write the scoped login's secret value and invoke ducklake_maintenance's provision_telemetry_login (migration plus password) only under explicit human direction, presenting each mutation and executing it after the human accepts (the Decision 204 cl.2 shape). The password is never displayed or stored outside Secrets Manager.
+6. Authorizes docs/contracts/iam-simulate-fixture.yaml's structural budget at 650 for the URL-only simulate rows (Decision 165).
+
+**Rationale:** The boundary is the one layer every bounded principal carries and agents cannot edit (Decision 143 cl.1, Decision 144); a boundary cannot see service principals or event source mappings, so those paths are closed at their control points. Live probe 2026-10-06: the Function URL needs both InvokeFunction and InvokeFunctionUrl, and lambda:InvokedViaFunctionUrl separates URL from direct calls in identity evaluation.
+
+**Coverage (Decision 181 cl.2):** direct invoke by bounded principals -- the boundary Deny and the per-grant conditions; resource-policy and event-source paths -- the two further Denies; continuous proof -- the telemetry writer's deploy gate asserts a direct DryRun invoke is denied by the permissions boundary (the denial names it), and the post-apply simulate rows expect explicitDeny; defence in depth -- the handler rejects a missing requestContext. Residuals with owning recs: PlatformAdmin and root (unbounded by Decision 144 cl.3, trusted operators; alarm on non-URL invokes, rec-4204); the apply guard's EventBridge safe shape and the repo checks that keep the boundary list, grant conditions and guard routing in sync (rec-4203); before 2c, the PR CI role's writer invoke (rec-4205), create_ops_tables force_recreate on the CI-reachable writer (rec-4206), and the producer identity model with the telemetry writer's re-sizing (rec-4207); cl.5's per-mutation human confirmation is instruction-enforced (rec-4098).
+
+```yaml reversal-conditions
+decision: 213
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: condition-key-semantics-change
+    kind: manual
+    description: "AWS changes lambda:InvokedViaFunctionUrl semantics, the deploy gate's direct DryRun invoke stops returning AccessDenied, or the post-apply simulate's url-only rows stop reporting explicitDeny: re-decide clause 1."
+  - id: scoped-login-blocks-verbs
+    kind: manual
+    description: "The scoped login cannot run a telemetry verb that needs no destructive privilege: re-examine the grant set before widening it."
+```
+
+**Related:** Decision 81 (amended), 91 (amended), 126 (amended), 143 cl.1/cl.3, 144 cl.1/cl.3, 200 cl.1, 202, 204 cl.2, 210, 181 cl.2, 165, 84 I-1, 98, 107, 157, 177.
+
+> **Update (2026-10-09):** PLAN-url-only-invoke-guard step 8 measured that a principal whose own InvokeFunction grant is URL-only sees 'no identity-based policy allows' on a direct invoke, never the boundary's name, so the telemetry writer's deploy gate asserts AccessDenied for its own principal. The boundary Deny is proven by tests/checks/iam_tf/test_url_only_invoke_guard.py on the policy text, which names the telemetry writer, and by the post-apply simulate's url-only rows on the shared writer's ARN (same statement, explicitDeny). The reversal stanza's condition-key-semantics-change was re-armed to match.
+
+[Amendment 2026-10-14, Decision 216: cl.3's admin step is carved out for the disposable smoke catalog; the reversal condition scoped-login-blocks-verbs fired and was resolved without widening the grant set.]
+
+[Amendment 2026-10-20, Decision 230: cl.1's denies name the telemetry functions by one pattern, cl.3's logins are one per catalog binding from a closed table, cl.5's carve-out covers the two catalog verbs and the four logins, and rec-4205 and rec-4206 concern the shared ops writer and stay with the CI write narrowing plan.]
+
+[Amendment 2026-10-27, Decision 237: cl.5's scoped-login value lives in its /secret/ SecureString parameter; the password is never displayed or stored outside it.]
+
+---
+
+## Decision 212: Port independence and conformance -- one conformance suite per port against a credential-free oracle, cross-port coupling is a defect, the ops store is three ports, one file declares the bundle (amends Decision 184 clause 2 and Decision 197 clause 2) (Decided)
+
+```yaml
+number: 212
+status: Decided
+decided_date: "2026-10-06"
+amends: [184, 197]
+significance:
+  value: numbered_decision
+  justification: >-
+    Amends Decision 184 clause 2's port rule (testing model, inclusion rule, coupling rule) and
+    places Decision 197 clause 2's storage port among the ports, under reversal conditions. Not
+    amendment_forms: it amends two entries and the oracle and ops-store split clear the bar alone.
+    Not a contract note: docs/contracts/ports.yaml carries the registry, never the rule.
+```
+
+**Status:** Decided
+**Date:** 2026-10-06
+**Warehouse ID:** dec-212 (per Decision 84 backfill)
+
+**Problem:** Decision 184 clause 2 names ports but not how adapters are tested, which ports exist, or what makes a bundle valid. Cross-product bundle testing grows with every adapter, and a port drawn around today's vendors (one ops-store port for Neon plus S3) forces both halves from one vendor.
+
+**Intent:** Any supported adapter for one port composes with any supported adapter for another, proven per port and without credentials.
+
+**Decision:**
+1. One suite per port. Adapters are tested against their port's ONE conformance suite, never as a cross-product of ports. A bundle is valid by construction when each adapter passes its port's suite and no OPEN cross-port coupling exists; each supported bundle gets one smoke test. Precedent: Kubernetes conformance.
+2. Credential-free oracle. Every port has one credential-free oracle or a recorded oracle gap -- the oracle is its local adapter, or an emulator harness where one is the standing oracle (orchestration: the T4.20 moto harness, Decision 185 clause 1). (a) The gating suite runs in PR CI with no credentials against that oracle or an emulator; every other adapter must match it. (b) Optional live drift runs are credentialed, cost-capped, alarm-not-gate and never a merge gate; an LLM-invoking drift run only as Decision 205 clause 1 permits, or off Actions. A pending oracle means none exists today. run_persona has no oracle: its parity is outcome parity (Decision 206 clause 4), read from Decision 199 events (T4.27 c12).
+3. Coupling is a defect. An adapter for one port that assumes another port's adapter is a defect -- e.g. an ops-store transport needing AWS identity because compute is on AWS, or persona code calling the GitHub API (Decision 205 clause 2 forbids it). Findings are ports.yaml `coupling_findings` rows; a coupling a ratified Decision holds is an accepted row naming it, removable only by re-deciding that Decision.
+4. The ops store is three ports, matching DuckLake's own separation: catalog, table data files, and content blobs (payloads over 64 KiB), so an organisation can keep the catalog on a managed Postgres it already runs and the data in its own buckets. DuckLake stays the sole ops-store format (Decision 84 I-1). Decision 197 clause 2's work-item storage port is registered beside them: its adapters are DuckLake over whichever catalog and table-data adapters the bundle declares, so DuckLake-on-Neon is one bundle, not the cloud adapter; T4.23 stays its local-adapter item.
+5. Change surface as verbs. Git hosting is abstracted as the verbs the loop uses (T4.19 names them, ports.yaml registers them), never as a platform. GitHub is the first adapter; GitLab and bare git are future adapters, bare git needing a verdict surface other than the Checks API, which first requires re-deciding Decision 184 clause 3 and Decision 205 clause 2.
+6. Inclusion rule. A port exists for each service or platform-owned verb surface the loop reaches across a substitutable boundary: every cloud service (Decision 184 clause 2), every verb surface a ratified Decision bounds (Decision 81's closed named-verb boundary, a module boundary locally per Decision 184 clause 2; Decision 197 clause 2; Decision 206 clause 7's run_persona) and the persona compute host (Decision 205 clauses 2 and 6). docs/contracts/ports.yaml is the sole port registry. Exemption: verdict_plane and change_surface carry no local-adapter item while Decision 184 clause 3 stands, since Decision 205 clause 2's non-Actions verdict App still reports through the Checks API.
+7. Tiers. The adapter matrix is tiered supported / community / experimental (Terraform provider labelling), starts at local + GitHub + AWS, and grows only when work demands it.
+8. One declaration file. `ontheloop/platform.yaml` names the adapter per port, schema-validated; `otl doctor` runs the configured bundle's conformance probes read-only against the user's real credentials before the loop runs (cf. `dbt debug`, `terraform validate`).
+
+**Coverage (Decision 181 cl.2):** registry, oracle and finding shape -- validate_ports_contract; the coupling threshold -- the ports_open_coupling_findings_exceed predicate; each suite -- the owning item ports.yaml names (T4.2 c14, T4.20, T4.23 c4 and c16, T4.24 c14, T4.27 c7); the coupling audit -- T4.23 c15; the change-surface verbs -- T4.19 c6; clause 8 -- T4.24 c14. Advisory residual: clause 6's completeness (every cloud service has a port) is unenforced; model providers sit behind LiteLLM under inference-provider.yaml, so clause 6 mints no provider port.
+
+```yaml reversal-conditions
+decision: 212
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: suite-cannot-be-shared
+    kind: manual
+    description: "A port's adapters cannot share one conformance suite (semantic divergence too large): re-decide that port's boundary."
+  - id: coupling-findings-exceed-ten
+    kind: repo_state
+    predicate: ports_open_coupling_findings_exceed
+    params: {threshold: 10}
+    description: "More than ten open coupling_findings rows at once: re-decide the port list."
+```
+
+**Related:** Decisions 78, 81, 84, 184, 185, 197, 199, 200, 205, 206, 209, 211; T4.1, T4.2, T4.19, T4.20, T4.22-T4.24, T4.27.
+
+> **Amended by Decision 224 (2026-10-18):** Clause 8's `ontheloop/platform.yaml` also holds every project setting, under the adapter that reads it or a `clouds.<vendor>` block, and names the variable of every secret and private setting without holding its value; docs/contracts/project-configuration.yaml registers each setting.
+
+> **Amended by Decision 234 (2026-10-23):** Clause 5's future change-surface adapters are ordered by demand: a self-hosted forge (Forgejo or Gitea), then GitLab, then bare git, each first needing Decision 184 clause 3 and Decision 205 clause 2 re-decided (coupling PC-02); none is registered before demand (clause 7). Core surfaces specified after Decision 234 reference a generic change id, never a pull request number, and the existing pull-request coupling is accepted while the repository bootstraps (Decision 234 clause 4). persona_compute_host gains the local sandbox_runtime adapters (Decision 234 clauses 1-2, T4.34).
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+---
+
+## Decision 211: Brownfield adoption model -- otl init attaches to the code and its history, replaces only the change process and builds the verification plane; the house style is an optional profile and autonomy is earned by coverage (Decided)
+
+```yaml
+number: 211
+status: Decided
+decided_date: "2026-10-06"
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant product-boundary commitment (what adoption requires of a host
+    repository, how autonomy is earned there, the ontheloop/ layout) with a falsifiable
+    acceptance test. Not a contract note: no docs/contracts file owns host-repository adoption
+    (ports.yaml owns adapters, and T4.24 carries work, not the commitment). Not an
+    amendment_forms annotation: no single prior entry owns adoption.
+```
+
+**Status:** Decided
+**Date:** 2026-10-06
+**Warehouse ID:** dec-211 (per Decision 84 backfill)
+
+**Problem:** T4.24 c2 proves `otl init` against a fixture repository, and nothing records what init may assume about, or do to, an existing one. This repository's conventions (SLOC budgets, the prose freeze, the agent-first doc model, its directory layout) are enforced here, so an agent building init would read them as preconditions and adoption would mean refactoring first.
+
+**Intent:** A team adopts On The Loop on the repository it already has, without restructuring it, and earns autonomy as verification coverage grows.
+
+**Decision:**
+1. Attach, then replace the process. The platform attaches to the durable asset -- the code and its git history -- and `otl init` replaces only the change process; init never refactors code structure. Work items the loop produces later may change structure like any other work. Precedent: dbt attached to the warehouse and replaced transformation; Terraform attached to the cloud account and replaced provisioning.
+2. Required versus preferred. The platform REQUIRES a verification plane, a CI verdict plane and a store for decisions, contracts and work items. This repository's house style (SLOC budgets, prose freeze, agent-first doc model, directory layout) ships as an optional profile, never an adoption precondition; it still binds this repository. Declining the profile switches its decisions off through Tier C `supersedes` records that `otl init` scaffolds (Decision 196 clause 4), never by trimming them from Tier B.
+3. Init builds the verification plane. Characterisation (golden/approval) tests are recorded per boundary from observed behaviour: a regression envelope, never a correctness oracle -- the correctness of new work comes from the red-before rule (docs/contracts/vp-red-before.yaml). Re-baselining a golden requires a recorded, reviewed re-baseline (a work item plus evidence naming the behaviour change). Init characterises only inside a Decision 206 clause 5-style OS sandbox with no credentials and no network, and runs each boundary twice; a boundary that cannot run that way, or whose output differs, is marked as needing seams and counts toward coverage only once it runs there stably.
+4. Autonomy is earned. The autonomy level (the T3.4/T4.4 A0-A5 ladder) is a function of measured verification-boundary coverage, an input alongside T4.4's reliability thresholds, never a replacement for them. A brownfield repository starts at plan-only with human merges and earns autonomous merge as coverage grows.
+5. Layout. A tracked `ontheloop/` root folder; a gitignored `.ontheloop/` for runtime state (local catalog, logs, transcripts, run state). Tracked content is AUTHORED -- north stars and invariants, decisions with reversal conditions (Decision 196), the authority boundary, outcome-signal pointers -- or GENERATED then human-confirmed -- the boundary map (public interfaces and their consumers), the dependency graph, the verification registry (check -> boundary -> tier -> stability) and recipes (build, test, run, deploy, rollback, secrets). Every contract line carries an enforcement pointer or is marked advisory.
+6. Acceptance test. `otl init` succeeds, without refactoring, on three repositories the operator did not write.
+7. Incremental adoption. A team may take the memory layer alone (decisions plus enforcement), then the queue and the plan/implement workflow, then the autonomous loop, and stop at any level.
+
+**Coverage (Decision 181 cl.2):** clauses 1-2 -- T4.24 c9 (init derived from the recorded structural assumptions); clause 3 -- T4.24 c11; clause 5 -- T4.24 c12; clause 6 -- T4.24 c10; clause 7 -- T4.24 c13; clause 4 -- T4.4, through owning rec rec-4192 until a T4.4 criterion carries it; the assumptions themselves -- docs/contracts/ports.yaml `structural_assumptions`, shape-checked by validate_ports_contract.
+
+```yaml reversal-conditions
+decision: 211
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: init-requires-refactor
+    kind: manual
+    description: "Two of the three clause-6 acceptance repositories need refactoring before otl init succeeds: re-decide the adoption model."
+```
+
+**Related:** Decisions 93, 181, 184, 196, 197, 206, 209, 212; T3.4, T4.4, T4.22-T4.24; docs/contracts/vp-red-before.yaml.
+
+> **Amended by Decision 224 (2026-10-18):** Clause 5's gitignored `.ontheloop/` also holds `.ontheloop/config.yaml`, one clone's machine settings (Decision 224 clause 2); it holds no secret or private value.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.7 and NS.8 in docs/contracts/north-star.yaml; clauses unchanged.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+---
+
 ## Decision 210: Data rules are enforced at the write boundary wherever the write can decide them; data-quality monitors own only what a write cannot (amends Decision 81 clauses 5 and 8) (Decided)
 
 ```yaml
@@ -44,6 +2277,18 @@ conditions:
 
 **Related:** Decision 207, 81 cl.5 and cl.8 (amended), 84 I-2, 103, 55, 199, 184 cl.2, 100, 181 cl.2, 163, 70, T1.6; CD.12 refined, not amended -- its ops single-source choice is deferred to rec-4158, telemetry's source is its Class A contract (already so under Decision 199), and its FK-pre-commit discipline is narrowed to write-decidable references (references across independent producers stay DQ, already so under Decision 199 / R3); CD.12's ratification reconciles with this Decision.
 
+[Amendment 2026-10-04, rec-4158: cl.3's ops choice is made -- the ops tables' single source is the owning Class A contract
+(ops_recommendations.yaml), field_semantics.yaml its projection; ops.yaml and the CD.12 models are DQ-side,
+never a rule source. A rule binds rows created on or after its exclude_before and any column a write changes; no date moves
+later. An exemption names its owning rec, except a repository_state rule (no write can decide it), naming its enforcing
+producer. Detail: data-modeling-standard.yaml.]
+
+[Amendment 2026-10-15, rec-4158: the writer-conformance residual is closed for row-local rules on every writer verb
+(validate_write_time_enforcement_conformance); a declared rule is enforced, so the enforced key is retired; value removal and
+new exemptions ratchet. Detail: data-modeling-standard.yaml.]
+
+> **Update (2026-10-18):** the Coverage line's rec-4101 residual is enforced by telemetry_orphan_counts and telemetry-verification workflow; rec-4439 owns the rest. No clause changes.
+
 ---
 
 ## Decision 209: Open-core paywall on organisational scale, never capability -- a multi-tenant, metadata-only control plane over a customer-owned data plane, and three monorepos placed by platform-vs-product and visibility (amends Decision 184 clause 1, Decision 178 and Decision 101 point (f)) (Decided)
@@ -69,6 +2314,8 @@ significance:
 **Problem:** Decision 184 makes this repository the free tier and the paid plane a separate repository, but not where the paywall falls, how tenant data is held, where products live, or whether cloud adapters stay public (its `adapter-residency` condition), so an agent could paywall capability.
 
 **Intent:** One team runs the whole governed loop on one repository for free; On The Loop charges for organisational scale.
+
+> **Amended by Decision 233 (2026-10-23):** Clause 1 is reworded, not reversed: scale is never blocked, and the tooling that makes scale painless is paid. Running the loop on any number of repositories through the public adapters is free, so this Intent's "on one repository" no longer bounds what is free and multi-repository operation itself is no longer paid; the multi-tenant control plane and what it carries, and operating it for you, stay paid (Decision 233 clause 2). Clauses 2-5 are unchanged.
 
 **Decision:**
 1. **Paywall.** The line is organisational scale, never capability (here: single-team governed-loop function). Everything one team needs to run the full governed loop on one repository is free. Paid: multi-repository operation; the multi-tenant control plane (tenancy-enforcement code stays in the public cloud adapter, Decision 200 clause 2); SSO/RBAC; audit, and retention policy set in the control plane over data that stays in the data plane; org-wide distribution of north stars and Tier C overrides (Decision 196; per-repository tiers and the Tier B snapshot stay free); fleet telemetry dashboards over allow-listed Decision 199 metadata; the cross-product DAG layer (multi-repository aggregation, not Decision 197's edge model); hosted compute. These are the capability absent from the core that Decision 194 condition (b) requires. Pattern: dbt Core/Cloud, Dagster/Dagster+, Databricks, HashiCorp Cloud. Decision 101 point (f) is discharged for boundary and architecture only; no commercial surface, pricing or terms is built here.
@@ -96,6 +2343,12 @@ conditions:
 ```
 
 **Related:** Decisions 57, 84, 101, 111, 127, 171, 178, 184, 194, 196, 197, 198, 199, 200, 205 (101, 178 and 184 clause 1 amended); T4.24; rec-3923 (superseded by this entry), rec-3624, rec-4141.
+
+> **Amended by Decision 220 (2026-10-17):** Clause 3(2)'s first showcase product is named: a UK organisation graph over public money, a project under the operator's tenant in the public products monorepo, importing released platform versions; any public surface stays bound by Decision 101 point (d). Its source ladder, bot-gate stop rule and otl init proving-ground role are Decision 220's.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.7 in docs/contracts/north-star.yaml; clauses unchanged.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -235,6 +2488,12 @@ OUT OF SCOPE: Type-1 current projections (derived, rebuildable from history, Dec
 
 **Related:** Decision 81 cl.3 and cl.8 (dated annotation added), Decision 84 I-2 (dated annotation added), Decision 88 cl.1 (egress budget), Decision 100 (native-primitive spirit; reversal trigger), Decision 191 cl.1 (write_mode scoping), Decision 199 cl.1-2 (telemetry physical grain refines this), T2.52 c1 (derived materializations out of scope); rec-4061, rec-4062 (bundled), rec-4121, rec-4122, rec-4063, rec-4024, rec-4025 (coverage owners).
 
+> **Update (2026-10-04):** representation-only columns (dq_intent representation_of) are excluded from an insert-grain table's compared content, because the payload identity they represent is compared instead -- a class term, never a table name, and still an equality compare that rejects loudly, not the content-hash tiebreak this entry rejects. Detail: data-modeling-standard.yaml rule grain-enforced-at-write (PLAN-telemetry-write-conformance).
+
+> **Update (2026-10-16):** the Coverage line's reader side is now enforced, not a residual: src/common/ducklake_event_reads.py reports a differing pair as conflicted_grain_keys and derivation_conflicted, never nulling, dropping or erroring the derivation, guarded by tests/common/test_ducklake_event_read_dedupe.py::test_conflicted_keys_are_reported_never_resolved (PLAN-telemetry-reader-verbs, #1496). rec-4024 no longer owns it; rec-4025 is unchanged.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
 ---
 
 ## Decision 206: User-owned CLI persona backend -- one end user's own Claude subscription drives personas through the unmodified Claude Code CLI behind run_persona on user-owned substrate, at outcome parity under one persona contract; post-MVP (amends Decision 164) (Decided)
@@ -293,6 +2552,12 @@ conditions:
 
 **Related:** Decisions 116, 122, 164, 173, 184, 185, 199, 205; CD.27, CD.28; T4.10a, T4.15, T4.27; PLAN-persona-event-origin-plans-in-git.
 
+> **Amended by Decision 217 (2026-10-14):** Clause 6's plan-limit pause, with turn and wall-clock budgets, is the subscription lane's binding budget unit; its shadow dollars are never a spend, and cost per verified merge is the top-line metric (Decision 217 clause 4).
+
+> **Amended by Decision 234 (2026-10-23):** Clause 2: a subscription runs only work its owner initiated -- a run the owner starts, the owner's own unattended queue included -- never one another person's action triggers; a subscription-backed verdict persona on GitHub Actions runs only when the pull request's author and the run's triggering actor are its owner, the thin shell checking both, and any other pull request runs on a team API key (byok) through LiteLLM or the verdict fails, never skips (Decision 205 clause 2). On the local adapter the backend runs on per-run state signed in by a credential passed by name (for the Claude CLI, a token from claude setup-token), never the owner's own configuration, so the laptop row's saved login no longer applies there. On a user's own machine, clause 5's OS sandbox is Decision 234 clause 1's local adapter, a per-run git clone under sandbox-runtime around the whole persona process (T4.34).
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
 ---
 
 ## Decision 205: GitHub-hosted persona compute keys on GitHub event origin; plans live in git; unattended agents use the API-key lane (amends Decision 184, Decision 87, Decision 116 and Decision 73) (Decided)
@@ -342,6 +2607,12 @@ conditions:
 ```
 
 **Related:** Decisions 72, 77, 122, 164, 173; rec-3386.
+
+> **Amended by Decision 217 (2026-10-14):** The executor App is ONE non-bypass App with persona carried as metadata; per-persona Apps wait on a measured rate-limit breach (Decision 217 clause 3). Above executor concurrency 1, clause 1's eligible list gains a push-to-main decision-scout pass that audits merged Tier C entries against Tier A and files a rec on a hit; the pre-merge scout on every plan PR is unchanged (Decision 217 clause 8).
+
+> **Amended by Decision 229 (2026-10-19):** Clause 6's compute plane is reached before any loop host: plan_agent and implement_agent start through the persona_compute_host port under the operator's AWS identity, PlatformDev as launcher only, and T4.15 becomes the implement_agent-on-Fargate item whose first live run is the long_running_container confirmation (Decision 229 cl.3), its live vehicle implement_agent (T4.15 c3's workspace-mutating leg); plan_agent's mid-loop kill (T4.31 c1) is a post-confirmation conformance leg, not a CD.27 ratification precondition. Clause 1's scout runs on a draft plan PR and re-runs when the plan's scout-input fingerprint changes; plan-critique runs from ready_for_review, each on the head SHA (Decision 229 cl.4).
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -577,6 +2848,14 @@ Roadmap refs: rec-4044, rec-4049, rec-4067.
 > Delete verb, no action wildcard; admin_grant_problems pins it. Re-narrow when AWS adds a resource
 > type for the action or the provider stops calling it at plan time.
 > PLAN-heartbeat-canary-plan-time-grant.
+>
+> **Update (2026-10-17):** Clause 6's "Decision 180 clause 6 is not re-decided" is overtaken: Decision 223 adopts that alternative, placing PlatformDev, PlatformAdmin and their inline policies in terraform/bootstrap. This entry's trail, grant, name family and region rule are unchanged.
+>
+> **Update (2026-10-18):** clause 4's declared residuals are closed (rec-4067). config/aws-region holds the project region; workflow jobs read it through .github/actions/aws-region, which fails closed on an empty or invalid value and exports AWS_REGION and AWS_DEFAULT_REGION, and every sign-in takes aws-region from it. No backend block or backend file names a region: the S3 backend reads AWS_REGION, or a -backend-config region set at init from the file. validate_project_region fails any other AWS region id in .github/ YAML or terraform/ HCL, and either aws_region default that differs from the file. Unenforced, outside clause 4: Python, config and runbook region defaults and the Neon region id (rec-4404). PLAN-project-region-single-source.
+>
+> **Update (2026-10-18):** Clause 6's "email until rec-4049 lands" is discharged by Decision 225: CI holds no IAM grant on PlatformDev, so the platform-role alarm has no sanctioned CI source. Alerts stay unfiltered by actor.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -723,6 +3002,17 @@ conditions:
 
 > **Update (2026-09-28):** Decision 206 adds persona_backend (litellm | claude_cli) and billing_shape (metered_marginal | fixed_non_rollover_allowance) to telemetry_observations' model_call rows; cost_usd derives only for metered_marginal, and cost-per-verified-merge derives at read per (persona, backend). The field semantics live in the contract.
 
+> **Update (2026-10-04):** clause 5's content is the model-visible payload, the full persisted tool output is its own bounded tool_output row, and a full output above the 8 MiB cap is a typed omission row (content_omitted_reason). Detail: telemetry_transcripts.yaml (PLAN-telemetry-write-conformance). This is the last clause-5 annotation: a further change to the content tier goes to a numbered Decision (decision-entry.yaml intent_accretion_note).
+
+> **Update (2026-10-16):** clause 1 bounds derivations, not verbs: a window verb (sessions_window; operator ruling reader-k2 (a), 2026-10-04) is a bounded window of per-session derivations, each reading only its own session's calendar-day partition, capped per verb in the reader registry. Detail: telemetry_sessions.yaml WINDOW VERBS. Last clause-1 note; later ones need a numbered Decision.
+
+> **Update (2026-10-24):** clause 3's legacy producer, scripts/session/preflight.py open_telemetry_session, was retired rather than migrated (rec-4589, PLAN-retire-session-cli): it recorded nothing after PR #969. No producer mints a session id; rec-4030 keeps only the planning_session_ref re-grounding.
+
+
+[Amendment 2026-10-18, Decision 228: clause 1's root session state and duration read from turn evidence; a producer close is optional evidence.]
+
+[Amendment 2026-10-25, PLAN-telemetry-reader-and-smoke-twin (Decision 236 cl.3): production serves no transcript content until a named consumer needs it (rec-4481).]
+
 ---
 
 ## Decision 200: Tenant and project identity for telemetry -- tenant_id and project_id are opaque writer-minted ids, always present, tenancy enforcement stays a cloud-adapter property (amends Decision 197 clause 2) (Decided)
@@ -764,6 +3054,12 @@ conditions:
 ```
 
 **Related:** Decision 197 clause 2 (amended), Decision 199 (the identity hash tenant_id/project_id feed), Decision 198 (retired the 'theseus' default this decision removes from project-id.yaml), Decision 84 I-2 (writer-minted ids precedent), rec-4024 (registration verb + dimension contracts).
+
+[Amendment 2026-10-05, PLAN-telemetry-table-registration (feedback-loop review item C2): an exception to clause 1's "auto-registering an unregistered row on first sight rather than rejecting the write" for the reserved `drill:` / `synthetic:` project_ref namespace -- such a ref is registered explicitly with register_project and an append naming it while unregistered is rejected, so a mistyped or hostile ref cannot mint a real-looking project. The writer-minted, never-caller-supplied, immutable id is unchanged. Detail: docs/contracts/project-id.yaml.]
+
+[Amendment 2026-10-25, PLAN-telemetry-reader-and-smoke-twin (Decision 236 cl.4): in a single-tenant data plane read-side tenancy is the function and principal boundary; reopens when a data plane holds a second tenant.]
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.7 in docs/contracts/north-star.yaml; clauses unchanged.
 
 ---
 
@@ -857,6 +3153,11 @@ clause 7 handle reconciliation), Decision 184 (Guerdon's forward intent destinat
 (BUSL-1.1 licensing this rename rides). rec-3922 (this plan's bundled rec), rec-3902/rec-3905
 (org-handle/transfer sequence), rec-3986/rec-3990/rec-3992/rec-3995 (deferred residue).
 
+> **Amended by Decision 218 (2026-10-15):** Clause 3's identifier map gains the repository row
+> `otl-labs/ontheloop`.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
 ---
 
 ## Decision 197: Work-item mechanism boundary -- the mechanism ships, the data does not; roadmap tier items and recommendations converge on one work-item model behind a storage port, and the executor's pick surface is kind-generic from its first implementation (Decided)
@@ -920,6 +3221,10 @@ conditions:
 
 > **Update (2026-09-28):** Decision 205 clause 5 merges each plan before its implementation, so this entry's clause 5 ("the squash-merge writes them") reads as the implementation merge -- the merge that consumes the exact merged plan; the plan merge writes no edges.
 
+> **Amended by Decision 212 (2026-10-06):** Clause 2's storage port is `work_item_storage` in docs/contracts/ports.yaml (Decision 212 clause 4). Tenancy enforcement (Decision 200 clauses 1-2) stays with the cloud function_url ops_verbs adapter, Decision 200 clause 1's write boundary (coupling row PC-01).
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
 ---
 
 ## Decision 196: Three-tier decision model for the open-core product -- north stars and product decisions share one shape, platform decisions ship as a read-only per-release snapshot that user decisions supersede (amends Decision 134) (Decided)
@@ -978,6 +3283,12 @@ conditions:
 > **Amended by Decision 198 (2026-09-21):** Clause 7's "undecided organisation handle" is now
 > decided (`otl-labs`, Decision 195 clause 4 / Decision 198). `otl` remains the CLI alias of the
 > `ontheloop` product/distribution namespace, a separate identifier from the org handle.
+
+> **Amended by Decision 217 (2026-10-14):** When clause 8's per-file split executes, the file slug is the decision identity, existing numbers freeze and new numbers derive from first-parent merge order, clause ids become addressable, and the index is generated into the gitignored runtime root, never committed (Decision 217 clauses 5-7); clause 6 prefixes are unchanged.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.9 in docs/contracts/north-star.yaml. Clause 3 is amended by Decision 243, its north-star-shape-diverges condition having fired; the other clauses are unchanged.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -1062,6 +3373,14 @@ keystone of).
 > decided: `otl-labs`. The `org-handle-decided` reversal condition above is PARTIALLY discharged
 > -- the handle is recorded here, but rec-3905 stays open for its own deliverable
 > (`docs/contracts/github-org-transfer.yaml`). See Decision 198 for the full identifier map.
+
+> **Update (2026-10-15):** The `org-handle-decided` reversal condition is fully discharged by
+> Decision 218: rec-3905 closes with `docs/contracts/github-org-transfer.yaml`.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+> **Update (2026-11-02):** The `account-move-decided` reversal condition is discharged by Decision 242:
+> migrate, not rebuild; the account is assigned in place to the company.
 
 ---
 
@@ -1160,6 +3479,10 @@ conditions:
 **Related:** Decision 171 (amended -- licence terms only), Decision 184 (clause 5 grant gate),
 Decisions 93, 111, 133, 178; T4.22-T4.24, T4.24 c6; rec-3148, rec-3153, rec-3906. Contributor
 assignment (Decision 171 clause 5, rec-3154) is out of scope.
+
+> **Update (2026-10-23):** Decision 234's local-first users are licence-sensitive -- source-available terms such as BUSL draw objections -- which informs the grant-widening point (clause 4, T4.24 c6) as context only; the two stanza conditions remain the flip's sole trigger, and contributor copyright assignment stays Decision 171 clause 5's matter (rec-3154).
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -1483,6 +3806,8 @@ authority), Decision 77 (the hard block whose LATCH TRIGGER this narrows), Decis
 (route-exhaustiveness), Decision 84 I-3, Decision 183 (first occurrence, 2026-09-04). Roadmap
 refs: T2.47 (closes no exit criterion); rec-3797 (auto-closed); rec-3800 (superseded).
 
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
 ---
 
 ## Decision 189: Plan-only PRs execute a graduate pre-deploy step under inverted (red-before) polarity -- Decision 148 point 1's no-execution ruling is negated for this population (amends Decision 148) (Decided)
@@ -1758,6 +4083,13 @@ reversal condition it satisfies by shipping none), Decision 169 (the manifest su
 Decision 104 (registration surfaces), Decision 181 (declare-your-coverage), Decision 135 (why the
 gate is ungated in `--pre`), Decision 55 (a missing and a passing oracle must never look alike).
 
+> **Amended by Decision 235 (2026-10-23):** Once built, clauses 3-4 gain a second authorization
+> kind -- an evidence record naming the check, resolvable at the base ref, bound through the shared
+> marker guard (clause 7) and meeting Decision 165's authorization bar -- and reversal conditions c1
+> and c3 count it as they count markers. At an earned rung, clause 5's mark-then-drop becomes
+> blocking, shadow, drop and dropping a shadowed check needs that record; below it clause 5 stands.
+> This body is otherwise unedited.
+
 ---
 
 ## Decision 186: Closure-time artifact obligation for escape-classified recs (Decided)
@@ -1874,6 +4206,10 @@ conditions:
 > cutover is exactly a rec either gate refused. Decision 201 hardens that instruction (and
 > `.claude/commands/implement.md`) to route through the printed close_proposed command instead.
 
+> **Update (2026-10-30):** PLAN-merge-step-checks (rec-4443): no job prints a close_proposed command.
+> A Decision 201 refusal takes the route in `docs/contracts/git-ops.yaml` `resolves_trailer`; a rec this
+> decision's gate refuses stays open for the operator (rec-4088). No rule of this decision changes.
+
 ---
 
 ## Decision 185: The executor loop is a repo-owned ASL-subset definition; Step Functions is its cloud host; the leash is staged (amends Decision 39 and Decision 117) (Decided)
@@ -1921,6 +4257,8 @@ conditions:
 
 **Related:** Decision 184 (the boundary this architecture serves), Decision 39 (amended, scoped), Decision 117 (amended), Decisions 55, 75, 83, 100, 128, 143, 173; CD.27, CD.38, CD.44; rec-2827, rec-3218; audits ad02653, 7d57a0d, 842ff92.
 
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.8 in docs/contracts/north-star.yaml; clauses unchanged.
+
 ---
 
 ## Decision 184: Open-core local-first platform -- the free tier is this repository, cloud services are adapters behind ports, GitHub Actions is the verdict plane and never persona compute (Decided)
@@ -1941,6 +4279,8 @@ significance:
 **Problem:** rec-3386 records the operator's product direction: an open-core platform whose governed loop runs on user-owned substrate with no Theseus cloud, so that a user with an LLM API key and a GitHub token can install it and go. No entry records that requirement, so the corpus optimised every substrate choice for the operator's cloud deployment alone, and hosted GitHub runners were still a candidate for persona compute.
 
 **Intent:** Theseus is open-core: this repository is the free tier and runs the full governed loop locally; the operator's cloud deployment runs the same loop through adapters; the paid management plane is a separate repository importing the platform.
+
+> **Amended by Decision 233 (2026-10-23):** Read "customer-owned" for "locally" here and for "local-first" in the title: the free tier of clauses 1-2 runs on substrate the customer owns, a laptop by default (Decision 224 clause 4) and the customer's own cloud through the public adapters; clause 2's module boundary stays literal. The title is never rewritten (Decision 233 clause 1).
 
 **Decision:**
 1. Boundary. The free tier IS the platform (this repository, BUSL-1.1); the paid management plane is a separate repository importing it (Decision 178). The AWS adapters stay here today; whether they remain open or move private is OPEN (reversal stanza), never pre-decided.
@@ -1972,6 +4312,12 @@ conditions:
 > **Update (2026-09-28):** Clause 4's user-owned CLI backend, as amended by Decision 205, is specified by Decision 206 -- purpose, credential by substrate, the LiteLLM clarification, outcome parity, leash and usage window; the adapter is post-MVP (T4.27).
 
 > **Amended by Decision 209 (2026-09-28):** Clause 1's adapter residency is decided: the AWS and other cloud adapters stay public in this repository and only hosted compute is paid (Decision 209 clause 4). The `adapter-residency` condition is discharged for clause 1 only; its Decision 171 grant leg rests with Decision 194 clause 4 and T4.24 c6. The paid management plane is Decision 209 clause 2's managed control plane (multi-tenant, metadata only), held in the private monorepo of clause 3, importing released versions of the core.
+
+> **Amended by Decision 212 (2026-10-06):** Clause 2's port rule gains a testing model and an inclusion rule: one conformance suite per port against a credential-free oracle or a recorded oracle gap (the oracle is the local adapter, or an emulator harness where one is the standing oracle), cross-port coupling as a defect, the ops store as three ports (catalog, table data, content blobs) under the one DuckLake format, and `ontheloop/platform.yaml` declaring the bundle; verdict_plane and change_surface carry no local-adapter item while clause 3 stands. docs/contracts/ports.yaml is the sole port registry.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as the mission in docs/contracts/north-star.yaml; clauses unchanged.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -2062,6 +4408,8 @@ second. The admin split-apply keeps Decision 180's permanent CI-role boundary in
 letting the one human approval clear the whole incident.
 
 **Related:** 126, 154, 158, 178, T2.47, rec-3522, rec-3135, rec-2918, rec-3568.
+
+> **Update (2026-10-17):** Point 4's split-apply no longer arises for PlatformDev, PlatformAdmin or their inline policies, which Decision 223 places in terraform/bootstrap; the same split still applies to the remaining terraform/personal actions the CI apply role cannot execute by design (including trust on agent-platform-* roles other than branch and pr, OIDC provider lifecycle and SNS Unsubscribe), which rec-3583 owns flagging. Reversal (b)'s terraform/CLAUDE.md recovery row was amended in the same change.
 
 ---
 
@@ -2242,6 +4590,12 @@ mechanical budget row names), Decision 167 (the Significance routing rule this e
 Decision 150 (the significance bar this entry clears). Roadmap refs (not DECISIONS.md entries):
 rec-3332 (closed by this entry's carrying merge via the Resolves trailer).
 
+> **Amended by Decision 235 (2026-10-23):** Clause 1's routing and its "to obtain green" bar stand
+> at every rung; whether a human or earned lane evidence approves executing a routed weakening is
+> Decision 235's ladder lane, and the check names, paths and derivation mechanics it needs live at
+> docs/contracts/implement-scope-boundary.yaml invariants.content.earned_autonomy. This body is
+> otherwise unedited.
+
 ---
 
 
@@ -2312,6 +4666,10 @@ enumeration precedent), Decision 143 (clause 1 worst-verb scoping, unaffected by
 grant), Decision 113 (the two-principal split clause 3's exclusion depends on), Decision 167 clause 2
 (the category-consistency gate `amendment_forms` was rejected against). Refs: rec-3327,
 docs/contracts/iam-simulate-fixture.yaml (the PlatformDev/PlatformAdmin rows this Decision licenses).
+
+> **Update (2026-10-17):** Clause 6's rejected alternative is adopted in full by Decision 223: PlatformDev, PlatformAdmin and their five inline policies are owned by terraform/bootstrap, and terraform/personal holds only their `destroy = false` removed blocks (rec-3838). Clauses 1-5 stand in text; Decision 144 clause 3 is preserved. Reversal condition (a) is not adjudicated there (PlatformDev stays Terraform-managed, clause 4's premise); rec-4049's plan does that.
+>
+> **Update (2026-10-18):** Decision 225 re-narrows IAMRoleMetadataWrite to role/agent-platform-* and retires CI's read quartet on PlatformDev and PlatformAdmin (rec-4049). Clauses 1-2 are amended: the enumeration lists only boundary-carrying non-prefixed roles a CI-applied root declares, none today. Reversal condition (a) is not declared fired (PlatformDev stays Terraform-managed in terraform/bootstrap); its response is elected ahead of the trigger. Clauses 3-5 and condition (b) stand.
 
 ---
 
@@ -2438,6 +4796,8 @@ Theseus is the platform only; hosted products live in their own repositories and
 
 > **Amended by Decision 209 (2026-09-28):** The Intent's "hosted products live in their own repositories" now reads: products live in the products monorepo matching their visibility -- open-code products in one public products monorepo, closed-code products (the trading product, Decision 198 clause 1) in the one private monorepo that also holds the paid control plane (Decision 209 clause 3). This repository stays platform-only; its examples/ tree holds small platform reference builds, never a product.
 
+> **Update (2026-10-17):** Decision 220 records one bounded bootstrapping exception to this Intent: the first showcase product's purpose here (the platform's metadata source and proof population), why it was chosen and its provisional init-handoff input (Decision 220 clause 6, superseded at otl init) live in this repository; the product's code, own direction and growth stay in its own repository.
+
 **Problem:**
 The repository carried three estates past their end of life: the first hosted product's code
 (market-data pipeline, strategy lab, live execution, broker plumbing) on an AWS account no longer
@@ -2515,6 +4875,8 @@ reviewed, and recorded here, and the guard's retirement is disclosed rather than
 > 183 dispatch after an admin split-apply of the two PlatformDev/PlatformAdmin inline-policy
 > narrowings the CI apply role cannot write). The apply-sandbox push/PR triggers were restored in
 > #975; the drift cron `17 * * * *` is restored here. Record green at main HEAD, backlog empty.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -2618,6 +4980,8 @@ envelope deliberately NOT carved out; its condition (c) is the T1.5-retirement p
 Decision 163 (the exception-path anti-pattern the no-waiver posture avoids), Decision 55
 (fail-loud), Decision 160 (retired the ceiling Decision 151's convention rested on). Roadmap refs:
 rec-3249 (resolved by this wave), rec-3264 / rec-3265 (drift flow-control, out of scope).
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -2953,12 +5317,12 @@ This trust stays additive until superseded by a scoped contraction: (a) the two 
 
 ```yaml reversal-conditions
 decision: 172
-review_by: 2026-11-15
+review_by: 2027-04-30
 on_trigger: "re-decide via /plan whether contraction is evidenced; update or re-arm this stanza"
 conditions:
-  - id: legacy-entries-provably-dead-with-proof
+  - id: old-owner-segment-removed-with-proof
     kind: manual
-    description: "All five CI roles record a live RoleLastUsed timestamp under the immutable sub (this plan's VP steps 11-12) and github_ci_deploy's pending evidence closes -> contract local.github_repos to the immutable entry alone via a follow-on plan, never silently."
+    description: "The otl-labs transfer is proven (docs/contracts/github-org-transfer.yaml phases.prove) and every CI role records a live assume under the otl-labs segment -> remove the benjamin-blake segment from both local.github_repos lists in the predecessor_removal phase, never silently (clause 4)."
   - id: future-rename-not-prestaged
     kind: manual
     description: "A future repository rename/transfer lands without the new name's immutable entry pre-staged additively beforehand -> this Decision's playbook (point 2) was not followed; re-run the same recovery and file a process gap."
@@ -2973,6 +5337,17 @@ conditions:
 > above still stands armed (not yet re-decided via `/plan`) -- its `review_by: 2026-11-15` date and
 > open condition list are recorded facts, not stale; routed to the operator to re-arm or close the
 > stanza, not resolved here.
+
+> **Amended by Decision 218 (2026-10-15):** Clause 2's playbook extends to an org transfer: the
+> owner-transfer case changes the OWNER login and numeric id, so the target owner's segment is
+> pre-staged additively before the transfer, exactly as for a rename. Only the repository id is
+> durable. Procedure: `docs/contracts/github-org-transfer.yaml`.
+
+> **Update (2026-10-20):** Reversal stanza re-armed by PLAN-oidc-owner-segment-prestage (rec-3902). Condition
+> `legacy-entries-provably-dead-with-proof` was discharged when PLAN-oidc-trust-contraction-closure (#925,
+> 2026-08-17) contracted both lists to the immutable entry; it is replaced by `old-owner-segment-removed-with-proof`,
+> the same clause-4 discipline applied to the benjamin-blake segment after the otl-labs transfer (Decision 218).
+> `review_by` moves from 2026-11-15 to 2027-04-30, matching Decision 218.
 
 ---
 
@@ -3011,6 +5386,12 @@ Decision 111's curated public-portal enumeration goes stale on merge -- three ne
 Asymmetric by half. The RENAME was reversible by an owner-executed rename-back only while the old-slug OIDC subjects stayed trusted; that window closed with Decision 172's contraction, and a further rename now follows Decision 172 point 2's pre-stage playbook. The LICENCE flip is not reversible for published versions -- a later, more permissive relicense is always available prospectively, but no published BUSL version can be unpublished. Re-decide if: (a) a copyright-provenance audit finds a contribution not covered by an assignment, in which case the dual-licensing posture must be settled BEFORE any commercial licence is sold, not after; or (b) the Additional Use Grant is read as narrowing despite point 4, in which case it reverts to "None" and the Terms stand alone.
 
 **Related:** Decision 101, Decision 111, Decision 127, Decision 128, Decision 167, Decision 172.
+
+> **Amended by Decision 218 (2026-10-15):** Clause 1's repository name is superseded: the
+> repository becomes `otl-labs/ontheloop` in one transfer-and-rename. The FROZEN internal
+> identifiers are unchanged.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -3452,6 +5833,8 @@ A strict CONSUMER ranks above every producer-side control: a consumer that switc
 
 **Related:** Decision 55 (anti-masking / fail-closed default -- the governing principle the strict consumer and R1 are both checked against), Decision 92 (gated-apply Environment model; the assert's placement preserves its marker-write guarantees), Decision 77 (no-TOCTOU; the pre-apply-failure marker family this Decision's placement sits alongside), Decision 126 (point 5 / T2.39 STARVED-class precedent this Decision preserves unchanged), Decision 142 (ci-rca fingerprint v2 / chain-lifecycle -- rec-2923's closure route), Decision 103 (closure needs a proof, not an assertion -- the live closure proof gathered for rec-2923), Decision 84 (Single Portal Invariant -- the rec-2664 filing job's sole write path), Decision 104 (test-mirror colocation convention this guard's test follows), Decision 131 (mirror-convention precedent for `tests/checks/ci_guards/`), Decision 132 (verification-graduation obligation this plan's VP steps satisfy), Decision 128 (SLOC raise-gate marker grammar R3 reuses verbatim), Decision 130 (whole-repo ratchet scope / one-time-grandfather precedent R3's seeding follows), Decision 150 (significance bar this entry clears), Decision 149 (compaction lifecycle, cited for the marker-shape precedent DCG-03 established), Decision 105 (Reversal-stanza convention), Decision 158 (terminal route set -- the rec-2664 filing job is deliberately no part of it), Decision 156 (IAM inline-policy headroom -- why the transcript-archival grant was verified rather than added), Decision 155 (the DCG-03 orphan-guard marker shape this Decision's STARVED marker mirrors), Decision 86 / Decision 127 (machine-readable contract routing -- `docs/contracts/composite-action-shape.yaml`'s home), Decision 134 (decisions-index freshness this entry's regeneration satisfies), Decision 72 (RCA-as-plan-source -- rec-2923 is the CI-RCA rec this Decision's carrying plan closes), Decision 73 (two-tier presubmit model the new check registers into). Roadmap refs (not DECISIONS.md entries): rec-2923 (closed by this plan's carrying merge, manual closure route per `docs/contracts/ci-rca-lifecycle.yaml`), rec-2664 (closed via the Resolves trailer).
 
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
 ## Decision 161: Mypy gate status is an error-count downward-ratchet -- per-file baseline, full-tier enforcement, tamper-guarded (VTS-15) (Decided)
 
 **Status:** Decided
@@ -3755,6 +6138,8 @@ after 3 rounds with all blocking items applied. Roadmap/queue refs (not DECISION
 
 **Related:** Decision 104/148 (`_common.py` sole-home), Decision 135 pt 3, Decision 73/142 (two-tier presubmit), Decision 82 (measurement-correction framing), Decision 48 (100% coverage V2 row, narrowed), Decision 124 (amended), Decision 128 (tamper-guard mirror), Decision 130 (roster precedent), Decision 76 (squash-merge), Decision 55/72/129 (fix the generator -- supersedes rec-2903's fetch-depth-alone fix). Bundled: rec-2903, rec-943.
 
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
 ## Decision 157: Secrets Manager split by value-capability -- metadata verbs ride the agent-platform-* prefix, value verbs enumerated (amends Decision 129 pt 2) (Decided)
 
 **Status:** Decided
@@ -3829,6 +6214,16 @@ Two structural facts justify the narrowing, independent of Decision 55's recover
 
 **Related:** Decision 149 (clause 3 -- owns `_assert_no_orphaned_current_rows`; this Decision narrows its guard failure-contract by forward reference), Decision 154 (structurally identical same-day precedent: a pre-condition infra failure stops latching a hard block, via a named marker plus itemised reversal conditions -- the marker shape is modelled on it), Decision 55 (anti-masking / fail-closed default -- the governing principle every point above is checked against; its "deterministic recovery remains valid" carve-out is explicitly NOT relied on here), Decision 84 (I-3 closed named-verb read boundary -- the orphan read stays on `reader.current_state`, no fallback path, no caller SQL, no new Lambda verb), Decision 72 (RCA-as-plan-source -- this Decision is filed from the required `/plan` review that AGENTS.md forbids bypassing with an inline patch), Decision 62 (2026-06-16 amendment -- weaker corroboration than an earlier plan draft claimed; cited only for establishing reader-502-driven check failure as a recognised problem class, not for ratifying an in-place skip), Decision 150 (significance bar / batch-wave convention this entry follows). Roadmap refs (not DECISIONS.md entries): rec-2876, rec-2878 (the bundled recommendations this Decision's carrying plan, PLAN-syspath-hygiene-advisory-read-tolerance, resolves).
 
+> **Amended (2026-10-14, PLAN-ducklake-typed-unmapped-errors / rec-4282, mints no new Decision number):** a dead catalog
+> connection now arrives as a typed 503 `catalog_unavailable`, not an untyped 502, and clause 2's never-transient sentence gains
+> that one error_type (`_TRANSIENT_ERROR_TYPES` in `scripts/ops_portal/reader_transient.py`, asserted equal to
+> `src/common/ducklake_handler_errors.py`'s `TRANSIENT_ERROR_TYPES`; every other error_type still gates). Deliberate fail-closed
+> narrowing: any other failure that shared the 502 (a DuckDB HTTPException or IOException on S3, Secrets Manager throttling)
+> now arrives as a typed 500 `unmapped`, is no longer retried and gates; a recurring transient class joins the dead-connection
+> predicate by a rec, never by widening the classifier. Consumers, for impact only: `scripts/ops_portal/decisions.py`,
+> `scripts/data_quality_execute.py` and two `scripts/preflight/ci_rca_gauges.py` sites (rec-4311); this licenses no call site
+> and clause 3 is unchanged.
+
 ## Decision 154: Pre-apply failures write a non-blocking infra_error marker, not a red convergence latch (amends Decision 92 by forward reference) (Decided)
 
 **Status:** Decided
@@ -3866,6 +6261,10 @@ The sandbox convergence record's red status means "an apply ran and left infrast
 **Significance:** clears the Decision 150 significance bar -- a durable architectural narrowing of the sole platform-halting hard block (Decision 77), with reversal-relevant consequences and explicit, itemised reversal conditions; not a CD state-flip, operational fact, or field-semantics change.
 
 **Related:** Decision 92 (amended by forward reference -- the gated-apply / tf-gated-apply Environment model whose always-run write this decision narrows from two branches to three; Decision 92's own body is not edited, per the Decision 126/143/145 amend-only convention), Decision 77 (no-TOCTOU; the platform-halting hard block this decision narrows the LATCH TRIGGER for, not the block itself), Decision 55 (anti-masking -- the governing principle every point above is checked against), Decision 72 (ci-rca forward-fix precedent), Decision 94 (VP10 creds-stage correction this decision is strictly louder than), Decision 126 (point 5 / T2.39 STARVED-class precedent; point 2, agents never self-direct terraform apply), Decision 142 (ci-rca fingerprint v2 / chain-lifecycle -- the sandbox-path anti-masking mechanism point 6 relies on), Decision 150 (significance bar; batch-wave/reversal-conditions convention this entry follows), Decision 143 (derive-the-set-assert-equality pattern `fetch_reviewed()` follows for `DUCKLAKE_ARTIFACT_NAMES`), Decision 131 (test-mirror convention -- not applied here; `tests/ci/` does not exist, the file is `tests/test_ducklake_artifacts.py`). Roadmap refs (not DECISIONS.md entries): T2.22 (gated-apply), T2.37 (Reconcile heal button), T2.42 (DuckLake artifact identity / c1 layer decoupling this decision's rationale depends on), T2.48 / DEP-02 (the stalled live-proof this decision unblocks), rec-2862 / rec-2824 / rec-2522 (the bundled recommendations this plan resolves).
+
+> **Update (2026-10-17):** rec-4372 showed point 1's push-path canary premise was wrong: its window has no upper bound, running from the PR's last speculative plan to the merge (about 30 minutes there), so the PR-time reference goes stale when main changes a packaged file in between (#1519's zips predated #1520's edit to `src/common/ducklake_handler_errors.py`). The speculative-plan job now records each artifact's inputs at `lambda-packages/<PR head sha>/inputs.json`. When every difference at merge traces to an input that moved on main (`DUCKLAKE_ZIP_INPUTS_MOVED`), the push run applies the saved plan.bin unchanged, writes the rebuilt zips to the fixed key and `lambda-packages/<merge sha>/`, and leaves a `superseded-by.json` pointer beside the untouched PR-time zips. Point 1's fetch follows that pointer one hop: gated-apply and Reconcile copy bytes fixed at push time, before any approval wait, whose identity rests on the input attribution rather than a PR-time byte match. Any other difference, or a missing reference or record, still fails closed as `DUCKLAKE_ZIP_MISMATCH`; the check is now a same-inputs canary, and a pre-merge double-build canary stays with rec-4194.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ## Decision 153: Fast-tier budget assertion waives a full-suite-forced --pre run (warn, not hard-fail) bounded by a forced-run ceiling derived from the pr-validate job timeout (amends Decision 73 enforcement + Decision 135) (Decided)
 
@@ -4293,6 +6692,8 @@ This Decision is the structural mechanism Decision 145's own reversal conditions
 
 [Amendment 2026-08-17: the commit-subject resolution mechanism this entry describes (`feat({slug})` commit subjects on `git log origin/main..HEAD`) is replaced by an explicit, schema-validated `implementation_declared` boolean on `PlanDocument`, resolved content-keyed via `scripts.checks._common.resolve_declared_plans` (PLAN-plan-resolution-content-keyed, provenance: explicit operator direction given during that plan's authoring). The two-leg model and advisory-SKIP shape this entry describes are unchanged; only the resolution signal moves from commit-message grammar to diff-carried plan content.]
 
+[Amendment 2026-10-31: point 2's resolution order gains `OTL_VENV_PYTHON` ahead of `.venv`. When set, `bin/venv-python` execs that interpreter if it is an executable file, else exits 1 naming the path; it never falls through to `.venv` or the PATH fallback (Decision 55 fail-loud kept). Its only setter is the CI-parity re-exec in `scripts/checks/deps/fast_tier_env.py` (PLAN-fast-tier-ci-parity, rec-4761), so the agent container's `validate --pre` subprocesses stay in the CI-shaped environment. The unset path, the sentinel-and-version fallback, and points 1 and 3 are unchanged.]
+
 ---
 
 ## Decision 147: Respond to Decision 114 reversal trigger by compacting ROADMAP-PLATFORM.yaml terminal content in place (single file preserved) (Decided)
@@ -4316,6 +6717,10 @@ This Decision is the structural mechanism Decision 145's own reversal conditions
 **Related:** Decision 114 (the reversal trigger this Decision responds to), Decision 110 (single-file agent-first structure, preserved), Decision 105 (candidate-decision ratification guard, whose read fields are preserved verbatim), Decision 136 (supersession-adjacent guard context), Decision 93, Decision 108 (adopts the roadmap as canonical platform-sequencing source), Decision 86 (rationale lives in DECISIONS.md, the premise this compaction acts on), Decision 84 (portal/warehouse sync for this entry), Decision 128 (anti-silent-raise posture, the rejected Path D), Decision 145 (temporary-ceiling-raise precedent named as a reversal option).
 
 [Amendment 2026-09-25: point 4's compact form is now staged at completion by docs/contracts/tier-item-lifecycle.yaml#completion_compaction, and PLAN-roadmap-terminal-compaction re-applied it (extended to resolved open_questions and closed known_gaps) after terminal regrowth re-consumed the headroom this Decision restored; this pass is norm re-application, the structural fix is overdue and owned by rec-3960.]
+
+> **Amended by Decision 227 (2026-10-18):** Point 4's single-file norm now holds for non-retired content only: lifecycle archival, this entry's first reversal valve, moves retired tier_items to docs/ROADMAP-PLATFORM-ARCHIVE.yaml behind dependency-resolving stubs. The compact form still applies to every retired record, in either file.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -4567,6 +6972,12 @@ post-merge, never written directly).
 > `platform-security-*` detector resources: their non-prefix name is a deliberate exclusion from CI
 > reach, not a coverage gap. See Decision 202 clause 3.
 
+> **Amended by Decision 238 (2026-10-28):** the T2.49 consolidation its clause 7 sequenced loses its
+> plan half to a dedicated trusted-plan role; drift stays on the planner. This body is otherwise
+> unedited; see Decision 238.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
 ---
 
 ## Decision 143: Privileged-verb Lambda decomposition -- scope identities by worst reachable verb; enforce the boundary in a primitive outside the agent merge loop (amends Decision 81 cl.1) (Decided)
@@ -4659,6 +7070,12 @@ prefix with no new grant), Decision 125 + Decision 126 (governed code-deploy cha
 decoupling -- the smoke function's code deploys via the same `deploy-ducklake-lambdas.yml` channel),
 Decision 55 (loud-failure / no-workaround doctrine -- the split enforces the boundary structurally
 rather than papering over it with a guard).
+
+[Amendment 2026-10-14, Decision 216: cl.2's dispatch set gains create_telemetry_tables, create-only on the disposable smoke catalog.]
+
+[Amendment 2026-10-17, Decision 222: create_telemetry_tables may also add declared nullable columns on the smoke catalog; dispatch set unchanged.]
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -4879,6 +7296,8 @@ absolute and every-table-is-partitioned rule are UNCHANGED; only the DuckLake sp
 day" is corrected. Live remediation (the physical ALTER + legacy day-of-month file rewrite) is
 rec-4070.]
 
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
 ---
 
 ## Decision 136: Ratify CD.39 -- exit-criteria ledger (per-criterion status) is the realized in_progress-resolution mechanism; follow-on planning is the in_progress default (Decided)
@@ -5084,6 +7503,8 @@ conditions:
 ```
 
 **Related:** Decision 93 (Platform-MVP boundary + deferred_post_mvp lifecycle -- the frame this Decision reversal-conditions; its two "per the platform-first directive" lines are the annotation targets; also the user-explicit ad-hoc-governance filing precedent and the no-live-dep invariant the ROADMAP edits respect), Decision 75 (frame-lock anti-pattern -- this Decision is its mandated conscious-choice conversion), Decision 95 (session-rooted agent-telemetry trace/observation model -- the SEQ-03 category boundary), Decision 96 + Decision 97 (telemetry temporal + identity standards completing the Decision-95 trio), Decision 78 (DuckLake adoption / product-table vs ops-telemetry split that makes "absent PRODUCT tables" literal), Decision 105 (reversal-condition-drafting-as-a-plan-step convention; CD.3 stays DEFERRED so the ratified-CD guard is not engaged), Decision 84 (Single Portal Invariant / DECISIONS.md numbering authority + backfill ETL), Decision 86 (rationale routes into this Decision, not a new prose doc), Decision 67 (STRATEGIC-plan freeze / CD.17 -- plan_type is IMPLEMENTATION), Decision 87 + Decision 126 (fresh forward-Decision precedent), Decision 108 (reversal-conditions section precedent the machine-parseable stanza extends), Decision 40 (recorded-then-forgotten triggers -- the cautionary failure mode a follow-on condition-monitor prices), Decision 101 (platform-first external-brand posture -- same lineage).
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -5694,6 +8115,19 @@ admin tier: an ADMIN-container agent may invoke two named partition-layout maint
 explicit human direction, rather than only filing a rec. `deploy-paths.yaml`'s admin_out_of_band
 index now names this carve-out beside bootstrap-root and IAM/trust/destroy admin-only work.]
 
+[Amendment 2026-10-09, Decision 213 cl.5: the operator-only admin tier is carved out a second time beside
+Decision 204's: an ADMIN-container agent may write the telemetry writer's scoped-login secret value and invoke
+ducklake_maintenance's provision_telemetry_login only under explicit human direction, presenting each
+mutation. `deploy-paths.yaml`'s admin_out_of_band.scoped_login_provisioning indexes it.]
+
+[Amendment 2026-10-20, Decision 230: the admin tier admits provision_catalog_owner and provision_telemetry_catalog for an ADMIN-container agent under explicit human direction.]
+
+
+[Amendment 2026-10-29, Decision 239: the telemetry content reader's operator-approved deploy job changes its code and configuration, outside cl.1's UpdateFunctionCode-only scope.]
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.9 in docs/contracts/north-star.yaml; clauses unchanged.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 ---
 
 ## Decision 125: Ratify decoupling DuckLake Lambda code deploys from terraform/personal infra apply (environment-taxonomy.md section 5 conformance) (Decided)
@@ -6072,6 +8506,14 @@ required terraform-validate CI job, unaffected), Decision 55 (honest convergence
 any record; the mirror is purely an init-time enabler), Decision 127 (the quarantine + sanctioned-
 prose taxonomy recorded above).
 
+> **Update (2026-10-30, PLAN-admin-terraform-assets-session-hook):** the mirror sync moved out of
+> `bin/setup-cloud-env.sh`: that script runs once per environment snapshot and the agent proxy never signs its
+> requests, so the sync never authenticated there. The every-session SessionStart hook
+> `.claude/hooks/session_start_terraform_assets.sh` now runs it in ADMIN sessions, as PlatformDev (`agent_platform`;
+> the mirror holds public provider binaries). The non-empty gate is unchanged: it now governs
+> `$HOME/.terraform-mirror.tfrc`, which a terraform command names inline, and the reversal condition reads that
+> hook's gate in place of the setup script's.
+
 ---
 
 ## Decision 119: CC-web session-class constraint -- third-party terraform provider init is github.com-egress-blocked; validate/plan for such roots is CI-delegated (Decided)
@@ -6198,6 +8640,8 @@ closure session), audits/unclosed-loops-44ef5c6.yaml ULF-05.
 > this Decision's own condition; routed to the operator for the lockstep fix, not resolved here.
 
 > **Amended by Decision 185 (2026-09-04):** the enforcement mechanism is no longer "unchanged from Decision 44": boundary_patterns gain the executor loop kernel path (src/executor_loop/), the rendered ASL, docs/contracts/personas/, docs/contracts/executor-loop-policy.yaml, docs/contracts/executor-personas.yaml, config/agent/executor/personas.yaml, .github/CODEOWNERS and the leash's own implementation (executor_boundary_guard, scripts/checks/executor/); a base-ref required check refuses executor-authored diffs to them (T4.21); validate_executor_boundary is to become diff-seeded and fail-closed (T4.21 c5; rec-3218); and the executor's merge identity must be a GitHub App absent from branch-protection bypass_actors (Decision 83), an invariant of this boundary.
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.8 in docs/contracts/north-star.yaml; clauses unchanged.
 
 ---
 
@@ -6335,6 +8779,8 @@ ops_decisions authoring/sync authority), Decision 86 (extend the machine-parseab
 prose), Decision 93 (deferred_post_mvp fail-loud lifecycle-status precedent), Decision 110 (ratified
 CD.13 -- the agent-first structured-data exemplar this decision preserves).
 
+> **Amended by Decision 227 (2026-10-18):** "The file is retained as a single file" now holds for the live roadmap's non-retired content only: retired tier_items move to docs/ROADMAP-PLATFORM-ARCHIVE.yaml behind dependency-resolving stubs, and the 10,000-line ceiling applies to each file on its own. A per-tier split stays rejected.
+
 ---
 
 ## Decision 113: Ratify CD.26 -- Pattern-B agent auth (static-key + chained AssumeRole) supersedes Identity Center for the personal account (Decided)
@@ -6360,6 +8806,12 @@ personal account (e.g. a second account or an SSO requirement emerges for it).
 
 **Related:** Decision 105 (the ratification lane executing this), CD.10 (two-principal allow-list
 model the auth primitive change preserves).
+
+> **Update (2026-10-17):** Pattern B's two roles and their inline policies are now declared in terraform/bootstrap/platform_roles.tf and its platform_*_policies.tf siblings (Decision 223), not terraform/personal/platform_roles.tf; the two-principal semantic and the ExternalId conditions are unchanged.
+
+> **Update (2026-10-21):** "company-account (company-aws-profile)" above names the founder's former employer's AWS account, retired in the 2026-05 migration (T2.3; Decision 24's update), per the operator's confirmation of 2026-10-21 (rec-3924). It is not an account of On The Loop Labs Limited (Decision 195). This entry sets no requirement for how that company's accounts authenticate; that stays with this entry's reversal condition and Decision 195 clause 3.
+
+> **Update (2026-10-25):** The agent_static key no longer sits in the containers. Each cloud environment's agent proxy holds it as an AWS network secret and signs requests to the project region's STS host only; `~/.aws` holds placeholder credentials printed by `bin/aws-proxy-placeholder-credentials` (rec-4510, PLAN-agent-aws-proxy-credentials). Because the proxy re-signs every call to that host as the IAM user, identity checks read the assumed role from a second region's STS host (`scripts/aws_identity.py` `caller_arn`). The two roles, their ExternalId conditions and the two-principal semantic are unchanged.
 
 ---
 
@@ -6493,6 +8945,8 @@ skill/gate that reads this file).
 shipped ratification vehicle, not the never-built log-decision Lambda), Decision 90 (tier-status
 flips are a separate `/implement` bookkeeping step from ratification itself).
 
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
 ---
 
 ## Decision 107: Ratify CD.34 -- DuckLake catalog backend RDS PostgreSQL -> Neon serverless Postgres (Decision-88-amended framing) (Decided)
@@ -6536,6 +8990,8 @@ the weekly dump is relied on as the swap-back artifact.
 endpoint basis), Decision 81/CD.33 (runtime architecture retained), Decision 77 (fail-closed
 guard), Decision 100/75 (managed-service-native preference the Neon choice aligns with).
 
+[Amendment 2026-10-09, Decision 214: a pre-emptive swap-back was evaluated and deferred; once rec-4220 caps the compute, cond. 1's baseline is the capped Neon bill (~$20), not $12-15; the RDS path is no longer Terraformed (retired in #82) and its reviewed design is kept on rec-4223; history is 7 days, ruling on cond. 2.]
+
 ---
 
 ## Decision 106: Ratify CD.6 -- Personal AWS account is the destination; rebuild not migrate (Decided)
@@ -6548,6 +9004,11 @@ guard), Decision 100/75 (managed-service-native preference the Neon choice align
 > owner reopens reversal condition (a) below -- a company-owned AWS account is now a live
 > candidate second destination, pending the gated account-ownership move. This body is otherwise
 > unedited; see Decision 195 for the full derivation.
+
+> **Amended by Decision 242 (2026-11-02):** The company move does not rebuild. Reversal condition (a) is
+> answered by moving this same account to the company, so no second destination exists; condition (b)
+> stays armed for any later move. The account is assigned in place to On The Loop Labs Limited and stays standalone. This
+> body is otherwise unedited.
 
 **Decision:**
 Ratifies CD.6. Realized 2026-05-28 -- Phase B personal-account Terraform re-deploy applied and
@@ -6564,6 +9025,8 @@ be re-evaluated.
 
 **Related:** Decision 77 (fail-closed apply pipeline that realized it), CD.34 (the catalog backend
 re-platformed within this account).
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -6712,6 +9175,8 @@ Decision 43 (CC<=20 waiver-carry rule), Decision 86 (no new standing prose-archi
 this section is the sole record of the registry rationale and owner convention), rec-2420
 (the `_update_sloc_budgets` lowering-test gap this plan closed in `tests/test_checks_registry.py`).
 
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
 ---
 
 ## Decision 103: Recommendation relevance is a governed lifecycle state (CD.36 ratification) (Decided)
@@ -6786,6 +9251,8 @@ semantics.]
 > decision's already-sanctioned mode, not a new machine. The verdict LAYER Decision 201 adds
 > (vocabulary, enforcement site, structural binding) is what crosses this decision's text; the
 > venue-reuse alone would not have.
+
+> **Update (2026-10-10):** Decision 215: "Queue-wide relevance surfacing serves the warmed read-cache only" is replaced for recommendations -- the cache is retired and relevance gates read named verbs, one call per batch (Decision 215 cl.5).
 
 ## Decision 102: SLOC Waiver Ratchet -- amends Decision 43 SLOC row (Decided)
 
@@ -6880,6 +9347,8 @@ to this numbered Decision).
 
 > **Amended by Decision 209 (2026-09-28):** Point (f)'s deferred paid service offering is further discharged for boundary and architecture only: Decision 209 draws the paywall on organisational scale, a metadata-only managed control plane over a customer-owned data plane, and the repository topology. No commercial surface, pricing or terms is built, so the rest of that deferral stands; point (d) binds any public docs site.
 
+> **Update (2026-10-17):** Operator reading (2026-10-17): point (d)'s "performance figures", as Decision 198 restated it, means financial performance of any kind, not only investment performance. Non-financial curves -- coverage, freshness, accuracy, time to heal, autonomy rung, tokens and GB-seconds per verified merge -- are platform engineering and may be published (Decision 221 clause 5); financial figures of any kind are not published under point (d) as it stands. The operator intends to supersede this entry in full (rec-4389).
+
 **Problem:**
 The platform and its trading product were operating under purely internal identifiers (repo
 `agent-platform`, AWS prefixes `agent-platform-*`, profile `agent_platform`, project_id
@@ -6952,6 +9421,10 @@ is explicitly deferred. This session's only artefacts are this decision and `doc
 
 **Affected files:**
 `docs/DECISIONS.md` (this decision), `docs/ROADMAP-SEMANTO.yaml` (new third sibling roadmap).
+
+[Amendment 2026-10-27, Decision 237: point (b) gains the /secret/ SSM name family for secret values, a deliberate exclusion from /agent-platform/*.]
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -7439,6 +9912,8 @@ T5.2 (teardown) was considered but excluded: it is a near-due cost-saver (grace 
 
 **Related:** Decision 73 (sandbox-only / forward-fix posture -- the boundary is consistent with it, not a re-derivation), Decision 75 (frame-lock anti-pattern; defer-by-exception avoids it), Decision 80 (validate.py single source of truth; the invariant lives in platform_roadmap.py model_validator, picked up by validate_platform_roadmap via load()), Decision 86 (no new prose-architecture doc; boundary semantics live in Decision 93 + ROADMAP-PLATFORM.yaml agent_instructions only), Decision 90 (four-tier workflow; parked items are excluded from the next_eligible eligibility surface, not surfaced in an orient bucket).
 
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
 ---
 
 ## Decision 92: Ratify CD.35 -- agent-native Terraform CI/CD (Wave 1 shipped) (Decided)
@@ -7458,6 +9933,10 @@ T5.2 (teardown) was considered but excluded: it is a near-due cost-saver (grace 
 > exit code), and a benign code-behind-state delta gets a bounded, non-status
 > `pending_codification` marker instead of latching red. This body is otherwise unedited; see
 > Decision 190 for the full derivation, constraints, and reversal conditions.
+
+> **Amended by Decision 238 (2026-10-28):** the Wave 2 speculative plan ratified here as direction
+> no longer runs under a PR-sub planner session; it runs under an environment- and workflow-bound
+> role. This body is otherwise unedited; see Decision 238.
 
 **Problem:**
 CD.35 (Agent-native Terraform CI/CD) specified a five-wave architecture ratified via the log-decision
@@ -7620,6 +10099,14 @@ two-principal allow-list retained; state:pending unchanged), CD.33 (closed read/
 OQ.15 (resolved to option (a) here), T0.6 (closed via supersession), T0.7a/b/c/T1.1/T1.2/T1.3
 (re-grounded; still not_started), ROADMAP-PLATFORM.yaml.
 
+[Amendment 2026-10-09, Decision 213: clause 1's identity-scoped verb sets may live on their own function
+(the telemetry writer); OQ.15's thin-verb Lambdas are not reopened. The realized DuckLakeInvokeRuntime grant
+is now split into DuckLakeInvokeUrl and DuckLakeInvokeViaUrlOnly, so a direct invoke is no longer authorized.]
+
+[Amendment 2026-10-25, PLAN-telemetry-reader-and-smoke-twin (Decision 236 cl.6): the telemetry reader serves its own verb set, the event verbs minus transcript_content.]
+
+[Amendment 2026-10-29, Decision 239: the telemetry content reader serves its own verb set, transcript_row_masked and session_transcript_masked.]
+
 ---
 
 ## Decision 90: Four-Tier Workflow Architecture (Decided)
@@ -7649,6 +10136,8 @@ Tier responsibilities:
 **Supersedes:** Decision 42 (Three-Tier Workflow Architecture). Supersedes Decision 42's framing; Decision 42's body is preserved intact with its status annotated "Superseded by Decision 90".
 
 **Related:** Decision 42 (superseded here), Decision 67 (executor + STRATEGIC freeze; the current operational constraint), Decision 76 (.claude/ as the canonical interactive layer).
+
+> **Update (2026-10-19):** Decision 229 cl.1 reads the freeze above, as an interim reading pending rec-4478, as binding STRATEGIC plans and the autonomous queue consumer: before any loop host, an interactive session or the /overseer may dispatch one human-gated persona step on an operator-chosen work item (a rec today) -- plan_agent drafting its plan, every later step on that approved IMPLEMENTATION plan -- never from the rec queue.
 
 ---
 
@@ -7688,6 +10177,12 @@ The free-tier breach proved the cap is real and the access pattern, not the work
 > `ListMetrics`. Direct CloudWatch reads are no longer IAM-blocked from the dev role; this is what
 > production-gc-and-storage-stability's VP14/VP16 `aws cloudwatch get-metric-data --profile
 > agent_platform` read-back depends on.
+
+[Amendment 2026-10-09, Decision 214: invariant (v) -- the ducklake_file_column_stats (table_id, column_id) index is present and valid on every catalog schema, reported by control_health; cl.3's 7-day PITR is now true in Terraform.]
+
+> **Update (2026-10-10):** Decision 215: clause 1(ii)'s "never re-query data already in the local read-cache" no longer applies to ops_recommendations, which has no local read cache; preflight's recs read model is two bounded named-verb calls (Decision 215 cl.4). Decision and other tables keep the clause.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -7845,6 +10340,12 @@ queue current-state semantics referenced here are this decision's own `priority_
 > id-allocation replay path is a named residual under Decision 207: it is not yet the
 > reject-on-conflict grain enforcement Decision 207 requires of insert-grain tables. Fixed by
 > rec-4121 (ops-writer idempotency replay and history MERGE on the write ULID).
+
+> **[Amendment 2026-10-19, PLAN-query-ops-retirement]:** I-3's staged follow-up landed. The data-quality harness (the YAML
+> runner and the contract-rule census) reads through the reader's `dq_check` action, a closed family of twelve check kinds whose
+> SQL is server-owned and whose values are bound, so `query_ops`, its `query_current` and `assert_read_only_sql` helpers and
+> `DuckLakeReader.query` are removed. No reader action accepts caller-supplied SQL. Sources:
+> `src/common/ducklake_dq_checks.py`, `src/lambdas/ducklake_reader/handler.py`, `docs/contracts/ducklake_reader.yaml`.
 
 ---
 
@@ -8102,6 +10603,18 @@ history MERGE on the write ULID).]
 residual owned by rec-4158); clause 8's in-transaction referential existence check is write-owned under Decision 210,
 while uniqueness under the concurrent-append race stays DQ.]
 
+[Amendment 2026-10-09, Decision 213: clause 1's runtime artifacts are writer, reader, maintenance,
+maintenance_smoke, catalog_dr and telemetry_writer (catalog_dr was never listed here); clauses 5 and 7 read
+as one write-time enforcement chokepoint per table, the closed boundary covering both the shared writer and
+the telemetry writer; clause 6's "no LLM / agent invocation" carve-out gains a third maintenance verb,
+provision_telemetry_login, invocable by an ADMIN-container agent only under explicit human direction.]
+
+[Amendment 2026-10-20, Decision 230: cl.6's agent carve-outs gain provision_catalog_owner and provision_telemetry_catalog under explicit human direction.]
+
+[Amendment 2026-10-25, PLAN-telemetry-reader-and-smoke-twin (Decision 236 cl.6): runtime artifacts add the smoke telemetry writer twin and the telemetry reader; the closed read boundary is two readers.]
+
+[Amendment 2026-10-29, Decision 239: runtime artifacts add the telemetry content reader; the closed read boundary is three readers.]
+
 ---
 
 ## Decision 80: Build-Tooling Direction -- defer Bazel/Pants now; do-less baseline; decompose validate.py tool-free (Decided)
@@ -8198,6 +10711,8 @@ turn-grain telemetry on the canonical telemetry_observations / telemetry_transcr
 (Decisions 95/96/97, built at T3.20) covers the forward event-tier need. Clause 2's other named
 tables are unaffected.]
 
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
 ---
 
 ## Decision 77: Two-Axis Environment/Phase Taxonomy + Sandbox Auto-Apply (Decided)
@@ -8271,6 +10786,8 @@ OIDC CI), `docs/contracts/environment-taxonomy.md`, `docs/INTENT-ci-cd-architect
 > 168's Class D mechanism). The two-axis vocabulary reservation and apply-model / guard
 > classification content named by this Decision is unchanged -- only the file format and path
 > changed; cite `docs/contracts/environment-taxonomy.yaml` going forward.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -8353,6 +10870,8 @@ Recognise frame-lock as a named architectural-planning failure mode. Embed two m
 **Related:** Decision 39, Decision 55, Decision 58, Decision 72, `docs/INTENT-recommendation-executor.md`, `docs/INTENT-provider-agnostic-executor.md`, `docs/ROADMAP-PLATFORM.yaml` (CD.11, T4.1, T4.2)
 
 > **Update (2026-08-02):** ESB-11 (audit ad02653) -- the `terraform/data_pipeline.tf` precedent this entry cites under "primitives already in production" sits at the retained-not-applied legacy Terraform root (see `terraform/CLAUDE.md`), not a deployed pipeline. The five-Lambda Step Functions shape it demonstrates is a design-and-skill precedent, not a runtime-evidence precedent. This annotation does not amend the frame-lock finding or its mitigations.
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---
 
@@ -8450,6 +10969,10 @@ Key elements:
 
 > **Amended by Decision 205 (2026-09-28):** Once rec-4114's path filter lands, clause 2's full tier on push to main stops covering a merge touching only docs/plans/**: Decision 205 clause 5 runs the fast tier for it -- the plan checks already run in --pre on the same diff, and every full-only check that reads plan content re-asserts an invariant they gate -- with Main Canary's 3-hourly full tier as the backstop; every other push to main keeps the full tier.
 
+> **Amended by Decision 217 (2026-10-14):** Above executor concurrency 1, clause 4's plan-time block on an open ci-rca rec becomes an affected-set overlap block, and a red whose file set cannot be determined still blocks (Decision 217 clause 1); until then clause 4 stands unchanged. Textual conflicts route per Decision 217 clause 2.
+
+> **Amended by Decision 226 (2026-10-18):** Clause 3's fixed priority="critical" becomes track-derived (High for a tests-only repair on a CI-tier workflow), and a manual revert PR is a permitted Track B corrective outside terraform/** and governed deploy paths (automated revert stays excluded). Clause 3's L6 pause and clause 4's plan-time block become the red_overlap overlap block; clause 4 as written now applies only to a red past its repair SLO. Clause 5's rec -> plan -> implement recovery stands for Track B, with Track A on the fast lane (Decision 226 cl.1-4). This supersedes the Decision 217 line above for clause 4.
+
 ---
 
 ## Decision 72: RCA-as-Plan-Source for CI Merge Gate Failures (Decided)
@@ -8479,6 +11002,8 @@ Reuses the cc-scheduled-agents infrastructure (Decision 71) with a `workflow_run
 > `docs/contracts/ci-rca-lifecycle.yaml` trigger_scope, and is diagnosed and fixed by the
 > implementing agent directly (AGENTS.md `## Git-ops procedure` step 6), not via this Decision's
 > rec-filing path.
+
+> **Amended by Decision 226 (2026-10-18):** Priority is derived in code from the agent's repair_track: High for a tests-only repair on a CI-tier workflow, Critical otherwise and for every regression filing (Decision 226 cl.1). Consumption via /plan, or a cl.4 manual revert PR, stands for Track B; a Track A repair takes the fast lane with no plan cycle (cl.2).
 
 ---
 
@@ -8578,6 +11103,8 @@ The control-plane intent defines the target loop: execution -> telemetry -> veri
 The architecture review concluded that the design is unusually mature for a sole-developer system, but not fully closed operationally. The missing capability is not another isolated prompt or script; it is an explicit control-plane model that sequences telemetry trust, verification, executor RCA, workflow migration, state-machine events, and recommendation governance.
 
 **Related:** Decision 48 (verification tier), Decision 51 (local-first outbox, superseded by Decision 78), Decision 55 (RCA-first executor), `docs/INTENT-autonomous-improvement-control-plane.md`
+
+> **Update (2026-11-02):** Promoted: this entry's intent is carried as the mission in docs/contracts/north-star.yaml; clauses unchanged. The INTENT documents it names were retired by Decision 86.
 
 ---
 
@@ -8812,6 +11339,17 @@ state authority.
 > `current`, so the owning contract and the live corpus disagree with no recorded resolution;
 > routed to the operator as a possible unrecorded supersession, not resolved here.
 
+> **Update (2026-10-04):** (rec-4158, Decision 210 cl.3) for ops_recommendations the canonical field-semantic and write-time
+> rule authority is the owning Class A contract (ops_recommendations.yaml). `config/agent/data_quality/ops.yaml`'s
+> write_time flags are a transitional, parity-checked copy (validate_ops_rule_source) until rec-4158 plan C retires them; its DQ
+> checks stay until T1.6 c7 retires the file, and the description/semantics text Decision 66 guidance reads moves to the contract
+> under T2.29 c7.
+
+> **Update (2026-10-16):** (rec-4158 portal row-rule gate, Decision 210 cl.3) `config/agent/data_quality/ops.yaml`'s write_time
+> flags are retired. The portal runs the DuckLake writer's own gate (schema_gate and check_write over the contract's projection)
+> as a derived pre-check, never authoritative: inserts evaluate every rule, updates and caller-keyed upserts the undated rules
+> only. ops.yaml keeps DQ backstops, never stricter than the contract (validate_ops_rule_source), until T1.6 c7 retires it.
+
 ## Decision 64: Bootstrap Cohort Anchor for ops_recommendations is 2026-05-01 (Decided)
 
 The bootstrap cohort for ops_recommendations consists of all records created before 2026-05-01
@@ -8820,6 +11358,10 @@ The bootstrap cohort for ops_recommendations consists of all records created bef
 this table use `exclude_before: '2026-05-01'`. This anchor is fixed and must not be changed
 retroactively. Bootstrap records are not corrupt -- they predate the rules. They age out of the
 _current view as recommendations are closed or superseded.
+
+> **Update (2026-10-04):** (rec-4158, Decision 210 cl.3) 2026-05-01 is also the floor for every write-time rule's
+> `exclude_before` on ops_recommendations. A rule introduced later carries its own later date -- a rule-effective date, never a
+> moved anchor -- and no date moves later or is removed once declared (validate_ops_rule_source's ratchet enforces this).
 
 ## Decision 63: Execution Fields Excluded from ops_recommendations DQ Scope (Decided)
 
@@ -9285,5 +11827,7 @@ terraform/
 - **Regex pattern choice:** Single targeted pattern (`r'VIRTUAL_ENV="([^"]+)"'`) minimizes risk of unintended modifications to script logic.
 
 **Status:** Agent-decided
+
+> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 ---

@@ -29,6 +29,7 @@ from scripts.ci.iam_simulate import (
     resolve_placeholders,
     run_fixture,
 )
+from scripts.ci.redaction_check import ACCOUNT_ID_SHAPE
 
 _ACCOUNT = "account-id-placeholder"
 _REGION = "eu-west-2"
@@ -150,6 +151,26 @@ def test_build_triples_rejects_wildcard_target(tmp_path: Path) -> None:
         build_triples(load_fixture(_write(tmp_path, body)), _ACCOUNT, _REGION)
 
 
+def test_build_triples_rejects_a_wildcard_inside_an_arn_even_when_it_ends_in_star(tmp_path: Path) -> None:
+    body = (
+        'triples:\n  - id: x\n    verb: "lambda:CreateEventSourceMapping"\n'
+        '    target_arn_template: "arn:aws:lambda:${region}:${account_id}:*"\n'
+        '    expected_decision: explicitDeny\n    why: "w"\n'
+    )
+    with pytest.raises(ValueError, match="only the bare"):
+        build_triples(load_fixture(_write(tmp_path, body)), _ACCOUNT, _REGION)
+
+
+def test_build_triples_accepts_the_bare_star_target_for_resourceless_actions(tmp_path: Path) -> None:
+    """Decision 213: CreateEventSourceMapping has no resource type, so the policy's Resource "*" is what is matched."""
+    body = (
+        'triples:\n  - id: x\n    verb: "lambda:CreateEventSourceMapping"\n    target_arn_template: "*"\n'
+        '    expected_decision: explicitDeny\n    why: "w"\n'
+    )
+    (triple,) = build_triples(load_fixture(_write(tmp_path, body)), _ACCOUNT, _REGION)
+    assert triple.target_arn == "*"
+
+
 def test_build_triples_rejects_duplicate_ids(tmp_path: Path) -> None:
     row = (
         '  - id: dup\n    verb: "iam:GetRole"\n    target_arn_template: "arn:aws:iam::${account_id}:role/x"\n'
@@ -192,6 +213,32 @@ def test_context_entries_empty_context_sends_nothing() -> None:
     assert context_entries(_triple(context={})) == []
 
 
+@pytest.mark.parametrize("flag,rendered", [(True, "true"), (False, "false")])
+def test_context_entries_bool_value_is_a_boolean_key(flag: bool, rendered: str) -> None:
+    entries = context_entries(_triple(context={"lambda:InvokedViaFunctionUrl": flag}))
+    assert entries == [
+        {"ContextKeyName": "lambda:InvokedViaFunctionUrl", "ContextKeyValues": [rendered], "ContextKeyType": "boolean"}
+    ]
+
+
+def test_build_triples_keeps_a_bool_context_untouched_through_placeholder_resolution(tmp_path: Path) -> None:
+    body = _MINIMAL_FIXTURE + (
+        "  - id: bool-ctx\n"
+        "    verb: lambda:InvokeFunction\n"
+        '    target_arn_template: "arn:aws:lambda:${region}:${account_id}:function:agent-platform-simulate-probe"\n'
+        "    expected_decision: explicitDeny\n"
+        "    required_context_keys:\n"
+        '      "lambda:InvokedViaFunctionUrl": false\n'
+        '      "lambda:FunctionArn": "arn:aws:lambda:${region}:${account_id}:function:agent-platform-simulate-probe"\n'
+        "    why: w\n"
+    )
+    triple = next(t for t in build_triples(load_fixture(_write(tmp_path, body)), _ACCOUNT, _REGION) if t.id == "bool-ctx")
+    assert triple.context["lambda:InvokedViaFunctionUrl"] is False
+    assert _ACCOUNT in triple.context["lambda:FunctionArn"]
+    types = {e["ContextKeyName"]: e["ContextKeyType"] for e in context_entries(triple)}
+    assert types == {"lambda:FunctionArn": "string", "lambda:InvokedViaFunctionUrl": "boolean"}
+
+
 # ---------------------------------------------------------------------------
 # Verdict logic
 # ---------------------------------------------------------------------------
@@ -232,6 +279,24 @@ def test_run_fixture_treats_a_raising_simulator_as_a_mismatch() -> None:
     stream = io.StringIO()
     assert run_fixture([_triple(id="x")], _boom, stream) == 1
     assert "ERROR(RuntimeError: AccessDenied on simulate)" in stream.getvalue()
+
+
+def test_printed_output_masks_account_ids() -> None:
+    account = str(10**11 + 7)
+    target = f"arn:aws:iam::{account}:role/probe"
+    triples = [_triple(id="m", target_arn=target, expected_decision="implicitDeny"), _triple(id="e", target_arn=target)]
+
+    def _simulate(triple: Triple) -> str:
+        if triple.id == "e":
+            raise RuntimeError(f"denied: arn:aws:sts::{account}:assumed-role/R/s")
+        return "allowed"
+
+    stream = io.StringIO()
+    assert run_fixture(triples, _simulate, stream) == 2
+    output = stream.getvalue()
+    assert "[ACCOUNT_ID]" in output
+    assert ":role/probe" in output
+    assert not ACCOUNT_ID_SHAPE.search(output)
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +372,36 @@ def test_main_fails_closed_on_a_malformed_fixture(tmp_path: Path) -> None:
     assert rc == 1
 
 
+def test_main_masks_account_ids_in_error_lines(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    account = str(10**11 + 7)
+
+    def _leaky_identity(profile, region):  # noqa: ANN001, ANN202
+        raise RuntimeError(f"denied for arn:aws:sts::{account}:assumed-role/R/s")
+
+    fixture = _write(tmp_path, _MINIMAL_FIXTURE)
+    rc = main(["--fixture", str(fixture)], identity_fn=_leaky_identity, simulator_factory=lambda p, r, a: lambda t: "allowed")
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "[ACCOUNT_ID]" in err
+    assert not ACCOUNT_ID_SHAPE.search(err)
+
+    wildcard = (
+        'principal:\n  arn_template: "arn:aws:iam::${account_id}:role/r"\n'
+        'triples:\n  - id: w\n    verb: "iam:GetRole"\n'
+        '    target_arn_template: "arn:aws:iam::${account_id}:role/*"\n'
+        '    expected_decision: allowed\n    why: "w"\n'
+    )
+    rc = main(
+        ["--fixture", str(_write(tmp_path, wildcard, "w.yaml"))],
+        identity_fn=lambda profile, region: (account, region or _REGION),
+        simulator_factory=lambda p, r, a: lambda t: "allowed",
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "[ACCOUNT_ID]" in err
+    assert not ACCOUNT_ID_SHAPE.search(err)
+
+
 # ---------------------------------------------------------------------------
 # The real fixture
 # ---------------------------------------------------------------------------
@@ -356,4 +451,31 @@ def test_real_fixture_context_entries_are_well_formed() -> None:
         for entry in context_entries(triple):
             assert entry["ContextKeyName"]
             assert entry["ContextKeyValues"]
-            assert entry["ContextKeyType"] in ("string", "stringList")
+            assert entry["ContextKeyType"] in ("string", "stringList", "boolean")
+
+
+_URL_ONLY_ROWS = {
+    "url-only-direct-invoke-denied": ("lambda:InvokeFunction", "explicitDeny"),
+    "url-only-direct-invoke-absent-key-denied": ("lambda:InvokeFunction", "explicitDeny"),
+    "url-only-add-permission-denied": ("lambda:AddPermission", "explicitDeny"),
+    "url-only-put-resource-policy-denied": ("lambda:PutResourcePolicy", "explicitDeny"),
+    "url-only-add-permission-scoped": ("lambda:AddPermission", "allowed"),
+    "url-only-event-source-mapping-denied": ("lambda:CreateEventSourceMapping", "explicitDeny"),
+}
+
+
+def test_real_fixture_carries_the_url_only_rows() -> None:
+    """Decision 213: the boundary Denies are recorded with their live expectations (post-apply simulate gate)."""
+    by_id = {t.id: t for t in build_triples(load_fixture(_REPO_ROOT / DEFAULT_FIXTURE), _ACCOUNT, _REGION)}
+    for row_id, (verb, decision) in _URL_ONLY_ROWS.items():
+        assert row_id in by_id, f"missing fixture row {row_id}"
+        assert (by_id[row_id].verb, by_id[row_id].expected_decision) == (verb, decision)
+    assert by_id["url-only-direct-invoke-denied"].context["lambda:InvokedViaFunctionUrl"] is False
+    assert by_id["url-only-direct-invoke-absent-key-denied"].context == {}
+    assert by_id["url-only-add-permission-scoped"].target_arn.endswith("function:agent-platform-simulate-probe")
+    assert by_id["url-only-event-source-mapping-denied"].target_arn == "*"
+    assert (
+        by_id["url-only-event-source-mapping-denied"]
+        .context["lambda:FunctionArn"]
+        .endswith("function:agent-platform-ducklake-writer")
+    )

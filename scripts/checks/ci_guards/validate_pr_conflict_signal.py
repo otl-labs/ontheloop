@@ -43,6 +43,7 @@ _TRANSITIONAL_VAR = f"{_PREFIX_VAR}_TRANSITIONAL"
 _PREFIX_DECLARATION_RE = re.compile(rf"^{_PREFIX_VAR}=\((.*)\)\s*$")
 _TRANSITIONAL_DECLARATION_RE = re.compile(rf"^{_TRANSITIONAL_VAR}=\((.*)\)\s*$")
 _PREFIX_TOKEN_RE = re.compile(r"""["']([^"']+)["']""")
+_PREFIX_TERMINATORS = ("/", "-")
 _PREFIX_CONSUMPTION_TOKEN = "${" + _PREFIX_VAR + "[@]}"
 
 _GH_PR_LIST_RE = re.compile(r"(?:^|\$\()\s*gh\s+pr\s+list\b")
@@ -100,7 +101,7 @@ def _parse_prefix_array(logical_lines: list[str], declaration_re: re.Pattern[str
 
 def _assert_prefix_declaration(failed: list[str], script_text: str) -> None:
     """The declared-prefix universe and its transitional subset, asserted structurally: present,
-    non-empty, every token slash-terminated, no duplicates, transitional a subset of declared,
+    non-empty, every token separator-terminated, no duplicates, transitional a subset of declared,
     and consumed (expanded) somewhere outside its own declaration line -- never a specific value."""
     logical_lines = _join_continuations(script_text)
     declared = _parse_prefix_array(logical_lines, _PREFIX_DECLARATION_RE)
@@ -113,9 +114,9 @@ def _assert_prefix_declaration(failed: list[str], script_text: str) -> None:
     if not declared:
         print(f"  FAIL: {_PREFIX_VAR} declares an empty prefix set")
         failed.append("pr-conflict-signal: branch-prefix declaration empty")
-    elif not all(token.endswith("/") for token in declared):
-        print(f"  FAIL: {_PREFIX_VAR} contains a token not ending in '/': {declared}")
-        failed.append("pr-conflict-signal: branch-prefix declaration malformed (token missing trailing /)")
+    elif not all(token.endswith(_PREFIX_TERMINATORS) for token in declared):
+        print(f"  FAIL: {_PREFIX_VAR} contains a token not ending in '/' or '-': {declared}")
+        failed.append("pr-conflict-signal: branch-prefix declaration malformed (token missing trailing / or -)")
     elif len(declared) != len(set(declared)):
         print(f"  FAIL: {_PREFIX_VAR} contains duplicate tokens: {declared}")
         failed.append("pr-conflict-signal: branch-prefix declaration contains duplicate tokens")

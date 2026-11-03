@@ -340,3 +340,24 @@ def test_compare_to_declared_rejects_a_layout_for_an_unclassified_physical_table
     )
     with pytest.raises(PartitionLayoutError, match="a_stray_table"):
         compare_to_declared({"a_stray_table": bogus_layout}, semantics=_semantics())
+
+
+def test_declared_spec_for_event_table_reads_history_partition():
+    """An event entry has no ScdTableSpec (no merge key): its declared spec is the projection's own
+    history partition block, classified like any append_only history table (Decision 191 unchanged)."""
+    from src.common.ducklake_partition_layout import _declared_spec_text
+
+    triple = "year(session_started_at), month(session_started_at), day(session_started_at)"
+    semantics = _semantics()
+    semantics["ops_tables"]["telemetry_sessions"] = {
+        "status": "pre_production",
+        "table_class": "event",
+        "write_mode": "append_only",
+        "history_table": "telemetry_sessions",
+        "partition": {"history": triple},
+        "partition_column": "session_started_at",
+        "columns": {},
+    }
+    classified = scope.build_registry(semantics)["telemetry_sessions"]
+    assert classified.table_class == "append_only" and classified.side == "history"
+    assert _declared_spec_text(classified, semantics) == triple

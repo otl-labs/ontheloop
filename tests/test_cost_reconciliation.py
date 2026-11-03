@@ -1,15 +1,14 @@
 """Unit tests for scripts.cost_reconciliation.
 
-All portal calls (file_rec / update_rec / sync) are mocked -- no live warehouse
-write. The synced-cache dedupe/auto-close behaviour is proven live in the
-plan's step-9 post-merge verification, not here.
+All portal calls (file_rec / update_rec) and the source-scoped reader are mocked -- no live
+warehouse access.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -187,34 +186,27 @@ class TestReconcileDedupe:
         mock_update.assert_not_called()
         mock_sync.assert_not_called()
 
-    def test_live_mode_calls_sync_before_find_open_cost_rec_for(self) -> None:
-        call_order: list[str] = []
-
-        def _sync(*args, **kwargs):
-            call_order.append("sync")
-            return {"pulled": {}}
+    def test_live_mode_looks_up_each_trigger_without_syncing(self) -> None:
+        looked_up: list[str] = []
 
         def _find(trigger_key):
-            call_order.append(f"find:{trigger_key}")
-            return
+            looked_up.append(trigger_key)
 
         with (
-            patch("scripts.ops_data_portal.sync", side_effect=_sync) as mock_sync,
+            patch("scripts.ops_data_portal.sync") as mock_sync,
             patch("scripts.ops_data_portal.file_rec", return_value="rec-9001") as mock_file,
             patch("scripts.ops_data_portal.update_rec") as mock_update,
             patch("scripts.cost_reconciliation.find_open_cost_rec_for", side_effect=_find),
         ):
             reconcile(str(TRIPPED), "2026-06", dry_run=False)
 
-        assert mock_sync.called
-        assert call_order[0] == "sync"
-        assert any(c.startswith("find:") for c in call_order[1:])
+        mock_sync.assert_not_called()
+        assert len(looked_up) == len(set(looked_up)) >= 2
         assert mock_file.call_count == 2
         mock_update.assert_not_called()
 
     def test_live_mode_updates_existing_open_rec(self) -> None:
         with (
-            patch("scripts.ops_data_portal.sync", return_value={"pulled": {}}),
             patch("scripts.ops_data_portal.file_rec") as mock_file,
             patch("scripts.ops_data_portal.update_rec") as mock_update,
             patch("scripts.cost_reconciliation.find_open_cost_rec_for", return_value="rec-100"),
@@ -247,7 +239,6 @@ class TestReconcileDedupe:
                 "scripts.cost_reconciliation.load_telemetry_cost",
                 return_value=TelemetryCost(month="2026-06", est_cost_usd=100.0),
             ),
-            patch("scripts.ops_data_portal.sync", return_value={"pulled": {}}),
             patch("scripts.ops_data_portal.file_rec", return_value="rec-9003") as mock_file,
             patch("scripts.ops_data_portal.update_rec"),
             patch("scripts.cost_reconciliation.find_open_cost_rec_for", return_value=None),
@@ -278,7 +269,6 @@ class TestReconcileDedupe:
 
     def test_live_mode_closes_rec_on_cleared_trigger(self) -> None:
         with (
-            patch("scripts.ops_data_portal.sync", return_value={"pulled": {}}),
             patch("scripts.ops_data_portal.file_rec") as mock_file,
             patch("scripts.ops_data_portal.update_rec") as mock_update,
             patch("scripts.cost_reconciliation.find_open_cost_rec_for", return_value="rec-200"),
@@ -310,6 +300,19 @@ class TestReconcileDedupe:
             str(TRIPPED),
         )
         _validate_rec_payload(fields)  # must not raise
+
+    def test_validate_rec_payload_runs_the_portal_gate(self) -> None:
+        """The dry-run validator is file_rec's own pre-check path: a too-short context and an absolute file path are
+        refused naming the contract rule."""
+        fields = build_rec_fields(
+            TriggerResult(key="s3_share_of_bill", label="S3 share", tripped=True, measured=60.0, threshold=50.0, unit="%"),
+            "2026-06",
+            str(TRIPPED),
+        )
+        with pytest.raises(ValueError, match="at least 80 stripped characters"):
+            _validate_rec_payload({**fields, "context": "too short"})
+        with pytest.raises(ValueError, match=r"ops_recommendations\.file: must match"):
+            _validate_rec_payload({**fields, "file": "/abs/ROADMAP.yaml"})
 
 
 # ---------------------------------------------------------------------------
@@ -385,56 +388,35 @@ class TestLoaders:
 # ---------------------------------------------------------------------------
 
 
-class TestFindOpenCostRec:
-    def test_returns_none_when_cache_missing(self, tmp_path: Path) -> None:
-        missing = tmp_path / "missing.jsonl"
-        with patch.object(cr, "RECS_JSONL_PATH", missing):
+class TestFindOpenCostRecViaReader:
+    @staticmethod
+    def _reader(rows: list[dict] | None = None, error: BaseException | None = None) -> MagicMock:
+        reader = MagicMock()
+        reader.current_state.side_effect = error or (lambda table, row_filter=None: rows)
+        return reader
+
+    @staticmethod
+    def _rec(rec_id: str, key: str, status: str = "open", source: str = "cost_reconciliation") -> dict:
+        return {"id": rec_id, "status": status, "source": source, "title": f"[cost:{key}] exceeded threshold (2026-06)"}
+
+    def test_source_scoped_read_finds_open_tagged_rec(self) -> None:
+        reader = self._reader([self._rec("rec-320", "step_functions_share_of_bill"), self._rec("rec-321", "s3_share_of_bill")])
+        with patch("scripts.rec_episode._make_reader", return_value=reader):
+            assert find_open_cost_rec_for("s3_share_of_bill") == "rec-321"
+        reader.current_state.assert_called_once_with("ops_recommendations", row_filter="source = 'cost_reconciliation'")
+
+    def test_returns_none_when_status_not_open_or_tag_differs(self) -> None:
+        reader = self._reader([self._rec("rec-1", "s3_share_of_bill", status="closed"), self._rec("rec-2", "other")])
+        with patch("scripts.rec_episode._make_reader", return_value=reader):
             assert find_open_cost_rec_for("s3_share_of_bill") is None
 
-    def test_returns_match_and_skips_malformed_and_blank_lines(self, tmp_path: Path) -> None:
-        cache = tmp_path / "recs.jsonl"
-        rec = {
-            "id": "rec-321",
-            "status": "open",
-            "source": "cost_reconciliation",
-            "title": "[cost:s3_share_of_bill] S3 share exceeded threshold (2026-06)",
-        }
-        content = "\n".join(
-            [
-                "# a comment line",
-                "",
-                "not-json{{",
-                json.dumps(rec),
-            ]
-        )
-        cache.write_text(content, encoding="utf-8")
-        with patch.object(cr, "RECS_JSONL_PATH", cache):
-            result = find_open_cost_rec_for("s3_share_of_bill")
-        assert result == "rec-321"
+    def test_reader_failure_raises_instead_of_returning_none(self) -> None:
+        with patch("scripts.rec_episode._make_reader", return_value=self._reader(error=RuntimeError("reader down"))):
+            with pytest.raises(RuntimeError, match="reader down"):
+                find_open_cost_rec_for("s3_share_of_bill")
 
-    def test_returns_none_when_status_not_open(self, tmp_path: Path) -> None:
-        cache = tmp_path / "recs.jsonl"
-        rec = {
-            "id": "rec-321",
-            "status": "closed",
-            "source": "cost_reconciliation",
-            "title": "[cost:s3_share_of_bill] S3 share exceeded threshold (2026-06)",
-        }
-        cache.write_text(json.dumps(rec) + "\n", encoding="utf-8")
-        with patch.object(cr, "RECS_JSONL_PATH", cache):
-            assert find_open_cost_rec_for("s3_share_of_bill") is None
-
-    def test_returns_none_when_trigger_tag_does_not_match(self, tmp_path: Path) -> None:
-        cache = tmp_path / "recs.jsonl"
-        rec = {
-            "id": "rec-321",
-            "status": "open",
-            "source": "cost_reconciliation",
-            "title": "[cost:step_functions_share_of_bill] Step Functions exceeded threshold (2026-06)",
-        }
-        cache.write_text(json.dumps(rec) + "\n", encoding="utf-8")
-        with patch.object(cr, "RECS_JSONL_PATH", cache):
-            assert find_open_cost_rec_for("s3_share_of_bill") is None
+    def test_never_reads_cache_file(self) -> None:
+        assert not hasattr(cr, "RECS_JSONL_PATH")
 
 
 # ---------------------------------------------------------------------------
@@ -450,10 +432,10 @@ class TestReconcileReportOut:
         assert "Cost reconciliation report" in out_path.read_text(encoding="utf-8")
 
     def test_previous_month_rolls_over_year_boundary(self) -> None:
-        import datetime as _dt
+        import datetime as dt
 
-        assert _previous_month(_dt.date(2026, 1, 15)) == "2025-12"
-        assert _previous_month(_dt.date(2026, 7, 1)) == "2026-06"
+        assert _previous_month(dt.date(2026, 1, 15)) == "2025-12"
+        assert _previous_month(dt.date(2026, 7, 1)) == "2026-06"
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +456,6 @@ class TestCLI:
 
     def test_main_live_mode_reports_actions(self, capsys: pytest.CaptureFixture) -> None:
         with (
-            patch("scripts.ops_data_portal.sync", return_value={"pulled": {}}),
             patch("scripts.ops_data_portal.file_rec", return_value="rec-9002"),
             patch("scripts.cost_reconciliation.find_open_cost_rec_for", return_value=None),
         ):

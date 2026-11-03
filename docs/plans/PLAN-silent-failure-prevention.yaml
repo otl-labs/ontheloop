@@ -1,0 +1,706 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: silent-failure-prevention
+intent: >-
+  Stop the three gaps that hid rec-4589 for two months. (1) No silent success: recording CLI modes report every
+  outcome as a STATUS v1 line (PLAN-retire-session-cli's grammar and parser), so the capture records a skip as a skip
+  and a failure as a failure row, not only as transcript text; a roster and a fast-tier check keep the emitters
+  honest. First roster: the two modes that exit 0 on a skip or failure -- ops portal --file-rec (its ci_rca dedup and
+  stale-rerun paths return an existing id with exit 0, indistinguishable from a fresh filing; those paths run mostly
+  in the ci-rca GitHub Actions agent, captured once T3.20 c9 lands) and postflight --metrics (returns 0 when its child
+  steps fail) -- plus --update-rec and postflight --evidence, the other two recording modes every /implement closure
+  calls, whose failures today leave only an unattributed tool_call error row. (2) Rec hygiene:
+  never append unrelated work to an existing rec, a rec's file is the surface its acceptance checks, and followon_recs
+  defers to an existing rec only when that rec's acceptance fails while the work is undone -- authored in the
+  contracts, served through get_rec_write_guidance, pinned by a parity test. (3) Deleting a writer disposes of every
+  caller: tier-item-lifecycle's replacement closure check, the planning skill and plan-critique 12k require each caller
+  of a deleted writer to be removed, rewired or made to fail loudly. Bundles rec-3875 (the portal's cli.py exits 0
+  silently under python -m). Exit codes and stdout contracts do not change; nothing deploys.
+plan_type: IMPLEMENTATION
+implementation_declared: true
+verification_tier: V2
+plan_path: docs/plans/PLAN-silent-failure-prevention.yaml
+phase: >-
+  ad_hoc_rec (defect prevention for rec-4589, with PLAN-telemetry-field-realization; Benjamin approved 2026-10-24).
+  Closes no roadmap exit criterion: closes_criteria is empty by design (see context for the related tier item).
+  PLAN-retire-session-cli (rec-4589 plan 1) builds first and
+  owns the STATUS v1 grammar, formatter, parser and writer deploy.
+closes_criteria: []
+scope:
+- file: scripts/telemetry_capture/status_line.py
+  action: Create
+  purpose: >-
+    emit_status(source, result, reason=None) -> None, the one emitter helper. Home: the telemetry-capture package
+    (file-router.yaml telemetry-capture route); a scripts-root module would be a validate_placement RS-01 stray. It
+    deferred-imports src.turn_capture.markers (stdlib only, so the package stays stdlib only; the
+    scripts/checks/validation_result.py precedent), builds the line with
+    format_status_marker and prints it as one whole line to sys.stderr, flushed. stderr, not stdout, so the --file-rec
+    rec-id line and the --metrics JSON stay the only stdout content (tests parse them); a Claude Code Bash tool_result's
+    content carries stderr after stdout, which is what the v6 parser scans (last 200 lines of a repo-CLI command).
+    Never raises: a formatter ValueError is caught and a one-line diagnostic without the marker goes to stderr instead,
+    so a bad argument can never turn a successful insert into a non-zero exit and a re-file (E3 and E4 catch bad
+    literals first). Its docstring
+    describes the line without spelling the marker literal (the sibling guard and rule E6 match raw text).
+- file: tests/telemetry_capture/test_status_line.py
+  action: Create
+  purpose: >-
+    emit_status writes exactly one line to stderr and nothing to stdout; the line parses back through
+    markers.parse_markers to Marker("status", "<source>.<result>", ..., result=<result>) for done, skipped and failed,
+    with and without reason; a bad argument writes the diagnostic (no marker) and raises nothing.
+- file: scripts/ops_data_portal.py
+  action: Modify
+  purpose: >-
+    file_rec's body moves into file_rec_with_outcome(fields, profile=None, _migration_int_id=None, _skip_sync=False,
+    context_v2_json=None) -> FileRecOutcome; file_rec keeps its exact signature and returns .rec_id, so its 30-odd
+    callers and every patch site are unchanged (both stay facade-defined, Decision 124 patch-epicentre). The open-dedup
+    branch returns FileRecOutcome(existing_id, inserted=False, reason="ci_rca_open_duplicate"), the closed-head drop
+    branch FileRecOutcome(head.rec_id, inserted=False, reason="ci_rca_stale_rerun"), the insert FileRecOutcome(rec_id,
+    inserted=True, reason=None). SLOC: 480 at main 2850f7be and the counter includes docstring lines, so the long
+    docstring moves to file_rec_with_outcome and file_rec keeps a one-line docstring (estimate about 490). If the
+    measured count still exceeds 500, decompose into a facade submodule (Decision 128), never a budget raise.
+- file: scripts/ops_portal/outcomes.py
+  action: Create
+  purpose: >-
+    FileRecOutcome NamedTuple (rec_id str, inserted bool, reason str | None), re-exported by the facade. Its own small
+    module because _common.py's docstring scopes it to shared ROOT and region constants.
+- file: scripts/ops_portal/cli.py
+  action: Modify
+  purpose: >-
+    --file-rec calls file_rec_with_outcome and, after printing the rec id (unchanged), emits ops_portal.file_rec done
+    when inserted and skipped when not, one literal emit_status call per reason (ci_rca_open_duplicate,
+    ci_rca_stale_rerun) so E3 checks every reason; missing required fields, an invalid --context-v2-json (refused
+    inside the branch, after the missing-required check) and the ValidationError/ValueError path emit failed
+    (missing_required, invalid_context_v2_json, invalid_fields) and keep exit 1; any other exception (a writer or
+    reader RuntimeError, a missing AWS profile or credentials) is caught as Exception, emits failed (writer_error) and
+    re-raises, so the traceback and non-zero exit are unchanged. --update-rec emits ops_portal.update_rec done after its
+    confirmation line, failed (invalid_update) on the rejected-flag, no-field and ValidationError/ValueError paths and
+    failed (writer_error) before re-raising any other exception; exit codes unchanged. The only silent paths are the
+    --dry-run refusal and argparse usage errors, both before any recording mode runs. rec-3875: add
+    `if __name__ == "__main__": sys.exit(main())` so python -m scripts.ops_portal.cli is the CLI, not a silent no-op.
+- file: tests/ops_data_portal/test_cli_status_lines.py
+  action: Create
+  purpose: >-
+    Through main() with the existing patch points (_ducklake_write, _run_ci_rca_cross_check,
+    find_open_ci_rca_rec_by_fingerprint, bump_ci_rca_occurrence, closed_head_of_chain, current_commit_sha,
+    classify_closed_head; precedent tests/ops_data_portal/test_ci_rca_close_then_recur.py): an insert emits done; an open fingerprint match emits skipped reason=ci_rca_open_duplicate
+    and the stale-rerun drop skipped reason=ci_rca_stale_rerun; invalid fields and missing required fields emit failed
+    with exit 1; an invalid --context-v2-json emits failed reason=invalid_context_v2_json; a _ducklake_write
+    RuntimeError emits failed reason=writer_error and still raises, in both modes; --update-rec done and failed; in
+    every case stdout is byte-identical to today's (the rec id line or the confirmation line).
+    test_emitted_lines_parse_as_status_markers feeds the captured stderr through markers.parse_markers. Each test reads
+    stderr once with capsys.readouterr() and asserts through parse results under a fixed message, so a failing test
+    never reprints a built STATUS line (the sibling plan's constraint).
+- file: tests/ops_data_portal/test_cli_main_guard.py
+  action: Create
+  purpose: >-
+    test_cli_module_runs_under_python_m (rec-3875) -- a subprocess run of python -m scripts.ops_portal.cli --help exits 0
+    and prints usage. Its own module because tests/ops_data_portal/test_cli.py importorskips duckdb.
+- file: tests/test_ops_portal_facade.py
+  action: Modify
+  purpose: _REQUIRED_PUBLIC gains file_rec_with_outcome and FileRecOutcome.
+- file: scripts/postflight/housekeeping.py
+  action: Modify
+  purpose: >-
+    run_metrics emits postflight.metrics done when both child steps exit 0, else failed with reason
+    metrics_exit_nonzero or plan_audit_exit_nonzero (the first failing child), after printing its JSON, and failed
+    (metrics_error) before re-raising any exception (e.g. prune_telemetry_logs OSError); it still
+    returns 0 and its stdout is still exactly the JSON (exit code unchanged by design: --auto chains on it). --auto
+    inherits the line because it redirects only stdout.
+- file: scripts/session/postflight.py
+  action: Modify
+  purpose: >-
+    --evidence emits postflight.evidence done after write and render, and failed (invalid_evidence) before re-raising
+    when the file is unreadable, not JSON, or postflight_evidence.validate refuses it, and failed (evidence_error)
+    before re-raising any later exception from write or render (exit stays non-zero).
+- file: tests/session/postflight/test_status_lines.py
+  action: Create
+  purpose: >-
+    run_metrics: done when both children exit 0, failed with the right reason when either exits non-zero, return 0 and
+    json.loads(stdout) succeeds in all three; --evidence done on a valid file, failed plus a raised error on an invalid
+    one; --auto's captured stderr carries the metrics line.
+- file: config/telemetry/status_sources.yaml
+  action: Create
+  purpose: >-
+    The emitter roster: a top-level sources mapping keyed by source id (one "<source>:" line each, the form
+    rec-4602's stored acceptance greps), entries ops_portal.file_rec, ops_portal.update_rec, postflight.metrics,
+    postflight.evidence, each value {module (repo path), command (the documented invocation, e.g. "bin/venv-python -m
+    scripts.ops_data_portal --file-rec") and results (the subset it emits). Header names the residual owner rec-4602
+    (recording CLIs not yet listed, postflight --auto's own evidence, validate and verify-head steps included).
+- file: scripts/checks/hygiene/validate_status_line_emitters.py
+  action: Create
+  purpose: >-
+    Registered fast-tier check (Decision 169 manifest, Decision 170 registry.examined(n, unit="status_sources")). Pure
+    function emitter_errors(roster, modules) over parsed inputs; the wrapper reads the roster and AST-parses every .py
+    under scripts/, src/ and .claude/hooks/. Rules: E1 each source fullmatches markers.SIGNATURE_PATTERN and is at most
+    markers.STATUS_SOURCE_MAX characters; E2 results are a non-empty subset of markers.STATUS_RESULTS; E3 each row's
+    module exists and holds at least one emit_status call with that literal source for each declared result and none
+    with an undeclared result (literal result arguments), and every reason literal fullmatches the signature class; E4 every emit_status call anywhere uses literal source
+    and result arguments and a literal reason or none, and names a source the roster assigns to that module; E5 each command contains one of
+    src/turn_capture/gate_events.py STATUS_COMMAND_TOKENS (where the sibling defines it), so the v6 parser scans it; E6
+    only src/turn_capture/markers.py and scripts/telemetry_capture/status_line.py call format_status_marker (AST) or hold the marker
+    needle as raw text, the same matching mode as the sibling guard. The needle is built from markers constants
+    (f"{STATUS_MARKER_PREFIX} v{STATUS_MARKER_VERSION}"), so this module's own source never holds it. Each error names
+    the file and, where one exists, the source. Fails closed (Decision 170): a missing or unparseable roster, a roster
+    that is not a source-keyed mapping, or a scanned file that does not parse appends a failure naming the file, never
+    an examined(0) PASS. Imports PyYAML, ast and the turn_capture constants (deferred); under
+    500 SLOC.
+- file: scripts/checks/verification/_manifest.py
+  action: Modify
+  purpose: >-
+    Plan amendment (coordinator, scope-escalation rule): pre_globs gain scripts/telemetry_capture/status_line.py for
+    validate_hermeticity_flags, validate_verification_registry and validate_differential_gate_baseline, because
+    status_line.py joins their import closure through scripts.ops_data_portal (validate_pre_glob_closure pay-down).
+- file: scripts/checks/ops_governance/_manifest.py
+  action: Modify
+  purpose: >-
+    Plan amendment: validate_recommendations_schema pre_globs gain status_line.py and src/turn_capture/markers.py;
+    validate_acceptance_literals gains src/turn_capture/markers.py (closure pay-down, no behaviour change).
+- file: scripts/checks/deps/_manifest.py
+  action: Modify
+  purpose: "Plan amendment: validate_presubmit_tool_pin_escalation pre_globs gain scripts/telemetry_capture/status_line.py (closure pay-down)."
+- file: scripts/checks/hygiene/_manifest.py
+  action: Modify
+  purpose: >-
+    Entry validate_status_line_emitters, pre=True with NO pre_globs (a repo-wide scripts/** or src/** glob is refused by
+    test_no_entry_except_the_auditor_newly_gains_a_repo_wide_glob, so it runs on every edit; the wrapper skips files
+    without an emitter token, about 0.1s); full_segment beside validate_subprocess_encoding.
+- file: tests/checks/hygiene/test__manifest.py
+  action: Modify
+  purpose: >-
+    TestStatusLineEmittersRegistered -- dispatched in pre and full, and ungated (pre=True, no pre_globs) so every edit runs it.
+- file: config/ci_rca_taxonomy.yaml
+  action: Modify
+  purpose: "validate_status_line_emitters: code_regression (an emitter or roster drifted, like validate_subprocess_encoding)."
+- file: tests/checks/hygiene/test_validate_status_line_emitters.py
+  action: Create
+  purpose: >-
+    test_each_rule_fails_closed, parametrised over every planted defect VP 5 lists for E1-E6 (each asserting its own
+    error; the needle is built at run time, so this file never holds it);
+    test_clean_synthetic_roster_passes; test_live_repository_passes (the real roster and tree yield no errors); the
+    wrapper error branches test_missing_roster_fails, test_unparseable_roster_fails, test_list_shaped_roster_fails and
+    test_unparseable_python_file_fails (each a named failure, for the full tier's 100% per-file coverage floor).
+- file: tests/turn_capture/test_status_events.py
+  action: Modify
+  purpose: >-
+    SANCTIONED ASSERTION CHANGE (planned in PLAN-retire-session-cli, which created the guard for this hand-off; the weakening detector reports 0 candidates because the allowed set only widens, so weakening_dispositions is empty):
+    test_no_status_emitter_outside_markers allows exactly src/turn_capture/markers.py and scripts/telemetry_capture/status_line.py to call
+    format_status_marker or hold "STATUS v1"; every other file still fails it. The property (one formatting home per
+    side of the boundary) is unchanged; rule E6 restates it in the registered check.
+- file: config/agent/verification_registry/entries/status-line-emitters.yaml
+  action: Create
+  purpose: Graduated shard for VP step 5 (test_selector, guard_target the new check, guard_symbol emitter_errors).
+- file: config/agent/verification_registry/entries/status-line-cli-emitters.yaml
+  action: Create
+  purpose: Graduated shard for VP step 3 (test_selector tests/ops_data_portal/test_cli_status_lines.py, guard_target scripts/ops_portal/cli.py, guard_symbol main).
+- file: config/agent/verification_registry/entries/status-line-postflight-emitters.yaml
+  action: Create
+  purpose: Graduated shard for VP step 4 (test_selector tests/session/postflight/test_status_lines.py, guard_target scripts/postflight/housekeeping.py, guard_symbol run_metrics).
+- file: config/agent/verification_registry/entries/rec-hygiene-rules-served.yaml
+  action: Create
+  purpose: Graduated shard for VP step 7 (test_selector tests/test_rec_hygiene_rules.py, guard_target config/agent/data_quality/ops.yaml).
+- file: config/agent/verification_registry/entries/deleted-writer-caller-disposition.yaml
+  action: Create
+  purpose: Graduated shard for VP step 8 (test_selector on the new anti-drift node, guard_target docs/contracts/tier-item-lifecycle.yaml).
+- file: docs/contracts/ops_recommendations.yaml
+  action: Modify
+  purpose: >-
+    Class A (Benjamin's word). Authored home of two rules, as field governance_notes (not semantics, so no category-6
+    redefinition and no writer projection; the rules are composition guidance, not a stored-value meaning). file gains:
+    "file names the surface the acceptance probe checks: the probe's verdict depends on that file's content, directly
+    or through a test that exercises it, so file-keyed discovery (recs_related) returns the rec. A probe whose verdict
+    never depends on file means the rec is mis-keyed." context gains: "Never append unrelated work to an existing rec
+    (a rider): file a new rec and cite the first in its context; use dependencies only when the new work cannot start
+    before the first is done. A context change through update_rec refines the rec's own problem only." Each
+    governance_notes string ends, on the same line, with its Decision 181 clause: "Decision 181: served as guidance
+    (get_rec_write_guidance) and parity-tested; write-time refusal unenforced, owned by rec-4603." The parity-test
+    constants are the rule sentences only. Each field gets one
+    flow-form governance_note_add amendment entry. Budget 556 effective lines, 552 at main: compact file's 2026-10-04
+    block-form entry to one flow line first, then measure; never a raise.
+- file: config/agent/data_quality/ops.yaml
+  action: Modify
+  purpose: >-
+    Served copy (Decision 65: contract authored, ops.yaml served): file and context semantics each append the same rule
+    sentence, so get_rec_write_guidance() returns it before composition (Decision 66). Single-line strings, no line growth.
+- file: docs/contracts/exit-criteria-ledger.yaml
+  action: Modify
+  purpose: >-
+    plan_followon_recs governance_notes gains: "Naming an EXISTING rec defers to it only when that rec's acceptance
+    fails while the deferred work is undone; otherwise file a new follow-on rec (no riders,
+    ops_recommendations.yaml context)." The Decision 181 line names rec-4603 for the unmechanised arm beside rec-3524.
+    One contract-level flow-form amendment entry.
+- file: tests/test_rec_hygiene_rules.py
+  action: Create
+  purpose: >-
+    Parity: each rule sentence (two module constants) appears, whitespace-normalised, in the contract field's
+    governance_notes and in get_rec_write_guidance()["<field>"]["semantics"]; the ledger rule appears in
+    plan_followon_recs governance_notes. Red before (sentences absent). Its module docstring names T2.29 c7: when
+    get_rec_write_guidance moves to reading the contract, the c7 implementer carries these sentences into what it reads.
+- file: docs/contracts/tier-item-lifecycle.yaml
+  action: Modify
+  purpose: >-
+    replacement_closure_check gains step (5), Dispose of every caller: whenever the plan deletes or retires a writer
+    (a function, CLI mode or flag that records state), whatever the tier_item's name, list every caller, flag, command
+    or skill step, docstring and test that names it, and verify each is removed, rewired to the replacement, or fails
+    loudly (non-zero exit naming the retirement). A stub that keeps the old name and its success output is a FAIL. The
+    Decision 181 line: mechanised detection is rec-4604's. One flow-form amendment entry (Class D mechanism contract).
+- file: .claude/skills/planning/SKILL.md
+  action: Modify
+  purpose: >-
+    Closure obligation trigger 2 adds: the plan lists every caller of a deleted writer as removed, rewired or
+    fail-loud; a stub keeping the old name and success output fails. About +180 bytes against 857 headroom.
+- file: .claude/skills/plan-critique/SKILL.md
+  action: Modify
+  purpose: >-
+    12k trigger 2's Required line becomes "- Required: a VP step proving the old surface dead; for a deleted writer,
+    each caller disposed per `tier-item-lifecycle.yaml#replacement_closure_check` (5)." (156 bytes replacing 165; the
+    file sits at its zero-headroom budget, so the edit must be net non-positive; the REVISE message is left unchanged).
+- file: .claude/skills/code-review/SKILL.md
+  action: Modify
+  purpose: >-
+    Dimension 10 gains "- **Deleted writer**: callers disposed per `replacement_closure_check` (5)". Paid for by
+    replacing the file's 54 em dashes with ASCII hyphens (AGENTS.md style rule; 2 bytes each), so the file stays under
+    its 12609 budget with no raise.
+- file: tests/test_workflow_skill_antidrift.py
+  action: Modify
+  purpose: >-
+    test_closure_obligation_requires_caller_disposition: replacement_closure_check carries step (5) with "fails loudly"
+    and "stub"; planning's trigger 2 and plan-critique's 12k section name the caller disposition; code-review names
+    replacement_closure_check. Existing 12k pins are untouched.
+bundled_recommendations: [rec-3875]
+followon_recs: [rec-4602, rec-4603, rec-4604, rec-4605, rec-4608]
+infrastructure_dependencies:
+  - >-
+    FREEZE: nothing is pushed, PR'd or merged until Benjamin says the repository transfer freeze is over (memory
+    PAUSE, 2026-10-20); building and committing locally is allowed (constraints[0]). After the lift: re-fetch, rebase
+    onto the renamed repository's main, re-run VP 1 and VP 11 on the rebased tree, then push.
+  - >-
+    Release order: this build STARTS only after PLAN-retire-session-cli has merged and its deploy verification is green
+    (the writer accepts status:<source>.<result> process events). Before that, a status line in the build session's
+    own transcript (a failed --evidence during closure, or a failing test's captured stderr under -m scripts.validate)
+    would be refused and halt that session's capture (runner.py writes halt.json on writer_refused).
+  - >-
+    No Lambda-packaged file, Terraform or IAM change: compute_affected_artifacts over scope is empty (scripts/, tests/,
+    config/telemetry, config/agent, .claude/skills and docs/contracts are not packaged), and field_semantics.yaml is
+    untouched (ops_recommendations governance_notes do not project; VP 9).
+  - >-
+    VP 13 (live status row) depends on rec-4292: the telemetry read verbs read the smoke catalog until slice 2c, so the
+    step is "not run: unmeasurable" while rec-4292 is open. rec-4608 (dependencies rec-4292) carries the live check
+    as a standing verification-monitor silent check, so it does not rest on this one-off probe.
+acceptance_criteria:
+  - >-
+    Every roster CLI mode reports its outcome on every path except the --dry-run refusal and argparse usage errors
+    (both before any mode runs): --file-rec prints done for
+    an insert, skipped with ci_rca_open_duplicate or ci_rca_stale_rerun when it returns an existing id, and failed on
+    every refusal and on a writer or reader error; --update-rec (a writer error included), postflight --metrics and
+    --evidence print done or failed; each line parses through the v6 parser's markers.parse_markers as a status marker;
+    stdout and exit codes are byte- and value-identical to today's.
+  - >-
+    validate_status_line_emitters is registered in both tiers, fails with an error naming the file and, where one
+    exists, the source for each of E1-E6, and passes on the real tree; the roster names its residual owner rec-4602.
+  - >-
+    The two rec rules are authored in docs/contracts/ops_recommendations.yaml and served verbatim by
+    get_rec_write_guidance(); the followon_recs rule is in exit-criteria-ledger.yaml; the parity test proves both.
+  - >-
+    replacement_closure_check step (5), the planning trigger, plan-critique 12k and the code-review pointer require
+    caller disposition for a deleted writer, pinned by an anti-drift node; no prose, SLOC or structural budget is
+    raised.
+  - rec-3875 -- python -m scripts.ops_portal.cli --help prints usage, and rec-3875 is closed on merge.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: >-
+      Precondition: PLAN-retire-session-cli is merged with the grammar this plan builds on and this branch is rebased. Its deploy verification being green is confirmed with the coordinator before execution
+      step 1, not only before the merge (not checkable from the tree; infrastructure_dependencies[1]).
+    command: >-
+      git fetch origin main --quiet && git merge-base --is-ancestor origin/main HEAD && grep -q "def
+      format_status_marker" src/turn_capture/markers.py && grep -q "STATUS_SOURCE_MAX" src/turn_capture/markers.py &&
+      grep -q "STATUS_COMMAND_TOKENS" src/turn_capture/gate_events.py && test -f tests/turn_capture/test_status_events.py &&
+      echo PRECONDITION_OK
+    expected: PRECONDITION_OK.
+    fix_if: Main moved -- rebase. A missing symbol or file means the sibling has not merged -- stop and wait for the coordinator.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      A sequencing precondition on a sibling plan's merge, not a behaviour of this change; as a standing guard it would
+      only re-assert that another plan landed.
+  - step: 2
+    phase: pre-deploy
+    action: emit_status writes one parseable whole line to stderr and nothing to stdout.
+    command: bin/venv-python -m pytest tests/telemetry_capture/test_status_line.py -q
+    expected: Every node passes. Red before (scripts/telemetry_capture/status_line.py absent).
+    fix_if: A line on stdout, two lines, or a parse mismatch is a helper bug.
+    hermetic: true
+    expected_literals: []
+    graduation: waive
+    graduation_waiver_reason: >-
+      Every roster emitter goes through this helper, and the graduated step 3 and 4 nodes parse the helper's real
+      output through markers.parse_markers, so a helper regression reddens those standing guards.
+  - step: 3
+    phase: pre-deploy
+    action: >-
+      The portal emits done, skipped (both reasons) and failed on the right paths (writer_error and
+      invalid_context_v2_json included), stdout and exit codes unchanged, and the lines parse as status markers.
+    command: bin/venv-python -m pytest tests/ops_data_portal/test_cli_status_lines.py -q
+    expected: Every node passes. Red before (no STATUS line is emitted; file_rec_with_outcome absent).
+    fix_if: A dedup path reporting done means file_rec_with_outcome lost the branch's outcome; a stdout diff means the line went to stdout.
+    hermetic: true
+    expected_literals: []
+    graduation: graduate
+    graduation_check_id: status-line-cli-emitters
+  - step: 4
+    phase: pre-deploy
+    action: postflight --metrics reports failed when a child step fails while still returning 0 with JSON stdout; --evidence reports done and failed.
+    command: bin/venv-python -m pytest tests/session/postflight/test_status_lines.py tests/session/postflight/test_metrics_housekeeping.py -q
+    expected: Every node passes, including the unchanged test_returns_combined_json. Red before (no line emitted).
+    fix_if: A JSON parse failure in test_returns_combined_json means the line was printed to stdout.
+    hermetic: true
+    expected_literals: []
+    graduation: graduate
+    graduation_check_id: status-line-postflight-emitters
+  - step: 5
+    phase: pre-deploy
+    action: Each roster rule fails closed on a planted defect, and the wrapper fails closed on unreadable input.
+    command: >-
+      bin/venv-python -m pytest
+      tests/checks/hygiene/test_validate_status_line_emitters.py::test_each_rule_fails_closed
+      tests/checks/hygiene/test_validate_status_line_emitters.py::test_missing_roster_fails
+      tests/checks/hygiene/test_validate_status_line_emitters.py::test_unparseable_roster_fails
+      tests/checks/hygiene/test_validate_status_line_emitters.py::test_list_shaped_roster_fails
+      tests/checks/hygiene/test_validate_status_line_emitters.py::test_unparseable_python_file_fails -q
+    expected: >-
+      Every node passes. The first is parametrised over E1 (bad source, overlong source), E2 (unknown result), E3 (module
+      missing the call, missing a declared result, an undeclared result, bad reason), E4 (unlisted source, non-literal
+      source, non-literal result, non-literal reason, a listed source called from a module the roster does not assign it), E5 (command the
+      parser never scans) and E6 (a stray format_status_marker call, a stray raw needle in a non-home file, with the
+      needle built at run time from the markers constants), each asserting its own error.
+    fix_if: A rule that does not fire, or fires without naming source and file, is a check bug.
+    hermetic: true
+    expected_literals: []
+    graduation: graduate
+    graduation_check_id: status-line-emitters
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      The real tree passes, the check is registered in both tiers, the sibling's guard admits exactly the two formatting
+      homes, and the check accounts for every roster row.
+    command: >-
+      bin/venv-python -m pytest
+      tests/checks/hygiene/test_validate_status_line_emitters.py::test_live_repository_passes
+      tests/checks/hygiene/test__manifest.py::TestStatusLineEmittersRegistered
+      tests/turn_capture/test_status_events.py::test_no_status_emitter_outside_markers -q && bin/venv-python -c "from
+      scripts.checks.hygiene.validate_status_line_emitters import validate_status_line_emitters as v; f=[]; v(f);
+      print('FAILED' if f else 'STATUS_EMITTERS_OK', len(f))"
+    expected: The nodes pass, then STATUS_EMITTERS_OK 0 after the check's PASS line reporting 4 status_sources examined.
+    fix_if: A live failure means an emitter and its roster row disagree -- fix the emitter or the row, never the rule.
+    hermetic: true
+    expected_literals: [STATUS_EMITTERS_OK 0]
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: The rec rules are authored in the contracts and served verbatim through get_rec_write_guidance.
+    command: bin/venv-python -m pytest tests/test_rec_hygiene_rules.py tests/test_rec_write_guidance.py -q
+    expected: Every node passes. Red before (rule sentences absent).
+    fix_if: A parity failure means the contract and ops.yaml wording diverged -- copy the contract sentence.
+    hermetic: true
+    expected_literals: []
+    graduation: graduate
+    graduation_check_id: rec-hygiene-rules-served
+  - step: 8
+    phase: pre-deploy
+    action: The deletion rule is present at every surface and the existing 12k pins still hold.
+    command: >-
+      bin/venv-python -m pytest
+      tests/test_workflow_skill_antidrift.py::test_closure_obligation_requires_caller_disposition
+      tests/test_workflow_skill_antidrift.py::test_critique_verifies_rather_than_rederives
+      tests/test_workflow_skill_antidrift.py::test_planning_enforcement_names_the_critique_check_id -q
+    expected: All three nodes pass. The first is red before (step (5) and the caller wording absent).
+    fix_if: A failing existing pin means the 12k edit removed pinned text -- restore it.
+    hermetic: true
+    expected_literals: []
+    graduation: graduate
+    graduation_check_id: deleted-writer-caller-disposition
+  - step: 9
+    phase: pre-deploy
+    action: >-
+      No budget is raised and the writer projection is untouched: prose, SLOC and structural size checks pass,
+      ops_recommendations.yaml is at or under 556 effective lines, and field_semantics.yaml has no diff.
+    command: >-
+      bin/venv-python -c "from scripts.checks.prose.prose_limits import validate_prose_limits as p; from
+      scripts.checks.sloc.sloc_limits import validate_sloc_limits as s; from scripts.checks.structural.size_limits import
+      validate_structural_size_limits as z; f=[]; p(f); s(f); z(f); print('FAILED' if f else 'BUDGETS_OK', len(f))" &&
+      git diff --exit-code origin/main -- config/lambda/ducklake/field_semantics.yaml config/prose_budgets.yaml
+      config/sloc_budgets.yaml config/structural_size_budgets.yaml && bin/venv-python -m
+      scripts.schema_to_field_semantics --check
+    expected: BUDGETS_OK 0, no diff on the four files, and the generator reports no drift.
+    fix_if: A prose breach -- trim the edit (never a raise); a size breach on ops_recommendations.yaml -- compact more amendment history.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: pre-deploy
+    action: rec-3875's acceptance passes; the second command is its stored acceptance verbatim (read 2026-10-24).
+    command: >-
+      bin/venv-python -m pytest tests/ops_data_portal/test_cli_main_guard.py::test_cli_module_runs_under_python_m -q &&
+      bin/venv-python -m scripts.ops_portal.cli --help | grep -qi usage && echo REC_3875_OK
+    expected: REC_3875_OK.
+    fix_if: Empty output means the __main__ guard is missing.
+    hermetic: true
+    expected_literals: []
+    graduation: waive
+    graduation_waiver_reason: tests/ops_data_portal/test_cli_main_guard.py::test_cli_module_runs_under_python_m runs in the fast tier and pins the same behaviour.
+  - step: 11
+    phase: pre-deploy
+    action: >-
+      Full tier on the committed, rebased, clean tree, then the evidence check for that HEAD (implement skill
+      IMPLEMENTATION Commit Flow; git-ops.yaml handoff_sequence).
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: >-
+      Exit 0 with a final "Validation Summary (scope: all)" PASS (including validate_status_line_emitters,
+      validate_contract_drift and the budget checks), then --verify-head exit 0. Parent-validator evidence only; child
+      output or CI cannot substitute.
+    fix_if: Fix the reported check, commit, rebase and re-run this step.
+    hermetic: false
+    graduation: not-applicable
+  - step: 12
+    phase: post-deploy
+    action: >-
+      After the squash merge (body "Resolves: rec-3875"), ci.yml's trailer-closure job has closed rec-3875.
+    command: >-
+      bin/venv-python -c "from scripts.recs_related.related_recs import make_reader; r=make_reader();
+      s=[x['status'] for x in r.named('recs_by_ids', ids='rec-3875')]; print('rec-3875', s); assert s==['closed'];
+      print('CLOSED_OK')"
+    expected: CLOSED_OK.
+    fix_if: >-
+      rec-3875 open -- first WAIT for ci.yml's trailer-closure job to conclude (the implement skill's rule; anything
+      else waits), then follow git-ops.yaml resolves_trailer's conditional fallback (Decision 201): after an
+      acceptance-verdict refusal run only the trailer-closure job's printed close_proposed command; a manual
+      --update-rec naming the merge SHA is allowed only after a transport failure or a merge-leg refusal.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A one-time post-merge confirmation that the bundled rec closed; the trailer-closure job is its standing mechanism.
+  - step: 13
+    phase: post-deploy
+    action: >-
+      Live capture: in a fresh session on merged main, run one deliberately refused update (bin/venv-python -m
+      scripts.ops_data_portal --update-rec rec-3875, no update field: exit 1, nothing written). After that session's
+      Stop hook has run, its telemetry tree holds exactly one process_event named status:ops_portal.update_rec.failed.
+      STATUS_PROBE_SESSION_ID is that session's root session_id, supplied by the session that ran the probe.
+    command: >-
+      bin/venv-python -c "import json,os; from scripts.recs_related.related_recs import make_reader; r=make_reader();
+      rows=r.named('session_tree_rows', session_id=os.environ['STATUS_PROBE_SESSION_ID'], offset='0', max_rows='500');
+      n=sum(1 for x in rows if json.loads(x['row_json']).get('name')=='status:ops_portal.update_rec.failed');
+      print('STATUS_ROWS', n); assert n==1; print('LIVE_STATUS_OK')"
+    expected: >-
+      STATUS_ROWS 1 then LIVE_STATUS_OK. Depends on rec-4292 (open): session_tree_rows, like every telemetry event
+      verb, reads the smoke catalog until slice 2c lands. While rec-4292 is open this step is reported "not run:
+      unmeasurable, owner rec-4292" and is never treated as a 0-row failure. Its carrier is rec-4608 (dependencies
+      rec-4292), whose standing silent check covers the same delivery.
+    fix_if: >-
+      0 rows -- read the probe session's capture diag (status_source_too_long, writer refusal, a command the parser did
+      not scan) before anything else; more than 1 -- a duplicated emission or a missing dedupe. STOP and RCA (Decision 55).
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      A one-time live confirmation that the stderr line reaches stored telemetry; graduated steps 3-6 pin the emitting
+      behaviour and the sibling plan's graduated parser checks pin the parsing.
+test_obligations:
+  - source: scripts/telemetry_capture/status_line.py
+    behavior: emit_status prints one parseable STATUS v1 line to stderr only.
+    verification_step: 2
+    test_selector: tests/telemetry_capture/test_status_line.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/ops_portal/cli.py
+    behavior: --file-rec and --update-rec report done, skipped and failed with unchanged stdout and exit codes.
+    verification_step: 3
+    test_selector: tests/ops_data_portal/test_cli_status_lines.py
+    red_green_expectation: red before (no STATUS line), green after
+  - source: scripts/ops_data_portal.py
+    behavior: file_rec_with_outcome distinguishes an insert from both ci_rca no-insert paths; file_rec is unchanged.
+    verification_step: 3
+    test_selector: tests/ops_data_portal/test_cli_status_lines.py
+    red_green_expectation: red before (function absent), green after
+  - source: scripts/ops_portal/cli.py
+    behavior: python -m scripts.ops_portal.cli runs the CLI instead of exiting 0 silently (rec-3875).
+    verification_step: 10
+    test_selector: tests/ops_data_portal/test_cli_main_guard.py::test_cli_module_runs_under_python_m
+    red_green_expectation: red before (no __main__ guard, empty output), green after
+  - source: scripts/postflight/housekeeping.py
+    behavior: run_metrics reports a failing child step while returning 0 with JSON stdout.
+    verification_step: 4
+    test_selector: tests/session/postflight/test_status_lines.py
+    red_green_expectation: red before (no STATUS line), green after
+  - source: scripts/session/postflight.py
+    behavior: --evidence reports done and failed.
+    verification_step: 4
+    test_selector: tests/session/postflight/test_status_lines.py
+    red_green_expectation: red before (no STATUS line), green after
+  - source: scripts/checks/hygiene/validate_status_line_emitters.py
+    behavior: Each roster rule E1-E6 fails closed with a source- and file-naming error.
+    verification_step: 5
+    test_selector: tests/checks/hygiene/test_validate_status_line_emitters.py::test_each_rule_fails_closed
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/checks/hygiene/_manifest.py
+    behavior: The check is registered in both tiers with globs covering the roster and the scanned code.
+    verification_step: 6
+    test_selector: tests/checks/hygiene/test__manifest.py::TestStatusLineEmittersRegistered
+    red_green_expectation: red before (no Entry), green after
+  - source: config/agent/data_quality/ops.yaml
+    behavior: The served rec guidance carries the contract's rule sentences verbatim.
+    verification_step: 7
+    test_selector: tests/test_rec_hygiene_rules.py
+    red_green_expectation: red before (sentences absent), green after
+  - source: docs/contracts/tier-item-lifecycle.yaml
+    behavior: The caller-disposition rule is present at the contract and the three skill surfaces.
+    verification_step: 8
+    test_selector: tests/test_workflow_skill_antidrift.py::test_closure_obligation_requires_caller_disposition
+    red_green_expectation: red before (step (5) absent), green after
+  - source: scripts/ops_portal/outcomes.py
+    behavior: FileRecOutcome carries rec_id, inserted and reason for the CLI.
+    verification_step: 3
+    test_selector: tests/ops_data_portal/test_cli_status_lines.py
+    red_green_expectation: red before (type absent), green after
+  - source: config/telemetry/status_sources.yaml
+    behavior: The roster lists exactly the emitting sources, each with a module, command and results.
+    verification_step: 6
+    test_selector: tests/checks/hygiene/test_validate_status_line_emitters.py::test_live_repository_passes
+    red_green_expectation: red before (roster and check absent), green after
+  - source: docs/contracts/ops_recommendations.yaml
+    behavior: The file and context rules are authored in the contract.
+    verification_step: 7
+    test_selector: tests/test_rec_hygiene_rules.py
+    red_green_expectation: red before (sentences absent), green after
+  - source: docs/contracts/exit-criteria-ledger.yaml
+    behavior: The followon_recs deferral rule is authored in the ledger.
+    verification_step: 7
+    test_selector: tests/test_rec_hygiene_rules.py
+    red_green_expectation: red before (sentence absent), green after
+  - source: scripts/checks/verification/_manifest.py
+    behavior: validate_hermeticity_flags, validate_verification_registry and validate_differential_gate_baseline gain the status_line.py glob (they already carry markers.py), because status_line.py joins their import closure.
+    verification_step: 11
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: validate_pre_glob_closure fails the --pre tier and the full tier (VP step 11) when a gated check's globs omit part of its import closure; a dedicated test would restate it.
+  - source: scripts/checks/ops_governance/_manifest.py
+    behavior: validate_recommendations_schema gains the status_line.py and markers.py globs; validate_acceptance_literals gains markers.py (its scripts/** already matches the nested status_line.py).
+    verification_step: 11
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: validate_pre_glob_closure fails the --pre tier and the full tier (VP step 11) when a gated check's globs omit part of its import closure; a dedicated test would restate it.
+  - source: scripts/checks/deps/_manifest.py
+    behavior: validate_presubmit_tool_pin_escalation gains the status_line.py glob (it already carries markers.py), because status_line.py joins its import closure.
+    verification_step: 11
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: validate_pre_glob_closure fails the --pre tier and the full tier (VP step 11) when a gated check's globs omit part of its import closure; a dedicated test would restate it.
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: The new check has a failure category.
+    verification_step: 11
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: The taxonomy's completeness check fails full validation for a registered check without a row; a dedicated test would restate it.
+  - source: config/agent/verification_registry/entries/status-line-emitters.yaml
+    behavior: VP step 5 is graduated to a standing guard.
+    verification_step: 11
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: validate_graduation_completeness fails full validation when a graduate step has no well-formed shard; a dedicated test would restate it.
+  - source: config/agent/verification_registry/entries/status-line-cli-emitters.yaml
+    behavior: VP step 3 is graduated to a standing guard.
+    verification_step: 11
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: validate_graduation_completeness fails full validation when a graduate step has no well-formed shard; a dedicated test would restate it.
+  - source: config/agent/verification_registry/entries/status-line-postflight-emitters.yaml
+    behavior: VP step 4 is graduated to a standing guard.
+    verification_step: 11
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: validate_graduation_completeness fails full validation when a graduate step has no well-formed shard; a dedicated test would restate it.
+  - source: config/agent/verification_registry/entries/rec-hygiene-rules-served.yaml
+    behavior: VP step 7 is graduated to a standing guard.
+    verification_step: 11
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: validate_graduation_completeness fails full validation when a graduate step has no well-formed shard; a dedicated test would restate it.
+  - source: config/agent/verification_registry/entries/deleted-writer-caller-disposition.yaml
+    behavior: VP step 8 is graduated to a standing guard.
+    verification_step: 11
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: validate_graduation_completeness fails full validation when a graduate step has no well-formed shard; a dedicated test would restate it.
+weakening_dispositions: []
+constraints:
+  - Freeze (Benjamin, 2026-10-24) -- nothing is pushed, PR'd or merged until he lifts the repo-transfer freeze; the build merge needs his word (Class A contract change).
+  - Exit codes and stdout of every touched CLI mode are unchanged; STATUS lines go to stderr only, built only through emit_status and format_status_marker.
+  - The new tests never print a built STATUS line (the sibling plan's constraint); stderr is read with capsys.readouterr() and asserted through parse results. Residual, owned by rec-4608 (its silent check counts lines against rows) - an existing test that drives a roster mode without consuming stderr shows the line in pytest's captured-stderr section only when it fails.
+  - No parser, grammar, contract name-rule, writer or reader change (PLAN-retire-session-cli and rec-4605 own those); no deploy.
+  - No prose, SLOC or structural budget raise (Decisions 128/166); relief is trimming, em-dash normalisation or amendment compaction.
+  - The rec rules are guidance plus parity in this plan; write-time refusal is rec-4603's, never improvised here.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - >-
+    Decision-scout verdict FLAGS_FOUND (shared scout for both rec-4589 prevention plans, 187 of 187 triaged); CITE 66,
+    65, 201, 181, 170, 169, 210, 124. Flags folded in: 181 (per-surface coverage, below), 65 (contract authored,
+    ops.yaml served, parity test), 166/128 (budgets).
+  - "gates: decision-scout=FLAGS_FOUND (addressed); plan-critique=PROCEED after 4 round(s) (3 REVISE, confirming PROCEED; its three advisories applied)"
+  - "red_overlap: {\"verdict\": \"clear\", \"slo_hours\": 4, \"reds\": []} (2026-10-24)"
+  - >-
+    Approval: Benjamin's "write the plans" (2026-10-24, cmsg_012XgaFy8VaDQbxP5D8nC958WHezqzm2qaVW4TZy3avTyU) approved
+    /mnt/project-files/rec-4589/plan-2/step6b-presentation.md, including all four controls now and the split.
+  - Evidence -- /mnt/project-files/rec-4589/FINDINGS.md (the rec-4030 rider; postflight --close-session printing success), fable-independent-advice.md.
+  - >-
+    Decision 181 coverage, per surface. STATUS: roster emitters mechanised by validate_status_line_emitters (both
+    tiers); unlisted recording CLIs are rec-4602's; friction labelling of status rows is rec-4605's (reader Lambda).
+    Rec rules: served and parity-tested here; write-time refusal is rec-4603's; whether a deferring session files a
+    follow-on at all stays rec-3524's. Live delivery of status rows (a printed line with no stored row): rec-4608.
+    Deletion rule: plan-time (12k) and bookkeeping-time (step (5)) are instruction
+    surfaces pinned by anti-drift; mechanised diff detection is rec-4604's.
+  - >-
+    Boundary with PLAN-retire-session-cli (agreed with its thread 2026-10-24): it owns STATUS_* constants,
+    format_status_marker, parsing (whole lines, last 200 lines of repo-CLI commands, done emits no row,
+    STATUS_SOURCE_MAX 192), the name-rule source and the writer deploy, plus the emitter guard this plan relaxes.
+    This plan owns emit_status, the emitters, the roster and the rules; rec-4605 owns the reader friction rows for
+    the status source. One-PR sibling; this builds after its deploy.
+  - >-
+    stderr, not stdout: --file-rec's stdout is its rec id and --metrics' stdout is JSON that
+    tests/session/postflight/test_metrics_housekeeping.py::test_returns_combined_json parses; Claude Code's Bash
+    tool_result content carries stderr after stdout, on both the inline-content and persisted-sidecar paths the v6
+    scan reads (checked here and probed by the sibling thread, 2026-10-24); a harness change would show in VP 13.
+  - >-
+    Why file_rec_with_outcome and not a changed return type: file_rec has 30-odd callers and is the facade's
+    patch-epicentre (Decision 124); the outcome is needed only by the CLI.
+  - rec-3875 bundled -- same file, same defect class (a CLI path that exits 0 doing nothing); its acceptance is VP 10.
+  - rec-4589 motivates this plan but is not bundled -- PLAN-retire-session-cli closes it with a Resolves trailer.
+  - Related tier item, none of whose criteria this plan flips -- T3.20, whose capture records the status rows (c9 brings the ci-rca agent's skips into capture).
+pre_implementation_checklist:
+  - Branch confirmed not on main and rebased on origin/main; VP step 1 passes
+  - The coordinator confirms PLAN-retire-session-cli's deploy verification is green (infrastructure_dependencies[1])
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 65, 66, 124, 169, 170, 181 read, only the cited clauses
+  - src/turn_capture/markers.py (merged sibling grammar), scripts/ops_portal/cli.py, scripts/ops_data_portal.py file_rec, scripts/postflight/housekeeping.py run_metrics and scripts/session/postflight.py main read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    scripts/telemetry_capture/status_line.py with tests/telemetry_capture/test_status_line.py first (red, then green).
+  - >-
+    Portal: FileRecOutcome in scripts/ops_portal/outcomes.py, file_rec_with_outcome in the facade (file_rec delegates),
+    the cli.py emitters and the __main__ guard; tests/ops_data_portal/test_cli_status_lines.py,
+    tests/ops_data_portal/test_cli_main_guard.py and the facade list.
+    Measure ops_data_portal.py SLOC.
+  - >-
+    Postflight: run_metrics and --evidence emitters with tests/session/postflight/test_status_lines.py.
+  - >-
+    Roster and check: status_sources.yaml, the check (tests first), the manifest entry and its test__manifest node, the
+    ci_rca_taxonomy row, the relaxed sibling guard and the five registry shards.
+  - >-
+    Rec rules: compact file's 2026-10-04 amendment entry, add the two governance_notes and their entries in
+    ops_recommendations.yaml, the ops.yaml served sentences, the ledger rule; tests/test_rec_hygiene_rules.py.
+    Measure effective lines.
+  - >-
+    Deletion rule: tier-item-lifecycle step (5) and its entry, the planning and plan-critique edits, the code-review
+    pointer with em-dash normalisation; the anti-drift node. Measure bytes against config/prose_budgets.yaml.
+  - Execute the Verification Plan steps 2-10 -- loop until pass; on unrecoverable failure stop and RCA (Decision 55).
+  - >-
+    Closure follows the implement skill's Workflow and IMPLEMENTATION Commit Flow exactly (code review, coverage and
+    --pre checks, readiness, evidence, commit, rebase, VP 11), each outcome reported separately; this plan adds only
+    the freeze handling. While the freeze holds, report push and PR as "not pushed: freeze" and stop. After Benjamin
+    lifts it: re-fetch, rebase onto the renamed main, re-run VP 1 and VP 11 on the rebased tree; push; PR (body: the roster, the rule texts, the Class A contract diff for Benjamin's
+    word, the VP compliance table and "Resolves: rec-3875"); CI green; merge only after code review PROCEED, CI green
+    and Benjamin's own word (fetch his message). Squash-merge. Then VP 12 and VP 13.
+  - 'Report: what was implemented, verification results, measured SLOC, effective lines and bytes.'
+rollback: >-
+  Revert the commit. STATUS lines are additive stderr output and the parser only records skipped and failed, so removing
+  the emitters removes rows without breaking capture; the rec and deletion rules are text. Nothing was deployed.

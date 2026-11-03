@@ -40,7 +40,7 @@ from scripts.executor.jsonl_store import DECISIONS_JSONL, Decision
 from scripts.ops_portal._common import ROOT
 from scripts.ops_portal.cache import _refresh_cache_after_write, _sanitize_record, _sync_table
 from scripts.ops_portal.reader_transient import is_reader_unavailable
-from scripts.ops_portal.write_validators import _load_write_time_validators
+from scripts.ops_portal.write_validators import gate_write
 from scripts.ops_portal.writer_transport import _ducklake_write
 
 if TYPE_CHECKING:
@@ -234,8 +234,7 @@ def file_decision(
     merged.setdefault("created_timestamp", now_iso)
     merged["last_updated_timestamp"] = now_iso
 
-    for _col, _validator in _load_write_time_validators("ops_decisions"):
-        _validator(merged.get(_col), _col)
+    gate_write("ops_decisions", merged, insert=False)
 
     Decision.model_validate(merged)
 
@@ -296,6 +295,7 @@ def update_decision(decision_id: str, updates: dict, profile: Optional[str] = No
     merged = {**existing, **updates}
     merged["id"] = decision_id
 
+    gate_write("ops_decisions", merged, insert=False, existing=existing)
     Decision.model_validate(merged)
 
     response = _ducklake_write("ops_decisions", merged, action="update_ops", profile=profile)

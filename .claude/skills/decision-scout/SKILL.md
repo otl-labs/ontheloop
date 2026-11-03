@@ -1,6 +1,6 @@
 ---
 name: decision-scout
-description: "Use when: scope a proposed plan against active decisions, surface decision-contradiction flags before plan commitment, find related decisions a plan should cite. Mandatory pre-confirmation gate in /plan; runs in a fresh-context subagent so the bounded triage load stays off the planning agent."
+description: "Use when: scope a proposed plan against active decisions, surface decision-contradiction flags before plan commitment, find related decisions a plan should cite. Mandatory project-alignment gate in /plan; runs in a fresh-context subagent so the bounded triage load stays off the planning agent."
 ---
 
 ## Intent

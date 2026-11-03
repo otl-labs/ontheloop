@@ -68,6 +68,53 @@ def test_no_circular_import():
     _ = source  # suppress lint
 
 
+@pytest.mark.parametrize("module", ["ducklake_named_reads", "ducklake_write_verbs"])
+def test_extracted_module_imports_on_its_own_without_the_facade(module):
+    """Each extracted module imports first and alone (fresh interpreter): neither has a module-scope
+    import of the facade, which would be a cycle (the facade imports them)."""
+    import subprocess
+    import sys
+
+    code = f"import sys, src.common.{module}; assert 'src.common.ducklake_scd2_schema' not in sys.modules"
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+# Every module-level name of the pre-split ducklake_scd2_schema (captured BEFORE the split, public and
+# private, including the imports a test patches or reads through the module).
+_PRE_SPLIT_SURFACE = frozenset(
+    {
+        "Any", "AppendOnlyUpdateError", "CATALOG_ALIAS", "DuckLakeRuntimeError", "NAMED_READS", "NAMED_READS_VERSION",
+        "NamedRead", "PartitionSpecError", "Path", "ReferentialError", "SMOKE_CURRENT_TABLE", "SMOKE_HISTORY_TABLE",
+        "STATUS_TRANSITIONS", "ScdTableSpec", "SchemaGateError", "StatusTransitionError", "VERB_REGISTRY", "WriteIdentity",
+        "WriteResult", "WriteVerb", "_ACTIVE_REC_STATUSES", "_DEFAULT_FIELD_SEMANTICS_PATH", "_DERIVED_LEAD", "_DERIVED_TAIL",
+        "_ENFORCED_REC_STATUSES", "_FIELD_SEMANTICS_ENV", "_PY_TYPE_FOR_SQL", "_RESOLVED_REC_STATUSES",
+        "_build_merge_current_sql", "_build_merge_history_sql", "_build_select_existing_created_sql", "_column_ddl",
+        "_field_semantics_path", "_load_field_semantics_cached", "_order_columns", "_params_schema", "_write_params",
+        "annotations", "check_append_only_guard", "check_rec_status_transition", "dataclass", "datetime",
+        "describe_named_reads", "describe_write_verbs", "load_field_semantics", "lru_cache", "ops_table_names", "os",
+        "resolve_partition_block", "resolve_table_spec", "schema_gate", "yaml",
+    }
+)  # fmt: skip
+
+
+def test_facade_reexports_pre_split_surface():
+    """The facade's names are a superset of the pre-split surface, plus exactly the named additions."""
+    names = {n for n in vars(schema) if not n.startswith("__")}
+    assert _PRE_SPLIT_SURFACE <= names, sorted(_PRE_SPLIT_SURFACE - names)
+    assert names - _PRE_SPLIT_SURFACE == {"is_event_table", "table_write_boundary"}
+
+
+def test_facade_reexports_are_the_extracted_modules_objects():
+    from src.common import ducklake_named_reads as nr
+    from src.common import ducklake_write_verbs as wv
+
+    assert schema.NAMED_READS is nr.NAMED_READS and schema.NamedRead is nr.NamedRead
+    assert schema.describe_named_reads is nr.describe_named_reads
+    assert schema.VERB_REGISTRY is wv.VERB_REGISTRY and schema.WriteVerb is wv.WriteVerb
+    assert schema.describe_write_verbs is wv.describe_write_verbs
+
+
 # ---------------------------------------------------------------------------
 # tests for the schema constants CATALOG_ALIAS and the SMOKE_* tables
 # ---------------------------------------------------------------------------
@@ -99,6 +146,36 @@ def test_order_columns_other_inputs_middle():
     payload_idx = names.index("payload")
     assert payload_idx > 1  # after ulid + merge key
     assert payload_idx < len(names) - 2  # before timestamps
+
+
+def test_order_columns_keeps_writer_derived_columns():
+    """A non-envelope role: derived column is physical (after the inputs, before the envelope tail) and
+    schema_gate still refuses it from a caller; every current non-event registry entry orders exactly
+    ulid, merge key, inputs, envelope tail, as before."""
+    fields = {
+        **_SEMANTICS["fields"],
+        "purpose": {"role": "derived", "sql_type": "VARCHAR", "nullable": False},
+    }
+    names = [c for c, _ in schema._order_columns(fields, "rec_id")]
+    assert names == ["ulid", "rec_id", "payload", "purpose", "created_timestamp", "last_updated_timestamp"]
+    with pytest.raises(schema.SchemaGateError, match="derived"):
+        schema.schema_gate({"rec_id": "x", "purpose": "drill"}, {**_SEMANTICS, "fields": fields})
+    envelope = {"ulid", "created_timestamp", "last_updated_timestamp"}
+    semantics = schema.load_field_semantics()
+    for table, entry in semantics["ops_tables"].items():
+        if schema.is_event_table(table, semantics) or entry.get("write_mode") == "control":
+            continue
+        columns = entry["columns"]
+        derived_outside = [
+            c for c, s in columns.items() if s["role"] == "derived" and c not in envelope and c != entry["merge_key"]
+        ]
+        ordered = [c for c, _ in schema.resolve_table_spec(table, semantics).ordered_columns]
+        assert (
+            ordered[0] == "ulid"
+            and ordered[1] == entry["merge_key"]
+            and ordered[-2:] == ["created_timestamp", "last_updated_timestamp"]
+        )
+        assert [c for c in ordered if c in derived_outside] == derived_outside
 
 
 # ---------------------------------------------------------------------------
@@ -274,12 +351,16 @@ def test_schema_gate_raises_empty_required():
 
 
 def test_schema_gate_ops_table():
-    schema.schema_gate({"id": "rec-1", "status": "open", "automatable": True}, table="ops_recommendations")
+    schema.schema_gate(
+        {"id": "rec-1", "title": "a valid title", "status": "open", "automatable": True}, table="ops_recommendations"
+    )
 
 
 def test_schema_gate_ops_rejects_mistyped_bool():
     with pytest.raises(schema.SchemaGateError, match="expected bool"):
-        schema.schema_gate({"id": "rec-1", "status": "open", "automatable": "yes"}, table="ops_recommendations")
+        schema.schema_gate(
+            {"id": "rec-1", "title": "a valid title", "status": "open", "automatable": "yes"}, table="ops_recommendations"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -530,94 +611,53 @@ def test_resolve_table_spec_refuses_missing_or_non_calendar_partition():
 
 
 # ---------------------------------------------------------------------------
-# rec_history NAMED_READS entry + NAMED_READS_VERSION (T1.16 c4)
+# Event-class entries and write_boundary (telemetry table registration)
 # ---------------------------------------------------------------------------
 
-
-def test_named_reads_version_is_3():
-    assert schema.NAMED_READS_VERSION == 3
-
-
-def test_rec_history_verb_registered():
-    rh = schema.NAMED_READS["rec_history"]
-    assert rh.table == "ops_recommendations"
-    assert rh.params == ("id",)
-    assert "{hist}" in rh.sql
-    assert "ORDER BY last_updated_timestamp DESC, ulid DESC" in rh.sql
-
-
-# ---------------------------------------------------------------------------
-# Total-order invariant (T1.16 c1): every paginable or trailing-LIMIT verb ends in a unique key
-# ---------------------------------------------------------------------------
+_EVENT_SEMANTICS = {
+    "ops_tables": {
+        "evt": {
+            "table_class": "event",
+            "write_mode": "append_only",
+            "write_boundary": "telemetry_append",
+            "history_table": "evt",
+        },
+        "dim": {"write_boundary": "registration", "merge_key": "k", "id_scheme": "ulid"},
+        "plain": {"merge_key": "k", "columns": {}, "history_table": "plain_h", "current_table": "plain_c", "partition": {}},
+        "smoke_like": {"write_mode": "append_only", "merge_key": "k"},
+    }
+}
 
 
-def test_named_reads_total_order_invariant():
-    import re
-
-    def lim(s: str) -> bool:
-        return bool(re.search(r"\bLIMIT\s+\d+\s*$", s, re.I))
-
-    def tot(s: str) -> bool:
-        return bool(re.search(r"ORDER BY .*\b(id|ulid)\b[^,]*$", s, re.I | re.S))
-
-    bad = [v for v, n in schema.NAMED_READS.items() if (n.paginable or lim(n.sql)) and not tot(n.sql)]
-    assert not bad
+def test_resolve_table_spec_directs_event_tables_elsewhere():
+    with pytest.raises(schema.SchemaGateError, match="event-class .*EventTableSpec.from_projection"):
+        schema.resolve_table_spec("evt", _EVENT_SEMANTICS)
+    real = schema.load_field_semantics()
+    with pytest.raises(schema.SchemaGateError, match="table_class=event"):
+        schema.resolve_table_spec("telemetry_sessions", real)
 
 
-def test_priority_queue_current_excluded_from_total_order_check():
-    """priority_queue_current's LIMIT is a subquery bound, not a trailing output cap -- excluded."""
-    entry = schema.NAMED_READS["priority_queue_current"]
-    assert not entry.paginable
-    import re
-
-    assert not re.search(r"\bLIMIT\s+\d+\s*$", entry.sql, re.I)
-
-
-def test_ci_rca_open_and_budget_bypass_recent_have_id_tiebreak():
-    """The two trailing-LIMIT verbs' ORDER BY carries an `id` tiebreak (reproducible bounded reads)."""
-    for verb in ("ci_rca_open", "budget_bypass_recent"):
-        sql = schema.NAMED_READS[verb].sql
-        assert ", id LIMIT" in sql
+def test_table_write_boundary_reads_entry():
+    assert schema.table_write_boundary("evt", _EVENT_SEMANTICS) == "telemetry_append"
+    assert schema.table_write_boundary("dim", _EVENT_SEMANTICS) == "registration"
+    assert schema.table_write_boundary("plain", _EVENT_SEMANTICS) is None
+    assert schema.table_write_boundary("absent", _EVENT_SEMANTICS) is None
+    assert schema.table_write_boundary(None) is None
+    assert schema.table_write_boundary("ops_projects") == "registration"  # default: the real registry
 
 
-def test_open_recs_and_recs_by_title_prefix_are_paginable():
-    assert schema.NAMED_READS["open_recs"].paginable is True
-    assert schema.NAMED_READS["recs_by_title_prefix"].paginable is True
+def test_is_event_table_is_marker_based_not_write_mode_based():
+    assert schema.is_event_table("evt", _EVENT_SEMANTICS)
+    assert not schema.is_event_table("smoke_like", _EVENT_SEMANTICS)  # append_only with a merge key is not an event table
+    assert not schema.is_event_table("absent", _EVENT_SEMANTICS)
+    assert not schema.is_event_table(None)
+    assert schema.is_event_table("telemetry_agents")
 
 
-# ---------------------------------------------------------------------------
-# describe_named_reads / describe_write_verbs (CD.10 / CD.15 agent-facing describe surface)
-# ---------------------------------------------------------------------------
-
-
-def test_describe_named_reads_covers_every_verb():
-    out = schema.describe_named_reads()
-    assert set(out) == set(schema.NAMED_READS)
-    entry = out["rec_by_id"]
-    assert entry["params"] == ["id"]
-    assert entry["params_schema"]["required"] == ["id"]
-    assert "table" in entry and "description" in entry and "paginable" in entry
-
-
-def test_describe_named_reads_no_params_verb():
-    out = schema.describe_named_reads()
-    assert out["open_recs"]["params"] == []
-    assert out["open_recs"]["params_schema"]["required"] == []
-
-
-def test_describe_write_verbs_covers_registry():
-    out = schema.describe_write_verbs()
-    assert set(out) == set(schema.VERB_REGISTRY)
-    assert set(out) >= {"write_ops", "update_ops", "file_ops", "create_ops_tables"}
-    for verb, entry in out.items():
-        assert entry["description"], verb
-        assert entry["params_schema"]["type"] == "object"
-
-
-def test_verb_registry_entries_are_writeverb_instances():
-    for verb, wv in schema.VERB_REGISTRY.items():
-        assert isinstance(wv, schema.WriteVerb)
-        assert wv.verb == verb
+def test_scd_spec_id_scheme_defaults_to_serial_and_reads_ulid():
+    assert schema.resolve_table_spec("ops_recommendations").id_scheme == "serial"  # null in the registry -> serial
+    assert schema.resolve_table_spec("ops_tenants").id_scheme == "ulid"
+    assert schema.resolve_table_spec(None).id_scheme == "serial"
 
 
 # ---------------------------------------------------------------------------

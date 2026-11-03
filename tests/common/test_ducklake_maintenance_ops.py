@@ -56,8 +56,8 @@ class FakeCon:
 
     def fetchall(self) -> list[Any]:
         for sub, val in self._fetchall_map.items():
-            if sub in self._last:
-                return val
+            if sub in self._last:  # a count(*) statement yields exactly one row, however it is fetched
+                return [self.fetchone()] if self._last.lower().startswith("select count(*)") else val
         return []
 
     def close(self) -> None:
@@ -493,6 +493,8 @@ class GuardedGcCon:
 
     def fetchall(self) -> list[Any]:
         sql = self._last
+        if sql.lstrip().lower().startswith("select count(*)"):
+            return [self.fetchone()]  # a count(*) statement yields exactly one row, however it is fetched
         if "ducklake_list_files" in sql:
             return [(p, s) for p, s in (self._live if self._list_calls <= 1 else self._live_after)]
         if "ducklake_cleanup_old_files" in sql:

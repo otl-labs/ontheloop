@@ -4,8 +4,8 @@
 # Authored against the live DuckLake column inventory in
 # config/lambda/ducklake/field_semantics.yaml (25 columns + _contract_version = 26 total).
 #
-# Decision 65: this contract + src/schemas/rec.py Annotated model are the canonical
-# field-semantic authority. ops.yaml (config/agent/data_quality/ops.yaml) retires via T1.6.
+# Decision 65 and Decision 210 cl.3 (rec-4158): this contract is the ONE declared source of every field-semantic and
+# write-time data rule; ops.yaml and the Pydantic models are consumer projections. ops.yaml retires via T1.6.
 # Decision 84: sole backend is DuckLake-on-Neon. id is writer/file_ops-allocated (I-2).
 # Decision 63: execution_* fields (5) are DQ-EXCLUDED -- documented but not DQ-enforced.
 contract:
@@ -36,9 +36,7 @@ fields:
       via python-ulid monotonic generation.
     populated_by: >-
       ducklake_runtime._derive_fields() -- minted once at op-start; NEVER caller-supplied.
-    dq_intent:
-      not_null:
-        enforced: true
+    dq_intent: {not_null: true}
     derivation:
       formula: python-ulid monotonic generation; minted once at op-start by ducklake_runtime._derive_fields()
       inputs: []
@@ -55,40 +53,41 @@ fields:
       Partitioned as bucket(8, id) on the current table for efficient point lookups.
     populated_by: >-
       ducklake_writer/file_ops allocates atomically in-transaction. update_rec/write_ops require caller to supply an existing id.
-    dq_intent:
-      not_null:
-        enforced: true
+    dq_intent: {not_null: true, pattern: '^(rec-[0-9]+|agent-[0-9]+|test-[a-z0-9-]+)$'}
 
   title:
     type: str
     iceberg_type: string
-    nullable: true
+    nullable: false
     description: One-line human-readable title for the recommendation.
     semantics: >-
-      Minimum 10 stripped characters enforced at write time via write_validators.py's YAML-driven min_length
-      check (rec-3310), through both file_rec and update_rec. Empty or null titles are accepted by the schema
-      gate but are flagged by DQ enforcement.
+      Minimum 10 stripped characters (from 2026-09-01) and not-null, enforced by the DuckLake writer from this contract's
+      projected rules (Decision 210) on every write; the portal's derived pre-check (write_validators.py gate_write)
+      refuses an insert early and an update for undated rules only.
     populated_by: Caller-supplied on file_rec/write_ops payload.
-    dq_intent:
-      not_null:
-        enforced: true
-      min_length:
-        value: 10
-        enforced: true
+    dq_intent: {not_null: true, min_length: {value: 10, exclude_before: "2026-09-01"}, glossary_lint: {}, write_time_exemptions: {glossary_lint: {class: repository_state, reason: "house style (Decision 211 clause 2) read from docs/contracts/glossary.yaml: whether it binds depends on this repository's profile, which no row-local write can decide", owner: scripts/ops_portal/write_validators.py}}}
     amendment_log:
       - date: "2026-09-01"
         semantic_break: false
         change_class: prose_improvement
         summary: Corrected title's semantics to describe the min_length 10 rule that now actually enforces (rec-3310).
         migration_story: Prose correction paired with the min_length write-time enforcement landing in the same change.
+      - date: "2026-10-05"
+        semantic_break: true
+        change_class: not_null_tighten
+        summary: title is nullable false (rec-4158 plan B, Decision 210 cl.5); the undated not_null leg already bound every row.
+        migration_story: >-
+          The census found no null or blank title. The live table keeps a nullable physical column (reconcile_columns only adds columns), so the constraint is declarative there (Decision 100); rec-4171 owns an admin-tier SET NOT NULL leg.
+      - date: "2026-10-16"
+        semantic_break: false
+        change_class: prose_improvement
+        summary: title semantics name the writer and the portal's derived pre-check, not the retired min_length builder.
+        migration_story: Prose re-pointed only (rec-4158 portal row-rule gate); the rules and the projection are unchanged.
+      - {date: "2026-10-30", semantic_break: true, change_class: accepted_values_narrow, summary: "PLAN-glossary (Decision 240): the portal now refuses new title text that uses either relative word unqualified (the glossary_lint leg).", migration_story: "Not retroactive: inserts are judged whole, updates only on sentences the stored value does not hold."}
 
   source:
     $ref: "docs/contracts/source-lineage.yaml#/contract/fields/registry_key"
-    dq_intent_local:
-      not_null:
-        enforced: true
-        write_time: true
-        exclude_before: "2026-05-01"
+    dq_intent_local: {not_null: {exclude_before: "2026-05-01"}}
 
   effort:
     type: str
@@ -101,9 +100,7 @@ fields:
       DERIVED field (target-state). Currently stored as caller-supplied string; derivation
       is deferred to T2.31. The derivation block documents the target-state formula.
     populated_by: Caller-supplied until T2.31; derivation rewrites on T2.31 release.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {not_null: {exclude_before: "2026-05-01"}, accepted_values: {values: [XS, S, M, L, XL], exclude_before: "2026-05-01"}}
     derivation:
       formula: >-
         LOC-weighted integer encoding. Target: estimate_effort(file, lines_of_code)
@@ -130,9 +127,7 @@ fields:
       derivation block documents the source_priority_map for all 30 registered sources.
       Full derivation realization deferred to T2.30.
     populated_by: Caller-supplied until T2.30; derivation rewrites on T2.30 release.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {not_null: {exclude_before: "2026-05-01"}, accepted_values: {values: [Critical, High, Medium, Low], exclude_before: "2026-05-01"}}
     derivation:
       realized: false
       formula: >-
@@ -143,6 +138,8 @@ fields:
       recompute_trigger: source field change
       failure_policy: fallback_priority
       fallback_priority: 3
+      source_rules:
+        ci_rca: "Decision 226 cl.1: High iff is_track_a, else Critical (source_priority_map's 1); realized for this source only, by derive_ci_rca_priority in file_rec and correct_rec_context (docs/contracts/red-main-recovery.yaml). T2.29 c1 keeps this rule when it realizes the map."
       source_priority_map:
         ci_rca: 1
         budget_breach: 1
@@ -180,16 +177,19 @@ fields:
     iceberg_type: string
     nullable: false
     description: >-
-      Recommendation lifecycle status. Valid values: open, closed, in_progress, deferred,
-      superseded, declined.
+      Recommendation lifecycle status. Valid values: open, closed, failed, declined, superseded.
     semantics: >-
-      Status controls eligibility for the executor queue. Only "open" and "in_progress"
-      recs are eligible for execution. Closed recs retain their full history in the
-      SCD2 history table. Closure via lifecycle state, not deletion (Decision 70).
+      Status controls eligibility for the executor queue. Only "open" recs are eligible for
+      execution. Closed recs retain their full history in the SCD2 history table. Closure via
+      lifecycle state, not deletion (Decision 70).
     populated_by: Caller-supplied on file_rec (default=open); updated via update_rec.
-    dq_intent:
-      not_null:
-        enforced: true
+    dq_intent: {not_null: true, accepted_values: {values: [open, closed, failed, declined, superseded]}}
+    amendment_log:
+      - date: "2026-10-04"
+        semantic_break: false
+        change_class: prose_improvement
+        summary: status description and semantics name the five enforced values and drop the in_progress/deferred executor eligibility (rec-4158).
+        migration_story: Prose correction only; the portal and the writer have enforced exactly these five values throughout.
 
   automatable:
     type: bool
@@ -203,9 +203,7 @@ fields:
       DERIVED field (target-state). Recomputed when capabilities.yaml maturity_ceiling
       changes (Decision 44/73 boundary file). Currently caller-supplied.
     populated_by: Caller-supplied until derivation is live at T2.31.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {not_null: {exclude_before: "2026-05-01"}}
     derivation:
       formula: >-
         True if all risk/effort/dependency gates pass and executor capability covers the
@@ -232,9 +230,7 @@ fields:
       DERIVED field (target-state). Currently caller-supplied string. The derivation block
       documents the target-state formula using radon and coverage.xml data.
     populated_by: Caller-supplied until T2.31.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {not_null: {exclude_before: "2026-05-01"}, accepted_values: {values: [low, medium, high], exclude_before: "2026-05-01"}}
     derivation:
       formula: >-
         estimate_risk(file, radon_complexity, coverage_pct) returning 'low'|'medium'|'high'.
@@ -256,11 +252,17 @@ fields:
     description: Primary target file path (relative to repo root) for this recommendation.
     semantics: >-
       The executor reads this field to determine which file to modify. Used as the dedup
-      gate key in the scoping step. Null for cross-cutting recs without a single primary file.
+      gate key in the scoping step. Required (non-null, repo-relative) since 2026-05-01.
+    governance_notes: "file names the surface the acceptance probe checks: the probe's verdict depends on that file's content, directly or through a test that exercises it, so file-keyed discovery (recs_related) returns the rec. A probe whose verdict never depends on file means the rec is mis-keyed. Decision 181: served as guidance (get_rec_write_guidance) and parity-tested; write-time refusal unenforced, owned by rec-4603."
     populated_by: Caller-supplied on file_rec.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {not_null: {exclude_before: "2026-05-01"}, min_length: {value: 1, exclude_before: "2026-05-01"}, pattern: {value: '^([^/\\A-Za-z][^\\]*|[A-Za-z]([^:\\][^\\]*)?|[A-Za-z]:([^/\\][^\\]*)?)$', exclude_before: "2026-05-01"}}
+    amendment_log:
+      - date: "2026-10-04"
+        semantic_break: false
+        change_class: prose_improvement
+        summary: file semantics drops "Null for cross-cutting recs" (rec-4158).
+        migration_story: Prose correction only; file has been required since 2026-05-01.
+      - {date: "2026-10-25", semantic_break: false, change_class: prose_improvement, summary: "file governance_notes gains the probe-surface keying rule (PLAN-silent-failure-prevention).", migration_story: "Guidance only; no write-time rule changes."}
 
   context:
     type: str
@@ -273,11 +275,10 @@ fields:
       Context is the primary LLM-consumption field. The executor reads this to understand
       the problem before acting. Thin or generic context is the main cause of executor
       failure on first attempt.
+    governance_notes: "Never append unrelated work to an existing rec (a rider): file a new rec and cite the first in its context; use dependencies only when the new work cannot start before the first is done. A context change through update_rec refines the rec's own problem only. Decision 181: served as guidance (get_rec_write_guidance) and parity-tested; write-time refusal unenforced, owned by rec-4603."
     populated_by: >-
-      Caller-supplied on file_rec, and on update_rec for a context-changing update. Both write paths enforce the >=80-stripped-char gate via write_validators.py::_validate_context_length (Decision 66 Tier-B write-time rejection); rec_write_guidance.py is the Tier-A pre-write guidance surface, not the enforcement point.
-    dq_intent:
-      not_null:
-        enforced: false
+      Caller-supplied on file_rec, and on update_rec for a context-changing update. The DuckLake writer enforces the >=80-stripped-char gate on every write from this contract's min_length rule, and the portal's derived pre-check (write_validators.py gate_write) refuses an insert early (Decision 66 Tier-B write-time rejection); rec_write_guidance.py is the Tier-A pre-write guidance surface, not the enforcement point.
+    dq_intent: {not_null: {exclude_before: "2026-05-01"}, min_length: {value: 80, exclude_before: "2026-05-01"}, glossary_lint: {}, write_time_exemptions: {glossary_lint: {class: repository_state, reason: "house style (Decision 211 clause 2) read from docs/contracts/glossary.yaml: whether it binds depends on this repository's profile, which no row-local write can decide", owner: scripts/ops_portal/write_validators.py}}}
     amendment_log:
       - date: "2026-09-01"
         semantic_break: false
@@ -285,6 +286,13 @@ fields:
         summary: Corrected the description's context minimum from 50 to 80 stripped characters (rec-3310).
         migration_story: >-
           Prose-only correction; write_validators.py has enforced the 80-char floor unchanged throughout.
+      - date: "2026-10-16"
+        semantic_break: false
+        change_class: prose_improvement
+        summary: context populated_by names the writer and the portal's derived pre-check, not the deleted length helper.
+        migration_story: Prose re-pointed only (rec-4158 portal row-rule gate); the rules and the projection are unchanged.
+      - {date: "2026-10-25", semantic_break: false, change_class: prose_improvement, summary: "context governance_notes gains the no-rider rule (PLAN-silent-failure-prevention).", migration_story: "Guidance only; no write-time rule changes."}
+      - {date: "2026-10-30", semantic_break: true, change_class: accepted_values_narrow, summary: "PLAN-glossary (Decision 240): the portal now refuses new context text that uses either relative word unqualified (the glossary_lint leg).", migration_story: "Not retroactive: inserts are judged whole, updates only on sentences the stored value does not hold."}
 
   acceptance:
     type: str
@@ -300,9 +308,7 @@ fields:
       list[dict] at T0.12.5. Full typed-check dispatch by type deferred to T3.6. file_rec
       requires a discriminating probe shape (require_discrimination=True); not retroactive.
     populated_by: Caller-supplied on file_rec.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {not_null: {exclude_before: "2026-05-01"}, min_length: {value: 1, exclude_before: "2026-05-01"}, acceptance_lint: {require_discrimination: true}, write_time_exemptions: {acceptance_lint: {class: repository_state, reason: "the lint reads the repository tree, which no row-local evaluator can", owner: scripts/ops_portal/write_validators.py}}}
     amendment_log:
       - date: "2026-06-20"
         semantic_break: false
@@ -321,6 +327,11 @@ fields:
         change_class: accepted_values_narrow
         summary: update_rec acceptance lint now requires a discriminating probe shape too (rec-3306).
         migration_story: require_discrimination=True wired at write_validators.py's YAML-driven _check_acceptance closure (used by both file_rec and update_rec); not retroactive.
+      - date: "2026-10-16"
+        semantic_break: false
+        change_class: prose_improvement
+        summary: the acceptance lint is driven by this contract's declared acceptance_lint leg (require_discrimination read from it) through the portal's gate_write.
+        migration_story: Prose re-pointed only (rec-4158 portal row-rule gate); the rules and the projection are unchanged.
 
   verification:
     type: str
@@ -333,9 +344,9 @@ fields:
       Human-readable verification plan consumed by the executor to confirm end-to-end
       correctness beyond the acceptance command. Null for recs with no explicit VP step.
     populated_by: Caller-supplied on file_rec.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {glossary_lint: {}, write_time_exemptions: {glossary_lint: {class: repository_state, reason: "house style (Decision 211 clause 2) read from docs/contracts/glossary.yaml: whether it binds depends on this repository's profile, which no row-local write can decide", owner: scripts/ops_portal/write_validators.py}}}
+    amendment_log:
+      - {date: "2026-10-30", semantic_break: true, change_class: accepted_values_narrow, summary: "PLAN-glossary (Decision 240): the portal now refuses new verification text that uses either relative word unqualified (the glossary_lint leg).", migration_story: "Not retroactive: inserts are judged whole, updates only on sentences the stored value does not hold."}
 
   verification_tier:
     type: str
@@ -349,9 +360,7 @@ fields:
       V2 requires functional end-to-end test. V1 requires only static/format checks.
       Null implies V1 (advisory default). Validated against the implement skill's VP protocol.
     populated_by: Caller-supplied on file_rec.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
 
   dependencies:
     type: "list[str]"
@@ -359,22 +368,20 @@ fields:
     nullable: true
     description: List of rec-IDs that must complete before this recommendation.
     semantics: >-
-      Dependency gate: the executor checks that all listed rec-IDs are in status=closed before scheduling this rec. Each element must also reference an existing rec of any status (open, closed, or superseded alike) -- enforced write-time via array_element_reference through both file_rec and update_rec. Null or empty list means no gate.
+      Dependency gate: the executor checks that all listed rec-IDs are in status=closed before scheduling this rec. Each element must also reference an existing rec of any status (open, closed, or superseded alike) -- enforced write-time by the portal's gate_write (array_element_reference, run from the declared exemption) on an insert and on an update that changes the column. Null or empty list means no gate.
     populated_by: Caller-supplied on file_rec.
-    dq_intent:
-      not_null:
-        enforced: false
-      array_element_format:
-        pattern: "^rec-[0-9]+$"
-        enforced: true
-      array_element_reference:
-        enforced: true
+    dq_intent: {array_element_format: {pattern: '^rec-[0-9]+$'}, array_element_reference: {}, write_time_exemptions: {array_element_reference: {class: cross_row, reason: "an existence lookup outside the batch partitions (Decision 210 cl.2(a))", owner: rec-4166}}}
     amendment_log:
       - date: "2026-09-08"
         semantic_break: true
         change_class: accepted_values_narrow
         summary: Struck the stale "or tier-item IDs" claim (rec-3364) and added array_element_reference existence enforcement (rec-3307's referential half).
         migration_story: array_element_format already rejected non-rec- values; array_element_reference is new write-time enforcement through file_rec and update_rec, not retroactive.
+      - date: "2026-10-16"
+        semantic_break: false
+        change_class: prose_improvement
+        summary: dependencies existence is enforced by the portal's gate_write from the declared exemption.
+        migration_story: Prose re-pointed only (rec-4158 portal row-rule gate); the rules and the projection are unchanged.
 
   tags:
     type: "list[str]"
@@ -382,20 +389,20 @@ fields:
     nullable: true
     description: Free-form tags for categorization and filtering.
     semantics: >-
-      Unstructured categorization signal with no registered consumer (no NAMED_READS verb, absent from src/schemas/rec.py, no skill/workflow/check reads it). No canonical vocabulary. DQ-enforced at the structural level only: each element must match ^[a-z][a-z0-9-]*$ (kebab-case) at write time via array_element_format, through both file_rec and update_rec.
+      Unstructured categorization signal with no registered consumer (no NAMED_READS verb, absent from src/schemas/rec.py, no skill/workflow/check reads it). No canonical vocabulary. DQ-enforced at the structural level only: each element must match ^[a-z][a-z0-9-]*$ (kebab-case) by the DuckLake writer from the array_element_format rule (dated; the portal's derived pre-check skips it on update).
     populated_by: Caller-supplied on file_rec.
-    dq_intent:
-      not_null:
-        enforced: false
-      array_element_format:
-        pattern: "^[a-z][a-z0-9-]*$"
-        enforced: true
+    dq_intent: {array_element_format: {pattern: '^[a-z][a-z0-9-]*$', exclude_before: "2026-09-08"}}
     amendment_log:
       - date: "2026-09-08"
         semantic_break: true
         change_class: accepted_values_narrow
         summary: Corrected three false claims (portal filtering, rec-curator ranking, "Not DQ-enforced") and added array_element_format enforcement (rec-609 unblocked; tag_registry.yaml clause retired).
         migration_story: Structural gate only; the registry-backed semantic gate the 2026-05-07 decision proposed is retired outright, not deferred again -- tags has no consumer to justify it.
+      - date: "2026-10-16"
+        semantic_break: false
+        change_class: prose_improvement
+        summary: tags semantics name the writer's rule, not a portal builder.
+        migration_story: Prose re-pointed only (rec-4158 portal row-rule gate); the rules and the projection are unchanged.
 
   resolution:
     type: str
@@ -409,9 +416,7 @@ fields:
       resolution on closed/declined/superseded recs is a data-quality warning (not an error).
     populated_by: >-
       Caller-supplied on update_rec at close time (Decision 70 closure-via-lifecycle-state).
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
 
   execution_result:
     type: str
@@ -427,9 +432,7 @@ fields:
       Decision 63 DQ-exclusion: execution_* fields are executor-internal write-only fields
       that the DQ runner does not enforce. They are NOT derived fields.
     populated_by: execute_recommendation.py writes this after run completion.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
 
   execution_date:
     type: str
@@ -441,9 +444,7 @@ fields:
       not enforced or derived. See execution_result semantics.
     governance_notes: Decision 63 DQ-exclusion. See execution_result governance_notes.
     populated_by: execute_recommendation.py writes this after run completion.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
 
   execution_branch:
     type: str
@@ -455,9 +456,7 @@ fields:
       not enforced or derived. See execution_result semantics.
     governance_notes: Decision 63 DQ-exclusion. See execution_result governance_notes.
     populated_by: execute_recommendation.py writes this after run completion.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
 
   execution_pr_url:
     type: str
@@ -469,9 +468,7 @@ fields:
       not enforced or derived. See execution_result semantics.
     governance_notes: Decision 63 DQ-exclusion. See execution_result governance_notes.
     populated_by: execute_recommendation.py writes this after run completion.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
 
   execution_steps:
     type: int
@@ -485,9 +482,7 @@ fields:
       not enforced or derived. See execution_result semantics.
     governance_notes: Decision 63 DQ-exclusion. See execution_result governance_notes.
     populated_by: execute_recommendation.py writes this after run completion.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
 
   created_timestamp:
     type: datetime
@@ -498,9 +493,7 @@ fields:
       UPDATEs to preserve original creation time across SCD2 versions.
     semantics: "SCD2 envelope field. Minted once at op-start by ducklake_runtime, OUTSIDE the OCC-retry loop. For UPDATE: the existing value from the current projection is carried; it is NEVER re-stamped. Partitions the history table via year(created_timestamp), month(created_timestamp), day(created_timestamp)."
     populated_by: ducklake_runtime._derive_fields() -- NOT caller-supplied.
-    dq_intent:
-      not_null:
-        enforced: true
+    dq_intent: {not_null: true}
     derivation:
       formula: high-precision now() minted ONCE at op-start by ducklake_runtime._derive_fields(); carried unchanged on UPDATE
       inputs: []
@@ -523,9 +516,7 @@ fields:
       OCC-retry loop. Stable across all retry iterations of the same write attempt.
       Together with ulid, serves as the tiebreak for selecting the latest SCD2 version.
     populated_by: ducklake_runtime._derive_fields() -- NOT caller-supplied.
-    dq_intent:
-      not_null:
-        enforced: true
+    dq_intent: {not_null: true, not_before: created_timestamp}
     derivation:
       formula: high-precision now() minted ONCE at op-start by ducklake_runtime._derive_fields(); stable across OCC retries
       inputs: []
@@ -543,9 +534,7 @@ fields:
       preferentially reads this over the free-text context field. Schema is unvalidated at
       T0.12.5; validated shape is deferred to the context-v2 graduation milestone.
     populated_by: Caller-supplied on file_rec/write_ops for recs that populate v2 context.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
 
   _contract_version:
     type: str
@@ -560,9 +549,7 @@ fields:
     populated_by: >-
       ducklake_writer Lambda handler.py stamps record['_contract_version'] = record.get('_contract_version', '1')
       before rt.write_scd2 / rt.file_scd2. NOT on the smoke-table action_write path.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
 
 governance:
   table_class: SCD2
@@ -578,14 +565,27 @@ governance:
   merge_key: id
 
 governance_notes: >-
-  Decision 65: this contract + src/schemas/rec.py are the canonical field-semantic authority for ops_recommendations; ops.yaml retires via T1.6 and is not authoritative post-ratification. Decision 84: sole backend is DuckLake-on-Neon, no second read/write path, no OPS_STORAGE_BACKEND env var; reads transit the closed ducklake_reader boundary (NAMED VERBS only, no caller SQL). Decision 63: execution_* fields (execution_result/date/branch/pr_url/steps) are DQ-EXCLUDED -- documented here, not enforced or derived. Decision 44: step_runner.py and acceptance_lint.py are executor boundary files; modifications require human-driven /implement only. _contract_version: nullable Lambda-handler sentinel; NULL pre-T0.12.5, "1" after.
+  Decision 65 and Decision 210 cl.3 (rec-4158): this contract is the ONE declared source of every field-semantic and write-time data rule for ops_recommendations (read by scripts/contract_rules.py); the Pydantic models are a consumer projection, and ops.yaml is a DQ-backstop file with no write-time role (validate_ops_rule_source keeps it never stricter than this contract) that retires via T1.6. The portal runs the writer's own gate over this contract's projection as a derived pre-check (write_validators.py gate_write), never authoritative: the writer enforces every rule on every write. Decision 84: sole backend is DuckLake-on-Neon, no second read/write path, no OPS_STORAGE_BACKEND env var; reads transit the closed ducklake_reader boundary (NAMED VERBS only, no caller SQL). Decision 63: execution_* fields (execution_result/date/branch/pr_url/steps) are DQ-EXCLUDED -- documented here, not enforced or derived. Decision 44: step_runner.py and acceptance_lint.py are executor boundary files; modifications require human-driven /implement only. _contract_version: nullable Lambda-handler sentinel; NULL pre-T0.12.5, "1" after.
 
 amendment_log:
-  - date: "2026-06-21"
-    semantic_break: false
-    change_class: field_add
+  - {date: "2026-06-21", semantic_break: false, change_class: field_add, summary: "CD.25 additive amendment (T2.33): add contract.projects_to, governance.merge_key=id, and realized markers on envelope/deferred-derivation fields. No column added or removed.", migration_story: "Adds contract.projects_to (field_semantics.yaml generator pointer) and governance.merge_key=id; realized=true on the SCD2 envelope fields (ulid/created_timestamp/last_updated_timestamp); realized=false on effort/priority/automatable/risk (forward-pointers to T2.29/T2.30/T2.31). Schema gate, DDL, MERGE unchanged."}
+  - date: "2026-10-04"
+    semantic_break: true
+    change_class: accepted_values_narrow
     summary: >-
-      CD.25 additive amendment (T2.33): add contract.projects_to, governance.merge_key=id, and realized markers on envelope/deferred-derivation fields. No column added or removed.
+      Declared every row-local write-time rule here, field by field, with its effective date (PLAN-ops-rule-source, rec-4158 plan A, Decision 210 cl.3): the contract is the one rule source; ops.yaml and src/schemas/rec.py are projections.
     migration_story: >-
-      Adds contract.projects_to (field_semantics.yaml generator pointer) and governance.merge_key=id; realized=true on the SCD2 envelope fields (ulid/created_timestamp/last_updated_timestamp); realized=false on effort/priority/automatable/risk (forward-pointers to T2.29/T2.30/T2.31). Schema gate, DDL, MERGE unchanged.
+      Declarations only; no writer or portal behaviour changes in this amendment. Dated legs bind rows created on or after their exclude_before; validate_ops_rule_source ratchets every date and census-proves the declarations against the warehouse.
+  - date: "2026-10-15"
+    semantic_break: false
+    change_class: prose_improvement
+    summary: >-
+      PLAN-rule-declarations-and-writer-conformance (rec-4158, Decision 210): the dq_intent `enforced` key is retired
+      from every rule leg. not_null is declared by presence (`true`, or `{exclude_before: D}`); an optional column or a
+      loosest-baseline field carries no not_null leg; the other legs lose the key. A declared rule is an enforced rule.
+    migration_story: >-
+      Declarations re-spelled only. No rule is added, removed or re-dated: the declared rule set, read through
+      scripts.contract_rules, is identical before and after, and the generated field_semantics.yaml projection of
+      this contract is unchanged.
+  - {date: "2026-10-18", semantic_break: false, change_class: governance_note_add, summary: "PLAN-red-main-recovery-policy (Decision 226): priority.derivation.source_rules names the ci_rca track rule; realized stays false and the generated field_semantics.yaml is unchanged."}
 previous_versions: []

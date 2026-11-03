@@ -73,6 +73,10 @@ class TestClassifyCommand:
         cmd = "grep -q " + "x" * 600
         assert census.classify_command(cmd) == census.UNPROBEABLE_SHAPE
 
+    def test_cap_length_false_lifts_only_the_length_check(self) -> None:
+        assert census.classify_command("grep -q " + "x" * 600, cap_length=False) == census.PROBEABLE
+        assert census.classify_command("echo one\necho two", cap_length=False) == census.UNPROBEABLE_SHAPE
+
     def test_safe_grep_is_probeable(self) -> None:
         assert census.classify_command("grep -q 'foo' bar.txt") == census.PROBEABLE
 

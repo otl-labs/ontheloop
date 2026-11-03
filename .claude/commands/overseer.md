@@ -1,6 +1,6 @@
 ---
 description: >-
-  Orchestration meta-layer that composes /plan and /implement subagents to drive an entire platform
+  Orchestration meta-layer that composes /plan and /implement subagents to drive an entire
   roadmap item or audit to completion largely unattended, narrowing the human to intake,
   decomposition, and completion gates. Not a fifth workflow tier -- composes the existing four-tier
   workflow (Decision 90).
@@ -10,7 +10,7 @@ argument-hint: [roadmap tier_item id | audit slug | free-form multi-step intent]
 
 # Overseer Workflow
 
-**Intent**: Drive an entire platform roadmap item, audit, or multi-step body of work to completion
+**Intent**: Drive an entire roadmap item, audit, or multi-step body of work to completion
 by decomposing it into one or more `/plan` + `/implement` cycles and dispatching each as a
 fresh-context subagent, largely unattended between the G0/G1/G3 human gates. The overseer never
 writes source code itself -- every file change happens inside a dispatched planning or
@@ -90,7 +90,8 @@ regardless.
 
 Apply the skill's Lifecycle and Gates exception path: a slice BLOCKED or FAILED twice routes to the
 `executor-rca` skill and escalates to the human -- never a third silent retry. Apply the
-halt-on-open-ci_rca gate before dispatching any new slice.
+halt-on-open-ci_rca gate (scripts.ci_rca.red_overlap, Decision 226) before every dispatch: --plan <plan> for an
+/implement slice, no arguments for a /plan slice (the global rules only; its Step 8 then checks overlap).
 
 ## Step 7: Aggregate
 

@@ -116,7 +116,9 @@ def census(
     the junit source instead), "refuse" (an unparseable pytest-carrying command, rerouted to
     unprobeable_shape so verdict_for resolves out_of_grammar and it is never probed), or
     "static" (every other bucket, and every non-junit-routed probeable entry -- slice A's probe
-    path, entirely unchanged)."""
+    path, entirely unchanged). The one widening of slice A's probeable set: a command the
+    partition routes to "junit" is bucketed without the census's _MAX_SHAPE_LEN cap, because it
+    is never executed (rec-4384)."""
     live_rows = rows
     if live_rows is None:
         live_reader = reader if reader is not None else _make_reader(profile)
@@ -129,15 +131,18 @@ def census(
     entries: list[dict[str, Any]] = []
     for row in live_rows:
         acceptance = row.get("acceptance") or ""
-        bucket = census_mod.classify_command(acceptance, repo_root=repo_root)
+        grammar = classify_grammar(acceptance) if probe_mod.is_pytest_command(acceptance) else None
+        # The census length cap guards the probe's execution surface; a junit-routed command is
+        # never executed, so a long node-id list must not be refused for its length (rec-4384).
+        junit_routed = grammar is not None and grammar.route == ROUTE_JUNIT
+        bucket = census_mod.classify_command(acceptance, repo_root=repo_root, cap_length=not junit_routed)
         if bucket == census_mod.PROBEABLE:
             ok, _reason = lint_acceptance_command(acceptance, require_decidable=True)
             if not ok:
                 bucket = census_mod.UNPROBEABLE_SHAPE
 
         route = ROUTE_STATIC
-        if bucket == census_mod.PROBEABLE and probe_mod.is_pytest_command(acceptance):
-            grammar = classify_grammar(acceptance)
+        if bucket == census_mod.PROBEABLE and grammar is not None:
             if grammar.route == ROUTE_REFUSE:
                 bucket = census_mod.UNPROBEABLE_SHAPE
                 route = ROUTE_REFUSE
@@ -349,7 +354,6 @@ def cmd_junit_verdict(args: argparse.Namespace) -> int:
 def cmd_close(args: argparse.Namespace) -> int:
     import os  # noqa: PLC0415
 
-    from scripts.ops_data_portal import sync  # noqa: PLC0415
     from scripts.ops_portal.ci_rca_lifecycle import close_recs_from_trailer  # noqa: PLC0415
 
     census_doc = _read_json(args.artifact_dir / _CENSUS_ARTIFACT)
@@ -369,21 +373,12 @@ def cmd_close(args: argparse.Namespace) -> int:
     run_id = os.environ.get("GITHUB_RUN_ID", "unknown")
     run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
 
-    try:
-        sync()
-    except Exception as exc:  # noqa: BLE001 -- mirrors rec-autoclose.yml's prior best-effort sync
-        print(f"[rec_trailer_acceptance close] sync warning ({exc}); continuing with possibly stale cache")
-
+    reader = _make_reader()
     recs_cache: dict[str, dict[str, Any]] = {}
-    cache_path = ROOT / "logs" / ".recommendations-log.jsonl"
-    if cache_path.exists():
-        for line in cache_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                try:
-                    row = json.loads(line)
-                    recs_cache[row["id"]] = row
-                except (json.JSONDecodeError, KeyError):
-                    pass
+    for rec_id in ids:
+        found = reader.named("rec_by_id", id=rec_id)
+        if found:
+            recs_cache[rec_id] = dict(found[0])
 
     return close_recs_from_trailer(
         ids,

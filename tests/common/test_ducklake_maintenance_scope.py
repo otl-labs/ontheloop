@@ -347,3 +347,34 @@ def test_partition_verbs_in_universe_with_control_rewrite_excluded():
     assert rewrite_result.skipped == (
         {"table": "ops_entity_counters", "table_class": "control", "reason": "entity-id counter, never re-laid"},
     )
+
+
+def test_event_entries_classify_as_append_only_history():
+    """Registering the telemetry event tables adds no class and no policy cell (Decision 191: write_mode
+    is the sole class source); each event entry is one append_only history table."""
+    semantics = scope.load_field_semantics()
+    registry = scope.build_registry(semantics)
+    events = [t for t, e in semantics["ops_tables"].items() if e.get("table_class") == "event"]
+    assert len(events) >= 4 and {"telemetry_sessions", "telemetry_agents"} <= set(events)
+    for table in events:
+        classified = registry[table]
+        assert (classified.table_class, classified.side, classified.table_id) == ("append_only", "history", table)
+        assert f"{table}_current" not in registry
+    assert scope.class_universe(semantics) == {"scd2", "append_only", "control", "smoke_harness"}
+
+
+def test_registered_absent_preproduction_status_is_expected():
+    """The pre-production tables, absent from a production enumeration, report status pre_production
+    (registered-and-absent is expected for them; only a live table's absence is notable)."""
+    semantics = scope.load_field_semantics()
+    result = scope.reconcile_catalog(["ops_recommendations_history", "ops_recommendations_current"], semantics=semantics)
+    absent = {e["table_id"]: e["status"] for e in result.registered_absent}
+    for table in (
+        "telemetry_sessions",
+        "telemetry_observations",
+        "telemetry_transcripts",
+        "telemetry_agents",
+        "ops_tenants",
+        "ops_projects",
+    ):
+        assert absent[table] == "pre_production"

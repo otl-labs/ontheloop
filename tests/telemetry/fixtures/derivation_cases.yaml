@@ -1,0 +1,455 @@
+# Golden derivation cases for the telemetry event-journal reader verbs (rec-4291), authored from the contract formulas
+# (telemetry_sessions.yaml state / duration_seconds, telemetry_agents.yaml, envelope R4/R5), never from the SQL. Fix the SQL, not
+# these expectations, unless a case misreads the contract.
+#
+# sessions: name -> {started_at, parent (a session name), project (a project name)}; the test derives each session_id from the
+#   name with src.telemetry.identity so its ULID time prefix is the root start. Rows: `session` names the row's session, `at` is
+#   event_timestamp, `so` is source_ordinal; every other key is a stored column. Rows default to producer claude_code, parser_version 1.
+# expect: a verb call with params (session or day window plus as_of) and `rows`, subsets of the verb's output columns in order;
+#   in a row, `session: name` stands for that session's id, and *_timestamp / as_of values are ISO strings.
+
+projects:
+  real: {purpose: real}
+  drill: {purpose: drill}
+
+cases:
+  - id: c01_closed_session_is_terminal_at_any_as_of
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: root, event_id: e2, event_kind: close, at: "2026-09-25T11:00:00+00:00", so: 1, outcome: success}
+    expect:
+      - verb: session_state_and_duration
+        session: root
+        params: {as_of: "2026-09-25T12:00:00+00:00"}
+        rows: [{state: success, outcome: success, duration_seconds: 3600, last_event_timestamp: "2026-09-25T11:00:00+00:00", derivation_conflicted: false}]
+      - verb: session_state_and_duration
+        session: root
+        params: {as_of: "2026-12-01T00:00:00+00:00"}
+        rows: [{state: success, outcome: success, duration_seconds: 3600}]
+
+  - id: c02_failed_and_cancelled_outcomes_are_the_state
+    sessions: {failed: {started_at: "2026-09-25T10:00:00+00:00"}, cancelled: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: failed, event_id: f1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: failed, event_id: f2, event_kind: close, at: "2026-09-25T10:30:00+00:00", so: 1, outcome: failed}
+        - {session: cancelled, event_id: g1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: cancelled, event_id: g2, event_kind: close, at: "2026-09-25T10:10:00+00:00", so: 1, outcome: cancelled}
+    expect:
+      - {verb: session_state_and_duration, session: failed, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{state: failed, outcome: failed, duration_seconds: 1800}]}
+      - {verb: session_state_and_duration, session: cancelled, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{state: cancelled, outcome: cancelled, duration_seconds: 600}]}
+
+  - id: c03_resume_after_close_is_running_again
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: root, event_id: e2, event_kind: close, at: "2026-09-25T11:00:00+00:00", so: 1, outcome: success}
+        - {session: root, event_id: e3, event_kind: resume, at: "2026-09-25T12:00:00+00:00", so: 2}
+    expect:
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-25T13:00:00+00:00"}, rows: [{state: running, outcome: null, duration_seconds: 3600, last_event_timestamp: "2026-09-25T12:00:00+00:00"}]}
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-26T11:59:00+00:00"}, rows: [{state: running, duration_seconds: 3600}]}
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-26T12:01:00+00:00"}, rows: [{state: abandoned, outcome: null, duration_seconds: 3600}]}
+
+  - id: c04_close_ranks_last_on_a_full_tie
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: root, event_id: e2, event_kind: resume, at: "2026-09-25T11:00:00+00:00", so: 2}
+        - {session: root, event_id: e0, event_kind: close, at: "2026-09-25T11:00:00+00:00", so: 2, outcome: success}
+    expect:
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{state: success, outcome: success, duration_seconds: 3600}]}
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-10-30T12:00:00+00:00"}, rows: [{state: success, outcome: success, duration_seconds: 3600}]}
+
+  - id: c04b_a_later_ordinal_beats_close_on_the_same_timestamp
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: root, event_id: e2, event_kind: close, at: "2026-09-25T11:00:00+00:00", so: 1, outcome: success}
+        - {session: root, event_id: e3, event_kind: resume, at: "2026-09-25T11:00:00+00:00", so: 2}
+    expect:
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{state: running, outcome: null, duration_seconds: 3600}]}
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-27T12:00:00+00:00"}, rows: [{state: abandoned, duration_seconds: 3600}]}
+
+  - id: c05_annotate_rows_never_decide_the_state
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: root, event_id: e2, event_kind: close, at: "2026-09-25T11:00:00+00:00", so: 1, outcome: success}
+        - {session: root, event_id: e3, event_kind: annotate, at: "2026-09-26T15:00:00+00:00", so: 3, pr_url: "https://example.test/pr/1"}
+    expect:
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{state: success, duration_seconds: 3600, last_event_timestamp: "2026-09-26T15:00:00+00:00"}]}
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-12-01T00:00:00+00:00"}, rows: [{state: success}]}
+
+  - id: c06_abandoned_only_strictly_past_the_idle_threshold
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+    expect:
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-26T09:59:00+00:00"}, rows: [{state: running, outcome: null, duration_seconds: null, idle_threshold_seconds: 86400}]}
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-26T10:00:00+00:00"}, rows: [{state: running}]}
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-26T10:00:01+00:00"}, rows: [{state: abandoned, outcome: null, duration_seconds: null, as_of: "2026-09-26T10:00:01+00:00"}]}
+
+  - id: c07_activity_in_any_table_keeps_a_session_running
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+      telemetry_observations:
+        - {session: root, event_id: o1, event_kind: open, observation_id: t1, observation_type: tool_call, name: Bash, at: "2026-09-26T09:00:00+00:00", so: 1}
+      telemetry_transcripts:
+        - {session: root, event_id: x1, event_kind: point, at: "2026-09-26T09:30:00+00:00", so: 2}
+    expect:
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-26T12:00:00+00:00"}, rows: [{state: running, last_event_timestamp: "2026-09-26T09:30:00+00:00"}]}
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-27T09:31:00+00:00"}, rows: [{state: abandoned}]}
+
+  - id: c08_multi_producer_latest_row_decides
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: root, event_id: e2, event_kind: close, at: "2026-09-25T11:00:00+00:00", so: 1, outcome: success}
+        - {session: root, event_id: a1, producer: ci_annotate, event_kind: resume, at: "2026-09-25T11:30:00+00:00", so: 0}
+    expect:
+      - verb: session_state_and_duration
+        session: root
+        params: {as_of: "2026-09-25T12:00:00+00:00"}
+        rows: [{state: running, outcome: null, duration_seconds: 3600, generations: [{producer: claude_code, parser_version: 1}]}]
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{state: abandoned}]}
+
+  - id: c09_generation_bump_retires_the_older_close
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0, parser_version: 1}
+        - {session: root, event_id: e2, event_kind: close, at: "2026-09-25T11:00:00+00:00", so: 1, outcome: failed, parser_version: 1}
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0, parser_version: 2}
+        - {session: root, event_id: e2, event_kind: close, at: "2026-09-25T11:30:00+00:00", so: 1, outcome: success, parser_version: 2}
+    expect:
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{state: success, outcome: success, duration_seconds: 5400, generations: [{producer: claude_code, parser_version: 2}]}]}
+
+  - id: c10_conflicted_grain_key_is_reported_not_resolved
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0, workflow: plan}
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0, workflow: implement, created: "2026-09-25T10:00:05+00:00"}
+        - {session: root, event_id: e2, event_kind: close, at: "2026-09-25T11:00:00+00:00", so: 1, outcome: success}
+    expect:
+      - verb: session_state_and_duration
+        session: root
+        params: {as_of: "2026-09-25T12:00:00+00:00"}
+        rows:
+          - state: success
+            duration_seconds: 3600
+            derivation_conflicted: true
+            conflicted_grain_keys: [{table_name: telemetry_sessions, producer: claude_code, event_id: e1, parser_version: 1}]
+
+  - id: c11_sub_agents_take_state_and_duration_from_the_agent_run_pair
+    sessions:
+      root: {started_at: "2026-09-25T10:00:00+00:00"}
+      sync_ok: {started_at: "2026-09-25T10:00:00+00:00", parent: root}
+      sync_failed: {started_at: "2026-09-25T10:00:00+00:00", parent: root}
+      sync_timeout: {started_at: "2026-09-25T10:00:00+00:00", parent: root}
+      sync_throttled: {started_at: "2026-09-25T10:00:00+00:00", parent: root}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: sync_ok, event_id: c1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: sync_failed, event_id: c2, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: sync_timeout, event_id: c3, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: sync_throttled, event_id: c4, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+      telemetry_agents:
+        - {session: sync_ok, event_id: a1, agent_run_id: r1, agent_type: reviewer, event_kind: open, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: sync_ok, event_id: a2, agent_run_id: r1, agent_type: reviewer, event_kind: close, at: "2026-09-25T10:15:00+00:00", so: 2, outcome: success}
+        - {session: sync_failed, event_id: a3, agent_run_id: r2, agent_type: reviewer, event_kind: open, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: sync_failed, event_id: a4, agent_run_id: r2, agent_type: reviewer, event_kind: close, at: "2026-09-25T10:06:00+00:00", so: 2, outcome: failed}
+        - {session: sync_timeout, event_id: a5, agent_run_id: r3, agent_type: reviewer, event_kind: open, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: sync_timeout, event_id: a6, agent_run_id: r3, agent_type: reviewer, event_kind: close, at: "2026-09-25T10:25:00+00:00", so: 2, outcome: timeout}
+        - {session: sync_throttled, event_id: a7, agent_run_id: r4, agent_type: reviewer, event_kind: open, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: sync_throttled, event_id: a8, agent_run_id: r4, agent_type: reviewer, event_kind: close, at: "2026-09-25T10:35:00+00:00", so: 2, outcome: throttled}
+    expect:
+      - {verb: session_state_and_duration, session: sync_ok, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{state: success, outcome: success, duration_seconds: 600, parent_session_id: {session: root}}]}
+      - {verb: session_state_and_duration, session: sync_failed, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{state: failed, outcome: failed, duration_seconds: 60}]}
+      - {verb: session_state_and_duration, session: sync_timeout, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{state: failed, outcome: timeout, duration_seconds: 1200}]}
+      - {verb: session_state_and_duration, session: sync_throttled, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{state: failed, outcome: throttled, duration_seconds: 1800}]}
+      - {verb: agent_run_state_and_duration, session: sync_timeout, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{agent_run_id: r3, agent_type: reviewer, state: failed, outcome: timeout, duration_seconds: 1200}]}
+
+  - id: c12_async_sub_agent_without_a_close
+    sessions:
+      root: {started_at: "2026-09-25T10:00:00+00:00"}
+      child: {started_at: "2026-09-25T10:00:00+00:00", parent: root}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: child, event_id: c1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+      telemetry_agents:
+        - {session: child, event_id: a1, agent_run_id: r1, agent_type: reviewer, event_kind: open, at: "2026-09-25T10:05:00+00:00", so: 1}
+      telemetry_observations:
+        - {session: child, event_id: m1, event_kind: point, observation_id: m1, observation_type: model_call, at: "2026-09-25T10:20:00+00:00", so: 2, tokens_input: 5, tokens_output: 1}
+    expect:
+      - {verb: session_state_and_duration, session: child, params: {as_of: "2026-09-26T10:19:00+00:00"}, rows: [{state: running, outcome: null, duration_seconds: null}]}
+      - {verb: session_state_and_duration, session: child, params: {as_of: "2026-09-26T10:21:00+00:00"}, rows: [{state: abandoned, outcome: null, duration_seconds: null}]}
+      - {verb: agent_run_state_and_duration, session: child, params: {as_of: "2026-09-26T10:21:00+00:00"}, rows: [{agent_run_id: r1, state: abandoned, outcome: null, duration_seconds: null}]}
+
+  - id: c13_process_event_and_step_rollup_after_dedupe
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+      telemetry_observations:
+        - {session: root, event_id: p1, event_kind: point, observation_id: p1, observation_type: process_event, name: "hook:a", severity: info, at: "2026-09-25T10:01:00+00:00", so: 1}
+        - {session: root, event_id: p1, event_kind: point, observation_id: p1, observation_type: process_event, name: "hook:a", severity: info, at: "2026-09-25T10:01:00+00:00", so: 1, created: "2026-09-25T10:00:30+00:00", producer_version: "2.0"}
+        - {session: root, event_id: p2, event_kind: point, observation_id: p2, observation_type: process_event, name: "hook:b", severity: info, at: "2026-09-25T10:02:00+00:00", so: 2}
+        - {session: root, event_id: p3, event_kind: point, observation_id: p3, observation_type: process_event, name: "hook:c", severity: info, at: "2026-09-25T10:03:00+00:00", so: 3}
+        - {session: root, event_id: s1o, event_kind: open, observation_id: s1, observation_type: step, name: one, at: "2026-09-25T10:04:00+00:00", so: 4}
+        - {session: root, event_id: s1c, event_kind: close, observation_id: s1, observation_type: step, name: one, at: "2026-09-25T10:05:00+00:00", so: 5}
+        - {session: root, event_id: s2o, event_kind: open, observation_id: s2, observation_type: step, name: two, at: "2026-09-25T10:06:00+00:00", so: 6}
+        - {session: root, event_id: s2c, event_kind: close, observation_id: s2, observation_type: step, name: two, at: "2026-09-25T10:07:00+00:00", so: 7}
+        - {session: root, event_id: s3o, event_kind: open, observation_id: s3, observation_type: step, name: three, at: "2026-09-25T10:08:00+00:00", so: 8}
+    expect:
+      - {verb: session_process_event_rollup, session: root, params: {}, rows: [{process_event_total: 3, steps_completed_total: 2, derivation_conflicted: false}]}
+
+  - id: c14_token_rollup_counts_one_per_model_call
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+      telemetry_observations:
+        - {session: root, event_id: m1, event_kind: point, observation_id: m1, observation_type: model_call, tokens_input: 100, tokens_output: 10, tokens_cache_read: 30, tokens_cache_creation: 4, at: "2026-09-25T10:10:00+00:00", so: 1}
+        - {session: root, event_id: m2, event_kind: point, observation_id: m2, observation_type: model_call, tokens_input: 200, tokens_output: 20, tokens_cache_read: 50, tokens_cache_creation: 9, at: "2026-09-25T10:30:00+00:00", so: 2}
+        - {session: root, event_id: m2l, producer: litellm, event_kind: point, observation_id: m2, observation_type: model_call, tokens_input: 999, tokens_output: 99, tokens_cache_read: 70, tokens_cache_creation: 2, at: "2026-09-25T10:31:00+00:00", so: 2}
+        - {session: root, event_id: m3, event_kind: point, observation_id: m3, observation_type: model_call, at: "2026-09-25T10:35:00+00:00", so: 3}
+        - {session: root, event_id: m4a, event_kind: point, observation_id: m4, observation_type: model_call, tokens_input: 1, tokens_output: 1, tokens_cache_read: 1, tokens_cache_creation: 1, at: "2026-09-25T10:40:00+00:00", so: 4}
+        - {session: root, event_id: m4b, event_kind: point, observation_id: m4, observation_type: model_call, tokens_input: 7, tokens_output: 7, tokens_cache_read: 6, tokens_cache_creation: 3, at: "2026-09-25T10:41:00+00:00", so: 5}
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 307, tokens_output_total: 37, tokens_cache_read_total: 86, tokens_cache_creation_total: 16, model_call_count: 4, usage_missing_count: 1}]}
+
+  - id: c15_cost_is_reported_allowance_or_unpriced_never_zero
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+      telemetry_observations:
+        - {session: root, event_id: mA, event_kind: point, observation_id: mA, observation_type: model_call, model: claude-x, provider: litellm, cost_usd_reported: 0.5, at: "2026-09-25T10:10:00+00:00", so: 1}
+        - {session: root, event_id: mB, event_kind: point, observation_id: mB, observation_type: model_call, model: claude-x, provider: anthropic_max, billing_shape: fixed_non_rollover_allowance, cost_usd_reported: 0.7, at: "2026-09-25T10:20:00+00:00", so: 2}
+        - {session: root, event_id: mC, event_kind: point, observation_id: mC, observation_type: model_call, model: claude-x, provider: litellm, at: "2026-09-25T10:30:00+00:00", so: 3}
+    expect:
+      - verb: model_call_cost_estimate
+        session: root
+        params: {}
+        rows:
+          - {observation_id: mA, cost_usd: 0.5, cost_source: reported}
+          - {observation_id: mB, cost_usd: null, cost_source: allowance}
+          - {observation_id: mC, cost_usd: null, cost_source: unpriced}
+
+  - id: c15b_local_cost_is_null_whatever_is_reported
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: e1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+      telemetry_observations:
+        - {session: root, event_id: mA, event_kind: point, observation_id: mA, observation_type: model_call, model: llama-x, provider: litellm, billing_shape: local, cost_usd_reported: 0.0, at: "2026-09-25T10:10:00+00:00", so: 1}
+        - {session: root, event_id: mB, event_kind: point, observation_id: mB, observation_type: model_call, model: llama-x, provider: litellm, billing_shape: local, cost_usd_reported: 0.42, at: "2026-09-25T10:20:00+00:00", so: 2}
+        - {session: root, event_id: mC, event_kind: point, observation_id: mC, observation_type: model_call, model: llama-x, provider: litellm, billing_shape: local, at: "2026-09-25T10:30:00+00:00", so: 3}
+        - {session: root, event_id: mD, event_kind: point, observation_id: mD, observation_type: model_call, model: claude-x, provider: litellm, billing_shape: metered_marginal, cost_usd_reported: 0.5, at: "2026-09-25T10:40:00+00:00", so: 4}
+    expect:
+      - verb: model_call_cost_estimate
+        session: root
+        params: {}
+        rows:
+          - {observation_id: mA, cost_usd: null, cost_source: local}
+          - {observation_id: mB, cost_usd: null, cost_source: local}
+          - {observation_id: mC, cost_usd: null, cost_source: local}
+          - {observation_id: mD, cost_usd: 0.5, cost_source: reported}
+
+  - id: c16_window_lists_root_sessions_of_real_projects_in_order
+    sessions:
+      first: {started_at: "2026-09-25T10:00:00+00:00", project: real}
+      drill_run: {started_at: "2026-09-25T11:00:00+00:00", project: drill}
+      later: {started_at: "2026-09-26T09:00:00+00:00", project: real}
+      child: {started_at: "2026-09-25T10:00:00+00:00", parent: first, project: real}
+    rows:
+      telemetry_sessions:
+        - {session: first, event_id: a1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: first, event_id: a2, event_kind: close, at: "2026-09-25T10:30:00+00:00", so: 1, outcome: success}
+        - {session: drill_run, event_id: b1, event_kind: open, at: "2026-09-25T11:00:00+00:00", so: 0}
+        - {session: later, event_id: c1, event_kind: open, at: "2026-09-26T09:00:00+00:00", so: 0}
+        - {session: child, event_id: d1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+    expect:
+      - verb: sessions_window
+        params: {day_from: "2026-09-25", day_to: "2026-09-26", as_of: "2026-09-26T12:00:00+00:00"}
+        rows:
+          - {session_id: {session: first}, state: success, outcome: success, duration_seconds: 1800}
+          - {session_id: {session: later}, state: running, outcome: null, duration_seconds: null}
+      - verb: sessions_window_all_purposes
+        params: {day_from: "2026-09-25", day_to: "2026-09-26", as_of: "2026-09-26T12:00:00+00:00"}
+        rows:
+          - {session_id: {session: first}, state: success}
+          - {session_id: {session: drill_run}, state: abandoned}
+          - {session_id: {session: later}, state: running}
+      - verb: sessions_window
+        params: {day_from: "2026-09-26", day_to: "2026-09-26", as_of: "2026-09-27T09:01:00+00:00"}
+        rows: [{session_id: {session: later}, state: abandoned}]
+
+  - id: c_at_rest_idle_reads_the_turn_outcome
+    sessions: {ok: {started_at: "2026-09-25T10:00:00+00:00"}, err: {started_at: "2026-09-25T10:00:00+00:00"}, intr: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: ok, event_id: ok_s1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: err, event_id: err_s1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: intr, event_id: intr_s1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+      telemetry_observations:
+        - {session: ok, event_id: ok_o, event_kind: open, observation_id: t_ok, observation_type: turn, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: ok, event_id: ok_c, event_kind: close, observation_id: t_ok, observation_type: turn, at: "2026-09-25T10:30:00+00:00", so: 2, outcome: success}
+        - {session: err, event_id: err_o, event_kind: open, observation_id: t_err, observation_type: turn, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: err, event_id: err_c, event_kind: close, observation_id: t_err, observation_type: turn, at: "2026-09-25T10:30:00+00:00", so: 2, outcome: error}
+        - {session: intr, event_id: intr_o, event_kind: open, observation_id: t_intr, observation_type: turn, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: intr, event_id: intr_c, event_kind: close, observation_id: t_intr, observation_type: turn, at: "2026-09-25T10:30:00+00:00", so: 2, outcome: interrupted}
+    expect:
+      - {verb: session_state_and_duration, session: ok, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{state: success, outcome: success, duration_seconds: 1800}]}
+      - {verb: session_state_and_duration, session: ok, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{state: running, outcome: null, duration_seconds: 1800}]}
+      - {verb: session_state_and_duration, session: err, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{state: failed, outcome: failed, duration_seconds: 1800}]}
+      - {verb: session_state_and_duration, session: err, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{state: running, outcome: null, duration_seconds: 1800}]}
+      - {verb: session_state_and_duration, session: intr, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{state: cancelled, outcome: cancelled, duration_seconds: 1800}]}
+      - {verb: session_state_and_duration, session: intr, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{state: running, outcome: null, duration_seconds: 1800}]}
+
+  - id: c_at_rest_not_idle_is_running
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: root_s1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+      telemetry_observations:
+        - {session: root, event_id: r_o, event_kind: open, observation_id: t1, observation_type: turn, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: root, event_id: r_c, event_kind: close, observation_id: t1, observation_type: turn, at: "2026-09-25T10:30:00+00:00", so: 2, outcome: success}
+    expect:
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-26T10:30:00+00:00"}, rows: [{state: running, outcome: null, duration_seconds: 1800}]}
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-26T10:30:01+00:00"}, rows: [{state: success, outcome: success, duration_seconds: 1800}]}
+
+  - id: c_mid_turn_idle_is_abandoned
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: root_s1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+      telemetry_observations:
+        - {session: root, event_id: r_o1, event_kind: open, observation_id: t1, observation_type: turn, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: root, event_id: r_c1, event_kind: close, observation_id: t1, observation_type: turn, at: "2026-09-25T10:30:00+00:00", so: 2, outcome: success}
+        - {session: root, event_id: r_o2, event_kind: open, observation_id: t2, observation_type: turn, at: "2026-09-25T11:00:00+00:00", so: 3}
+    expect:
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{state: abandoned, outcome: null, duration_seconds: 1800}]}
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{state: running, outcome: null, duration_seconds: 1800}]}
+
+  - id: c_producer_close_stands_without_a_later_turn
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: root_s1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: root, event_id: r_pc, event_kind: close, at: "2026-09-25T10:40:00+00:00", so: 5, outcome: success}
+      telemetry_observations:
+        - {session: root, event_id: r_o, event_kind: open, observation_id: t1, observation_type: turn, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: root, event_id: r_c, event_kind: close, observation_id: t1, observation_type: turn, at: "2026-09-25T10:30:00+00:00", so: 2, outcome: error}
+    expect:
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{state: success, outcome: success, duration_seconds: 2400}]}
+
+  - id: c_turn_after_a_producer_close_reads_from_the_turn
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: root_s1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: root, event_id: r_pc, event_kind: close, at: "2026-09-25T10:40:00+00:00", so: 5, outcome: success}
+      telemetry_observations:
+        - {session: root, event_id: r_o, event_kind: open, observation_id: t2, observation_type: turn, at: "2026-09-25T11:00:00+00:00", so: 6}
+        - {session: root, event_id: r_c, event_kind: close, observation_id: t2, observation_type: turn, at: "2026-09-25T11:20:00+00:00", so: 7, outcome: error}
+    expect:
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{state: failed, outcome: failed, duration_seconds: 4800}]}
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-25T11:10:00+00:00"}, rows: [{state: running, outcome: null, duration_seconds: 4800}]}
+
+  - id: c_turn_open_tied_with_the_producer_close
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: root_s1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: root, event_id: r_pc, event_kind: close, at: "2026-09-25T10:40:00+00:00", so: 5, outcome: success}
+      telemetry_observations:
+        - {session: root, event_id: r_o1, event_kind: open, observation_id: t1, observation_type: turn, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: root, event_id: r_c1, event_kind: close, observation_id: t1, observation_type: turn, at: "2026-09-25T10:20:00+00:00", so: 2, outcome: error}
+        - {session: root, event_id: r_o2, event_kind: open, observation_id: t2, observation_type: turn, at: "2026-09-25T10:40:00+00:00", so: 3}
+    expect:
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{state: success, outcome: success, duration_seconds: 2400}]}
+
+  - id: c_turn_open_same_timestamp_later_ordinal_reads_from_the_turn
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: root_s1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: root, event_id: r_pc, event_kind: close, at: "2026-09-25T10:40:00+00:00", so: 5, outcome: success}
+      telemetry_observations:
+        - {session: root, event_id: r_o1, event_kind: open, observation_id: t1, observation_type: turn, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: root, event_id: r_c1, event_kind: close, observation_id: t1, observation_type: turn, at: "2026-09-25T10:20:00+00:00", so: 2, outcome: error}
+        - {session: root, event_id: r_o2, event_kind: open, observation_id: t2, observation_type: turn, at: "2026-09-25T10:40:00+00:00", so: 7}
+    expect:
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{state: abandoned, outcome: null, duration_seconds: 2400}]}
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{state: running, outcome: null, duration_seconds: 2400}]}
+
+  - id: c_producer_close_tied_with_a_turn_close
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: root_s1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: root, event_id: r_pc, event_kind: close, at: "2026-09-25T10:40:00+00:00", so: 5, outcome: success}
+      telemetry_observations:
+        - {session: root, event_id: r_o, event_kind: open, observation_id: t1, observation_type: turn, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: root, event_id: r_c, event_kind: close, observation_id: t1, observation_type: turn, at: "2026-09-25T10:40:00+00:00", so: 6, outcome: error}
+    expect:
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{state: success, outcome: success, duration_seconds: 2400}]}
+
+  - id: c_blocked_turn_takes_its_latest_close
+    sessions: {rerun: {started_at: "2026-09-25T10:00:00+00:00"}, stuck: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: rerun, event_id: rerun_s1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: stuck, event_id: stuck_s1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+      telemetry_observations:
+        - {session: rerun, event_id: a_o, event_kind: open, observation_id: t1, observation_type: turn, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: rerun, event_id: a_c1, event_kind: close, observation_id: t1, observation_type: turn, at: "2026-09-25T10:20:00+00:00", so: 2, outcome: blocked}
+        - {session: rerun, event_id: a_c2, event_kind: close, observation_id: t1, observation_type: turn, at: "2026-09-25T10:30:00+00:00", so: 3, outcome: success}
+        - {session: stuck, event_id: b_o, event_kind: open, observation_id: t1, observation_type: turn, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: stuck, event_id: b_c1, event_kind: close, observation_id: t1, observation_type: turn, at: "2026-09-25T10:20:00+00:00", so: 2, outcome: blocked}
+    expect:
+      - {verb: session_state_and_duration, session: rerun, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{state: success, outcome: success, duration_seconds: 1800}]}
+      - {verb: session_state_and_duration, session: stuck, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{state: failed, outcome: failed, duration_seconds: 1200}]}
+
+  - id: c_turn_close_without_outcome_keeps_the_prior_rule
+    sessions: {root: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: root, event_id: root_s1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+      telemetry_observations:
+        - {session: root, event_id: r_o, event_kind: open, observation_id: t1, observation_type: turn, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: root, event_id: r_c, event_kind: close, observation_id: t1, observation_type: turn, at: "2026-09-25T10:30:00+00:00", so: 2}
+    expect:
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{state: abandoned, outcome: null, duration_seconds: 1800}]}
+      - {verb: session_state_and_duration, session: root, params: {as_of: "2026-09-25T12:00:00+00:00"}, rows: [{state: running, outcome: null, duration_seconds: 1800}]}
+
+  - id: c_duration_is_the_later_close_truncated
+    sessions: {pcl: {started_at: "2026-09-25T10:00:00+00:00"}, tcl: {started_at: "2026-09-25T10:00:00+00:00"}}
+    rows:
+      telemetry_sessions:
+        - {session: pcl, event_id: pcl_s1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: tcl, event_id: tcl_s1, event_kind: open, at: "2026-09-25T10:00:00+00:00", so: 0}
+        - {session: pcl, event_id: p_pc, event_kind: close, at: "2026-09-25T10:40:00.900+00:00", so: 5, outcome: success}
+        - {session: tcl, event_id: t_pc, event_kind: close, at: "2026-09-25T10:40:00+00:00", so: 5, outcome: success}
+      telemetry_observations:
+        - {session: pcl, event_id: p_o, event_kind: open, observation_id: t1, observation_type: turn, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: pcl, event_id: p_c, event_kind: close, observation_id: t1, observation_type: turn, at: "2026-09-25T10:20:00+00:00", so: 2, outcome: success}
+        - {session: tcl, event_id: t_o, event_kind: open, observation_id: t1, observation_type: turn, at: "2026-09-25T10:05:00+00:00", so: 1}
+        - {session: tcl, event_id: t_c, event_kind: close, observation_id: t1, observation_type: turn, at: "2026-09-25T10:50:00.500+00:00", so: 6, outcome: success}
+    expect:
+      - {verb: session_state_and_duration, session: pcl, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{duration_seconds: 2400}]}
+      - {verb: session_state_and_duration, session: tcl, params: {as_of: "2026-09-27T00:00:00+00:00"}, rows: [{duration_seconds: 3000}]}

@@ -9,8 +9,6 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
-import sys
-import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -49,32 +47,26 @@ from scripts.rec_trailer_acceptance_junit import ROUTE_JUNIT, ROUTE_REFUSE, ROUT
 _REAL_NODE = "tests/test_rec_trailer_acceptance.py::TestRejoin::test_matching_record_survives"
 
 
-def _stub_ops_data_portal() -> types.ModuleType:
-    """Stub for scripts.ops_data_portal so cmd_close's lazy sync import never reaches the real portal module."""
-    stub = types.ModuleType("scripts.ops_data_portal")
-    stub.sync = MagicMock()
-    return stub
-
-
 def _run_cmd_close(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     junit_verdict: Path | None = None,
-    sync_side_effect: BaseException | None = None,
+    live_rows: dict[str, dict] | None = None,
+    reader_error: BaseException | None = None,
     close_return: int = 0,
 ) -> tuple[int, MagicMock]:
-    """Shared cmd_close invocation: redirects ROOT, sets env vars, stubs the portal, patches close_recs_from_trailer."""
+    """Shared cmd_close invocation: env vars, a fake rec_by_id reader, patched close_recs_from_trailer."""
     args = argparse.Namespace(artifact_dir=tmp_path, junit_verdict=junit_verdict)
-    monkeypatch.setattr("scripts.rec_trailer_acceptance.ROOT", tmp_path)
     monkeypatch.setenv("GITHUB_SHA", "deadbeef")
     monkeypatch.setenv("GITHUB_REPOSITORY", "org/repo")
     monkeypatch.setenv("GITHUB_RUN_ID", "123")
-    stub = _stub_ops_data_portal()
-    if sync_side_effect is not None:
-        stub.sync.side_effect = sync_side_effect
+    reader = MagicMock()
+    reader.named.side_effect = reader_error or (
+        lambda verb, **kw: [live_rows[kw["id"]]] if kw["id"] in (live_rows or {}) else []
+    )
     with (
-        patch.dict(sys.modules, {"scripts.ops_data_portal": stub}),
+        patch("scripts.rec_trailer_acceptance._make_reader", return_value=reader),
         patch("scripts.ops_portal.ci_rca_lifecycle.close_recs_from_trailer", return_value=close_return) as mock_close,
     ):
         rc = cmd_close(args)
@@ -254,6 +246,15 @@ class TestJunitRouting:
         rows = [{"id": "rec-1", "acceptance": "pytest " + _REAL_NODE + " | tee out.log"}]
         entries = census(["rec-1"], rows=rows)
         assert entries[0]["route"] == ROUTE_STATIC
+
+    def test_long_node_id_list_routes_to_junit_not_out_of_grammar(self) -> None:
+        nodes = " ".join([_REAL_NODE] * 7)
+        assert len(nodes) > census_mod._MAX_SHAPE_LEN
+        long_junit = {"id": "a", "acceptance": f"bin/venv-python -m pytest {nodes} -q"}
+        long_chain = {"id": "b", "acceptance": f"true && pytest {nodes}"}
+        on_route, off_route = census(["a", "b"], rows=[long_junit, long_chain])
+        assert (on_route["bucket"], on_route["route"]) == (census_mod.PROBEABLE, ROUTE_JUNIT)
+        assert (off_route["bucket"], off_route["route"]) == (census_mod.UNPROBEABLE_SHAPE, ROUTE_STATIC)
 
     def test_bare_pytest_path_stays_static(self) -> None:
         rows = [{"id": "rec-1", "acceptance": "pytest tests/x.py"}]
@@ -468,38 +469,6 @@ class TestCliStages:
         assert rc == 0
         mock_close.assert_not_called()
 
-    def test_cmd_close_sync_exception_is_tolerated(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        _write_json(
-            tmp_path / _CENSUS_ARTIFACT, {"ids": ["rec-1"], "entries": [{"rec_id": "rec-1", "acceptance_sha256": "abc"}]}
-        )
-        _write_json(
-            tmp_path / _VERDICT_ARTIFACT,
-            {"records": [{"rec_id": "rec-1", "acceptance_sha256": "abc", "verdict": HOLDS}]},
-        )
-        rc, mock_close = _run_cmd_close(tmp_path, monkeypatch, sync_side_effect=RuntimeError("warehouse unreachable"))
-        assert rc == 0
-        mock_close.assert_called_once()
-
-    def test_cmd_close_cache_skips_blank_and_malformed_lines(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        _write_json(
-            tmp_path / _CENSUS_ARTIFACT, {"ids": ["rec-1"], "entries": [{"rec_id": "rec-1", "acceptance_sha256": "abc"}]}
-        )
-        _write_json(
-            tmp_path / _VERDICT_ARTIFACT,
-            {"records": [{"rec_id": "rec-1", "acceptance_sha256": "abc", "verdict": HOLDS}]},
-        )
-        logs_dir = tmp_path / "logs"
-        logs_dir.mkdir()
-        cache_path = logs_dir / ".recommendations-log.jsonl"
-        cache_path.write_text(
-            '{"id": "rec-1", "status": "open"}\n\nnot-json\n{"no_id_field": true}\n',
-            encoding="utf-8",
-        )
-        rc, mock_close = _run_cmd_close(tmp_path, monkeypatch)
-        assert rc == 0
-        recs_cache_arg = mock_close.call_args.args[3]
-        assert recs_cache_arg == {"rec-1": {"id": "rec-1", "status": "open"}}
-
     def test_cmd_close_reads_junit_verdict_file_when_present(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """--junit-verdict names a file that exists: cmd_close reads it and threads it into rejoin() as junit_doc."""
         _write_json(
@@ -581,3 +550,37 @@ class TestCliStages:
             rc = main(["close"])
         assert rc == 1
         assert "FAIL: boom" in capsys.readouterr().err
+
+
+class TestCloseReadsLiveRows:
+    """cmd_close reads each trailer rec live via rec_by_id: no sync(), no cache file, loud on reader failure."""
+
+    def _stage(self, tmp_path: Path) -> None:
+        _write_json(
+            tmp_path / _CENSUS_ARTIFACT, {"ids": ["rec-1"], "entries": [{"rec_id": "rec-1", "acceptance_sha256": "abc"}]}
+        )
+        _write_json(
+            tmp_path / _VERDICT_ARTIFACT, {"records": [{"rec_id": "rec-1", "acceptance_sha256": "abc", "verdict": HOLDS}]}
+        )
+
+    def test_close_hands_live_rows_to_closer(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._stage(tmp_path)
+        rc, mock_close = _run_cmd_close(tmp_path, monkeypatch, live_rows={"rec-1": {"id": "rec-1", "status": "open"}})
+        assert rc == 0
+        assert mock_close.call_args.args[3] == {"rec-1": {"id": "rec-1", "status": "open"}}
+
+    def test_close_never_reads_cache_file_or_syncs(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._stage(tmp_path)
+        monkeypatch.setattr("scripts.rec_trailer_acceptance.ROOT", tmp_path)
+        (tmp_path / "logs").mkdir()
+        (tmp_path / "logs" / ".recommendations-log.jsonl").write_text('{"id": "rec-1", "status": "stale"}\n', encoding="utf-8")
+        with patch("scripts.ops_data_portal.sync") as mock_sync:
+            rc, mock_close = _run_cmd_close(tmp_path, monkeypatch)
+        assert rc == 0
+        mock_sync.assert_not_called()
+        assert mock_close.call_args.args[3] == {}
+
+    def test_close_raises_on_reader_failure(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._stage(tmp_path)
+        with pytest.raises(RuntimeError, match="reader down"):
+            _run_cmd_close(tmp_path, monkeypatch, reader_error=RuntimeError("reader down"))

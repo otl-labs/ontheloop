@@ -5,7 +5,7 @@ model: opus[1m]
 
 # Orient Workflow
 
-**Intent**: Consume the preflight cache and platform roadmap to produce a structured orientation deliverable: status digest, CI-RCA triage, ranked work list, and up to 5 disjoint `/plan` prompts with an overlap matrix and keystone-first sequencing. Writes nothing.
+**Intent**: Consume the preflight cache and the roadmap to produce a structured orientation deliverable: status digest, CI-RCA triage, ranked work list, and up to 5 disjoint `/plan` prompts with an overlap matrix and keystone-first sequencing. Writes nothing.
 
 *Note: For the full orientation methodology (read-only contract, deliverable shape, overlap matrix spec, keystone sequencing, status-trusted-never-inferred rule), invoke your `orient` skill via the Skill tool.*
 
@@ -60,7 +60,8 @@ See the skill's Deliverable Shape section for the full spec of each, except Sect
 
 | Preflight signal | Classification | Operator action |
 |---|---|---|
-| `ci_rca_unresolved_recs` non-empty | **HARD BLOCK** | List each rec (id, priority, title, its `prior_deferrals` line -- see below). The next `/plan` enforces the block; orient surfaces it. |
+| `ci_rca_unresolved_recs` null (`recs_read_status` != `ok`) | **HARD BLOCK -- UNAVAILABLE** | Print "CI-RCA UNAVAILABLE"; never render it as clear or zero. The next `/plan` blocks at commitment unless the human overrides. |
+| `ci_rca_unresolved_recs` non-empty | **HARD BLOCK** | List each rec (id, priority, title, its `prior_deferrals` line -- see below). The next `/plan` blocks overlapping work, and all work once a red is past its SLO (`scripts.ci_rca.red_overlap`, Decision 226); orient surfaces it. A High rec is Track A: route it to `docs/contracts/red-main-recovery.yaml` `procedure.fast_lane_repair`, never a zero-th `/plan` prompt. |
 | `ci_rca_likely_resolved_recs` non-empty | **SOFT PROMPT** | "LIKELY RESOLVED -- verify and close." Close-then-stamp: `bin/venv-python -m scripts.ops_data_portal --update-rec <id> --status closed --resolution '...'`, then `bin/venv-python -c "from scripts.ops_portal.ci_rca_lifecycle import stamp_fixed_by_sha; stamp_fixed_by_sha('<id>', '<merge-sha>')"` per `docs/contracts/ci-rca-lifecycle.yaml` `closure_dependency.manual_route`. |
 | `ci_rca_liveness_alert` non-null | **HARD ALERT** | Main CI red >30 min with no rec. Triage immediately. |
 | `forward_fix_recursion_alert` non-null | **HARD ALERT** | 3+ ci-rca recs targeting same file in 24h. Triage immediately. |
@@ -71,14 +72,14 @@ If HARD BLOCK recs exist, note them prominently at the top of this section.
 
 **N >= 3 close-or-plan trigger**: once a rec's `prior_deferrals.count` reaches 3 or more, it has been deferred at least three times without closure -- do not defer it again by reflex.
 
-1. Side-effect guard clause, checked BEFORE anything runs: read the rec's `acceptance` string from `logs/.recommendations-log.jsonl`; it is probeable only when that `acceptance` string is read-only -- a grep, a read-only inspection, or a pytest selector. A pytest selector is read-only only after BOTH `-p no:cacheprovider` AND `--randomly-seed=0` are appended to its pytest segment: `pyproject.toml`'s `addopts` carries `--randomly-seed=last`, and pytest-randomly asserts the cacheprovider plugin is present (`hasattr(config, "cache")`) whenever the seed resolves to the literal string `last` -- so `-p no:cacheprovider` alone hard-errors (`INTERNALERROR`) on every pytest acceptance command in this repo. Overriding the seed to a concrete value sidesteps that assertion (pytest-randomly only touches `config.cache` when the option equals `last`) while the run still writes no `.pytest_cache`. Anything else is surfaced verbatim, unprobed, with the /plan prompt below.
+1. Side-effect guard clause, checked BEFORE anything runs: read the rec's `acceptance` string from its `ci_rca_unresolved_recs[].acceptance` preflight-report entry; it is probeable only when that `acceptance` string is read-only -- a grep, a read-only inspection, or a pytest selector. A pytest selector is read-only only after BOTH `-p no:cacheprovider` AND `--randomly-seed=0` are appended to its pytest segment: `pyproject.toml`'s `addopts` carries `--randomly-seed=last`, and pytest-randomly asserts the cacheprovider plugin is present (`hasattr(config, "cache")`) whenever the seed resolves to the literal string `last` -- so `-p no:cacheprovider` alone hard-errors (`INTERNALERROR`) on every pytest acceptance command in this repo. Overriding the seed to a concrete value sidesteps that assertion (pytest-randomly only touches `config.cache` when the option equals `last`) while the run still writes no `.pytest_cache`. Anything else is surfaced verbatim, unprobed, with the /plan prompt below.
 2. The bounded, timed probe (commits sourced from the preflight cache's `recent_main_commits` -- cache only, no fresh shell command):
    ```
    bin/venv-python -c "
    import json, time
    from scripts.rec_relevance import evaluate_rec_relevance
    report = json.load(open('logs/.preflight-report.json'))
-   rec = <the rec dict from ci_rca_unresolved_recs, acceptance already read from the cache>
+   rec = <the rec dict from ci_rca_unresolved_recs, acceptance taken from the report entry>
    start = time.monotonic()
    verdict, evidence = evaluate_rec_relevance(
        rec, run_acceptance_probe=True, acceptance_timeout=120,

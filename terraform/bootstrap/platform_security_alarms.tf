@@ -11,15 +11,17 @@
 #   - regex spans (%...%) use only the CloudWatch Logs regex subset -- no parentheses, so the
 #     case-insensitive roleName match is character classes with top-level alternation. IAM role
 #     names are case-insensitive in API calls, so an exact-case match is evadable.
-# Alerts are never filtered by actor (Decision 202): sanctioned CI metadata writes on PlatformDev
-# email too, until rec-4049 lands.
+# Alerts are never filtered by actor (Decision 202): no CI identity holds an IAM grant on either
+# role (Decision 225).
 locals {
   platform_security_alerts_topic_arn = "arn:aws:sns:${var.aws_region}:${var.account_id}:agent-platform-alerts"
 
   platform_security_filter_patterns = {
-    # Any IAM write (denied attempts included) naming PlatformDev/PlatformAdmin in any case, or a
-    # content edit to a managed policy attached to them (policy-version verbs carry no roleName).
-    "platform-security-platform-role-iam-change" = "{ ($.eventSource = \"iam.amazonaws.com\") && ($.readOnly IS FALSE) && (($.requestParameters.roleName = %^[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Dd][Ee][Vv]$|^[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Aa][Dd][Mm][Ii][Nn]$%) || ((($.eventName = \"CreatePolicyVersion\") || ($.eventName = \"SetDefaultPolicyVersion\") || ($.eventName = \"DeletePolicyVersion\") || ($.eventName = \"DeletePolicy\")) && (($.requestParameters.policyArn = \"*:policy/agent-platform-github-ci-apply-boundary\") || ($.requestParameters.policyArn = \"*:policy/platform-security-detector-admin\")))) }"
+    # Any IAM write naming PlatformDev/PlatformAdmin in any case, or a content edit to a managed
+    # policy attached to them (policy-version verbs carry no roleName). A denied call carries
+    # requestParameters null, so it is matched on the role CloudTrail names in errorMessage
+    # ("... on resource: role <name> because ...", or the older ":role/<name> ..." ARN form).
+    "platform-security-platform-role-iam-change" = "{ ($.eventSource = \"iam.amazonaws.com\") && ($.readOnly IS FALSE) && (($.requestParameters.roleName = %^[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Dd][Ee][Vv]$|^[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Aa][Dd][Mm][Ii][Nn]$%) || ($.errorMessage = %role.[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Dd][Ee][Vv]\\s|role.[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Aa][Dd][Mm][Ii][Nn]\\s%) || ((($.eventName = \"CreatePolicyVersion\") || ($.eventName = \"SetDefaultPolicyVersion\") || ($.eventName = \"DeletePolicyVersion\") || ($.eventName = \"DeletePolicy\")) && (($.requestParameters.policyArn = \"*:policy/agent-platform-github-ci-apply-boundary\") || ($.requestParameters.policyArn = \"*:policy/platform-security-detector-admin\")))) }"
 
     # Any denied IAM write, any role.
     "platform-security-denied-iam-write" = "{ ($.eventSource = \"iam.amazonaws.com\") && ($.readOnly IS FALSE) && ($.errorCode = \"AccessDenied*\") }"
@@ -52,7 +54,7 @@ locals {
     "platform-security-iam-event-heartbeat"      = "IamEventHeartbeat"
   }
 
-  platform_security_alarm_triage = "Read who changed what: CloudWatch Logs Insights on log group platform-security-cloudtrail -- fields eventTime, userIdentity.arn, eventName, requestParameters.roleName, errorCode, eventID | sort eventTime desc | limit 50. Console: https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#logsV2:logs-insights"
+  platform_security_alarm_triage = "Read who changed what: CloudWatch Logs Insights on log group platform-security-cloudtrail -- fields eventTime, userIdentity.arn, eventName, requestParameters.roleName, errorCode, errorMessage, eventID | sort eventTime desc | limit 50. Console: https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#logsV2:logs-insights"
 }
 
 resource "aws_cloudwatch_log_metric_filter" "platform_security" {

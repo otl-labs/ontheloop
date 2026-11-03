@@ -113,19 +113,18 @@ class TestCheckBudgetBreachSummary:
         assert result is not None
         mock_reader.assert_not_called()
 
-    def test_reader_path_used_when_sentinel_default(self) -> None:
-        rows = [{"source": "budget_breach", "context": "Dominant phase: lint. "}]
+    def test_sentinel_default_makes_no_reader_call(self) -> None:
         with patch("scripts.preflight._common._make_reader") as MockReader:
-            MockReader.return_value.named.return_value = rows
-            result = alerts._check_budget_breach_summary()
-        assert result == {"count": 1, "by_phase": {"lint": 1}}
-        MockReader.return_value.named.assert_called_once_with("budget_breach_recent")
+            assert alerts._check_budget_breach_summary() is None
+        MockReader.assert_not_called()
 
-    def test_returns_none_on_reader_failure(self) -> None:
-        with patch("scripts.preflight._common._make_reader") as MockReader:
-            MockReader.return_value.named.side_effect = RuntimeError("reader unreachable")
-            result = alerts._check_budget_breach_summary()
-        assert result is None
+    def test_signal_rows_are_summarised_by_phase(self) -> None:
+        from datetime import datetime, timezone
+
+        rows = [
+            {"source": "budget_breach", "context": "Dominant phase: lint. ", "created_timestamp": datetime.now(timezone.utc)}
+        ]
+        assert alerts._check_budget_breach_summary(rows) == {"count": 1, "by_phase": {"lint": 1}}
 
     def test_returns_none_when_reader_returns_empty(self) -> None:
         with patch("scripts.preflight._common._make_reader") as MockReader:

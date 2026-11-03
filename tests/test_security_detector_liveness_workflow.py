@@ -195,8 +195,8 @@ _WF_REDS: dict[str, Callable[[str], str]] = {
     "planner role": lambda t: _sub(t, "role/agent-platform-github-ci-branch", "role/agent-platform-github-ci-planner"),
     "reserved session name": lambda t: _sub(
         t,
-        "aws-region: eu-west-2\n\n      - name: Fail",
-        "aws-region: eu-west-2\n          role-session-name: tf-drift-convergence-writer\n\n      - name: Fail",
+        "aws-region: ${{ env.AWS_REGION }}\n\n      - name: Fail",
+        "aws-region: ${{ env.AWS_REGION }}\n          role-session-name: tf-drift-convergence-writer\n\n      - name: Fail",
     ),
     "unconditional bootstrap window": lambda t: _sub(
         t, "--file-on-transition $BOOTSTRAP_FLAG", "--file-on-transition --bootstrap-window"

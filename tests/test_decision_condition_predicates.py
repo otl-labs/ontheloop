@@ -1,4 +1,4 @@
-"""Tests for scripts.preflight.decision_conditions.roadmap_items_complete (Decision 194).
+"""Tests for scripts.preflight.decision_conditions predicates (Decisions 194 and 212).
 
 A new file, not an addition to tests/test_decision_conditions.py (488 SLOC against the 500 limit
 -- Decision 128 decompose-by-default, no budget raise). Covers the predicate's own semantics on a
@@ -125,3 +125,30 @@ class TestLiveState:
         """Assertion-light by design: its inversion coincides with condition (a) firing, which
         drafted Decision 194 clause 2 pre-licenses. Never assert the reverse."""
         assert dc.roadmap_items_complete(items=["T4.22", "T4.23", "T4.24"], roadmap_path=_LIVE_ROADMAP) is False
+
+
+_LIVE_PORTS = Path(__file__).resolve().parent.parent / "docs" / "contracts" / "ports.yaml"
+
+
+def _write_ports(tmp_path: Path, statuses: list[str]) -> Path:
+    rows = [{"id": f"PC-{i + 1:02d}", "status": s} for i, s in enumerate(statuses)]
+    path = tmp_path / "ports.yaml"
+    path.write_text(yaml.safe_dump({"coupling_findings": rows}), encoding="utf-8")
+    return path
+
+
+class TestPortsOpenCouplingFindings:
+    def test_predicate_is_registered(self) -> None:
+        assert dc._PREDICATE_REGISTRY["ports_open_coupling_findings_exceed"] is dc.ports_open_coupling_findings_exceed
+
+    def test_fires_only_above_threshold(self, tmp_path: Path) -> None:
+        path = _write_ports(tmp_path, ["open", "open", "accepted"])
+        assert dc.ports_open_coupling_findings_exceed(1, contract_path=path) is True
+        assert dc.ports_open_coupling_findings_exceed(2, contract_path=path) is False
+
+    def test_missing_contract_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(OSError):
+            dc.ports_open_coupling_findings_exceed(10, contract_path=tmp_path / "absent.yaml")
+
+    def test_live_contract_evaluates_to_bool(self) -> None:
+        assert isinstance(dc.ports_open_coupling_findings_exceed(10, contract_path=_LIVE_PORTS), bool)

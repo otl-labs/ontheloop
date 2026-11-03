@@ -1,0 +1,293 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "account-id-out-of-session-output"
+intent: >-
+  Stop the session-start AWS hook and the identity-printing scripts agents run in sessions from putting the AWS account
+  ID into model context, transcripts and logs (Decision 224 clauses 1-2; the AGENTS.md public-repo boundary): the hook prints the role
+  name only on every branch, the caller-arn CLI prints the ARN with its account field masked, and the post-apply IAM
+  simulate runner masks the account in everything it prints. Executes rec-4656 and closes rec-823.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-account-id-out-of-session-output.yaml
+phase: >-
+  security_advisory (soft-warn category; no tier_item claimed, so the Tier Item Freshness Gate is skipped). Executes
+  rec-4656.
+scope:
+  - file: scripts/ci/redaction_check.py
+    action: Modify
+    purpose: >-
+      Additive only, stdlib only (the sandbox workflow runs it with the runner's system python3, so no new import):
+      UNIQUE_ID_SHAPE = re.compile(r"(?<![0-9A-Za-z])A(?:ROA|IDA)[A-Z0-9]{16,17}(?![0-9A-Za-z])") (IAM role and user
+      unique IDs encode the account; scripts/checks/ci_guards/validate_actions_account_id_masking.py:4-5) and
+      mask_account_ids(text: str) -> str, which replaces every ACCOUNT_ID_SHAPE match with the existing "[ACCOUNT_ID]"
+      placeholder and every UNIQUE_ID_SHAPE match with "[UNIQUE_ID]", leaving the rest of the text (ARN resource paths,
+      error codes) intact. ACCOUNT_ID_SHAPE, redact, unscrubbed_labels, main and both modes are unchanged. The module
+      docstring gains one line naming mask_account_ids as the shared shape mask for session output (rec-4656).
+  - file: scripts/aws_identity.py
+    action: Modify
+    purpose: >-
+      main() prints mask_account_ids(caller_arn(profile)) (import from scripts.ci.redaction_check), so the CLI output is
+      "arn:aws:sts::[ACCOUNT_ID]:assumed-role/<Role>/<session>": every consumer grep of 'assumed-role/<Role>/'
+      (docs/contracts/deploy-paths.yaml:393-395 ENVIRONMENT CHECK, validate_admin_root_premerge_gate ENV_MARKERS, seven
+      merged plans) and Plan A's acceptance ("prints an Arn containing assumed-role/PlatformDev/") stay true. caller_arn()
+      is unchanged and still returns the full ARN in process (Decision 113); the error path stays type-and-code only. The
+      caller-arn subparser help becomes "print the caller ARN with the account ID masked"; the module docstring gains one
+      sentence that the CLI never prints the account ID.
+  - file: .claude/hooks/session_start_aws.sh
+    action: Modify
+    purpose: >-
+      The helper call keeps `2>&1` capture into a variable. Success branch: take the first line containing
+      ':assumed-role/', cut the role name between 'assumed-role/' and the next '/', and if it matches
+      ^[A-Za-z0-9+=,.@_-]+$ print exactly "OK: assumed-role/<Role>" (no arn:, no account, no session name), keeping the
+      two existing Note lines; otherwise (no assumed-role line, e.g. the proxy re-signing as the IAM user, or an
+      unexpected role-name shape) print the fixed line "WARNING: '<profile>' did not resolve to an assumed role -- see
+      bin/setup-cloud-env.sh header (proxy and profile chain)." and nothing from the helper. Failure branch: print
+      "WARNING: could not assume '<profile>':" then only the first helper line matching ^caller-arn failed: (already
+      value-free, tests/test_aws_identity.py), or, if there is none, the fixed line "helper exited with no diagnostic line;
+      rerun: bin/venv-python -m scripts.aws_identity caller-arn --profile <profile>"; the two existing network-secret
+      hint lines stay. Raw captured output is never echoed on any branch and the hook does no regex masking of its own.
+      Header comment says the hook prints the role name only (rec-4656). Exit 0 on every path, unchanged.
+  - file: scripts/ci/iam_simulate.py
+    action: Modify
+    purpose: >-
+      Every line the module prints passes through mask_account_ids: run_fixture's per-triple table line (actual may be
+      ERROR(<type>: <exc>) carrying an AccessDenied caller ARN), the mismatch detail lines (target_arn is
+      account-resolved), and main()'s cannot-load, cannot-resolve, malformed-fixture (build_triples' wildcard error quotes
+      the resolved target) and cannot-build-client lines. Masking happens at print time only: Triple values, the
+      simulate call and the verdict logic are unchanged. The import is function-local inside run_fixture and main (`from
+      scripts.ci.redaction_check import mask_account_ids  # noqa: PLC0415`), matching the module's dependency-light
+      import style; redaction_check is stdlib only, so the docstring's "boto3 only inside the two default factories" stays
+      true.
+  - file: tests/hooks/test_session_start_aws.py
+    action: Modify
+    purpose: >-
+      Add test_output_never_contains_account_id_or_arn (rec-4656's acceptance), parametrized over: success with the stub
+      printing an UNMASKED ARN (defence if the helper ever regresses), success with the masked form, a non-assumed-role
+      (IAM user) identity, failure with multi-line stderr carrying an ARN plus the caller-arn failed line, and failure
+      with no diagnostic line. Each case asserts stdout+stderr contain no ACCOUNT_ID_SHAPE match, no UNIQUE_ID_SHAPE match
+      and no "arn:", and asserts the branch's expected line ("OK: assumed-role/PlatformDev", the not-an-assumed-role
+      warning, the caller-arn failed line, the fixed fallback). Account-shaped values are built at runtime (e.g.
+      str(10**11 + 7)), never written as 12-digit literals (the pre-commit never-commit hook, Decision 138).
+      test_reports_helper_arn is replaced by test_reports_role_name_only, which asserts the helper argv as before and that
+      stdout contains "OK: assumed-role/PlatformDev" and no "arn:" -- the old assertion that the full ARN is printed
+      encodes the bug and is replaced by a stricter one (named here per Decision 235 clause 1). The other tests are
+      unchanged.
+  - file: tests/test_aws_identity.py
+    action: Modify
+    purpose: >-
+      test_cli_prints_arn becomes test_cli_masks_account_id: caller_arn patched to return an ARN built with a runtime
+      12-digit account; asserts stdout equals the same ARN with "[ACCOUNT_ID]" in the account field, contains
+      'assumed-role/PlatformDev/' (the consumer grep marker) and has no ACCOUNT_ID_SHAPE match; stderr empty. The old
+      exact-full-ARN assertion encodes the bug and is replaced by this stricter one (Decision 235 clause 1). Other tests
+      unchanged.
+  - file: tests/test_redaction_check.py
+    action: Modify
+    purpose: >-
+      Add test_mask_account_ids: masks a runtime-built account inside an sts ARN, an iam ARN and an AccessDenied message,
+      and a runtime-built AROA and AIDA unique ID; leaves the resource path, a 40-hex SHA, an md5 and the incident digest
+      already used in this file unchanged; idempotent on its own output.
+  - file: tests/test_iam_simulate.py
+    action: Modify
+    purpose: >-
+      Add test_printed_output_masks_account_ids: build_triples over a fixture resolved with a runtime-built 12-digit
+      account, run_fixture with one mismatching triple and one simulator raising an exception whose text embeds an ARN
+      with that account; the captured stream contains "[ACCOUNT_ID]", the resource path, and no ACCOUNT_ID_SHAPE match.
+      Add test_main_masks_account_ids_in_error_lines: identity_fn raising an exception carrying the account, and a
+      wildcard target resolved with it; stderr/stdout carry no ACCOUNT_ID_SHAPE match. Existing tests unchanged.
+  - file: config/agent/verification_registry/entries/session-start-aws-no-account-id.yaml
+    action: Create
+    purpose: >-
+      Graduation shard for VP step 1: check_id session-start-aws-no-account-id, primitive_slot test_selector,
+      guard_target .claude/hooks/session_start_aws.sh, plan_slug account-id-out-of-session-output, graduated_at (the
+      merge date), graduated_by implement-agent, check_spec node_id
+      tests/hooks/test_session_start_aws.py::test_output_never_contains_account_id_or_arn (same field set as its sibling
+      session-start-aws-caller-arn.yaml; validate_verification_registry requires graduated_at).
+bundled_recommendations:
+  - rec-4656
+  - rec-823
+followon_recs:
+  - rec-4658
+infrastructure_dependencies: []
+acceptance_criteria:
+  - >-
+    The session-start AWS hook's output on success, non-assumed-role, failure-with-diagnostic and
+    failure-without-diagnostic paths contains no account-shaped run, no unique-ID shape and no arn token; success prints
+    OK, assumed-role/<Role> (the exact line is "OK: assumed-role/<Role>").
+  - "`bin/venv-python -m scripts.aws_identity caller-arn` prints the ARN with the account field masked; output still contains assumed-role/<Role>/, so every existing ENVIRONMENT CHECK and ENV_MARKERS consumer is unchanged."
+  - scripts/ci/iam_simulate.py prints no account ID on any line, including mismatch detail and echoed exception text; its verdicts are unchanged.
+  - No contract, AGENTS.md, skill, Decision or merged-plan text changes.
+  - In the ADMIN container after merge, the hook and caller-arn output carry no account-shaped run and the deploy-paths ENVIRONMENT CHECK still prints ADMIN_CHAIN_OK.
+  - rec-4656 and rec-823 are closed; rec-4658 is open with the remaining sites.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-4656's acceptance -- the hook prints no account ID or ARN on any branch.
+    command: bin/venv-python -m pytest tests/hooks/test_session_start_aws.py::test_output_never_contains_account_id_or_arn -q
+    expected: exit 0; every parametrized case passes. Before the change the node does not exist.
+    fix_if: "A case finds an account-shaped run or arn: -- fix the hook, never the assertion or the stub."
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: graduate
+    graduation_check_id: session-start-aws-no-account-id
+  - step: 2
+    phase: pre-deploy
+    action: The shared mask, the masked CLI and iam_simulate's masked output.
+    command: >-
+      bin/venv-python -m pytest tests/test_redaction_check.py::test_mask_account_ids
+      tests/test_aws_identity.py::test_cli_masks_account_id
+      tests/test_iam_simulate.py::test_printed_output_masks_account_ids
+      tests/test_iam_simulate.py::test_main_masks_account_ids_in_error_lines -q
+    expected: exit 0; every selected test passes (some may be parametrized). Before the change none of the four nodes exists.
+    fix_if: A node fails -- fix the masking code; never widen what the test accepts.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: waive
+    graduation_waiver_reason: >-
+      Four node selectors in one step do not fit one registry slot; the nodes run in every tier through affected-test
+      selection, and step 1 graduates the rec's own acceptance.
+  - step: 3
+    phase: pre-deploy
+    action: The touched suites stay green in full (existing hook branches, caller-arn errors, redaction modes, simulate verdicts) and lint is clean.
+    command: >-
+      bin/venv-python -m pytest tests/hooks/test_session_start_aws.py tests/test_aws_identity.py tests/test_redaction_check.py
+      tests/test_iam_simulate.py tests/test_sts_call_sites.py tests/checks/verification/test_validate_admin_root_premerge_gate.py
+      tests/test_deploy_paths_admin_procedure.py -q && bin/venv-python -m ruff check scripts/ci/redaction_check.py
+      scripts/aws_identity.py scripts/ci/iam_simulate.py tests/hooks/test_session_start_aws.py tests/test_aws_identity.py
+      tests/test_redaction_check.py tests/test_iam_simulate.py && bin/venv-python -m ruff format --check
+      scripts/ci/redaction_check.py scripts/aws_identity.py scripts/ci/iam_simulate.py tests/hooks/test_session_start_aws.py
+      tests/test_aws_identity.py tests/test_redaction_check.py tests/test_iam_simulate.py
+    expected: exit 0.
+    fix_if: An existing test fails -- the change altered behaviour outside its intent; fix the code. Only the two assertions named in scope may change.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-file re-runs of suites already in every tier's affected-test selection, plus lint.
+  - step: 4
+    phase: pre-deploy
+    action: No consumer, contract or public-surface text changed (the masked form keeps every grep valid).
+    command: >-
+      git diff --name-only origin/main...HEAD | grep -E '^(AGENTS\.md|CLAUDE\.md|docs/contracts/|docs/DECISIONS\.md|\.claude/skills/|docs/plans/PLAN-(agent-aws|secrets-to-ssm|trusted-plan|platformdev|retire-github|neon-key))'
+      | wc -l
+    expected: Prints 0.
+    fix_if: A non-zero count -- revert that file; consumer text was never meant to change.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Depends on this branch's transient diff against origin/main, so it cannot stand as a regression guard.
+  - step: 5
+    phase: pre-deploy
+    action: SLOC budgets hold with no raise.
+    command: >-
+      bin/venv-python -c "from scripts.checks.sloc.sloc_limits import validate_sloc_limits as c; f=[]; c(f); print('SLOC_FAILS', len(f)); assert not f, f"
+    expected: SLOC_FAILS 0; exit 0.
+    fix_if: A file is over budget -- decompose (Decision 128); never raise.
+    hermetic: true
+    expected_literals: ["SLOC_FAILS 0"]
+    graduation: waive
+    graduation_waiver_reason: Replays the registered SLOC check that runs in every tier.
+  - step: 6
+    phase: pre-deploy
+    action: Discharge the handoff obligation with a full-tier run to completion (Decision 163).
+    command: bin/venv-python -m scripts.validate
+    expected: exit 0.
+    fix_if: >-
+      A failure in scope is fixed on the branch; never skip a test, relax an assertion, or add a baseline, allowlist or
+      budget entry. A failure outside scope becomes a rec via scripts.ops_data_portal (Decision 59, 55).
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: >-
+      Live, read-only, in the ADMIN container after the merge (main checked out): the hook and the CLI print no
+      account-shaped run, the hook names the role, and the approved ENVIRONMENT CHECK still prints ADMIN_CHAIN_OK. Output
+      is reduced to counts and fixed markers; no raw hook or CLI output is ever printed.
+    command: >-
+      out="$(bash .claude/hooks/session_start_aws.sh 2>&1)";
+      printf '%s\n' "$out" | grep -cE '(^|[^0-9A-Za-z])[0-9]{12}([^0-9A-Za-z]|$)|arn:';
+      printf '%s\n' "$out" | grep -oE 'OK: assumed-role/PlatformAdmin$';
+      bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform 2>/dev/null | grep -cE '(^|[^0-9A-Za-z])[0-9]{12}([^0-9A-Za-z]|$)';
+      bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform 2>/dev/null | grep -o 'assumed-role/PlatformDev/';
+      (bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null | grep -q 'assumed-role/PlatformAdmin/' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT)
+    expected: "Prints 0, OK: assumed-role/PlatformAdmin, 0, assumed-role/PlatformDev/, ADMIN_CHAIN_OK."
+    fix_if: >-
+      A non-zero count -- stop, do not paste or re-run anything that prints the raw output, and report the failing branch
+      to the planning thread. ADMIN_CHAIN_ABSENT or no role line -- the chain itself is down (read the hook's WARNING
+      line); not this plan's regression unless the pre-merge hook passed in the same container.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: Confirm rec-4656 and rec-823 are closed (the squash-merge Resolves trailer closes them) and rec-4658 is open.
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; r,_=fetch_recs_by_ids(make_reader(), ['rec-4656','rec-823','rec-4658']); print(sorted((x['id'], x['status']) for x in r))"
+    expected: rec-4656 closed, rec-823 closed, rec-4658 open.
+    fix_if: Still open -- the ci.yml closure job failed; read its log, fix the cause, and close with update_rec citing step 1's output (Decision 84 I-4).
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: .claude/hooks/session_start_aws.sh
+    behavior: Role name only on success; fixed warnings otherwise; only the value-free helper line on failure; never raw output.
+    verification_step: 1
+    test_selector: tests/hooks/test_session_start_aws.py::test_output_never_contains_account_id_or_arn
+    red_green_expectation: red before (node missing; the hook prints the full ARN), green after.
+  - source: scripts/ci/redaction_check.py
+    behavior: mask_account_ids masks account and unique-ID shapes, leaves hex digests and resource paths intact.
+    verification_step: 2
+    test_selector: tests/test_redaction_check.py::test_mask_account_ids
+    red_green_expectation: red before (mask_account_ids missing), green after.
+  - source: scripts/aws_identity.py
+    behavior: caller-arn prints the masked ARN that still carries the consumer grep marker.
+    verification_step: 2
+    test_selector: tests/test_aws_identity.py::test_cli_masks_account_id
+    red_green_expectation: red before (node missing; CLI prints the full ARN), green after.
+  - source: scripts/ci/iam_simulate.py
+    behavior: Every printed line is masked; verdicts unchanged.
+    verification_step: 2
+    test_selector: tests/test_iam_simulate.py::test_printed_output_masks_account_ids
+    red_green_expectation: red before (node missing; mismatch lines print the resolved account), green after.
+  - source: config/agent/verification_registry/entries/session-start-aws-no-account-id.yaml
+    behavior: Records VP step 1's graduation.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      A registry row is itself an executable check; validate_verification_registry and validate_graduation_completeness
+      run it in every tier and fail on a missing or non-resolving shard, which is the red-green proof.
+constraints:
+  - Never print, paste or commit an AWS account ID, full ARN or unique ID anywhere -- code, tests, commit messages, PR body, thread replies or VP output. Tests build account-shaped values at runtime (Decision 138 never-commit hook).
+  - No change to AGENTS.md, CLAUDE.md, skills, docs/contracts/, DECISIONS.md or merged plans (always-ask surfaces; the masked form keeps them valid).
+  - caller_arn() keeps returning the full ARN in process; only the CLI output is masked (Decision 113).
+  - redaction_check.py stays stdlib only and its redact and assert-clean modes are untouched (terraform-apply-sandbox.yml runs it with system python3).
+  - No admin-credential write and no AWS state change; step 7 is a read-only probe (project critical rule).
+  - Context-masking hooks are out of scope (Benjamin 2026-10-27); remaining exception-echo sites are rec-4658; the telemetry closed loop is rec-4657.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Brief and evidence: /mnt/project-files/hook-arn-at-source/ (fable-brief/BRIEF.md, ADVICE.md, step6b-presentation.md)."
+  - "Benjamin 2026-10-27 11:59Z (cmsg_01Cqz6E4mzSv6kkGCSCub3WM88SK3FQTq3BB5FVJWMZXKo): source fix in remit; masking hooks dropped; RCA queued (rec-4657). 12:23Z (cmsg_01Cqz6E4mzSv6kkGCSCub3WMVPYrWzbQtvefy4wQxvmSxE): both recommendations -- fork 1a masked ARN, fork 2a identity printers only plus a follow-on rec."
+  - "Settled after 6b (mechanical): the mask lives in scripts/ci/redaction_check.py, not scripts/aws_identity.py as 6b said and not scripts/aws_profile.py as Fable said -- aws_profile.py is packaged into 8 Lambdas (lambda_manifest), aws_identity imports boto3 at module top (iam_simulate keeps boto3 out of import time), and redaction_check already owns ACCOUNT_ID_SHAPE (token-bounded, hex-safe, rec-3322)."
+  - "Masked placeholder reuses redaction_check's [ACCOUNT_ID]; all consumers grep assumed-role/<Role>/ (deploy-paths.yaml:393-395, validate_admin_root_premerge_gate.py:32, PLAN-agent-aws-proxy-credentials.yaml:186-188 and :341-343)."
+  - "Session name is botocore-session-<10-digit epoch> (no role_session_name in bin/setup-cloud-env.sh), not account-derived; the hook drops it anyway."
+  - "Live reproduction 2026-10-27: this planning thread's own resume hook printed the full PlatformAdmin ARN into context (value not recorded)."
+  - "rec-823 (no test for the hook) is already met by tests/hooks/test_session_start_aws.py (Plan A); bundled so it closes here. Relevance gate: rec-4656 unknown, rec-823 unknown (proceed)."
+  - "Follow-on rec-4658: ~13 scripts echo raw boto exception text; _scaffolding.py:339; build_lambda_deploy layer ARNs (break-glass). For rec-4657: src/turn_capture/scrub.py has no account or ARN class, and its access-key class (16 chars) misses 21-char AROA IDs."
+  - "red_overlap verdict: clear (no open reds). CI logs are out of scope: the rec-4211 guard (validate_actions_account_id_masking.py) masks the account in public Actions logs."
+  - "Decision-scout verdict NO_FLAGS; CITE: Decision 224, Decision 101, Decision 113. RELATED: Decision 111, 126, 138, 236, 163, 48. Decisions triaged: 188 of 188. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1."
+  - "gates: decision-scout=NO_FLAGS; plan-critique=PROCEED after 2 round(s); round 2 autonomous"
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - Re-check rec-4656 and rec-823 relevance per the implement skill's protocol (rec-4656's acceptance names step 1's node).
+  - scripts/ci/redaction_check.py and tests/test_redaction_check.py -- UNIQUE_ID_SHAPE, mask_account_ids and its test.
+  - scripts/aws_identity.py and tests/test_aws_identity.py -- masked CLI output; replace the full-ARN assertion as scoped.
+  - .claude/hooks/session_start_aws.sh and tests/hooks/test_session_start_aws.py -- role-only success, fixed warnings, value-free failure line; the acceptance test and the replaced success test.
+  - scripts/ci/iam_simulate.py and tests/test_iam_simulate.py -- mask every printed line; the two new tests.
+  - config/agent/verification_registry/entries/session-start-aws-no-account-id.yaml -- graduation shard for step 1.
+  - Execute Verification Plan steps 1-6 -- run each step; loop until pass; on unrecoverable failure stop and RCA (Decision 55).
+  - "Open the PR with a `Resolves: rec-4656, rec-823` trailer; merge on code review PROCEED and green CI under the standing rule; then steps 7-8."
+  - 'Report: what was implemented, verification results'
+rollback: >-
+  Revert the squash commit. Nothing is deployed or applied; the hook and CLI revert to printing the full ARN on the next
+  session start.

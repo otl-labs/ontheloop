@@ -24,7 +24,6 @@ real DuckLake write, under the same constraint that motivated dropping the duckd
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -102,7 +101,7 @@ class TestFileRecRefusesNonDiscriminating:
 
         assert result == "rec-8001"
         mock_write.assert_called_once()
-        entry = json.loads(recs_file.read_text(encoding="utf-8").strip().splitlines()[0])
+        entry = mock_write.call_args.args[1]
         assert entry["id"] == "rec-8001"
 
     def test_pytest_path_that_does_not_exist_still_files(self, tmp_path: Path) -> None:

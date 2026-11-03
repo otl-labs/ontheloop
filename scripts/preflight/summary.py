@@ -43,6 +43,21 @@ def print_convergence_sensor_liveness_alert(alert: dict | None) -> None:
         )
 
 
+def print_ci_rca_liveness_alert(alert: dict | None) -> None:
+    """Print the ci-rca-liveness alert (see ci_rca_signals._check_ci_rca_liveness).
+
+    Fires when main CI has been red for over 30 minutes with no matching ci_rca rec filed --
+    the counterpart to print_convergence_sensor_liveness_alert, but for ci-rca.yml's own
+    liveness rather than convergence-health.yml's."""
+    if alert is not None:
+        print(
+            f"CI-RCA liveness alert: main CI run {alert.get('run_url', '')} has been red for "
+            f"{alert.get('elapsed_minutes', '')} minutes with no ci_rca rec filed -- "
+            "dispatch ci-rca.yml or file one manually.",
+            file=sys.stderr,
+        )
+
+
 def print_budget_bypass_alert(alert: dict | None) -> None:
     """Print the fast-tier budget-bypass alert (see alerts._check_budget_bypass_alert)."""
     if alert is not None:
@@ -142,12 +157,21 @@ def _format_preflight_summary(report: dict, report_path: Path) -> str:
     ahead = mf.get("commits_ahead", "?")
     recs_status = report.get("recs_read_status", "ok")
     recs_status_suffix = "" if recs_status == "ok" else f" [DEGRADED: recs_read_status={recs_status}]"
-    ci_rca_unresolved = len(report.get("ci_rca_unresolved_recs") or [])
-    ci_rca_likely = len(report.get("ci_rca_likely_resolved_recs") or [])
-    if ci_rca_unresolved or ci_rca_likely:
-        ci_rca_summary = f"ci_rca_unresolved={ci_rca_unresolved} ci_rca_likely_resolved={ci_rca_likely}"
+    unresolved_recs = report.get("ci_rca_unresolved_recs")
+    if recs_status != "ok" or unresolved_recs is None:
+        recs_summary = "open_recs=UNAVAILABLE non_automatable=UNAVAILABLE ci_rca=UNAVAILABLE"
     else:
-        ci_rca_summary = "ci_rca=0"
+        ci_rca_unresolved = len(unresolved_recs)
+        ci_rca_likely = len(report.get("ci_rca_likely_resolved_recs") or [])
+        if ci_rca_unresolved or ci_rca_likely:
+            ci_rca_summary = f"ci_rca_unresolved={ci_rca_unresolved} ci_rca_likely_resolved={ci_rca_likely}"
+        else:
+            ci_rca_summary = "ci_rca=0"
+        recs_summary = (
+            f"open_recs={report.get('open_recommendations')} "
+            f"non_automatable={report.get('non_automatable_recommendations')} "
+            f"{ci_rca_summary} ci_rca_open_total={report.get('ci_rca_open_total')}"
+        )
     convergence_rca_gap = report.get("convergence_rca_gap_alert")
     convergence_rca_gap_suffix = (
         f" convergence_rca_gap_alert=red_{convergence_rca_gap['red_age_hours']}h" if convergence_rca_gap else ""
@@ -158,8 +182,6 @@ def _format_preflight_summary(report: dict, report_path: Path) -> str:
         f"Preflight OK -> {report_path}\n"
         f"  venv={report.get('venv_ok')} creds={report.get('creds_status')} "
         f"branch={report.get('branch')} main=({behind} behind, {ahead} ahead)\n"
-        f"  open_recs={report.get('open_recommendations')} "
-        f"non_automatable={report.get('non_automatable_recommendations')} "
-        f"{ci_rca_summary}{recs_status_suffix}{convergence_rca_gap_suffix}{sensor_liveness_suffix}\n"
+        f"  {recs_summary}{recs_status_suffix}{convergence_rca_gap_suffix}{sensor_liveness_suffix}\n"
         f"  Read the report file for full constraint detail."
     )

@@ -6,6 +6,7 @@ refusal, plus the ducklake_scd2_schema shim's directed-raise delegation.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 
 import pytest
 
@@ -83,28 +84,82 @@ def test_write_verb_refusal_on_control_table():
         writes.write_scd2(con, {"counter_name": "ops_recommendations"}, table="ops_entity_counters", require_exists=True)
 
 
+_SPEC_BASELINE: tuple[tuple[str, str, bool], ...] = (
+    ("table", "str | None", False),
+    ("history_table", "str", False),
+    ("current_table", "str | None", False),
+    ("merge_key", "str", False),
+    ("fields", "dict[str, Any]", False),
+    ("ordered_columns", "tuple[tuple[str, str], ...]", False),
+    ("partition_history", "str", False),
+    ("partition_current", "str | None", False),
+    ("entity_id_prefix", "str | None", True),
+    ("id_keyspace", "str", True),
+    ("write_mode", "str", True),
+)
+# Approved additions to ScdTableSpec beyond the baseline, each naming its admitting plan. A new field needs a reviewed
+# line here and a default; widening or reordering a baseline field edits _SPEC_BASELINE in the same PR.
+_SPEC_APPROVED_ADDITIONS = {"id_scheme": "PLAN-telemetry-table-registration"}
+
+
+def _annotation_text(annotation) -> str:
+    if isinstance(annotation, str):
+        return annotation
+    return inspect.formatannotation(annotation).replace("typing.", "")
+
+
+def _has_default(f: dataclasses.Field) -> bool:
+    return f.default is not dataclasses.MISSING or f.default_factory is not dataclasses.MISSING
+
+
+def _assert_spec_shape(cls) -> None:
+    assert cls.__dataclass_params__.frozen, "ScdTableSpec must stay frozen"
+    fields = dataclasses.fields(cls)
+    lead = tuple((f.name, _annotation_text(f.type), _has_default(f)) for f in fields[: len(_SPEC_BASELINE)])
+    assert lead == _SPEC_BASELINE
+    for f in fields[len(_SPEC_BASELINE) :]:
+        assert f.name in _SPEC_APPROVED_ADDITIONS, f"unrostered ScdTableSpec field {f.name!r}"
+        assert _has_default(f), f"approved addition {f.name!r} must carry a default"
+
+
 def test_scd2_schema_delegates_without_widening():
     """resolve_table_spec raises a directed error for a control-class table; ScdTableSpec.history_table
-    stays non-optional (mypy is ratchet-enforced) -- the shim delegates, it never widens."""
+    stays non-optional (mypy is ratchet-enforced) -- the shim delegates, it never widens. Growth is admitted only
+    through an explicit roster line and a default."""
     with pytest.raises(schema.SchemaGateError, match="ducklake_control_tables"):
         schema.resolve_table_spec("ops_entity_counters")
 
     history_field = next(f for f in dataclasses.fields(schema.ScdTableSpec) if f.name == "history_table")
     assert history_field.type == "str"  # unchanged, non-Optional
-    field_names = {f.name for f in dataclasses.fields(schema.ScdTableSpec)}
-    assert field_names == {
-        "table",
-        "history_table",
-        "current_table",
-        "merge_key",
-        "fields",
-        "ordered_columns",
-        "partition_history",
-        "partition_current",
-        "entity_id_prefix",
-        "id_keyspace",
-        "write_mode",
+    _assert_spec_shape(schema.ScdTableSpec)
+
+
+def _spec_fixture(*, drop=None, extra=(), retype=None, swap=None, frozen=True):
+    fields = [(n, a, dataclasses.field(default=None) if d else dataclasses.field()) for n, a, d in _SPEC_BASELINE]
+    fields = [f for f in fields if f[0] != drop]
+    if retype:
+        fields = [(n, retype[1] if n == retype[0] else a, d) for n, a, d in fields]
+    if swap:
+        i, j = (next(k for k, f in enumerate(fields) if f[0] == n) for n in swap)
+        fields[i], fields[j] = fields[j], fields[i]
+    return dataclasses.make_dataclass("SpecFixture", [*fields, *extra], frozen=frozen)
+
+
+def test_spec_shape_guard_admits_only_approved_defaulted_growth():
+    _assert_spec_shape(_spec_fixture())
+    _assert_spec_shape(_spec_fixture(extra=[("id_scheme", "str", dataclasses.field(default="x"))]))
+    rejected = {
+        "dropped baseline field": _spec_fixture(drop="merge_key"),
+        "unrostered field": _spec_fixture(extra=[("surprise", "str", dataclasses.field(default="x"))]),
+        "widened annotation": _spec_fixture(retype=("history_table", "str | None")),
+        "reordered fields": _spec_fixture(swap=("history_table", "current_table")),
+        "not frozen": _spec_fixture(frozen=False),
+        "rostered without default": _spec_fixture(extra=[("id_scheme", "str", dataclasses.field(kw_only=True))]),
     }
+    for label, cls in rejected.items():
+        with pytest.raises(AssertionError):
+            _assert_spec_shape(cls)
+            pytest.fail(f"guard admitted: {label}")
 
 
 # ---------------------------------------------------------------------------

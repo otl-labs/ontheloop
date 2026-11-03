@@ -1,0 +1,791 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-capture-hooks
+intent: >-
+  Turn on the platform's first real telemetry producer: Claude Code hooks that capture every completed agent turn and
+  each session end through the merged parser v3 producer and send the rows to the live telemetry writer, deterministic
+  and invisible to the agent. Agent-turn friction, cost and outcome rows are the learning input for the platform's
+  recursive self-improvement loop (PROJECT_CONTEXT); until they flow, telemetry is blind. The hooks land inert behind a
+  committed switch, the hook-to-writer path is proven end to end against the live smoke catalog first (T3.20 c8), and
+  capture of real sessions starts with a one-line enablement on Benjamin's word.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-telemetry-capture-hooks.yaml
+phase: >-
+  T3.20 (agent-turn telemetry capture), slice 3b plan P-C of three (Benjamin, 2026-10-12). Closes T3.20 c8 at the build
+  merge (the hook-to-writer path proven end to end against a live catalog before broad enablement), and c1 (SessionStart
+  and Stop hooks emit per-turn events with the pre-write credential scrub) and c2 (turn-grain rows on the canonical
+  tables via the writer boundary) at the enablement change, after a real session's rows are read back (post-deploy steps
+  10-11). rec-4026 is the carrier. Builds after the blob-route plan (PLAN-telemetry-blob-route) is built and deployed: the
+  transport calls its client. c3, c6 and c7 stay open outside slice 3b.
+closes_criteria:
+- T3.20:c1
+- T3.20:c2
+- T3.20:c8
+scope:
+- file: .claude/hooks/session_start_log_turn.sh
+  action: Create
+  purpose: >-
+    The capture pin hook (bash, no venv dependency). On every SessionStart source (startup, resume, clear, compact,
+    fork) it prints exactly one fixed stderr line and exits 0, writing nothing to stdout, reading no state and starting
+    no pass: Claude Code then records the SessionStart attachment whose command carries --project-ref=<ref>, which P-B's
+    pin rules (P-1..P-4) and fork and resume boundaries read. It never captures (rule HK-2).
+- file: .claude/hooks/stop_log_turn.py
+  action: Create
+  purpose: >-
+    The Stop and StopFailure shim (rule HK-3). Reads the hook JSON from stdin; exits 0 at once when stop_hook_active is
+    true, when the switch or a guard says no (rule SW-1), or on any error; otherwise starts the capture runner fully
+    detached and exits 0 without waiting. Prints nothing on any path.
+- file: .claude/hooks/session_end_log_turn.py
+  action: Create
+  purpose: >-
+    The SessionEnd hook (rule HK-4): the same switch and guards, then one final pass (session_final true) in process
+    under a single deadline measured from hook start (rule TR-4); when the tree's lock is busy it detaches a final pass
+    that waits for the lock instead. Exit 0 always, nothing printed.
+- file: .claude/settings.json
+  action: Modify
+  purpose: >-
+    Registers the four hooks (rule HK-1), every path resolved from $CLAUDE_PROJECT_DIR (the cloud clone path changes
+    at the org transfer): SessionStart `bash "$CLAUDE_PROJECT_DIR/.claude/hooks/session_start_log_turn.sh"
+    --project-ref=ontheloop` (unquoted ref token), Stop and StopFailure the stop_log_turn.py shim, SessionEnd
+    session_end_log_turn.py with "timeout": 60 on its own entry. No async entries; existing hooks unchanged and in order.
+- file: config/telemetry/capture.yaml
+  action: Create
+  purpose: >-
+    The committed capture switch (rule SW-1): `enabled: false` at this build; the enablement is a one-line change on
+    Benjamin's word (post-deploy step 10). Comments name the guards and the disable-only environment variable.
+- file: scripts/telemetry_capture/__init__.py
+  action: Create
+  purpose: >-
+    Package docstring: the hook-side producer runtime for Claude Code turn capture (switch, state, transport, runner,
+    operator CLI and the c8 smoke). Lives under scripts/ because src/turn_capture (stdlib only) and src/telemetry_client
+    (stdlib plus src.telemetry) are fenced against network and botocore imports.
+- file: scripts/telemetry_capture/switch.py
+  action: Create
+  purpose: >-
+    capture_allowed(env, repo_root) per rule SW-1 and the synthetic-bound smoke override per SW-2. Reads only the switch
+    file; imports nothing outside the stdlib and yaml.
+- file: scripts/telemetry_capture/state.py
+  action: Create
+  purpose: >-
+    The per-tree state directory <transcript dir>/<session id>/telemetry-capture/ (rules ST-1..ST-4): the cursor
+    envelope (cursor plus root tail check; atomic, monotonic), the lock, the halt record and bounded diagnostics.
+- file: scripts/telemetry_capture/transport.py
+  action: Create
+  purpose: >-
+    The writer client (rules TR-1..TR-4): Function URL discovery, SigV4 POST, the retry table, request chunking, and
+    budget-bounded invoke and put callables (every timeout clamped to the remaining budget).
+- file: scripts/telemetry_capture/runner.py
+  action: Create
+  purpose: >-
+    run_pass(transcript_path, session_id, event, final, deadline) per rules RN-1..RN-8: lock, halt check, cursor load
+    and tail check, project_ref resolution and deferral, record_turn, the describe check, blob delivery through
+    src.telemetry_client.blob_delivery, chunked appends in R7 order, cursor persistence only after every request is
+    acknowledged, diagnostics. RN-7's table lives in responses.py, keeping runner.py under 400 SLOC (Decision 128).
+- file: scripts/telemetry_capture/responses.py
+  action: Create
+  purpose: >-
+    RN-7's response table as data plus classify(status, body) -> next action (ok, retry, rechunk, register_tenant,
+    redeliver, halt, stop) and the value-free halt fields (status, error_type, rule, column, row index).
+- file: scripts/telemetry_capture/__main__.py
+  action: Create
+  purpose: >-
+    The runner entry the hooks detach (`python -m scripts.telemetry_capture run ...`) and the operator CLI over the same
+    runner (rule OP-1): pass, status, probe, observe, mark, clear-halt, register.
+- file: scripts/telemetry_capture/smoke.py
+  action: Create
+  purpose: >-
+    The c8 proof (rule SM-1): registers synthetic:pc-smoke-<hex>, writes a synthetic transcript tree (one tool output
+    above 64 KiB so blob delivery runs, one completed subagent spawn so all four tables carry rows) to a temp dir, drives
+    the real Stop and SessionEnd entry points with crafted stdin, reads back with telemetry_probe, deletes the cursor and
+    replays both entry points for the writer's identical-resend no-op. Prints counts and PASS/FAIL lines only.
+- file: src/turn_capture/observations.py
+  action: Modify
+  purpose: >-
+    Diagnostics only (rule DG-1): an absent model_call usage key counts absent_usage_key, and an absent or non-dict usage
+    object counts absent_usage. No row changes, so no parser_version bump and no golden regeneration.
+- file: src/turn_capture/transcript.py
+  action: Modify
+  purpose: >-
+    rec-4308 (rule PN-1): project_ref_pin accepts a quoted --project-ref value by value-level quote stripping inside
+    project_ref_pin only; hook_script (shared with hook_name) is unchanged. Pin only: no row change for any existing tree.
+- file: tests/hooks/test_session_start_log_turn.py
+  action: Create
+  purpose: >-
+    The pin hook: one stderr line, empty stdout, exit 0 for every source including fork, no file written anywhere, no
+    venv needed (runs under env -i with only PATH).
+- file: tests/hooks/test_stop_log_turn.py
+  action: Create
+  purpose: >-
+    rec-4026's acceptance node test_turn_rows_written_once_per_turn (two Stop passes over a growing tree on a fake writer:
+    every row sent exactly once, the cursor advances only after acknowledgement), the detach proof
+    test_shim_detaches_silently (the test writes a sleeping fake runner module to tmp_path, puts tmp_path on PYTHONPATH
+    and runs a wrapper that sets the shim's RUNNER_MODULE before calling its main(); the shim exits while the fake still
+    sleeps, with empty stdout and stderr, and the fake records a new session id and /dev/null descriptors; the test reaps
+    the child), stop_hook_active and guard inertness.
+- file: tests/hooks/test_session_end_log_turn.py
+  action: Create
+  purpose: >-
+    The final pass emits the root close row; against a hung fake writer the hook returns before its deadline
+    (test_session_end_returns_within_deadline_against_a_hung_writer, run in process with the deadline scaled down through
+    main()'s deadline parameter); a busy lock, or too little budget left after record_turn, detaches a final pass; every
+    failure exits 0 silently.
+- file: tests/hooks/test_capture_hook_registration.py
+  action: Create
+  purpose: >-
+    The settings.json registrations (HK-1), "timeout": 60 on SessionEnd only, no async entries, existing order kept,
+    every capture command resolved from $CLAUDE_PROJECT_DIR and no literal /home/user/ path in the new hooks or
+    scripts/telemetry_capture, and pin parity: project_ref_pin over an attachment built from the registered SessionStart
+    command returns ontheloop.
+- file: tests/telemetry_capture/__init__.py
+  action: Create
+  purpose: Mirror-test package marker (Decision 131).
+- file: tests/telemetry_capture/test_switch.py
+  action: Create
+  purpose: >-
+    Mirror test for switch.py (SW-1, SW-2), including test_switch_off_keeps_every_hook_inert (the hook entry points run
+    in process, so the suite's socket guard covers them).
+- file: tests/telemetry_capture/test_state.py
+  action: Create
+  purpose: Mirror test for state.py (ST-1..ST-4), including the tail-check mismatch.
+- file: tests/telemetry_capture/test_transport.py
+  action: Create
+  purpose: Mirror test for transport.py (TR-1..TR-4) on an injected HTTP seam; no socket.
+- file: tests/telemetry_capture/test_runner.py
+  action: Create
+  purpose: >-
+    Mirror test for runner.py (RN-1..RN-8) on a fake writer: deferral, halts, re-chunk on 413 and too_many_blobs, the
+    blob-row cap, stops, lost-cursor and tail-mismatch replay (the lost cursor is replaced, not compared), a failed last
+    chunk leaves the cursor and finalize_cuts unchanged, the describe check, blob delivery wiring, and
+    test_sent_payloads_carry_no_secret_shaped_value (append bodies and blob PUT bodies both; one seeded secret sits
+    inside a tool output above 64 KiB, so a PUT body carries its scrubbed form).
+- file: tests/telemetry_capture/test_responses.py
+  action: Create
+  purpose: Mirror test for responses.py (every row of RN-7's table, including the default stop for unlisted statuses).
+- file: tests/telemetry_capture/test_main.py
+  action: Create
+  purpose: Mirror test for __main__.py (the detached entry and every operator subcommand on fakes).
+- file: tests/telemetry_capture/test_smoke.py
+  action: Create
+  purpose: Mirror test for smoke.py on a fake writer (the live run is VP step 8).
+- file: tests/telemetry/test_process_event_name_rule.py
+  action: Modify
+  purpose: >-
+    _HOOK_EVENTS gains SessionEnd and StopFailure, so every registered capture hook command still yields a contract-valid
+    process_event name.
+- file: tests/turn_capture/test_observations.py
+  action: Modify
+  purpose: The absent_usage_key and absent_usage counters (DG-1), node test_absent_usage_keys_are_counted.
+- file: tests/turn_capture/test_transcript.py
+  action: Modify
+  purpose: rec-4308's acceptance node test_project_ref_pin_quoted_flag_value.
+- file: docs/contracts/ports.yaml
+  action: Modify
+  purpose: >-
+    Decision 212 cl.3: PC-01's description names scripts/telemetry_capture/transport.py as a further function_url client
+    (no port row, cl.6), and a new structural_assumptions row SA-02 records the capture runtime's assumptions: Claude
+    Code's hook stdin fields and output-channel semantics (an exit-0 stderr line records an invisible SessionStart
+    attachment), its transcript layout (<transcript dir>/<sid>/ with subagents and tool-results, tolerating the foreign
+    telemetry-capture/ directory) and .claude/settings.json registration (status open, owning_item "T4.24:c9", the SA-01
+    precedent). One amendment_log entry (Class D, field_add, semantic_break false). Edited only after the blob-route
+    build, which also touches this file, has merged.
+- file: docs/contracts/file-router.yaml
+  action: Modify
+  purpose: >-
+    A telemetry-capture route beside the turn-capture route, its targets listed explicitly (validate_placement takes no
+    globs): scripts/telemetry_capture/, .claude/hooks/session_start_log_turn.sh, .claude/hooks/stop_log_turn.py,
+    .claude/hooks/session_end_log_turn.py and config/telemetry/capture.yaml; one amendment_log entry. Edited only after
+    the blob-route build has merged (the org-transfer plan also appends one route; a trivial merge).
+- file: docs/ROADMAP-PLATFORM.yaml
+  action: Modify
+  purpose: >-
+    Bookkeeping walk (tier-item-lifecycle.yaml bookkeeping_walk): at the build, flip T3.20 c8 open -> met with met_by
+    this plan, correct files_in_scope's session_start_log_turn entry to .sh, and add a dated progress_note line (c1 and c2
+    flip at enablement; c3, c6, c7 outside slice 3b). At the enablement change (step 10), flip c1 and c2 after step 11's
+    read-back.
+bundled_recommendations:
+- rec-4308
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+- >-
+  c1/c2 (rec-4026's acceptance): two Stop passes over a growing transcript send every row exactly once in R7 order (data
+  batches, then the telemetry_sessions batch last), and the cursor advances only after every request is acknowledged
+  (tests/hooks/test_stop_log_turn.py::test_turn_rows_written_once_per_turn).
+- >-
+  c1: the agent never sees the producer. No capture hook writes stdout; the Stop and SessionEnd hooks write no stderr;
+  the SessionStart pin hook writes exactly one fixed stderr line; every hook exits 0 on every path, and the SessionEnd
+  hook returns before its 60 s timeout even against a hung writer. The Stop shim exits while its detached runner (own
+  session id, /dev/null descriptors) is still running.
+- >-
+  c1: capture runs only when the committed switch is on, CLAUDE_CODE_REMOTE is "true", GITHUB_ACTIONS is not "true",
+  OTL_TURN_CAPTURE is not "off" and credentials resolve, or under the synthetic:-bound smoke override (SW-2); otherwise
+  every hook exits 0 having opened no socket and written nothing under the session directory. At this build the switch
+  is off.
+- >-
+  c2: a permanent refusal (409, 422 including blob_not_verified after one re-delivery, 400, 403 project_unregistered) or
+  a producer pin error halts the tree: a halt record is written, later passes send nothing, and the cursor never advances
+  past unacknowledged rows. 429 and 503 retry within the deadline; 413 payload_too_large and too_many_blobs re-chunk;
+  5xx and blob transport failures stop the pass without halting. No request carries more blob rows than the writer's
+  max_items.
+- >-
+  c2: a lost cursor, or a stored cursor whose root tail check fails, replays from scratch: identical rows are no-ops and
+  a diverged key halts with diagnostic grain_conflict_after_cursor_loss. No pass starts on a tree without a pinning
+  SessionStart attachment (deferral), and the SessionStart hook never runs a pass, so a fork is first captured only
+  after its own fork attachment exists.
+- >-
+  c1's launch criterion holds on the hook path: a tree seeded with an AWS access key, an Anthropic key, a GitHub PAT and
+  a Bearer token sends none of them in any request body.
+- >-
+  c8: scripts.telemetry_capture.smoke, driving the real Stop and SessionEnd entry points against the live writer under a
+  registered synthetic: ref over a tree with one blob-delivered transcript row and one completed subagent spawn, reads
+  back through telemetry_probe the rows record_turn built for all four tables; with the cursor deleted, replaying Stop
+  then SessionEnd submits per table exactly the first run's total and inserts 0.
+- >-
+  c1 and c2 (the flip condition, after enablement): for a real cloud session on main, `probe --tree` reports rows above
+  zero for observations and transcripts and the session's diagnostics show no halt; c1 and c2 flip only then.
+- >-
+  An absent model_call usage key and an absent usage object are counted in the pass diagnostics, with no row change.
+  project_ref_pin accepts --project-ref="a/b" (rec-4308).
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: >-
+    Run rec-4026's acceptance node: two Stop passes over a growing tree on a fake writer send every row once.
+  command: >-
+    bin/venv-python -m pytest tests/hooks/test_stop_log_turn.py::test_turn_rows_written_once_per_turn -q
+  expected: >-
+    Exit 0, 1 passed. Red before: target_absent (the file does not exist on the plan-only tree).
+  fix_if: >-
+    A row sent twice: the cursor was persisted before acknowledgement or the prior set is not built from the cursor. A
+    row missing: a chunk failure did not stop the pass, or the sessions batch was sent before the data batches.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: capture-stop-pass-sends-each-row-once
+  expected_literals:
+  - 1 passed
+- step: 2
+  phase: pre-deploy
+  action: >-
+    Prove the Stop shim detaches silently: the real shim, run through a test wrapper that points RUNNER_MODULE at a
+    sleeping fake, exits while the fake still runs, with empty stdout and stderr; the fake reports a new session id and
+    /dev/null descriptors.
+  command: >-
+    bin/venv-python -m pytest tests/hooks/test_stop_log_turn.py::test_shim_detaches_silently -q
+  expected: >-
+    Exit 0, 1 passed. Red before: target_absent.
+  fix_if: >-
+    The shim waits: a pipe is still attached to the child (use subprocess.DEVNULL for all three descriptors and
+    start_new_session=True). Output appears: an import or exception path prints.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: capture-stop-shim-detaches-silently
+  expected_literals:
+  - 1 passed
+- step: 3
+  phase: pre-deploy
+  action: >-
+    Prove the registrations and the pin parity: settings.json registers the four hooks as HK-1 says, and project_ref_pin
+    over an attachment built from the registered SessionStart command returns ontheloop.
+  command: >-
+    bin/venv-python -m pytest tests/hooks/test_capture_hook_registration.py tests/hooks/test_session_start_log_turn.py -q
+  expected: >-
+    Exit 0, all passed. Red before: target_absent.
+  fix_if: >-
+    Pin parity fails: the token is quoted or a wrapper token precedes the script (H-1 takes the first .py/.sh token).
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: capture-hooks-registered-with-pin-token
+  expected_literals:
+  - passed
+- step: 4
+  phase: pre-deploy
+  action: >-
+    Prove c1's launch criterion on the hook path: a tree seeded with an AWS access key, an Anthropic key, a GitHub PAT and
+    a Bearer token, run through the runner on a fake writer, sends none of them in any request body.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_capture/test_runner.py::test_sent_payloads_carry_no_secret_shaped_value -q
+  expected: >-
+    Exit 0, 1 passed. Red before: target_absent.
+  fix_if: >-
+    A secret appears: a row field bypasses src/turn_capture/scrub.py (fix in the producer, never in the transport), or
+    the runner sends something other than record_turn's rows.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: capture-hook-payloads-scrubbed
+  expected_literals:
+  - 1 passed
+- step: 5
+  phase: pre-deploy
+  action: >-
+    Run rec-4308's acceptance node, the absent-usage counter node and the SessionEnd deadline node.
+  command: >-
+    bin/venv-python -m pytest tests/turn_capture/test_transcript.py::test_project_ref_pin_quoted_flag_value
+    tests/turn_capture/test_observations.py::test_absent_usage_keys_are_counted
+    tests/hooks/test_session_end_log_turn.py::test_session_end_returns_within_deadline_against_a_hung_writer -q
+  expected: >-
+    Exit 0, 3 passed. Red before: target_absent.
+  fix_if: >-
+    The quoted node fails: the value's leading quote survives (H-1 already strips the trailing one). The deadline node
+    fails: an HTTP, PUT, SSM or STS timeout is not clamped to the remaining budget, or the lock wait is outside the
+    deadline.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: capture-pin-quote-usage-counter-session-end-deadline
+  expected_literals:
+  - 3 passed
+- step: 6
+  phase: pre-deploy
+  action: >-
+    Run every new and modified test module.
+  command: >-
+    bin/venv-python -m pytest tests/hooks/test_session_start_log_turn.py tests/hooks/test_stop_log_turn.py
+    tests/hooks/test_session_end_log_turn.py tests/hooks/test_capture_hook_registration.py tests/telemetry_capture
+    tests/telemetry/test_process_event_name_rule.py tests/turn_capture/test_observations.py
+    tests/turn_capture/test_transcript.py tests/turn_capture/test_package_boundary.py -q
+  expected: >-
+    Exit 0, all passed.
+  fix_if: >-
+    Any failure: fix at root; never relax a guard or the silence assertions.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    Whole-file re-runs of this plan's own test modules (vp-red-before.yaml hermetic_authoring (v)); the --pre pytest_diff
+    and the full tier's unit-test scaffold run them on every change.
+- step: 7
+  phase: pre-deploy
+  action: >-
+    Prove the switch keeps everything inert: with the committed switch off, each hook entry run with crafted stdin exits
+    0, opens no socket and writes nothing under the session directory.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_capture/test_switch.py::test_switch_off_keeps_every_hook_inert -q
+  expected: >-
+    Exit 0, 1 passed. Red before: target_absent.
+  fix_if: >-
+    A file appears under telemetry-capture/: a shim checks the switch after touching state.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: capture-switch-off-keeps-hooks-inert
+  expected_literals:
+  - 1 passed
+- step: 8
+  phase: pre-deploy
+  action: >-
+    The c8 smoke proof against the live writer (smoke catalog): register a synthetic: ref, drive the real Stop and
+    SessionEnd entry points over a synthetic tree with one blob-delivered row and one completed subagent spawn, read back
+    with telemetry_probe, delete the cursor and replay both entry points.
+  command: >-
+    bin/venv-python -m scripts.telemetry_capture.smoke
+  expected: >-
+    Exit 0; per-table read-back counts equal the counts record_turn built, all four tables above zero; the blob row was
+    delivered (uploaded or existed); the replay's submitted per table equals the first run's total and inserted is 0 for
+    every table; the last line is "PC_SMOKE PASS". Counts only, no content.
+  fix_if: >-
+    403 tenant_unresolved: register_tenant was not called. 403 project_unregistered: the synthetic: ref was not
+    registered first. Counts short: the runner deferred (no pinning attachment in the synthetic tree) or the read-back
+    used a different session_started_at. Credentials or URL missing: run from a session with the agent_platform profile.
+  hermetic: false
+  graduation: not-applicable
+- step: 9
+  phase: pre-deploy
+  action: >-
+    Lint the changed Python files and run the full tier, as the handoff policy requires before commit.
+  command: >-
+    bin/venv-python -m ruff check scripts/telemetry_capture .claude/hooks/stop_log_turn.py
+    .claude/hooks/session_end_log_turn.py tests/hooks tests/telemetry_capture src/turn_capture && bin/venv-python -m
+    ruff format --check scripts/telemetry_capture .claude/hooks tests/hooks tests/telemetry_capture src/turn_capture &&
+    bin/venv-python -m scripts.validate
+  expected: >-
+    ruff exit 0, then the full tier ends with "All checks passed." and exit 0.
+  fix_if: >-
+    Any failure: fix at root and rerun the full tier from the start (handoff_policy).
+  hermetic: false
+  graduation: not-applicable
+- step: 10
+  phase: post-deploy
+  action: >-
+    Enablement, only on Benjamin's word in the thread and only after the reclaim observation (OP-1 mark, then observe
+    after the session's VM was reclaimed: boot id changed, marker under <sid>/telemetry-capture/ present, root prefix
+    hash equal; record the result in the thread, or "no reclaim seen, unproven" if none occurred, and proceed on his word
+    either way). Then register ontheloop explicitly with the repository's GitHub URL of the day (origin's URL;
+    rec-4026 owns the re-run after the org transfer: a new version of the project row, same project_id), and a one-line
+    PR sets enabled: true and squash-merges on green CI outside the org-transfer freeze window.
+  command: >-
+    bin/venv-python -m scripts.telemetry_capture register --project-ref ontheloop --name "On The Loop platform"
+    --remote "$(git remote get-url origin)" && git fetch origin main --quiet && git show
+    origin/main:config/telemetry/capture.yaml | grep -q '^enabled: true'
+  expected: >-
+    The register call answers ok (created or existing) and main's switch reads enabled: true.
+  fix_if: >-
+    No word from Benjamin: do not enable; the build stays merged and inert. The marker did not survive or the prefix
+    hash differs: report it; the tail check (ST-3) turns that case into a replay, so enablement may still proceed on his
+    word.
+  hermetic: false
+- step: 11
+  phase: post-deploy
+  action: >-
+    After enablement, read a real cloud session's rows back from the writer and record the open observations; then flip
+    T3.20 c1 and c2 (bookkeeping walk) in a PR that touches only their status and met_by in docs/ROADMAP-PLATFORM.yaml.
+  command: >-
+    T="$(ls -t ~/.claude/projects/*/*.jsonl | head -1)" && bin/venv-python -m scripts.telemetry_capture probe --tree "$T"
+    --require telemetry_observations,telemetry_transcripts && bin/venv-python -m scripts.telemetry_capture observe --tree "$T"
+  expected: >-
+    probe prints per-table row counts from telemetry_probe for this session's {project_ref, session_ref,
+    session_started_at} and exits 0 only when observations and transcripts are above zero and no halt is recorded;
+    observe prints the counts of SessionStart
+    attachments by source (resume included), SessionEnd passes in diagnostics.jsonl, and tool-results sidecars written
+    after their tool_result record. Unobserved items are reported as unproven, never as passes.
+  fix_if: >-
+    A halt: read diagnostics.jsonl (rule, column, row index) and the writer's C6 log line; fix the producer, then
+    clear-halt. Zero rows: the pin attachment is missing (deferred_no_pin) or the switch is off on the session's branch.
+  hermetic: false
+- step: 12
+  phase: post-deploy
+  action: >-
+    After the build's squash merge, confirm rec-4308 closed and rec-4026 open with its narrowed acceptance.
+  command: >-
+    bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; rows, missing =
+    fetch_recs_by_ids(make_reader(), ['rec-4026', 'rec-4308']); s = {r['id']: r['status'] for r in rows}; a = {r['id']:
+    r.get('acceptance') or '' for r in rows}; print(s, missing); assert not missing and s == {'rec-4026': 'open',
+    'rec-4308': 'closed'}, (s, missing); assert 'test_turn_rows_written_once_per_turn' not in a['rec-4026'],
+    'rec-4026 acceptance not narrowed'"
+  expected: >-
+    Exit 0: rec-4308 closed, rec-4026 open, and rec-4026's acceptance no longer names this build's node.
+  fix_if: >-
+    rec-4308 still open once the trailer-closure job concludes: act only on that job's log at the merge sha, per the
+    implement skill's post-merge closeout fallback (git-ops.yaml resolves_trailer); never a direct close after a Decision
+    186 or 201 refusal. rec-4026's acceptance unchanged: re-run the closeout update_rec.
+  hermetic: false
+test_obligations:
+- source: .claude/hooks/stop_log_turn.py
+  behavior: Every Stop pass sends each row once.
+  verification_step: 1
+  test_selector: tests/hooks/test_stop_log_turn.py::test_turn_rows_written_once_per_turn
+  red_green_expectation: red before (file absent), green after.
+- source: .claude/hooks/stop_log_turn.py
+  behavior: The Stop shim detaches the runner silently.
+  verification_step: 2
+  test_selector: tests/hooks/test_stop_log_turn.py::test_shim_detaches_silently
+  red_green_expectation: red before (file absent), green after.
+- source: .claude/hooks/session_start_log_turn.sh
+  behavior: One fixed stderr line, empty stdout, exit 0, no pass, for every source.
+  verification_step: 3
+  test_selector: tests/hooks/test_session_start_log_turn.py
+  red_green_expectation: red before (file absent), green after.
+- source: .claude/settings.json
+  behavior: The four capture hooks are registered with the pin token and the SessionEnd timeout.
+  verification_step: 3
+  test_selector: tests/hooks/test_capture_hook_registration.py
+  red_green_expectation: red before (no capture hook registered), green after.
+- source: scripts/telemetry_capture/runner.py
+  behavior: Every request body the runner sends is scrubbed (c1's launch criterion).
+  verification_step: 4
+  test_selector: tests/telemetry_capture/test_runner.py::test_sent_payloads_carry_no_secret_shaped_value
+  red_green_expectation: red before (module absent), green after.
+- source: src/turn_capture/transcript.py
+  behavior: project_ref_pin accepts a quoted flag value (rec-4308).
+  verification_step: 5
+  test_selector: tests/turn_capture/test_transcript.py::test_project_ref_pin_quoted_flag_value
+  red_green_expectation: red before (--project-ref="a/b" pins nothing), green after.
+- source: src/turn_capture/observations.py
+  behavior: Absent usage keys and objects are counted (DG-1).
+  verification_step: 5
+  test_selector: tests/turn_capture/test_observations.py::test_absent_usage_keys_are_counted
+  red_green_expectation: red before (no counter for an absent key), green after.
+- source: .claude/hooks/session_end_log_turn.py
+  behavior: The SessionEnd hook returns before its deadline against a hung writer.
+  verification_step: 5
+  test_selector: tests/hooks/test_session_end_log_turn.py::test_session_end_returns_within_deadline_against_a_hung_writer
+  red_green_expectation: red before (file absent), green after.
+- source: config/telemetry/capture.yaml
+  behavior: The committed switch is off at this build and keeps every hook inert.
+  verification_step: 7
+  test_selector: tests/telemetry_capture/test_switch.py::test_switch_off_keeps_every_hook_inert
+  red_green_expectation: red before (file absent), green after.
+- source: scripts/telemetry_capture/switch.py
+  behavior: The switch, the guards and the synthetic-bound smoke override.
+  verification_step: 6
+  test_selector: tests/telemetry_capture/test_switch.py
+  red_green_expectation: red before (module absent), green after.
+- source: scripts/telemetry_capture/state.py
+  behavior: State directory, cursor envelope with tail check, lock, halt record, bounded diagnostics.
+  verification_step: 6
+  test_selector: tests/telemetry_capture/test_state.py
+  red_green_expectation: red before (module absent), green after.
+- source: scripts/telemetry_capture/transport.py
+  behavior: SigV4 invoke, retry table, budget clamping, chunking with the blob-row cap.
+  verification_step: 6
+  test_selector: tests/telemetry_capture/test_transport.py
+  red_green_expectation: red before (module absent), green after.
+- source: scripts/telemetry_capture/runner.py
+  behavior: The pass (deferral, halt, re-chunk, stop, replay, persistence after acknowledgement).
+  verification_step: 6
+  test_selector: tests/telemetry_capture/test_runner.py
+  red_green_expectation: red before (module absent), green after.
+- source: scripts/telemetry_capture/responses.py
+  behavior: RN-7's response table.
+  verification_step: 6
+  test_selector: tests/telemetry_capture/test_responses.py
+  red_green_expectation: red before (module absent), green after.
+- source: scripts/telemetry_capture/__main__.py
+  behavior: The detached entry and the operator CLI.
+  verification_step: 6
+  test_selector: tests/telemetry_capture/test_main.py
+  red_green_expectation: red before (module absent), green after.
+- source: scripts/telemetry_capture/smoke.py
+  behavior: The c8 smoke drives the hook entry points and reads back counts.
+  verification_step: 6
+  test_selector: tests/telemetry_capture/test_smoke.py
+  red_green_expectation: red before (module absent), green after.
+- source: scripts/telemetry_capture/__init__.py
+  behavior: Package marker only.
+  verification_step: 6
+  test_selector: tests/telemetry_capture
+  red_green_expectation: red before (package absent), green after.
+- source: docs/contracts/ports.yaml
+  behavior: PC-01 names the capture transport and SA-02 records the capture runtime's structural assumptions.
+  verification_step: 9
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: >-
+    Class D contract rows with no runtime behaviour; validate_ports_contract and validate_contract_drift, run by the full
+    tier in step 9, check their grammar, references and amendment_log entry.
+- source: docs/contracts/file-router.yaml
+  behavior: The telemetry-capture discovery route.
+  verification_step: 9
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: >-
+    A discovery route with no runtime behaviour; the file-router checks in the full tier (step 9) validate its targets
+    and amendment_log entry.
+- source: docs/ROADMAP-PLATFORM.yaml
+  behavior: T3.20 c8 flips to met with met_by this plan; files_in_scope and progress_note re-grounded.
+  verification_step: 9
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: >-
+    Roadmap bookkeeping with no runtime behaviour; validate_platform_roadmap's closes_criteria and exit-criteria ledger
+    checks run in the full tier (step 9).
+constraints:
+- >-
+  Only the files listed in scope may be modified, plus the registry shards of graduated steps; the roadmap edit is the
+  bookkeeping walk's c8 flip, the files_in_scope re-grounding and the progress_note only (c1 and c2 flip in the
+  enablement change, step 11).
+- >-
+  Agent invisibility is structural (operator ruling 2026-10-09): no capture hook writes stdout; only the SessionStart pin
+  hook writes stderr (one fixed line, no values); every hook exits 0; Stop and StopFailure never run a pass in the hook
+  process; no hook entry is async.
+- >-
+  No hard-coded clone path: hook commands resolve from $CLAUDE_PROJECT_DIR, the shims take the repo root from their
+  own file location and the state directory from the hook's transcript_path; no
+  environment variable can redirect the production runner module (test seams patch it in process).
+- >-
+  Do not edit the blob-route plan's files (src/telemetry_client/*, src/telemetry/blobs.py and request.py, the writer
+  Lambda, .importlinter, the telemetry contracts, tests/turn_capture/test_record_turn.py,
+  test_capture_ducklake_integration.py, test_real_transcript_conformance.py); call its client, never change it. The
+  shared files docs/contracts/ports.yaml and docs/contracts/file-router.yaml are edited only after the blob build merged.
+- >-
+  No Lambda, Terraform, IAM, Class A contract or Decision change. The only active-manifest hit is docs/ROADMAP-PLATFORM.yaml
+  as a data-pipeline asset (the rec-2910 over-inclusion; deploy-prod-lambdas.yml's trigger paths exclude it): scripts/
+  is not Lambda-packaged and src/turn_capture is excluded by name (Decision 79), so V2 holds and no deploy is owed.
+- >-
+  The writer is pinned to the smoke catalog (Decision 216's disposable catalog): this plan writes no production rows
+  (rec-4101's monitor precedes those), and after enablement real sessions' rows land there until 2c rebinds production;
+  RN-5's data_path_is_smoke check then stops capture until the producer is re-pointed (noted on rec-4292 and rec-4207).
+- >-
+  Not in 3b (feedback-loop gate, Benjamin 2026-10-12): the SessionStart session denominator, durable producer-diagnostics
+  storage and an operator signal for producer-side halts, a durable rejection record, the offline conformance job. They
+  stay on rec-4026, which remains open as their carrier.
+- >-
+  Persist the cursor only after every request of the pass is acknowledged; never write a cut before sending (ADVICE-5
+  F1: record_turn builds the prior set from finalize_cuts, so an unsent cut would mark its rows emitted).
+- No rescue agents or workaround loops (Decision 55); a pinned rule that cannot hold on real data is a STOP back to /plan.
+context:
+- >-
+  Decision-scout verdict: FLAGS_FOUND (two NOTEs, both resolved here: Decision 212 by PC-01 and SA-02 in ports.yaml;
+  Decision 84 spirit by the residual below). CITE: 199, 200, 207, 210, 213, 84, 55, 181, 79, 131, 132, 189, 136, 201.
+  Decisions triaged: 170 of 170. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 1.
+- >-
+  gates: decision-scout=FLAGS_FOUND (resolved); plan-critique=PROCEED after 4 rounds (r4 a narrow check)
+- >-
+  Design inputs: rec-4026, ADVICE-5-pc-hooks (F1-F4 followed; F5 replaced by Benjamin's pick `ontheloop`, 2026-10-15:
+  tenant_id already names the owner, and a slash reads as a GitHub path), REPORT-w1 (#1384), spike FINDINGS.md :91-94.
+  Cloud resume evidence: the planning session's own CC-web transcript holds 14 SessionStart:resume attachments, which
+  settles P-B's resume verification item.
+- >-
+  Claude Code facts (code.claude.com hooks and cloud docs, 2026-10-15): Claude never sees stderr at exit 0; SessionStart
+  stdout becomes context; Stop exit 2 continues the turn; SessionEnd budget 1.5 s unless the entry sets its own timeout
+  (max 60 s); matching hooks run in parallel; async hooks feed the next turn and are killed at -p teardown.
+- >-
+  Declared residuals: cloud finalization rests on SessionEnd firing at VM pause or reclaim (undocumented; without it no
+  close rows, sessions read abandoned by the idle rule); a lost cursor, or one failing its tail check, replays and
+  re-derives the session_started_at pin from the transcript instead of the 3a hand-on's decode_time_prefix recovery: the
+  same transcript yields the same pin, a same-day different pin 409s and halts, and a cross-day one would duplicate the
+  tree silently (Decision 207's lookup is partition-bounded); Stop bursts against reserved concurrency 5 retry on 429 and
+  any 5xx pages the operator; finalize_cuts stay unbounded (rec-4306 open; cuts grow only at SessionEnd); the stderr
+  attachment premise rests on one spike (Claude Code 2.1.296; SA-02). Producer-side failures (pin errors, describe
+  mismatch, missing credentials, lock contention, deferral) leave only the local, ephemeral halt record and diagnostics;
+  the writer's C6 line records only refusals it answered (Decision 84 I-4 no outbox; Decision 55).
+- >-
+  rec-4026 is the carrier but is not bundled: its acceptance node lands here, yet it stays open as the one owner of what
+  slice 3b leaves (the enablement read-back, then the feedback-loop-gated items in constraints), so the squash trailer
+  names only rec-4308. Filing those gated items as new recs now would itself be feedback-loop work (Benjamin's gate).
+- >-
+  Org transfer (rec-3905; relayed by Benjamin 2026-10-15): the repo moves and is renamed to otl-labs/ontheloop in one
+  operation, with a merge and workflow-dispatch freeze from go/no-go until its checklist passes; the cloud clone path
+  becomes /home/user/ontheloop. No internal identifier changes (Decision 101(b)); project_ref ontheloop is
+  unaffected. The AWS account move is a separate, undecided workstream (its leading option keeps the tenant).
+- >-
+  Sequencing: builds after PLAN-telemetry-blob-route is built and deployed (protocol_from_describe, deliver_blobs; inline
+  content above 64 KiB needs it). The build merge needs nobody's word; the enablement (step 10) does (real transcripts
+  into the operator's catalog). transport.py is a fourth SigV4 Function-URL client with its own SSM call and a
+  status-returning invoke, because the others raise on non-200 (PC-01).
+pre_implementation_checklist:
+- Branch confirmed not on main; PLAN-telemetry-blob-route built and deployed on main
+- docs/PROJECT_CONTEXT.md read
+- Decisions 84 (I-4), 199, 200, 207, 213 and 131 (only the cited clauses) read
+- All files in scope located and readable
+- Acceptance criteria understood and verifiable
+execution_steps:
+- >-
+  RULE HK-1 (registrations): SessionStart `bash "$CLAUDE_PROJECT_DIR/.claude/hooks/session_start_log_turn.sh"
+  --project-ref=ontheloop` (no matcher, unquoted ref token; H-1 strips the path token's quotes, so the stem is
+  session_start_log_turn); Stop and StopFailure `"$CLAUDE_PROJECT_DIR/bin/venv-python"
+  "$CLAUDE_PROJECT_DIR/.claude/hooks/stop_log_turn.py"`; SessionEnd `"$CLAUDE_PROJECT_DIR/bin/venv-python"
+  "$CLAUDE_PROJECT_DIR/.claude/hooks/session_end_log_turn.py"` with "timeout": 60 on that entry only. No "async".
+  Existing entries keep their order.
+- >-
+  RULE HK-2 (pin hook): `printf '%s\n' "[session_start_log_turn] capture pin" >&2; exit 0`. No stdin read, no state, no
+  pass, every source (fork included: P-B's fork obligation).
+- >-
+  RULE HK-3 (Stop shim): parse stdin JSON (malformed -> exit 0); stop_hook_active true -> exit 0;
+  switch.capture_allowed false -> exit 0; else subprocess.Popen([sys.executable, "-m", RUNNER_MODULE, "run", "--event",
+  <hook_event_name>, "--transcript", <transcript_path>, "--session-id", <session_id>], cwd=<repo root>, stdin, stdout and
+  stderr DEVNULL, start_new_session=True, close_fds=True) and exit 0 without waiting. RUNNER_MODULE is the module
+  constant "scripts.telemetry_capture"; no environment variable overrides it (step 2's wrapper patches it in process).
+  The repo root is the shim's own parents[2]. The whole body sits in try/except -> exit 0; the
+  switch is checked before any import beyond the stdlib and yaml.
+- >-
+  RULE HK-4 (SessionEnd): deadline = hook start + 50 s (the entry's timeout is 60 s; main() takes the 50 s as a
+  parameter so tests scale it down). Same parse, switch and guards; try the tree's lock for up to 5 s inside the
+  deadline; when held, run_pass(final=True, deadline) in process, which detaches the final pass instead of sending when
+  less than 20 s remain after record_turn returns; when busy, detach a final pass exactly as HK-3 does (event
+  SessionEnd, --final, its own lock wait up to 600 s) and exit 0.
+- >-
+  RULE SW-1 (switch and guards): capture_allowed is true iff config/telemetry/capture.yaml has enabled: true AND
+  CLAUDE_CODE_REMOTE == "true" AND GITHUB_ACTIONS != "true" AND OTL_TURN_CAPTURE != "off". Credentials are checked by the
+  runner (none -> diagnostic no_credentials, exit 0). RULE SW-2 (smoke override): OTL_TURN_CAPTURE_SMOKE_REF=<ref>
+  allows capture regardless of the switch and CLAUDE_CODE_REMOTE only when <ref> starts with "synthetic:" and the tree's
+  pinned project_ref equals it; the runner re-checks the pin before sending, so no real session can be enabled by it.
+  GITHUB_ACTIONS == "true" and OTL_TURN_CAPTURE == "off" still win.
+- >-
+  RULE ST-1 (state home, ADVICE-5 F1): <dir of transcript_path>/<session_id>/telemetry-capture/ holding state.json,
+  lock, halt.json, diagnostics.jsonl, writer_url and the OP-1 marker. FsTree reads only <sid>/subagents and
+  <sid>/tool-results, so the directory is invisible to the parser. RULE ST-2 (state writes): temp file plus os.replace;
+  when the pass loaded a valid cursor, refuse one whose root lines_consumed is below it (diagnostic cursor_regression);
+  a cursor loaded as lost (missing, unparseable or failing ST-3) is replaced, never compared. RULE ST-3 (tail
+  check): state.json = {cursor (format 2 JSON), root_tail_uuid}; root_tail_uuid is the uuid of the last root record
+  below lines_consumed that carries one; on load, a missing file, a parse failure or a tail mismatch is a lost cursor
+  (diagnostic cursor_lost or cursor_tail_mismatch). RULE ST-4 (diagnostics): one JSON line per pass with event, counts
+  per request (submitted, inserted), the record_turn diagnostics and the outcome; keep the last 500 lines; never content,
+  rows or credentials.
+- >-
+  RULE TR-1 (endpoint and auth): URL from DUCKLAKE_TELEMETRY_WRITER_URL, else an SSM get_parameter of
+  /agent-platform/ducklake/telemetry_writer_url (transport's own call, not the reader client's private helper), cached
+  in the state dir; botocore SigV4Auth (service "lambda", region from the URL) under
+  scripts.aws_profile.resolve_aws_profile(); one botocore Config, retries {"total_max_attempts": 1} and connect plus
+  read timeout at most the remaining budget, installed with set_default_client_config on the botocore session, so the
+  SSM client and the assume-role STS client behind the profile both inherit it; body json.dumps(payload)
+  (ensure_ascii default), Content-Type application/json; re-sign per attempt. RULE TR-2 (retry table): appends retry
+  429, 503 and transport errors with full-jitter backoff (0.5 s base, 8 s cap) while the deadline allows; every other
+  status returns at once. RULE TR-3 (chunking): per request <= 2000 rows per table, <= 5000 rows, <= protocol.max_items
+  blob rows (counted with src.telemetry.blobs.blob_row, the blob route's single definition), and len(json.dumps(body))
+  <= 5242880 measured on the exact body; data batches in record_turn order and the telemetry_sessions rows only in the
+  pass's last request(s); any 413 (payload_too_large, too_many_rows, too_many_blobs or untyped) halves the chunk and
+  retries down to one row. RULE TR-4 (budgets): a pass has one deadline (Stop: start + 600 s; SessionEnd: HK-4); every
+  HTTP request and blob PUT timeout is min(130 s, remaining); the invoke and put callables passed to deliver_blobs carry
+  the same clamp and make a single attempt each (deliver_blobs owns its own retries); deadline reached -> stop the pass
+  (cursor unchanged, diagnostic deadline).
+- >-
+  RULE RN-1 (lock): flock the tree's lock; a Stop pass that cannot take it at once exits (the next pass catches up);
+  SessionEnd per HK-4. RULE RN-2 (halt): halt.json present -> exit. RULE RN-3 (project_ref): the cursor's pin when a
+  cursor exists, else transcript.project_ref_pin(tree); None -> defer (diagnostic deferred_no_pin, no request, no
+  cursor). RULE RN-4 (pass): record_turn(FsTree(transcript), cursor, project_ref=..., session_final=final);
+  PinOrderError, CursorError or SourceMutated -> halt with that class name. No rows -> persist next_cursor (when not
+  None) and exit.
+- >-
+  RULE RN-5 (describe check): describe once per pass: append_telemetry in actions, data_path_is_smoke true (until 2c
+  rebinds production), caps no lower than TR-3's limits, and blob_delivery.protocol_from_describe(body) succeeds; any
+  failure -> stop with diagnostic describe_mismatch (not a halt: a deploy may fix it).
+- >-
+  RULE RN-6 (delivery): blob_delivery.deliver_blobs over the transcripts rows with the clamped invoke and put; append its
+  wire_rows in place of the transcripts rows. BlobDeliveryError refused or defect -> halt; transient or proxy -> stop.
+- >-
+  RULE RN-7 (responses, responses.py): 200 -> next request; 403 tenant_unresolved -> register_tenant once, retry the
+  request; 422 blob_not_verified -> re-run delivery for that request once, then halt; 409, other 422 (row_rule,
+  schema_gate), 400 and 403 project_unregistered -> halt, recording status, error_type, rule, column and the 0-based row
+  index from the body (never values); 413 -> TR-3 re-chunk; 500 -> stop (no retry; it pages); any other status
+  (401, an untyped 403, 502, 504) -> stop, never halt. RULE RN-8 (persist): after
+  the last request is acknowledged, write state.json (ST-2, ST-3) and the diagnostics line. A lost cursor replays from
+  scratch; a 409 then halts with diagnostic grain_conflict_after_cursor_loss.
+- >-
+  RULE OP-1 (operator CLI, `python -m scripts.telemetry_capture <cmd>`): `run` (the detached entry); `pass --tree
+  <root.jsonl> [--final]` runs RN-1..RN-8 on that tree (refusing a tree with no pinning attachment, K-1); `status --tree`
+  prints positions, halt record and the last diagnostics line (counts only); `probe --tree [--require t1,t2]` calls
+  telemetry_probe with the tree's {project_ref, root session_ref, session_started_at} from its cursor, prints grain
+  counts per table and exits 1 when a required table reads zero or a halt is recorded; `observe --tree` prints
+  SessionStart attachment counts by source, SessionEnd pass count from diagnostics, and the count of tool-results
+  sidecars whose mtime is later than their tool_result record's timestamp; `mark --tree` writes a marker file, the root
+  prefix sha256 and /proc/sys/kernel/random/boot_id under the state dir, and `observe` reports whether the boot id
+  changed (a reclaim happened) and whether the marker and prefix hash still match;
+  `clear-halt --tree`; `register --project-ref <ref> --name <n> --remote <url>` (register_tenant, then
+  register_project). No sweep exists: no pass ever starts on a tree except through its own hook or an explicit --tree.
+- >-
+  RULE SM-1 (c8 smoke): ref synthetic:pc-smoke-<8 hex>; register_tenant and register_project; write a temp tree whose
+  records follow 3b-observation-spike/record-shapes.json and the builders in tests/fixtures/turn_capture_corpus.py
+  (copied shapes; scripts/ never imports tests/): a SessionStart hook attachment whose command is
+  `bash "$CLAUDE_PROJECT_DIR/.claude/hooks/session_start_log_turn.sh" --project-ref=<ref>`, a prompt, an assistant reply
+  with usage and a Bash tool_use, its tool_result with a persisted tool-results sidecar above 64 KiB, an Agent tool_use
+  with its <sid>/subagents/agent-<id>.jsonl child (a prompt and a reply) and its completed tool_result, a final reply.
+  Run 1: stop_log_turn.py with crafted Stop stdin and OTL_TURN_CAPTURE_SMOKE_REF=<ref>, poll state.json until it
+  appears (60 s), then session_end_log_turn.py with SessionEnd stdin; telemetry_probe and compare grain_counts rows per
+  table to record_turn's counts (all four tables above zero) and require the blob row delivered. Run 2: delete
+  state.json and replay Stop then SessionEnd the same way; per table, the sum of submitted over run 2's diagnostics
+  lines equals run 1's and inserted is 0. Print counts and "PC_SMOKE PASS" or "PC_SMOKE FAIL <reason>".
+- >-
+  RULE DG-1 (absent usage): in observations, a usage key that is absent counts absent_usage_key (one per key), and a
+  message whose usage is absent or not a dict counts absent_usage; a present non-int value still counts non_int_usage.
+- >-
+  RULE PN-1 (rec-4308): hook_script strips quotes from token edges, so --project-ref="a/b" reaches project_ref_pin as
+  the value `"a/b`; project_ref_pin drops one leading ' or " from the value before the ref pattern. hook_script is
+  unchanged (hook_name shares it). test_project_ref_pin_quoted_flag_value pins --project-ref="a/b" (red before) and
+  '--project-ref=a/b' (already pins).
+- >-
+  Bookkeeping walk (exit-criteria-ledger.yaml met_by flip procedure): c1, c2 and c8 are all this plan's closes_criteria,
+  each flipped on its own verified VP pass. At the build closure flip exactly T3.20:c8 (met_by telemetry-capture-hooks,
+  on step 8's PC_SMOKE PASS), correct files_in_scope's session_start_log_turn entry to .sh and add the dated
+  progress_note. c1 and c2 stay open through the build; they flip (same met_by) in the step-11 roadmap PR, only after
+  step 11's real-session read-back passes.
+- Execute Verification Plan steps 1-9 -- loop until pass; on an unrecoverable failure stop and RCA (Decision 55).
+- >-
+  Closure sequence (implement skill, git-ops handoff_sequence), each outcome reported on its own: run the code-review
+  gate (fresh sibling subagent); run scripts.session.github_readiness and report each state separately (unknown is
+  unproven, never PASS); set implementation_declared true in this plan; rebase onto origin/main; write the
+  retrospective evidence and run scripts.session.postflight --evidence; then VP step 9 on the committed, rebased, clean
+  tree to completion, then scripts.checks.validation_result --verify-head exit 0. Push, open the PR, wait for CI by
+  subscription, squash-merge with Resolves: rec-4308 in the squash body (rec-4026 stays open); then VP step 12, and
+  steps 10-11 only on Benjamin's word.
+- >-
+  Closeout notes (ops portal update_rec, get_rec_write_guidance first): narrow rec-4026's context and acceptance (this
+  build satisfies today's acceptance) to what remains (the enablement and step 11's read-back and observations; the
+  session denominator, durable producer diagnostics and halt signal, the durable rejection record and the offline
+  conformance job, all held by the feedback-loop gate); the new acceptance must stay unsatisfiable by this build and by
+  the c1/c2 flip (it names the gated items' own proof), and the c1/c2 flip PR carries step 11's probe and observe
+  output as its evidence (Decision 103); rec-4026's context also names the register re-run with the new remote after
+  the org transfer (rec-3905); note on rec-4292 and rec-4207 that RN-5 stops capture when the writer rebinds
+  production, so the producer must be re-pointed at 2c. Close nothing directly.
+- 'Report: what was implemented, the VP results, the c8 smoke counts and whether enablement is pending.'
+work_areas: []
+rollback: >-
+  Before enablement: revert the squash commit (no state outside the repository except synthetic smoke rows, which carry a
+  synthetic: project). After enablement: set enabled: false (one line) or export OTL_TURN_CAPTURE=off; rows already
+  written stay (append-only) and are attributable to ontheloop.

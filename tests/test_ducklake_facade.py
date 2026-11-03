@@ -34,7 +34,7 @@ pytestmark = pytest.mark.unit
 _RUNTIME_FACADE_REQUIRED = [
     "open_connection",
     "fetch_dsn",
-    "_parse_secret_string",
+    "_parse_dsn_document",
     "libpq_conninfo",
     "assert_duckdb_version",
     "get_warm_connection",
@@ -62,9 +62,7 @@ _RUNTIME_FACADE_REQUIRED = [
     "ControlTableSpec",
     "read_current",
     "read_history",
-    "assert_read_only_sql",
     "named_read",
-    "query_current",
     "emit_metric",
     "make_metric_sink",
     "CATALOG_ALIAS",
@@ -74,7 +72,7 @@ _RUNTIME_FACADE_REQUIRED = [
     "META_SCHEMA",
     "SMOKE_META_SCHEMA",
     "LAMBDA_EXTENSION_DIRECTORY",
-    "DSN_SECRET_ID",
+    "DSN_PARAMETER_NAME",
     "ENTITY_COUNTERS_TABLE",
     "BAKED_EXTENSIONS",
     "CHURN_WRITERS",
@@ -150,6 +148,15 @@ def test_ducklake_runtime_facade_reexports_symbol(symbol: str) -> None:
 def test_ducklake_writer_handler_facade_reexports_symbol(symbol: str) -> None:
     """Every accessed handler symbol resolves as a real attribute of src.lambdas.ducklake_writer.handler."""
     assert hasattr(h, symbol), f"src.lambdas.ducklake_writer.handler is missing re-export: {symbol!r}"
+
+
+def test_facade_drops_the_caller_sql_helpers() -> None:
+    """The caller-SQL helpers are gone from the facade and the reads module (named as strings, never called)."""
+    import src.common.ducklake_reads as reads
+
+    for name in ("query_current", "assert_read_only_sql"):
+        assert not hasattr(rt, name)
+        assert not hasattr(reads, name)
 
 
 def test_ducklake_spike_submodule_resolves_on_facade() -> None:

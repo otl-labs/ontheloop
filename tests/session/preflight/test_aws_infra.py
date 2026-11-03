@@ -157,6 +157,13 @@ class TestHandleCredentialsStartup:
         mock_run.assert_not_called()
         assert "DEGRADED" in capsys.readouterr().err
 
+    def test_guidance_names_helper_and_network_secret(self, capsys: pytest.CaptureFixture) -> None:
+        _preflight._handle_credentials_startup("unavailable")
+        err = capsys.readouterr().err
+        assert "scripts.aws_identity caller-arn" in err
+        assert "network secret" in err
+        assert "~/.aws/credentials" not in err
+
 
 class TestCredentialsOrderingInMain:
     """Verify that the credential check runs before ops sync in main()."""
@@ -187,8 +194,10 @@ class TestCredentialsOrderingInMain:
             patch("scripts.preflight.aws_infra.check_credentials", return_value="ok"),
             patch("scripts.preflight.aws_infra._handle_credentials_startup", side_effect=_track_creds),
             patch("scripts.sync.ops.warm_sync", side_effect=_track_sync),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
-            patch("scripts.preflight.recs_cache.count_recommendations", return_value=(0, 0, 0, [])),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch("scripts.preflight.priority_queue.read_priority_queue", return_value=[]),
             patch("scripts.preflight.priority_queue.print_priority_queue"),
             patch(
@@ -196,7 +205,6 @@ class TestCredentialsOrderingInMain:
                 return_value={
                     "roadmap_phase": "",
                     "open_decisions_count": 0,
-                    "recent_sessions": [],
                     "strategic_review_due": False,
                     "recommendations_count": 0,
                 },

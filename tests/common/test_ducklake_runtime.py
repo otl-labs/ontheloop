@@ -62,9 +62,10 @@ def test_fetch_dsn_success(monkeypatch):
     captured = {}
 
     class _Client:
-        def get_secret_value(self, SecretId):
-            captured["secret_id"] = SecretId
-            return {"SecretString": json.dumps(_DSN)}
+        def get_parameter(self, Name, WithDecryption):
+            captured["parameter_name"] = Name
+            captured["decrypt"] = WithDecryption
+            return {"Parameter": {"Value": json.dumps(_DSN)}}
 
     class _Session:
         def __init__(self, profile_name=None):
@@ -77,16 +78,17 @@ def test_fetch_dsn_success(monkeypatch):
     monkeypatch.setattr(boto3, "Session", _Session)
     out = rt.fetch_dsn(profile="agent_platform")
     assert out["host"] == _DSN["host"]
-    assert captured["secret_id"] == rt.DSN_SECRET_ID
-    assert captured["client"] == "secretsmanager"
+    assert captured["parameter_name"] == rt.DSN_PARAMETER_NAME
+    assert captured["decrypt"] is True
+    assert captured["client"] == "ssm"
 
 
 def test_fetch_dsn_missing_key_raises(monkeypatch):
     bad = {k: v for k, v in _DSN.items() if k != "password"}
 
     class _Client:
-        def get_secret_value(self, SecretId):
-            return {"SecretString": json.dumps(bad)}
+        def get_parameter(self, Name, WithDecryption):
+            return {"Parameter": {"Value": json.dumps(bad)}}
 
     class _Session:
         def __init__(self, profile_name=None):
@@ -336,12 +338,16 @@ def test_schema_gate_ops_requires_merge_key_and_status():
 
 def test_schema_gate_ops_rejects_mistyped_bool():
     with pytest.raises(rt.SchemaGateError, match="expected bool"):
-        rt.schema_gate({"id": "rec-1", "status": "open", "automatable": "yes"}, table="ops_recommendations")
+        rt.schema_gate(
+            {"id": "rec-1", "title": "a valid title", "status": "open", "automatable": "yes"}, table="ops_recommendations"
+        )
 
 
 def test_schema_gate_ops_rejects_mistyped_array():
     with pytest.raises(rt.SchemaGateError, match="expected list"):
-        rt.schema_gate({"id": "rec-1", "status": "open", "tags": "not-a-list"}, table="ops_recommendations")
+        rt.schema_gate(
+            {"id": "rec-1", "title": "a valid title", "status": "open", "tags": "not-a-list"}, table="ops_recommendations"
+        )
 
 
 def test_build_merge_sql_ops_recommendations_uses_id_key():
@@ -358,19 +364,32 @@ def test_build_merge_sql_ops_recommendations_uses_id_key():
     assert "id = s.id" not in curr_sql.split("WHEN MATCHED THEN UPDATE SET")[1].split("WHEN NOT MATCHED")[0]
 
 
-def test_ops_table_names_lists_all_six():
+def test_ops_table_names_lists_every_registered_table():
     """T2.26: ops_entity_counters (control class) joins the registry -- refused at both
     boundaries via resolve_table_spec's directed raise, never removed from ops_table_names().
-    PLAN-t2-26-retire-ops-session-log: ops_session_log was retired (CD.40), dropping the count
-    from seven to six."""
+    ops_session_log was retired (CD.40). Membership and uniqueness, never an exact count: the
+    registry grows (telemetry event tables, ops_tenants, ops_projects)."""
     names = rt.ops_table_names()
     assert "ops_recommendations" in names
     assert "ops_decisions" in names
     assert "ops_priority_queue" in names
     assert "ops_smoke_events" in names
     assert "ops_entity_counters" in names
+    for registered in ("telemetry_sessions", "telemetry_observations", "telemetry_transcripts", "telemetry_agents"):
+        assert registered in names
+    assert "ops_tenants" in names and "ops_projects" in names
     assert "ops_session_log" not in names
-    assert len(names) == 6
+    assert len(names) == len(set(names))
+
+
+def test_runtime_reexports_registry_helpers():
+    """Both handlers reach the schema layer only through `rt`: the helpers and read_version are the
+    defining modules' own objects."""
+    from src.common import ducklake_named_reads
+
+    assert rt.is_event_table is schema.is_event_table
+    assert rt.table_write_boundary is schema.table_write_boundary
+    assert rt.read_version is ducklake_named_reads.read_version
 
 
 def test_split_smoke_merge_history_sql_byte_identical():
@@ -406,3 +425,110 @@ def test_split_no_import_cycle():
 
     importlib.import_module("src.common.ducklake_scd2_schema")
     importlib.import_module("src.common.ducklake_runtime")
+
+
+# ---------------------------------------------------------------------------
+# Named warm-connection slots (rec-4291): the reader's telemetry catalog is a second, isolated warm connection.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _clean_slots():
+    rt.reset_warm_connection()
+    yield
+    rt.reset_warm_connection()
+
+
+def _slot_con(alive: bool = True):
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    con = MagicMock(name="slot_con")
+    if not alive:
+        con.execute.side_effect = Exception("connection already closed")
+    return con
+
+
+def test_named_slots_are_independent(_clean_slots):
+    ops, telemetry = _slot_con(), _slot_con()
+    first, _ = rt.get_warm_connection(opener=lambda: ops)
+    second, meta = rt.get_warm_connection(opener=lambda: telemetry, slot="telemetry")
+    assert (first, second) == (ops, telemetry) and meta["reused"] is False
+    assert rt.get_warm_connection(opener=lambda: _slot_con())[0] is ops
+    assert rt.get_warm_connection(opener=lambda: _slot_con(), slot="telemetry")[0] is telemetry
+    ops.close.assert_not_called()
+    telemetry.close.assert_not_called()
+
+
+def test_dead_slot_reopens_without_evicting_the_other(_clean_slots):
+    ops, dead, fresh = _slot_con(), _slot_con(alive=False), _slot_con()
+    rt.get_warm_connection(opener=lambda: ops)
+    rt.get_warm_connection(opener=lambda: dead, slot="telemetry")
+    con, meta = rt.get_warm_connection(opener=lambda: fresh, slot="telemetry")
+    assert con is fresh and meta["reopened"] is True
+    dead.close.assert_called_once()
+    assert rt.get_warm_connection(opener=lambda: _slot_con())[0] is ops
+    ops.close.assert_not_called()
+    again, meta = rt.get_warm_connection(opener=lambda: _slot_con(), slot="telemetry", force_reopen=True)
+    assert meta["reopened"] is True and again is not fresh
+    assert rt.get_warm_connection(opener=lambda: _slot_con())[0] is ops
+
+
+def test_reset_drops_one_slot_or_all(_clean_slots):
+    ops, telemetry = _slot_con(), _slot_con()
+    rt.get_warm_connection(opener=lambda: ops)
+    rt.get_warm_connection(opener=lambda: telemetry, slot="telemetry")
+    rt.reset_warm_connection("telemetry")
+    telemetry.close.assert_called_once()
+    ops.close.assert_not_called()
+    assert rt._named_slots["telemetry"] == {}
+    assert rt._warm_connection["con"] is ops
+    rt.get_warm_connection(opener=lambda: _slot_con(), slot="telemetry")
+    rt.reset_warm_connection()
+    ops.close.assert_called_once()
+    assert rt._warm_connection == {} and rt._named_slots["telemetry"] == {}
+    broken = _slot_con()
+    broken.close.side_effect = Exception("already gone")
+    rt.get_warm_connection(opener=lambda: broken, slot="telemetry")
+    rt.reset_warm_connection()
+
+
+def test_open_connection_attaches_under_the_given_alias(monkeypatch):
+    con = FakeCon()
+    _patch_duckdb(monkeypatch, con)
+    rt.open_connection(dsn=_DSN, data_path="s3://x/y/", alias=rt.TELEMETRY_CATALOG_ALIAS)
+    attach = next(s for s, _ in con.executed if s.startswith("ATTACH 'ducklake:postgres:"))
+    assert f" AS {rt.TELEMETRY_CATALOG_ALIAS} (" in attach
+    default = FakeCon()
+    _patch_duckdb(monkeypatch, default)
+    rt.open_connection(dsn=_DSN, data_path="s3://x/y/")
+    assert any(f" AS {rt.CATALOG_ALIAS} (" in s for s, _ in default.executed)
+    opened: list[str] = []
+    monkeypatch.setattr(rt, "open_connection", lambda **kw: opened.append(kw["alias"]) or _slot_con())
+    rt.get_warm_connection(dsn=_DSN, slot="telemetry", alias=rt.TELEMETRY_CATALOG_ALIAS)
+    assert opened == [rt.TELEMETRY_CATALOG_ALIAS]
+    rt.reset_warm_connection()
+
+
+def test_ops_slot_storage_is_unchanged(_clean_slots):
+    """The ops slot keeps the module-level dict with con/key entries that test_ducklake_runtime_warm_connection.py reads."""
+    con = _slot_con()
+    rt.get_warm_connection(opener=lambda: con, data_path="s3://x/", meta_schema="m", extension_directory="/e")
+    assert rt._warm_connection["con"] is con
+    assert rt._warm_connection["key"] == ("s3://x/", "m", "/e")
+    assert "ops" not in rt._named_slots
+
+
+def test_open_connection_read_only_adds_the_attach_option(monkeypatch):
+    plain = FakeCon()
+    _patch_duckdb(monkeypatch, plain)
+    rt.open_connection(dsn=_DSN, data_path="s3://x/y/", meta_schema="ducklake_telemetry")
+    plain_attach = next(s for s, _ in plain.executed if s.startswith("ATTACH 'ducklake:postgres:"))
+    assert plain_attach.endswith("(DATA_PATH 's3://x/y/', META_SCHEMA 'ducklake_telemetry')")
+    read_only = FakeCon()
+    _patch_duckdb(monkeypatch, read_only)
+    rt.open_connection(dsn=_DSN, data_path="s3://x/y/", meta_schema="ducklake_telemetry", read_only=True)
+    attach = next(s for s, _ in read_only.executed if s.startswith("ATTACH 'ducklake:postgres:"))
+    assert attach.endswith("(DATA_PATH 's3://x/y/', META_SCHEMA 'ducklake_telemetry', READ_ONLY)")
+    assert rt.TELEMETRY_PROD_META_SCHEMA == "ducklake_telemetry"
+    assert rt.TELEMETRY_PROD_DATA_PATH == "s3://agent-platform-data-lake/ducklake-telemetry/"
+    assert not rt.TELEMETRY_PROD_DATA_PATH.startswith("s3://agent-platform-data-lake/ducklake/")

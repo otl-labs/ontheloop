@@ -39,9 +39,11 @@ def _patch_key_plans(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _project(table_id, resolved, ops_config=None, partition_by=None, **kwargs):
-    return proj_mod.project_event_table(
-        table_id, resolved, ops_config or {}, partition_by, map_iceberg_type=_map_iceberg_type, **kwargs
-    )
+    directory = _FIXTURES_DIR if table_id == "fixture_events" else _CONTRACTS_DIR
+    with patch.object(proj_mod, "_CONTRACTS_DIR", directory):
+        return proj_mod.project_event_table(
+            table_id, resolved, ops_config or {}, partition_by, map_iceberg_type=_map_iceberg_type, **kwargs
+        )
 
 
 class TestFixtureContractProjectionShape:
@@ -220,14 +222,15 @@ class TestGenerateAcceptsEventContractWithoutMergeKey:
 
         doc, resolved = fixture_resolved
         assert doc.governance.merge_key is None
-        entry = _project_contract_table(
-            "fixture_events",
-            resolved,
-            None,
-            {},
-            table_class="event",
-            partition_by=doc.governance.partition_by,
-        )
+        with patch.object(proj_mod, "_CONTRACTS_DIR", _FIXTURES_DIR):
+            entry = _project_contract_table(
+                "fixture_events",
+                resolved,
+                None,
+                {},
+                table_class="event",
+                partition_by=doc.governance.partition_by,
+            )
         assert entry["write_mode"] == "append_only"
         assert "merge_key" not in entry
 
@@ -304,3 +307,279 @@ class TestRealTelemetryContractsProject:
         # workflow is nullable:false but carries required_when (open only) -> projects nullable.
         assert entry["columns"]["workflow"]["nullable"] is True
         assert entry["columns"]["workflow"]["required_when"] == {"event_kind": ["open"]}
+
+
+# ---------------------------------------------------------------------------
+# Row rules (Decision 210): projected from the raw contracts, $ref inheritance, fail closed.
+# ---------------------------------------------------------------------------
+_REAL_TABLES = ("telemetry_sessions", "telemetry_observations", "telemetry_transcripts", "telemetry_agents")
+
+
+def _real_entry(table_id: str) -> dict:
+    doc = load_contract(_CONTRACTS_DIR / f"{table_id}.yaml")
+    return _project(table_id, resolve_refs(doc, _CONTRACTS_DIR), partition_by=doc.governance.partition_by)
+
+
+def test_row_rules_projected_from_contracts() -> None:
+    for table_id in _REAL_TABLES:
+        event_timestamp = _real_entry(table_id)["columns"]["event_timestamp"]
+        assert event_timestamp["not_before"] == "session_started_at", table_id
+        assert event_timestamp["max_after_write_seconds"] == 300, table_id
+    observations = _real_entry("telemetry_observations")
+    columns = observations["columns"]
+    assert columns["outcome"]["accepted_values"] == ["success", "error", "blocked", "interrupted"]
+    assert columns["outcome"]["required_when"] == {"event_kind": ["close"], "observation_type": ["tool_call"]}
+    assert columns["output_bytes"]["required_when"] == {"output_capture": ["not_persisted", "captured", "omitted_oversize"]}
+    assert columns["output_sha256"]["pattern"] == "^[0-9a-f]{64}$"
+    assert columns["reasoning_tokens"]["at_most"] == "tokens_output"
+    assert columns["reasoning_tokens"]["null_or_zero_when"] == {"reasoning_visibility": ["none"]}
+    assert "table_rules" not in observations
+    assert _real_entry("telemetry_sessions")["columns"]["workflow"]["nullable"] is True
+    transcripts = _real_entry("telemetry_transcripts")
+    assert transcripts["table_rules"] == {
+        "exactly_one_of": [["content", "content_uri", "content_omitted_reason"]],
+        "payload": {
+            "inline": "content", "uri": "content_uri", "sha": "content_sha256", "size": "content_bytes",
+            "threshold": 65536, "cap": 8388608, "integrity": True,
+        },
+    }  # fmt: skip
+    assert transcripts["columns"]["content_sha256"]["pattern"] == "^[0-9a-f]{64}$"
+    assert transcripts["columns"]["content_omitted_reason"]["accepted_values"] == ["oversize", "withheld_by_policy"]
+
+
+def test_amended_telemetry_rules_project() -> None:
+    columns = _real_entry("telemetry_observations")["columns"]
+    process_event_point = {"event_kind": ["point"], "observation_type": ["process_event"]}
+    assert columns["severity"]["accepted_values"] == ["info", "warning", "error", "critical"]
+    assert columns["severity"]["required_when"] == process_event_point
+    assert columns["name"]["required_when"] == process_event_point
+    assert "pattern" not in columns["name"]
+    assert "state" not in _real_entry("telemetry_sessions")["columns"]
+
+
+def test_agent_type_accepted_values_come_from_source_registry() -> None:
+    registry = yaml.safe_load((_ROOT / "config/agent/data_quality/source_registry.yaml").read_text(encoding="utf-8"))
+    expected = [entry["canonical_id"] for entry in registry["entries"]]
+    assert _real_entry("telemetry_agents")["columns"]["agent_type"]["accepted_values"] == expected
+    assert "claude-code-subagent" in expected
+
+
+def test_representation_of_and_exemptions_projected() -> None:
+    columns = _real_entry("telemetry_transcripts")["columns"]
+    for name in ("content", "content_uri"):
+        assert columns[name]["representation_of"] == ["content_sha256", "content_bytes"], name
+    assert "write_time_exemptions" not in columns["content"]
+    assert "write_time_exemptions" not in columns["content_uri"]
+
+
+def _fixture_copy(tmp_path: Path, edit) -> Path:
+    import shutil
+
+    target = tmp_path / "contracts"
+    shutil.copytree(_FIXTURES_DIR, target)
+    edit(target)
+    return target
+
+
+def _edit_yaml(path: Path, change) -> None:
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    change(data)
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+def _intents(directory: Path, table_id: str = "fixture_events") -> dict:
+    resolved = resolve_refs(load_contract(_FIXTURES_DIR / "fixture_events.yaml"), _FIXTURES_DIR)
+    with patch.object(proj_mod, "_CONTRACTS_DIR", directory):
+        return proj_mod._effective_intents(table_id, resolved)
+
+
+def test_unknown_rule_key_fails_closed(tmp_path: Path) -> None:
+    directory = _fixture_copy(
+        tmp_path,
+        lambda d: _edit_yaml(d / "fixture_events.yaml", lambda c: c["fields"]["retry_count"]["dq_intent"].update(mystery=1)),
+    )
+    doc = load_contract(directory / "fixture_events.yaml")
+    with patch.object(proj_mod, "_CONTRACTS_DIR", directory):
+        with pytest.raises(ValueError, match=r"unknown dq_intent rule key\(s\) \['mystery'\]"):
+            proj_mod.project_event_table(
+                "fixture_events", resolve_refs(doc, directory), {}, doc.governance.partition_by,
+                map_iceberg_type=_map_iceberg_type,
+            )  # fmt: skip
+    with pytest.raises(ValueError, match="accepted_values must carry a values list"):
+        proj_mod._check_rule_keys("t", "c", {"accepted_values": ["a"]})
+
+
+def test_pattern_when_projects_verbatim(tmp_path: Path) -> None:
+    rule = [{"when": {"retry_count": [1]}, "pattern": "^x:[a-z]+$"}]
+    directory = _fixture_copy(
+        tmp_path,
+        lambda d: _edit_yaml(
+            d / "fixture_events.yaml", lambda c: c["fields"]["retry_count"]["dq_intent"].update(pattern_when=rule)
+        ),
+    )
+    doc = load_contract(directory / "fixture_events.yaml")
+    with patch.object(proj_mod, "_CONTRACTS_DIR", directory):
+        entry = proj_mod.project_event_table(
+            "fixture_events", resolve_refs(doc, directory), {}, doc.governance.partition_by, map_iceberg_type=_map_iceberg_type
+        )
+    assert entry["columns"]["retry_count"]["pattern_when"] == rule
+
+
+def test_envelope_rules_layer_under_a_local_block(tmp_path: Path) -> None:
+    def add_envelope_rule(directory: Path) -> None:
+        _edit_yaml(
+            directory / "fixture-event-envelope.yaml",
+            lambda c: c["fields"]["event_timestamp"]["dq_intent"].update(
+                not_before="session_started_at", max_after_write_seconds=300
+            ),
+        )
+
+    directory = _fixture_copy(tmp_path, add_envelope_rule)
+    intents = _intents(directory)
+    assert intents["event_timestamp"] == {
+        "not_null": True, "not_before": "session_started_at", "max_after_write_seconds": 300,
+    }  # fmt: skip
+    assert intents["created_timestamp"] == {"not_null": True}
+
+    def local_adds_and_changes(directory: Path, key: str, value) -> None:
+        _edit_yaml(
+            directory / "fixture_events.yaml", lambda c: c["fields"]["event_timestamp"]["dq_intent_local"].update({key: value})
+        )
+
+    added = _fixture_copy(tmp_path / "a", add_envelope_rule)
+    local_adds_and_changes(added, "required_when", {"event_id": ["x"]})
+    assert _intents(added)["event_timestamp"]["required_when"] == {"event_id": ["x"]}
+    same = _fixture_copy(tmp_path / "b", add_envelope_rule)
+    local_adds_and_changes(same, "max_after_write_seconds", 300)
+    assert _intents(same)["event_timestamp"]["max_after_write_seconds"] == 300
+    changed = _fixture_copy(tmp_path / "c", add_envelope_rule)
+    local_adds_and_changes(changed, "max_after_write_seconds", 60)
+    with pytest.raises(ValueError, match="changes the inherited rule 'max_after_write_seconds'"):
+        _intents(changed)
+
+
+def test_not_null_by_presence_and_exempt_rule_not_projected() -> None:
+    why = {"class": "temporary", "reason": "r", "owner": "rec-1", "review_by": "2027-01-31"}
+    assert proj_mod._is_not_null({"not_null": True}, True)[0] is True
+    assert proj_mod._is_not_null({"not_null": {"exclude_before": "2026-10-01"}}, True)[0] is True
+    assert proj_mod._is_not_null({"not_null": {"enforced": False}}, True)[0] is False
+    assert proj_mod._is_not_null({}, True)[0] is False and proj_mod._is_not_null({}, False)[0] is True
+    assert proj_mod._is_not_null({"not_null": True, "write_time_exemptions": {"not_null": why}}, True)[0] is False
+    intent = {"accepted_values": {"values": ["a"]}, "pattern": "^a$", "write_time_exemptions": {"accepted_values": why}}
+    assert proj_mod._column_rules("t", "c", intent) == {"pattern": "^a$", "write_time_exemptions": {"accepted_values": why}}
+
+
+def test_effective_intents_fail_closed_on_unreadable_or_dangling_input(tmp_path: Path) -> None:
+    fallback = _intents(tmp_path)
+    assert fallback["retry_count"] == {"not_null": {"enforced": False}} and fallback["event_id"] == {
+        "not_null": {"enforced": True}
+    }
+    (tmp_path / "bad_events.yaml").write_text("- a\n- b\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a YAML mapping"):
+        _intents(tmp_path, "bad_events")
+    (tmp_path / "locked_events.yaml").write_text("fields: {}\n", encoding="utf-8")
+    resolved = resolve_refs(load_contract(_FIXTURES_DIR / "fixture_events.yaml"), _FIXTURES_DIR)
+    with patch.object(proj_mod, "_CONTRACTS_DIR", tmp_path), patch.object(Path, "read_text", side_effect=OSError("denied")):
+        with pytest.raises(ValueError, match="cannot read contract file"):
+            proj_mod._effective_intents("locked_events", resolved)
+    dangling = _fixture_copy(
+        tmp_path / "d",
+        lambda d: _edit_yaml(
+            d / "fixture_events.yaml",
+            lambda c: c["fields"]["event_id"].update({"$ref": "fixture-event-envelope.yaml#/contract/fields/nope"}),
+        ),
+    )
+    with pytest.raises(ValueError, match="not found"):
+        _intents(dangling)
+
+
+def test_registry_sourced_values_fail_closed(tmp_path: Path) -> None:
+    def make_registry(directory: Path, doc: dict) -> None:
+        (directory / "lineage.yaml").write_text(
+            yaml.safe_dump({"contract": {"id": "lineage"}, "fields": {"registry_key": {"dq_intent": {}}}, **doc}),
+            encoding="utf-8",
+        )
+
+    def point_at_registry(directory: Path, doc: dict, own: dict | None = None) -> None:
+        make_registry(directory, doc)
+        (directory / "registry.yaml").write_text(
+            yaml.safe_dump({"entries": [{"canonical_id": "a"}, {"canonical_id": "b"}]}), encoding="utf-8"
+        )
+
+        def change(c: dict) -> None:
+            c["fields"]["retry_count"] = {"$ref": "lineage.yaml#/contract/fields/registry_key", "dq_intent_local": own or {}}
+
+        _edit_yaml(directory / "fixture_events.yaml", change)
+
+    good = _fixture_copy(
+        tmp_path / "g",
+        lambda d: point_at_registry(d, {"allowed_values": {"registry": "registry.yaml", "key": "canonical_id"}}),
+    )
+    with (
+        patch.object(proj_mod, "_REGISTRY_KEY_REF", ("lineage.yaml", "registry_key")),
+        patch.object(proj_mod, "_REPO_ROOT", good),
+    ):
+        assert _intents(good)["retry_count"]["accepted_values"] == {"values": ["a", "b"]}
+    with (
+        patch.object(proj_mod, "_REGISTRY_KEY_REF", ("lineage.yaml", "registry_key")),
+        patch.object(proj_mod, "_REPO_ROOT", good),
+    ):
+        own = _fixture_copy(
+            tmp_path / "o",
+            lambda d: point_at_registry(
+                d,
+                {"allowed_values": {"registry": "registry.yaml", "key": "canonical_id"}},
+                {"accepted_values": {"values": ["z"]}},
+            ),
+        )
+        with pytest.raises(ValueError, match="declares no accepted_values of its own"):
+            _intents(own)
+        bare = _fixture_copy(tmp_path / "n", lambda d: point_at_registry(d, {}))
+        with pytest.raises(ValueError, match="must name a registry and a key"):
+            _intents(bare)
+        empty = _fixture_copy(
+            tmp_path / "e",
+            lambda d: point_at_registry(d, {"allowed_values": {"registry": "empty.yaml", "key": "canonical_id"}}),
+        )
+        (empty / "empty.yaml").write_text("entries: []\n", encoding="utf-8")
+        with patch.object(proj_mod, "_REPO_ROOT", empty), pytest.raises(ValueError, match="no values or duplicate"):
+            _intents(empty)
+
+
+def test_table_rule_projection_fails_closed() -> None:
+    columns = {
+        "body": {"sql_type": "VARCHAR"},
+        "blob": {"sql_type": "VARCHAR"},
+        "digest": {"sql_type": "VARCHAR"},
+        "size": {"sql_type": "BIGINT"},
+    }
+    pair = ["digest", "size"]
+    sized = {"content_inline_threshold_bytes": 10, "representation_of": pair, "full_output_cap_bytes": 100, "integrity": True}
+    ok = {"body": sized, "blob": {"representation_of": pair}, "digest": {}, "size": {}}
+    assert proj_mod._table_rules("t", ok, columns)["payload"] == {
+        "inline": "body", "uri": "blob", "sha": "digest", "size": "size", "threshold": 10, "cap": 100, "integrity": True,
+    }  # fmt: skip
+    plain = {"body": {"content_inline_threshold_bytes": 5, "representation_of": pair}, "blob": {"representation_of": pair}}
+    assert proj_mod._table_rules("t", plain, columns)["payload"]["cap"] is None
+    assert proj_mod._table_rules("t", {"body": {}}, columns) == {}
+    cases = [
+        ({"body": {"exactly_one_of": {"fields": ["blob"]}}}, "exactly_one_of must list fields including itself"),
+        ({"body": {"exactly_one_of": ["body"]}}, "exactly_one_of must list fields including itself"),
+        ({"body": {"integrity": True}}, "without content_inline_threshold_bytes"),
+        ({"body": sized, "blob": {**sized}}, "more than one content_inline_threshold_bytes"),
+        ({"body": sized}, "exactly one sibling"),
+        ({"body": sized, "blob": {"representation_of": pair}, "digest": {"representation_of": pair}}, "exactly one sibling"),
+        (
+            {"body": {**sized, "representation_of": ["digest"]}, "blob": {"representation_of": ["digest"]}},
+            "one VARCHAR digest and one BIGINT",
+        ),
+        (
+            {"body": {**sized, "representation_of": ["digest", "blob"]}, "blob": {"representation_of": ["digest", "blob"]}},
+            "one VARCHAR digest and one BIGINT",
+        ),
+    ]
+    for intents, message in cases:
+        with pytest.raises(ValueError, match=message):
+            proj_mod._table_rules("t", intents, columns)
+    grouped = proj_mod._table_rules("t", {"body": {"exactly_one_of": {"fields": ["body", "blob"]}}}, columns)
+    assert grouped == {"exactly_one_of": [["body", "blob"]]}

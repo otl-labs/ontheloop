@@ -7,20 +7,24 @@ gets a fresh catalog (the corpus reuses uuids across cases by design). The exten
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from src.telemetry.gate import AppendError
-from src.turn_capture.record_turn import record_turn
+from src.telemetry.gate import GrainConflictError
+from src.turn_capture.record_turn import PARSER_VERSION, record_turn
 from tests.fixtures.telemetry_dedupe_reference import compute_generations, resolve_table
-from tests.fixtures.turn_capture_corpus import PROJECT, PROJECT_REF, TENANT, case_names, load_case, mem_tree
+from tests.fixtures.turn_capture_corpus import PROJECT, PROJECT_REF, TENANT, case_cap, case_names, load_case, mem_tree
 from tests.fixtures.turn_capture_ducklake import TABLES, create_tables, load_specs, open_local_lake
 
 pytestmark = pytest.mark.integration
 
-OVER_64K = {"large_tool_result_over_64k.json"}
+ROUTE_PENDING_BYTES = (
+    65536  # the kernel facade has no blob route; the writer's begin_blobs and HEAD-verify store larger payloads
+)
+ROUTE_PENDING = {"large_tool_result_over_64k.json": 1}
 FKS = (
     ("telemetry_observations", "session_id", "telemetry_sessions", "session_id"),
     ("telemetry_transcripts", "session_id", "telemetry_sessions", "session_id"),
@@ -63,13 +67,27 @@ def read_rows(con: Any, table: str) -> list[dict[str, Any]]:
     return [dict(zip(names, row, strict=True)) for row in cur.fetchall()]
 
 
+def is_route_pending(row: dict[str, Any]) -> bool:
+    return "content" in row and row["content_bytes"] > ROUTE_PENDING_BYTES
+
+
+def split_route_pending(result: Any) -> tuple[Any, int]:
+    """(result without the payloads above the inline threshold, how many were held back)."""
+    kept = [r for r in result.transcripts if not is_route_pending(r)]
+    return dataclasses.replace(result, transcripts=kept), len(result.transcripts) - len(kept)
+
+
 def test_every_golden_case_loads_with_every_fk_resolving(tmp_path: Path) -> None:
     specs = load_specs()
+    full_outputs = omissions = 0
     for name in case_names():
-        if name in OVER_64K:
-            continue
         files, _ = load_case(name)
-        result = record_turn(mem_tree(files), None, project_ref=PROJECT_REF, session_final=True)
+        with case_cap(name):
+            whole = record_turn(mem_tree(files), None, project_ref=PROJECT_REF, session_final=True)
+        result, held_back = split_route_pending(whole)
+        assert held_back == ROUTE_PENDING.get(name, 0), (name, held_back)
+        full_outputs += sum(r["purpose"] == "tool_output" and "content" in r for r in result.transcripts)
+        omissions += sum("content_omitted_reason" in r for r in result.transcripts)
         con = open_local_lake(tmp_path / name.removesuffix(".json"))
         create_tables(con, specs)
         load(con, specs, result)
@@ -80,10 +98,14 @@ def test_every_golden_case_loads_with_every_fk_resolving(tmp_path: Path) -> None
             for t in TABLES
             if any(rows for tbl, rows in result.batches if tbl == t)
         }
-        assert starts == {1}, name
+        if starts:
+            assert starts == {1}, name
+        else:
+            assert name == "no_reply_session.json" and not any(rows for _, rows in result.batches), name
         stored = con.execute("SELECT coalesce(max(strlen(content)), 0) FROM lake.telemetry_transcripts").fetchone()[0]
-        assert stored <= 65536, name
+        assert stored <= ROUTE_PENDING_BYTES, name
         con.close()
+    assert full_outputs >= 2 and omissions == 1
 
 
 def test_replay_mutation_and_generation_bump_on_a_nested_tree(tmp_path: Path) -> None:
@@ -96,12 +118,19 @@ def test_replay_mutation_and_generation_bump_on_a_nested_tree(tmp_path: Path) ->
     for table, rows in result.batches:
         assert append_rows(con, specs[table], rows).inserted == 0, table
 
-    victim = dict(result.transcripts[0], content="a different payload", content_sha256="0" * 64)
-    with pytest.raises(AppendError, match="TELEMETRY_GRAIN_CONFLICT"):
+    payload = "a different payload"
+    victim = dict(
+        result.transcripts[0],
+        content=payload,
+        content_sha256=hashlib.sha256(payload.encode()).hexdigest(),
+        content_bytes=len(payload.encode()),
+    )
+    with pytest.raises(GrainConflictError, match="TELEMETRY_GRAIN_CONFLICT"):
         append_rows(con, specs["telemetry_transcripts"], [victim])
 
+    bump = PARSER_VERSION + 1
     for table, rows in result.batches:
-        bumped = [dict(row, parser_version=2) for row in rows]
+        bumped = [dict(row, parser_version=bump) for row in rows]
         assert append_rows(con, specs[table], bumped).inserted == len(bumped), table
 
     def oracle(table: str) -> list[dict[str, Any]]:
@@ -116,15 +145,15 @@ def test_replay_mutation_and_generation_bump_on_a_nested_tree(tmp_path: Path) ->
 
     sessions = oracle("telemetry_sessions")
     generations = compute_generations(sessions)
-    assert generations and set(generations.values()) == {2}
+    assert generations and set(generations.values()) == {bump}
     for table in ("telemetry_sessions", "telemetry_observations", "telemetry_transcripts", "telemetry_agents"):
         rows = oracle(table)
         survivors, conflicted = resolve_table(rows, generations)
-        assert not conflicted and {r["parser_version"] for r in survivors} == {2}
+        assert not conflicted and {r["parser_version"] for r in survivors} == {bump}
         assert len(survivors) == len(rows) // 2, table
     model_calls = [r for r in oracle("telemetry_observations") if r["observation_type"] == "model_call"]
     survivors, conflicted = resolve_table(model_calls, generations, is_model_call=True)
-    assert not conflicted and {r["parser_version"] for r in survivors} == {2}
+    assert not conflicted and {r["parser_version"] for r in survivors} == {bump}
     con.close()
 
 

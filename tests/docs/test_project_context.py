@@ -14,7 +14,7 @@ def _text() -> str:
 def test_project_context_preserves_roadmap_end_state_orientation() -> None:
     text = _text()
 
-    assert "Platform roadmap end-state map" in text
+    assert "Roadmap end-state map" in text
     assert "T2.18 DuckLake maintenance" in text
     assert "T2.36 telemetry rebuild on DuckLake" in text
     assert "T4.2 Lambda Durable Function agent personas" in text
@@ -32,7 +32,7 @@ def test_project_context_keeps_operational_boundaries_actionable() -> None:
     assert "Never commit credentials" in text
     assert "Agent-facing operations are only" in text
     assert "file_rec" in text and "update_rec" in text and "sync" in text
-    assert "Never append to `logs/.recommendations-log.jsonl`" in text
+    assert "recommendations have no local cache (Decision 215)" in text
     assert "governed GitHub workflows" in text
     assert "break-glass only" in text
 

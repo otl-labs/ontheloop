@@ -24,7 +24,9 @@ def validate_recommendations_schema(failed: list[str]) -> None:
         # input, not an empty domain -- check-accounting.yaml's discrimination_rule) makes that
         # honest instead of indistinguishable from "examined 0 rows and they were all fine".
         print("logs/.recommendations-log.jsonl not found — skipping.")
-        registry.skipped("logs/.recommendations-log.jsonl not found -- gitignored cache never synced by CI")
+        registry.skipped(
+            "recs cache retired (Decision 215); rec-4237 (claim-check export) owns a future full-table schema scan"
+        )
         return
 
     # Lazy import with sys.path injection

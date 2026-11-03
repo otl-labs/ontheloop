@@ -45,10 +45,9 @@ from src.common.ducklake_metrics import (  # noqa: F401 -- re-exported facade su
     emit_metric,
     make_metric_sink,
 )
+from src.common.ducklake_named_reads import read_version  # noqa: F401 -- re-exported for the reader handler's per-verb stamp
 from src.common.ducklake_reads import (  # noqa: F401 -- re-exported facade surface (PLAN-sloc-ducklake-layer)
-    assert_read_only_sql,
     named_read,
-    query_current,
     read_current,
     read_history,
 )
@@ -85,10 +84,12 @@ from src.common.ducklake_scd2_schema import (
     check_rec_status_transition,  # noqa: F401 -- re-exported; own use (write_scd2) moved to ducklake_writes
     describe_named_reads,  # noqa: F401 -- re-exported for the reader handler's `describe` action
     describe_write_verbs,  # noqa: F401 -- re-exported for the writer handler's `describe` action
+    is_event_table,  # noqa: F401 -- re-exported for both handlers' write_boundary refusal and control_health
     load_field_semantics,  # noqa: F401 -- re-exported; own use (write_scd2/file_scd2) moved to ducklake_writes
     ops_table_names,  # noqa: F401 -- re-exported for backward compat
     resolve_table_spec,  # noqa: F401 -- re-exported; own use moved to ducklake_writes/tables/reads
     schema_gate,  # noqa: F401 -- re-exported; own use (write_scd2/file_scd2) moved to ducklake_writes
+    table_write_boundary,  # noqa: F401 -- re-exported for both handlers' write_boundary refusal
 )
 from src.common.ducklake_tables import (  # noqa: F401 -- re-exported facade surface
     create_control_table,
@@ -96,6 +97,9 @@ from src.common.ducklake_tables import (  # noqa: F401 -- re-exported facade sur
     reconcile_table_columns,
 )
 from src.common.ducklake_version import pinned_duckdb_version as _pinned_duckdb_version
+from src.common.ducklake_write_rules import (
+    RowRuleViolationError,  # noqa: F401 -- re-exported for the writer handler's 422 row_rule
+)
 from src.common.ducklake_writes import (  # noqa: F401 -- re-exported facade surface (PLAN-sloc-ducklake-layer)
     CHURN_WRITERS,
     CHURN_WRITES_PER_WRITER,
@@ -121,7 +125,7 @@ from src.common.ducklake_writes import (  # noqa: F401 -- re-exported facade sur
 
 _PINNED_DUCKDB_VERSION: str | None = None  # resolved lazily via module __getattr__ -> _pinned_duckdb_version()
 
-DSN_SECRET_ID = "ducklake-neon-catalog-dsn"
+DSN_PARAMETER_NAME = "/secret/ducklake-neon-catalog-dsn"
 META_SCHEMA = "ducklake_ops"
 
 # Smoke uses a DEDICATED meta-schema so it can never collide with the production catalog. rec-2099
@@ -131,8 +135,18 @@ META_SCHEMA = "ducklake_ops"
 # attaches `ducklake_smoke` -- so their DATA_PATH pins never conflict.
 SMOKE_META_SCHEMA = "ducklake_smoke"
 
+# The reader's second catalog (telemetry event journal) attaches under its own alias, so a statement that reaches the
+# wrong slot fails loud (catalog missing) instead of silently reading the other catalog.
+TELEMETRY_CATALOG_ALIAS = "telemetry_catalog"
+OPS_SLOT = "ops"
+
 # Representative SCD2 smoke-table pair (real ops_* business schema is T2.19).
 SMOKE_DATA_PATH = "s3://agent-platform-data-lake/ducklake-neon-smoke/"
+
+# Production telemetry is its own catalog. Its data prefix is a SIBLING of ducklake/, never inside it, so the ops catalog's
+# catalog-wide orphan cleanup never sees telemetry Parquet.
+TELEMETRY_PROD_META_SCHEMA = "ducklake_telemetry"
+TELEMETRY_PROD_DATA_PATH = "s3://agent-platform-data-lake/ducklake-telemetry/"
 
 # Baked extensions in the Lambda layer: (LOAD/INSTALL name, on-disk file stem). DuckDB publishes
 # the Postgres extension binary as `postgres_scanner.duckdb_extension` even though it INSTALLs and
@@ -190,31 +204,34 @@ def assert_duckdb_version(duckdb_module: Any = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def fetch_dsn(secret_id: str = DSN_SECRET_ID, *, profile: str | None = None) -> dict[str, str]:
-    """Fetch + parse the Neon DSN JSON from Secrets Manager (Decision 37 runtime-fetch).
+def fetch_dsn(parameter_name: str = DSN_PARAMETER_NAME, *, profile: str | None = None) -> dict[str, str]:
+    """Fetch + parse the Neon DSN JSON from an SSM SecureString parameter (Decision 37 runtime-fetch).
 
     Returns a dict with at least host / dbname / username / password (sslmode optional, defaults
-    to require). Raises RuntimeError if the secret is missing a required key.
+    to require). Raises RuntimeError if the document is missing a required key, and ValueError for a
+    name outside /secret/ (a stale Secrets Manager id fails loudly). Store errors propagate unwrapped.
     """
     import boto3  # noqa: PLC0415
 
     from scripts.aws_profile import resolve_aws_profile  # noqa: PLC0415
 
+    if not parameter_name.startswith("/secret/"):
+        raise ValueError(f"DSN parameter name {parameter_name!r} is not under /secret/")
     session = boto3.Session(profile_name=resolve_aws_profile(profile))
-    client = session.client("secretsmanager")
-    resp = client.get_secret_value(SecretId=secret_id)
-    payload = _parse_secret_string(resp["SecretString"])
+    client = session.client("ssm")
+    resp = client.get_parameter(Name=parameter_name, WithDecryption=True)
+    payload = _parse_dsn_document(resp["Parameter"]["Value"])
     missing = [k for k in ("host", "dbname", "username", "password") if not payload.get(k)]
     if missing:
-        raise RuntimeError(f"DSN secret {secret_id!r} is missing required keys: {missing}")
+        raise RuntimeError(f"DSN parameter {parameter_name!r} is missing required keys: {missing}")
     return payload
 
 
-def _parse_secret_string(secret_string: str) -> dict[str, str]:
-    """Parse the Secrets Manager SecretString JSON into a dict."""
+def _parse_dsn_document(document: str) -> dict[str, str]:
+    """Parse the DSN parameter's JSON value into a dict."""
     import json  # noqa: PLC0415
 
-    return json.loads(secret_string)
+    return json.loads(document)
 
 
 def libpq_conninfo(dsn: dict[str, str]) -> str:
@@ -246,6 +263,8 @@ def open_connection(
     meta_schema: str = META_SCHEMA,
     extension_directory: str | None = None,
     profile: str | None = None,
+    alias: str = CATALOG_ALIAS,
+    read_only: bool = False,
     _creds: tuple[str, str, str | None, str] | None = None,
 ) -> Any:
     """Open a DuckDB connection with ducklake/httpfs/postgres loaded and the Neon catalog ATTACHed.
@@ -308,8 +327,10 @@ def open_connection(
     con.execute("SET TimeZone='UTC'")
 
     conninfo = libpq_conninfo(dsn)
+    read_only_option = ", READ_ONLY" if read_only else ""
     con.execute(
-        f"ATTACH 'ducklake:postgres:{conninfo}' AS {CATALOG_ALIAS} (DATA_PATH '{data_path}', META_SCHEMA '{meta_schema}')"
+        f"ATTACH 'ducklake:postgres:{conninfo}' AS {alias} "
+        f"(DATA_PATH '{data_path}', META_SCHEMA '{meta_schema}'{read_only_option})"
     )
     return con
 
@@ -331,6 +352,14 @@ def open_connection(
 
 _WARM_CONNECTION_LOCK = threading.Lock()
 _warm_connection: dict[str, Any] = {}
+# Every non-ops slot (the reader's telemetry catalog): slot -> {"con", "key"}. The ops slot keeps the module-level dict
+# above, which existing callers and tests read directly; a reopen or reset of one slot never touches another.
+_named_slots: dict[str, dict[str, Any]] = {}
+
+
+def _slot_store(slot: str) -> dict[str, Any]:
+    return _warm_connection if slot == OPS_SLOT else _named_slots.setdefault(slot, {})
+
 
 # Connection-failure signatures treated as the expected dead-catalog-session condition (Neon
 # scale-to-zero suspended the underlying Postgres session, or the cached DuckDB connection was closed).
@@ -373,16 +402,19 @@ def _probe_connection_alive(con: Any, probe_sql: str) -> bool:
         return False
 
 
-def reset_warm_connection() -> None:
-    """Close + clear the per-container warm connection (test teardown / explicit drop)."""
+def reset_warm_connection(slot: str | None = None) -> None:
+    """Close + clear one warm slot (test teardown / explicit drop); slot=None drops every slot."""
     with _WARM_CONNECTION_LOCK:
-        con = _warm_connection.pop("con", None)
-        _warm_connection.pop("key", None)
-    if con is not None:
-        try:
-            con.close()
-        except Exception:  # noqa: BLE001
-            pass
+        stores = [_slot_store(slot)] if slot is not None else [_warm_connection, *_named_slots.values()]
+        cons = [store.pop("con", None) for store in stores]
+        for store in stores:
+            store.pop("key", None)
+    for con in cons:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def get_warm_connection(
@@ -397,6 +429,8 @@ def get_warm_connection(
     _creds: tuple[str, str, str | None, str] | None = None,
     probe_sql: str = "SELECT 1",
     force_reopen: bool = False,
+    slot: str = OPS_SLOT,
+    alias: str = CATALOG_ALIAS,
 ) -> tuple[Any, dict[str, Any]]:
     """Return a per-container cached DuckLake connection, reusing the ATTACH across SEQUENTIAL warm
     invocations (neon-egress-reduction D2).
@@ -416,13 +450,18 @@ def get_warm_connection(
     connect_ms is 0.0 on reuse (no ATTACH) and the real open cost on a (re)open -- so warm reuse is
     observable in the handler response.
 
+    *slot* names an independent cache entry (the reader's telemetry catalog uses its own); each slot has its own key,
+    liveness probe, reopen and connect meta, and reopening one never closes another. *alias* is the ATTACH alias when
+    this function opens the connection itself.
+
     CONCURRENCY: per-container module global for SEQUENTIAL handling only. The churn harness opens its
     own per-thread connections via open_connection and MUST NOT call this.
     """
     key = (data_path, meta_schema, extension_directory)
     with _WARM_CONNECTION_LOCK:
-        cached = _warm_connection.get("con")
-        cached_key = _warm_connection.get("key")
+        store = _slot_store(slot)
+        cached = store.get("con")
+        cached_key = store.get("key")
         had_cached = cached is not None
         if not force_reopen and cached is not None and cached_key == key and _probe_connection_alive(cached, probe_sql):
             return cached, {"reused": True, "reopened": False, "connect_ms": 0.0}
@@ -433,8 +472,8 @@ def get_warm_connection(
                 cached.close()
             except Exception:  # noqa: BLE001
                 pass
-            _warm_connection.pop("con", None)
-            _warm_connection.pop("key", None)
+            store.pop("con", None)
+            store.pop("key", None)
 
         t0 = time.perf_counter()
         if opener is not None:
@@ -449,10 +488,11 @@ def get_warm_connection(
                 meta_schema=meta_schema,
                 extension_directory=extension_directory,
                 profile=profile,
+                alias=alias,
                 _creds=_creds,
             )
         connect_ms = (time.perf_counter() - t0) * 1000.0
-        _warm_connection["con"] = con
-        _warm_connection["key"] = key
+        store["con"] = con
+        store["key"] = key
         # reopened=True means a previously-cached (dead/stale) connection was replaced (not a cold start).
         return con, {"reused": False, "reopened": had_cached, "connect_ms": round(connect_ms, 2)}

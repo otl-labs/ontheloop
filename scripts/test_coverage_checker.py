@@ -223,6 +223,7 @@ _CONCERN_SPLIT_TEST_PACKAGES: frozenset[str] = frozenset(
         "scripts/lambda_manifest.py",
         "scripts/ducklake_neon_smoke_test.py",
         "src/common/ducklake_reader_client.py",
+        "src/common/ducklake_event_reads.py",
         "src/lambdas/ducklake_maintenance/handler.py",
         "src/lambdas/ducklake_writer/handler.py",
         "src/data/handlers/scheduled_agent_handler.py",

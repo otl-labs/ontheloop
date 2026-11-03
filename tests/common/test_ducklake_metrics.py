@@ -32,6 +32,28 @@ def test_emit_metric_with_injected_client():
     assert calls[0]["MetricData"][0]["MetricName"] == "OccRetryCount"
 
 
+def test_emit_metric_omits_dimensions_by_default():
+    calls = []
+
+    class _CW:
+        def put_metric_data(self, **kwargs):
+            calls.append(kwargs)
+
+    rt.emit_metric("MaintenanceBreakerTrip", 1.0, client=_CW())
+    assert "Dimensions" not in calls[0]["MetricData"][0]
+
+
+def test_emit_metric_attaches_dimensions():
+    calls = []
+
+    class _CW:
+        def put_metric_data(self, **kwargs):
+            calls.append(kwargs)
+
+    rt.emit_metric("MaintenanceBreakerTrip", 1.0, client=_CW(), dimensions={"Catalog": "smoke"})
+    assert calls[0]["MetricData"][0]["Dimensions"] == [{"Name": "Catalog", "Value": "smoke"}]
+
+
 def test_emit_metric_swallows_client_error():
     class _CW:
         def put_metric_data(self, **kwargs):
@@ -72,3 +94,43 @@ def test_make_metric_sink_units():
     units = {d["MetricName"]: d["Unit"] for d in captured}
     assert units["CommitLatencyMs"] == "Milliseconds"
     assert units["OccRetryCount"] == "Count"
+
+
+def test_log_invocation_fixed_fields(capsys):
+    import json
+
+    from src.common.ducklake_metrics import log_invocation
+
+    log_invocation("reader", "named_read", 200, 12.5, True, False, 33.333)
+    line = capsys.readouterr().out.strip()
+    assert json.loads(line) == {
+        "event": "ducklake_invocation",
+        "function": "reader",
+        "action": "named_read",
+        "status": 200,
+        "connect_ms": 12.5,
+        "connect_reused": True,
+        "reopened": False,
+        "elapsed_ms": 33.33,
+    }
+    assert "\n" not in line
+    with pytest.raises(TypeError):
+        log_invocation("reader", "x", 200, None, None, False, 1.0, payload="secret")  # type: ignore[call-arg]
+
+
+class TestResponseBytesField:
+    def _line(self, capsys, **kw):
+        import json
+
+        from src.common.ducklake_metrics import log_invocation
+
+        capsys.readouterr()
+        log_invocation("reader", "describe", 200, None, None, False, 1.234, **kw)
+        return json.loads(capsys.readouterr().out)
+
+    def test_present_when_passed(self, capsys):
+        assert self._line(capsys, response_bytes=1234)["response_bytes"] == 1234
+
+    def test_absent_when_omitted(self, capsys):
+        line = self._line(capsys)
+        assert "response_bytes" not in line and len(line) == 8

@@ -37,6 +37,7 @@ from scripts.checks.iam_tf._read_coverage import (
     _scan_resources,
     _split_top_level_objects,  # noqa: F401 -- re-exported for tests
 )
+from scripts.checks.iam_tf._secure_string_coverage import check_secure_string_write_coverage
 from scripts.checks.iam_tf._write_companions import (
     check_identity_iam_actions_subset_of_boundary,
     check_lifecycle_companions,
@@ -153,6 +154,7 @@ def validate_ci_refresh_read_coverage(failed: list[str]) -> None:
     # facade is the single production entry point every guard must be reachable from (the PR #752
     # REVISE lesson -- a checker that is defined and unit-tested but never called is dead in --pre).
     write_types = check_write_coverage(apply_statements, resources, failed, key)
+    check_secure_string_write_coverage(apply_statements, resources, locals_map, attr_index, failed, key)
     check_lifecycle_companions(apply_statements, failed, key)
     check_identity_iam_actions_subset_of_boundary(apply_statements, failed, key)
     check_tag_untag_symmetry(apply_statements, failed, key)

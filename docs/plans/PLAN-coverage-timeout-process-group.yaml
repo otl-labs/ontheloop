@@ -1,0 +1,484 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: coverage-timeout-process-group
+intent: >-
+  Stop the full tier's per-file coverage gate from SIGKILLing scripts.validate itself. A pytest --cov child that outlives
+  its cap is killed through its OWN process group by a new shared helper that refuses to signal the caller's group, and is
+  reaped with a bounded wait. validate then survives, records an ordinary timed-out check failure and writes
+  validation-result.json (rule failed_run, which the handoff gate warns on) instead of dying with exit 137 and leaving the
+  gate to deny on missing evidence. The 300s cap becomes one named constant that both the deadline and the failure text
+  read. The vp-replay runner moves onto the same helper, so scripts/checks/ keeps one reaper (bundles rec-4185's
+  test-teardown fix). For the stranded PLAN-recs-full-cache-retirement handoff (rec-4232, Critical) the gate's deny on missing evidence
+  becomes a failed_run warning. Operator go-ahead is still required while rec-3208's preflight coverage timeout stands.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-coverage-timeout-process-group.yaml
+phase: >-
+  Unblocker for PLAN-recs-full-cache-retirement (rec-4232, Critical), operator-directed (Benjamin, 2026-10-10). No tier_item:
+  rec-4252 is an ad_hoc_rec soft-warn exception; claims, moves and closes no tier_item criterion.
+scope:
+- file: scripts/checks/_process_group.py
+  action: Create
+  purpose: >-
+    The shared process-group kill-and-reap helper. It is a top-level scripts/checks/ sibling for the same reason as
+    _marker_guard.py: Decision 104 keeps _common.py for its named primitives and forbids a domain _shared.py that spans
+    domains. Public surface: REAP_TIMEOUT_SECONDS = 5.0 and kill_and_reap(popen) -> tuple[str, str]. When popen.returncode is not None
+    (leader already reaped) it uses pgid = popen.pid directly and never calls os.getpgid on a possibly recycled pid.
+    Otherwise it looks up pgid = os.getpgid(popen.pid), falling back to pgid = popen.pid on ProcessLookupError (the
+    poll-to-lookup race). Either way surviving group members are still killed; this keeps vp-red-before.yaml replay_bound.kill's 'never a bare process
+    kill' true in the BaseException-after-reap window. When pgid equals os.getpgrp() it sends os.kill(popen.pid, SIGKILL)
+    only, so it never signals a group the caller belongs to; this guards any future call site that forgets
+    start_new_session. Otherwise it sends os.killpg(pgid, SIGKILL). Both signal calls sit inside ONE shared 'try: ...
+    except ProcessLookupError: pass' (already exited), so the already-reaped node covers that arm and real processes
+    reach every line. Then it reaps with popen.communicate(timeout=REAP_TIMEOUT_SECONDS). On
+    subprocess.TimeoutExpired it closes both pipes, calls a plain popen.wait() and returns ('', ''). That reap logic is a
+    port of _vp_replay_budget._kill_and_reap, whose docstring rationale it carries. The module takes the Popen object and
+    never constructs a process, so callers keep their own injected subprocess seam. The docstring declares it POSIX-only.
+    About 40 SLOC. It becomes the only reaper: _vp_replay_budget's private copy is deleted in this plan.
+- file: tests/checks/test__process_group.py
+  action: Create
+  purpose: >-
+    Mirror test (map_source_to_test resolves scripts/checks/_process_group.py here, as tests/checks/test__marker_guard.py
+    does for its sibling). It uses real processes. Pid helpers come only from tests/fixtures/process_probes.py, never
+    from another test module (tests/CLAUDE.md). Two classes give 100% line coverage of the module.
+    Class TestKillAndReapSignalTargeting (new):
+    - test_kills_the_detached_childs_whole_group: "sleep 30 & echo $! > pidfile; wait" with start_new_session=True. It
+      reads the published grandchild pid with read_published_pid BEFORE calling kill_and_reap (killing first can leave the
+      pidfile unwritten), then expects that pid dead within a 5s pid_is_dead poll.
+    - test_never_signals_the_callers_own_group: sleep 30 started WITHOUT start_new_session. os.killpg is patched with a
+      spy that records each pgid, raises PermissionError for os.getpgrp() and delegates any other pgid. The test asserts
+      the spy never saw os.getpgrp() and the child's returncode is -SIGKILL.
+    - test_an_already_reaped_child_is_not_an_error: true with start_new_session, waited, then kill_and_reap returns without
+      raising. This drives the reaped-leader branch and the tolerated killpg ProcessLookupError, and replaces TestKillpgQuiet.
+    - test_a_leader_gone_before_lookup_falls_back_to_its_pid: a live start_new_session child with os.getpgid patched to raise
+      ProcessLookupError. It asserts killpg was sent to popen.pid and the child is dead, covering the race arm.
+    Class TestKillAndReapBoundedWait (moved from test__vp_replay_budget.py, node names kept):
+    - test_reap_timeout_closes_pipes_and_reaps_the_shell: now patches pg.REAP_TIMEOUT_SECONDS and calls pg.kill_and_reap.
+      It carries rec-4185's fix: the pidfile read moves inside the try, and the finally carries 'if popen.returncode is None:'
+      followed by a tolerant os.killpg(popen.pid, SIGKILL) and popen.wait(), killing the shell's whole group. That replaces the no-op _killpg_quiet(grandchild_pid) / waitpid teardown.
+    - test_reap_success_returns_the_captured_output.
+    - test_reap_itself_timing_out_returns_empty_strings.
+- file: tests/fixtures/process_probes.py
+  action: Create
+  purpose: >-
+    Shared process probes that test__vp_replay_budget.py and test__process_group.py both need. tests/fixtures/ is the
+    sanctioned home and is exempt from the no-cross-test-import guard. Moved verbatim from test__vp_replay_budget.py,
+    renamed public: read_published_pid (with _PID_RECORD), pid_is_dead and pid_state. Docstrings keep their rec-4182 and
+    zombie-latency rationale. No pytest collection: the names never start with test_.
+- file: scripts/checks/verification/_vp_replay_budget.py
+  action: Modify
+  purpose: >-
+    Behavior-preserving re-point. _killpg_quiet, _kill_and_reap and _REAP_TIMEOUT_SECONDS are deleted. run_bounded's
+    TimeoutExpired arm and BaseException arm call _process_group.kill_and_reap(popen) through the module object (from
+    scripts.checks import _process_group). Under start_new_session the looked-up pgid equals popen.pid, so the signal is
+    the same as today. The module docstring's kill-and-reap paragraph and the reap-window comment point to
+    scripts/checks/_process_group.py instead of restating it. docs/contracts/vp-red-before.yaml replay_bound.kill still
+    holds verbatim ('_vp_replay_budget.run_bounded', a whole-group SIGKILL), so no contract edit is needed.
+- file: tests/checks/verification/test__vp_replay_budget.py
+  action: Modify
+  purpose: >-
+    TestKillAndReapBoundedWait and TestKillpgQuiet move to tests/checks/test__process_group.py. _read_published_pid,
+    _pid_is_dead, _pid_state and _PID_RECORD move to tests/fixtures/process_probes.py and are imported from there (aliased
+    on import so the remaining call sites stay byte-identical, per the plan_document_helpers precedent).
+    TestReadPublishedPid, TestRunBoundedTimeoutKillsTheProcessGroup, TestRunBoundedBaseExceptionPath and every telemetry
+    or message test stay unchanged. The module docstring drops the moved paths, which are now covered by the mirror test.
+    The file still covers 100% of _vp_replay_budget.py: run_bounded's happy, timeout and BaseException arms remain here.
+- file: scripts/checks/misc/coverage_baseline.py
+  action: Modify
+  purpose: >-
+    measure_and_check. The Popen call (still subprocess_module.Popen, the patch seam) gains start_new_session=True. A new
+    module constant COVERAGE_TIMEOUT_SECONDS = 300 (value unchanged) is the communicate() deadline and the failure text,
+    read at call time. A one-line comment says why the cap is not raised to fit a slow target: rec-3208 owns that slowness,
+    and a timeout is a recorded failure. On TimeoutExpired, inside the with block: out, err =
+    _process_group.kill_and_reap(proc), called through the module object so it can be patched. Then a printed
+    '  [diagnostic] <rel>: coverage subprocess killed at <cap>s; output tail=<last 500 chars>' line, following the existing
+    sub-threshold diagnostic print convention and never appended to errors. The error text becomes '<rel>: coverage check
+    timed out (<COVERAGE_TIMEOUT_SECONDS>s)', with pcts[key] = None and continue. A new 'except BaseException:
+    _process_group.kill_and_reap(proc); raise' arm stops an interrupt while waiting from orphaning the detached child. The
+    function-local scripts.llm.utils import and the unbounded proc.wait() are deleted (kill_process_tree itself is
+    untouched). The module docstring gains an accepted-residuals sentence, worded like _vp_replay_budget's. (a) A
+    SIGTERM/SIGKILL delivered to validate itself raises no Python exception, so a still-running detached coverage child is
+    orphaned. It may later write .coverage.json or .coverage into the repo root. Before this change a group-directed kill
+    took it down with validate; moving those artefacts out of the root is owned by rec-3615/rec-3282. (b) The timeout arm
+    is POSIX-only: kill_process_tree's win32 taskkill path is dropped, matching the vp-replay 'every surface is Linux'
+    precedent.
+- file: tests/checks/misc/test_coverage_baseline.py
+  action: Modify
+  purpose: >-
+    Seam-level mock tests only; the real-process proof lives in the mirror test and VP step 4. test_timeout_yields_none_and_error
+    is replaced by test_timeout_kills_the_child_group_and_records_the_cap. It patches scripts.checks._process_group.kill_and_reap
+    (returning ('', 'tail')) and sets COVERAGE_TIMEOUT_SECONDS to 7 via monkeypatch.setattr, whose default raising=True
+    makes a tree without the constant fail at once. It asserts: Popen received start_new_session=True; communicate received
+    timeout=7; kill_and_reap was called once with proc; errors == ['scripts/probe.py: coverage check timed out (7s)'];
+    the measurement is None; the diagnostic line names 7s. New node test_interrupt_while_waiting_kills_the_child_group_and_reraises
+    sets mock_subprocess.TimeoutExpired = subprocess.TimeoutExpired (otherwise evaluating 'except
+    subprocess_module.TimeoutExpired' raises TypeError before the BaseException arm) and communicate.side_effect =
+    KeyboardInterrupt(), patches kill_and_reap, and asserts the KeyboardInterrupt propagates after exactly one
+    kill_and_reap(proc) call. No mock pid ever reaches a real os.killpg. The file is 456 SLOC
+    at plan time and must stay at or under 500. If it would not, first extract the repeated source/test_file/mock-proc
+    scaffolding into one module-level helper in this file. Never move a node that exercises coverage_baseline.py lines
+    out of the mapped file.
+- file: config/agent/verification_registry/entries/process-group-kill-and-reap.yaml
+  action: Create
+  purpose: >-
+    Verification-registry row for graduated VP step 1. check_id process-group-kill-and-reap (filename equals check_id,
+    Decision 176), primitive_slot command_exit_zero, check_spec.command is step 1's pytest node list. guard_target
+    scripts/checks/_process_group.py, a scalar, as the contract's orphan-detection key requires. guard_symbol kill_and_reap,
+    plan_slug coverage-timeout-process-group, graduated_by implement-agent.
+- file: config/agent/verification_registry/entries/coverage-timeout-process-group.yaml
+  action: Create
+  purpose: >-
+    Verification-registry row for graduated VP step 2. check_id coverage-timeout-process-group, primitive_slot
+    command_exit_zero, check_spec.command is step 2's pytest node list. guard_target scripts/checks/misc/coverage_baseline.py,
+    guard_symbol measure_and_check, plan_slug coverage-timeout-process-group, graduated_by implement-agent. run_bounded
+    stays guarded by the existing vp-replay-bounded-runner-kills-process-group row.
+bundled_recommendations:
+- rec-4252
+- rec-4185
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+- >-
+  A coverage child that reaches COVERAGE_TIMEOUT_SECONDS is killed through its own process group, never the caller's.
+  The caller returns normally with '<rel>: coverage check timed out (<cap>s)' and a None measurement, and leaves no live
+  descendant.
+- >-
+  kill_and_reap never signals the caller's own process group. Given a child that shares it, the helper kills that child
+  by pid only.
+- >-
+  An exception raised while waiting on the child (KeyboardInterrupt, a harness timeout) kills and reaps the child's group
+  before propagating.
+- >-
+  The literal 300 appears once, in COVERAGE_TIMEOUT_SECONDS. The deadline and the failure text both read it, and
+  scripts/checks/misc/coverage_baseline.py no longer references kill_process_tree.
+- >-
+  _process_group.py, coverage_baseline.py and _vp_replay_budget.py each have 100% line coverage from their mapped test
+  files, and every touched test file is at most 500 SLOC.
+- >-
+  _vp_replay_budget.py defines no reaper of its own: run_bounded kills and reaps through _process_group.kill_and_reap, and
+  its existing timeout and BaseException tests pass unchanged.
+- >-
+  The moved reap-timeout test's teardown kills and reaps the shell's group whenever the shell is still running, including
+  when the pidfile read fails (rec-4185).
+- >-
+  rec-4252's acceptance is the bare junit-routable form naming the new nodes. rec-4185's is a decidable compound whose
+  structural leg asserts the teardown fix is present in the moved test. Both recs are closed after merge by the Resolves:
+  trailer.
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: >-
+    Run the shared helper's new and moved nodes: whole-group kill, own-group refusal, already-reaped child, the lookup-race
+    fallback, and the three bounded-wait proofs.
+  command: >-
+    bin/venv-python -m pytest tests/checks/test__process_group.py::TestKillAndReapSignalTargeting::test_kills_the_detached_childs_whole_group
+    tests/checks/test__process_group.py::TestKillAndReapSignalTargeting::test_never_signals_the_callers_own_group tests/checks/test__process_group.py::TestKillAndReapSignalTargeting::test_an_already_reaped_child_is_not_an_error
+    tests/checks/test__process_group.py::TestKillAndReapSignalTargeting::test_a_leader_gone_before_lookup_falls_back_to_its_pid
+    tests/checks/test__process_group.py::TestKillAndReapBoundedWait::test_reap_timeout_closes_pipes_and_reaps_the_shell
+    tests/checks/test__process_group.py::TestKillAndReapBoundedWait::test_reap_success_returns_the_captured_output tests/checks/test__process_group.py::TestKillAndReapBoundedWait::test_reap_itself_timing_out_returns_empty_strings
+    -q
+  expected: >-
+    Exit 0, 7 passed in a few seconds (the reap-timeout node patches REAP_TIMEOUT_SECONDS to 0.05, so no real 5s wait, per
+    Decision 208). Red before: tests/checks/test__process_group.py is absent from the pre-change tree (pytest exit 4,
+    target_absent).
+  fix_if: >-
+    The own-group spy saw os.getpgrp(): the guard compares the wrong ids or runs after the killpg. The grandchild survives:
+    the helper killed the pid rather than the looked-up group. Never widen the spy or drop an assertion.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: process-group-kill-and-reap
+  expected_literals:
+  - 7 passed
+- step: 2
+  phase: pre-deploy
+  action: >-
+    Run the coverage seam's timeout and interrupt nodes.
+  command: >-
+    bin/venv-python -m pytest tests/checks/misc/test_coverage_baseline.py::TestMeasureAndCheck::test_timeout_kills_the_child_group_and_records_the_cap
+    tests/checks/misc/test_coverage_baseline.py::TestMeasureAndCheck::test_interrupt_while_waiting_kills_the_child_group_and_reraises
+    -q
+  expected: >-
+    Exit 0, 2 passed. Red before: both nodes are absent from the pre-change tree (pytest exit 4, target_absent).
+  fix_if: >-
+    communicate got timeout=300: the deadline is not read from COVERAGE_TIMEOUT_SECONDS at call time. kill_and_reap not
+    called: the arm still uses kill_process_tree or calls the helper outside the with block. Never let a mock pid reach the
+    real os.killpg.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: coverage-timeout-process-group
+  expected_literals:
+  - 2 passed
+- step: 3
+  phase: pre-deploy
+  action: >-
+    Stale-reference sweep. The coverage module has no kill_process_tree, no bare 300 deadline and no '(300s)' text, the
+    literal 300 occurs on exactly one line (the constant; comments name the cap without the bare literal), and it passes
+    start_new_session=True. vp-replay defines no reaper of its own and calls the shared one. No test reaches the
+    deleted private names. rec-4185's no-op grandchild teardown is gone.
+  command: >-
+    ! grep -nE 'kill_process_tree|timeout=300|\(300s\)' scripts/checks/misc/coverage_baseline.py && test "$(grep -cw 300
+    scripts/checks/misc/coverage_baseline.py)" -eq 1 && grep -q 'start_new_session=True' scripts/checks/misc/coverage_baseline.py
+    && ! grep -nE 'def _kill_and_reap|def _killpg_quiet|_REAP_TIMEOUT_SECONDS'
+    scripts/checks/verification/_vp_replay_budget.py && grep -q '_process_group.kill_and_reap' scripts/checks/verification/_vp_replay_budget.py
+    && ! grep -rnE 'b\._kill_and_reap|b\._killpg_quiet|b\._REAP_TIMEOUT_SECONDS|_killpg_quiet\(grandchild_pid\)' tests/ &&
+    echo SWEEP_OK
+  expected: Exit 0 and the success marker printed.
+  fix_if: >-
+    A grep prints a line: that surface survived. Route it through COVERAGE_TIMEOUT_SECONDS or _process_group.kill_and_reap,
+    or move the test per its scope row.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    A one-time removal sweep over named files. Steps 1 and 2's graduated nodes guard the behavior the removed surfaces
+    carried, and a reintroduced private reaper would have no test to reach it.
+  expected_literals:
+  - SWEEP_OK
+- step: 4
+  phase: pre-deploy
+  action: >-
+    Re-run every created or modified test module whole, then the untouched neighbours: the Popen-mock checker suites that
+    reach measure_and_check, the check wrapper, and validate_vp_replay's own suites that drive run_bounded.
+  command: >-
+    bin/venv-python -m pytest tests/checks/test__process_group.py tests/checks/misc/test_coverage_baseline.py tests/checks/verification/test__vp_replay_budget.py
+    tests/test_coverage_checker tests/checks/misc/test_validate_test_coverage.py tests/checks/verification/validate_vp_replay
+    -q
+  expected: Exit 0, no failures (about 30s measured at plan time, before the new file).
+  fix_if: >-
+    A tests/test_coverage_checker node fails: the change bypassed subprocess_module.Popen, so the conftest recursion guard
+    or a patch('test_coverage_checker.subprocess.Popen') no longer intercepts; keep the seam. A validate_vp_replay node fails:
+    run_bounded's arms changed behavior; the re-point must be signal-identical under start_new_session.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    Whole-file re-run of modules this plan creates or modifies (vp-red-before hermetic_authoring carve-out (v)), plus
+    untouched suites that are already standing guards in the full tier and in rows coverage-baseline-gate-tests,
+    coverage-checker-at-100 and vp-replay-bounded-runner-kills-process-group.
+- step: 5
+  phase: pre-deploy
+  action: >-
+    End-to-end proof on the real failure mode: the actual checker measures scripts/session/preflight.py against
+    tests/session/preflight/ (the stranded target) with the cap lowered to 3s, in an isolated session so a regression kills
+    only the probe.
+  command: >-
+    D=$(mktemp -d) && COVERAGE_FILE=$D/cov.data setsid -w bin/venv-python -c "from pathlib import Path; import scripts.test_coverage_checker
+    as t; from scripts.checks.misc import coverage_baseline as cb; cb.COVERAGE_TIMEOUT_SECONDS = 3; e = t.check_per_file_coverage([Path('scripts/session/preflight.py').resolve()]);
+    assert e == ['scripts/session/preflight.py: coverage check timed out (3s)'], e; print('CALLER_SURVIVED')" && ! pgrep
+    -f '[-]m pytest tests/session/preflight' && echo NO_ORPHANS
+  expected: >-
+    Exit 0 within about 10s, both markers printed. The pre-change code ignores the constant, so there the probe runs about
+    300s and is then SIGKILLed (setsid reports the child did not exit normally, exit 9). The plan-time scratch probe
+    reproduced exactly that, with the literal patched to 3s.
+  fix_if: >-
+    setsid reports exit 9: the caller still shares the child's group. NO_ORPHANS missing: a descendant escaped the kill;
+    confirm kill_and_reap signals the pgid it looked up, not the bare pid.
+  hermetic: false
+  graduation: not-applicable
+- step: 6
+  phase: pre-deploy
+  action: >-
+    Both bundled recs store a decidable acceptance naming this plan's nodes (execution step 6); rec-4252's is the bare
+    junit-routable form. Narrowing
+    rec-4252's directory run to named nodes strengthens it, because the old form already passes on the unfixed tree
+    (Decision 181). rec-4185's old form names a class this plan moves. Its structural leg is re-pointed to assert the fix
+    is present (the teardown's returncode guard) instead of the old no-op line's absence, which is stronger and still
+    decidable; it routes static like the original compound.
+  command: >-
+    bin/venv-python -c "from scripts.ops_data_portal import _fetch_rec_from_reader as f; from scripts.rec_trailer_acceptance_junit
+    import classify_grammar as g; from scripts.executor.acceptance_lint import lint_acceptance_command as lint; want = {'rec-4252':
+    'pytest tests/checks/misc/test_coverage_baseline.py::TestMeasureAndCheck::test_timeout_kills_the_child_group_and_records_the_cap
+    tests/checks/test__process_group.py::TestKillAndReapSignalTargeting::test_never_signals_the_callers_own_group', 'rec-4185':
+    'grep -q \"if popen.returncode is None\" tests/checks/test__process_group.py && bin/venv-python -m pytest tests/checks/test__process_group.py::TestKillAndReapBoundedWait::test_reap_timeout_closes_pipes_and_reaps_the_shell
+    -q'}; got = {k: (f(k) or {}).get('acceptance') for k in want}; assert got == want, got; assert g(got['rec-4252']).route
+    == 'junit'; assert all(lint(a, require_decidable=True)[0] for a in got.values()), got; print('ACCEPTANCE_UPDATED')"
+  expected: Exit 0 and ACCEPTANCE_UPDATED.
+  fix_if: >-
+    An old acceptance is still stored. Run execution step 6's update_rec calls, then re-run. Never push the PR with the
+    trailer while this step is red (Decision 201: the closing verdict is keyed to the current acceptance).
+  hermetic: false
+  graduation: not-applicable
+- step: 7
+  phase: pre-deploy
+  action: >-
+    Full validation tier before handoff (Decision 163), on the committed, rebased, clean tree, followed by
+    bin/venv-python -m scripts.checks.validation_result --verify-head exit 0 (git-ops.yaml handoff_sequence).
+  command: bin/venv-python -m scripts.validate
+  expected: >-
+    Exit 0 and a final 'Validation Summary (scope: all)' PASS.
+  fix_if: >-
+    Fix the named check and rerun the full tier from the start; never raise a budget, skip a check or weaken an assertion.
+    A timed-out or incomplete full run is BLOCKED -- resume and rerun the full tier from the start; never skipped,
+    downgraded to a warning, or handed to CI. If validate itself was killed externally, first confirm no orphaned coverage
+    child is still running (pgrep -f -- '--cov-report=json:.coverage.json'); end it and remove any root .coverage.json
+    before the rerun (residual (a)).
+  hermetic: false
+  graduation: not-applicable
+- step: 8
+  phase: post-deploy
+  action: rec-4252 and rec-4185 are closed by the squash commit's Resolves trailer.
+  command: >-
+    bin/venv-python -c "from scripts.ops_data_portal import _fetch_rec_from_reader as f; st = {k: (f(k) or {}).get('status')
+    for k in ('rec-4252', 'rec-4185')}; print(st); assert set(st.values()) == {'closed'}, st"
+  expected: Prints both statuses as closed, exit 0.
+  fix_if: >-
+    Still open: confirm the squash body carries 'Resolves: rec-4252, rec-4185' and inspect ci.yml's closure job run on the
+    merge commit.
+test_obligations:
+- source: scripts/checks/_process_group.py
+  behavior: >-
+    kill_and_reap SIGKILLs the child's whole process group, never the caller's own group (it falls back to the child's
+    pid there), tolerates an already-reaped child, and bounds the reap, closing both pipes when it times out.
+  verification_step: 1
+  test_selector: tests/checks/test__process_group.py::TestKillAndReapSignalTargeting::test_never_signals_the_callers_own_group
+  red_green_expectation: >-
+    Red before: the module and its mirror test are absent (pytest exit 4). Without the guard, the spy records os.getpgrp()
+    and the assertion fails without killing the runner. Green after.
+- source: scripts/checks/misc/coverage_baseline.py
+  behavior: >-
+    The coverage child starts in its own session. On timeout it is killed through _process_group.kill_and_reap and the
+    cap-named failure is recorded from COVERAGE_TIMEOUT_SECONDS. An interrupt while waiting kills the child, then re-raises.
+  verification_step: 2
+  test_selector: tests/checks/misc/test_coverage_baseline.py::TestMeasureAndCheck::test_timeout_kills_the_child_group_and_records_the_cap
+  red_green_expectation: >-
+    Red before: the node is absent (pytest exit 4), and on a tree without the constant monkeypatch.setattr raises at once.
+    Green after.
+- source: scripts/checks/verification/_vp_replay_budget.py
+  behavior: >-
+    run_bounded still kills the timed-out step's whole process group and bounded-reaps it on TimeoutExpired and on any
+    BaseException, now through the shared helper.
+  verification_step: 4
+  test_selector: tests/checks/verification/test__vp_replay_budget.py::TestRunBoundedTimeoutKillsTheProcessGroup::test_the_orphaned_grandchild_is_dead
+  waiver_reason: >-
+    Behavior-preserving re-point: run_bounded's timeout and BaseException arms are pinned by the existing
+    TestRunBoundedTimeoutKillsTheProcessGroup and TestRunBoundedBaseExceptionPath nodes, green before and after. The
+    deleted private helpers' behavior moved with their tests to tests/checks/test__process_group.py (step 1, graduated),
+    and step 3's sweep proves the private copies are gone.
+- source: config/agent/verification_registry/entries/process-group-kill-and-reap.yaml
+  behavior: Registry row for the graduated step-1 check.
+  verification_step: 7
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: >-
+    Verification-registry metadata for step 1's graduation. validate_verification_registry's differential admission gate
+    (the new nodes are absent on origin/main) and validate_graduation_completeness are its standing checks.
+- source: config/agent/verification_registry/entries/coverage-timeout-process-group.yaml
+  behavior: Registry row for the graduated step-2 check.
+  verification_step: 7
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: >-
+    Verification-registry metadata for step 2's graduation. validate_verification_registry's differential admission gate
+    (the new nodes are absent on origin/main) and validate_graduation_completeness are its standing checks.
+constraints:
+- >-
+  Scope is the nine files above. Untouched: scripts/llm/utils.py (deploy-prod-lambdas path filter; the frozen executor
+  still uses kill_process_tree), scripts/test_coverage_checker.py, validate_test_coverage.py, validate_vp_replay.py,
+  docs/contracts/vp-red-before.yaml and the existing vp-replay registry row (Decision 59).
+- >-
+  The cap stays at 300s (operator decision, 2026-10-10). Raising it to fit tests/session/preflight/ (about 31 min under
+  coverage on CC-web) would hide rec-3208's debt and stretch every full tier (Decision 181).
+- >-
+  Keep the subprocess_module.Popen seam. tests/test_coverage_checker/conftest.py's recursion guard and every
+  patch('test_coverage_checker.subprocess.Popen') depend on it. kill_and_reap takes the Popen object and never spawns one.
+  Both callers reach it as _process_group.kill_and_reap so a test can patch it in one place.
+- >-
+  Every mock-process test patches kill_and_reap or os.killpg. A fake pid must never reach the real os.killpg.
+- >-
+  No new file lacks a mirror test. _process_group.py, coverage_baseline.py and _vp_replay_budget.py have no
+  config/coverage_baseline.yaml entry, so each needs 100% line coverage from its mapped test file alone. Every touched file
+  stays at or under 500 SLOC by decomposition, never a budget raise (Decision 128/130); test_coverage_baseline.py is 456
+  at plan time and stays seam-level. The new module is mypy-clean (Decision 161).
+- >-
+  Accepted residuals, declared in coverage_baseline.py's docstring (scope row): an orphaned coverage child when validate
+  itself is SIGTERM/SIGKILLed (artefact relocation owned by rec-3615/rec-3282), and a POSIX-only timeout arm. No
+  parent-death-signal machinery is added.
+- >-
+  The timeout stays a recorded failure: validate_test_coverage appends to failed and never calls registry.skipped()
+  (Decision 170). Only TimeoutExpired and BaseException are caught around the wait.
+- >-
+  Never weaken (implement-scope-boundary CONTENT clause). No rescue agents or workaround loops (Decision 55).
+context:
+- >-
+  Decision-scout verdict FLAGS_FOUND, all resolved. Round 1 WARN 104 (cross-domain private import) is cleared by the
+  top-level _process_group sibling (the _marker_guard precedent). Round 2 SPIRIT NOTE 165 (a ported second reaper copy)
+  is cleared by re-pointing vp-replay in this plan. The delta pass raised WARN 176 (a comma-joined guard_target),
+  answered by two scalar per-target rows. It raised NOTE 181 (rec-4185's acceptance leg), answered by a re-pointed
+  structural leg asserting the fix. Its RELATED 182/189 edge (the reaped-leader window) is answered by the pgid
+  fallback. CITE: 104, 128, 131, 132, 159, 163, 189, 201, 203. RELATED: 48, 55, 67, 103, 148, 161, 165, 170, 176, 181,
+  182, 186, 187, 208. Decisions triaged: 167 of 167. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2
+- "gates: decision-scout=FLAGS_FOUND after 3 passes (all resolved); plan-critique=PROCEED after 2 rounds (r1 REVISE: F1-F6 fixed, F7 disputed -- operator-owned rec-2489 closure and declined executor tracking; r2 confirming PROCEED, optional 1-4 applied)"
+- >-
+  Decision 203: this is reversal (a)'s case. A checker defect left no evidence, so the identity gate denied on 'missing'
+  instead of warning on failed_run; fix the checker, never add an override. Reversal (b) count: one wedged non-exempt push
+  (four attempts at the same push, per rec-4252), so not fired. The separately filed check-raise evidence-loss rec closes
+  a second path to the same wedge.
+- >-
+  Fable advice consult (2026-10-10, operator-requested). Q1 adopted: a top-level _process_group sibling keyed on the Popen
+  object, with an own-group guard; the vp-replay re-point is in scope (operator chose single-PR over a follow-on). Q2 adopted:
+  a named module constant read at call time, with a patch-and-assert test. Q3: rec-4185 bundled with the test move; the
+  timeout output tail is a printed diagnostic, never part of the error text; per-target dedup and .coverage artefacts are
+  skipped (mapping is 1:1, the plan-time probe left no artefact). Executor copies: no rec, because the operator says the
+  executor will be remade, not unfrozen. Residual for that remake: every remaining scripts/llm/utils.kill_process_tree
+  caller (scripts/executor/**, scripts/execute_recommendation.py) has the same same-group defect, so do not inherit it.
+- >-
+  CI-RCA deferral (Related-Work check). rec-4243 (Critical, terraform/personal/ducklake_telemetry_writer.tf first-CREATE
+  apply regression) shares no file, Decision or failure category with this plan. The operator confirmed the deferral
+  (Benjamin, 2026-10-10): another agent owns rec-4243.
+- >-
+  Reproduced at plan time (VP step 5's probe on the old code): the caller is SIGKILLed (exit 9), and the text said '(300s)'
+  under a 3s deadline. Checks run in-process (scripts/validate.py _dispatch_check); validate_test_coverage is full-tier only.
+- >-
+  Handoff effect: a timeout yields failed_run (gate WARNS, git-ops.yaml outcome_map). The stranded agent still records one
+  preflight coverage timeout (rec-3208), so its push needs the operator's go-ahead.
+- >-
+  Not bundled: rec-2489 (same bug, older; relevance verdict stale_target). The operator closes it as a duplicate of rec-4252.
+  Filed separately at plan-write time: rec-4256 (validate writes no completed evidence when a registered check raises)
+  and rec-4257 (harness ccr-* session branches fall outside agent_branch_prefixes; this plan was pushed to a claude/
+  branch on the operator's explicit authorization). Related, out of scope: rec-3615/rec-3282
+  (.coverage artefacts), rec-4087 (stricter gate), rec-3208 (slow preflight tests).
+pre_implementation_checklist:
+- Branch confirmed not on main
+- docs/PROJECT_CONTEXT.md read
+- Only the plan-cited decision sections read
+- All files in scope located and readable
+- Acceptance criteria understood and verifiable
+execution_steps:
+- >-
+  scripts/checks/_process_group.py, tests/fixtures/process_probes.py and tests/checks/test__process_group.py: create them
+  per their scope rows. Confirm 100% line coverage with bin/venv-python -m pytest tests/checks/test__process_group.py
+  --cov=scripts/checks --cov-report=term-missing (read the _process_group.py row).
+- >-
+  scripts/checks/verification/_vp_replay_budget.py and tests/checks/verification/test__vp_replay_budget.py: re-point and
+  move per their scope rows. Confirm 100% line coverage of _vp_replay_budget.py with bin/venv-python -m pytest
+  tests/checks/verification/test__vp_replay_budget.py --cov=scripts/checks/verification --cov-report=term-missing.
+- >-
+  scripts/checks/misc/coverage_baseline.py: apply the scope row. Import _process_group at module top (from scripts.checks
+  import _process_group; no import-time side effects). Keep subprocess_module.Popen and every existing kwarg, adding
+  start_new_session=True. The kill runs inside the with block.
+- >-
+  tests/checks/misc/test_coverage_baseline.py: replace test_timeout_yields_none_and_error and add the interrupt node per the
+  scope row. Confirm 100% line coverage of coverage_baseline.py with bin/venv-python -m pytest
+  tests/checks/misc/test_coverage_baseline.py --cov=scripts/checks/misc --cov-report=term-missing, and every touched file
+  at or under 500 SLOC.
+- >-
+  config/agent/verification_registry/entries/process-group-kill-and-reap.yaml and coverage-timeout-process-group.yaml:
+  create both rows per their scope rows (graduated_at = implement date).
+- >-
+  Update both bundled recs' acceptance via the portal, exactly as VP step 6 asserts: bin/venv-python -m scripts.ops_data_portal
+  --update-rec rec-4252 --acceptance '<rec-4252 string>' and --update-rec rec-4185 --acceptance '<rec-4185 string>'.
+- Execute Verification Plan -- run each step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
+- >-
+  Code-review gate (implement skill), then the closure sequence, in order. (1) bin/venv-python -m
+  scripts.session.github_readiness, each state reported on its own; unknown is never PASS, and fetch/API PASS never
+  authorizes push or PR. (2) Set implementation_declared: true. (3) Postflight evidence: bin/venv-python -m
+  scripts.session.postflight --evidence /tmp/implementation-retrospective.json. (4) VP step 7's full tier on the
+  committed, rebased, clean tree, then bin/venv-python -m scripts.checks.validation_result --verify-head exit 0. (5) Push
+  (git push -u origin HEAD as its own call). (6) PR whose squash body carries 'Resolves: rec-4252, rec-4185'. (7) CI green.
+  (8) Squash-merge. Then VP step 8 post-merge.
+- >-
+  Report readiness states, the validator verdict, the postflight evidence and the real push, PR and CI outcomes
+  separately, plus what was implemented and each VP step's result.
+work_areas: []
+rollback: >-
+  Revert the squash commit. The change is local to two checks' subprocess handling plus the shared helper they now use, and
+  carries no data, schema or deploy state.
+implementation_declared: true

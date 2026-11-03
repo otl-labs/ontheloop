@@ -1,8 +1,8 @@
 """CloudTrail write authority is exactly six verbs on one trail, held only by PlatformAdmin (Decision 202).
 
 Replaces the retired no-CloudTrail-write check, whose claim Decision 202 deliberately narrowed.
-Path-independent -- it sweeps every *.tf under terraform/ and keys on the Sid, so moving the grant
-between roots (PLAN-platform-iam-bootstrap-adopt) needs no repoint:
+Path-independent -- it sweeps every *.tf under terraform/ and keys on the Sid, so the
+PLAN-platform-iam-bootstrap-adopt move of the grant into terraform/bootstrap needed no repoint here:
   (a) quoted "cloudtrail:LookupEvents" is still granted somewhere;
   (b) every quoted cloudtrail verb that is not Get*/Describe*/List*/LookupEvents sits in exactly one
       statement, Sid PlatformSecurityTrailManage, whose Action set EQUALS the six trail-management
@@ -240,7 +240,9 @@ _REDS: dict[str, Callable[[dict[str, str]], dict[str, str]]] = {
     },
     "policy attached to PlatformDev": lambda t: {
         **t,
-        _ADMIN_FILE: t[_ADMIN_FILE].replace('role       = "PlatformAdmin"', 'role       = "PlatformDev"'),
+        _ADMIN_FILE: t[_ADMIN_FILE].replace(
+            "role       = aws_iam_role.platform_admin.name", "role       = aws_iam_role.platform_dev.name"
+        ),
     },
     "second attachment to PlatformDev": lambda t: {
         **t,

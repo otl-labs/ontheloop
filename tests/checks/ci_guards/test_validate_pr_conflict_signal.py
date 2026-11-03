@@ -272,6 +272,20 @@ class TestBranchPrefixDeclaration:
         failed = self._run(tmp_path, script)
         assert any("missing trailing /" in f for f in failed)
 
+    def test_declaration_hyphen_terminated_token_passes(self, tmp_path: Path) -> None:
+        script = _VALID_SCRIPT.replace(
+            '_WAKE_HEAD_PREFIXES=("agent/" "claude/")', '_WAKE_HEAD_PREFIXES=("agent/" "claude/" "ccr-")'
+        )
+        failed = self._run(tmp_path, script)
+        assert not any("branch-prefix declaration" in f for f in failed)
+        validator_source = Path(_MODULE.replace(".", "/") + ".py").read_text(encoding="utf-8")
+        assert "ccr-" not in validator_source
+
+    def test_declaration_bare_harness_token_fails(self, tmp_path: Path) -> None:
+        script = _VALID_SCRIPT.replace('_WAKE_HEAD_PREFIXES=("agent/" "claude/")', '_WAKE_HEAD_PREFIXES=("agent/" "ccr")')
+        failed = self._run(tmp_path, script)
+        assert any("missing trailing" in f for f in failed)
+
     def test_declaration_duplicate_tokens_fails(self, tmp_path: Path) -> None:
         script = _VALID_SCRIPT.replace('_WAKE_HEAD_PREFIXES=("agent/" "claude/")', '_WAKE_HEAD_PREFIXES=("agent/" "agent/")')
         failed = self._run(tmp_path, script)

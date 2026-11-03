@@ -25,6 +25,8 @@ import re
 import time
 from typing import Any, Protocol
 
+from src.common.event_usage_fields import MODEL_USAGE_FIELDS, STARTUP_BASELINE_FIELDS, TOOL_USE_FIELDS
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_REGION = "eu-west-2"
@@ -38,13 +40,14 @@ _DUCKLAKE_READER_FUNCTION_NAME = "agent-platform-ducklake-reader"
 _DUCKLAKE_READER_SSM_PATH = "/agent-platform/ducklake/reader_url"
 _DUCKLAKE_WRITER_SSM_PATH = "/agent-platform/ducklake/writer_url"
 
-# Transient reader-invoke resilience: the Neon free-tier catalog scales to zero, so the first
-# read after idle can return a 5xx while the compute resumes (cold-resume). Reader ops are
-# idempotent, so retry transient 5xx with backoff before loud-failing. (HTTP 502 is the observed
-# cold-resume signature; 503/504 covered for completeness.)
+# Transient reader-invoke resilience: reader ops are idempotent, so retry a transient 5xx with backoff before
+# loud-failing. A 502 is a process exit or a deadline overrun, a 503 catalog_unavailable (a dead catalog connection);
+# a typed 504 read_deadline_exceeded is the one answer never retried (the same read overruns again).
 _READER_MAX_ATTEMPTS = 3
 _READER_TRANSIENT_STATUS = frozenset({502, 503, 504})
 _READER_RETRY_BACKOFF_S = (2.0, 4.0)
+# Literal, not imported: the reader-only deadline module is not in this file's data-pipeline bundle.
+_READ_DEADLINE_ERROR_TYPE = "read_deadline_exceeded"
 
 _ORDER_BY_DEFAULT = "last_updated_timestamp"
 
@@ -106,8 +109,8 @@ class Reader(Protocol):
 
     Any implementation must satisfy this protocol without changing call sites (CD.8).
 
-    named(), query() and describe() are deliberately NOT part of this Protocol -- named() and
-    query() were already undeclared DuckLakeReader-only extras before this file added describe(),
+    named(), dq_check() and describe() are deliberately NOT part of this Protocol -- named() was
+    already an undeclared DuckLakeReader-only extra before this file added describe(),
     so widening the Protocol to cover the new method would silently formalise that gap by omission
     rather than by decision. A caller that needs describe() holds a DuckLakeReader (or the
     narrower structural type it needs), not the Reader Protocol.
@@ -144,11 +147,60 @@ ALL_TABLE_COLUMNS: object = object()
 
 # Same-commit parity with src.common.ducklake_scd2_schema.NAMED_READS_VERSION, asserted by
 # test_verb_fields_parity.py::test_version_pin_matches_registry.
-_NAMED_READS_VERSION_PIN = 3
+_NAMED_READS_VERSION_PIN = 6
+
+# Every event-journal verb's trailing response stamps (Decision 207: generations and conflicts are reported, never resolved).
+_STAMP_FIELDS = ("generations", "conflicted_grain_keys", "derivation_conflicted")
+_STATE_FIELDS = (
+    "session_id",
+    "parent_session_id",
+    "project_id",
+    "session_started_at",
+    "state",
+    "outcome",
+    "duration_seconds",
+    "last_event_timestamp",
+    "as_of",
+    "idle_threshold_seconds",
+    *_STAMP_FIELDS,
+)
 
 VERB_FIELDS: dict[str, tuple[str, ...] | object] = {
     "open_recs": ("id", "title", "context", "created_timestamp", "automatable"),
     "rec_by_id": ALL_TABLE_COLUMNS,
+    "recs_by_ids": ALL_TABLE_COLUMNS,
+    "recs_for_files": ("id", "title", "status", "priority", "effort", "source", "file", "tags", "created_timestamp"),
+    "recs_related": (
+        "id",
+        "title",
+        "status",
+        "priority",
+        "effort",
+        "source",
+        "file",
+        "created_timestamp",
+        "direct",
+        "score",
+        "matched_terms",
+        "snippet",
+        "total",
+        "direct_total",
+    ),
+    "open_recs_tally": ("open_count", "aging_count", "non_automatable_count"),
+    "preflight_signal_rows": (
+        "id",
+        "title",
+        "status",
+        "source",
+        "priority",
+        "file",
+        "automatable",
+        "created_timestamp",
+        "last_updated_timestamp",
+        "context_v2_json",
+        "context",
+        "acceptance",
+    ),
     "recs_by_title_prefix": ("id", "title", "status", "source"),
     "ci_rca_open": ("id", "title", "priority", "created_timestamp", "file"),
     "ci_rca_since": ("id",),
@@ -159,6 +211,91 @@ VERB_FIELDS: dict[str, tuple[str, ...] | object] = {
     "decision_by_id": ALL_TABLE_COLUMNS,
     "decisions_max_updated": ("ts",),
     "priority_queue_current": ALL_TABLE_COLUMNS,
+    # Event-journal verbs (the reader-only EVENT_READS registry, registry v6): derived columns only, plus the response stamps.
+    "session_state_and_duration": _STATE_FIELDS,
+    "sessions_window": _STATE_FIELDS,
+    "sessions_window_all_purposes": _STATE_FIELDS,
+    "session_process_event_rollup": ("session_id", "process_event_total", "steps_completed_total", *_STAMP_FIELDS),
+    "session_friction_rollup": (
+        "session_id",
+        "rework_total",
+        "exception_total",
+        "label_counts",
+        "unmapped_count",
+        "classifier_version",
+        *_STAMP_FIELDS,
+    ),
+    "agent_run_state_and_duration": (
+        "agent_run_id",
+        "session_id",
+        "agent_type",
+        "state",
+        "outcome",
+        "duration_seconds",
+        "last_event_timestamp",
+        "as_of",
+        "idle_threshold_seconds",
+        *_STAMP_FIELDS,
+    ),
+    "agent_run_token_rollup": (
+        "session_id",
+        "tokens_input_total",
+        "tokens_output_total",
+        "tokens_cache_read_total",
+        "tokens_cache_creation_total",
+        "model_call_count",
+        "usage_missing_count",
+        *_STAMP_FIELDS,
+    ),
+    "model_call_cost_estimate": (
+        "session_id",
+        "observation_id",
+        "event_timestamp",
+        "model",
+        "provider",
+        "billing_shape",
+        "tokens_input",
+        "tokens_output",
+        "cost_usd",
+        "cost_source",
+        *_STAMP_FIELDS,
+    ),
+    "model_usage_rollup": (*MODEL_USAGE_FIELDS, *_STAMP_FIELDS),
+    "tool_use_rollup": (*TOOL_USE_FIELDS, *_STAMP_FIELDS),
+    "session_startup_baseline": (*STARTUP_BASELINE_FIELDS, *_STAMP_FIELDS),
+    "telemetry_health_count": ("table_name", "record_count", "meta_schema"),
+    "session_tree_rows": ("table_name", "row_json", "total_rows", "roots_in_tree"),
+    "telemetry_orphan_counts": (
+        "day",
+        "join_id",
+        "child_rows",
+        "orphans_quiescent",
+        "orphans_pending",
+        "trees_quiescent",
+        "trees_pending",
+        "conflicted_keys",
+    ),
+    "telemetry_root_sessions": (
+        "session_id",
+        "entity_ref",
+        "harness_session_key",
+        "branch",
+        "session_started_at",
+        "last_event_timestamp",
+        "generations",
+        "conflicted_grain_keys",
+        "derivation_conflicted",
+    ),
+    "transcript_content": (
+        "storage",
+        "encoding",
+        "offset",
+        "length",
+        "content_bytes",
+        "content_sha256",
+        "data",
+        "omitted_reason",
+    ),
 }
 
 
@@ -181,6 +318,28 @@ class ReaderInvokeError(RuntimeError):
         self.text = text
         self.body = body
         super().__init__(f"ducklake_reader {action!r} failed (HTTP {status}): {text[:300]}")
+
+
+class ResponseTooLargeError(ReaderInvokeError):
+    """The reader refused a response above its size cap (HTTP 413 response_too_large, rec-4232).
+
+    Never retried: the same request yields the same oversize answer. Narrow the read to a named verb.
+    """
+
+    def __init__(self, action: str | None, text: str, body: dict[str, Any] | None) -> None:
+        super().__init__(action, 413, text, body)
+        self.bytes = (body or {}).get("bytes")
+        self.cap = (body or {}).get("cap")
+
+
+class ReadDeadlineExceededError(ReaderInvokeError):
+    """The reader interrupted an event-journal read at its deadline (HTTP 504 read_deadline_exceeded, rec-4474).
+
+    Never retried: the same read overruns again. Narrow the window.
+    """
+
+    def __init__(self, action: str | None, text: str, body: dict[str, Any] | None) -> None:
+        super().__init__(action, 504, text, body)
 
 
 def _parse_error_body(text: str) -> dict[str, Any] | None:
@@ -273,10 +432,13 @@ class DuckLakeReader:
                 return resp.json()
             last_status, last_text = resp.status_code, resp.text
             last_body = _parse_error_body(resp.text)
+            if resp.status_code == 413:
+                raise ResponseTooLargeError(payload.get("action"), last_text, last_body)
+            if resp.status_code == 504 and (last_body or {}).get("error_type") == _READ_DEADLINE_ERROR_TYPE:
+                raise ReadDeadlineExceededError(payload.get("action"), last_text, last_body)
             if resp.status_code in _READER_TRANSIENT_STATUS and attempt < _READER_MAX_ATTEMPTS - 1:
-                # Cold-resume: give Neon time to wake, then re-invoke (reads are idempotent).
                 logger.warning(
-                    "ducklake_reader %r HTTP %d (attempt %d/%d) -- retrying after cold-resume backoff",
+                    "ducklake_reader %r HTTP %d (attempt %d/%d) -- retrying after backoff",
                     payload.get("action"),
                     resp.status_code,
                     attempt + 1,
@@ -344,17 +506,32 @@ class DuckLakeReader:
         body = self._invoke({"action": "named_read", "verb": verb, "params": params})
         return list(body.get("rows", []))
 
-    def query(
-        self,
-        table: str,
-        sql: str,
-        *,
-        params: tuple[Any, ...] = (),
-        snapshot_id: int | None = None,
-    ) -> list[dict]:
-        """Execute *sql* (using `{tbl}`) over the current projection via the reader. Raises on error (Decision 55)."""
-        body = self._invoke({"action": "query_ops", "table": table, "sql": sql, "params": list(params)})
-        return list(body.get("rows", []))
+    def dq_check(self, check: str, table: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Run one closed data-quality check on the reader; returns {check, table, violation_count, check_version, ...}.
+
+        The reader owns the SQL (Decision 84 I-3): the caller names a kind from its fixed vocabulary and binds params.
+        Raises on any non-200 answer (Decision 55); a typed 400 dq_check_input names the refused parameter.
+        """
+        return self._invoke({"action": "dq_check", "check": check, "table": table, "params": params or {}})
+
+
+_MAX_RECS_BY_IDS = 50
+
+
+def fetch_recs_by_ids(reader: Any, ids: Any) -> tuple[list[dict], list[str]]:
+    """Fetch recommendations by id through the registered `named` verb; return (rows, missing ids).
+
+    Strips and de-duplicates *ids* (order kept), refuses more than 50 with ValueError, and reports the
+    requested ids that did not resolve so a caller never mistakes an absent rec for a present one.
+    """
+    wanted = list(dict.fromkeys(i.strip() for i in ids if isinstance(i, str) and i.strip()))
+    if not wanted:
+        return [], []
+    if len(wanted) > _MAX_RECS_BY_IDS:
+        raise ValueError(f"fetch_recs_by_ids: at most {_MAX_RECS_BY_IDS} ids per call; got {len(wanted)}")
+    rows = list(reader.named("recs_by_ids", ids=",".join(wanted)))
+    found = {r.get("id") for r in rows}
+    return rows, [i for i in wanted if i not in found]
 
 
 def make_reader(profile: str | None = None, table: str | None = None) -> Reader:

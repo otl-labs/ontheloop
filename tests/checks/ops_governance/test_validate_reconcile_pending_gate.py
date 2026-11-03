@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 from unittest import mock
 
+import yaml
+
 from scripts.checks.ops_governance import validate_reconcile_pending_gate as gate
 
 
@@ -261,6 +263,30 @@ def test_control_class_needs_no_reconcile_sides() -> None:
     assert failed == []
 
 
+def _gap(status: str, scope: str = "exempt") -> list[str]:
+    sidecar = _sidecar(
+        {"ops_new": {"status": status, "reconcile_scope": scope, "pending_reconcile": {"history": [], "current": []}}}
+    )
+    generated = {"ops_new": {"write_mode": "scd2"}}
+    with mock.patch.object(gate, "_diff_added_columns", return_value={"ops_new": {"a", "b"}}):
+        failed: list[str] = []
+        gate._check_diff_added_column_gap(gate._common.ROOT, sidecar, "k:", failed, generated=generated)
+    return failed
+
+
+def test_preproduction_exempt_table_owes_no_alters_and_is_reported(capsys) -> None:
+    failed = _gap("pre_production")
+    assert failed == []
+    assert "['ops_new']" in capsys.readouterr().out  # the leg names the skipped table, never a vacuous pass
+
+
+def test_live_exempt_table_still_owes_alters() -> None:
+    failed = _gap("live")
+    assert len(failed) == 4  # two columns x history+current, none skipped
+    failed = _gap("pre_production", scope="ducklake")
+    assert len(failed) == 4  # reconcile_scope ducklake is never skipped
+
+
 class TestOriginMainAdvisorySkip:
     def test_unreachable_origin_main_advisory_skips_without_failing(self, capsys) -> None:
         sidecar = _sidecar(
@@ -343,6 +369,19 @@ class TestDiffAddedColumnsRealGit:
         added = gate._diff_added_columns(repo)
         assert added.get("ops_recommendations") == {"rec_id", "status"}
 
+    def test_diff_added_telemetry_column_needs_pending_entry(self, tmp_path: Path) -> None:
+        contract = self._repo(tmp_path) / "docs" / "contracts" / "telemetry_agents.yaml"
+        contract.write_text("fields:\n  host_run_ref: {}\n  surface:\n    derivation: {timing: read}\n", encoding="utf-8")
+        assert gate._diff_added_columns(contract.parents[2]) == {"telemetry_agents": {"host_run_ref"}}  # surface owes none
+        for history, expect_failure in (([], True), (["host_run_ref"], False)):
+            failed: list[str] = []
+            generated = {"telemetry_agents": {"write_mode": "append_only"}}
+            sidecar = _telemetry_sidecar(history)
+            gate._check_diff_added_column_gap(contract.parents[2], sidecar, "k:", failed, generated=generated)
+            assert bool(failed) is expect_failure
+            if failed:
+                assert "provision_telemetry_catalog" in failed[0] and "reconcile_columns" not in failed[0]
+
     def test_old_yaml_invalid_on_origin_main_treated_as_absent(self, tmp_path: Path) -> None:
         repo = tmp_path / "badyaml_repo"
         (repo / "docs" / "contracts").mkdir(parents=True)
@@ -408,6 +447,7 @@ class TestDeployGateCli:
         assert exit_code == 1
         assert "DEPLOY REFUSED" in captured.err
         assert "ops_decisions" in captured.err
+        assert "telemetry-writer" in captured.err
 
     def test_deploy_gate_zero_when_clear(self) -> None:
         sidecar = _sidecar(
@@ -457,6 +497,12 @@ class TestRealRepoIntegration:
             "ops_priority_queue",
             "ops_execution_plans",
             "ops_smoke_events",
+            "telemetry_sessions",
+            "telemetry_observations",
+            "telemetry_transcripts",
+            "telemetry_agents",
+            "ops_tenants",
+            "ops_projects",
         }
 
     def test_declared_columns_real_contract_table(self) -> None:
@@ -495,3 +541,30 @@ class TestRealRepoIntegration:
     def test_diff_added_columns_real_repo_returns_dict_or_none(self) -> None:
         result = gate._diff_added_columns(gate._common.ROOT)
         assert result is None or isinstance(result, dict)
+
+
+def _telemetry_sidecar(history: list[str]) -> dict:
+    entry = {"reconcile_scope": "telemetry_catalog", "pending_reconcile": {"history": history}}
+    return _sidecar({"telemetry_agents": entry, "ops_decisions": {"reconcile_scope": "ducklake", "pending_reconcile": {}}})
+
+
+def test_telemetry_hold_reports_pending_production_columns(capsys) -> None:
+    ducklake_only = _telemetry_sidecar([])
+    ducklake_only["contract_table_ops"]["ops_decisions"]["pending_reconcile"] = {"history": ["intent"]}
+    marker = "TELEMETRY_PRODUCTION_HOLD pending=1 columns=['telemetry_agents.host_run_ref']"
+    for sidecar, line, marked in (
+        (_telemetry_sidecar(["host_run_ref"]), "held=true", True),
+        (_telemetry_sidecar([]), "held=false", False),
+        (ducklake_only, "held=false", False),
+    ):
+        with mock.patch.object(gate, "_load_sidecar", return_value=sidecar):
+            assert gate.main(["--telemetry-hold"]) == 0
+        captured = capsys.readouterr()
+        assert captured.out.splitlines() == [line] and (marker in captured.err) is marked
+    with mock.patch.object(gate, "_load_sidecar", return_value=_telemetry_sidecar(["host_run_ref"])):
+        assert gate.main(["--deploy-gate"]) == 0  # the ops serving gate ignores a telemetry column
+    capsys.readouterr()
+    broken = [OSError("x"), yaml.YAMLError("x"), {"contract_table_ops": []}, {}]
+    with mock.patch.object(gate, "_load_sidecar", side_effect=broken):
+        assert [gate.main(["--telemetry-hold"]) for _ in broken] == [1, 1, 1, 1]
+    assert "held=" not in capsys.readouterr().out

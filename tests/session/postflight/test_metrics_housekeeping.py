@@ -169,8 +169,6 @@ class TestStageDocumentDerivedTables:
         """run_auto() does not call _stage_document_derived_tables (ETL bypass removed)."""
         close_out = json.dumps(
             {
-                "intent_achieved": True,
-                "session_log_entry": "## [2026-04-28] session",
                 "sanity_status": "PASS",
                 "details": {},
             }

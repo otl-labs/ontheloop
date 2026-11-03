@@ -15,7 +15,7 @@ from scripts.data_quality_models import Check, CheckResult, RunResult  # noqa: E
 
 
 def test_run_checks_dry_run():
-    checks = [Check("t", "c", "type", "sql", "desc")]
+    checks = [Check("t", "c", "type", "not_null", "desc")]
     res = run_checks(checks, dry_run=True)
     assert res.verdict == "SKIP"
 
@@ -23,11 +23,11 @@ def test_run_checks_dry_run():
 def test_run_checks_with_issues():
     with patch("scripts.data_quality_execute._execute_check_ducklake") as mock_exec:
         mock_exec.side_effect = [
-            CheckResult(Check("t", "c", "type", "sql", "desc"), "PASS"),
-            CheckResult(Check("t", "c", "type", "sql", "desc"), "FAIL"),
-            CheckResult(Check("t", "c", "type", "sql", "desc"), "ERROR"),
+            CheckResult(Check("t", "c", "type", "not_null", "desc"), "PASS"),
+            CheckResult(Check("t", "c", "type", "not_null", "desc"), "FAIL"),
+            CheckResult(Check("t", "c", "type", "not_null", "desc"), "ERROR"),
         ]
-        checks = [Check("t", "c", "type", "sql", "desc")] * 3
+        checks = [Check("t", "c", "type", "not_null", "desc")] * 3
         with patch("src.common.ducklake_reader_client.DuckLakeReader"):
             res = run_checks(checks)
     assert res.verdict == "FAIL"
@@ -39,8 +39,8 @@ def test_run_checks_profile_arg_reaches_the_reader():
         patch("src.common.ducklake_reader_client.DuckLakeReader") as mock_reader,
         patch("scripts.data_quality_execute._execute_check_ducklake") as mock_exec,
     ):
-        mock_exec.return_value = CheckResult(Check("t", "c", "type", "sql", "desc"), "PASS")
-        run_checks([Check("t", "c", "type", "sql", "desc")], profile_name="my-profile")
+        mock_exec.return_value = CheckResult(Check("t", "c", "type", "not_null", "desc"), "PASS")
+        run_checks([Check("t", "c", "type", "not_null", "desc")], profile_name="my-profile")
     mock_reader.assert_called_once_with(profile="my-profile")
 
 
@@ -50,71 +50,26 @@ def test_run_checks_profile_defaults_to_none():
         patch("src.common.ducklake_reader_client.DuckLakeReader") as mock_reader,
         patch("scripts.data_quality_execute._execute_check_ducklake") as mock_exec,
     ):
-        mock_exec.return_value = CheckResult(Check("t", "c", "type", "sql", "desc"), "PASS")
-        run_checks([Check("t", "c", "type", "sql", "desc")])
+        mock_exec.return_value = CheckResult(Check("t", "c", "type", "not_null", "desc"), "PASS")
+        run_checks([Check("t", "c", "type", "not_null", "desc")])
     mock_reader.assert_called_once_with(profile=None)
 
 
-def test_apply_backend_routing_rewrites_all_migrated_tables():
-    """Every _OPS_TABLES check routes to the DuckLake reader; other tables are left alone."""
+def test_apply_backend_routing_pins_ops_tables_and_appends_clause8():
+    """Every _OPS_TABLES check is pinned to the DuckLake reader and the clause-8 checks are appended."""
     import scripts.data_quality_runner as dq
 
-    recs = Check(
-        "ops_recommendations",
-        "file",
-        "not_null",
-        "SELECT COUNT(*) AS violation FROM agent_platform.ops_recommendations_current WHERE file IS NULL",
-        "recs file not null",
-        "error",
-    )
-    decisions = Check(
-        "ops_decisions",
-        "status",
-        "not_null",
-        "SELECT COUNT(*) AS violation FROM agent_platform.ops_decisions_current WHERE status IS NULL",
-        "dec status",
-        "error",
-    )
-    untouched = Check(
-        "market_data",
-        "trade_id",
-        "not_null",
-        "SELECT COUNT(*) AS violation FROM agent_platform.market_data_current WHERE trade_id IS NULL",
-        "market data trade id",
-        "error",
-    )
-    original_sql = untouched.sql
-    dq.apply_backend_routing([recs, decisions, untouched], "agent_platform")
-    assert recs.backend == "ducklake"
-    assert "{tbl}" in recs.sql
-    assert "ops_recommendations_current" not in recs.sql
-    # ops_decisions is migrated too (Decision 84 I-1) -- routed to the reader.
-    assert decisions.backend == "ducklake"
-    assert "{tbl}" in decisions.sql
-    # A non-ops table is not rewritten.
-    assert untouched.sql == original_sql
-
-
-def test_apply_backend_routing_returns_the_mutated_list():
-    import scripts.data_quality_runner as dq
-
-    recs = Check(
-        "ops_recommendations",
-        "file",
-        "not_null",
-        "SELECT COUNT(*) AS violation FROM agent_platform.ops_recommendations_current WHERE file IS NULL",
-        "recs file not null",
-        "error",
-    )
-    out = dq.apply_backend_routing([recs], "agent_platform")
-    assert recs.backend == "ducklake"
-    assert recs in out
+    recs = Check("ops_recommendations", "file", "not_null", "not_null", "recs file not null", params={"column": "file"})
+    other = Check("market_data", "trade_id", "not_null", "not_null", "x", backend="elsewhere")
+    out = dq.apply_backend_routing([recs, other], "agent_platform")
+    assert recs.backend == "ducklake" and other.backend == "elsewhere"
+    assert out[:2] == [recs, other] and {c.test_type for c in out[2:]} >= {"ulid_history_unique", "current_merge_key_unique"}
 
 
 def test_run_checks_no_reader_client():
     """An unimportable reader client degrades to SKIP rather than raising."""
     with patch.dict("sys.modules", {"src.common.ducklake_reader_client": None}):
-        checks = [Check("t", "c", "type", "sql", "desc")]
+        checks = [Check("t", "c", "type", "not_null", "desc")]
         res = run_checks(checks)
     assert res.verdict == "SKIP"
 
@@ -128,8 +83,8 @@ def test_run_checks_empty_list_returns_error():
 
 def test_run_checks_enforced_false_advisory():
     """enforced=False FAIL does not produce FAIL aggregate; enforced=True FAIL does."""
-    enforced_check = Check("t", "c", "not_null", "sql", "desc", enforced=True)
-    unenforced_check = Check("t", "c", "unique", "sql", "desc", enforced=False)
+    enforced_check = Check("t", "c", "not_null", "not_null", "desc", enforced=True)
+    unenforced_check = Check("t", "c", "unique", "not_null", "desc", enforced=False)
 
     with (
         patch("src.common.ducklake_reader_client.DuckLakeReader"),
@@ -176,123 +131,65 @@ def test_verdict_for_pass_fail_unenforced_hardgate():
     assert dq._verdict_for(c_tomb, 1, 0.1).verdict == "HARD_GATE"
 
 
-def test_execute_check_ducklake_success():
-    class _Reader:
-        def _invoke(self, payload):
-            return {"rows": [{"violation": 0}]}
+def _reply(**over):
+    from src.common.ducklake_dq_checks import check_version
 
-    check = Check("ops_recommendations", "id", "not_null", "SELECT COUNT(*) v FROM {tbl}", "d", backend="ducklake")
-    assert _execute_check_ducklake(check, _Reader()).verdict == "PASS"
+    body = {"ok": True, "check": "not_null", "table": "ops_recommendations", "violation_count": 0}
+    body["check_version"] = check_version("not_null")
+    body.update(over)
+    return body
+
+
+class _Reader:
+    def __init__(self, body=None, exc=None):
+        self.body, self.exc, self.calls = body if body is not None else _reply(), exc, []
+
+    def dq_check(self, check, table, params=None):
+        self.calls.append((check, table, params))
+        if self.exc:
+            raise self.exc
+        return self.body
+
+
+def _check(**kw):
+    return Check("ops_recommendations", "id", "not_null", "not_null", "d", params={"column": "id"}, **kw)
+
+
+def test_checks_run_through_dq_check():
+    reader = _Reader()
+    assert _execute_check_ducklake(_check(), reader).verdict == "PASS"
+    assert reader.calls == [("not_null", "ops_recommendations", {"column": "id"})]
+    failing = _Reader(_reply(violation_count=3))
+    result = _execute_check_ducklake(_check(), failing)
+    assert result.verdict == "FAIL" and result.violation_count == 3
 
 
 def test_execute_check_ducklake_relationships_skipped():
-    check = Check("ops_priority_queue", "rec_id", "relationships", "sql", "d", backend="ducklake")
+    check = Check("ops_priority_queue", "rec_id", "relationships", None, "d", backend="ducklake")
     assert _execute_check_ducklake(check, object()).verdict == "SKIP"
 
 
-def test_execute_check_ducklake_reader_none_is_error():
-    class _Reader:
-        def _invoke(self, payload):
-            return None  # unexpected None from _invoke -- body.get() raises AttributeError -> ERROR
-
-    check = Check("ops_recommendations", "id", "not_null", "SELECT 1 FROM {tbl}", "d", backend="ducklake")
-    assert _execute_check_ducklake(check, _Reader()).verdict == "ERROR"
+def test_check_version_skew_is_unavailable():
+    result = _execute_check_ducklake(_check(), _Reader(_reply(check_version="0" * 16)))
+    assert result.verdict == "UNAVAILABLE" and "not at this code" in result.detail
+    assert result.violation_count == 0
 
 
-def test_execute_check_ducklake_hist_only_resolves_to_history_table():
-    """A check whose SQL references ONLY {hist} (no {tbl}) is resolved to the physical history table
-    client-side (rec-2756-adjacent: a genuine cross-table current-vs-history DQ check, T2.26 c9)."""
-    captured = {}
-
-    class _Reader:
-        def _invoke(self, payload):
-            captured["sql"] = payload["sql"]
-            return {"rows": [{"violation": 0}]}
-
-    check = Check(
-        "ops_execution_plans",
-        "rec_id",
-        "expression",
-        "SELECT COUNT(*) v FROM {hist} GROUP BY rec_id, revision HAVING COUNT(*) > 1",
-        "d",
-        backend="ducklake",
-    )
-    result = _execute_check_ducklake(check, _Reader())
-    assert result.verdict == "PASS"
-    assert "{hist}" not in captured["sql"]
-    assert "ops_catalog.ops_execution_plans_history" in captured["sql"]
+def test_history_kind_is_unavailable_on_a_transient_reader_error():
+    check = Check("ops_recommendations", "ulid", "ulid_history_unique", "unique", "d", params={"columns": ["ulid"]})
+    result = _execute_check_ducklake(check, _Reader(exc=RuntimeError("ducklake reader failed (HTTP 503)")))
+    assert result.verdict == "UNAVAILABLE"
 
 
-def test_execute_check_ducklake_hist_and_tbl_both_present():
-    """A check referencing BOTH {tbl} and {hist} resolves {hist} client-side while leaving {tbl}
-    for query_ops/query_current's own server-side current-table substitution."""
-    captured = {}
-
-    class _Reader:
-        def _invoke(self, payload):
-            captured["sql"] = payload["sql"]
-            return {"rows": [{"violation": 0}]}
-
-    check = Check(
-        "ops_execution_plans",
-        "revision",
-        "expression",
-        "SELECT COUNT(*) v FROM {tbl} cur JOIN {hist} h ON h.rec_id = cur.rec_id WHERE h.revision > cur.revision",
-        "d",
-        backend="ducklake",
-    )
-    result = _execute_check_ducklake(check, _Reader())
-    assert result.verdict == "PASS"
-    assert "{hist}" not in captured["sql"]
-    assert "ops_catalog.ops_execution_plans_history" in captured["sql"]
-    # {tbl} is left for query_ops's own server-side substitution -- still a literal placeholder here.
-    assert "{tbl}" in captured["sql"]
-
-
-def test_execute_check_ducklake_is_history_replaces_tbl_with_history_table():
-    """A check whose test_type is 'ulid_history_unique' runs entirely over the history table:
-    {tbl} in its SQL is resolved client-side to the physical history table name."""
-    captured = {}
-
-    class _Reader:
-        def _invoke(self, payload):
-            captured["sql"] = payload["sql"]
-            return {"rows": [{"violation": 0}]}
-
-    check = Check(
-        "ops_execution_plans",
-        "id",
-        "ulid_history_unique",
-        "SELECT COUNT(*) v FROM {tbl} GROUP BY id HAVING COUNT(*) > 1",
-        "d",
-        backend="ducklake",
-    )
-    result = _execute_check_ducklake(check, _Reader())
-    assert result.verdict == "PASS"
-    assert "{tbl}" not in captured["sql"]
-    assert "ops_catalog.ops_execution_plans_history" in captured["sql"]
-
-
-def test_execute_check_ducklake_none_rows_is_error(monkeypatch):
-    """The defensive `rows is None` branch (distinct from an _invoke exception) returns ERROR."""
-    import scripts.data_quality_execute as dqe
-
-    monkeypatch.setattr(dqe, "_query_ops_rows", lambda reader, table, sql: None)
-    check = Check("ops_recommendations", "id", "not_null", "SELECT 1 FROM {tbl}", "d", backend="ducklake")
-    result = _execute_check_ducklake(check, object())
-    assert result.verdict == "ERROR"
-    assert "returned None" in result.detail
+def test_missing_violation_count_is_error():
+    body = _reply()
+    del body["violation_count"]
+    assert _execute_check_ducklake(_check(), _Reader(body)).verdict == "ERROR"
 
 
 def test_run_checks_routes_ducklake(monkeypatch):
-    class _Reader:
-        def _invoke(self, payload):
-            return {"rows": [{"violation": 0}]}
-
     monkeypatch.setattr("src.common.ducklake_reader_client.DuckLakeReader", lambda profile=None: _Reader())
-    check = Check("ops_recommendations", "id", "not_null", "SELECT 1 FROM {tbl}", "d", backend="ducklake")
-    result = run_checks([check], dry_run=False)
-    assert result.verdict == "PASS"
+    assert run_checks([_check(backend="ducklake")], dry_run=False).verdict == "PASS"
 
 
 # ---------------------------------------------------------------------------
@@ -348,57 +245,33 @@ class TestIsReaderUnavailable:
 
 
 class TestExecuteCheckDucklakeUnavailable:
-    """_execute_check_ducklake must classify transient _invoke raises as UNAVAILABLE."""
+    """_execute_check_ducklake must classify transient dq_check raises as UNAVAILABLE."""
+
+    def _verdict(self, exc):
+        return _execute_check_ducklake(_check(), _Reader(exc=exc)).verdict
 
     def test_connection_error_returns_unavailable(self):
         import requests
 
-        class _Reader:
-            def _invoke(self, payload):
-                raise requests.ConnectionError("connection refused")
-
-        check = Check("ops_recommendations", "id", "not_null", "SELECT 1 FROM {tbl}", "d", backend="ducklake")
-        assert _execute_check_ducklake(check, _Reader()).verdict == "UNAVAILABLE"
+        assert self._verdict(requests.ConnectionError("connection refused")) == "UNAVAILABLE"
 
     def test_runtime_error_502_returns_unavailable(self):
-        class _Reader:
-            def _invoke(self, payload):
-                raise RuntimeError("ducklake reader failed (HTTP 502)")
-
-        check = Check("ops_recommendations", "id", "not_null", "SELECT 1 FROM {tbl}", "d", backend="ducklake")
-        assert _execute_check_ducklake(check, _Reader()).verdict == "UNAVAILABLE"
+        assert self._verdict(RuntimeError("ducklake reader failed (HTTP 502)")) == "UNAVAILABLE"
 
     def test_runtime_error_503_returns_unavailable(self):
-        class _Reader:
-            def _invoke(self, payload):
-                raise RuntimeError("failed (HTTP 503)")
-
-        check = Check("ops_recommendations", "id", "not_null", "SELECT 1 FROM {tbl}", "d", backend="ducklake")
-        assert _execute_check_ducklake(check, _Reader()).verdict == "UNAVAILABLE"
+        assert self._verdict(RuntimeError("failed (HTTP 503)")) == "UNAVAILABLE"
 
     def test_structured_500_with_error_type_returns_error(self):
-        class _Reader:
-            def _invoke(self, payload):
-                raise RuntimeError("ducklake reader failed (HTTP 500) error_type=runtime")
+        assert self._verdict(RuntimeError("ducklake reader failed (HTTP 500) error_type=runtime")) == "ERROR"
 
-        check = Check("ops_recommendations", "id", "not_null", "SELECT 1 FROM {tbl}", "d", backend="ducklake")
-        assert _execute_check_ducklake(check, _Reader()).verdict == "ERROR"
+    def test_typed_400_input_refusal_returns_error(self):
+        assert self._verdict(RuntimeError("ducklake reader failed (HTTP 400) error_type=dq_check_input")) == "ERROR"
 
     def test_runtime_error_4xx_returns_error(self):
-        class _Reader:
-            def _invoke(self, payload):
-                raise RuntimeError("ducklake reader failed (HTTP 403)")
-
-        check = Check("ops_recommendations", "id", "not_null", "SELECT 1 FROM {tbl}", "d", backend="ducklake")
-        assert _execute_check_ducklake(check, _Reader()).verdict == "ERROR"
+        assert self._verdict(RuntimeError("ducklake reader failed (HTTP 403)")) == "ERROR"
 
     def test_semantic_error_returns_error(self):
-        class _Reader:
-            def _invoke(self, payload):
-                raise ValueError("bad SQL syntax")
-
-        check = Check("ops_recommendations", "id", "not_null", "SELECT 1 FROM {tbl}", "d", backend="ducklake")
-        assert _execute_check_ducklake(check, _Reader()).verdict == "ERROR"
+        assert self._verdict(ValueError("bad value")) == "ERROR"
 
 
 # ---------------------------------------------------------------------------
@@ -410,32 +283,24 @@ class TestRunChecksDegradedAggregate:
     """run_checks must aggregate DEGRADED when the only non-PASS results are UNAVAILABLE."""
 
     def test_only_unavailable_aggregates_to_degraded(self, monkeypatch):
-        class _Reader:
-            def _invoke(self, payload):
-                raise RuntimeError("failed (HTTP 503)")
-
-        monkeypatch.setattr("src.common.ducklake_reader_client.DuckLakeReader", lambda profile=None: _Reader())
-        check = Check("ops_recommendations", "id", "not_null", "SELECT 1 FROM {tbl}", "d", backend="ducklake")
-        result = run_checks([check], dry_run=False)
+        reader = _Reader(exc=RuntimeError("failed (HTTP 503)"))
+        monkeypatch.setattr("src.common.ducklake_reader_client.DuckLakeReader", lambda profile=None: reader)
+        result = run_checks([_check(backend="ducklake")], dry_run=False)
         assert result.verdict == "DEGRADED"
         assert result.unavailable == 1
 
     def test_mixed_unavailable_and_violation_aggregates_to_fail(self, monkeypatch):
-        call_count = {"n": 0}
+        replies = [RuntimeError("failed (HTTP 503)"), _reply(violation_count=5)]
 
-        class _Reader:
-            def _invoke(self, payload):
-                call_count["n"] += 1
-                if call_count["n"] == 1:
-                    raise RuntimeError("failed (HTTP 503)")
-                return {"rows": [{"violation": 5}]}
+        class _Seq:
+            def dq_check(self, check, table, params=None):
+                nxt = replies.pop(0)
+                if isinstance(nxt, Exception):
+                    raise nxt
+                return nxt
 
-        monkeypatch.setattr("src.common.ducklake_reader_client.DuckLakeReader", lambda profile=None: _Reader())
-        checks = [
-            Check("ops_recommendations", "id", "not_null", "SELECT 1 FROM {tbl}", "d", backend="ducklake"),
-            Check("ops_recommendations", "file", "not_null", "SELECT 1 FROM {tbl}", "d", backend="ducklake"),
-        ]
-        result = run_checks(checks, dry_run=False)
+        monkeypatch.setattr("src.common.ducklake_reader_client.DuckLakeReader", lambda profile=None: _Seq())
+        result = run_checks([_check(backend="ducklake"), _check(backend="ducklake")], dry_run=False)
         assert result.verdict == "FAIL"
 
     def test_unavailable_property_counts_correctly(self):

@@ -9,9 +9,9 @@ conversion (Decision 128's default) would retire a live path out from under them
 process group (``start_new_session=True``): on ``TimeoutExpired`` -- or any ``BaseException``
 raised while waiting, since ``start_new_session`` detaches the child from the caller's foreground
 group and would otherwise orphan it -- the whole process group is SIGKILLed and reaped with a
-BOUNDED wait, so a descendant that escaped via setsid while holding the pipe can never hang this
-check with no deadline. POSIX-only by design (``os.killpg``, ``start_new_session``): every surface
-that runs this check is Linux (CC-web, CI). Accepted residual: a SIGTERM/SIGKILL delivered to the
+BOUNDED wait by ``scripts/checks/_process_group.py`` (the shared kill-and-reap; see it for the
+descendant-holding-the-pipe rationale). POSIX-only by design: every surface that runs this check
+is Linux (CC-web, CI). Accepted residual: a SIGTERM/SIGKILL delivered to the
 validate process itself (no Python exception raised) orphans a still-running step's process group
 -- bounded at job end on CI runners, unbounded locally only for a genuinely hung step.
 
@@ -25,13 +25,12 @@ passed in by the caller, never read from this module, so the existing
 
 from __future__ import annotations
 
-import os
-import signal
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from scripts.checks import _process_group
 from scripts.checks.verification import _vp_replay_classify as _classify
 
 # docs/contracts/vp-red-before.yaml's replay_bound -- TestContractPins derive-asserts these three
@@ -39,11 +38,6 @@ from scripts.checks.verification import _vp_replay_classify as _classify
 PER_STEP_WARN_FRACTION = 0.5
 CUMULATIVE_WARN_FRACTION = 0.8
 AUTHORING_MAX_FRACTION = 0.25
-
-# Bounded reap window after a SIGKILL -- never an unbounded communicate(), per the module
-# docstring's accepted residual (a descendant that escaped the killed group via setsid, still
-# holding the pipe open, must not be able to hang this check indefinitely).
-_REAP_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -54,47 +48,10 @@ class BoundedResult:
     timed_out: bool
 
 
-def _killpg_quiet(pgid: int) -> None:
-    """SIGKILL a process group; a group that has already exited is not an error."""
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-
-
-def _kill_and_reap(popen: subprocess.Popen) -> tuple[str, str]:
-    """SIGKILL ``popen``'s whole process group and reap it with a BOUNDED wait.
-
-    A descendant that escaped the group via setsid before the kill (e.g. a double-forked
-    daemonizer still holding the inherited stdout/stderr pipe open) would otherwise make an
-    unbounded ``communicate()`` hang forever waiting for EOF -- the bounded reap trades a
-    guaranteed return for a possibly-incomplete capture of that descendant's own output, which
-    is a fine trade since the step is already being reported as a deadline kill.
-
-    When the bounded reap itself times out, ``communicate()``'s own pipes are closed and the
-    already-SIGKILLed SHELL (never the escaped descendant) is reaped with a plain, unbounded
-    ``popen.wait()`` -- no try/except: the kernel reaps a SIGKILLed process promptly, and the
-    escaped descendant holding the pipe open cannot block a wait on the shell, which is a
-    different process. This leaves no zombie and no open file descriptor after the call. Residual:
-    an unbounded wait on a SIGKILLed shell can only hang on an uninterruptible kernel sleep, never
-    on the escaped descendant's own I/O.
-    """
-    _killpg_quiet(popen.pid)
-    try:
-        return popen.communicate(timeout=_REAP_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        if popen.stdout is not None:
-            popen.stdout.close()
-        if popen.stderr is not None:
-            popen.stderr.close()
-        popen.wait()
-        return "", ""
-
-
 def run_bounded(command: str, cwd: Path, timeout: float) -> BoundedResult:
     """Run ``command`` (``shell=True``) under a wall-clock ``timeout``, in its own process group.
 
-    On timeout, kills and bounded-reaps the whole group (see ``_kill_and_reap``). The same
+    On timeout, kills and bounded-reaps the whole group (see ``_process_group.kill_and_reap``). The same
     kill-and-reap runs on any ``BaseException`` raised while waiting (``KeyboardInterrupt``, a
     harness timeout) -- ``start_new_session`` removes the child from the caller's foreground
     process group, which would otherwise orphan it the moment this function's own frame unwinds.
@@ -115,10 +72,10 @@ def run_bounded(command: str, cwd: Path, timeout: float) -> BoundedResult:
         stdout, stderr = popen.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         elapsed = time.monotonic() - start
-        stdout, stderr = _kill_and_reap(popen)
+        stdout, stderr = _process_group.kill_and_reap(popen)
         return BoundedResult(returncode=None, output=(stdout or "") + (stderr or ""), elapsed=elapsed, timed_out=True)
     except BaseException:
-        _kill_and_reap(popen)
+        _process_group.kill_and_reap(popen)
         raise
     elapsed = time.monotonic() - start
     return BoundedResult(returncode=popen.returncode, output=stdout + stderr, elapsed=elapsed, timed_out=False)

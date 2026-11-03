@@ -1,0 +1,171 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: terraform-github-plan-state-grant
+intent: >-
+  Let the planner role read terraform/github's state object, the IAM half that PLAN-terraform-github-pr-plan's PR-time
+  workflow needs before its first run (rec-4335). One s3:GetObject statement on exactly tfstate/github/terraform.tfstate,
+  applied at merge through the governed terraform/personal path, so the workflow PR's own run can be the root's first
+  live plan.
+implementation_declared: true
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-terraform-github-plan-state-grant.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category) -- prerequisite of PLAN-terraform-github-pr-plan, which resolves rec-4335.
+  No tier_item criterion claimed. Adjacent: T2.48 (one more in-budget auto-apply data point).
+scope:
+- file: terraform/personal/oidc_pipeline_roles.tf
+  action: Modify
+  purpose: >-
+    Add one statement to data "aws_iam_policy_document" "github_ci_planner", directly after the TfstateNativeLockFile
+    statement, verbatim as execution_steps[0]: Sid TfstateGithubRead, Allow, s3:GetObject on exactly
+    "${aws_s3_bucket.data_lake.arn}/tfstate/github/terraform.tfstate", no condition. ci_full_refresh_read, every other
+    statement and the trust policy stay byte-identical. In-budget aws_iam_role_policy UPDATE on a boundary-carrying
+    agent-platform-* role, so it auto-applies at merge (Decision 144 cl.5); headroom measured live 2026-10-15 at 7,031
+    of 10,240 B; the boundary's DataPlaneAllow s3:* already covers it, and s3:ListBucket for backend init is already
+    granted (oidc.tf DataLakeBucketRead).
+- file: tests/test_terraform_github_pr_plan.py
+  action: Create
+  purpose: >-
+    rec-4335's acceptance file, created here with class TestPlannerStateGrant only (execution_steps[1]);
+    PLAN-terraform-github-pr-plan adds its other two classes. Pure functions of HCL text: no network, terraform or AWS.
+- file: config/agent/verification_registry/entries/terraform-github-plan-planner-state-grant.yaml
+  action: Create
+  purpose: >-
+    Graduation record for VP step 1: check_id == filename stem == graduation_check_id, primitive_slot test_selector,
+    guard_target terraform/personal/oidc_pipeline_roles.tf, guard_symbol null, plan_slug
+    terraform-github-plan-state-grant, graduated_at the implementation date, graduated_by implement-agent,
+    check_spec.node_id "tests/test_terraform_github_pr_plan.py::TestPlannerStateGrant".
+bundled_recommendations: []
+followon_recs: []
+infrastructure_dependencies:
+- "terraform/personal planner inline-policy UPDATE, auto-applied at merge by terraform-apply-sandbox.yml (guard PASS predicted, in-budget per environment-taxonomy.yaml guard_classification). No trust, boundary or role change."
+acceptance_criteria:
+- The github_ci_planner policy grants s3:GetObject on exactly tfstate/github/terraform.tfstate, and no other Allow statement in terraform/personal names tfstate/github (TestPlannerStateGrant).
+- The speculative plan on the PR shows the policy update as the only change with predicted guard verdict PASS, and the PR merges only when code review is PROCEED, CI is green on the head and the operator has typed the word (all three necessary).
+- After merge the push-path apply is green and the live policy simulates allowed for that GetObject and implicitDeny for a PutObject on it and a GetObject on a sibling key.
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: The planner's new grant is exactly one GetObject on the one state object, and nothing else on tfstate/github anywhere in terraform/personal
+  command: bin/venv-python -m pytest "tests/test_terraform_github_pr_plan.py::TestPlannerStateGrant" -q
+  expected: every test passes; before the change the file does not exist (exit 4, red)
+  fix_if: >-
+    a red case passes silently, or the real-HCL case fails -- fix the HCL to the planned statement; if the predicate
+    itself misreads real HCL (for example a statement it should exclude by action), return to the planner, never
+    narrow unrelated refresh-read statements
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: terraform-github-plan-planner-state-grant
+- step: 2
+  phase: pre-deploy
+  action: The speculative plan on the PR shows the grant as the only change, and the guard predicts PASS
+  command: >-
+    echo 'VIA MCP: mcp__github__pull_request_read(method="get_comments", owner="benjamin-blake", repo="theseus",
+    pullNumber=<this PR>) -- read the "Terraform Speculative Plan" comment for the PR head sha'
+  expected: >-
+    Predicted guard verdict PASS; the only change is an in-place update of aws_iam_role_policy.github_ci_planner adding
+    the TfstateGithubRead statement. This comment is what the operator approves before the merge.
+  fix_if: any other resource changes, or the verdict is BLOCKED or ERROR -- stop and return to the planner; never merge
+  hermetic: false
+  graduation: not-applicable
+- step: 3
+  phase: post-deploy
+  action: ENVIRONMENT CHECK before the live IAM read -- simulate-principal-policy needs the ADMIN chain (PlatformDev is denied it)
+  command: >-
+    aws sts get-caller-identity --profile agent_platform_admin --query Arn --output text 2>/dev/null | grep -q
+    'assumed-role/PlatformAdmin/' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT
+  expected: ADMIN_CHAIN_OK in this project's ADMIN environment, so the build session runs step 4 itself
+  fix_if: >-
+    ADMIN_CHAIN_ABSENT -- hand step 4 to an ADMIN session through the coordinator; PLAN-terraform-github-pr-plan's live
+    run (its terraform init reading the state) is a second proof of the grant, never a substitute for step 4
+  hermetic: false
+  graduation: not-applicable
+- step: 4
+  phase: post-deploy
+  action: Applied -- the push-path apply-sandbox run is green and the live planner policy allows exactly the new read
+  command: |-
+    bin/venv-python -c "import boto3; s=boto3.Session(profile_name='agent_platform_admin', region_name='eu-west-2'); a=s.client('sts').get_caller_identity()['Account']; iam=s.client('iam'); r='arn:aws:iam::'+a+':role/agent-platform-github-ci-planner'; b='arn:aws:s3:::agent-platform-data-lake/tfstate/github/'; d=lambda act,res: iam.simulate_principal_policy(PolicySourceArn=r, ActionNames=[act], ResourceArns=[res])['EvaluationResults'][0]['EvalDecision']; got=(d('s3:GetObject', b+'terraform.tfstate'), d('s3:PutObject', b+'terraform.tfstate'), d('s3:GetObject', b+'other.tfstate')); print('SIMULATE', got); assert got==('allowed','implicitDeny','implicitDeny'), got; print('PLANNER_GITHUB_STATE_READ_OK')"
+  expected: >-
+    The terraform-apply-sandbox push run for the merge commit is green (mcp__github__actions_list / actions_get), then
+    SIMULATE ('allowed', 'implicitDeny', 'implicitDeny') and PLANNER_GITHUB_STATE_READ_OK. Read-only admin call
+    (standing). Post only the SIMULATE tuple, never the role ARN or account id.
+  fix_if: the apply run is red or routed -- follow deploy-paths.yaml's reconcile row, never a local apply; any other tuple -- stop and RCA (Decision 55)
+  hermetic: false
+  graduation: not-applicable
+- step: 5
+  phase: pre-deploy
+  action: Fast tier before push
+  command: bin/venv-python -m scripts.validate --pre
+  expected: >-
+    exit 0; validate_graduation_completeness and the iam_tf checks PASS. The 10,240 B byte guard is the HCL
+    precondition on aws_iam_role_policy.github_ci_planner, which runs at the CI speculative plan (step 2), not here.
+  fix_if: any failure -- fix on the branch
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: A whole fast-tier run over diff-relative state; graduate steps may not invoke scripts.validate (recursion), and step 1 carries the durable regression.
+- step: 6
+  phase: pre-deploy
+  action: Full tier, then HEAD attestation, before commit and push (handoff_policy)
+  command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+  expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+  fix_if: any failure -- fix and rerun the full tier from the start; never push on a partial or timed-out run
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: The full tier cannot graduate (recursion refusal) and depends on the whole tree at HEAD; it is the handoff gate, not a regression check.
+test_obligations:
+- source: terraform/personal/oidc_pipeline_roles.tf
+  behavior: the planner reads exactly the one terraform/github state object and nothing else on tfstate/github
+  verification_step: 1
+  test_selector: "tests/test_terraform_github_pr_plan.py::TestPlannerStateGrant"
+  red_green_expectation: red before (statement and class absent), green after
+- source: config/agent/verification_registry/entries/terraform-github-plan-planner-state-grant.yaml
+  behavior: step 1's graduated check is admitted under this plan's slug
+  verification_step: 5
+  command: bin/venv-python -m scripts.validate --pre
+  red_green_expectation: red before (a graduate step with no registry row fails validate_graduation_completeness), green after
+constraints:
+- "IAM is always-ask: the PR merges only on the operator's own typed word in the build thread naming this PR, after the speculative-plan comment (VP step 2) is shown. Exactly one statement is added; no trust, boundary, role or other policy change."
+- "No apply by an agent; the governed PR -> CI path applies it (Decision 126)."
+- "Public repo (Decision 101): no account id or ARN in any file, comment or evidence."
+- "The PR carries no Resolves trailer: rec-4335 closes with PLAN-terraform-github-pr-plan's PR."
+- No rescue agents or workaround loops (Decision 55).
+context:
+- "Decision-scout verdict (run on the combined design, 2026-10-15): FLAGS_FOUND -- none on this half beyond Decision 144 cl.5 in-budget and Decision 92 pt2 (trust untouched). CITE: Decision 144, 92, 126, 101, 48, 218. Decisions triaged: 171 of 171. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 3"
+- "gates: decision-scout=FLAGS_FOUND; plan-critique=PROCEED after 3 round(s); round 3 autonomous (J11 Allow-only scoping folded)"
+- "Split from PLAN-terraform-github-pr-plan at critique round 1 (M1): one plan per PR (rec-3139 convention), so each PR carries its own implementation_declared flip and graduation rows. Design and operator approval are shared: Benjamin, 2026-10-15, thread message cmsg_017f94mmYqSe3q2p9o6tPW3UXPtLoJDpYr4dee7sinLKwW ('happy with your recommendations. write the plan'); presentation /mnt/project-files/terraform-github-pr-plan/step6b-presentation.md."
+- "Why the planner role: it already reads tfstate/personal/* under a PR-sub trust with a non-reserved session; the read-only github_ci_pr role must never gain tfstate access, and a new role would mean a trust edit and a sixth CI role in github-org-transfer.yaml."
+- "Order: this plan's PR merges and is verified (steps 3-4) before PLAN-terraform-github-pr-plan's workflow PR is pushed (IAM-before-consumer, ci.yml terraform-validate comment). Both land before the OIDC pre-stage build PR merges (its freeze point)."
+- "Overlap (2026-10-15): the OIDC pre-stage plan edits local.github_repos (oidc.tf) and the bootstrap trust, not this policy document; IAM refactor PR #1500 touches terraform/bootstrap only among .tf files."
+- "V3 resolution: terraform/personal applies only at merge, so the pre-merge V3 evidence is the speculative-plan comment for the PR head and its run URL (VP step 2), which the implement V3 Merge Gate and the code-review V3 check read for this plan; the behavioural acceptance (Decision 48) is VP steps 3-4 after merge, posted as a comment on the merged PR (the SIMULATE tuple and the apply run URL). Precedent: PLAN-platform-iam-bootstrap-adopt, PLAN-heartbeat-canary-plan-time-grant."
+- "What the grant exposes: tfstate/github holds repository settings and GitHub numeric ids (the bypass actor role and the reviewer ids), no secret -- the root manages no Actions secret and var.github_token is sensitive and never persisted to state."
+- "Out-of-scope finding filed (critique round 2 J8): rec-4353, PlatformDev can already write tfstate/github (its write Deny covers tfstate/personal only); pre-existing, not widened here."
+- "CI-RCA: no open critical rec at plan start (ci_rca_open empty, 2026-10-15)."
+pre_implementation_checklist:
+- Branch confirmed not on main
+- docs/PROJECT_CONTEXT.md read
+- only the plan-cited decision sections
+- All files in scope located and readable
+- Acceptance criteria understood and verifiable
+execution_steps:
+- |-
+  terraform/personal/oidc_pipeline_roles.tf -- in data "aws_iam_policy_document" "github_ci_planner", directly after the TfstateNativeLockFile statement, insert this statement verbatim (two-space indent as shown):
+    statement {
+      # rec-4335: the PR-time terraform/github plan (terraform-github-plan.yml) reads that root's
+      # state. GetObject on the ONE state object only -- no PutObject (the plan runs -lock=false, so
+      # no .tflock write) and no other key under tfstate/github/.
+      sid       = "TfstateGithubRead"
+      effect    = "Allow"
+      actions   = ["s3:GetObject"]
+      resources = ["${aws_s3_bucket.data_lake.arn}/tfstate/github/terraform.tfstate"]
+    }
+- |-
+  tests/test_terraform_github_pr_plan.py -- create it with a module docstring naming rec-4335 and class TestPlannerStateGrant: a pure predicate over HCL text, run on the real file and on synthetic red cases. (a) The github_ci_planner policy document carries exactly one statement whose resources mention tfstate/github: sid TfstateGithubRead, effect Allow, actions exactly ["s3:GetObject"], resources exactly ["${aws_s3_bucket.data_lake.arn}/tfstate/github/terraform.tfstate"], no condition. (b) With comments stripped, the literal "tfstate/github" appears in no other Allow statement of any terraform/personal/*.tf file (HCL effect = "Allow" blocks, and jsonencode statements with Effect = "Allow" or no Effect); Deny statements are out of scope, and a synthetic Deny on tfstate/github/* in another file passes (rec-4353 adds exactly such a Deny). (c) ci_full_refresh_read's TfstateRead still names only tfstate/personal/*. (d) Glob coverage, action-aware: among the statements the planner policy composes (its own plus ci_full_refresh_read and ci_ssm_refresh_read), only those with an action that fnmatches s3:GetObject (s3:GetObject, s3:Get*, s3:* or *) are checked; their resources, with ${aws_s3_bucket.data_lake.arn} expanded to arn:aws:s3:::agent-platform-data-lake, are fnmatch-ed against arn:aws:s3:::agent-platform-data-lake/tfstate/github/terraform.tfstate, and only TfstateGithubRead may match. The Resource "*" statements (SSMDescribeParameters, SNSSubscriptionRead, CloudWatchAlarmsRead, CloudWatchLogsRead) are excluded by action, not by name. Red cases on synthetic HCL, each failing the predicate: a tfstate/github/* wildcard, an added s3:PutObject, the grant placed in ci_full_refresh_read, the grant placed in github_ci_pr's policy, a broader tfstate/* or bucket/* resource on another planner statement that carries s3:GetObject, and s3:GetObject on "*". Reuse tests/fixtures/terraform_hcl_blocks.py helpers where they fit; no cross-test imports.
+- Create the step 1 registry entry.
+- |-
+  Closure (implement skill Commit Flows; docs/contracts/git-ops.yaml), each outcome reported separately: bin/venv-python -m scripts.session.github_readiness, implementation_declared true in this plan, rebase on origin/main, VP steps 1 and 5, VP step 6 on the committed clean tree then --verify-head, then write /tmp/implementation-retrospective.json with the ten scripts.session.postflight_evidence.CATEGORIES keys and run bin/venv-python -m scripts.session.postflight --evidence /tmp/implementation-retrospective.json, push, the PR (no Resolves trailer), subscribe_pr_activity on it. Read the speculative-plan comment for the PR head (VP step 2) and post in the build thread the plan's change line, the predicted verdict and the exact statement, asking the operator to reply "merge PR A". Then dispatch code review (the code-review skill in a fresh context) with the context 'V3 resolution:' line quoted in its prompt, so its V3 Post-Deploy Evidence check reads the speculative-plan comment and its run URL; fix every blocking finding. Squash-merge only when all three hold: code review PROCEED, CI green on the head, and that typed word in the build thread (IAM is always-ask). Then wait for the push-path apply run's event (never poll), run VP steps 3 and 4, post the SIMULATE tuple and the apply run URL as a comment on the merged PR, and tell the coordinator the grant is live so PLAN-terraform-github-pr-plan's build can push its workflow PR.
+- 'Report: what was implemented, the VP results and the SIMULATE tuple'
+rollback: >-
+  Revert the PR; the next apply removes the statement (an in-budget update). Nothing else changes.

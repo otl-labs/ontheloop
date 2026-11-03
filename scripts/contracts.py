@@ -20,6 +20,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from scripts.contract_rules import not_null_declared, parse_yaml
 from scripts.contracts_schema import (
     ContractClass,
     ContractDocument,
@@ -87,17 +88,23 @@ def load_contract(path: str | Path) -> ContractDocument:
         raise ContractValidationError(f"cannot read contract file {p}: {exc}") from exc
 
     try:
-        data = yaml.safe_load(raw_text)
+        data = parse_yaml(raw_text)
     except yaml.YAMLError as exc:
         raise ContractValidationError(f"invalid YAML in {p}: {exc}") from exc
 
+    return _validate_contract(data, p)
+
+
+def _validate_contract(data: Any, path: Path) -> ContractDocument:
+    """Schema-validate an already-parsed contract mapping (the load_contract/load_all_contracts
+    shared tail), so load_all_contracts never re-reads or re-parses a file it already parsed."""
     if not isinstance(data, dict):
-        raise ContractValidationError(f"contract {p} must be a YAML mapping, got {type(data).__name__}")
+        raise ContractValidationError(f"contract {path} must be a YAML mapping, got {type(data).__name__}")
 
     try:
         return ContractDocument.model_validate(data)
     except ValidationError as exc:
-        raise ContractValidationError(f"schema validation failed for {p}: {exc}") from exc
+        raise ContractValidationError(f"schema validation failed for {path}: {exc}") from exc
 
 
 def load_all_contracts(contracts_dir: str | Path) -> dict[str, ContractDocument]:
@@ -114,6 +121,9 @@ def load_all_contracts(contracts_dir: str | Path) -> dict[str, ContractDocument]
     context_docs.py wraps this in a bare `except Exception: pass`, which would silently swallow
     that raise and kill the whole provisional-contract scan for every contract, not just the D
     file that triggered it. Use load_contract_meta for Class D.
+
+    Each file is read and parsed exactly once here -- never via load_contract, which would
+    re-read and re-parse a file this function already parsed.
     """
     directory = Path(contracts_dir)
     out: dict[str, ContractDocument] = {}
@@ -122,14 +132,14 @@ def load_all_contracts(contracts_dir: str | Path) -> dict[str, ContractDocument]
 
     for yaml_path in sorted(directory.glob("*.yaml")):
         try:
-            data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+            data = parse_yaml(yaml_path.read_text(encoding="utf-8"))
         except (OSError, yaml.YAMLError):
             continue
         if not _is_ritual_contract(data):
             continue
         if data["contract"].get("class") == ContractClass.D.value:
             continue
-        doc = load_contract(yaml_path)
+        doc = _validate_contract(data, yaml_path)
         out[doc.contract.id] = doc
     return out
 
@@ -163,7 +173,7 @@ def load_contract_meta(path: str | Path) -> ContractMeta:
         raise ContractValidationError(f"cannot read contract file {p}: {exc}") from exc
 
     try:
-        data = yaml.safe_load(raw_text)
+        data = parse_yaml(raw_text)
     except yaml.YAMLError as exc:
         raise ContractValidationError(f"invalid YAML in {p}: {exc}") from exc
 
@@ -279,15 +289,13 @@ def _layer_overrides(name: str, target: FieldSpec, local: FieldSpec) -> FieldSpe
 def _override_loosens(referenced: dict[str, Any] | None, override: dict[str, Any]) -> bool:
     """True iff `override` weakens a constraint the referenced field already enforces.
 
-    Concrete rule: a referenced `not_null.enforced: true` cannot be overridden to false.
+    Concrete rule: a referenced not_null (declared by presence) cannot be overridden by a legacy `{enforced: false}`.
     """
     if not referenced:
         return False
-    ref_nn = referenced.get("not_null")
     ovr_nn = override.get("not_null")
-    if isinstance(ref_nn, dict) and isinstance(ovr_nn, dict):
-        if ref_nn.get("enforced") is True and ovr_nn.get("enforced") is False:
-            return True
+    if isinstance(ovr_nn, dict) and ovr_nn.get("enforced") is False:
+        return not_null_declared(referenced.get("not_null"))
     return False
 
 

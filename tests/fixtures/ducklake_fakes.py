@@ -13,6 +13,7 @@ src.common.ducklake_runtime directly (not the tests/common/test_ducklake_runtime
 from __future__ import annotations
 
 from src.common import ducklake_runtime as rt
+from tests.fixtures.ops_portal_records import VALID_FIELDS
 
 _SEMANTICS = {
     "fields": {
@@ -29,6 +30,16 @@ _SEMANTICS = {
 }
 
 
+def ops_rec_fields(**overrides):
+    """A rule-clean ops_recommendations input record WITHOUT its merge key (the file_scd2 shape)."""
+    return {**VALID_FIELDS, **overrides}
+
+
+def ops_rec_record(**overrides):
+    """A rule-clean ops_recommendations input record carrying id rec-1 (the write_scd2 shape)."""
+    return {"id": "rec-1", **VALID_FIELDS, **overrides}
+
+
 class FakeCon:
     """DuckDB-connection double: records (sql, params); simulates OCC + hard failures + reads."""
 
@@ -42,7 +53,9 @@ class FakeCon:
         rollback_raises: bool = False,
     ):
         self.executed: list[tuple[str, list | None]] = []
-        self._created_lookup = created_lookup  # None/[] -> insert path; [(ts,)] -> update path
+        # None/[] -> insert path; [(ts,)] -> update path. A scripted prior is a tuple (created_timestamp[, status], padded
+        # with None to the selected columns) or a dict of column -> value in any order.
+        self._created_lookup = created_lookup
         self._occ_fail_times = occ_fail_times
         self._merge_hist_calls = 0
         self._hard_fail_substr = hard_fail_substr
@@ -73,10 +86,17 @@ class FakeCon:
 
     def fetchall(self):
         if self._last.startswith("SELECT created_timestamp"):
-            return self._created_lookup or []
+            columns = [c.strip() for c in self._last[len("SELECT ") : self._last.index(" FROM ")].split(",")]
+            return [self._prior_row(row, columns) for row in (self._created_lookup or [])]
         if self._last.startswith("SELECT ulid"):
             return self._read_rows
         return []
+
+    @staticmethod
+    def _prior_row(row, columns):
+        if isinstance(row, dict):
+            return tuple(row.get(c) for c in columns)
+        return tuple(row) + (None,) * (len(columns) - len(row))
 
     def merge_history_params(self) -> list[list]:
         """All params bound to the history MERGE, one per attempt."""

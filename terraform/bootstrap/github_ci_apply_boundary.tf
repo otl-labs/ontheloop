@@ -163,6 +163,172 @@ locals {
           # the boundary's (no circular resource reference).
           "arn:aws:iam::${var.account_id}:policy/agent-platform-github-ci-apply-reads",
         ]
+      },
+      {
+        # URL-only invariant (Decision 213 cl.1). A handler that trusts requestContext.authorizer.iam is safe
+        # only while every non-URL path to it is closed, so the three statements here and below close those
+        # paths for the DuckLake writer, reader and telemetry writer. The telemetry writer is named before
+        # its function exists, which IAM accepts. lambda:InvokedViaFunctionUrl is false on a direct call and
+        # true through the Function URL (live-verified 2026-10-06); BoolIfExists also denies a call that
+        # carries no such key at all.
+        Sid    = "DenyDuckLakeDirectInvoke"
+        Effect = "Deny"
+        Action = [
+          "lambda:InvokeFunction",
+          "lambda:InvokeAsync"
+        ]
+        Resource = [
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer",
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer:*",
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader",
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader:*",
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-*",
+        ]
+        Condition = {
+          BoolIfExists = {
+            "lambda:InvokedViaFunctionUrl" = "false"
+          }
+        }
+      },
+      {
+        # A boundary cannot see service principals, so the resource-policy path is denied at its control
+        # point: no bounded identity, the CI apply role included, may grant a service principal or another
+        # account a way in that bypasses the Function URL. Both generations of the API are named: Add and
+        # RemovePermission edit one statement, while PutResourcePolicy and DeleteResourcePolicy replace or
+        # drop the whole function policy. Unconditioned on purpose.
+        Sid    = "DenyDuckLakeResourcePolicyEdit"
+        Effect = "Deny"
+        Action = [
+          "lambda:AddPermission",
+          "lambda:RemovePermission",
+          "lambda:PutResourcePolicy",
+          "lambda:DeleteResourcePolicy"
+        ]
+        Resource = [
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer",
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer:*",
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader",
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader:*",
+          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-*",
+        ]
+      },
+      {
+        # Event source mappings are the third non-URL path: a mapping makes the Lambda service itself invoke
+        # the function, outside any identity check. CreateEventSourceMapping has no function resource to
+        # name, so the Deny sits on the wildcard and is keyed on lambda:FunctionArn. PlatformAdmin and root
+        # are outside this boundary by design (Decision 144 cl.3) and remain the trusted operators.
+        Sid    = "DenyDuckLakeEventSourceMapping"
+        Effect = "Deny"
+        Action = [
+          "lambda:CreateEventSourceMapping",
+          "lambda:UpdateEventSourceMapping"
+        ]
+        Resource = ["*"]
+        Condition = {
+          ArnLike = {
+            "lambda:FunctionArn" = [
+              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer",
+              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer:*",
+              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader",
+              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader:*",
+              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-*",
+            ]
+          }
+        }
+      },
+      {
+        # Decision 230 cl.5: the production telemetry catalog's data prefix and its blob root are reachable only by
+        # the roles that serve or maintain that catalog. PlatformDev and the CI roles carry this boundary, so their
+        # bucket-wide S3 grants are fenced here without an identity-side edit. The roles may not exist yet, which
+        # IAM accepts.
+        Sid    = "DenyTelemetryProdPrefixIO"
+        Effect = "Deny"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:PutObject",
+          "s3:DeleteObject"
+        ]
+        Resource = [
+          "arn:aws:s3:::agent-platform-data-lake/ducklake-telemetry/*",
+          "arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/ducklake_telemetry/*"
+        ]
+        Condition = {
+          ArnNotLike = {
+            "aws:PrincipalArn" = [
+              "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-writer",
+              "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-reader",
+              "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-maintenance"
+            ]
+          }
+        }
+      },
+      {
+        # Presigned PUTs execute as the signing role, so only the writer and its smoke twin may put a blob.
+        Sid      = "DenyTelemetryBlobPut"
+        Effect   = "Deny"
+        Action   = ["s3:PutObject"]
+        Resource = ["arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/*"]
+        Condition = {
+          ArnNotLike = {
+            "aws:PrincipalArn" = [
+              "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-writer",
+              "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-writer-smoke"
+            ]
+          }
+        }
+      },
+      {
+        # The blob sweep is a plain DeleteObject from the admin maintenance role; the bucket's noncurrent
+        # lifecycle reclaims the bytes.
+        Sid      = "DenyTelemetryBlobDelete"
+        Effect   = "Deny"
+        Action   = ["s3:DeleteObject"]
+        Resource = ["arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/*"]
+        Condition = {
+          ArnNotLike = {
+            "aws:PrincipalArn" = ["arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-maintenance"]
+          }
+        }
+      },
+      {
+        # No bounded identity deletes an object version of telemetry data, so the lifecycle is the only reclaimer.
+        Sid    = "DenyTelemetryVersionDelete"
+        Effect = "Deny"
+        Action = ["s3:DeleteObjectVersion"]
+        Resource = [
+          "arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/*",
+          "arn:aws:s3:::agent-platform-data-lake/ducklake-telemetry/*"
+        ]
+      },
+      {
+        # The CI branch and CI PR roles are reached by agents without review (agent pushes, pull_request jobs) and
+        # never need Terraform state, saved plans or review transcripts, so they may not read, overwrite or delete
+        # them. The branch role's inline Deny is removable by an auto-applied PR; this admin-held copy is not
+        # (Decision 143 cl.1, rec-4645). The condition leaves the apply role, planner, PlatformDev and every other
+        # carrier of this shared boundary untouched.
+        Sid    = "DenyCiAgentRoleStatePlanAndTranscriptIO"
+        Effect = "Deny"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:DeleteObjectVersion"
+        ]
+        Resource = [
+          "arn:aws:s3:::agent-platform-data-lake/tfstate/*",
+          "arn:aws:s3:::agent-platform-data-lake/tfplan/*",
+          "arn:aws:s3:::agent-platform-data-lake/ci-rca-evidence/review-transcripts/*"
+        ]
+        Condition = {
+          ArnLike = {
+            "aws:PrincipalArn" = [
+              "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-branch",
+              "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-pr"
+            ]
+          }
+        }
       }
     ]
   })

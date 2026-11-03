@@ -5,8 +5,32 @@ import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from scripts.checks import _scaffolding
 from scripts.checks.misc import coverage_baseline
 from scripts.checks.misc.coverage_baseline import _SPEC
+
+
+def _probe_files(tmp_path: Path) -> tuple[Path, Path]:
+    source = tmp_path / "scripts" / "probe.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("x = 1\n", encoding="utf-8")
+    test_file = tmp_path / "tests" / "test_probe.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("# test\n", encoding="utf-8")
+    return source, test_file
+
+
+def _mock_subprocess() -> MagicMock:
+    mock_subprocess = MagicMock()
+    proc = MagicMock()
+    proc.__enter__.return_value = proc
+    proc.__exit__.return_value = False
+    proc.communicate.return_value = ("", "")
+    proc.returncode = 0
+    mock_subprocess.Popen.return_value = proc
+    return mock_subprocess
 
 
 class TestLoadBaseline:
@@ -88,12 +112,7 @@ class TestMeasureAndCheck:
         mock_subprocess.Popen.assert_not_called()
 
     def test_measures_matched_file_pct(self, tmp_path: Path) -> None:
-        source = tmp_path / "scripts" / "probe.py"
-        source.parent.mkdir(parents=True)
-        source.write_text("x = 1\n", encoding="utf-8")
-        test_file = tmp_path / "tests" / "test_probe.py"
-        test_file.parent.mkdir(parents=True)
-        test_file.write_text("# test\n", encoding="utf-8")
+        source, test_file = _probe_files(tmp_path)
 
         coverage_json = tmp_path / ".coverage.json"
         coverage_json.write_text('{"files": {"scripts/probe.py": {"summary": {"percent_covered": 87.7}}}}', encoding="utf-8")
@@ -103,13 +122,7 @@ class TestMeasureAndCheck:
         config_dir.mkdir()
         (config_dir / "coverage_baseline.yaml").write_text("entries:\n  scripts/probe.py: 80.0\n", encoding="utf-8")
 
-        mock_subprocess = MagicMock()
-        proc = MagicMock()
-        proc.__enter__.return_value = proc
-        proc.__exit__.return_value = False
-        proc.communicate.return_value = ("", "")
-        proc.returncode = 0
-        mock_subprocess.Popen.return_value = proc
+        mock_subprocess = _mock_subprocess()
 
         pcts, errors = coverage_baseline.measure_and_check(
             [source],
@@ -124,26 +137,50 @@ class TestMeasureAndCheck:
         cov_args = [a for a in called_cmd if isinstance(a, str) and a.startswith("--cov=")]
         assert cov_args == ["--cov=scripts"], called_cmd
 
+    def test_child_selects_the_full_tier_marker_expression(self, tmp_path: Path) -> None:
+        full_tier = _scaffolding._build_unit_test_cmd()
+        expected = full_tier[full_tier.index("-m", full_tier.index("pytest")) + 1]
+        source, test_file = _probe_files(tmp_path)
+        mock_subprocess = _mock_subprocess()
+
+        coverage_baseline.measure_and_check(
+            [source],
+            root=tmp_path,
+            map_source_to_test=lambda p: test_file,
+            is_empty_dir=lambda p: False,
+            subprocess_module=mock_subprocess,
+        )
+        argv = mock_subprocess.Popen.call_args.args[0]
+        after_pytest = argv[argv.index("pytest") :]
+        assert after_pytest[after_pytest.index("-m") + 1] == expected, argv
+
+    def test_child_runs_on_the_sysmon_core(self, tmp_path: Path) -> None:
+        """rec-4365: the per-file coverage child runs with COVERAGE_CORE=sysmon, read from
+        coverage_baseline.COVERAGE_CORE rather than the literal -- so a renamed constant value
+        is still what the child actually sees."""
+        source, test_file = _probe_files(tmp_path)
+        mock_subprocess = _mock_subprocess()
+
+        coverage_baseline.measure_and_check(
+            [source],
+            root=tmp_path,
+            map_source_to_test=lambda p: test_file,
+            is_empty_dir=lambda p: False,
+            subprocess_module=mock_subprocess,
+        )
+        child_env = mock_subprocess.Popen.call_args.kwargs["env"]
+        assert child_env["COVERAGE_CORE"] == coverage_baseline.COVERAGE_CORE
+        assert coverage_baseline.COVERAGE_CORE == "sysmon"
+
     def test_unmatched_report_yields_none_and_error(self, tmp_path: Path) -> None:
-        source = tmp_path / "scripts" / "probe.py"
-        source.parent.mkdir(parents=True)
-        source.write_text("x = 1\n", encoding="utf-8")
-        test_file = tmp_path / "tests" / "test_probe.py"
-        test_file.parent.mkdir(parents=True)
-        test_file.write_text("# test\n", encoding="utf-8")
+        source, test_file = _probe_files(tmp_path)
 
         coverage_json = tmp_path / ".coverage.json"
         coverage_json.write_text(
             '{"files": {"scripts/unrelated.py": {"summary": {"percent_covered": 100.0}}}}', encoding="utf-8"
         )
 
-        mock_subprocess = MagicMock()
-        proc = MagicMock()
-        proc.__enter__.return_value = proc
-        proc.__exit__.return_value = False
-        proc.communicate.return_value = ("", "")
-        proc.returncode = 0
-        mock_subprocess.Popen.return_value = proc
+        mock_subprocess = _mock_subprocess()
 
         pcts, errors = coverage_baseline.measure_and_check(
             [source],
@@ -156,20 +193,9 @@ class TestMeasureAndCheck:
         assert any("0% coverage" in e for e in errors)
 
     def test_missing_coverage_json_yields_none_no_error(self, tmp_path: Path) -> None:
-        source = tmp_path / "scripts" / "probe.py"
-        source.parent.mkdir(parents=True)
-        source.write_text("x = 1\n", encoding="utf-8")
-        test_file = tmp_path / "tests" / "test_probe.py"
-        test_file.parent.mkdir(parents=True)
-        test_file.write_text("# test\n", encoding="utf-8")
+        source, test_file = _probe_files(tmp_path)
 
-        mock_subprocess = MagicMock()
-        proc = MagicMock()
-        proc.__enter__.return_value = proc
-        proc.__exit__.return_value = False
-        proc.communicate.return_value = ("", "")
-        proc.returncode = 0
-        mock_subprocess.Popen.return_value = proc
+        mock_subprocess = _mock_subprocess()
 
         pcts, errors = coverage_baseline.measure_and_check(
             [source],
@@ -196,22 +222,11 @@ class TestMeasureAndCheck:
         assert errors == []
 
     def test_malformed_coverage_json_yields_none(self, tmp_path: Path) -> None:
-        source = tmp_path / "scripts" / "probe.py"
-        source.parent.mkdir(parents=True)
-        source.write_text("x = 1\n", encoding="utf-8")
-        test_file = tmp_path / "tests" / "test_probe.py"
-        test_file.parent.mkdir(parents=True)
-        test_file.write_text("# test\n", encoding="utf-8")
+        source, test_file = _probe_files(tmp_path)
 
         (tmp_path / ".coverage.json").write_text("{not valid json", encoding="utf-8")
 
-        mock_subprocess = MagicMock()
-        proc = MagicMock()
-        proc.__enter__.return_value = proc
-        proc.__exit__.return_value = False
-        proc.communicate.return_value = ("", "")
-        proc.returncode = 0
-        mock_subprocess.Popen.return_value = proc
+        mock_subprocess = _mock_subprocess()
 
         pcts, errors = coverage_baseline.measure_and_check(
             [source],
@@ -224,24 +239,13 @@ class TestMeasureAndCheck:
         assert errors == []
 
     def test_unlink_oserror_is_swallowed(self, tmp_path: Path) -> None:
-        source = tmp_path / "scripts" / "probe.py"
-        source.parent.mkdir(parents=True)
-        source.write_text("x = 1\n", encoding="utf-8")
-        test_file = tmp_path / "tests" / "test_probe.py"
-        test_file.parent.mkdir(parents=True)
-        test_file.write_text("# test\n", encoding="utf-8")
+        source, test_file = _probe_files(tmp_path)
 
         (tmp_path / ".coverage.json").write_text(
             '{"files": {"scripts/probe.py": {"summary": {"percent_covered": 100.0}}}}', encoding="utf-8"
         )
 
-        mock_subprocess = MagicMock()
-        proc = MagicMock()
-        proc.__enter__.return_value = proc
-        proc.__exit__.return_value = False
-        proc.communicate.return_value = ("", "")
-        proc.returncode = 0
-        mock_subprocess.Popen.return_value = proc
+        mock_subprocess = _mock_subprocess()
 
         with patch("pathlib.Path.unlink", side_effect=OSError("locked")):
             pcts, errors = coverage_baseline.measure_and_check(
@@ -254,15 +258,10 @@ class TestMeasureAndCheck:
         assert pcts == {str(source.resolve()): 100.0}
         assert errors == []
 
-    def test_timeout_yields_none_and_error(self, tmp_path: Path) -> None:
+    def _timeout_scaffold(self, tmp_path: Path, side_effect: BaseException) -> tuple:
         import subprocess as real_subprocess
 
-        source = tmp_path / "scripts" / "probe.py"
-        source.parent.mkdir(parents=True)
-        source.write_text("x = 1\n", encoding="utf-8")
-        test_file = tmp_path / "tests" / "test_probe.py"
-        test_file.parent.mkdir(parents=True)
-        test_file.write_text("# test\n", encoding="utf-8")
+        source, test_file = _probe_files(tmp_path)
 
         mock_subprocess = MagicMock()
         mock_subprocess.TimeoutExpired = real_subprocess.TimeoutExpired
@@ -270,11 +269,21 @@ class TestMeasureAndCheck:
         proc = MagicMock()
         proc.__enter__.return_value = proc
         proc.__exit__.return_value = False
-        proc.communicate.side_effect = real_subprocess.TimeoutExpired(cmd="pytest", timeout=300)
-        proc.pid = 12345
+        proc.communicate.side_effect = side_effect
         mock_subprocess.Popen.return_value = proc
+        return source, test_file, mock_subprocess, proc
 
-        with patch("scripts.llm.utils.kill_process_tree") as mock_kill:
+    def test_timeout_kills_the_child_group_and_records_the_cap(self, tmp_path: Path, capsys) -> None:
+        import subprocess as real_subprocess
+
+        source, test_file, mock_subprocess, proc = self._timeout_scaffold(
+            tmp_path, real_subprocess.TimeoutExpired(cmd="pytest", timeout=7)
+        )
+
+        with (
+            patch.object(coverage_baseline, "COVERAGE_TIMEOUT_SECONDS", 7),
+            patch("scripts.checks._process_group.kill_and_reap", return_value=("", "tail")) as mock_kill,
+        ):
             pcts, errors = coverage_baseline.measure_and_check(
                 [source],
                 root=tmp_path,
@@ -282,9 +291,26 @@ class TestMeasureAndCheck:
                 is_empty_dir=lambda p: False,
                 subprocess_module=mock_subprocess,
             )
-        mock_kill.assert_called_once_with(12345)
+        assert mock_subprocess.Popen.call_args.kwargs["start_new_session"] is True
+        assert proc.communicate.call_args.kwargs["timeout"] == 7
+        mock_kill.assert_called_once_with(proc)
+        assert errors == ["scripts/probe.py: coverage check timed out (7s)"]
         assert pcts == {str(source.resolve()): None}
-        assert any("timed out" in e for e in errors)
+        assert "killed at 7s" in capsys.readouterr().out
+
+    def test_interrupt_while_waiting_kills_the_child_group_and_reraises(self, tmp_path: Path) -> None:
+        source, test_file, mock_subprocess, proc = self._timeout_scaffold(tmp_path, KeyboardInterrupt())
+
+        with patch("scripts.checks._process_group.kill_and_reap") as mock_kill:
+            with pytest.raises(KeyboardInterrupt):
+                coverage_baseline.measure_and_check(
+                    [source],
+                    root=tmp_path,
+                    map_source_to_test=lambda p: test_file,
+                    is_empty_dir=lambda p: False,
+                    subprocess_module=mock_subprocess,
+                )
+        mock_kill.assert_called_once_with(proc)
 
 
 class TestSubthresholdDiagnostics:
@@ -299,12 +325,7 @@ class TestSubthresholdDiagnostics:
         check_per_file_coverage() separately appends its own baseline-aware message to the same
         list; a second errors entry here would silently double that list instead of adding
         value."""
-        source = tmp_path / "scripts" / "probe.py"
-        source.parent.mkdir(parents=True)
-        source.write_text("x = 1\n", encoding="utf-8")
-        test_file = tmp_path / "tests" / "test_probe.py"
-        test_file.parent.mkdir(parents=True)
-        test_file.write_text("# test\n", encoding="utf-8")
+        source, test_file = _probe_files(tmp_path)
 
         coverage_json = tmp_path / ".coverage.json"
         coverage_json.write_text(
@@ -339,12 +360,7 @@ class TestSubthresholdDiagnostics:
         """'sub-threshold' is decided by load_baseline/compare, never by 'has missing lines' -- a
         baselined file with missing lines that still clears its own threshold must not get a
         spurious diagnostic (11+ live sub-100 baseline entries pass this way today)."""
-        source = tmp_path / "scripts" / "probe.py"
-        source.parent.mkdir(parents=True)
-        source.write_text("x = 1\n", encoding="utf-8")
-        test_file = tmp_path / "tests" / "test_probe.py"
-        test_file.parent.mkdir(parents=True)
-        test_file.write_text("# test\n", encoding="utf-8")
+        source, test_file = _probe_files(tmp_path)
 
         config_dir = tmp_path / "config"
         config_dir.mkdir()
@@ -356,13 +372,7 @@ class TestSubthresholdDiagnostics:
             encoding="utf-8",
         )
 
-        mock_subprocess = MagicMock()
-        proc = MagicMock()
-        proc.__enter__.return_value = proc
-        proc.__exit__.return_value = False
-        proc.communicate.return_value = ("", "")
-        proc.returncode = 0
-        mock_subprocess.Popen.return_value = proc
+        mock_subprocess = _mock_subprocess()
 
         pcts, errors = coverage_baseline.measure_and_check(
             [source],

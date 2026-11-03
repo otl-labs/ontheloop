@@ -1,0 +1,153 @@
+# Hand-authored expectations for the telemetry roll-up verbs (agent_run_token_rollup, session_process_event_rollup,
+# session_friction_rollup, model_call_cost_estimate). Residual-class file (Decision 166): one flow-mapping line per expectation,
+# why inline. Companion of derived_golden_state.yaml (same header rule, same shape, same selectors, same size rule); together
+# they are the one expectations set every engine asserts. PLAN-telemetry-golden-harness (rec-4025).
+#
+# AUTHORING RULE (as the state file): the contract formula applied BY HAND to the rows the CURRENT producer (parser_version
+# below) emits; never copied from a verb or oracle output; known_defect names the owner rec where the emitted rows carry a
+# known producer defect (none at parser_version 7: rec-4354's non-final usage is flagged on the row by usage_final false).
+# FORMULAS. tokens_*_total = sum over the session's model_call rows after R5c (one per observation_id; telemetry_agents.yaml
+# tokens_*_total); model_call_count = those rows; usage_missing_count = those with no token counts (none in these trees).
+# process_event_total = count of process_event observations; steps_completed_total = step-kind closes (telemetry_sessions.yaml).
+# Friction: facts are process_events at severity error|warning|critical and tool_call closes with outcome error|blocked;
+# each fact gets one label (hook:never_on_main -> branch_policy_block; any other process_event at error|critical ->
+# unmapped_block; at warning -> hook_fault; tool_call error -> tool_error; blocked -> tool_blocked); a blocked tool_call whose
+# own blocking hook is already a fact is not counted twice; rework needs 3 consecutive error closes of one tool in one turn
+# (a success or blocked close of the same tool breaks the run); classifier_version 1. label_counts rows compare sorted by label.
+# Cost: fixed_non_rollover_allowance rows derive cost_usd NULL with cost_source allowance (Decision 206), never 0.
+parser_version: 7
+trees:
+  - tree: corpus:hooks_resume_and_compact
+    pass: final
+    why: three model calls (10, 20, 30, 40 each) and six process events (resume x3, PreCompact, compact, PostCompact)
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 30, tokens_output_total: 60, tokens_cache_read_total: 90, tokens_cache_creation_total: 120, model_call_count: 3, usage_missing_count: 0}], why: 3 x (10, 20, 30, 40)}
+      - {verb: session_process_event_rollup, session: root, params: {}, rows: [{process_event_total: 6, steps_completed_total: 0}], why: six hook process events; no step observations}
+      - {verb: model_call_cost_estimate, session: root, params: {}, rows: [{event_timestamp: "2026-01-01T00:00:02Z", model: claude-test-1, billing_shape: fixed_non_rollover_allowance, tokens_input: 10, tokens_output: 20, cost_usd: null, cost_source: allowance}, {event_timestamp: "2026-01-01T00:00:05Z", tokens_input: 10, cost_usd: null, cost_source: allowance}, {event_timestamp: "2026-01-01T00:00:08Z", tokens_output: 20, cost_usd: null, cost_source: allowance}], why: allowance rows derive no dollar cost and never a 0}
+  - tree: corpus:hooks_resume_and_compact
+    pass: stop
+    why: a Stop pass emits the same three calls and six process events
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 30, tokens_output_total: 60, tokens_cache_read_total: 90, tokens_cache_creation_total: 120, model_call_count: 3, usage_missing_count: 0}], why: 3 x (10, 20, 30, 40)}
+      - {verb: session_process_event_rollup, session: root, params: {}, rows: [{process_event_total: 6, steps_completed_total: 0}], why: six hook process events}
+  - tree: corpus:resume_after_interrupt
+    pass: final
+    why: two model calls and two info process events
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 20, tokens_output_total: 40, tokens_cache_read_total: 60, tokens_cache_creation_total: 80, model_call_count: 2, usage_missing_count: 0}], why: 2 x (10, 20, 30, 40)}
+      - {verb: session_process_event_rollup, session: root, params: {}, rows: [{process_event_total: 2, steps_completed_total: 0}], why: hook:resume and hook:other}
+  - tree: corpus:close_cancelled_mid_stream
+    pass: final
+    why: two complete model calls
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 20, tokens_output_total: 40, tokens_cache_read_total: 60, tokens_cache_creation_total: 80, model_call_count: 2, usage_missing_count: 0}], why: 2 x (10, 20, 30, 40)}
+  - tree: corpus:close_cancelled_running_tool
+    pass: final
+    why: one model call
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 10, tokens_output_total: 20, tokens_cache_read_total: 30, tokens_cache_creation_total: 40, model_call_count: 1, usage_missing_count: 0}], why: one call}
+  - tree: corpus:close_failed_api_error
+    pass: final
+    why: two model calls; the blocked Bash close has no blocking hook row, so it is its own fact
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 20, tokens_output_total: 40, tokens_cache_read_total: 60, tokens_cache_creation_total: 80, model_call_count: 2, usage_missing_count: 0}], why: 2 x (10, 20, 30, 40)}
+      - {verb: session_friction_rollup, session: root, params: {}, rows: [{rework_total: 0, exception_total: 1, label_counts: [{label: tool_blocked, n: 1}], unmapped_count: 0, classifier_version: 1}], why: one blocked tool_call close with no hook fact, labelled tool_blocked}
+  - tree: corpus:subagent_sync
+    pass: final
+    why: root two calls, child agent1 one call
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 20, tokens_output_total: 40, tokens_cache_read_total: 60, tokens_cache_creation_total: 80, model_call_count: 2, usage_missing_count: 0}], why: 2 x (10, 20, 30, 40)}
+      - {verb: agent_run_token_rollup, session: "agent:agent1", params: {}, rows: [{tokens_input_total: 10, tokens_output_total: 20, tokens_cache_read_total: 30, tokens_cache_creation_total: 40, model_call_count: 1, usage_missing_count: 0}], why: the child's own call, not the parent's}
+  - tree: corpus:subagent_background_with_completion
+    pass: final
+    why: root two calls, child agent2 one call
+    expect:
+      - {verb: agent_run_token_rollup, session: "agent:agent2", params: {}, rows: [{tokens_input_total: 10, tokens_output_total: 20, tokens_cache_read_total: 30, tokens_cache_creation_total: 40, model_call_count: 1, usage_missing_count: 0}], why: the child's own call}
+  - tree: corpus:subagent_background_without_completion
+    pass: final
+    why: root two calls, child agent3 one call (no close)
+    expect:
+      - {verb: agent_run_token_rollup, session: "agent:agent3", params: {}, rows: [{tokens_input_total: 10, tokens_output_total: 20, tokens_cache_read_total: 30, tokens_cache_creation_total: 40, model_call_count: 1, usage_missing_count: 0}], why: the unclosed child still has its call}
+  - tree: corpus:nested_subagent_depth2
+    pass: final
+    why: root two calls, agent4 two calls, agent5 one call
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 20, tokens_output_total: 40, tokens_cache_read_total: 60, tokens_cache_creation_total: 80, model_call_count: 2, usage_missing_count: 0}], why: 2 x (10, 20, 30, 40)}
+      - {verb: agent_run_token_rollup, session: "agent:agent4", params: {}, rows: [{tokens_input_total: 20, tokens_output_total: 40, tokens_cache_read_total: 60, tokens_cache_creation_total: 80, model_call_count: 2, usage_missing_count: 0}], why: its own two calls}
+      - {verb: agent_run_token_rollup, session: "agent:agent5", params: {}, rows: [{tokens_input_total: 10, tokens_output_total: 20, tokens_cache_read_total: 30, tokens_cache_creation_total: 40, model_call_count: 1, usage_missing_count: 0}], why: its own call}
+      - {verb: model_call_cost_estimate, session: "agent:agent4", params: {}, rows: [{event_timestamp: "2026-01-01T00:00:03Z", cost_usd: null, cost_source: allowance}, {event_timestamp: "2026-01-01T00:00:05Z", cost_usd: null, cost_source: allowance}], why: two allowance rows}
+  - tree: corpus:fork_session_nested
+    pass: final
+    why: the copied head is skipped; one model call and one process event of the fork itself
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 10, tokens_output_total: 20, tokens_cache_read_total: 30, tokens_cache_creation_total: 40, model_call_count: 1, usage_missing_count: 0}], why: one call}
+      - {verb: session_process_event_rollup, session: root, params: {}, rows: [{process_event_total: 1, steps_completed_total: 0}], why: hook:start}
+  - tree: corpus:multiblock_response_interleaved_tool_results
+    pass: final
+    why: one multi-block response is one model call
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 10, tokens_output_total: 20, tokens_cache_read_total: 30, tokens_cache_creation_total: 40, model_call_count: 1, usage_missing_count: 0}], why: one call}
+  - tree: corpus:gate_and_precommit_markers
+    pass: final
+    why: four gate and precommit process_events at error; Bash closes error, success, error, error, success inside one turn
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 10, tokens_output_total: 20, tokens_cache_read_total: 30, tokens_cache_creation_total: 40, model_call_count: 1, usage_missing_count: 0}], why: one call}
+      - {verb: session_process_event_rollup, session: root, params: {}, rows: [{process_event_total: 4, steps_completed_total: 0}], why: three gate events and one precommit event}
+      - {verb: session_friction_rollup, session: root, params: {}, rows: [{rework_total: 0, exception_total: 7, label_counts: [{label: tool_error, n: 3}, {label: unmapped_block, n: 4}], unmapped_count: 4, classifier_version: 1}], why: "four error process_events with no mapped signature (unmapped_block) + three Bash error closes (tool_error); the error runs are [1] and [2] long (a success separates them) so no rework"}
+  - tree: corpus:status_markers
+    pass: final
+    why: "PLAN-retire-session-cli (v6): six Bash calls to repo CLIs and one echo; the status lines yield four process_events (tool_b skipped warning, tool_c failed error, tool_e skipped warning and failed error); the done, malformed and echoed lines yield none; one Bash close is an error"
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 10, tokens_output_total: 20, tokens_cache_read_total: 30, tokens_cache_creation_total: 40, model_call_count: 1, usage_missing_count: 0}], why: one call}
+      - {verb: session_process_event_rollup, session: root, params: {}, rows: [{process_event_total: 4, steps_completed_total: 0}], why: "PLAN-retire-session-cli (v6): the four status rows and no hook process events"}
+      - {verb: session_friction_rollup, session: root, params: {}, rows: [{rework_total: 0, exception_total: 5, label_counts: [{label: hook_fault, n: 2}, {label: tool_error, n: 1}, {label: unmapped_block, n: 2}], unmapped_count: 2, classifier_version: 1}], why: "PLAN-retire-session-cli (v6): until rec-4605 adds a status rule, the two warning rows read hook_fault and the two error rows unmapped_block (any other process_event at error); the one Bash error close is tool_error; no 3-run of errors so no rework"}
+  - tree: corpus:hook_blocked_tool_call
+    pass: final
+    why: hook:never_on_main error absorbs its blocked Bash close; hook:post error and hook:Stop warning are separate facts
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 10, tokens_output_total: 20, tokens_cache_read_total: 30, tokens_cache_creation_total: 40, model_call_count: 1, usage_missing_count: 0}], why: one call}
+      - {verb: session_process_event_rollup, session: root, params: {}, rows: [{process_event_total: 4, steps_completed_total: 0}], why: UserPromptSubmit, never_on_main, post and Stop}
+      - {verb: session_friction_rollup, session: root, params: {}, rows: [{rework_total: 0, exception_total: 3, label_counts: [{label: branch_policy_block, n: 1}, {label: hook_fault, n: 1}, {label: unmapped_block, n: 1}], unmapped_count: 1, classifier_version: 1}], why: "never_on_main error (branch_policy_block, absorbs the blocked close), hook:post error (unmapped_block), hook:Stop warning (hook_fault); UserPromptSubmit is info"}
+  - tree: corpus:tool_result_error
+    pass: final
+    why: one Bash error close and no process events
+    expect:
+      - {verb: session_process_event_rollup, session: root, params: {}, rows: [{process_event_total: 0, steps_completed_total: 0}], why: no process events and no steps}
+      - {verb: session_friction_rollup, session: root, params: {}, rows: [{rework_total: 0, exception_total: 1, label_counts: [{label: tool_error, n: 1}], unmapped_count: 0, classifier_version: 1}], why: one error close is a tool_error fact; a run of one is not rework}
+  - tree: corpus:sidecar_present
+    pass: final
+    why: one model call
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 10, tokens_output_total: 20, tokens_cache_read_total: 30, tokens_cache_creation_total: 40, model_call_count: 1, usage_missing_count: 0}], why: one call}
+  - tree: verification:subagent_nonfinal_midstream
+    pass: final
+    why: "child agentV1 makes calls with output 20, 4 and 8 (the last two are streaming snapshots); the parent says the true final is 768; PLAN-telemetry-capture-producer-fixes (v4): the last call, whose input classes equal the spawn result's, takes its usage (768, usage_source spawn_result), the mid-stream snapshot 4 stays as emitted and flagged usage_final false"
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 20, tokens_output_total: 40, tokens_cache_read_total: 60, tokens_cache_creation_total: 80, model_call_count: 2, usage_missing_count: 0}], why: 2 x (10, 20, 30, 40)}
+      - {verb: agent_run_token_rollup, session: "agent:agentV1", params: {}, rows: [{tokens_input_total: 30, tokens_output_total: 792, tokens_cache_read_total: 90, tokens_cache_creation_total: 120, model_call_count: 3, usage_missing_count: 0}], why: "PLAN-telemetry-capture-producer-fixes (v4): output 20 + 4 + 768 = 792; the 4 is a mid-stream snapshot flagged usage_final false (a lower bound), the final call carries the spawn result's 768"}
+      - {verb: model_call_cost_estimate, session: "agent:agentV1", params: {}, rows: [{event_timestamp: "2026-01-01T00:00:04Z", tokens_output: 20, cost_usd: null, cost_source: allowance}, {event_timestamp: "2026-01-01T00:00:07Z", tokens_output: 4, cost_usd: null, cost_source: allowance}, {event_timestamp: "2026-01-01T00:00:09Z", tokens_output: 768, cost_usd: null, cost_source: allowance}], why: "PLAN-telemetry-capture-producer-fixes (v4): three rows of their own, each priced allowance; the last takes the spawn result's output 768"}
+  - tree: verification:subagent_background_failed
+    pass: final
+    why: root four calls; three background children one call each
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 40, tokens_output_total: 80, tokens_cache_read_total: 120, tokens_cache_creation_total: 160, model_call_count: 4, usage_missing_count: 0}], why: 4 x (10, 20, 30, 40)}
+      - {verb: agent_run_token_rollup, session: "agent:agentF2", params: {}, rows: [{tokens_input_total: 10, tokens_output_total: 20, tokens_cache_read_total: 30, tokens_cache_creation_total: 40, model_call_count: 1, usage_missing_count: 0}], why: the killed child's one call}
+  - tree: verification:resume_with_cost_state
+    pass: final
+    why: root calls m1, m3 and the turn-2 call m4; agentM1 has a mid-stream non-final call (output 4); agentS1 two exact calls on claude-sub-1
+    expect:
+      - {verb: agent_run_token_rollup, session: root, params: {}, rows: [{tokens_input_total: 30, tokens_output_total: 60, tokens_cache_read_total: 90, tokens_cache_creation_total: 120, model_call_count: 3, usage_missing_count: 0}], why: 3 x (10, 20, 30, 40) including the call after the resume}
+      - {verb: session_process_event_rollup, session: root, params: {}, rows: [{process_event_total: 1, steps_completed_total: 0}], why: the SessionStart:resume hook}
+      - {verb: agent_run_token_rollup, session: "agent:agentM1", params: {}, rows: [{tokens_input_total: 30, tokens_output_total: 44, tokens_cache_read_total: 90, tokens_cache_creation_total: 120, model_call_count: 3, usage_missing_count: 0}], why: "PLAN-telemetry-capture-producer-fixes (v4): output 20 + 4 + 20 = 44; the last response is final (stop_reason end_turn) so no correction applies, and the mid-stream snapshot 4 stays as emitted, flagged usage_final false"}
+      - {verb: agent_run_token_rollup, session: "agent:agentS1", params: {}, rows: [{tokens_input_total: 5, tokens_output_total: 7, tokens_cache_read_total: 11, tokens_cache_creation_total: 13, model_call_count: 2, usage_missing_count: 0}], why: (2, 3, 5, 6) + (3, 4, 6, 7)}
+      - {verb: model_call_cost_estimate, session: "agent:agentS1", params: {}, rows: [{event_timestamp: "2026-01-01T00:00:13Z", model: claude-sub-1, tokens_input: 2, tokens_output: 3, cost_usd: null, cost_source: allowance}, {event_timestamp: "2026-01-01T00:00:14.500Z", model: claude-sub-1, tokens_input: 3, tokens_output: 4, cost_usd: null, cost_source: allowance}], why: the sub-agent's own two calls on its own model}
+  - tree: corpus:late_startup_group
+    pass: final
+    why: "PLAN-telemetry-late-hook-records (parser_version 7, rec-4633): five hook runs. Two Stop witnesses and three SessionStart:startup runs (the pin, hook A, hook B); the two plain twins of A and B are one run each with their held copy, so they add no row"
+    expect:
+      - {verb: session_process_event_rollup, session: root, params: {}, rows: [{process_event_total: 5, steps_completed_total: 0}], why: "2 witnesses + 3 startup runs; twins collapse (HG-1)"}
+  - tree: corpus:resume_hook_twins
+    pass: final
+    why: "PLAN-telemetry-late-hook-records (parser_version 7, rec-4633): four hook runs. Two Stop witnesses, the pin and hook A of the resume group; hook A was written plain, held and held again (two twins) and the pin once"
+    expect:
+      - {verb: session_process_event_rollup, session: root, params: {}, rows: [{process_event_total: 4, steps_completed_total: 0}], why: "2 witnesses + 2 resume runs; twins collapse (HG-1)"}

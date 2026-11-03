@@ -26,6 +26,7 @@ from scripts.checks import _common, _marker_guard, registry
 from scripts.platform_roadmap_liveness import toxic_node_ids
 from scripts.platform_roadmap_models import RoadmapDocument, TierItem
 from scripts.platform_roadmap_state import load as load_roadmap_document
+from scripts.roadmap import roadmap_archive
 
 _BASELINE_REL_PATH = "config/roadmap_liveness_baseline.yaml"
 _CONTRACT_REL_PATH = "docs/contracts/roadmap-liveness.yaml"
@@ -115,9 +116,12 @@ def _leg_b_rehome_coverage(doc: RoadmapDocument) -> list[str]:
 def _base_item_texts(base_text: str) -> dict[str, set[str]]:
     """{tier_item id: set of its exit_criteria texts} at the diff base -- parsed PER ITEM via
     TierItem.model_validate, never RoadmapDocument.model_validate (whose graph validator can
-    raise on an older base's since-changed shape)."""
+    raise on an older base's since-changed shape). A stub-bearing base is hydrated leniently from
+    its own archive (Decision 227), so an unchanged archived criterion never reads as added."""
     result: dict[str, set[str]] = {}
     data = yaml.safe_load(base_text) or {}
+    if roadmap_archive.has_stubs(data):
+        data = roadmap_archive.hydrate_base(data, _marker_guard.default_base_reader(roadmap_archive.ARCHIVE_REL_PATH))
     for raw in data.get("tier_items") or []:
         try:
             item = TierItem.model_validate(raw)

@@ -374,3 +374,28 @@ class TestSurfaceQueueRelevanceTriage:
         ]
         result = _preflight.surface_queue_relevance_triage(cache, commits, cap=5)
         assert len(result) <= 5
+
+
+class TestRedOverlapPointer:
+    """Decision 226: the HARD BLOCK render points at the overlap check instead of a global /plan block."""
+
+    def _render(self, recs: list[dict], correlation: dict | None) -> str:
+        printed: list[str] = []
+        with patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(str(x) for x in a))):
+            _preflight.print_ci_rca_recs(recs, correlation=correlation)
+        return "\n".join(printed)
+
+    def test_both_paths_name_red_overlap(self) -> None:
+        rec = {"id": "rec-1", "title": "CI broken", "priority": "Critical", "created_timestamp": "2026-10-18"}
+        for correlation in (None, {"likely_resolved": [], "unresolved": [rec]}):
+            output = self._render([rec], correlation)
+            assert "scripts.ci_rca.red_overlap" in output
+            assert "cannot scope unrelated work" not in output
+
+    def test_abstention_advisory_names_decision_226(self) -> None:
+        printed: list[str] = []
+        rec = {"id": "rec-2", "title": "unsure", "priority": "Critical", "rca_confidence": "undetermined"}
+        with patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(str(x) for x in a))):
+            _preflight.print_ci_rca_undetermined_recs([rec])
+        assert "Decision 226" in "\n".join(printed)
+        assert "Decision 73 L5" in "\n".join(printed)

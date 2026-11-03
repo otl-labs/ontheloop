@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
+import subprocess  # noqa: F401  (tests/session/preflight/test_env_git.py patches session_preflight.subprocess.run)
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -36,7 +36,9 @@ from scripts.preflight import (
     priority_queue,
     prose_context,
     recs_cache,
+    session_history,
     summary,
+    telemetry_health,
 )
 
 # Facade re-exports (Decision 80/104 pattern): every public function and every test-referenced
@@ -48,11 +50,9 @@ from scripts.preflight._common import (  # noqa: F401
     _READER_SENTINEL,
     DECISIONS_FILE,
     PRIORITY_QUEUE_FILE,
-    RECOMMENDATIONS_FILE,
     ROADMAP_FILE,
     ROADMAP_PLATFORM_PATH,
     ROOT,
-    SESSION_LOG_FILE,
     STRATEGIC_REVIEW_LOOKBACK_DAYS,
     TERRAFORM_DIR,
     _make_reader,
@@ -117,7 +117,6 @@ from scripts.preflight.context_docs import (  # noqa: F401
     _check_endstate_drift,
     _scan_provisional_contracts,
     check_data_quality_coverage,
-    parse_last_session,
     print_data_quality_health,
     read_context_files,
 )
@@ -149,17 +148,15 @@ from scripts.preflight.recs_cache import (  # noqa: F401
     _check_non_automatable_softcap,
     _count_recommendations_reader,
     _derive_decisions_max_updated,
-    _derive_open_recs,
     _get_latest_decision_ts,
     _tally_rec_counts,
-    count_recommendations,
 )
+from scripts.preflight.recs_signals_source import RecsSignalInputs, ci_rca_open_total, fetch_recs_signal_inputs  # noqa: F401
 from scripts.preflight.summary import _format_preflight_summary  # noqa: F401
 from scripts.roadmap import platform_roadmap
 from scripts.sync.ops import _rebuild_local_cache as _sync_ops_pull  # noqa: F401  (kept for back-compat test patch targets)
 
 PREFLIGHT_REPORT = _common.ROOT / "logs" / ".preflight-report.json"
-TELEMETRY_ACTIVE_SESSION_FILE = _common.ROOT / "logs" / ".telemetry-active-session.json"
 
 
 def main(roadmap_detail: str = "slim") -> int:
@@ -209,13 +206,12 @@ def main(roadmap_detail: str = "slim") -> int:
     # then hits the Lambda URL directly rather than re-resolving SSM on each call.
     aws_infra._prime_reader_url(creds_status)
 
-    # Single warm-up sync: pull every migrated ops table ONCE, holding the rows
-    # in-memory. This is the one serial reader touch that absorbs the Neon cold-resume before the
-    # Phase B work; every Phase-B signal is then DERIVED from these rows -- ZERO additional reader
-    # calls (neon-egress-reduction D4: catalog egress was self-inflicted by a ~9-10-call fan-out).
-    # (The cold-resume warm-up is NOT attributable to Decision 82 -- that Decision concerns the
-    # DIRECT-vs-pooled endpoint basis and the EC8 churn-gate N=8->4 frame, audit F-033; the warm
-    # connection reuse / egress-budget rationale is the neon-egress-reduction Decision.)
+    # Telemetry-backed recent sessions (T3.20 c6): started before warm_sync so its cold read overlaps the serial phases.
+    history_handle = session_history.start_session_history() if creds_status == "ok" else None
+
+    # Warm-up sync: pull the small ops tables (decisions, priority queue, execution plans) ONCE and hold the
+    # rows in memory; Phase-B signals derive from them with no further reader calls. ops_recommendations is NOT
+    # pulled (Decision 215): its inputs are the two bounded named-verb reads in fetch_recs_signal_inputs below.
     recommendation_sync: dict = {}
     warm_rows: dict[str, list[dict] | None] = {}
     warm_reader_ok: dict[str, bool] = {}
@@ -234,12 +230,18 @@ def main(roadmap_detail: str = "slim") -> int:
         except Exception:  # noqa: BLE001
             pass  # sync is best-effort
 
-    last_session = context_docs.parse_last_session()
-
-    # Resolve the per-table warm-pull outcome. cache_rows semantics (D4): a list => serve from it;
-    # None => that table's reader pull FAILED (degrade loudly); never the reader sentinel here, so
-    # NO Phase-B signal re-touches the reader. creds-down also yields None (degraded read-cache).
-    recs_rows_cache = warm_rows.get("ops_recommendations") if warm_reader_ok.get("ops_recommendations") else None
+    # Recs inputs: two bounded named-verb reads (Decision 215). signal_rows is a list, or None when the
+    # reads failed or credentials are down (degrade loudly); Phase-B derivations never re-touch the reader.
+    if creds_status == "ok":
+        landed_followons = recs_cache._landed_followon_rec_ids()
+        recs_inputs = fetch_recs_signal_inputs(followon_ids=landed_followons)
+        telemetry_gauge = telemetry_health.check_telemetry_health()
+    else:
+        landed_followons = None
+        recs_inputs = RecsSignalInputs("unavailable", error="credentials unavailable")
+        telemetry_gauge = telemetry_health.unavailable_gauge("credentials unavailable")
+    print(telemetry_health.format_gauge(telemetry_gauge), file=sys.stderr)
+    recs_rows_cache = recs_inputs.signal_rows
     pq_cache = warm_rows.get("ops_priority_queue") if warm_reader_ok.get("ops_priority_queue") else None
     dec_cache = warm_rows.get("ops_decisions") if warm_reader_ok.get("ops_decisions") else None
 
@@ -249,7 +251,7 @@ def main(roadmap_detail: str = "slim") -> int:
     # inflation (Decision 82). Retrieve every future via .result() so exceptions and SystemExit
     # re-raise in the main thread (Decision 55/81).
     with ThreadPoolExecutor(max_workers=4) as phase_b:
-        fut_rec_count = phase_b.submit(recs_cache._count_recommendations_reader, recs_rows_cache)
+        fut_rec_count = phase_b.submit(recs_cache._count_recommendations_reader, recs_inputs.tally)
         fut_ci_rca = phase_b.submit(ci_rca_signals._fetch_ci_rca_recs, recs_rows_cache)
         fut_ci_rca_dispute = phase_b.submit(ci_rca_signals._fetch_ci_rca_dispute_recs, recs_rows_cache)
         fut_ci_rca_undetermined = phase_b.submit(ci_rca_signals._fetch_ci_rca_undetermined_recs, recs_rows_cache)
@@ -281,22 +283,24 @@ def main(roadmap_detail: str = "slim") -> int:
         budget_breach_summary = fut_budget_breach_summary.result()
         dependabot_stranded_prs = fut_dependabot.result()
 
-    recs_read_status: str
-    if _rec_result == "reader_unreachable":
-        recs_read_status = "reader_unreachable"
-        open_recommendations, aging_recommendations, non_automatable_count, non_automatable_details = 0, 0, 0, []
+    recs_ok = recs_inputs.status == "ok" and isinstance(_rec_result, tuple)
+    recs_read_status = "ok" if recs_ok else "reader_unreachable"
+    open_recommendations = aging_recommendations = non_automatable_count = None
+    ci_rca_correlation: dict = {}
+    if isinstance(_rec_result, tuple) and recs_ok:
+        open_recommendations, aging_recommendations, non_automatable_count, _ = _rec_result
+        closed_ci_rca_recs = ci_rca_signals._derive_ci_rca_closed(recs_rows_cache or [])
+        ci_rca_correlation = correlation.correlate_ci_rca_with_main(
+            ci_rca_recs or [], recent_main_commits, closed_ci_rca_recs=closed_ci_rca_recs
+        )
+        ci_rca_correlation = ci_rca_signals.annotate_prior_deferrals(ci_rca_correlation)
+        ci_rca_signals.print_ci_rca_recs(ci_rca_recs or [], correlation=ci_rca_correlation)
+        ci_rca_signals.print_ci_rca_dispute_recs(ci_rca_dispute_recs or [])
+        ci_rca_signals.print_ci_rca_undetermined_recs(ci_rca_undetermined_recs or [])
     else:
-        recs_read_status = "ok"
-        open_recommendations, aging_recommendations, non_automatable_count, non_automatable_details = _rec_result  # type: ignore[misc]
-
-    closed_ci_rca_recs = ci_rca_signals._derive_ci_rca_closed(recs_rows_cache) if recs_rows_cache is not None else None
-    ci_rca_correlation = correlation.correlate_ci_rca_with_main(
-        ci_rca_recs, recent_main_commits, closed_ci_rca_recs=closed_ci_rca_recs
-    )
-    ci_rca_correlation = ci_rca_signals.annotate_prior_deferrals(ci_rca_correlation)
-    ci_rca_signals.print_ci_rca_recs(ci_rca_recs, correlation=ci_rca_correlation)
-    ci_rca_signals.print_ci_rca_dispute_recs(ci_rca_dispute_recs)
-    ci_rca_signals.print_ci_rca_undetermined_recs(ci_rca_undetermined_recs)
+        # Unavailable is NEVER an empty list or a zero (Decision 55): every recs-derived field is null.
+        ci_rca_recs = ci_rca_dispute_recs = ci_rca_undetermined_recs = None
+        print("\n--- CI-RCA signals UNAVAILABLE (reader unreachable) -- hard block at plan commitment ---\n")
 
     ci_rca_abstention_gauge = ci_rca_gauges._compute_ci_rca_abstention(recs_rows_cache)
     ci_rca_probe_health_escalation = ci_rca_gauges._escalate_ci_rca_probe_health(
@@ -340,10 +344,10 @@ def main(roadmap_detail: str = "slim") -> int:
     decision_conditions_bucket = decision_conditions.preflight_bucket()
     decision_conditions.print_decision_conditions(decision_conditions_bucket)
 
-    # Dedupe open_recs: count already computed in Phase B; pass to read_context_files
-    # to skip the second open_recs verb call (Decision 84 I-3: closed named-verb boundary).
-    open_recs_count = open_recommendations if recs_read_status == "ok" else None
-    context = context_docs.read_context_files(open_recs_count=open_recs_count)
+    context = context_docs.read_context_files(open_recs_count=open_recommendations)
+    history = history_handle.result() if history_handle is not None else session_history.unavailable("credentials unavailable")
+    print(session_history.format_history(history), file=sys.stderr)
+    context["recent_sessions"] = history["recent_sessions"]
 
     # Dedupe decisions_max_updated: timestamp fetched once in Phase B; reuse for both
     # roadmap compute_state_dict calls rather than re-issuing the verb.
@@ -361,7 +365,8 @@ def main(roadmap_detail: str = "slim") -> int:
         "s3_log_bucket_set": s3_log_bucket_set,
         "terraform_pending": terraform_pending,
         "convergence_health": convergence_health_data,
-        "last_session": last_session,
+        "last_session": history["last_session"],
+        "session_history": {k: history[k] for k in ("status", "window_days", "reason") if k in history},
         "open_recommendations": open_recommendations,
         "aging_recommendations": aging_recommendations,
         "non_automatable_recommendations": non_automatable_count,
@@ -369,11 +374,13 @@ def main(roadmap_detail: str = "slim") -> int:
         "priority_queue_source": "ducklake_reader" if creds_status == "ok" else "cache",
         "recs_read_status": recs_read_status,
         "ci_rca_recs": ci_rca_recs,
-        "ci_rca_unresolved_recs": ci_rca_correlation.get("unresolved") or [],
-        "ci_rca_likely_resolved_recs": ci_rca_correlation.get("likely_resolved") or [],
+        "recs_read": recs_inputs.recs_read,
+        "ci_rca_open_total": ci_rca_open_total(recs_rows_cache),
+        "ci_rca_unresolved_recs": (ci_rca_correlation.get("unresolved") or []) if recs_ok else None,
+        "ci_rca_likely_resolved_recs": (ci_rca_correlation.get("likely_resolved") or []) if recs_ok else None,
         "ci_rca_dispute_recs": ci_rca_dispute_recs,
-        "ci_rca_undetermined_recs": ci_rca_undetermined_recs[:5],
-        "ci_rca_undetermined_total": len(ci_rca_undetermined_recs),
+        "ci_rca_undetermined_recs": (ci_rca_undetermined_recs or [])[:5] if recs_ok else None,
+        "ci_rca_undetermined_total": len(ci_rca_undetermined_recs or []) if recs_ok else None,
         "ci_rca_abstention_gauge": ci_rca_abstention_gauge,
         "ci_rca_escape_mode_gauge": ci_rca_escape_mode_gauge,
         "ci_rca_probe_health_escalation": ci_rca_probe_health_escalation,
@@ -381,6 +388,7 @@ def main(roadmap_detail: str = "slim") -> int:
         "ci_rca_back_validation": ci_rca_back_validation,
         "dedup_effectiveness_gauge": dedup_effectiveness_gauge,
         "dedup_effectiveness_escalation": dedup_effectiveness_escalation,
+        "telemetry_health": telemetry_gauge,
         "recent_main_commits": recent_main_commits,
         "friction_patterns": [],
         "log_sync_result": log_sync_result,
@@ -393,14 +401,15 @@ def main(roadmap_detail: str = "slim") -> int:
 
     report["provisional_contracts_due"] = provisional_contracts_due
     report["decision_conditions"] = decision_conditions_bucket
-    report["non_automatable_softcap_breached"] = recs_cache._check_non_automatable_softcap(non_automatable_count)
-    # Ad-hoc /orient lane (audit PDB-01, B1-R4 + B4-O1): pure derivations over the already-pulled
-    # recs_rows_cache -- unconditionally written on both the healthy and degraded paths (a
-    # degraded warm pull yields [] for both, never a missing key -- Decision 55: no silent zero,
-    # the READER half of that honesty is /orient's own recs_read_status-keyed degraded clause).
-    report["followon_recs"] = recs_cache._derive_followon_recs(recs_rows_cache or [])
-    report["open_critical_recs"] = recs_cache._derive_open_critical_recs(recs_rows_cache or [])
+    report["non_automatable_softcap_breached"] = (
+        recs_cache._check_non_automatable_softcap(non_automatable_count) if non_automatable_count is not None else None
+    )
+    # Ad-hoc /orient lane (audit PDB-01, B1-R4 + B4-O1): pure derivations over the bounded signal rows; null
+    # (never []) when the rows are unavailable -- /orient's recs_read_status-keyed clause reads the null.
+    report["followon_recs"] = recs_cache._derive_followon_recs(recs_rows_cache, landed=landed_followons)
+    report["open_critical_recs"] = recs_cache._derive_open_critical_recs(recs_rows_cache)
     report["ci_rca_liveness_alert"] = ci_rca_liveness_alert
+    summary.print_ci_rca_liveness_alert(ci_rca_liveness_alert)
     report["convergence_sensor_liveness_alert"] = convergence_sensor_liveness_alert
     summary.print_convergence_sensor_liveness_alert(convergence_sensor_liveness_alert)
     report["convergence_rca_gap_alert"] = convergence_rca_gap_alert
@@ -458,27 +467,6 @@ def _slim_roadmap_state(state: dict, full: bool = False) -> dict:
     }
 
 
-def open_telemetry_session(workflow: str, branch: str) -> str:
-    """Open a session and record its state to the active-session file.
-
-    Writes ``logs/.telemetry-active-session.json`` containing the session_id,
-    workflow, branch, and started_at timestamp.  Returns the session_id UUID.
-    """
-    import uuid  # noqa: PLC0415
-
-    session_id = str(uuid.uuid4())
-
-    state = {
-        "session_id": session_id,
-        "workflow": workflow,
-        "branch": branch,
-        "started_at": datetime.now(timezone.utc).isoformat(),
-    }
-    TELEMETRY_ACTIVE_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-    TELEMETRY_ACTIVE_SESSION_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    return session_id
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Pre-session environment and context check",
@@ -486,23 +474,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--health",
         action="store_true",
-        help=("Run only the telemetry health check. Exits non-zero on critical threshold."),
-    )
-    parser.add_argument(
-        "--open-session",
-        action="store_true",
-        dest="open_session",
-        help="Open a telemetry session and write state to logs/.telemetry-active-session.json",
-    )
-    parser.add_argument(
-        "--workflow",
-        default="manual",
-        help="Workflow name for telemetry (used with --open-session)",
-    )
-    parser.add_argument(
-        "--branch",
-        default="",
-        help="Branch name for telemetry (used with --open-session; defaults to current git branch)",
+        help=("Run only the data-quality health check and print the telemetry-store gauge. Exits 0."),
     )
     parser.add_argument(
         "--roadmap-detail",
@@ -519,22 +491,7 @@ if __name__ == "__main__":
 
     if args.health:
         context_docs.print_data_quality_health()
-        sys.exit(0)
-
-    if args.open_session:
-        branch = args.branch
-        if not branch:
-            result = subprocess.run(
-                ["git", "branch", "--show-current"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                cwd=_common.ROOT,
-            )
-            branch = result.stdout.strip() if result.returncode == 0 else "unknown"
-        sid = open_telemetry_session(workflow=args.workflow, branch=branch)
-        print(sid)
+        print(telemetry_health.format_gauge(telemetry_health.check_telemetry_health()))
         sys.exit(0)
 
     sys.exit(main(roadmap_detail=args.roadmap_detail))

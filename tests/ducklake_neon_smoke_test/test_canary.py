@@ -42,6 +42,7 @@ def _stub_canary_rehearsal(monkeypatch, *, clone_ok=True, ryw_ok=True):
     monkeypatch.setattr(canary, "_canary_delete_function", lambda fn, **kw: True)
 
     monkeypatch.setattr(smoke.neon_api, "fetch_api_key", lambda profile=None: "fake-api-key")
+    monkeypatch.delenv("NEON_PROJECT_ID", raising=False)
     monkeypatch.setattr(smoke.neon_api, "resolve_project_id", lambda api_key, name="ducklake-catalog": _FAKE_PROJECT_ID)
     monkeypatch.setattr(
         smoke.neon_api,
@@ -156,6 +157,7 @@ def test_canary_rehearsal_functions_torn_down_on_error(monkeypatch):
     monkeypatch.setattr(core, "_sigv4_invoke", lambda url, p, **kw: _Resp(200, {"ok": True}))
     monkeypatch.setattr(smoke.subprocess, "run", lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout="", stderr=""))
     monkeypatch.setattr(smoke.neon_api, "fetch_api_key", lambda profile=None: "fake-api-key")
+    monkeypatch.delenv("NEON_PROJECT_ID", raising=False)
     monkeypatch.setattr(smoke.neon_api, "resolve_project_id", lambda api_key, name="ducklake-catalog": _FAKE_PROJECT_ID)
     monkeypatch.setattr(
         smoke.neon_api, "create_branch", lambda api_key, project_id: {"branch_id": _FAKE_BRANCH_ID, "host": _FAKE_BRANCH_HOST}
@@ -345,3 +347,57 @@ def test_core_sigv4_invoke_interception_canary_family(monkeypatch):
     monkeypatch.setattr(core, "_sigv4_invoke", _raise_sigv4)
     smoke.canary_rehearsal(json_output=True)
     assert calls, "core._sigv4_invoke was never called -- interception did not occur"
+
+
+def test_explicit_project_id_skips_resolve_project_id(monkeypatch, capsys):
+    """An explicit project id never calls the org-level project listing (a project-scoped key cannot)."""
+    _stub_canary_rehearsal(monkeypatch)
+    seen: list[str] = []
+
+    def _no_listing(api_key, name="ducklake-catalog"):
+        raise AssertionError("resolve_project_id must not be called when a project id is given")
+
+    monkeypatch.setattr(smoke.neon_api, "resolve_project_id", _no_listing)
+    monkeypatch.setattr(
+        smoke.neon_api,
+        "create_branch",
+        lambda api_key, project_id: seen.append(project_id) or {"branch_id": _FAKE_BRANCH_ID, "host": _FAKE_BRANCH_HOST},
+    )
+    smoke.canary_rehearsal(project_id="proj-explicit-1")
+    assert seen == ["proj-explicit-1"]
+
+
+def test_env_project_id_skips_resolve_project_id(monkeypatch):
+    _stub_canary_rehearsal(monkeypatch)
+    monkeypatch.setenv("NEON_PROJECT_ID", "proj-from-env")
+    seen: list[str] = []
+    monkeypatch.setattr(
+        smoke.neon_api,
+        "resolve_project_id",
+        lambda api_key, name="ducklake-catalog": (_ for _ in ()).throw(AssertionError("listing called")),
+    )
+    monkeypatch.setattr(
+        smoke.neon_api,
+        "create_branch",
+        lambda api_key, project_id: seen.append(project_id) or {"branch_id": _FAKE_BRANCH_ID, "host": _FAKE_BRANCH_HOST},
+    )
+    smoke.canary_rehearsal()
+    assert seen == ["proj-from-env"]
+
+
+def test_cli_project_id_reaches_canary_rehearsal(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(smoke, "canary_rehearsal", lambda **kw: captured.update(kw))
+    assert smoke.main(["--canary-rehearsal", "--project-id", "proj-cli-9"]) == 0
+    assert captured["project_id"] == "proj-cli-9"
+
+
+def test_missing_project_id_and_listing_failure_fails_loud_with_hint(monkeypatch):
+    _stub_canary_rehearsal(monkeypatch)
+
+    def _listing_denied(api_key, name="ducklake-catalog"):
+        raise smoke.neon_api.NeonApiError("organizations listing returned 403")
+
+    monkeypatch.setattr(smoke.neon_api, "resolve_project_id", _listing_denied)
+    with pytest.raises(smoke.SmokeTestFailure, match="--project-id"):
+        smoke.canary_rehearsal()

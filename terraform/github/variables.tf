@@ -1,19 +1,37 @@
 variable "github_token" {
-  description = "GitHub admin PAT. Supplied at apply time from Secrets Manager -- never committed. Required scopes: repo, admin:repo_hook, read:org."
+  description = "GitHub token, supplied at run time and never committed: an installation token of the PR-time plan App or of the apply App (rec-4355), or the classic admin PAT (repo, admin:repo_hook, read:org) as rollback until it is revoked. Ephemeral, so no saved plan or state holds it; applying a saved plan needs it set again."
   type        = string
   sensitive   = true
+  ephemeral   = true
+
+  validation {
+    condition     = var.github_token != ""
+    error_message = "github_token is empty; an empty token makes the provider fall back to the gh CLI, then anonymous access."
+  }
 }
 
 variable "github_owner" {
   description = "GitHub organisation or user that owns the repository."
   type        = string
-  default     = "benjamin-blake"
+  default     = "otl-labs"
 }
 
 variable "repository_name" {
   description = "GitHub repository name managed by this module."
   type        = string
-  default     = "theseus"
+  default     = "ontheloop"
+}
+
+variable "main_protection_ruleset_id" {
+  description = "Numeric id of the main-protection ruleset, used only by its import block. Re-read it from the API after a transfer: rulesets are not documented to carry over."
+  type        = number
+  default     = 17117072
+}
+
+variable "tf_trusted_plan_main_policy_id" {
+  description = "Numeric id of the tf-trusted-plan main deployment branch policy, used only by its import block. Re-read it from the API after a transfer."
+  type        = number
+  default     = 64562499
 }
 
 variable "admin_bypass_actor_id" {
@@ -23,7 +41,7 @@ variable "admin_bypass_actor_id" {
 }
 
 variable "gated_apply_reviewer_user_ids" {
-  description = "List of GitHub numeric user IDs required to approve the tf-gated-apply Environment gate before the gated-apply job may execute. Supplied at apply time -- never committed with a literal default. Resolve before applying: `gh api /user --jq .id` (authenticated as the reviewer) or the GitHub MCP get_me tool."
+  description = "List of GitHub numeric user IDs required to approve the tf-gated-apply Environment gate before the gated-apply job may execute. Supplied at apply time -- never committed with a literal default. Resolve before applying: GET /user with the reviewer's PAT (terraform/github/CLAUDE.md runbook step 2) or the GitHub MCP get_me tool."
   type        = list(number)
 
   validation {

@@ -16,73 +16,7 @@ boto3 = pytest.importorskip("boto3")
 from tests.fixtures.session_preflight_module import preflight as _preflight  # noqa: E402
 
 
-class TestGracefulMissingFiles:
-    def test_missing_session_log(self, tmp_path: Path) -> None:
-        missing = tmp_path / "SESSION_LOG.md"
-        with patch("scripts.preflight._common.SESSION_LOG_FILE", missing):
-            result = _preflight.parse_last_session()
-        assert result == ""
-
-    def test_missing_recommendations(self, tmp_path: Path) -> None:
-        missing = tmp_path / "RECOMMENDATIONS.md"
-        with (
-            patch("scripts.preflight.recs_cache._count_recommendations_reader", return_value="reader_unreachable"),
-            patch("scripts.preflight._common.RECOMMENDATIONS_FILE", missing),
-        ):
-            open_count, aging_count, non_auto_count, non_auto_details = _preflight.count_recommendations()
-        assert open_count == 0
-        assert aging_count == 0
-        assert non_auto_count == 0
-        assert non_auto_details == []
-
-
 class TestNonAutomatableRecommendations:
-    _REC_001 = (
-        '{"id": "rec-001", "status": "open", "automatable": false,'
-        ' "title": "Manual task", "date": "2026-01-01", "context": "Needs human review"}\n'
-    )
-    _REC_002 = (
-        '{"id": "rec-002", "status": "open", "automatable": true,'
-        ' "title": "Auto task", "date": "2026-01-01", "context": "Can be automated"}\n'
-    )
-    _REC_003 = (
-        '{"id": "rec-003", "status": "closed", "automatable": false,'
-        ' "title": "Closed manual", "date": "2026-01-01", "context": "Already done"}\n'
-    )
-
-    def test_non_automatable_count_and_details(self, tmp_path: Path) -> None:
-        """count_recommendations returns non-automatable count and details (cache fallback path)."""
-        recs_file = tmp_path / ".recommendations-log.jsonl"
-        recs_file.write_text(self._REC_001 + self._REC_002 + self._REC_003, encoding="utf-8")
-        with (
-            patch("scripts.preflight.recs_cache._count_recommendations_reader", return_value="reader_unreachable"),
-            patch("scripts.preflight._common.RECOMMENDATIONS_FILE", recs_file),
-        ):
-            open_count, aging_count, non_auto_count, non_auto_details = _preflight.count_recommendations()
-        assert open_count == 2
-        assert non_auto_count == 1
-        assert len(non_auto_details) == 1
-        assert non_auto_details[0]["id"] == "rec-001"
-        assert non_auto_details[0]["title"] == "Manual task"
-        assert "Needs human review" in non_auto_details[0]["context_excerpt"]
-
-    def test_non_automatable_details_capped_at_ten(self, tmp_path: Path) -> None:
-        """non_automatable_details list is capped at 10 entries."""
-        recs_file = tmp_path / ".recommendations-log.jsonl"
-        _line = (
-            '{{"id": "rec-{i:03d}", "status": "open", "automatable": false,'
-            ' "title": "Task {i}", "date": "2026-01-01", "context": "ctx"}}\n'
-        )
-        lines = [_line.format(i=i) for i in range(1, 16)]
-        recs_file.write_text("".join(lines), encoding="utf-8")
-        with (
-            patch("scripts.preflight.recs_cache._count_recommendations_reader", return_value="reader_unreachable"),
-            patch("scripts.preflight._common.RECOMMENDATIONS_FILE", recs_file),
-        ):
-            _, _, non_auto_count, non_auto_details = _preflight.count_recommendations()
-        assert non_auto_count == 15
-        assert len(non_auto_details) == 10
-
     def test_non_automatable_fields_in_preflight_output(self, tmp_path: Path) -> None:
         """non_automatable_recommendations and non_automatable_details appear in preflight JSON."""
         preflight_report = tmp_path / ".preflight-report.json"
@@ -91,7 +25,10 @@ class TestNonAutomatableRecommendations:
             patch("scripts.preflight.env_git.get_git_status", return_value=("agent/test", False, [])),
             patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="ok"),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch(
                 "scripts.preflight.recs_cache._count_recommendations_reader",
                 return_value=(2, 0, 1, [{"id": "rec-001", "title": "Manual", "context_excerpt": "ctx"}]),
@@ -102,7 +39,6 @@ class TestNonAutomatableRecommendations:
                 return_value={
                     "roadmap_phase": "Phase 1.5",
                     "open_decisions_count": 0,
-                    "recent_sessions": [],
                     "strategic_review_due": False,
                     "recommendations_count": 0,
                 },
@@ -117,39 +53,8 @@ class TestNonAutomatableRecommendations:
         assert data["non_automatable_recommendations"] == 1
         assert "non_automatable_details" not in data, (
             "non_automatable_details is intentionally dropped from the slim report "
-            "(Decision 73: individual rec review suspended). count_recommendations() "
-            "still returns the details for any non-report consumer."
+            "(Decision 73: individual rec review suspended)."
         )
-
-    def test_count_recommendations_treats_missing_automatable_as_true(self, tmp_path: Path) -> None:
-        """Recs without automatable field default to automatable=True (not counted as non-auto)."""
-        recs_file = tmp_path / ".recommendations-log.jsonl"
-        recs_file.write_text(
-            '{"id": "rec-001", "status": "open", "title": "No automatable field", "date": "2026-01-01", "context": "ctx"}\n',
-            encoding="utf-8",
-        )
-        with (
-            patch("scripts.preflight.recs_cache._count_recommendations_reader", return_value="reader_unreachable"),
-            patch("scripts.preflight._common.RECOMMENDATIONS_FILE", recs_file),
-        ):
-            _, _, non_auto_count, non_auto_details = _preflight.count_recommendations()
-        assert non_auto_count == 0
-        assert non_auto_details == []
-
-    def test_malformed_date_does_not_crash(self, tmp_path: Path) -> None:
-        """Recs with invalid date format are counted open but not counted aging."""
-        recs_file = tmp_path / ".recommendations-log.jsonl"
-        recs_file.write_text(
-            '{"id": "rec-001", "status": "open", "date": "not-a-date", "title": "Bad date", "context": "ctx"}\n',
-            encoding="utf-8",
-        )
-        with (
-            patch("scripts.preflight.recs_cache._count_recommendations_reader", return_value="reader_unreachable"),
-            patch("scripts.preflight._common.RECOMMENDATIONS_FILE", recs_file),
-        ):
-            open_count, aging_count, non_auto_count, non_auto_details = _preflight.count_recommendations()
-        assert open_count == 1
-        assert aging_count == 0  # malformed date is not counted as aging
 
 
 class TestNonAutomatableSoftcap:
@@ -242,56 +147,24 @@ class TestBudgetBypassAlert:
 
 
 class TestCountRecommendationsReader:
-    """Tests for _count_recommendations_reader() -- DuckLake reader path (T2.19 cutover)."""
+    """_count_recommendations_reader() serves the open_recs_tally row (Decision 215)."""
 
-    _OPEN_ROWS = [
-        {
-            "id": "rec-001",
-            "title": "Fix thing",
-            "context": "ctx",
-            "created_timestamp": "2026-05-01T00:00:00Z",
-            "automatable": True,
-        },
-        {
-            "id": "rec-002",
-            "title": "Other thing",
-            "context": "ctx2",
-            "created_timestamp": "2026-05-01T00:00:00Z",
-            "automatable": False,
-        },
-    ]
+    _TALLY = {"open_count": 2, "aging_count": 1, "non_automatable_count": 1}
 
-    def test_reader_path_returns_counts(self) -> None:
-        """open_recs verb success -> counts returned as tuple."""
+    def test_tally_row_becomes_the_four_tuple_with_empty_details(self) -> None:
+        assert _preflight._count_recommendations_reader(dict(self._TALLY)) == (2, 1, 1, [])
+
+    def test_none_tally_is_reader_unreachable_never_a_false_zero(self) -> None:
+        assert _preflight._count_recommendations_reader(None) == "reader_unreachable"
+
+    def test_no_argument_makes_no_reader_call(self) -> None:
         with patch("scripts.preflight._common._make_reader") as MockReader:
-            MockReader.return_value.named.return_value = list(self._OPEN_ROWS)
+            assert _preflight._count_recommendations_reader() == "reader_unreachable"
+        MockReader.assert_not_called()
 
-            result = _preflight._count_recommendations_reader()
-
-        MockReader.return_value.named.assert_called_once_with("open_recs")
-        assert isinstance(result, tuple)
-        open_count, _aging, non_auto_count, _details = result
-        assert open_count == 2
-        assert non_auto_count == 1
-
-    def test_reader_failure_returns_reader_unreachable_string(self) -> None:
-        """Reader raises -> returns 'reader_unreachable' string (no silent fallback, Decision 55)."""
-        with patch("scripts.preflight._common._make_reader") as MockReader:
-            MockReader.return_value.named.side_effect = RuntimeError("reader down")
-
-            result = _preflight._count_recommendations_reader()
-
-        assert result == "reader_unreachable"
-
-    def test_reader_failure_only_returns_reader_unreachable(self) -> None:
-        """Reader fails -> 'reader_unreachable' string, never None (T2.19: no silent escape)."""
-        with patch("scripts.preflight._common._make_reader") as MockReader:
-            MockReader.return_value.named.side_effect = ConnectionError("timeout")
-
-            result = _preflight._count_recommendations_reader()
-
-        assert result == "reader_unreachable"
-        assert result is not None
+    def test_zero_tally_is_a_real_zero(self) -> None:
+        tally = {"open_count": 0, "aging_count": 0, "non_automatable_count": 0}
+        assert _preflight._count_recommendations_reader(tally) == (0, 0, 0, [])
 
 
 class TestRecsReadStatusDegradation:
@@ -316,7 +189,10 @@ class TestRecsReadStatusDegradation:
             ),
             patch("scripts.preflight.aws_infra.check_terraform_pending", return_value=False),
             patch("scripts.preflight.aws_infra.check_credentials", return_value="ok"),
-            patch("scripts.preflight.context_docs.parse_last_session", return_value=""),
+            patch(
+                "scripts.preflight.session_history.read_session_history",
+                return_value={"status": "empty", "window_days": 2, "recent_sessions": [], "last_session": ""},
+            ),
             patch("scripts.preflight.recs_cache._count_recommendations_reader", return_value="reader_unreachable"),
             patch("session_preflight._sync_ops_pull", return_value={}),
             patch("scripts.preflight.priority_queue.read_priority_queue", return_value=[]),
@@ -326,7 +202,6 @@ class TestRecsReadStatusDegradation:
                 return_value={
                     "roadmap_phase": "Phase 2",
                     "open_decisions_count": 0,
-                    "recent_sessions": [],
                     "strategic_review_due": False,
                     "recommendations_count": 0,
                 },
@@ -344,8 +219,7 @@ class TestRecsReadStatusDegradation:
 
         data = json.loads(preflight_report.read_text(encoding="utf-8"))
         assert data.get("recs_read_status") == "reader_unreachable"
-        # open_recommendations sentinel is 0 on degradation -- distinguish via recs_read_status
-        assert data.get("open_recommendations") == 0
+        assert data.get("open_recommendations") is None
 
 
 class TestGetLatestDecisionTs:

@@ -1,5 +1,5 @@
 """Tests for the scripts/ops_data_portal.py write-path core: file_rec / update_rec,
-write_time validators, retired-surface guards, and the private migration params.
+the row-rule gate dispatch, retired-surface guards, and the private migration params.
 
 Split out of the former tests/test_ops_data_portal.py monolith (rec-2709 Wave 3). Decision 124
 namespace migration: patches below target the facade (scripts.ops_data_portal) because the
@@ -19,6 +19,7 @@ duckdb = pytest.importorskip("duckdb")
 from pydantic import ValidationError  # noqa: E402
 
 from tests.fixtures.ops_portal_records import VALID_FIELDS as _VALID_FIELDS  # noqa: E402
+from tests.fixtures.ops_rec_rows import reader_rec_row, writer_stand_in  # noqa: E402
 
 
 class TestFileRec:
@@ -45,11 +46,8 @@ class TestFileRec:
         assert mock_dl_write.call_args.kwargs["action"] == "file_ops"
         ulid = mock_dl_write.call_args.kwargs["idempotency_ulid"]
         assert isinstance(ulid, str) and len(ulid) == 26  # ULID (time-ordered tiebreak for history reads)
-        # write-through: local JSONL has new entry carrying the allocated id
-        lines = recs_file.read_text(encoding="utf-8").strip().splitlines()
-        assert len(lines) == 1
-        entry = json.loads(lines[0])
-        assert entry["id"] == "rec-2171"
+        # the record handed to the writer carries the allocated id (no local cache write, Decision 215)
+        assert call_rec["id"] == "rec-2171"
 
     def test_file_rec_missing_allocated_key_raises(self, tmp_path: Path) -> None:
         """file_rec() raises RuntimeError when the writer response carries no allocated key."""
@@ -97,7 +95,7 @@ class TestFileRec:
         recs_file = tmp_path / ".recommendations-log.jsonl"
 
         with (
-            patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-602"}),
+            patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-602"}) as mock_dl_write,
             patch("scripts.ops_data_portal._sync_table"),
             patch("scripts.ops_data_portal.RECS_JSONL", recs_file),
         ):
@@ -106,7 +104,7 @@ class TestFileRec:
             result = file_rec(dict(_VALID_FIELDS))
 
         assert result == "rec-602"
-        entry = json.loads(recs_file.read_text(encoding="utf-8").strip().splitlines()[0])
+        entry = mock_dl_write.call_args[0][1]
         assert entry.get("date") is not None  # date was added
 
     def test_file_rec_rejects_unregistered_source(self, tmp_path: Path) -> None:
@@ -147,7 +145,7 @@ class TestUpdateRec:
     """Tests for update_rec()."""
 
     def test_update_rec_success(self, tmp_path: Path) -> None:
-        """update_rec() reads via the reader, merges updates, writes update_ops, appends to local JSONL."""
+        """update_rec() reads via the reader, merges updates, writes update_ops, writes through ducklake_writer."""
         existing = {**_VALID_FIELDS, "id": "rec-042", "date": "2026-01-01"}
         recs_file = tmp_path / ".recommendations-log.jsonl"
         recs_file.write_text(json.dumps(existing) + "\n", encoding="utf-8")
@@ -168,19 +166,20 @@ class TestUpdateRec:
         assert call_rec["status"] == "closed"
         assert call_rec["execution_result"] == "success"
         assert mock_dl_write.call_args.kwargs["action"] == "update_ops"
-        # write-through: the incremental upsert keeps ONE deduplicated row per id (D4), reflecting
-        # the update (was: append, which left the stale original behind until the next full sync).
-        lines = recs_file.read_text(encoding="utf-8").strip().splitlines()
-        assert len(lines) == 1
-        cached = json.loads(lines[0])
-        assert cached["id"] == "rec-042" and cached["status"] == "closed"
+        assert call_rec["id"] == "rec-042"
 
     def test_update_rec_invalid_status(self) -> None:
-        """update_rec() raises ValueError for invalid status values (before any read)."""
+        """update_rec() raises ValueError for an invalid status: the gate's status accepted_values refuses it after the
+        existing-row read."""
         from scripts.ops_data_portal import update_rec
 
-        with pytest.raises(ValueError, match="Invalid status"):
+        with (
+            patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=reader_rec_row(id="rec-042")),
+            patch("scripts.ops_data_portal._ducklake_write") as mock_dl_write,
+            pytest.raises(ValueError, match="status"),
+        ):
             update_rec("rec-042", {"status": "done"})
+        mock_dl_write.assert_not_called()
 
     def test_update_rec_context_replace(self, tmp_path: Path) -> None:
         """update_rec() with a >=80-char context writes it through via action=update_ops."""
@@ -206,23 +205,24 @@ class TestUpdateRec:
         assert mock_dl_write.call_args.kwargs["action"] == "update_ops"
 
     def test_update_rec_context_too_short_rejected(self, tmp_path: Path) -> None:
-        """update_rec() raises ValueError referencing context when the new context is <80 stripped chars."""
-        existing = {**_VALID_FIELDS, "id": "rec-042", "date": "2026-01-01"}
-        recs_file = tmp_path / ".recommendations-log.jsonl"
-        recs_file.write_text(json.dumps(existing) + "\n", encoding="utf-8")
+        """update_rec() still raises ValueError referencing context when the new context is <80 stripped chars: the
+        portal's update pre-check skips the dated min_length, so the writer (the shared fake runs its own check_write
+        with the stored row as prior) refuses it, mapped to ValueError as writer_transport maps the 422."""
+        existing = reader_rec_row(id="rec-042")
+        fake_writer = writer_stand_in([existing])
 
         with (
             patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=dict(existing)),
-            patch("scripts.ops_data_portal._ducklake_write") as mock_dl_write,
+            patch("scripts.ops_data_portal._ducklake_write", fake_writer),
             patch("scripts.ops_data_portal._sync_table"),
-            patch("scripts.ops_data_portal.RECS_JSONL", recs_file),
+            patch("scripts.ops_data_portal.RECS_JSONL", tmp_path / ".recommendations-log.jsonl"),
         ):
             from scripts.ops_data_portal import update_rec
 
             with pytest.raises(ValueError, match="context"):
                 update_rec("rec-042", {"context": "too short"})
 
-        mock_dl_write.assert_not_called()
+        assert fake_writer.writes == []
 
     def test_update_rec_absent_rec_loud_fails(self, tmp_path: Path) -> None:
         """update_rec() loud-fails on an absent rec (referential, CD.33 cl.8 / D-5).
@@ -281,28 +281,48 @@ class TestRetiredSurfaces:
 
 
 class TestWriteTimeDispatch:
-    """Tests for _load_write_time_validators and _derive_computed_fields via file_rec."""
+    """file_rec and update_rec dispatch to the writer's own row-rule gate (gate_write); _derive_computed_fields feeds it."""
 
-    def test_write_time_validators_loaded(self) -> None:
-        """_load_write_time_validators returns >= 6 validators for ops_recommendations."""
-        from scripts.ops_data_portal import _load_write_time_validators, _write_time_validators_cache
+    def test_gate_dispatch(self) -> None:
+        """file_rec gates a new rec with insert=True; update_rec gates the merged row with insert=False and the stored row."""
+        from scripts.ops_data_portal import file_rec, update_rec
 
-        _write_time_validators_cache.clear()
-        validators = _load_write_time_validators("ops_recommendations")
-        assert len(validators) >= 6, f"Expected >= 6 write_time validators, got {len(validators)}"
-        col_names = [col for col, _ in validators]
-        assert "title" in col_names
-        assert "status" in col_names
-        assert "effort" in col_names
-        assert "priority" in col_names
+        existing = reader_rec_row(id="rec-042")
+        with (
+            patch("scripts.ops_data_portal.gate_write") as mock_gate,
+            patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-960"}),
+            patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=dict(existing)),
+        ):
+            file_rec(dict(_VALID_FIELDS))
+            assert mock_gate.call_args.args[0] == "ops_recommendations" and mock_gate.call_args.kwargs == {"insert": True}
+            update_rec("rec-042", {"priority": "High"})
+            assert mock_gate.call_args.kwargs["insert"] is False
+            assert mock_gate.call_args.kwargs["existing"] == existing
+            assert mock_gate.call_args.args[1]["priority"] == "High"
+            file_rec(dict(_VALID_FIELDS), _migration_int_id=9)
+            assert mock_gate.call_args.kwargs == {"insert": False}
+
+    def test_file_rec_and_update_rec_refuse_through_the_gate(self) -> None:
+        """Unpatched gate: a blank required input is refused with the gate's message on both call sites and the writer is
+        never called."""
+        from scripts.ops_data_portal import file_rec, update_rec
+
+        with (
+            patch("scripts.ops_data_portal._ducklake_write") as mock_dl_write,
+            patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=reader_rec_row(id="rec-042")),
+        ):
+            with pytest.raises(ValueError, match="at least 80 stripped characters"):
+                file_rec({**_VALID_FIELDS, "context": "   "})
+            with pytest.raises(ValueError, match="required input field 'title' is empty"):
+                update_rec("rec-042", {"title": ""})
+        mock_dl_write.assert_not_called()
 
     def test_write_time_rejects_null_required_field(self) -> None:
-        """file_rec() raises ValueError via write_time validators when a required field is null."""
-        from scripts.ops_data_portal import _write_time_validators_cache, file_rec
+        """file_rec() raises ValueError through the gate when a required field is null."""
+        from scripts.ops_data_portal import file_rec
 
-        _write_time_validators_cache.clear()
         fields = dict(_VALID_FIELDS)
-        fields["status"] = None  # status has write_time: true in ops.yaml
+        fields["status"] = None  # status is nullable:false in the contract
 
         with pytest.raises(ValueError, match="status"):
             file_rec(fields)
@@ -316,7 +336,6 @@ class TestWriteTimeDispatch:
             patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-950"}) as mock_dl_write,
             patch("scripts.ops_data_portal._sync_table"),
             patch("scripts.ops_data_portal.RECS_JSONL", recs_file),
-            patch("scripts.ops_portal.write_validators._write_time_validators_cache", {}),
         ):
             from scripts.ops_data_portal import file_rec
 
@@ -335,7 +354,6 @@ class TestWriteTimeDispatch:
             patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-951"}) as mock_dl_write,
             patch("scripts.ops_data_portal._sync_table"),
             patch("scripts.ops_data_portal.RECS_JSONL", recs_file),
-            patch("scripts.ops_portal.write_validators._write_time_validators_cache", {}),
         ):
             from scripts.ops_data_portal import file_rec
 
@@ -360,7 +378,7 @@ class TestMigrationParams:
         ):
             from scripts.ops_data_portal import file_rec
 
-            result = file_rec(dict(_VALID_FIELDS), _migration_int_id=5, _migration_mode=True, _skip_sync=True)
+            result = file_rec(dict(_VALID_FIELDS), _migration_int_id=5, _skip_sync=True)
 
         assert result == "rec-005"
         _, call_rec = mock_dl_write.call_args[0]
@@ -368,8 +386,8 @@ class TestMigrationParams:
         assert mock_dl_write.call_args.kwargs["action"] == "write_ops"
         assert "idempotency_ulid" not in mock_dl_write.call_args.kwargs
 
-    def test_file_rec_skip_sync_uses_append_not_upsert(self, tmp_path: Path) -> None:
-        """_skip_sync=True appends (bulk path; final sync reconciles); the default path upserts (D4)."""
+    def test_file_rec_never_appends_or_upserts_recs_cache(self, tmp_path: Path) -> None:
+        """Neither the bulk (_skip_sync) path nor the default path writes a recs cache (Decision 215)."""
         with (
             patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-700"}),
             patch("scripts.ops_data_portal.RECS_JSONL", tmp_path / "recs.jsonl"),
@@ -379,43 +397,34 @@ class TestMigrationParams:
         ):
             from scripts.ops_data_portal import file_rec
 
-            # Bulk path: append only, no per-row upsert and never the full-table _sync_table.
             file_rec(dict(_VALID_FIELDS), _skip_sync=True)
-            mock_append.assert_called_once()
+            file_rec(dict(_VALID_FIELDS))
+            mock_append.assert_not_called()
             mock_upsert.assert_not_called()
             mock_sync.assert_not_called()
 
-            # Default path: incremental upsert, no append and no full-table _sync_table (D4).
-            mock_append.reset_mock()
-            file_rec(dict(_VALID_FIELDS))
-            mock_upsert.assert_called_once()
-            mock_append.assert_not_called()
-            mock_sync.assert_not_called()
-
-    def test_file_rec_migration_mode_bypasses_content_validators(self, tmp_path: Path) -> None:
-        """_migration_mode lets a historical row that fails content rules import; the schema still applies."""
-        thin = {**_VALID_FIELDS, "context": "too short", "acceptance": ""}
+    def test_file_rec_migration_int_id_evaluates_undated_rules_only(self, tmp_path: Path) -> None:
+        """The caller-keyed _migration_int_id upsert evaluates undated rules only (never stricter than the writer): a
+        historical row failing a dated content rule imports, an undated violation is still refused."""
+        thin = {**_VALID_FIELDS, "context": "too short"}
 
         with (
-            patch("scripts.ops_data_portal._ducklake_write", return_value={"ok": True}),
+            patch("scripts.ops_data_portal._ducklake_write", return_value={"ok": True}) as mock_dl_write,
             patch("scripts.ops_data_portal.RECS_JSONL", tmp_path / "recs.jsonl"),
             patch("scripts.ops_data_portal._sync_table"),
         ):
             from scripts.ops_data_portal import file_rec
 
-            # Without migration mode the short context is rejected.
-            with pytest.raises(ValueError, match="context"):
-                file_rec(dict(thin), _migration_int_id=701)
-
-            # With migration mode it imports.
-            assert file_rec(dict(thin), _migration_int_id=701, _migration_mode=True, _skip_sync=True) == "rec-701"
+            assert file_rec(dict(thin), _migration_int_id=701, _skip_sync=True) == "rec-701"
+            with pytest.raises(ValueError, match="status"):
+                file_rec({**thin, "status": "bogus"}, _migration_int_id=702, _skip_sync=True)
+            mock_dl_write.assert_called_once()
 
     def test_file_decision_skip_sync_suppresses_sync_table(self, tmp_path: Path) -> None:
         """_skip_sync=True on file_decision flows to _refresh_cache_after_write(append_only=True)."""
         with (
             patch("scripts.ops_portal.decisions._ducklake_write", return_value={"ok": True}),
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", tmp_path / "dec.jsonl"),
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
             patch("scripts.ops_portal.decisions._refresh_cache_after_write") as mock_refresh,
         ):
             from scripts.ops_data_portal import file_decision

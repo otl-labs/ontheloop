@@ -68,7 +68,7 @@ class TestNextId:
             mock_session = mock_boto3.Session.return_value
             mock_ddb = mock_session.client.return_value
             mock_ddb.update_item.return_value = self._mock_ddb_response(522)
-            result = next_id("recommendations", profile="company-aws-profile")
+            result = next_id("recommendations", profile="test-profile")
 
         assert result == "rec-522"
 

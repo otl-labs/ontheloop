@@ -6,15 +6,12 @@ Split out of the former tests/test_ops_data_portal.py monolith (rec-2709 Wave 3)
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-duckdb = pytest.importorskip("duckdb")
-
-from tests.fixtures.ops_portal_records import VALID_FIELDS as _VALID_FIELDS  # noqa: E402
+from tests.fixtures.ops_portal_records import VALID_FIELDS as _VALID_FIELDS
 
 
 class TestPipelineConsolidation:
@@ -37,65 +34,24 @@ class TestPipelineConsolidation:
 
         mock_fetch.assert_called_once_with("rec-042", profile=None)
 
-    def test_update_rec_refreshes_cache_incrementally(self, tmp_path: Path) -> None:
-        """update_rec() refreshes the cache via an incremental upsert -- no full-table reader pull (D4)."""
-        recs_file = tmp_path / ".recommendations-log.jsonl"
-        existing = dict(_VALID_FIELDS, id="rec-042", status="open")
-
-        with (
-            patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=existing),
-            patch("scripts.ops_data_portal._ducklake_write", return_value={"ok": True, "ulid": "ulid-test-0001"}),
-            patch("scripts.ops_data_portal._sync_table") as mock_sync,
-            patch("scripts.sync.ops._pull_single_table") as mock_pull,
-            patch("scripts.ops_data_portal.RECS_JSONL", recs_file),
-        ):
-            from scripts.ops_data_portal import update_rec
-
-            update_rec("rec-042", {"status": "closed"})
-
-        # Neon-egress-reduction D4: the per-write full-table resync is gone.
-        mock_sync.assert_not_called()
-        mock_pull.assert_not_called()
-        rows = [json.loads(line) for line in recs_file.read_text(encoding="utf-8").splitlines() if line.strip()]
-        assert any(r["id"] == "rec-042" and r["status"] == "closed" for r in rows)
-
-    def test_file_rec_refreshes_cache_incrementally(self, tmp_path: Path) -> None:
-        """file_rec() refreshes the cache via an incremental upsert -- no full-table reader pull (D4)."""
-        recs_file = tmp_path / ".recommendations-log.jsonl"
-
-        with (
-            patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-700", "ulid": "ulid-test-0001"}),
-            patch("scripts.ops_data_portal._sync_table") as mock_sync,
-            patch("scripts.sync.ops._pull_single_table") as mock_pull,
-            patch("scripts.ops_data_portal.RECS_JSONL", recs_file),
-        ):
-            from scripts.ops_data_portal import file_rec
-
-            file_rec(dict(_VALID_FIELDS))
-
-        mock_sync.assert_not_called()
-        mock_pull.assert_not_called()
-        rows = [json.loads(line) for line in recs_file.read_text(encoding="utf-8").splitlines() if line.strip()]
-        assert any(r["id"] == "rec-700" for r in rows)
-
     def test_sync_returns_pull_only_report(self) -> None:
         """sync() returns {'pulled': ...} only -- no drain/compact/view-refresh keys (Decision 84 I-4)."""
         with patch("scripts.sync.ops._pull_single_table", return_value=10):
             from scripts.ops_data_portal import sync
 
-            result = sync(["ops_recommendations"])
+            result = sync(["ops_decisions"])
 
-        assert result == {"pulled": {"ops_recommendations": 10}}
+        assert result == {"pulled": {"ops_decisions": 10}}
 
     def test_sync_defaults_to_all_migrated_tables(self) -> None:
-        """sync() with no args pulls recs, decisions, and the priority queue."""
+        """sync() with no args pulls decisions and the priority queue (recs have no cache, Decision 215)."""
         pulled: list[str] = []
         with patch("scripts.sync.ops._pull_single_table", side_effect=lambda t: pulled.append(t) or 1):
             from scripts.ops_data_portal import sync
 
             result = sync()
 
-        assert pulled == ["ops_recommendations", "ops_decisions", "ops_priority_queue"]
+        assert pulled == ["ops_decisions", "ops_priority_queue"]
         assert result == {"pulled": dict.fromkeys(pulled, 1)}
 
     def test_update_rec_raises_on_reader_unreachable(self, tmp_path: Path) -> None:
@@ -188,3 +144,65 @@ class TestSyncTable:
         p._sync_table("ops_recommendations")
         p._sync_table("ops_decisions")
         assert calls == ["ops_recommendations", "ops_decisions"]
+
+
+class TestRecsCacheNotWritten:
+    """Decision 215: portal writes never create or modify the recs cache; sync() refuses the table."""
+
+    def test_update_rec_does_not_touch_recs_cache(self, tmp_path: Path) -> None:
+        recs_file = tmp_path / ".recommendations-log.jsonl"
+        recs_file.write_text('{"id": "rec-042", "status": "open"}\n', encoding="utf-8")
+        before = recs_file.read_text(encoding="utf-8")
+        existing = dict(_VALID_FIELDS, id="rec-042", status="open")
+
+        with (
+            patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=existing),
+            patch(
+                "scripts.ops_data_portal._ducklake_write", return_value={"ok": True, "ulid": "ulid-test-0001"}
+            ) as mock_write,
+            patch("scripts.sync.ops._pull_single_table") as mock_pull,
+            patch("scripts.ops_data_portal.RECS_JSONL", recs_file),
+        ):
+            from scripts.ops_data_portal import update_rec
+
+            update_rec("rec-042", {"status": "closed"})
+
+        assert mock_write.call_args.args[1]["status"] == "closed"
+        mock_pull.assert_not_called()
+        assert recs_file.read_text(encoding="utf-8") == before
+
+    def test_file_rec_does_not_create_recs_cache(self, tmp_path: Path) -> None:
+        recs_file = tmp_path / ".recommendations-log.jsonl"
+
+        with (
+            patch(
+                "scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-700", "ulid": "ulid-test-0001"}
+            ) as mock_write,
+            patch("scripts.sync.ops._pull_single_table") as mock_pull,
+            patch("scripts.ops_data_portal.RECS_JSONL", recs_file),
+        ):
+            from scripts.ops_data_portal import file_rec
+
+            assert file_rec(dict(_VALID_FIELDS)) == "rec-700"
+
+        assert mock_write.call_args.args[1]["id"] == "rec-700"
+        mock_pull.assert_not_called()
+        assert not recs_file.exists()
+
+    def test_sync_refuses_ops_recommendations(self) -> None:
+        with patch("scripts.sync.ops._pull_single_table") as mock_pull:
+            from scripts.ops_data_portal import sync
+
+            with pytest.raises(ValueError, match="Decision 215"):
+                sync(["ops_decisions", "ops_recommendations"])
+
+        mock_pull.assert_not_called()
+
+    def test_sync_default_omits_ops_recommendations(self) -> None:
+        with patch("scripts.sync.ops._pull_single_table", return_value=0) as mock_pull:
+            from scripts.ops_data_portal import sync
+
+            result = sync()
+
+        assert "ops_recommendations" not in result["pulled"]
+        assert all(c.args[0] != "ops_recommendations" for c in mock_pull.call_args_list)

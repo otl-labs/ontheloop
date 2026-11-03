@@ -237,6 +237,49 @@ class TestCommonPrimitives:
         assert _common.origin_main_reachable(tmp_path) is False
 
 
+class TestStatusDiffBase:
+    """scripts.checks._common.status_diff_base -- Decision 159's sole base-resolution path for
+    get_status_aware_diff (and any future status-aware-diff caller)."""
+
+    def test_push_base_wins(self, tmp_path: Path) -> None:
+        def mock_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "pushbase\n" if cmd[:2] == ["git", "rev-parse"] else ""
+            return result
+
+        with (
+            patch("scripts.checks._common.run", side_effect=mock_run),
+            patch("scripts.checks._common.ROOT", tmp_path),
+            patch.dict("os.environ", {"GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_BEFORE": "pushbase"}),
+        ):
+            assert _common.status_diff_base() == "pushbase"
+
+    def test_merge_base_fallback(self, tmp_path: Path) -> None:
+        def mock_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            result = MagicMock()
+            if cmd[:2] == ["git", "merge-base"]:
+                result.returncode = 0
+                result.stdout = "mergebasesha\n"
+            else:
+                result.returncode = 1
+                result.stdout = ""
+            return result
+
+        with patch("scripts.checks._common.run", side_effect=mock_run), patch("scripts.checks._common.ROOT", tmp_path):
+            assert _common.status_diff_base() == "mergebasesha"
+
+    def test_none_when_neither_resolves(self, tmp_path: Path) -> None:
+        def mock_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            result = MagicMock()
+            result.returncode = 1
+            result.stdout = ""
+            return result
+
+        with patch("scripts.checks._common.run", side_effect=mock_run), patch("scripts.checks._common.ROOT", tmp_path):
+            assert _common.status_diff_base() is None
+
+
 class TestImplementationDeclaredResolver:
     """scripts.checks._common.resolve_declared_plans -- content-keyed plan resolution
     (Decision 148 sole home, PLAN-plan-resolution-content-keyed)."""

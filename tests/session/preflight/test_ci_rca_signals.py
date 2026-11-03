@@ -409,9 +409,9 @@ class TestFetchCiRcaDisputeRecs:
         assert result[0]["id"] == "rec-501"
 
     def test_cache_rows_none_returns_empty(self) -> None:
-        """When cache_rows is None (warm-pull failed), returns []."""
+        """When cache_rows is None (signal rows unavailable), returns None, never []."""
         result = _preflight._fetch_ci_rca_dispute_recs(cache_rows=None)
-        assert result == []
+        assert result is None
 
     def test_sentinel_returns_empty(self) -> None:
         """When called with the sentinel (no cache_rows arg), returns [] -- no reader call."""
@@ -525,7 +525,7 @@ class TestFetchCiRcaUndeterminedRecs:
 
     def test_fetch_returns_empty_for_none_cache(self):
         result = _preflight._fetch_ci_rca_undetermined_recs(cache_rows=None)
-        assert result == []
+        assert result is None
 
     def test_print_ci_rca_undetermined_recs_empty(self, capsys):
         _preflight.print_ci_rca_undetermined_recs([])

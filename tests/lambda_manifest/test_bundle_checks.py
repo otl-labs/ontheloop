@@ -268,6 +268,7 @@ class TestComputeAffectedArtifacts:
 def test_new_ducklake_modules_track_scd2_schema_membership():
     scd2_module = "src/common/ducklake_scd2_schema.py"
     control_module = "src/common/ducklake_control_tables.py"
+    split_modules = ("src/common/ducklake_named_reads.py", "src/common/ducklake_write_verbs.py")
     manifests = load_all()
     assert manifests, "expected at least one real src/lambdas/*/manifest.yaml"
 
@@ -279,11 +280,15 @@ def test_new_ducklake_modules_track_scd2_schema_membership():
         if scd2_module in includes:
             checked_include += 1
             assert control_module in includes, f"{slug}: bundles {scd2_module} but not {control_module} -- add an includes row"
+            for mod in split_modules:
+                assert mod in includes, f"{slug}: bundles {scd2_module} but not {mod} -- add an includes row"
         if scd2_module in excludes:
             checked_exclude += 1
             assert control_module in excludes, (
                 f"{slug}: excludes {scd2_module} but not {control_module} -- add an excludes row"
             )
+            for mod in split_modules:
+                assert mod in excludes, f"{slug}: excludes {scd2_module} but not {mod} -- add an excludes row"
     # Growth-safe (never a hardcoded count): both sides of the invariant must have been exercised
     # at least once, or this test would vacuously pass if every manifest happened to reference
     # neither module.
@@ -360,3 +365,84 @@ def test_turn_capture_excluded_from_data_pipeline(tmp_path):
     stage_bundle(data_pipeline, stage_dir, skip_pip=True)
     staged_paths = [p for p in stage_dir.rglob("*") if "turn_capture" in p.parts]
     assert staged_paths == [], f"src/turn_capture leaked into data-pipeline.zip: {staged_paths}"
+
+
+# ---------------------------------------------------------------------------
+# PLAN-ducklake-typed-unmapped-errors: the terminal-answer helper ships with the three URL-only serving functions only.
+# The async handlers (maintenance, maintenance_smoke, catalog_dr) keep Lambda's own retry behaviour (follow-on rec-4303).
+# ---------------------------------------------------------------------------
+
+
+def test_handler_errors_module_bundled_by_serving_functions_only(tmp_path):
+    helper = "src/common/ducklake_handler_errors.py"
+    manifests = load_all()
+    for serving in ("ducklake_telemetry_writer", "ducklake_reader", "ducklake_writer"):
+        assert helper in set(manifests[serving].includes), f"{serving} must bundle {helper}"
+    assert helper in set(manifests["data-pipeline"].excludes), "data-pipeline must exclude the helper"
+    for asynchronous in ("ducklake_maintenance", "ducklake_maintenance_smoke", "ducklake_catalog_dr"):
+        assert helper not in set(manifests[asynchronous].includes), f"{asynchronous} must not bundle {helper} yet"
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir()
+    stage_bundle(manifests["data-pipeline"], stage_dir, skip_pip=True)
+    assert list(stage_dir.rglob("ducklake_handler_errors.py")) == []
+
+
+# ---------------------------------------------------------------------------
+# PLAN-telemetry-transcript-content: the reader serves transcript_content, so its bundle carries the content module and the
+# blob store adapter with their imports. ducklake_event_content is imported function-locally and --check-bundles does not
+# run in --pre, so no pre-merge import check would see a missing include.
+# ---------------------------------------------------------------------------
+
+
+def test_reader_bundle_carries_no_event_read_module():
+    manifests = load_all()
+    reader = set(manifests["ducklake_reader"].includes)
+    for module in (
+        "src/common/ducklake_event_reads.py",
+        "src/common/ducklake_event_read_sql.py",
+        "src/common/ducklake_event_read_verbs.py",
+        "src/common/ducklake_event_content.py",
+        "src/common/ducklake_read_deadline.py",
+        "src/common/ducklake_telemetry_blobstore.py",
+        "src/telemetry/blobs.py",
+        "src/telemetry/request.py",
+    ):
+        assert module not in reader, f"ducklake_reader must not bundle {module}"
+    assert not [m for m in reader if m.startswith("src/telemetry/")]
+    telemetry_reader = set(manifests["ducklake_telemetry_reader"].includes)
+    for module in ("src/common/ducklake_event_reads.py", "src/common/ducklake_read_deadline.py"):
+        assert module in telemetry_reader, module
+    assert "src/common/ducklake_event_content.py" in set(manifests["data-pipeline"].excludes)
+
+
+def test_reader_bundle_carries_the_dq_check_module():
+    manifests = load_all()
+    module = "src/common/ducklake_dq_checks.py"
+    assert module in set(manifests["ducklake_reader"].includes)
+    assert module in set(manifests["data-pipeline"].excludes)
+
+
+# ---------------------------------------------------------------------------
+# PLAN-sensitive-value-detectors: src/sensitive_values stays out of data-pipeline (stdlib leaf, rec-4481 plan 1).
+# ---------------------------------------------------------------------------
+
+
+def test_sensitive_values_excluded_from_data_pipeline(tmp_path):
+    manifests = load_all()
+    data_pipeline = manifests["data-pipeline"]
+    assert "src/sensitive_values" in set(data_pipeline.excludes), "data-pipeline manifest must exclude src/sensitive_values"
+
+    changed = [
+        "src/sensitive_values/__init__.py",
+        "src/sensitive_values/classes.py",
+        "src/sensitive_values/engine.py",
+        "src/sensitive_values/profiles.py",
+    ]
+    affected = compute_affected_artifacts(changed)
+    assert "data-pipeline" not in affected, affected
+
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir()
+    stage_bundle(data_pipeline, stage_dir, skip_pip=True)
+    staged_paths = [p for p in stage_dir.rglob("*") if "sensitive_values" in p.parts]
+    assert staged_paths == [], f"src/sensitive_values leaked into data-pipeline.zip: {staged_paths}"

@@ -27,7 +27,7 @@ class TestFileDecision:
             patch("scripts.ops_portal.decisions._ducklake_write", return_value={"ok": True}) as mock_dl_write,
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", decisions_jsonl),
             patch("scripts.ops_portal.decisions._sync_table") as mock_sync,
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
+            patch("scripts.ops_portal.decisions.gate_write"),
         ):
             from scripts.ops_data_portal import file_decision
 
@@ -70,7 +70,7 @@ class TestFileDecision:
             patch("scripts.ops_portal.decisions._ducklake_write", return_value={"ok": True}) as mock_dl_write,
             patch("scripts.ops_portal.decisions.DECISIONS_JSONL", tmp_path / "dec.jsonl"),
             patch("scripts.ops_portal.decisions._sync_table"),
-            patch("scripts.ops_portal.decisions._load_write_time_validators", return_value=[]),
+            patch("scripts.ops_portal.decisions.gate_write"),
         ):
             from scripts.ops_data_portal import file_decision
 
@@ -208,3 +208,20 @@ class TestBackfillDecisionsFromMd:
 
         assert result == {"written": 0, "failed": 1, "skipped": 1}
         mock_sync.assert_not_called()
+
+
+def test_file_decision_and_update_decision_refuse_through_the_gate() -> None:
+    """Unpatched gate (AC1): a null or blank required input is refused with the gate's message on both call sites and the
+    writer is never called."""
+    from scripts.ops_data_portal import file_decision, update_decision
+
+    existing = {"id": "dec-042", "title": "D", "status": "open"}
+    with (
+        patch("scripts.ops_portal.decisions._ducklake_write") as mock_dl_write,
+        patch("scripts.ops_portal.decisions._fetch_decision_from_reader", return_value=dict(existing)),
+    ):
+        with pytest.raises(ValueError, match="required input field 'title' is empty"):
+            file_decision({"title": "", "status": "open", "decision_id": 56})
+        with pytest.raises(ValueError, match="required input field 'status' is missing or null"):
+            update_decision("dec-042", {"status": None})
+    mock_dl_write.assert_not_called()

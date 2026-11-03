@@ -173,7 +173,7 @@ def surface_queue_relevance_triage(
     executes acceptance probes -- surfacing-only per Decision 55.
 
     Args:
-        cache_rows:      All rows from the warmed read-cache (logs/.recommendations-log.jsonl).
+        cache_rows:      Caller-supplied recommendation rows (not a local read cache; Decision 215).
         commits:         Recent main commits already fetched by the caller.
         exclude_sources: Source tags that have their own triage block (default: ci_rca).
         cap:             Maximum recs returned.

@@ -285,3 +285,48 @@ class TestCalendarDayCompactionGuarantee:
                 f"SELECT DISTINCT date_trunc('day', session_started_at) FROM read_parquet('{path}')"
             ).fetchall()
             assert len(file_dates) == 1, f"{path} mixes more than one UTC calendar date: {file_dates}"
+
+
+@pytest.mark.integration
+def test_four_tables_one_transaction_all_or_nothing(tmp_path: Path, _skip_if_no_extension: None) -> None:
+    from src.telemetry.append import execute_prepared, prepare_batch
+    from src.telemetry.gate import GrainConflictError
+    from src.turn_capture.record_turn import record_turn
+    from tests.fixtures.turn_capture_corpus import PROJECT_REF, load_case, mem_tree
+    from tests.fixtures.turn_capture_ducklake import create_tables, load_specs
+
+    con = _local_catalog(tmp_path)
+    specs = load_specs()
+    create_tables(con, specs)
+    files, _ = load_case("subagent_sync.json")
+    result = record_turn(mem_tree(files), None, project_ref=PROJECT_REF, session_final=True)
+    assert [t for t, rows in result.batches if rows] == [t for t, _ in result.batches]
+    append_events(
+        con, specs["telemetry_agents"], [dict(result.agents[0], model="a different model")],
+        tenant_id=TENANT, project_id=PROJECT, catalog="lake",
+    )  # fmt: skip
+
+    def counts() -> dict[str, int]:
+        return {t: con.execute(f"SELECT count(*) FROM lake.{t}").fetchone()[0] for t, _ in result.batches}
+
+    before = counts()
+    prepared = [prepare_batch(specs[t], rows, tenant_id=TENANT, project_id=PROJECT) for t, rows in result.batches]
+    con.execute("BEGIN")
+    with pytest.raises(GrainConflictError, match="TELEMETRY_GRAIN_CONFLICT"):
+        for batch in prepared:
+            execute_prepared(con, batch, catalog="lake")
+    con.execute("ROLLBACK")
+    assert counts() == before and before["telemetry_observations"] == 0 and before["telemetry_agents"] == 1
+
+    clean_agents = prepare_batch(specs["telemetry_agents"], result.agents[1:], tenant_id=TENANT, project_id=PROJECT)
+    con.execute("BEGIN")
+    done = [execute_prepared(con, batch, catalog="lake") for batch in prepared[:2]] + [
+        execute_prepared(con, clean_agents, catalog="lake"),
+        execute_prepared(con, prepared[3], catalog="lake"),
+    ]
+    con.execute("COMMIT")
+    assert [d.inserted for d in done] == [len(r) for t, r in result.batches if t != "telemetry_agents"][:2] + [
+        len(result.agents) - 1,
+        len(result.sessions),
+    ]
+    assert counts()["telemetry_agents"] == len(result.agents)

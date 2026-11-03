@@ -20,6 +20,7 @@ def make(**over: object) -> CaptureCursor:
         "lines_consumed": {"root": 4, "agent1": 2},
         "sidecars": {"a.txt": "ab" * 32, "b.txt": None},
         "finalized": True,
+        "finalize_cuts": [{"root": 2}, {"root": 4, "agent1": 2}],
     }
     base.update(over)
     return CaptureCursor(**base)  # type: ignore[arg-type]
@@ -30,13 +31,27 @@ def test_cursor_json_round_trip() -> None:
     assert CaptureCursor.from_json(cursor.to_json()) == cursor
 
 
-def test_reset_keeps_exactly_the_four_pins() -> None:
+def test_format_two_round_trip_and_format_one_refused() -> None:
+    cursor = make()
+    assert cursor.cursor_format == 2 and json.loads(cursor.to_json())["finalize_cuts"] == [
+        {"root": 2},
+        {"root": 4, "agent1": 2},
+    ]
+    old = json.loads(cursor.to_json())
+    old.pop("finalize_cuts")
+    old["cursor_format"] = 1
+    with pytest.raises(CursorError, match="cursor_format"):
+        CaptureCursor.from_json(json.dumps(old))
+
+
+def test_reset_keeps_the_four_pins_and_the_finalization_cuts() -> None:
     reset = make().reset(2)
     assert reset.parser_version == 2
     assert (reset.root_session_ref, reset.project_ref, reset.billing_shape, reset.session_started_at_ms) == (
         "sess", "proj", "fixed_non_rollover_allowance", 1_700_000_000_000,
     )  # fmt: skip
     assert reset.lines_consumed == {} and reset.sidecars == {} and reset.finalized is False
+    assert reset.finalize_cuts == [{"root": 2}, {"root": 4, "agent1": 2}]
 
 
 def test_pin_mismatches_raise() -> None:
@@ -81,6 +96,11 @@ def test_sidecar_contradiction_raises_and_absent_pin_is_honoured() -> None:
         lambda d: d.update(sidecars=[]),
         lambda d: d.update(sidecars={"a": 5}),
         lambda d: d.update(finalized="yes"),
+        lambda d: d.update(finalize_cuts={}),
+        lambda d: d.update(finalize_cuts=[3]),
+        lambda d: d.update(finalize_cuts=[{"root": -1}]),
+        lambda d: d.update(finalize_cuts=[{"root": True}]),
+        lambda d: d.pop("finalize_cuts"),
         lambda d: d.pop("finalized"),
         lambda d: d.update(extra=1),
     ],

@@ -80,7 +80,7 @@ def verify_read_path(
     for table in tables:
         try:
             row = con.execute(
-                f"SELECT count(*), sum(hash(t)) FROM {catalog}.{table} AT (VERSION => {int(snapshot_id)}) AS t"
+                f"SELECT count(*), sum(hash(t)) FROM {catalog}.{table} AS t AT (VERSION => {int(snapshot_id)})"
             ).fetchone()
         except maint.DuckLakeMaintenanceError:
             raise

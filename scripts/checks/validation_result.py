@@ -38,6 +38,9 @@ _ATTRIBUTIONS: list[dict[str, str]] = []
 # never read as history, so it needs no merge key/identity/partitioning.
 _OUTCOMES: list[registry.CheckOutcome] = []
 
+# Names of scaffold steps that appended to `failed` (run_scaffold), in first-seen order. Reset by clear().
+_SCAFFOLD_FAILURES: list[str] = []
+
 # Accumulator of {check: [detail, ...]}, populated by dispatch_recording() when a check declares
 # registry.failure_detail() (this plan, coverage-failure-attribution). Reset by clear(), same
 # lifecycle as _ATTRIBUTIONS/_OUTCOMES. Emitted on write_completed()'s NEW top-level
@@ -99,6 +102,7 @@ def clear(path: Path | None = None) -> None:
     resolved.unlink(missing_ok=True)
     _ATTRIBUTIONS.clear()
     _OUTCOMES.clear()
+    _SCAFFOLD_FAILURES.clear()
     _FAILURE_DETAILS.clear()
     global _START_HEAD_TREE, _START_TREE_CLEAN
     _START_HEAD_TREE = _head_tree()
@@ -137,6 +141,31 @@ def dispatch_recording(name: str, failed: list[str], fn: Callable[[list[str]], N
     if detail is not None:
         _FAILURE_DETAILS[name] = detail
     _harvest_declared_outcome(name, "check", appended_to_failed=bool(appended))
+
+
+def run_scaffold(name: str, failed: list[str], fn: Callable[[], None]) -> None:
+    """Run a non-check scaffold step, recording its name when it newly appends to `failed`."""
+    before = len(failed)
+    fn()
+    if failed[before:]:
+        _SCAFFOLD_FAILURES.append(name)
+
+
+def failure_markers() -> list[str]:
+    """One gate marker per failed check (first-seen order), then per failed scaffold step."""
+    from src.turn_capture import markers  # noqa: PLC0415 -- deferred: keeps src/ out of this module's import closure
+
+    names = list(dict.fromkeys(a["check"] for a in _ATTRIBUTIONS))
+    names.extend(n for n in dict.fromkeys(_SCAFFOLD_FAILURES) if n not in names)
+    return [markers.format_gate_marker(n) for n in names]
+
+
+def print_failure_summary(failed: list[str]) -> None:
+    print("Failed checks:")
+    for f in failed:
+        print(f"  - {f}")
+    for line in failure_markers():
+        print(line)
 
 
 def git_head() -> str:

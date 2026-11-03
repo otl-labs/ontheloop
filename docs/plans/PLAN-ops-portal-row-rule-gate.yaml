@@ -1,0 +1,911 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: ops-portal-row-rule-gate
+intent: >-
+  rec-4158 (Decision 210), its closing plan: the agent-side ops portal stops carrying its own copy of the rules.
+  file_rec, update_rec, file_decision and update_decision run the DuckLake writer's own pure gate (schema_gate and
+  check_write) over the field_semantics.yaml the writer ships, as a fail-fast pre-check that can never drift from the
+  writer and is never authoritative. Inserts evaluate every rule; updates and caller-keyed upserts evaluate only
+  undated rules, so the pre-check can never be stricter than the writer. The two rules no writer can run (acceptance lint, dependency existence) stay
+  portal-side, driven by the contract's own exemptions. config/agent/data_quality/ops.yaml loses its write-time role:
+  its write_time flags and the five portal-only test entries go, and what remains is a DQ backstop never stricter than
+  the contract. Closes T2.29 c6 and rec-4158.
+plan_type: IMPLEMENTATION
+implementation_declared: true
+verification_tier: V2
+plan_path: docs/plans/PLAN-ops-portal-row-rule-gate.yaml
+phase: >-
+  ad_hoc_rec rec-4158 (Decision 210 cl.3 single source, applied to the portal); closes T2.29 c6 (the write-time
+  validator registry repointed to the Class A contract's declared rules) and re-grounds T2.29 c5's wording.
+scope:
+# --- the portal -----------------------------------------------------------------------------------------------------
+- file: scripts/ops_portal/write_validators.py
+  action: Modify
+  purpose: >-
+    Rewritten in place (the ops_recommendations contract names this path as the acceptance_lint exemption owner, and
+    the projection ships that owner, so the path must not move). Deleted: _load_write_time_validators, its cache, the
+    _WRITE_TIME_VALIDATOR_BUILDERS map and every builder, _check_not_null, _validate_file_path,
+    _validate_context_length and _OPS_YAML_PATH. Kept: _rec_exists and its positive memo. New gate_write(table,
+    record, *, insert, existing=None): projects the record exactly as the transport does
+    (writer_transport._project_ops_record), then calls the writer's own schema_gate and
+    src.common.ducklake_write_rules.check_write against resolve_table_spec(table) over the repo's
+    config/lambda/ducklake/field_semantics.yaml. insert=True is used only where the row is new by construction
+    (file_ops: the writer allocates the key) and evaluates every rule with prior None and the minted columns set as
+    file_scd2 sets them (a placeholder merge key "<entity_id_prefix>0"). insert=False is used for update_ops and for
+    every caller-keyed write_ops upsert (file_decision, which backfill_decisions_from_md re-runs over existing rows,
+    and file_rec's _migration_int_id path), where a stored prior may exist: it evaluates only the undated rules -- the
+    projection's columns with every leg named in their exclude_before removed -- with prior None, because an undated
+    rule binds every row whatever its age (src/row_rules/rules.py _binder), so the created_timestamp argument is just
+    the call time and the existing row's stored value is never read (a missing or unparseable one cannot fail the
+    gate; created_timestamp is a derived column the writer owns), and dated rules stay the writer's alone: never stricter
+    than the writer, by construction. Consequence, stated in the records: an update no longer fails fast in the
+    portal on a dated leg (title, context, file and acceptance min_length, file pattern, tags format and the dated
+    not_null legs); the writer evaluates it, binding it when the column changes or the row is newer than the date,
+    and its 422 surfaces as the portal's ValueError (writer_transport) at the cost of one round-trip. A rejection
+    raises RowRuleRejected(ValueError) naming table, column, rule, the declared limit in words (min_length "at least
+    N stripped characters", accepted_values "one of [...]", pattern and array_element_format the pattern, not_null
+    "is required") and exclude_before -- never the value; a schema-gate failure raises ValueError with the gate's own
+    message. Then the producer-side rules, driven by RowRules.producer_exemptions (column, kind): a handler map
+    {acceptance_lint: lint_acceptance_command, array_element_reference: _rec_exists}, each handler given the declared
+    leg's params from scripts.contract_rules.declared_rules(table) for that (column, kind) -- so require_discrimination
+    comes from the contract, never a portal copy; a handler runs on insert, on an upsert with no existing row
+    (existing None: the producer-side rules apply as on insert), and on update only when the column's value differs
+    from the existing row; an exempt kind with no handler fails closed. The update arm removes each dated leg together
+    with its exclude_before entry from the projection copy, deleting an emptied exclude_before mapping
+    (RowRules.from_projection refuses a date naming an absent rule and an empty mapping), and also drops any undated
+    two-column rule (not_before, at_most) whose other column is writer-derived, since the gate's call-time
+    created_timestamp is not the stored one; none is declared on an ops table today, so this keeps "never stricter"
+    true by construction rather than by inventory. The array_element_reference handler is built once per gate_write call and holds one reader for the
+    whole element list, built lazily and not at all when every element is memoised (Decision 88 invariant (i), as the
+    deleted builder closure did). Module docstring: a derived pre-check, never authoritative; the writer re-evaluates
+    every rule (Decision 81 cl.5 as widened by Decision 210 cl.5).
+- file: scripts/ops_data_portal.py
+  action: Modify
+  purpose: >-
+    file_rec: the ops.yaml loop and the explicit _validate_file_path/_validate_context_length calls become one
+    gate_write("ops_recommendations", fields, insert=<no explicit id>) after _derive_computed_fields and the ci_rca
+    branch (insert=False on the _migration_int_id write_ops path);
+    validate_source stays and runs before gate_write (it reads the source registry itself, the same source the
+    contract references, and names the registered values, so "Unknown source" keeps its message). The private _migration_mode parameter is retired (no non-test caller; with the writer
+    enforcing every rule on insert it promised a bypass that no longer exists). update_rec: the restated
+    _VALID_STATUSES fast-fail, the loop and _UPDATE_CONTENT_VALIDATED_FIELDS go; gate_write("ops_recommendations",
+    merged, insert=False, existing=existing) runs before Recommendation.model_validate, so a rejection names the contract rule;
+    assert_closure_obligation and assert_acceptance_verdict stay the last checks before the write (Decisions 186,
+    201). The facade stops re-exporting the deleted names. Net SLOC falls (488 of 500 today).
+- file: scripts/ops_portal/decisions.py
+  action: Modify
+  purpose: >-
+    file_decision's loop becomes gate_write("ops_decisions", record, insert=False) (a caller-keyed write_ops upsert
+    that backfill_decisions_from_md re-runs over existing rows); update_decision gains gate_write("ops_decisions",
+    merged, insert=False, existing=existing) before Decision.model_validate. Behaviour today is unchanged (ops_decisions declares
+    only not_null on nullable false columns, which the writer already enforces).
+- file: scripts/checks/ci_guards/validate_ops_portal_patch_targets.py
+  action: Modify
+  purpose: >-
+    The roster of names file_decision resolves in scripts.ops_portal.decisions drops _load_write_time_validators and
+    gains gate_write; update_decision's bound set gains gate_write too. Touching the check makes it declare
+    registry.examined() on every success exit (Decision 170 touch-it-fix-it).
+- file: config/check_accounting_baseline.yaml
+  action: Modify
+  purpose: >-
+    Added by amendment (2026-10-16): the build escalated it to the coordinator, which routed it to this planning thread
+    under Benjamin's 2026-10-14 scope escalation rule; landed as its own reviewed PR first (implement-scope-boundary
+    amendment_procedure). Strike validate_ops_portal_patch_targets: once the touched check declares examined() on
+    every reachable success exit, tests/checks/hygiene/test_validate_check_accounting.py::test_no_live_roster_name_is_fully_declared
+    demands the strike. The exemption list only shrinks.
+- file: scripts/checks/deps/_manifest.py
+  action: Modify
+  purpose: >-
+    Added by the same amendment. validate_presubmit_tool_pin_escalation's pre_globs gain "scripts/contract_rules.py":
+    write_validators.py now reads declared acceptance_lint params through scripts.contract_rules.declared_rules, a new
+    import edge validate_pre_glob_closure reports. Globs are only added (Decision 187: never a demotion), as the
+    earlier "src/row_rules/**" additions to the same Entries were.
+- file: scripts/checks/ops_governance/_manifest.py
+  action: Modify
+  purpose: Added by the same amendment, for the same edge -- validate_recommendations_schema's pre_globs gain "scripts/contract_rules.py".
+- file: scripts/checks/verification/_manifest.py
+  action: Modify
+  purpose: >-
+    Added by the same amendment, for the same edge -- validate_hermeticity_flags, validate_verification_registry and
+    validate_differential_gate_baseline each gain "scripts/contract_rules.py" in pre_globs.
+- file: scripts/cost_reconciliation.py
+  action: Modify
+  purpose: >-
+    _validate_rec_payload (the --dry-run path of .github/workflows/cost-reconciliation.yml) imports the two deleted
+    helpers from the facade; it becomes file_rec's own pre-check path minus the write: validate_source, then
+    _derive_computed_fields on a copy (scripts.ops_portal.risk_scoring, local only), then gate_write("ops_recommendations",
+    copy, insert=True); Recommendation.model_validate({**fields, "id": "rec-0"}) stays. Its docstring's divergence note (acceptance lint without require_discrimination) goes: the
+    gate's acceptance handler takes require_discrimination from the contract's declared leg, exactly as file_rec
+    does.
+- file: scripts/ops_portal/closure_gate.py
+  action: Modify
+  purpose: >-
+    Docstring only (line ~280): "context_v2_json is not in _UPDATE_CONTENT_VALIDATED_FIELDS" becomes "context_v2_json
+    carries no contract rule and no monotonicity guard"; behaviour unchanged.
+# --- ops.yaml loses its write-time role ------------------------------------------------------------------------------
+- file: config/agent/data_quality/ops.yaml
+  action: Modify
+  purpose: >-
+    Every `write_time:` key is deleted (20 write_time tests measured at planning), and so are the seven test entries,
+    of five types, only the portal ever read (the DQ compiler never compiled them): title min_length, file path_syntax, context min_length (its compiled LENGTH(TRIM(context))
+    >= 80 expression stays), acceptance acceptance_lint, dependencies array_element_format and
+    array_element_reference, tags array_element_format. The header names every remaining ops_recommendations test that
+    restates a contract rule as a DQ backstop of the writer's enforcement (Decision 210; the Class A contract is the
+    rule source; T1.6 c7 retires this file). Prose that names write_validators.py, _validate_file_path,
+    _validate_context_length or validate_source as the enforcer now names the contract and the writer, keeping the
+    meaning get_rec_write_guidance serves (Decision 66; T2.29 c7 still owns repointing guidance).
+- file: config/agent/data_quality/decisions/ops_recommendations.yaml
+  action: Modify
+  purpose: >-
+    The dependencies and tags current_test lines name the contract rule enforced by the writer (no DQ test); the
+    current_test strings that cite `write_time: true` drop it. The status rationale that names
+    _load_write_time_validators (line ~200) sits in a dated decided_action, so it is not rewritten: one appended
+    dated sentence says the guard is now the writer and the portal's derived pre-check. Dated rationale history lines
+    stay as written. Net line count unchanged or lower (Decision 166).
+- file: scripts/data_quality_compile.py
+  action: Modify
+  purpose: >-
+    _WRITE_TIME_ONLY_TEST_TYPES and its skip are removed, so any of those five test types now raises as an unknown
+    test type: no write-time test can return to a DQ file.
+- file: scripts/checks/contracts/_ops_rule_bindings.py
+  action: Modify
+  purpose: >-
+    Created by the rule declarations build. The ops.yaml write_time parity leg (vacuous once the flags are gone) is replaced by: (i) no `write_time` key
+    anywhere in ops.yaml; (ii) DQ is never stricter than the contract, judged on the ops_recommendations table only
+    and on its DQ-enforced tests only (an `enforced: false` DQ test refuses nothing) -- an accepted_values test's
+    values are a subset of the contract's, a not_null test sits only on a column the contract declares not_null, and a
+    DQ exclude_before is never earlier than the contract leg's date. No pre_glob is dropped (Decision 187).
+# --- records ---------------------------------------------------------------------------------------------------------
+- file: docs/contracts/ops_recommendations.yaml
+  action: Modify
+  purpose: >-
+    governance_notes: ops.yaml is a DQ-backstop file with no write-time role (validate_ops_rule_source keeps it no
+    stricter than this contract) and retires via T1.6 c7. Field semantics that name write_validators.py functions or
+    "write-enforced through both file_rec and update_rec" re-point to the writer, which enforces every rule on every
+    write, and to the portal's derived pre-check, which covers inserts fully and updates for undated rules only; each
+    with a field-level prose_improvement entry. Rules unchanged; projection unchanged. Measured headroom: 513 of 556
+    effective lines before the rule declarations build's entry; this plan adds a governance sentence and four short
+    field entries (no raise, Decision 166).
+- file: docs/contracts/data-modeling-standard.yaml
+  action: Modify
+  purpose: >-
+    Rule write-time-enforcement COVERAGE: the portal-and-ops.yaml clause moves from a rec-4158 residual to enforced
+    coverage -- the portal runs the writer's own gate as a derived pre-check (inserts all rules, updates and upserts
+    undated rules only), the producer-side rules stay with their exemption owners, and ops.yaml carries DQ backstops
+    only, kept never stricter by the one-way leg. The anchors test_write_time_enforcement_decision.py pins for that
+    clause are re-pinned to the new wording (never weakened); every other anchored phrase is kept. amendment_log entry;
+    updated_by. At 439 of 500 effective lines before the rule declarations build adds up to 40: this change is net
+    neutral, compressing rather than raising (Decision 128).
+- file: docs/contracts/ports.yaml
+  action: Modify
+  purpose: >-
+    PC-05 {ports: [work_item_storage, ops_verbs], location: scripts/ops_portal/write_validators.py, status: accepted,
+    owning_item: dec-210}: the portal's pre-check imports the DuckLake writer's pure gate modules and reads the
+    repository's field_semantics.yaml, so it presumes the repository projection equals the deployed one. Between a
+    contract merge and its deploy the two differ in either direction: a narrowing makes the pre-check stricter (it
+    refuses early what the deployed writer still accepts, which Decision 210 cl.4 intends), and an added accepted
+    value or other widening makes it looser (the deployed writer still refuses, authoritatively, so no invalid row is
+    written; the caller sees the writer's 422). Decision 212 cl.3: a recorded, accepted coupling. amendment_log entry.
+- file: docs/DECISIONS.md
+  action: Modify
+  purpose: >-
+    One dated update appended to Decision 65 (Decision 177 pinned form): ops.yaml's write_time flags are retired; the
+    portal runs the writer's own gate over the contract's projection; ops.yaml keeps DQ backstops, never stricter than
+    the contract, until T1.6 c7 retires it.
+- file: docs/decisions-index.json
+  action: Modify
+  purpose: Regenerated by bin/venv-python -m scripts.decisions_index --write; never hand-edited.
+- file: docs/ROADMAP-PLATFORM.yaml
+  action: Modify
+  purpose: >-
+    T2.29 is git-diff-touched, so its nine bare-string criteria convert to the structured ExitCriterion form (id
+    c1..c9 by position, text verbatim, status open; validate_platform_roadmap (ii)). c5's text is re-grounded (it
+    names write_validators.py::_build_min_length_validator and the ops.yaml title min_length, both deleted here) to
+    the contract's title min_length leg, enforced by the writer and, on insert, the portal gate, keeping "exclude_before
+    2026-09-01" and rec-4158. c6 is re-worded in the same edit to what was realised (the loader is retired, not
+    repointed: the portal runs the writer's own gate over the contract's projection) and flips to met through
+    closes_criteria on the verified VP pass (the /implement flow), which also moves T2.29 to in_progress with a
+    progress_note. Line budget: 9,804 at planning, up to about 10 more from the rule declarations build, about 20 for
+    the conversion and a few for the status and note, under the 10,000 ceiling.
+# --- verification registry: retire what disappears, re-point what survives (Decision 176) ---------------------------
+- file: config/agent/verification_registry/entries/deprecated/loader-context-min-length-80.yaml
+  action: Create
+  purpose: git mv from entries/ (its guard symbol is deleted); replaced by VP step 4's ledger node (context min_length 80 through the gate).
+- file: config/agent/verification_registry/entries/loader-context-min-length-80.yaml
+  action: Delete
+  purpose: Moved to entries/deprecated/ (Decision 176).
+- file: config/agent/verification_registry/entries/deprecated/write-time-unknown-test-raises.yaml
+  action: Create
+  purpose: git mv (the loader is deleted); replaced by VP step 6 (an unknown or former write-time test type raises in the compiler).
+- file: config/agent/verification_registry/entries/write-time-unknown-test-raises.yaml
+  action: Delete
+  purpose: Moved to entries/deprecated/.
+- file: config/agent/verification_registry/entries/deprecated/expression-write-time-branch-retired.yaml
+  action: Create
+  purpose: git mv (the builder is deleted); the retired behaviour cannot recur -- no write-time loader exists.
+- file: config/agent/verification_registry/entries/expression-write-time-branch-retired.yaml
+  action: Delete
+  purpose: Moved to entries/deprecated/.
+- file: config/agent/verification_registry/entries/deprecated/min-length-honours-declared-column.yaml
+  action: Create
+  purpose: git mv (the builder is deleted); replaced by VP step 4's ledger node (title and context bounds through the gate).
+- file: config/agent/verification_registry/entries/min-length-honours-declared-column.yaml
+  action: Delete
+  purpose: Moved to entries/deprecated/.
+- file: config/agent/verification_registry/entries/deprecated/dependencies-array-element-format.yaml
+  action: Create
+  purpose: git mv (the builder is deleted); replaced by VP step 4's ledger node (dependencies element format through the gate).
+- file: config/agent/verification_registry/entries/dependencies-array-element-format.yaml
+  action: Delete
+  purpose: Moved to entries/deprecated/.
+- file: config/agent/verification_registry/entries/deprecated/dq-compiler-write-time-only-skip.yaml
+  action: Create
+  purpose: git mv (the skip set is deleted); replaced by VP step 6.
+- file: config/agent/verification_registry/entries/dq-compiler-write-time-only-skip.yaml
+  action: Delete
+  purpose: Moved to entries/deprecated/.
+- file: config/agent/verification_registry/entries/deprecated/dq-compiler-array-element-reference-skip.yaml
+  action: Create
+  purpose: git mv (the type now raises); replaced by VP step 6.
+- file: config/agent/verification_registry/entries/dq-compiler-array-element-reference-skip.yaml
+  action: Delete
+  purpose: Moved to entries/deprecated/.
+- file: config/agent/verification_registry/entries/deprecated/dependencies-array-element-reference.yaml
+  action: Create
+  purpose: >-
+    git mv (its guard _build_array_element_reference_validator is deleted). An in-place re-point with the same node
+    would fail validate_verification_registry's modified-record differential (the node passes on origin/main, so it is
+    tautological; the verification-registry.yaml precedent retires rather than forcing an admission). Replaced by step
+    3's portal-producer-rules-follow-exemptions row; the node test_array_element_reference_rejects_absent_rec keeps its
+    file and name, re-pinned to drive the gate.
+- file: config/agent/verification_registry/entries/dependencies-array-element-reference.yaml
+  action: Delete
+  purpose: Moved to entries/deprecated/.
+- file: config/agent/verification_registry/entries/deprecated/update-rec-acceptance-discrimination.yaml
+  action: Create
+  purpose: >-
+    git mv (its guard _build_acceptance_lint_validator is deleted), for the same reason; replaced by step 3's row; the
+    node test_update_rec_acceptance_requires_discrimination keeps its file and name. dependencies-reference-reader-loud-fail's
+    registry row is unchanged (its guard _rec_exists survives, so it is not modified); its node keeps its file and name
+    and is re-pinned in place to drive gate_write.
+- file: config/agent/verification_registry/entries/update-rec-acceptance-discrimination.yaml
+  action: Delete
+  purpose: Moved to entries/deprecated/.
+# --- tests (measured on a prototype: 28 nodes break across 17 files; each is re-pinned, never weakened) -------------
+- file: tests/test_ops_data_portal_validators.py
+  action: Modify
+  purpose: >-
+    The loader and builder tests go with their code (each replaced per the removal ledger, step 4), except the
+    graduated and Decision 88 nodes, which keep their names and are re-pinned to drive gate_write:
+    test_array_element_reference_rejects_absent_rec, test_array_element_reference_loud_fails_on_unreachable_reader,
+    test_array_element_reference_holds_one_reader_per_write and
+    test_array_element_reference_skips_reader_when_all_elements_memoised, and
+    test_array_element_reference_memoises_positive_results_only (the surviving positive-only memo; only its loader
+    cache clear goes). New: test_portal_gate_is_the_writer_gate
+    (rec-4158's new acceptance node), test_update_gate_is_never_stricter_than_the_writer,
+    test_producer_side_rules_follow_the_contract_exemptions, test_each_retired_validator_is_replaced_by_its_contract_leg.
+    353 SLOC today; stays under 500, concern-splitting (Decision 131) rather than raising if it would cross.
+- file: tests/ops_data_portal/test_rec_write.py
+  action: Modify
+  purpose: >-
+    TestWriteTimeDispatch becomes gate dispatch, with new test_file_rec_and_update_rec_refuse_through_the_gate (unpatched
+    gate: a blank required input refused with the gate's message on both call sites, `_ducklake_write` never called);
+    the migration-mode tests go with the parameter; message pins move to the gate's wording.
+    TestUpdateRec::test_update_rec_invalid_status keeps its name and its ValueError, gains a reader mock (the restated
+    fast-fail is gone, so the refusal now comes from the gate's status accepted_values after the existing-row read)
+    and drops its "before any read" claim. TestUpdateRec::test_update_rec_context_too_short_rejected keeps its name and still asserts the
+    ValueError, now raised by the writer: context's min_length is dated, so the update pre-check skips it, and the
+    test drives update_rec against the shared fake writer (tests/fixtures/ops_rec_rows.py) that evaluates the writer's
+    own check_write with the existing row as prior and maps a refusal to ValueError as writer_transport does.
+- file: tests/ops_data_portal/test_update_rec_content_validation.py
+  action: Modify
+  purpose: >-
+    Existing-row fixtures become complete, rule-clean, reader-shaped rows (a shared factory); message pins move to the
+    gate's wording. test_update_rec_rejects_nonconforming_tag (graduated row tags-array-element-format, guard
+    update_rec, kept) keeps its name and still asserts ValueError naming tags, now from the shared fake writer: the
+    tags format leg is dated, so the pre-check skips it and the writer binds it because the column changes; its
+    `_ducklake_write` stub becomes that fake writer, which stores nothing on refusal. test_legacy_nonconforming_tag_still_updates
+    then proves the other half (an older row's untouched dated column does not bind).
+- file: tests/test_cost_reconciliation.py
+  action: Modify
+  purpose: >-
+    test_validate_rec_payload_raises_on_bad_acceptance and test_validate_rec_payload_passes_for_well_formed_fields keep
+    their names and assertions over the re-pointed validator; new test_validate_rec_payload_runs_the_portal_gate
+    asserts a too-short context and an absolute file path are refused naming the contract rule.
+- file: tests/fixtures/portal_removal_ledger.py
+  action: Create
+  purpose: >-
+    The removal ledger as data, LEDGER: one mapping {column, check, input, leg, update_path} per retired portal check
+    (the two explicit validators keyed as check "explicit file path" and "explicit context length", the status
+    fast-fail as "status fast-fail", so no row spells a swept identifier) -- the 20 ops.yaml write_time tests at planning (by
+    column and test type), _validate_file_path, _validate_context_length and the update_rec status fast-fail -- each
+    with the input it rejected, the contract leg that replaces it on insert, and, where that leg is dated, its
+    update-path replacement in the writer (tests/common/test_ducklake_write_rules.py::test_write_scd2_update_binds_dated_rule_only_when_column_changes
+    and ::test_older_rows_verdicts_on_the_real_projection). A blank-string row maps to min_length or accepted_values,
+    since the engine's not_null refuses None only; a None or blank on a nullable false input (title, status) and a
+    non-boolean automatable are refused by schema_gate, so those rows name schema_gate as the leg and their "leg
+    removed" mutation flips the copied column to nullable or widens its type. Completeness against origin/main's ops.yaml is proven PR-relative
+    by step 12.
+- file: tests/checks/contracts/test_ops_rule_source_records.py
+  action: Modify
+  purpose: >-
+    test_roadmap_is_regrounded (graduated row ops-rule-source-records) keeps its name: it reads T2.29's criteria by
+    their structured text, asserts the re-grounded c5 still carries "exclude_before 2026-09-01" and rec-4158, and the
+    re-worded c6 names the portal's gate over the contract's projection and is met (the old "_load_write_time_validators
+    ... rec-4158 plan C" pin re-pinned to the realised wording, never weakened). test_standard_records_the_ops_source
+    is re-pinned to the COVERAGE clause's new wording. New test_portal_gate_records_land (AC6): Decision 65's section
+    carries this plan's dated update naming the portal gate and the retired write_time flags, and ports.yaml carries
+    PC-05 at scripts/ops_portal/write_validators.py with owning_item dec-210 and status accepted.
+- file: tests/checks/contracts/test_write_time_enforcement_decision.py
+  action: Modify
+  purpose: >-
+    The anchors on the COVERAGE sentence's portal-and-ops.yaml clause are re-pinned to the new wording (enforced
+    coverage, not a rec-4158 residual); every other anchor kept. The same clause is also anchored by
+    tests/checks/contracts/test_ops_rule_source_records.py::test_standard_records_the_ops_source (graduated rows
+    ops-rule-source-records and ops-row-rules-contracts), re-pinned in that file's row.
+- file: tests/fixtures/ops_rec_rows.py
+  action: Create
+  purpose: >-
+    The shared reader-shaped, rule-clean existing-rec factory (string created_timestamp, coerced arrays), used by every
+    update_rec test that needs an existing row; and the fake writer: a `_ducklake_write` stand-in that runs the
+    writer's own schema_gate and check_write (src.common.ducklake_write_rules) with the stored row as prior, raising
+    ValueError naming rule and column on a refusal, as writer_transport maps a 422.
+- file: tests/test_ops_data_portal_decisions.py
+  action: Modify
+  purpose: >-
+    The 14 patches of decisions._load_write_time_validators move to gate_write. The file is at 499 of 500 SLOC: the
+    change is line-neutral; concern-split (Decision 131) rather than raise if it would cross.
+- file: tests/ops_data_portal/test_decisions.py
+  action: Modify
+  purpose: >-
+    The 2 patches of decisions._load_write_time_validators move to gate_write. New
+    test_file_decision_and_update_decision_refuse_through_the_gate (unpatched gate): a null or blank required input is
+    refused with the gate's message on both call sites and `_ducklake_write` is never called (AC1 evidence; this file,
+    not the 499-SLOC tests/test_ops_data_portal_decisions.py, takes it).
+- file: tests/test_ops_portal_facade.py
+  action: Modify
+  purpose: The facade export list drops the deleted names.
+- file: tests/test_data_quality_compile.py
+  action: Modify
+  purpose: The write-time-only skip nodes become test_former_write_time_only_types_now_raise.
+- file: tests/checks/test__budget_recs.py
+  action: Modify
+  purpose: The two producer-oracle nodes check the budget-rec fields against gate_write instead of the deleted loader.
+- file: tests/convergence_health/budget_ingest/test_ingest.py
+  action: Modify
+  purpose: The producer-oracle node checks against gate_write.
+- file: tests/convergence_health/test_escalate.py
+  action: Modify
+  purpose: The producer-oracle node checks against gate_write.
+- file: tests/ci_rca/test_close_recs_from_trailer.py
+  action: Modify
+  purpose: Existing-row fixtures become complete rule-clean rows (the update gate's schema gate needs title and the other required inputs).
+- file: tests/ops_data_portal/test_ci_rca_propose_close.py
+  action: Modify
+  purpose: As above.
+- file: tests/ops_data_portal/test_ci_rca_schema.py
+  action: Modify
+  purpose: Message pins move to the gate's wording ("at least 80 stripped characters" is kept in the gate's message).
+- file: tests/test_ci_rca_inactivity_sweep.py
+  action: Modify
+  purpose: Existing-row fixtures become complete rule-clean rows.
+- file: tests/session/preflight/test_context_docs_data_quality.py
+  action: Modify
+  purpose: >-
+    Conditional: its live-tree node is growth-safe (> 0) today; re-measure after the rule declarations build and the
+    ops.yaml change, and touch it only if a count it pins moves (measured in the prototype as one failure).
+- file: tests/checks/ops_governance/test_validate_dq_manifest_gate.py
+  action: Modify
+  purpose: >-
+    Conditional, as the row above: re-measure the live-tree enforced-test count after the ops.yaml change and touch the
+    file only if a pinned value moves.
+- file: tests/checks/contracts/test__ops_rule_bindings.py
+  action: Modify
+  purpose: >-
+    Created by the rule declarations build. test_ops_yaml_has_no_write_time_role_and_is_never_stricter (replaces the
+    parity unit cases), with the one-way leg's failure-mode cases for coverage.
+- file: tests/checks/contracts/test_validate_ops_rule_source.py
+  action: Modify
+  purpose: >-
+    Any remaining parity fixture moves to the one-way leg. test_portal_validators_agree_with_contract (named by the
+    graduated registry row ops-rule-source-parity) keeps its file and name and is re-pinned to drive gate_write over
+    the same corpus instead of the deleted _validate_file_path and _validate_context_length: the gate accepts a path
+    exactly when the contract's file pattern matches, and a context exactly when its stripped length meets the
+    contract's min_length. No assertion weakened.
+- file: tests/test_contract_rule_census_duckdb.py
+  action: Modify
+  purpose: The node comparing the census file pattern with the deleted _validate_file_path compares it with the engine's compiled pattern from the projection instead.
+- file: tests/checks/ci_guards/test_validate_ops_portal_patch_targets.py
+  action: Modify
+  purpose: >-
+    New test_facade_patch_of_gate_write_is_flagged: a test exercising file_decision (and one exercising
+    update_decision) that patches scripts.ops_data_portal.gate_write is flagged by the check, red before the roster
+    gains gate_write.
+- file: config/agent/verification_registry/entries/portal-gate-is-the-writer-gate.yaml
+  action: Create
+  purpose: Graduated registry row for VP step 1.
+- file: config/agent/verification_registry/entries/portal-update-gate-never-stricter.yaml
+  action: Create
+  purpose: Graduated registry row for VP step 2.
+- file: config/agent/verification_registry/entries/portal-producer-rules-follow-exemptions.yaml
+  action: Create
+  purpose: Graduated registry row for VP step 3.
+- file: config/agent/verification_registry/entries/portal-removal-ledger-by-mutation.yaml
+  action: Create
+  purpose: Graduated registry row for VP step 4.
+- file: config/agent/verification_registry/entries/ops-yaml-no-write-time-role.yaml
+  action: Create
+  purpose: Graduated registry row for VP step 5.
+- file: config/agent/verification_registry/entries/dq-compiler-former-write-time-types-raise.yaml
+  action: Create
+  purpose: Graduated registry row for VP step 6.
+bundled_recommendations: [rec-4158, rec-3217, rec-2801]
+followon_recs: []
+closes_criteria: ["T2.29:c6"]
+infrastructure_dependencies:
+- >-
+  data-pipeline (src/lambdas/data-pipeline/manifest.yaml, active) packages docs/ROADMAP-PLATFORM.yaml as an asset, so
+  compute_affected_artifacts reports it. No deploy is performed or needed (Decision 198 precedent; asserted by VP
+  step 10; rec-3990 tracks the asset deploy-trigger gap). No other scope file is Lambda-packaged; no .tf is in scope.
+acceptance_criteria:
+- >-
+  file_rec, update_rec, file_decision and update_decision reject through the writer's own gate functions over the
+  shipped projection; no portal module reads config/agent/data_quality/ops.yaml for a write-time rule
+  (tests/test_ops_data_portal_validators.py::test_portal_gate_is_the_writer_gate, rec-4158's acceptance node, for the
+  gate; tests/ops_data_portal/test_rec_write.py::TestWriteTimeDispatch::test_file_rec_and_update_rec_refuse_through_the_gate
+  and tests/ops_data_portal/test_decisions.py::test_file_decision_and_update_decision_refuse_through_the_gate for the
+  four call sites; step 12's sweep for the ops.yaml reads).
+- The update pre-check evaluates only undated rules and is never stricter than the writer; an older row with a pre-date violation stays updatable through the portal.
+- Acceptance lint and dependency existence run from the contract's exemptions, on insert and on a changed column only; an exempt kind with no handler fails closed.
+- >-
+  Every retired portal check maps to the contract leg that replaces it, proven by mutation (the removal ledger, step
+  4): on insert the gate refuses what the old check refused; on update a dated leg is the writer's, named per row; the
+  ledger is complete against origin/main's ops.yaml (step 12).
+- ops.yaml carries no write_time key and no write-time-only test; the DQ compiler raises on any such test type; DQ is never stricter than the contract.
+- >-
+  T2.29 c6 is met and c5 re-grounded; Decision 65 carries the dated update; ports.yaml records the coupling
+  (tests/checks/contracts/test_ops_rule_source_records.py::test_roadmap_is_regrounded and ::test_portal_gate_records_land).
+- >-
+  rec-4158, rec-3217 and rec-2801 close on holds verdicts (step 13); the build report lists the close_proposed commands
+  propose_or_close_rec composes for rec-746, rec-2807 and rec-759 (superseded) and rec-2805 (contradicted), for the
+  operator to run (they persist nothing until run).
+- No reference to a deleted symbol or an ops.yaml write_time key remains in scripts, src, tests or .github (step 12).
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: >-
+    rec-4158's acceptance node -- for every rule kind its tables declare (derived from RowRules), a mutation the
+    writer itself refuses (driven through tests/fixtures/ducklake_fakes.py, not check_write, which the gate itself
+    calls: file_scd2 for ops_recommendations, write_scd2 with a new key for ops_decisions, whose keyspace is the
+    caller's) is refused by the gate naming the same rule and column, and a rule-clean record passes both; writer-minted
+    columns are skipped, derived from their role, since no payload supplies them.
+  command: bin/venv-python -m pytest "tests/test_ops_data_portal_validators.py::test_portal_gate_is_the_writer_gate" -q
+  expected: Exit 0.
+  fix_if: A kind where the gate and the writer disagree -> the gate re-implemented or skipped something; call the writer's functions, never copy them.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: portal-gate-is-the-writer-gate
+- step: 2
+  phase: pre-deploy
+  action: >-
+    The update pre-check is never stricter than the writer: update_rec, driven with a reader-shaped older row that
+    violates a dated leg on an untouched column, passes the gate and the fake writer's write_scd2 alike; for every
+    undated kind a violation is refused by both.
+  command: bin/venv-python -m pytest "tests/test_ops_data_portal_validators.py::test_update_gate_is_never_stricter_than_the_writer" -q
+  expected: Exit 0; every parametrized kind passes.
+  fix_if: A dated rule evaluated on update -> remove it from the update rule set (Decision 70).
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: portal-update-gate-never-stricter
+- step: 3
+  phase: pre-deploy
+  action: >-
+    The producer-side rules follow the contract's exemptions and take their params from the declared leg (a copied
+    contract with require_discrimination false flips the verdict on a lone-grep acceptance); an unhandled exempt kind
+    fails closed; an unchanged column skips on update; one reader per write.
+  command: bin/venv-python -m pytest "tests/test_ops_data_portal_validators.py::test_producer_side_rules_follow_the_contract_exemptions" -q
+  expected: Exit 0.
+  fix_if: Fix the handler map; never drop a producer-side rule.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: portal-producer-rules-follow-exemptions
+- step: 4
+  phase: pre-deploy
+  action: >-
+    The removal ledger, proven by mutation: for each row of tests/fixtures/portal_removal_ledger.py (every retired
+    portal check), gate_write(insert=True) refuses the input the old check refused, naming the contract rule, and
+    accepts it once that leg is removed from a copied projection; for each row whose leg is dated, the named writer
+    node passes, run as a pytest subprocess (never imported: the no-cross-test-import guard).
+  command: bin/venv-python -m pytest "tests/test_ops_data_portal_validators.py::test_each_retired_validator_is_replaced_by_its_contract_leg" -q
+  expected: Exit 0; every parametrized ledger row passes.
+  fix_if: A row whose input the gate accepts -> a rule was lost; restore it at the contract, never in portal code (Decision 181 cl.1).
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: portal-removal-ledger-by-mutation
+- step: 5
+  phase: pre-deploy
+  action: ops.yaml has no write-time role and is never stricter than the contract.
+  command: bin/venv-python -m pytest "tests/checks/contracts/test__ops_rule_bindings.py::test_ops_yaml_has_no_write_time_role_and_is_never_stricter" -q
+  expected: Exit 0.
+  fix_if: Fix ops.yaml or the leg.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: ops-yaml-no-write-time-role
+- step: 6
+  phase: pre-deploy
+  action: The DQ compiler raises on each former write-time-only test type.
+  command: bin/venv-python -m pytest "tests/test_data_quality_compile.py::test_former_write_time_only_types_now_raise" -q
+  expected: Exit 0.
+  fix_if: Fix the compiler.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: dq-compiler-former-write-time-types-raise
+- step: 7
+  phase: pre-deploy
+  action: The re-pinned and new suites pass whole.
+  command: >-
+    bin/venv-python -m pytest tests/test_ops_data_portal_validators.py tests/ops_data_portal/test_rec_write.py
+    tests/ops_data_portal/test_update_rec_content_validation.py tests/test_ops_data_portal_decisions.py
+    tests/ops_data_portal/test_decisions.py tests/test_ops_portal_facade.py tests/test_data_quality_compile.py
+    tests/checks/test__budget_recs.py tests/convergence_health/budget_ingest/test_ingest.py
+    tests/convergence_health/test_escalate.py tests/ci_rca/test_close_recs_from_trailer.py
+    tests/ops_data_portal/test_ci_rca_propose_close.py tests/ops_data_portal/test_ci_rca_schema.py
+    tests/test_ci_rca_inactivity_sweep.py tests/session/preflight/test_context_docs_data_quality.py
+    tests/checks/ops_governance/test_validate_dq_manifest_gate.py tests/checks/contracts/test__ops_rule_bindings.py
+    tests/checks/contracts/test_validate_ops_rule_source.py tests/checks/ci_guards/test_validate_ops_portal_patch_targets.py
+    tests/test_cost_reconciliation.py tests/checks/contracts/test_ops_rule_source_records.py
+    tests/checks/contracts/test_write_time_enforcement_decision.py -q
+  expected: Exit 0.
+  fix_if: Re-pin to the gate; never weaken an assertion (Decision 181 cl.1).
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: Whole-file re-run of files this plan scopes; --pre's pytest_diff already runs them; steps 1-6 carry the standing guards.
+- step: 8
+  phase: pre-deploy
+  action: The census-to-engine agreement test still agrees after the portal pattern helper is gone.
+  command: bin/venv-python -m pytest tests/test_contract_rule_census_duckdb.py -q
+  expected: Exit 0.
+  fix_if: Fix the re-pin.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    Whole-file re-run of a file this plan re-pins (local DuckDB, credential-free); its census-to-engine node is already
+    a standing test, run by the full tier (duckdb is a heavy dependency deferred there, Decision 104; the fast CI tier
+    skips the module at import, which is why the step is not hermetic).
+- step: 9
+  phase: pre-deploy
+  action: Live census through the DQ harness -- no stored row violates a rule the update gate evaluates (undated rules bind every row).
+  command: bin/venv-python -m scripts.contract_rule_census
+  expected: Exit 0; every compiled rule prints 0 violators with PASS.
+  fix_if: A violator -> STOP, do not merge, return to /plan. Exit 2 -> the reader is unavailable; never treat it as clean.
+  hermetic: false
+  graduation: not-applicable
+- step: 10
+  phase: pre-deploy
+  action: Assert the ground for NO data-pipeline redeploy despite touching its packaged roadmap asset.
+  command: >-
+    grep -q 'the schedule stays disabled' src/lambdas/data-pipeline/manifest.yaml && ! grep -q 'ROADMAP-PLATFORM'
+    .github/workflows/deploy-prod-lambdas.yml && git diff --quiet "$(git merge-base HEAD origin/main)" -- config/lambda
+    src/common src/lambdas src/row_rules src/telemetry terraform && echo INERT_OK
+  expected: Exit 0 and INERT_OK printed.
+  fix_if: A packaged diff -> it does not belong in this plan; revert it. Schedules re-enabled -> the governed deploy-prod-lambdas workflow, never a local deploy.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: Green on the un-implemented tree too, a per-PR transient; its durable form is rec-3990.
+- step: 11
+  phase: pre-deploy
+  action: Full validation tier before handoff.
+  command: bin/venv-python -m scripts.validate
+  expected: Exit 0.
+  fix_if: Fix the named check; never raise a budget, skip a check or drop a pre_glob.
+  hermetic: false
+  graduation: not-applicable
+- step: 12
+  phase: pre-deploy
+  action: >-
+    Closure sweep (12k): no deleted symbol and no ops.yaml write_time key remains in scripts, src, tests or .github,
+    and the removal ledger covers every write_time test origin/main's ops.yaml carries.
+  command: >-
+    ! git grep -n -E '_load_write_time_validators|_validate_file_path|_validate_context_length|_check_not_null|_write_time_validators_cache|_UPDATE_CONTENT_VALIDATED_FIELDS|_migration_mode|_WRITE_TIME_ONLY_TEST_TYPES|_WRITE_TIME_VALIDATOR_BUILDERS|_build_[a-z_]+_validator|_OPS_YAML_PATH'
+    -- scripts src tests .github && ! grep -n 'write_time' config/agent/data_quality/ops.yaml && bin/venv-python -c
+    "import subprocess,yaml;from tests.fixtures.portal_removal_ledger import LEDGER;
+    b=yaml.safe_load(subprocess.run(['git','show','origin/main:config/agent/data_quality/ops.yaml'],capture_output=True,text=True,check=True).stdout);
+    w=set();[w.add((c,next(iter(t)))) for tb in b['tables'].values() for c,col in (tb.get('columns') or {}).items() for t in (col.get('tests') or []) if isinstance(t,dict) and any(isinstance(v,dict) and v.get('write_time') for v in t.values())];
+    h={(r['column'],r['check']) for r in LEDGER};m=w-h;print('SWEEP_CLEAN' if not m else m);assert not m"
+  expected: Exit 0 and SWEEP_CLEAN printed (git fetch origin main first).
+  expected_literals:
+  - SWEEP_CLEAN
+  fix_if: >-
+    A hit -> remove or re-point that reference (the whole surface is in scope); a ledger gap -> add the row with its
+    replacing leg, never drop the retired check silently.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    PR-relative closure sweep against origin/main: after merge the base carries no write_time keys and the deleted
+    symbols, so it proves nothing; the standing guards are step 4's ledger, step 5's one-way leg and step 6's compiler
+    refusal.
+- step: 13
+  phase: post-deploy
+  action: Bookkeeping landed -- rec-4158, rec-3217 and rec-2801 closed by the Resolves trailer, and T2.29 c6 met.
+  command: >-
+    bin/venv-python -c "from scripts.ops_data_portal import _fetch_rec_from_reader as f;from scripts.platform_roadmap_state import load;
+    s={r:(f(r) or {}).get('status') for r in ('rec-4158','rec-3217','rec-2801')};
+    t=[i for i in load('docs/ROADMAP-PLATFORM.yaml').tier_items if i.id=='T2.29'][0];c6=[c for c in t.exit_criteria if c.id=='c6'][0].status;
+    print('CLOSURE', s, 'T2.29:c6', c6);assert set(s.values())=={'closed'} and c6=='met'"
+  expected: Exit 0; CLOSURE printed with all three closed and T2.29:c6 met (git pull origin main first).
+  fix_if: A rec still open -> check ci.yml's closure job and the holds verdict; never close by hand without the verdict (Decision 201).
+  hermetic: false
+test_obligations:
+- source: scripts/ops_portal/write_validators.py
+  behavior: The gate is the writer's gate; updates evaluate undated rules only; producer-side rules follow exemptions.
+  verification_step: 1
+  test_selector: tests/test_ops_data_portal_validators.py::test_portal_gate_is_the_writer_gate
+  red_green_expectation: red before (node absent), green after
+- source: scripts/ops_portal/write_validators.py
+  behavior: The update and upsert pre-check evaluates undated rules only and is never stricter than the writer.
+  verification_step: 2
+  test_selector: tests/test_ops_data_portal_validators.py::test_update_gate_is_never_stricter_than_the_writer
+  red_green_expectation: red before (node absent), green after
+- source: scripts/ops_portal/write_validators.py
+  behavior: Producer-side rules run from the contract's exemptions, one reader per write; an unhandled kind fails closed.
+  verification_step: 3
+  test_selector: tests/test_ops_data_portal_validators.py::test_producer_side_rules_follow_the_contract_exemptions
+  red_green_expectation: red before (node absent), green after
+- source: scripts/cost_reconciliation.py
+  behavior: The dry-run validator runs file_rec's own pre-check path (validate_source, derivation, gate_write).
+  verification_step: 7
+  test_selector: tests/test_cost_reconciliation.py::TestReconcileDedupe::test_validate_rec_payload_runs_the_portal_gate
+  red_green_expectation: red before (node absent), green after
+- source: scripts/ops_portal/closure_gate.py
+  behavior: Docstring re-worded; behaviour unchanged.
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: Docstring only; the full tier runs the closure-gate suites unchanged and step 12's sweep proves the stale name is gone.
+- source: tests/fixtures/portal_removal_ledger.py
+  behavior: The complete ledger of retired portal checks and their replacing legs.
+  verification_step: 4
+  test_selector: tests/test_ops_data_portal_validators.py::test_each_retired_validator_is_replaced_by_its_contract_leg
+  waiver_reason: Test data; step 4 consumes it and step 12 proves it complete against origin/main.
+- source: scripts/ops_data_portal.py
+  behavior: file_rec and update_rec call the gate; the fast-fail, loop, allowlist and migration bypass are gone; closure asserts last.
+  verification_step: 7
+  test_selector: tests/ops_data_portal/test_rec_write.py
+  red_green_expectation: red before (the gate dispatch nodes absent), green after
+- source: scripts/ops_portal/decisions.py
+  behavior: file_decision and update_decision refuse through the real gate.
+  verification_step: 7
+  test_selector: tests/ops_data_portal/test_decisions.py::test_file_decision_and_update_decision_refuse_through_the_gate
+  red_green_expectation: red before (node absent), green after
+- source: scripts/checks/ci_guards/validate_ops_portal_patch_targets.py
+  behavior: The roster follows the gate.
+  verification_step: 7
+  test_selector: tests/checks/ci_guards/test_validate_ops_portal_patch_targets.py::test_facade_patch_of_gate_write_is_flagged
+  red_green_expectation: red before (gate_write absent from the roster), green after
+- source: config/agent/data_quality/ops.yaml
+  behavior: No write-time role; never stricter than the contract.
+  verification_step: 5
+  test_selector: tests/checks/contracts/test__ops_rule_bindings.py::test_ops_yaml_has_no_write_time_role_and_is_never_stricter
+  red_green_expectation: red before (write_time keys present), green after
+- source: config/agent/data_quality/decisions/ops_recommendations.yaml
+  behavior: Prose re-pointed.
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: Manifest prose; the DQ manifest gate and the structural budgets in the full tier are its evidence.
+- source: scripts/data_quality_compile.py
+  behavior: Former write-time-only types raise.
+  verification_step: 6
+  test_selector: tests/test_data_quality_compile.py::test_former_write_time_only_types_now_raise
+  red_green_expectation: red before (node absent), green after
+- source: scripts/checks/contracts/_ops_rule_bindings.py
+  behavior: The one-way leg replaces parity.
+  verification_step: 5
+  test_selector: tests/checks/contracts/test__ops_rule_bindings.py::test_ops_yaml_has_no_write_time_role_and_is_never_stricter
+  red_green_expectation: red before (node absent), green after
+- source: docs/contracts/ops_recommendations.yaml
+  behavior: Prose re-pointed; rules unchanged.
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: Prose with amendment entries; contract drift and the conformance check in the full tier are its evidence.
+- source: docs/contracts/data-modeling-standard.yaml
+  behavior: The coverage sentence names the portal pre-check and DQ-only ops.yaml.
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: Prose; the decision-anchor tests run in the full tier.
+- source: docs/contracts/ports.yaml
+  behavior: The coupling is recorded.
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: Registry data; the ports contract checks in the full tier are its evidence.
+- source: docs/DECISIONS.md
+  behavior: Decision 65 dated update.
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: Decision text; entry conformance and size checks in the full tier are its evidence.
+- source: docs/decisions-index.json
+  behavior: Regenerated.
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: Generated; the freshness check is its evidence.
+- source: docs/ROADMAP-PLATFORM.yaml
+  behavior: T2.29 c5 re-grounded; c6 met.
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: Roadmap data; validate_platform_roadmap is its evidence.
+- source: config/agent/verification_registry/entries/portal-gate-is-the-writer-gate.yaml
+  behavior: The graduated registry row for VP step 1.
+  verification_step: 1
+  test_selector: tests/test_ops_data_portal_validators.py::test_portal_gate_is_the_writer_gate
+  waiver_reason: A registry row records the graduated node; the node itself (step 1) is the evidence.
+- source: config/agent/verification_registry/entries/portal-update-gate-never-stricter.yaml
+  behavior: The graduated registry row for VP step 2.
+  verification_step: 2
+  test_selector: tests/test_ops_data_portal_validators.py::test_update_gate_is_never_stricter_than_the_writer
+  waiver_reason: A registry row records the graduated node; the node itself (step 2) is the evidence.
+- source: config/agent/verification_registry/entries/portal-producer-rules-follow-exemptions.yaml
+  behavior: The graduated registry row for VP step 3.
+  verification_step: 3
+  test_selector: tests/test_ops_data_portal_validators.py::test_producer_side_rules_follow_the_contract_exemptions
+  waiver_reason: A registry row records the graduated node; the node itself (step 3) is the evidence.
+- source: config/agent/verification_registry/entries/portal-removal-ledger-by-mutation.yaml
+  behavior: The graduated registry row for VP step 4.
+  verification_step: 4
+  test_selector: tests/test_ops_data_portal_validators.py::test_each_retired_validator_is_replaced_by_its_contract_leg
+  waiver_reason: A registry row records the graduated node; the node itself (step 4) is the evidence.
+- source: config/agent/verification_registry/entries/ops-yaml-no-write-time-role.yaml
+  behavior: The graduated registry row for VP step 5.
+  verification_step: 5
+  test_selector: tests/checks/contracts/test__ops_rule_bindings.py::test_ops_yaml_has_no_write_time_role_and_is_never_stricter
+  waiver_reason: A registry row records the graduated node; the node itself (step 5) is the evidence.
+- source: config/agent/verification_registry/entries/dq-compiler-former-write-time-types-raise.yaml
+  behavior: The graduated registry row for VP step 6.
+  verification_step: 6
+  test_selector: tests/test_data_quality_compile.py::test_former_write_time_only_types_now_raise
+  waiver_reason: A registry row records the graduated node; the node itself (step 6) is the evidence.
+- source: config/agent/verification_registry/entries/deprecated/loader-context-min-length-80.yaml
+  behavior: Retired by git mv (Decision 176); its guard symbol is deleted and its replacement is named in its scope row.
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: >-
+    A retired registry row: the evidence is the 100% git rename and the loader's structural exclusion of
+    entries/deprecated/ (verification_graduation.py); no check reads a deprecated row.
+- source: config/agent/verification_registry/entries/deprecated/write-time-unknown-test-raises.yaml
+  behavior: Retired by git mv (Decision 176); its guard symbol is deleted and its replacement is named in its scope row.
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: >-
+    A retired registry row: the evidence is the 100% git rename and the loader's structural exclusion of
+    entries/deprecated/ (verification_graduation.py); no check reads a deprecated row.
+- source: config/agent/verification_registry/entries/deprecated/expression-write-time-branch-retired.yaml
+  behavior: Retired by git mv (Decision 176); its guard symbol is deleted and its replacement is named in its scope row.
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: >-
+    A retired registry row: the evidence is the 100% git rename and the loader's structural exclusion of
+    entries/deprecated/ (verification_graduation.py); no check reads a deprecated row.
+- source: config/agent/verification_registry/entries/deprecated/min-length-honours-declared-column.yaml
+  behavior: Retired by git mv (Decision 176); its guard symbol is deleted and its replacement is named in its scope row.
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: >-
+    A retired registry row: the evidence is the 100% git rename and the loader's structural exclusion of
+    entries/deprecated/ (verification_graduation.py); no check reads a deprecated row.
+- source: config/agent/verification_registry/entries/deprecated/dependencies-array-element-format.yaml
+  behavior: Retired by git mv (Decision 176); its guard symbol is deleted and its replacement is named in its scope row.
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: >-
+    A retired registry row: the evidence is the 100% git rename and the loader's structural exclusion of
+    entries/deprecated/ (verification_graduation.py); no check reads a deprecated row.
+- source: config/agent/verification_registry/entries/deprecated/dq-compiler-write-time-only-skip.yaml
+  behavior: Retired by git mv (Decision 176); its guard symbol is deleted and its replacement is named in its scope row.
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: >-
+    A retired registry row: the evidence is the 100% git rename and the loader's structural exclusion of
+    entries/deprecated/ (verification_graduation.py); no check reads a deprecated row.
+- source: config/agent/verification_registry/entries/deprecated/dq-compiler-array-element-reference-skip.yaml
+  behavior: Retired by git mv (Decision 176); its guard symbol is deleted and its replacement is named in its scope row.
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: >-
+    A retired registry row: the evidence is the 100% git rename and the loader's structural exclusion of
+    entries/deprecated/ (verification_graduation.py); no check reads a deprecated row.
+- source: config/agent/verification_registry/entries/deprecated/dependencies-array-element-reference.yaml
+  behavior: Retired by git mv (Decision 176); replaced by step 3's row; its node stays, re-pinned.
+  verification_step: 3
+  test_selector: tests/test_ops_data_portal_validators.py::test_producer_side_rules_follow_the_contract_exemptions
+  waiver_reason: >-
+    A retired registry row: the evidence is the 100% git rename and the loader's structural exclusion of
+    entries/deprecated/ (verification_graduation.py); the replacing node is step 3's.
+- source: config/agent/verification_registry/entries/deprecated/update-rec-acceptance-discrimination.yaml
+  behavior: Retired by git mv (Decision 176); replaced by step 3's row; its node stays, re-pinned.
+  verification_step: 3
+  test_selector: tests/test_ops_data_portal_validators.py::test_producer_side_rules_follow_the_contract_exemptions
+  waiver_reason: >-
+    A retired registry row: the evidence is the 100% git rename and the loader's structural exclusion of
+    entries/deprecated/ (verification_graduation.py); the replacing node is step 3's.
+- source: config/check_accounting_baseline.yaml
+  behavior: validate_ops_portal_patch_targets struck from the accounting baseline (shrink only).
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: >-
+    Baseline data; the full tier runs validate_check_accounting and
+    tests/checks/hygiene/test_validate_check_accounting.py, whose test_no_live_roster_name_is_fully_declared fails
+    until the strike lands.
+- source: scripts/checks/deps/_manifest.py
+  behavior: One Entry's pre_globs gain scripts/contract_rules.py (superset).
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: Registration data; validate_pre_glob_closure and validate_check_manifests in the full tier are its evidence.
+- source: scripts/checks/ops_governance/_manifest.py
+  behavior: One Entry's pre_globs gain scripts/contract_rules.py (superset).
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: Registration data; validate_pre_glob_closure and validate_check_manifests in the full tier are its evidence.
+- source: scripts/checks/verification/_manifest.py
+  behavior: Three Entries' pre_globs gain scripts/contract_rules.py (superset).
+  verification_step: 11
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: Registration data; validate_pre_glob_closure and validate_check_manifests in the full tier are its evidence.
+constraints:
+- No Lambda-packaged code or generated projection changes (the roadmap asset data-pipeline packages excepted, step 10); the writer stays the authority.
+- The pre-check calls the writer's functions; it never re-implements a rule, and on update never evaluates a dated rule.
+- No assertion is weakened; every removed validator, test entry, check leg and registry row maps to a surviving node (steps 4-6; Decision 181 cl.1); retired rows move to entries/deprecated/ (Decision 176).
+- No pre_glob is dropped (Decision 187); no budget raised (Decisions 128, 166).
+- The build amends a Class A contract and annotates Decision 65, so its merge waits for the operator's word.
+- >-
+  Every node a graduated registry row names inside a test file this plan scopes keeps its file and name and is
+  re-pinned in place, never moved or weakened (Decision 181 cl.1), except the nine rows moved to entries/deprecated/
+  (their guard symbols are deleted), whose nodes are not registry-named after the move.
+- No rescue agents or workaround loops (Decision 55).
+context:
+- >-
+  Decision-scout: as the rule declarations and writer conformance plan (FLAGS_FOUND, resolved; 170 of 170). This plan's
+  own flags: SPIRIT 210 (restated status fast-fail removed; Pydantic models deferred to CD.12, status parity kept);
+  201/103 (rec-746, rec-2807, rec-759 superseded and rec-2805 contradicted go through close_proposed for the operator;
+  rec-3217 and rec-2801 already satisfy their acceptance and close on holds verdicts); 212 (PC-05).
+- 'gates: decision-scout=FLAGS_FOUND (all resolved); plan-critique=PROCEED after 3 round(s) (r1 and r2 REVISE, every finding fixed and none recurring; r3 confirming PROCEED with non-blocking S1-S14 folded in); amendment 2026-10-16 (accounting-baseline strike and five scripts/contract_rules.py pre_globs, build escalation judged by this planning thread under the 2026-10-14 rule): a1 PROCEED (import-graph simulation: exactly these five Entries gain the one path); amendment 2026-10-17 (VP step 8 hermetic false: the fast CI tier lacks duckdb, so replay saw exit 5; raised by the build): one-field metadata fix, no command or expectation change, --pre green'
+- >-
+  Operator direction (Benjamin, 2026-10-15, thread "Ops enforcement plan C"): every recommendation accepted after the
+  Fable consults -- the portal runs the writer's own gate; updates evaluate undated rules only; two plans built one
+  after the other, this one second. Evidence: /mnt/project-files/ops-enforcement/.
+- 'fork: portal update pre-check | chosen: undated rules only | class: asked | precedent: operator answer 2026-10-15 | precedent_kind: answered-fork | reversible: yes | persisted: write_validators.py, ports.yaml'
+- >-
+  Measured on a scratch prototype (2026-10-15, main 9df9535b): 28 nodes across 17 files break -- fixture rows missing
+  required inputs, message pins, the removed skip set, live-tree DQ counts, and loader patches; each is in scope above.
+  Critique round 1 added the two cost-reconciliation nodes and the update-path pins (all scoped). The other
+  VALID_FIELDS users (test_pipeline_reader, test_ops_portal_incremental_cache, test_cli) were not among the failures; the update gate
+  never reads created_timestamp.
+- Depends on PLAN-rule-declarations-and-writer-conformance merging first (it moves the parity leg into _ops_rule_bindings.py and makes not_null presence-read).
+pre_implementation_checklist:
+- Branch confirmed not on main; the rule declarations build (PLAN-rule-declarations-and-writer-conformance) is merged on main and on this branch (first execution step)
+- docs/PROJECT_CONTEXT.md read
+- 'Only the plan-cited decision sections read: 65, 66, 70, 81, 88, 176, 181, 186, 187, 201, 210, 212'
+- All files in scope located and readable
+- Acceptance criteria understood and verifiable
+execution_steps:
+- >-
+  Confirm the precondition: git fetch -q origin main && git cat-file -e origin/main:scripts/checks/contracts/_ops_rule_bindings.py
+  && git grep -q validate_write_time_enforcement_conformance origin/main -- scripts/checks/contracts/_manifest.py && echo
+  BUILD_ON_MAIN. Not on main: stop and wait; both builds rework the rule-source bindings.
+- Write the red tests first (steps 1-6) and confirm each fails on the unchanged tree.
+- The shared reader-shaped rec fixture, the fake writer and the removal ledger fixture; then gate_write and the producer-side handlers in write_validators.py; then the call sites (file_rec, update_rec, file_decision, update_decision); then delete the loader, builders and explicit validators and the facade re-exports.
+- ops.yaml, the decisions manifest prose, the compiler, the bindings leg; the registry moves (git mv) and re-points.
+- >-
+  Records -- the contract prose, data-modeling-standard, ports.yaml, the Decision 65 update, decisions-index, and T2.29
+  (structured conversion, c5 re-grounded, c6 re-worded) with the two records tests re-pinned.
+- cost_reconciliation's validator and closure_gate's docstring; the stale-reference sweep (step 12).
+- Execute Verification Plan steps 1-12 -- loop until pass (Decision 55).
+- Write the registry rows for the graduated steps (1-6).
+- >-
+  CLOSURE: readiness, implementation_declared true, rebase, step 11, postflight evidence, push, PR, subscribe. On green
+  CI and code review PROCEED, STOP and ask the operator for the merge (Class A contract prose and a Decision update).
+  On his word squash-merge with `Resolves: rec-4158, rec-3217, rec-2801` in the body; then compose the close_proposed
+  commands (propose_or_close_rec, deterministic False) for rec-746, rec-2807, rec-759 (superseded) and rec-2805
+  (contradicted) and list them in the report for the operator to run; run step 13.
+- 'Report: what was implemented, verification results'
+rollback: >-
+  Revert the squash commit: the portal returns to the ops.yaml loader, which the reverted ops.yaml feeds again. No
+  Lambda, projection or warehouse row changes in either direction; the writer enforced every rule throughout.

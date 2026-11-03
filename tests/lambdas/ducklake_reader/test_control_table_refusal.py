@@ -22,15 +22,18 @@ class FakeCon:
 
 
 def test_reader_refuses_control_table():
-    """Every reader verb (read_ops_current, read_ops_history, query_ops) refuses a control-class
+    """Every reader verb (read_ops_current, read_ops_history, dq_check) refuses a control-class
     table -- registering it for governance does not grant application read access."""
     con = FakeCon()
     with pytest.raises(rt.DuckLakeRuntimeError, match="control-class table"):
         h.action_read_ops_current({"table": "ops_entity_counters"}, con)
     with pytest.raises(rt.DuckLakeRuntimeError, match="control-class table"):
         h.action_read_ops_history({"table": "ops_entity_counters"}, con)
-    with pytest.raises(rt.DuckLakeRuntimeError, match="control-class table"):
-        h.action_query_ops({"table": "ops_entity_counters", "sql": "SELECT 1 FROM {tbl}"}, con)
+    from src.common import ducklake_dq_checks as dq
+
+    with pytest.raises(dq.DqCheckInputError) as err:
+        h.action_dq_check({"check": "row_count_min", "table": "ops_entity_counters", "params": {"min": 1}}, con)
+    assert err.value.param == "table"
 
 
 def test_require_ops_table_still_rejects_unknown():

@@ -26,7 +26,6 @@ class TestPull:
 
             result = _rebuild_local_cache()
         assert result == {
-            "ops_recommendations": 0,
             "ops_decisions": 0,
             "ops_priority_queue": 0,
             "ops_execution_plans": 0,
@@ -276,3 +275,55 @@ class TestPull:
         assert count == 1
         saved = json.loads((tmp_path / ".recs.jsonl").read_text(encoding="utf-8").strip())
         assert saved["id"] == "rec-rdr"
+
+
+class TestRecsCacheRetired:
+    """Decision 215: sync and warm_sync never pull ops_recommendations and delete a stale cache copy."""
+
+    def test_sync_never_requests_recs_and_deletes_stale_file(self, tmp_path):
+        from scripts.sync import ops as sync_ops
+
+        stale = tmp_path / ".recommendations-log.jsonl"
+        stale.write_text('{"id": "rec-1"}\n', encoding="utf-8")
+        requested: list[str] = []
+
+        def _reader(table: str) -> list[dict]:
+            requested.append(table)
+            return []
+
+        with patch("scripts.sync.ops._pull_via_reader", side_effect=_reader), patch("scripts.sync.ops._LOGS_DIR", tmp_path):
+            result = sync_ops.sync()
+
+        assert "ops_recommendations" not in requested
+        assert "ops_recommendations" not in result["pulled"]
+        assert not stale.exists()
+
+    def test_stale_file_that_cannot_be_deleted_is_logged_not_raised(self, tmp_path):
+        from scripts.sync import ops as sync_ops
+
+        with patch("pathlib.Path.unlink", side_effect=OSError("denied")), patch("scripts.sync.ops._LOGS_DIR", tmp_path):
+            sync_ops._delete_retired_recs_cache()
+
+    def test_warm_sync_never_requests_recs_and_deletes_stale_file(self, tmp_path):
+        from scripts.sync import ops as sync_ops
+
+        stale = tmp_path / ".recommendations-log.jsonl"
+        stale.write_text('{"id": "rec-1"}\n', encoding="utf-8")
+        requested: list[str] = []
+
+        def _reader(table: str) -> list[dict]:
+            requested.append(table)
+            return []
+
+        with patch("scripts.sync.ops._pull_via_reader", side_effect=_reader), patch("scripts.sync.ops._LOGS_DIR", tmp_path):
+            result = sync_ops.warm_sync()
+
+        assert "ops_recommendations" not in requested
+        assert "ops_recommendations" not in result["rows"]
+        assert not stale.exists()
+
+    def test_missing_stale_file_is_not_an_error(self, tmp_path):
+        from scripts.sync import ops as sync_ops
+
+        with patch("scripts.sync.ops._pull_via_reader", return_value=[]), patch("scripts.sync.ops._LOGS_DIR", tmp_path):
+            assert sync_ops.sync()["failed"] == []

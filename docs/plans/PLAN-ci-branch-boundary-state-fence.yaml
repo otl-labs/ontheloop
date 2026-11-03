@@ -1,0 +1,498 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: ci-branch-boundary-state-fence
+intent: >-
+  Put the CI branch role's state, saved-plan and review-transcript Deny where no agent PR can remove it: one
+  principal-conditioned Deny in the admin-applied permissions boundary agent-platform-github-ci-apply-boundary, covering
+  the CI branch role and the CI PR role, plus a guard test and read-only admin simulate proof. Follow-on to S1 (rec-4632)
+  of the trusted plan executor ("no agent-controlled identity reads Terraform state or saved plans"); executes rec-4645.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-ci-branch-boundary-state-fence.yaml
+phase: >-
+  security_advisory (soft-warn exception category; no tier_item claimed, so the Tier Item Freshness Gate is skipped).
+  Executes rec-4645, the boundary half of slice S1 (rec-4632) of the trusted plan executor split.
+closes_criteria: []
+scope:
+- file: terraform/bootstrap/github_ci_apply_boundary.tf
+  action: Modify
+  purpose: >-
+    Append one statement to the Statement list in local.github_ci_apply_boundary_policy_json, after
+    DenyTelemetryVersionDelete (the last statement): Sid "DenyCiAgentRoleStatePlanAndTranscriptIO", Effect "Deny",
+    Action exactly ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:DeleteObject",
+    "s3:DeleteObjectVersion"], Resource exactly ["arn:aws:s3:::agent-platform-data-lake/tfstate/*",
+    "arn:aws:s3:::agent-platform-data-lake/tfplan/*",
+    "arn:aws:s3:::agent-platform-data-lake/ci-rca-evidence/review-transcripts/*"], Condition exactly
+    { ArnLike = { "aws:PrincipalArn" = ["arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-branch",
+    "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-pr"] } } -- exact role ARNs, no wildcard. One short
+    why-comment inside the object: the two CI roles that agents reach without review (agent/* pushes, pull_request
+    jobs) and that never need state, saved plans or review transcripts must not read, overwrite or delete them (the
+    planner, also PR-reachable, keeps its state access until S2 and S4 move it; the comment must not imply these two are
+    the only agent-reachable state readers); the branch role's inline Deny (rec-4632) is
+    removable by an in-budget auto-applied PR, this copy is admin-held (Decision 143 cl.1, rec-4645); the condition keeps
+    the apply role, planner, PlatformDev and every other carrier of this shared boundary unaffected. The comment
+    contains no "[", "]", "{" or "}" character and no quoted star (the bracket-regex trap recorded at
+    github_ci_apply_boundary.tf:87-94; _read_coverage splits statements by brace depth without stripping comments).
+    Nothing else in the file changes. The minified document grows from 4,732 to about 5,266 of 6,144 B (measured at
+    planning with terraform console and a placeholder account id; the in-file precondition enforces the limit).
+- file: tests/checks/iam_tf/test_ci_branch_boundary_state_fence.py
+  action: Create
+  purpose: >-
+    rec-4645's acceptance test. Module docstring names rec-4645, Decision 143 cl.1 and this plan. Reuses
+    _json_statements from tests/checks/iam_tf/test_telemetry_prefix_fence.py (statement splitter that returns sid,
+    effect, actions, resources and (operator, key, values) conditions for the jsonencode boundary) and reads the file
+    through a helper whose argument is the quoted literal "github_ci_apply_boundary.tf" (the fast tier's data-edge
+    channel selects a test by that quoted basename, scripts/checks/deps/affected_tests.py:136-142; VP step 4 proves it).
+    Public predicate boundary_fence_problems(text) -> list[str] asserting the Sid is present exactly once, Effect Deny,
+    Action set exactly the five verbs, Resource set exactly the three prefixes, and conditions exactly
+    [("ArnLike", "aws:PrincipalArn", sorted([branch role ARN, pr role ARN]))] with the "${var.account_id}" form; and no
+    other statement in the file names any of the three resource strings. Tests: synthetic good HCL passes;
+    test_real_boundary_fences_ci_agent_roles (exactly this name; rec-4645's acceptance node) runs the predicate on the
+    real file; red cases each driving the real predicate -- statement absent, Effect Allow, each of the five verbs
+    dropped, each of the three resources dropped, the condition removed, operator changed to ArnNotLike, a role
+    dropped from the list (each of the two), a third role added (for example agent-platform-github-ci-apply), a
+    wildcard role ARN, and a second statement naming tfstate/*. Under 500 SLOC.
+- file: config/agent/verification_registry/entries/ci-branch-boundary-state-fence.yaml
+  action: Create
+  purpose: >-
+    Graduation shard for VP step 1: check_id ci-branch-boundary-state-fence, primitive_slot test_selector,
+    guard_target terraform/bootstrap/github_ci_apply_boundary.tf, plan_slug ci-branch-boundary-state-fence, check_spec
+    node_id tests/checks/iam_tf/test_ci_branch_boundary_state_fence.py (shape of ci-branch-state-fence.yaml).
+bundled_recommendations:
+- rec-4645
+followon_recs: []
+infrastructure_dependencies:
+- >-
+  terraform/bootstrap is admin-only and never auto-applied (Decision 126; Decision 223 cl.2). This PR merges code only;
+  nothing is applied before merge. Expected apply outcome: 0 add, 1 change (aws_iam_policy.github_ci_apply_boundary,
+  a new default policy version), 0 destroy.
+- >-
+  Pre-merge (VP steps 10-13, ADMIN container under agent_platform_admin): read-only, -lock=false, at the CI-green PR
+  head, in a throwaway worktree (docs/contracts/deploy-paths.yaml admin_out_of_band.pre_merge_live_plan). Any new PR
+  head re-runs steps 11-12.
+- >-
+  One bootstrap change at a time (Benjamin's S1b F2-A, applied to every bootstrap plan; coordinator queue rule
+  2026-10-27): the gate and the apply-time plan must show only this diff. secrets-to-ssm-grants (#1677) and any other
+  merged-but-unapplied terraform/bootstrap change is applied through its own plan first; this PR does not merge while
+  another bootstrap change is merged but unapplied, and never shares an apply with one. No declared ride-along.
+- >-
+  Post-merge (VP steps 15-18): the human-directed admin apply from main on Benjamin's word on the exact command after he
+  sees the plan output (admin_out_of_band.procedure: plan -> PRESENT -> explicit acceptance -> apply, no -target), then
+  the live simulate and the standing iam-simulate fixture (POST-APPLY rule for any boundary change). Never in parallel
+  with another bootstrap apply.
+- >-
+  PRE-APPLY drain rule (deploy-paths.yaml, boundary narrowing): the Deny never matches the apply role (step 12's
+  control rows prove it), so it does not narrow the apply role's grant surface; step 15 still confirms no
+  terraform/personal gated apply or destroy is in flight before applying.
+- >-
+  Expected emails at apply: the platform-role IAM-change alarm (CreatePolicyVersion on the boundary, and
+  DeletePolicyVersion if the provider prunes the oldest of five versions; Decision 202). Sanctioned; never filtered.
+acceptance_criteria:
+- >-
+  The boundary carries DenyCiAgentRoleStatePlanAndTranscriptIO exactly as scoped (five verbs, three prefixes, ArnLike
+  aws:PrincipalArn on exactly the CI branch and CI PR role ARNs); no other statement changes.
+- >-
+  tests/checks/iam_tf/test_ci_branch_boundary_state_fence.py passes on the tree, every red case is detected, it fails on
+  origin/main's boundary file, and the fast tier selects it when only the boundary file changes.
+- >-
+  Before merge, the ADMIN gate on the CI-green PR head shows 0 add, 1 change, 0 destroy, the change being
+  aws_iam_policy.github_ci_apply_boundary with exactly the one Sid added and none changed or removed, minified size at
+  most 6,144 B; IAM's simulator, given an allow-s3 identity policy and the candidate boundary, returns explicitDeny for
+  the branch and PR roles on all five verbs on four fenced keys, and allowed for the apply role, planner and PlatformDev
+  on the same cells and for the branch role on convergence/personal/sandbox.json. Counts and decisions only on the PR.
+- >-
+  After the human-directed apply, the same simulate against the live boundary gives the same decisions; the live CI PR
+  role (simulate-principal-policy with its aws:PrincipalArn) moves from implicitDeny to explicitDeny on tfstate reads;
+  the live apply role and planner keep their state access; the standing iam-simulate fixture exits 0. Evidence is a
+  counts-only comment on the merged PR naming the applied sha.
+- >-
+  rec-4645 carries the node-id acceptance test_ci_branch_boundary_state_fence.py::test_real_boundary_fences_ci_agent_roles
+  and a context note naming the CI PR role widening before merge, and closes through the build merge's Resolves trailer.
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: the new boundary fence test passes and every red case is detected
+  command: bin/venv-python -m pytest tests/checks/iam_tf/test_ci_branch_boundary_state_fence.py -q
+  expected: all tests pass, including every red case and test_real_boundary_fences_ci_agent_roles
+  fix_if: a red case not detected means boundary_fence_problems is too weak -- strengthen it, never drop the red case
+  hermetic: false
+  graduation: graduate
+  graduation_check_id: ci-branch-boundary-state-fence
+- step: 2
+  phase: pre-deploy
+  action: red before -- the predicate fails on origin/main's boundary file because the statement is absent
+  command: >-
+    git fetch origin main --quiet && T="${TMPDIR:-/tmp}/ci-apply-boundary-at-main.tf" && git show
+    origin/main:terraform/bootstrap/github_ci_apply_boundary.tf > "$T" && bin/venv-python -c "import sys; from
+    tests.checks.iam_tf.test_ci_branch_boundary_state_fence import boundary_fence_problems as v;
+    p=v(open(sys.argv[1]).read()); print(p); sys.exit(0 if any('DenyCiAgentRoleStatePlanAndTranscriptIO' in x for x in p)
+    else 1)" "$T" && rm -f "$T" && echo "RED BEFORE AT ORIGIN MAIN"
+  expected: the problem list names the missing Sid, then the marker (before merge only)
+  fix_if: the Sid is not named -- the presence pin is missing from the predicate; add it
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    Depends on origin/main predating this merge; after merge it cannot go red, and step 1's "statement absent" red case
+    is the standing form of the same proof.
+- step: 3
+  phase: pre-deploy
+  action: the rendered boundary stays under AWS's 6,144 B managed-policy limit (whitespace-stripped, as the precondition measures)
+  command: |-
+    D="${TMPDIR:-/tmp}/boundary-size" && rm -rf "$D" && mkdir -p "$D" && sed -n '/^locals {/,/^}/p' terraform/bootstrap/github_ci_apply_boundary.tf > "$D/b.tf" && printf 'variable "account_id" {\n  default = "000000000000"\n}\nvariable "aws_region" {\n  default = "eu-west-2"\n}\n' > "$D/v.tf" && N=$(echo 'length(jsonencode(jsondecode(local.github_ci_apply_boundary_policy_json)))' | terraform -chdir="$D" console) && rm -rf "$D" && echo "BOUNDARY_MINIFIED_BYTES $N" && test "$N" -le 6144 && echo "BOUNDARY SIZE OK"
+  expected: BOUNDARY_MINIFIED_BYTES about 5266 (at most 6144), then BOUNDARY SIZE OK
+  fix_if: >-
+    over 6,144 -- the statement or its comment rendering is wrong (comments do not render; check for a duplicated
+    statement); never trim another statement in this plan, return to the planner
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: The in-file precondition enforces the limit at every plan, including step 11's gate.
+- step: 4
+  phase: pre-deploy
+  action: the fast tier's affected-set selects the new test when only the boundary file changes
+  command: >-
+    bin/venv-python -c "from scripts.checks.deps.affected_tests import derive_affected_tests as d;
+    s=d([('M','terraform/bootstrap/github_ci_apply_boundary.tf')])['selected'];
+    t='tests/checks/iam_tf/test_ci_branch_boundary_state_fence.py'; print(t in s); assert t in s" && echo "FAST TIER SELECTS THE GUARD"
+  expected: True, then the marker
+  fix_if: >-
+    False -- the test file lacks the quoted literal "github_ci_apply_boundary.tf" the data-edge channel matches
+    (affected_tests.py:136-142); add it to the file-reading helper call
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: A property of the test file's text (it reads the boundary by that quoted basename); a one-time pre-merge confirmation, and the selector itself has its own tests.
+- step: 5
+  phase: pre-deploy
+  action: the existing boundary guards and the whole iam_tf suite stay green with no edit to them
+  command: >-
+    bin/venv-python -m pytest tests/checks/iam_tf -q && git diff --quiet origin/main --
+    tests/checks/iam_tf/test_telemetry_prefix_fence.py tests/checks/iam_tf/test_url_only_invoke_guard.py
+    tests/checks/iam_tf/test_validate_ci_branch_state_fence.py && echo "BOUNDARY GUARDS UNCHANGED AND GREEN"
+  expected: all pass, none of the three guard files differs from origin/main, then the marker
+  fix_if: >-
+    a read-coverage or write-companion check flags the new statement -- read its rule; never weaken it, return to the
+    planner; a guard file differs -- revert it, this plan never edits them
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: Existing suites already run in the fast and full tiers; steps 1-4 carry this plan's assertions.
+- step: 6
+  phase: pre-deploy
+  action: provider-free formatting of the bootstrap root (validate is CI's terraform-validate job; plan is the gate's)
+  command: terraform fmt -check -recursive terraform/bootstrap && echo "BOOTSTRAP FMT OK"
+  expected: exit 0 with the marker
+  fix_if: run terraform fmt on the touched file only
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: The required terraform-validate CI job enforces fmt; a registry row would duplicate it.
+- step: 7
+  phase: pre-deploy
+  action: the plan document validates
+  command: bin/venv-python -m scripts.roadmap.plan_document docs/plans/PLAN-ci-branch-boundary-state-fence.yaml && echo "PLAN VALID"
+  expected: exit 0 with the marker
+  fix_if: a schema error names the field -- fix only the bookkeeping fields implement may edit
+  hermetic: true
+  expected_literals: []
+  graduation: waive
+  graduation_waiver_reason: validate --pre already runs plan_document over every plan (step 8).
+- step: 8
+  phase: pre-deploy
+  action: fast tier
+  command: bin/venv-python -m scripts.validate --pre
+  expected: exit 0
+  fix_if: validate_sloc_limits -- decompose, never raise; any other failure -- RCA (Decision 55)
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: docs/contracts/vp-red-before.yaml#recursion_refusal refuses a graduate step whose command invokes scripts.validate.
+- step: 9
+  phase: pre-deploy
+  action: full tier before handoff (handoff_policy)
+  command: bin/venv-python -m scripts.validate
+  expected: exit 0
+  fix_if: RCA per Decision 55; a timeout is blocked, rerun from the start
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: Same recursion_refusal as step 8.
+- step: 10
+  phase: pre-deploy
+  action: ENVIRONMENT CHECK -- the gate and the post-merge apply need the ADMIN chain
+  command: >-
+    bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null | grep -q
+    'assumed-role/PlatformAdmin/' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT
+  expected: ADMIN_CHAIN_OK in this project's ADMIN environment
+  fix_if: ADMIN_CHAIN_ABSENT -- the PR waits at CI-green and steps 11-13 go to an ADMIN session through the coordinator
+  hermetic: false
+  graduation: not-applicable
+- step: 11
+  phase: pre-deploy
+  action: >-
+    PRE-MERGE GATE (ADMIN) -- read-only plan of terraform/bootstrap at the CI-green PR head: one in-place update of the
+    boundary policy that adds exactly the one Sid and changes nothing else
+  command: |-
+    test -n "$PR_HEAD_SHA" && M="${TMPDIR:-/tmp}/boundary-fence-gate" && (umask 077 && mkdir -p "$M") && aws secretsmanager get-secret-value --secret-id agent-platform-terraform-personal-tfvars --profile agent_platform_admin --query SecretString --output text | grep -E '^[[:space:]]*(account_id|owner_email|platform_dev_external_id|platform_admin_external_id|agent_service_account_user_name)[[:space:]]*=' > "$M/bootstrap.tfvars" && W="$M/wt" && git fetch origin "$PR_HEAD_SHA" && git worktree add --detach "$W" "$PR_HEAD_SHA" > /dev/null && rc=0 && { terraform -chdir="$W/terraform/bootstrap" init -input=false -backend-config="region=$(tr -d '[:space:]' < "$W/config/aws-region")" > /dev/null && terraform -chdir="$W/terraform/bootstrap" plan -input=false -lock=false -var-file="$M/bootstrap.tfvars" -out="$M/head.tfplan" > /dev/null && terraform -chdir="$W/terraform/bootstrap" show -json "$M/head.tfplan" > "$M/head.json"; } || rc=1; git worktree remove --force "$W"; rm -f "$M/head.tfplan" "$M/bootstrap.tfvars"; test $rc -eq 0 && M="$M" bin/venv-python - <<'EOF'
+    import json, os, sys
+    m = os.environ["M"]
+    rc = json.load(open(f"{m}/head.json")).get("resource_changes", [])
+    os.remove(f"{m}/head.json")
+    moving = [r for r in rc if r["change"]["actions"] not in (["no-op"], ["read"])]
+    addr = "aws_iam_policy.github_ci_apply_boundary"
+    sid = "DenyCiAgentRoleStatePlanAndTranscriptIO"
+    out = {"add": sum("create" in r["change"]["actions"] for r in moving), "change": sum(r["change"]["actions"] == ["update"] for r in moving), "destroy": sum("delete" in r["change"]["actions"] for r in moving), "moving_addresses": sorted(r["address"] for r in moving)}
+    pol = [r for r in moving if r["address"] == addr and r["change"]["actions"] == ["update"]]
+    if pol and len(moving) == 1:
+        b = {s["Sid"]: s for s in json.loads(pol[0]["change"]["before"]["policy"])["Statement"]}
+        a = {s["Sid"]: s for s in json.loads(pol[0]["change"]["after"]["policy"])["Statement"]}
+        cond = a.get(sid, {}).get("Condition", {})
+        roles = cond.get("ArnLike", {}).get("aws:PrincipalArn", [])
+        roles = sorted(x.rsplit("/", 1)[-1] for x in ([roles] if isinstance(roles, str) else roles))
+        out.update(added_sids=sorted(set(a) - set(b)), removed_sids=sorted(set(b) - set(a)), changed_sids=sorted(k for k in set(a) & set(b) if a[k] != b[k]), condition_operators=sorted(cond), condition_role_names=roles, minified_bytes=len(json.dumps(json.loads(pol[0]["change"]["after"]["policy"]), separators=(",", ":"))))
+        open(f"{m}/candidate-boundary.json", "w").write(pol[0]["change"]["after"]["policy"])
+    print(json.dumps(out))
+    good = (out["add"], out["change"], out["destroy"]) == (0, 1, 0) and out.get("added_sids") == [sid] and out.get("removed_sids") == [] and out.get("changed_sids") == [] and out.get("condition_operators") == ["ArnLike"] and out.get("condition_role_names") == ["agent-platform-github-ci-branch", "agent-platform-github-ci-pr"] and out.get("minified_bytes", 99999) <= 6144
+    print("PRE-MERGE PLAN OK -- the boundary adds exactly the one principal-conditioned Deny") if good else sys.exit("PRE-MERGE PLAN STOP")
+    EOF
+  expected: >-
+    one counts-only JSON line: add 0, change 1, destroy 0, moving_addresses ["aws_iam_policy.github_ci_apply_boundary"],
+    added_sids ["DenyCiAgentRoleStatePlanAndTranscriptIO"], removed_sids [], changed_sids [], condition_operators
+    ["ArnLike"], condition_role_names the two CI role names (names only, never ARNs), minified_bytes about 5,266 (at
+    most 6,144); then PRE-MERGE PLAN OK. Nothing is applied; -lock=false keeps the read off the state lock; the plan
+    file, its JSON and the tfvars are deleted in this step (the candidate boundary JSON stays in the scratch folder for
+    step 12). Post the JSON line and PR_HEAD_SHA in the PR description.
+  fix_if: >-
+    any other moving address or a changed/removed Sid -- another merged bootstrap change is unapplied or live drifted:
+    STOP, name the moving addresses and Sid names (no values) to the coordinator, and wait for that change to be applied
+    by its own plan; never apply to make the plan match, never bundle. A tfvars key missing (a later plan may have moved
+    or removed one) -- read the current source from docs/contracts/terraform-cc-web-operations.yaml
+    tfvars_and_remote_state_recovery and adjust the key list only. If the session's permission layer refuses the tfvars
+    read, ask Benjamin to allow this exact command. An init failure -- the backend needs the region flag
+    (terraform-cc-web-operations.yaml backend_region) or a provider fetch failed: STOP and return to the planner.
+    A precondition error on size -- see step 3. Any new PR head re-runs steps 11-12.
+  hermetic: false
+  graduation: not-applicable
+- step: 12
+  phase: pre-deploy
+  action: >-
+    PRE-MERGE GATE (ADMIN) -- IAM's simulator, with an allow-s3 identity policy and the CANDIDATE boundary, denies the
+    two CI roles on every fenced cell and leaves every other principal and the control key allowed; the live boundary
+    today allows the same cells (red before). Run with LIVE=1 after the apply (step 16).
+  command: |-
+    M="${TMPDIR:-/tmp}/boundary-fence-gate" && { test -n "${LIVE:-}" || test -s "$M/candidate-boundary.json"; } && M="$M" LIVE="${LIVE:-}" bin/venv-python - <<'EOF'
+    import json, os, sys, boto3
+    s = boto3.Session(profile_name="agent_platform_admin", region_name="eu-west-2")
+    acct = s.client("sts", region_name="eu-west-1", endpoint_url="https://sts.eu-west-1.amazonaws.com").get_caller_identity()["Account"]
+    iam = s.client("iam")
+    arn = lambda name: "arn" + ":aws:iam::" + acct + ":role/" + name
+    barn = "arn" + ":aws:iam::" + acct + ":policy/agent-platform-github-ci-apply-boundary"
+    live_doc = json.dumps(iam.get_policy_version(PolicyArn=barn, VersionId=iam.get_policy(PolicyArn=barn)["Policy"]["DefaultVersionId"])["PolicyVersion"]["Document"])
+    live = bool(os.environ["LIVE"])
+    boundary = live_doc if live else open(os.path.join(os.environ["M"], "candidate-boundary.json")).read()
+    o = lambda k: "arn:aws:s3:::agent-platform-data-lake/" + k
+    ident = json.dumps({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "s3:*", "Resource": o("*")}]})
+    verbs = ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion"]
+    keys = ["tfstate/personal/sandbox/terraform.tfstate", "tfstate/github/terraform.tfstate", "tfplan/personal/1/simulate-probe.bin", "ci-rca-evidence/review-transcripts/1/review.json"]
+    fenced = ["agent-platform-github-ci-branch", "agent-platform-github-ci-pr"]
+    controls = ["agent-platform-github-ci-apply", "agent-platform-github-ci-planner", "PlatformDev"]
+    def sim(doc, role, verb, key):
+        ctx = [{"ContextKeyName": "aws:PrincipalArn", "ContextKeyValues": [arn(role)], "ContextKeyType": "string"}]
+        return iam.simulate_custom_policy(PolicyInputList=[ident], PermissionsBoundaryPolicyInputList=[doc], ActionNames=[verb], ResourceArns=[o(key)], ContextEntries=ctx)["EvaluationResults"][0]["EvalDecision"]
+    rows = [(r, v, k, "explicitDeny") for r in fenced for v in verbs for k in keys] + [(r, v, k, "allowed") for r in controls for v in verbs for k in keys] + [("agent-platform-github-ci-branch", "s3:GetObject", "convergence/personal/sandbox.json", "allowed"), ("agent-platform-github-ci-branch", "s3:PutObject", "ci-rca-evidence/simulate-probe.json", "allowed")]
+    got = [(r, v, k, want, sim(boundary, r, v, k)) for r, v, k, want in rows]
+    bad = [f"{r} {v} {k} got {d}" for r, v, k, want, d in got if d != want]
+    counts = {"rows": len(got), "fenced_explicitDeny": sum(1 for r, v, k, w, d in got if w == "explicitDeny" and d == w), "controls_allowed": sum(1 for r, v, k, w, d in got if w == "allowed" and d == w), "mismatches": len(bad)}
+    if not live:
+        today = [sim(live_doc, r, v, k) for r, v, k, want in rows if want == "explicitDeny"]
+        counts["fenced_allowed_today"] = sum(d == "allowed" for d in today)
+    print(json.dumps(counts))
+    for line in bad[:20]:
+        print("MISMATCH", line)
+    ok = not bad and (live or counts["fenced_allowed_today"] == 40)
+    print("SIMULATE OK (" + ("live" if live else "candidate") + ") -- two CI roles fenced, every control kept") if ok else sys.exit("SIMULATE STOP")
+    EOF
+  expected: >-
+    one counts-only JSON line: rows 102, fenced_explicitDeny 40 (2 roles x 5 verbs x 4 keys), controls_allowed 62 (3
+    principals x 20 cells plus the 2 branch-role control keys), mismatches 0, fenced_allowed_today 40 (the live boundary
+    has no such Deny yet); then SIMULATE OK (candidate). Role names, verbs and representative keys only; never an ARN or
+    account id. Simulated keys are strings, not objects. Post the line with step 11's.
+  fix_if: >-
+    a fenced cell allowed with the candidate -- the Action, Resource or Condition is wrong, or the simulator ignored the
+    context entry (all 40 allowed): fix the statement or the context entry type and re-run steps 11-12; a control
+    denied -- the condition is too wide (wildcard or wrong operator): fix and re-run; fenced_allowed_today below 40 --
+    some boundary Deny already covers these cells: stop and establish who applied it
+  hermetic: false
+  graduation: not-applicable
+- step: 13
+  phase: pre-deploy
+  action: CLEANUP (ADMIN) -- remove the scratch evidence and any leftover worktree; also run after any STOP
+  command: rm -rf "${TMPDIR:-/tmp}/boundary-fence-gate" && git worktree prune && test ! -e "${TMPDIR:-/tmp}/boundary-fence-gate" && echo "SCRATCH CLEARED"
+  expected: SCRATCH CLEARED
+  fix_if: a path survives -- remove it by hand before ending the ADMIN session
+  hermetic: false
+  graduation: not-applicable
+- step: 14
+  phase: pre-deploy
+  action: rec-4645's acceptance names the node and holds on the PR tree
+  command: >-
+    bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; rows, _ =
+    fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-4645']); want='pytest
+    tests/checks/iam_tf/test_ci_branch_boundary_state_fence.py::test_real_boundary_fences_ci_agent_roles'; from
+    scripts.executor.acceptance_lint import lint_acceptance_command as lint; r=rows[0]; got=want in (r.get('acceptance')
+    or '') and lint(r['acceptance'], require_decidable=True)[0] and 'agent-platform-github-ci-pr' in (r.get('context') or
+    ''); print({'rec-4645': got}); assert got" && bin/venv-python -m pytest
+    tests/checks/iam_tf/test_ci_branch_boundary_state_fence.py::test_real_boundary_fences_ci_agent_roles -q && echo "REC ACCEPTANCE HOLDS"
+  expected: "{'rec-4645': True}, the node passes, then the marker"
+  fix_if: the rec still carries the bare-file acceptance or lacks the PR-role note -- rewrite it through the portal (execution step 2); never close it by hand
+  hermetic: false
+  graduation: not-applicable
+- step: 15
+  phase: post-deploy
+  action: HUMAN-DIRECTED ADMIN APPLY of terraform/bootstrap from main, full root, no -target, after Benjamin's word on the exact command
+  command: >-
+    echo 'ADMIN, after merge: confirm no terraform/personal gated apply or destroy is in flight (deploy-paths PRE-APPLY
+    drain rule) and no other bootstrap change is merged but unapplied; re-run step 11 against main (PR_HEAD_SHA=the
+    merge sha) and present to Benjamin that counts line and the exact command -- terraform -chdir=terraform/bootstrap
+    init -input=false -backend-config="region=$(tr -d '[:space:]' < config/aws-region)" then terraform
+    -chdir=terraform/bootstrap plan -input=false -var-file=<scratch bootstrap.tfvars> -out=<scratch>/apply.tfplan then
+    terraform -chdir=terraform/bootstrap apply <scratch>/apply.tfplan; run it only after Benjamin replies naming this
+    change; the lock is held (no -lock=false); delete the tfvars and plan files in the same step'
+  expected: >-
+    Benjamin's own message approving the command (message id in the merged-PR comment); apply exits 0 with 0 added, 1
+    changed, 0 destroyed; the IAM-change alarm email arrives (expected)
+  fix_if: >-
+    the post-merge plan differs from the gate's line (another bootstrap change merged meanwhile) -- stop and show him;
+    an apply error -- stop and RCA, never retry with -target (Decision 223)
+  hermetic: false
+  graduation: not-applicable
+- step: 16
+  phase: post-deploy
+  action: >-
+    LIVE SIMULATE (ADMIN) -- step 12 against the live boundary, then the live roles: the CI PR role is now explicitDeny
+    on a tfstate read, the apply role and planner keep their state access
+  command: |-
+    LIVE=1 && M="${TMPDIR:-/tmp}/boundary-fence-gate" && M="$M" LIVE=1 bin/venv-python - <<'EOF'
+    import json, sys, boto3
+    s = boto3.Session(profile_name="agent_platform_admin", region_name="eu-west-2")
+    acct = s.client("sts", region_name="eu-west-1", endpoint_url="https://sts.eu-west-1.amazonaws.com").get_caller_identity()["Account"]
+    iam = s.client("iam")
+    arn = lambda name: "arn" + ":aws:iam::" + acct + ":role/" + name
+    o = lambda k: "arn:aws:s3:::agent-platform-data-lake/" + k
+    def sim(role, verb, key):
+        ctx = [{"ContextKeyName": "aws:PrincipalArn", "ContextKeyValues": [arn(role)], "ContextKeyType": "string"}]
+        return iam.simulate_principal_policy(PolicySourceArn=arn(role), ActionNames=[verb], ResourceArns=[o(key)], ContextEntries=ctx)["EvaluationResults"][0]["EvalDecision"]
+    rows = [
+        ("pr-read-tfstate", "agent-platform-github-ci-pr", "s3:GetObject", "tfstate/personal/sandbox/terraform.tfstate", "explicitDeny"),
+        ("pr-read-tfplan", "agent-platform-github-ci-pr", "s3:GetObject", "tfplan/personal/1/simulate-probe.bin", "explicitDeny"),
+        ("pr-read-convergence", "agent-platform-github-ci-pr", "s3:GetObject", "convergence/personal/sandbox.json", "allowed"),
+        ("branch-read-tfstate", "agent-platform-github-ci-branch", "s3:GetObject", "tfstate/personal/sandbox/terraform.tfstate", "explicitDeny"),
+        ("apply-read-tfstate", "agent-platform-github-ci-apply", "s3:GetObject", "tfstate/personal/sandbox/terraform.tfstate", "allowed"),
+        ("apply-put-tfstate", "agent-platform-github-ci-apply", "s3:PutObject", "tfstate/personal/sandbox/terraform.tfstate", "allowed"),
+        ("planner-read-tfstate", "agent-platform-github-ci-planner", "s3:GetObject", "tfstate/personal/sandbox/terraform.tfstate", "allowed"),
+    ]
+    got = {n: sim(r, v, k) for n, r, v, k, _ in rows}
+    print(json.dumps(got))
+    bad = [n for n, r, v, k, want in rows if got[n] != want]
+    print("LIVE ROLES OK") if not bad else sys.exit("LIVE ROLES STOP " + ",".join(bad))
+    EOF
+  expected: >-
+    first re-run step 12's command with LIVE=1 (SIMULATE OK (live), mismatches 0); then this step prints one JSON line of
+    row names and decisions only -- pr-read-tfstate and pr-read-tfplan explicitDeny (implicitDeny before the apply),
+    pr-read-convergence allowed, branch-read-tfstate explicitDeny, the apply and planner rows allowed -- then LIVE ROLES
+    OK. Post both lines and the applied sha as a counts-only comment on the merged PR.
+  fix_if: >-
+    a PR-role row implicitDeny -- the apply did not take, or the simulator ignored the context entry: check step 12 LIVE
+    first; an apply or planner row denied -- the condition caught a control principal: stop and RCA with Benjamin
+    (rollback below); a row that a scoped grant changed since planning (for example the planner losing a grant through
+    S4) -- record it and compare against that plan before treating it as a regression
+  hermetic: false
+  graduation: not-applicable
+- step: 17
+  phase: post-deploy
+  action: POST-APPLY standing gate for any boundary change (deploy-paths.yaml admin_out_of_band.procedure)
+  command: bin/venv-python -m scripts.ci.iam_simulate --profile agent_platform_admin --fixture docs/contracts/iam-simulate-fixture.yaml
+  expected: exit 0 with zero mismatches (the apply role's anchor-tfstate-put-object row stays allowed)
+  fix_if: >-
+    a mismatch on a granted verb -- the new statement caught the apply role: stop and RCA with Benjamin; a by_design
+    denial now allowed -- a grant leak unrelated to this Deny: raise it as a security finding
+  hermetic: false
+  graduation: not-applicable
+- step: 18
+  phase: post-deploy
+  action: rec-4645 is closed through the Resolves trailer
+  command: >-
+    bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; rows, _ =
+    fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-4645']); print(sorted((r['id'], r['status']) for r in rows))"
+  expected: "[('rec-4645', 'closed')] after ci.yml's closure job for the merge commit"
+  fix_if: >-
+    still open -- read the trailer-closure job log; a transport failure or merge-leg refusal allows the manual close in
+    docs/contracts/git-ops.yaml resolves_trailer; an acceptance-verdict refusal allows only its printed close_proposed
+    command. If step 16 or 17 fails after closure, reopen rec-4645 with update_rec and stop.
+  hermetic: false
+  graduation: not-applicable
+test_obligations:
+- source: terraform/bootstrap/github_ci_apply_boundary.tf
+  behavior: >-
+    The boundary denies the CI branch and CI PR roles (exact role ARNs, ArnLike aws:PrincipalArn) the five S3 object verbs
+    on tfstate/*, tfplan/* and ci-rca-evidence/review-transcripts/*, and the condition names no other principal
+  verification_step: 1
+  test_selector: tests/checks/iam_tf/test_ci_branch_boundary_state_fence.py
+  red_green_expectation: red before (the Sid is absent on origin/main, step 2), green after
+- source: config/agent/verification_registry/entries/ci-branch-boundary-state-fence.yaml
+  behavior: Records VP step 1's graduation (check_id ci-branch-boundary-state-fence, node_id the new test file).
+  verification_step: 9
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: >-
+    A registry row is itself an executable check; validate_verification_registry and validate_graduation_completeness
+    run it in every tier and fail on a missing or non-resolving shard, which is the red-green proof.
+constraints:
+- terraform/bootstrap is admin-only; nothing is applied before merge and the apply is full-root with no -target (Decisions 126, 223).
+- No other statement in the boundary changes; test_telemetry_prefix_fence.py, test_url_only_invoke_guard.py and the S1 inline fence and its check stay unedited (Decision 235 cl.1).
+- The inline Deny on the branch role (rec-4632) stays; this plan adds the admin-held copy, it does not move it.
+- No standing iam-simulate fixture rows (S4, rec-4640, owns the multi-principal fixture).
+- No local terraform init/plan in a DEV session (Decision 119); the gate runs only in the ADMIN environment.
+- "Evidence is counts, role names and decisions only: no account ids, ARNs, ExternalIds, object keys or hosts (Decision 101)."
+- No rescue agents or workaround loops (Decision 55).
+context:
+- "Decision-scout verdict: FLAGS_FOUND. CITE: Decision 143, 144, 92, 223, 101, 189. NOTE answered: Decision 126 cl.1 -- the apply runs only through admin_out_of_band.procedure (plan -> present -> Benjamin's acceptance of that output and the exact command -> apply at the merge sha, no -target). Related: 225, 156, 202, 230, 213, 98, 77, 181, 235, 170, 169, 48, 150. Decisions triaged: 188 of 188. Roadmap items intersected: 4; CONFLICT: 0; RELATED: 4. Report: /mnt/project-files/trusted-plan-executor/s1-boundary-deny/decision-scout-report.md."
+- "gates: decision-scout=FLAGS_FOUND; plan-critique=PROCEED after 2 round(s); round 2 autonomous; red_overlap verdict clear (no reds, 2026-10-27)"
+- "Approval: Benjamin, 2026-10-27, cmsg_01Cqz6E4mzSv6kkGCSCub3WMLE3bv2Nv7nhNmHBsCs4a3z ('write the plan') on /mnt/project-files/trusted-plan-executor/s1-boundary-deny/step6b-presentation.md, after cmsg_01Cqz6E4mzSv6kkGCSCub3WM1iAM8pMowS6RCimtYNLVrq ('agree with 1B'): F1-B (branch and CI PR roles), F2-A (S1's five verbs). Build merge (IAM) and the exact apply command each need his word; no build pre-approval was given."
+- "Fable consult: /mnt/project-files/trusted-plan-executor/s1-boundary-deny/ADVICE.md (all six points adopted; fresh Sid rather than S1's, so simulate output and logs tell the two layers apart)."
+- "Slice map: /mnt/project-files/trusted-plan-executor/SPLIT.md. Owns only this boundary statement, its test and its proofs. S1 rec-4632 owns the inline Deny and validate_ci_branch_state_fence (personal root only); S1b rec-4635 owns PlatformDev's fence; S4 rec-4640 owns the principle check and the multi-principal fixture."
+- "Why ArnLike on a list and not an allow-list (6b fork 1C, rejected): with the principal key absent ArnNotLike is true, so the standing fixture's apply-role tfstate row (iam-simulate-fixture.yaml anchor-tfstate-put-object) would flip, and every new state-reading role (S2's trusted-plan role) would need a bootstrap apply first."
+- "Proof design: simulating the branch role itself proves nothing here (its inline Deny already returns explicitDeny), so step 12 isolates the boundary with simulate-custom-policy, an allow-s3 identity policy and an explicit aws:PrincipalArn context entry; without that entry ArnLike is false and the run passes vacuously, which the fenced_allowed_today and 40-cell counts catch."
+- "Gotchas: no [, ], { or } in any comment inside the boundary's Statement list (github_ci_apply_boundary.tf:87-94; _read_coverage.py:170-198); the new test must contain the quoted literal \"github_ci_apply_boundary.tf\" or the fast tier never selects it (step 4); rec-4645's current bare-file acceptance is out_of_grammar for the trailer census, so it is rewritten to the ::node_id form before merge (execution step 2, precedent PLAN-platformdev-plan-state-fence)."
+- "Size: 4,732 of 6,144 B on main 93e472a6; about 5,266 with this statement (planning measure, step 3 re-measures)."
+- "Start conditions: no other terraform/bootstrap change merged but unapplied (secrets-to-ssm-grants #1677 first); no build merge or deploy until telemetry PR #1679 has merged and deployed (Benjamin 2026-10-27, cmsg_01Cqz6E4mzSv6kkGCSCub3WMDHkSEz9R6y4sCSi71w3ACD); the coordinator gives the merge window. The window between merge and apply is harmless for the branch role (its inline Deny already holds)."
+- "V3 resolution: terraform/bootstrap is admin-only and applies after merge (Decision 126). The pre-merge evidence is the gate's counts-only lines for the CI-green head (VP steps 11-12), posted on the PR with $PR_HEAD_SHA; it substitutes for the pre-merge post-deploy evidence the implement V3 Merge Gate and code-review V3 check require. The behavioural acceptance (Decision 48) is the post-merge human-directed apply walk (VP steps 15-17), evidenced by a counts-only comment on the merged PR naming the applied sha."
+pre_implementation_checklist:
+- Branch confirmed not on main
+- docs/PROJECT_CONTEXT.md read
+- only the plan-cited decision sections
+- All files in scope located and readable
+- Acceptance criteria understood and verifiable
+execution_steps:
+- >-
+  Confirm start conditions on origin/main: no other terraform/bootstrap change merged but unapplied (ask the
+  coordinator), and github_ci_apply_boundary.tf's last statement is still DenyTelemetryVersionDelete.
+- >-
+  Rec rewrite, before the PR merges (Decision 201: the closing commit's verdict is keyed to the rec's current
+  acceptance): call get_rec_write_guidance(), then update_rec on rec-4645 setting acceptance to "bin/venv-python -m
+  pytest tests/checks/iam_tf/test_ci_branch_boundary_state_fence.py::test_real_boundary_fences_ci_agent_roles -q" and
+  appending a context note: Benjamin 2026-10-27 (6b F1-B) widened the Deny to also cover agent-platform-github-ci-pr;
+  Sid DenyCiAgentRoleStatePlanAndTranscriptIO; plan PLAN-ci-branch-boundary-state-fence.
+- >-
+  tests/checks/iam_tf/test_ci_branch_boundary_state_fence.py -- write it first, as scoped; run VP step 2 and see it red
+  on origin/main.
+- terraform/bootstrap/github_ci_apply_boundary.tf -- append the statement and its comment exactly as scoped.
+- config/agent/verification_registry/entries/ci-branch-boundary-state-fence.yaml -- the graduation shard as scoped.
+- Execute VP steps 1-9; loop until pass; on an unrecoverable failure stop and RCA (Decision 55).
+- >-
+  Open the PR (squash-merge body carries "Resolves: rec-4645" in a Key: value block), drive CI green, then run VP steps
+  10-14 in the ADMIN environment and post their lines on the PR.
+- >-
+  Ask Benjamin, through the thread, to approve the merge (IAM change) and the post-merge apply together, showing the
+  statement diff and step 11's and 12's lines, once the coordinator confirms the merge window. Merge only on his word;
+  then run step 15 on his word naming the exact command, then steps 16-18.
+- "Report: what was implemented, gate and live evidence lines, rec closure."
+rollback: >-
+  Revert the merge commit on main through a PR, then an admin apply of terraform/bootstrap from the reverted main on
+  Benjamin's word on the exact command removes the statement (0 add, 1 change, 0 destroy). The branch role keeps its
+  inline Deny; nothing depends on the boundary copy.

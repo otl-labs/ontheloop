@@ -17,6 +17,13 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_status_line_emitters",
+        module="scripts.checks.hygiene.validate_status_line_emitters",
+        attr="validate_status_line_emitters",
+        pre=True,
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_test_count_coupling",
         module="scripts.checks.hygiene.validate_test_count_coupling",
         attr="validate_test_count_coupling",
@@ -117,6 +124,20 @@ ENTRIES: tuple[Entry, ...] = (
         name="validate_declaring_coverage",
         module="scripts.checks.hygiene.validate_declaring_coverage",
         attr="validate_declaring_coverage",
+        full_segment="full_after_lint",
+    ),
+    Entry(
+        name="validate_test_skip_citations",
+        module="scripts.checks.hygiene.validate_test_skip_citations",
+        attr="validate_test_skip_citations",
+        pre=True,
+        pre_globs=(
+            "tests/**/*.py",
+            "scripts/checks/hygiene/validate_test_skip_citations.py",
+            "scripts/checks/_weakening_ast.py",
+            "scripts/checks/_common.py",
+            "scripts/checks/registry.py",
+        ),
         full_segment="full_after_lint",
     ),
     Entry(

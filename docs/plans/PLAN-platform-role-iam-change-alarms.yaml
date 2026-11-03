@@ -510,9 +510,10 @@ verification_plan:
     phase: post-deploy
     action: ADMIN -- merged main checked out, bootstrap initialised, tfvars present, baseline converged except for the new platform-security addresses
     command: |-
-      test -n "$MERGE_SHA" && git fetch origin main && git checkout --detach origin/main && git merge-base --is-ancestor "$MERGE_SHA" HEAD && test -f terraform/bootstrap/terraform.bootstrap.tfvars && git check-ignore -q terraform/bootstrap/terraform.bootstrap.tfvars && terraform -chdir=terraform/bootstrap init -input=false && M="${TMPDIR:-/tmp}/platform-security" && mkdir -p "$M" && terraform -chdir=terraform/bootstrap plan -input=false -lock=false -var-file=terraform.bootstrap.tfvars -out="$M/base.tfplan" > "$M/base.txt" && terraform -chdir=terraform/bootstrap show -json "$M/base.tfplan" | bin/venv-python -c "import json,sys; rc=json.load(sys.stdin).get('resource_changes',[]); bad=[(r['address'],r['change']['actions']) for r in rc if r['change']['actions'] not in (['no-op'],['read']) and not (r['change']['actions']==['create'] and '.platform_security' in r['address'])]; sys.exit(f'STOP {bad}') if bad else print('BASELINE OK -- only platform_security creates pending')"; rc=$?; rm -f "$M/base.tfplan"; test $rc -eq 0
+      test -n "$MERGE_SHA" && git fetch origin main && git checkout --detach origin/main && git merge-base --is-ancestor "$MERGE_SHA" HEAD && test -f terraform/bootstrap/terraform.bootstrap.tfvars && git check-ignore -q terraform/bootstrap/terraform.bootstrap.tfvars && terraform -chdir=terraform/bootstrap init -input=false && M="${TMPDIR:-/tmp}/platform-security" && mkdir -p "$M" && terraform -chdir=terraform/bootstrap plan -input=false -lock=false -var-file=terraform.bootstrap.tfvars -out="$M/base.tfplan" > "$M/base.txt" && terraform -chdir=terraform/bootstrap show -json "$M/base.tfplan" | bin/venv-python -c "import json,sys; rc=json.load(sys.stdin).get('resource_changes',[]); bad=[(r['address'],r['change']['actions']) for r in rc if r['change']['actions'] not in (['no-op'],['read']) and not (r['change']['actions']==['create'] and '.platform_security' in r['address']) and not (r['change']['actions']==['update'] and r['type'] in ('aws_cloudwatch_log_metric_filter','aws_cloudwatch_metric_alarm') and '.platform_security' in r['address'])]; sys.exit(f'STOP {bad}') if bad else print('BASELINE OK -- only platform_security creates or filter/alarm updates pending')"; rc=$?; rm -f "$M/base.tfplan"; test $rc -eq 0
     expected: >-
-      BASELINE OK -- every pending change is a create of a platform_security address; nothing else in
+      BASELINE OK -- every pending change is a create of a platform_security address, or (on the
+      filter-fix re-entry) an in-place update of a platform_security metric filter or alarm; nothing else in
       bootstrap is drifted or unapplied. Also confirm the merge's terraform/personal CD apply (the
       github_ci_branch read Sid) converged: via mcp__github__actions_list the terraform-apply-sandbox
       run for MERGE_SHA concluded success, and reading
@@ -570,12 +571,12 @@ verification_plan:
     phase: post-deploy
     action: ADMIN phase 2 -- PRESENT the detector plan, apply only on explicit human direction
     command: |-
-      M="${TMPDIR:-/tmp}/platform-security" && terraform -chdir=terraform/bootstrap plan -input=false -var-file=terraform.bootstrap.tfvars -out="$M/phase2.tfplan" && terraform -chdir=terraform/bootstrap show -json "$M/phase2.tfplan" | bin/venv-python -c "import json,sys; rc=json.load(sys.stdin).get('resource_changes',[]); bad=[(r['address'],r['change']['actions']) for r in rc if r['change']['actions'] not in (['no-op'],['read'],['create']) or (r['change']['actions']==['create'] and '.platform_security' not in r['address'])]; sys.exit(f'STOP {bad}') if bad else print('PHASE 2 OK -- detector creates only')" && terraform -chdir=terraform/bootstrap show "$M/phase2.tfplan"
+      M="${TMPDIR:-/tmp}/platform-security" && terraform -chdir=terraform/bootstrap plan -input=false -var-file=terraform.bootstrap.tfvars -out="$M/phase2.tfplan" && terraform -chdir=terraform/bootstrap show -json "$M/phase2.tfplan" | bin/venv-python -c "import json,sys; rc=json.load(sys.stdin).get('resource_changes',[]); bad=[(r['address'],r['change']['actions']) for r in rc if not (r['change']['actions'] in (['no-op'],['read']) or (r['change']['actions']==['create'] and '.platform_security' in r['address']) or (r['change']['actions']==['update'] and r['type'] in ('aws_cloudwatch_log_metric_filter','aws_cloudwatch_metric_alarm') and '.platform_security' in r['address']))]; sys.exit(f'STOP {bad}') if bad else print('PHASE 2 OK -- detector creates or filter/alarm updates only')" && terraform -chdir=terraform/bootstrap show "$M/phase2.tfplan"
     expected: >-
       PHASE 2 OK and the plan PRESENTED in the ADMIN session only; after explicit human acceptance,
       terraform apply "$M/phase2.tfplan" (the apply itself fires the tamper alarm -- CreateTrail,
       PutMetricFilter -- which is the first expected email)
-    fix_if: a non-create or a non-platform_security address -- STOP; on apply error stop and RCA (Decision 55)
+    fix_if: anything but a platform_security create or a platform_security metric-filter or alarm update -- STOP; on apply error stop and RCA (Decision 55)
   - step: 15
     phase: post-deploy
     action: ADMIN -- bootstrap converged and the trail is live with fresh Logs delivery
@@ -620,12 +621,14 @@ verification_plan:
     phase: post-deploy
     action: LIVE PROOF call 2 (Benjamin runs it) -- only once both alarms read OK again, an unchanged-value UpdateRole on PlatformAdmin
     command: |-
-      test "$(aws cloudwatch describe-alarms --alarm-names platform-security-platform-role-iam-change platform-security-denied-iam-write --state-value OK --query 'length(MetricAlarms)' --output text --profile agent_platform_admin)" = "2" && aws iam update-role --role-name PlatformAdmin --max-session-duration 3600 --profile agent_platform_admin && echo "CALL 2 MADE"
+      test "$(aws cloudwatch describe-alarms --alarm-names platform-security-platform-role-iam-change platform-security-denied-iam-write --state-value OK --query 'length(MetricAlarms)' --output text --profile agent_platform_admin)" = "2" && aws iam update-role --role-name platformadmin --max-session-duration 3600 --profile agent_platform_admin && echo "CALL 2 MADE"
     expected: >-
       the state precheck passes (both alarms back to OK, so the next transition is attributable to
       this call alone), the UpdateRole succeeds writing the value terraform/personal already
       declares (3600, so no drift), and platform-security-platform-role-iam-change reaches ALARM a
-      second time with a second email
+      second time with a second email. The role name is lowercase (IAM resolves it to PlatformAdmin),
+      so this call proves the case-insensitive roleName regex live; call 1 proves the errorMessage
+      clause, because a denied call carries requestParameters null
     fix_if: the precheck fails -- an alarm is still in ALARM from call 1; run this step again after the next 300 s period, never before
   - step: 19
     phase: post-deploy
@@ -642,11 +645,14 @@ verification_plan:
     phase: post-deploy
     action: close rec-4044 through update_rec with a holds acceptance verdict keyed to the merge sha, and verify it is closed
     command: |-
-      test -n "$MERGE_SHA" && test -n "$EVIDENCE" && git checkout --detach "$MERGE_SHA" && bin/venv-python -m pytest tests/checks/iam_tf/test_platform_role_iam_change_alarms.py -q && bin/venv-python -c "import hashlib,os,json; from scripts.ops_data_portal import update_rec, sync; sync(['ops_recommendations']); rows=[json.loads(l) for l in open('logs/.recommendations-log.jsonl') if l.strip()]; acc=max((x for x in rows if x.get('id')=='rec-4044'), key=lambda x: x.get('last_updated_timestamp') or '')['acceptance']; sha=os.environ['MERGE_SHA']; rec={'rec_id':'rec-4044','sha':sha,'acceptance_sha256':hashlib.sha256(acc.encode()).hexdigest(),'verdict':'holds','source':'manual','arm':'post-live-proof'}; update_rec('rec-4044',{'status':'closed','file':'terraform/bootstrap/platform_security_alarms.tf','execution_result':'success','resolution':'Detector live in terraform/bootstrap (Decision 202). Live proof: '+os.environ['EVIDENCE']},acceptance_verdict=rec,closing_sha=sha); print('rec-4044 close written')" && bin/venv-python -c "import json; from scripts.ops_data_portal import sync; sync(['ops_recommendations']); rows=[json.loads(l) for l in open('logs/.recommendations-log.jsonl') if l.strip()]; r=max((x for x in rows if x.get('id')=='rec-4044'), key=lambda x: x.get('last_updated_timestamp') or ''); assert r['status']=='closed' and 'Live proof' in (r.get('resolution') or ''), r['status']; print('rec-4044 closed (read back)')"
+      test -n "$MERGE_SHA" && test -n "$EVIDENCE" && git fetch origin main && git checkout --detach "$MERGE_SHA" && bin/venv-python -m pytest tests/checks/iam_tf/test_platform_role_iam_change_alarms.py -q && git checkout --detach origin/main && bin/venv-python -c "import hashlib,os; from scripts.ops_data_portal import update_rec; from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids; rows,missing=fetch_recs_by_ids(make_reader(),['rec-4044']); assert not missing, missing; acc=rows[0]['acceptance']; sha=os.environ['MERGE_SHA']; rec={'rec_id':'rec-4044','sha':sha,'acceptance_sha256':hashlib.sha256(acc.encode()).hexdigest(),'verdict':'holds','source':'manual','arm':'post-live-proof'}; update_rec('rec-4044',{'status':'closed','file':'terraform/bootstrap/platform_security_alarms.tf','execution_result':'success','resolution':'Detector live in terraform/bootstrap (Decision 202). Live proof: '+os.environ['EVIDENCE']},acceptance_verdict=rec,closing_sha=sha); print('rec-4044 close written')" && bin/venv-python -c "from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids; rows,missing=fetch_recs_by_ids(make_reader(),['rec-4044']); assert not missing, missing; r=rows[0]; assert r['status']=='closed' and 'Live proof' in (r.get('resolution') or ''), r['status']; print('rec-4044 closed (read back)')"
     expected: >-
       the acceptance oracle passes at the merge sha, update_rec accepts the holds record (the
-      acceptance text is unchanged, so its sha256 matches), and the read-back after a fresh sync
-      prints rec-4044 closed (read back) with the live-proof evidence in its resolution
+      acceptance text is unchanged, so its sha256 matches), and the read-back through the
+      recs_by_ids named verb prints rec-4044 closed (read back) with the live-proof evidence in its
+      resolution. The oracle runs at MERGE_SHA; the portal calls run from origin/main, because
+      Decision 215 (#1452) retired the recs cache this step originally synced and read (sync now
+      refuses ops_recommendations), and MERGE_SHA predates fetch_recs_by_ids
     fix_if: >-
       AcceptanceVerdictRefused -- the acceptance text or sha differ; recompute from the rec's
       current acceptance, never close without a record (git-ops.yaml trailer_acceptance_gate).
@@ -797,6 +803,7 @@ context:
   - "IAM events are delivered only to trails that cover us-east-1; a multi-region trail homed in var.aws_region receives them and forwards all regions' events to its one Logs group, which is why no second-region resource exists."
   - "The PlatformDev out-of-band AgentPlatformRuntime inline policy (terraform/CLAUDE.md) is outside every root; filter 1 matches any change naming the role, so edits to it alert too."
   - "Plan A (PLAN-platform-iam-bootstrap-adopt) step 10 gates on rec-4044 closed; its bootstrap baseline plan (its step 9) needs this plan's apply to have landed first."
+  - "Filter-fix re-entry (2026-10-12): the first step 17 run proved filter 2 live (ALARM 00:46Z) but filter 1 never fired -- CloudTrail records requestParameters, responseElements and resources as null on a denied IAM call, naming the target role only in errorMessage, and the fixture's denied TagRole had been hand-written with a roleName, so step 13 passed against a shape CloudTrail never emits. Fix (Benjamin chose it over relaxing the acceptance, Decision 181): filter 1 gains an errorMessage clause (role.<case-insensitive name>\\s, verified live by TestMetricFilter against the real denied event), the fixture's denied events carry the real shape, every alarm email's Insights query adds errorMessage (so a denied alert shows its target), and step 1 pins all three. Re-entry path after the fix PR merges: steps 9 (gate admits in-place platform_security metric-filter and alarm updates), 13, 14 (expected plan: 1 filter + 5 alarm-description updates in place, 0 add, 0 destroy, human-directed), 15, 16, then 17-21 with a fresh PROOF_AT. Steps 10-12 are skipped: phase 1 is applied and unchanged, and step 12's no-trail check is pre-first-apply only."
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read

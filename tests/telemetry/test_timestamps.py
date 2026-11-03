@@ -6,7 +6,14 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from src.telemetry.timestamps import TimestampError, epoch_ms, parse_iso8601_utc, require_aware_utc, truncate_to_ms
+from src.telemetry.timestamps import (
+    TimestampError,
+    epoch_ms,
+    parse_iso8601_utc,
+    parse_wire_timestamp,
+    require_aware_utc,
+    truncate_to_ms,
+)
 
 
 class TestParseIso8601Utc:
@@ -134,3 +141,25 @@ class TestEpochMs:
         # the invariant instead: the latest ms-precision datetime is still comfortably in range.
         latest = datetime(9999, 12, 31, 23, 59, 59, 999000, tzinfo=timezone.utc)
         assert epoch_ms(latest) <= 2**48 - 1
+
+
+def test_wire_timestamp_requires_exactly_three_fraction_digits() -> None:
+    assert parse_wire_timestamp("2026-09-25T10:00:00.123Z") == datetime(2026, 9, 25, 10, 0, 0, 123000, tzinfo=timezone.utc)
+    assert parse_wire_timestamp("2026-09-25T12:00:00.000+02:00") == datetime(2026, 9, 25, 10, 0, 0, tzinfo=timezone.utc)
+    assert parse_wire_timestamp("2026-09-25 10:00:00,456z").microsecond == 456000
+    for rejected in (
+        "2026-09-25T10:00:00Z",
+        "2026-09-25T10:00:00.1Z",
+        "2026-09-25T10:00:00.12Z",
+        "2026-09-25T10:00:00.1234Z",
+        "2026-09-25T10:00:00.123456789Z",
+        "2026-09-25T10:00:00.123",
+        "2026-09-25",
+        "not a timestamp",
+        "2026-02-30T10:00:00.000Z",
+    ):
+        with pytest.raises(TimestampError):
+            parse_wire_timestamp(rejected)
+    for non_string in (None, 5, datetime(2026, 9, 25, tzinfo=timezone.utc)):
+        with pytest.raises(TimestampError, match="expected str"):
+            parse_wire_timestamp(non_string)  # type: ignore[arg-type]

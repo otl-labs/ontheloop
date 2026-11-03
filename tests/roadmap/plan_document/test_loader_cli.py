@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from scripts.checks.roadmap.validate_plan_documents import validate_plan_documents
 from scripts.roadmap.plan_document import context_block_lines, load, main, validate_paths
 from tests.fixtures.plan_document_helpers import FIXTURES, _mutate
+from tests.fixtures.yaml_parse_spy import install as install_yaml_parse_spy
 
 
 def test_context_block_lines_counts_rendered_span(tmp_path):
@@ -64,6 +65,18 @@ class TestLoader:
         failures = validate_paths([good, bad])
         assert len(failures) == 1
         assert failures[0][0] == bad
+
+
+class TestLoaderUsesLibyaml:
+    def test_load_parses_with_libyaml_not_the_pure_python_loader(self, tmp_path, monkeypatch):
+        """rec-4778: corpus-wide callers parse every plan, and the pure-Python parser made the corpus
+        tests cross the 120s pytest timeout on slow CI runners."""
+        target = tmp_path / "PLAN-zz-valid-demo.yaml"
+        shutil.copy(FIXTURES / "valid.yaml", target)
+        log = install_yaml_parse_spy(monkeypatch)
+        load(target)
+        assert log.pure_entries == []
+        assert len(log.libyaml_sizes) == 1
 
 
 class TestCli:

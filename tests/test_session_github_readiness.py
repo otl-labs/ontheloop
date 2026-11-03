@@ -73,3 +73,19 @@ def test_main_prints_report(capsys) -> None:
     with patch("scripts.session.github_readiness.probe", return_value={"pr_write": {"status": "unknown"}}):
         assert github_readiness.main() == 0
     assert '"pr_write"' in capsys.readouterr().out
+
+
+def test_authenticated_read_targets_the_ci_repository(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example-org/example-repo")
+    token = tmp_path / ".config" / "gh-mcp" / "token"
+    token.parent.mkdir(parents=True)
+    token.write_text("credential-value", encoding="utf-8")
+    response = MagicMock(status=200)
+    response.__enter__.return_value = response
+    response.__exit__.return_value = False
+    with (
+        patch("pathlib.Path.home", return_value=tmp_path),
+        patch("scripts.session.github_readiness.urllib.request.urlopen", return_value=response) as urlopen,
+    ):
+        assert github_readiness._authenticated_read() == ("pass", "")
+    assert urlopen.call_args.args[0].full_url == "https://api.github.com/repos/example-org/example-repo"

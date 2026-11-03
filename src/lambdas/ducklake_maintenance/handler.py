@@ -12,14 +12,16 @@ is connectionless). The only surviving SCHEDULED cadence on this function is act
 OPERATIONAL admin actions are invoked over 443 via `aws lambda invoke` (NOT public Function URLs,
 NOT agent surfaces): catalog_reinit (rec-2099 fix -- drop the squatting meta-schema + re-init at the
 production DATA_PATH), restore_drill (pg_dump->pg_restore + read-your-write DR gate),
-reconcile_columns, catalog_stats, and clone_catalog (OQ.12 canary rehearsal). These target the
+reconcile_columns, catalog_stats, and clone_catalog (OQ.12 canary rehearsal), plus the operator-only
+ensure_catalog_indexes (Decision 81 cl.6: no agent invokes it). These target the
 PRODUCTION catalog (ducklake_ops) via explicit event params. (The TEMPORARY
 seed_ops_recommendations bootstrap action was removed at the 2026-06-09 recs sign-off -- the closed
 boundary now admits recs writes only via the portal `file_rec`/`update_rec` -> writer path,
 Decision 81 cl.7.)
 
-The scheduled path is agent-free; an ADMIN-container agent may invoke the partition-layout verbs
-only under explicit human direction, Decision 204 (amending CD.33 clause 5 / Decision 81 clause 6).
+The scheduled path is agent-free; an ADMIN-container agent may invoke the partition-layout verbs (Decision 204)
+and provision_telemetry_login (Decision 213), provision_catalog_owner and provision_telemetry_catalog (Decision 230) only under
+explicit human direction (CD.33 clause 5 / Decision 81 cl.6).
 Singleton enforced by reserved_concurrent_executions=1 (Decision 81 clause 6; see Terraform).
 
 See src/common/ducklake_maintenance.py::MAINTENANCE_SCOPE_NOTE.
@@ -28,28 +30,23 @@ See src/common/ducklake_maintenance.py::MAINTENANCE_SCOPE_NOTE.
 from __future__ import annotations
 
 import json
-import os
 import time
 from typing import Any
 
-from src.common import catalog_dr, ducklake_control_health
+from src.common import catalog_dr
 from src.common import ducklake_gc_ops as gc_ops_body
 from src.common import ducklake_maintenance as maint
 from src.common import ducklake_maintenance_scope as scope
 from src.common import ducklake_runtime as rt
-from src.lambdas.ducklake_maintenance import partition_actions
-from src.lambdas.ducklake_maintenance._shared import EXTENSION_DIRECTORY, _require_identifier
-
-# T2.26: control_health is read-mostly (asserts invariants, never mutates), so -- unlike the
-# production-destructive/operational actions below, which all REQUIRE an explicit event data_path
-# (no-arg invokes refused, Decision 84/81) -- it may fall back to an env-pinned production default
-# so a scheduled EventBridge target's static input (or a manual smoke invoke) need not repeat it.
-DATA_PATH = os.environ.get("DUCKLAKE_DATA_PATH")
-
-
-def _emit_maintenance_metric(name: str, value: float, *, profile: str | None = None) -> None:
-    rt.emit_metric(name, value, namespace=maint.MAINTENANCE_CLOUDWATCH_NAMESPACE, profile=profile)
-
+from src.lambdas.ducklake_maintenance import catalog_actions, health_actions, index_actions, login_actions, partition_actions
+from src.lambdas.ducklake_maintenance._shared import (  # noqa: F401 -- DATA_PATH re-bound for existing callers
+    CATALOG_METRICS,
+    DATA_PATH,
+    EXTENSION_DIRECTORY,
+    _emit_maintenance_metric,
+    _require_identifier,
+    catalog_dimensions,
+)
 
 # ---------------------------------------------------------------------------
 # Operational actions (T2.19 recs cutover) -- invoked over 443 via `aws lambda invoke`, NOT public
@@ -127,6 +124,7 @@ def action_catalog_reinit(event: dict[str, Any], _con: Any) -> dict[str, Any]:
         "data_path": data_path,
         "dropped_existing": dropped,
         "reinitialized": True,
+        "stats_index": index_actions.ensure_index_for(meta_schema),
     }
 
 
@@ -312,29 +310,18 @@ def action_reconcile_columns(event: dict[str, Any], _con: Any) -> dict[str, Any]
     }
 
 
-def action_catalog_stats(event: dict[str, Any], _con: Any) -> dict[str, Any]:
-    """OPERATIONAL read-only: catalog-metadata footprint of the production ops_* catalog (D3a).
+def _catalog_sink(meta_schema: Any) -> Any:
+    """Metric emitter for one catalog: the rebound ops emitter itself for ducklake_ops (or an invalid name), else a
+    (name, value) emitter limited to CATALOG_METRICS and dimensioned by MetaSchema."""
+    dims = catalog_dimensions(meta_schema)
+    if dims is None:
+        return _emit_maintenance_metric
 
-    Connectionless and ATTACH-free: it reads the catalog's own Postgres metadata tables directly
-    (psycopg2), so it needs only an explicit meta_schema -- NO data_path (unlike merge_ops). This is
-    the supported measurement path for the neon-egress budget (the DR bucket + direct CloudWatch reads
-    are IAM-blocked from the dev role by design). Read-only: no merge/expire/cleanup/orphan.
+    def sink(name: str, value: float) -> None:
+        if name in CATALOG_METRICS:
+            _emit_maintenance_metric(name, value, dimensions=dims)
 
-    Expected event: {"action": "catalog_stats", "meta_schema": "ducklake_ops"}
-    """
-    raw_schema = event.get("meta_schema")
-    if not raw_schema:
-        raise rt.DuckLakeRuntimeError(
-            "catalog_stats requires an explicit 'meta_schema' (e.g. 'ducklake_ops') -- no default production schema"
-        )
-    meta_schema = _require_identifier(raw_schema)
-    ops_filter = event.get("ops_table_filter", "ops_%")
-    result = maint.catalog_stats(meta_schema=meta_schema, dsn=rt.fetch_dsn(), ops_table_filter=ops_filter)
-
-    _emit_maintenance_metric("CatalogMetadataBytes", float(result.get("catalog_metadata_bytes") or 0))
-    if result.get("file_column_stats_rows_est") is not None:
-        _emit_maintenance_metric("CatalogFileColumnStatsRows", float(result["file_column_stats_rows_est"]))
-    return result
+    return sink
 
 
 def action_merge_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
@@ -366,6 +353,7 @@ def action_merge_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
             "merge_ops requires an explicit 'meta_schema' (e.g. 'ducklake_ops') -- no default production schema"
         )
     meta_schema = _require_identifier(raw_schema)
+    emit = _catalog_sink(meta_schema)
 
     dsn = rt.fetch_dsn()
     con = rt.open_connection(dsn=dsn, data_path=data_path, meta_schema=meta_schema, extension_directory=EXTENSION_DIRECTORY)
@@ -379,7 +367,7 @@ def action_merge_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
         if not discovered:
             raise rt.DuckLakeRuntimeError(
                 "merge_ops: no tables discovered in the catalog -- verify data_path and meta_schema "
-                "point at the production DuckLake (ducklake_ops @ s3://.../ducklake/)"
+                f"point at the production DuckLake (meta_schema {meta_schema!r})"
             )
 
         semantics = rt.load_field_semantics()
@@ -415,7 +403,7 @@ def action_merge_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
                 # (Decision 188 pt 3, extended by Decision 191) -- see the aggregate raise below.
                 merge_error = str(exc)
                 merge_failures.append({"table": table, "error": merge_error})
-                _emit_maintenance_metric("MergeOpsTableFailure", 1.0)
+                emit("MergeOpsTableFailure", 1.0)
 
             if merge_error is None and not count_unavailable:
                 try:
@@ -447,13 +435,13 @@ def action_merge_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-        _emit_maintenance_metric("MergeOpsDurationMs", elapsed_ms)
+        emit("MergeOpsDurationMs", elapsed_ms)
         if not any_count_unavailable:
-            _emit_maintenance_metric("MergeOpsFilesBeforeTotal", float(files_before_total))
-            _emit_maintenance_metric("MergeOpsFilesAfterTotal", float(files_after_total))
-        _emit_maintenance_metric("MergeOpsTablesCount", float(len(resolution.to_merge)))
-        _emit_maintenance_metric("MergeOpsUnclassifiedTables", float(len(resolution.unclassified)))
-        _emit_maintenance_metric("MergeOpsPassFailed", float(len(merge_failures) + len(resolution.unclassified) > 0))
+            emit("MergeOpsFilesBeforeTotal", float(files_before_total))
+            emit("MergeOpsFilesAfterTotal", float(files_after_total))
+        emit("MergeOpsTablesCount", float(len(resolution.to_merge)))
+        emit("MergeOpsUnclassifiedTables", float(len(resolution.unclassified)))
+        emit("MergeOpsPassFailed", float(len(merge_failures) + len(resolution.unclassified) > 0))
 
         if merge_failures or resolution.unclassified:
             # The per-table error detail is embedded directly in the raised message (not just
@@ -519,44 +507,10 @@ def action_gc_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
             catalog=maint.CATALOG_ALIAS,
             data_path=data_path,
             dry_run=dry_run,
-            metric_sink=_emit_maintenance_metric,
+            metric_sink=_catalog_sink(meta_schema),
         )
     finally:
         con.close()
-
-
-def action_control_health(event: dict[str, Any], _con: Any) -> dict[str, Any]:
-    """OPERATIONAL: assert control-class table invariants (row count, counter floor, live-file
-    ceiling) -- the periodic health assertion docs/contracts/ops_entity_counters.yaml's dq_scope
-    exemption names as its substitute for DQ-runner coverage (T2.26).
-
-    Unlike the other operational actions above, `data_path` falls back to the env-pinned
-    DATA_PATH (see its module-level comment) since this action only reads and never mutates.
-
-    Expected event: {"action": "control_health", "meta_schema": "ducklake_ops"} (data_path
-    optional when DUCKLAKE_DATA_PATH is set on the function).
-    """
-    data_path = event.get("data_path") or DATA_PATH
-    if not isinstance(data_path, str) or not data_path.startswith("s3://"):
-        raise rt.DuckLakeRuntimeError(
-            "control_health requires a 'data_path' s3:// URI (the production DuckLake path) -- "
-            "pass it explicitly, or set DUCKLAKE_DATA_PATH on the function"
-        )
-    raw_schema = event.get("meta_schema")
-    if not raw_schema:
-        raise rt.DuckLakeRuntimeError("control_health requires an explicit 'meta_schema' (e.g. 'ducklake_ops')")
-    meta_schema = _require_identifier(raw_schema)
-
-    con = rt.open_connection(
-        dsn=rt.fetch_dsn(), data_path=data_path, meta_schema=meta_schema, extension_directory=EXTENSION_DIRECTORY
-    )
-    try:
-        result = ducklake_control_health.control_health(
-            con, metric_sink=lambda name, value: _emit_maintenance_metric(name, value)
-        )
-    finally:
-        con.close()
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -568,12 +522,16 @@ _ACTIONS: dict[str, Any] = {
     "restore_drill": action_restore_drill,
     "merge_ops": action_merge_ops,
     "gc_ops": action_gc_ops,
-    "catalog_stats": action_catalog_stats,
+    "catalog_stats": health_actions.action_catalog_stats,
     "reconcile_columns": action_reconcile_columns,
     "clone_catalog": action_clone_catalog,
-    "control_health": action_control_health,
+    "control_health": health_actions.action_control_health,
     "reconcile_partitions": partition_actions.action_reconcile_partitions,
     "rewrite_partition_layout": partition_actions.action_rewrite_partition_layout,
+    "provision_telemetry_login": login_actions.action_provision_telemetry_login,
+    "provision_catalog_owner": catalog_actions.action_provision_catalog_owner,
+    "provision_telemetry_catalog": catalog_actions.action_provision_telemetry_catalog,
+    "ensure_catalog_indexes": index_actions.action_ensure_catalog_indexes,
 }
 
 
@@ -589,8 +547,12 @@ def _parse_event(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _response(status: int, payload: dict[str, Any]) -> dict[str, Any]:
-    """Build a Function-URL response envelope."""
-    return {"statusCode": status, "headers": {"Content-Type": "application/json"}, "body": json.dumps(payload)}
+    """Build a Function-URL response envelope. A 5xx body is also printed to CloudWatch Logs: an
+    asynchronous (EventBridge) invoke discards the response, so the log is the only record of why."""
+    body = json.dumps(payload)
+    if status >= 500:
+        print(f"MAINTENANCE_FAILURE status={status} body={body}")
+    return {"statusCode": status, "headers": {"Content-Type": "application/json"}, "body": body}
 
 
 def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
@@ -609,7 +571,7 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
     try:
         return _response(200, fn(payload, None))
     except maint.DuckLakeMaintenanceError as exc:
-        _emit_maintenance_metric("MaintenanceBreakerTrip", 1.0)
+        _catalog_sink(payload.get("meta_schema"))("MaintenanceBreakerTrip", 1.0)
         return _response(500, {"ok": False, "error_type": "breaker", "breaker_tripped": True, "error": str(exc)})
     except catalog_dr.CatalogDrError as exc:
         return _response(500, {"ok": False, "error_type": "catalog_dr", "error": str(exc)})

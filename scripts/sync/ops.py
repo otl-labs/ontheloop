@@ -3,9 +3,11 @@
 
 Read path: the DuckLake closed reader, for every migrated table. It is the sole backend
 (Decision 84 I-1); on reader failure the cache is left untouched with a loud warning.
+ops_recommendations has no local cache (Decision 215): it is never pulled, and any stale
+logs/.recommendations-log.jsonl is deleted by sync and warm_sync.
 
 Provides one CLI subcommand:
-  sync   -- pull all migrated tables from the DuckLake reader; exits non-zero if any table pull failed
+  sync   -- pull decisions, priority queue and execution plans from the reader; exits non-zero if any pull failed
 
 Internal helpers (not for direct agent use):
   _rebuild_local_cache -- read current-state rows and overwrite local JSONL files
@@ -41,16 +43,25 @@ _LOGS_DIR = _REPO_ROOT / "logs"
 
 # Maps warehouse table name -> local JSONL file (relative to _LOGS_DIR)
 _TABLE_TO_LOCAL: dict[str, str] = {
-    "ops_recommendations": ".recommendations-log.jsonl",
     "ops_decisions": ".decisions-index.jsonl",
     "ops_priority_queue": "priority-queue/.priority-queue.jsonl",
     "ops_execution_plans": ".execution-plans-index.jsonl",
 }
 
+# Retired recs cache (Decision 215): never written; any pre-existing copy is deleted on every sync.
+_RETIRED_RECS_CACHE = ".recommendations-log.jsonl"
 _SSO_PROFILE = "agent_platform"
 _SYNC_REJECTS_LOG = _LOGS_DIR / "debug" / "dq-sync-rejects.jsonl"
 _DECISIONS_SYNC_REJECTS_LOG = _LOGS_DIR / "debug" / "decisions-sync-rejects.jsonl"
 _REQUIRED_REC_FIELDS = ["title", "source", "effort", "priority"]
+
+
+def _delete_retired_recs_cache() -> None:
+    """Remove a stale full-looking recs cache copy left by a pre-Decision-215 sync."""
+    try:
+        (_LOGS_DIR / _RETIRED_RECS_CACHE).unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("sync_ops._delete_retired_recs_cache: could not delete stale recs cache: %s", exc)
 
 
 def _pull_via_reader(table: str) -> list[dict] | None:
@@ -428,6 +439,7 @@ def sync(profile: str = _SSO_PROFILE) -> dict[str, object]:
         {"pulled": {table: count}, "failed": [table, ...]} -- "failed" lists every table whose
         reader pull failed (T2.19 c9); the CLI exits non-zero when it is non-empty.
     """
+    _delete_retired_recs_cache()
     counts, failed = _rebuild_with_failures(profile)
     return {"pulled": counts, "failed": failed}
 
@@ -448,6 +460,7 @@ def warm_sync(profile: str = _SSO_PROFILE) -> dict[str, object]:
           "reader_ok": {table: bool},                  # per-table reachability (False on failure)
         }
     """
+    _delete_retired_recs_cache()
     pulled: dict[str, int] = {}
     rows: dict[str, list[dict] | None] = {}
     reader_ok: dict[str, bool] = {}

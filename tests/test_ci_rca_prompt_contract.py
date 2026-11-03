@@ -118,3 +118,24 @@ class TestStaleFormsAbsent:
     def test_no_lowercase_priority_critical(self, agent_text: str) -> None:
         """Stale '--priority critical' (lowercase) is absent; only '--priority Critical' is used."""
         assert "--priority critical" not in agent_text
+
+
+class TestRepairTrackInstructions:
+    """Decision 226: the agent records repair_track and passes High only for a Track A red."""
+
+    def test_repair_track_with_both_values(self, agent_text: str) -> None:
+        assert "repair_track" in agent_text
+        assert "test_defect" in agent_text and "product_regression" in agent_text
+
+    def test_high_priority_only_for_track_a(self, agent_text: str) -> None:
+        assert "--priority High" in agent_text
+        assert "High` for a Track A red" in agent_text
+
+    def test_preventive_action_omitted_only_for_track_a(self, agent_text: str) -> None:
+        assert "Omit `preventive_action` only when `repair_track` is `test_defect`" in agent_text
+        assert "except preventive_action for a Track A red" in agent_text
+
+    def test_hard_rules_name_the_fast_lane(self, agent_text: str) -> None:
+        assert "the fast lane for a red the portal files High (Decision 226)" in agent_text
+        assert "--priority Critical" in agent_text
+        assert "autonomous fix" in agent_text

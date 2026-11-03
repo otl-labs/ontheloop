@@ -7,8 +7,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
-from scripts.checks import validation_result
+from scripts.checks import _common, validation_result
 from scripts.session import handoff_evidence
 from scripts.session.handoff_push_parse import ParsedPush, parse_canonical
 
@@ -315,11 +316,7 @@ class TestExemptSet:
 
     def test_real_contract_exempt_clause_parses(self) -> None:
         """The real working-tree git-ops.yaml clause: docs/plans/x exempt, git-ops.yaml never-exempt."""
-        import scripts.checks._common as _common
-
         text = (_common.ROOT / "docs" / "contracts" / "git-ops.yaml").read_text(encoding="utf-8")
-        import yaml
-
         data = yaml.safe_load(text)
         gate_clause = data.get("handoff_evidence_gate")
         assert gate_clause is not None, "docs/contracts/git-ops.yaml must carry handoff_evidence_gate"
@@ -371,6 +368,19 @@ class TestDestination:
         parsed = parse_canonical("git push -u origin HEAD")
         verdict = handoff_evidence.decide_bash(parsed, wt)
         assert verdict.kind == "pass"
+
+
+def test_a_ccr_harness_session_branch_is_an_allowed_destination(tmp_path: Path) -> None:
+    # Seeds the REAL working-tree contract as origin/main, so the declared prefix set is the shipped one.
+    work = _make_repo(tmp_path)
+    real = (_common.ROOT / "docs" / "contracts" / "git-ops.yaml").read_text(encoding="utf-8")
+    _commit_file(work, "docs/contracts/git-ops.yaml", real, "real contract")
+    _git(["push", "origin", "main"], cwd=work)
+    wt = _new_branch_worktree(work, "ccr-679d754f-m99ugp")
+    _commit_file(wt, "docs/plans/PLAN-probe.yaml", "probe\n")
+    verdict = handoff_evidence.decide_bash(parse_canonical("git push -u origin HEAD"), wt)
+    assert (verdict.kind, verdict.rule) == ("pass", "exempt")
+    assert handoff_evidence._dst_allowed("random-branch", handoff_evidence.destination_prefixes(wt)) is False
 
 
 class TestBareAndDelete:

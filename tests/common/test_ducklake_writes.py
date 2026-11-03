@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src.common import ducklake_runtime as rt
-from tests.fixtures.ducklake_fakes import _SEMANTICS, FakeCon
+from tests.fixtures.ducklake_fakes import _SEMANTICS, FakeCon, ops_rec_fields, ops_rec_record
 
 pytestmark = pytest.mark.unit
 
@@ -193,7 +193,7 @@ def test_write_scd2_ops_binds_columns_in_order(monkeypatch):
     con = FakeCon(created_lookup=None)  # insert path (no existing row)
     moment = datetime(2026, 6, 8, tzinfo=timezone.utc)
     identity = rt.mint_write_identity(now=moment)
-    record = {"id": "rec-1", "status": "open", "title": "t", "automatable": False, "execution_steps": 2}
+    record = ops_rec_record(automatable=False, execution_steps=2)
     result = rt.write_scd2(con, record, table="ops_recommendations", identity=identity)
     assert result.rec_id == "rec-1"
     # The history MERGE params: positional, matching ordered_columns.
@@ -212,7 +212,7 @@ def test_write_scd2_ops_binds_columns_in_order(monkeypatch):
 def test_write_scd2_ops_require_exists_loud_fails_on_absent():
     """update path (require_exists=True) raises ReferentialError when the merge key is absent."""
     con = FakeCon(created_lookup=None)  # no existing current row
-    record = {"id": "rec-absent", "status": "closed"}
+    record = ops_rec_record(id="rec-absent", status="closed")
     with pytest.raises(rt.ReferentialError, match="absent"):
         rt.write_scd2(con, record, table="ops_recommendations", require_exists=True)
     # The MERGE must NOT have run (rolled back before any write).
@@ -224,7 +224,7 @@ def test_write_scd2_ops_require_exists_proceeds_when_present():
     """update path proceeds and carries the original created_timestamp when the row exists."""
     original = datetime(2026, 1, 1, tzinfo=timezone.utc)
     con = FakeCon(created_lookup=[(original, "open")])  # existing current row, status included
-    record = {"id": "rec-1", "status": "closed"}
+    record = ops_rec_record(status="closed")
     result = rt.write_scd2(con, record, table="ops_recommendations", require_exists=True)
     assert result.created_timestamp == original  # carried, not re-stamped
     assert any(sql.startswith("MERGE INTO") for sql, _ in con.executed)
@@ -233,7 +233,7 @@ def test_write_scd2_ops_require_exists_proceeds_when_present():
 def test_write_scd2_ops_require_exists_select_includes_status():
     """The require_exists existing-row fetch on a DAG-declaring table selects status too (no 2nd round-trip)."""
     con = FakeCon(created_lookup=[(datetime(2026, 1, 1, tzinfo=timezone.utc), "open")])
-    rt.write_scd2(con, {"id": "rec-1", "status": "closed"}, table="ops_recommendations", require_exists=True)
+    rt.write_scd2(con, ops_rec_record(status="closed"), table="ops_recommendations", require_exists=True)
     selects = [sql for sql, _ in con.executed if sql.startswith("SELECT created_timestamp")]
     assert len(selects) == 1
     assert "status" in selects[0]
@@ -243,7 +243,7 @@ def test_write_scd2_ops_require_exists_rejects_resolved_reactivation():
     """A resolved rec (closed) reactivated to open raises StatusTransitionError before any MERGE."""
     con = FakeCon(created_lookup=[(datetime(2026, 1, 1, tzinfo=timezone.utc), "closed")])
     with pytest.raises(rt.StatusTransitionError, match="illegal status transition"):
-        rt.write_scd2(con, {"id": "rec-1", "status": "open"}, table="ops_recommendations", require_exists=True)
+        rt.write_scd2(con, ops_rec_record(), table="ops_recommendations", require_exists=True)
     merged = [sql for sql, _ in con.executed if sql.startswith("MERGE INTO")]
     assert merged == []
 
@@ -253,14 +253,14 @@ def test_write_scd2_ops_require_exists_allows_live_transitions():
     live = [("failed", "open"), ("open", "superseded"), ("closed", "superseded"), ("failed", "declined"), ("open", "declined")]
     for existing_status, new_status in live:
         con = FakeCon(created_lookup=[(datetime(2026, 1, 1, tzinfo=timezone.utc), existing_status)])
-        rt.write_scd2(con, {"id": "rec-1", "status": new_status}, table="ops_recommendations", require_exists=True)
+        rt.write_scd2(con, ops_rec_record(status=new_status), table="ops_recommendations", require_exists=True)
         assert any(sql.startswith("MERGE INTO") for sql, _ in con.executed), (existing_status, new_status)
 
 
 def test_write_scd2_ops_require_exists_skips_unknown_vocab():
     """An unrecognised status value is skipped narrowly (never treated as illegal)."""
     con = FakeCon(created_lookup=[(datetime(2026, 1, 1, tzinfo=timezone.utc), "banana")])
-    rt.write_scd2(con, {"id": "rec-1", "status": "open"}, table="ops_recommendations", require_exists=True)
+    rt.write_scd2(con, ops_rec_record(), table="ops_recommendations", require_exists=True)
     assert any(sql.startswith("MERGE INTO") for sql, _ in con.executed)
 
 
@@ -332,7 +332,7 @@ class FileOpsCon:
 
 def test_file_scd2_allocates_next_id_from_counter():
     con = FileOpsCon(counter_value=2170)
-    result = rt.file_scd2(con, {"status": "open", "title": "t"}, table="ops_recommendations")
+    result = rt.file_scd2(con, ops_rec_fields(), table="ops_recommendations")
     assert result.rec_id == "rec-2171"
     merges = [s for s, _ in con.executed if s.startswith("MERGE INTO")]
     assert len(merges) == 2
@@ -342,7 +342,7 @@ def test_file_scd2_missing_counter_is_terminal():
     """The hot path NEVER self-seeds: the concurrent-seed race mints duplicate ids (live 2026-06-11)."""
     con = FileOpsCon(counter_value=None)
     with pytest.raises(rt.DuckLakeRuntimeError, match="run create_ops_tables"):
-        rt.file_scd2(con, {"status": "open"}, table="ops_recommendations")
+        rt.file_scd2(con, ops_rec_fields(), table="ops_recommendations")
     assert ("ROLLBACK", None) in con.executed
     assert not any(s.startswith("MERGE INTO") for s, _ in con.executed)
 
@@ -358,7 +358,7 @@ def test_allocate_entity_id_rejects_no_writer_keyspace():
 def test_file_scd2_occ_retry_exhaustion_raises():
     con = FileOpsCon(counter_value=2170, occ_fail_on_update=99)  # always collide
     with pytest.raises(rt.OCCRetryExhaustedError, match="exhausted"):
-        rt.file_scd2(con, {"status": "open"}, table="ops_recommendations", sleep=lambda s: None)
+        rt.file_scd2(con, ops_rec_fields(), table="ops_recommendations", sleep=lambda s: None)
 
 
 def test_file_scd2_non_occ_error_propagates():
@@ -366,7 +366,7 @@ def test_file_scd2_non_occ_error_propagates():
     never retried, never reclassified as an OCC collision."""
     con = FileOpsCon(counter_value=2170, hard_fail_substr="MERGE INTO")
     with pytest.raises(ValueError, match="hard failure"):
-        rt.file_scd2(con, {"status": "open"}, table="ops_recommendations")
+        rt.file_scd2(con, ops_rec_fields(), table="ops_recommendations")
     assert any(s == "ROLLBACK" for s, _ in con.executed)
 
 
@@ -388,7 +388,7 @@ def test_bootstrap_entity_counter_rejects_unprefixed_table():
 
 def test_file_scd2_zero_pads_small_ids():
     con = FileOpsCon(counter_value=7)
-    result = rt.file_scd2(con, {"status": "open"}, table="ops_recommendations")
+    result = rt.file_scd2(con, ops_rec_fields(), table="ops_recommendations")
     assert result.rec_id == "rec-008"
 
 
@@ -396,7 +396,7 @@ def test_file_scd2_replay_returns_original_id_without_allocating():
     ts = datetime(2026, 6, 10, tzinfo=timezone.utc)
     identity = rt.mint_write_identity()
     con = FileOpsCon(replay_rows=[("rec-2160", ts)])
-    result = rt.file_scd2(con, {"status": "open"}, table="ops_recommendations", identity=identity)
+    result = rt.file_scd2(con, ops_rec_fields(), table="ops_recommendations", identity=identity)
     assert result.rec_id == "rec-2160"
     assert result.created_timestamp == ts
     assert not any("UPDATE" in s and rt.ENTITY_COUNTERS_TABLE in s for s, _ in con.executed)
@@ -431,14 +431,14 @@ def test_bootstrap_entity_counter_rejects_caller_keyspace():
 def test_write_scd2_advances_counter_for_canonical_caller_key():
     """A caller-keyed rec-NNN write_ops (backfill / pre-merge clients) must never strand the counter."""
     con = FileOpsCon(counter_value=2170)
-    rt.write_scd2(con, {"id": "rec-2200", "status": "open"}, table="ops_recommendations")
+    rt.write_scd2(con, ops_rec_record(id="rec-2200"), table="ops_recommendations")
     advances = [(s, p) for s, p in con.executed if s.startswith("UPDATE") and rt.ENTITY_COUNTERS_TABLE in s]
     assert advances and advances[0][1] == [2200, "ops_recommendations"]
 
 
 def test_write_scd2_no_counter_advance_for_noncanonical_key():
     con = FileOpsCon(counter_value=2170)
-    rt.write_scd2(con, {"id": "test-probe-1", "status": "open"}, table="ops_recommendations")
+    rt.write_scd2(con, ops_rec_record(id="test-probe-1"), table="ops_recommendations")
     assert not any(s.startswith("UPDATE") and rt.ENTITY_COUNTERS_TABLE in s for s, _ in con.executed)
 
 
@@ -453,7 +453,7 @@ def test_advance_counter_noop_writes_no_files():
     UPDATE would still be issued and merely match zero rows.
     """
     con = FileOpsCon(counter_value=2170)
-    rt.write_scd2(con, {"id": "rec-2100", "status": "open"}, table="ops_recommendations")
+    rt.write_scd2(con, ops_rec_record(id="rec-2100"), table="ops_recommendations")
     assert not any(s.startswith("UPDATE") and rt.ENTITY_COUNTERS_TABLE in s for s, _ in con.executed)
 
 
@@ -461,14 +461,14 @@ def test_file_scd2_allocated_collision_is_terminal():
     ts = datetime(2026, 6, 10, tzinfo=timezone.utc)
     con = FileOpsCon(counter_value=2170, existing_rows=[(ts,)])
     with pytest.raises(rt.DuckLakeRuntimeError, match="already exists"):
-        rt.file_scd2(con, {"status": "open"}, table="ops_recommendations")
+        rt.file_scd2(con, ops_rec_fields(), table="ops_recommendations")
     assert ("ROLLBACK", None) in con.executed
 
 
 def test_file_scd2_occ_retry_reallocates():
     """An aborted transaction's counter increment rolls back; the retry re-issues the same number."""
     con = FileOpsCon(counter_value=2170, occ_fail_on_update=1)
-    result = rt.file_scd2(con, {"status": "open"}, table="ops_recommendations", sleep=lambda s: None)
+    result = rt.file_scd2(con, ops_rec_fields(), table="ops_recommendations", sleep=lambda s: None)
     assert result.occ_retries == 1
     assert result.rec_id == "rec-2171"
     assert ("ROLLBACK", None) in con.executed
@@ -477,15 +477,15 @@ def test_file_scd2_occ_retry_reallocates():
 def test_file_scd2_gate_blocks_before_catalog():
     con = FileOpsCon()
     with pytest.raises(rt.SchemaGateError):
-        rt.file_scd2(con, {"status": "open", "bogus": "x"}, table="ops_recommendations")
+        rt.file_scd2(con, ops_rec_fields(bogus="x"), table="ops_recommendations")
     assert con.executed == []
 
 
 def test_file_scd2_sequential_allocations_are_distinct_and_monotonic():
     """c2 distinct-id lock (T2.28): sequential file_scd2 allocations yield distinct, monotonic rec-NNN ids."""
     con = FileOpsCon(counter_value=2170)
-    r1 = rt.file_scd2(con, {"status": "open", "title": "first"}, table="ops_recommendations")
-    r2 = rt.file_scd2(con, {"status": "open", "title": "second"}, table="ops_recommendations")
+    r1 = rt.file_scd2(con, ops_rec_fields(title="first recommendation"), table="ops_recommendations")
+    r2 = rt.file_scd2(con, ops_rec_fields(title="second recommendation"), table="ops_recommendations")
     assert r1.rec_id != r2.rec_id, "sequential allocations must be distinct"
     n1 = int(r1.rec_id.split("-")[1])
     n2 = int(r2.rec_id.split("-")[1])

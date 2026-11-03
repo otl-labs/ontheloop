@@ -52,6 +52,8 @@ class FakeCon:
         return (0,)
 
     def fetchall(self) -> list[Any]:
+        if self._last.lstrip().lower().startswith("select count(*)"):
+            return [self.fetchone()]  # a count(*) statement yields exactly one row, however it is fetched
         for sub, val in self._fetchall_map.items():
             if sub in self._last:
                 return val
@@ -542,8 +544,9 @@ _DSN = {"username": "u", "password": "p", "host": "h", "dbname": "neondb", "sslm
 class _FakeCursor:
     """psycopg2-cursor double: serves fetchall() results in order; optional per-query raiser."""
 
-    def __init__(self, results: list[list[Any]], raise_on: str | None = None):
+    def __init__(self, results: list[list[Any]], raise_on: str | None = None, ones: list[Any] | None = None):
         self._results = list(results)
+        self._ones = list(ones or [])
         self._raise_on = raise_on
         self.queries: list[tuple[str, Any]] = []
 
@@ -560,6 +563,9 @@ class _FakeCursor:
 
     def fetchall(self) -> list[Any]:
         return self._results.pop(0)
+
+    def fetchone(self) -> Any:
+        return self._ones.pop(0) if self._ones else None
 
 
 class _FakeConn:
@@ -584,10 +590,15 @@ _OPS_ROWS = [("ops_decisions_current", 30), ("ops_recommendations_current", 400)
 
 class TestCatalogStats:
     def test_reports_catalog_metadata_footprint(self) -> None:
-        cursor = _FakeCursor([_META_ROWS, _OPS_ROWS])
+        index_rows = [("ducklake_file_column_stats_table_id_column_id_idx", True, ["table_id", "column_id"], 9, 4096)]
+        cursor = _FakeCursor([index_rows, _META_ROWS, _OPS_ROWS], ones=[(3,), ("2026-10-01 00:00:00+00",)])
         conn = _FakeConn(cursor)
         result = catalog_stats(meta_schema="ducklake_ops", dsn=_DSN, _connect=lambda conninfo: conn)
 
+        assert result["stats_index"]["valid"] is True and result["stats_index"]["idx_scan"] == 9
+        assert result["stats_index"]["table_seq_scan"] == 3
+        # stats_index is read FIRST: the per-ops query's failure branch aborts the transaction.
+        assert "pg_index" in cursor.queries[0][0]
         assert result["ok"] is True
         assert result["meta_schema"] == "ducklake_ops"
         assert result["catalog_metadata_bytes"] == 7_100_000  # exact sum of pg_total_relation_size
@@ -603,7 +614,7 @@ class TestCatalogStats:
 
     def test_per_ops_breakdown_degrades_without_crashing(self) -> None:
         """If the per-ops join fails (catalog column drift), totals are still reported with a note."""
-        cursor = _FakeCursor([_META_ROWS], raise_on="ducklake_data_file df")
+        cursor = _FakeCursor([[], _META_ROWS], raise_on="ducklake_data_file df")
         conn = _FakeConn(cursor)
         result = catalog_stats(meta_schema="ducklake_ops", dsn=_DSN, _connect=lambda conninfo: conn)
 
@@ -618,7 +629,7 @@ class TestCatalogStats:
             catalog_stats(meta_schema="ducklake_ops; DROP", dsn=_DSN, _connect=lambda conninfo: _FakeConn(_FakeCursor([])))
 
     def test_missing_metadata_tables_yields_null_estimates(self) -> None:
-        cursor = _FakeCursor([[], []])  # no ducklake_* tables found
+        cursor = _FakeCursor([[], [], []])  # no ducklake_* tables found
         result = catalog_stats(meta_schema="ducklake_ops", dsn=_DSN, _connect=lambda conninfo: _FakeConn(cursor))
         assert result["catalog_metadata_bytes"] == 0
         assert result["file_column_stats_rows_est"] is None

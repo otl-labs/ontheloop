@@ -56,7 +56,7 @@ _PYTHON3_SHIM = """\
 # Stands in for both python3 entrypoints review.sh calls, keyed on the script path in $1.
 SCRIPT="${1:-}"
 case "$SCRIPT" in
-  *terraform_apply_guard.py)
+  *terraform_plan_digest.py)
     if [ "${PY3_SHIM_KILL_ON_GUARD:-0}" = "1" ]; then
       kill -KILL "$PPID"
       exit 137
@@ -83,15 +83,17 @@ case "$SCRIPT" in
     esac
     ;;
 esac
-echo "python3 shim: unexpected script: $SCRIPT" >&2
-exit 99
+# Any other invocation (the stats line's `python3 -`) runs on the real interpreter by an absolute
+# path baked in here: PATH would re-enter this shim, and env -i strips any variable.
+exec "__REAL_PYTHON__" "$@"
 """
 
 # One line per invocation (the prompt review.sh builds is a single line, so the arg echo cannot
-# inflate the count). claude_p_retry.sh funnels this stdout into the transcript file.
+# inflate the count). The log path is baked in: review.sh runs claude under env -i.
+# claude_p_retry.sh funnels this stdout into the transcript file.
 _CLAUDE_SHIM = """\
 #!/usr/bin/env bash
-echo "invocation $*" >> "$CLAUDE_INVOCATION_LOG"
+echo "invocation $*" >> "__CLAUDE_LOG__"
 echo '{"type":"result","subtype":"success","is_error":false,"result":"stub"}'
 exit 0
 """
@@ -213,9 +215,10 @@ def harness(tmp_path: Path, verdict_exit_codes: dict[str, int]) -> _Harness:
         _PYTHON3_SHIM.replace("__PROCEED_RC__", str(verdict_exit_codes["PROCEED"]))
         .replace("__REVISE_RC__", str(verdict_exit_codes["REVISE"]))
         .replace("__STARVED_RC__", str(verdict_exit_codes["STARVED"]))
+        .replace("__REAL_PYTHON__", sys.executable)
     )
     _write_shim(bin_dir / "python3", python3_shim)
-    _write_shim(bin_dir / "claude", _CLAUDE_SHIM)
+    _write_shim(bin_dir / "claude", _CLAUDE_SHIM.replace("__CLAUDE_LOG__", str(tmp_path / "claude_invocations")))
     _write_shim(bin_dir / "sudo", _NETWORK_SHIM)
     _write_shim(bin_dir / "npm", _NETWORK_SHIM)
 

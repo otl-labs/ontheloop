@@ -27,7 +27,8 @@
 # permissions, alarm) auto-apply behind the guard once the exec role exists in state.
 #
 # CODE/INFRA COUPLING (Decision 125, environment-taxonomy.yaml conformance): the aws_lambda_function
-# resource below carries a lifecycle block ignoring source_code_hash changes -- code deploys go via
+# resource below sets no source_code_hash (Terraform reads no build artifact) and keeps a lifecycle
+# block ignoring it as the conformance marker and a backstop -- code deploys go via
 # the governed CD channel (.github/workflows/deploy-ducklake-lambdas.yml, T2.38), never via this
 # apply path.
 # ---------------------------------------------------------------------------
@@ -59,8 +60,8 @@ resource "aws_cloudwatch_log_group" "ducklake_maintenance_smoke" {
 # ---------------------------------------------------------------------------
 # Smoke-prefix-scoped execution role: S3 Get/Put/Delete/List on the SMOKE prefix ONLY (no prod
 # prefix grant -- the blast-radius boundary this whole split exists to enforce), Neon DSN read,
-# DuckLakeMaintenance CloudWatch metrics (shared namespace with the admin function -- both singleton
-# cadences alarm through the same MaintenanceBreakerTrip metric), logs.
+# DuckLakeMaintenance CloudWatch metrics (shared namespace with the admin function; this function's
+# data carry the Catalog=smoke dimension, so the two breaker alarms watch distinct metrics), logs.
 # ---------------------------------------------------------------------------
 
 resource "aws_iam_role" "ducklake_maintenance_smoke" {
@@ -88,7 +89,14 @@ resource "aws_iam_role_policy" "ducklake_maintenance_smoke" {
         Sid      = "NeonDsnRead"
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn]
+        Resource = [aws_secretsmanager_secret.ducklake_smoke_maintainer_dsn.arn]
+      },
+      {
+        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
+        Sid      = "NeonDsnParameterRead"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-smoke-maintainer-dsn"]
       },
       {
         # Smoke prefix ONLY -- no prod prefix. This is the resource-shape half of the blast-radius
@@ -142,9 +150,8 @@ resource "aws_lambda_function" "ducklake_maintenance_smoke" {
 
   reserved_concurrent_executions = var.ducklake_maintenance_smoke_reserved_concurrency
 
-  s3_bucket        = aws_s3_bucket.data_lake.id
-  s3_key           = "lambda-packages/ducklake-maintenance-smoke.zip"
-  source_code_hash = try(filemd5("${path.module}/../../lambda-packages/ducklake-maintenance-smoke.zip"), null)
+  s3_bucket = aws_s3_bucket.data_lake.id
+  s3_key    = "lambda-packages/ducklake-maintenance-smoke.zip"
 
   layers = [
     aws_lambda_layer_version.ducklake_deps.arn,
@@ -154,6 +161,8 @@ resource "aws_lambda_function" "ducklake_maintenance_smoke" {
   environment {
     variables = {
       DUCKLAKE_DATA_PATH            = local.ducklake_smoke_data_path
+      DUCKLAKE_DSN_SECRET_ID        = aws_secretsmanager_secret.ducklake_smoke_maintainer_dsn.name
+      DUCKLAKE_DSN_PARAMETER        = local.secret_parameter_names.smoke_maintainer_dsn
       DUCKLAKE_META_SCHEMA          = "ducklake_smoke"
       DUCKLAKE_EXTENSION_DIRECTORY  = local.ducklake_extension_dir
       DUCKLAKE_FIELD_SEMANTICS_PATH = "/var/task/config/lambda/ducklake/field_semantics.yaml"
@@ -171,7 +180,8 @@ resource "aws_lambda_function" "ducklake_maintenance_smoke" {
   }
 
   # Decision 125/126 physical decoupling: code deploys go via the governed CD channel
-  # (.github/workflows/deploy-ducklake-lambdas.yml), not terraform.
+  # (.github/workflows/deploy-ducklake-lambdas.yml), not terraform. No source_code_hash is set; this
+  # block is the conformance marker and a backstop.
   lifecycle {
     ignore_changes = [source_code_hash]
   }
@@ -299,9 +309,11 @@ resource "aws_lambda_permission" "ducklake_maintenance_smoke_hot_merge" {
 }
 
 # ---------------------------------------------------------------------------
-# Circuit-breaker CloudWatch metric alarm (namespace-scoped, shared DuckLakeMaintenance namespace
-# with the admin function's own alarm in ducklake_maintenance.tf -- both singletons emit
-# MaintenanceBreakerTrip; a distinct alarm name here avoids colliding with the admin alarm).
+# Circuit-breaker CloudWatch metric alarm (shared DuckLakeMaintenance namespace with the admin
+# function's own alarm in ducklake_maintenance.tf). Both singletons emit MaintenanceBreakerTrip; this
+# function emits it with the Catalog=smoke dimension (handler METRIC_DIMENSIONS) and this alarm
+# selects that dimension, so the per-deploy breaker_probe gate's deliberate trip never reaches the
+# admin alarm, which is declared with no dimensions.
 # ---------------------------------------------------------------------------
 
 resource "aws_cloudwatch_metric_alarm" "ducklake_maintenance_smoke_breaker" {
@@ -314,6 +326,10 @@ resource "aws_cloudwatch_metric_alarm" "ducklake_maintenance_smoke_breaker" {
   period              = 300
   statistic           = "Sum"
   threshold           = 1
+
+  dimensions = {
+    Catalog = "smoke"
+  }
 
   alarm_actions = [aws_sns_topic.alerts.arn]
   ok_actions    = [aws_sns_topic.alerts.arn]

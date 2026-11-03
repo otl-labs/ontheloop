@@ -1,0 +1,638 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-writer-apply-parity
+implementation_declared: true
+intent: >-
+  Forward-fix the failed tf-gated-apply of PR #1442 (rec-4243) so the telemetry writer function lands and the companion
+  deploy-wiring plan and plan 3 part 1 can proceed (T2.36). Terraform stops reading CI-built Lambda artifacts altogether:
+  every source_code_hash read in terraform/personal goes, a --pre check keeps it that way, and every copy of the false
+  claim that a saved-plan apply never re-reads files is corrected. Telemetry is the learning signal for recursive
+  self-improvement (PROJECT_CONTEXT).
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-telemetry-writer-apply-parity.yaml
+phase: >-
+  T2.36 (telemetry re-lands on DuckLake). Forward fix under PLAN-telemetry-writer-function for ci-rca rec-4243; closes no
+  exit criterion.
+scope:
+- file: terraform/personal/ducklake_telemetry_writer.tf
+  action: Modify
+  purpose: >-
+    Delete the source_code_hash argument of aws_lambda_function.ducklake_telemetry_writer and realign its attribute group
+    to terraform fmt: `s3_bucket = aws_s3_bucket.data_lake.id` and `s3_key    = "lambda-packages/ducklake-telemetry-writer.zip"`.
+    Keep lifecycle { ignore_changes = [source_code_hash] }: an omitted Optional+Computed attribute never diffs, so the block
+    is now the validate_deploy_channel_conformance marker and a backstop if the argument is ever reintroduced. In the
+    APPLY POSTURE header and the comment above the lifecycle block, say exactly that and that Terraform reads no build
+    artifact (environment-taxonomy.yaml conformance).
+- file: terraform/personal/ducklake_maintenance_smoke.tf
+  action: Modify
+  purpose: >-
+    The same deletion and realignment on aws_lambda_function.ducklake_maintenance_smoke (`s3_key    = "lambda-packages/ducklake-maintenance-smoke.zip"`),
+    and the same wording in its CODE/INFRA COUPLING header and above its lifecycle block.
+- file: terraform/personal/ducklake_lambdas.tf
+  action: Modify
+  purpose: >-
+    Delete source_code_hash from aws_lambda_layer_version.ducklake_deps and .ducklake_extensions (their attribute groups
+    keep their alignment, since compatible_runtimes is the longest key) and from aws_lambda_function.ducklake_writer and
+    .ducklake_reader (realign to `s3_bucket = ...` / `s3_key    = "lambda-packages/ducklake-<writer|reader>.zip"`). Keep
+    every ignore_changes block. Reword the comments that rest on Terraform reading the zip: the two "source_code_hash
+    is try()-guarded" section comments, each layer's "T2.42 c1 ... without this, every rebuild's non-reproducible zip
+    bytes surface as a layer create+delete" lead-in, the deps layer's SILENT-FREEZE GUARD ("source_code_hash is now ignored";
+    the extensions layer has none) and the writer's and reader's lifecycle comments ("Without this, every rebuild's non-reproducible zip bytes trip a
+    Terraform diff"). The replacement wording: no source_code_hash is set, the lifecycle block stays as the conformance
+    marker and a backstop, and Terraform never republishes a layer on content change (it did not before either; rec-4253).
+- file: terraform/personal/ducklake_catalog_dr.tf
+  action: Modify
+  purpose: >-
+    Delete source_code_hash from aws_lambda_layer_version.ducklake_pgclient and aws_lambda_function.ducklake_catalog_dr,
+    realigning each to `s3_bucket = ...` / `s3_key    = "lambda-packages/ducklake-<pgclient-layer|catalog-dr>.zip"`; keep
+    both ignore_changes blocks. Reword the pgclient layer's "T2.42 c1 ... without this" lead-in and SILENT-FREEZE GUARD
+    and the catalog-dr function's lifecycle comment the same way as in ducklake_lambdas.tf (the pgclient layer gets the
+    same "never republishes on content change" sentence).
+- file: terraform/personal/ducklake_maintenance.tf
+  action: Modify
+  purpose: >-
+    Delete source_code_hash from aws_lambda_function.ducklake_maintenance and realign (`s3_key    = "lambda-packages/ducklake-maintenance.zip"`);
+    keep its ignore_changes block and reword its lifecycle comment the same way.
+- file: terraform/personal/prod_lambdas.tf
+  action: Modify
+  purpose: >-
+    Delete local.prod_source_hash (and the blank line after it, so the locals block opens with scheduled_agent_dispatcher_function)
+    and its two uses in aws_lambda_function.scheduled_agent_dispatcher and .findings_processor, realigning each to `s3_bucket = ...`
+    / `s3_key    = "lambda-packages/data-pipeline.zip"`; keep both ignore_changes blocks; reword the "source_code_hash try()-guarded"
+    comment above the two functions.
+- file: scripts/checks/iam_tf/validate_terraform_no_build_artifact_reads.py
+  action: Create
+  purpose: >-
+    A registered check, @registry.register("validate_terraform_no_build_artifact_reads", owner="platform"). Public helper
+    find_build_artifact_reads(tf_root, is_ignored) returns sorted findings (relative path, line, reasons), one per (file,
+    line), over every *.tf under tf_root, skipping .terraform/, with whole-line # and // comments blanked offset-preserving
+    (import _blank_comment_lines from validate_terraform_try). A string literal counts as a filesystem path when it starts
+    with ${path.module}, ${path.root}, ${path.cwd}, ./ or ../ anywhere in the file, or when it is the plain first argument
+    of a file-family function (file, filemd5, filesha1, filesha256, filesha512, filebase64, filebase64sha256, filebase64sha512,
+    templatefile, fileexists, fileset). An s3_key literal such as "lambda-packages/x.zip" is neither and is legitimate.
+    Resolution base: every terraform/<root>/ is its own root module with no child modules, so ${path.module}, ${path.root},
+    ${path.cwd} and an unprefixed file-function argument all resolve against the file's own directory. Rule (a): a filesystem
+    path with lambda-packages as a path segment, (^|/)lambda-packages(/|$), so a directory local such as
+    "${path.module}/../../lambda-packages" is caught. Rule (b): a filesystem path that is_ignored reports as ignored once
+    resolved, probing both the path and the path with a trailing slash (git check-ignore answers a directory pattern only
+    for the slash form when the directory is absent). Rule (c): any source_code_hash argument in terraform/, whatever its
+    value, so the "no resource sets source_code_hash" half of the invariant has a standing guard too. This catches direct and bare file-function arguments, templatefile(),
+    and indirection through a local or a variable default alike. The registered check passes a `git check-ignore -q` probe run from the
+    repo root and treats any exit other than 0 (ignored) or 1 (not ignored) as a finding, so an unanswerable probe fails
+    closed. It scans the whole terraform/ tree like validate_terraform_try, calls registry.examined(count, unit="tf_files"),
+    and each finding names file:line, the rule and the fix (address code by s3_bucket/s3_key and ship it through the deploy
+    channel; docs/contracts/environment-taxonomy.yaml conformance; rec-4243). Declared residual, in the module docstring
+    and the contract's coverage line: a path assembled from non-literal parts (format(), a variable value supplied at plan
+    time) cannot be resolved statically; none exists today, and review of such inputs is rec-4246's checklist item. No
+    import-time work.
+- file: scripts/checks/iam_tf/_manifest.py
+  action: Modify
+  purpose: >-
+    One Entry for the check in the validate_terraform_lock_coherence shape: pre=True, pre_globs ("terraform/**/*.tf",
+    ".gitignore", "scripts/checks/iam_tf/validate_terraform_no_build_artifact_reads.py", "scripts/checks/iam_tf/validate_terraform_try.py",
+    "scripts/checks/_common.py", "scripts/checks/registry.py"), full_segment="full_after_lint". .gitignore is listed
+    because rule (b)'s verdict depends on it; validate_terraform_try.py because the check imports its comment blanker.
+- file: config/ci_rca_taxonomy.yaml
+  action: Modify
+  purpose: >-
+    function_to_category row validate_terraform_no_build_artifact_reads: environment, in alphabetical position between
+    validate_terraform_lock_coherence and validate_terraform_tag_charset.
+- file: tests/checks/iam_tf/test_validate_terraform_no_build_artifact_reads.py
+  action: Create
+  purpose: >-
+    Mirror test, 100% line coverage of the new module. test_real_tree_has_no_build_artifact_reads runs the check over
+    the real tree with the real git probe and asserts no findings. Red cases on synthetic HCL in tmp_path with an injected
+    is_ignored: a direct try(filemd5("${path.module}/../../lambda-packages/x.zip"), null) (flagged once, though both rules
+    match); a locals indirection p = "${path.module}/../../lambda-packages/x.zip" then filemd5(local.p) (flagged on the local's
+    line); a directory local "${path.module}/../../lambda-packages" (flagged); source_code_hash = "abc" (flagged, rule c); a bare "../../lambda-packages/x.zip" and a "${path.root}/build/out.json" that is ignored (flagged); a templatefile()
+    of an ignored path (flagged); a probe that errors (flagged, fail closed); an s3_key = "lambda-packages/x.zip" literal,
+    a commented-out read, and a file() of a tracked in-tree file (none flagged). Bare file-function arguments: try(filemd5("lambda-packages/x.zip"),
+    null) and file("<an ignored path>") (both flagged). test_check_is_registered_in_pre asserts registry._ALL_ENTRIES holds
+    validate_terraform_no_build_artifact_reads with pre True and pre_globs including "terraform/**/*.tf" and ".gitignore".
+    Plus the registered check's failure path appending to failed and its pass path, and that it declares examined.
+- file: docs/contracts/environment-taxonomy.yaml
+  action: Modify
+  purpose: >-
+    State the invariant once, class-agnostically, at the end of conformance.description (it binds the DuckLake and prod
+    classes alike), keeping the phrase "never reads a build artifact" on one physical line: Terraform never reads a build
+    artifact; function and layer code is addressed only by s3_bucket/s3_key, no resource sets source_code_hash (the
+    ignore_changes block stays as the conformance marker and a backstop), and code ships through the code-deploy channel.
+    Because Terraform re-evaluates file functions when it applies a saved plan, and nothing masks a create, no configuration
+    file read may name a file a job builds or downloads (rec-4243). Coverage (Decision 181): validate_terraform_no_build_artifact_reads
+    enforces it for every literal filesystem path in terraform/ (a prefixed literal anywhere, or a plain literal passed
+    to a file-family function) and flags any source_code_hash argument; declared residuals: a path assembled from non-literal
+    parts, and a job output written to an untracked but not ignored path (none exists today; rec-4246); job-materialised inputs that are not file reads (the tfvars fetched from Secrets
+    Manager, the provider mirror) are recorded in plan.bin itself. In conformance.ducklake_detail, replace the false clause
+    "and this decoupling is precisely why a verbatim saved-plan apply never re-evaluates filemd5() against the local tree
+    regardless of where that fetch step's working directory lands" with a pointer to that rule, and add the same pointer
+    to prod_detail. Add a 2026-10-10 amendment_log entry (semantic_break false; change_class from the contract's allowed
+    values) naming the correction and that it retires archived Decision 19's try(filemd5(...), md5(file(...))) fallback
+    and its "use the artifact hash to detect changes" rationale (already superseded in substance by Decisions 125/126). No apply-model, guard-classification or typed conformance field changes.
+- file: terraform/CLAUDE.md
+  action: Modify
+  purpose: >-
+    Replace the "Optional artifacts" hard-rule line verbatim, in place, with this line (34 bytes shorter): "- **Optional
+    artifacts**: `try()`-wrap `filemd5()`/`file()`. Terraform never reads a build artifact (no `source_code_hash`; guard
+    `validate_terraform_no_build_artifact_reads`; environment-taxonomy.yaml conformance)." It
+    drops the md5(file("module_file.tf")) example, points at the contract instead of restating it, and names the guard.
+    Zero prose headroom (Decision 43/127), so it must not grow; the terraform-cc-web-operations.yaml pointer stays.
+- file: AGENTS.md
+  action: Modify
+  purpose: >-
+    Replace the Safety bullet "- Always wrap `filemd5()` and `file()` Terraform calls on optional artifacts with `try()`."
+    verbatim with this bullet (1 byte shorter), a short form pointing at the one owner (decision-scout WARN 92): "- Terraform
+    never reads a build artifact (environment-taxonomy.yaml); `try()` file reads." No other change (public surface, Decision
+    101; Benjamin chose this edit on 2026-10-10).
+- file: config/prose_budgets.yaml
+  action: Modify
+  purpose: >-
+    Ratchet S1 root_ambient_load_set and S2 terraform/CLAUDE.md down to their measured sizes after the two edits (1 and
+    34 bytes smaller). The prose-budgets-reseeded-to-measured registry check asserts budget equals measured, so this is
+    required. A decrease needs no raise marker; never an increase.
+- file: .github/workflows/reconcile.yml
+  action: Modify
+  purpose: >-
+    Comment-only. The comments at the red-commit checkout (around :205-212) and at both fetch steps (around :318-330 and
+    :728-739) justify the side-checkout download with "every DuckLake function and layer carries ignore_changes ..., so
+    the verbatim saved-plan apply never re-evaluates filemd5 against the local tree". Replace that reasoning with: Terraform
+    reads no build artifact (environment-taxonomy.yaml conformance; validate_terraform_no_build_artifact_reads), so nothing
+    under lambda-packages/ is a plan input and the server-side copy onto the fixed key is the load-bearing output (rec-4248
+    makes the fetch copy-only). Drop the stale ducklake_lambdas.tf line numbers. No non-comment line changes.
+- file: .github/workflows/terraform-apply-sandbox.yml
+  action: Modify
+  purpose: >-
+    Comment-only. The apply-sandbox build comment (around :270-272) and the speculative-plan build comment (around :571-573)
+    say the build exists so filemd5() resolves to a real hash. Reword: the build uploads the reviewed bytes to the fixed
+    and per-sha S3 keys that the configuration addresses by s3_key and that gated-apply fetches; Terraform reads no local
+    zip. No non-comment line changes.
+- file: config/agent/verification_registry/entries/saved-plan-parity-guidance.yaml
+  action: Create
+  purpose: >-
+    Verification-registry shard for graduated VP step 3: check_id saved-plan-parity-guidance, plan_slug telemetry-writer-apply-parity,
+    primitive_slot command_exit_zero with step 3's command wrapped as ["bash", "-c", "<command>"] (it uses ! and &&; precedent
+    agents-md-contradiction-resolved.yaml), guard_target docs/contracts/environment-taxonomy.yaml,terraform/CLAUDE.md,AGENTS.md,.github/workflows/reconcile.yml,
+    graduated_by implement-agent, graduated_at the implementation date.
+bundled_recommendations:
+- rec-4243
+followon_recs: []
+infrastructure_dependencies:
+- >-
+  Live state (run 38046095276, gated-apply job, c21ba7da): applied aws_iam_role, aws_cloudwatch_log_group and aws_iam_role_policy
+  for the telemetry writer, the shared writer's policy and environment, and github_ci_planner's policy. Not applied: the
+  telemetry function, its Function URL, SSM parameter and errors alarm, and github_ci_branch's policy. The convergence
+  record is red on c21ba7da (rec-4243). The partial state is consistent and nothing calls the function yet.
+- >-
+  Zero-diff by construction: source_code_hash is Optional and Computed in hashicorp/aws 5.100.0 (the failure message
+  "was known, but now unknown" proves the provider computes it), and every touched resource carries ignore_changes on
+  it, which substitutes the prior state value; an omitted Optional+Computed attribute never diffs. Step 6 proves it before
+  merge: the fix PR's speculative plan must name exactly the five remaining addresses and nothing else.
+- >-
+  Fix PR speculative plan, checked by step 6: exactly 4 to add (function, URL, SSM parameter, alarm), 1 to change (aws_iam_role_policy.github_ci_branch,
+  whose document is read during apply because it references the function being created), 0 to destroy; predicted guard
+  verdict BLOCKED (the new aws_lambda_function_url routes it); the new function shows source_code_hash as (known after
+  apply); no other resource address. github_ci_pr's re-render in #1442's plan was a deferred read caused by the writer's
+  pending environment change, which is now applied. Corroboration: the 2026-10-10 terraform-drift runs found exactly
+  these five addresses, 4 to add, 1 to change, 0 to destroy, and no out-of-band change (rec-4255's context). Any other
+  delta is a stop.
+- >-
+  The merge applies nothing: the push run's convergence precondition refuses on the red record (CONVERGENCE_RED), which
+  is expected and dedupes to rec-4243. Recovery per docs/contracts/deploy-paths.yaml's reconcile row (the fix merged after
+  the red commit): dispatch terraform-apply-sandbox.yml with acknowledge_red_commit = the red sha, not Reconcile, which
+  would re-apply c21ba7da's HCL. The dispatch plans fresh at main HEAD, steps 7 and 8 check that plan and the creation bytes before Benjamin is asked,
+  the guard routes it, and gated-apply applies it via SANDBOX_FRESH_PLAN_ARTIFACT (Decision 183) after his tf-gated-apply
+  approval, which is the governed-deploy authorization. The one update is github_ci_branch's policy, not a PlatformDev
+  or PlatformAdmin write, so Decision 183 point 4's admin split-apply does not apply.
+- >-
+  Code at creation: the function is created from the fixed key lambda-packages/ducklake-telemetry-writer.zip, last written
+  by an upload-only run (this fix PR's own speculative plan rebuilds it from the same source as #1442). This is PLAN-telemetry-writer-function's
+  accepted Decision 154 deviation, narrowed by step 8's byte-identity check against a reviewed per-sha upload and step
+  9's proof that the key was not rewritten during the approval wait. The telemetry writer is not in the deploy map yet (build_lambda_config.py _DUCKLAKE_FUNCTION_ZIP_KEYS),
+  so until PLAN-telemetry-writer-deploy-wiring lands, another PR's upload-only run can redefine its live stub; deploy-wiring
+  should run right after this apply, and its DEPLOY_RECORD_OK step proves the merged-sha bytes. The immutable-reference
+  fix for creates is rec-4254.
+- >-
+  Apply-role grants for the four creates are in terraform/bootstrap/github_ci_apply_policy.tf (CreateFunction, TagResource,
+  PutFunctionConcurrency and CreateFunctionUrlConfig on function:agent-platform-*, the PassRole Sid, PutMetricAlarm, ssm:PutParameter
+  and AddTagsToResource). The failed run stopped at plan expansion, so they are unexercised, and PlatformDev cannot simulate
+  them; a second apply-time failure would leave the record red and heal the same way.
+- >-
+  Lambda deployment (Decision 79): no Lambda-packaged file changes, so no artifact build or deploy is triggered. Ordering:
+  this apply precedes PLAN-telemetry-writer-deploy-wiring and plan 3 part 1.
+acceptance_criteria:
+- >-
+  No terraform/personal resource sets source_code_hash and local.prod_source_hash is gone; every lifecycle ignore_changes
+  = [source_code_hash] block remains; CI's terraform-validate (fmt -check) passes.
+- >-
+  validate_terraform_no_build_artifact_reads is registered in --pre with terraform/**/*.tf globs and a ci_rca taxonomy
+  row; it passes on the fixed tree, its scan over origin/main's terraform/personal finds exactly twelve lines (the ten
+  reads: four in ducklake_lambdas.tf, two in ducklake_catalog_dr.tf, one each in ducklake_maintenance.tf, ducklake_maintenance_smoke.tf,
+  ducklake_telemetry_writer.tf and prod_lambdas.tf; plus prod_lambdas.tf's two source_code_hash = local.prod_source_hash
+  lines), and its mirror test covers all three rules and the legitimate cases.
+- >-
+  The fix PR's speculative plan is exactly 4 to add, 1 to change, 0 to destroy, routed, naming only the five remaining
+  addresses, with source_code_hash unknown on the new function.
+- >-
+  The phrase claiming a saved-plan apply never re-evaluates filemd5 appears nowhere outside docs/plans; the contract, terraform/CLAUDE.md
+  and AGENTS.md state that Terraform never reads a build artifact; terraform/CLAUDE.md no longer recommends the md5(file())
+  fallback; the workflow comment edits change no non-comment line. The guidance guard is graduated as saved-plan-parity-guidance.
+- rec-4243's acceptance is the mirror test's real-tree node, and the rec is closed by the implementation PR's Resolves trailer.
+- >-
+  After Benjamin approves the acknowledge-and-retry run, the convergence record is green and PLAN-telemetry-writer-function's
+  post-deploy steps 6-9 pass, with step 6 as amended alongside this plan; the dispatch's own plan was checked before he
+  was asked to approve.
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: The new check's mirror test passes, real tree included.
+  command: bin/venv-python -m pytest tests/checks/iam_tf/test_validate_terraform_no_build_artifact_reads.py -q
+  expected: >-
+    Exit 0. Red before on the unfixed tree (execution step 1 records the real-tree node failing on twelve lines, one finding
+    per line).
+  fix_if: >-
+    A real-tree finding: drop the argument (code is addressed by s3_bucket/s3_key), never loosen the rule; a finding on
+    some other ignored-path literal is a real plan input to remove or a case to raise with Benjamin, never a silent
+    allow-list. A red case that passes: the rule is too narrow.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    The registered --pre check validate_terraform_no_build_artifact_reads is the standing guard on every .tf change, and
+    this mirror test runs in both tiers; graduating would duplicate it. Whole-file selector of a file this plan creates.
+- step: 2
+  phase: pre-deploy
+  action: >-
+    The check would have caught rec-4243 and the Reconcile hazard: scan origin/main's terraform/personal, which still carries
+    all ten reads until this PR merges.
+  command: >-
+    d="$(mktemp -d)" && git archive origin/main terraform/personal | tar -x -C "$d" && bin/venv-python -c "import sys,pathlib,collections;from
+    scripts.checks.iam_tf.validate_terraform_no_build_artifact_reads import find_build_artifact_reads as f;r=f(pathlib.Path(sys.argv[1])/'terraform'/'personal',lambda
+    p:False);c=collections.Counter(pathlib.Path(x[0]).name for x in r);assert c=={'ducklake_lambdas.tf':4,'ducklake_catalog_dr.tf':2,'ducklake_maintenance.tf':1,'ducklake_maintenance_smoke.tf':1,'ducklake_telemetry_writer.tf':1,'prod_lambdas.tf':3},
+    dict(c);print('CHECK_RED_ON_MAIN', sum(c.values()))" "$d"
+  expected: Exit 0 and CHECK_RED_ON_MAIN 12 (the ten read lines plus the two source_code_hash = local.prod_source_hash lines, rule c).
+  fix_if: >-
+    A different count: either the scan misses the real idiom (fix the rule) or main has another read or hash argument; add it through a
+    human-directed amendment rather than widening silently.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    Reads origin/main by construction, so it is meaningful only before this PR merges; the registered check is the standing
+    equivalent over the working tree.
+- step: 3
+  phase: pre-deploy
+  action: >-
+    The false claim is gone everywhere and the rule is stated: no file outside docs/plans says a saved-plan apply never
+    re-evaluates filemd5, terraform/CLAUDE.md no longer recommends the md5(file()) fallback, and the contract, terraform/CLAUDE.md
+    and AGENTS.md each say Terraform never reads a build artifact.
+  command: >-
+    ! git grep -qE 'never re-evaluates [f]ilemd5' -- . ':!docs/plans' && ! grep -qF 'md5(file("module_file.tf"))' terraform/CLAUDE.md
+    && grep -qF 'never reads a build artifact' docs/contracts/environment-taxonomy.yaml && grep -qF 'never reads a build artifact'
+    terraform/CLAUDE.md && grep -qF 'never reads a build artifact' AGENTS.md && echo GUIDANCE_OK
+  expected: Exit 0 and the marker. Red before on the plan-only PR, where the false phrase and the old example are present.
+  fix_if: >-
+    Reword the edited sentence so the phrase sits on one physical line; never weaken the guard's negated patterns. The
+    bracketed [f] keeps the pattern from matching its own registry shard.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: saved-plan-parity-guidance
+  expected_literals: []
+- step: 4
+  phase: pre-deploy
+  action: >-
+    Shape: no source_code_hash argument or prod_source_hash local remains; every ignore_changes block survives; each edited
+    function and the pgclient layer is fmt-aligned; the workflow edits are comment-only; the diff touches only scope files
+    (and this plan's own bookkeeping); no 12-digit literal is added; AGENTS.md and terraform/CLAUDE.md do not grow.
+  command: >-
+    bin/venv-python -c "import subprocess,re,pathlib,yaml;from tests.fixtures.terraform_hcl_blocks import find_resource_block as f;
+    g=lambda *a:subprocess.run(['git',*a],capture_output=True,text=True,check=True).stdout;
+    mb=g('merge-base','origin/main','HEAD').strip();errs=[];tf=pathlib.Path('terraform/personal');
+    errs+=[str(p)+':source_code_hash_set' for p in tf.glob('*.tf') if re.search(r'^\s*source_code_hash\s*=',p.read_text(encoding='utf-8'),re.M)];
+    errs+=['prod_source_hash_left' for p in [tf/'prod_lambdas.tf'] if 'prod_source_hash' in p.read_text(encoding='utf-8')];
+    ic=lambda s:len(re.findall(r'ignore_changes\s*=\s*\[source_code_hash\]',s));
+    errs+=[p.name+':ignore_changes_lost' for p in tf.glob('*.tf') if ic(p.read_text(encoding='utf-8'))<ic(subprocess.run(['git','show',mb+':'+str(p)],capture_output=True,text=True).stdout)];
+    al=[('ducklake_telemetry_writer.tf','aws_lambda_function','ducklake_telemetry_writer'),('ducklake_maintenance_smoke.tf','aws_lambda_function','ducklake_maintenance_smoke'),('ducklake_lambdas.tf','aws_lambda_function','ducklake_writer'),('ducklake_lambdas.tf','aws_lambda_function','ducklake_reader'),('ducklake_catalog_dr.tf','aws_lambda_function','ducklake_catalog_dr'),('ducklake_catalog_dr.tf','aws_lambda_layer_version','ducklake_pgclient'),('ducklake_maintenance.tf','aws_lambda_function','ducklake_maintenance'),('prod_lambdas.tf','aws_lambda_function','scheduled_agent_dispatcher'),('prod_lambdas.tf','aws_lambda_function','findings_processor')];
+    errs+=[n+':fmt_alignment' for p,t,n in al if not re.search(r'\n  s3_bucket = aws_s3_bucket\.data_lake\.id\n  s3_key    = \x22lambda-packages/',f((tf/p).read_text(encoding='utf-8'),t,n))];
+    errs+=[w+':non_comment_change' for w in ('.github/workflows/reconcile.yml','.github/workflows/terraform-apply-sandbox.yml') for l in g('diff','-U0',mb,'--',w).splitlines() if l[:1] in '+-' and not l.startswith(('+++','---')) and l[1:].strip() and not l[1:].lstrip().startswith('#')];
+    nf=g('ls-files','--others','--exclude-standard').split();ch=g('diff','--name-only',mb).split()+nf;
+    pf='docs/plans/PLAN-telemetry-writer-apply-parity.yaml';sc={e['file'] for e in yaml.safe_load(open(pf,encoding='utf-8'))['scope']}|{pf};
+    errs+=[p+':outside_scope' for p in ch if p not in sc];
+    add=[l for l in g('diff',mb).splitlines() if l.startswith('+')]+[l for q in nf for l in pathlib.Path(q).read_text(encoding='utf-8').splitlines()];
+    errs+=['twelve_digit_literal_added' for l in add if re.search(r'\b\d{12}\b',l)];
+    errs+=[q+':prose_grew' for q in ('AGENTS.md','terraform/CLAUDE.md') if len(pathlib.Path(q).read_bytes())>len(subprocess.run(['git','show',mb+':'+q],capture_output=True,check=True).stdout)];
+    print(chr(10).join(errs) or 'SHAPE_OK');assert not errs"
+  expected: Exit 0 and SHAPE_OK.
+  fix_if: >-
+    Revert any out-of-scope or non-comment workflow edit; realign exactly as the scope rows show (CI's fmt -check is authoritative;
+    there is no local terraform binary, Decision 119).
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    Diff-relative to the merge base by construction; the registered check, validate_deploy_channel_conformance, validate_prose_limits
+    and CI's terraform-validate are the standing equivalents.
+- step: 5
+  phase: pre-deploy
+  action: Fast tier, then the full tier before handoff.
+  command: bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate
+  expected: >-
+    Exit 0 on a completed full run. handoff_policy.timeout_disposition is blocked, so a timeout is not a pass: resume and
+    rerun the full tier from the start.
+  fix_if: Fix the named check; never raise a budget or skip a check.
+  hermetic: false
+  graduation: not-applicable
+- step: 6
+  phase: pre-deploy
+  action: >-
+    Before merge, the PR's speculative plan is exactly the remaining set and proves every other edit is zero-diff. Save
+    the "Terraform Speculative Plan" PR comment body for the PR's final head (mcp__github__pull_request_read get_comments;
+    re-pushes leave several) to $SPEC_PLAN_FILE and export PR_HEAD_SHA.
+  command: >-
+    test -s "$SPEC_PLAN_FILE" && test -n "$PR_HEAD_SHA" && bin/venv-python -c "import os,re;t=open(os.environ['SPEC_PLAN_FILE'],encoding='utf-8',errors='replace').read();
+    assert ('PR head SHA: '+chr(96)+os.environ['PR_HEAD_SHA']+chr(96)) in t, 'not the final head comment';
+    m=re.search(r'Plan: (\d+) to add, (\d+) to change, (\d+) to destroy',t);assert m and m.groups()==('4','1','0'), m and m.group(0);
+    assert 'Predicted guard verdict: BLOCKED' in t, 'not routed';
+    want={'aws_lambda_function.ducklake_telemetry_writer':'created','aws_lambda_function_url.ducklake_telemetry_writer':'created','aws_ssm_parameter.ducklake_telemetry_writer_url':'created','aws_cloudwatch_metric_alarm.ducklake_telemetry_writer_errors':'created','aws_iam_role_policy.github_ci_branch':'updated in-place'};
+    got={a:v for a,v in re.findall(r'# (\S+) (?:will|must) be (created|updated in-place|destroyed|replaced|read during apply)',t) if not a.startswith('data.')};
+    assert got==want, got;
+    blk=t.split('# aws_lambda_function.ducklake_telemetry_writer will be created',1)[-1].split('\n  # ',1)[0];
+    assert re.search(r'source_code_hash\s+= \(known after apply\)',blk), 'source_code_hash not unknown';print('SPEC_PLAN_OK',m.group(0))"
+  expected: Exit 0 and SPEC_PLAN_OK with 4 to add, 1 to change, 0 to destroy and no other resource address.
+  fix_if: >-
+    Any other address or count is a stop: explain it mechanically (a deferred data-source read, an unrelated merge, a non-zero
+    diff from a deletion) and report it to Benjamin before merging. Never merge on a plan you cannot account for.
+  hermetic: false
+  graduation: not-applicable
+- step: 7
+  phase: post-deploy
+  action: >-
+    After the merge and the acknowledge-and-retry dispatch, and before asking Benjamin to approve, the dispatch's fresh
+    plan is the same routed set (an unrelated terraform merge refused on the red record would otherwise ride into the approved
+    plan), and the creation key's ETag and LastModified are recorded to $CREATION_KEY_FILE for step 9. Save the dispatch
+    run's apply-sandbox job log (mcp__github__get_job_logs) to $DISPATCH_PLAN_LOG_FILE. Tell Benjamin the fresh plan artifact
+    is kept for two days, so the approval must land within that window or the dispatch is re-run.
+  command: >-
+    test -s "$DISPATCH_PLAN_LOG_FILE" && test -n "$CREATION_KEY_FILE" && aws s3api head-object --profile agent_platform --bucket
+    agent-platform-data-lake --key lambda-packages/ducklake-telemetry-writer.zip --query '[ETag,LastModified]' --output
+    text > "$CREATION_KEY_FILE" && bin/venv-python -c "import os,re;t=re.sub(r'\x1b\[[0-9;]*m','',open(os.environ['DISPATCH_PLAN_LOG_FILE'],encoding='utf-8',errors='replace').read());
+    assert 'CONVERGENCE_ACK' in t, 'precondition did not accept the acknowledgement';assert 'Apply complete!' not in t, 'applied without the gate';
+    m=re.search(r'Plan: (\d+) to add, (\d+) to change, (\d+) to destroy',t);assert m and m.groups()==('4','1','0'), m and m.group(0);
+    want={'aws_lambda_function.ducklake_telemetry_writer':'created','aws_lambda_function_url.ducklake_telemetry_writer':'created','aws_ssm_parameter.ducklake_telemetry_writer_url':'created','aws_cloudwatch_metric_alarm.ducklake_telemetry_writer_errors':'created','aws_iam_role_policy.github_ci_branch':'updated in-place'};
+    got={a:v for a,v in re.findall(r'# (\S+) (?:will|must) be (created|updated in-place|destroyed|replaced|read during apply)',t) if not a.startswith('data.')};
+    assert got==want, got;print('DISPATCH_PLAN_OK',m.group(0))"
+  expected: Exit 0 and DISPATCH_PLAN_OK with 4 to add, 1 to change, 0 to destroy; $CREATION_KEY_FILE written.
+  fix_if: >-
+    Any plan delta: do not ask for approval. Tell Benjamin what changed and recommend rejecting the pending deployment; the
+    record stays red and the next dispatch re-plans. Never approve or apply on his behalf.
+- step: 8
+  phase: post-deploy
+  action: >-
+    Also before asking for approval: the fixed key lambda-packages/ducklake-telemetry-writer.zip holds reviewed bytes, either
+    the fix PR's per-sha upload (export PR_HEAD_SHA, the fix PR's final head) or, if a main deploy-ducklake-lambdas run
+    rewrote the key since, that run's merged per-sha upload (export MERGED_DEPLOY_SHA, that run's head sha, and record
+    the run id). Decision-scout SPIRIT 154; nothing else binds creation bytes until rec-4254.
+  command: >-
+    test -n "$PR_HEAD_SHA" && d="$(mktemp -d)" && k=s3://agent-platform-data-lake/lambda-packages && aws s3 cp --quiet --profile
+    agent_platform "$k/ducklake-telemetry-writer.zip" "$d/fixed.zip" && { { aws s3 cp --quiet --profile agent_platform "$k/${PR_HEAD_SHA}/ducklake-telemetry-writer.zip"
+    "$d/pr.zip" && cmp -s "$d/fixed.zip" "$d/pr.zip" && echo CREATION_BYTES_REVIEWED pr; } || { test -n "$MERGED_DEPLOY_SHA"
+    && aws s3 cp --quiet --profile agent_platform "$k/${MERGED_DEPLOY_SHA}/ducklake-telemetry-writer.zip" "$d/main.zip"
+    && cmp -s "$d/fixed.zip" "$d/main.zip" && echo CREATION_BYTES_REVIEWED main; }; }
+  expected: Exit 0 and CREATION_BYTES_REVIEWED (pr, or main with the deploy run recorded).
+  fix_if: >-
+    Neither matches: another PR's upload-only run wrote the key. Re-run the fix PR's speculative-plan job to restore the
+    reviewed bytes, re-run steps 7 and 8, and only then ask for approval.
+- step: 9
+  phase: post-deploy
+  action: >-
+    Right after Benjamin's approval and the gated apply: the fixed key was not rewritten during the approval wait, so the
+    function was created from the bytes step 8 checked (the key's ETag and LastModified still match $CREATION_KEY_FILE,
+    written in step 7).
+    PlatformDev cannot read the function's CodeSha256, so key continuity is the evidence.
+  command: >-
+    test -s "$CREATION_KEY_FILE" && aws s3api head-object --profile agent_platform --bucket agent-platform-data-lake --key
+    lambda-packages/ducklake-telemetry-writer.zip --query '[ETag,LastModified]' --output text | cmp -s - "$CREATION_KEY_FILE"
+    && echo CREATION_KEY_UNCHANGED
+  expected: Exit 0 and CREATION_KEY_UNCHANGED.
+  fix_if: >-
+    Changed: find the writer (LastModified against workflow runs). A main deploy-ducklake-lambdas run's merged bytes are
+    acceptable (record it). Another PR's upload-only bytes mean the stub may be running unreviewed code: tell Benjamin
+    and run the deploy-wiring plan's governed deploy next, which replaces the code from the merged sha.
+- step: 10
+  phase: post-deploy
+  action: >-
+    After Benjamin's tf-gated-apply approval: run PLAN-telemetry-writer-function's step 6 as amended (the two gated applies
+    together match the plan; record green on the retry run). Set RETRY_SHA, RETRY_RUN_ID, FIRST_APPLY_LOG_FILE and RETRY_APPLY_LOG_FILE
+    as that step's action says.
+  command: >-
+    bin/venv-python -c "import subprocess,yaml;s={x['step']:x for x in yaml.safe_load(open('docs/plans/PLAN-telemetry-writer-function.yaml',encoding='utf-8'))['verification_plan']};subprocess.run(s[6]['command'],shell=True,check=True)"
+  expected: Exit 0 and APPLY_CONVERGED with 4 added, 1 changed, 0 destroyed for the retry.
+  fix_if: >-
+    Follow that step's fix_if. A second failed apply: stop, RCA (Decision 55) and tell Benjamin; never apply locally and never dispatch
+    a third attempt without his word.
+- step: 11
+  phase: post-deploy
+  action: The stub is live through its URL under the scoped login and refuses direct invoke (PLAN-telemetry-writer-function step 7, unchanged).
+  command: >-
+    bin/venv-python -c "import subprocess,yaml;s={x['step']:x for x in yaml.safe_load(open('docs/plans/PLAN-telemetry-writer-function.yaml',encoding='utf-8'))['verification_plan']};subprocess.run(s[7]['command'],shell=True,check=True)"
+  expected: Exit 0 with STUB_LIVE_OK and TELEMETRY_URL_ONLY_OK.
+  fix_if: Follow PLAN-telemetry-writer-function step 7's fix_if.
+- step: 12
+  phase: post-deploy
+  action: The shared writer and reader ops gates still pass (PLAN-telemetry-writer-function step 8, unchanged).
+  command: >-
+    bin/venv-python -c "import subprocess,yaml;s={x['step']:x for x in yaml.safe_load(open('docs/plans/PLAN-telemetry-writer-function.yaml',encoding='utf-8'))['verification_plan']};subprocess.run(s[8]['command'],shell=True,check=True)"
+  expected: Exit 0 and OPS_GATES_OK.
+  fix_if: Follow PLAN-telemetry-writer-function step 8's fix_if.
+- step: 13
+  phase: post-deploy
+  action: >-
+    Live-versus-declared read-back: dispatch terraform-drift.yml after the green apply, save its drift-check job log to $DRIFT_LOG_FILE
+    and run PLAN-telemetry-writer-function step 9 (unchanged). This also proves the eleven argument deletions and the removed
+    local left every other resource unchanged in AWS.
+  command: >-
+    bin/venv-python -c "import subprocess,yaml;s={x['step']:x for x in yaml.safe_load(open('docs/plans/PLAN-telemetry-writer-function.yaml',encoding='utf-8'))['verification_plan']};subprocess.run(s[9]['command'],shell=True,check=True)"
+  expected: Exit 0 and DRIFT_CLEAN.
+  fix_if: >-
+    Follow PLAN-telemetry-writer-function step 9's fix_if; drift on a resource this plan edited means a zero-diff claim
+    failed, so report it. A crash with "Argument list too long" is rec-4255 and only happens when drift exists (exit 2):
+    read the plan output above the crash.
+- step: 14
+  phase: post-deploy
+  action: >-
+    rec-4243 closed by the implementation PR's Resolves trailer (Decision 201 acceptance-gated closure), and rec-4245 narrowed
+    to the executor prompt string (execution step 3).
+  command: >-
+    bin/venv-python -m scripts.sync.ops sync && bin/venv-python -c "import json,pathlib;rows=[json.loads(l) for l in pathlib.Path('logs/.recommendations-log.jsonl').read_text(encoding='utf-8').splitlines()
+    if l.strip()];r=next((x for x in rows if x.get('id')=='rec-4243'),None);assert r and r.get('status')=='closed', (r or {}).get('status');assert
+    (r.get('acceptance') or '')=='pytest tests/checks/iam_tf/test_validate_terraform_no_build_artifact_reads.py::test_real_tree_has_no_build_artifact_reads',
+    r.get('acceptance');s=next((x for x in rows if x.get('id')=='rec-4245'),None);assert s and 'scripts/executor/step_context.py' in (s.get('acceptance')
+    or '') and 'terraform/CLAUDE.md' not in (s.get('acceptance') or ''), (s or {}).get('acceptance');print('rec-4243 closed; rec-4245 narrowed')"
+  expected: >-
+    Prints rec-4243 closed and rec-4245 narrowed: rec-4243 carries the pinned acceptance (the Decision 186 gate refuses
+    closure without the check closure artifact, so closed also proves that field), and rec-4245's acceptance names only
+    scripts/executor/step_context.py.
+  fix_if: >-
+    Still open: read the trailer job's verdict artifact. A ClosureArtifactRequired or merge-leg refusal, a transport failure
+    or an omitted trailer may close through the portal's manual route with --closure-artifact and --closure-fix-sha in
+    one call; an AcceptanceVerdictRefused is never closed manually: fix the acceptance or the code and let a trailer close
+    it. Never edit the cache. A duplicate ci-rca rec filed during the approval wait, by a Decision 190 escalation or by
+    a CONVERGENCE_RED push refusal processed after rec-4243 closed, is closed as a duplicate with the same closure artifact
+    and the fix squash sha as fixed_by_sha.
+test_obligations:
+- source: terraform/personal/ducklake_telemetry_writer.tf
+  behavior: Reads no build artifact.
+  verification_step: 1
+  test_selector: tests/checks/iam_tf/test_validate_terraform_no_build_artifact_reads.py::test_real_tree_has_no_build_artifact_reads
+  red_green_expectation: red before (the node is absent; then it names this file's read on the unfixed tree), green after
+- source: terraform/personal/ducklake_maintenance_smoke.tf
+  behavior: Reads no build artifact.
+  verification_step: 1
+  test_selector: tests/checks/iam_tf/test_validate_terraform_no_build_artifact_reads.py::test_real_tree_has_no_build_artifact_reads
+  red_green_expectation: red before (the node is absent; then it names this file's read on the unfixed tree), green after
+- source: terraform/personal/ducklake_lambdas.tf
+  behavior: The two layers and two functions read no build artifact.
+  verification_step: 1
+  test_selector: tests/checks/iam_tf/test_validate_terraform_no_build_artifact_reads.py::test_real_tree_has_no_build_artifact_reads
+  red_green_expectation: red before (the node is absent; then it names this file's four reads on the unfixed tree), green after
+- source: terraform/personal/ducklake_catalog_dr.tf
+  behavior: The pgclient layer and catalog-dr function read no build artifact.
+  verification_step: 1
+  test_selector: tests/checks/iam_tf/test_validate_terraform_no_build_artifact_reads.py::test_real_tree_has_no_build_artifact_reads
+  red_green_expectation: red before (the node is absent; then it names this file's two reads on the unfixed tree), green after
+- source: terraform/personal/ducklake_maintenance.tf
+  behavior: Reads no build artifact.
+  verification_step: 1
+  test_selector: tests/checks/iam_tf/test_validate_terraform_no_build_artifact_reads.py::test_real_tree_has_no_build_artifact_reads
+  red_green_expectation: red before (the node is absent; then it names this file's read on the unfixed tree), green after
+- source: terraform/personal/prod_lambdas.tf
+  behavior: The prod functions read no build artifact, directly or through a local.
+  verification_step: 1
+  test_selector: tests/checks/iam_tf/test_validate_terraform_no_build_artifact_reads.py::test_real_tree_has_no_build_artifact_reads
+  red_green_expectation: red before (the node is absent; then it names the prod_source_hash local on the unfixed tree), green after
+- source: scripts/checks/iam_tf/validate_terraform_no_build_artifact_reads.py
+  behavior: Flags path.module-relative lambda-packages/ strings and file reads of ignored paths, and nothing legitimate.
+  verification_step: 1
+  test_selector: tests/checks/iam_tf/test_validate_terraform_no_build_artifact_reads.py
+  red_green_expectation: red before (module and mirror test absent), green after
+- source: scripts/checks/iam_tf/_manifest.py
+  behavior: The check is registered in --pre on terraform/**/*.tf and .gitignore.
+  verification_step: 1
+  test_selector: tests/checks/iam_tf/test_validate_terraform_no_build_artifact_reads.py::test_check_is_registered_in_pre
+  red_green_expectation: red before (no Entry), green after
+- source: config/ci_rca_taxonomy.yaml
+  behavior: The check's failures classify as environment.
+  verification_step: 5
+  command: bin/venv-python -m scripts.validate --pre
+  waiver_reason: The taxonomy coverage check in the pre tier fails on a registered check with no category row.
+- source: config/agent/verification_registry/entries/saved-plan-parity-guidance.yaml
+  behavior: Registry shard for the graduated step-3 check.
+  verification_step: 5
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: validate_graduation_completeness and validate_verification_registry (pre and full tiers) are its standing checks.
+- source: config/prose_budgets.yaml
+  behavior: The two touched prose surfaces' budgets ratchet down to their new sizes.
+  verification_step: 5
+  command: bin/venv-python -m scripts.validate --pre
+  waiver_reason: validate_prose_limits, validate_prose_budget_raises and the prose-budgets-reseeded-to-measured registry check are the standing checks.
+- source: docs/contracts/environment-taxonomy.yaml
+  behavior: The conformance prose states that Terraform never reads a build artifact; no typed field changes.
+  verification_step: 3
+  command: grep -qF 'never reads a build artifact' docs/contracts/environment-taxonomy.yaml
+  red_green_expectation: red before (the phrase is absent and the false sentence present), green after
+- source: terraform/CLAUDE.md
+  behavior: The Terraform hard rule names the never-read rule and no longer recommends a file fallback.
+  verification_step: 3
+  command: grep -qF 'never reads a build artifact' terraform/CLAUDE.md
+  red_green_expectation: red before (the md5(file) example is the recommended pattern), green after
+- source: AGENTS.md
+  behavior: The universal try() rule carries the never-read rule.
+  verification_step: 3
+  command: grep -qF 'never reads a build artifact' AGENTS.md
+  red_green_expectation: red before (the clause is absent), green after
+- source: .github/workflows/reconcile.yml
+  behavior: Comments no longer claim a saved-plan apply never re-evaluates filemd5; no executable line changes.
+  verification_step: 5
+  command: bin/venv-python -m scripts.validate --pre
+  waiver_reason: Comment-only edit; step 3's graduated grep guards the phrase and step 4 asserts no non-comment line changed.
+- source: .github/workflows/terraform-apply-sandbox.yml
+  behavior: Build-step comments no longer say the build exists to feed filemd5; no executable line changes.
+  verification_step: 5
+  command: bin/venv-python -m scripts.validate --pre
+  waiver_reason: Comment-only edit; step 4 asserts no non-comment line changed and the workflow checks in the pre tier cover its bodies.
+constraints:
+- >-
+  No local terraform init, validate, plan or apply (Decision 119). CI's terraform-validate and the speculative plan are authoritative;
+  never apply locally, even on the red record.
+- >-
+  In the six .tf files change only source_code_hash arguments, the prod_source_hash local, their attribute groups' alignment
+  and the comments the scope rows name (headers, section comments, layer lead-ins and SILENT-FREEZE guards, lifecycle
+  comments); no other attribute or resource. Do not change DUCKLAKE_ARTIFACT_NAMES, the build-ducklake-artifacts
+  action or any executable workflow line. In the instruction files change only the named sentence or line (plus the contract's
+  amendment_log entry), using the verbatim lines so AGENTS.md and terraform/CLAUDE.md shrink (no prose budget raise, Decision
+  165). Layer publication (rec-4253) and immutable code references (rec-4254) are not this plan.
+- >-
+  Dispatch the retry only after the merge and only when step 6 passed; run steps 7 and 8 before asking Benjamin to approve; if
+  the dispatch's guard does not route, stop and ask him. His tf-gated-apply approval is the deploy authorization.
+- 'Public repository (Decision 101): no account id, ARN or hostname literal anywhere, including PR text and pasted logs.'
+- No rescue agents or workaround loops (Decision 55).
+context:
+- >-
+  RCA, Fable consult and recs: /mnt/project-files/telemetry-slice2/apply-parity/ (RCA.md, fable-consult/ADVICE.md). Durable-fix
+  recs rec-4245..4249 (rec-4248 re-scoped to a copy-only fetch), rec-4253 (layer publication) and rec-4254 (immutable code references). #1442's reviewed plan showed a literal source_code_hash on the
+  create; filemd5 was never the provider's documented form (base64 SHA-256), so removal loses no detection.
+- >-
+  Mechanism: Terraform re-evaluates file functions when it applies a saved plan; upload-only built nine zips for the plan
+  job, gated-apply fetches seven to the workspace root, and Reconcile fetches them under .dispatch-tooling/ (reconcile.yml
+  fetch steps, Decision 154 pt 2), so its saved-plan route has none. ignore_changes masks an update, never a create.
+- "fork: drop every build-artifact read vs only the two unfetched ones vs split | chosen: drop every read (Benjamin, 2026-10-10, aligned with the Fable consult) | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: this plan's scope"
+- "fork: fold the contract, terraform/CLAUDE.md and AGENTS.md fixes into this plan | chosen: yes (Benjamin, 2026-10-10 card) | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: this plan's scope"
+- "fork: guard as a registered --pre check | chosen: yes | class: consistency-only | precedent: validate_terraform_tag_charset (scripts/checks/iam_tf/_manifest.py) | precedent_kind: contract | reversible: yes | persisted: iam_tf manifest"
+- "fork: amend PLAN-telemetry-writer-function in the plan PR | chosen: yes | class: consistency-only | precedent: implement-scope-boundary.yaml | precedent_kind: contract | reversible: yes | persisted: that plan file"
+- "fork: acknowledge the red sha, not rec-4243 | chosen: red sha | class: consistency-only | precedent: deploy-paths.yaml | precedent_kind: contract | reversible: yes | persisted: execution steps"
+- >-
+  PLAN-telemetry-writer-function is amended in this plan's PR (VP step 6, its post-deploy criterion, its function scope
+  text, the count note and Code at creation); steps 10-13 here delegate to its steps 6-9.
+- >-
+  Decision-scout (third run, widened scope): FLAGS_FOUND. CITE 125, 126, 77, 154, 183, 119, 213, 55, 48, 186, 201, 132,
+  189, 170, 187, 59, 67, 101; T2.54 (clause names the check). WARN 92 (the ambient lines are short forms pointing at
+  environment-taxonomy.yaml), WARN 181 (invariant narrowed to configuration file reads, with a coverage line), SPIRIT 154
+  (steps 8-9 creation-bytes checks; rec-4254 owns the immutable reference). Decisions triaged: 167 of 167. Roadmap items intersected:
+  5; CONFLICT: 0; RELATED: 4. Retired example's provenance: archived Decision 19.
+- "gates: decision-scout=FLAGS_FOUND (resolved in-plan, 3 runs); plan-critique=new series after the re-scope: round 1 REVISE (J1-J4, A1-A7 fixed), round 2 REVISE (J1-J3, M1-M4 fixed; escalated to Benjamin on the recurring guard-coverage anchor; he chose one more round), round 3 PROCEED with non-blocking notes, the strengthenings it marked safe (J1, J3-J6, M1, M4) folded in after the verdict; J2's not-tracked predicate left as an implement-time option (prior series: PROCEED then REVISE on the narrower scope)"
+- >-
+  Gotchas: removing the longest key shifts terraform fmt alignment of s3_bucket/s3_key in nine groups (the two DuckLake
+  layers keep theirs); RETRY_SHA is the dispatch run's head sha, which the gated-apply record write uses as commit_sha;
+  the push run's refusal on merge is expected red CI, not a new failure.
+pre_implementation_checklist:
+- Branch confirmed not on main, started from main after this plan's PR merged
+- docs/PROJECT_CONTEXT.md read
+- 'Only the plan-cited decision sections read'
+- All files in scope located and readable
+- Acceptance criteria understood and verifiable
+execution_steps:
+- >-
+  Start from main after this plan's PR has merged (step 4 diffs against the merge base). Write the check module and its
+  mirror test first; run step 1 on the unchanged Terraform and record the real-tree node failing on the twelve lines; run
+  step 2.
+- Register the check (manifest Entry, taxonomy row), then edit the six .tf files, the contract, terraform/CLAUDE.md, AGENTS.md, prose budgets and the two workflow comments; run steps 1-4.
+- >-
+  Through the ops portal (get_rec_write_guidance first, then update_rec), before the merge: rec-4243's acceptance becomes
+  exactly `pytest tests/checks/iam_tf/test_validate_terraform_no_build_artifact_reads.py::test_real_tree_has_no_build_artifact_reads`
+  (a bare pytest head with a ::node_id, decidable and junit-routed under Decision 201) and context_v2_json.closure_artifact
+  becomes check:validate_terraform_no_build_artifact_reads (Decision 186; the check is pre=True); append that the coalesce/md5(file)
+  fallback fails the same check and the heal verb is acknowledge-and-retry. Narrow rec-4245 to the remaining executor
+  prompt string in scripts/executor/step_context.py (frozen, Decision 67), noting in its context the stale bootstrap
+  comment at terraform/bootstrap/github_ci_apply_policy.tf (layers "compute source_code_hash live", around :511-519,
+  admin-tier file), with acceptance
+  ! grep -qF "md5(file('module_file.tf'))" scripts/executor/step_context.py && grep -qF 'never reads a build artifact' scripts/executor/step_context.py.
+  Write the registry shard; run step 5.
+- >-
+  Push, open the PR with Resolves rec-4243 in the squash body, drive CI green, run step 6 on the final head's speculative-plan
+  comment. Squash-merge, confirm the push run refused with CONVERGENCE_RED, dispatch terraform-apply-sandbox.yml (mcp__github__actions_run_trigger,
+  ref main, acknowledge_red_commit c21ba7da56a5640bc7c368af6cb8b50ae92b3e78), run steps 7 and 8, and only then ask
+  Benjamin to approve the tf-gated-apply run.
+- Execute steps 9-14. Loop until they pass, never weakening an assertion. On an unrecoverable failure stop and RCA (Decision 55).
+- 'Report: what landed, the verification results, and that the deploy-wiring plan (to run next) and plan 3 part 1 are unblocked'
+rollback: >-
+  Before the retry: revert the squash commit (nothing was applied). After it: the function exists; the provider keeps
+  recording each function's deployed code hash in state whether or not configuration sets it, so restoring the reads would
+  be cosmetic under ignore_changes. Removing the function is PLAN-telemetry-writer-function's rollback.

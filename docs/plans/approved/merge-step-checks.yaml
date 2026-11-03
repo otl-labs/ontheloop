@@ -1,0 +1,382 @@
+schema_version: 1
+slug: merge-step-checks
+blocks:
+- id: skill-1
+  file: .claude/skills/implement/SKILL.md
+  before: |2
+
+    Before writing any code, re-check every rec in the plan's `bundled_recommendations` field.
+    A rec can become stale between `/plan` and `/implement` (target file deleted, decision
+    ratified, a sibling plan already satisfied it). Implementing stale work wastes the session.
+
+    ### Protocol
+    For each rec id in `bundled_recommendations`:
+    ```bash
+    bin/venv-python -c "
+    from scripts.rec_relevance import evaluate_rec_relevance
+    from scripts.ops_data_portal import propose_or_close_rec
+    from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader
+    rows, _ = fetch_recs_by_ids(make_reader(), ['rec-NNNN'])
+    rec = rows[0] if rows else None
+    verdict, evidence = evaluate_rec_relevance(rec, run_acceptance_probe=True)
+    det = (verdict == 'satisfied' and evidence.startswith('acceptance probe passed:'))
+    proposal = propose_or_close_rec('rec-NNNN', verdict, evidence, deterministic=det)
+    print(f'verdict={verdict} det={det}')
+    if proposal: print('proposal:', proposal)
+    "
+    ```
+
+    **Verdict handling:**
+    - **`relevant` or `unknown`** -- proceed; implement as planned.
+    - **`satisfied` (deterministic -- acceptance probe passed)** -- `propose_or_close_rec` auto-closes
+      the rec via the portal. Remove it from the effective bundled list, skip its implementation step,
+      and record in chat: "rec-NNNN auto-closed as satisfied ([evidence]); skipping implementation."
+    - **`satisfied` (semantic)** -- present the proposal command; wait for operator confirmation.
+      Do NOT skip implementation until operator explicitly confirms closure.
+    - **`superseded`, `duplicate`, `contradicted`, `stale_target`, `blocked_by_decision`** -- present
+      the proposal command and wait for operator decision before removing from the implementation list.
+
+    **Decision 55 compliance:** auto-closure fires ONLY for deterministic `satisfied`. All semantic
+    verdicts route to the operator -- the agent never auto-acts on semantic judgment.
+  after: |2
+
+    Before writing code, re-check the plan's `bundled_recommendations` (a rec can go stale after /plan):
+    `bin/venv-python -m scripts.rec_relevance --implement-recheck rec-NNNN[,rec-MMMM]`. It never closes a rec
+    (`docs/contracts/recommendation-relevance.yaml#implement_gate`); the merged trailer does.
+    - **`relevant` or `unknown`** -- implement as planned.
+    - **`satisfied`** -- the acceptance already passes on this tree; say so in chat. The rec stays bundled.
+    - **Any other verdict** -- present the printed proposal command and wait for the operator. A rec the operator closes
+      stays bundled and in the trailer (the closure job skips it); one the operator supersedes or declines leaves
+      `bundled_recommendations` only by a plan amendment PR, never a build edit.
+- id: skill-2
+  file: .claude/skills/implement/SKILL.md
+  before: |-
+    **On wake**, always confirm check runs via `mcp__github__pull_request_read` (`get_status` / `get_check_runs`) BEFORE merging, then branch on status:
+       - **All green** -> `mcp__github__merge_pull_request(owner, repo, pullNumber, merge_method="squash")`, then `mcp__github__unsubscribe_pr_activity(...)`. Report the merge. **Carve-out:** for a PR touching `terraform/personal/**`, do NOT unsubscribe here -- defer to the "Hold subscription through apply" section below (the real outcome is the post-merge apply, not the merge).
+       - **Any red** -> diagnose, fix, re-run the Commit Flow (re-triggers PR CI). Stay subscribed and end the turn. Per `docs/contracts/ci-rca-lifecycle.yaml` trigger_scope, this failure is uncovered by ci-rca by construction -- no rec is filed, nothing gates; the existing 3-fix-attempt STOP and VF-08 rules above govern the loop (Decision 55). Never weaken a check to obtain green -- `docs/contracts/implement-scope-boundary.yaml`'s CONTENT invariant is canonical; cited here, not restated. `executor-rca` is out of scope here -- Step 8's RCA-First Protocol is separate, session-end friction capture.
+  after: |-
+    **On wake**, always confirm check runs via `mcp__github__pull_request_read` (`get_status` / `get_check_runs`) BEFORE merging, then branch on status:
+       - **All green** -> for an IMPLEMENTATION PR, Commit Flow step 4 (premerge, squash-merge, readback); otherwise `mcp__github__merge_pull_request(owner, repo, pullNumber, merge_method="squash")`. Then `mcp__github__unsubscribe_pr_activity(...)`. Report the merge with its sha. **Carve-out:** for a PR touching `terraform/personal/**`, do NOT unsubscribe here -- defer to the "Hold subscription through apply" section below (the real outcome is the post-merge apply, not the merge).
+       - **Any red** -> diagnose, fix, re-run the Commit Flow (re-triggers PR CI). Stay subscribed and end the turn. Per `docs/contracts/ci-rca-lifecycle.yaml` trigger_scope, this failure is uncovered by ci-rca by construction -- no rec is filed, nothing gates; the existing 3-fix-attempt STOP and VF-08 rules above govern the loop (Decision 55). Never weaken a check to obtain green -- `docs/contracts/implement-scope-boundary.yaml`'s CONTENT invariant is canonical; cited here, not restated. `executor-rca` is out of scope here -- Step 8's RCA-First Protocol is separate, session-end friction capture.
+- id: skill-3
+  file: .claude/skills/implement/SKILL.md
+  before: |-
+    git add -A
+    git commit -m "feat({slug}): implement {brief-description}"
+    git fetch origin main
+  after: |-
+    git add -A
+    git commit -m "feat({slug}): implement {brief-description}" -m "Resolves: rec-NNNN[, rec-MMMM]"   # omit -m when nothing is bundled
+    git fetch origin main
+- id: skill-4
+  file: .claude/skills/implement/SKILL.md
+  before: |-
+    Then via GitHub MCP (owner/repo from `git remote get-url origin`):
+    1. Build the PR body. If the plan `bundled_recommendations` list is non-empty, add the `Resolves: rec-NNNN[, rec-MMMM]` trailer in the PR body, which the squash-merge commit body inherits -- per `docs/contracts/git-ops.yaml` (`ci.yml`'s trailer-closure job closes each named rec after merge). If empty, omit it. Under a clear heading (e.g. `## VP Compliance`), append the VP compliance table to the PR body -- the same bounded table produced by the VP Compliance Gate, including the Attempts column and any NONDETERMINISTIC markers -- so the executed proof lands in the PR/merge record instead of vanishing chat (Decision 115: this PR-body table is PR-scoped ephemeral evidence, not the durable record -- the durable record is the tier_item criterion closure in the roadmap, staged by the bookkeeping walk below).
+    2. `mcp__github__create_pull_request(owner, repo, head=<this branch>, base="main", title="feat({slug}): {brief-description}", body=<body from step 1>)`
+  after: |-
+    Then via GitHub MCP (owner/repo from `git remote get-url origin`):
+    1. Build the PR body, repeating the commit's `Resolves:` trailer block (`docs/contracts/git-ops.yaml#resolves_trailer`; `ci.yml`'s trailer jobs close each named rec after merge). Under a clear heading (e.g. `## VP Compliance`), append the VP compliance table to the PR body -- the same bounded table produced by the VP Compliance Gate, including the Attempts column and any NONDETERMINISTIC markers -- so the executed proof lands in the PR/merge record instead of vanishing chat (Decision 115: this PR-body table is PR-scoped ephemeral evidence, not the durable record -- the durable record is the tier_item criterion closure in the roadmap, staged by the bookkeeping walk below).
+    2. `mcp__github__create_pull_request(owner, repo, head=<this branch>, base="main", title="feat({slug}): {brief-description}", body=<body from step 1>)`
+- id: skill-5
+  file: .claude/skills/implement/SKILL.md
+  before: |-
+    3. `mcp__github__subscribe_pr_activity(...)`; end the turn (see "Wait-for-CI").
+    4. On green wake: `mcp__github__merge_pull_request(..., merge_method="squash")` + `mcp__github__unsubscribe_pr_activity(...)`.
+    5. **Post-merge closeout fallback (Decision 201, conditional).** WAIT for the
+  after: |-
+    3. `mcp__github__subscribe_pr_activity(...)`; end the turn (see "Wait-for-CI").
+    4. On green wake: write the squash commit message (the implementation commit's body, trailer included) to a file and
+       run `bin/venv-python -m scripts.session.merge_step premerge --slug {slug} --message-file <file>` (add
+       `--expect <digest>` when the operator approved text); fix any red line before merging. Then
+       `mcp__github__merge_pull_request(..., merge_method="squash", commit_message=<that message>,
+       expectedHeadSha=<the HEAD premerge printed>)`, `bin/venv-python -m scripts.session.merge_step readback --slug
+       {slug} --sha <merge sha>`, and unsubscribe.
+    5. **Post-merge closeout fallback (Decision 201, conditional).** WAIT for the
+- id: skill-6
+  file: .claude/skills/implement/SKILL.md
+  before: |2
+       `$GITHUB_STEP_SUMMARY`) to CONCLUDE, then follow the conditional fallback in
+       `docs/contracts/git-ops.yaml::resolves_trailer`: a refusal marker naming the rec forbids the
+       fallback (use its `close_proposed` command); a non-refusal per-rec log line permits it;
+       anything else waits.
+  after: |2
+       `$GITHUB_STEP_SUMMARY`) to CONCLUDE, then follow the conditional fallback in
+       `docs/contracts/git-ops.yaml::resolves_trailer`: an acceptance-verdict refusal takes that clause's
+       route, a Decision 186 refusal stays open and is reported, a merge-leg refusal or a non-refusal
+       per-rec log line permits the fallback, a trailer readback found missing goes to `merge_step
+       recover` (never the fallback); anything else waits.
+- id: implement-1
+  file: .claude/commands/implement.md
+  before: |2
+
+    When creating the PR body, emit a `Resolves: rec-NNNN[, rec-MMMM]` trailer if the plan's `bundled_recommendations` list is non-empty. After the merge, execute the **post-merge closeout fallback** from the implement skill: wait for `ci.yml`'s trailer-closure job to conclude on the push run at the merge sha, then act on its per-rec log evidence -- never on elapsed wall-clock time. A rec the job's log names in a refusal marker (Decision 186 or Decision 201) may ONLY be closed via that log's own printed `close_proposed` command, never by a direct `--update-rec ... --status closed` call; a rec the log names as closed, not-found, or errored may use the direct fallback command; anything else (no log line for that rec, an unconcluded or failed job) is left alone until the job concludes.
+  after: |2
+
+    When the plan's `bundled_recommendations` list is non-empty, the implementation commit and the PR body carry a `Resolves: rec-NNNN[, rec-MMMM]` trailer, and the merge follows the implement skill's Commit Flow step 4 (premerge, squash-merge with an explicit `commit_message` and `expectedHeadSha`, readback). After the merge, execute the **post-merge closeout fallback** from the implement skill: wait for `ci.yml`'s trailer-closure job to conclude on the push run at the merge sha, then act on its per-rec log evidence -- never on elapsed wall-clock time. A rec the job's log names in a Decision 186 or Decision 201 refusal marker is never closed by a direct `--update-rec ... --status closed` call: after a Decision 201 refusal it takes the route in `docs/contracts/git-ops.yaml#resolves_trailer`, and after a Decision 186 refusal it stays open and is reported to the operator (rec-4088). A rec the log names as closed, not-found, or errored may use the direct fallback command; anything else (no log line for that rec, an unconcluded or failed job) is left alone until the job concludes.
+- id: git-ops-1
+  file: docs/contracts/git-ops.yaml
+  before: |2-
+      class: D
+      contract_version: 8
+      status: ratified
+  after: |2-
+      class: D
+      contract_version: 9
+      status: ratified
+- id: git-ops-2
+  file: docs/contracts/git-ops.yaml
+  before: |-
+    amendment_log:
+      - {date: "2026-10-17", semantic_break: true, change_class: accepted_values_extend, summary: "rec-4384: trailer_acceptance_gate.source_admission PRECEDENCE now names the census shape buckets' precedence over routing and exempts a junit-routed command from the census's 500-character length cap, since it is never executed; a long pytest node-id list reaches the junit route instead of resolving out_of_grammar. contract_version 7 -> 8."}
+  after: |-
+    amendment_log:
+      - {date: "{{DATE}}", semantic_break: true, change_class: field_add, summary: "PLAN-merge-step-checks (rec-2733, rec-3856, rec-4244, rec-4443, rec-4687): resolves_trailer gains the TRANSPORT clause (the implementation commit carries the trailer, validate_merge_step enforces it, merge_pull_request gets an explicit commit_message and expectedHeadSha, scripts.session.merge_step premerge before and readback after an IMPLEMENTATION merge), the verdict-bound lost-trailer route (merge_step recover; a junit-routed rec stays open for the operator) and the real acceptance-refusal route (fix-forward or strengthen and re-run, replacing the never-printed close_proposed command); added approved_text_binding and merge_step_coverage; amendment_log compacted to one-line entries (parsed values unchanged). contract_version 8 -> 9."}
+      - {date: "2026-10-17", semantic_break: true, change_class: accepted_values_extend, summary: "rec-4384: trailer_acceptance_gate.source_admission PRECEDENCE now names the census shape buckets' precedence over routing and exempts a junit-routed command from the census's 500-character length cap, since it is never executed; a long pytest node-id list reaches the junit route instead of resolving out_of_grammar. contract_version 7 -> 8."}
+- id: git-ops-3
+  file: docs/contracts/git-ops.yaml
+  before: |2-
+      - {date: "2026-09-26", semantic_break: true, change_class: field_add, summary: "PLAN-handoff-evidence-gate (Decision 203): added the handoff_evidence_gate clause (exempt path globs, never-exempt paths, extra destination prefixes, base-ref read rule, canonical forms and destination rule, outcome map, no agent override) and a fail-closed PreToolUse harness hook enforcing it at the agent push / GitHub remote-write boundary. Extended handoff_sequence.enforcement_coverage in place: flipped the interactive /implement push row from residual (rec-4083) to mechanical, added rows for MCP remote writes, non-canonical Bash/Monitor commands, and destination denial (all mechanical), and declared the remaining residuals (rec-4085, rec-4086, rec-4087). Added scripts/session/handoff_evidence.py, scripts/session/handoff_push_parse.py, .claude/hooks/handoff_evidence_gate.py and .claude/hooks/handoff_evidence_gate.sh to referenced_repo_paths. Bumped contract_version 5 -> 6 per this file's own convention."}
+      - date: "2026-09-26"
+        semantic_break: true
+        change_class: field_add
+        summary: >-
+          PLAN-handoff-validates-committed-tree (Decision 163 point 3, dated Update): added
+          handoff_sequence -- the pre-handoff full tier now runs on the committed, rebased, clean
+          tree (rebase moves before the full tier, not after) and its evidence
+          (validation_result.py schema_version 4) must attest HEAD's tree via the new
+          `--verify-head` CLI before push. Updated push_pr_ci_merge_flow.steps to name the full
+          tier + --verify-head before push, and the red-fix loop to re-run both. Added
+          scripts/checks/validation_result.py and scripts/session/postflight.py to
+          referenced_repo_paths. Bumped contract_version 4 -> 5 per this file's own convention.
+      - date: "2026-09-26"
+        semantic_break: true
+        change_class: field_add
+        summary: >-
+          PLAN-trailer-acceptance-junit-verdict (Decision 201 slice B): converted trailer_acceptance_gate
+          from a scalar to a mapping, adding a `sources` sub-key (static + junit), the `source_admission`
+          grammar-arm partition (the literal, underscore-spelled key VP tooling greps for), the rejoin
+          disjointness refusal, and the declared rec-4002 residual. The existing scalar's text survives
+          unchanged under the new `description` sub-key. Bumped contract_version 3 -> 4 per this file's
+          own convention.
+      - date: "2026-09-25"
+        semantic_break: true
+        change_class: field_add
+        summary: "PLAN-trailer-acceptance-static-gate (Decision 201): resolves_trailer's trigger moved to ci.yml's trailer-census / trailer-acceptance-evaluate / trailer-closure jobs, its manual-route fallback made conditional, and trailer_acceptance_gate added. contract_version 2 -> 3."
+      - date: "2026-09-21"
+        semantic_break: true
+        change_class: field_add
+        summary: "PLAN-trailer-closure-evidence-gate: resolves_trailer gained the CARRIER (rec-3901) and PLACEMENT (rec-2922) clauses, both enforced by validate_rec_autoclose_trailer_gate. contract_version 1 -> 2."
+      - date: "2026-09-19"
+        semantic_break: true
+        change_class: field_add
+        summary: "PLAN-ci-full-tier-history-parity (dated correction on Decision 159 clause 1): added two_tier_presubmit_model.full_tier_checkout_depth (fetch-depth 0 for every full-tier job) and its two referenced_repo_paths."
+      - date: "2026-09-15"
+        semantic_break: true
+        change_class: field_add
+        summary: "PLAN-conflict-wake-prefix-realignment: added branching_topology.agent_branch_prefixes with its rationale and reversal condition, corrected four single-prefix premises to name the declared set, and noted the rec-3874 probe evidence on wake_signals.merge_conflict."
+      - date: "2026-09-12"
+        semantic_break: false
+        change_class: prose_improvement
+        summary: "PLAN-skills-layer-prose-relocation (T2.56 c1): merged the planning skill's Main Divergence Assessment rule into rebase_phase_distinction.assessment_time. No rule changed."
+      - date: "2026-09-01"
+        semantic_break: false
+        change_class: prose_improvement
+        summary: "PLAN-ambient-prose-contract-relocation: initial authoring -- AGENTS.md's git-ops procedure, merge-protocol and OAuth-token runbook detail relocated here. No new rule."
+        migration_story: >-
+          AGENTS.md keeps one-line triggers plus the verbatim-pinned subsections (Commit signing, the
+          presubmit table's Full row, two ci-rca Merge-protocol bullets).
+
+    # Every repo-relative path this contract's procedure names, verified to exist by
+  after: |2-
+      - {date: "2026-09-26", semantic_break: true, change_class: field_add, summary: "PLAN-handoff-evidence-gate (Decision 203): added the handoff_evidence_gate clause (exempt path globs, never-exempt paths, extra destination prefixes, base-ref read rule, canonical forms and destination rule, outcome map, no agent override) and a fail-closed PreToolUse harness hook enforcing it at the agent push / GitHub remote-write boundary. Extended handoff_sequence.enforcement_coverage in place: flipped the interactive /implement push row from residual (rec-4083) to mechanical, added rows for MCP remote writes, non-canonical Bash/Monitor commands, and destination denial (all mechanical), and declared the remaining residuals (rec-4085, rec-4086, rec-4087). Added scripts/session/handoff_evidence.py, scripts/session/handoff_push_parse.py, .claude/hooks/handoff_evidence_gate.py and .claude/hooks/handoff_evidence_gate.sh to referenced_repo_paths. Bumped contract_version 5 -> 6 per this file's own convention."}
+      - {date: "2026-09-26", semantic_break: true, change_class: field_add, summary: "PLAN-handoff-validates-committed-tree (Decision 163 point 3, dated Update): added handoff_sequence -- the pre-handoff full tier now runs on the committed, rebased, clean tree (rebase moves before the full tier, not after) and its evidence (validation_result.py schema_version 4) must attest HEAD's tree via the new `--verify-head` CLI before push. Updated push_pr_ci_merge_flow.steps to name the full tier + --verify-head before push, and the red-fix loop to re-run both. Added scripts/checks/validation_result.py and scripts/session/postflight.py to referenced_repo_paths. Bumped contract_version 4 -> 5 per this file's own convention."}
+      - {date: "2026-09-26", semantic_break: true, change_class: field_add, summary: "PLAN-trailer-acceptance-junit-verdict (Decision 201 slice B): converted trailer_acceptance_gate from a scalar to a mapping, adding a `sources` sub-key (static + junit), the `source_admission` grammar-arm partition (the literal, underscore-spelled key VP tooling greps for), the rejoin disjointness refusal, and the declared rec-4002 residual. The existing scalar's text survives unchanged under the new `description` sub-key. Bumped contract_version 3 -> 4 per this file's own convention."}
+      - {date: "2026-09-25", semantic_break: true, change_class: field_add, summary: "PLAN-trailer-acceptance-static-gate (Decision 201): resolves_trailer's trigger moved to ci.yml's trailer-census / trailer-acceptance-evaluate / trailer-closure jobs, its manual-route fallback made conditional, and trailer_acceptance_gate added. contract_version 2 -> 3."}
+      - {date: "2026-09-21", semantic_break: true, change_class: field_add, summary: "PLAN-trailer-closure-evidence-gate: resolves_trailer gained the CARRIER (rec-3901) and PLACEMENT (rec-2922) clauses, both enforced by validate_rec_autoclose_trailer_gate. contract_version 1 -> 2."}
+      - {date: "2026-09-19", semantic_break: true, change_class: field_add, summary: "PLAN-ci-full-tier-history-parity (dated correction on Decision 159 clause 1): added two_tier_presubmit_model.full_tier_checkout_depth (fetch-depth 0 for every full-tier job) and its two referenced_repo_paths."}
+      - {date: "2026-09-15", semantic_break: true, change_class: field_add, summary: "PLAN-conflict-wake-prefix-realignment: added branching_topology.agent_branch_prefixes with its rationale and reversal condition, corrected four single-prefix premises to name the declared set, and noted the rec-3874 probe evidence on wake_signals.merge_conflict."}
+      - {date: "2026-09-12", semantic_break: false, change_class: prose_improvement, summary: "PLAN-skills-layer-prose-relocation (T2.56 c1): merged the planning skill's Main Divergence Assessment rule into rebase_phase_distinction.assessment_time. No rule changed."}
+      - {date: "2026-09-01", semantic_break: false, change_class: prose_improvement, summary: "PLAN-ambient-prose-contract-relocation: initial authoring -- AGENTS.md's git-ops procedure, merge-protocol and OAuth-token runbook detail relocated here. No new rule.", migration_story: "AGENTS.md keeps one-line triggers plus the verbatim-pinned subsections (Commit signing, the presubmit table's Full row, two ci-rca Merge-protocol bullets)."}
+    # Every repo-relative path this contract's procedure names, verified to exist by
+- id: git-ops-4
+  file: docs/contracts/git-ops.yaml
+  before: |2
+      - scripts/verify_ci_workflow/_ci_yaml.py
+  after: |2
+      - scripts/verify_ci_workflow/_ci_yaml.py
+      - scripts/roadmap/approved_text.py
+      - scripts/session/merge_step.py
+      - scripts/checks/verification/validate_merge_step.py
+- id: git-ops-5
+  file: docs/contracts/git-ops.yaml
+  before: |2-
+          On green confirmation: mcp__github__merge_pull_request(..., merge_method="squash") then
+          mcp__github__unsubscribe_pr_activity(...).
+        - >-
+  after: |2-
+          On green confirmation: mcp__github__merge_pull_request(..., merge_method="squash") then
+          mcp__github__unsubscribe_pr_activity(...). An IMPLEMENTATION merge first runs `scripts.session.merge_step
+          premerge` on the squash message, merges with commit_message=<that message> and expectedHeadSha=<the head
+          premerge checked>, then runs `scripts.session.merge_step readback` on the merge sha.
+        - >-
+- id: git-ops-6
+  file: docs/contracts/git-ops.yaml
+  before: |
+    resolves_trailer: >-
+      When a plan's `bundled_recommendations` list is non-empty, include in the squash-merge commit
+      body: "Resolves: rec-NNNN[, rec-MMMM]". Triggers `.github/workflows/ci.yml`'s trailer-census /
+      trailer-acceptance-evaluate / trailer-closure jobs (Decision 201), which close each named rec
+      via the ops portal. CARRIER (rec-3901): the trailer belongs only on the IMPLEMENTATION merge --
+      the one whose diff carries the code the plan's recs claim is resolved; a plan-only merge carries
+      no trailer. PLACEMENT (rec-2922): the trailer must sit in a block whose every line is
+      `Key: value`-shaped (never mid-paragraph -- a `Resolves:` line wrapped inside a prose paragraph
+      does not parse), and it may precede the mandated `Co-Authored-By:` / `Claude-Session:`
+      attribution footer. The space after the colon is REQUIRED -- `Resolves:rec-NNNN` does not
+      parse. Both the carrier rule and the placement rule are enforced by
+      `validate_rec_autoclose_trailer_gate` (scripts/checks/ci_guards/
+      validate_rec_autoclose_trailer_gate.py). Independently of trailer well-formedness, a merge whose
+      diff is confined to `docs/plans/` (or is empty/unresolvable) is REFUSED by the merge-leg gate
+      (scripts/ops_portal/trailer_closure_gate.py::merge_leg_refuses) -- every named rec is left OPEN,
+      not closed. FALLBACK IS CONDITIONAL (Decision 201): `bin/venv-python -m scripts.ops_data_portal
+      --update-rec rec-NNNN --status closed --resolution "..."` (Decision 70) is sanctioned ONLY after
+      a transport failure or a MERGE-LEG refusal above -- both leave a rec open for a reason
+      `update_rec`'s own gates re-check on the manual route too (assert_closure_obligation re-arms
+      unconditionally; assert_acceptance_verdict re-arms only when a verdict record is supplied, which
+      the manual route never does). It is FORBIDDEN after an acceptance-verdict refusal
+      (`trailer_acceptance_gate` below): that rec's oracle did not hold, and the manual command would
+      close it around the gate with no record supplied, defeating the very check that refused it. The
+      only sanctioned route for that case is the printed `close_proposed` command from the
+      trailer-closure job's log.
+  after: |
+    resolves_trailer: >-
+      When a plan's `bundled_recommendations` list is non-empty, the squash-merge commit body carries "Resolves:
+      rec-NNNN[, rec-MMMM]". It triggers `.github/workflows/ci.yml`'s trailer-census / trailer-acceptance-evaluate /
+      trailer-closure jobs (Decision 201), which close each named rec via the ops portal. CARRIER (rec-3901): the trailer
+      belongs only on the IMPLEMENTATION merge -- the one whose diff carries the code the plan's recs claim is resolved; a
+      plan-only merge carries no trailer. PLACEMENT (rec-2922): the trailer must sit in a block whose every line is
+      `Key: value`-shaped (never mid-paragraph), and it may precede the mandated `Co-Authored-By:` / `Claude-Session:`
+      footer; the space after the colon is REQUIRED (`Resolves:rec-NNNN` does not parse). Both rules are enforced by
+      `validate_rec_autoclose_trailer_gate`. TRANSPORT (rec-2733, rec-3856, rec-4244): GitHub's default squash body is the
+      branch's commit messages, not the PR body, so the implementation puts the trailer in a commit message on the branch
+      (`validate_merge_step` fails a PR declaring a plan with bundled recs unless its branch commits' trailers name exactly
+      those recs), and `merge_pull_request` is passed an explicit `commit_message` carrying it and the `expectedHeadSha`
+      that `scripts.session.merge_step premerge` checked. premerge checks that the message parses to the plan's recs, that
+      each approved-text block still anchors exactly once on main, and previews each rec's acceptance at the PR head
+      (Decision 201's census and sandboxed probe; it writes nothing, and a red line blocks the merge); after the merge,
+      `scripts.session.merge_step readback` confirms the trailer in the merge commit against the plan as merged. A merge
+      whose diff is confined to `docs/plans/` (or is empty/unresolvable) is REFUSED by the merge-leg gate
+      (scripts/ops_portal/trailer_closure_gate.py::merge_leg_refuses) and every named rec stays OPEN. FALLBACK IS
+      CONDITIONAL (Decision 201): `bin/venv-python -m scripts.ops_data_portal --update-rec rec-NNNN --status closed
+      --resolution "..."` is sanctioned ONLY after a transport failure or a merge-leg refusal; it supplies no verdict
+      record. A trailer that readback finds missing goes to
+      `scripts.session.merge_step recover` instead: at the merge sha it runs the census and the sandboxed evaluate and
+      closes only that plan's missing recs, only with a verdict record; a junit-routed rec it never re-executes (Decision
+      201 source_admission) and leaves open for the operator's decision. After an acceptance-verdict refusal (`trailer_acceptance_gate` below) any manual close is FORBIDDEN; the route is a
+      fix-forward PR whose trailer names the rec or, when the acceptance itself is wrong or out of grammar, strengthening
+      it with `update_rec` (never weakening it, Decision 181 clause 1; a weakening needs the operator's word, Decision
+      235), confirming it holds at the merge sha with `scripts.rec_trailer_acceptance` census and evaluate, then
+      re-running the merge commit's ci.yml push run (or `recover`, for a rec it handled) so the gate re-decides
+      (rec-4443).
+
+    approved_text_binding: >-
+      Operator-approved exact text for a plan lives in `docs/plans/approved/<slug>.yaml` (schema, placeholders and
+      normalisation: scripts/roadmap/approved_text.py). Each block quotes the unique existing text it replaces (`before`)
+      and its approved replacement (`after`); a placeholder (a number or a date) is the only allowed variance and must be
+      filled. `validate_merge_step` reads the sidecar from the diff base, fails a PR that declares the plan while adding,
+      changing or deleting it, and fails when any bound file's words at HEAD differ from its base words with the blocks
+      applied (whitespace and line wrapping ignored; a YAML file must still parse). `scripts.roadmap.approved_text record`
+      prints the digest the operator approves; the approving message id stays outside the repository. That the committed
+      sidecar is the text the operator approved is procedural (the digest is compared outside the repository); rec-4769
+      owns that residual (Decision 181 clause 2).
+
+    merge_step_coverage: >-
+      Decision 181 clause 2 coverage: for the plan whose `implementation_declared` flips in a PR, the branch-commit trailer
+      and the approved-text binding are mechanical (`validate_merge_step`, PR fast tier). The explicit commit_message and
+      expectedHeadSha, premerge and readback are procedural (push_pr_ci_merge_flow and implement skill Commit Flow step 4,
+      for every agent that merges, /overseer included), and a trailer on a PR that declares no plan (red-main-recovery
+      fast_lane_repair, a remediation evidence PR) has no mechanical leg. recover runs the census,
+      the sandboxed evaluate and the close in one operator session (outside Decision 143's CI credential split) and has no
+      verdict-bound route for a junit-routed rec. These residuals are owned by rec-4755 (a merge-time gate on
+      merge_pull_request, which prevents the lost trailer recover handles).
+- id: recommendation-relevance-1
+  file: docs/contracts/recommendation-relevance.yaml
+  before: |2-
+      class: D
+      contract_version: 1
+      status: active
+  after: |2-
+      class: D
+      contract_version: 2
+      status: active
+- id: recommendation-relevance-2
+  file: docs/contracts/recommendation-relevance.yaml
+  before: |-
+    amendment_log:
+      - date: "2026-10-10"
+  after: |-
+    amendment_log:
+      - {date: "{{DATE}}", semantic_break: true, change_class: field_add, summary: "PLAN-merge-step-checks (rec-4592, rec-2437): added implement_gate (the /implement re-check never closes a bundled rec) and scoped deterministic_auto_close to the post-merge venue; close_proposed.verdicts lists satisfied for the semantic path. Narrows Decision 103 permissive may-auto-close at one venue; no verdict changed. contract_version 1 -> 2."}
+      - date: "2026-10-10"
+- id: recommendation-relevance-3
+  file: docs/contracts/recommendation-relevance.yaml
+  before: |2-
+          Auto-closes via update_rec(status=closed, resolution=<proof>). Decision 70 lifecycle.
+        proof_required: true
+  after: |2-
+          Auto-closes via update_rec(status=closed, resolution=<proof>). Decision 70 lifecycle.
+          Post-merge venue only (T3.9); never at /implement time (implement_gate below).
+        proof_required: true
+- id: recommendation-relevance-4
+  file: docs/contracts/recommendation-relevance.yaml
+  before: |2-
+        verdicts:
+          - superseded
+  after: |2-
+        verdicts:
+          - satisfied
+          - superseded
+- id: recommendation-relevance-5
+  file: docs/contracts/recommendation-relevance.yaml
+  before: |2-
+        condition: >-
+          Semantic signal or deterministic non-satisfaction verdict.
+          Emits a printed close_proposed command (--update-rec ... --status closed).
+  after: |2-
+        condition: >-
+          Semantic signal (including a semantic satisfied, e.g. commit correlation) or deterministic
+          non-satisfaction verdict.
+          Emits a printed close_proposed command (--update-rec ... --status closed).
+- id: recommendation-relevance-6
+  file: docs/contracts/recommendation-relevance.yaml
+  before: |2-
+          Surfaced for operator review; no action is taken automatically.
+    signal_definitions:
+  after: |2-
+          Surfaced for operator review; no action is taken automatically.
+    implement_gate: >-
+      /implement Workflow Step 3 (`bin/venv-python -m scripts.rec_relevance --implement-recheck`) runs the acceptance
+      probe on each bundled rec but never closes one (rec-4592): a probe that passes on the implementing tree does not
+      prove the work merged (a non-discriminating probe, a drifted premise, or a resumed run's own edits all pass). A
+      satisfied verdict is reported and the rec stays bundled; the Resolves trailer closes it after merge through
+      Decision 201's gate. Every verdict other than relevant, unknown or satisfied prints the close_proposed command
+      (deterministic=False).
+    signal_definitions:
+- id: recommendation-relevance-7
+  file: docs/contracts/recommendation-relevance.yaml
+  before: |2-
+      - "Decision 70: verdict and lifecycle status are orthogonal; no new status enum value."
+      - "CD.36: deterministic satisfied auto-closes with proof; all else is close_proposed."
+  after: |2-
+      - "Decision 70: verdict and lifecycle status are orthogonal; no new status enum value."
+      - "CD.36: deterministic satisfied auto-closes with proof (post-merge venue; never at /implement, see implement_gate); all else is close_proposed."
+- id: decisions-1
+  file: docs/DECISIONS.md
+  before: |
+    > `.claude/commands/implement.md`) to route through the printed close_proposed command instead.
+  after: |
+    > `.claude/commands/implement.md`) to route through the printed close_proposed command instead.
+
+    > **Update ({{DATE}}):** PLAN-merge-step-checks (rec-4443): no job prints a close_proposed command.
+    > A Decision 201 refusal takes the route in `docs/contracts/git-ops.yaml` `resolves_trailer`; a rec this
+    > decision's gate refuses stays open for the operator (rec-4088). No rule of this decision changes.

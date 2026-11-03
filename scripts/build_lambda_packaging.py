@@ -9,6 +9,7 @@ scripts/build_lambda.py for the CLI facade that re-exports this module's public 
 symbols.
 """
 
+import csv
 import gzip
 import os
 import shutil
@@ -17,7 +18,7 @@ import sys
 import tempfile
 import urllib.request
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from scripts.build_lambda_config import (
     _EXT_FETCH_HEADERS,
@@ -137,6 +138,43 @@ def build_ducklake_function_package(temp_dir: Path, slug: str, zip_name: str) ->
     return _zip_staged_dir(app_dir, OUTPUT_DIR / zip_name)
 
 
+def _is_console_script_row(record_path: str) -> bool:
+    """A RECORD path pip wrote for a wrapper in its --target scripts dir: one or more '..' parts, then bin/<name>."""
+    parts = PurePosixPath(record_path).parts
+    leading = 0
+    while leading < len(parts) and parts[leading] == "..":
+        leading += 1
+    return leading > 0 and len(parts) - leading == 2 and parts[leading] == "bin"
+
+
+def _prune_console_scripts(site_packages: Path) -> list[str]:
+    """Remove pip's console-script wrappers and the RECORD rows naming them (rec-4189).
+
+    pip writes each wrapper's shebang as the building interpreter's sys.executable, so runners with
+    different Python patch versions built different layer bytes and the push-path byte-identity
+    assert failed closed. In a layer the wrappers are dead: site-packages/bin is off PATH and the
+    shebang names an interpreter that does not exist on Lambda. Retained RECORD lines keep their bytes.
+    """
+    pruned: list[str] = []
+    for record in sorted(site_packages.glob("*.dist-info/RECORD")):
+        lines = record.read_bytes().splitlines(keepends=True)
+        kept = []
+        for line in lines:
+            row = next(csv.reader([line.decode("utf-8")]), [])
+            if row and _is_console_script_row(row[0]):
+                name = PurePosixPath(row[0]).name
+                (site_packages / "bin" / name).unlink(missing_ok=True)
+                pruned.append(name)
+            else:
+                kept.append(line)
+        if len(kept) != len(lines):
+            record.write_bytes(b"".join(kept))
+    scripts_dir = site_packages / "bin"
+    if scripts_dir.is_dir() and not any(scripts_dir.iterdir()):
+        scripts_dir.rmdir()
+    return sorted(pruned)
+
+
 def build_ducklake_deps_layer(temp_dir: Path) -> Path:
     """Create ducklake-deps-layer.zip (duckdb pinned via config/lambda/ducklake/version.yaml
     + psycopg2-binary + python-ulid + pyyaml)."""
@@ -176,6 +214,10 @@ def build_ducklake_deps_layer(temp_dir: Path) -> Path:
     if pip_result.returncode != 0:
         print(f"ERROR: DuckLake deps installation failed (exit {pip_result.returncode})")
         sys.exit(1)
+
+    pruned = _prune_console_scripts(site_packages)
+    if pruned:
+        print(f"  Pruned console-script wrapper(s) that embed the build interpreter path: {', '.join(pruned)}")
 
     # Do NOT strip *.dist-info: duckdb>=1.3 reads its own version via importlib.metadata at import
     # time (duckdb/_version.py -> importlib.metadata.version("duckdb")), which needs the dist-info

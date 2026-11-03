@@ -1,8 +1,11 @@
 """Pure builders for telemetry_transcripts rows.
 
 Content is scrubbed BEFORE content_sha256 and content_bytes; an empty payload yields no row; image/binary
-blocks are replaced by a {type, media_type, sha256, bytes} stub; a tool_result is the full sidecar content when
-it resolves, else the in-transcript preview with content_truncated true. Attachments emit no rows in 3a.
+blocks are replaced by a {type, media_type, sha256, bytes} stub. A tool_result row holds what the model saw (the
+in-transcript text). A persisted output (a Bash persistedOutputPath or an MCP-overflow message naming a saved file)
+adds ONE tool_output row holding the full sidecar, or, above the cap, ONE omission row carrying the raw bytes'
+identity and no payload. content_truncated is a defect detector no path sets. Attachments emit no transcript rows in
+v3 (attachment-derived system transcripts are deferred: no consumer).
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from datetime import datetime
 from typing import Any
 
 from src.turn_capture.cursor import CaptureCursor
-from src.turn_capture.refs import transcript_ref, turn_entity_ref
+from src.turn_capture.refs import full_output_ref, transcript_ref, turn_entity_ref
 from src.turn_capture.scrub import scrub_text
 from src.turn_capture.streams import (
     HARNESS_DENIAL_PREFIXES,
@@ -28,6 +31,7 @@ from src.turn_capture.streams import (
     Result,
     block_base,
     emitting_streams,
+    is_api_error,
 )
 from src.turn_capture.transcript import TranscriptTree
 
@@ -47,6 +51,7 @@ TRANSCRIPT_COLUMNS = (
     "origin",
     "content",
     "content_uri",
+    "content_omitted_reason",
     "content_sha256",
     "content_bytes",
     "content_truncated",
@@ -63,26 +68,110 @@ class Ctx:
     parser_version: int
     started: datetime
     billing_shape: str
+    full_output_cap_bytes: int
+
+
+@dataclass(frozen=True)
+class Digest:
+    """The RAW identity of a persisted output: byte length, sha256 and line count, streamed, never decoded."""
+
+    size: int
+    sha256: str
+    lines: int
+
+
+@dataclass(frozen=True)
+class Output:
+    """A readable persisted output: its raw identity plus the storable scrubbed text (None when omitted as oversize)."""
+
+    digest: Digest
+    text: str | None
+
+
+def line_count(lf_bytes: int, size: int, last_byte_is_lf: bool) -> int:
+    return lf_bytes + (1 if size > 0 and not last_byte_is_lf else 0)
 
 
 class Sidecars:
-    """Sidecar reads under the cursor's pins: a present pin must still match, an absent pin is honoured."""
+    """Sidecar reads under the cursor's pins: a present pin must still match, an absent pin is honoured.
+
+    output() resolves each sidecar once per pass (the digest is cached), so however many builders read it, it is
+    streamed or read once. A sidecar whose raw size exceeds the cap is only ever streamed in chunks.
+    """
 
     def __init__(self, tree: TranscriptTree, cursor: CaptureCursor | None) -> None:
         self._tree = tree
         self._cursor = cursor
         self.used: dict[str, str | None] = {}
+        self.reads = 0
+        self._outputs: dict[str, Output | None] = {}
 
-    def read(self, name: str) -> bytes | None:
-        pins = self._cursor.sidecars if self._cursor is not None else {}
-        if name in pins and pins[name] is None:
-            return None
-        data = self._tree.sidecar(name)
-        sha = hashlib.sha256(data).hexdigest() if data is not None else None
+    def output(self, name: str, cap: int) -> Output | None:
+        if name not in self._outputs:
+            self._outputs[name] = self._load(name, cap)
+        return self._outputs[name]
+
+    def _pin(self, name: str, sha: str | None) -> None:
         if self._cursor is not None:
             self._cursor.check_sidecar(name, sha)
         self.used[name] = sha
-        return data
+
+    def _load(self, name: str, cap: int) -> Output | None:
+        pins = self._cursor.sidecars if self._cursor is not None else {}
+        if name in pins and pins[name] is None:
+            return None
+        size = self._tree.sidecar_size(name)
+        if size is None:
+            self._pin(name, None)
+            return None
+        if size > cap:
+            hasher, total, lf, last = hashlib.sha256(), 0, 0, b""
+            self.reads += 1
+            for chunk in self._tree.sidecar_chunks(name):
+                hasher.update(chunk)
+                total += len(chunk)
+                lf += chunk.count(b"\n")
+                last = chunk[-1:]
+            sha = hasher.hexdigest()
+            self._pin(name, sha)
+            return Output(Digest(total, sha, line_count(lf, total, last == b"\n")), None)
+        self.reads += 1
+        data = self._tree.sidecar(name)
+        if data is None:
+            self._pin(name, None)
+            return None
+        sha = hashlib.sha256(data).hexdigest()
+        self._pin(name, sha)
+        digest = Digest(len(data), sha, line_count(data.count(b"\n"), len(data), data.endswith(b"\n")))
+        text = clean(data.decode("utf-8", "replace"))
+        return Output(digest, None if len(text.encode("utf-8")) > cap else text)
+
+
+@dataclass(frozen=True)
+class Persisted:
+    """A tool result whose full output the harness wrote to a sidecar; mcp is the overflow-message form."""
+
+    name: str
+    mcp: bool
+
+
+_SAVED_RE = re.compile(r"Output has been saved to (\S+)")
+
+
+def _basename(path: str) -> str:
+    return re.split(r"[\\/]", path)[-1]
+
+
+def persisted_output(res: Result) -> Persisted | None:
+    """The sidecar a tool result names: a Bash persistedOutputPath, or an MCP-overflow string naming a saved file."""
+    info = res.use_result
+    if isinstance(info, dict):
+        path = info.get("persistedOutputPath")
+        name = _basename(path) if isinstance(path, str) else ""
+        return Persisted(name, False) if name else None
+    if isinstance(info, str) and (match := _SAVED_RE.search(info)) and (name := _basename(match.group(1))):
+        return Persisted(name, True)
+    return None
 
 
 def canonical_json(value: Any) -> str:
@@ -141,12 +230,15 @@ def _row(
     obs_ref: str,
     purpose: str,
     origin: str,
-    text: str,
+    text: str | None,
     model: Any,
-    truncated: bool = False,
+    *,
+    ref: str | None = None,
+    cleaned: bool = False,
+    omitted: Digest | None = None,
 ) -> dict[str, Any]:
-    payload = clean(text)
-    ref = transcript_ref(rec.uuid, block)
+    """One transcript row. *text* None with *omitted* is a typed omission: raw identity, no payload."""
+    ref = ref or transcript_ref(rec.uuid, block)
     row: dict[str, Any] = dict.fromkeys(TRANSCRIPT_COLUMNS)
     row.update(
         event_kind="point",
@@ -162,12 +254,19 @@ def _row(
         parser_version=ctx.parser_version,
         purpose=purpose,
         origin=origin,
-        content=payload,
-        content_sha256=hashlib.sha256(payload.encode("utf-8")).hexdigest(),
-        content_bytes=len(payload.encode("utf-8")),
-        content_truncated=truncated,
+        content_truncated=False,
         model=model if isinstance(model, str) else None,
     )
+    if omitted is not None:
+        row.update(content_omitted_reason="oversize", content_sha256=omitted.sha256, content_bytes=omitted.size)
+    else:
+        assert text is not None
+        payload = text if cleaned else clean(text)
+        row.update(
+            content=payload,
+            content_sha256=hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            content_bytes=len(payload.encode("utf-8")),
+        )
     return {k: v for k, v in row.items() if v is not None}
 
 
@@ -219,25 +318,35 @@ def _assistant(ctx: Ctx, rec: Rec, session_ref: str, diag: Counter[str]) -> list
     return rows
 
 
+def _full_output_row(ctx: Ctx, res: Result, session_ref: str, out: Output) -> dict[str, Any]:
+    ref = full_output_ref(res.rec.uuid, res.block)
+    omitted = out.digest if out.text is None else None
+    return _row(
+        ctx, res.rec, res.block, session_ref, res.tool_use_id, "tool_output", "tool", out.text, None,
+        ref=ref, cleaned=True, omitted=omitted,
+    )  # fmt: skip
+
+
 def _tool_result(ctx: Ctx, res: Result, session_ref: str, sidecars: Sidecars, diag: Counter[str]) -> list[dict[str, Any]]:
-    text = text_of(res.body.get("content"))
-    truncated = False
+    visible = text_of(res.body.get("content"))
     info = res.use_result
-    path = info.get("persistedOutputPath") if isinstance(info, dict) else None
-    name = re.split(r"[\\/]", path)[-1] if isinstance(path, str) else ""
-    if name:
-        data = sidecars.read(name)
-        if data is not None:
-            size = info.get("persistedOutputSize")
-            if type(size) is int and size != len(data):
-                diag["sidecar_size_mismatch"] += 1
-            text = data.decode("utf-8", "replace")
-        else:
-            truncated = True
-    if text == "":
-        return []
-    origin = "harness" if is_sentinel(text) else "tool"
-    return [_row(ctx, res.rec, res.block, session_ref, res.tool_use_id, "tool_result", origin, text, None, truncated)]
+    persisted = persisted_output(res)
+    denial = isinstance(res.rec.data.get("toolDenialKind"), str)
+    if isinstance(info, str) and persisted is None and not denial:
+        diag["unmatched_string_tool_use_result"] += 1
+    rows: list[dict[str, Any]] = []
+    if visible != "":
+        harness = denial or is_sentinel(visible) or (persisted is not None and persisted.mcp)
+        origin = "harness" if harness else "tool"
+        rows.append(_row(ctx, res.rec, res.block, session_ref, res.tool_use_id, "tool_result", origin, visible, None))
+    out = sidecars.output(persisted.name, ctx.full_output_cap_bytes) if persisted is not None else None
+    if out is not None:
+        size = info.get("persistedOutputSize") if isinstance(info, dict) else None
+        if type(size) is int and size != out.digest.size:
+            diag["sidecar_size_mismatch"] += 1
+        if out.text != "":
+            rows.append(_full_output_row(ctx, res, session_ref, out))
+    return rows
 
 
 def build_transcripts(parsed: ParsedTree, ctx: Ctx, sidecars: Sidecars, diag: Counter[str]) -> list[dict[str, Any]]:
@@ -248,11 +357,13 @@ def build_transcripts(parsed: ParsedTree, ctx: Ctx, sidecars: Sidecars, diag: Co
             tref = turn_entity_ref(sref, turn.prompt_id)
             for rec in turn.recs:
                 if rec.kind == "prompt":
-                    harness = rec.data.get("isMeta") is True
+                    harness = rec.data.get("isMeta") is True or is_sentinel(text_of(rec.data["message"]["content"]))
                     rows += _prompt_like(
                         ctx, rec, sref, tref, "system" if harness else "prompt", "harness" if harness else "human"
                     )
                 elif rec.kind == "companion":
+                    rows += _prompt_like(ctx, rec, sref, tref, "system", "harness")
+                elif rec.kind == "assistant" and is_api_error(rec.data):
                     rows += _prompt_like(ctx, rec, sref, tref, "system", "harness")
                 elif rec.kind == "assistant":
                     rows += _assistant(ctx, rec, sref, diag)

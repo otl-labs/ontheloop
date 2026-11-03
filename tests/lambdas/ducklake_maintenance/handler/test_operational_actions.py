@@ -77,6 +77,7 @@ def test_catalog_reinit_drops_then_reattaches():
         patch.object(h, "_drop_meta_schema", return_value=True) as drop_mock,
         patch.object(h.rt, "fetch_dsn", return_value=_FULL_DSN),
         patch.object(h.rt, "open_connection", return_value=con) as open_mock,
+        patch.object(h.index_actions, "ensure_index_for", return_value={"valid_after": True}) as ensure_mock,
     ):
         result = h.action_catalog_reinit(
             {
@@ -89,6 +90,8 @@ def test_catalog_reinit_drops_then_reattaches():
         )
     assert result["ok"] is True and result["reinitialized"] is True
     drop_mock.assert_called_once_with("ducklake_ops", recreate=True)
+    ensure_mock.assert_called_once_with("ducklake_ops")
+    assert result["stats_index"] == {"valid_after": True}
     assert open_mock.call_args.kwargs["data_path"] == "s3://b/ducklake/"
     assert open_mock.call_args.kwargs["meta_schema"] == "ducklake_ops"
     con.close.assert_called_once()
@@ -312,6 +315,66 @@ def test_action_merge_ops_emits_metrics():
     assert "MergeOpsTablesCount" in metric_names
 
 
+_TELEMETRY_DISCOVERED = ["telemetry_sessions", "telemetry_agents"]
+
+
+def _telemetry_semantics() -> dict:
+    return {
+        "ops_tables": {},
+        "maintenance_policy": {"append_only": {"merge_ops": {"apply": True, "reason": "standard"}}},
+    }
+
+
+def _run_merge_ops(meta_schema: str):
+    con = MagicMock()
+    con.execute.return_value.fetchall.return_value = [(t,) for t in _TELEMETRY_DISCOVERED]
+    with (
+        patch.object(h.rt, "fetch_dsn", return_value=_FULL_DSN),
+        patch.object(h.rt, "open_connection", return_value=con),
+        patch.object(h.rt, "load_field_semantics", return_value=_merge_ops_semantics()),
+        patch.object(h.scope, "resolve_scope") as resolve,
+        patch.object(h.maint, "_count_files", return_value=3),
+        patch.object(h.maint, "merge_adjacent_files"),
+        patch.object(h, "_emit_maintenance_metric") as mock_emit,
+    ):
+        resolve.return_value = MagicMock(to_merge=list(_TELEMETRY_DISCOVERED), unclassified=[])
+        h.action_merge_ops({"data_path": "s3://b/ducklake-telemetry/", "meta_schema": meta_schema}, None)
+    return mock_emit
+
+
+def test_merge_ops_on_a_telemetry_catalog_dimensions_every_metric():
+    mock_emit = _run_merge_ops("ducklake_telemetry")
+    names = {c.args[0] for c in mock_emit.call_args_list}
+    assert names and names <= h.CATALOG_METRICS
+    assert {"MergeOpsDurationMs", "MergeOpsFilesAfterTotal", "MergeOpsTablesCount", "MergeOpsPassFailed"} <= names
+    assert all(c.kwargs.get("dimensions") == {"MetaSchema": "ducklake_telemetry"} for c in mock_emit.call_args_list)
+
+
+def test_merge_ops_on_ops_calls_the_rebound_emitter_unchanged():
+    mock_emit = _run_merge_ops("ducklake_ops")
+    names = {c.args[0] for c in mock_emit.call_args_list}
+    assert {"MergeOpsFilesBeforeTotal", "MergeOpsUnclassifiedTables"} <= names
+    assert all("dimensions" not in c.kwargs for c in mock_emit.call_args_list)
+
+
+def test_breaker_trip_is_dimensioned_by_catalog():
+    err = h.maint.DuckLakeMaintenanceError("tripped")
+    for event, dims in (
+        ({"action": "merge_ops", "meta_schema": "ducklake_telemetry"}, {"MetaSchema": "ducklake_telemetry"}),
+        ({"action": "merge_ops", "meta_schema": "ducklake_ops"}, None),
+        ({"action": "merge_ops"}, None),
+        ({"action": "merge_ops", "meta_schema": "bad-name;"}, None),
+    ):
+        with (
+            patch.dict(h._ACTIONS, {"merge_ops": MagicMock(side_effect=err)}),
+            patch.object(h, "_emit_maintenance_metric") as mock_emit,
+        ):
+            assert h.handler(event)["statusCode"] == 500
+        (call,) = mock_emit.call_args_list
+        assert call.args == ("MaintenanceBreakerTrip", 1.0)
+        assert call.kwargs.get("dimensions") == dims
+
+
 def test_action_merge_ops_handler_receives_no_connection():
     """Handler dispatches merge_ops with con=None -- the action opens its own connection."""
     action_mock = MagicMock(
@@ -423,62 +486,6 @@ def test_handler_merge_ops_listed_in_actions():
     """merge_ops must appear in the actions list returned on unknown action."""
     body = _response_body(h.handler({"action": "bad"}))
     assert "merge_ops" in body["actions"]
-
-
-# ---------------------------------------------------------------------------
-# catalog_stats (D3a / neon-egress measurement obligation)
-# ---------------------------------------------------------------------------
-
-
-def test_action_catalog_stats_success():
-    """catalog_stats dispatches to maint.catalog_stats with the event meta_schema; emits the size metric."""
-    stats = {
-        "ok": True,
-        "meta_schema": "ducklake_ops",
-        "catalog_metadata_bytes": 7_100_000,
-        "snapshot_rows_est": 50,
-        "data_file_rows_est": 800,
-        "file_column_stats_rows_est": 12000,
-        "metadata_table_count": 3,
-        "metadata_tables": [],
-        "per_ops_table": [{"table": "ops_recommendations_current", "data_file_count": 400}],
-        "per_ops_table_note": "",
-    }
-    with (
-        patch.object(h.rt, "fetch_dsn", return_value=_FULL_DSN),
-        patch.object(h.maint, "catalog_stats", return_value=stats) as mock_stats,
-        patch.object(h, "_emit_maintenance_metric") as mock_emit,
-    ):
-        result = h.action_catalog_stats({"meta_schema": "ducklake_ops"}, None)
-
-    assert result["catalog_metadata_bytes"] == 7_100_000
-    assert mock_stats.call_args.kwargs["meta_schema"] == "ducklake_ops"
-    metric_names = [c.args[0] for c in mock_emit.call_args_list]
-    assert "CatalogMetadataBytes" in metric_names
-    assert "CatalogFileColumnStatsRows" in metric_names
-
-
-def test_action_catalog_stats_requires_meta_schema():
-    """No-arg invoke is refused -- catalog_stats needs an explicit meta_schema (no production default)."""
-    with pytest.raises(DuckLakeRuntimeError, match="meta_schema"):
-        h.action_catalog_stats({}, None)
-
-
-def test_action_catalog_stats_is_connectionless_and_attach_free():
-    """catalog_stats is metadata-only (ATTACH-free) -- the handler dispatches it with con=None."""
-    with (
-        patch.object(h.rt, "fetch_dsn", return_value=_FULL_DSN),
-        patch.object(h.maint, "catalog_stats", return_value={"ok": True, "catalog_metadata_bytes": 0}),
-        patch.object(h, "_emit_maintenance_metric"),
-    ):
-        r = h.handler({"action": "catalog_stats", "meta_schema": "ducklake_ops"})
-    assert r["statusCode"] == 200
-
-
-def test_handler_catalog_stats_listed_in_actions():
-    """catalog_stats must appear in the actions list returned on an unknown action."""
-    body = _response_body(h.handler({"action": "bad"}))
-    assert "catalog_stats" in body["actions"]
 
 
 # ---------------------------------------------------------------------------

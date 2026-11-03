@@ -13,6 +13,7 @@ deviation trigger branch (b)).
 from __future__ import annotations
 
 import re
+import typing
 from pathlib import Path
 from typing import Any
 
@@ -20,11 +21,13 @@ import yaml
 
 from scripts.checks.verification import validate_scope_boundary as _check_module
 from scripts.decisions_md import iter_decision_sections
+from scripts.roadmap.plan_document import WeakeningDisposition
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = REPO_ROOT / "docs" / "contracts" / "implement-scope-boundary.yaml"
 AGENTS_PATH = REPO_ROOT / "AGENTS.md"
 SKILL_PATH = REPO_ROOT / ".claude" / "skills" / "implement" / "SKILL.md"
+CODE_REVIEW_SKILL_PATH = REPO_ROOT / ".claude" / "skills" / "code-review" / "SKILL.md"
 FILE_ROUTER_PATH = REPO_ROOT / "docs" / "contracts" / "file-router.yaml"
 DECISIONS_PATH = REPO_ROOT / "docs" / "DECISIONS.md"
 
@@ -229,6 +232,27 @@ class TestProseSurfacesPointAtContract:
         for token in ("file_rec", "ops_data_portal", "--file-rec"):
             assert token not in section
 
+    def test_code_review_skill_requires_weakening_dispositions(self) -> None:
+        """PLAN-test-weakening-surfacing: the Testing section's Weakening candidates bullet and
+        the Output Format's Weakening Dispositions section, asserted on the bullet alone (since
+        "High" already appears elsewhere in the Testing section)."""
+        text = CODE_REVIEW_SKILL_PATH.read_text(encoding="utf-8")
+        i = text.find("### 3. Testing")
+        assert i >= 0
+        section = re.split(r"\n#{2,3} ", text[i:], maxsplit=1)[0]
+        bullet_match = re.search(r"- \*\*Weakening candidates\*\*.*?(?=\n- |\Z)", section, re.DOTALL)
+        assert bullet_match, "the Weakening candidates bullet is missing from the Testing section"
+        bullet = bullet_match.group(0)
+        assert "scripts.checks.verification.validate_weakening_candidates" in bullet
+        assert "review_dispositions" in bullet
+        assert "High" in bullet
+
+        output_format_idx = text.find("### Test Completeness")
+        assert output_format_idx >= 0
+        tail = text[output_format_idx:]
+        assert "### Weakening Dispositions" in tail
+        assert "weakening_dispositions" in tail
+
 
 class TestFileRouterRegistration:
     def test_route_topic_equals_subject(self) -> None:
@@ -286,3 +310,117 @@ class TestTriSurfaceStopDispositionIdentity:
 
     def test_check_module_failure_guidance_carries_same_disposition(self) -> None:
         assert _check_module._STOP_DISPOSITION == _STOP_DISPOSITION
+
+
+class TestWeakeningSurfacingContract:
+    """PLAN-test-weakening-surfacing (rec-3357, Decision 181 point 2): the two new MECHANICAL
+    rows, the narrowed rec-4413 residual, review_dispositions, the plan-schema Literal pin, and
+    permitted_field_edits."""
+
+    def test_added_skip_row_is_mechanical(self) -> None:
+        doc = _load_contract()
+        rows = doc["invariants"]["content"]["enforcement_coverage"]
+        row = next(r for r in rows if r.get("enforced_by") == "validate_test_skip_citations")
+        assert row["status"] == "mechanical"
+
+    def test_recorded_disposition_row_is_mechanical(self) -> None:
+        doc = _load_contract()
+        rows = doc["invariants"]["content"]["enforcement_coverage"]
+        row = next(r for r in rows if r.get("enforced_by") == "validate_weakening_dispositions")
+        assert row["status"] == "mechanical"
+
+    def test_single_residual_row_owned_by_rec_4413(self) -> None:
+        doc = _load_contract()
+        rows = doc["invariants"]["content"]["enforcement_coverage"]
+        residual_rows = [r for r in rows if r.get("status") != "mechanical"]
+        assert len(residual_rows) == 1
+        residual = residual_rows[0]
+        assert residual["residual_owner"] == "rec-4413"
+        note = residual["note"]
+        assert "DOMINANT" in note
+        assert "validate_weakening_candidates" in note
+        assert "validate_weakening_dispositions" in note
+        assert "test-oracle" in note
+        assert "review_dispositions" in note
+
+    def test_review_dispositions_has_exactly_six_keys_with_cite_forms(self) -> None:
+        doc = _load_contract()
+        review_dispositions = doc["invariants"]["content"]["review_dispositions"]
+        assert set(review_dispositions) == {
+            "refactor",
+            "planned-change",
+            "retirement",
+            "growth-safe-pin",
+            "owned-skip",
+            "weakening",
+        }
+        for key in ("refactor", "planned-change", "retirement", "growth-safe-pin", "owned-skip"):
+            assert "cite" in review_dispositions[key].lower()
+
+    def test_permitted_field_edits_includes_weakening_dispositions(self) -> None:
+        doc = _load_contract()
+        row = doc["sanction_rows"]["implementing_plan_bookkeeping"]
+        assert "weakening_dispositions" in row["permitted_field_edits"]
+
+    def test_plan_schema_literal_equals_contract_keys(self) -> None:
+        doc = _load_contract()
+        contract_keys = set(doc["invariants"]["content"]["review_dispositions"])
+        annotation = WeakeningDisposition.model_fields["disposition"].annotation
+        literal_values = set(typing.get_args(annotation))
+        assert literal_values == contract_keys
+
+    def test_ineligible_cites_rec_4413_and_still_rec_3357(self) -> None:
+        doc = _load_contract()
+        ineligible = doc["sanction_row_eligibility"]["ineligible"]
+        assert "rec-4413" in ineligible
+        assert "rec-3357" in ineligible
+
+    def test_exactly_one_amendment_log_entry_names_this_plan(self) -> None:
+        doc = _load_contract()
+        entries = [e for e in doc["amendment_log"] if "test-weakening-surfacing" in (e.get("summary") or "")]
+        assert len(entries) == 1
+
+
+class TestPlanDefectLoop:
+    """PLAN-plan-defect-loop: the escalation, amendment procedure and plan-time declaration clauses."""
+
+    def test_escalation_names_the_report_fields_and_routing(self) -> None:
+        escalation = _load_contract()["deviation_trigger"]["escalation"]
+        for field in ("plan, branch, failing_check", "evidence", "defect_class", "proposed_amendment"):
+            assert field in escalation
+        for defect_class in ("scope_companion", "vp_text", "approved_text", "contract", "repeated_failure"):
+            assert defect_class in escalation
+        assert "never build to planner" in escalation
+        assert "Decision 229 cl.2" in escalation
+
+    def test_escalation_keeps_the_always_ask_exceptions(self) -> None:
+        escalation = _load_contract()["deviation_trigger"]["escalation"]
+        assert "standing direction" in escalation
+        assert (
+            "an approved_text or contract fix, or any loosened assertion, still needs the human's own approval" in escalation
+        )
+        assert "nothing is loosened to obtain green" in escalation
+
+    def test_amendment_procedure_names_the_prohibited_field_edits_case_and_commit_subject(self) -> None:
+        procedure = _load_contract()["sanction_rows"]["implementing_plan_bookkeeping"]["amendment_procedure"]
+        assert "prohibited_field_edits" in procedure
+        assert "plan({slug}): scope amendment -- <reason>" in procedure
+
+    def test_hand_written_test_clause_records_the_two_plan_time_declarations(self) -> None:
+        ineligible = _load_contract()["sanction_row_eligibility"]["ineligible"]
+        assert "tests/test_session_preflight_decomposition.py's frozen_report_key set" in ineligible
+        assert "config/structural_size_budgets.yaml" in ineligible
+        assert "declared at plan time, never sanctioned" in ineligible
+
+    def test_one_amendment_log_entry_names_this_plan(self) -> None:
+        entries = [e for e in _load_contract()["amendment_log"] if "PLAN-plan-defect-loop" in (e.get("summary") or "")]
+        assert len(entries) == 1
+        assert entries[0]["date"] == "2026-10-31"
+
+    def test_contract_stays_within_the_effective_line_cap(self) -> None:
+        lines = [
+            ln
+            for ln in CONTRACT_PATH.read_text(encoding="utf-8").splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")
+        ]
+        assert len(lines) <= 500

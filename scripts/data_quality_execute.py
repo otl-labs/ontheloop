@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from scripts.data_quality_compile import build_clause8_checks, to_ducklake_sql
+from scripts.data_quality_compile import build_clause8_checks
 from scripts.data_quality_models import _DQ_DIR, Check, CheckResult, RunResult
 from scripts.ops_portal.reader_transient import is_reader_unavailable as _is_reader_unavailable
 
@@ -50,53 +50,33 @@ def _verdict_for(check: Check, violation_count: int, duration: float) -> CheckRe
     )
 
 
-def _query_ops_rows(reader: Any, table: str, sql: str) -> list[dict]:
-    """Call the reader's raising _invoke surface and return the rows list."""
-    body = reader._invoke({"action": "query_ops", "table": table, "sql": sql, "params": []})
-    return list(body.get("rows", []))
-
-
 def _execute_check_ducklake(check: Check, reader: Any) -> CheckResult:
-    """Execute a single ops-table check against DuckLake via the closed reader. DuckDB dialect.
+    """Execute a single ops-table check through the closed reader's dq_check action (server-owned SQL, counts only).
 
-    `ulid_history_unique` runs entirely over the history table (its whole SQL uses `{tbl}`, resolved
-    here to the history table via read_ops_history's naming). Any OTHER check's SQL may additionally
-    reference `{hist}` for a genuine cross-table current-vs-history expression (e.g. a composite
-    history-uniqueness check, or a current-regressed-behind-history guard): `{hist}` is resolved
-    client-side to the physical history table name before the query reaches query_ops, while `{tbl}`
-    (if also present) is left for query_ops/query_current's own server-side current-table
-    substitution -- so a single query can reference both tables at once. A cross-table `relationships`
-    check cannot be expressed even with this and is SKIPPED on this backend (priority_queue FK is
-    dormant + unenforced).
+    A check with no kind (a cross-table `relationships` FK, dormant and unenforced) is SKIPPED. A response whose
+    check_version differs from this repository's is UNAVAILABLE ("deployed reader not at this code"), never a silent pass
+    and never a data FAIL; the persistent-unavailability alarm is T1.6 c5.
     """
+    from src.common.ducklake_dq_checks import check_version  # noqa: PLC0415
+
     start = time.time()
-    if check.test_type == "relationships":
+    if check.kind is None:
         return CheckResult(
             check=check,
             verdict="SKIP",
             detail="cross-table FK not run on ducklake backend (dormant/unenforced)",
             duration_seconds=0.0,
         )
-    table = check.table
-    is_history = check.test_type == "ulid_history_unique"
-    sql = to_ducklake_sql(check.sql, table, "agent_platform")
-    if "{hist}" in sql:
-        from src.common.ducklake_runtime import resolve_table_spec  # noqa: PLC0415
-
-        sql = sql.replace("{hist}", f"ops_catalog.{resolve_table_spec(table).history_table}")
     try:
-        if is_history:
-            from src.common.ducklake_runtime import resolve_table_spec  # noqa: PLC0415
-
-            hist = resolve_table_spec(table).history_table
-            rows = _query_ops_rows(reader, table, sql.replace("{tbl}", f"ops_catalog.{hist}"))
-        else:
-            rows = _query_ops_rows(reader, table, sql)
-        if rows is None:
+        body = reader.dq_check(check.kind, check.table, check.params)
+        if body.get("check_version") != check_version(check.kind):
             return CheckResult(
-                check=check, verdict="ERROR", detail="ducklake reader returned None", duration_seconds=time.time() - start
+                check=check,
+                verdict="UNAVAILABLE",
+                detail="deployed reader not at this code (check_version differs)",
+                duration_seconds=time.time() - start,
             )
-        violation_count = int(next(iter(rows[0].values()))) if rows else 0
+        violation_count = int(body["violation_count"])
     except Exception as exc:  # noqa: BLE001
         verdict = "UNAVAILABLE" if _is_reader_unavailable(exc) else "ERROR"
         return CheckResult(
@@ -106,15 +86,12 @@ def _execute_check_ducklake(check: Check, reader: Any) -> CheckResult:
 
 
 def apply_backend_routing(all_checks: list[Check], database: str, *, table_filter: str | None = None) -> list[Check]:
-    """Rewrite the ops-table checks for the DuckLake reader (sole backend, Decision 84 I-1).
+    """Append the CD.33 clause-8 checks and pin every ops-table check to the DuckLake reader (sole backend, Decision 84 I-1).
 
-    Translates each ops-table check's SQL to the DuckDB dialect over the `current` TABLE and appends
-    the CD.33 clause-8 checks. Shared by main() and the DQ scaffold route so both go through the
-    closed reader. Mutates and returns *all_checks*.
+    Shared by main() and the DQ scaffold route so both go through the closed reader. Mutates and returns *all_checks*.
     """
     for c in all_checks:
         if c.table in _OPS_TABLES:
-            c.sql = to_ducklake_sql(c.sql, c.table, database)
             c.backend = "ducklake"
     ops_spec_yaml = yaml.safe_load((_DQ_DIR / "ops.yaml").read_text(encoding="utf-8")) or {}
     all_checks.extend(build_clause8_checks(ops_spec_yaml, database, table_filter=table_filter))

@@ -38,6 +38,11 @@ def test_history_partition_is_calendar_day_triple():
     for table in schema.ops_table_names():
         if semantics["ops_tables"][table].get("write_mode") == "control":
             continue  # control-class tables (e.g. ops_entity_counters) have no history/current pair
+        if schema.is_event_table(table, semantics):
+            entry_partition = semantics["ops_tables"][table]["partition"]["history"]
+            column = semantics["ops_tables"][table]["partition_column"]
+            assert entry_partition == f"year({column}), month({column}), day({column})", f"{table}: {entry_partition}"
+            continue
         spec = schema.resolve_table_spec(table)
         assert spec.partition_history == _CALENDAR_TRIPLE, f"{table}: {spec.partition_history}"
 

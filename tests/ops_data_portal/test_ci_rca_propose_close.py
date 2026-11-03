@@ -23,6 +23,7 @@ duckdb = pytest.importorskip("duckdb")
 
 from scripts.ops_portal import ci_rca_schema as _ci_rca_schema_mod  # noqa: E402
 from tests.fixtures.ops_portal_records import VALID_FIELDS as _VALID_FIELDS  # noqa: E402
+from tests.fixtures.ops_rec_rows import reader_rec_row  # noqa: E402
 
 _CI_RCA_FIELDS = {
     **_VALID_FIELDS,
@@ -187,11 +188,7 @@ class TestProposeOrCloseRec:
         it silently, and performs no write."""
         import scripts.ops_data_portal as p
 
-        existing = {
-            "id": "rec-010",
-            "status": "open",
-            "context_v2_json": json.dumps({"escape_class": "no-edge"}),
-        }
+        existing = reader_rec_row(id="rec-010", context_v2_json=json.dumps({"escape_class": "no-edge"}))
         with (
             patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=existing),
             patch("scripts.ops_data_portal._ducklake_write") as mock_write,
@@ -391,13 +388,13 @@ class TestWarnModeRejectMarker:
             "rca_confidence": "undetermined",  # isolate the schema-deficiency stamp from bundle-absent
         }
         with (
-            patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-9101"}),
+            patch("scripts.ops_data_portal._ducklake_write", return_value={"key": "rec-9101"}) as mock_write,
             patch("scripts.ops_data_portal._sync_table"),
             patch("scripts.ops_data_portal.RECS_JSONL", recs_file),
         ):
             rec_id = p.file_rec(dict(_CI_RCA_FIELDS), context_v2_json=deficient_ctx)
         assert rec_id == "rec-9101"
-        entry = json.loads(recs_file.read_text(encoding="utf-8").splitlines()[0])
+        entry = mock_write.call_args.args[1]
         stored = json.loads(entry["context_v2_json"])
         # CIRCA-04: per-rule stamping -- a too-short why_chain entry stamps the specific
         # schema_why_chain_too_short tag, not the bare "schema_deficiency" bucket.

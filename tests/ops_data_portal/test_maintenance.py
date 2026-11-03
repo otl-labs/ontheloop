@@ -33,7 +33,7 @@ class TestEnqueueFindings:
             patch(
                 "scripts.ops_data_portal._ducklake_write",
                 side_effect=[{"key": "rec-801"}, {"key": "rec-802"}, {"key": "rec-803"}],
-            ),
+            ) as mock_write,
             patch("scripts.ops_data_portal._sync_table"),
             patch("scripts.ops_data_portal.RECS_JSONL", recs_file),
         ):
@@ -42,7 +42,7 @@ class TestEnqueueFindings:
             result = enqueue_findings(jsonl_file)
 
         assert result == {"enqueued": 3, "invalid": 0, "skipped": 0}
-        ids = [json.loads(line)["id"] for line in recs_file.read_text(encoding="utf-8").strip().splitlines()]
+        ids = [call.args[1]["id"] for call in mock_write.call_args_list]
         assert ids == ["rec-801", "rec-802", "rec-803"]
 
     def test_enqueue_findings_invalid_entries_counted_not_raised(self, tmp_path: Path) -> None:

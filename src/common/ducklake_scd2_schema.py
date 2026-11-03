@@ -1,5 +1,8 @@
 """SCD2 schema layer -- pure, I/O-free SQL-generation and validation (T2.19 / CD.33, Decision 81).
 
+Facade (Decision 124 / 128): the named-read registry lives in ducklake_named_reads and the write-verb registry in
+ducklake_write_verbs; both are re-exported here so `src.common.ducklake_scd2_schema.<name>` is unchanged.
+
 The seam between this module and ducklake_runtime is the pure/impure boundary:
   - ducklake_scd2_schema: WHAT the schema IS and how to render its SQL (I/O-free, DB-free).
   - ducklake_runtime: WHAT the schema DOES (connection, transaction, OCC, reads, metrics).
@@ -19,7 +22,15 @@ from typing import Any
 
 import yaml
 
+from src.common.ducklake_named_reads import (  # noqa: F401 -- facade re-exports
+    NAMED_READS,
+    NAMED_READS_VERSION,
+    NamedRead,
+    _params_schema,
+    describe_named_reads,
+)
 from src.common.ducklake_partition_spec import PartitionSpecError, resolve_partition_block
+from src.common.ducklake_write_verbs import VERB_REGISTRY, WriteVerb, describe_write_verbs  # noqa: F401 -- facade re-exports
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -167,18 +178,41 @@ class ScdTableSpec:
     entity_id_prefix: str | None = None  # canonical id shape <prefix>NNN (None = no canonical keyspace)
     id_keyspace: str = "caller"  # "writer" => file_ops allocates + write_ops advances the counter (Decision 84 I-2)
     write_mode: str = "scd2"  # "scd2" | "append_only"; append_only skips the current write-through projection
+    id_scheme: str = "serial"  # "serial" | "ulid": how a writer-keyspace id is minted (counter semantics, control_health)
 
 
 def _order_columns(fields: dict[str, Any], merge_key: str) -> tuple[tuple[str, str], ...]:
-    """Return ((name, sql_type), ...) in physical order: ulid, merge_key, other inputs, created, updated.
+    """Return ((name, sql_type), ...) in physical order: ulid, merge_key, other inputs, writer-derived, created, updated.
 
     A stable, deterministic order so the DDL, the MERGE source SELECT, the INSERT VALUES list, and the
-    read projection all agree without a separate ordering source.
+    read projection all agree without a separate ordering source. A `role: derived` column outside the
+    SCD2 envelope (a writer-computed attribute such as ops_projects.purpose) is physical: it follows the
+    inputs, and schema_gate still refuses it from a caller.
     """
     inputs = [c for c, s in fields.items() if s.get("role") == "input"]
     other_inputs = [c for c in inputs if c != merge_key]
-    ordered = [_DERIVED_LEAD, merge_key, *other_inputs, *_DERIVED_TAIL]
+    envelope = {_DERIVED_LEAD, *_DERIVED_TAIL}
+    writer_derived = [c for c, s in fields.items() if s.get("role") == "derived" and c not in envelope and c != merge_key]
+    ordered = [_DERIVED_LEAD, merge_key, *other_inputs, *writer_derived, *_DERIVED_TAIL]
     return tuple((c, fields[c]["sql_type"]) for c in ordered)
+
+
+def is_event_table(table: str | None, semantics: dict[str, Any] | None = None) -> bool:
+    """True iff the ops_tables entry for *table* carries table_class: event (append_only with a merge key is not one)."""
+    if table is None:
+        return False
+    semantics = semantics if semantics is not None else load_field_semantics()
+    entry = semantics.get("ops_tables", {}).get(table)
+    return entry is not None and entry.get("table_class") == "event"
+
+
+def table_write_boundary(table: str | None, semantics: dict[str, Any] | None = None) -> str | None:
+    """The ops_tables entry's write_boundary (e.g. telemetry_append, registration), read without resolving the entry."""
+    if table is None:
+        return None
+    semantics = semantics if semantics is not None else load_field_semantics()
+    entry = semantics.get("ops_tables", {}).get(table)
+    return None if entry is None else entry.get("write_boundary")
 
 
 def resolve_table_spec(table: str | None = None, semantics: dict[str, Any] | None = None) -> ScdTableSpec:
@@ -212,6 +246,12 @@ def resolve_table_spec(table: str | None = None, semantics: dict[str, Any] | Non
             "serve control-class tables -- use ducklake_control_tables.resolve_control_spec instead "
             "(it is also refused at both the write and read boundaries, Decision 55)"
         )
+    if spec.get("table_class") == "event":
+        raise SchemaGateError(
+            f"{table!r} is an event-class table (table_class=event): it has no merge key or SCD2 pair, so "
+            "resolve_table_spec does not serve it -- its spec is the event projection loaded through "
+            "src.telemetry.append.EventTableSpec.from_projection"
+        )
     merge_key = spec["merge_key"]
     fields = spec["columns"]
     part = spec.get("partition", {})
@@ -231,6 +271,7 @@ def resolve_table_spec(table: str | None = None, semantics: dict[str, Any] | Non
         entity_id_prefix=spec.get("entity_id_prefix"),
         id_keyspace=spec.get("id_keyspace", "caller"),
         write_mode=write_mode,
+        id_scheme=spec.get("id_scheme") or "serial",
     )
 
 
@@ -321,154 +362,6 @@ def _write_params(spec: ScdTableSpec, record: dict[str, Any], identity: WriteIde
 
 
 # ---------------------------------------------------------------------------
-# Named-read registry -- the pre-established read verbs the reader Lambda serves (Decision 84 I-3).
-# Verb SQL is server-side trusted content: callers name a verb and bind params; no caller SQL
-# crosses the boundary on this path. `{tbl}` = current projection, `{hist}` = history table.
-# ---------------------------------------------------------------------------
-
-NAMED_READS_VERSION = 3
-
-
-@dataclass(frozen=True)
-class NamedRead:
-    """One pre-established read verb: fixed SQL over a fixed table with named bind params."""
-
-    verb: str
-    table: str
-    sql: str
-    params: tuple[str, ...] = ()
-    description: str = ""
-    paginable: bool = False  # True => the caller-supplied `limit` (named_read) may bound this verb's rows
-
-
-NAMED_READS: dict[str, NamedRead] = {
-    nr.verb: nr
-    for nr in (
-        NamedRead(
-            verb="open_recs",
-            table="ops_recommendations",
-            sql=("SELECT id, title, context, created_timestamp, automatable FROM {tbl} WHERE status = 'open' ORDER BY id"),
-            description="Open recommendations with the fields the preflight tally consumes.",
-            paginable=True,
-        ),
-        NamedRead(
-            verb="rec_by_id",
-            table="ops_recommendations",
-            sql="SELECT * FROM {tbl} WHERE id = ?",
-            params=("id",),
-            description="Single recommendation by id (portal fetch-before-update).",
-        ),
-        NamedRead(
-            verb="recs_by_title_prefix",
-            table="ops_recommendations",
-            sql="SELECT id, title, status, source FROM {tbl} WHERE title LIKE ? ORDER BY id",
-            params=("title_prefix",),
-            description="Recommendations whose title starts with the bound prefix (postmortem supersede sweep).",
-            paginable=True,
-        ),
-        NamedRead(
-            verb="ci_rca_open",
-            table="ops_recommendations",
-            sql=(
-                "SELECT id, title, priority, created_timestamp, file FROM {tbl} "
-                "WHERE source = 'ci_rca' AND status IN ('open', 'in_progress') "
-                "ORDER BY created_timestamp DESC, id LIMIT 5"
-            ),
-            description="Most recent open/in-progress CI-RCA recommendations (preflight hard-block surface).",
-        ),
-        NamedRead(
-            verb="ci_rca_since",
-            table="ops_recommendations",
-            sql=("SELECT id FROM {tbl} WHERE source = 'ci_rca' AND created_timestamp > CAST(? AS TIMESTAMPTZ)"),
-            params=("since_ts",),
-            description="CI-RCA recommendations created after the bound timestamp (liveness alert).",
-        ),
-        NamedRead(
-            verb="forward_fix_recursion",
-            table="ops_recommendations",
-            sql=(
-                "SELECT file, COUNT(*) AS cnt FROM {tbl} "
-                "WHERE source = 'ci_rca' AND created_timestamp > CAST(? AS TIMESTAMPTZ) "
-                "GROUP BY file HAVING COUNT(*) >= 3"
-            ),
-            params=("since_ts",),
-            description="Files targeted by >=3 CI-RCA recommendations since the bound timestamp.",
-        ),
-        NamedRead(
-            verb="budget_bypass_recent",
-            table="ops_recommendations",
-            sql=(
-                "SELECT id, context, created_timestamp FROM {tbl} "
-                "WHERE source = 'budget_bypass' "
-                "AND created_timestamp > (current_timestamp - INTERVAL 7 DAY) "
-                "ORDER BY created_timestamp DESC, id LIMIT 10"
-            ),
-            description="budget_bypass recommendations filed in the last 7 days (fast-tier drift alert).",
-        ),
-        NamedRead(
-            verb="rec_history",
-            table="ops_recommendations",
-            sql="SELECT * FROM {hist} WHERE id = ? ORDER BY last_updated_timestamp DESC, ulid DESC",
-            params=("id",),
-            description="Prior SCD2 history versions of a rec, newest-first (agent-facing history read).",
-        ),
-        NamedRead(
-            verb="count_by_status",
-            table="ops_recommendations",
-            sql="SELECT status, COUNT(*) AS n FROM {tbl} GROUP BY status ORDER BY status",
-            description="Recommendation count per lifecycle status.",
-        ),
-        NamedRead(
-            verb="decision_by_id",
-            table="ops_decisions",
-            sql="SELECT * FROM {tbl} WHERE id = ?",
-            params=("id",),
-            description="Single decision by dec-NNN id (portal fetch-before-update).",
-        ),
-        NamedRead(
-            verb="decisions_max_updated",
-            table="ops_decisions",
-            sql="SELECT max(last_updated_timestamp) AS ts FROM {tbl}",
-            description="Latest decision update timestamp (roadmap freshness input).",
-        ),
-        NamedRead(
-            verb="priority_queue_current",
-            table="ops_priority_queue",
-            sql=(
-                "SELECT * FROM {tbl} WHERE queue_run_id = ("
-                "SELECT queue_run_id FROM {tbl} ORDER BY last_updated_timestamp DESC LIMIT 1) "
-                "ORDER BY rank"
-            ),
-            description="All entries of the latest curator run (Decision 70 correlated-subquery pattern).",
-        ),
-    )
-}
-
-
-def _params_schema(params: tuple[str, ...]) -> dict[str, Any]:
-    """A minimal JSON-schema-shaped object over *params* (all bind values are strings at this boundary)."""
-    return {
-        "type": "object",
-        "properties": {p: {"type": "string"} for p in params},
-        "required": list(params),
-    }
-
-
-def describe_named_reads() -> dict[str, dict[str, Any]]:
-    """Per-verb parameter schema for every NAMED_READS entry (agent-facing `describe`, CD.10 / CD.15)."""
-    return {
-        verb: {
-            "table": nr.table,
-            "description": nr.description,
-            "params": list(nr.params),
-            "paginable": nr.paginable,
-            "params_schema": _params_schema(nr.params),
-        }
-        for verb, nr in NAMED_READS.items()
-    }
-
-
-# ---------------------------------------------------------------------------
 # Rec status DAG -- resolved-reactivation guard (Decision 103 / Decision 55).
 #
 # NOT a forward-only/terminal-status whitelist: every LIVE transition passes (failed->open executor
@@ -510,92 +403,6 @@ def check_rec_status_transition(table: str, existing_status: Any, new_status: An
             f"{table}: illegal status transition {existing_status!r} -> {new_status!r} -- a resolved rec "
             "must not be silently reactivated (Decision 103). Record the reopen as a new event/rec instead."
         )
-
-
-# ---------------------------------------------------------------------------
-# Write-verb registry -- the pre-established write verbs the writer Lambda serves (CD.10 / CD.15
-# describe surface). Mirrors NAMED_READS' shape for the write side; params_schema is descriptive
-# metadata only -- schema_gate (per-table field_semantics) remains the enforced write contract.
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class WriteVerb:
-    """One pre-established write verb: a description + a descriptive params_schema."""
-
-    verb: str
-    description: str
-    params_schema: dict[str, Any]
-
-
-VERB_REGISTRY: dict[str, WriteVerb] = {
-    wv.verb: wv
-    for wv in (
-        WriteVerb(
-            verb="write_ops",
-            description=(
-                "Raw SCD2 upsert into an ops_* table (history MERGE-on-ULID append + current "
-                "write-through, schema-gated, bounded-OCC-retried). No id allocation, no require_exists."
-            ),
-            params_schema={
-                "type": "object",
-                "properties": {"table": {"type": "string"}, "record": {"type": "object"}},
-                "required": ["table", "record"],
-            },
-        ),
-        WriteVerb(
-            verb="update_ops",
-            description=(
-                "Update an existing ops_* record (record is the FULL merged row). Loud-fails "
-                "(ReferentialError) if the merge key is absent, or (StatusTransitionError) if the "
-                "update would silently reactivate a resolved rec."
-            ),
-            params_schema={
-                "type": "object",
-                "properties": {"table": {"type": "string"}, "record": {"type": "object"}},
-                "required": ["table", "record"],
-            },
-        ),
-        WriteVerb(
-            verb="file_ops",
-            description=(
-                "Create one ops_* record, allocating its merge key inside the write transaction "
-                "(writer-owned keyspace, Decision 84 I-2). idempotency_ulid replays to the "
-                "originally-allocated id on a response-lost retry."
-            ),
-            params_schema={
-                "type": "object",
-                "properties": {
-                    "table": {"type": "string"},
-                    "record": {"type": "object"},
-                    "idempotency_ulid": {"type": "string"},
-                },
-                "required": ["table", "record"],
-            },
-        ),
-        WriteVerb(
-            verb="create_ops_tables",
-            description=(
-                "Admin provisioning verb: create (optionally force-recreate) an ops_* table pair with "
-                "partition transforms; bootstraps/repairs the writer-owned entity-id counter."
-            ),
-            params_schema={
-                "type": "object",
-                "properties": {
-                    "table": {"type": "string"},
-                    "force_recreate_tables": {"type": "boolean"},
-                    "confirm_force_recreate": {"type": "string"},
-                },
-                "required": ["table"],
-            },
-        ),
-    )
-}
-
-
-def describe_write_verbs() -> dict[str, dict[str, Any]]:
-    """Per-verb description + params_schema for every VERB_REGISTRY entry (agent-facing `describe`)."""
-    return {verb: {"description": wv.description, "params_schema": wv.params_schema} for verb, wv in VERB_REGISTRY.items()}
 
 
 # ---------------------------------------------------------------------------

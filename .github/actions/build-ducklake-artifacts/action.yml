@@ -12,18 +12,22 @@ inputs:
     description: >-
       'assert' rebuilds via --skip-upload, byte-checks the seven build/apply-path artifacts
       against their per-sha S3 reference (Decision 77 no-TOCTOU), then dual-writes them (the
-      sandbox push path -- the sole remaining reproducibility canary). 'skip-assert' rebuilds via
-      --skip-upload and dual-writes those same seven artifacts with no prior check (a fresh
-      workflow_dispatch plan with nothing to compare against yet). 'upload-only' runs
-      `build_lambda --ducklake-only` WITHOUT --skip-upload -- the PR speculative-plan job's
-      first-upload path, which builds and dual-writes all EIGHT artifacts (including
-      ducklake-maintenance-smoke.zip, which the other modes deliberately exclude -- see
+      sandbox push path -- the sole remaining reproducibility canary; rec-4372: a mismatch whose
+      every difference traces to a tracked input that moved on main between the PR's last plan
+      and its merge still applies the reviewed plan.bin, on merge-tree zips). 'skip-assert'
+      rebuilds via --skip-upload and dual-writes those same seven artifacts with no prior check (a
+      fresh workflow_dispatch plan with nothing to compare against yet). 'upload-only' runs
+      scripts.ci.ducklake_artifacts --mode upload-only -- the PR speculative-plan job's
+      first-upload path, which builds and dual-writes all NINE artifacts (including
+      ducklake-maintenance-smoke.zip and ducklake-telemetry-writer.zip, which the other modes deliberately exclude -- see
       scripts/ci/ducklake_artifacts.py's DUCKLAKE_ARTIFACT_NAMES) via build_lambda's own internal
-      upload_to_s3, with no separate assert since there is nothing yet to compare against.
-      'fetch' does NOT rebuild: it downloads the seven reviewed per-sha artifacts and server-side
-      copies each onto its fixed key (gated-apply, and both Reconcile call sites -- every
-      human-gated site that re-applies a previously-reviewed plan after an unbounded approval
-      wait, where a rebuild could resolve a dependency to bytes nobody reviewed).
+      upload_to_s3, with no separate assert since there is nothing yet to compare against, then
+      also records and uploads each artifact's tracked-input identity as inputs.json (rec-4372).
+      'fetch' does NOT rebuild: it downloads the seven reviewed per-sha artifacts -- following a
+      superseded-by.json pointer one hop first, when the push run left one (rec-4372) -- and
+      server-side copies each onto its fixed key (gated-apply, and both Reconcile call sites --
+      every human-gated site that re-applies a previously-reviewed plan after an unbounded
+      approval wait, where a rebuild could resolve a dependency to bytes nobody reviewed).
     required: true
   artifact-sha:
     description: >-
@@ -39,9 +43,8 @@ inputs:
     required: false
     default: "agent-platform-data-lake"
   region:
-    description: "AWS region."
+    description: "AWS region. Falls back to AWS_REGION, exported by the aws-region action or the job's sign-in."
     required: false
-    default: "eu-west-2"
   working-directory:
     description: "Directory the build runs from (lambda-packages/ lands here) -- the repo root in every current call site."
     required: false
@@ -58,15 +61,15 @@ runs:
         ARTIFACT_SHA: ${{ inputs.artifact-sha }}
         LAMBDA_ARTIFACT_SHA: ${{ inputs.artifact-sha }}
         BUCKET: ${{ inputs.bucket }}
-        REGION: ${{ inputs.region }}
+        REGION: ${{ inputs.region || env.AWS_REGION }}
       run: |
         set -euo pipefail
         # This runner has no .venv (CC-web-only convention); install the build + upload
         # import-time deps directly, mirroring ci.yml's "Install validate.py import-time deps".
         pip install pyyaml pydantic boto3
         if [ "$MODE" = "upload-only" ]; then
-          echo "Building + uploading all DuckLake artifacts via build_lambda's own internal upload (PR speculative-plan first-upload path)."
-          python3 -m scripts.build_lambda --ducklake-only --profile "" --bucket "$BUCKET"
+          echo "Building + uploading all DuckLake artifacts (PR speculative-plan first-upload path), then recording inputs.json (rec-4372)."
+          python3 -m scripts.ci.ducklake_artifacts "pull_request" "$ARTIFACT_SHA" "$BUCKET" --region "$REGION" --mode upload-only
           exit 0
         fi
         if [ "$MODE" = "fetch" ]; then

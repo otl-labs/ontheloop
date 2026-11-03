@@ -1,93 +1,61 @@
-"""Write-time rec-field content validation, driven by config/agent/data_quality/ops.yaml.
+"""The portal's derived row-rule pre-check (rec-4158, Decision 210 cl.3).
 
-Owner-concern: the three explicit content-quality checks (path syntax, context length,
-not-null) plus the YAML-driven write_time validator loader that file_rec() (kept in the
-facade) runs before any write reaches the DuckLake writer.
+Owner-concern: gate_write runs the DuckLake writer's own pure gate (schema_gate and check_write) over the repo's
+field_semantics.yaml projection of the Class A contract, so file_rec, update_rec, file_decision and update_decision
+refuse early with the rule the writer would apply. It is a derived pre-check, never authoritative: the writer
+re-evaluates every rule (Decision 81 cl.5 as widened by Decision 210 cl.5). The producer-side rules no row-local
+evaluator can run (acceptance lint, dependency existence, and the glossary rule, whose ground is house style the
+repository's profile decides) are driven from the contract's own exemptions. This path is named by the
+ops_recommendations contract as the acceptance_lint and glossary_lint exemption owner; it must not move.
 """
 
 from __future__ import annotations
 
+import copy
+import functools
 import re
-from typing import Callable, cast
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, cast
 
 import yaml
 
 from scripts.executor.acceptance_lint import lint_acceptance_command
-from scripts.ops_portal._common import ROOT
+from scripts.ops_portal._common import _REPO_ROOT
+from scripts.ops_portal.writer_transport import _project_ops_record
+from src.common.ducklake_scd2_schema import SchemaGateError, resolve_table_spec, schema_gate
+from src.common.ducklake_write_rules import RowRuleViolationError, check_write
+from src.row_rules.rules import RowRules
 
-_OPS_YAML_PATH = ROOT / "config" / "agent" / "data_quality" / "ops.yaml"
-_write_time_validators_cache: dict[str, list] = {}
-
-
-def _validate_file_path(path: str) -> None:
-    """Raise ValueError if path is absolute or uses backslash separators."""
-    if not path:
-        return
-    if path.startswith("/"):
-        raise ValueError(f"file must be a repo-relative path with forward slashes (got absolute Unix path): {path!r}")
-    if re.match(r"[A-Za-z]:[/\\]", path):
-        raise ValueError(f"file must be a repo-relative path with forward slashes (got absolute Windows path): {path!r}")
-    if "\\" in path:
-        raise ValueError(f"file must use forward slashes as path separators (got backslash): {path!r}")
+_PLACEHOLDER_ULID = "0" * 26
+_GLOSSARY_PATH = _REPO_ROOT / "docs" / "contracts" / "glossary.yaml"
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
 
-def _validate_context_length(text: str) -> None:
-    """Raise ValueError if stripped context is shorter than 80 characters."""
-    if not text:
-        return
-    stripped_len = len(text.strip())
-    if stripped_len < 80:
-        raise ValueError(
-            f"context must be at least 80 stripped characters (got {stripped_len}). "
-            "Answer 'what problem does this solve and why now?'"
-        )
+class RowRuleRejected(ValueError):
+    """A contract-declared row rule refused the record; names table, column, rule and limit, never the value."""
+
+    def __init__(self, table: str, column: str, rule: str, limit: str, exclude_before: str | None) -> None:
+        self.table = table
+        self.column = column
+        self.rule = rule
+        self.exclude_before = exclude_before
+        since = f"; exclude_before {exclude_before}" if exclude_before else ""
+        super().__init__(f"{table}.{column}: {limit} (row rule {rule}{since})")
 
 
-def _check_not_null(v: object, col: str) -> None:
-    if v is None or not str(v).strip():
-        raise ValueError(f"required field '{col}' must be non-empty")
-
-
-def _build_not_null_validator(params: dict) -> Callable:
-    return _check_not_null
-
-
-def _build_accepted_values_validator(params: dict) -> Callable:
-    allowed = list(params.get("values", []))
-
-    def _check(v: object, col: str) -> None:
-        if v is not None and str(v).strip() and str(v) not in allowed:
-            raise ValueError(f"{col} must be one of {allowed!r}, got {str(v)!r}")
-
-    return _check
-
-
-def _build_path_syntax_validator(params: dict) -> Callable:
-    return lambda v, col: _validate_file_path(str(v) if v else "")
-
-
-def _build_acceptance_lint_validator(params: dict) -> Callable:
-    def _check(v: object, col: str) -> None:
-        ok, msg = lint_acceptance_command(str(v) if v else "", require_discrimination=True)
-        if not ok:
-            raise ValueError(msg)
-
-    return _check
-
-
-def _build_array_element_format_validator(params: dict) -> Callable:
-    pattern = params.get("pattern", "")
-
-    def _check(v: object, col: str) -> None:
-        if v is None:
-            return
-        if not isinstance(v, list):
-            raise ValueError(f"{col} must be a list of strings, got {type(v).__name__}")
-        bad = [str(x) for x in v if not re.fullmatch(pattern, str(x))]
-        if bad:
-            raise ValueError(f"{col} elements must match {pattern!r}; invalid: {bad!r}")
-
-    return _check
+def _limit_in_words(rule: str, spec: dict[str, Any]) -> str:
+    if rule == "min_length":
+        return f"must be at least {spec.get('min_length')} stripped characters"
+    if rule == "accepted_values":
+        return f"must be one of {list(spec.get('accepted_values', []))!r}"
+    if rule == "pattern":
+        return f"must match {spec.get('pattern')!r}"
+    if rule == "array_element_format":
+        return f"elements must match {spec.get('array_element_format')!r}"
+    if rule == "not_null":
+        return "is required"
+    return "violates its declared rule"
 
 
 _rec_exists_memo: dict[str, bool] = {}
@@ -122,108 +90,143 @@ def _rec_exists(rec_id: str, reader: object | None = None) -> bool:
     return found
 
 
-def _build_array_element_reference_validator(params: dict) -> Callable:
-    def _check(v: object, col: str) -> None:
-        if v is None:
-            return
-        if not isinstance(v, list):
-            raise ValueError(f"{col} must be a list of strings, got {type(v).__name__}")
-        elements = [str(x) for x in v]
-        # Decision 88 invariant (i): hold ONE reader across this whole element list rather than
-        # constructing one per element -- built only if at least one element isn't already
-        # positively memoised, so an all-memoised write never touches the reader at all.
-        reader = None
-        if any(not _rec_exists_memo.get(e) for e in elements):
-            from src.common.ducklake_reader_client import DuckLakeReader, make_reader  # noqa: PLC0415
-
-            reader = cast(DuckLakeReader, make_reader())
-        absent = [e for e in elements if not _rec_exists(e, reader=reader)]
-        if absent:
-            raise ValueError(f"{col} elements must reference existing recs; absent: {absent!r}")
-
-    return _check
-
-
-def _build_min_length_validator(params: dict) -> Callable:
-    bound = params.get("value")
-    if not isinstance(bound, int):
-        raise ValueError(f"min_length test declares a non-integer 'value' parameter: {bound!r}")
-
-    def _check(v: object, col: str) -> None:
-        if not v or not str(v).strip():
-            return
-        stripped_len = len(str(v).strip())
-        if stripped_len < bound:
-            raise ValueError(f"{col} must be at least {bound} stripped characters (got {stripped_len})")
-
-    return _check
-
-
-def _build_expression_validator(params: dict) -> None:
-    """Retired write-time branch (rec-3310).
-
-    expression used to bind _validate_context_length to ANY column regardless of its declared
-    sql/python content -- a landmine, since a column's write_time flag on expression silently
-    inherited context's 80-char rule. min_length is the parameterised write-time replacement; a
-    write_time: true expression now yields no validator rather than reviving that hardcoded
-    binding. Recognised (present in _WRITE_TIME_VALIDATOR_BUILDERS, not an unrecognised-name
-    raise) because expression remains a legitimate SQL-only test type for the compiler; only its
-    write-time capability is retired.
-    """
-    return
-
-
-# One builder per recognised write_time test name; each takes the test's params dict and returns
-# either a (v, col) -> None validator callable, or None for a recognised-but-inert type
-# (_build_expression_validator). A test_name outside this map is unrecognised and loud-fails
-# rather than silently falling through (rec-3308 sibling gap). Kept as top-level functions rather
-# than nested closures so each stays its own small AST node for the Decision 43 cyclomatic-
-# complexity gate, instead of inflating _load_write_time_validators's own branch count.
-_WRITE_TIME_VALIDATOR_BUILDERS: dict[str, Callable[[dict], Callable | None]] = {
-    "not_null": _build_not_null_validator,
-    "accepted_values": _build_accepted_values_validator,
-    "path_syntax": _build_path_syntax_validator,
-    "acceptance_lint": _build_acceptance_lint_validator,
-    "array_element_format": _build_array_element_format_validator,
-    "array_element_reference": _build_array_element_reference_validator,
-    "min_length": _build_min_length_validator,
-    "expression": _build_expression_validator,
-}
-
-
-def _load_write_time_validators(table: str) -> list[tuple[str, Callable]]:
-    """Load write-time validators from ops.yaml for the given table.
-
-    Returns a list of (column_name, validator_fn) tuples for every test entry
-    with write_time: true. Result is cached to avoid repeated YAML reads.
-    """
-    if table in _write_time_validators_cache:
-        return _write_time_validators_cache[table]
+@functools.lru_cache(maxsize=None)
+def _producer_params(table: str) -> dict[tuple[str, str], dict[str, Any]]:
+    """(column, kind) -> the declared leg's params, from the contract the projection ships from."""
+    from scripts.contract_rules import declared_rules  # noqa: PLC0415
 
     try:
-        data = yaml.safe_load(_OPS_YAML_PATH.read_text(encoding="utf-8")) or {}
-    except (FileNotFoundError, OSError, yaml.YAMLError):
-        _write_time_validators_cache[table] = []
-        return []
+        rules = declared_rules(table)
+    except ValueError:
+        return {}
+    return {(r.column, r.kind): dict(r.params) for r in rules}
 
-    columns = data.get("tables", {}).get(table, {}).get("columns", {})
-    validators: list[tuple[str, Callable]] = []
 
-    for col_name, col_def in columns.items():
-        if not isinstance(col_def, dict):
-            continue
-        for test_entry in col_def.get("tests", []):
-            if not isinstance(test_entry, dict):
+def _acceptance_lint(column: str, value: object, params: dict[str, Any]) -> None:
+    ok, msg = lint_acceptance_command(
+        str(value) if value else "", require_discrimination=bool(params.get("require_discrimination", False))
+    )
+    if not ok:
+        raise ValueError(msg)
+
+
+class _ElementReference:
+    """array_element_reference for one write: one reader across the element list, built lazily (Decision 88 (i))."""
+
+    def __init__(self) -> None:
+        self._reader: object | None = None
+
+    def __call__(self, column: str, value: object, params: dict[str, Any]) -> None:
+        if value is None:
+            return
+        if not isinstance(value, list):
+            raise ValueError(f"{column} must be a list of strings, got {type(value).__name__}")
+        elements = [str(x) for x in value]
+        if self._reader is None and any(not _rec_exists_memo.get(e) for e in elements):
+            from src.common.ducklake_reader_client import DuckLakeReader, make_reader  # noqa: PLC0415
+
+            self._reader = cast(DuckLakeReader, make_reader())
+        absent = [e for e in elements if not _rec_exists(e, reader=self._reader)]
+        if absent:
+            raise ValueError(f"{column} elements must reference existing recs; absent: {absent!r}")
+
+
+@functools.lru_cache(maxsize=None)
+def _load_glossary(path: Path) -> dict[str, Any]:
+    try:
+        return cast(dict[str, Any], yaml.safe_load(path.read_text(encoding="utf-8")))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ValueError(f"glossary_lint: {path.name} is not loadable ({type(exc).__name__}); failing closed") from exc
+
+
+class _GlossaryLint:
+    """glossary_lint for one write: refuse a sentence the stored value does not already hold that uses either relative word."""
+
+    def __init__(self, existing: dict[str, Any] | None) -> None:
+        self._existing = existing
+
+    def __call__(self, column: str, value: object, params: dict[str, Any]) -> None:
+        if value is None:
+            return
+        from scripts.checks.contracts import _glossary_words  # noqa: PLC0415
+
+        contract = _load_glossary(_GLOSSARY_PATH)
+        known = _glossary_words.identifiers(contract)
+        held = {s.strip() for s in _SENTENCE_END.split(str((self._existing or {}).get(column) or ""))}
+        for sentence in _SENTENCE_END.split(str(value)):
+            if sentence.strip() in held:
                 continue
-            for test_name, params in test_entry.items():
-                if not isinstance(params, dict) or not params.get("write_time"):
-                    continue
-                builder = _WRITE_TIME_VALIDATOR_BUILDERS.get(test_name)
-                if builder is None:
-                    raise ValueError(f"{col_name}: unrecognised write_time test {test_name!r}")
-                validator = builder(params)
-                if validator is not None:
-                    validators.append((col_name, validator))
+            for _, word in _glossary_words.unqualified_uses(sentence, yaml_keys=False, identifiers=known):
+                derived = " (a short context is built from context_v2_json or dispute evidence)" if column == "context" else ""
+                raise ValueError(
+                    f'{column}: unqualified "{word}" -- say instead: {_glossary_words.say_instead(word, contract)}, '
+                    f"or quote it if it is not the relative word; see docs/contracts/glossary.yaml{derived}"
+                )
 
-    _write_time_validators_cache[table] = validators
-    return validators
+
+def _producer_handlers(existing: dict[str, Any] | None) -> dict[str, Callable[[str, object, dict[str, Any]], None]]:
+    return {
+        "acceptance_lint": _acceptance_lint,
+        "array_element_reference": _ElementReference(),
+        "glossary_lint": _GlossaryLint(existing),
+    }
+
+
+def _undated_projection(fields: dict[str, Any]) -> dict[str, Any]:
+    """The projection with every dated leg (and its exclude_before entry) removed, so only undated rules remain."""
+    out = copy.deepcopy(fields)
+    for spec in out.values():
+        for kind in list(spec.get("exclude_before", {})):
+            spec.pop(kind, None)
+        spec.pop("exclude_before", None)
+    for name, spec in out.items():
+        for kind in ("not_before", "at_most"):
+            other = spec.get(kind)
+            if other is not None and "derived" in (spec.get("role"), out.get(other, {}).get("role")):
+                spec.pop(kind)
+    return out
+
+
+def _run_row_rules(table: str, record: dict[str, Any], *, insert: bool) -> None:
+    spec = resolve_table_spec(table)
+    columns = spec.fields if insert else _undated_projection(spec.fields)
+    rules = RowRules.from_projection(columns)
+    now = datetime.now(timezone.utc)
+    try:
+        check_write(spec, rules, record, now, now, _PLACEHOLDER_ULID, None)
+    except RowRuleViolationError as exc:
+        raise RowRuleRejected(
+            table, exc.column, exc.rule, _limit_in_words(exc.rule, spec.fields.get(exc.column, {})), exc.exclude_before
+        ) from exc
+
+
+def _run_producer_rules(table: str, projected: dict[str, Any], *, insert: bool, existing: dict[str, Any] | None) -> None:
+    exemptions = RowRules.from_projection(resolve_table_spec(table).fields).producer_exemptions
+    if not exemptions:
+        return
+    params, handlers = _producer_params(table), _producer_handlers(existing)
+    for column, kind in exemptions:
+        handler = handlers.get(kind)
+        if handler is None:
+            raise ValueError(f"{table}.{column}: producer-side rule {kind!r} has no portal handler (fails closed)")
+        value = projected.get(column)
+        if insert or existing is None or value != existing.get(column):
+            handler(column, value, params.get((column, kind), {}))
+
+
+def gate_write(table: str, record: dict[str, Any], *, insert: bool, existing: dict[str, Any] | None = None) -> None:
+    """Refuse *record* with the writer's own gate; never stricter than the writer.
+
+    insert=True (file_ops only: the writer allocates the key) evaluates every rule with no prior. insert=False
+    (update_ops and caller-keyed write_ops upserts) evaluates undated rules only: dated legs stay the writer's alone,
+    which binds them against the stored row.
+    """
+    spec = resolve_table_spec(table)
+    projected = _project_ops_record(table, record)
+    keyed = {**projected, spec.merge_key: f"{spec.entity_id_prefix or 'x-'}0"} if insert else projected
+    try:
+        schema_gate(keyed, table=table)
+    except SchemaGateError as exc:
+        raise ValueError(str(exc)) from exc
+    _run_row_rules(table, keyed, insert=insert)
+    _run_producer_rules(table, projected, insert=insert, existing=existing)

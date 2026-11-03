@@ -19,9 +19,12 @@ from unittest.mock import patch
 
 
 class TestSync:
-    def test_sync_returns_pulled_counts(self):
+    def test_sync_returns_pulled_counts(self, tmp_path):
         """sync() delegates to _rebuild_with_failures() and returns counts under "pulled", failures under "failed"."""
-        with patch("scripts.sync.ops._rebuild_with_failures", return_value=({"ops_recommendations": 50}, [])) as mock_rebuild:
+        with (
+            patch("scripts.sync.ops._LOGS_DIR", tmp_path),
+            patch("scripts.sync.ops._rebuild_with_failures", return_value=({"ops_recommendations": 50}, [])) as mock_rebuild,
+        ):
             from scripts.sync.ops import sync
 
             result = sync(profile="test-profile")
@@ -193,10 +196,10 @@ class TestTelemetryMappings:
             assert table not in _TABLE_TO_LOCAL
 
     def test_migrated_ops_tables_present(self):
-        """All four migrated tables are cached locally from the DuckLake reader (Decision 84 I-1)."""
+        """The three cached tables come from the DuckLake reader; recs have no local cache (Decision 215)."""
         import scripts.sync.ops as sync_ops
 
-        expected = {"ops_recommendations", "ops_decisions", "ops_priority_queue", "ops_execution_plans"}
+        expected = {"ops_decisions", "ops_priority_queue", "ops_execution_plans"}
         assert set(sync_ops._TABLE_TO_LOCAL) == expected
 
 

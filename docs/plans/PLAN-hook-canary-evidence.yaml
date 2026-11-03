@@ -1,0 +1,283 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: hook-canary-evidence
+intent: >-
+  Make AGENTS.md's hook canary trustworthy in Claude-projects threads. Today it reads the opening context for a
+  SessionStart line, but a project thread never gets plugin SessionStart output before its first turn, so the canary
+  says "repo hooks not loaded" when every hook is live and an agent can park for nothing. A UserPromptSubmit hook puts
+  the evidence line into each prompt's context, so the guard that keeps agents off a hookless session works wherever it
+  runs.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-hook-canary-evidence.yaml
+phase: >-
+  ad_hoc_rec (soft-warn category; no tier_item claimed, so the Tier Item Freshness Gate is skipped). Executes rec-4824,
+  from the Project Review consult on repo hooks and Decision 229 (2026-11-02).
+scope:
+  - file: .claude/hooks/hook_canary.sh
+    action: Create
+    purpose: >-
+      UserPromptSubmit hook. Drains stdin (`cat >/dev/null 2>&1 || true`), prints exactly one line of JSON
+      {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "[hook_canary] repo hooks
+      loaded"}} to stdout, ends with an explicit `exit 0` so it exits 0 on every path (never blocks a prompt, never prints to stderr). Stateless: it emits on
+      every prompt, so no session state, no session_id parsing, no temp files. Bash, no Python start-up cost per prompt.
+  - file: .claude/settings.json
+    action: Modify
+    purpose: >-
+      Append a second UserPromptSubmit group with one command hook, `bash
+      "$CLAUDE_PROJECT_DIR/.claude/hooks/hook_canary.sh"` (no matcher, no timeout, not async). The stop_log_turn group
+      stays first and unchanged.
+  - file: .claude/hooks/hooks.json
+    action: Modify
+    purpose: >-
+      Regenerated, never hand-edited: `bin/venv-python .claude/hooks/plugin_hooks.py render` so the plugin carries the
+      same hook behind the project-settings gate (tests/hooks/test_plugin_hooks.py
+      test_the_committed_hooks_file_is_the_render_of_the_settings).
+  - file: AGENTS.md
+    action: Modify
+    purpose: >-
+      Exactly sidecar block agents-md-hook-canary (docs/plans/approved/hook-canary-evidence.yaml): the canary's evidence
+      clause changes from "session-start context has no `[session_start_` line" to "the opening context has no
+      `[hook_canary]` line". Scope parenthetical and the rest of the rule unchanged. Net -4 bytes (S1 16955 -> 16951 measured on base 1f08d2c7).
+  - file: config/prose_budgets.yaml
+    action: Modify
+    purpose: >-
+      Ratchet S1 root_ambient_load_set down to the measured post-edit size (validate_prose_limits fails under-budget too;
+      implement-scope-boundary.yaml prose_budgets_ratchet_down row). Measure against the build tree, never a fixed figure:
+      another AGENTS.md plan may land first.
+  - file: tests/session/test_hook_canary.py
+    action: Create
+    purpose: >-
+      rec-4824's acceptance node and the hook's behaviour. Nodes: test_canary_reads_hook_evidence_not_context (AGENTS.md's
+      canary bullet names `[hook_canary]` and not `[session_start_`; .claude/settings.json and .claude/hooks/hooks.json
+      each register a UserPromptSubmit command running .claude/hooks/hook_canary.sh; the additionalContext the script
+      prints starts with the literal AGENTS.md names), test_hook_prints_one_user_prompt_submit_context_line (subprocess
+      with a real UserPromptSubmit payload on stdin: exit 0, empty stderr, stdout is one JSON object whose
+      hookSpecificOutput is exactly {hookEventName: UserPromptSubmit, additionalContext: "[hook_canary] repo hooks
+      loaded"}), test_hook_ignores_its_input_and_still_exits_zero (parametrised: empty stdin and non-JSON stdin give the
+      same stdout and exit 0).
+  - file: tests/test_agents_md_rules.py
+    action: Modify
+    purpose: >-
+      Exactly sidecar block agents-md-rules-canary: CANARY becomes "[hook_canary]"; _SCRIPT_RE, _session_start_scripts,
+      test_registered_session_start_scripts_print_the_canary and the json/re imports go. The canary no longer reads
+      SessionStart output; the guard on the evidence source moves to
+      tests/session/test_hook_canary.py::test_canary_reads_hook_evidence_not_context (same strictness, both config
+      files). Bound in the sidecar so the operator approves the guard move with the wording (Decisions 181, 235).
+  - file: tests/hooks/test_capture_hook_registration.py
+    action: Modify
+    purpose: >-
+      test_the_four_capture_hooks_are_registered pins each capture event's exact command list; UserPromptSubmit's
+      becomes exactly [STOP_CMD, CANARY_CMD] (a new CANARY_CMD constant), still an exact equality. Stop, StopFailure and
+      SessionEnd stay exactly [STOP_CMD] / [END_CMD]. Edit form pinned (so the declared weakening candidate is emitted):
+      replace the single loop at the end of the test with a dict of expected lists, {"Stop": [STOP_CMD], "StopFailure":
+      [STOP_CMD], "UserPromptSubmit": [STOP_CMD, CANARY_CMD], "SessionEnd": [END_CMD]}, and one loop asserting
+      [h["command"] for h in _entries(event)] == expected[event] for each.
+bundled_recommendations:
+  - rec-4824
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - rec-4824's acceptance command exits 0.
+  - The hook prints exactly one UserPromptSubmit additionalContext line naming `[hook_canary]` and exits 0 on any input.
+  - .claude/settings.json and the rendered .claude/hooks/hooks.json both register it; hooks.json equals the render.
+  - The AGENTS.md and tests/test_agents_md_rules.py edits equal the sidecar (approved_text verify exits 0) and the S1 prose budget equals the measured size.
+  - After merge and the plugin update, a fresh project thread's first-turn context carries the line before its first reply.
+  - rec-4824 reads closed after the squash merge (Resolves trailer).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Run rec-4824's acceptance node and the hook's behaviour tests.
+    command: bin/venv-python -m pytest tests/session/test_hook_canary.py -q
+    expected: >-
+      exit 0, 4 passed (one acceptance node, one stdout node, two parametrised input cases). hermetic true although the
+      plan creates the file (hermetic_authoring rule v): the node-count literal is the discrimination, and a missing
+      file is a legitimate target_absent red-before.
+    fix_if: >-
+      exit 4 (file or node missing), or a node fails because AGENTS.md still names `[session_start_`, a config file does
+      not register the script, or the script's JSON differs
+    hermetic: true
+    expected_literals: ["4 passed"]
+    graduation: graduate
+    graduation_check_id: hook-canary-evidence-source
+  - step: 2
+    phase: pre-deploy
+    action: Run the drift guards this change edits (canary literal, capture registration, plugin render parity).
+    command: >-
+      bin/venv-python -m pytest tests/test_agents_md_rules.py tests/hooks/test_capture_hook_registration.py
+      tests/hooks/test_plugin_hooks.py -q
+    expected: exit 0, no failures
+    fix_if: >-
+      test_the_committed_hooks_file_is_the_render_of_the_settings fails (re-run the render, never hand-edit hooks.json);
+      the capture registration test fails (UserPromptSubmit list order or command text differs from CANARY_CMD)
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: waive
+    graduation_waiver_reason: >-
+      Existing standing guards already in every --pre selection that touches these files; this step only re-runs them
+      after their edits.
+  - step: 3
+    phase: pre-deploy
+    action: Exercise the real script the way Claude Code calls it and parse its output.
+    command: >-
+      printf '%s' '{"session_id":"s","hook_event_name":"UserPromptSubmit","prompt":"hi"}' | bash
+      .claude/hooks/hook_canary.sh | bin/venv-python -c "import json,sys; o=json.load(sys.stdin)['hookSpecificOutput'];
+      assert o['hookEventName']=='UserPromptSubmit', o; print(o['additionalContext'])"
+    expected: exit 0; prints the canary line
+    fix_if: JSON parse error, wrong event name, or a different line
+    hermetic: true
+    expected_literals: ["[hook_canary] repo hooks loaded"]
+    graduation: waive
+    graduation_waiver_reason: >-
+      Duplicates step 1's test_hook_prints_one_user_prompt_submit_context_line as a shell pipeline; step 1 graduates
+      (hook-canary-evidence-source), so the registry already holds the standing guard.
+  - step: 4
+    phase: pre-deploy
+    action: Bind the AGENTS.md and tests/test_agents_md_rules.py edits to the approved words.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug hook-canary-evidence --base origin/main
+    expected: exit 0; both blocks match
+    fix_if: any word differs from the sidecar; fix the edit, never the sidecar (operator-approved text)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      PR-relative to origin/main, so vacuous once merged; validate_merge_step's approved-text leg already enforces the
+      sidecar on every PR declaring this plan. Same disposition as PLAN-decision-229-subagent-scope.
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      Fast tier, then the full tier before handoff (handoff_policy): run bin/venv-python -m scripts.validate --pre in the
+      foreground (exit 0), then bin/venv-python -m scripts.validate as its own backgrounded run with a 2 h limit from the
+      top-level session (this command, as one backgrounded Bash call; it outruns the 10-minute foreground cap); the
+      chained --verify-head reads the recorded verdict when it completes.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: >-
+      bin/venv-python -m scripts.validate --pre exited 0 first (record it); then this command exits 0 for HEAD (the full
+      tier's recorded verdict, never the backgrounded run's own exit status)
+    fix_if: >-
+      validate_prose_limits fails (the S1 budget must equal the measured size); a failure in this plan's files is fixed at
+      root and the full tier rerun from the start; a failure only in another open red's tests (for example rec-4797,
+      owned outside this project) is not this build's to fix: log the deferral and follow the implement skill's go/no-go
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: >-
+      Operator step (always-ask, admin): after the squash merge, update the ontheloop plugin on claude.ai (Customize >
+      Plugins), then ask the coordinator for a fresh project thread on this repo whose first act is this check. It proves
+      the line reached turn-1 context before the first reply, which is the property the canary relies on.
+    command: >-
+      bin/venv-python -c "import json,os,pathlib; p=pathlib.Path.home()/'.claude/projects/-home-user-ontheloop'/(os.environ['CLAUDE_CODE_SESSION_ID']+'.jsonl');
+      rs=[]; [rs.append(json.loads(l)) for l in p.open() if l.strip().endswith('}')]; a=next((i for i,r in enumerate(rs) if r.get('type')=='assistant'),None); assert a is not None, 'no assistant record yet';
+      c=[i for i,r in enumerate(rs) if (r.get('attachment') or {}).get('type')=='hook_additional_context' and
+      '[hook_canary]' in json.dumps(r)]; assert c and c[0]<a, (c,a); print('canary before first reply')"
+    expected: prints "canary before first reply"
+    fix_if: >-
+      no transcript file: the thread's working directory is not /home/user/ontheloop, so fix the path, not the canary;
+      no canary attachment: run grep "hook_canary" /tmp/claude-code.log in that thread; if the hook never ran, the plugin
+      was not updated (plugin_hooks check reports drift); if it ran but no attachment reached context, the harness drops
+      plugin UserPromptSubmit context too: reopen rec-4824 through update_rec (it closed at merge) and send a plan-defect
+      report (the premise in context is then wrong)
+    hermetic: false
+  - step: 7
+    phase: post-deploy
+    action: Confirm rec-4824 closed.
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids;
+      print(fetch_recs_by_ids(make_reader(), ['rec-4824'])[0][0]['status'])"
+    expected: prints closed
+    fix_if: still open after the closure job; read the ci.yml closure job log and close it through update_rec with the merge SHA
+    hermetic: false
+test_obligations:
+  - source: .claude/hooks/hook_canary.sh
+    behavior: Prints exactly one UserPromptSubmit additionalContext line naming `[hook_canary]`, exits 0, on any stdin.
+    verification_step: 1
+    test_selector: tests/session/test_hook_canary.py::test_hook_prints_one_user_prompt_submit_context_line
+    red_green_expectation: red before (script absent), green after.
+  - source: .claude/settings.json
+    behavior: Registers the canary script on UserPromptSubmit in both the settings and the plugin render, next to the capture shim.
+    verification_step: 1
+    test_selector: tests/session/test_hook_canary.py::test_canary_reads_hook_evidence_not_context
+    red_green_expectation: red before (no registration, AGENTS.md names `[session_start_`), green after.
+  - source: .claude/hooks/hooks.json
+    behavior: Equals the render of .claude/settings.json, so project threads run the canary through the plugin.
+    verification_step: 2
+    test_selector: tests/hooks/test_plugin_hooks.py::test_the_committed_hooks_file_is_the_render_of_the_settings
+    waiver_reason: >-
+      Existing guard; it goes red only if the settings change without a re-render, which step 1's acceptance node also
+      catches by reading hooks.json directly.
+  - source: AGENTS.md
+    behavior: The canary names the literal the hook prints.
+    verification_step: 1
+    test_selector: tests/session/test_hook_canary.py::test_canary_reads_hook_evidence_not_context
+    red_green_expectation: red before (AGENTS.md names `[session_start_`), green after.
+  - source: config/prose_budgets.yaml
+    behavior: S1 root_ambient_load_set equals the measured post-edit size.
+    verification_step: 5
+    command: bin/venv-python -m scripts.checks.validation_result --verify-head
+    waiver_reason: >-
+      A budget figure, not behaviour: validate_prose_limits runs in both tiers and fails it both over and under the
+      measured size; step 5 reads that verdict, so the existing check is the obligation's evidence and no new test can
+      add to it.
+constraints:
+  - The AGENTS.md words are operator-approved; place them exactly (sidecar), never re-word. Any other AGENTS.md change is always-ask.
+  - Never hand-edit .claude/hooks/hooks.json; regenerate it with plugin_hooks.py render.
+  - The hook never blocks or fails a prompt (exit 0 on every path, no stderr) and never reads or writes state.
+  - No Decision text; the S1 budget only ratchets down (no raise marker).
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "rec-4824 (Low, S). Cause refined at planning (2026-11-02, this thread's own /tmp/claude-code.log): it is not hook slowness. In a project thread 8 of 9 plugin SessionStart hooks finished 3.7 to 10.3 s before the turn-1 prompt (14:08:19.2-14:08:25.8 vs 14:08:29.5) and none of their output reached turn-1 context; it reached the agent's context only with the NEXT prompt (observed in this planning thread's second turn). Matches PLAN-telemetry-late-hook-records (late-loaded plugin SessionStart records written after the first turn). Making hooks faster would not fix it."
+  - "Why UserPromptSubmit: its additionalContext is applied before the turn starts. Verified in the same thread for a user-level UserPromptSubmit hook (hook_additional_context attachment before turn 1); for a plugin UserPromptSubmit hook, stop_log_turn's output went through the same parse path at 14:08:29.583, after the user-level hook and before 'turn 1 start' at 14:08:29.631, but it prints only stderr so its context is unobserved. Plugin-hook context delivery is therefore inferred-likely, UNPROVEN until VP step 6."
+  - "Departure from rec-4824's suggested fix (a SessionStart-written marker plus a check command): a marker still races the first turn and makes every agent run a command; the prompt-context line needs no agent action and has no race. The rec's acceptance node is kept as named."
+  - "Registry: shard agents-md-hook-canary-marker (node tests/test_agents_md_rules.py) is kept unchanged, since that file still guards the AGENTS.md literal; the moved evidence-source guard gets its own shard via VP step 1 (hook-canary-evidence-source)."
+  - "Round-5 nits not applied: N2 (scope parenthetical does not name project threads) needs new approved wording and rec-4824 asks to keep the scope; N3 (record the UserPromptSubmit-context assumption in ports.yaml SA-02) is outside AGENTS.md's ports.yaml remit (executor/adapter/port code); N4 keeps refactor: the evidence-source check survives at equal strength in the cited node."
+  - "Test placement: tests/session/test_hook_canary.py stays where rec-4824's acceptance command pins it, though hook tests normally live in tests/hooks/ (critique round 3 nit, accepted)."
+  - "Stateless by choice: one line (about 12 tokens) per prompt beats per-session state; it also re-proves the hooks after a compaction."
+  - "Transition: until the operator updates the claude.ai plugin, project threads keep misfiring exactly as today (status quo, not a regression); top-level sessions read .claude/settings.json and get the line at once. plugin_hooks check reports the drift in the session log. Edge case: a checkout that predates the merge with an updated plugin runs bash on a missing script (exit 127, one stderr line, non-blocking); the canary then reads absent, as today, and that branch's AGENTS.md still names `[session_start_`."
+  - "Guard moved, not loosened: test_registered_session_start_scripts_print_the_canary is removed because the canary no longer reads SessionStart output; the evidence-source guard moves to the acceptance node with the same strictness over both config files. Named to the operator with the wording (Decision 235)."
+  - "Turn capture is hook-agnostic (rules H-1..H-3): a hook record that carries the command is named hook:hook_canary; the context attachment carries no command and is named hook:UserPromptSubmit, like the user-level reminder hook's (critique round 6, observed in this thread's transcript). No parser or contract change."
+  - "Other plans touching these files (plan_obligations): unbuilt PLAN-protected-action-gate, PLAN-telemetry-capture-hooks and PLAN-telemetry-content-reader-lock scope .claude/settings.json and/or hooks.json (capture-hooks also tests/hooks/test_capture_hook_registration.py); rec-4478's plan may edit AGENTS.md. Whichever builds second rebases, re-renders hooks.json and re-measures the S1 budget."
+  - "red_overlap at plan write: verdict clear, no reds. Wording check: see gate_rounds (wording-check row; the rehearsal placed both sidecar blocks and settled S1 to 16951)."
+  - "weakening_dispositions[0] (the removed SessionStart-print test) is also bound in the operator-approved sidecar block agents-md-rules-canary, so the operator's wording approval covers the removal."
+  - "Decision-scout verdict NO_FLAGS (round 1). CITE: Decisions 181, 127. Decisions triaged: 192 of 192. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Decision 181: both guard retargets keep equal strength (exact list; registered in both configs and prints the literal). Decision 127: S1 ratchets down, no raise marker. Scout caveat (Decision 163) on a venv-less first prompt is moot: the hook is bash, not bin/venv-python."
+  - "Owning planning thread: 'Plan the hook-canary fix' (Project Review). Plan defects go to the coordinator, which forwards them here."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS}
+  - {gate: wording-check, round: 1, verdict: PASS, digest: 30f57c4367a400cafe9ec2736cb4c791694a8f4115737d272dfcb82a9504c639, base: 1f08d2c7a4693b63f33c2547150f26a6e4f2abcc, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: PROCEED, blocking: 0, nits: 5}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 2}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 5}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 5}
+  - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 5}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "tests/session/test_hook_canary.py: write the four nodes; run them against main's tree and confirm they fail (red-before)."
+  - ".claude/hooks/hook_canary.sh: create per scope."
+  - ".claude/settings.json: append the UserPromptSubmit group; then run bin/venv-python .claude/hooks/plugin_hooks.py render to regenerate .claude/hooks/hooks.json."
+  - "AGENTS.md: place sidecar block agents-md-hook-canary exactly; measure the S1 surface and set config/prose_budgets.yaml root_ambient_load_set to it."
+  - "tests/test_agents_md_rules.py: place sidecar block agents-md-rules-canary exactly. tests/hooks/test_capture_hook_registration.py: edit per scope."
+  - "Record the plan's weakening_dispositions as declared (validate_weakening_dispositions); if validate_weakening_candidates lists any other candidate, or does not list a declared one, stop and send a plan-defect report rather than adding or dropping a disposition."
+  - "Commit locally (no push) before VP step 5: --verify-head attests only a full run that started on a clean, committed tree (validation_result dirty_start)."
+  - "Execute Verification Plan steps 1-5; loop until pass; on an unrecoverable failure stop and send a plan-defect report (Decision 55)."
+  - "Closure evidence, recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state (scripts.session.github_readiness; unknown is unproven, never ready); parent validator evidence (VP 5 full tier plus bin/venv-python -m scripts.checks.validation_result --verify-head for the pushed HEAD); structured postflight evidence (write the scripts.session.postflight_evidence.CATEGORIES JSON in the scratchpad, then bin/venv-python -m scripts.session.postflight --evidence <file>); the real outcome - push, build PR, CI green by event-driven wake (never polled), merge SHA."
+  - "The implementation commit message carries the trailer 'Resolves: rec-4824', and merge_pull_request passes an explicit commit_message carrying it too (git-ops.yaml resolves_trailer). The build PR merges only with the operator's OK on the final diff (hooks and AGENTS.md are always-ask)."
+  - "After merge: ask the operator for the plugin update (step 6), then the coordinator for the fresh verifying thread; run step 7."
+  - "Report: what was implemented, verification results, merge SHA, step 6 result; until step 6 passes, report rec-4824's closure as provisional. rec-4824's stored file is scripts/session/hook_canary.py, which this plan does not create: add an update_rec context note naming .claude/hooks/hook_canary.sh, the merge SHA, and that closure is provisional until VP step 6 passes."
+work_areas: []
+weakening_dispositions:
+  - candidate: "[test-removed] tests/test_agents_md_rules.py::test_registered_session_start_scripts_print_the_canary"
+    disposition: refactor
+    cite: "tests/session/test_hook_canary.py::test_canary_reads_hook_evidence_not_context"
+  - candidate: "[assertion-changed] tests/hooks/test_capture_hook_registration.py::test_the_four_capture_hooks_are_registered"
+    disposition: planned-change
+    cite: "acceptance_criteria[2]"
+rollback: >-
+  Revert the build PR; the canary returns to reading SessionStart lines (misfiring in project threads as before) and the
+  operator updates the plugin again.

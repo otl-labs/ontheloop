@@ -6,21 +6,21 @@ decisions, sessions, recs count), telemetry-health stub and endstate-drift detec
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-import yaml
 
+from scripts.contract_rules import parse_yaml
 from scripts.preflight import _common as preflight_common
 
 boto3 = pytest.importorskip("boto3")
 
 from tests.fixtures.session_preflight_module import MODULE_PATH as _MODULE_PATH  # noqa: E402
 from tests.fixtures.session_preflight_module import preflight as _preflight  # noqa: E402
+from tests.fixtures.yaml_parse_spy import install as install_yaml_parse_spy  # noqa: E402
 
 
 class TestSlimRoadmapState:
@@ -60,8 +60,6 @@ class TestReadContextFiles:
         with (
             patch("scripts.preflight._common.ROADMAP_FILE", roadmap),
             patch("scripts.preflight._common.DECISIONS_FILE", tmp_path / "missing.md"),
-            patch("scripts.preflight._common.SESSION_LOG_FILE", tmp_path / "missing2.md"),
-            patch("scripts.preflight._common.RECOMMENDATIONS_FILE", tmp_path / "missing3.md"),
         ):
             result = _preflight.read_context_files()
         assert result["roadmap_phase"] == "Phase 1.5: Schema Flattening"
@@ -70,8 +68,6 @@ class TestReadContextFiles:
         with (
             patch("scripts.preflight._common.ROADMAP_FILE", tmp_path / "missing.md"),
             patch("scripts.preflight._common.DECISIONS_FILE", tmp_path / "missing2.md"),
-            patch("scripts.preflight._common.SESSION_LOG_FILE", tmp_path / "missing3.md"),
-            patch("scripts.preflight._common.RECOMMENDATIONS_FILE", tmp_path / "missing4.md"),
         ):
             result = _preflight.read_context_files()
         assert result["roadmap_phase"] == "unknown"
@@ -85,8 +81,6 @@ class TestReadContextFiles:
         with (
             patch("scripts.preflight._common.ROADMAP_FILE", tmp_path / "missing.md"),
             patch("scripts.preflight._common.DECISIONS_FILE", decisions),
-            patch("scripts.preflight._common.SESSION_LOG_FILE", tmp_path / "missing2.md"),
-            patch("scripts.preflight._common.RECOMMENDATIONS_FILE", tmp_path / "missing3.md"),
         ):
             result = _preflight.read_context_files()
         # Decision 1 and 3 are open; Decision 2 is Decided
@@ -113,89 +107,45 @@ class TestReadContextFiles:
         result = _preflight.read_context_files()
         assert result["open_decisions_count"] == expected_open
 
-    def test_recent_sessions_extracted(self, tmp_path: Path) -> None:
-        """RE-SHAPED (Decision 181, PLAN-preflight-context-docs-honesty): this case's fixture is
-        OLDEST-FIRST and its index-0 assertion previously pinned the 2026-03-01 header, which
-        ENCODED the positional-slice defect -- recent_sessions returned the oldest entries. The
-        index-0 assertion is inverted to the NEWEST-dated entry and a second assertion pinning the
-        older entry at index 1 is ADDED, so the case constrains strictly more than before; the
-        count assertion is unchanged. Nothing was deleted or weakened.
-        """
-        session_log = tmp_path / "SESSION_LOG.md"
-        session_log.write_text(
-            "## [2026-03-01] -- agent/feature-a\n\n**Done:** Did something\n"
-            "## [2026-03-10] -- agent/feature-b\n\n**Done:** Did another thing\n",
-            encoding="utf-8",
-        )
+    def test_read_context_files_has_no_recent_sessions(self, tmp_path: Path) -> None:
         with (
             patch("scripts.preflight._common.ROADMAP_FILE", tmp_path / "missing.md"),
             patch("scripts.preflight._common.DECISIONS_FILE", tmp_path / "missing2.md"),
-            patch("scripts.preflight._common.SESSION_LOG_FILE", session_log),
-            patch("scripts.preflight._common.RECOMMENDATIONS_FILE", tmp_path / "missing3.md"),
         ):
             result = _preflight.read_context_files()
-        assert len(result["recent_sessions"]) == 2
-        assert "2026-03-10" in result["recent_sessions"][0]
-        assert "2026-03-01" in result["recent_sessions"][1]
+        assert "recent_sessions" not in result
 
     def test_missing_files_return_defaults(self, tmp_path: Path) -> None:
         with (
             patch("scripts.preflight._common.ROADMAP_FILE", tmp_path / "missing.md"),
             patch("scripts.preflight._common.DECISIONS_FILE", tmp_path / "missing2.md"),
-            patch("scripts.preflight._common.SESSION_LOG_FILE", tmp_path / "missing3.md"),
-            patch("scripts.preflight._common.RECOMMENDATIONS_FILE", tmp_path / "missing4.md"),
         ):
             result = _preflight.read_context_files()
         assert result["roadmap_phase"] == "unknown"
         assert result["open_decisions_count"] == 0
-        assert result["recent_sessions"] == []
-        assert result["recommendations_count"] == 0
-
-
-class TestOpenTelemetrySession:
-    """open_telemetry_session() writes the active-session state file."""
-
-    def test_open_session_creates_state_file(self, tmp_path: Path) -> None:
-        """open_telemetry_session writes state file with correct schema."""
-        state_file = tmp_path / ".telemetry-active-session.json"
-        with patch("session_preflight.TELEMETRY_ACTIVE_SESSION_FILE", state_file):
-            _preflight.open_telemetry_session(workflow="plan", branch="agent/test")
-
-        assert state_file.exists()
-        data = json.loads(state_file.read_text(encoding="utf-8"))
-        assert "session_id" in data
-        assert data["workflow"] == "plan"
-        assert data["branch"] == "agent/test"
-        assert "started_at" in data
+        assert result["recommendations_count"] is None
 
 
 class TestReadContextFilesRecsCount:
-    """read_context_files() counts open recs via the open_recs verb (Decision 84 I-3)."""
+    """read_context_files() takes the open count from the tally preflight fetched; no reader call (Decision 215)."""
 
-    def test_recommendations_count_is_len_of_open_recs_rows(self, tmp_path: Path) -> None:
-        reader = MagicMock()
-        reader.named.return_value = [{"id": "rec-1"}, {"id": "rec-2"}, {"id": "rec-3"}]
+    def _call(self, tmp_path: Path, reader: MagicMock, **kw):
         with (
             patch("scripts.preflight._common._make_reader", return_value=reader),
             patch("scripts.preflight._common.ROADMAP_FILE", tmp_path / "missing.md"),
             patch("scripts.preflight._common.DECISIONS_FILE", tmp_path / "missing2.md"),
-            patch("scripts.preflight._common.SESSION_LOG_FILE", tmp_path / "missing3.md"),
         ):
-            result = _preflight.read_context_files()
-        assert result["recommendations_count"] == 3
-        reader.named.assert_called_once_with("open_recs")
+            return _preflight.read_context_files(**kw)
 
-    def test_recommendations_count_zero_on_reader_failure(self, tmp_path: Path) -> None:
+    def test_recommendations_count_is_the_passed_tally_count(self, tmp_path: Path) -> None:
         reader = MagicMock()
-        reader.named.side_effect = RuntimeError("reader down")
-        with (
-            patch("scripts.preflight._common._make_reader", return_value=reader),
-            patch("scripts.preflight._common.ROADMAP_FILE", tmp_path / "missing.md"),
-            patch("scripts.preflight._common.DECISIONS_FILE", tmp_path / "missing2.md"),
-            patch("scripts.preflight._common.SESSION_LOG_FILE", tmp_path / "missing3.md"),
-        ):
-            result = _preflight.read_context_files()
-        assert result["recommendations_count"] == 0
+        assert self._call(tmp_path, reader, open_recs_count=3)["recommendations_count"] == 3
+        reader.named.assert_not_called()
+
+    def test_recommendations_count_is_none_when_unavailable_and_no_fallback_call(self, tmp_path: Path) -> None:
+        reader = MagicMock()
+        assert self._call(tmp_path, reader)["recommendations_count"] is None
+        reader.named.assert_not_called()
 
 
 class TestRetiredStagingEstate:
@@ -309,6 +259,40 @@ class TestEndstateDrift:
         assert result["new_ids"] == []
 
 
+class TestEndstateDriftParser:
+    """rec-4365: both _check_endstate_drift roadmap parses use the libyaml loader."""
+
+    _OLD_IDS = ["T1.1", "T1.2"]
+
+    def test_roadmap_parses_use_libyaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        old_hash = hashlib.sha256("\n".join(sorted(self._OLD_IDS)).encode()).hexdigest()
+        context = f"Derived from ROADMAP-PLATFORM.yaml @ abc1234 (2026-06-28).\nroadmap_tier_id_set sha256: {old_hash}\n"
+        old_roadmap_yaml = (
+            "tier_items:\n  - id: T1.1\n    name: Item 1\n    status: not_started\n"
+            "  - id: T1.2\n    name: Item 2\n    status: not_started\n"
+        )
+        new_roadmap_yaml = old_roadmap_yaml + "  - id: ZZ9.99\n    name: New Item\n    status: not_started\n"
+        (tmp_path / "docs").mkdir(parents=True)
+        (tmp_path / "docs" / "PROJECT_CONTEXT.md").write_text(context, encoding="utf-8")
+        (tmp_path / "docs" / "ROADMAP-PLATFORM.yaml").write_text(new_roadmap_yaml, encoding="utf-8")
+
+        git_result = MagicMock()
+        git_result.returncode = 0
+        git_result.stdout = old_roadmap_yaml
+
+        log = install_yaml_parse_spy(monkeypatch)
+        with (
+            patch("scripts.preflight._common.ROOT", tmp_path),
+            patch("session_preflight.subprocess.run", return_value=git_result),
+        ):
+            result = _preflight._check_endstate_drift()
+
+        assert result["stale"] is True
+        assert result["reason"] == "stamp_ref_new_ids_named"
+        assert len(log.entries) == 2
+        assert log.pure_entries == []
+
+
 class TestEndstateStampRefResolves:
     """docs/PROJECT_CONTEXT.md's Source stamp ref half resolves through _check_endstate_drift's
     own matcher, so the drift check reaches its git-show attribution branch instead of reporting
@@ -399,7 +383,7 @@ class TestEndstateStampRefResolves:
             cwd=root,
         )
         assert show.returncode == 0, show.stderr
-        items = (yaml.safe_load(show.stdout) or {}).get("tier_items", [])
+        items = (parse_yaml(show.stdout) or {}).get("tier_items", [])
         old_ids = sorted({str(i["id"]) for i in items if isinstance(i, dict) and "id" in i})
         digest = hashlib.sha256("\n".join(old_ids).encode()).hexdigest()
         stamped = re.search(r"roadmap_tier_id_set sha256:\s*([a-f0-9]{64})", self._real_stamp_line())

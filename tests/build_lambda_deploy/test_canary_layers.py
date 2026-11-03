@@ -1,5 +1,5 @@
 """Tests for scripts/build_lambda_deploy.py -- canary-layer publishing + ducklake-profile
-resolution concern (VERBATIM split from tests/test_build_lambda_deploy.py, rec-2709 Wave 12).
+passthrough concern (VERBATIM split from tests/test_build_lambda_deploy.py, rec-2709 Wave 12).
 """
 
 import types
@@ -41,18 +41,11 @@ def _args(**kw):
     return ns
 
 
-class TestResolveDucklakeProfile:
-    def test_generic_default_maps_to_personal(self):
-        assert bd._resolve_ducklake_profile("company-aws-profile") == "agent_platform"
-
-    def test_explicit_profile_unchanged(self):
-        assert bd._resolve_ducklake_profile("agent_platform") == "agent_platform"
-        assert bd._resolve_ducklake_profile("agent_platform_admin") == "agent_platform_admin"
-
-    def test_ducklake_build_resolves_profile(self):
-        """_run_ducklake_build (the orchestrator; still defined in scripts.build_lambda) resolves
-        the generic default profile to agent_platform before calling the DuckLake builders --
-        exercised via the facade since the orchestrator itself does not move."""
+class TestDucklakeBuildProfile:
+    def test_ducklake_build_passes_profile_through(self):
+        """_run_ducklake_build (the orchestrator; still defined in scripts.build_lambda) passes the
+        profile to the DuckLake builders unchanged -- exercised via the facade since the orchestrator
+        itself does not move."""
         captured = {}
         with (
             patch("scripts.build_lambda.resolve_bucket", return_value="bk"),
@@ -64,6 +57,8 @@ class TestResolveDucklakeProfile:
                     _FakePath(name="m.zip"),
                     _FakePath(name="ms.zip"),
                     _FakePath(name="dr.zip"),
+                    _FakePath(name="tw.zip"),
+                    _FakePath(name="trd.zip"),
                 ],
             ),
             patch("scripts.build_lambda.build_ducklake_deps_layer", return_value=_FakePath(name="deps.zip")),
@@ -74,8 +69,8 @@ class TestResolveDucklakeProfile:
             patch("scripts.build_lambda.build_pgclient_layer", return_value=_FakePath(name="pgclient.zip")),
             patch("scripts.build_lambda.assert_within_size_limit"),
         ):
-            bl._run_ducklake_build(_args(skip_upload=True, profile="company-aws-profile"))
-        assert captured["profile"] == "agent_platform"  # generic default resolved to personal
+            bl._run_ducklake_build(_args(skip_upload=True, profile="agent_platform"))
+        assert captured["profile"] == "agent_platform"
 
 
 class TestPublishCanaryLayers:

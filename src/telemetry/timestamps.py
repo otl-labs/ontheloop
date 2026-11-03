@@ -31,7 +31,7 @@ _MS_OVERFLOW_LIMIT = 2**48 - 1
 
 
 class TimestampError(ValueError):
-    """Raised on any rejected timestamp input across this module's four functions."""
+    """Raised on any rejected timestamp input across this module's functions."""
 
 
 def parse_iso8601_utc(value: str) -> datetime:
@@ -75,6 +75,24 @@ def parse_iso8601_utc(value: str) -> datetime:
         raise TimestampError(f"not a valid calendar timestamp: {value!r} ({exc})") from exc
 
     return dt.astimezone(timezone.utc)
+
+
+def parse_wire_timestamp(value: str) -> datetime:
+    """Parse a writer-edge timestamp: the pinned RFC 3339 profile with EXACTLY three fraction digits.
+
+    Every timestamp column carries its full millisecond value at the writer edge (event_id's 48-bit prefix depends on
+    event_timestamp the same way the entity keys depend on session_started_at), so a fraction-less value, which the
+    profile alone would silently pad to .000, and any other width are rejected. Decision 96 cl.4.
+    """
+    if not isinstance(value, str):
+        raise TimestampError(f"expected str, got {type(value).__name__}")
+    match = _RFC3339_RE.match(value)
+    if match is None:
+        raise TimestampError(f"not a valid RFC 3339 timestamp (pinned profile): {value!r}")
+    frac = match.group("frac")
+    if frac is None or len(frac) != 3:
+        raise TimestampError(f"wire timestamps carry exactly three fraction digits: {value!r}")
+    return parse_iso8601_utc(value)
 
 
 def require_aware_utc(value: datetime) -> None:

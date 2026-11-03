@@ -24,7 +24,7 @@ Status flips remain the verification-earned closing step owned by `/implement` t
 
 | Input | Source | Load method |
 |---|---|---|
-| CI-RCA recs | `logs/.preflight-report.json` (`ci_rca_unresolved_recs`, `ci_rca_likely_resolved_recs`, alerts) | Read preflight cache |
+| CI-RCA recs | `logs/.preflight-report.json` (`ci_rca_unresolved_recs`, `ci_rca_likely_resolved_recs`, alerts) | Read preflight cache; null list = UNAVAILABLE hard block |
 | Eligible / in_progress items | `logs/.preflight-report.json` (`platform_roadmap.next_eligible`, `in_progress`, `strategic_pending`) | Read preflight cache |
 | Blocked-on-CD annotations | `logs/.preflight-report.json` (`platform_roadmap.blocked_on_cd`) | Read preflight cache |
 | Ratifiable CDs | `logs/.preflight-report.json` (`platform_roadmap.ratifiable_cds`) | Read preflight cache |
@@ -35,9 +35,9 @@ Status flips remain the verification-earned closing step owned by `/implement` t
 | Roadmap detail (`files_in_scope`, `depends_on`) | `docs/ROADMAP-PLATFORM.yaml` | Typed-loader projection: `scripts.roadmap.platform_roadmap.load()` (pure-local, no warehouse I/O -- distinct from the banned `-m scripts.roadmap.platform_roadmap` module entrypoint), returning both a candidate-scoped projection (filtered to the ids already surfaced by the preflight cache) and a roadmap-wide `depends_index` (`{id: depends_on}`, cheap) for reverse-dependency lookups; see the orient command Step 2 for the literal runnable form. Full-file Read only as an error fallback if the extraction fails. |
 | Recent main activity | `logs/.preflight-report.json` (`recent_main_commits`) | Read preflight cache |
 | Decision reversal-conditions monitor | `logs/.preflight-report.json` (`decision_conditions`: `monitored[]`, `surfaced[]`, `malformed[]`) | Read preflight cache (`scripts.preflight.decision_conditions.preflight_bucket()`, SEQ-02) |
-| Rec `acceptance` string (Step 3 probe) | `logs/.recommendations-log.jsonl` | Read local cache file (no portal or reader call) |
+| Rec `acceptance` string (Step 3 probe) | `ci_rca_unresolved_recs[].acceptance` | Read preflight cache (no portal or reader call) |
 
-**Read-from-preflight-cache constraint (Decision 88 egress budget; Decision 84 closed boundary):** `/orient` reads the preflight cache -- it must NOT trigger a fresh warehouse reader fan-out. Do not call `bin/venv-python -m scripts.roadmap.platform_roadmap` or any DuckLake reader verb during orient. The preflight script is the only path that may refresh `logs/.preflight-report.json`.
+**Read-from-preflight-cache constraint (Decision 88 egress budget; Decision 84 closed boundary):** `/orient` reads the preflight cache -- it must NOT trigger a warehouse reader fan-out. Do not call `bin/venv-python -m scripts.roadmap.platform_roadmap` or any DuckLake reader verb during orient. The preflight script is the only path that may refresh `logs/.preflight-report.json`.
 
 **Full-projection requirement:** `/orient` requires the full preflight projection (`--roadmap-detail full`). If `platform_roadmap.gate_evaluations` is absent from the cached report, re-run preflight with `--roadmap-detail full` before proceeding (the orient command handles this check in Step 1).
 
@@ -49,7 +49,7 @@ Each entry in `platform_roadmap.in_progress` (preflight cache) carries:
 - `needs_followon_plan` -- true iff `open_criteria_count > 0` AND `all_plans_actioned` is true (follow-on `/plan` is the next action)
 - `completion_blocked_on_cd` -- sorted list of pending CD ids gating this item's completion (via related_candidate_decisions / cd.gates / decision_required_before); empty when `bootstrap_completion_exempt` or no pending gating CD; non-empty with `open_criteria_count == 0` means the item is parked-gated (qualifies for complete but the decision has not ratified)
 
-**Phase A (degradation branch, stale preflight cache predating the structured ledger):** if an in_progress entry lacks `open_criteria_count`, `all_plans_actioned`, or `needs_followon_plan`, infer them from the item's `exit_criteria[]` list and `progress_note` prose (exit_criteria entries not mentioned as done in the progress_note count as open; when ambiguous, count as open per the conservative bias). If `completion_blocked_on_cd` is missing entirely, treat it as unknown rather than empty -- do NOT infer parked-gated status from a missing key, and do not emit a closeout or follow-on `/plan` prompt until the cache is refreshed with `--roadmap-detail full` (this is the safe default: a missing key must never be silently read as "no gating CD"). Phase A is a fallback only; the preflight cache carrying the structured ledger is the primary path (Decision 59).
+**Phase A (degradation branch, stale cache lacking the structured ledger):** if an in_progress entry lacks `open_criteria_count`, `all_plans_actioned`, or `needs_followon_plan`, infer them from the item's `exit_criteria[]` list and `progress_note` prose (exit_criteria entries not mentioned as done in the progress_note count as open; when ambiguous, count as open per the conservative bias). If `completion_blocked_on_cd` is missing entirely, treat it as unknown rather than empty -- do NOT infer parked-gated status from a missing key, and do not emit a closeout or follow-on `/plan` prompt until the cache is refreshed with `--roadmap-detail full` (safe default: a missing key is never silently "no gating CD"). Phase A is a fallback only; the structured ledger is the primary path (Decision 59).
 
 **Parked-gated rule (canonical, single location -- Decision 93):** an in_progress item with `open_criteria_count == 0` AND a non-empty `completion_blocked_on_cd` is parked -- all code work is done but it cannot close because a pending candidate_decision gates its completion. Emit NO closeout or follow-on `/plan` prompt for a parked-gated item -- the gate is a pending decision, not pending code work. Every Deliverable Shape section below references this rule rather than restating it.
 
@@ -144,7 +144,7 @@ Classification rows, the `prior_deferrals` render and the close-then-stamp route
 
 Source: `recent_main_commits` from the preflight cache (`logs/.preflight-report.json`). Do not issue a `git log` Bash call -- cache only (Decision 88 egress budget; Decision 84 closed boundary).
 
-Group the recent commits by conventional-prefix slug (`feat`/`plan`/`roadmap`/`scope`) and map each slug to the tier_item it advanced using the Step-2 roadmap projection (Inputs > Roadmap detail). Emit a one-line trajectory read describing which area of the platform saw recent activity.
+Group the recent commits by conventional-prefix slug (`feat`/`plan`/`roadmap`/`scope`) and map each slug to the tier_item it advanced using the Step-2 roadmap projection (Inputs > Roadmap detail). Emit a one-line trajectory read describing which area of the codebase saw recent activity.
 
 **Degradation rule**: when the slug->tier_item mapping is ambiguous (e.g., the commit prefix does not match any tier_item slug or multiple items share a prefix pattern), skip the inferred mapping and emit the raw commit list (sha, date, subject) without any inferred tier_item association.
 
@@ -160,7 +160,7 @@ Render as a table: practice -> preflight signal -> PASS/WATCH/GAP.
 |---|---|---|
 | Terraform converged | `convergence_health.status` | PASS if `green`; WATCH if `red` and `red_age_hours` < 6; GAP if `red` and `red_age_hours` >= 6 or `stuck_approvals` > 0 |
 | Data quality coverage | `data_quality.last_run.verdict` | PASS if `PASS`; WATCH if `DEGRADED` or `SKIP`; GAP if `FAIL`, `HARD_GATE`, `ERROR` or null/absent |
-| CI-RCA liveness | `ci_rca_unresolved_recs` empty AND `ci_rca_liveness_alert` null | PASS if both clear; GAP if either non-empty or non-null |
+| CI-RCA liveness | `ci_rca_unresolved_recs` empty (null = UNAVAILABLE) AND `ci_rca_liveness_alert` null | PASS if both clear; GAP if either non-empty or non-null |
 | Rec backlog (soft cap) | `non_automatable_softcap_breached` | PASS if false; GAP if true |
 | Terraform pending | `terraform_pending` | PASS if false or absent; WATCH if true |
 | Dependency backlog | `dependabot_stranded_prs` | PASS if `stranded` and `quota_saturated` both empty; WATCH if all `stranded` < 14d; GAP if any >= 14d or `quota_saturated` non-empty |
@@ -171,7 +171,7 @@ If a signal is absent from the preflight cache, mark it UNKNOWN rather than infe
 
 Prioritized work list from the Status Digest:
 
-1. **CI-RCA first**: HARD BLOCK recs appear as item 0 -- they block other work. For each, suggest a `/plan` prompt to resolve it.
+1. **CI-RCA first**: HARD BLOCK recs appear as item 0 -- they block overlapping work. Route each per the command's Section 2 row.
 2. **In_progress follow-on planning (ranked fewest-open-criteria-first)**: in_progress items have momentum and are typically the lowest-activation-cost next step. Rank them fewest-open-criteria-first (closest-to-done). For each, determine which of the three cases applies:
    - **Parked-gated**: see Inputs > In_progress entry fields for the canonical rule -- no prompt is emitted for these items.
    - **Mid-implementing** (a PLAN-*.yaml was authored and is in-flight but not yet acted on): suggest `/implement PLAN-{slug}.yaml` for that item.
@@ -196,7 +196,7 @@ Overlap matrix:
 
 **Keystone-first sequencing**: order prompts so items that unblock the most downstream work appear first. Note explicitly which pairs are safe to run in parallel sessions.
 
-If a HARD BLOCK ci-rca rec exists, prepend a zero-th prompt:
+If a HARD BLOCK Critical rec exists, prepend a zero-th prompt:
 ```
 /plan ci-rca: resolve rec-NNNN (<brief title>)
 ```
@@ -221,4 +221,4 @@ Ad-hoc lane (non-blocking, cap 3): open Critical recs, ready follow-on recs, pri
 
 ## Scope
 
-v1: platform roadmap only. Product-roadmap orientation is deferred.
+v1: the roadmap only.

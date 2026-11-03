@@ -71,6 +71,34 @@ class TestIsReaderUnavailableTruthTable:
 
         assert is_reader_unavailable(ValueError("bad value")) is False
 
+    def test_503_catalog_unavailable_classifies_transient(self) -> None:
+        from scripts.ops_portal.reader_transient import is_reader_unavailable
+
+        msg = 'ducklake_reader \'named_read\' failed (HTTP 503): {"ok": false, "error_type": "catalog_unavailable"}'
+        assert is_reader_unavailable(RuntimeError(msg)) is True
+
+    def test_catalog_unavailable_body_classifies_transient(self) -> None:
+        """The parsed body of a ReaderInvokeError wins over the message text."""
+        from scripts.ops_portal.reader_transient import is_reader_unavailable
+        from src.common.ducklake_reader_client import ReaderInvokeError
+
+        exc = ReaderInvokeError("named_read", 503, "{}", {"ok": False, "error_type": "catalog_unavailable"})
+        assert is_reader_unavailable(exc) is True
+        assert is_reader_unavailable(ReaderInvokeError("named_read", 503, "{}", {"error_type": "occ_exhausted"})) is False
+
+    def test_other_error_type_on_503_does_not_classify(self) -> None:
+        from scripts.ops_portal.reader_transient import is_reader_unavailable
+
+        msg = 'ducklake_writer \'file_ops\' failed (HTTP 503): {"ok": false, "error_type": "occ_exhausted"}'
+        assert is_reader_unavailable(RuntimeError(msg)) is False
+        assert is_reader_unavailable(RuntimeError("failed (HTTP 502) error_type=catalog_unavailable")) is False
+
+    def test_unmapped_500_does_not_classify(self) -> None:
+        from scripts.ops_portal.reader_transient import is_reader_unavailable
+
+        msg = 'ducklake_reader \'named_read\' failed (HTTP 500): {"ok": false, "error_type": "unmapped"}'
+        assert is_reader_unavailable(RuntimeError(msg)) is False
+
     def test_connection_error_classifies_transient(self) -> None:
         requests = pytest.importorskip("requests")
         from scripts.ops_portal.reader_transient import is_reader_unavailable
@@ -121,3 +149,33 @@ class TestTransientSetParity:
         for status in _WRITER_TRANSIENT_STATUS:
             message = f"ducklake_writer file_ops ops_recommendations failed (HTTP {status}): backend unavailable"
             assert is_reader_unavailable(RuntimeError(message)) is True
+
+
+class TestTransientErrorTypeParity:
+    """The classifier's allow-list literal (kept in scripts/) equals the handlers' exported authority, and every other
+    error_type the three serving contracts declare still gates (Decision 155 cl.2: asserted equal, never restated)."""
+
+    def test_allow_list_equals_the_helper_authority(self) -> None:
+        from scripts.ops_portal.reader_transient import _TRANSIENT_ERROR_TYPES
+        from src.common.ducklake_handler_errors import TRANSIENT_ERROR_TYPES
+
+        assert _TRANSIENT_ERROR_TYPES == TRANSIENT_ERROR_TYPES
+
+    def test_every_other_declared_error_type_still_gates(self) -> None:
+        from pathlib import Path
+
+        import yaml
+
+        from scripts.ops_portal.reader_transient import _TRANSIENT_ERROR_TYPES, is_reader_unavailable
+
+        root = Path(__file__).resolve().parents[2] / "docs" / "contracts"
+        declared: set[str] = set()
+        for name in ("ducklake_telemetry_writer", "ducklake_reader", "ducklake_writer"):
+            contract = yaml.safe_load((root / f"{name}.yaml").read_text(encoding="utf-8"))
+            for verb in contract["verbs"].values():
+                declared |= set(verb["typed_errors"])
+        assert _TRANSIENT_ERROR_TYPES <= declared
+        for error_type in sorted(declared - _TRANSIENT_ERROR_TYPES):
+            for status in (500, 502, 503, 504):
+                msg = f'ducklake_reader \'x\' failed (HTTP {status}): {{"ok": false, "error_type": "{error_type}"}}'
+                assert is_reader_unavailable(RuntimeError(msg)) is False, (error_type, status)

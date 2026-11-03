@@ -2,7 +2,7 @@
 """AWS deploy/publish + bucket resolution for the Lambda build/deploy tool (Decision 104 pattern).
 
 Holds upload_to_s3, update_lambda_functions, resolve_bucket, validate_bucket_exists,
-publish_canary_layers, and _resolve_ducklake_profile. Imports only the accessors and constants it
+and publish_canary_layers. Imports only the accessors and constants it
 needs from scripts.build_lambda_config (no import of build_lambda_packaging -- no cycle). See
 scripts/build_lambda.py for the CLI facade that re-exports this module's public and
 test-patched symbols.
@@ -108,11 +108,11 @@ def update_lambda_functions(
 
     ``only_functions`` (hotfix follow-up to the 2026-07-24 ops_decisions incident -- splits the
     ducklake deploy into a maintenance leg and a serving leg so the reconcile gate can refuse only
-    the latter): further filters ``only_ducklake``'s five-function map down to the named subset.
+    the latter): further filters ``only_ducklake``'s deploy map down to the named subset.
     Raises ``ValueError`` on an unrecognised function name (a subset deploy that silently
     intersects to empty and reports success is exactly the false-green this exists to prevent) and
     on ``only_functions`` passed with ``only_ducklake=False`` (the prod branch builds a different
-    map; subsetting it is out of scope). ``None`` (the default) deploys all five ducklake functions,
+    map; subsetting it is out of scope). ``None`` (the default) deploys every ducklake function,
     unchanged from prior behaviour.
 
     Ref: AWS CLI ``lambda update-function-code`` requires
@@ -378,14 +378,3 @@ def publish_canary_layers(
         print(f"  OK {layer_name}: {arn}")
     print(_json.dumps(arns))
     return arns
-
-
-def _resolve_ducklake_profile(profile: str) -> str:
-    """Map the generic default profile to the personal-account profile for DuckLake.
-
-    The ducklake_writer/reader functions, layers, and S3 bucket all live in the PERSONAL account
-    (agent_platform). The generic `company-aws-profile` default cannot reach them (and a same-named
-    function elsewhere would be a deploy hazard), so the ducklake path resolves it to agent_platform.
-    An explicitly-passed non-default profile is honoured unchanged.
-    """
-    return "agent_platform" if profile == "company-aws-profile" else profile

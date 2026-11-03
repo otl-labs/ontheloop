@@ -252,6 +252,49 @@ class TestJunitGrammar:
         assert result.arm == GRAMMAR_SELECTOR_FLAG
         assert result.route == ROUTE_STATIC
 
+    def test_interpreter_dash_m_pytest_is_not_a_selector_flag(self) -> None:
+        for prefix in ("bin/venv-python -m pytest", "python -m pytest", ".venv/bin/python -m pytest", ".venv/bin/pytest"):
+            result = classify_grammar(f"{prefix} tests/x.py::test_a tests/x.py::test_b -q")
+            assert result.arm == GRAMMAR_SINGLE_NODE_CHAIN, prefix
+            assert result.route == ROUTE_JUNIT, prefix
+            assert result.node_ids == ("tests/x.py::test_a", "tests/x.py::test_b"), prefix
+
+    def test_real_marker_selector_still_refused(self) -> None:
+        for cmd in (
+            "bin/venv-python -m pytest -m slow tests/x.py::test_a",
+            "bin/venv-python -m pytest tests/x.py::test_a -k foo",
+            "bin/venv-python -m pytest --deselect tests/x.py::test_b tests/x.py::test_a",
+            "pytest -m=slow tests/x.py::test_a",
+        ):
+            result = classify_grammar(cmd)
+            assert result.arm == GRAMMAR_SELECTOR_FLAG, cmd
+            assert result.route == ROUTE_STATIC, cmd
+
+    def test_attached_or_combined_short_selector_is_refused(self) -> None:
+        for cmd in (
+            "pytest -mslow tests/x.py::test_a",
+            "bin/venv-python -m pytest -kfoo tests/x.py::test_a",
+            "bin/venv-python -m pytest -vk foo tests/x.py::test_a",
+            "bin/venv-python -m pytest -xm slow tests/x.py::test_a",
+            "pytest -qk foo tests/x.py::test_a",
+        ):
+            result = classify_grammar(cmd)
+            assert result.arm == GRAMMAR_SELECTOR_FLAG, cmd
+            assert result.route == ROUTE_STATIC, cmd
+
+    def test_without_an_anchored_invocation_the_whole_segment_is_scanned(self) -> None:
+        for cmd in (
+            "py.test -k foo tests/x.py::test_a tests/pytest",
+            "bin/venv-python -mpytest -k foo tests/x.py::test_a --rootdir=a/pytest",
+            "pytest-3 -k foo tests/x.py::test_a",
+            "timeout -k 5 60 pytest tests/x.py::test_a",
+            "pytest-3 -k foo -m pytest tests/x.py::test_a",
+            "uv run --with pytest pytest -k foo tests/x.py::test_a",
+        ):
+            result = classify_grammar(cmd)
+            assert result.arm == GRAMMAR_SELECTOR_FLAG, cmd
+            assert result.route == ROUTE_STATIC, cmd
+
     def test_bare_path_with_no_node_id_is_residual_and_stays_static(self) -> None:
         result = classify_grammar("pytest tests/x.py")
         assert result.arm == GRAMMAR_NO_NODE_ID
@@ -274,6 +317,8 @@ class TestJunitGrammar:
             "! pytest tests/x.py::test_a",
             "pytest -k foo tests/x.py::test_a",
             "pytest -m slow tests/x.py::test_a",
+            "bin/venv-python -m pytest tests/x.py::test_a -q",
+            "bin/venv-python -m pytest -m slow tests/x.py::test_a",
             "pytest --deselect tests/x.py::test_b tests/x.py::test_a",
             "pytest tests/x.py::test_a'",
         ]

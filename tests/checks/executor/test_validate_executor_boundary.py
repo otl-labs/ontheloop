@@ -4,6 +4,7 @@ scripts/checks/executor/validate_executor_boundary.py, rec-2709 Wave 1)."""
 from pathlib import Path
 from unittest.mock import patch
 
+from scripts.checks import registry
 from scripts.checks.executor.validate_executor_boundary import validate_executor_boundary
 
 
@@ -84,11 +85,19 @@ class TestValidateExecutorBoundary:
         assert failed == []
 
     def test_missing_jsonl_skips_gracefully(self, tmp_path: Path) -> None:
-        """Missing JSONL file does not raise and does not append to failed."""
-        with patch("scripts.checks._common.ROOT", tmp_path):
+        """Missing JSONL file does not raise, does not append to failed, and declares skipped() (Decision 170)."""
+        with (
+            patch("scripts.checks._common.ROOT", tmp_path),
+            registry.outcome_scope("validate_executor_boundary"),
+        ):
             failed: list[str] = []
             validate_executor_boundary(failed)
+            declaration = registry.pop_declaration()
         assert failed == []
+        assert declaration is not None
+        assert declaration.kind == "skipped"
+        assert "Decision 215" in declaration.reason
+        assert "rec-4236" in declaration.reason
 
     def test_executor_boundary_matches_new_prompt_path(self, tmp_path: Path) -> None:
         """config/agent/executor/prompts/*.prompt.md is recognised as a boundary file.

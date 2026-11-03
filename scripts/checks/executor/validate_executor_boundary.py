@@ -36,6 +36,9 @@ def validate_executor_boundary(failed: list[str]) -> None:
 
     if not recs_jsonl.exists():
         print("logs/.recommendations-log.jsonl not found — skipping.")
+        registry.skipped(
+            "recs cache retired (Decision 215) and this check still scans it; rec-4236 owns moving it onto a reader verb"
+        )
         return
 
     violations: list[tuple[str, str, str]] = []

@@ -1,0 +1,763 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "recs-related-verb"
+intent: >-
+  Planning agents find the open recommendations relevant to the files they are about to change -- including recs anchored on
+  neighbouring files that a direct hit misses because the 500-SLOC limit spreads each concern over many small files --
+  as one ranked, bounded, explained page instead of an unranked direct-hit list. Ships rec-4235's verb half: one
+  server-ranked reader verb (recs_related) fed by a repo-side neighbourhood expansion (imports, package siblings, tests
+  mirror, patch_string edges, text mentions, git change coupling, rename aliases, lexical terms) behind a grep-like CLI over
+  one Python core, and moves the planning surfaces off the interim recs_for_files read (Decision 215 clause 3).
+plan_type: IMPLEMENTATION
+implementation_declared: true
+verification_tier: V3
+plan_path: docs/plans/PLAN-recs-related-verb.yaml
+phase: >-
+  ad_hoc_rec rec-4235 (High; soft-warn category, no tier_item claimed, so the Tier Item Freshness Gate is skipped).
+  Realises Decision 215 clause 3's deferred graph-aware ranking. Claims, moves and closes no tier_item criterion; adds one
+  ports.yaml structural_assumptions row that T4.24 c9 consumes later.
+scope:
+  # --- reader verb. src/common/ducklake_named_reads.py ships in six active DuckLake artifacts (reader, writer,
+  # --- maintenance, maintenance_smoke, catalog_dr, telemetry_writer) and in data-pipeline (which bundles src/); see constraints.
+  - file: src/common/ducklake_named_reads.py
+    action: Modify
+    purpose: >-
+      NAMED_READS_VERSION 4 -> 5 (EXPAND only, no verb removed). New NamedRead recs_related on ops_recommendations, params
+      ("files", "near", "terms", "exclude_ids", "max_rows") in that bind order (max_rows, not limit, so it is never
+      confused with the reader envelope's `limit`, which is accepted only for paginable verbs), paginable False,
+      agent_facing False, a
+      description saying it is a relevance lookup behind scripts.recs_related and not a bulk path. Fixed SQL, every bind a
+      string (Decision 84 I-3); execution step 2 carries the planning-time SQL validated on duckdb 1.5.4 (the Lambda pin).
+      Semantics: `files` (comma list, empty entries dropped) is the DIRECT tier -- exact anchor equality only; the verb
+      encodes no directory model (directories are scope, never anchors -- owner choice after a Fable consult; a
+      trailing-slash anchor is matched only through `near`), and an empty or NULL anchor is never direct; `near` is "path|weight" pairs
+      (CAST, never TRY_CAST, so a malformed weight fails loudly); `terms` is "term|weight" pairs of plain lower-case
+      literals the SQL escapes with regexp_escape and matches as whole tokens ('(^|[^a-z0-9_])' || regexp_escape(term) ||
+      '($|[^a-z0-9_])') over lower(title || ' ' || context), computed ONCE per (open rec, term) pair after a materialised
+      contains() prefilter, each hit scored w * ln(1 + n_open / (1 + df)) with df counted from the same hit set; a term
+      whose df exceeds 5% of open recs only re-ranks and never admits a row alone (decision-scout NOTE, Decision 215 cl.1).
+      `exclude_ids` (keyset-by-exclusion paging) over 200 ids raises via DuckDB error() -- loud, never a silent empty. A row
+      is a candidate iff direct OR near weight > 0 OR an admitting term hit; status = 'open' only. ORDER BY direct DESC,
+      priority rank (critical 0, high 1, medium 2, low 3, else 4), score (near weight + term score) DESC,
+      created_timestamp DESC, id; LIMIT least(CAST(? AS INTEGER), 100) bound from max_rows. Projects id, title, status, priority, effort,
+      source, file, created_timestamp, direct, score, matched_terms, snippet (left(context, 200)), total (count(*) OVER (),
+      counted AFTER the exclude filter), direct_total (count(*) FILTER (WHERE direct) OVER (), likewise). All-empty binds
+      return zero rows. recs_for_files' and open_recs' descriptions gain a leading "deprecated: ... (removal rec-4240)"
+      (expand/contract, Decision 215 cl.7 precedent); no other verb's SQL, params or paginable flag changes, so no other
+      read_version moves.
+  - file: src/common/ducklake_reader_client.py
+    action: Modify
+    purpose: >-
+      VERB_FIELDS gains recs_related's exact column tuple (the projection order above); _NAMED_READS_VERSION_PIN 5. No
+      adapter method is added (Decision 212: client additions are module helpers over named()).
+  - file: docs/contracts/read-engine.yaml
+    action: Modify
+    purpose: >-
+      read_surface.named_verbs.verbs.ops_recommendations gains recs_related; deprecated_verbs gains recs_for_files and
+      open_recs (removal rec-4240); the recs_cache line names recs_related (through scripts.recs_related) as the relevance
+      read; one related_recs_read block (named so it cannot be confused with Decision 103's relevance lifecycle verdict)
+      carrying the output field semantics (direct = exact anchor equality only, score, matched_terms, snippet, total and
+      direct_total counted after exclusion; directory anchors are scope, reached only as interim client-side near paths
+      until rec-4279 re-anchors them), the 100-row page cap, the 200-id exclude cap, the 5% term ceiling, and "a relevance lookup, not a bulk
+      path -- bulk export is rec-4237"; amendment_log entry (Decision 168). validate_read_engine_verbs stays green.
+  # --- client core + CLI (scripts/recs_related/, every module < 500 SLOC, Decision 128) ---
+  - file: scripts/recs_related/__init__.py
+    action: Create
+    purpose: Facade re-exporting related_recs, the channel entry points and the envelope types (Decision 124 pattern).
+  - file: scripts/recs_related/envelope.py
+    action: Create
+    purpose: >-
+      The single output schema (dataclasses): Hit (id, title, priority, status, effort, source, file, tier
+      direct|near|term, score, why list, snippet) and Envelope (query {files, aliases, terms}, query_files [{path,
+      status}], hits, total, direct_total, returned, complete, direct_complete, channels {name: ok|unavailable: reason},
+      dir_anchor_hits, near_truncated, terms_truncated, next_exclude), with to_json(). Completeness is computed
+      against the post-exclusion totals the verb returns: complete = returned >= total; direct_complete = (direct hits
+      returned) >= direct_total. The CLI's JSON is asserted against it, and rec-4280's MCP outputSchema will be generated
+      from it.
+  - file: scripts/recs_related/neighbourhood.py
+    action: Create
+    purpose: >-
+      Structural channel, generic over files (no rec vocabulary, Decision 197 cl.7): for each query file, Python imports via
+      scripts.dependency_graph's public API only (build_graph + import_subgraph; dependency_graph.py is NOT modified, so
+      Decision 135's affected-set derivation is untouched) -- upstream 1-hop (files the query imports) and downstream 1-hop
+      (files importing it); patch_string edges either direction; package siblings (same directory); tests mirror =
+      scripts.test_coverage_checker.map_source_to_test when it maps (Decision 131's naming source, read-only) plus the
+      tests/**/test_<stem>.py stem rule the measurement used, because map_source_to_test returns None for unregistered
+      subpackages (gap owned by rec-2641). Returns (path, relation set) neighbours plus a channel status.
+  - file: scripts/recs_related/mentions.py
+    action: Create
+    purpose: >-
+      Text-reference channel the import graph cannot see (37% of anchors are yaml/md/yml/tf/sh): repo paths and dotted
+      src/scripts/tests module names referenced in the query file's own text, matched precisely (path or quoted-token,
+      never a bare substring -- Decision 135 cl.1(b)) with its OWN two patterns, whose docstring cites
+      scripts/checks/deps/affected_tests.py's _quoted_token_pattern/_dotted_token_pattern as their source (never import those
+      private names; promoting them would touch Decision 135's selection module), resolved to tracked files (git
+      ls-files). Outbound only (inbound measured at zero lift).
+  - file: scripts/recs_related/history.py
+    action: Create
+    purpose: >-
+      Git channel over first-parent HEAD history: (1) change coupling -- commits touching <= 30 files only, shared-commit
+      count and confidence (shared / commits touching the query file) per partner; (2) aliases -- the query file's earlier
+      names from rename records, plus the pre-split module path when the query file sits in a package that replaced a
+      same-named .py (Decision 128 decomposition). A shallow clone or a git failure marks the channel unavailable in the
+      envelope; it never raises and never silently reports zero (Decision 215 cl.2).
+  - file: scripts/recs_related/terms.py
+    action: Create
+    purpose: >-
+      Lexical channel: repo path, dotted module, stem (skipping generic stems such as __init__, conftest, manifest, skill,
+      handler, claude, readme), basename, and up to 40 top-level def/class names of length >= 5 read by AST (never import
+      or exec). Lower-cased, restricted to [a-z0-9_./-] (no comma or pipe can reach a bind), deduplicated; free-text --terms
+      are sanitised the same way; at most 40 terms per call, kept by weight, with any truncation reported in the envelope
+      (terms_truncated), never silent.
+  - file: scripts/recs_related/related_recs.py
+    action: Create
+    purpose: >-
+      The core, a module helper over the existing `named` port verb (Decision 212): related_recs(files, terms, limit,
+      exclude_ids, reader=None) -> Envelope. Builds the five binds with the measured weights pinned in one module constant
+      -- near per path = sum over query files of upstream 4, downstream 1, sibling 1, tests mirror 1, patch_string 1, mention
+      0.5, coupling 0.5*min(shared, 5) + 0.5*confidence (near list capped at 400 paths by weight, truncation reported);
+      aliases join the direct tier; interim directory scope -- each query file's parent directory (0.5) and grandparent
+      directory (0.25), each emitted in BOTH spellings (with and without the trailing slash, since live rec-3173 is
+      anchored on docs/contracts), never a single-segment root such as scripts/ or src/, join `near` with why
+      "ancestor_dir:<dir>" and are counted in dir_anchor_hits (rec-4279 deletes this once directory anchors are repaired);
+      terms = stem 16, module 1, basename 0.5, path 0.5, symbol 0.5 -- then makes EXACTLY ONE
+      reader.named("recs_related", ...) call and attaches a why list to every hit from the expansion map and matched_terms.
+      Query paths are normalised first (an absolute path under the repo root becomes repo-relative, ./ and // collapse,
+      POSIX separators) and each gets a status in the envelope: tracked, untracked (e.g. a not-yet-created plan scope file:
+      it still joins the direct tier and keeps its sibling and term channels, while import, mention and history channels
+      report unavailable for it), outside_repo, or invalid (a path containing ',' or '|', which would corrupt a bind) --
+      the last two are dropped and reported, never silently. Near paths obey the same bind-safety rule.
+      next_exclude carries the ids seen so far (prior excludes plus this page); at 200 excluded ids paging stops with
+      complete false and a narrow-the-query hint (decision-scout NOTE). A reader failure raises (Decision 55); it never
+      returns an empty result.
+  - file: scripts/recs_related/__main__.py
+    action: Create
+    purpose: >-
+      CLI over the core only: bin/venv-python -m scripts.recs_related FILE [FILE ...] [--terms "a b"] [--limit N (default
+      20, max 100)] [--exclude IDS] [--table]. JSON (Envelope.to_json) by default, --table for one line per hit (a
+      directory-anchored near hit prints its tier as near(dir)) plus an envelope line. No files and no terms exits 2; a reader failure exits 1 with the error on stderr.
+  # --- tests (mirror package, every directory carries __init__.py). Tmp git repos set GIT_AUTHOR_*/GIT_COMMITTER_* (or
+  # --- -c user.*), pass -c commit.gpgsign=false (or GIT_CONFIG_GLOBAL=/dev/null; precedent tests/hooks/
+  # --- test_handoff_evidence_gate.py) and write only under tmp_path: the Decision 201 closure sandbox has no git
+  # --- identity and a read-only repo, and CC-web's global config signs commits through the harness signer.
+  - file: tests/recs_related/__init__.py
+    action: Create
+    purpose: Mirror test package marker (prepend import mode).
+  - file: tests/recs_related/test_envelope.py
+    action: Create
+    purpose: >-
+      Hermetic class TestEnvelope -- field set, tier values, to_json round-trip, and the post-exclusion completeness
+      arithmetic on a multi-page case where candidates remain after page 2 (complete false) and on a final page (true).
+  - file: tests/recs_related/test_neighbourhood.py
+    action: Create
+    purpose: >-
+      Hermetic class TestNeighbourhood over a tmp repo tree: upstream and downstream 1-hop, patch_string, siblings, the
+      tests mirror through map_source_to_test (scripts.test_coverage_checker.ROOT patched to the tmp tree) and through the
+      stem rule; an untracked (not-yet-created) file yields its siblings but no import neighbours, with the import channel
+      reported unavailable for it.
+  - file: tests/recs_related/test_mentions.py
+    action: Create
+    purpose: >-
+      Hermetic class TestMentions: path and dotted-module mentions in yaml, md and py resolve to tracked files; untracked
+      paths, self mentions and bare-substring look-alikes drop.
+  - file: tests/recs_related/test_history.py
+    action: Create
+    purpose: >-
+      Hermetic class TestHistory over a tmp git repo (git init in tmp_path, explicit author/committer identity): coupling
+      counts and confidence, the 30-file commit filter, rename and split aliases, the shallow-clone and git-failure channel
+      status.
+  - file: tests/recs_related/test_terms.py
+    action: Create
+    purpose: Hermetic class TestTerms -- derivation, stoplist, AST symbols without import, sanitising, the 40-term cap.
+  - file: tests/recs_related/test_related_recs.py
+    action: Create
+    purpose: >-
+      rec-4235's acceptance file. Fully hermetic (fake reader, tmp repo, no duckdb, no credentials, no network) because the
+      Decision 201 closure verdict runs it in the static sandbox on the merge push, before the deploy. Class
+      TestRelatedRecs: one named("recs_related") call with the expected binds and weights; every hit carries a why; aliases
+      join files; the parent (0.5) and grandparent (0.25) ancestor directories reach near in both spellings (a
+      slashless directory anchor such as docs/contracts is reached too) with why ancestor_dir and are counted in
+      dir_anchor_hits, while a single-segment root never does; a query path with ',' or '|' is reported invalid; query-path normalisation and the
+      tracked/untracked/outside_repo statuses; the 40-term cap truncates by
+      weight and sets terms_truncated; complete, direct_complete and next_exclude across a three-page sequence where
+      candidates remain after page 2; the 200-id stop; a reader error propagates; an empty query is refused.
+  - file: tests/recs_related/test_verb_sql.py
+    action: Create
+    purpose: >-
+      Executes recs_related's REGISTERED SQL in in-memory DuckDB (pytest.importorskip("duckdb"); the table built from
+      resolve_table_spec("ops_recommendations"), {tbl} substituted as the parity test does). The fixture holds more than 20
+      open rows (the 5% ceiling needs them) plus closed, empty-anchor and NULL-anchor rows. Asserts: direct tier first, then
+      priority, score, recency; a directory anchor, with or without a trailing slash, is NEVER direct, even for files
+      beneath it, and is reached only when its exact spelling is passed in near; whole-token matching (no substring hit) and
+      regexp_escape (a '.' in a term is literal); a common term (df over 5%) never admits a row alone but re-ranks; the
+      exclude filter, post-exclusion total/direct_total on a 250-candidate two-page case, and the >200-id error; the
+      100-row cap; non-open, empty-anchor and NULL-anchor rows never returned for empty binds; a malformed near weight
+      raises.
+  - file: tests/recs_related/test___main__.py
+    action: Create
+    purpose: Hermetic class TestCli -- argument parsing, JSON and --table output, exit 2 on an empty query, exit 1 on a reader error.
+  - file: tests/test_ducklake_named_reads.py
+    action: Modify
+    purpose: >-
+      test_named_reads_version_is_4 becomes ..._is_5. New class TestRecsRelatedVerbV5: registered on ops_recommendations
+      with its five params in bind order (files, near, terms, exclude_ids, max_rows), paginable False, agent_facing
+      False; its ORDER BY ends with the id tiebreak
+      immediately before LIMIT (the existing total-order regex does not match LIMIT least(...)); recs_for_files and
+      open_recs still registered with descriptions starting "deprecated:"; no pre-existing verb re-versioned -- read_version
+      digests are pinned ONLY for the non-SELECT-* verbs (their digest depends on their own definition alone); for the five
+      SELECT * verbs (rec_by_id, recs_by_ids, rec_history, decision_by_id, priority_queue_current) the test pins table,
+      params, paginable and whitespace-normalised SQL and lets the column projection float (a field_semantics column add
+      must not redden this file; the existing projection test at :124-136 covers it); the class docstring states the
+      pins are the "re-versioning must be deliberate" guard, so a later intentional verb change (rec-4240) edits them
+      openly rather than reading as a weakening (Decision 181). TestRecsReadVerbsV4
+      .test_agent_facing_flags' exemption set gains recs_related.
+  - file: tests/checks/contracts/test_validate_read_engine_verbs.py
+    action: Modify
+    purpose: >-
+      New node TestRealContractRoster::test_real_contract_names_recs_related -- the real read-engine.yaml roster lists
+      recs_related under ops_recommendations and names recs_for_files and open_recs under deprecated_verbs. Red before.
+  - file: tests/common/ducklake_reader_client/test_verb_fields_parity.py
+    action: Modify
+    purpose: _PARAM_VALUES gains castable values for near ("a.py|1"), terms ("x|1") and max_rows ("5") so the parity harness executes recs_related's SQL.
+  - file: tests/test_agent_sdk_mcp_server.py
+    action: Modify
+    purpose: >-
+      TestAgentFacingProjection.test_real_registry_hides_open_recs_and_preflight_signal_rows also asserts recs_related is not
+      projected. Hermetic only (rec-4273/rec-4275); no live call added; mcp_server.py itself is untouched.
+  # --- planning surfaces ---
+  - file: .claude/skills/planning/SKILL.md
+    action: Modify
+    purpose: >-
+      "Suggest Aligned Recommendations": the INTERIM recs_for_files paragraph becomes `bin/venv-python -m scripts.recs_related
+      <scope files>` (ranked hits with why and a completeness envelope; --terms for keyword search; bodies via recs_by_ids).
+      Byte-neutral or smaller (Decision 127: 786 bytes headroom at planning time; never raise the budget).
+  - file: .claude/commands/plan.md
+    action: Modify
+    purpose: Step 3's recs_for_files call (line 48) becomes the scripts.recs_related CLI over the likely scope files.
+  # --- contracts and governance ---
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      structural_assumptions gains SA-01 (status open, owning_item T4.24:c9, location scripts/recs_related/): the expansion
+      assumes a src/scripts/tests Python layout, the tests/ mirror naming convention, and first-parent squash-merge history
+      on the default branch (Decision 211 cl.2, Decision 212). No coupling finding: the core reuses named() over the
+      function_url adapter, already PC-01. amendment_log entry (Decision 168).
+  - file: tests/checks/contracts/test_validate_ports_contract.py
+    action: Modify
+    purpose: >-
+      Human-directed scope amendment (2026-10-12, found at implement time): test_accepts_structural_assumption_row appends a
+      synthetic SA-01 row to a copy of the live contract, which now collides with the real SA-01 above (duplicate id), so the
+      synthetic row's id becomes SA-99. One-line change; no assertion is weakened.
+  - file: docs/contracts/file-router.yaml
+    action: Modify
+    purpose: >-
+      One route (topic recs-related, target scripts/recs_related/, one-line description) plus a one-line amendment_log
+      entry: at most 4 effective lines in total (494 of the 500-line limit at planning time). Additive only.
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: >-
+      One dated amendment_forms annotation appended inside Decision 215's section (never an in-place edit, Decision 177):
+      clause 3's graph-aware ranking shipped as recs_related behind scripts.recs_related (PLAN-recs-related-verb,
+      rec-4235); recs_for_files and open_recs are deprecated and removed by rec-4240; the Coverage residuals rec-4235 owned
+      (cache-reference CI ban, audit dedup instructions) now belong to rec-4279 (Decision 181 point 2). No new numbered
+      Decision.
+bundled_recommendations:
+  - rec-4235
+followon_recs:
+  - rec-4279
+  - rec-4280
+  - rec-4281
+infrastructure_dependencies:
+  - >-
+    Governed code deploy only (Decision 125/126): the merge push runs .github/workflows/deploy-ducklake-lambdas.yml, which
+    redeploys the six DuckLake functions bundling ducklake_named_reads.py (reader, writer, maintenance, maintenance-smoke,
+    catalog-dr, telemetry-writer) and writes their deploy records; VP 20 checks run conclusion and records.
+  - >-
+    data-pipeline (bundles src/ but excludes ducklake_named_reads.py, so only ducklake_reader_client.py ships in it) is a
+    no-deploy disposition: none of its handlers or
+    bundled scripts entry points reference recs_related, VERB_FIELDS, verb_rows or the version pin (VP 18), and
+    deploy-prod-lambdas.yml's paths exclude src/common, so the inert change ships with its next governed deploy.
+acceptance_criteria:
+  - >-
+    recs_related is registered (registry v5, agent_facing False) and its SQL ranks direct hits first, then priority, score
+    and recency, at most 100 rows per call with post-exclusion total and direct_total disclosed; a common term never admits
+    a row alone; only an exact anchor match is direct (never a directory, empty or NULL anchor); more than 200 excluded
+    ids fails loudly.
+  - >-
+    One related_recs call (CLI or core) makes exactly one reader call and returns hits that each carry a why, plus an
+    Envelope whose complete flag is false whenever candidates remain unreturned, with per-channel status and next_exclude;
+    a reader failure raises, never an empty result.
+  - The planning skill and plan.md tell agents to use scripts.recs_related; neither instructs recs_for_files.
+  - recs_for_files and open_recs remain registered with deprecated descriptions; no pre-existing verb is re-versioned.
+  - >-
+    The merge's deploy-ducklake-lambdas.yml run concludes success and all six DuckLake functions carry the merge sha; the
+    live reader describes recs_related and the live CLI's direct_total equals recs_for_files' row count over the same
+    file and its git aliases.
+  - rec-4235 is closed by the merge's Resolves trailer; Decision 215 carries the dated annotation naming rec-4279 and rec-4240.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Registry v5 carries recs_related with its params, flags, id tiebreak and deprecations, and re-versions nothing else.
+    command: bin/venv-python -m pytest tests/test_ducklake_named_reads.py::TestRecsRelatedVerbV5 -q
+    expected: Exit 0, all nodes pass. Red before, the class is absent (pytest exit 4).
+    fix_if: A param, flag, ordering, description or read_version assertion fails; fix the registry entry, never the assertion.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: recs-related-verb-registered
+    expected_literals:
+      - passed
+  - step: 2
+    phase: pre-deploy
+    action: The registered SQL ranks, bounds and guards correctly when executed in DuckDB.
+    command: bin/venv-python -m pytest tests/recs_related/test_verb_sql.py -q
+    expected: Exit 0, all nodes pass. Red before, the test file is absent.
+    fix_if: >-
+      Ordering, token boundary, escaping, term ceiling, exact-only direct tier, empty-anchor rule, exclude guard,
+      post-exclusion totals or the cap
+      diverge; fix the SQL, never relax the fixture.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Depends on duckdb, absent from requirements-fast.txt (vp-red-before hermetic_authoring rule iii), so venv-less
+      pr-validate cannot collect it; the full tier runs it pre-handoff locally and post-merge on main.
+  - step: 3
+    phase: pre-deploy
+    action: VERB_FIELDS parity executes recs_related's SQL and matches its declared columns.
+    command: bin/venv-python -m pytest tests/common/ducklake_reader_client/test_verb_fields_parity.py -q
+    expected: Exit 0.
+    fix_if: The VERB_FIELDS tuple or a bind value drifts from the SQL.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Existing standing duckdb-dependent parity suite (rule iii) that already guards every registered verb, the new one included.
+  - step: 4
+    phase: pre-deploy
+    action: Envelope schema and post-exclusion completeness arithmetic.
+    command: bin/venv-python -m pytest tests/recs_related/test_envelope.py::TestEnvelope -q
+    expected: Exit 0. Red before, module and class absent (exit 4).
+    fix_if: Fix scripts/recs_related/envelope.py, never the assertion.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: recs-related-envelope
+    expected_literals:
+      - passed
+  - step: 5
+    phase: pre-deploy
+    action: Structural channel -- imports up and down, patch_string, siblings, tests mirror.
+    command: bin/venv-python -m pytest tests/recs_related/test_neighbourhood.py::TestNeighbourhood -q
+    expected: Exit 0. Red before, module and class absent (exit 4).
+    fix_if: Fix scripts/recs_related/neighbourhood.py; never modify scripts/dependency_graph.py.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: recs-related-neighbourhood
+    expected_literals:
+      - passed
+  - step: 6
+    phase: pre-deploy
+    action: Text-mention channel.
+    command: bin/venv-python -m pytest tests/recs_related/test_mentions.py::TestMentions -q
+    expected: Exit 0. Red before, module and class absent (exit 4).
+    fix_if: Fix scripts/recs_related/mentions.py; never fall back to bare-substring matching.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: recs-related-mentions
+    expected_literals:
+      - passed
+  - step: 7
+    phase: pre-deploy
+    action: Git channel -- coupling, aliases, unavailable status.
+    command: bin/venv-python -m pytest tests/recs_related/test_history.py::TestHistory -q
+    expected: Exit 0. Red before, module and class absent (exit 4).
+    fix_if: Fix scripts/recs_related/history.py; a git failure must surface as channel status, never as zero partners.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: recs-related-history
+    expected_literals:
+      - passed
+  - step: 8
+    phase: pre-deploy
+    action: Lexical channel.
+    command: bin/venv-python -m pytest tests/recs_related/test_terms.py::TestTerms -q
+    expected: Exit 0. Red before, module and class absent (exit 4).
+    fix_if: Fix scripts/recs_related/terms.py.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: recs-related-terms
+    expected_literals:
+      - passed
+  - step: 9
+    phase: pre-deploy
+    action: Core (rec-4235 acceptance class) -- one call, binds and weights, why, multi-page completeness, paging stop, loud failure.
+    command: bin/venv-python -m pytest tests/recs_related/test_related_recs.py::TestRelatedRecs -q
+    expected: Exit 0. Red before, module and class absent (exit 4).
+    fix_if: >-
+      More than one named() call, a hit without why, complete true while candidates remain, or an error swallowed into an
+      empty result.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: recs-related-one-call-why-envelope
+    expected_literals:
+      - passed
+  - step: 10
+    phase: pre-deploy
+    action: CLI contract.
+    command: bin/venv-python -m pytest tests/recs_related/test___main__.py::TestCli -q
+    expected: Exit 0. Red before, module and class absent (exit 4).
+    fix_if: Exit codes or output shape diverge from the Envelope.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: recs-related-cli
+    expected_literals:
+      - passed
+  - step: 11
+    phase: pre-deploy
+    action: >-
+      100% line coverage of the new package, measured directly because the per-file coverage gate skips it
+      (map_source_to_test returns None for unregistered subpackages; gap owned by rec-2641).
+    command: >-
+      bin/venv-python -m pytest tests/recs_related --cov=scripts/recs_related --cov-report=term-missing --cov-fail-under=100
+      -q -p no:randomly
+    expected: Exit 0, total coverage 100%.
+    fix_if: A missing line -- add a test for it; never add a coverage pragma or a baseline entry.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Whole-directory re-run of test files this plan creates (rule v); steps 4-10 graduate the class selectors. The
+      standing coverage gate for the package is rec-2641's work.
+  - step: 12
+    phase: pre-deploy
+    action: The MCP projection still hides non-agent-facing verbs, recs_related included.
+    command: >-
+      bin/venv-python -m pytest
+      tests/test_agent_sdk_mcp_server.py::TestAgentFacingProjection::test_real_registry_hides_open_recs_and_preflight_signal_rows -q
+    expected: Exit 0, 1 passed.
+    fix_if: recs_related is projected -- its agent_facing flag is wrong; fix the registry, never the test.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Green on the un-implemented tree (recs_related is absent, so it is trivially not projected), which would make a
+      red-before replay tautological; step 1's graduated class already pins agent_facing False.
+  - step: 13
+    phase: pre-deploy
+    action: Stale-reference sweep -- both planning surfaces name the CLI and neither instructs recs_for_files.
+    command: >-
+      grep -o -m1 'scripts.recs_related' .claude/skills/planning/SKILL.md && grep -o -m1 'scripts.recs_related'
+      .claude/commands/plan.md && ! grep -n 'recs_for_files' .claude/skills/planning/SKILL.md .claude/commands/plan.md
+    expected: Exit 0, the CLI module printed once per file. Red before, the first grep finds nothing (exit 1).
+    fix_if: A surface still instructs the interim verb, or the CLI is not named.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: planning-surfaces-use-recs-related
+    expected_literals:
+      - scripts.recs_related
+  - step: 14
+    phase: pre-deploy
+    action: The real read-engine.yaml roster names recs_related and the two deprecated verbs.
+    command: >-
+      bin/venv-python -m pytest
+      tests/checks/contracts/test_validate_read_engine_verbs.py::TestRealContractRoster::test_real_contract_names_recs_related -q
+    expected: Exit 0, 1 passed. Red before, the node is absent (exit 4).
+    fix_if: The contract roster or deprecated_verbs block drifts from the registry; fix the contract.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: recs-related-read-engine-roster
+    expected_literals:
+      - passed
+  - step: 15
+    phase: pre-deploy
+    action: ports.yaml records SA-01 and the live ports contract still validates.
+    command: >-
+      grep -o -m1 'SA-01' docs/contracts/ports.yaml && bin/venv-python -m pytest
+      tests/checks/contracts/test_validate_ports_contract.py::test_real_contract_passes -q
+    expected: Exit 0, SA-01 printed and 1 passed. Red before, the grep finds nothing (exit 1).
+    fix_if: SA-01's shape or owning_item does not resolve (T4.24:c9 must exist).
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: ports-sa01-recs-related
+    expected_literals:
+      - SA-01
+  - step: 16
+    phase: pre-deploy
+    action: file-router.yaml routes scripts/recs_related/.
+    command: grep -o -m1 'scripts/recs_related/' docs/contracts/file-router.yaml
+    expected: Exit 0, the target printed. Red before, no match (exit 1).
+    fix_if: The route is missing or names a different target.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: recs-related-routed
+    expected_literals:
+      - scripts/recs_related/
+  - step: 17
+    phase: pre-deploy
+    action: Decision 215's section carries the dated annotation re-pointing its residuals to rec-4279 (rec-4240 already appears there).
+    command: sed -n '/^## Decision 215:/,/^---$/p' docs/DECISIONS.md | grep -o -m1 'rec-4279'
+    expected: Exit 0, the follow-on id printed from inside Decision 215's section. Red before, no match (exit 1).
+    fix_if: The annotation is missing, outside the section, or an in-place edit of an existing line (Decision 177).
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: decision-215-residuals-repointed
+    expected_literals:
+      - rec-4279
+  - step: 18
+    phase: pre-deploy
+    action: >-
+      data-pipeline no-deploy disposition -- no data-pipeline handler or bundled scripts entry point references any symbol
+      this plan adds or changes (the bundled modules ship inertly).
+    command: >-
+      test "$(grep -rlE 'recs_related|VERB_FIELDS|verb_rows|_NAMED_READS_VERSION_PIN' src/data/handlers
+      scripts/run_scheduled_agent.py scripts/tool_runtime.py scripts/llm scripts/s3_log_store.py scripts/aws_profile.py | wc -l)"
+      -eq 0 && echo DATA_PIPELINE_INERT
+    expected: Prints the marker; zero files match.
+    fix_if: >-
+      A handler now uses a changed symbol -- data-pipeline then needs its governed deploy (deploy-prod-lambdas.yml) and a
+      smoke step; never a local build.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      An invariant green before and after by construction (the precedent PLAN-recs-full-cache-retirement step 15 shape);
+      graduating it would fail the red-before gate as tautological.
+    expected_literals:
+      - DATA_PIPELINE_INERT
+  - step: 19
+    phase: pre-deploy
+    action: Full validation before handoff (prose budgets, SLOC, read-engine verbs, placement, coverage, plan documents).
+    command: bin/venv-python -m scripts.validate
+    expected: Exit 0 and a final Validation Summary (scope all) PASS, then scripts.checks.validation_result --verify-head exit 0.
+    fix_if: Any check red, incomplete or mismatched is BLOCKED; fix at root cause and rerun; never raise a prose or SLOC budget.
+    hermetic: false
+    graduation: not-applicable
+  - step: 20
+    phase: post-deploy
+    action: >-
+      The governed deploy shipped the merge commit -- confirm via mcp__github__ that the merge sha's push-triggered
+      deploy-ducklake-lambdas.yml run concluded success with every job green (deploy-maintenance, maintenance-smoke,
+      reconcile-gate, deploy-serving, smoke); export DEPLOY_CONCLUSION and MERGE_SHA; then check each DuckLake function's
+      deploy record.
+    command: >-
+      test "$DEPLOY_CONCLUSION" = success && for f in reader writer maintenance maintenance-smoke catalog-dr telemetry-writer;
+      do aws s3 cp "s3://agent-platform-data-lake/deploy-records/ducklake/agent-platform-ducklake-$f.json" - --profile
+      agent_platform | bin/venv-python -c "import json,os,sys;r=json.load(sys.stdin);assert
+      r['source_git_sha']==os.environ['MERGE_SHA'],r;print('DEPLOYED',r['function'])" || exit 1; done
+    expected: Six DEPLOYED lines.
+    fix_if: A failed job or a stale record -- read the workflow run's logs; never a local build_lambda --deploy (Decision 125/126).
+    hermetic: false
+  - step: 21
+    phase: post-deploy
+    action: The live reader describes recs_related as non-agent-facing with its five params.
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import DuckLakeReader as R;
+      v = R().describe()['recs_related']; print(v['agent_facing'], v['params'])"
+    expected: False ['files', 'near', 'terms', 'exclude_ids', 'max_rows'].
+    fix_if: Verb absent or flags wrong after a green deploy -- RCA the packaging, never retry-loop (Decision 55).
+    hermetic: false
+  - step: 22
+    phase: post-deploy
+    action: >-
+      Live, self-asserting, differential CLI check on the file carrying the most open recs: direct_total equals
+      recs_for_files' row count over the same file plus the git aliases the envelope reports (both are exact-match; that
+      verb stays registered until rec-4240), at most 20 hits, the direct tier first, every hit explained; wall time
+      recorded.
+    command: >-
+      bin/venv-python -c "import json,subprocess,time;from src.common.ducklake_reader_client import DuckLakeReader as R;
+      f='scripts/preflight/ci_rca_signals.py';t=time.time();e=json.loads(subprocess.run(['bin/venv-python','-m',
+      'scripts.recs_related',f,'--limit','20'],capture_output=True,text=True,check=True).stdout);w=time.time()-t;
+      d=len(R().named('recs_for_files',files=','.join([f]+e['query']['aliases'])));h=e['hits'];assert e['direct_total']==d,(e['direct_total'],d);
+      assert len(h)<=20;assert all(x['tier']=='direct' for x in h[:min(d,20)]);assert all(x['why'] for x in h);
+      print('LIVE_OK',d,e['total'],round(w,1))"
+    expected: One LIVE_OK line with the direct count, total and wall seconds; record the wall time in the PR body.
+    fix_if: An assertion fails -- RCA against step 2's SQL tests; a wall time over 45 s goes to rec-4280's timeout concern.
+    hermetic: false
+  - step: 23
+    phase: post-deploy
+    action: rec-4235 closed by the merge's Resolves trailer (closure obligation).
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import DuckLakeReader as R;
+      print(R().named('recs_by_ids', ids='rec-4235')[0]['status'])"
+    expected: closed
+    fix_if: Still open -- read the ci.yml closure job; the acceptance file must be fully hermetic.
+    hermetic: false
+test_obligations:
+  - source: src/common/ducklake_named_reads.py
+    behavior: recs_related's bounded, ranked, guarded SQL (ordering, tiers, ceiling, escaping, empty anchors, exclude cap, post-exclusion totals)
+    verification_step: 2
+    command: bin/venv-python -m pytest tests/recs_related/test_verb_sql.py -q
+    red_green_expectation: red before (test file absent; the verb is not registered), green after
+  - source: src/common/ducklake_reader_client.py
+    behavior: VERB_FIELDS matches recs_related's SQL columns
+    verification_step: 3
+    test_selector: tests/common/ducklake_reader_client/test_verb_fields_parity.py::test_verb_fields_match_registry_sql
+    red_green_expectation: red before (no VERB_FIELDS entry for a registered verb), green after
+  - source: scripts/recs_related/envelope.py
+    behavior: single output schema and post-exclusion completeness arithmetic
+    verification_step: 4
+    test_selector: tests/recs_related/test_envelope.py::TestEnvelope
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/recs_related/neighbourhood.py
+    behavior: structural expansion edges
+    verification_step: 5
+    test_selector: tests/recs_related/test_neighbourhood.py::TestNeighbourhood
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/recs_related/mentions.py
+    behavior: precise text-reference edges
+    verification_step: 6
+    test_selector: tests/recs_related/test_mentions.py::TestMentions
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/recs_related/history.py
+    behavior: coupling, aliases and channel status
+    verification_step: 7
+    test_selector: tests/recs_related/test_history.py::TestHistory
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/recs_related/terms.py
+    behavior: lexical term derivation and sanitising
+    verification_step: 8
+    test_selector: tests/recs_related/test_terms.py::TestTerms
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/recs_related/related_recs.py
+    behavior: one bounded call, why attribution, multi-page completeness, paging stop, loud failure
+    verification_step: 9
+    test_selector: tests/recs_related/test_related_recs.py::TestRelatedRecs
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/recs_related/__main__.py
+    behavior: CLI contract
+    verification_step: 10
+    test_selector: tests/recs_related/test___main__.py::TestCli
+    red_green_expectation: red before (module absent), green after
+  - source: docs/contracts/read-engine.yaml
+    behavior: roster lists recs_related; deprecated_verbs names recs_for_files and open_recs
+    verification_step: 14
+    test_selector: tests/checks/contracts/test_validate_read_engine_verbs.py::TestRealContractRoster::test_real_contract_names_recs_related
+    red_green_expectation: red before (node absent), green after
+  - source: docs/contracts/ports.yaml
+    behavior: SA-01 structural assumption recorded and the contract still validates
+    verification_step: 15
+    command: >-
+      grep -o -m1 'SA-01' docs/contracts/ports.yaml && bin/venv-python -m pytest
+      tests/checks/contracts/test_validate_ports_contract.py::test_real_contract_passes -q
+    red_green_expectation: red before (no SA-01), green after
+  - source: docs/contracts/file-router.yaml
+    behavior: scripts/recs_related/ is routed
+    verification_step: 16
+    command: grep -o -m1 'scripts/recs_related/' docs/contracts/file-router.yaml
+    red_green_expectation: red before (no route), green after
+  - source: scripts/recs_related/__init__.py
+    behavior: facade re-exports only
+    verification_step: 9
+    test_selector: tests/recs_related/test_related_recs.py::TestRelatedRecs
+    waiver_reason: Pure re-export facade with no behaviour of its own; every test importing through it exercises it.
+constraints:
+  - Decision 84 I-3 -- fixed server SQL, string binds only, no caller SQL; terms are plain literals the SQL escapes. Decision 212 -- module helpers over named(), no new adapter method.
+  - Decision 88 / Decision 215 cl.2, cl.4, cl.5 -- exactly one bounded reader call per query; completeness disclosed honestly (post-exclusion totals); a failure is loud, never [].
+  - Decision 215 cl.1 -- recs_related is a relevance lookup, never a bulk path (term ceiling, 100-row page, 200-id exclude cap).
+  - Decision 128 -- every new module (source and test) under 500 SLOC; decompose, never raise. Decision 127 -- prose budgets byte-neutral.
+  - Decision 135 -- scripts/dependency_graph.py and its default graph are not modified; read-only use of map_source_to_test; no import of affected_tests' private matchers.
+  - Decision 125/126/79 -- the six DuckLake functions ship through deploy-ducklake-lambdas.yml on the merge push; data-pipeline is a proven no-deploy disposition (VP 18); never a local break-glass build.
+  - Expand/contract -- no verb removed (rec-4240); nothing on the merge push calls recs_related; rec-4235's acceptance file is hermetic (Decision 201).
+  - scripts/agent_sdk/mcp_server.py is not modified (its tool list stays derived; the typed tool is rec-4280).
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - >-
+    Decision-scout FLAGS_FOUND (1 NOTE, Decision 215 cl.1 paging drift; resolved by pivot: 5% term ceiling, 200-id exclude
+    cap, not-a-bulk-path statement). CITE: 215, 84, 88, 212, 211, 135, 128, 127, 86, 177, 181, 201, 79, 125, 126.
+    Decisions triaged: 168 of 168. Roadmap items intersected: 7; CONFLICT: 0; RELATED: 7
+  - "gates: decision-scout=FLAGS_FOUND (1 NOTE, folded); plan-critique=PROCEED after 3 rounds (r1 REVISE R1-R5/S1-S4 fixed; r2 REVISE R1-R2/S1-S6 fixed, S1 owner-decided after a Fable consult; r3 PROCEED, should-fix S1-S5/S7/S8 folded post-verdict as one-line amendments, S6 filed as rec-4282)"
+  - >-
+    Measurement (840 linked closed recs, 288 fix commits, graphs at each fix's parent, chronological 60/40 split) and both
+    Fable consults are recorded in this plan's initial commit body; weights in related_recs.py come from it.
+  - >-
+    Gotchas: duckdb is absent from the fast tier (tests importing it importorskip and stay out of hermetic graduate steps);
+    NamedRead binds are positional in params order, so the SQL unnests each bind exactly once in a CTE; DuckDB optimises
+    away an unreferenced error() guard (reference it in WHERE) and evaluates a per-row regex before a sibling contains()
+    unless candidates are a MATERIALIZED CTE (3.8 s -> 0.19 s on a 1,600-row synthetic corpus, results identical).
+  - >-
+    Not bundled: rec-4238 (tag facet measured 1.8% coverage, about 1% precision); rec-3355 and rec-4191 (rec-4279 and
+    T4.24 territory); rec-2641/rec-2634 (coverage-gate mapping for new subpackages; VP 11 measures this package
+    directly); rec-4282 (DuckDB errors in named verbs surface as a retried 502, pre-existing). Not shipped: rec-4235's
+    file-router-domain channel (routes are mostly single files or directories that coincide with the measured sibling
+    and ancestor-dir channels) -- a rec-4281 candidate signal, with hub damping and score-before-priority in the
+    non-direct tier. If dependabot's duckdb 1.5.6 bump (PR 1412) merges first, re-run VP 2 on the new pin.
+  - "fork: split | chosen: verb+core+CLI+planning surfaces here; rec-4279 owns the rest | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: followon_recs"
+  - "fork: agent surface | chosen: core+CLI now, separate repo-tools MCP tool next (rec-4280), raw verb never agent-facing | class: asked (after a Fable consult) | precedent: none | precedent_kind: none | reversible: yes | persisted: followon_recs, scope"
+  - "fork: scout NOTE paging drift | chosen: term ceiling + exclude cap + not-a-bulk-path | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: scope (registry SQL)"
+  - "fork: recs_for_files/open_recs fate | chosen: deprecate here, remove via rec-4240 (widened 2026-10-12) | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: rec-4240"
+  - "fork: evaluation harness | chosen: follow-on rec-4281 after rec-4237 | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: followon_recs"
+  - "fork: directory anchors | chosen: scope never anchor -- exact-only direct tier, interim client ancestor-dir near paths, rec-4279 rejects and triages directory anchors | class: asked (after a Fable consult) | precedent: none | precedent_kind: none | reversible: yes | persisted: scope, rec-4279"
+  - "fork: signal mix and weights | chosen: all four families, direct > priority > score > recency | class: consistency-only | precedent: owner instruction to let the measurement pick | precedent_kind: none | reversible: yes | persisted: scope (related_recs.py constant)"
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections read (Decision 215 in full; Decision 84 I-3; Decision 135 cl.1)
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    1. Registry and contract: add recs_related to src/common/ducklake_named_reads.py (version 5, deprecate the two
+    descriptions), VERB_FIELDS + pin 5 in src/common/ducklake_reader_client.py, docs/contracts/read-engine.yaml; update
+    tests/test_ducklake_named_reads.py, the parity test's _PARAM_VALUES, the MCP projection node, the read-engine roster
+    node; write tests/recs_related/test_verb_sql.py. Run VP steps 1-3, 12 and 14.
+  - |-
+    2. SQL reference -- validated at planning time on duckdb 1.5.4 against every behaviour step 2 asserts (adapt layout to
+    the registry style; {tbl} is the current projection; the five binds appear in params order):
+      WITH q AS (SELECT p AS path FROM (SELECT unnest(string_split(?, ',')) AS p) WHERE p <> ''),
+      near AS (SELECT split_part(x, '|', 1) AS path, CAST(split_part(x, '|', 2) AS DOUBLE) AS w
+               FROM (SELECT unnest(string_split(?, ',')) AS x) WHERE x <> ''),
+      terms_in AS (SELECT split_part(x, '|', 1) AS term, CAST(split_part(x, '|', 2) AS DOUBLE) AS w
+                   FROM (SELECT unnest(string_split(?, ',')) AS x) WHERE x <> ''),
+      ex AS (SELECT string_split(?, ',') AS ids),
+      guard AS (SELECT CASE WHEN len(ids) > 200 THEN error('recs_related: exclude_ids over 200 ids -- narrow the query') END AS g FROM ex),
+      openr AS (SELECT id, title, status, priority, effort, source, file, created_timestamp, context,
+                       lower(title || ' ' || coalesce(context, '')) AS doc
+                FROM {tbl} WHERE status = 'open'),
+      n AS (SELECT count(*) AS n_open FROM openr),
+      cand AS MATERIALIZED (SELECT o.id, o.doc, t.term, t.w FROM openr o JOIN terms_in t ON contains(o.doc, t.term)),
+      hits AS (SELECT id, term, w FROM cand
+               WHERE regexp_matches(doc, '(^|[^a-z0-9_])' || regexp_escape(term) || '($|[^a-z0-9_])')),
+      df AS (SELECT term, count(*) AS df FROM hits GROUP BY term),
+      term_scores AS (SELECT h.id, sum(h.w * ln(1 + n.n_open / (1 + df.df))) AS term_w,
+                             count(*) FILTER (WHERE df.df <= 0.05 * n.n_open) AS admitting_hits,
+                             string_agg(h.term, ' ' ORDER BY h.term) AS matched_terms
+                      FROM hits h JOIN df USING (term) CROSS JOIN n GROUP BY h.id),
+      nearw AS (SELECT path, max(w) AS w FROM near GROUP BY path),
+      scored AS (
+        SELECT o.id, o.title, o.status, o.priority, o.effort, o.source, o.file, o.created_timestamp,
+               coalesce(o.file IN (SELECT path FROM q), false) AS direct,
+               coalesce(nw.w, 0) AS near_w, coalesce(ts.term_w, 0) AS term_w, coalesce(ts.admitting_hits, 0) AS admitting_hits,
+               ts.matched_terms, left(o.context, 200) AS snippet
+        FROM openr o CROSS JOIN guard CROSS JOIN ex
+        LEFT JOIN nearw nw ON nw.path = o.file
+        LEFT JOIN term_scores ts ON ts.id = o.id
+        WHERE guard.g IS NULL AND NOT list_contains(ex.ids, o.id))
+      SELECT id, title, status, priority, effort, source, file, created_timestamp, direct, near_w + term_w AS score,
+             matched_terms, snippet, count(*) OVER () AS total, count(*) FILTER (WHERE direct) OVER () AS direct_total
+      FROM scored WHERE direct OR near_w > 0 OR admitting_hits > 0
+      ORDER BY direct DESC, CASE lower(priority) WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2
+               WHEN 'low' THEN 3 ELSE 4 END, score DESC, created_timestamp DESC, id
+      LIMIT least(CAST(? AS INTEGER), 100)
+  - >-
+    3. Channel modules and their tests (envelope, neighbourhood, mentions, history, terms), each generic over files and
+    returning neighbours or terms plus a channel status. Run VP steps 4-8.
+  - >-
+    4. Core and CLI (related_recs.py, __main__.py, __init__.py) and their tests. Run VP steps 9-11, then the live CLI
+    against the still-v4 reader ONLY to confirm it fails loudly with an unknown-verb error before the deploy (never a
+    silent empty result); never depend on the live verb pre-merge.
+  - >-
+    5. Planning surfaces (planning SKILL.md, plan.md) byte-neutral; docs/contracts/ports.yaml SA-01; the file-router
+    route (at most 4 effective lines); the Decision 215 amendment annotation naming rec-4279 and rec-4240 (both exist;
+    Decision 181). Run VP steps 13 and 15-18.
+  - >-
+    6. Closure sequence (implement skill, git-ops handoff_sequence), each outcome reported on its own: run the code-review
+    gate; run scripts.session.github_readiness and report each state separately (unknown is unproven, never PASS); run
+    scripts.test_coverage_checker --check-tests --check-coverage as a diagnostic; set implementation_declared true in this
+    plan; run scripts.validate --pre; write the retrospective evidence and run scripts.session.postflight --evidence.
+    Then VP 19: the full tier on the committed, rebased, clean tree to completion (final Validation Summary scope all
+    PASS), then scripts.checks.validation_result --verify-head exit 0; any review-fix commit reruns both; a timeout is
+    BLOCKED, never skipped.
+  - >-
+    7. Push, open the PR with "Resolves: rec-4235" in the squash body, wait for CI by subscription, confirm check runs,
+    squash-merge; report push, PR, CI and merge outcomes separately. After the merge, VP 20 (deploy run and six deploy
+    records), then VP 21-23, recording VP 22's wall time in the PR.
+  - "8. Report: what was implemented, verification results, the live VP 22 line."
+work_areas: []
+rollback: >-
+  Revert the merge: the registry returns to v4 on the next governed deploy (recs_related disappears; nothing else calls
+  it) and the planning surfaces return to recs_for_files, which stays registered throughout this plan.

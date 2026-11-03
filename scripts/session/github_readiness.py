@@ -8,6 +8,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from scripts import repo_identity
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -28,7 +30,7 @@ def _authenticated_read(timeout: int = 15) -> tuple[str, str]:
         if not token:
             return "unknown", "token unavailable"
         request = urllib.request.Request(
-            "https://api.github.com/repos/benjamin-blake/theseus",
+            f"https://api.github.com/repos/{repo_identity.full_name()}",
             headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:

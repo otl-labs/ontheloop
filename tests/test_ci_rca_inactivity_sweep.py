@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 from scripts.ci_rca.inactivity_sweep import close_inactive_recs, find_inactive_recs, main, run_sweep
+from tests.fixtures.ops_rec_rows import reader_rec_row
 
 
 def _row(rec_id: str, created: str, last_seen: str | None = None):
@@ -90,7 +91,7 @@ class TestCloseInactiveRecs:
         now = datetime.now(timezone.utc)
         old = (now - timedelta(days=45)).isoformat()
         rows = [_row("rec-1", old, last_seen=old)]
-        existing = {"id": "rec-1", "status": "open", "context_v2_json": json.dumps({"escape_class": "no-edge"})}
+        existing = reader_rec_row(id="rec-1", context_v2_json=json.dumps({"escape_class": "no-edge"}))
         recs_file = tmp_path / "recs.jsonl"
         with (
             patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=existing),

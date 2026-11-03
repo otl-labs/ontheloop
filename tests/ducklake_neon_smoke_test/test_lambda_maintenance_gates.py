@@ -321,3 +321,130 @@ def test_lambda_maintenance_breaker_missing_breaker_tripped_fails(monkeypatch):
     )
     with pytest.raises(smoke.SmokeTestFailure, match="lacks breaker_tripped=True"):
         smoke.lambda_maintenance_breaker()
+
+
+_CLEAN_OWNERSHIP = {
+    "foreign_owned": 0,
+    "schema_owner_is_current_user": True,
+    "schema_owner_held": True,
+    "schema_owner": "ducklake_smoke_owner",
+    "scoped_create_on_schema": False,
+    "scoped_create_on_public": False,
+}
+_CREATE_OK = {
+    "ok": True,
+    "tables": [f"t{i}" for i in range(9)],
+    "created": ["t1", "t2"],
+    "added": [],
+    "ownership": _CLEAN_OWNERSHIP,
+}
+
+
+def _create_gate(monkeypatch, resp):
+    seen = {}
+    monkeypatch.setattr(core, "_function_url", lambda role: seen.setdefault("role", role) and "https://fake-url.invalid")
+
+    def fake_invoke(url, payload, **kw):
+        seen["payload"] = payload
+        return resp
+
+    monkeypatch.setattr(core, "_sigv4_invoke", fake_invoke)
+    return seen
+
+
+def test_create_telemetry_gate_passes_on_a_clean_report(monkeypatch, capsys):
+    seen = _create_gate(monkeypatch, _Resp(200, _CREATE_OK))
+    smoke.lambda_maintenance_create_telemetry()
+    out = capsys.readouterr().out
+    assert out.strip() == "MAINTENANCE_CREATE_TELEMETRY OK created=2 added=0 foreign_owned=0 scoped_create=false"
+    assert seen == {"role": "maintenance_smoke", "payload": {"action": "create_telemetry_tables"}}
+    assert "fake-url" not in out
+
+
+@pytest.mark.parametrize(
+    ("override", "needle"),
+    [
+        ({"foreign_owned": 3}, "foreign owner"),
+        ({"foreign_owned": None}, "foreign owner"),
+        ({"schema_owner_held": False}, "owner role is not held"),
+        ({"schema_owner_held": None}, "owner role is not held"),
+        ({"scoped_create_on_schema": True}, "scoped login holds CREATE"),
+        ({"scoped_create_on_public": True}, "scoped login holds CREATE"),
+        ({"scoped_create_on_schema": None}, "scoped login holds CREATE"),
+    ],
+)
+def test_create_telemetry_ownership_failures(monkeypatch, override, needle):
+    _create_gate(monkeypatch, _Resp(200, {**_CREATE_OK, "ownership": {**_CLEAN_OWNERSHIP, **override}}))
+    with pytest.raises(core.SmokeTestFailure, match=needle):
+        smoke.lambda_maintenance_create_telemetry()
+
+
+def test_create_telemetry_foreign_owned_fails(monkeypatch):
+    _create_gate(monkeypatch, _Resp(200, {**_CREATE_OK, "ownership": {**_CLEAN_OWNERSHIP, "foreign_owned": 1}}))
+    with pytest.raises(core.SmokeTestFailure, match="MAINTENANCE_CREATE_TELEMETRY FAIL: a relation"):
+        smoke.lambda_maintenance_create_telemetry()
+
+
+def test_create_telemetry_schema_owner_mismatch_fails(monkeypatch):
+    _create_gate(monkeypatch, _Resp(200, {**_CREATE_OK, "ownership": {**_CLEAN_OWNERSHIP, "schema_owner_held": False}}))
+    with pytest.raises(core.SmokeTestFailure, match="owner role is not held by the session"):
+        smoke.lambda_maintenance_create_telemetry()
+
+
+def test_create_telemetry_owner_held_through_membership_passes(monkeypatch, capsys):
+    member = {**_CLEAN_OWNERSHIP, "schema_owner_is_current_user": False, "schema_owner_held": True}
+    _create_gate(monkeypatch, _Resp(200, {**_CREATE_OK, "ownership": member}))
+    smoke.lambda_maintenance_create_telemetry()
+    assert capsys.readouterr().out.startswith("MAINTENANCE_CREATE_TELEMETRY OK")
+
+
+def test_create_telemetry_scoped_create_fails(monkeypatch):
+    _create_gate(monkeypatch, _Resp(200, {**_CREATE_OK, "ownership": {**_CLEAN_OWNERSHIP, "scoped_create_on_schema": True}}))
+    with pytest.raises(core.SmokeTestFailure, match="Decision 216 cl.1"):
+        smoke.lambda_maintenance_create_telemetry()
+
+
+@pytest.mark.parametrize(
+    "resp",
+    [
+        _Resp(500, {"ok": False, "error_type": "runtime", "error": "sentinel-host.example"}, text="sentinel-host.example"),
+        _Resp(200, {**_CREATE_OK, "ok": False}),
+        _Resp(502, None, text="sentinel-host.example"),
+    ],
+)
+def test_create_telemetry_not_ok_fails(monkeypatch, resp):
+    _create_gate(monkeypatch, resp)
+    with pytest.raises(core.SmokeTestFailure, match=r"MAINTENANCE_CREATE_TELEMETRY FAIL: status=\d+ error_type=") as info:
+        smoke.lambda_maintenance_create_telemetry()
+    assert "sentinel-host" not in str(info.value)
+
+
+def test_create_telemetry_wrong_table_count_fails(monkeypatch):
+    _create_gate(monkeypatch, _Resp(200, {**_CREATE_OK, "tables": ["t"]}))
+    with pytest.raises(core.SmokeTestFailure, match="nine telemetry tables"):
+        smoke.lambda_maintenance_create_telemetry()
+
+
+def test_create_telemetry_gate_prints_added_count(monkeypatch, capsys):
+    added = ["telemetry_sessions.checkout_sha", "telemetry_observations.usage_final", "telemetry_observations.requested_model"]
+    _create_gate(monkeypatch, _Resp(200, {**_CREATE_OK, "added": added}))
+    smoke.lambda_maintenance_create_telemetry()
+    out = capsys.readouterr().out
+    assert out.strip() == "MAINTENANCE_CREATE_TELEMETRY OK created=2 added=3 foreign_owned=0 scoped_create=false"
+    assert not any(part in out for name in added for part in name.split("."))
+
+
+@pytest.mark.parametrize("added", ["absent", None, "telemetry_sessions.checkout_sha", [1]])
+def test_create_telemetry_gate_fails_without_an_added_list(monkeypatch, added):
+    body = {k: v for k, v in _CREATE_OK.items() if k != "added"}
+    if added != "absent":
+        body["added"] = added
+    _create_gate(monkeypatch, _Resp(200, body))
+    with pytest.raises(core.SmokeTestFailure, match="did not list added columns"):
+        smoke.lambda_maintenance_create_telemetry()
+
+
+def test_create_telemetry_missing_created_prints_zero(monkeypatch, capsys):
+    _create_gate(monkeypatch, _Resp(200, {k: v for k, v in _CREATE_OK.items() if k != "created"}))
+    smoke.lambda_maintenance_create_telemetry()
+    assert "created=0" in capsys.readouterr().out

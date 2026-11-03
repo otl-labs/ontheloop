@@ -1,11 +1,11 @@
 """Smoke-test CLI for CD.28 T0.4 inference credentials (T0.4).
 
-Fetches an API key from Secrets Manager using the ambient credential chain
+Fetches an API key from SSM Parameter Store using the ambient credential chain
 (agent_platform / PlatformDev profile in CC-web dev; OIDC chain on CI / Lambda), then
 makes a minimal LiteLLM completion call to verify the key is valid end-to-end.
 
 The InferenceCredentialsRead IAM grant is exercised on every run: a missing or
-misconfigured grant surfaces as AccessDenied from Secrets Manager, failing the test
+misconfigured grant surfaces as AccessDenied from SSM, failing the test
 with a clear diagnostic.
 
 Usage:
@@ -29,18 +29,18 @@ from scripts.aws_profile import resolve_aws_profile
 if TYPE_CHECKING:
     pass
 
-# envelope_id (not secret_id) names the Secrets Manager resource identifier deliberately: it
+# envelope_id (not secret_id) names the SSM parameter name deliberately: it
 # is a non-sensitive resource name (it appears in IAM policies, Terraform, and CloudTrail), and
 # the "envelope" term avoids CodeQL's sensitive-name heuristic flagging the identifier as a
 # secret when it is interpolated into diagnostics. The actual key material lives in api_key,
 # which is never logged.
 _PROVIDER_CONFIG: dict[str, dict[str, str]] = {
     "deepseek": {
-        "envelope_id": "agent-platform-deepseek-api-key",
+        "envelope_id": "/secret/agent-platform-deepseek-api-key",
         "model": "deepseek/deepseek-chat",
     },
     "anthropic": {
-        "envelope_id": "agent-platform-anthropic-api-key",
+        "envelope_id": "/secret/agent-platform-anthropic-api-key",
         "model": "anthropic/claude-haiku-4-5",
     },
 }
@@ -48,7 +48,7 @@ _PROVIDER_CONFIG: dict[str, dict[str, str]] = {
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Smoke-test: fetch an inference API key from Secrets Manager and make a LiteLLM completion call."
+        description="Smoke-test: fetch an inference API key from SSM Parameter Store and make a LiteLLM completion call."
     )
     parser.add_argument(
         "--provider",
@@ -62,16 +62,16 @@ def _parse_args() -> argparse.Namespace:
         help="Override the default LiteLLM model alias for the selected provider.",
     )
     parser.add_argument(
-        "--secret-id",
+        "--parameter-name",
         dest="envelope_id",
-        metavar="SECRET_ID",
+        metavar="PARAMETER_NAME",
         default=None,
-        help="Override the default Secrets Manager secret ID for the selected provider.",
+        help="Override the default SSM parameter name for the selected provider.",
     )
     parser.add_argument(
         "--region",
         default="eu-west-2",
-        help="AWS region for Secrets Manager (default: eu-west-2).",
+        help="AWS region for SSM Parameter Store (default: eu-west-2).",
     )
     return parser.parse_args()
 
@@ -87,39 +87,39 @@ def run(
     resolved_envelope_id = envelope_id or cfg["envelope_id"]
     resolved_model = model or cfg["model"]
 
-    print(f"[{provider}] Fetching secret: {resolved_envelope_id}")
+    print(f"[{provider}] Fetching parameter: {resolved_envelope_id}")
     session = boto3.Session(profile_name=resolve_aws_profile())
-    client = session.client("secretsmanager", region_name=region)
+    client = session.client("ssm", region_name=region)
 
     try:
-        response = client.get_secret_value(SecretId=resolved_envelope_id)
+        response = client.get_parameter(Name=resolved_envelope_id, WithDecryption=True)
     except ClientError as exc:
         code = exc.response["Error"]["Code"]
-        print(f"FAIL [{provider}] Secrets Manager error ({code}): {exc}", file=sys.stderr)
+        print(f"FAIL [{provider}] SSM error ({code}): {exc}", file=sys.stderr)
         if code == "AccessDeniedException":
             print(
-                f"  -> InferenceCredentialsRead IAM grant not applied or not propagated;"
-                f" verify the PlatformDev DailyOps policy includes the {resolved_envelope_id} ARN.",
+                f"  -> InferenceCredentialsParameterRead IAM grant not applied or not propagated;"
+                f" verify the PlatformDev policy includes the {resolved_envelope_id} parameter ARN.",
                 file=sys.stderr,
             )
-        elif code == "ResourceNotFoundException":
+        elif code == "ParameterNotFound":
             print(
-                f"  -> Secret {resolved_envelope_id!r} not found; confirm terraform apply created the envelope.",
+                f"  -> Parameter {resolved_envelope_id!r} not found; confirm the SSM copy created it.",
                 file=sys.stderr,
             )
         return 1
 
-    api_key: str = response.get("SecretString") or ""
+    api_key: str = response.get("Parameter", {}).get("Value") or ""
     if not api_key:
         print(
-            f"FAIL [{provider}] Secret {resolved_envelope_id!r} has an empty value;"
-            " set it via: aws secretsmanager put-secret-value --secret-id"
-            f" {resolved_envelope_id} --secret-string '<key>'",
+            f"FAIL [{provider}] Parameter {resolved_envelope_id!r} has an empty value;"
+            " set it via: aws ssm put-parameter --type SecureString --overwrite --name"
+            f" {resolved_envelope_id} --value '<key>'",
             file=sys.stderr,
         )
         return 1
 
-    print(f"[{provider}] Secret fetched. Calling LiteLLM model: {resolved_model}")
+    print(f"[{provider}] Parameter fetched. Calling LiteLLM model: {resolved_model}")
     try:
         result = litellm.completion(
             model=resolved_model,

@@ -1,7 +1,7 @@
-"""Data quality runner: compiles YAML check definitions to DuckLake SQL.
+"""Data quality runner: compiles YAML check definitions to dq_check requests on the DuckLake reader.
 
-Modelled after dbt test semantics. Each check produces a SQL query that returns
-VIOLATION rows. Zero violations = PASS. Any violations = FAIL (or WARN).
+Modelled after dbt test semantics. Each check is a closed dq_check kind plus bound params whose SQL is owned by the
+reader; the answer is a violation count. Zero violations = PASS. Any violations = FAIL (or WARN).
 
 Two-layer health picture (surfaced in preflight's `data_quality` section):
     1. Coverage, read from config/agent/data_quality/*.yaml: how many declarative
@@ -26,7 +26,7 @@ Usage:
     # Run checks from a specific YAML file
     AWS_PROFILE=agent_platform python -m scripts.data_quality_runner --file config/agent/data_quality/ops.yaml
 
-    # Dry-run: print compiled SQL without executing
+    # Dry-run: print each check's dq_check request without executing
     python -m scripts.data_quality_runner --dry-run
 
     # JSON output for programmatic consumption
@@ -43,19 +43,16 @@ from pathlib import Path
 
 from scripts.data_quality_compile import (
     _compile_column_test,  # noqa: F401
-    _uniqueness_sql,  # noqa: F401
     build_clause8_checks,  # noqa: F401
     build_tombstone_checks,
     load_checks,
     load_tombstones,
-    to_ducklake_sql,  # noqa: F401
 )
 from scripts.data_quality_execute import (
     _OPS_TABLES,  # noqa: F401
     _execute_check_ducklake,  # noqa: F401
     _is_reader_unavailable,  # noqa: F401
     _ops_backend,  # noqa: F401
-    _query_ops_rows,  # noqa: F401
     _verdict_for,  # noqa: F401
     apply_backend_routing,
     run_checks,
@@ -67,6 +64,7 @@ from scripts.data_quality_models import (
     Check,
     CheckResult,  # noqa: F401
     RunResult,
+    dq_request,
 )
 
 logger = logging.getLogger(__name__)
@@ -164,7 +162,7 @@ def main() -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print compiled SQL without executing",
+        help="Print each check's dq_check request without executing",
     )
     parser.add_argument(
         "--json",
@@ -254,7 +252,7 @@ def main() -> int:
         else:
             for r in result.results:
                 print(f"\n-- [{r.check.severity.upper()}] {r.check.description}")
-                print(f"{r.check.sql};")
+                print(json.dumps(dq_request(r.check)))
         return 0
 
     # Execute

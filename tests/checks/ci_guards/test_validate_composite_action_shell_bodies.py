@@ -149,7 +149,7 @@ class TestR2TestCovers:
 
 
 class TestScanRepositoryRealTree:
-    """Against the LIVE repo tree -- the universe of output-declaring actions is exactly three."""
+    """Against the LIVE repo tree -- the universe of output-declaring actions is exactly four."""
 
     def test_known_r1_violators_present(self) -> None:
         scan = scan_repository()
@@ -160,10 +160,11 @@ class TestScanRepositoryRealTree:
         scan = scan_repository()
         assert scan["r1_conformant_scripts"].get(".github/actions/subagent-plan-review::review") == "review.sh"
 
-    def test_no_fourth_output_producing_action_exists(self) -> None:
+    def test_no_fifth_output_producing_action_exists(self) -> None:
         scan = scan_repository()
         producing_actions = {k.split("::")[0] for k in {**scan["r1_violations"], **scan["r1_conformant_scripts"]}}
         assert producing_actions == {
+            ".github/actions/aws-region",
             ".github/actions/deterministic-guard",
             ".github/actions/fetch-saved-plan",
             ".github/actions/subagent-plan-review",

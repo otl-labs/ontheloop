@@ -1,0 +1,737 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: ducklake-typed-unmapped-errors
+intent: >-
+  Close rec-4282 and land rec-4294's preventive half (PLAN-telemetry-owner-provisioning bundles and closes rec-4294 with the
+  grant fix): an exception that no error-map row recognises must never reach a DuckLake serving Function URL as the runtime's
+  untyped 502. The three URL-only serving functions (telemetry writer, reader, ops
+  writer) answer an unmapped exception with a typed 500 `unmapped` carrying only the exception class and the Lambda request id,
+  a dead catalog connection with a typed retryable 503 `catalog_unavailable`, an unparseable body with a 400 `bad_request`,
+  and (reader) a caller-input DuckDB error inside a named verb with a 400 `named_read_input` carrying the DuckDB message. Paging
+  survives the change because both writers' errors alarms sum AWS/Lambda Errors and Url5xxCount. Telemetry is the platform's
+  learning signal (PROJECT_CONTEXT); a post-deploy gate that reports `error_type=none` teaches nothing.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+implementation_declared: true
+plan_path: docs/plans/PLAN-ducklake-typed-unmapped-errors.yaml
+phase: >-
+  ci_rca soft-warn exception category (rec-4294, the one open ci-rca rec; same file as its source_file). Touches the T2.36
+  telemetry writer and the T2.19 reader and ops writer serving functions, named only as owners of the touched code; closes
+  no roadmap exit criterion (no open T2.19 or T2.36 criterion is advanced).
+scope:
+- file: src/common/ducklake_handler_errors.py
+  action: Create
+  purpose: >-
+    Leaf helper shared by the three serving handlers (imports only stdlib and src.common.ducklake_runtime's
+    is_dead_connection_error; no import-time side effects). (1) unmapped(exc, *, function, action, request_id, elapsed_ms) ->
+    tuple[int, dict]: status 500, body {ok: false, error_type: "unmapped", error_class: type(exc).__name__, request_id, action,
+    elapsed_ms}; never str(exc). Before returning it prints ONE JSON line {event: "ducklake_unmapped_error", function, action,
+    error_class, request_id, chain (class names of __cause__/__context__, at most 3), frames (the last 10 traceback frames as
+    "path:function:line", no locals), message: redact(str(exc))}. (2) catalog_unavailable(exc, *, function, action,
+    request_id, reopened) -> tuple[int, dict]: status 503, body {ok: false, error_type: "catalog_unavailable", error_class,
+    request_id, action, reopened}; logs the same line shape with event "ducklake_catalog_unavailable". (3) terminal(exc, ...)
+    dispatching between the two on rt.is_dead_connection_error(exc). (3b) TRANSIENT_ERROR_TYPES = frozenset({"catalog_unavailable"}),
+    the authority the Decision 155 classifier's literal is asserted equal to. (4) redact(text) -> str: replaces password=VALUE,
+    X-Amz-*=VALUE, arn:... tokens and any run of 12 or more digits with a fixed marker, keeps the first line only and
+    truncates to 300 characters. (5) bad_request(function, action) -> tuple[int, dict]: 400 {ok: false, error_type:
+    "bad_request", error: "request body is not a JSON object"}. (6) A named_read_input log helper printing one
+    ducklake_named_read_input line {function, verb, error_class, request_id, message: redact(...)}. `action` is always a registered action name or the token
+    "unknown", never the caller's string (the log_invocation rule, src/common/ducklake_metrics.py:71-76).
+- file: src/lambdas/ducklake_telemetry_writer/handler.py
+  action: Modify
+  purpose: >-
+    The terminal `raise` at handler.py:211 becomes the helper's terminal answer: a dead-connection error (at _warm_connection
+    or mid-verb) answers 503 catalog_unavailable (reopened false; no reopen-once is added), anything else 500 unmapped, with
+    request_id from context.aws_request_id (None when context is None) and the dispatched action or "unknown". Every mapped
+    row is unchanged and keeps precedence. The docstring's "unmapped errors propagate" is replaced. _parse_body's 400
+    bad_request row also catches RecursionError (a deeply nested body), as the reader and ops writer rows do.
+- file: src/lambdas/ducklake_reader/handler.py
+  action: Modify
+  purpose: >-
+    (1) handler(): a body that json.loads refuses (ValueError, RecursionError) or that is not a JSON object answers 400
+    bad_request before dispatch; the invocation line logs status 400. (2) One outermost terminal except in handler() covering
+    parse, _handle and _guard_response_size: rt.is_dead_connection_error -> 503 catalog_unavailable (reopened true when it
+    survived the reopen-once at handler.py:336-343), anything else -> 500 unmapped; the invocation line logs the answered
+    status. (3) action_named_read: an exception from rt.named_read that is not a dead-connection error, not a
+    DuckLakeRuntimeError and whose class is one of InvalidInputException, ConversionException, OutOfRangeException or
+    TypeMismatchException from the duckdb/_duckdb module (the classes a bound value or a registry error() guard raises) is
+    raised as a NamedReadInputError and answered
+    400 {ok: false, error_type: "named_read_input", verb, error_class, error: the DuckDB message passed through the helper's
+    redact() (first line, 300 characters; defence in depth, since InvalidInputException is broad)}, and the helper prints one
+    ducklake_named_read_input line {verb, error_class, request_id, redacted message} so a misclassified server-side
+    InvalidInputException can be found by request id; every other DuckDB class falls through to 500 unmapped (class name only: BinderException and
+    ParserException mean registry-versus-schema drift, since callers send no SQL (Decision 84 I-3), and IOException,
+    CatalogException, HTTPException and the rest carry URLs, hosts and paths). The dead-connection check stays first so the reopen-once path is
+    unchanged. The "Any non-connection error still propagates (Decision 55)" comment is reworded to the new terminal posture.
+- file: src/lambdas/ducklake_writer/handler.py
+  action: Modify
+  purpose: >-
+    Same posture as the reader: 400 bad_request for an unparseable or non-object body; one outermost terminal except in
+    handler(): dead connection (at connect, or surviving the reopen-once at handler.py:320-327) -> 503 catalog_unavailable,
+    anything else -> 500 unmapped; the invocation line logs the answered status. Every typed row (422/409/400/503/500) is
+    unchanged. This makes docs/contracts/ducklake_writer.yaml:166 ("every failure maps to a typed 4xx/5xx") true.
+- file: src/lambdas/ducklake_telemetry_writer/manifest.yaml
+  action: Modify
+  purpose: includes += src/common/ducklake_handler_errors.py.
+- file: src/lambdas/ducklake_reader/manifest.yaml
+  action: Modify
+  purpose: includes += src/common/ducklake_handler_errors.py.
+- file: src/lambdas/ducklake_writer/manifest.yaml
+  action: Modify
+  purpose: includes += src/common/ducklake_handler_errors.py.
+- file: src/lambdas/data-pipeline/manifest.yaml
+  action: Modify
+  purpose: >-
+    excludes += src/common/ducklake_handler_errors.py (the wildcard src/ include would otherwise bundle it). Manifest only, zip
+    contents unchanged (the part 1 precedent; Decision 79).
+- file: scripts/ops_portal/reader_transient.py
+  action: Modify
+  purpose: >-
+    Decision 155 classifier: a module constant _TRANSIENT_ERROR_TYPES = frozenset({"catalog_unavailable"}), a literal kept
+    in scripts/ (the module's own reason for not living in src/) and asserted equal to the helper's exported
+    TRANSIENT_ERROR_TYPES by a parity test, the same shape as its status-set parity (Decision 155 cl.2 "asserted equal
+    rather than restated"). is_reader_unavailable also returns True for an HTTP 503 failure whose error_type is in that set
+    (read from the exception's parsed `body` when it has one, else from the message text); every other error_type-bearing
+    failure still gates, and the status set stays derived from the reader's own _READER_TRANSIENT_STATUS. The docstring
+    names the allow-list and its four consumers (scripts/ops_portal/decisions.py DCG-03 guard, scripts/data_quality_execute.py,
+    and the two scripts/preflight/ci_rca_gauges.py sites).
+- file: scripts/ducklake_smoke/lambda_telemetry_gates.py
+  action: Modify
+  purpose: >-
+    Failure-text helpers only (_error_type, _expect_ok, _fail callers that print error_type): a failing response also prints
+    error_class and request_id from the JSON body, or for a body-less response the x-amzn-RequestId header, as
+    "error_class=X request_id=Y"; each value is printed only when it matches its shape (a Python identifier of at most 100
+    characters; a UUID), else "none", so the gate never prints arbitrary body text. The module docstring's allowed-fields sentence gains "an exception
+    class name or a request id". No vector, _check_provision or other gate logic changes (the writer grant fix thread edits
+    those).
+- file: terraform/personal/ducklake_telemetry_writer.tf
+  action: Modify
+  purpose: >-
+    aws_cloudwatch_metric_alarm.ducklake_telemetry_writer_errors keeps its name, threshold > 0, one evaluation period,
+    notBreaching, SNS actions and tags, and replaces metric_name/namespace/period/statistic/dimensions with three metric_query
+    blocks: m1 AWS/Lambda Errors Sum 900 s, m2 AWS/Lambda Url5xxCount Sum 900 s (both FunctionName = the function), e1
+    expression "FILL(m1, 0) + FILL(m2, 0)" with return_data true. alarm_description names both metrics and this plan.
+    Non-IAM, in-place update; auto-applies through terraform-apply-sandbox.
+- file: terraform/personal/ducklake_lambdas.tf
+  action: Modify
+  purpose: >-
+    The same metric-math change on aws_cloudwatch_metric_alarm.ducklake_writer_errors (Decision 84 I-4 rationale comment kept,
+    extended with one line on why Url5xxCount is summed). Its alarm_description, like the telemetry writer's, notes that an
+    operator-run gate eliciting a typed 5xx on purpose pages too. No other resource changes.
+- file: docs/contracts/ducklake_telemetry_writer.yaml
+  action: Modify
+  purpose: >-
+    Every verb's typed_errors gains unmapped (500); the connectionful verbs also gain catalog_unavailable (503); the 500 and
+    503 response_codes strings name them. audit_invariants gains: "No request that reaches the handler answers the Function
+    URL's 502: an exception no row maps answers 500 unmapped {error_class, request_id, action}, never its message; a dead
+    catalog connection answers 503 catalog_unavailable. Enforced by tests/lambdas/ducklake_telemetry_writer/test_handler.py
+    (test_unexpected_exception_is_a_typed_500, test_unmapped_answer_never_echoes_the_message) and live by the post-deploy
+    no-escaped-traceback check; process-level failures (timeout, out of memory, runtime exit) remain the runtime's 502 and
+    count in Errors." and the declared residual: "The ducklake_unmapped_error log line
+    carries the exception message redacted and truncated to 300 characters, so a request value inside an unmapped exception's
+    message can reach the log (residual against the rejected-string rule; strictly less than the runtime traceback it
+    replaces)." amendment_log: one field_add entry (semantic_break false; migration: the untyped 502 becomes typed;
+    clients never retried it as anything but transient).
+- file: docs/contracts/ducklake_reader.yaml
+  action: Modify
+  purpose: >-
+    named_read gains 400 named_read_input (caller-input DuckDB classes, the DuckDB message) and every verb's 500 names
+    unmapped; connectionful verbs gain 503 catalog_unavailable; the dispatcher-level invariant names 400 bad_request for an
+    unparseable body. The "client-input errors surface as DuckLakeRuntimeError -> 500" invariant (ducklake_reader.yaml:140) is
+    amended to name named_read_input as the second 4xx verb outcome. A "no request that reaches the handler answers 502"
+    invariant names its enforcing tests (tests/test_ducklake_reader_handler.py nodes of VP step 3) and the process-level
+    residual (rec-4296 owns the reader's Runtime.ExitError exits). amendment_log: one field_add entry.
+- file: docs/contracts/ducklake_writer.yaml
+  action: Modify
+  purpose: >-
+    Every verb's 500 names unmapped, connectionful verbs gain 503 catalog_unavailable, the dispatcher-level unknown-action
+    invariant gains the 400 bad_request body case; the loud-fail invariant at :166 cites the terminal answer and its enforcing
+    tests (tests/lambdas/ducklake_writer/handler/test_envelope_dispatch.py nodes of VP step 5). The async DuckLake handlers'
+    residual (maintenance, maintenance_smoke, catalog_dr) is named in each serving contract's invariant with its owner,
+    rec-4303. amendment_log: one field_add entry.
+- file: docs/DECISIONS.md
+  action: Modify
+  purpose: >-
+    One dated, source-cited blockquote amendment on its own line under Decision 155 (amendment_forms dated_amendment shape,
+    Decision 177 append-only; mints no new number; precedent: the 2026-10-12 annotation on Decision 215). Content: (a) what
+    changes, stated as a deliberate fail-closed narrowing of clause 2's tolerance, not an unchanged outcome: a dead catalog
+    connection (rt.is_dead_connection_error's signatures) that arrived as an untyped 502 now arrives as a typed 503
+    catalog_unavailable and stays transient; a process-level 502 (timeout, runtime exit) stays transient; every other failure
+    that used to share the untyped 502, deterministic defects and infra faults outside those signatures alike (a DuckDB
+    HTTPException or IOException on S3, Secrets Manager throttling), now arrives as a typed 500 unmapped, is no longer retried
+    by the reader client or the writer transport, and gates. A recurring transient class joins the dead-connection predicate
+    by a rec, never by widening the classifier. (b) The
+    four consumers the classifier reaches, by path. (c) The allow-list is scripts/ops_portal/reader_transient.py's
+    _TRANSIENT_ERROR_TYPES, asserted equal to src/common/ducklake_handler_errors.py's TRANSIENT_ERROR_TYPES, with a test that
+    every other error_type the three serving contracts declare still gates. (d) Decision 167 question 3 and the Decision
+    213/214/215 precedent, answered explicitly: those entries minted numbers because they replaced an invariant or added a
+    carve-out; this adds one error_type exception to clause 2's never-transient sentence, which preserves today's outcome for
+    a dead connection, and its net effect narrows the tolerance toward Decision 55's fail-closed default; that preserved
+    outcome is the argument for an annotation; Benjamin chooses the annotation or a numbered form at PR B's merge. (e) The consumer list is
+    for impact only: it licenses no call site retroactively and clause 3's named-call-site rule is unchanged; rec-4311 owns
+    the two scripts/preflight/ci_rca_gauges.py sites that no clause names. The annotation
+    stays within the accretion norm (about 150 words); detail beyond (a)-(e) belongs in PR B's body.
+- file: docs/decisions-index.json
+  action: Modify
+  purpose: >-
+    Regenerated with the repo's own index tooling only if validate_decisions_index_freshness reports drift after the Decision
+    155 annotation; never hand-edited.
+- file: docs/plans/PLAN-telemetry-append-inline.yaml
+  action: Modify
+  purpose: >-
+    Consequential text edits only (no design fork besides the one this plan reverses): the handler row's item (3) names the
+    error_type unmapped 500 and catalog_unavailable 503 answers (that literal wording, which VP step 10 greps) among those
+    that get one C6 line; acceptance criteria :427 and :438 and
+    VP step 14 (:671-688) assert AWS/Lambda Errors AND Url5xxCount are zero since the deploy (same get_metric_statistics call
+    pattern), with fix_if reading "Errors above zero -> a runtime-level failure; Url5xxCount above zero -> read the C6 line's
+    error_type". The contract row (:223-229) adds that append_telemetry's typed_errors gain unmapped (500) and
+    catalog_unavailable (503). A context line names rec-4294 and this plan.
+- file: docs/plans/PLAN-telemetry-blob-route.yaml
+  action: Modify
+  purpose: >-
+    Consequential text edits reversing the raise-to-page fork: the three blob fault classes (blob_integrity,
+    blob_grant_self_check, blob_store_access) emit their C6 line with status 500 and answer that typed 500, no raise, paged
+    through the alarm's Url5xxCount (handler row :164-171, test row :364-368, contract row :244 "502 for the three paging
+    faults" -> typed 500, acceptance :512-516 and :532, producer helper text :65 "500/502 defect" -> "500 defect; a 502 is a
+    runtime-level defect", step 5 node and fix_if :623/:630, step 16 :803-816 adds Url5xxCount == 0, test obligation
+    :889-893 renamed test_blob_faults_answer_a_typed_500, with its behavior text at :890 rewritten from "log a status-500
+    C6 line and then raise" to "log a status-500 C6 line and answer a typed 500"; the contract row :244 also adds that
+    begin_blobs' typed_errors gain unmapped (500) and catalog_unavailable (503)). The fork line :1055 is marked reversed by
+    rec-4294 and this plan.
+- file: tests/test_ducklake_handler_errors.py
+  action: Create
+  purpose: >-
+    Helper tests (mapped home of src/common/ducklake_handler_errors.py): typed 500 and 503 bodies; the body never carries the
+    message (exception text with password=, s3://, arn:aws: and a 12-digit run); the log line's redaction, first-line and
+    300-character truncation, frames without locals, chain names; action is a registered name or "unknown"; and the three
+    serving contracts declare unmapped/catalog_unavailable on the verbs the handlers can answer them on, deriving the verb
+    set from each contract (every verb declares unmapped; every connectionful verb, i.e. every verb but the connectionless
+    ones each handler names, also declares catalog_unavailable), never a hard-coded verb list, so a verb added later by
+    plan 3 part 2 or the blob route is held to the same rule its amended plan text states.
+- file: tests/lambdas/ducklake_telemetry_writer/test_handler.py
+  action: Modify
+  purpose: >-
+    test_unexpected_exception_propagates (:218-221) is replaced by test_unexpected_exception_is_a_typed_500; new nodes for the
+    message never echoed (Exception, KeyError and a fake duckdb-module IOException carrying password=, raised from the verb and
+    from _warm_connection), a dead connection at connect answering 503, and request_id taken from the Lambda context.
+- file: tests/test_ducklake_reader_handler.py
+  action: Modify
+  purpose: >-
+    test_invocation_line_on_unparseable_body (:569-573) asserts 400 bad_request and a status-400 invocation line; new nodes
+    for named_read caller-input classes -> 400 with the message (fake classes whose __module__ is _duckdb, parametrized over
+    the four names), BinderException and another DuckDB class -> 500 unmapped without the message, a dead connection surviving reopen-once -> 503,
+    a non-object body -> 400, and one real-DuckDB node (pytest.importorskip("duckdb") inside the test) proving a CAST failure
+    on a bound value and an error() guard classify as named_read_input with the real classes. Stays under 500 SLOC: if it
+    would cross, the real-DuckDB node moves to a new sibling tests/test_ducklake_reader_named_read_errors.py (the fake-based
+    branch nodes stay in this mapped file, which the coverage gate runs); never a budget raise (Decision 128).
+- file: tests/lambdas/ducklake_writer/handler/test_envelope_dispatch.py
+  action: Modify
+  purpose: >-
+    New nodes for the ops writer's 500 unmapped, 503 catalog_unavailable after reopen-once, and 400 bad_request for an
+    unparseable body and for a non-object body.
+- file: tests/common/ducklake_reader_client/test_named_read_errors.py
+  action: Create
+  purpose: >-
+    rec-4282's client half, with a fake requests.post: a 400 named_read_input and a 500 unmapped each raise ReaderInvokeError
+    after exactly one POST (no retry); a 503 catalog_unavailable is retried with the existing backoff.
+- file: tests/ops_data_portal/test_reader_transient.py
+  action: Modify
+  purpose: >-
+    A 503 carrying catalog_unavailable classifies transient (message and parsed-body forms); a 503 carrying any other
+    error_type, and a 500 unmapped, do not; new TestTransientErrorTypeParity asserts _TRANSIENT_ERROR_TYPES equals the
+    helper's TRANSIENT_ERROR_TYPES and that every other error_type key declared in the three serving contracts' typed_errors
+    still gates; the existing parity tests stay unchanged.
+- file: tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py
+  action: Modify
+  purpose: >-
+    A failing vector's text carries error_class and request_id from the body, a body-less 502 carries the x-amzn-RequestId
+    header, and the existing never-leaks tests still hold (no message, ARN or account id).
+- file: tests/fixtures/ducklake_smoke_fakes.py
+  action: Modify
+  purpose: >-
+    _Resp gains an optional headers mapping (default empty dict) so the body-less 502 node can carry x-amzn-RequestId;
+    every existing caller is unchanged.
+- file: tests/checks/iam_tf/test_ducklake_writer_error_alarms.py
+  action: Create
+  purpose: >-
+    HCL pins (tests/fixtures/terraform_hcl_blocks.find_resource_block): both errors alarms carry m1 Errors and m2 Url5xxCount
+    metric queries on their own FunctionName, the e1 FILL(m1, 0) + FILL(m2, 0) expression with return_data, threshold 0,
+    GreaterThanThreshold and the alerts SNS actions; a guard test proves the pin rejects an alarm that drops either operand
+    or the FILL.
+- file: tests/lambda_manifest/test_bundle_checks.py
+  action: Modify
+  purpose: >-
+    One node: the three serving manifests bundle src/common/ducklake_handler_errors.py, data-pipeline excludes it, and no
+    async DuckLake manifest (maintenance, maintenance_smoke, catalog_dr) bundles it yet.
+- file: scripts/agent_sdk/errors.py
+  action: Modify
+  purpose: >-
+    map_reader_error learns the new reader shapes: named_read_input -> a new ReaderInputError(AgentToolError) carrying the
+    reader's message (the caller can fix its input); catalog_unavailable -> a new ReaderUnavailableError(AgentToolError)
+    (transient, retry later); unmapped stays the loud generic ReaderBoundaryError, its message naming error_class and
+    request_id. The module docstring lists every shape the reader now answers (it says "three" today).
+- file: tests/test_agent_sdk_errors.py
+  action: Modify
+  purpose: >-
+    Nodes for named_read_input -> ReaderInputError, catalog_unavailable -> ReaderUnavailableError, and unmapped ->
+    ReaderBoundaryError naming the class and request id; both new types are AgentToolErrors.
+- file: docs/plans/PLAN-ducklake-typed-unmapped-errors.yaml
+  action: Create
+  purpose: This plan.
+bundled_recommendations:
+- rec-4282
+followon_recs:
+- rec-4303
+closes_criteria: []
+infrastructure_dependencies:
+- >-
+  Two PRs in order. PR A is Terraform only (the two alarm edits plus tests/checks/iam_tf/test_ducklake_writer_error_alarms.py):
+  CI's terraform-validate and speculative plan must show exactly two in-place updates and no IAM, then it merges and
+  terraform-apply-sandbox applies the reviewed plan (Decision 77/126). PR B (everything else) merges only after PR A's apply
+  is green, so a typed 5xx never ships unwatched. Spend: each alarm goes from one to two metrics, about USD 0.10 a month
+  each, signed off by Benjamin on the decision card (2026-10-14).
+- >-
+  PR B merges only after the Writer grant fix (PLAN-telemetry-owner-provisioning, thread "Writer grant fix plan", which
+  bundles and closes rec-4294) is deployed and its --lambda-telemetry gate printed TELEMETRY_PROVISION_OK: PR B's own governed deploy runs the same
+  gate, which would otherwise be red at provision_telemetry (now as a typed 500). PR B rebases onto that fix, which edits
+  the same telemetry writer contract (its 500 runtime row gains "a target table is absent"; this plan's unmapped text joins
+  that same 500 key, so merge the two strings, never replace one), only _check_probe in lambda_telemetry_gates.py (this plan
+  touches only the failure-text helpers), and one fixture sentence each in PLAN-telemetry-append-inline and
+  PLAN-telemetry-blob-route (fixtures call create_telemetry_tables first); this plan's amendments to those plans leave those
+  sentences alone.
+- >-
+  PR B merges before the plan 3 part 2 build (PLAN-telemetry-append-inline) starts, so that build reads the amended text;
+  the coordinator holds part 2's build until then. The blob-route build follows part 2 as before.
+- >-
+  PR B redeploys the DuckLake functions through deploy-ducklake-lambdas.yml (src/lambdas/ducklake_*/** and
+  src/common/ducklake_*.py are push paths; Decisions 79/125/126). PR B carries the Decision 155 amendment, so its merge waits
+  for Benjamin's explicit word (always-ask: Decision text). LAMBDA-DEPLOY DEFERRED for data-pipeline: manifest excludes only.
+acceptance_criteria:
+- >-
+  No request that reaches the telemetry writer, reader or ops writer handler code answers 502: an exception no row maps
+  answers 500 {ok: false, error_type: unmapped, error_class, request_id, action, elapsed_ms} with no exception message, and
+  one ducklake_unmapped_error log line carries the class, request id, frames and the redacted, truncated message.
+  Process-level failures (timeout, out of memory, Runtime.ExitError, an init failure) still answer the runtime's 502 and
+  count in AWS/Lambda Errors by design (rec-4296 owns the reader's).
+- >-
+  A dead catalog connection that fails at connect or survives the reopen-once answers a typed 503 catalog_unavailable; the
+  reader client retries it, the ops writer transport retries it for replay-safe requests only (an idempotency_ulid or
+  update_ops, unchanged), and the Decision 155 classifier treats it (and only it among error_type-bearing failures) as
+  transient.
+- >-
+  A reader named verb whose bound value or error() guard raises a caller-input DuckDB class answers 400 named_read_input with
+  the DuckDB message (live: recs_related with 201 exclude_ids answers 400 naming "narrow the query"); the client raises it
+  after one POST, and the agent SDK maps it to ReaderInputError. Every other DuckDB class answers 500 unmapped with the
+  class name only.
+- An unparseable or non-object body answers 400 bad_request on all three serving functions.
+- >-
+  Both writers' errors alarms sum AWS/Lambda Errors and Url5xxCount with FILL(..., 0), threshold > 0 over 900 s, and the
+  applied alarms read back with that expression.
+- >-
+  A failing --lambda-telemetry vector prints error_class and request_id, never a message, ARN or account id.
+- >-
+  The plan 3 part 2 and blob-route plans no longer assume a raise-to-502 or Errors-only zero check; Decision 155 carries the
+  dated catalog_unavailable amendment; the three contracts declare the typed answers.
+- >-
+  rec-4282 is closed by PR B's Resolves trailer. rec-4294 is cited, not bundled: PLAN-telemetry-owner-provisioning closes
+  it.
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: The helper answers typed 500 and 503 bodies, never the message, and logs one redacted line; the contracts declare the answers.
+  command: >-
+    bin/venv-python -m pytest tests/test_ducklake_handler_errors.py::test_unmapped_is_a_typed_500_with_class_and_request_id_only
+    tests/test_ducklake_handler_errors.py::test_unmapped_body_never_carries_the_message
+    tests/test_ducklake_handler_errors.py::test_log_line_redacts_truncates_and_keeps_the_first_line
+    tests/test_ducklake_handler_errors.py::test_log_line_frames_carry_no_locals_and_name_the_chain
+    tests/test_ducklake_handler_errors.py::test_dead_connection_is_a_typed_503
+    tests/test_ducklake_handler_errors.py::test_action_is_registered_or_unknown
+    tests/test_ducklake_handler_errors.py::test_serving_contracts_declare_the_terminal_answers -q
+  expected: Exit 0, every node passes. Red before because the module and nodes are absent.
+  fix_if: A message, password, s3 path or ARN in a body is a helper bug; fix redaction or the body builder, never the test.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: ducklake-handler-errors-helper
+  expected_literals: []
+- step: 2
+  phase: pre-deploy
+  action: The telemetry writer never lets an exception escape and never echoes its message.
+  command: >-
+    bin/venv-python -m pytest tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_unexpected_exception_is_a_typed_500
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_unmapped_answer_never_echoes_the_message
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_dead_connection_at_connect_is_503
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_request_id_comes_from_the_lambda_context
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_runtime_error_is_500 -q
+  expected: Exit 0, every node passes. Red before because the new nodes are absent and the handler re-raises.
+  fix_if: A KeyError escaping means the terminal branch was not reached; a mapped row answering unmapped means precedence is wrong.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-writer-never-502
+  expected_literals: []
+- step: 3
+  phase: pre-deploy
+  action: The reader answers typed 400/500/503 for caller-input DuckDB errors, unmapped errors, dead connections and bad bodies; the client does not retry the 400 or 500.
+  command: >-
+    bin/venv-python -m pytest tests/test_ducklake_reader_handler.py::test_invocation_line_on_unparseable_body
+    tests/test_ducklake_reader_handler.py::test_non_object_body_is_400
+    tests/test_ducklake_reader_handler.py::test_named_read_caller_input_error_is_400_with_its_message
+    tests/test_ducklake_reader_handler.py::test_named_read_other_duckdb_error_is_unmapped_500
+    tests/test_ducklake_reader_handler.py::test_dead_connection_after_reopen_is_503
+    tests/test_ducklake_reader_handler.py::test_handler_non_dead_error_does_not_reopen
+    tests/common/ducklake_reader_client/test_named_read_errors.py::test_named_read_input_raises_after_one_post
+    tests/common/ducklake_reader_client/test_named_read_errors.py::test_unmapped_500_raises_after_one_post
+    tests/common/ducklake_reader_client/test_named_read_errors.py::test_catalog_unavailable_is_retried
+    tests/test_agent_sdk_errors.py::test_named_read_input_maps_to_reader_input_error
+    tests/test_agent_sdk_errors.py::test_catalog_unavailable_maps_to_reader_unavailable_error
+    tests/test_agent_sdk_errors.py::test_unmapped_maps_to_boundary_error_naming_class_and_request_id -q
+  expected: Exit 0, every node passes. Red before because the nodes are absent and the unparseable-body test expects a raise.
+  fix_if: A caller-input class answering 500, or the reopen-once no longer firing on a dead connection, is a handler ordering bug.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: reader-typed-terminal-errors
+  expected_literals: []
+- step: 4
+  phase: pre-deploy
+  action: With real DuckDB classes, a CAST failure on a bound value and an error() guard classify as named_read_input.
+  command: >-
+    bin/venv-python -m pytest tests/test_ducklake_reader_handler.py::test_real_duckdb_caller_input_errors_are_400 -q -rs
+  expected: Exit 0 with the node passing, not skipped, in the full venv (duckdb present).
+  fix_if: A real class missing from the caller-input set means the class list drifted from the pinned duckdb; update it from config/lambda/ducklake/version.yaml's version.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    The node needs duckdb, which requirements-fast.txt excludes (heavy-exclusion, Decision 104), so venv-less replay would
+    skip it and pass vacuously; the full tier's run of the mapped reader test file is the standing guard (rec-2809).
+- step: 5
+  phase: pre-deploy
+  action: The ops writer answers typed 500/503/400 instead of escaping.
+  command: >-
+    bin/venv-python -m pytest tests/lambdas/ducklake_writer/handler/test_envelope_dispatch.py::test_handler_unmapped_exception_is_typed_500
+    tests/lambdas/ducklake_writer/handler/test_envelope_dispatch.py::test_handler_dead_connection_after_reopen_is_503
+    tests/lambdas/ducklake_writer/handler/test_envelope_dispatch.py::test_handler_unparseable_body_is_400
+    tests/lambdas/ducklake_writer/handler/test_envelope_dispatch.py::test_handler_non_object_body_is_400
+    tests/lambdas/ducklake_writer/handler/test_envelope_dispatch.py::test_handler_runtime_error_maps_500 -q
+  expected: Exit 0, every node passes. Red before because the new nodes are absent.
+  fix_if: An escaping exception means the terminal except is not outermost in handler().
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: ops-writer-typed-terminal-errors
+  expected_literals: []
+- step: 6
+  phase: pre-deploy
+  action: The Decision 155 classifier keeps catalog_unavailable transient and gates every other error_type.
+  command: >-
+    bin/venv-python -m pytest tests/ops_data_portal/test_reader_transient.py::TestIsReaderUnavailableTruthTable::test_503_catalog_unavailable_classifies_transient
+    tests/ops_data_portal/test_reader_transient.py::TestIsReaderUnavailableTruthTable::test_catalog_unavailable_body_classifies_transient
+    tests/ops_data_portal/test_reader_transient.py::TestIsReaderUnavailableTruthTable::test_other_error_type_on_503_does_not_classify
+    tests/ops_data_portal/test_reader_transient.py::TestIsReaderUnavailableTruthTable::test_unmapped_500_does_not_classify
+    tests/ops_data_portal/test_reader_transient.py::TestTransientSetParity
+    tests/ops_data_portal/test_reader_transient.py::TestTransientErrorTypeParity -q
+  expected: Exit 0, every node passes. Red before because the nodes are absent and a catalog_unavailable 503 gates today.
+  fix_if: Any second error_type admitted as transient widens Decision 155 beyond its amendment; remove it.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: reader-transient-catalog-unavailable
+  expected_literals: []
+- step: 7
+  phase: pre-deploy
+  action: A failing telemetry gate vector names the class and request id, never a message.
+  command: >-
+    bin/venv-python -m pytest tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_failure_text_carries_error_class_and_request_id
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_bodyless_502_failure_text_carries_the_runtime_request_id
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_http_body_never_leaks
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_gate_output_never_contains_an_account_id -q
+  expected: Exit 0, every node passes. Red before because the first two nodes are absent.
+  fix_if: A body field other than error_type, error_class or request_id in the text breaks the Decision 101 rule; narrow the helper.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-gate-failure-diagnostics
+  expected_literals: []
+- step: 8
+  phase: pre-deploy
+  action: Both writers' errors alarms sum Errors and Url5xxCount with FILL, and the pin rejects a dropped operand.
+  command: >-
+    bin/venv-python -m pytest tests/checks/iam_tf/test_ducklake_writer_error_alarms.py::test_telemetry_writer_alarm_sums_errors_and_url5xx
+    tests/checks/iam_tf/test_ducklake_writer_error_alarms.py::test_ops_writer_alarm_sums_errors_and_url5xx
+    tests/checks/iam_tf/test_ducklake_writer_error_alarms.py::test_alarm_expression_fills_both_operands
+    tests/checks/iam_tf/test_ducklake_writer_error_alarms.py::test_pin_rejects_a_dropped_operand_or_fill -q
+  expected: Exit 0, every node passes. Red before because the file is absent.
+  fix_if: A missing FILL lets the alarm go silent on a period with no Url5xxCount datapoint (it emits none at zero); restore it.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    differential rejected: the alarm pins and their Terraform subject landed in PR A, so the check passes with origin/main
+    checked out (tautological on main); the pins stay a standing test, tests/checks/iam_tf/test_ducklake_writer_error_alarms.py,
+    run by the full tier and by --pre when the alarms or the test change
+  expected_literals: []
+- step: 9
+  phase: pre-deploy
+  action: The helper is bundled by the three serving functions and excluded from data-pipeline.
+  command: >-
+    bin/venv-python -m pytest tests/lambda_manifest/test_bundle_checks.py::test_handler_errors_module_bundled_by_serving_functions_only -q
+  expected: Exit 0, the node passes. Red before because the node is absent.
+  fix_if: An async manifest bundling the module means the follow-on rec's design was pre-empted; remove it there.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: handler-errors-module-bundled
+  expected_literals: []
+- step: 10
+  phase: pre-deploy
+  action: The sibling plans no longer assume a raise-to-502, both name Url5xxCount, and both still validate.
+  command: >-
+    ! grep -n -E "log_then_raise|it must log then raise|then re-raise|500/502 defect|paging faults, which raise|caller sees the Function URL's 502" docs/plans/PLAN-telemetry-blob-route.yaml &&
+    grep -c Url5xxCount docs/plans/PLAN-telemetry-blob-route.yaml && grep -c Url5xxCount docs/plans/PLAN-telemetry-append-inline.yaml &&
+    grep -c "error_type unmapped" docs/plans/PLAN-telemetry-append-inline.yaml &&
+    bin/venv-python -m scripts.roadmap.plan_document docs/plans/PLAN-telemetry-blob-route.yaml docs/plans/PLAN-telemetry-append-inline.yaml
+  expected: Exit 0; every count is at least 1 and both plans validate.
+  fix_if: A surviving raise-to-502 phrase would reinstate the defect when the blob route is built; edit it.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    One-time edits to two approved plan documents; once their builds land the text is history, so a standing registry guard
+    would pin dead prose. The amended behaviour itself is guarded by steps 1-3 and the blob route's own tests.
+  expected_literals: []
+- step: 11
+  phase: pre-deploy
+  action: Decision 155 carries the dated catalog_unavailable amendment and the decision files stay consistent.
+  command: >-
+    awk '/^## Decision 155:/{f=1;next} /^## Decision /{f=0} f' docs/DECISIONS.md | grep -c catalog_unavailable &&
+    bin/venv-python -m pytest tests/decisions_md -q
+  expected: Exit 0 with a count of at least 1 and the decisions_md suite passing.
+  fix_if: A parse failure means the annotation is not a sanctioned amendment_forms shape; use the blockquote form.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    The count assertion is a one-time document edit, and the second command is a whole-directory pytest re-run that the
+    --pre tier already covers (hermetic_authoring rule (v)); validate_decisions_index_freshness guards the index.
+- step: 12
+  phase: pre-deploy
+  action: Fast tier on the branch (PR CI is authoritative, Decision 73).
+  command: bin/venv-python -m scripts.validate --pre
+  expected: Exit 0.
+  fix_if: Fix the reported check at its root; never skip or waive a check to get green.
+  hermetic: false
+  graduation: not-applicable
+- step: 13
+  phase: pre-deploy
+  action: Full tier before handoff (handoff_policy).
+  command: bin/venv-python -m scripts.validate
+  expected: Exit 0 from a completed full run.
+  fix_if: A timeout is blocked, not passed; rerun from the start (timeout_disposition).
+  hermetic: false
+  graduation: not-applicable
+- step: 14
+  phase: post-deploy
+  action: >-
+    PR A applied: terraform-apply-sandbox succeeded on PR A's merge commit (mcp__github__actions_list, workflow
+    terraform-apply-sandbox.yml, head_sha $ALARM_MERGE_SHA), and both live alarms read back with the summed expression.
+  command: >-
+    aws cloudwatch describe-alarms --profile agent_platform --region eu-west-2 --alarm-names ducklake-telemetry-writer-errors
+    ducklake-writer-errors --output json > "${TMPDIR:-/tmp}/alarms.json" && bin/venv-python -c "import json,os;a=json.load(open(os.path.join(os.environ.get('TMPDIR','/tmp'),'alarms.json')))['MetricAlarms'];assert
+    len(a)==2,len(a);[None for x in a if (lambda q:(sorted(m['MetricStat']['Metric']['MetricName'] for m in q if 'MetricStat' in m)==['Errors','Url5xxCount'] and any('FILL' in m.get('Expression','') and m.get('ReturnData') for m in q)) or (_ for _ in ()).throw(AssertionError(x['AlarmName'])))(x.get('Metrics') or [])];print('ALARMS_SUM_OK')"
+  expected: ALARMS_SUM_OK with both alarms carrying Errors, Url5xxCount and a returned FILL expression.
+  fix_if: A single-metric alarm means the apply did not run or was refused; read terraform-apply-sandbox's convergence record, never apply locally.
+  hermetic: false
+  graduation: not-applicable
+- step: 15
+  phase: post-deploy
+  action: >-
+    PR B's governed deploy succeeded, every job included. Read with mcp__github__actions_list (workflow
+    deploy-ducklake-lambdas.yml, head_sha $MERGE_SHA) and list_workflow_jobs, writing the jobs JSON to $DEPLOY_JOBS_JSON, and
+    save the smoke job's log (mcp__github__get_job_logs) to $SMOKE_LOG_FILE.
+  command: >-
+    test -s "$DEPLOY_JOBS_JSON" && test -s "$SMOKE_LOG_FILE" && bin/venv-python -c "import json,os,re;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));jobs={x['name']:x.get('conclusion')
+    for x in (j.get('jobs') if isinstance(j,dict) else j)};want=['deploy-maintenance','maintenance-smoke','reconcile-gate','deploy-serving','smoke'];assert
+    all(any(n.startswith(w) and c=='success' for n,c in jobs.items()) for w in want),jobs;t=open(os.environ['SMOKE_LOG_FILE'],encoding='utf-8',errors='replace').read();assert
+    'TELEMETRY_PROVISION_OK' in t,'no TELEMETRY_PROVISION_OK';assert 'status=502' not in t,'a 502 in the smoke log';L=t.splitlines();i=next(k for k,l in enumerate(L) if '##[group]Run' in l and '--lambda-telemetry' in l);j=next((k for k in range(i+1,len(L)) if '##[group]Run' in L[k]),len(L));assert
+    not re.search(r'(?<![0-9])[0-9]{12}(?![0-9])',chr(10).join(L[i:j])),'12-digit run in the telemetry step';print('DEPLOY_AND_GATE_OK')"
+  expected: >-
+    DEPLOY_AND_GATE_OK; every named job succeeded, the smoke log carries TELEMETRY_PROVISION_OK with no 502, and the
+    --lambda-telemetry step's own section (its group header to the next step's) has no 12-digit run.
+  fix_if: >-
+    A red smoke at provision_telemetry before the grant fix deployed is the ordering precondition, not this plan's fault:
+    hold. A red --lambda-reader step whose reader log shows a Runtime.ExitError REPORT line is rec-4296's process exit:
+    record the request id on rec-4296 and report it, never re-run to green. Any other red job is this plan's to root-cause
+    and fix forward, never a re-run to green.
+  hermetic: false
+  graduation: not-applicable
+- step: 16
+  phase: post-deploy
+  action: >-
+    Live typed answers as PlatformDev: an unparseable body to the reader and ops writer answers 400 bad_request, and
+    recs_related with 201 exclude_ids answers 400 named_read_input naming the guard's message.
+  command: >-
+    DUCKLAKE_READER_URL=$(aws ssm get-parameter --profile agent_platform --region eu-west-2 --name /agent-platform/ducklake/reader_url
+    --query Parameter.Value --output text) DUCKLAKE_WRITER_URL=$(aws ssm get-parameter --profile agent_platform --region eu-west-2
+    --name /agent-platform/ducklake/writer_url --query Parameter.Value --output text) bin/venv-python -c "import json,os,boto3,requests;from
+    botocore.auth import SigV4Auth;from botocore.awsrequest import AWSRequest;c=boto3.Session(profile_name='agent_platform').get_credentials().get_frozen_credentials();P=lambda
+    u,b:(lambda r:(SigV4Auth(c,'lambda','eu-west-2').add_auth(r),requests.post(u,data=b,headers=dict(r.headers),timeout=180))[1])(AWSRequest(method='POST',url=u,data=b,headers={'Content-Type':'application/json'}));R=os.environ['DUCKLAKE_READER_URL'];W=os.environ['DUCKLAKE_WRITER_URL'];[None
+    for u in (R,W) if not (lambda x:x.status_code==400 and x.json().get('error_type')=='bad_request')(P(u,'{not json')) and (_ for _ in ()).throw(AssertionError('bad body'))];x=P(R,json.dumps({'action':'named_read','verb':'recs_related','params':{'files':'','near':'','terms':'','exclude_ids':','.join('rec-%d'%i
+    for i in range(201)),'max_rows':1}}));b=x.json();assert x.status_code==400 and b.get('error_type')=='named_read_input' and 'narrow the query' in b.get('error',''),(x.status_code,b.get('error_type'));print('TYPED_ERRORS_LIVE_OK')"
+  expected: TYPED_ERRORS_LIVE_OK.
+  fix_if: A 502 or 500 for the guard means the caller-input classification or the deploy is wrong; read the ducklake_unmapped_error line by request id.
+  hermetic: false
+  graduation: not-applicable
+- step: 17
+  phase: post-deploy
+  action: >-
+    No Python exception escaped any of the three serving functions since PR B's deploy, and both writers' summed alarm
+    metrics are zero over the same window (the reader's Runtime.ExitError process exits are out of scope and excluded).
+  command: >-
+    test -s "$DEPLOY_JOBS_JSON" && bin/venv-python -c "import datetime as d,json,os,boto3;b=boto3.Session(profile_name='agent_platform',region_name='eu-west-2');j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));jobs=j.get('jobs') if isinstance(j,dict) else j;t=d.datetime.fromisoformat([x['completed_at'] for x in jobs if x['name'].startswith('deploy-serving')][0].replace('Z','+00:00'));lg=b.client('logs');cw=b.client('cloudwatch');now=d.datetime.now(d.timezone.utc);
+    pg=lg.get_paginator('filter_log_events');esc={f:sum(len(pp['events']) for pp in pg.paginate(logGroupName='/aws/lambda/agent-platform-ducklake-'+f,filterPattern='\"Traceback (most recent call last)\"',startTime=int(t.timestamp()*1000))) for f in ('reader','writer','telemetry-writer')};assert not any(esc.values()),esc;
+    S=lambda f,m:sum(p['Sum'] for p in cw.get_metric_statistics(Namespace='AWS/Lambda',MetricName=m,Dimensions=[{'Name':'FunctionName','Value':'agent-platform-ducklake-'+f}],StartTime=t,EndTime=now,Period=3600,Statistics=['Sum'])['Datapoints']);v={(f,m):S(f,m) for f in ('writer','telemetry-writer') for m in ('Errors','Url5xxCount')};assert not any(v.values()),v;print('NO_ESCAPED_EXCEPTIONS',esc,v)"
+  expected: NO_ESCAPED_EXCEPTIONS with zero escaped tracebacks and zero Errors and Url5xxCount on both writers.
+  fix_if: A traceback means a path bypasses the terminal answer (read it and route it through the helper); a Url5xxCount above zero is a typed 5xx to read by its request id.
+  hermetic: false
+  graduation: not-applicable
+- step: 18
+  phase: post-deploy
+  action: rec-4282 closed by PR B's Resolves trailer (closure obligation).
+  command: >-
+    bin/venv-python -c "from src.common.ducklake_reader_client import DuckLakeReader as R;
+    print(R().named('recs_by_ids', ids='rec-4282')[0]['status'])"
+  expected: closed
+  fix_if: Still open -- read ci.yml's trailer-closure job; the repaired acceptance names hermetic node ids only.
+  hermetic: false
+  graduation: not-applicable
+test_obligations:
+- source: src/common/ducklake_handler_errors.py
+  behavior: Typed 500 and 503 bodies carry class and request id only; the log line is redacted, first-line, truncated, frame-only.
+  verification_step: 1
+  test_selector: tests/test_ducklake_handler_errors.py::test_unmapped_body_never_carries_the_message
+  red_green_expectation: red before (module absent), green after
+- source: src/lambdas/ducklake_telemetry_writer/handler.py
+  behavior: An unmapped exception answers a typed 500 instead of escaping as the Function URL's 502.
+  verification_step: 2
+  test_selector: tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_unexpected_exception_is_a_typed_500
+  red_green_expectation: red before (node absent; the handler re-raises), green after
+- source: src/lambdas/ducklake_reader/handler.py
+  behavior: Caller-input DuckDB errors in named verbs answer 400 with the message; other unmapped errors answer 500 without it.
+  verification_step: 3
+  test_selector: tests/test_ducklake_reader_handler.py::test_named_read_caller_input_error_is_400_with_its_message
+  red_green_expectation: red before (node absent), green after
+- source: src/lambdas/ducklake_writer/handler.py
+  behavior: An unmapped exception answers a typed 500 and a dead connection after reopen-once answers 503.
+  verification_step: 5
+  test_selector: tests/lambdas/ducklake_writer/handler/test_envelope_dispatch.py::test_handler_unmapped_exception_is_typed_500
+  red_green_expectation: red before (node absent), green after
+- source: scripts/ops_portal/reader_transient.py
+  behavior: catalog_unavailable is the one error_type-bearing failure classified transient.
+  verification_step: 6
+  test_selector: tests/ops_data_portal/test_reader_transient.py::TestIsReaderUnavailableTruthTable::test_503_catalog_unavailable_classifies_transient
+  red_green_expectation: red before (node absent), green after
+- source: scripts/ducklake_smoke/lambda_telemetry_gates.py
+  behavior: A failing vector prints error_class and request_id and nothing else from the body.
+  verification_step: 7
+  test_selector: tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_failure_text_carries_error_class_and_request_id
+  red_green_expectation: red before (node absent), green after
+- source: terraform/personal/ducklake_telemetry_writer.tf
+  behavior: The telemetry writer errors alarm sums FILLed Errors and Url5xxCount.
+  verification_step: 8
+  test_selector: tests/checks/iam_tf/test_ducklake_writer_error_alarms.py::test_telemetry_writer_alarm_sums_errors_and_url5xx
+  red_green_expectation: red before (file absent), green after
+- source: terraform/personal/ducklake_lambdas.tf
+  behavior: The ops writer errors alarm sums FILLed Errors and Url5xxCount.
+  verification_step: 8
+  test_selector: tests/checks/iam_tf/test_ducklake_writer_error_alarms.py::test_ops_writer_alarm_sums_errors_and_url5xx
+  red_green_expectation: red before (file absent), green after
+- source: src/lambdas/ducklake_telemetry_writer/manifest.yaml
+  behavior: The three serving manifests bundle src/common/ducklake_handler_errors.py, data-pipeline excludes it, and no async manifest bundles it yet.
+  verification_step: 9
+  test_selector: tests/lambda_manifest/test_bundle_checks.py::test_handler_errors_module_bundled_by_serving_functions_only
+  red_green_expectation: red before (node absent), green after
+- source: src/lambdas/ducklake_reader/manifest.yaml
+  behavior: The three serving manifests bundle src/common/ducklake_handler_errors.py, data-pipeline excludes it, and no async manifest bundles it yet.
+  verification_step: 9
+  test_selector: tests/lambda_manifest/test_bundle_checks.py::test_handler_errors_module_bundled_by_serving_functions_only
+  red_green_expectation: red before (node absent), green after
+- source: src/lambdas/ducklake_writer/manifest.yaml
+  behavior: The three serving manifests bundle src/common/ducklake_handler_errors.py, data-pipeline excludes it, and no async manifest bundles it yet.
+  verification_step: 9
+  test_selector: tests/lambda_manifest/test_bundle_checks.py::test_handler_errors_module_bundled_by_serving_functions_only
+  red_green_expectation: red before (node absent), green after
+- source: src/lambdas/data-pipeline/manifest.yaml
+  behavior: The three serving manifests bundle src/common/ducklake_handler_errors.py, data-pipeline excludes it, and no async manifest bundles it yet.
+  verification_step: 9
+  test_selector: tests/lambda_manifest/test_bundle_checks.py::test_handler_errors_module_bundled_by_serving_functions_only
+  red_green_expectation: red before (node absent), green after
+- source: docs/contracts/ducklake_telemetry_writer.yaml
+  behavior: The contract declares unmapped and catalog_unavailable on every verb the handler can answer them on (and named_read_input on the reader's named_read).
+  verification_step: 1
+  test_selector: tests/test_ducklake_handler_errors.py::test_serving_contracts_declare_the_terminal_answers
+  red_green_expectation: red before (node absent), green after
+- source: docs/contracts/ducklake_reader.yaml
+  behavior: The contract declares unmapped and catalog_unavailable on every verb the handler can answer them on (and named_read_input on the reader's named_read).
+  verification_step: 1
+  test_selector: tests/test_ducklake_handler_errors.py::test_serving_contracts_declare_the_terminal_answers
+  red_green_expectation: red before (node absent), green after
+- source: docs/contracts/ducklake_writer.yaml
+  behavior: The contract declares unmapped and catalog_unavailable on every verb the handler can answer them on (and named_read_input on the reader's named_read).
+  verification_step: 1
+  test_selector: tests/test_ducklake_handler_errors.py::test_serving_contracts_declare_the_terminal_answers
+  red_green_expectation: red before (node absent), green after
+- source: docs/decisions-index.json
+  behavior: The committed decisions index matches DECISIONS.md after the Decision 155 annotation.
+  verification_step: 12
+  command: bin/venv-python -m scripts.validate --pre
+  waiver_reason: >-
+    A derived artefact regenerated by the repo's own index tooling only when validate_decisions_index_freshness reports
+    drift; that standing --pre check is its guard, so a plan-specific test would restate it.
+- source: scripts/agent_sdk/errors.py
+  behavior: The agent SDK maps named_read_input and catalog_unavailable to their own typed errors and unmapped to the loud generic.
+  verification_step: 3
+  test_selector: tests/test_agent_sdk_errors.py::test_named_read_input_maps_to_reader_input_error
+  red_green_expectation: red before (node absent), green after
+constraints:
+- Never return or print the message of an unmapped or catalog_unavailable exception in a response body or smoke output (Decision 101; ATTACH errors embed the libpq password, src/common/ducklake_runtime.py libpq_conninfo); the one message a new answer carries, named_read_input's, passes through redact(). Mapped rows the plan leaves unchanged keep their existing bodies.
+- "No catch-and-relax (Decision 55): every terminal answer is a non-2xx typed response plus one structured log line, and both writers' alarms still page on it."
+- The dead-connection check stays ahead of every other classification so the reopen-once paths are unchanged.
+- Async DuckLake handlers (maintenance, maintenance_smoke, catalog_dr) are out of scope (EventBridge-invoked; an escaped exception drives Lambda's own retries); rec-4303 owns them.
+- No module-import side effects; no new IAM; no workflow change; no edit to telemetry_actions.py, ducklake_telemetry_provision.py or any gate vector (the Writer grant fix owns them).
+- No rescue agents or workaround loops (Decision 55); a red post-deploy step is root-caused, never re-run to green.
+context:
+- "Decision-scout verdict FLAGS_FOUND (Decisions triaged: 168 of 168; Roadmap items intersected: 13; CONFLICT: 0; RELATED: 13). CITE: Decision 55, Decision 81, Decision 84, Decision 213, Decision 215, Decision 79, Decision 125, Decision 126, Decision 77, Decision 177, Decision 181, Decision 186, Decision 201. WARN Decision 155 resolved by the three-condition amendment (scope row docs/DECISIONS.md); NOTE Decision 88 resolved below; SPIRIT Decision 84 resolved (BinderException stays 500)."
+- "gates: decision-scout=FLAGS_FOUND (WARN 155, NOTE 88, SPIRIT 84 resolved); plan-critique=REVISE r1 (R1 rec-4294 moved to PLAN-telemetry-owner-provisioning, its acceptance cannot hold in the networkless evaluator, finding relayed; R2 paginated log scan; R3 full tier before PR A; N1-N9 folded in); REVISE r2 (B1 PR sequencing for registry rows and the implementation_declared flip; N1 RecursionError; N2 rollback order; N3 fixture headers; N4 merge-ask wording and annotation length; N6 rec-4296 routing); REVISE r3 (R3-B1 the Decision 155 text discloses the fail-closed narrowing and the retry loss; R3-N1 literal named; R3-N2 operator-run 5xx gates page; R3-N3 rec-4311 owns the unlicensed gauge sites); PROCEED r4 (confirming), R4-N1 to R4-N5 folded in (rec-4311's acceptance repaired at planning to a node its own fix lands, so this plan's annotation cannot satisfy it; sibling contract rows; carve-out wording; named_read_input log line; :890 rewrite)"
+- "Decision 88 cl.1(i) reading: 'a dead session is the one expected reopen condition; any other error still raises' holds at the connection layer (the reopen predicate and its raise are unchanged); only the handler's terminal answer to a raise changes. The summed alarm pages on 503 catalog_unavailable and the writers' existing 503 occ_exhausted and 500 runtime/version_mismatch too; Benjamin signs that scope off with the spend. An operator-run gate that elicits a typed 5xx on purpose (for example --lambda-append-only assertion 3, scripts/ducklake_smoke/lambda_ops_gates.py:352-361, expecting a 500) also pages ducklake-writer-errors; both alarm_descriptions say so, so that page is not read as an incident."
+- "Decision 213: the telemetry writer's 403 missing_caller_identity stays ahead of body parsing and of every new answer; Decision 215 cl.6: the reader's 413 response_too_large stays a returned response ahead of the terminal except; every mapped row keeps precedence (Decisions 81, 207, 210)."
+- "rec-4294 trigger (scoped login lacks CREATE on the smoke metadata schema; DuckLake's failed S3 cleanup masks it as TransactionException ... Forbidden) is fixed by PLAN-telemetry-owner-provisioning (the Writer grant fix, which bundles and closes rec-4294); this plan owns the masking half."
+- "Live evidence 2026-10-14 (agent_platform CloudWatch): the two 502s counted in AWS/Lambda Errors at 10:22 and 10:47 with no Url5xxCount datapoint, so a handler-returned 5xx is invisible to an Errors-only alarm; hence the summed alarm. Reader Errors 3-39/day are Runtime.ExitError process exits, not Python exceptions (separate rec)."
+- "Design input: /mnt/project-files/rec-4294/ADVICE.md (Fable, 2026-10-14); brief /mnt/project-files/rec-4294/fable-brief/BRIEF.md."
+- "fork: standalone vs fold into PLAN-telemetry-blob-route | chosen: standalone, landing before part 2 and the blob route | class: decided-with-notice | precedent: rec-4294 Critical; blob route builds two plans out | reversible: yes | persisted: this plan"
+- "fork: paging basis | chosen: metric-math Errors + Url5xxCount on both writers' alarms | class: always-ask (spend, infrastructure); Benjamin chose 'Watch both' on the thread's decision card, 2026-10-14 | precedent: Fable Q1 | reversible: yes | persisted: terraform/personal"
+- "fork: terminal answer body | chosen: error_type, error_class, request_id, action, elapsed_ms; never the message | class: decided-with-notice | precedent: maintenance index_actions.py:116 class-name-only; Decision 101 | reversible: yes | persisted: ducklake_handler_errors.py"
+- "fork: reader caller-input DuckDB errors | chosen: 400 named_read_input with the message for four bound-value classes; BinderException and ParserException stay 500 unmapped (registry-versus-schema drift; scout SPIRIT flag on Decision 84 I-3) | class: decided-with-notice | precedent: ducklake_reader.yaml:140 names a 4xx split as a code change; 413 precedent | reversible: yes | persisted: reader handler, contract"
+- "fork: catalog_unavailable | chosen: typed 503 plus a one-entry allow-list in the Decision 155 classifier, recorded as a dated amendment on Decision 155 (no new number) | class: always-ask (Decision text) | precedent: Decision 215's 2026-10-12 annotation | reversible: yes | persisted: reader_transient.py, DECISIONS.md"
+- "fork: scope | chosen: the three URL-only serving functions now; async handlers as follow-on rec-4303 | class: decided-with-notice | precedent: Fable Q4 | reversible: yes | persisted: followon_recs"
+- "fork: sibling plans | chosen: amend PLAN-telemetry-append-inline and PLAN-telemetry-blob-route here (their fix_if text would otherwise reinstate the raise) | class: decided-with-notice | precedent: PLAN-company-formation-vp-expected-amendment | reversible: yes | persisted: those plans"
+- "rec-4294 is cited, not bundled: PLAN-telemetry-owner-provisioning bundles it and closes it via the escape-classified manual route (agreed through the coordinator 2026-10-14); never name it in this plan's Resolves trailer. rec-4282's filed acceptance (whole-file pytest) is out_of_grammar for require_decidable: repair it to this plan's hermetic node ids before PR B merges (get_rec_write_guidance first; never weaker)."
+- "Url5xxCount premise, 14 days to 2026-10-14 (agent_platform, read-only): ops writer Url4xxCount 73 and telemetry writer 17 (handler-returned 4xx), reader Url5xxCount 11 against Errors 208; the metric counts handler-returned statuses, never the runtime's 502."
+- "Side effect, deliberate (Decision 55): an infra error outside rt.is_dead_connection_error's signatures (a DuckDB HTTPException on an S3 read, Secrets Manager throttling) used to escape as a 502 that the clients retried and the Decision 155 classifier called transient; it now answers 500 unmapped, is not retried, and gates DCG-03, DQ and the preflight gauges. Observed incidence is near zero (reader Url5xxCount 11 in 14 days, its Errors are process exits). The log line names its class, so a recurring transient class is added to the predicate by a rec, never by widening the classifier."
+- "Decision 155 vehicle: the Fable consult (ADVICE.md Q6.5) recommended a short numbered Decision; the scout allowed a dated amendment under three conditions; this plan uses the amendment. PR B's merge ask to Benjamin states the consult's recommendation and offers the numbered form."
+- "Gotcha: Url5xxCount emits no datapoint at zero; FILL(m, 0) is mandatory in the alarm expression."
+- "Gotcha: DuckDB exception classes live in module _duckdb (duckdb 1.5.4); classify on class name and module, with the real-DuckDB node as the drift guard."
+- "Separately filed (not a split of this plan): the reader's Runtime.ExitError process exits, rec-4296."
+pre_implementation_checklist:
+- Branch confirmed not on main
+- docs/PROJECT_CONTEXT.md read
+- Decision 55, Decision 101, Decision 155 and Decision 84 I-4 sections only
+- PLAN-telemetry-owner-provisioning's build is deployed with TELEMETRY_PROVISION_OK before PR B merges
+- All files in scope located and readable
+- Acceptance criteria understood and verifiable
+execution_steps:
+- 'Sequencing (graduation and replay): this plan merges in its own plan PR first. PR A adds NO verification-registry row and leaves implementation_declared unset (an override of the implement commit flow''s flip step for PR A only), so the implement-leg replay does not run steps 1-11 against a tree without the helper. PR B carries all eight graduate registry rows (steps 1, 2, 3, 5, 6, 7, 8 and 9, including writer-error-alarms-sum-5xx for step 8 whose test lands in PR A) and the implementation_declared flip. Never downgrade a graduate disposition to waive to get green (one ruled exception, 2026-10-14: step 8 is waived because its test landed in PR A and the differential is tautological on main).'
+- 'PR A: edit the two alarms and create tests/checks/iam_tf/test_ducklake_writer_error_alarms.py; run steps 8, 12 and 13 (the full tier; a timeout is blocked, never a CI-only handoff, Decision 203); open PR A; on green CI (the speculative plan shows two in-place alarm updates and no IAM) merge; run step 14.'
+- 'Rebase onto main (PR A and, before PR B merges, PLAN-telemetry-owner-provisioning''s build; merge its 500 runtime contract string with this plan''s unmapped text).'
+- 'Create src/common/ducklake_handler_errors.py and its tests; wire the three handlers; update the four manifests, the classifier, the gate helpers, the three contracts, the Decision 155 amendment (regenerate docs/decisions-index.json only if the freshness check says so) and the two sibling plans; add every test node named in steps 1-11.'
+- 'Repair rec-4282''s acceptance to hermetic node ids of step 3 (get_rec_write_guidance first; one update_rec; never weaker).'
+- Execute Verification Plan steps 1-13 -- loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)
+- 'Code review (code-review skill); open PR B with "Resolves: rec-4282" in the squash body (never rec-4294); merge on green CI, review PROCEED and Benjamin''s explicit word (Decision 155 text: state that the change narrows clause 2''s tolerance, so infra faults outside the dead-connection signatures now gate and are no longer retried; that the consult recommended a numbered Decision; that the cited Decision 215 annotation recorded a shipped clause rather than a changed rule, so it is a weaker precedent; and offer the numbered form).'
+- Execute post-deploy steps 15-18.
+- 'Report: what was implemented, verification results, the rec-4282 closure.'
+rollback: >-
+  PR B: revert the squash; the handlers return to propagating and the reverted classifier gates catalog_unavailable again
+  (no 503 is emitted after the revert). PR A: revert to restore the single-metric alarms only after PR B's revert is
+  deployed, never while PR B is live, because PR B's typed 5xx answers page only through Url5xxCount.

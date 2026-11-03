@@ -10,26 +10,54 @@ Actions:
   partition_prune_check-- a single-key `current` lookup that touches <=1 bucket-partition.
   read_ops_current     -- production: current projection of an ops_* table (optional single-key filter).
   read_ops_history     -- production: append-history rows of an ops_* table.
-  query_ops            -- production: a read-only SELECT over an ops_* current projection (pushdown).
+  dq_check             -- production: one closed data-quality check over an ops_* table, returning a violation count only.
   describe             -- production: per-verb parameter schema for every NAMED_READS entry (agent-facing).
 
 PRODUCTION OPS PATH (T2.19 / Decision 81): the reader is the SOLE read authority for the ops_*
 governance tables -- the closed boundary. The read role is S3 GetObject only, so a write attempt is
 denied at IAM/S3. Every ops read transits this URL; there is no escape hatch.
+
+The event-journal verbs are served by agent-platform-ducklake-telemetry-reader on the production telemetry catalog
+(Decision 236 cl.2); this function holds no telemetry slot and answers an event verb name as an unregistered verb.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any, Callable
 
 from src.common import ducklake_connect_probe as probe
+from src.common import ducklake_dq_checks as dq
+from src.common import ducklake_handler_errors as handler_errors
 from src.common import ducklake_runtime as rt
+from src.common.ducklake_metrics import log_invocation
 
 DATA_PATH = os.environ.get("DUCKLAKE_DATA_PATH", rt.SMOKE_DATA_PATH)
 META_SCHEMA = os.environ.get("DUCKLAKE_META_SCHEMA", rt.META_SCHEMA)
 EXTENSION_DIRECTORY = os.environ.get("DUCKLAKE_EXTENSION_DIRECTORY", rt.LAMBDA_EXTENSION_DIRECTORY)
+
+# DuckDB classes a bound value or a registry error() guard raises on caller input (duckdb 1.5.4, module _duckdb).
+# BinderException and ParserException are deliberately absent: callers send no SQL (Decision 84 I-3), so they mean
+# registry-versus-schema drift and stay a 500 unmapped.
+_CALLER_INPUT_CLASSES = frozenset(
+    {"InvalidInputException", "ConversionException", "OutOfRangeException", "TypeMismatchException"}
+)
+_DUCKDB_MODULES = frozenset({"_duckdb", "duckdb"})
+
+
+class NamedReadInputError(Exception):
+    """A named verb refused caller input (a bad bind or a registry error() guard): answered 400 named_read_input."""
+
+    def __init__(self, verb: str, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.verb = verb
+        self.error_class = type(cause).__name__
+
+
+def _is_caller_input_error(exc: BaseException) -> bool:
+    return any(c.__name__ in _CALLER_INPUT_CLASSES and c.__module__ in _DUCKDB_MODULES for c in type(exc).__mro__)
 
 
 def _open_reader_connection() -> Any:
@@ -157,11 +185,18 @@ def action_named_read(event: dict[str, Any], con: Any) -> dict[str, Any]:
     params = event.get("params") or {}
     if not isinstance(params, dict):
         raise rt.DuckLakeRuntimeError("named_read 'params' must be an object of named bind values")
-    rows = rt.named_read(con, verb=verb, params=params, limit=event.get("limit"))
+    try:
+        rows = rt.named_read(con, verb=verb, params=params, limit=event.get("limit"))
+    except Exception as exc:
+        # The dead-connection check stays first so the reopen-once path is unchanged.
+        if rt.is_dead_connection_error(exc) or isinstance(exc, rt.DuckLakeRuntimeError) or not _is_caller_input_error(exc):
+            raise
+        raise NamedReadInputError(verb, exc) from exc
     return {
         "ok": True,
         "verb": verb,
         "registry_version": rt.NAMED_READS_VERSION,
+        "read_version": rt.read_version(verb),
         "rows": _json_safe(rows),
         "row_count": len(rows),
     }
@@ -184,19 +219,23 @@ def action_read_ops_history(event: dict[str, Any], con: Any) -> dict[str, Any]:
     return {"ok": True, "table": table, "rows": _json_safe(rows), "row_count": len(rows)}
 
 
-def action_query_ops(event: dict[str, Any], con: Any) -> dict[str, Any]:
-    """Production: run a read-only SELECT over an ops_* current projection. Use `{tbl}` for the table.
-
-    The SQL is caller-supplied (internal read paths: predicate pushdown). Only the current projection
-    is reachable; the read role is S3-read-only so the boundary holds even for an arbitrary SELECT.
-    """
-    table = event.get("table")
-    _require_ops_table(table)
-    sql = event.get("sql")
-    if not isinstance(sql, str) or not sql.strip():
-        raise rt.DuckLakeRuntimeError("query_ops requires a non-empty 'sql' string referencing {tbl}")
-    rows = rt.query_current(con, table=table, sql=sql, params=event.get("params") or [])
-    return {"ok": True, "table": table, "rows": _json_safe(rows), "row_count": len(rows)}
+def action_dq_check(event: dict[str, Any], con: Any) -> dict[str, Any]:
+    """Production: run one closed DQ check kind (server-owned SQL, bound values) and return its violation count only."""
+    check = dq.validate(event)
+    try:
+        count = dq.run_check(con, check)
+    except Exception as exc:
+        # The dead-connection check stays first so the reopen-once path is unchanged.
+        if rt.is_dead_connection_error(exc) or not _is_caller_input_error(exc):
+            raise
+        raise dq.DqCheckInputError(check.kind, "params", "was refused by the engine (pattern or column type)") from exc
+    return {
+        "ok": True,
+        "check": check.kind,
+        "table": check.table,
+        "violation_count": count,
+        "check_version": dq.check_version(check.kind),
+    }
 
 
 def action_reset_warm_connection(event: dict[str, Any], _con: Any) -> dict[str, Any]:
@@ -207,6 +246,9 @@ def action_reset_warm_connection(event: dict[str, Any], _con: Any) -> dict[str, 
     """
     rt.reset_warm_connection()
     return {"ok": True, "reset": True}
+
+
+_GENERIC_REFUSED_BOUNDARIES = frozenset({"telemetry_append", "registration"})
 
 
 def _require_ops_table(table: Any) -> None:
@@ -223,6 +265,12 @@ def _require_ops_table(table: Any) -> None:
             f"{table!r} is a control-class table (read_boundary=none): not reachable through any "
             "reader verb (docs/contracts/ops_entity_counters.yaml) -- readable only in-transaction "
             "by its owning writer, or via the admin ducklake_maintenance control_health verb"
+        )
+    boundary = rt.table_write_boundary(table) if isinstance(table, str) else None
+    if boundary in _GENERIC_REFUSED_BOUNDARIES:
+        raise rt.DuckLakeRuntimeError(
+            f"{table!r} is not reachable through the generic read verbs (write_boundary={boundary}): "
+            "telemetry and dimension reads arrive as named verbs"
         )
     if not isinstance(table, str) or table not in rt.ops_table_names():
         raise rt.DuckLakeRuntimeError(f"unknown or missing ops table {table!r}: expected one of {list(rt.ops_table_names())}")
@@ -244,7 +292,7 @@ _ACTIONS: dict[str, Callable[[dict[str, Any], Any], dict[str, Any]]] = {
     "read_ops_current": action_read_ops_current,
     "read_ops_history": action_read_ops_history,
     "named_read": action_named_read,
-    "query_ops": action_query_ops,
+    "dq_check": action_dq_check,
     "connect_probe": action_connect_probe,
     "reset_warm_connection": action_reset_warm_connection,
     "describe": action_describe,
@@ -271,9 +319,36 @@ def _response(status: int, payload: dict[str, Any]) -> dict[str, Any]:
     return {"statusCode": status, "headers": {"Content-Type": "application/json"}, "body": json.dumps(payload)}
 
 
-def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
-    """Reader Lambda entrypoint. Dispatches `action`; loud-fail maps to a 5xx (no silent drop)."""
-    payload = _parse_event(event)
+# Headroom under the Lambda runtime's 6,291,556-byte RequestEntityTooLarge cap on the whole Function-URL response.
+MAX_RESPONSE_BYTES = 6_000_000
+
+
+def _guard_response_size(response: dict[str, Any], payload: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    """Refuse an oversized response with a typed 413 (rec-4232) instead of the runtime's opaque 502.
+
+    The cap applies to the whole Function-URL envelope, whose `body` string is JSON-escaped again
+    inside it, so the envelope (not the body) is what is measured.
+    """
+    size = len(json.dumps(response).encode("utf-8"))
+    meta["response_bytes"] = size
+    if size <= MAX_RESPONSE_BYTES:
+        return response
+    action = payload.get("action")
+    return _response(
+        413,
+        {
+            "ok": False,
+            "error_type": "response_too_large",
+            "action": action if isinstance(action, str) and action in _ACTIONS else "unknown",
+            "bytes": size,
+            "cap": MAX_RESPONSE_BYTES,
+            "hint": "use a narrower named verb, or the claim-check export (rec-4237)",
+        },
+    )
+
+
+def _handle(payload: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    """Reader dispatch. Dispatches `action`; loud-fail maps to a 5xx (no silent drop)."""
     action = payload.get("action")
     fn = _ACTIONS.get(action)
     if fn is None:
@@ -282,13 +357,18 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
     try:
         if action in _CONNECTIONLESS_ACTIONS:
             return _response(200, fn(payload, None))
+        if action == "dq_check":
+            dq.validate(payload)  # a refused request opens nothing
         # Warm-reuse acquisition (D2): the connection is kept open for the next invocation (NOT closed
         # in a finally). A dead session (Neon scale-to-zero) surfaces as a connection error from the
         # action; reads are idempotent, so reopen ONCE and retry -- the reopen never leaks a 5xx for
-        # this expected transient. Any non-connection error still propagates (Decision 55).
+        # this expected transient. Any non-connection error reaches handler()'s terminal answer (Decision 55).
         con, conn_meta = _warm_reader_connection()
         payload["_connect_ms"] = conn_meta["connect_ms"]
         payload["_connect_reused"] = conn_meta["reused"]
+        meta.update(
+            connect_ms=conn_meta["connect_ms"], connect_reused=conn_meta["reused"], reopened=bool(conn_meta.get("reopened"))
+        )
         try:
             return _response(200, fn(payload, con))
         except Exception as exc:  # noqa: BLE001 -- narrowed immediately to the dead-connection case
@@ -297,8 +377,80 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
             con, conn_meta = _warm_reader_connection(force_reopen=True)
             payload["_connect_ms"] = conn_meta["connect_ms"]
             payload["_connect_reused"] = conn_meta["reused"]
+            meta.update(connect_ms=conn_meta["connect_ms"], connect_reused=conn_meta["reused"], reopened=True)
             return _response(200, fn(payload, con))
+    except NamedReadInputError as exc:
+        handler_errors.log_named_read_input(
+            exc.__cause__ or exc, function="reader", verb=exc.verb, request_id=meta.get("request_id")
+        )
+        return _response(
+            400,
+            {
+                "ok": False,
+                "error_type": "named_read_input",
+                "verb": exc.verb,
+                "error_class": exc.error_class,
+                "error": handler_errors.redact(str(exc)),
+            },
+        )
+    except dq.DqCheckInputError as exc:
+        return _response(
+            400, {"ok": False, "error_type": "dq_check_input", "check": exc.check, "param": exc.param, "reason": exc.reason}
+        )
     except rt.VersionMismatchError as exc:
         return _response(500, {"ok": False, "error_type": "version_mismatch", "error": str(exc)})
     except rt.DuckLakeRuntimeError as exc:
         return _response(500, {"ok": False, "error_type": "runtime", "error": str(exc)})
+
+
+def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
+    """Entrypoint: dispatch, then log exactly one ducklake_invocation line on every path.
+
+    No exception escapes as the runtime's untyped 502: an unparseable or non-object body answers 400 bad_request, an
+    unmapped exception 500 unmapped and a dead catalog connection 503 catalog_unavailable (class and request id only).
+    """
+    started = time.perf_counter()
+    payload: dict[str, Any] = {}
+    meta: dict[str, Any] = {
+        "connect_ms": None,
+        "connect_reused": None,
+        "reopened": False,
+        "response_bytes": None,
+        "request_id": handler_errors.request_id(context),
+    }
+    status = 500
+    try:
+        try:
+            parsed = _parse_event(event)
+        except (ValueError, RecursionError):
+            parsed = None
+        if not isinstance(parsed, dict):
+            status, body = handler_errors.bad_request("reader", "unknown")
+            return _response(status, body)
+        payload = parsed
+        response = _guard_response_size(_handle(payload, meta), payload, meta)
+        status = response["statusCode"]
+        return response
+    except Exception as exc:
+        action = payload.get("action")
+        status, body = handler_errors.terminal(
+            exc,
+            function="reader",
+            action=action if isinstance(action, str) and action in _ACTIONS else "unknown",
+            request_id=meta["request_id"],
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            reopened=bool(meta["reopened"]),
+        )
+        return _response(status, body)
+    finally:
+        action = payload.get("action")
+        log_invocation(
+            "reader",
+            action if isinstance(action, str) and action in _ACTIONS else "unknown",
+            status,
+            meta["connect_ms"],
+            meta["connect_reused"],
+            meta["reopened"],
+            (time.perf_counter() - started) * 1000.0,
+            response_bytes=meta["response_bytes"],
+        )

@@ -15,10 +15,13 @@ so this module stays importable on origin/main, where the symbol does not exist 
 
 from __future__ import annotations
 
+import hashlib
 import json
 from unittest.mock import patch
 
 import pytest
+
+from tests.fixtures.ops_rec_rows import reader_rec_row
 
 _FIX_SHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
@@ -42,7 +45,7 @@ def test_closes_rec_lacking_context_v2_json(tmp_path) -> None:
     the broad `except Exception` in close_recs_from_trailer caught and turned into exit_code=1."""
     from scripts.ops_portal.ci_rca_lifecycle import close_recs_from_trailer
 
-    existing = {"id": "rec-1", "status": "open"}  # no context_v2_json key at all
+    existing = reader_rec_row(id="rec-1")  # complete rule-clean row, no context_v2_json key at all
     recs_file = tmp_path / "recs.jsonl"
     with (
         patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=existing),
@@ -158,14 +161,14 @@ class TestAcceptanceVerdictRefusal:
     OPEN, print their own marker, and return 0; a holds verdict closes; the STRUCTURAL binding
     (require_acceptance_verdict=True) keeps an absent verdict out of update_rec entirely."""
 
-    # sha256 of "" -- every mocked `existing` row in this class carries no "acceptance" key.
-    _EMPTY_ACCEPTANCE_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"  # pragma: allowlist secret
+    # sha256 of the acceptance every complete mocked `existing` row in this class carries (reader_rec_row).
+    _ACCEPTANCE_SHA256 = hashlib.sha256(reader_rec_row()["acceptance"].encode("utf-8")).hexdigest()
 
     def _holds_record(self, **overrides) -> dict:
         record = {
             "rec_id": "rec-1",
             "sha": _FIX_SHA,
-            "acceptance_sha256": self._EMPTY_ACCEPTANCE_SHA256,
+            "acceptance_sha256": self._ACCEPTANCE_SHA256,
             "verdict": "holds",
         }
         record.update(overrides)
@@ -196,7 +199,7 @@ class TestAcceptanceVerdictRefusal:
         not a mocked stand-in."""
         from scripts.ops_portal.ci_rca_lifecycle import close_recs_from_trailer
 
-        existing = {"id": "rec-1", "status": "open"}
+        existing = reader_rec_row(id="rec-1")
         with (
             patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=existing),
             patch("scripts.ops_data_portal._ducklake_write") as mock_write,
@@ -248,7 +251,7 @@ class TestAcceptanceVerdictRefusal:
         is never consulted for the acceptance verdict or its closing sha."""
         from scripts.ops_portal.ci_rca_lifecycle import close_recs_from_trailer
 
-        existing = {"id": "rec-1", "status": "open"}  # no context_v2_json key at all
+        existing = reader_rec_row(id="rec-1")  # complete rule-clean row, no context_v2_json key at all
         with (
             patch("scripts.ops_data_portal._fetch_rec_from_reader", return_value=existing),
             patch("scripts.ops_data_portal._ducklake_write", return_value={"ok": True}) as mock_write,

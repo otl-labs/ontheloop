@@ -9,25 +9,30 @@ operational verb is reachable. Action logic mirrors the admin handler's former s
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import src.lambdas.ducklake_maintenance_smoke.handler as h
+from src.common import ducklake_telemetry_provision as prov
 from src.common.ducklake_maintenance import DuckLakeMaintenanceError
 from src.common.ducklake_runtime import DuckLakeRuntimeError, VersionMismatchError
+from src.lambdas.ducklake_maintenance_smoke import telemetry_actions as ta
 from tests.fixtures.ducklake_maintenance_handler import FakeCon, _response_body
+from tests.fixtures.terraform_hcl_blocks import find_resource_block
 
 pytestmark = pytest.mark.unit
 
 
 # ---------------------------------------------------------------------------
-# Blast-radius invariant: dispatch is EXACTLY the 4 smoke actions
+# Blast-radius invariant: dispatch is EXACTLY the 5 smoke actions
 # ---------------------------------------------------------------------------
 
 
-def test_dispatch_table_is_exactly_the_four_smoke_actions():
-    assert set(h._ACTIONS) == {"merge", "gc", "hot_merge", "breaker_probe"}
+def test_dispatch_table_is_exactly_the_five_smoke_actions():
+    assert set(h._ACTIONS) == {"merge", "gc", "hot_merge", "breaker_probe", "create_telemetry_tables"}
 
 
 def test_dispatch_has_no_production_destructive_verb():
@@ -40,7 +45,7 @@ def test_handler_destructive_payload_returns_400_unknown_action():
     assert r["statusCode"] == 400
     body = _response_body(r)
     assert "unknown action" in body["error"]
-    assert set(body["actions"]) == {"merge", "gc", "hot_merge", "breaker_probe"}
+    assert set(body["actions"]) == {"merge", "gc", "hot_merge", "breaker_probe", "create_telemetry_tables"}
 
 
 def test_open_connection_takes_no_event_argument():
@@ -61,13 +66,31 @@ def test_open_connection_builds_connection_from_fetched_dsn():
         with patch.object(h.rt, "open_connection", return_value=fake_con) as mock_open_conn:
             result = h._open_connection()
     assert result is fake_con
-    mock_fetch.assert_called_once_with()
+    mock_fetch.assert_called_once_with(h.DSN_PARAMETER_NAME)
     mock_open_conn.assert_called_once_with(
         dsn={"host": "x"},
         data_path=h.DATA_PATH,
         meta_schema=h.META_SCHEMA,
         extension_directory=h.EXTENSION_DIRECTORY,
     )
+
+
+def test_open_connection_reads_the_secret_named_by_env(monkeypatch):
+    import importlib
+
+    monkeypatch.delenv("DUCKLAKE_DSN_PARAMETER", raising=False)
+    assert importlib.reload(h).DSN_PARAMETER_NAME == h.rt.DSN_PARAMETER_NAME
+    monkeypatch.setenv("DUCKLAKE_DSN_PARAMETER", "/secret/agent-platform-ducklake-smoke-maintainer-dsn")
+    try:
+        reloaded = importlib.reload(h)
+        assert reloaded.DSN_PARAMETER_NAME == "/secret/agent-platform-ducklake-smoke-maintainer-dsn"
+        with patch.object(reloaded.rt, "fetch_dsn", return_value={"host": "x"}) as mock_fetch:
+            with patch.object(reloaded.rt, "open_connection", return_value=object()):
+                reloaded._open_connection()
+        mock_fetch.assert_called_once_with("/secret/agent-platform-ducklake-smoke-maintainer-dsn")
+    finally:
+        monkeypatch.delenv("DUCKLAKE_DSN_PARAMETER", raising=False)
+        importlib.reload(h)
 
 
 def test_handler_ignores_data_path_and_meta_schema_in_event():
@@ -325,6 +348,59 @@ def test_handler_breaker_probe_emits_metric_exactly_once():
 
 
 # ---------------------------------------------------------------------------
+# Smoke metrics stay off the production breaker alarm
+# ---------------------------------------------------------------------------
+
+_TF_DIR = Path(__file__).resolve().parents[1] / "terraform" / "personal"
+_DIMENSIONS_RE = re.compile(r"dimensions\s*=\s*\{([^}]*)\}")
+_DIMENSION_PAIR_RE = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
+
+
+def _alarm_dimensions(tf_file: str, resource_name: str) -> dict[str, str] | None:
+    block = find_resource_block((_TF_DIR / tf_file).read_text(encoding="utf-8"), "aws_cloudwatch_metric_alarm", resource_name)
+    match = _DIMENSIONS_RE.search(block)
+    return dict(_DIMENSION_PAIR_RE.findall(match.group(1))) if match else None
+
+
+def test_emit_maintenance_metric_carries_smoke_dimension():
+    with patch.object(h.rt, "emit_metric") as mock_emit:
+        h._emit_maintenance_metric("MaintenanceBreakerTrip", 1.0)
+    mock_emit.assert_called_once_with(
+        "MaintenanceBreakerTrip",
+        1.0,
+        namespace=h.maint.MAINTENANCE_CLOUDWATCH_NAMESPACE,
+        profile=None,
+        dimensions={"Catalog": "smoke"},
+    )
+
+
+def test_smoke_alarm_selects_the_handler_dimension():
+    assert _alarm_dimensions("ducklake_maintenance_smoke.tf", "ducklake_maintenance_smoke_breaker") == h.METRIC_DIMENSIONS
+
+
+def test_production_breaker_alarm_declares_no_dimensions():
+    """CloudWatch matches an alarm's dimension set exactly: with none declared, the production alarm
+    sees only the admin function's undimensioned datum, never the smoke Catalog=smoke one that the
+    per-deploy breaker_probe gate trips on purpose."""
+    assert _alarm_dimensions("ducklake_maintenance.tf", "ducklake_maintenance_breaker") is None
+
+
+def test_smoke_breaker_trip_reason_is_logged(capsys):
+    with patch.object(h, "_open_connection", return_value=MagicMock()):
+        with patch.object(h, "_emit_maintenance_metric"):
+            h.handler({"action": "breaker_probe"})
+    out = capsys.readouterr().out
+    assert "MAINTENANCE_SMOKE_FAILURE status=500" in out
+    assert "G1 reachability" in out
+
+
+def test_smoke_response_logs_only_server_errors(capsys):
+    h._response(200, {"ok": True})
+    h._response(400, {"ok": False})
+    assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
 # action_hot_merge
 # ---------------------------------------------------------------------------
 
@@ -440,3 +516,149 @@ def test_handler_runtime_error_maps_to_500():
     assert r["statusCode"] == 500
     body = _response_body(r)
     assert body["error_type"] == "runtime"
+
+
+# ---------------------------------------------------------------------------
+# create_telemetry_tables (Decision 216): owner-login, create-only, smoke-pinned, typed failures
+# ---------------------------------------------------------------------------
+
+CLEAN = prov.OwnershipReport(0, True, False, False, True, "ducklake_smoke_owner")
+NINE = tuple(f"t{i}" for i in range(9))
+
+
+class _Rec(FakeCon):
+    def __init__(self):
+        super().__init__()
+        self.sql: list[str] = []
+
+    def execute(self, sql, params=None):
+        self.sql.append(sql)
+        return super().execute(sql, params)
+
+
+def _patched(reports=(CLEAN, CLEAN), create=None):
+    report = MagicMock(side_effect=list(reports))
+    made = create or MagicMock(return_value=prov.CreateResult(NINE, NINE[:2]))
+    return (
+        patch.object(ta.prov, "ownership_report", report),
+        patch.object(ta.prov, "create_telemetry_tables", made),
+        report,
+        made,
+    )
+
+
+def _run(event=None, con=None, **kw):
+    p1, p2, report, made = _patched(**kw)
+    con = con or _Rec()
+    with p1, p2:
+        return ta.action_create_telemetry_tables(event or {"action": "create_telemetry_tables"}, con), con, report, made
+
+
+def test_create_telemetry_event_keys_are_never_read():
+    decoy = {"action": "create_telemetry_tables", "meta_schema": "ducklake_ops", "data_path": "s3://x/", "table": "ops_x"}
+    out, con, report, made = _run(decoy)
+    assert out["ok"] is True
+    assert [c.kwargs["meta_schema"] for c in report.call_args_list] == [h.rt.SMOKE_META_SCHEMA] * 2
+    assert "ducklake_ops" not in str(report.call_args_list) + str(made.call_args_list) + "".join(con.sql)
+
+
+def test_create_telemetry_non_smoke_meta_schema_refuses_before_any_statement(monkeypatch):
+    monkeypatch.setenv("DUCKLAKE_META_SCHEMA", "ducklake_ops")
+    p1, p2, report, made = _patched()
+    con = _Rec()
+    with p1, p2, pytest.raises(DuckLakeRuntimeError, match="pinned to the smoke metadata schema"):
+        ta.action_create_telemetry_tables({}, con)
+    assert con.sql == [] and not report.called and not made.called
+
+
+def test_create_telemetry_owner_mismatch_refuses_before_any_ddl():
+    for dirty in (
+        prov.OwnershipReport(1, True, False, False, True, "ducklake_smoke_owner"),
+        prov.OwnershipReport(0, False, False, False, False, "ducklake_ops_other"),
+        prov.OwnershipReport(0, True, True, False, True, "ducklake_smoke_owner"),
+        prov.OwnershipReport(0, True, False, True, True, "ducklake_smoke_owner"),
+    ):
+        p1, p2, _report, made = _patched(reports=(dirty,))
+        con = _Rec()
+        with p1, p2, pytest.raises(DuckLakeRuntimeError, match=r"single-owner check failed \(pre-DDL\)"):
+            ta.action_create_telemetry_tables({}, con)
+        assert not made.called and con.sql == []
+
+
+def test_create_telemetry_passes_when_the_owner_is_held_through_membership():
+    member = prov.OwnershipReport(0, False, False, False, True, "ducklake_smoke_owner")
+    p1, p2, _report, made = _patched(reports=(member, member))
+    with p1, p2:
+        out = ta.action_create_telemetry_tables({}, _Rec())
+    assert out["ok"] is True and made.called
+    assert out["ownership"]["schema_owner_held"] is True and out["ownership"]["schema_owner_is_current_user"] is False
+    not_held = prov.OwnershipReport(0, True, False, False, False, "ducklake_smoke_owner")
+    p1, p2, _report, made = _patched(reports=(not_held,))
+    with p1, p2, pytest.raises(DuckLakeRuntimeError, match=r"single-owner check failed \(pre-DDL\)"):
+        ta.action_create_telemetry_tables({}, _Rec())
+    assert not made.called
+
+
+def test_create_telemetry_single_owner_violation_raises_with_report_fields_only():
+    p1, p2, _report, made = _patched(reports=(CLEAN, prov.OwnershipReport(2, True, False, True, True, "ducklake_smoke_owner")))
+    with p1, p2, pytest.raises(DuckLakeRuntimeError) as info:
+        ta.action_create_telemetry_tables({}, _Rec())
+    text = str(info.value)
+    assert "post-DDL" in text and "'foreign_owned': 2" in text and "'scoped_create_on_public': True" in text
+    assert made.called and "Traceback" not in text
+
+
+@pytest.mark.parametrize("where", ["create", "ownership"])
+def test_create_telemetry_unmapped_txn_error_names_the_class_only(where, capsys):
+    sentinel = RuntimeError("connection to sentinel-host.example failed")
+    if where == "create":
+        p1, p2, _r, _m = _patched(create=MagicMock(side_effect=sentinel))
+    else:
+        p1, p2, _r, _m = _patched(reports=(sentinel,))
+    with p1, p2, pytest.raises(DuckLakeRuntimeError) as info:
+        ta.action_create_telemetry_tables({}, _Rec())
+    assert "RuntimeError" in str(info.value) and "sentinel-host" not in str(info.value)
+    assert "sentinel-host" in capsys.readouterr().err
+
+
+def test_create_telemetry_ownership_read_failure_names_the_class_only(capsys):
+    boom = ValueError("password for sentinel-host.example rejected")
+    p1, p2, _report, made = _patched(reports=(boom,))
+    with p1, p2, pytest.raises(DuckLakeRuntimeError) as info:
+        ta.action_create_telemetry_tables({}, _Rec())
+    assert str(info.value) == "create_telemetry_tables failed: ValueError" and not made.called
+    assert "sentinel-host" in capsys.readouterr().err
+
+
+def test_create_telemetry_response_shape():
+    out, con, _report, _made = _run()
+    assert set(out) == {"ok", "tables", "created", "added", "ownership", "elapsed_ms"}
+    assert out["added"] == []
+    assert out["tables"] == sorted(NINE) and out["created"] == sorted(NINE[:2])
+    assert out["ownership"] == {
+        "foreign_owned": 0,
+        "schema_owner_is_current_user": True,
+        "schema_owner_held": True,
+        "schema_owner": "ducklake_smoke_owner",
+        "scoped_create_on_schema": False,
+        "scoped_create_on_public": False,
+    }
+    assert con.sql[0] == "BEGIN TRANSACTION" and con.sql[-1] == "COMMIT"
+
+
+def test_create_telemetry_response_lists_added_columns():
+    added = ("telemetry_sessions.checkout_sha", "telemetry_observations.usage_final")
+    made = MagicMock(return_value=prov.CreateResult(NINE, (), added))
+    out, _con, _report, _made = _run(create=made)
+    assert out["added"] == sorted(added) and out["created"] == []
+
+
+def test_create_telemetry_handler_returns_500_runtime_never_raises():
+    p1, p2, _report, _made = _patched(reports=(RuntimeError("sentinel-host.example"),))
+    with p1, p2, patch.object(h, "_open_connection", return_value=_Rec()):
+        r = h.handler({"action": "create_telemetry_tables"})
+    body = _response_body(r)
+    assert r["statusCode"] == 500 and body["error_type"] == "runtime" and "sentinel-host" not in r["body"]
+    p1, p2, _report, _made = _patched()
+    with p1, p2, patch.object(h, "_open_connection", return_value=_Rec()):
+        assert h.handler({"action": "create_telemetry_tables"})["statusCode"] == 200

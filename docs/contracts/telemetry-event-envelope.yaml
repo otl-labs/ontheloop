@@ -44,9 +44,7 @@ fields:
       never silently dropped) -- see governance_notes' GENERATIONS AND READ-SIDE DEDUPE rule for
       how a reader then selects the authoritative row across generations and producers.
     populated_by: the write boundary, from external_ref (rec-4024's append_events verb).
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
     amendment_log:
       - date: "2026-09-28"
         semantic_break: true
@@ -73,9 +71,7 @@ fields:
       by pairing its open and close rows (see data-modeling-standard.yaml's derived-state rule) --
       never stored on either row.
     populated_by: the emitting producer, per its own event grammar.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
   event_timestamp:
     type: datetime
     iceberg_type: timestamptz
@@ -84,21 +80,33 @@ fields:
       The event-time column: the timestamp of the ORIGINATING record (source-derived), never the
       write time. UTC, tz-aware, parsed and truncated (not rounded) to millisecond precision.
     semantics: >-
-      The writer rejects an implausible event_timestamp (later than created_timestamp plus a
-      configured skew bound) -- the rule is declared here; the write-time validator itself is
-      rec-4024's. Distinct from created_timestamp (write time) and from session_started_at (the
-      partition basis, the ROOT session's own event_timestamp).
+      Write-enforced (Decision 210 cl.1): the writer rejects an event_timestamp earlier than the
+      row's own session_started_at (in-row ordering; a producer whose event_timestamp and
+      session_started_at come from different clocks, e.g. a transcript-less producer, declares a
+      skew allowance when it lands, never an exact comparison) and one later than created_timestamp
+      by more than 300 s (the skew bound this field always declared). Distinct from created_timestamp
+      (write time) and from session_started_at (the partition basis, the ROOT session's own pin).
     populated_by: the emitting producer, decoded from its own source record.
     dq_intent:
-      not_null:
-        enforced: false
+      not_before: session_started_at
+      max_after_write_seconds: 300
+    amendment_log:
+      - date: "2026-10-04"
+        semantic_break: true
+        change_class: governance_note_add
+        summary: >-
+          PLAN-telemetry-write-conformance (slice 2a-1, Decision 210): the skew bound declared here gained its
+          value (300 s) and a write-time enforcer, and the in-row ordering rule not_before session_started_at is
+          declared with its cross-clock-domain allowance.
+        migration_story: No live populator exists; the kernel enforces both rules before any SQL from this slice.
   session_started_at:
     type: datetime
     iceberg_type: timestamptz
     nullable: true
     description: >-
-      The ROOT session's start time: source-derived from the FIRST timestamped record in the root
-      transcript, UTC, truncated to ms -- never a warehouse lookup, never re-derived downstream.
+      The ROOT session's start time: source-derived from the EARLIEST parseable record timestamp in the
+      root transcript at pin time (the first capture pass), UTC, truncated to ms -- never a warehouse
+      lookup, never re-derived downstream. For a forked or copied Claude Code session, only the records it wrote itself count (see external_ref).
       Every row of a root session AND all its sub-agent sessions carries this SAME value, so a
       whole trace tree lands in one calendar-day partition regardless of how deep the sub-agent
       nesting goes or how much wall-clock time a long-running root session spans.
@@ -123,14 +131,19 @@ fields:
       clause 4). Separately, one obligation spans EVERY hop, producer-to-writer included:
       session_started_at always carries its full millisecond value (e.g. an RFC 3339 string with a
       3-digit fraction at the writer edge) -- the pinned RFC 3339 profile accepts a fraction-less
-      value and would silently pad it to .000, losing precision the identity hash depends on; any
-      writer-side rejection of a fraction-less value is rec-4024's to build (the event_timestamp
-      "rule declared here, validator is rec-4024's" pattern).
-    populated_by: the emitting producer, pinned once per session at the root transcript's first record.
-    dq_intent:
-      not_null:
-        enforced: false
+      value and would silently pad it to .000, losing precision the identity hash depends on;
+      timestamps.parse_wire_timestamp rejects every width but three digits, and applying it at the
+      writer edge is rec-4024's to build. The pin is the EARLIEST timestamp, never the first record
+      in file order: SessionStart hook records are written after an earlier queue-operation record yet
+      carry earlier timestamps (probe: up to 9.87 s earlier). It is pinned once per tree; a record
+      appended later with a timestamp earlier than the persisted pin RE-PINS only while the cursor
+      has emitted no row under that pin (its consumed prefix builds zero rows, so no row carries the
+      old value); once any row is emitted under the pin, such a record is a producer HALT, never
+      re-pinned and never emitted. For a forked or copied Claude Code session, records the fork did not write (forkedFrom, or before its own SessionStart:fork hook group) take no part in the pin: it is the earliest timestamp among the records the session wrote itself.
+    populated_by: the emitting producer, pinned once per session at the earliest root-transcript timestamp of the session's own records.
+    dq_intent: {}
     amendment_log:
+      - {date: "2026-10-14", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-parser-v3 (slice 3b plan P-B): rec-4149: for a forked or copied Claude Code session only the records it wrote itself count toward the pin."}
       - date: "2026-09-26"
         semantic_break: true
         change_class: governance_note_add
@@ -146,6 +159,16 @@ fields:
         migration_story: >-
           No live populator exists yet (population is future-state, rec-4024), so no runtime
           migration is required.
+      - date: "2026-10-04"
+        semantic_break: true
+        change_class: governance_note_add
+        summary: >-
+          PLAN-telemetry-write-conformance (slice 2a-1): the pin is the EARLIEST parseable record timestamp, not the
+          first record in file order, with the re-pin-while-nothing-emitted carve-out and the producer halt after
+          a row is emitted.
+        migration_story: >-
+          Re-keys any session whose earliest timestamp is not its first record in file order; safe only because no
+          v1 row and no persisted cursor exists anywhere.
       - date: "2026-09-25"
         semantic_break: false
         change_class: prose_improvement
@@ -166,9 +189,7 @@ fields:
       originating events) still sort deterministically on source_ordinal.
     semantics: A read-side ordering aid only; never part of any identity hash.
     populated_by: the emitting producer, from its own source record's position.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
   external_ref:
     type: str
     iceberg_type: string
@@ -183,12 +204,11 @@ fields:
       For a model_call row specifically, external_ref is '<provider_response_id>/model_call' for
       EVERY producer that observes that response id, and is owned by the LAST source record
       carrying it (final usage numbers win) -- see entity_ref below for how model_call rows still
-      de-duplicate to one row per API response despite each producer's event_id differing.
+      de-duplicate to one row per API response despite each producer's event_id differing. A forked or copied Claude Code session's copied records keep their uuids and are the parent session's events, never the fork's: the claude_code producer (parser version 3) emits a fork's rows only for the records it wrote, recognising copies by forkedFrom or by their position before the fork's own SessionStart:fork hook group, so no ref is re-scoped (R10 untouched). If neither signal is present, the fork's first pass collides with its source in the same partition and halts loudly (Decision 207); a pass that ran before the fork's own SessionStart:fork record existed makes the next pass halt on its moved session pin.
     populated_by: the emitting producer.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
     amendment_log:
+      - {date: "2026-10-14", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-parser-v3 (slice 3b plan P-B): rec-4149: a fork's copied records are the parent's events; the claude_code producer emits a fork's rows only for the records it wrote."}
       - date: "2026-09-28"
         semantic_break: true
         change_class: governance_note_add
@@ -213,9 +233,7 @@ fields:
       project + entity_ref arrive at the identical ULID with no coordination -- this is what lets a
       child row's FK equal its parent's own key without the parent propagating anything.
     populated_by: the emitting producer.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
   producer:
     type: str
     iceberg_type: string
@@ -230,9 +248,7 @@ fields:
       comparable only between rows sharing producer -- versions from different producers are
       incomparable and never sort against each other.
     populated_by: the emitting producer, self-identifying.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
     amendment_log:
       - date: "2026-09-28"
         semantic_break: true
@@ -248,9 +264,7 @@ fields:
     description: Version string of the emitting producer (distinct from parser_version below, which is integer and dedupe-authoritative).
     semantics: Provenance only; never consulted by the read-side dedupe rule.
     populated_by: the emitting producer.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
   parser_version:
     type: int
     iceberg_type: bigint
@@ -260,7 +274,10 @@ fields:
       all four tables (R1). It increments iff the producer's normalised output (event_ids, entity
       keys, every stored column except created_timestamp and producer_version) for any golden
       input differs from the previous version; never for identical output or a build change alone;
-      never decrements, never reused -- a revert ships as a NEW higher number. Part of the
+      never decrements, never reused -- a revert ships as a NEW higher number. A change to a
+      registry-recorded producer input constant (full_output_cap_bytes in
+      config/telemetry/parser_versions.yaml) is an output change and bumps even when the golden
+      digest repeats, because it changes the output for inputs the goldens do not hold. Part of the
       telemetry grain key (producer, event_id, parser_version), enforced at write (Decision 207).
       Comparable only between rows sharing producer (R2). An identity-spec change, or a change to
       ANY session entity_ref grammar (root or sub-agent), bumps EVERY producer and requires a
@@ -271,14 +288,13 @@ fields:
       write data rows first and ONE telemetry_sessions batch of every tree session's rows LAST
       (the generation commit marker), bind its cursor to parser_version and reset it on mismatch,
       never emit v for a session after a v+1 marker for it, and reuse the pinned project_ref and
-      session_started_at persisted with its cursor across a reset (never re-reading config), so a
+      session_started_at and the recorded finalization cuts persisted with its cursor across a reset (never re-reading config), so a
       re-emission cannot re-key the tree. A non-replayable producer (R8) emits no open marker,
       never re-emits, and a bump retires nothing.
     populated_by: the emitting producer, a hand-maintained per-producer constant (never a build identity).
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
     amendment_log:
+      - {date: "2026-10-14", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-parser-v3 (slice 3b plan P-B): the cursor's recorded finalization cuts persist across a reset like the pins."}
       - date: "2026-09-28"
         semantic_break: true
         change_class: governance_note_add
@@ -288,6 +304,13 @@ fields:
           policy, the per-producer comparability scope, the never-reused/revert-is-new-version
           rule, the identity-spec/session-grammar Decision-R10 clause, and the R7
           replayable-producer write-order and cursor-reuse obligations.
+      - date: "2026-10-04"
+        semantic_break: true
+        change_class: governance_note_add
+        summary: >-
+          PLAN-telemetry-write-conformance (slice 2a-1): R1 gains a clause -- a change to a registry-recorded producer
+          input constant is an output change and bumps parser_version even when the golden digest repeats.
+        migration_story: No live populator exists; the registry check accepts such a bump from this slice.
   created_timestamp:
     type: datetime
     iceberg_type: timestamptz
@@ -301,9 +324,7 @@ fields:
       Replaces the retired per-table ingested_at column (same concept, promoted to the shared
       envelope so every telemetry table carries one write-time field under one name).
     populated_by: the write boundary, at append time.
-    dq_intent:
-      not_null:
-        enforced: false
+    dq_intent: {}
     amendment_log:
       - date: "2026-09-28"
         semantic_break: true
@@ -348,14 +369,19 @@ governance_notes: >-
   R6: a telemetry_agents row belongs to its own (child) session_id's generation, committed by the
   child's own open-row marker, never the spawning session's.
   R7 producer obligations: a producer never emits two different rows under one grain key (a
-  model_call is emitted only once its source record carries final usage); every emitted column is
+  model_call is emitted once its turn is closed (a later boundary, its stream's completion evidence, a resume boundary or a recorded finalization cut, which treats the tree as final); it carries its owner record's usage and declares in usage_final whether that usage is final and in usage_source whether a sync spawn result supplied it; a non-final row stays non-final until a parser_version bump re-parses it); every emitted column is
   a pure function of the source records plus the inputs pinned with the cursor, and incremental
-  emission equals a full re-parse for every row already emitted; a replayable producer on a bump
+  emission equals the emission set recomputed from the tree and its recorded finalization cuts for every row already emitted (with one carve-out: a record
+  appended later with a timestamp earlier than the persisted session_started_at pin re-pins only while
+  the cursor has emitted no row under that pin, and is otherwise a producer halt); a replayable producer on a bump
   re-parses the whole root tree from the start, writes data rows first and ONE telemetry_sessions
   batch of every tree session's rows LAST, binds its cursor to parser_version and resets it on
   mismatch, never emits v for a session after a v+1 marker for it, and REUSES the pinned
-  project_ref and session_started_at persisted with its cursor across a reset (never re-reading
-  config), so a re-emission cannot re-key the tree.
+  project_ref and session_started_at and the recorded finalization cuts persisted with its cursor across a reset (never re-reading
+  config), so a re-emission cannot re-key the tree. A replayable producer's emission set is a function of the tree and its recorded finalization cuts, and includes one session close per root resume boundary for the segment before it (SC-1), derived from the tree, so a resume records no finalization cut; a root background run is complete at a later resume boundary on the inference that background work does not survive a resume; every emitted column, the provenance columns included, is a function of the source records (the checkout reaches the tree only through the pin hook's recorded line); the cuts survive a parser_version reset like the pins, so a bump re-emits every finalization's close row. Two declared exceptions arise when a stream keeps writing after a finalization cut (a background sub-agent still running at its root's finalization, or a root session continued without a recorded SessionStart:resume boundary), counted in the producer's per-pass diagnostics (CaptureResult.diagnostics; not stored durably): a row first emitted at the cut whose content later differs (e.g. a model_call with partial usage) is kept as first emitted (cut_content_divergence); and a turn, and each of its tool_calls with no result at the cut, gains a second close under its later anchor; the cut-time tool_call close is synthetic (metadata.synthetic true, output_capture no_result, outcome interrupted) and is superseded, never retracted (reanchored_close); and a root background run completed at a resume boundary whose child keeps writing (the inference was wrong) has its rows kept as first emitted (notice_after_boundary and prior_content_divergence).
+  PARSER_VERSION 5 (PLAN-telemetry-stop-turn-close): the emission set of a non-final pass reads an open root turn only up to its frontier (its last usable Stop witness or API-error record, else its first prompt record); a turn closes at each usable closing event (a witness is the capture shim's own hook_success attachment at a Stop, usable when the turn's last response has ended and no tool is pending; an API-error record closes its own turn) and, when none lies at or after its last assistant record, at its boundary; every turn close is keyed on the record that ends its window (its witness, its API-error record, or the turn's last uuid and timestamp record before the boundary or eof), so a key fixes its content and a blocked-and-continued turn carries one close per Stop by construction (counted multi_close_turns, never a declared exception).
+  The declared reanchored_close now counts, over the prior and current emitted sets, the closes that exist because of a recorded cut, a record appended to a child file after its completion evidence (it re-keys that child turn's close) and a synthetic tool close at an API-error frontier later superseded by a real result; finalization cuts arise only at final passes (SessionEnd on /clear, interactive /resume and local exits).
+  PARSER_VERSION 7 (PLAN-telemetry-late-hook-records, rec-4633): claude_code reads late and twinned SessionStart hook records by four rules. HG-1: hook records of one stream matching on toolUseID, hookEvent, hookName, command and durationMs are one hook run, and only the first in file order is a record; the rest are twins (no row, no boundary, no turn). HG-2: a SessionStart startup or clear hook record written after an own prompt record is late. HG-3: a SessionStart:resume group whose first record's hook started (its timestamp minus durationMs) before the latest prompt or assistant record already written is late. HG-4: every SessionStart startup, clear and resume hook record attaches to no turn; a late resume group closes no turn and takes the first prompt of the turn it was written into as its effective boundary, which its SC-1 close, the next segment's start and the background-completion boundary all use. Every verdict is a function of the record and the records before it in file order, so every prefix agrees (R7).
   R8: non-replayable producers emit no open marker, never re-emit, and a bump retires nothing.
   DQ intents (owner rec-4063): more than one distinct row per grain key (conflict); pending
   generations older than 2h; null producer.
@@ -365,12 +391,28 @@ governance_notes: >-
   it does not amend Decision 81: state/friction/cost are derived at read (data-modeling-standard.yaml's
   derived-state rule), but every derivation is bounded to a session's single calendar-day
   partition, so it is never the unprunable full scan clause 8 exists to avoid.
+  TIMESTAMP PRECISION (Decision 96 cl.4): every timestamp column carries its full millisecond value at
+  the writer edge (exactly three fraction digits in the wire form), extending session_started_at's
+  every-hop obligation to all of them, because event_id's 48-bit prefix depends on event_timestamp
+  the same way the entity keys depend on session_started_at.
   CONFORMANCE VECTORS: tests/telemetry/fixtures/identity_vectors.yaml is the committed golden-vector
   file for this identity spec. Its POSITIVE vectors are the normative inputs -> exact-ids pins of
   the identity spec above; its NEGATIVE vectors pin the slice-1 kernel's own input policy (ref
   length/control-character rules, the closed domain-tag registry), which is implementation policy
   of src/telemetry/identity.py, not part of the ratified spec itself.
 amendment_log:
+  - {date: "2026-10-26", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-late-hook-records (parser_version 7, rec-4633): governance_notes gain the PARSER_VERSION 7 line (rules HG-1..HG-4) before R8: twin hook records collapse to the first in file order, SessionStart startup, clear and resume hook records attach to no turn, and a late resume group closes no turn and takes the first prompt of the turn it landed in as its effective boundary; every verdict reads only the record and the records before it (R7)."}
+  - {date: "2026-10-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-stop-turn-close (parser_version 5): governance_notes R7 qualified in place: an open root turn is read only up to its frontier, a turn closes at each usable Stop witness or API-error record and at its boundary when none ends its last response, every turn close is keyed on the record that ends its window, and reanchored_close counts over the prior and current emitted sets.", migration_story: "Parser v5 re-parses every tree from the start; v4 rows are superseded by version, never rewritten."}
+  - {date: "2026-10-17", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-capture-producer-fixes (parser_version 4): governance_notes R7 qualified in place: a model_call is emitted once its turn is closed and declares usage_final and usage_source; the emission set includes one close per root resume boundary (SC-1) and a root background run completes at a later resume boundary; provenance columns are source-record functions; a new declared exception for a child that keeps writing after its boundary.", migration_story: "Parser v4 re-parses every tree from the start; v3 rows are superseded by version, never rewritten."}
+  - {date: "2026-10-14", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-parser-v3 (slice 3b plan P-B): governance_notes R7 qualified in place (final-usage and full-re-parse clauses) and extended with the finalization-cut emission-set rule and its two declared exceptions."}
+  - date: "2026-10-04"
+    semantic_break: true
+    change_class: governance_note_add
+    summary: >-
+      PLAN-telemetry-write-conformance (slice 2a-1): governance_notes R7 gains the re-pin carve-out and a
+      TIMESTAMP PRECISION rule (three fraction digits on every timestamp column). Field-level changes
+      (the earliest-timestamp pin, event_timestamp's write-enforced rules, the R1 input-constant clause) are
+      recorded on their own fields' amendment_log entries. contract_version stays 1.
   - date: "2026-09-28"
     semantic_break: true
     change_class: governance_note_add
@@ -398,4 +440,15 @@ amendment_log:
       sentence reworded from "day(session_started_at) partition" to "calendar-day partition";
       accompanies the field-level amendment_log entry on session_started_at (CD.25 category-6
       gate). Decision 199 always meant a calendar day; no table exists yet.
+  - date: "2026-10-15"
+    semantic_break: false
+    change_class: prose_improvement
+    summary: >-
+      PLAN-rule-declarations-and-writer-conformance (rec-4158, Decision 210): the dq_intent `enforced` key is retired
+      from every rule leg. not_null is declared by presence (`true`, or `{exclude_before: D}`); an optional column or a
+      loosest-baseline field carries no not_null leg; the other legs lose the key. A declared rule is an enforced rule.
+    migration_story: >-
+      Declarations re-spelled only. No rule is added, removed or re-dated: the declared rule set, read through
+      scripts.contract_rules, is identical before and after, and the generated field_semantics.yaml projection of
+      this contract is unchanged.
 previous_versions: []

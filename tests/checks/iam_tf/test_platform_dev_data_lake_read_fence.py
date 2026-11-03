@@ -1,5 +1,5 @@
 """Standing guard for PLAN-datalake-read-visibility's version-level read grant + DEP-13 fence in
-terraform/personal/platform_dev_policies.tf.
+terraform/bootstrap/platform_dev_policies.tf (PLAN-platform-iam-bootstrap-adopt, the durable owner).
 
 Asserts grant and Deny SHAPES, not merely verb-string presence -- a text `grep` cannot see that
 s3:GetObjectVersion is OBJECT-level (Resource must be an object-prefix ARN) while
@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_POLICY_FILE = _REPO_ROOT / "terraform" / "personal" / "platform_dev_policies.tf"
+_POLICY_FILE = _REPO_ROOT / "terraform" / "bootstrap" / "platform_dev_policies.tf"
 
 _CONFIG_GRANT_SID = "DataLakeBucketConfigRead"
 _LIST_GRANT_SID = "DataLakeVersionListRead"
@@ -32,15 +32,15 @@ _EXPECTED_LIST_CONDITION_PREFIXES = frozenset(
 )
 _EXPECTED_OBJECT_GRANT_RESOURCES = frozenset(
     {
-        "${aws_s3_bucket.data_lake.arn}/${local.ducklake_prod_data_prefix}/*",
-        "${aws_s3_bucket.data_lake.arn}/${local.ducklake_smoke_data_prefix}/*",
+        "${local.data_lake_bucket_arn}/${local.ducklake_prod_data_prefix}/*",
+        "${local.data_lake_bucket_arn}/${local.ducklake_smoke_data_prefix}/*",
     }
 )
 _EXPECTED_FENCED_OBJECT_RESOURCES = frozenset(
     {
-        "${aws_s3_bucket.data_lake.arn}/convergence/personal/*",
-        "${aws_s3_bucket.data_lake.arn}/tfplan/personal/*",
-        "${aws_s3_bucket.data_lake.arn}/tfstate/personal/*",
+        "${local.data_lake_bucket_arn}/convergence/personal/*",
+        "${local.data_lake_bucket_arn}/tfplan/personal/*",
+        "${local.data_lake_bucket_arn}/tfstate/personal/*",
     }
 )
 _EXPECTED_LIST_DENY_CONDITION_PREFIXES = frozenset(
@@ -86,7 +86,7 @@ def _bracket_list(block: str, field: str) -> list[str]:
 
 def _is_bare_bucket_arn(block: str, field: str) -> bool:
     body = _bracket_body(block, field)
-    return body is not None and body.strip() == "aws_s3_bucket.data_lake.arn"
+    return body is not None and body.strip() == "local.data_lake_bucket_arn"
 
 
 def _effect(block: str) -> str | None:
@@ -231,13 +231,13 @@ _GOOD_FENCE_TEXT = """
         Sid      = "DataLakeBucketConfigRead"
         Effect   = "Allow"
         Action   = ["s3:GetLifecycleConfiguration", "s3:GetBucketVersioning"]
-        Resource = [aws_s3_bucket.data_lake.arn]
+        Resource = [local.data_lake_bucket_arn]
       },
       {
         Sid      = "DataLakeVersionListRead"
         Effect   = "Allow"
         Action   = ["s3:ListBucketVersions"]
-        Resource = [aws_s3_bucket.data_lake.arn]
+        Resource = [local.data_lake_bucket_arn]
         Condition = {
           StringLike = {
             "s3:prefix" = [
@@ -252,8 +252,8 @@ _GOOD_FENCE_TEXT = """
         Effect = "Allow"
         Action = ["s3:GetObjectVersion"]
         Resource = [
-          "${aws_s3_bucket.data_lake.arn}/${local.ducklake_prod_data_prefix}/*",
-          "${aws_s3_bucket.data_lake.arn}/${local.ducklake_smoke_data_prefix}/*",
+          "${local.data_lake_bucket_arn}/${local.ducklake_prod_data_prefix}/*",
+          "${local.data_lake_bucket_arn}/${local.ducklake_smoke_data_prefix}/*",
         ]
       },
       {
@@ -266,16 +266,16 @@ _GOOD_FENCE_TEXT = """
           "s3:GetObjectVersionAttributes",
         ]
         Resource = [
-          "${aws_s3_bucket.data_lake.arn}/convergence/personal/*",
-          "${aws_s3_bucket.data_lake.arn}/tfplan/personal/*",
-          "${aws_s3_bucket.data_lake.arn}/tfstate/personal/*",
+          "${local.data_lake_bucket_arn}/convergence/personal/*",
+          "${local.data_lake_bucket_arn}/tfplan/personal/*",
+          "${local.data_lake_bucket_arn}/tfstate/personal/*",
         ]
       },
       {
         Sid      = "DenyStateAndConvergenceVersionList"
         Effect   = "Deny"
         Action   = ["s3:ListBucketVersions"]
-        Resource = [aws_s3_bucket.data_lake.arn]
+        Resource = [local.data_lake_bucket_arn]
         Condition = {
           StringLike = {
             "s3:prefix" = [
@@ -300,9 +300,9 @@ def test_real_tree_fence_shapes_pass() -> None:
 
 def test_bucket_wide_object_version_grant_is_rejected() -> None:
     bad = _GOOD_FENCE_TEXT.replace(
-        '"${aws_s3_bucket.data_lake.arn}/${local.ducklake_prod_data_prefix}/*",\n'
-        '          "${aws_s3_bucket.data_lake.arn}/${local.ducklake_smoke_data_prefix}/*",',
-        '"${aws_s3_bucket.data_lake.arn}/*",',
+        '"${local.data_lake_bucket_arn}/${local.ducklake_prod_data_prefix}/*",\n'
+        '          "${local.data_lake_bucket_arn}/${local.ducklake_smoke_data_prefix}/*",',
+        '"${local.data_lake_bucket_arn}/*",',
     )
     assert bad != _GOOD_FENCE_TEXT
     failed = validate_fence_shapes(bad)
@@ -332,12 +332,12 @@ def test_inert_object_prefix_list_deny_is_rejected() -> None:
         'Sid      = "DenyStateAndConvergenceVersionList"\n'
         '        Effect   = "Deny"\n'
         '        Action   = ["s3:ListBucketVersions"]\n'
-        "        Resource = [aws_s3_bucket.data_lake.arn]",
+        "        Resource = [local.data_lake_bucket_arn]",
         'Sid      = "DenyStateAndConvergenceVersionList"\n'
         '        Effect   = "Deny"\n'
         '        Action   = ["s3:ListBucketVersions"]\n'
         "        Resource = [\n"
-        '          "${aws_s3_bucket.data_lake.arn}/tfstate/personal/*",\n'
+        '          "${local.data_lake_bucket_arn}/tfstate/personal/*",\n'
         "        ]",
     )
     assert bad != _GOOD_FENCE_TEXT

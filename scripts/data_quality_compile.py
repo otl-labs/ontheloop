@@ -1,23 +1,13 @@
-"""Data quality compile path: YAML/tombstones manifest -> Check objects, DuckLake SQL translation."""
+"""Data quality compile path: YAML/tombstones manifest -> Check objects (a dq_check kind and bound params, never SQL)."""
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from scripts.data_quality_models import _TOMBSTONES_PATH, Check
-
-# Test types that are enforced only at write time (scripts/ops_portal/write_validators.py) and
-# are deliberately not SQL-compilable -- e.g. acceptance_lint runs a filesystem/shell-syntax
-# check, not a column predicate. _compile_column_test recognises and skips these by design
-# rather than loud-failing; any OTHER unrecognised test type is a silent-drop bug (Decision 55)
-# and raises instead (rec-3308).
-_WRITE_TIME_ONLY_TEST_TYPES = frozenset(
-    {"path_syntax", "acceptance_lint", "array_element_format", "min_length", "array_element_reference"}
-)
 
 # ---------------------------------------------------------------------------
 # Tombstone resurrection checks
@@ -48,13 +38,13 @@ def build_tombstone_checks(
         if table_filter and table != table_filter:
             continue
         view_name = f"{table}_current" if table == "ops_recommendations" else table
-        query_table = f"{database}.{view_name}"
         checks.append(
             Check(
                 table=table,
                 column="id",
                 test_type="tombstone_resurrection",
-                sql=(f"SELECT COUNT(*) AS violation FROM {query_table} WHERE id = '{rec_id}'"),
+                kind="key_absent",
+                params={"column": "id", "value": rec_id},
                 description=f"{table}: tombstoned record {rec_id} must not exist in {view_name}",
                 severity="error",
                 enforced=True,
@@ -79,40 +69,28 @@ def load_checks(
     with open(yaml_path, encoding="utf-8") as f:
         spec = yaml.safe_load(f)
 
-    database = spec.get("database", "agent_platform")
-    metadata = {"database": database}
+    metadata = {"database": spec.get("database", "agent_platform")}
 
     checks: list[Check] = []
-    tables = spec.get("tables", {})
-
-    for table_name, table_def in tables.items():
+    for table_name, table_def in spec.get("tables", {}).items():
         if table_filter and table_name != table_filter:
             continue
 
-        view_suffix = table_def.get("view_suffix", "")
-        query_table = f"{database}.{table_name}{view_suffix}"
-
-        # Table-level checks
+        # Table-level checks. Their exclude_before is carried on the Check but never applied to the count.
         if "row_count" in table_def:
             rc = table_def["row_count"]
             min_rows = rc.get("min", 1)
-            severity = rc.get("severity", "error")
-            enforced = rc.get("enforced", True)
-            exclude_before = rc.get("exclude_before")
             checks.append(
                 Check(
                     table=table_name,
                     column=None,
                     test_type="row_count",
-                    sql=(
-                        f"SELECT CASE WHEN cnt < {min_rows} THEN 1 ELSE 0 END "
-                        f"AS violation FROM "
-                        f"(SELECT COUNT(*) AS cnt FROM {query_table})"
-                    ),
+                    kind="row_count_min",
+                    params={"min": min_rows},
                     description=f"{table_name}: must have >= {min_rows} rows",
-                    severity=severity,
-                    enforced=enforced,
-                    exclude_before=exclude_before,
+                    severity=rc.get("severity", "error"),
+                    enforced=rc.get("enforced", True),
+                    exclude_before=rc.get("exclude_before"),
                 )
             )
 
@@ -120,235 +98,94 @@ def load_checks(
             rec = table_def["recency"]
             col = rec["column"]
             error_h = rec.get("error_after_hours", 168)
-            enforced = rec.get("enforced", True)
-            exclude_before = rec.get("exclude_before")
-            # Use error threshold for the check; runner can distinguish warn vs error
             checks.append(
                 Check(
                     table=table_name,
                     column=col,
                     test_type="recency",
-                    sql=(
-                        f"SELECT CASE WHEN "
-                        f"date_diff('hour', MAX({col}), CURRENT_TIMESTAMP) > {error_h} "
-                        f"THEN 1 ELSE 0 END AS violation "
-                        f"FROM {query_table}"
-                    ),
-                    description=(f"{table_name}.{col}: most recent value must be within {error_h}h of now"),
+                    kind="recency_hours",
+                    params={"column": col, "hours": error_h},
+                    description=f"{table_name}.{col}: most recent value must be within {error_h}h of now",
                     severity="error",
-                    enforced=enforced,
-                    exclude_before=exclude_before,
+                    enforced=rec.get("enforced", True),
+                    exclude_before=rec.get("exclude_before"),
                 )
             )
 
-        # Column-level checks
-        columns = table_def.get("columns", {})
-        for col_name, col_def in columns.items():
-            tests = col_def.get("tests", [])
-            for test in tests:
-                compiled = _compile_column_test(
-                    query_table,
-                    table_name,
-                    col_name,
-                    test,
-                )
+        for col_name, col_def in table_def.get("columns", {}).items():
+            for test in col_def.get("tests", []):
+                compiled = _compile_column_test(table_name, table_name, col_name, test)
                 if compiled:
                     checks.append(compiled)
 
     return checks, metadata
 
 
-def _compile_column_test(
-    query_table: str,
-    table_name: str,
-    col_name: str,
-    test: str | dict,
-) -> Check | None:
-    """Compile a single column test definition to a Check."""
-    # Simple string tests: not_null, unique
-    if isinstance(test, str):
-        if test == "not_null":
-            return Check(
-                table=table_name,
-                column=col_name,
-                test_type="not_null",
-                sql=(f"SELECT COUNT(*) AS violation FROM {query_table} WHERE {col_name} IS NULL"),
-                description=f"{table_name}.{col_name}: must not be NULL",
-            )
-        if test == "unique":
-            return Check(
-                table=table_name,
-                column=col_name,
-                test_type="unique",
-                sql=(
-                    f"SELECT COUNT(*) AS violation FROM ("
-                    f"SELECT {col_name}, COUNT(*) AS n "
-                    f"FROM {query_table} "
-                    f"GROUP BY {col_name} HAVING COUNT(*) > 1"
-                    f")"
-                ),
-                description=f"{table_name}.{col_name}: must be unique",
-            )
-        if test in _WRITE_TIME_ONLY_TEST_TYPES:
-            return None
-        raise ValueError(
-            f"{table_name}.{col_name}: unrecognised test type {test!r} (neither SQL-compilable nor declared write-time-only)"
-        )
-
-    # Dict tests: accepted_values, relationships, expression
-    if isinstance(test, dict):
-        test_type = next(iter(test))
-        params = test[test_type]
-
-        if test_type == "accepted_values":
-            if isinstance(params, list):
-                values = params
-                severity = "error"
-                enforced = True
-                eb = None
-            else:
-                values = params.get("values", [])
-                severity = params.get("severity", "error")
-                enforced = params.get("enforced", True)
-                eb = params.get("exclude_before")
-            quoted = ", ".join(f"'{v}'" for v in values)
-            temporal = f" AND created_timestamp >= DATE('{eb}')" if eb else ""
-            return Check(
-                table=table_name,
-                column=col_name,
-                test_type="accepted_values",
-                sql=(
-                    f"SELECT COUNT(*) AS violation "
-                    f"FROM {query_table} "
-                    f"WHERE {col_name} IS NOT NULL "
-                    f"AND {col_name} NOT IN ({quoted})"
-                    f"{temporal}"
-                ),
-                description=(f"{table_name}.{col_name}: values must be in [{', '.join(values)}]"),
-                severity=severity,
-                enforced=enforced,
-                exclude_before=eb,
-            )
-
-        if test_type == "relationships":
-            if not isinstance(params, dict):
-                return None
-            to_table = params.get("to_table", "")
-            to_column = params.get("to_column", "")
-            severity = params.get("severity", "error")
-            enforced = params.get("enforced", True)
-            eb = params.get("exclude_before")
-            # Resolve the target table in the same database
-            db = query_table.split(".")[0]
-            # For SCD tables, check against _current view if it exists
-            target = f"{db}.{to_table}"
-            temporal = f" AND child.created_timestamp >= DATE('{eb}')" if eb else ""
-            return Check(
-                table=table_name,
-                column=col_name,
-                test_type="relationships",
-                sql=(
-                    f"SELECT COUNT(*) AS violation "
-                    f"FROM {query_table} child "
-                    f"LEFT JOIN {target} parent "
-                    f"ON child.{col_name} = parent.{to_column} "
-                    f"WHERE child.{col_name} IS NOT NULL "
-                    f"AND parent.{to_column} IS NULL"
-                    f"{temporal}"
-                ),
-                description=(f"{table_name}.{col_name} -> {to_table}.{to_column}: FK must resolve"),
-                severity=severity,
-                enforced=enforced,
-                exclude_before=eb,
-            )
-
-        if test_type == "expression":
-            if not isinstance(params, dict):
-                return None
-            sql_expr = params.get("sql", "")
-            desc = params.get("description", f"expression: {sql_expr}")
-            severity = params.get("severity", "error")
-            enforced = params.get("enforced", True)
-            eb = params.get("exclude_before")
-            temporal = f" AND created_timestamp >= DATE('{eb}')" if eb else ""
-            return Check(
-                table=table_name,
-                column=col_name,
-                test_type="expression",
-                sql=(f"SELECT COUNT(*) AS violation FROM {query_table} WHERE NOT ({sql_expr}){temporal}"),
-                description=f"{table_name}.{col_name}: {desc}",
-                severity=severity,
-                enforced=enforced,
-                exclude_before=eb,
-            )
-
-        # not_null / unique can also appear as dict for severity override
-        if test_type == "not_null":
-            severity = params.get("severity", "error") if isinstance(params, dict) else "error"
-            enforced = params.get("enforced", True) if isinstance(params, dict) else True
-            eb = params.get("exclude_before") if isinstance(params, dict) else None
-            temporal = f" AND created_timestamp >= DATE('{eb}')" if eb else ""
-            return Check(
-                table=table_name,
-                column=col_name,
-                test_type="not_null",
-                sql=(f"SELECT COUNT(*) AS violation FROM {query_table} WHERE {col_name} IS NULL{temporal}"),
-                description=f"{table_name}.{col_name}: must not be NULL",
-                severity=severity,
-                enforced=enforced,
-                exclude_before=eb,
-            )
-
-        if test_type == "unique":
-            severity = params.get("severity", "error") if isinstance(params, dict) else "error"
-            enforced = params.get("enforced", True) if isinstance(params, dict) else True
-            eb = params.get("exclude_before") if isinstance(params, dict) else None
-            where_clause = f"WHERE created_timestamp >= DATE('{eb}') " if eb else ""
-            return Check(
-                table=table_name,
-                column=col_name,
-                test_type="unique",
-                sql=(
-                    f"SELECT COUNT(*) AS violation FROM ("
-                    f"SELECT {col_name}, COUNT(*) AS n "
-                    f"FROM {query_table} "
-                    f"{where_clause}"
-                    f"GROUP BY {col_name} HAVING COUNT(*) > 1"
-                    f")"
-                ),
-                description=f"{table_name}.{col_name}: must be unique",
-                severity=severity,
-                enforced=enforced,
-                exclude_before=eb,
-            )
-
-        if test_type in _WRITE_TIME_ONLY_TEST_TYPES:
-            return None
-        raise ValueError(
-            f"{table_name}.{col_name}: unrecognised test type {test_type!r} "
-            "(neither SQL-compilable nor declared write-time-only)"
-        )
-
-    return None
+def _gate(kind_params: dict[str, Any], exclude_before: str | None) -> dict[str, Any]:
+    return {**kind_params, "exclude_before": exclude_before} if exclude_before else kind_params
 
 
-def to_ducklake_sql(sql: str, table: str, database: str) -> str:
-    """Normalise a compiled check SQL to the DuckDB dialect over the DuckLake `current` table.
+def _compile_column_test(_query_table: str, table_name: str, col_name: str, test: str | dict) -> Check | None:
+    """Compile a single column test definition to a Check (a dq_check kind and params).
 
-    - Rewrite the qualified table reference (`{database}.{table}_current` or `{database}.{table}`) to
-      the `{tbl}` placeholder the reader's query_ops substitutes with the DuckLake current TABLE.
-    - Translate `regexp_like(x, p)` -> DuckDB `regexp_matches(x, p)`. `date_diff`, CURRENT_TIMESTAMP,
-      DATE('...'), COUNT(*), NOT IN, IS NULL are already DuckDB-compatible.
-    - Idempotent: already-translated SQL passes through unchanged.
+    `_query_table` is the retired SQL FROM-target argument, kept so the compiler's callers and graduated guards keep their
+    call shape; it is never read.
     """
-    out = sql.replace(f"{database}.{table}_current", "{tbl}").replace(f"{database}.{table}", "{tbl}")
-    return re.sub(r"\bregexp_like\(", "regexp_matches(", out)
+    if isinstance(test, str):
+        test_type, opts = test, {}
+    elif isinstance(test, dict):
+        test_type = next(iter(test))
+        opts = test[test_type]
+    else:
+        return None
 
+    # accepted_values may be written as a bare list of values.
+    meta = opts if isinstance(opts, dict) else {}
+    severity = meta.get("severity", "error")
+    enforced = meta.get("enforced", True)
+    eb = meta.get("exclude_before")
 
-def _uniqueness_sql(column: str) -> str:
-    """DuckDB COUNT-of-duplicates violation query for *column* over the `{tbl}` placeholder."""
-    dupes = f"SELECT {column}, COUNT(*) n FROM {{tbl}} GROUP BY {column} HAVING COUNT(*) > 1"
-    return f"SELECT COUNT(*) AS violation FROM ({dupes}) d"
+    def make(kind: str | None, params: dict[str, Any], description: str, *, gated: bool = True) -> Check:
+        return Check(
+            table=table_name,
+            column=col_name,
+            test_type=test_type,
+            kind=kind,
+            params=_gate(params, eb) if gated else params,
+            description=f"{table_name}.{col_name}: {description}" if kind else description,
+            severity=severity,
+            enforced=enforced,
+            exclude_before=eb,
+        )
+
+    if test_type == "not_null":
+        return make("not_null", {"column": col_name}, "must not be NULL")
+    if test_type == "unique":
+        columns = list(meta.get("columns") or [col_name])
+        projection = meta.get("projection", "current")
+        return make("unique", {"columns": columns, "projection": projection}, "must be unique")
+    if test_type == "accepted_values":
+        values = list(opts if isinstance(opts, list) else meta.get("values", []))
+        return make("accepted_values", {"column": col_name, "values": values}, f"values must be in [{', '.join(values)}]")
+    if test_type == "pattern":
+        return make("pattern", {"column": col_name, "value": meta["value"]}, f"must match {meta['value']}")
+    if test_type == "min_value":
+        return make("min_value", {"column": col_name, "value": meta["value"]}, f"must be >= {meta['value']}")
+    if test_type == "history_not_ahead_of_current":
+        column = meta.get("column", col_name)
+        return make(
+            "history_not_ahead_of_current",
+            {"column": column},
+            f"history {column} must never exceed current {column}",
+            gated=False,
+        )
+    if test_type == "relationships":
+        if not isinstance(opts, dict):
+            return None
+        to_table, to_column = opts.get("to_table", ""), opts.get("to_column", "")
+        desc = f"{table_name}.{col_name} -> {to_table}.{to_column}: FK must resolve"
+        return make(None, {}, desc)
+    raise ValueError(f"{table_name}.{col_name}: unrecognised test type {test_type!r} (not SQL-compilable)")
 
 
 def build_clause8_checks(spec_yaml: dict, database: str, table_filter: str | None = None) -> list[Check]:
@@ -372,7 +209,8 @@ def build_clause8_checks(spec_yaml: dict, database: str, table_filter: str | Non
                     table=table,
                     column="ulid",
                     test_type="ulid_history_unique",
-                    sql=_uniqueness_sql("ulid"),
+                    kind="unique",
+                    params={"columns": ["ulid"], "projection": "history"},
                     description=f"{spec.history_table}.ulid: history ULID unique (idempotency PK)",
                     backend="ducklake",
                 )
@@ -384,7 +222,8 @@ def build_clause8_checks(spec_yaml: dict, database: str, table_filter: str | Non
                     table=table,
                     column=mk,
                     test_type="current_merge_key_unique",
-                    sql=_uniqueness_sql(mk),
+                    kind="unique",
+                    params={"columns": [mk], "projection": "current"},
                     description=f"{spec.current_table}.{mk}: current has one row per merge key",
                     backend="ducklake",
                 )

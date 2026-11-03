@@ -1,7 +1,7 @@
 """Flags a root-taking function that calls a ROOT-pinned diff-base primitive bare (rec-3166).
 
 Root cause: scripts/checks/_common.py's push_context_base() / get_changed_files() /
-get_status_aware_diff() each grew an optional `root` parameter (Decision 159 cl.1 amendment)
+get_status_aware_diff() / status_diff_base() each grew an optional `root` parameter (Decision 159 cl.1 amendment)
 so a check evaluating an injected root (a fixture repository, a test tmp_path) can pair its
 git probes and path-existence filters with that same root instead of silently reading the
 REAL repository. A function that itself accepts `root` but calls one of these three
@@ -31,7 +31,7 @@ from pathlib import Path
 
 from scripts.checks import _common, registry
 
-_TARGET_PRIMITIVES = frozenset({"push_context_base", "get_changed_files", "get_status_aware_diff"})
+_TARGET_PRIMITIVES = frozenset({"push_context_base", "get_changed_files", "get_status_aware_diff", "status_diff_base"})
 _WAIVER_MARKER = "# root-scoped-ok:"
 
 
@@ -128,8 +128,8 @@ def _scan_tree(paths: list[Path]) -> tuple[list[str], int]:
 @registry.register("validate_root_scoped_diff_base", owner="platform")
 def validate_root_scoped_diff_base(failed: list[str]) -> None:
     """Scan scripts/checks/**/*.py for a root-taking function that calls a ROOT-pinned
-    diff-base primitive (push_context_base / get_changed_files / get_status_aware_diff)
-    without forwarding its own `root`.
+    diff-base primitive (push_context_base / get_changed_files / get_status_aware_diff /
+    status_diff_base) without forwarding its own `root`.
 
     Composes exactly ONE terminal Decision 170 declaration on each of its two reachable exit
     paths: a missing scripts/checks/ directory under ROOT `skipped()`s (could not examine);

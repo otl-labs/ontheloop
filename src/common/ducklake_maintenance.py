@@ -45,6 +45,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from src.common import ducklake_catalog_index_status
 from src.common.ducklake_runtime import CATALOG_ALIAS, SMOKE_CURRENT_TABLE, SMOKE_HISTORY_TABLE, libpq_conninfo
 
 # A bare SQL identifier (meta-schema name) -- guards the f-string-interpolated catalog_stats query.
@@ -244,6 +245,17 @@ def merge_adjacent_files(
         con.execute(f"SELECT * FROM ducklake_merge_adjacent_files('{catalog}', '{table}', schema='{schema}')").fetchall()
 
 
+def _run_destructive_count(con: Any, sql: str) -> int:
+    """Run a destructive DuckLake table function to COMPLETION and return its count(*) row.
+
+    fetchall(), never fetchone(): DuckLake deletes storage files while the statement runs but records
+    the catalog change only when the statement completes, and fetchone() leaves the one-row result
+    open, so the next statement discards it. That split the 2026-09-20 production gc_ops pass:
+    18,744 files deleted from S3 and still listed in the catalog as scheduled for deletion.
+    """
+    return int(con.execute(sql).fetchall()[0][0])
+
+
 def expire_snapshots(
     con: Any,
     *,
@@ -280,10 +292,9 @@ def expire_snapshots(
         return 0
 
     ts = _ts_str(expire_cutoff)
-    expired = con.execute(
-        f"SELECT count(*) FROM ducklake_expire_snapshots('{catalog}', older_than=TIMESTAMPTZ '{ts}')"
-    ).fetchone()
-    return int(expired[0]) if expired else 0
+    return _run_destructive_count(
+        con, f"SELECT count(*) FROM ducklake_expire_snapshots('{catalog}', older_than=TIMESTAMPTZ '{ts}')"
+    )
 
 
 def _resolve_cleanup_cutoff(*, grace_days: int, older_than: datetime | None, now: datetime, caller: str) -> datetime:
@@ -326,11 +337,11 @@ def cleanup_old_files(
     now = _now or _now_utc()
     cutoff = _resolve_cleanup_cutoff(grace_days=grace_days, older_than=older_than, now=now, caller="cleanup_old_files")
     ts = _ts_str(cutoff)
-    result = con.execute(
+    return _run_destructive_count(
+        con,
         f"SELECT count(*) FROM ducklake_cleanup_old_files('{catalog}', dry_run=False, "
-        f"cleanup_all=False, older_than=TIMESTAMPTZ '{ts}')"
-    ).fetchone()
-    return int(result[0]) if result else 0
+        f"cleanup_all=False, older_than=TIMESTAMPTZ '{ts}')",
+    )
 
 
 def delete_orphaned_files(
@@ -352,10 +363,9 @@ def delete_orphaned_files(
     now = _now or _now_utc()
     cutoff = _resolve_cleanup_cutoff(grace_days=grace_days, older_than=older_than, now=now, caller="delete_orphaned_files")
     ts = _ts_str(cutoff)
-    result = con.execute(
-        f"SELECT count(*) FROM ducklake_delete_orphaned_files('{catalog}', dry_run=False, older_than=TIMESTAMPTZ '{ts}')"
-    ).fetchone()
-    return int(result[0]) if result else 0
+    return _run_destructive_count(
+        con, f"SELECT count(*) FROM ducklake_delete_orphaned_files('{catalog}', dry_run=False, older_than=TIMESTAMPTZ '{ts}')"
+    )
 
 
 def rewrite(
@@ -471,6 +481,8 @@ def catalog_stats(
     conn = connect(libpq_conninfo(dsn))
     try:
         with conn.cursor() as cur:
+            # Read FIRST: the per-ops-table failure branch below leaves the non-autocommit transaction aborted.
+            stats_index = ducklake_catalog_index_status.catalog_index_status(cur, meta_schema)
             # Exact bytes per metadata table + estimated rows, in one query (no per-table count scan).
             cur.execute(
                 "SELECT c.relname, pg_total_relation_size(c.oid), c.reltuples::bigint "
@@ -516,6 +528,7 @@ def catalog_stats(
         "metadata_tables": metadata_tables,
         "per_ops_table": per_ops_table,
         "per_ops_table_note": per_ops_note,
+        "stats_index": stats_index,
     }
 
 

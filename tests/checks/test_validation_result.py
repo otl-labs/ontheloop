@@ -20,12 +20,14 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
 def _reset_attributions():
     validation_result._ATTRIBUTIONS.clear()
     validation_result._OUTCOMES.clear()
+    validation_result._SCAFFOLD_FAILURES.clear()
     validation_result._FAILURE_DETAILS.clear()
     validation_result._START_HEAD_TREE = None
     validation_result._START_TREE_CLEAN = False
     yield
     validation_result._ATTRIBUTIONS.clear()
     validation_result._OUTCOMES.clear()
+    validation_result._SCAFFOLD_FAILURES.clear()
     validation_result._FAILURE_DETAILS.clear()
     validation_result._START_HEAD_TREE = None
     validation_result._START_TREE_CLEAN = False
@@ -509,3 +511,40 @@ class TestVerifyHeadCli:
     def test_no_flag_prints_help_and_exits_one(self, capsys: pytest.CaptureFixture) -> None:
         rc = validation_result.main([])
         assert rc == 1
+
+
+def test_run_scaffold_records_only_scaffolds_that_append_labels() -> None:
+    failed = ["earlier"]
+    validation_result.run_scaffold("quiet", failed, lambda: None)
+    validation_result.run_scaffold("noisy", failed, lambda: failed.append("label"))
+    assert validation_result._SCAFFOLD_FAILURES == ["noisy"]
+
+
+def test_failure_markers_are_ordered_unique_and_checks_first() -> None:
+    validation_result._SCAFFOLD_FAILURES.extend(["scaf_b", "scaf_b", "scaf_a"])
+    validation_result._ATTRIBUTIONS.extend(
+        [{"check": "check_z", "label": "1"}, {"check": "check_y", "label": "2"}, {"check": "check_z", "label": "3"}]
+    )
+    assert validation_result.failure_markers() == [
+        "GATE-FAILURE v1 source=gate check=check_z",
+        "GATE-FAILURE v1 source=gate check=check_y",
+        "GATE-FAILURE v1 source=gate check=scaf_b",
+        "GATE-FAILURE v1 source=gate check=scaf_a",
+    ]
+
+
+def test_clear_resets_scaffold_failures(tmp_path: Path) -> None:
+    validation_result._SCAFFOLD_FAILURES.append("scaf")
+    validation_result.clear(tmp_path / "result.json")
+    assert validation_result._SCAFFOLD_FAILURES == []
+
+
+def test_print_failure_summary_prints_labels_then_markers(capsys: pytest.CaptureFixture[str]) -> None:
+    validation_result._ATTRIBUTIONS.append({"check": "check_z", "label": "lbl"})
+    validation_result.print_failure_summary(["lbl"])
+    assert capsys.readouterr().out == "Failed checks:\n  - lbl\nGATE-FAILURE v1 source=gate check=check_z\n"
+
+
+def test_print_failure_summary_without_markers_prints_labels_only(capsys: pytest.CaptureFixture[str]) -> None:
+    validation_result.print_failure_summary(["lbl"])
+    assert capsys.readouterr().out == "Failed checks:\n  - lbl\n"

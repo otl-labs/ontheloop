@@ -1,0 +1,198 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: ci-rca-gate-summary-branch-guard
+intent: >-
+  Resolve Critical ci_rca rec-4302 and turn main-validate green again: the gate-failure summary test's terraform-only
+  phase must not depend on the git branch it runs on, and any future validate.main() call in that module that reaches
+  scripts.checks._common.run unstubbed (every branch-reading call goes through it) must fail deterministically on every
+  branch, so the escape cannot recur unseen. A red main blocks
+  slice dispatch (Decision 73), and a trustworthy two-tier gate is what lets the loop merge autonomously.
+implementation_declared: true
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-ci-rca-gate-summary-branch-guard.yaml
+phase: >-
+  Platform reliability, CI-RCA forward-fix (Decision 72): resolves ci_rca rec-4302, opened against #1468
+  (PLAN-gate-failure-markers' build). No tier item; closes no exit criterion.
+scope:
+- file: tests/validate/test_gate_failure_summary.py
+  action: Modify
+  purpose: >-
+    Corrective: test_clean_run_and_terraform_only_print_no_marker's phase 2 (the direct --terraform-only
+    _validate.main() call) also patches scripts.checks._common.run with _pre_mock_run, the stub _run_main and the
+    other validate.main() tests use, so validate.py's branch guard never reads the real git branch. Preventive: a
+    module-level autouse fixture patches scripts.checks._common.run with a stub that raises AssertionError naming the
+    unstubbed command, and test_unstubbed_subprocess_is_refused proves the guard fires. Every existing assertion stays.
+bundled_recommendations:
+- rec-4302
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+- >-
+  bin/venv-python -m pytest tests/validate/test_gate_failure_summary.py::test_clean_run_and_terraform_only_print_no_marker
+  -q exits 0 (rec-4302's acceptance) on a feature branch and on a worktree whose current branch is main, with its
+  terraform-label and no-marker assertions unchanged.
+- >-
+  Every scripts.checks._common.run call in tests/validate/test_gate_failure_summary.py is stubbed: an unstubbed call
+  raises AssertionError naming the command (test_unstubbed_subprocess_is_refused), so the phase-2 defect, reintroduced,
+  fails on any branch rather than only on main.
+- >-
+  scripts/validate.py and every other file are unchanged (except the sanctioned implementation_declared bookkeeping on
+  this plan); the whole module and the graduated row
+  gate-failure-summary-wired-in-validate-main still pass.
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: >-
+    Prove the preventive guard is wired: an unstubbed scripts.checks._common.run call in the module raises
+    AssertionError naming the command.
+  command: >-
+    bin/venv-python -m pytest tests/validate/test_gate_failure_summary.py::test_unstubbed_subprocess_is_refused -q
+  expected: >-
+    Exit 0, 1 passed. Red before: the node is absent on the plan-only tree (pytest exit 4, target_absent).
+  fix_if: >-
+    The node fails: the autouse fixture patches the wrong dotted path (validate.py calls _common.run through the
+    scripts.checks._common module attribute, so patch scripts.checks._common.run) or is not autouse.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    A meta-test of this module's own fixture: the unit tiers run the whole module on every change, and the regression
+    itself is pinned by the graduated row gate-failure-summary-wired-in-validate-main, whose phase-2 node fails on any
+    branch under the guard if the stub is lost; a registry row would only duplicate that.
+- step: 2
+  phase: pre-deploy
+  action: >-
+    Run rec-4302's acceptance node and the rest of the module on the feature branch.
+  command: >-
+    bin/venv-python -m pytest tests/validate/test_gate_failure_summary.py -q
+  expected: >-
+    Exit 0, 5 passed. Red before (implement order): with the autouse guard added and the phase-2 stub not yet added,
+    test_clean_run_and_terraform_only_print_no_marker fails on any branch with the guard's AssertionError naming
+    git branch --show-current.
+  fix_if: >-
+    The acceptance node fails with the guard's AssertionError: the phase-2 patch does not cover the
+    _validate.main() call. Another node fails with it: that node reaches a real subprocess outside _run_main's stub;
+    stub it the same way, never by relaxing the guard.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    Whole-file re-run of the modified module (vp-red-before.yaml hermetic_authoring (v)); the --pre pytest_diff and the
+    full tier's unit-test scaffold run it on every change.
+- step: 3
+  phase: pre-deploy
+  action: >-
+    Reproduce the main-validate condition: run the module from a throwaway worktree of HEAD, with the working-tree copy
+    of the changed test file, whose current branch reads main, so validate.py's branch guard would refuse if any call
+    reached the real git.
+  command: >-
+    R=$(git rev-parse --show-toplevel) && T=$(mktemp -d) && git worktree add -q --detach "$T" HEAD &&
+    cp "$R/tests/validate/test_gate_failure_summary.py" "$T/tests/validate/" && git -C "$T" symbolic-ref HEAD refs/heads/main && (cd "$T" && "$R/bin/venv-python" -m pytest
+    tests/validate/test_gate_failure_summary.py -q); rc=$?; git worktree remove --force "$T"; exit $rc
+  expected: >-
+    Exit 0, 5 passed. Red before: the same command on origin/main's tree exits 1 with
+    test_clean_run_and_terraform_only_print_no_marker failing on "[ERROR] validate.py refused to run on 'main'."
+    (reproduced at planning time on ac0985e1).
+  fix_if: >-
+    The acceptance node fails with the branch-guard refusal: phase 2 still reaches the real git.
+  hermetic: false
+  graduation: not-applicable
+- step: 4
+  phase: pre-deploy
+  action: >-
+    Lint the changed file and run the full tier, as the handoff policy requires before commit.
+  command: >-
+    bin/venv-python -m ruff check tests/validate/test_gate_failure_summary.py && bin/venv-python -m ruff format --check
+    tests/validate/test_gate_failure_summary.py && bin/venv-python -m scripts.validate
+  expected: >-
+    ruff exit 0, then the full tier ends with "All checks passed." and exit 0.
+  fix_if: >-
+    Any failure: fix at root and rerun the full tier from the start (handoff_policy).
+  hermetic: false
+  graduation: not-applicable
+- step: 5
+  phase: post-deploy
+  action: >-
+    After the squash merge, confirm rec-4302 closed and main-validate green on the merge commit.
+  command: >-
+    bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; rows, missing =
+    fetch_recs_by_ids(make_reader(), ['rec-4302']); print({r['id']: r['status'] for r in rows}, missing); assert not
+    missing and all(r['status'] == 'closed' for r in rows), (rows, missing)"
+  expected: >-
+    Exit 0 with rec-4302 closed; separately, the main-validate run on the merge commit is green (read with the
+    mcp__github__ actions tools or the CI-green wake).
+  fix_if: >-
+    rec-4302 still open once the trailer-closure job concludes: act only on that job's log at the merge sha, per the implement skill's
+    post-merge closeout fallback (.claude/commands/implement.md; git-ops.yaml resolves_trailer). A Decision 186 or 201
+    refusal marker for rec-4302 permits ONLY that log's printed close_proposed command, never a direct --update-rec
+    close. A closed/not-found/errored line, a transport failure or a merge-leg refusal permits the direct fallback citing
+    the merge commit. Anything else (an omitted trailer included): leave it open and report. main-validate still red on
+    this node: STOP and re-open planning (Decision 55).
+  hermetic: false
+test_obligations: []
+constraints:
+- Only tests/validate/test_gate_failure_summary.py may be modified; scripts/validate.py's branch guard is correct.
+- >-
+  Keep every existing assertion; the change only adds stubs, the autouse guard and the meta-test (implement-scope-boundary
+  CONTENT invariants, Decision 181).
+- >-
+  The guard is module-scoped (an autouse fixture in this test module only), never global: other modules legitimately run
+  real subprocesses.
+- No rescue agents or workaround loops (Decision 55); this is the reviewed forward-fix of a source=ci_rca rec (Decision 72).
+context:
+- >-
+  Decision-scout verdict: NO_FLAGS. CITE: 72, 73, 55, 104, 135, 181, 163, 132, 189, 186, 201. Decisions triaged: 168 of
+  168. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1.
+- "gates: decision-scout=NO_FLAGS; plan-critique=REVISE r1 (F1-F5 fixed), REVISE r2 confirming (R2-F1..F3 fixed), escalated; narrow check r3 PROCEED (R3-I1 folded in)"
+- >-
+  Root cause (rec-4302; reproduced on ac0985e1): phase 1's _run_main deletes CI and stops its patches, so phase 2's
+  validate.main() reaches validate.py:235-243, whose real git branch --show-current reads main on main-validate. PR CI
+  checks out a detached merge ref (empty branch), so #1468's presubmit ran the test green.
+- >-
+  Not adopted: rec-4302's suggested preventive (pre-tier tier_membership for scripts/validate.py). The test already ran
+  in presubmit; the escape was branch-name dependence, which the module guard makes deterministic on every branch.
+- >-
+  Declared residuals: the guard covers scripts.checks._common.run only; validation_result.py:67 and :172 call
+  subprocess.run directly (branch-independent git rev-parse probes). Other tests/validate modules and
+  tests/checks/registry/test_resolution.py call validate.main() (most with CI unset); they are green on main because
+  each stubs _common.run or keeps CI set. A package-level guard (tests/validate/conftest.py, non-autouse by design, and a conftest edit widens
+  --pre selection) is left to a follow-on only if the class recurs.
+- >-
+  Precedent: PLAN-ci-rca-test-mock (corrective mock, scoped autouse guard, self-verifying meta-test); _pre_mock_run
+  (tests/fixtures/subprocess_stubs.py) is the stub every validate.main() test uses.
+pre_implementation_checklist:
+- Branch confirmed not on main
+- docs/PROJECT_CONTEXT.md read
+- Decisions 55 and 72 (only the cited clauses) read
+- tests/validate/test_gate_failure_summary.py located and readable
+- Acceptance criteria understood and verifiable
+execution_steps:
+- >-
+  Preventive first (TDD): add a module-level @pytest.fixture(autouse=True) that patches scripts.checks._common.run with
+  a stub raising AssertionError(f"unstubbed scripts.checks._common.run({cmd!r}): stub it with _pre_mock_run") and
+  yields inside the patch; add test_unstubbed_subprocess_is_refused, which imports scripts.checks._common and asserts
+  pytest.raises(AssertionError, match="show-current") on _common.run(["git", "branch", "--show-current"]). Run VP 2: the acceptance node now
+  fails on this branch with the guard's message (the red-before).
+- >-
+  Corrective: in test_clean_run_and_terraform_only_print_no_marker, add patch("scripts.checks._common.run",
+  side_effect=_pre_mock_run) to the with-block around the phase-2 _validate.main() call. _run_main's own patch nests
+  over the autouse guard and restores it on stop.
+- Execute Verification Plan steps 1-3 -- loop until pass; on an unrecoverable failure stop and RCA (Decision 55).
+- >-
+  Closure sequence (implement skill, git-ops handoff_sequence), each outcome reported on its own: run the code-review
+  gate (fresh sibling subagent); run scripts.session.github_readiness and report each state separately (unknown is
+  unproven, never PASS); set implementation_declared true in this plan; rebase onto origin/main; write the
+  retrospective evidence and run scripts.session.postflight --evidence; then VP step 4, the full tier on the committed,
+  rebased, clean tree to completion, then scripts.checks.validation_result --verify-head exit 0. Push, open the PR,
+  wait for CI by subscription, squash-merge with Resolves: rec-4302 in the squash body; then VP step 5.
+- >-
+  Through the ops portal (get_rec_write_guidance first, then update_rec), before the merge: rec-4302's
+  context_v2_json.closure_artifact becomes pytest:tests/validate/test_gate_failure_summary.py::test_unstubbed_subprocess_is_refused
+  (Decision 186: its defining file changes in the fix commit; never check:, which resolves against the tier fact this
+  plan declines to change). Keep the four existing node ids unrenamed: rec-4302's acceptance and the graduated row
+  gate-failure-summary-wired-in-validate-main pin them (Decision 201).
+- 'Report: what was implemented and the verification results.'
+work_areas: []
+rollback: >-
+  Revert the squash commit. Test-only: no production, infrastructure or warehouse state changes.

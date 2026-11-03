@@ -1,8 +1,8 @@
 # PlatformAdmin's detector-management grant for the platform-security-* IAM-change detector
 # (rec-4044, Decision 202). A customer-managed policy, not an AdminOps inline statement:
 # PlatformAdmin's inline aggregate has ~2.2 KB of its 10,240 B per-role headroom left (Decision 156
-# managed-policy remedy). The role is referenced by its literal name because this root does not
-# declare PlatformAdmin (PLAN-platform-iam-bootstrap-adopt moves it here later).
+# managed-policy remedy). The attachment references the adopted aws_iam_role.platform_admin
+# resource (PLAN-platform-iam-bootstrap-adopt) -- this root now declares PlatformAdmin.
 #
 # Decision 202 clause 2: PlatformAdmin -- and only PlatformAdmin -- holds exactly six
 # trail-management verbs on the ONE platform-security trail. cloudtrail:StopLogging,
@@ -48,7 +48,7 @@ locals {
         Resource = "*"
       },
       {
-        # Mirrors terraform/personal/platform_admin_data_policies.tf CatalogDrBucketManage verb for
+        # Mirrors this root's platform_admin_datalake_policy_json CatalogDrBucketManage verb for
         # verb, plus PutBucketOwnershipControls (BucketOwnerEnforced). Get* entries are the
         # aws_s3_bucket refresh reads; without them every plan AccessDenies.
         Sid    = "PlatformSecurityTrailBucketManage"
@@ -203,6 +203,6 @@ resource "aws_iam_policy" "platform_security_admin" {
 }
 
 resource "aws_iam_role_policy_attachment" "platform_security_admin" {
-  role       = "PlatformAdmin"
+  role       = aws_iam_role.platform_admin.name
   policy_arn = aws_iam_policy.platform_security_admin.arn
 }

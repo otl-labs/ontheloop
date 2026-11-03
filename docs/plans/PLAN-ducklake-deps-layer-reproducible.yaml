@@ -1,0 +1,305 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: ducklake-deps-layer-reproducible
+intent: >-
+  Make the DuckLake deps Lambda layer byte-reproducible across build interpreters so the push-path byte-identity
+  assert (Decision 77) stops failing closed when the PR build and the merge rebuild land on GitHub runners with
+  different Python 3.12 patch versions, and make any future mismatch diagnosable from the failing log alone.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-ducklake-deps-layer-reproducible.yaml
+implementation_declared: true
+phase: >-
+  ci_rca (soft-warn category): forward fix for the Critical ci_rca rec-4189 and its build-side twin rec-4190. No
+  tier_item is claimed and no exit criterion is closed.
+scope:
+- file: scripts/build_lambda_packaging.py
+  action: Modify
+  purpose: >-
+    build_ducklake_deps_layer: after the pip-success check and before the existing __pycache__/tests prune, call a new
+    helper that removes pip's console-script wrappers. The helper reads every site-packages *.dist-info/RECORD; a row
+    whose path starts with one or more '..' parts followed by exactly bin/<name> names a wrapper pip installed into
+    its scripts directory (python-ulid's [console_scripts] ulid today). It deletes those files from
+    site-packages/bin, removes bin/ only if it is then empty, and rewrites each touched RECORD with exactly those rows
+    dropped, filtering whole lines so every retained row keeps its bytes and line terminator. Prints one line naming
+    the pruned wrappers. Nothing else in the build changes: same pip flags and DUCKLAKE_DEPS, same prune, same
+    sorted fixed-timestamp fixed-mode zipping.
+- file: scripts/ci/ducklake_artifacts.py
+  action: Modify
+  purpose: >-
+    assert_and_upload's push-path byte mismatch keeps failing closed with DUCKLAKE_ZIP_MISMATCH and the same md5
+    comparison; its message additionally names the differing zip entries, computed from the two in-memory archives by
+    (CRC, uncompressed size): changed, only-local and only-remote names, sorted, at most ten listed plus a count, on
+    lines after the first, which keeps its exact DUCKLAKE_ZIP_MISMATCH {name}: local=... remote=... form (the ::error::
+    annotation shows that line; the diff lines print as plain log lines). The ci-rca fingerprint is unaffected: the
+    non-pytest log-tail signature keys on the step's final runner line (scripts/ci_rca/fingerprint.py:237). When
+    every entry matches it says the entry contents are identical and only the container bytes differ (compression or
+    zip metadata); when either side is not a readable zip it says the entry diff is unavailable. The missing-object
+    branch is unchanged.
+- file: tests/test_ducklake_artifacts.py
+  action: Modify
+  purpose: >-
+    test_deps_layer_rebuild_is_byte_identical (rec-4189's filed acceptance node): builds the layer twice through
+    build_ducklake_deps_layer with sys.executable patched to two hostedtoolcache paths (3.12.14, 3.12.15) and a fake
+    pip that, like pip --target, writes a package, a dist-info whose RECORD lists a ../../bin/<name> row hashing the
+    wrapper, and bin/<name> whose shebang is cmd[0]; asserts identical md5s, no zip entry under site-packages/bin/,
+    and neither interpreter path in any entry. The fake-pip helper lives here (this file has the SLOC headroom).
+    test_push_byte_mismatch_names_differing_entries (changed, only-local and only-remote names, and the cap with its
+    count over more than ten differing entries), test_push_byte_mismatch_reports_container_only_difference and
+    test_push_byte_mismatch_without_zip_bytes_says_diff_unavailable cover every new branch, keeping
+    scripts/ci/ducklake_artifacts.py at 100% line coverage (no coverage-baseline entry, Decision 159); the existing
+    mismatch tests keep passing unchanged.
+- file: tests/test_build_lambda_packaging.py
+  action: Modify
+  purpose: >-
+    TestBuildDucklakeDepsLayer::test_prunes_console_scripts_and_only_their_record_rows: with a fake pip writing two
+    dist-infos (one with a ../../bin/ulid row and CRLF line endings, one without bin rows), a package directory under
+    site-packages and an unrecorded file in bin/, the wrapper and only its row are gone, every other RECORD byte is
+    unchanged, the unrelated RECORD is untouched, and bin/ survives because it is not empty. At most 30 added SLOC
+    (434 at planning; stays under 500). build_lambda_packaging.py stays at or above its 90.4 coverage floor.
+- file: config/agent/verification_registry/entries/ducklake-deps-layer-reproducible.yaml
+  action: Create
+  purpose: >-
+    Graduated shard for VP step 1: check_id ducklake-deps-layer-reproducible, primitive_slot command_exit_zero running
+    both step-1 nodes, guard_target scripts/build_lambda_packaging.py.
+bundled_recommendations:
+- rec-4189
+- rec-4190
+followon_recs:
+- rec-4194
+infrastructure_dependencies: []
+acceptance_criteria:
+- >-
+  Two builds of ducklake-deps-layer.zip whose pip runs under interpreters at different paths are byte-identical, and the
+  layer carries no site-packages/bin/ entry and no build-interpreter path (hermetically, and with real pip).
+- >-
+  Compared with the PR reference uploaded for #1425, the new layer differs only by the removed bin/ulid wrapper and the
+  one removed python-ulid RECORD row; every other entry is byte-identical.
+- >-
+  A push-path byte mismatch still fails closed with DUCKLAKE_ZIP_MISMATCH before any upload, and its message names the
+  differing entries (or says only the container bytes differ).
+- >-
+  rec-4190 closes through the squash commit's Resolves trailer; rec-4189 closes through the manual closure route with
+  closure_artifact shard:ducklake-deps-layer-reproducible and the merge sha as fixed_by_sha.
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: The layer rebuild is byte-identical across interpreter paths, and the prune drops only the wrappers and their RECORD rows.
+  command: >-
+    bin/venv-python -m pytest tests/test_ducklake_artifacts.py::test_deps_layer_rebuild_is_byte_identical
+    tests/test_build_lambda_packaging.py::TestBuildDucklakeDepsLayer::test_prunes_console_scripts_and_only_their_record_rows
+    -q
+  expected: Exit 0, 2 passed. Red before, because the nodes do not exist.
+  expected_literals: []
+  fix_if: A differing md5 or a surviving bin/ entry -> fix the prune in build_lambda_packaging.py, never loosen the test.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: ducklake-deps-layer-reproducible
+- step: 2
+  phase: pre-deploy
+  action: A push-path mismatch names the differing entries and still fails closed before any upload.
+  command: >-
+    bin/venv-python -m pytest tests/test_ducklake_artifacts.py::test_push_byte_mismatch_names_differing_entries
+    tests/test_ducklake_artifacts.py::test_push_byte_mismatch_reports_container_only_difference
+    tests/test_ducklake_artifacts.py::test_push_byte_mismatch_without_zip_bytes_says_diff_unavailable
+    tests/test_ducklake_artifacts.py::test_push_byte_mismatch_fails_closed -q
+  expected: Exit 0, 4 passed. Red before, because three of the nodes do not exist.
+  expected_literals: []
+  fix_if: Any upload recorded before the raise, or a message without the entry names -> fix ducklake_artifacts.py.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    Diagnostic wording on a failure path, not a standing invariant; the nodes run in every --pre and full-tier pytest
+    pass, and the invariant worth a registry row (layer reproducibility) is step 1's shard.
+- step: 3
+  phase: pre-deploy
+  action: >-
+    Real pip, two interpreters at different paths (this repo's venv and a fresh venv): the two layers are byte-identical
+    and carry no bin/ entry. Before the fix this reproduces the incident locally (the md5s differ and bin/ulid is
+    present; step 4 shows the per-entry diff).
+  command: |-
+    S=$(mktemp -d) && /usr/bin/python3.12 -m venv "$S/interp-b" && PYTHONPATH=. bin/venv-python - "$S" "$(bin/venv-python -c 'import sys; print(sys.executable)')" "$S/interp-b/bin/python" <<'EOF'
+    import hashlib, sys, zipfile
+    from pathlib import Path
+    from unittest.mock import patch
+    import scripts.build_lambda_packaging as bm
+    root, zips = Path(sys.argv[1]), []
+    for i, interp in enumerate(sys.argv[2:]):
+        (root / f"out{i}").mkdir()
+        with patch.object(sys, "executable", interp), patch.object(bm, "OUTPUT_DIR", root / f"out{i}"):
+            zips.append(bm.build_ducklake_deps_layer(root / f"build{i}"))
+    md5 = [hashlib.md5(z.read_bytes()).hexdigest() for z in zips]
+    names = zipfile.ZipFile(zips[0]).namelist()
+    bins = [n for n in names if "/site-packages/bin/" in n]
+    print("md5", md5, "entries", len(names), "bin", bins)
+    sys.exit(0 if md5[0] == md5[1] and not bins else 1)
+    EOF
+  expected: Exit 0; both md5s equal; 754 entries; empty bin list.
+  fix_if: Differing md5 -> diff the two zips by entry (CRC, size) and fix the leak it names; STOP and report if the diff names anything other than pip-generated content.
+  hermetic: false
+  graduation: not-applicable
+- step: 4
+  phase: pre-deploy
+  action: No collateral change -- the new layer differs from #1425's PR reference only by the pruned wrapper and its RECORD row.
+  command: |-
+    S=$(mktemp -d) && aws s3 cp s3://agent-platform-data-lake/lambda-packages/76a42897656ea09b131115d3d3a25220e6b2ef9d/ducklake-deps-layer.zip "$S/ref.zip" --profile agent_platform --region eu-west-2 --only-show-errors && PYTHONPATH=. bin/venv-python - "$S" <<'EOF'
+    import sys, zipfile
+    from pathlib import Path
+    from unittest.mock import patch
+    import scripts.build_lambda_packaging as bm
+    root = Path(sys.argv[1])
+    (root / "out").mkdir()
+    with patch.object(bm, "OUTPUT_DIR", root / "out"):
+        new = zipfile.ZipFile(bm.build_ducklake_deps_layer(root / "build"))
+    ref = zipfile.ZipFile(root / "ref.zip")
+    a = {i.filename: (i.CRC, i.file_size, i.date_time, i.external_attr) for i in ref.infolist()}
+    b = {i.filename: (i.CRC, i.file_size, i.date_time, i.external_attr) for i in new.infolist()}
+    diff = sorted(n for n in a.keys() | b.keys() if a.get(n) != b.get(n))
+    print(diff)
+    sp = "python/lib/python3.12/site-packages/"
+    sys.exit(0 if diff == [sp + "bin/ulid", sp + "python_ulid-4.0.1.dist-info/RECORD"] and sp + "bin/ulid" not in b else 1)
+    EOF
+  expected: Exit 0; the printed diff is exactly the bin/ulid wrapper (absent from the new layer) and the python-ulid RECORD.
+  fix_if: Any other entry differs -> STOP and report; the prune touched more than the wrappers or the build inputs drifted.
+  hermetic: false
+  graduation: not-applicable
+- step: 5
+  phase: pre-deploy
+  action: Full validation before handoff.
+  command: bin/venv-python -m scripts.validate
+  expected: Exit 0.
+  fix_if: Any failure -> fix on the branch and rerun from the start.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: Invokes scripts.validate (recursion refusal); it is the handoff gate itself.
+- step: 6
+  phase: post-deploy
+  action: rec-4190 closed by the squash commit's Resolves trailer.
+  command: >-
+    bin/venv-python -c "from scripts.ops_data_portal import _fetch_rec_from_reader as f;r=f('rec-4190') or
+    {};print(r.get('status'));assert r.get('status')=='closed'"
+  expected: Exit 0 and closed printed.
+  fix_if: Still open -> read ci.yml's trailer-closure job output on the squash commit; a transport failure allows the manual route, an acceptance-verdict refusal does not (git-ops.yaml resolves_trailer).
+  hermetic: false
+- step: 7
+  phase: post-deploy
+  action: rec-4189 closed through the manual closure route with its closure artifact and fix sha.
+  command: >-
+    bin/venv-python -c "import json;from scripts.ops_data_portal import _fetch_rec_from_reader as f;r=f('rec-4189') or
+    {};c=json.loads(r.get('context_v2_json') or '{}');print(r.get('status'),c.get('closure_artifact'),c.get('fixed_by_sha'));assert
+    r.get('status')=='closed' and c.get('closure_artifact') and c.get('fixed_by_sha')"
+  expected: >-
+    Exit 0; closed, shard:ducklake-deps-layer-reproducible (or the step-1 pytest node on the fix_if fallback) and the
+    merge sha printed.
+  fix_if: >-
+    ClosureArtifactRequired -> the merge commit must add the shard file and closure_fix_sha must be that merge sha, in
+    the same update_rec call; if the shard kind is refused, use the pytest node of step 1 instead.
+  hermetic: false
+test_obligations:
+- source: scripts/build_lambda_packaging.py
+  behavior: The deps layer carries no pip console-script wrapper or build-interpreter path, so rebuilds under different interpreters are byte-identical; only the wrappers' RECORD rows change.
+  verification_step: 1
+  test_selector: tests/test_ducklake_artifacts.py::test_deps_layer_rebuild_is_byte_identical
+  red_green_expectation: red before (node absent; with the node written first it fails on differing md5s), green after
+- source: scripts/ci/ducklake_artifacts.py
+  behavior: A push-path byte mismatch fails closed before upload and names the differing zip entries.
+  verification_step: 2
+  test_selector: tests/test_ducklake_artifacts.py::test_push_byte_mismatch_names_differing_entries
+  red_green_expectation: red before (node absent; written first, it fails on the missing entry names), green after
+- source: config/agent/verification_registry/entries/ducklake-deps-layer-reproducible.yaml
+  behavior: The graduated guard runs VP step 1's nodes as a standing regression check.
+  verification_step: 5
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: >-
+    A new graduated shard is replayed differentially by validate_verification_registry -- it must fail on origin/main
+    and pass on HEAD, its own red-green proof.
+constraints:
+- >-
+  Decision 77: the push-path assert keeps its md5 byte-identity comparison and fails closed exactly as before; only its
+  message gains the entry diff. No switch to a manifest comparison in this plan.
+- >-
+  No change under config/lambda/ducklake/**, src/common/ducklake_*.py, src/lambdas/**, terraform/** or any workflow, so
+  no governed Lambda deploy (Decision 125/126) and no IAM change; DUCKLAKE_DEPS and the pip flags stay as they are.
+- Only the wrapper files and the RECORD rows naming them change in the layer; every other entry stays byte-identical (VP step 4).
+- Every scope file stays under 500 SLOC (Decision 128).
+- No rescue agents or workaround loops (Decision 55).
+context:
+- >-
+  Decision-scout: FLAGS_FOUND -- WARN 186 (spirit): the closure artifact covers only the console-script cause; the RCA's
+  general premerge reproducibility probe is deferred to follow-on rec-4194, stated here per Decision 186. CITE: 77, 154,
+  55, 72, 186, 201, 189, 132, 48, 79, 159, 126. Decisions triaged: 163 of 163. Roadmap items intersected: 1; CONFLICT:
+  0; RELATED: 1.
+- "gates: decision-scout=FLAGS_FOUND (WARN 186 resolved by explicit scope statement and rec-4194); plan-critique=REVISE r1 (F1 closure sequence, F2 rec-4194, F3-F6 wording fixed), PROCEED after 2 rounds; round 2 autonomous (optional N1-N5 applied)"
+- >-
+  fork: fix shape | chosen: prune the wrappers and their RECORD rows | alternatives: rewrite shebangs, pin the Python
+  patch, pip download and unpack | class: asked | precedent: Fable consult 2026-10-06 under the operator's approval line
+  of 2026-10-05 (mechanical forks may be approved on Fable evidence) | reversible: yes | persisted: this plan's scope
+- >-
+  fork: hash pins, --no-deps, pip pin, manifest compare, leak scan, real-build probe | chosen: defer to rec-4194 |
+  class: asked | precedent: same approval line; deferred for proportion and because hash pins touch the Decision 99
+  duckdb bump path | reversible: yes | persisted: rec-4194
+- >-
+  Evidence (2026-10-06, /mnt/project-files/rec-4189/): #1425's PR build (Python 3.12.15) and merge rebuild (3.12.14)
+  differ in exactly 2 of 755 entries, bin/ulid (shebang = build interpreter) and the python-ulid RECORD row hashing it;
+  the other six artifacts matched; a real-pip local repro gives the same 2. Fable rejected shebang rewriting (dead code),
+  a Python-patch pin (hides the leak) and a same-runner double rebuild (same interpreter, cannot catch this).
+- >-
+  rec-4189 is escape-classified (no-edge, no_premerge_gate_by_design): a Resolves trailer is refused
+  (ClosureArtifactRequired), so the squash commit names only rec-4190 and rec-4189 closes by ci-rca-lifecycle.yaml
+  closure_dependency.manual_route (precedent #1420, rec-4182).
+- >-
+  rec-4190's acceptance names a nonexistent tests/ci/ file (lint-refused today); repoint it before the merge: a path
+  correction plus a narrowing from an out_of_grammar whole-file run to a red-before ::node_id, a strengthening (Decision
+  181 not engaged), so the trailer's acceptance verdict can hold.
+- >-
+  Nothing deploys: aws_lambda_layer_version.ducklake_deps ignores source_code_hash and republishes only on a description
+  change (T2.42 c1), so the live layer keeps its dead bin/ulid until the next duckdb bump; the fix takes effect in the
+  next terraform/personal PR and push builds (Decision 126), whose apply-sandbox log printing DUCKLAKE_ZIP_IDEMPOTENT_OK
+  is the field confirmation (not a closure gate). A terraform/personal PR whose PR job predates this merge would
+  mismatch at its own merge; none open at planning.
+- Preflight's rec read is degraded (read_ops_current HTTP 502); named reads (rec_by_id, ci_rca_open) work.
+pre_implementation_checklist:
+- Branch confirmed not on main
+- docs/PROJECT_CONTEXT.md read
+- 'Only the plan-cited decision sections read: 77, 186, 201, 55, 128'
+- All files in scope located and readable; SLOC measured (packaging 316, artifacts 211, artifacts tests 286, packaging tests 434)
+- Acceptance criteria understood and verifiable
+execution_steps:
+- Confirm the checklist; STOP if any scope file is missing or over budget.
+- >-
+  Write the red tests first (steps 1 and 2 nodes) and confirm each fails on the unchanged tree: the rec-4189 node on
+  differing md5s, the prune node on the surviving wrapper, the message nodes on the missing entry names. Run step 3
+  once and confirm it exits 1 with differing md5s and bin/ulid listed.
+- 'scripts/build_lambda_packaging.py: the RECORD-driven wrapper prune, called from build_ducklake_deps_layer as scoped.'
+- 'scripts/ci/ducklake_artifacts.py: the entry diff in the DUCKLAKE_ZIP_MISMATCH message as scoped.'
+- Add the graduated registry shard.
+- >-
+  Repoint rec-4190's acceptance to bin/venv-python -m pytest
+  tests/test_ducklake_artifacts.py::test_deps_layer_rebuild_is_byte_identical -q through update_rec (call
+  get_rec_write_guidance first, Decision 66; fetch the rec immediately before updating).
+- >-
+  Execute VP steps 1-4; loop until pass; never weaken an assertion; on an unexplained step 3 or 4 diff STOP and RCA
+  (Decision 55).
+- >-
+  Code review via a fresh code-review subagent; fix every blocking finding and rerun VP steps 1-2, and steps 3-4 too if
+  scripts/build_lambda_packaging.py changed.
+- >-
+  CLOSURE -- separate facts, in order (a)-(e) (implement skill Commit Flows; docs/contracts/git-ops.yaml), each reported
+  on its own. (a) READINESS: bin/venv-python -m scripts.session.github_readiness (unknown is never PASS). (b) Set
+  implementation_declared true, commit, git fetch origin main and git rebase origin/main (STOP on conflict). (c) VP
+  step 5 on the committed, rebased, clean tree, then bin/venv-python -m scripts.checks.validation_result --verify-head.
+  (d) Write a scratchpad JSON holding exactly the scripts.session.postflight_evidence.CATEGORIES keys, then
+  bin/venv-python -m scripts.session.postflight --evidence that file. (e) Re-check that no open terraform/personal PR
+  predates this merge (name any in the PR body); push, open the PR, subscribe; on green CI on the head (standing merge
+  authorization: no deploy surface), squash-merge with an explicit commit_message whose trailer block reads Resolves:
+  rec-4190 (rec-4189 deliberately absent).
+- >-
+  Close rec-4189 after the merge: in scripts.verification_graduation.git_worktree(merge_sha) run
+  rec_trailer_acceptance census and evaluate on its acceptance; only on isolation True and verdict holds, one update_rec
+  call with status closed, resolution, closure_artifact shard:ducklake-deps-layer-reproducible, closure_fix_sha,
+  acceptance_verdict and closing_sha. If census routes the acceptance to junit and evaluate yields no record, close by
+  the verdict-free closure_dependency.manual_route instead (sanctioned for this escape-classified rec). Then run VP
+  steps 6 and 7.
+- 'Report: what was implemented, verification results'

@@ -46,6 +46,7 @@ from typing import Any
 
 import yaml
 
+from scripts.field_semantics_rule_projection import refuse_contract_overlap, validate_sidecar_rules
 from src.common.ducklake_partition_spec import (
     parse_partition_by,
     resolve_partition_block,
@@ -65,7 +66,17 @@ _GENERATED_HEADER = """\
 # Drift gate: bin/venv-python -m scripts.schema_to_field_semantics --check (non-zero on drift)
 """
 
-_CONTRACT_TABLE_IDS = ("ops_recommendations", "ops_decisions", "ops_entity_counters")
+_CONTRACT_TABLE_IDS = (
+    "ops_recommendations",
+    "ops_decisions",
+    "ops_entity_counters",
+    "telemetry_sessions",
+    "telemetry_observations",
+    "telemetry_transcripts",
+    "telemetry_agents",
+    "ops_tenants",
+    "ops_projects",
+)
 _DORMANT_TABLE_IDS = ("ops_priority_queue", "ops_execution_plans")
 # Append-only smoke tables (T1.14): no Class A contract, no current projection
 # (write_mode: append_only -> current_table absent); spliced verbatim from the sidecar.
@@ -146,8 +157,12 @@ def _enforce_reconcile_pending_subset(
     does not exist -- ScdTableSpec.current_table=None -- so nothing there could ever reconcile).
     """
     scope = ops_entry.get("reconcile_scope")
-    if scope not in ("ducklake", "exempt"):
-        raise ValueError(f"{table_id}: contract_table_ops.reconcile_scope must be 'ducklake' or 'exempt', got {scope!r}")
+    if scope not in ("ducklake", "exempt", "telemetry_catalog"):
+        raise ValueError(f"{table_id}: reconcile_scope must be 'ducklake', 'exempt' or 'telemetry_catalog', got {scope!r}")
+    if scope == "telemetry_catalog" and not (
+        isinstance(ops_entry.get("scope_reason"), str) and ops_entry["scope_reason"].strip()
+    ):
+        raise ValueError(f"{table_id}: a telemetry_catalog reconcile_scope requires a non-empty scope_reason")
 
     for block_name in ("pending_reconcile", "reconciled"):
         block = ops_entry.get(block_name)
@@ -212,9 +227,16 @@ def _project_contract_table(
         )
 
     columns: dict[str, Any] = {}
+    derivations: dict[str, Any] = {}
     for fname, fspec in resolved_fields.items():
         derivation = fspec.derivation if hasattr(fspec, "derivation") else fspec.get("derivation")
         role = _project_role(derivation)
+        if derivation and derivation.get("prefix_map"):
+            derivations[fname] = {
+                "inputs": list(derivation["inputs"]),
+                "prefix_map": dict(derivation["prefix_map"]),
+                "default": derivation["default"],
+            }
         sql_type = _map_iceberg_type(
             fspec.iceberg_type if hasattr(fspec, "iceberg_type") else fspec.get("iceberg_type"),
             fname,
@@ -254,6 +276,11 @@ def _project_contract_table(
     current_table = f"{table_id}_current"
     if not partition_by:
         raise ValueError(f"{table_id}: governance.partition_by is missing -- required for {table_class} tables")
+    from scripts.field_semantics_rule_projection import project_row_rules  # noqa: PLC0415
+    from src.row_rules.rules import RowRules  # noqa: PLC0415
+
+    columns = project_row_rules(table_id, columns)
+    RowRules.from_projection(columns)  # a malformed projection fails the generator, not the Lambda
     history, current = resolve_partition_block(parse_partition_by(partition_by), "scd2")
     partition = {"history": history, "current": current}
     entry = {
@@ -261,14 +288,43 @@ def _project_contract_table(
         "merge_key": merge_key,
         "entity_id_prefix": ops_config.get("entity_id_prefix"),
         "id_keyspace": ops_config.get("id_keyspace"),
+        "id_scheme": ops_config.get("id_scheme"),
+        "write_boundary": ops_config.get("write_boundary"),
         "history_table": history_table,
         "current_table": current_table,
         "partition": partition,
         "columns": columns,
     }
+    if derivations:
+        entry["derivations"] = derivations
     if migration_columns:
         entry["migration_columns"] = migration_columns
     return entry
+
+
+def _telemetry_joins() -> list[dict[str, str]]:
+    """Every docs/contracts/_joins.yaml join between two telemetry_* tables, child side by the contract's cardinality.
+
+    Module-local on purpose: the deploy's reconcile-gate job runs this generator with pyyaml and pydantic only, so it cannot
+    import scripts.telemetry_verify (whose loader reads the same contract independently; a parity test pins the two).
+    """
+    joins = yaml.safe_load((_CONTRACTS_DIR / "_joins.yaml").read_text(encoding="utf-8"))["joins"]
+    out: list[dict[str, str]] = []
+    for join_id, spec in joins.items():
+        source, target = spec["from"].split(".", 1), spec["to"].split(".", 1)
+        if not (source[0].startswith("telemetry_") and target[0].startswith("telemetry_")):
+            continue
+        child, parent = (target, source) if spec["cardinality"] == "one_to_many" else (source, target)
+        out.append(
+            {
+                "join_id": join_id,
+                "child_table": child[0],
+                "child_column": child[1],
+                "parent_table": parent[0],
+                "parent_column": parent[1],
+            }
+        )
+    return sorted(out, key=lambda j: j["join_id"])
 
 
 def generate(*, include_prose: bool = False) -> dict[str, Any]:
@@ -323,11 +379,14 @@ def generate(*, include_prose: bool = False) -> dict[str, Any]:
         )
 
     dormant = sidecar.get("dormant_ops_tables", {})
+    smoke = sidecar.get("smoke_ops_tables", {})
+    refuse_contract_overlap((*_DORMANT_TABLE_IDS, *_SMOKE_TABLE_IDS), _CONTRACTS_DIR)
+    validate_sidecar_rules({t: dormant[t] for t in _DORMANT_TABLE_IDS if t in dormant})
+    validate_sidecar_rules({t: smoke[t] for t in _SMOKE_TABLE_IDS if t in smoke})
     for table_id in _DORMANT_TABLE_IDS:
         if table_id in dormant:
             ops_tables[table_id] = dormant[table_id]
 
-    smoke = sidecar.get("smoke_ops_tables", {})
     for table_id in _SMOKE_TABLE_IDS:
         if table_id in smoke:
             ops_tables[table_id] = smoke[table_id]
@@ -340,6 +399,7 @@ def generate(*, include_prose: bool = False) -> dict[str, Any]:
         _enforce_reconcile_pending_subset(table_id, ops_entry, declared_columns, write_mode)
 
     doc["ops_tables"] = ops_tables
+    doc["telemetry_joins"] = _telemetry_joins()
     validate_projection_partitions(doc)
     return doc
 

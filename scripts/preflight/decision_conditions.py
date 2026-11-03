@@ -27,8 +27,8 @@ a merge, and only on stanza WELL-FORMEDNESS.
 
 Predicate registry: a module-level dict. Decision 133's two repo_state conditions both ship
 ``predicate: null`` (manual/context; no predicate to register there). ``roadmap_items_complete``
-(Decision 194) is the first registered entry. ``register_predicate()`` remains the extension point
-for any future predicate.
+(Decision 194) is the first registered entry, ``ports_open_coupling_findings_exceed`` (Decision 212)
+the second. ``register_predicate()`` remains the extension point for any future predicate.
 """
 
 from __future__ import annotations
@@ -95,6 +95,22 @@ def roadmap_items_complete(items: list[str], roadmap_path: str | Path = "docs/RO
         by_id[item_id].status == "complete" and all(c.status == "met" for c in by_id[item_id].exit_criteria)
         for item_id in items
     )
+
+
+@register_predicate("ports_open_coupling_findings_exceed")
+def ports_open_coupling_findings_exceed(threshold: int, contract_path: str | Path = "docs/contracts/ports.yaml") -> bool:
+    """True iff docs/contracts/ports.yaml carries strictly more than `threshold` coupling_findings rows with status 'open'.
+
+    Raises (never returns False) when the contract is missing or coupling_findings is not a list, so
+    evaluate() reports the condition MALFORMED instead of a silent not-fired.
+    """
+    import yaml as _yaml  # function-local: AGENTS.md import-safety
+
+    data = _yaml.safe_load(Path(contract_path).read_text(encoding="utf-8"))
+    findings = data.get("coupling_findings") if isinstance(data, dict) else None
+    if not isinstance(findings, list):
+        raise ValueError(f"{contract_path}: coupling_findings is not a list")
+    return sum(1 for row in findings if isinstance(row, dict) and row.get("status") == "open") > threshold
 
 
 @dataclass

@@ -98,3 +98,63 @@ def test_writer_keyspace_tables_excludes_control_class_tables():
     tables = ch._writer_keyspace_tables()
     assert "ops_entity_counters" not in tables
     assert "ops_recommendations" in tables
+
+
+_COUNTERS = "SELECT counter_name, current_value"
+_PRESENT = "information_schema.tables"
+
+
+def test_control_health_expects_only_present_writer_keyspace_tables():
+    """Expected counter rows come from the catalog: pre_production dimension tables absent from it are
+    reported in absent_tables, never demanded and never silently dropped; a missing LIVE table still fails."""
+    production_shaped = FakeCon(
+        fetchall_map={_COUNTERS: [("ops_recommendations", 5000)], _PRESENT: [("ops_recommendations_history",)]},
+        fetchone_map={"coalesce(max(": (5000,), "ducklake_list_files": (10,)},
+    )
+    result = ch.control_health(production_shaped)
+    assert result["absent_tables"] == ["ops_projects", "ops_tenants"]
+    assert result["tables"]["ops_entity_counters"]["expected_row_count"] == 1
+
+    vanished_live_table = FakeCon(
+        fetchall_map={_COUNTERS: [], _PRESENT: []},
+        fetchone_map={"coalesce(max(": (0,), "ducklake_list_files": (0,)},
+    )
+    with pytest.raises(DuckLakeMaintenanceError, match="row count 0 != expected 1"):
+        ch.control_health(vanished_live_table)
+
+    dimension_present_without_counter = FakeCon(
+        fetchall_map={_COUNTERS: [("ops_recommendations", 5000)], _PRESENT: [("ops_tenants_history",)]},
+        fetchone_map={"coalesce(max(": (5000,), "ducklake_list_files": (10,)},
+    )
+    with pytest.raises(DuckLakeMaintenanceError, match="row count 1 != expected 2"):
+        ch.control_health(dimension_present_without_counter)
+
+
+def test_control_health_ulid_floor():
+    """A ulid-scheme counter must be at or above the owning current table's row count."""
+
+    def con(registered: int) -> FakeCon:
+        return FakeCon(
+            fetchall_map={
+                _COUNTERS: [("ops_recommendations", 5000), ("ops_tenants", 2)],
+                _PRESENT: [("ops_tenants_history",)],
+            },
+            fetchone_map={"ops_tenants_current": (registered,), "coalesce(max(": (5000,), "ducklake_list_files": (10,)},
+        )
+
+    assert ch.control_health(con(2))["ok"] is True
+    assert ch.control_health(con(1))["ok"] is True
+    with pytest.raises(DuckLakeMaintenanceError, match=r"ulid floor"):
+        ch.control_health(con(3))
+    null_count = FakeCon(
+        fetchall_map={_COUNTERS: [("ops_recommendations", 5000), ("ops_tenants", 0)], _PRESENT: [("ops_tenants_history",)]},
+        fetchone_map={"ops_tenants_current": (None,), "coalesce(max(": (5000,), "ducklake_list_files": (10,)},
+    )
+    assert ch.control_health(null_count)["ok"] is True
+
+
+def test_control_health_skips_event_entries():
+    """Event-class entries have no keyspace and no spec: they never reach resolve_table_spec."""
+    tables = ch._writer_keyspace_tables()
+    assert not [t for t in tables if t.startswith("telemetry_")]
+    assert {"ops_recommendations", "ops_tenants", "ops_projects"} <= set(tables)

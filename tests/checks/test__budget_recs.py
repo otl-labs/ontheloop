@@ -180,8 +180,8 @@ class TestBudgetBreachRecFiling:
 
     def test_breach_priority_survives_real_accepted_values_validator(self) -> None:
         """Anti-vacuous: the priority _file_budget_breach_rec passes must survive the REAL
-        ops.yaml accepted_values validator, not just a hardcoded set in this test."""
-        from scripts.ops_data_portal import _load_write_time_validators  # noqa: PLC0415
+        row-rule gate, not just a hardcoded set in this test."""
+        from scripts.ops_data_portal import _derive_computed_fields, gate_write  # noqa: PLC0415
 
         mock_portal = MagicMock()
         git_result = MagicMock(returncode=0, stdout="agent/test\n")
@@ -192,16 +192,14 @@ class TestBudgetBreachRecFiling:
         ):
             _file_budget_breach_rec(400.0, ["scripts/validate.py"], None)
 
-        priority = mock_portal.file_rec.call_args[0][0]["priority"]
-        priority_validators = [fn for col, fn in _load_write_time_validators("ops_recommendations") if col == "priority"]
-        assert priority_validators, "no priority validators loaded from ops.yaml"
-        for validator in priority_validators:
-            validator(priority, "priority")  # must not raise
+        fields = dict(mock_portal.file_rec.call_args[0][0])
+        _derive_computed_fields(fields)
+        gate_write("ops_recommendations", fields, insert=True)  # must not raise
 
     def test_bypass_priority_survives_real_accepted_values_validator(self) -> None:
         """Anti-vacuous: the priority _file_budget_bypass_rec passes must survive the REAL
-        ops.yaml accepted_values validator, not just a hardcoded set in this test."""
-        from scripts.ops_data_portal import _load_write_time_validators  # noqa: PLC0415
+        row-rule gate, not just a hardcoded set in this test."""
+        from scripts.ops_data_portal import _derive_computed_fields, gate_write  # noqa: PLC0415
 
         mock_portal = MagicMock()
         git_result = MagicMock(returncode=0, stdout="agent/test\n")
@@ -212,11 +210,9 @@ class TestBudgetBreachRecFiling:
         ):
             _file_budget_bypass_rec(60.0, ["scripts/validate.py"], "disk issue")
 
-        priority = mock_portal.file_rec.call_args[0][0]["priority"]
-        priority_validators = [fn for col, fn in _load_write_time_validators("ops_recommendations") if col == "priority"]
-        assert priority_validators, "no priority validators loaded from ops.yaml"
-        for validator in priority_validators:
-            validator(priority, "priority")  # must not raise
+        fields = dict(mock_portal.file_rec.call_args[0][0])
+        _derive_computed_fields(fields)
+        gate_write("ops_recommendations", fields, insert=True)  # must not raise
 
 
 class TestBudgetRecFilingCiGuard:

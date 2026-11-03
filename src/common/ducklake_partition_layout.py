@@ -27,7 +27,13 @@ from typing import Any
 from src.common import ducklake_control_tables as control_tables
 from src.common import ducklake_maintenance_scope as maintenance_scope
 from src.common.ducklake_partition_spec import normalize_partition_spec
-from src.common.ducklake_scd2_schema import CATALOG_ALIAS, DuckLakeRuntimeError, load_field_semantics, resolve_table_spec
+from src.common.ducklake_scd2_schema import (
+    CATALOG_ALIAS,
+    DuckLakeRuntimeError,
+    is_event_table,
+    load_field_semantics,
+    resolve_table_spec,
+)
 
 
 class PartitionLayoutError(DuckLakeRuntimeError):
@@ -72,6 +78,10 @@ def _declared_spec_text(classified: maintenance_scope.ClassifiedTable, semantics
     if classified.table_class == maintenance_scope.SMOKE_HARNESS_CLASS:
         smoke_spec = resolve_table_spec(None, semantics)
         return smoke_spec.partition_history if classified.side == "history" else smoke_spec.partition_current  # type: ignore[return-value]
+    if is_event_table(classified.table_id, semantics):
+        # An event entry has no ScdTableSpec (no merge key): its declared history spec is the projection's
+        # own partition block (the calendar-day triple), classified like any append_only history table.
+        return str(semantics["ops_tables"][classified.table_id]["partition"]["history"])
     table_spec = resolve_table_spec(classified.table_id, semantics)
     return table_spec.partition_history if classified.side == "history" else table_spec.partition_current  # type: ignore[return-value]
 

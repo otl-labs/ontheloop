@@ -123,19 +123,12 @@ def _check_budget_breach_summary(cache_rows: object = _common._READER_SENTINEL) 
     """Return {"count": N, "by_phase": {phase: N, ...}} for budget_breach recs filed in the last 7
     days, or None when there are none / the source is unavailable (VTS-20 summary half).
 
-    cache_rows (Decision 88 warm-cache serving): a supplied row list is served via
-    _derive_budget_breach_recent (zero reader call); a supplied None -> degrade to None. Omitted
-    (sentinel) -> reader path (best-effort), mirroring _check_budget_bypass_alert.
+    cache_rows are the preflight signal rows (budget_breach rows arrive in them); None (unavailable) or
+    omitted -> None, so unavailability is carried by recs_read_status, never a false alert.
     """
-    if cache_rows is not _common._READER_SENTINEL:
-        if cache_rows is None:
-            return None
-        rows = _derive_budget_breach_recent(cache_rows)  # type: ignore[arg-type]
-    else:
-        try:
-            rows = cast(DuckLakeReader, _common._make_reader()).named("budget_breach_recent")
-        except Exception:  # noqa: BLE001
-            return None
+    if cache_rows is _common._READER_SENTINEL or cache_rows is None:
+        return None
+    rows = _derive_budget_breach_recent(cache_rows)  # type: ignore[arg-type]
 
     if not rows:
         return None

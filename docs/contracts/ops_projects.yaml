@@ -1,0 +1,231 @@
+---
+# Class A data contract for ops_projects (DuckLake SCD2 dimension, pre-production).
+# Authored by PLAN-telemetry-table-registration (telemetry slice 2a-2 plan 1, rec-4024 carrier) under the
+# CD.25 ritual: the SCD2 project dimension Decision 200 forward-declares and project-id.yaml defers here.
+# Registered as status pre_production, write_boundary registration (see ops_tenants.yaml's header).
+contract:
+  id: ops_projects
+  class: A
+  contract_version: 1
+  status: ratified
+  ratified_at: "2026-10-05"
+  ratified_via: "PLAN-telemetry-table-registration merge to main (telemetry slice 2a-2 plan 1; Decision 200)"
+  description: >-
+    Class A schema contract for the ops_projects SCD2 dimension: one logical row per project (repository) of a
+    tenant, keyed by the opaque writer-minted project_id. The natural key (tenant_id, project_ref) resolves a
+    caller-sent project_ref to its permanent project_id; the binding is immutable. purpose classifies the project
+    as real, drill or synthetic from a reserved project_ref prefix, so readers derive drill/synthetic from this
+    attribute rather than from a column on the event tables (Decision 199 clause 1).
+  projects_to:
+    artifact: config/lambda/ducklake/field_semantics.yaml
+    table: ops_projects
+    generator: scripts/schema_to_field_semantics.py
+fields:
+  ulid:
+    type: str
+    iceberg_type: string
+    nullable: false
+    description: >-
+      Monotonic ULID minted once per write attempt by the writer, outside the OCC-retry loop. History
+      table logical PK; idempotency dedup key in MERGE-on-ULID append.
+    semantics: SCD2 envelope field; NOT caller-supplied.
+    populated_by: ducklake_runtime._derive_fields() -- minted once at op-start; NEVER caller-supplied.
+    dq_intent:
+      not_null: true
+    derivation:
+      formula: python-ulid monotonic generation; minted once at op-start by ducklake_runtime._derive_fields()
+      inputs: []
+      realized: true
+
+  project_id:
+    $ref: project-id.yaml#/contract/fields/project_id
+    dq_intent_local: {not_null: true}
+    governance_notes_local: >-
+      Merge key of this dimension. Minted by plan 3's registration verb (an opaque ULID), never caller-supplied:
+      it projects as role input only because the generic verbs refuse the table (the ops_recommendations.id
+      precedent for a writer-allocated key).
+
+  tenant_id:
+    $ref: tenant-id.yaml#/contract/fields/tenant_id
+    dq_intent_local: {not_null: true}
+    governance_notes_local: >-
+      The tenant this project belongs to; part of the natural key (tenant_id, project_ref).
+    joins: [tenant_id_join_ops_projects_to_tenants]
+
+  project_ref:
+    type: str
+    iceberg_type: string
+    nullable: false
+    description: >-
+      Opaque per-repository label the caller sends; resolved to project_id at the write boundary.
+    semantics: >-
+      Part of the natural key (tenant_id, project_ref); a registered resolution never re-binds (project-id.yaml). A ref beginning with a reserved prefix (see purpose) is never auto-registered.
+    populated_by: >-
+      Plan 3's registration verb, from the caller's project_ref.
+    dq_intent: {not_null: true}
+
+  registration:
+    type: str
+    iceberg_type: string
+    nullable: false
+    description: >-
+      How the project came to be registered.
+    semantics: >-
+      unregistered: auto-registered on first sight of an unknown project_ref (Decision 200 clause 1); registered: registered explicitly. Never reclassifies facts already written.
+    populated_by: >-
+      Plan 3's registration verb.
+    dq_intent: {not_null: true, accepted_values: {values: [unregistered, registered]}}
+
+  name:
+    type: str
+    iceberg_type: string
+    nullable: true
+    description: >-
+      Human label of the project.
+    semantics: >-
+      Mutable attribute; carries no identity.
+    populated_by: >-
+      Plan 3's registration verb (attribute update).
+    dq_intent: {}
+
+  remote:
+    type: str
+    iceberg_type: string
+    nullable: true
+    description: >-
+      Repository remote the project corresponds to.
+    semantics: >-
+      Mutable attribute; carries no identity.
+    populated_by: >-
+      Plan 3's registration verb (attribute update).
+    dq_intent: {}
+
+  canonical_project_id:
+    type: str
+    iceberg_type: string
+    nullable: true
+    description: >-
+      Optional remap to the canonical project this registration folds into.
+    semantics: >-
+      Read-side only (Decision 200 clause 3). Single-hop: the target must be a registered self-canonical row of the same tenant (declared coverage: DQ monitor, rec-4063 family, residual until slice 2b).
+    populated_by: >-
+      Plan 3's registration verb.
+    dq_intent: {}
+
+  status:
+    type: str
+    iceberg_type: string
+    nullable: false
+    description: >-
+      Lifecycle status of the project.
+    semantics: >-
+      active or archived; status never changes a project_id.
+    populated_by: >-
+      Plan 3's registration verb.
+    dq_intent: {not_null: true, accepted_values: {values: [active, archived]}}
+
+  purpose:
+    type: str
+    iceberg_type: string
+    nullable: false
+    description: >-
+      Whether the project is real work, a drill or synthetic traffic.
+    semantics: >-
+      Derived at write time from project_ref and immutable with the binding, so a project's history is never reclassified at read. The reserved prefixes live in the derivation block's prefix_map (the single source; project-id.yaml states the never-auto-registered rule and points here). Not caller-supplied: schema_gate refuses a caller value; the writer computes it after the gate.
+    populated_by: >-
+      Plan 3's registration verb, from project_ref through the derivation below.
+    dq_intent: {not_null: true, accepted_values: {values: [real, drill, synthetic]}}
+    derivation:
+      formula: >-
+        purpose = prefix_map[p] for the first reserved prefix p that project_ref starts with, else default; computed once at
+        registration and carried unchanged.
+      inputs: [project_ref]
+      realized: true
+      prefix_map: {"drill:": drill, "synthetic:": synthetic}
+      default: real
+
+  created_timestamp:
+    type: datetime
+    iceberg_type: timestamptz
+    nullable: false
+    description: UTC timestamp minted at first write; carried unchanged on every later SCD2 version.
+    semantics: SCD2 envelope field; NOT caller-supplied. Also the history partition column.
+    populated_by: ducklake_runtime._derive_fields() -- NOT caller-supplied.
+    dq_intent:
+      not_null: true
+    derivation:
+      formula: high-precision now() minted ONCE at op-start by ducklake_runtime._derive_fields(); carried unchanged on UPDATE
+      inputs: []
+      realized: true
+
+  last_updated_timestamp:
+    type: datetime
+    iceberg_type: timestamptz
+    nullable: false
+    description: UTC timestamp of the most recent write. SCD2 ordering key.
+    semantics: SCD2 envelope field; NOT caller-supplied. Stable across OCC retries of one write attempt.
+    populated_by: ducklake_runtime._derive_fields() -- NOT caller-supplied.
+    dq_intent:
+      not_null: true
+    derivation:
+      formula: high-precision now() minted ONCE at op-start by ducklake_runtime._derive_fields(); stable across OCC retries
+      inputs: []
+      realized: true
+
+governance:
+  table_class: SCD2
+  partition_by: "history=year(created_timestamp), month(created_timestamp), day(created_timestamp); current=bucket(8, tenant_id)"
+  dedup_view: ops_projects_current
+  write_path: >-
+    The register_project verb on the agent-platform-ducklake-telemetry-writer Lambda (Decision 213), in the telemetry
+    catalog only. The generic write_ops / update_ops / file_ops / create_ops_tables verbs on the shared ducklake_writer
+    REFUSE this table (write_boundary=registration); the generic read verbs refuse it too (reads arrive as named verbs
+    in slice 2b). The purpose prefix_map projects into field_semantics as ops_tables.ops_projects.derivations.purpose,
+    where the writer reads it; this contract's derivation block stays the single source.
+  id_allocator: >-
+    Writer-minted opaque ULID (id_scheme ulid, id_keyspace writer), minted once per request outside the retry loop and
+    bound inside the transaction that takes the lock-only counter-row UPDATE on ops_entity_counters (Decision 81 cl.3,
+    Decision 200). No entity_id_prefix: the id is not a serial.
+  merge_key: project_id
+
+governance_notes: >-
+  Pre-production (see ops_tenants.yaml). No drill column exists on the four event tables: readers derive
+  drill/synthetic from this table's purpose attribute (Decision 199 clause 1). Coverage per invariant
+  (Decision 181): (tenant_id, project_ref) never re-binds -- enforced by the registration verb built in plan 3 (rec-4024, closed; src/common/ducklake_telemetry_registration.py resolve_or_register_project: a hit returns the prior project_id, a miss mints one under the counter-row lock);
+  canonical remap is single-hop, to a registered self-canonical row of the same tenant -- DQ monitor in slice 2b
+  (rec-4063 family), residual until then; the reserved-namespace rule is stated in project-id.yaml and enforced by
+  plan 3's writer. Known residual (rec-4121): history MERGE-on-ULID does not reject a replay carrying different
+  content for the same ulid; applies to this dimension.
+
+audit_invariants:
+  - "The generic write and read verbs refuse ops_projects (write_boundary=registration) -- the same two tests as ops_tenants.yaml."
+  - "(tenant_id, project_ref) never re-binds to a different project_id -- enforced by the registration verb (src/common/ducklake_telemetry_registration.py resolve_or_register_project)."
+  - "purpose derives only from project_ref's reserved prefix via the derivation's prefix_map and is immutable with the binding; schema_gate refuses a caller-supplied value -- tests/test_ducklake_scd2_schema.py::test_order_columns_keeps_writer_derived_columns."
+amendment_log:
+  - date: "2026-10-16"
+    semantic_break: false
+    change_class: prose_improvement
+    summary: >-
+      rec-4368: the never-re-binds coverage moves from residual (owner rec-4024) to enforced, now that the registration verb is built (PLAN-telemetry-table-registration, plan 3). Prose only; no field, rule or schema change.
+  - date: "2026-10-12"
+    semantic_break: false
+    change_class: prose_improvement
+    summary: >-
+      PLAN-telemetry-registration-verbs (slice 2a-2 plan 3 part 1): governance.write_path names the register_project verb
+      on the telemetry writer function (Decision 213) and states that the purpose prefix_map projects into field_semantics
+      as ops_tables.ops_projects.derivations.purpose; governance.id_allocator states that the id is minted once per request
+      outside the retry loop and bound inside the locked transaction (Decision 81 cl.3). The derivation block is unchanged.
+    migration_story: >-
+      Prose only: no field type, nullability or description changes, and nothing reads write_path.
+  - date: "2026-10-15"
+    semantic_break: false
+    change_class: prose_improvement
+    summary: >-
+      PLAN-rule-declarations-and-writer-conformance (rec-4158, Decision 210): the dq_intent `enforced` key is retired
+      from every rule leg. not_null is declared by presence (`true`, or `{exclude_before: D}`); an optional column or a
+      loosest-baseline field carries no not_null leg; the other legs lose the key. A declared rule is an enforced rule.
+    migration_story: >-
+      Declarations re-spelled only. No rule is added, removed or re-dated: the declared rule set, read through
+      scripts.contract_rules, is identical before and after, and the generated field_semantics.yaml projection of
+      this contract is unchanged.
+previous_versions: []

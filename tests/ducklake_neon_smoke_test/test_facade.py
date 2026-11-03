@@ -68,6 +68,9 @@ def test_core_sigv4_invoke_interception_lambda_ec_gates_family(monkeypatch, caps
         return _Resp(200, {"write_denied": True})
 
     monkeypatch.setattr(core, "_sigv4_invoke", fake_invoke)
+    monkeypatch.setattr(lambda_ec_gates, "_telemetry_read_checks", lambda **kw: None)
+    monkeypatch.setattr(lambda_ec_gates, "dq_check_gate", lambda **kw: None)
+    monkeypatch.setattr(lambda_ec_gates, "retired_actions_gate", lambda **kw: None)
     smoke.lambda_reader()
     assert "READER OK rows=1 write_denied=true" in capsys.readouterr().out
 

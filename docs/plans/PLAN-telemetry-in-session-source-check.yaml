@@ -1,0 +1,982 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-in-session-source-check
+intent: >-
+  Telemetry slice 4's real-session leg (rec-4025): inside every captured Claude Code session, compare what the warehouse
+  stored for the session's tree with a fresh re-parse of its transcript at the capture cursor, and reconcile the
+  session's tokens per model against Claude Code's own cost-state ledger, in code, never by agent judgement (Benjamin,
+  2026-10-15). The check runs in the already-detached Stop runner right after a pass: on the first pass after a new
+  ledger record (a resume), on a session's 10th sent pass and every 50th after it, after its backoff when a check did
+  not complete, and on demand as a CLI. Findings are counts in the
+  tree's local diagnostics; each alarm class files or updates one rec under the telemetry_verify source through the
+  verification verbs plan's helper; declared residual classes are counted, never filed. It never changes a capture
+  pass's outcome and never blocks capture (Decision 210 cl.2: alarm, not gate).
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-telemetry-in-session-source-check.yaml
+implementation_declared: true
+phase: >-
+  rec-4025 carrier (telemetry slice 4, verification): the third of its four plans (golden harness, verification verbs,
+  in-session source check, verification monitor), approved by Benjamin's "write the plan" on 2026-10-17
+  (cmsg_012XgaFy8VaDQbxP5D8nC958MdLJawKLhVPEQqyXDX82iS) on the approach in
+  /mnt/project-files/telemetry-slice4/step6b-presentation.md, which carries his 2026-10-15 rulings
+  (cmsg_012XgaFy8VaDQbxP5D8nC9585DQ3zJCYVFZ3Y5QULniDZ3: the SessionEnd re-parse check moves into slice 4; tokens
+  reconcile against Claude Code's usage summary per model, compared in code). Related tier items, named in context
+  only: T3.20 and T2.36; this plan closes no criterion, and rec-4025 stays open as the slice's carrier.
+closes_criteria: []
+scope:
+- file: scripts/telemetry_capture/verify_due.py
+  action: Create
+  purpose: >-
+    The due rule, importing only the standard library and src.turn_capture.transcript (so it can never break a capture
+    pass's imports): verify_due(cursor, root_bytes, verify_state, *, event, final, outcome, now) per execution_steps[1];
+    producer_fingerprint(), computed once per process: the sha256 over the relative path and bytes of each of
+    src/turn_capture/*.py, src/telemetry/timestamps.py and src/telemetry/identity.py (the code that emits a tree's rows
+    and derives its keys) and over the bytes of the four ops_tables.telemetry_* blocks of
+    config/lambda/ducklake/field_semantics.yaml (the comparison's column roles; a stdlib line scan of the generated file,
+    each block running from its two-space key line to the next two-space or top-level key, skipping every
+    accepted_values list, which is registry-sourced and never a comparison input, so neither an unrelated ops-table
+    change nor a new rec source moves it), read by path from the checkout that holds src.turn_capture.transcript; and the constants
+    VERIFY_FIRST_SENT_PASS = 10, VERIFY_EVERY_SENT_PASSES = 50, MAX_CHECKS_PER_TREE_PER_DAY = 3, VERIFY_RETRY_S = 1800
+    (doubling to at most 21,600 after each check that did not complete) and VERIFY_GUARD_S = 1,500. Pure apart from
+    producer_fingerprint's file reads.
+- file: scripts/telemetry_capture/cursor_tree.py
+  action: Create
+  purpose: >-
+    CursorTree(tree, cursor) is a TranscriptTree view of the tree as the cursor consumed it: read(key) returns the
+    first cursor.lines_consumed[key] lines of that stream (absent key: no stream), agent_ids() only the streams the
+    cursor holds, and a sidecar reads as the cursor pinned it (pinned absent reads absent; pinned present returns the
+    current bytes, and a sha that no longer matches raises SidecarMutated, the skip token sidecar_mutated).
+    expected_rows(view, cursor, *, session_final=None) is the full emission set at the cursor: record_turn(view,
+    dataclasses.replace(cursor, parser_version=PARSER_VERSION + 1), project_ref=cursor.project_ref,
+    session_final=cursor.finalized when session_final is None), which takes record_turn's documented parser-bump path
+    (cursor.py: a mismatch resets everything but the four pins and the finalization cuts, so the prior set is empty and
+    every row of every cut is rebuilt); a reset cursor at the current version would return only the rows after the
+    cuts. call_refs(message_ids) maps message ids to model_call external_refs with src.turn_capture.refs.model_call_ref.
+    Imports the standard library and src.turn_capture only.
+- file: scripts/telemetry_capture/verify.py
+  action: Create
+  purpose: >-
+    The check. run_verify(transcript_path, session_id, *, trigger, scheduling_record, reader, portal, budget,
+    alarms=True) runs one check in the order of execution_steps[2], holding the tree's lock only to load the cursor,
+    to re-check that no pass ran while it worked and for its final writes; it records reader_calls, response_bytes,
+    elapsed_s and each class's denominator, hands alarm classes to scripts.telemetry_verify.alarms.raise_alarms and
+    writes its diagnostics record and the verify state under the lock. rows.read_tree reaches the reader through this
+    module's wrapper of named(), which counts session_tree_rows calls (413 retries included), raises the module's own
+    TreeCallCap before a call beyond MAX_TREE_PAGES, and records each page's total_rows, roots_in_tree and response
+    bytes, so a moving total is read from those records, never from read_tree's exception class. A reader call starts
+    only while at least 180 s of the budget remain. Every other exception is caught and becomes the token
+    verify_error:<ExceptionClass>; nothing is printed on the detached path, and all logging is disabled for the whole
+    check (logging.disable), because the reader client's and the writer transport's warnings can carry an ARN or a
+    Function URL host.
+- file: scripts/telemetry_capture/runner.py
+  action: Modify
+  purpose: >-
+    After a non-final pass whose outcome is sent or no_rows and whose cursor was persisted, still under the pass lock:
+    on a sent outcome, advance sent_passes and record verify_due.producer_fingerprint() (set producer_fingerprint when
+    absent; set the sticky producer_changed when it differs); add verify_due (verify_due.verify_due over the persisted
+    cursor and the root snapshot) to the pass record; when due, increment today's checks_by_day and set scheduled_at =
+    now and next_attempt_at = now + VERIFY_GUARD_S (the check's 600 s budget, one reader call's worst case of three
+    180 s attempts with backoff, and a margin), so later passes do not re-schedule while the check runs and every
+    scheduled check counts against the daily cap. The runner owns sent_passes, checks_by_day, producer_fingerprint,
+    producer_changed, scheduled_at and this scheduling next_attempt_at; the check owns the other fields (state.py
+    row). PassResult and
+    every pass outcome are otherwise unchanged; an exception in this step is recorded as verify_due_error and the
+    outcome stands. verify_due.py is the only new import.
+- file: scripts/telemetry_capture/__main__.py
+  action: Modify
+  purpose: >-
+    run: after run_pass returns a result whose record carries verify_due true, call verify.run_verify in the same
+    already-detached process (trigger detached; imported inside the guarded block, so an import failure changes
+    nothing), with its own Budget of VERIFY_BUDGET_S = 600; still silent and exit 0 on every path. New command verify
+    --tree [--session-id] [--no-alarms] [--assert-zero <class>] (trigger operator): prints one VERIFY line of counts
+    and fixed tokens (status=<completed or skip token> compare_skipped=<none, root_not_due, root_absent,
+    tree_too_large, tree_collision or producer_modified> rows_equal=<n> missing_in_store=<n> unexpected_in_store=<n>
+    column_mismatch=<n> key_mismatch=<n> duplicate_ref_rows=<n> race_duplicate_rows=<n> r7_boundary_divergence=<n>
+    other_generation_rows=<n> other_producer_rows=<n> root_checked=<n>
+    ledger_records=<n> stored_ledger_tested=<n> root_calls=<n> sync_spawns=<n> pinned_absent=<n> reader_calls=<n>
+    elapsed_s=<n> alarms=<classes or none>), never a row value. Exit 0 when the check completed with no alarm class; 1
+    when it completed with an alarm class, or with --assert-zero when that class is above zero; 2 when it did not
+    complete (any skip or error token). --assert-zero <class> exits 0 only after a completed check in which that class
+    is zero and its own denominator is positive: compare classes, rows_equal of at least 1 with
+    r7_boundary_divergence zero (a tree whose compare classes were declared away is never green); root_absent,
+    root_checked
+    of at least 1 (the expected root telemetry_sessions row exists and the root was looked up or read from the cache);
+    ledger classes, at least one reconciled cost-state record; stored-ledger classes, at least one tested model;
+    nonfinal_root_call, root_calls (root model calls); spawn_usage_mismatch, sync_spawns (sync spawns compared);
+    sidecar_pinned_absent_present, pinned_absent (sidecars the cursor pinned absent); verify_incomplete, the completed
+    check itself. A completed check with a zero denominator exits 2, so neither a check that did not run nor a leg
+    that had no input is ever green.
+- file: scripts/telemetry_capture/state.py
+  action: Modify
+  purpose: >-
+    CaptureState.verify_state() and save_verify_state(state_dict): one JSON file beside the cursor holding
+    sent_passes, checks_by_day (UTC day -> count), producer_fingerprint, producer_changed, scheduled_at and the
+    scheduling next_attempt_at, owned by the runner; and last_ledger_line (the root file line number of the newest
+    cost-state record a completed check covered) and held_ledger_line (the newest one it checked, a pending record
+    included), settled_at (the scheduled_at of the newest detached check that completed or
+    ended on a per-tree condition; a scheduled_at newer than it is a check that has not settled, busy and a dropped
+    final write included), root_session_id (the cached lookup), retry_s, incomplete_streak (consecutive non-benign
+    non-completed detached checks) and alarm_at (class -> epoch seconds of the last portal episode call), owned by the
+    check, which also sets next_attempt_at after a check that did not complete. An operator check (trigger operator,
+    with or without --no-alarms) writes only its diagnostics record, root_session_id and, when it filed, alarm_at;
+    never last_ledger_line, held_ledger_line, settled_at, retry_s, incomplete_streak or next_attempt_at, so an operator or acceptance
+    run never consumes a due detached check. merge_verify_state(current, updates, owner) applies only the owner's
+    fields to a freshly read state. A missing or malformed file reads as the empty state; written with the module's
+    atomic _write and only by a holder of the tree lock.
+- file: scripts/telemetry_verify/compare.py
+  action: Create
+  purpose: >-
+    compare_tree(expected_batches, stored_by_table, *, producer, parser_version, semantics=None) returns per-table
+    counts over rows keyed by (table, producer, external_ref), comparing only the given producer's rows (claude_code;
+    parser_version is scoped per producer): rows_equal; missing_in_store (alarm: an expected row with no stored row at
+    parser_version); unexpected_in_store (alarm: a stored row at parser_version the re-parse does not produce);
+    column_mismatch (alarm, counted per column name); key_mismatch (alarm: a stored derived key that differs from
+    src.telemetry.identity's derivation, execution_steps[3]); other_generation_rows (that producer's stored rows at
+    another parser_version) and other_producer_rows (any other producer's stored rows), both counted, never compared.
+    A key held by more than one stored row at parser_version (the writer's grain is producer, event_id and
+    parser_version) counts every row beyond the first: duplicate_ref_rows (alarm) when their event_ids differ, one
+    event stored under two identities; race_duplicate_rows (declared, rec-4063's grain monitor, the Decision 210 cl.2
+    concurrent-append race) when they share one event_id. The compared survivor is the row whose event_id equals the
+    expected derivation, else the one with the smallest event_id, so no count depends on read order. Pure; no I/O.
+- file: scripts/telemetry_verify/stored_ledger.py
+  action: Create
+  purpose: >-
+    The stored-row ledger leg (the producer fixes thread's silent-failure check 5, relayed 2026-10-17):
+    reconcile(records, stored_model_calls, transcript_classes) takes, per cost-state record, its cut index, its
+    modelUsage and, per model, the prefix's call refs split four ways by verify.py (this module never imports the
+    producer): selected (refs of the calls the ledger leg's own prefix walk counts, ledger.prefix_calls, that the
+    expected emission at the cursor holds), pending (refs the producer defers at the cursor but emits once the stream
+    closes: in a session_final expected emission and not the cursor's), inherited (calls on inherited fork lines,
+    src.turn_capture.transcript.inherited_lines, which the producer never stores) and unemitted (every other prefix
+    call: neither emission holds it); and transcript_classes, the ledger leg's class per (cut_index, model) from
+    ledger.reconcile_ledger over the same view. It sums the stored model_call rows of the selected refs at the
+    cursor's parser_version only, one row per ref (the compare's survivor; another generation under the same refs is
+    counted other_generation, never summed), per model as the prefix walk groups its calls (ledger.model_key:
+    requestedModel, else message.model), never by the stored requested_model, whose value is the compare's column
+    check. A model with a selected ref whose stored row the compare found missing or column-mismatched is
+    stored_ledger_not_compared (compare_defect), because the compare's alarm already names that cause. A model with an
+    inherited call is
+    stored_ledger_not_compared (inherited_prefix); with a pending call, stored_ledger_not_compared (pending_emission),
+    and a completed check holds that record (held_ledger_line, execution_steps[1]), so it is checked again by the
+    next sampled check or the next new cost-state record, never on every pass; with an unemitted call, the alarm stored_ledger_call_unemitted (the ledger counts a
+    call the producer never emits). Otherwise by its transcript class. ledger_exact and
+    ledger_output_residual_nonfinal compare exactly: stored_ledger_exact; stored_ledger_output_residual_final_false
+    (declared, rec-4354: output short and at least one selected row has usage_final false for that model); or the
+    alarm classes stored_ledger_input_class_mismatch, stored_ledger_output_residual_unexplained (output short, every
+    selected row final) and stored_ledger_output_excess. A bounded class (ledger_bounded_compaction,
+    ledger_bounded_background, ledger_bounded_auxiliary: a compaction call has no assistant record, so no stored row,
+    and a straddling background child is outside the prefix walk) compares as a bound: stored_ledger_bounded (declared)
+    when every class is at or below the ledger, else the alarm stored_ledger_bound_exceeded. ledger_auxiliary_only,
+    ledger_unavailable and every ledger alarm class are counted as stored_ledger_not_compared, because the ledger leg's
+    own alarm names that cause and one cause never files twice. A model with any untested selected row reads only
+    stored_ledger_untested, never a declared or alarm stored-ledger class. stored_ledger_untested counts selected rows
+    written before parser_version 4 or whose usage_final is null (a v4 row's requested_model is null whenever its owner record
+    carries no requestedModel, so it never marks a row untested); a model is tested only when
+    compared from rows none of which is untested, and is never reported exact or bounded from untested rows. A
+    cost-state record on an inherited fork line is counted as inherited and not reconciled. Pure; no I/O.
+- file: scripts/telemetry_verify/ledger.py
+  action: Modify
+  purpose: >-
+    prefix_calls(tree, cut_line) returns, per model key, the (stream key, file line number, message id) of every
+    response the cost-state prefix at cut_line (the position in the parsed stream, as Finding.cut_line) counts, from
+    the same walk as _prefix (one shared helper, so the two can never disagree), and file_line(tree, cut_line) maps a
+    parsed root position to its file line number (read_lines' RawLine.line), so the stored-row leg selects exactly the
+    calls the ledger leg summed, and every line the check stores or tests against inherited_lines is a file line
+    number. reconcile_ledger and its findings are unchanged.
+- file: scripts/telemetry_verify/__init__.py
+  action: Modify
+  purpose: Facade re-exports compare and stored_ledger's public surface.
+- file: docs/contracts/ports.yaml
+  action: Modify
+  purpose: >-
+    PC-01's description names scripts/telemetry_capture/verify.py as a further function_url client (the reader's named
+    verbs and, through scripts.rec_episode, the ops portal) beside transport.py, and the coupling that
+    scripts/telemetry_verify/compare.py takes its compared columns and roles from the repository's
+    config/lambda/ducklake/field_semantics.yaml, so it presumes the repository projection equals the deployed reader's
+    (the coupling PC-07 records for the portal; VP step 1's read_version equality is its build-time check); no port row
+    (Decision 212 cl.6). One amendment_log entry (field_add, semantic_break false).
+- file: tests/telemetry_capture/test_verify_due.py
+  action: Create
+  purpose: Mirror tests for verify_due.py; nodes in execution_steps[5].
+- file: tests/telemetry_capture/test_cursor_tree.py
+  action: Create
+  purpose: >-
+    Mirror tests for cursor_tree.py, duckdb-free: test_cursor_tree_cuts_each_stream_and_honours_sidecar_pins,
+    test_expected_rows_are_the_full_emission_set_after_finalization (a corpus tree finalized at half its root lines
+    then resumed: the expected set equals the union of the incremental record_turn emissions across those passes) and
+    test_call_refs_match_the_producer_model_call_refs (on the resume trap, resume_with_cost_state or its corpus
+    successor resume_segment_closes, the prefix calls of the cost-state
+    record, the open last turn's root calls included, map to model_call refs the session_final emission holds).
+- file: tests/telemetry_capture/test_verify.py
+  action: Create
+  purpose: Mirror tests for verify.py over fakes; nodes in execution_steps[5].
+- file: tests/telemetry_capture/test_runner.py
+  action: Modify
+  purpose: >-
+    test_verify_due_never_changes_the_pass_outcome, test_verify_due_is_recorded_only_after_a_persisted_non_final_pass,
+    test_a_verify_due_error_leaves_the_outcome and test_sent_passes_record_the_producer_fingerprint (set when absent,
+    producer_changed sticky once a sent pass's fingerprint differs) over the module's existing fake writer.
+- file: tests/telemetry_capture/test_main.py
+  action: Modify
+  purpose: >-
+    test_run_runs_verify_in_process_only_when_due, test_a_verify_import_failure_leaves_run_silent,
+    test_verify_command_prints_counts_only and test_verify_exit_contract (0, 1 and 2 as the scope row states;
+    --assert-zero is 2 on a skip and on a zero denominator, such as a ledger class in a session with no cost-state
+    record, a stored-ledger class with only untested rows, spawn_usage_mismatch with no sync spawn or a compare class
+    when compare_skipped is set, 0 for verify_incomplete after any completed check, and 1 on a nonzero class) over the
+    module's existing fakes.
+- file: tests/telemetry_capture/test_state.py
+  action: Modify
+  purpose: test_verify_state_round_trips_and_a_malformed_file_reads_empty.
+- file: tests/telemetry_verify/test_compare.py
+  action: Create
+  purpose: Mirror tests for compare.py; nodes in execution_steps[3].
+- file: tests/telemetry_verify/test_stored_ledger.py
+  action: Create
+  purpose: >-
+    Mirror tests for stored_ledger.py over plain rows and hand-built cost-state records: test_stored_ledger_classes
+    (each class from a minimal input), test_rows_after_the_cut_are_never_summed, test_pre_v4_rows_count_as_untested
+    (a parser_version 3 row is untested and its model reads only stored_ledger_untested; a v4 row with a null
+    requested_model and a set usage_final, claude-sub-1's shape, is tested and reads stored_ledger_exact),
+    test_an_inherited_record_is_not_reconciled, test_only_the_cursor_generation_is_summed (a tree holding the same
+    external_refs at parser_version 3 and 4), test_bounded_models_compare_as_bounds (with ledger_bounded_compaction for
+    the model, a stored input below the ledger reads stored_ledger_bounded, never stored_ledger_input_class_mismatch,
+    and a stored class above the ledger reads stored_ledger_bound_exceeded), test_a_ledger_alarm_is_not_compared_again
+    (a model whose transcript class is ledger_input_class_mismatch reads stored_ledger_not_compared),
+    test_inherited_pending_and_unemitted_calls_are_classified (an inherited call and a pending call each make the model
+    stored_ledger_not_compared with its reason; an unemitted call is stored_ledger_call_unemitted; a compare-defect ref
+    makes it stored_ledger_not_compared) and test_a_ref_held_twice_is_summed_once.
+- file: tests/telemetry_verify/test_ledger.py
+  action: Modify
+  purpose: >-
+    test_prefix_calls_are_the_counted_responses: per model, prefix_calls' message ids are exactly the responses whose
+    usage the cut's Finding sums, a nested child's and an open last turn's calls included.
+- file: tests/telemetry_verify/test_package_boundary.py
+  action: Modify
+  purpose: >-
+    The direct-import allow-list gains exactly src.telemetry.identity (compare.py's key derivation); the forbidden set
+    is unchanged.
+- file: tests/fixtures/telemetry_golden_chain.py
+  action: Modify
+  purpose: >-
+    A keyword (store_held_back_as_blob, default False so the golden harness's own nodes are unchanged) that stores each
+    transcript row the chain holds back above HELD_BACK_BYTES the way the writer's blob route stores it: content null,
+    content_uri set to a synthetic object key, content_sha256 and content_bytes as emitted, so a verify over the chain
+    sees every emitted row stored.
+- file: tests/telemetry/test_in_session_verify_chain.py
+  action: Create
+  purpose: >-
+    End-to-end over the golden chain (tests/fixtures/telemetry_golden_chain.py) with module-level duckdb =
+    pytest.importorskip("duckdb"): capture each tree, then run run_verify against an in-memory reader whose
+    named(verb, **params) executes the verb through src.common.ducklake_event_reads.execute on the chain's catalog.
+    Nodes in execution_steps[6], parametrized per tree.
+bundled_recommendations: []
+followon_recs:
+- rec-4025
+infrastructure_dependencies: []
+acceptance_criteria:
+- >-
+  For every producer golden tree and every verification tree, captured through record_turn and the append kernel at
+  every root line cut from the fork boundary to the end, at the final pass, and finalized at half its root lines then
+  resumed to the end, run_verify at each point whose expected set holds the root telemetry_sessions row reports
+  rows_equal equal to the stored row count at PARSER_VERSION and zero for every compare class (missing_in_store,
+  unexpected_in_store, column_mismatch, key_mismatch, duplicate_ref_rows), and at every other point completes with
+  compare_skipped=root_not_due and root_checked 0; the chain stores rows above the inline threshold as the blob route
+  does (store_held_back_as_blob), and the check runs with alarms off (the hand-off is VP steps 6 and 8's). At the final
+  pass every stored-ledger alarm class is zero, and the check's ledger and shape classes equal those
+  ledger.reconcile_ledger and shape.check_shape report on the raw tree, computed independently in the test, so a
+  corpus case that plants a ledger or shape alarm (the producer fixes corpus's
+  subagent_usage_final_and_spawn_correction carries a spawn_usage_mismatch at PARSER_VERSION 4) is reported as that
+  class and no other (VP step 7).
+- >-
+  Each planted store defect is reported as its class: a stored row deleted (missing_in_store), a compared column
+  altered (column_mismatch naming the column), an extra row at PARSER_VERSION (unexpected_in_store), a derived key
+  altered (key_mismatch); a row at another parser_version is counted in other_generation_rows and never compared (VP
+  steps 3 and 8).
+- >-
+  The stored-row ledger leg sums, per model as the prefix walk keys it, only the stored model_call rows of the calls
+  the ledger leg's own prefix walk counts at each cost-state record (an open last turn's calls included), one row per
+  ref, classifies each model into the stored_ledger classes, counts rows written before parser_version 4 or with a null
+  usage_final as untested, never
+  reports a model exact from untested rows, sums only the cursor's generation, compares a model the ledger leg bounds
+  (compaction, straddling background child, auxiliary) as a bound, never re-compares a model the ledger leg already
+  alarms on, reads a model with fork-inherited or still-deferred prefix calls as not compared and one with a call the
+  producer never emits as stored_ledger_call_unemitted, and skips inherited records (VP step 3).
+- >-
+  On the golden harness's resume trap (resume_with_cost_state, or its corpus successor resume_segment_closes if the
+  producer fixes build moved it) the check reports the trap's declared ledger classes and files nothing for them, with
+  no stored-ledger alarm: at PARSER_VERSION 3 every model reads stored_ledger_untested or stored_ledger_not_compared;
+  at PARSER_VERSION 4 or later, on the producer's own rows (no catalog edit), every model reads a declared
+  stored-ledger class or stored_ledger_not_compared and the sub-agent model claude-sub-1, whose records carry no
+  requestedModel, reads a tested class. The same tree with the cost-state record's inputTokens raised by 1 files a rec
+  whose classes include ledger_input_class_mismatch (VP step 8).
+- >-
+  A check is due on the first non-final pass after a new cost-state record, on the sent pass that advances the
+  counter to VERIFY_FIRST_SENT_PASS or a later multiple of VERIFY_EVERY_SENT_PASSES, and after its backoff when a
+  detached check did not complete, at most
+  MAX_CHECKS_PER_TREE_PER_DAY a day counted when scheduled, never before
+  next_attempt_at, never on a final, halted, stopped, busy or deferred pass; it never changes the pass outcome; a
+  check that raises is recorded as verify_error:<class>, backs off, and the next pass captures normally (VP steps 4
+  and 5).
+- >-
+  The check holds the tree lock only for local work and skips with tree_moved when a pass ran while it read or a
+  page's total_rows differs from page 1's; it runs the transcript ledger and shape legs but neither the compare nor the
+  stored-ledger leg when no root row is expected yet (root_not_due, benign), the root is absent though its row is
+  expected (root_absent, an alarm), the tree is above MAX_TREE_PAGES pages or calls
+  (tree_too_large), roots_in_tree is above 1 (tree_collision) or the session's producer fingerprint changed
+  (producer_modified); it merges only its own verify-state fields into a freshly read state under the lock, an operator
+  check never writes the scheduling fields, and the non-completed detached check that brings incomplete_streak to
+  VERIFY_INCOMPLETE_STREAK files one verify_incomplete alarm on that skip or failure path (VP steps 4 and 5).
+- >-
+  Alarm classes reach the shared helper with the tree's root session ref as scope and the verify state's rate map, so
+  each files or updates one rec under source telemetry_verify, never closes, at most once per class per tree per
+  ALARM_MIN_INTERVAL_S; declared classes pass as declared and are never filed; diagnostics carry counts, class names
+  and refs only (VP step 6).
+- >-
+  The CLI exits 0, 1 or 2 by the exit contract, --assert-zero is never green for a check that did not complete or a
+  class whose own denominator (scope row __main__.py) is zero, and its acceptance commands pass the decidable acceptance lint (VP step 9). In the implementing session, the operator
+  command over its own tree prints one VERIFY line of counts with status=completed (VP step 10).
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: >-
+    Precondition. The golden harness and verification verbs builds have merged and are on this branch, and the branch
+    is on current main.
+  command: >-
+    git fetch origin main --quiet && git merge-base --is-ancestor origin/main HEAD && test -f
+    scripts/telemetry_verify/ledger.py && test -f scripts/telemetry_verify/shape.py && test -f
+    scripts/telemetry_verify/rows.py && test -f scripts/telemetry_verify/alarms.py && test -f
+    tests/fixtures/telemetry_golden_chain.py && grep -q "session_tree_rows" src/common/ducklake_event_read_verbs.py &&
+    grep -q "telemetry_root_sessions" src/common/ducklake_event_read_verbs.py && grep -q "canonical_id: telemetry_verify"
+    config/agent/data_quality/source_registry.yaml && grep -E "^PARSER_VERSION = [0-9]+$"
+    src/turn_capture/record_turn.py && AWS_PROFILE=agent_platform bin/venv-python -c "from
+    src.common.ducklake_reader_client import make_reader;from src.common import ducklake_event_reads as ev;
+    d=make_reader(profile='agent_platform')._invoke({'action':'describe'})['verbs'];w=ev.describe_all();
+    assert all(d[v]['read_version']==w[v]['read_version'] for v in ('session_tree_rows','telemetry_root_sessions'))"
+    && echo PRECONDITION_OK
+  expected: >-
+    The PARSER_VERSION line (3 or 4; the build runs on either, and VP steps 7 and 8 follow it: VP 7 through the raw
+    tree's own ledger and shape classes, VP 8 through its stored-ledger assertion),
+    then PRECONDITION_OK.
+  fix_if: >-
+    The ancestry test failing means main moved: rebase onto origin/main and re-run. A missing file or symbol means a
+    sibling build has not merged, and a read_version mismatch means the verbs deploy is not live yet: stop and wait. A
+    changed shape (a renamed helper, verb, column or private reader method) means escalate to the coordinator for a
+    plan amendment, never adapt the scope inline.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    A sequencing precondition on other plans' builds and deploy, not a behaviour of this change; as a standing guard it
+    would only re-assert that those files and stamps exist.
+- step: 2
+  phase: pre-deploy
+  action: The verify state file round-trips and the import boundary holds.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_capture/test_state.py::test_verify_state_round_trips_and_a_malformed_file_reads_empty
+    tests/telemetry_verify/test_package_boundary.py::test_oracle_has_no_direct_reader_sql_duckdb_streams_or_tests_import
+    -q
+  expected: Exit 0, both nodes pass. The first is red before because it is absent.
+  expected_literals: []
+  fix_if: A boundary failure means a module imports what constraints[2] forbids; remove the import, never widen the list.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-verify-state-and-boundary
+- step: 3
+  phase: pre-deploy
+  action: >-
+    The comparison classifies equal, missing, unexpected, column, key and other-generation rows, and the stored-row
+    ledger leg classifies each model.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_verify/test_compare.py::test_equal_trees_compare_equal
+    tests/telemetry_verify/test_compare.py::test_missing_unexpected_and_column_mismatches_are_classified
+    tests/telemetry_verify/test_compare.py::test_every_derived_key_is_checked_against_identity
+    tests/telemetry_verify/test_compare.py::test_other_generations_and_producers_are_counted_never_compared
+    tests/telemetry_verify/test_compare.py::test_column_rules_are_declared_and_minimal
+    tests/telemetry_verify/test_compare.py::test_a_key_held_by_two_stored_rows_is_classified
+    tests/telemetry_verify/test_stored_ledger.py::test_stored_ledger_classes
+    tests/telemetry_verify/test_stored_ledger.py::test_rows_after_the_cut_are_never_summed
+    tests/telemetry_verify/test_stored_ledger.py::test_pre_v4_rows_count_as_untested
+    tests/telemetry_verify/test_stored_ledger.py::test_an_inherited_record_is_not_reconciled
+    tests/telemetry_verify/test_stored_ledger.py::test_only_the_cursor_generation_is_summed
+    tests/telemetry_verify/test_stored_ledger.py::test_bounded_models_compare_as_bounds
+    tests/telemetry_verify/test_stored_ledger.py::test_a_ledger_alarm_is_not_compared_again
+    tests/telemetry_verify/test_stored_ledger.py::test_inherited_pending_and_unemitted_calls_are_classified
+    tests/telemetry_verify/test_stored_ledger.py::test_a_ref_held_twice_is_summed_once
+    tests/telemetry_verify/test_ledger.py::test_prefix_calls_are_the_counted_responses -q
+  expected: Exit 0, all sixteen nodes pass. Red before because the modules and nodes are absent.
+  expected_literals: []
+  fix_if: >-
+    A misclassification is a compare.py or stored_ledger.py defect; fix it there. Never widen the column rules to make
+    two rows agree: a real difference is a finding.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-verify-compare-classifies
+- step: 4
+  phase: pre-deploy
+  action: The due rule and the cursor view.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_capture/test_verify_due.py::test_due_on_the_first_pass_after_a_new_cost_state_record
+    tests/telemetry_capture/test_verify_due.py::test_due_only_on_the_sent_pass_that_advances_the_counter
+    tests/telemetry_capture/test_verify_due.py::test_never_due_on_final_halted_stopped_busy_or_deferred_passes
+    tests/telemetry_capture/test_verify_due.py::test_daily_cap_and_backoff
+    tests/telemetry_capture/test_verify_due.py::test_an_unsettled_check_is_retried_after_its_backoff
+    tests/telemetry_capture/test_verify_due.py::test_producer_fingerprint_covers_the_emitting_code
+    tests/telemetry_capture/test_verify_due.py::test_a_pending_record_does_not_retrigger_every_pass
+    tests/telemetry_capture/test_verify_due.py::test_imports_only_the_stdlib_and_transcript
+    tests/telemetry_capture/test_cursor_tree.py::test_cursor_tree_cuts_each_stream_and_honours_sidecar_pins
+    tests/telemetry_capture/test_cursor_tree.py::test_expected_rows_are_the_full_emission_set_after_finalization
+    tests/telemetry_capture/test_cursor_tree.py::test_call_refs_match_the_producer_model_call_refs -q
+  expected: Exit 0, all eleven nodes pass. Red before because the modules are absent.
+  expected_literals: []
+  fix_if: >-
+    A check due on a final pass breaks the SessionEnd path; a cursor view that reads past lines_consumed compares rows
+    the store cannot yet hold; expected rows missing a cut's rows means record_turn was called at the current version.
+    Fix verify_due.py or verify.py.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-verify-due-rule-and-cursor-view
+- step: 5
+  phase: pre-deploy
+  action: The check never changes a pass outcome, runs only when due, and keeps its lock discipline.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_capture/test_runner.py::test_verify_due_never_changes_the_pass_outcome
+    tests/telemetry_capture/test_runner.py::test_verify_due_is_recorded_only_after_a_persisted_non_final_pass
+    tests/telemetry_capture/test_runner.py::test_a_verify_due_error_leaves_the_outcome
+    tests/telemetry_capture/test_runner.py::test_sent_passes_record_the_producer_fingerprint
+    tests/telemetry_capture/test_main.py::test_run_runs_verify_in_process_only_when_due
+    tests/telemetry_capture/test_main.py::test_a_verify_import_failure_leaves_run_silent
+    tests/telemetry_capture/test_verify.py::test_a_failing_check_is_recorded_silent_and_backs_off
+    tests/telemetry_capture/test_verify.py::test_a_pass_during_the_read_is_tree_moved_never_a_finding
+    tests/telemetry_capture/test_verify.py::test_writes_happen_only_under_the_lock
+    tests/telemetry_capture/test_verify.py::test_a_newer_pass_record_skips_the_check
+    tests/telemetry_capture/test_verify.py::test_state_fields_are_merged_by_owner
+    tests/telemetry_capture/test_verify.py::test_moving_and_tail_mismatched_trees_skip
+    tests/telemetry_capture/test_verify.py::test_compare_skips_keep_the_transcript_legs
+    tests/telemetry_capture/test_verify.py::test_tree_reads_stop_at_the_call_cap
+    tests/telemetry_capture/test_verify.py::test_no_credentials_is_benign
+    tests/telemetry_capture/test_verify.py::test_an_operator_check_never_writes_scheduling_fields
+    tests/telemetry_capture/test_verify.py::test_a_persistent_non_completion_files_one_incomplete_alarm
+    tests/telemetry_capture/test_verify.py::test_malformed_lines_keep_one_index_space
+    tests/telemetry_capture/test_verify.py::test_an_r7_boundary_divergence_is_declared_never_filed -q
+  expected: Exit 0, all nineteen nodes pass. Red before because the nodes are absent.
+  expected_literals: []
+  fix_if: >-
+    An outcome that moves with verify_due is a gate where an alarm was required (Decision 210 cl.2); remove it. A write
+    outside the lock races a capture pass; move it under the lock.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-verify-never-gates-capture
+- step: 6
+  phase: pre-deploy
+  action: The check hands its alarm classes to the shared helper with its scope, rate state and declared classes.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_capture/test_verify.py::test_alarm_classes_reach_the_helper_with_scope_and_rate_state
+    tests/telemetry_capture/test_verify.py::test_declared_classes_are_passed_as_declared
+    tests/telemetry_capture/test_verify.py::test_acceptance_is_the_verify_command_for_the_class -q
+  expected: Exit 0, all three nodes pass. Red before because the module is absent.
+  expected_literals: []
+  fix_if: >-
+    A declared class reaching the portal, or an alarm class filed without the verify state's rate map, is a hand-off
+    defect in verify.py; the helper itself is the verification verbs plan's.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-verify-alarm-handoff
+- step: 7
+  phase: pre-deploy
+  action: Agreement on every golden tree at every cut, at the final pass and after finalize-then-resume.
+  command: >-
+    bin/venv-python -m pytest
+    tests/telemetry/test_in_session_verify_chain.py::test_verify_finds_no_compare_alarm_on_any_golden_tree_at_any_point
+    tests/telemetry/test_in_session_verify_chain.py::test_final_pass_ledger_and_shape_classes_match_the_raw_tree -q
+  expected: Exit 0, both nodes pass. Red before because the module is absent.
+  fix_if: >-
+    A compare alarm on a golden tree is a compare, cursor-view or producer defect: decide which from the producer's own
+    incremental-equals-full test (tests/turn_capture/test_record_turn.py::test_incremental_equals_full_at_every_line_cut);
+    a producer defect is filed through the portal and escalated to the coordinator, never fixed here. A final-pass
+    ledger or shape class that differs from the raw tree's is a cursor-view or wiring defect in this plan's code; a
+    class the raw tree itself reports is the corpus's, never suppressed.
+  hermetic: false
+  graduation: graduate
+  graduation_check_id: telemetry-verify-golden-agreement
+- step: 8
+  phase: pre-deploy
+  action: Mutation evidence and the ledger leg.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry/test_in_session_verify_chain.py::test_planted_store_defects_are_reported_by_class
+    tests/telemetry/test_in_session_verify_chain.py::test_ledger_classes_on_the_resume_trap_and_a_planted_input_mismatch
+    -q
+  expected: Exit 0, both nodes pass. Red before because the nodes are absent.
+  fix_if: A planted defect that survives means the check misses that class; fix the check, never drop the mutation.
+  hermetic: false
+  graduation: graduate
+  graduation_check_id: telemetry-verify-mutation-evidence
+- step: 9
+  phase: pre-deploy
+  action: The operator command prints counts only, follows the exit contract, and its acceptance commands lint as decidable.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_capture/test_main.py::test_verify_command_prints_counts_only
+    tests/telemetry_capture/test_main.py::test_verify_exit_contract
+    tests/telemetry_capture/test_verify.py::test_acceptance_is_the_verify_command_for_the_class -q
+  expected: Exit 0, all three nodes pass. Red before because the nodes are absent.
+  expected_literals: []
+  fix_if: >-
+    A row value or content fragment in the output is a Decision 101 defect. An acceptance the lint refuses with
+    require_decidable=True would land in UNPROBEABLE_SHAPE at closure; use the --assert-zero form.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-verify-cli-counts-only
+- step: 10
+  phase: pre-deploy
+  action: >-
+    The implementing session's own tree (its hooks run this branch's code): the operator command without alarms, then
+    the latest diagnostics records by trigger. The detached record is reported when present; its wiring is VP step 5's.
+  command: >-
+    T="$(ls -t ~/.claude/projects/*/*.jsonl | head -1)" && AWS_PROFILE=agent_platform bin/venv-python -m
+    scripts.telemetry_capture verify --tree "$T" --no-alarms; AWS_PROFILE=agent_platform bin/venv-python -c "import
+    sys;from pathlib import Path;from scripts.telemetry_capture.state import CaptureState,state_dir;t=Path(sys.argv[1]);
+    d=[r for r in CaptureState(state_dir(t,t.stem)).diagnostics() if r.get('event')=='verify'];
+    last={g:[r for r in d if r.get('trigger')==g][-1:] for g in ('operator','detached')};
+    print({g:{k:v for k,v in (r[0] if r else {}).items() if k in ('status','counts','reader_calls','elapsed_s')} for g,r in last.items()});
+    print('VERIFY_RECORD_OK' if last['operator'] else 'NO_VERIFY_RECORD')" "$T"
+  expected: >-
+    One VERIFY line with status=completed and rows_equal of at least 1, the latest operator and detached records'
+    counts, then VERIFY_RECORD_OK. Report both lines verbatim; any alarm class on this real tree is a finding to report
+    and file, not a reason to change the check.
+  fix_if: >-
+    NO_VERIFY_RECORD after the operator command means run_verify did not write its record under the lock: fix
+    verify.py. rows_equal 0 with stored rows present: report the compare_skipped token first (tree_too_large and
+    producer_modified also read 0); with compare_skipped none it means the root lookup or the cursor view is wrong. A
+    reader that
+    is unreachable from the session is an environment fact: report the status token, never fall back to anything else.
+  hermetic: false
+  graduation: not-applicable
+- step: 11
+  phase: pre-deploy
+  action: >-
+    Coverage. Run pytest-cov directly for the scripts/ modules the coverage checker's map does not reach (rec-2641):
+    the five new modules and the lines this plan adds to ledger.py, runner.py, __main__.py and state.py.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_verify/test_compare.py tests/telemetry_verify/test_stored_ledger.py
+    tests/telemetry_verify/test_ledger.py tests/telemetry_capture tests/telemetry/test_in_session_verify_chain.py -m
+    "not integration" --cov=scripts.telemetry_verify.compare --cov=scripts.telemetry_verify.stored_ledger
+    --cov=scripts.telemetry_verify.ledger
+    --cov=scripts.telemetry_capture.verify --cov=scripts.telemetry_capture.verify_due
+    --cov=scripts.telemetry_capture.cursor_tree --cov=scripts.telemetry_capture.runner
+    --cov=scripts.telemetry_capture.__main__ --cov=scripts.telemetry_capture.state --cov-report=term-missing
+    --cov-fail-under=0 -q
+  expected: >-
+    Exit 0; the term-missing report lists no missing line in compare.py, stored_ledger.py, verify.py, verify_due.py or
+    cursor_tree.py, and no missing line in ledger.py, runner.py, __main__.py or state.py among the lines this plan adds
+    (prefix_calls and file_line, the
+    verify_due hook-up and its verify_due_error path, the guarded run-path import, the verify command's exit contract,
+    and verify_state, save_verify_state, merge_verify_state and the malformed-file read).
+  fix_if: A coverage gap needs a direct assertion in the module's test, never a pragma.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    A whole-module coverage run needing pytest-cov, which the venv-less fast tier lacks; rec-2641 owns mapping
+    scripts/ subpackages into the standing coverage gate.
+- step: 12
+  phase: pre-deploy
+  action: ports.yaml names the new function_url caller.
+  command: grep -c "scripts/telemetry_capture/verify.py" docs/contracts/ports.yaml
+  expected: 1 or more.
+  expected_literals: []
+  fix_if: A count of 0 means PC-01's description was not extended.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    Registry prose presence; validate_contract_drift and the contract loader already gate the file's structure, and a
+    standing grep would pin wording rather than behaviour.
+- step: 13
+  phase: pre-deploy
+  action: Lint and run the full tier on the committed, clean tree before the push, as the handoff policy requires.
+  command: >-
+    bin/venv-python -m ruff check scripts/telemetry_capture scripts/telemetry_verify tests/telemetry_capture
+    tests/telemetry_verify tests/telemetry && bin/venv-python -m scripts.validate
+  expected: Exit 0 from both.
+  fix_if: Fix the reported finding at its root (Decision 55); never skip, disable or quarantine a test.
+  hermetic: false
+  graduation: not-applicable
+- step: 14
+  phase: post-deploy
+  action: The carrier note landed (read-back after the closure's portal update).
+  command: >-
+    AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import
+    make_reader,fetch_recs_by_ids;rs,missing=fetch_recs_by_ids(make_reader(profile='agent_platform'),['rec-4025']);
+    assert not missing and rs[0]['status']=='open' and 'PLAN-telemetry-in-session-source-check' in rs[0]['context'];
+    print('CARRIER_OK')"
+  expected: CARRIER_OK.
+  fix_if: A missing note means the closure's update_rec did not land; re-run it through the portal, never edit a cache.
+  hermetic: false
+  graduation: not-applicable
+test_obligations:
+- source: scripts/telemetry_capture/verify_due.py
+  behavior: Due after a new ledger record, on the advancing sent pass and on a retry; capped daily, backed off, never final.
+  verification_step: 4
+  test_selector: tests/telemetry_capture/test_verify_due.py::test_due_on_the_first_pass_after_a_new_cost_state_record
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_capture/cursor_tree.py
+  behavior: The cursor view reads exactly the consumed lines and the expected rows are the full emission set.
+  verification_step: 4
+  test_selector: tests/telemetry_capture/test_cursor_tree.py::test_expected_rows_are_the_full_emission_set_after_finalization
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_capture/verify.py
+  behavior: State fields merge by owner; moving and tail-mismatched trees skip with tokens.
+  verification_step: 5
+  test_selector: tests/telemetry_capture/test_verify.py::test_state_fields_are_merged_by_owner
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_capture/verify.py
+  behavior: The check agrees with the store on every golden tree at every point.
+  verification_step: 7
+  test_selector: tests/telemetry/test_in_session_verify_chain.py::test_verify_finds_no_compare_alarm_on_any_golden_tree_at_any_point
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_capture/runner.py
+  behavior: verify_due is recorded after a persisted non-final pass and never changes the outcome.
+  verification_step: 5
+  test_selector: tests/telemetry_capture/test_runner.py::test_verify_due_never_changes_the_pass_outcome
+  red_green_expectation: red before (node absent), green after
+- source: scripts/telemetry_capture/__main__.py
+  behavior: run runs the check in process only when due; the verify command follows the exit contract.
+  verification_step: 5
+  test_selector: tests/telemetry_capture/test_main.py::test_run_runs_verify_in_process_only_when_due
+  red_green_expectation: red before (node absent), green after
+- source: scripts/telemetry_capture/state.py
+  behavior: The verify state round-trips and a malformed file reads empty.
+  verification_step: 2
+  test_selector: tests/telemetry_capture/test_state.py::test_verify_state_round_trips_and_a_malformed_file_reads_empty
+  red_green_expectation: red before (node absent), green after
+- source: scripts/telemetry_verify/compare.py
+  behavior: Rows are classified equal, missing, unexpected, column-mismatched, key-mismatched or other-generation.
+  verification_step: 3
+  test_selector: tests/telemetry_verify/test_compare.py::test_missing_unexpected_and_column_mismatches_are_classified
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_verify/stored_ledger.py
+  behavior: Stored model_call rows at each ledger cut are reconciled per model as ledger.model_key keys it; untested rows read untested.
+  verification_step: 3
+  test_selector: tests/telemetry_verify/test_stored_ledger.py::test_stored_ledger_classes
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_verify/ledger.py
+  behavior: prefix_calls names exactly the responses the cost-state prefix sums.
+  verification_step: 3
+  test_selector: tests/telemetry_verify/test_ledger.py::test_prefix_calls_are_the_counted_responses
+  red_green_expectation: red before (node absent), green after
+- source: scripts/telemetry_verify/__init__.py
+  behavior: The facade re-exports compare and stored_ledger.
+  verification_step: 3
+  test_selector: tests/telemetry_verify/test_compare.py::test_equal_trees_compare_equal
+  waiver_reason: >-
+    Re-export lines only, no logic; the step 3 mirror tests import compare and stored_ledger through the facade and
+    fail if a name is missing.
+- source: docs/contracts/ports.yaml
+  behavior: PC-01 names the new function_url caller.
+  verification_step: 12
+  command: grep -c "scripts/telemetry_capture/verify.py" docs/contracts/ports.yaml
+  red_green_expectation: count 0 before, 1 or more after
+constraints:
+- >-
+  Never a gate (Decision 210 cl.2). The check runs after the pass returned; the pass's outcome, cursor and diagnostics
+  record are fixed before verify_due is read, and a failing check is a counted token with a backoff. The tree lock is
+  held only for local work (reading the verify state, loading the cursor, confirming the scheduling pass record is
+  still the latest) and for the final writes; the expected rows are built and the stored tree is paged with the lock
+  released, and the check then
+  re-acquires it to confirm that neither the cursor nor the latest pass record moved (else tree_moved, never a
+  finding). A Stop pass that finds the lock held returns busy as today and the next pass catches up. No check runs on
+  a final pass (SessionEnd runs in-process under its own budget).
+- >-
+  Counts only (Decision 101): diagnostics, CLI output and rec text carry counts, class names, column names, refs and
+  parser_version, never a row value or transcript content; all logging is disabled during a check. No
+  verification row is ever written to a telemetry table (the friction rules would count it as agent friction; Decision
+  95).
+- >-
+  Imports: scripts/telemetry_verify keeps the allow-list as the golden harness and verification verbs plans left it,
+  extended by exactly src.telemetry.identity (compare.py); never duckdb, src.common.ducklake_event_read_sql,
+  src.turn_capture.streams, src.turn_capture.observations or tests. scripts/telemetry_capture/cursor_tree.py imports
+  the standard library and src.turn_capture only; verify.py may import cursor_tree, src.common.ducklake_reader_client
+  (the reader) and scripts.telemetry_verify; verify_due.py only the standard library and src.turn_capture.transcript;
+  never
+  src.telemetry.append (.importlinter scripts-never-import-telemetry-append).
+- >-
+  Reads only through named verbs (Decision 84 I-3): telemetry_root_sessions once per tree (the session_id is cached),
+  then session_tree_rows pages; no telemetry-writer call; recs only through the portal (rec_episode's find_rec reads
+  through the portal's own reader path). The expected rows are the CURRENT producer's full emission set at the cursor
+  (record_turn's parser-bump path over the cursor view), so the comparison holds by the producer's
+  incremental-equals-full property (record_turn.py's R7 docstring and its line-cut test). The one R7 exception the
+  cut-retaining re-parse does not reproduce (BN-1's, added at parser_version 4: a root background child completed at
+  a resume boundary that keeps writing keeps its rows as first emitted, and a resume records no finalization cut) is
+  declared: when the expected emission's DG-1 counter notice_after_boundary is above zero (a counter the
+  parser_version 3 CaptureResult lacks reads as zero), the tree's compare still runs, its column_mismatch,
+  missing_in_store and unexpected_in_store counts sum into the declared class r7_boundary_divergence (owner: the
+  producer fixes plan's R7 exception) and are never filed, while duplicate_ref_rows and key_mismatch (which keeping a
+  first-emitted row cannot produce) stay filed and the per-class counts stay in the diagnostics record. Residuals the
+  coverage follow-on rec names: the rule covers the whole tree for the rest of its life, so it can hide a real store
+  defect of those three classes there; and before the notice reaches the cursor view, or when none ever arrives, the
+  divergence files as compare alarms, which errs toward filing. A tree whose cursor carries
+  another parser_version is skipped and counted, never compared; a tree whose project_ref carries a reserved prefix
+  (synthetic:, drill:; ops_projects.yaml prefix_map) is skipped as non_real_project, because telemetry_root_sessions
+  reads real-purpose projects only.
+- >-
+  Reader budget (Decision 215 cl.4 and its reader-invocations-doubled reversal condition, a fleet count of daily
+  reader invocations against a 7-day baseline): a check costs one session_tree_rows call per 2,000 stored rows (413
+  retries included, at most MAX_TREE_PAGES = 10 calls; a larger tree is compare_skipped tree_too_large, judged from
+  the expected rows before any call where it can be), plus one telemetry_root_sessions call per tree's lifetime and one
+  portal read per alarm class filed; at most MAX_CHECKS_PER_TREE_PER_DAY checks run per tree per day, so a captured
+  session adds at most 1 + 3 x 10 reader invocations a day. Measured on 2026-10-17 over a one-day CC-web coordinator
+  session (3,640 root lines, 22 sub-agents): 11,729 emitted rows, six calls a check, so its resume check and its
+  10th-pass sample cost 1 + 2 x 6 = 13 invocations that day against the six per session of cl.4; a short session is
+  one or two calls a check. If reader-invocations-doubled trips, MAX_CHECKS_PER_TREE_PER_DAY moves first (to 1, which
+  keeps the resume-triggered check), then VERIFY_EVERY_SENT_PASSES grows, then MAX_TREE_PAGES shrinks. The per-tree
+  caps are the bound; no fleet tripwire is claimed, because nothing outside the reader's own log_invocation lines
+  counts fleet invocations. Egress (Decision 88): each page re-runs the verb's ordered union, so each verify record
+  also carries response_bytes. Residuals, which the verification monitor plan's coverage follow-on rec names: a tree
+  above 20,000 rows (routine for multi-day, resume-heavy sessions) and a producer_modified session get the transcript
+  ledger and shape legs but no compare or stored-ledger leg; a session whose checks always end on a benign token that
+  never settles (tree_moved, superseded_by_pass, no_credentials) stays unverified with no signal beyond its local
+  diagnostics. Each verify record carries reader_calls and elapsed_s, and the closure report states the
+  implementing session's measured calls.
+- >-
+  Defaults decided with notice: VERIFY_FIRST_SENT_PASS = 10 and VERIFY_EVERY_SENT_PASSES = 50 (so a session that never
+  resumes is still checked from its 10th turn); MAX_CHECKS_PER_TREE_PER_DAY = 3; MAX_TREE_PAGES = 10;
+  VERIFY_INCOMPLETE_STREAK = 3 (one day of a session's capped checks, retries included, reaches it); VERIFY_RETRY_S =
+  1,800 doubling to 21,600; VERIFY_BUDGET_S = 600 (the check's own budget; each reader call keeps the client's 180 s
+  timeout and three attempts, so VERIFY_GUARD_S = 1,500 covers the budget plus one call's worst case); the helper's
+  ALARM_MIN_INTERVAL_S = 21,600 and priority High. Concurrent sessions can each file the first rec of a class before
+  either sees the other's; such a duplicate is closed as a duplicate on triage, never by this check. A fleet-wide
+  defect updates its class's one open rec at most four times a day per session (the rate limit is per tree);
+  accepted, because that is when the updates should land.
+- >-
+  Ledger and shape: the golden harness's ledger and shape modules run over the cursor view as they are, except the
+  sidecar_pinned_absent_present check, which runs over the real tree with the cursor's pins (the cursor view hides
+  exactly the sidecars it looks for). Their declared classes (ledger_output_residual_nonfinal, nonfinal_call and the
+  rest, each with its owner rec) are counted and never filed; their alarm classes are filed. The stored-row ledger leg
+  is this plan's, not the verification monitor's, because the cost-state ledger exists only in the transcript; it reads
+  the column additions plan's requested_model and usage_final when present and counts rows without them as untested.
+  A forked session's prefix holds fork-copied calls the producer never stores: the stored leg reads those models as
+  not compared, and a ledger alarm class on such a model is counted as ledger_fork_unmeasured (declared) and not
+  filed, because how Claude Code's cost-state counts a fork is unmeasured; the coverage follow-on rec names it.
+  Closing a ledger, stored-ledger or spawn class needs its denominator: the rec text says its acceptance needs a
+  session that has resumed (ledger and stored-ledger classes) or spawned a sync sub-agent (spawn_usage_mismatch), and
+  exit 2 elsewhere means not yet probeable, never green.
+- >-
+  Development safety: the runner hook-up (scope rows runner.py and __main__.py's run path) is the last code step,
+  after VP steps 2-9 pass, because the implementing session's own hooks run this branch's code; this plan changes no
+  fingerprinted file, so its implementing session's own tree compares (VP step 10). A session whose working tree
+  changes src/turn_capture, the timestamps or identity module or a telemetry table's field_semantics.yaml block after
+  its first fingerprinted pass gets compare_skipped producer_modified, so its own detached check never files compare or stored-ledger recs
+  about its own development; the producer fixes plan's build session, whose rows that plan hands slice 4 to exclude,
+  is one such session. Rows a tree stored before its first fingerprinted pass are presumed emitted by the code that
+  fingerprint names; the residual is a session that changed those files before this build reached it at an unchanged
+  PARSER_VERSION, which is transitional. Any rec the check files during implementation is listed in the report with
+  a disposition (kept when the finding is real; closed as superseded, naming the build commit that fixed the defect,
+  when a half-built check filed it).
+- >-
+  SLOC: every module under 500 (the cursor view and the expected-row construction live in cursor_tree.py from the
+  start, so verify.py holds only the orchestration). No change under src/, no Lambda-packaged path, no
+  Terraform, IAM, contract field or Decision text; data-model walk not owed (no table, field or write path).
+- >-
+  Coverage gate gap: scripts/test_coverage_checker.py's map_source_to_test returns None for scripts/ subpackages
+  (rec-2641), so VP step 11 runs pytest-cov directly.
+context:
+- >-
+  Approval: Benjamin's "write the plan" (2026-10-17, cmsg_012XgaFy8VaDQbxP5D8nC958MdLJawKLhVPEQqyXDX82iS) approved
+  the four-plan approach in /mnt/project-files/telemetry-slice4/step6b-presentation.md; his 2026-10-15 rulings
+  (cmsg_012XgaFy8VaDQbxP5D8nC9585DQ3zJCYVFZ3Y5QULniDZ3) put the SessionEnd re-parse check and the per-model ledger
+  comparison in slice 4, compared in code.
+- >-
+  Why not SessionEnd: no captured cloud session has a close row; SessionEnd fires but its final pass stops on
+  no_credentials (rec-4382), and the root of a resumed session is complete only at the resume. So the check runs in the
+  background Stop path: always after a new cost-state record (Claude Code writes one per model at each resume, the
+  exact ledger: planning-facts.md ledger measurements 1 and 2) and on a sparse sample of other passes. Sessions with no
+  ledger record report the ledger leg as ledger_unavailable or absent, never green. If rec-4382 makes finalization
+  routine, the full-emission construction already covers finalized cursors (VP step 7).
+- >-
+  Sibling plans (merged as plans; their builds create the code): PLAN-telemetry-golden-harness (#1539:
+  scripts/telemetry_verify dedupe, derive, ledger, shape, joins, the golden chain and the trap trees),
+  PLAN-telemetry-verification-verbs (session_tree_rows, telemetry_root_sessions, telemetry_orphan_counts,
+  scripts/telemetry_verify/rows.py and alarms.py, and the telemetry_verify source), PLAN-telemetry-column-additions and
+  PLAN-telemetry-capture-producer-fixes (#1542: requested_model, usage_final, parser_version 4),
+  PLAN-telemetry-verification-monitor (the daily job and completeness).
+- >-
+  Decisions cited: 210 cl.2 (alarm, not gate), 61 (findings as recs), 84 I-3 (named verbs only), 95 (no verification
+  rows in telemetry), 101 (counts only), 199 cl.2 (every row of a tree carries the root's pin), 212 cl.6 (ports.yaml
+  coupling prose, no port row), 215 cl.4 (reader invocations per session), 66 (the source registered before first use,
+  by the verification verbs plan).
+- "gates: decision-scout=FLAGS_FOUND (resolved by the slice design; /mnt/project-files/telemetry-slice4/decision-scout-report.md); plan-critique=REVISE round 1 (M1-M7, J1-J13 fixed), REVISE round 2 (M1-M5, J1-J6 fixed), REVISE round 3 (M1, J1-J8 fixed), REVISE round 4 (J1-J5 and N1-N3 fixed), REVISE round 5 (J1-J3, M1, M2 and N1-N5 fixed), REVISE round 6 (J1, M1, M2 and N1 fixed), REVISE round 7 (J1 fixed), PROCEED round 8 (note N1 applied; R7 boundary exception and T3.20 c9 added after, delta review PROCEED with F2-F7 folded in)"
+- "ci-rca: none open (ci_rca_open returned 0 rows on 2026-10-17)."
+- >-
+  Tier Item Freshness Gate: T3.20 (in_progress, open c3, c6, c7, c9): no open criterion silently holds; c3 is re-grounded
+  and closed by the verification monitor plan. T2.36: untouched.
+pre_implementation_checklist:
+- Branch confirmed not on main and rebased on origin/main; VP step 1 passes
+- docs/PROJECT_CONTEXT.md read
+- Decisions 210 (cl.2), 84 (I-3), 61 and 215 (cl.4 and its reversal conditions) read, only the cited clauses
+- scripts/telemetry_capture runner, state and __main__, src/turn_capture/record_turn.py and cursor.py, and the golden harness and verification verbs modules read
+- All files in scope located and readable
+- Acceptance criteria understood and verifiable
+execution_steps:
+- >-
+  Confirm VP step 1. Read scripts/telemetry_capture/runner.py, state.py, __main__.py and __init__.py,
+  src/turn_capture/record_turn.py (the emission-set docstring and the parser-bump path), cursor.py (reset keeps pins
+  and finalization cuts) and transcript.py (read_lines, inherited_lines), scripts/telemetry_verify (ledger, shape, rows,
+  alarms, and the declared-class vocabulary), src/telemetry/identity.py (KEY_PLANS, derive_entity_key,
+  derive_event_id), config/lambda/ducklake/field_semantics.yaml's column roles and scripts/rec_episode.py.
+- >-
+  verify_due.py and its tests (VP step 4), in this order: false unless event is Stop or StopFailure, final is false
+  and the outcome is sent or no_rows with the cursor persisted; false before next_attempt_at or when checks_by_day for
+  today has reached MAX_CHECKS_PER_TREE_PER_DAY; true when scheduled_at is newer than settled_at (a scheduled check
+  that has not settled); true when the persisted root holds a cost-state record (a root line whose type is cost-state,
+  read with transcript.read_lines, inside lines_consumed["root"], not inherited) at a file line number above both
+  last_ledger_line and held_ledger_line;
+  true when the outcome is sent and this pass advanced sent_passes to VERIFY_FIRST_SENT_PASS or to a positive multiple
+  of VERIFY_EVERY_SENT_PASSES; else false. When due, the runner increments today's checks_by_day and sets scheduled_at
+  = now and next_attempt_at = now + VERIFY_GUARD_S. Every ledger line the state holds is a file line number (verify.py
+  maps each Finding.cut_line through ledger.file_line before storing it or testing it against inherited_lines). A
+  completed detached check sets last_ledger_line to the file line of the newest cost-state record it covered, stopping
+  before the first record with a pending model, and held_ledger_line to the newest record it checked (so a held record
+  never re-triggers the cost-state rule; the next sampled check or the next new record re-reads every record above
+  last_ledger_line), sets settled_at to its
+  scheduled_at, clears next_attempt_at, and resets retry_s and incomplete_streak. A detached check that did not
+  complete sets next_attempt_at = now + retry_s and doubles retry_s up to 21,600; it settles (sets settled_at) only
+  when its token is a per-tree condition the next due trigger re-tests locally (no_cursor, cursor_tail_mismatch,
+  halted, parser_version_skip, non_real_project), so every other non-completion, busy and a dropped final write
+  included, is retried after its backoff; and a non-benign token increments incomplete_streak. Benign tokens: busy
+  (which writes nothing), tree_moved, superseded_by_pass, those five per-tree conditions and no_credentials (the
+  credential resolution transport.make_client performs, a boto3 Session under resolve_aws_profile() whose
+  get_credentials() is None or raises, run before the first reader call). Every other token (sidecar_mutated,
+  budget_exhausted and each verify_error:<class>) is non-benign. Then the state file and the runner hook-up's tests (VP
+  steps 2 and 5), writing the runner hook-up itself last (constraints[7]).
+- >-
+  CursorTree, expected_rows and run_verify (scope rows), in this order. (1) Acquire the tree lock (wait at most 30 s;
+  busy: return the token busy, writing nothing). Under it: read the verify state; load the cursor with
+  state.load_cursor(root bytes), the runner's own tail check (no_cursor, cursor_tail_mismatch, halted,
+  parser_version_skip, non_real_project are skip tokens); confirm the latest diagnostics record is the scheduling pass
+  record (same event, at and outcome; else superseded_by_pass); release. (2) Unlocked (the view reads only the lines
+  the loaded cursor consumed, and the sidecar pins are checked on read): build the expected rows, the model_call refs
+  of the session_final emission, and for each cost-state record in the view the prefix's calls (ledger.prefix_calls,
+  mapped with cursor_tree.call_refs) split into selected, pending, inherited and unemitted refs (scope row
+  stored_ledger.py); run the transcript legs, ledger.reconcile_ledger and shape.check_shape over the view (closes
+  taken from the expected rows' agent close outcomes; the sidecar check over the real tree with the cursor's pins), reclassifying a ledger alarm on a model with an inherited prefix
+  call as ledger_fork_unmeasured. Then compare_skipped, first match wins: producer_modified (the verify state's
+  producer_changed is set or a recorded producer_fingerprint differs from this process's; an absent fingerprint, before
+  the tree's first sent pass under this build, is never producer_modified); tree_too_large (more than
+  MAX_TREE_PAGES x 2,000 expected rows, judged before any reader call); then credentials (no_credentials) and the root
+  session_id (cached, else telemetry_root_sessions over the pin's UTC day, matched on entity_ref ==
+  cursor.root_session_ref); none found while the expected set holds no root telemetry_sessions row (the root's first
+  turn is still open, its children's rows already stored) is root_not_due with root_checked 0, benign; none found while
+  that row is expected is root_absent, the alarm class of that name, root_checked 1; in both the stored tree is not
+  read, so one cause never also reads as missing_in_store; then the stored tree through rows.read_tree and the
+  wrapper: page 1's total_rows above MAX_TREE_PAGES x 2,000 or a TreeCallCap is tree_too_large, roots_in_tree above 1
+  is tree_collision, and a page whose recorded total_rows differs from page 1's is the skip tree_moved. (3)
+  Re-acquire (30 s): the cursor and the latest diagnostics record are unchanged, else tree_moved; release. (4)
+  Unlocked: unless compare_skipped is set, compare_tree (producer claude_code); when the expected CaptureResult's
+  diagnostics.get("notice_after_boundary", 0) is above zero, its column_mismatch, missing_in_store and
+  unexpected_in_store counts sum into r7_boundary_divergence (constraints[3]); then stored_ledger.reconcile over the
+  stored model_call rows with the per-record ref sets, the ledger leg's classes and the per-ref compare findings (so
+  compare_defect keeps those models stored_ledger_not_compared); then raise_alarms over every alarm
+  class (a detached check, or an operator check without --no-alarms). (5) Re-acquire (30 s): append one diagnostics
+  record (event verify, trigger, status, compare_skipped, counts, denominators, reader_calls, response_bytes,
+  elapsed_s, alarm classes), re-read the verify state and merge only the check's fields (merge_verify_state, owner
+  check; an operator check writes only what the state.py row allows), then save; if the lock stays busy the record
+  and the check's fields are dropped (the alarms already landed; the check stays unsettled, so it is retried after
+  next_attempt_at, and the runner's checks_by_day already counted the attempt, so the daily cap holds). Every step
+  stops at the budget with the token budget_exhausted. A detached check that ends at any step with a non-benign token
+  finishes the same way: unlocked, when the streak it brings (the incomplete_streak read in step (1), plus one)
+  reaches VERIFY_INCOMPLETE_STREAK, raise_alarms with the class verify_incomplete (the helper's per-class rate limit
+  bounds repeats while the streak stays at or above it); then step (5)'s locked write of its record and fields. A
+  completed check is never verify_incomplete, whatever compare_skipped says.
+- >-
+  scripts/telemetry_verify/compare.py and tests/telemetry_verify/test_compare.py (VP step 3). Column rules, declared in
+  the module docstring and pinned by test_column_rules_are_declared_and_minimal, and nothing else: the compared value
+  columns are compared_columns(table) (src.common.ducklake_event_reads, the reader's own Decision 207 set) restricted to
+  role input in field_semantics.yaml; the derived columns are checked as keys instead, event_id with
+  derive_event_id(table, tenant_id, project_id, external_ref, event_timestamp) and every KEY_PLANS[table] column with
+  derive_entity_key over the EXPECTED row's ref field for it (session_ref, observation_ref, parent_session_ref,
+  parent_observation_ref or entity_ref, which are not stored columns) and the stored row's session_started_at, both
+  from the stored row's own tenant_id and project_id, which are not themselves compared (the writer resolves them); created_timestamp is never compared; a
+  column the producer row omits compares as NULL; timestamps compare as UTC instants at millisecond precision;
+  transcripts content compares by content_sha256 and content_bytes (the tree verb never returns content or
+  content_uri); JSON-typed columns compare as parsed values. The test asserts a one-millisecond difference, a one-byte
+  content difference and a non-null stored value against an omitted producer column are each reported. Only rows of
+  the given producer are compared; another producer's rows are counted in other_producer_rows.
+  test_a_key_held_by_two_stored_rows_is_classified: two stored rows at one ref with differing event_ids count one
+  duplicate_ref_rows, two with one event_id count one race_duplicate_rows, and the survivor rule makes every count
+  independent of row order. Then
+  scripts/telemetry_verify/stored_ledger.py and its tests (VP step 3).
+- >-
+  The alarm hand-off (VP step 6) to the verification verbs plan's raise_alarms: scope the root session ref, alarm_at the
+  verify state's map, file scripts/telemetry_capture/verify.py, and acceptance_for(class) the static command
+  AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_capture verify --tree "$(ls -t
+  ~/.claude/projects/*/*.jsonl | head -1)" --no-alarms --assert-zero <class> (exit 0 only after a completed check on a
+  fresh session's tree with that class at zero), which test_acceptance_is_the_verify_command_for_the_class lints with
+  lint_acceptance_command(require_decidable=True). The declared classes (ledger, shape and stored-ledger declared
+  entries, stored_ledger_bounded among them, plus race_duplicate_rows, ledger_fork_unmeasured and
+  r7_boundary_divergence) go in
+  raise_alarms' declared argument, which test_declared_classes_are_passed_as_declared pins class by class; the returned AlarmOutcome's counts go into the diagnostics record. Episodes close through normal triage once the cause is fixed; this check never closes one.
+- >-
+  tests/telemetry_capture/test_verify_due.py, test_cursor_tree.py and test_verify.py: the nodes VP steps 4, 5, 6 and 9
+  name, including test_expected_rows_are_the_full_emission_set_after_finalization (duckdb-free: a corpus tree finalized
+  at half its root lines then resumed; the expected set equals the union of the incremental record_turn emissions
+  across those passes), test_an_unsettled_check_is_retried_after_its_backoff (a sample-triggered check that skipped,
+  found the lock busy, or lost its final write is due again on the first pass past next_attempt_at; a per-tree skip
+  is not), test_producer_fingerprint_covers_the_emitting_code (editing a fingerprinted module or a telemetry table's
+  field_semantics block changes it; an unrelated file or a non-telemetry block does not), test_a_pass_during_the_read_is_tree_moved_never_a_finding, test_state_fields_are_merged_by_owner (a Stop
+  pass advancing sent_passes while the check reads keeps its count), test_moving_and_tail_mismatched_trees_skip,
+  test_an_r7_boundary_divergence_is_declared_never_filed (alarms on, over fakes: an expected emission whose
+  CaptureResult diagnostics hold notice_after_boundary 1 turns a planted column_mismatch into r7_boundary_divergence
+  with no portal call and --assert-zero column_mismatch exiting 2, while a planted duplicate_ref_rows still files;
+  the same plant with the key absent reads column_mismatch and files), test_compare_skips_keep_the_transcript_legs (root_not_due, root_absent, tree_too_large judged from the expected rows
+  with no reader call, tree_collision and producer_modified each complete with their compare_skipped token, the ledger and
+  shape counts present, no compare or stored-ledger count, root_absent filed as its own class and no missing_in_store),
+  test_tree_reads_stop_at_the_call_cap (a reader answering 413 until the page halves past the cap stops at
+  MAX_TREE_PAGES calls with tree_too_large), test_no_credentials_is_benign,
+  test_an_operator_check_never_writes_scheduling_fields (a --no-alarms check after a due detached check leaves
+  last_ledger_line, settled_at and next_attempt_at as they were), test_a_persistent_non_completion_files_one_incomplete_alarm
+  (three non-benign non-completions inside one UTC day, the third ending at step (1) or (2), file exactly one
+  verify_incomplete alarm; a benign token neither counts nor resets),
+  test_a_pending_record_does_not_retrigger_every_pass (after a completed check that held a pending record, the
+  next passes are not due until a sample or a new record), test_malformed_lines_keep_one_index_space (malformed root
+  lines before a fork boundary and before a cost-state record: the inherited split, last_ledger_line and verify_due
+  agree in file line numbers, and the pass after a completed check is not due), test_writes_happen_only_under_the_lock,
+  test_a_newer_pass_record_skips_the_check (a stopped pass that sent some requests after the scheduling pass) and
+  test_a_failing_check_is_recorded_silent_and_backs_off.
+- >-
+  tests/telemetry/test_in_session_verify_chain.py over the golden chain, parametrized per tree, each parameter in a
+  fresh open_catalog() (the chain registers one project, and most golden trees share one root ref and pin):
+  test_verify_finds_no_compare_alarm_on_any_golden_tree_at_any_point (every tree from case_names() and every
+  verification tree; at every root line count from fork_boundary to the end, at the final pass, and finalized at half
+  then resumed to the end, the chain built with store_held_back_as_blob: where the expected set holds the root
+  telemetry_sessions row, zero compare classes and rows_equal equal to the stored row count at PARSER_VERSION, and
+  elsewhere compare_skipped=root_not_due; run with alarms off, so no portal call at any point);
+  test_final_pass_ledger_and_shape_classes_match_the_raw_tree (at the final pass of every tree, the check's ledger and
+  shape class counts equal reconcile_ledger's and check_shape's over the raw tree, the raw-tree check_shape given the
+  same closes the check derived, and no stored-ledger alarm class is set); test_planted_store_defects_are_reported_by_class (after a full
+  capture, each of four direct catalog edits: delete one observation row, change one compared column of a sessions
+  row, insert one extra transcripts row at PARSER_VERSION, change one stored observation_id; each yields exactly its
+  class); test_ledger_classes_on_the_resume_trap_and_a_planted_input_mismatch (the resume trap, resume_with_cost_state
+  or its corpus successor resume_segment_closes, yields its declared classes, no stored-ledger alarm and no portal
+  call; the stored-ledger assertion follows the checkout's PARSER_VERSION, never a catalog edit, which would read as
+  column_mismatch: at 3 every model is stored_ledger_untested or stored_ledger_not_compared, at 4 or later every model
+  reads a declared stored-ledger class or stored_ledger_not_compared and claude-sub-1 a tested class; with the
+  cost-state record's inputTokens raised by 1, one portal file call whose classes include
+  ledger_input_class_mismatch). Each parameter stays well inside the full tier's 120 s timeout; report
+  the slowest.
+- Execute VP steps 1-12; loop until each passes.
+- Code review (the code-review skill in a fresh context); fix every blocking finding.
+- >-
+  Closure (implement skill Commit Flows; docs/contracts/git-ops.yaml), each outcome reported separately: the readiness
+  check; set implementation_declared true; rebase on origin/main and re-run VP step 1; VP step 13 on the committed,
+  clean tree, then scripts.checks.validation_result --verify-head; the postflight evidence file and
+  scripts.session.postflight --evidence; push; PR; CI green on the head. No Resolves trailer (rec-4025 stays open).
+  Merge on code review PROCEED and green CI under the standing rule (no deploy, IAM, spend, contract field or Decision
+  text). After the merge, update rec-4025's context through the portal (naming PLAN-telemetry-in-session-source-check,
+  the merge SHA and VP step 10's two lines), then VP step 14.
+- >-
+  Report: what was implemented, each VP step's output (step 10's lines verbatim), the slowest chain parameter, the
+  implementing session's measured reader_calls per check, every alarm the real tree raised and the rec it was filed
+  as, and the disposition of any rec filed during implementation.
+rollback: >-
+  Revert the squash commit: the runner stops recording verify_due and no check runs; the verify state file is ignored
+  by the reverted code. Recs already filed stay open for triage; no stored row is touched in either direction.

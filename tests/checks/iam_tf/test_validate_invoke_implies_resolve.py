@@ -366,3 +366,49 @@ class TestValidateInvokeImpliesResolve:
             validate_invoke_implies_resolve(failed)
         assert len(failed) == 1
         assert "cannot read any *.tf file" in failed[0]
+
+    def test_invoke_implies_resolve_covers_the_telemetry_writer(self, tmp_path: Path) -> None:
+        """A role invoking only the telemetry writer escaped the check while the markers named only the
+        shared writer and reader; without ssm:Get* it now fails, and with it the same role passes."""
+        statement = """
+              statement {
+                sid       = "TelemetryWriterInvokeCI"
+                effect    = "Allow"
+                actions   = ["lambda:InvokeFunction"]
+                resources = [aws_lambda_function.ducklake_telemetry_writer.arn]
+              }
+        """
+        ssm = """
+              statement {
+                sid       = "SSMParameterRead"
+                effect    = "Allow"
+                actions   = ["ssm:Get*"]
+                resources = ["arn:aws:ssm:eu-west-2:1234567890:parameter/agent-platform/*"]
+              }
+        """
+
+        def _tf(extra: str) -> str:
+            return f"""
+            data "aws_iam_policy_document" "github_ci_telemetry" {{
+              {statement}
+              {extra}
+            }}
+
+            resource "aws_iam_role_policy" "github_ci_telemetry" {{
+              name   = "agent-platform-github-ci-telemetry"
+              role   = aws_iam_role.github_ci_telemetry.id
+              policy = data.aws_iam_policy_document.github_ci_telemetry.json
+            }}
+            """
+
+        _write_oidc_tf(tmp_path, _tf(""))
+        failed: list[str] = []
+        with patch("scripts.checks._common.ROOT", tmp_path):
+            validate_invoke_implies_resolve(failed)
+        assert len(failed) == 1 and "github_ci_telemetry" in failed[0] and "lacks ssm:Get*" in failed[0]
+
+        _write_oidc_tf(tmp_path, _tf(ssm))
+        failed = []
+        with patch("scripts.checks._common.ROOT", tmp_path):
+            validate_invoke_implies_resolve(failed)
+        assert failed == []

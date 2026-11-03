@@ -91,6 +91,7 @@ env:
   # PR role gets read on this prefix only and must never gain tfstate read.
   CONVERGENCE_BUCKET: agent-platform-data-lake
   CONVERGENCE_KEY: convergence/personal/sandbox.json
+  MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -125,7 +126,6 @@ jobs:
       actions: write        # self-dispatch ci-rca on a re-run failure (workflow_run re-run gap)
 
     env:
-      AWS_DEFAULT_REGION: eu-west-2
       # The personal provider defaults profile = var.aws_profile (agent_platform_admin), which does
       # not exist on a GitHub-hosted runner. Blank it so the AWS provider uses the OIDC-exported
       # credential env vars (configure-aws-credentials) instead of a named profile.
@@ -138,11 +138,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: ./.github/actions/aws-region
+
       - name: Configure AWS credentials (OIDC -- apply role, main only)
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-apply
-          aws-region: eu-west-2
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-apply
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Read pinned Terraform version
         id: tfver
@@ -266,16 +268,24 @@ jobs:
 
       - name: Build DuckLake lambda packages (rebuild before plan/apply, rec-2512)
         id: build_ducklake
-        # rec-2512: lambda-packages/ is gitignored, so filemd5() in the terraform config silently
-        # resolves to null on a CI checkout and terraform never detects layer/function content
-        # changes. Rebuild the seven DuckLake artifacts here, before plan/apply, using the
+        # rec-2512: lambda-packages/ is gitignored and Terraform reads no local zip (the configuration
+        # addresses code by s3_key). Rebuild the seven DuckLake artifacts here, before plan/apply, using the
         # profile-less env-credential path (this GitHub-hosted OIDC runner has no named AWS
         # profile). On push (apply-the-saved-plan path, Decision 77 no-TOCTOU): the plan.bin about
         # to be applied was reviewed against the PR job's uploaded S3 objects, so assert the
         # freshly rebuilt zips are byte-identical to those objects BEFORE re-uploading -- a
         # mismatch means the applied layer content would skew from the reviewed plan and must fail
         # closed rather than silently apply divergent bytes. workflow_dispatch (fresh plan) skips
-        # the assert since there is no prior speculative-plan artifact to compare against.
+        # the assert since there is no prior trusted-plan artifact to compare against.
+        #
+        # rec-4372 (Decision 154 Update): that reference can go stale -- its window runs from the
+        # PR's last speculative plan to this merge, with no upper bound, and main can edit a
+        # packaged file in between. When every differing artifact's bytes trace to a tracked input
+        # that moved on main (scripts/ci/ducklake_artifacts.py assert_and_upload, keyed on
+        # GITHUB_SHA as the merge sha), this step applies the reviewed plan.bin unchanged on the
+        # merge-tree zips, uploaded to the fixed key and lambda-packages/<merge sha>/, and writes a
+        # superseded-by.json pointer beside the untouched PR-head zips. A pre-existing pointer at
+        # this sha refuses an identical-bytes re-upload (only the moved branch may create one).
         #
         # T2.42 c3 (DEP-03): the byte-assert reads the per-artifact-sha key
         # (lambda-packages/<sha>/<name>, overwrite-immune per PR-head-sha) instead of the fixed
@@ -310,7 +320,7 @@ jobs:
         if: success() && github.event_name == 'workflow_dispatch'
         working-directory: ${{ env.WORKDIR }}
         run: |
-          terraform plan -input=false -lock-timeout=120s -var-file=terraform.personal.tfvars -out=plan.bin
+          bash "$GITHUB_WORKSPACE/scripts/ci/neon_api_key.sh" run -- terraform plan -input=false -lock-timeout=120s -var-file=terraform.personal.tfvars -out=plan.bin
           terraform show -json plan.bin > plan.json
 
       - name: Deterministic apply guard (fail-closed)
@@ -333,9 +343,9 @@ jobs:
         # the reviewer used to be handed only the plan.json FILENAME with nothing on stdin, so it
         # burned its entire turn budget reading the raw terraform show -json dump before reaching
         # a verdict (--output-format text also discarded the turn trace -- zero diagnosability).
-        # Fix: feed a bounded scripts/terraform_apply_guard.py --digest on stdin (removes the
-        # ingestion cost), constrain --allowedTools to Read (a follow-up read is still possible if
-        # genuinely needed), classify the verdict from --output-format json via
+        # Fix: feed a bounded, names-only scripts/ci/terraform_plan_digest.py digest on stdin (no
+        # Terraform values reach the reviewer), run the reviewer with no tools from an empty
+        # directory, classify the verdict from --output-format json via
         # scripts/ci/review_verdict.py (not a grep over combined stdout/stderr), and keep a small
         # FIXED turn budget. A STARVED verdict (max-turns / no-verdict / API-exhausted) retries the
         # reviewer exactly ONCE at the SAME budget (never a larger one, T2.39 c2); a still-STARVED
@@ -372,7 +382,7 @@ jobs:
         # is preserved by design at this push-path site).
         if: success() && steps.guard.outputs.routed != 'true'
         working-directory: ${{ env.WORKDIR }}
-        run: python3 "$GITHUB_WORKSPACE/scripts/ci/stale_plan_signature.py" --wrap -- terraform apply -input=false -lock-timeout=120s plan.bin
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/neon_api_key.sh" run -- python3 "$GITHUB_WORKSPACE/scripts/ci/stale_plan_signature.py" --wrap -- terraform apply -input=false -lock-timeout=120s plan.bin
 
       - name: Emit fresh plan.bin sha256 (SANDBOX_FRESH_PLAN_ARTIFACT sha256 job-output EMIT)
         # Decision 183, mirrors reconcile.yml's RECONCILE_FRESH_PLAN_ARTIFACT EMIT verbatim: the
@@ -483,242 +493,68 @@ jobs:
         run: gh workflow run ci-rca.yml -f run_id=${{ github.run_id }}
 
   # ---------------------------------------------------------------------------
-  # Speculative-plan job: pull_request ONLY, same-repo gated (CD.35 Wave 2 / T2.21).
-  # Plans under the planner role's PR-sub statement (tfstate-read, tfplan-write; T2.49 / DEP-12
-  # merged plan+drift into agent-platform-github-ci-planner), captures the guard's PREDICTED
-  # verdict, persists plan.bin keyed by PR head SHA for apply-the-saved-plan at merge, and
-  # posts a redacted diff + verdict as a PR comment. Fork PRs are excluded via the job-level
-  # if: guard (fork OIDC cannot assume the planner role's non-reserved-session PR-sub statement;
-  # the trust + job gate together enforce the capability split from github_ci_pr which has NO
-  # tfstate read).
-  # Decision 83 / CD.20: the speculative-plan PR comment is advisory -- do NOT add it to
-  # required_status_checks (would wedge autonomous fix-merges once any record is red).
+  # DuckLake artifacts job: pull_request ONLY, same-repo gated (Decision 238 cutover, rec-4637).
+  # The PR-time terraform plan moved to terraform-plan-trusted.yml (main's pull_request_target
+  # workflow under agent-platform-github-ci-trusted-plan). This job only builds the PR's DuckLake
+  # artifacts under the planner role's PR-sub statement and uploads them to the fixed per-sha keys
+  # (lambda-packages/<PR head sha>/..., plus inputs.json, rec-4372) that the trusted plan's
+  # configuration addresses and that the merge-time apply and gated-apply re-verify or fetch
+  # (Decision 154 cl.1, rec-2512). It writes no plan.bin, posts no status or comment and runs no
+  # terraform. Fork PRs are excluded by the job-level if: (fork OIDC cannot assume the planner
+  # role's non-reserved-session PR-sub statement). Advisory (Decision 83 / CD.20): never add it to
+  # required_status_checks.
   # ---------------------------------------------------------------------------
-  speculative-plan:
+  ducklake-artifacts:
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       id-token: write       # OIDC for the planner role (PR-sub, non-reserved session)
       contents: read
-      pull-requests: write  # post the speculative-plan comment
-      statuses: write       # DEP-07: post the terraform-plan-digest commit status
-    env:
-      AWS_DEFAULT_REGION: eu-west-2
-      TF_VAR_aws_profile: ""
-      WORKDIR: terraform/personal
 
     steps:
       - uses: actions/checkout@v7
 
+      - uses: ./.github/actions/aws-region
+
       - name: Configure AWS credentials (OIDC -- planner role, PR-sub, non-reserved session)
-        # T2.49 / DEP-12 (Decision 144): repointed from the retired github_ci_plan role to the
-        # merged agent-platform-github-ci-planner (plan+drift, c2). role-session-name is
-        # set EXPLICITLY to a NON-reserved value -- it must NOT equal
+        # role-session-name is set EXPLICITLY to a NON-reserved value -- it must NOT equal
         # local.convergence_writer_session_name (terraform/personal/oidc.tf), which the planner's
-        # pr-sub trust statement StringNotEquals-enforces. A mismatch (someone accidentally
-        # reusing the reserved name here) fails loudly at assume-role time rather than silently
-        # widening this PR-context job's blast radius. Best-effort: before the gated apply creates
-        # the planner role (bootstrap window), the assume-role fails. continue-on-error keeps the
-        # job from failing; subsequent steps gate on steps.oidc_plan.outcome == 'success' and are
-        # skipped when creds are absent, so the job ends green-with-skipped rather than
-        # hard-failing during the bootstrap window.
+        # pr-sub trust statement StringNotEquals-enforces. Best-effort: before the gated apply creates
+        # the planner role (bootstrap window), the assume-role fails. continue-on-error keeps the job
+        # from failing; the build step below is skipped when creds are absent, so the job ends
+        # green-with-skipped rather than hard-failing during the bootstrap window.
         id: oidc_plan
         continue-on-error: true
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-planner
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-planner
           role-session-name: terraform-plan-pr
-          aws-region: eu-west-2
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Surface a failed assume (no plan.bin will be persisted)
-        # Decision 172 PR-2: before this step, a failed assume silently skipped every step below
-        # and the job still reported success -- so a pre-merge failure became a POST-merge red,
-        # when the merge-time apply fails closed on the missing plan.bin. Surfacing it here keeps
-        # the job green (this is a warning annotation, not exit 1: the speculative plan is advisory
-        # and must not wedge a PR) while making the skip visible instead of silent.
+      - name: Surface a failed assume (no DuckLake artifacts will be uploaded)
+        # Decision 172 PR-2: a failed assume must stay visible. A warning annotation, not exit 1: this
+        # job is advisory and must not wedge a PR.
         if: steps.oidc_plan.outcome != 'success'
         run: |
-          echo "::warning::OIDC_ASSUME_FAILED could not assume agent-platform-github-ci-planner (PR-sub). Every speculative-plan step below is SKIPPED, so NO plan.bin is persisted for this PR head sha -- the merge-time apply will fail closed on the missing saved plan. Recovery is the workflow_dispatch acknowledge-and-retry path."
-
-      - name: Read pinned Terraform version
-        id: tfver
-        run: echo "version=$(cat config/terraform-version)" >> "$GITHUB_OUTPUT"
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v4
-        with:
-          terraform_version: ${{ steps.tfver.outputs.version }}
-          terraform_wrapper: false
+          echo "::warning::OIDC_ASSUME_FAILED could not assume agent-platform-github-ci-planner (PR-sub). The DuckLake artifact build is SKIPPED, so no per-sha artifacts are uploaded for this PR head sha."
 
       - name: Setup Python 3.12
         uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
-      - name: Materialise tfvars from Secrets Manager
-        if: success() && steps.oidc_plan.outcome == 'success'
-        uses: ./.github/actions/materialise-tfvars
-
-      - name: Terraform init (S3 backend, sandbox)
-        if: success() && steps.oidc_plan.outcome == 'success'
-        uses: ./.github/actions/terraform-init-retry
-        with:
-          working-directory: ${{ env.WORKDIR }}
-
-      - name: Build DuckLake lambda packages (build + upload before plan, rec-2512)
+      - name: Build DuckLake lambda packages (build + upload before the merge-time apply, rec-2512)
         id: build_ducklake
-        # rec-2512: rebuild + upload the DuckLake artifacts BEFORE the speculative plan so the
-        # reviewed plan.bin captures a real filemd5 (lambda-packages/ is gitignored -- without this,
-        # filemd5() resolves to null and terraform never detects layer/function content changes) AND
-        # the referenced S3 content actually exists for the apply-sandbox job to re-verify at merge
-        # time. Profile-less env-credential path (this GitHub-hosted OIDC runner has no named AWS
-        # profile) under the planner role's PR-sub statement (T2.49 / DEP-12: grants
-        # s3:GetObject on the pgclient/extensions vendored bundles and s3:PutObject on
-        # lambda-packages/*, same as the retired github_ci_plan).
-        #
-        # T2.42 c3 (DEP-03): LAMBDA_ARTIFACT_SHA pins upload_to_s3's per-sha dual-write to the SAME
-        # PR-head-sha "Persist saved plan to S3" (below) keys tfplan/personal/<pr>/<sha>.bin by, so
-        # the apply-sandbox push-path byte-assert reads back exactly this job's uploaded bytes.
+        # LAMBDA_ARTIFACT_SHA pins upload_to_s3's per-sha dual-write to the PR head sha, the same sha the
+        # trusted plan job keys tfplan/personal/<pr>/<sha>.bin by (T2.42 c3 / DEP-03). rec-4372:
+        # upload-only also records each artifact's tracked git-blob inputs as
+        # lambda-packages/<PR head sha>/inputs.json.
         if: success() && steps.oidc_plan.outcome == 'success'
         uses: ./.github/actions/build-ducklake-artifacts
         with:
           mode: upload-only
           artifact-sha: ${{ github.event.pull_request.head.sha }}
-
-      - name: Terraform speculative plan (-lock=false, read-only preview)
-        id: spec_plan
-        # -lock=false: the planner role's PR-sub statement has no tfstate PutObject, so it cannot
-        # take the native S3 lock (T2.49 / DEP-12: same as the retired github_ci_plan). The
-        # merge-time apply under github_ci_apply still locks normally.
-        if: success() && steps.oidc_plan.outcome == 'success'
-        working-directory: ${{ env.WORKDIR }}
-        run: |
-          terraform plan -lock=false -input=false -var-file=terraform.personal.tfvars -out=plan.bin
-          terraform show -json plan.bin > plan.json
-
-      - name: Deterministic apply guard (predicted verdict)
-        id: pred_guard
-        # Captures the PREDICTED verdict from the guard. This is advisory -- the
-        # authoritative verdict is the guard re-run at merge time on the saved plan. Exit codes:
-        #   0 = PASS (non-IAM or in-budget IAM, T2.25), 2 = BLOCKED (out-of-budget IAM/trust/destroy),
-        #   1 = internal error.
-        if: success() && steps.oidc_plan.outcome == 'success'
-        working-directory: ${{ env.WORKDIR }}
-        run: |
-          set +e
-          python ../../scripts/terraform_apply_guard.py plan.json
-          PRED_RC=$?
-          set -e
-          if [ "$PRED_RC" -eq 0 ]; then
-            echo "verdict=PASS" >> "$GITHUB_OUTPUT"
-          elif [ "$PRED_RC" -eq 2 ]; then
-            echo "verdict=BLOCKED" >> "$GITHUB_OUTPUT"
-          else
-            echo "verdict=ERROR" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Persist saved plan to S3
-        # Content-addressed by (pr, sha) -- DEP-07 c3: s3://agent-platform-data-lake/tfplan/
-        # personal/<pr>/<sha>.bin. Stays inside the existing tfplan/personal/* PutObject grant (no
-        # IAM change, no apply). The apply job resolves this key at merge time via the merge
-        # commit's PR lookup (fetch-saved-plan composite action).
-        if: success() && steps.oidc_plan.outcome == 'success'
-        env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_NUM: ${{ github.event.pull_request.number }}
-        working-directory: ${{ env.WORKDIR }}
-        run: |
-          set -euo pipefail
-          aws s3 cp plan.bin "s3://agent-platform-data-lake/tfplan/personal/${PR_NUM}/${HEAD_SHA}.bin"
-          echo "Persisted saved plan to s3://agent-platform-data-lake/tfplan/personal/${PR_NUM}/${HEAD_SHA}.bin"
-
-      - name: Emit and post plan digest (DEP-07)
-        # T2.46 c2: sha256(plan.bin) is the reference every apply-time fetch site (fetch-saved-plan
-        # composite action) verifies the FETCHED plan.bin against before terraform show -json /
-        # apply -- FAILS CLOSED on mismatch or a missing reference. Posted as a commit status
-        # (advisory/machine-verified, NOT a required PR check -- Decision 83) keyed to the PR head
-        # sha, and echoed into the PR comment below for human visibility.
-        id: digest
-        if: success() && steps.oidc_plan.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        working-directory: ${{ env.WORKDIR }}
-        run: |
-          set -euo pipefail
-          DIGEST=$(python3 "${{ github.workspace }}/scripts/ci/plan_digest.py" emit plan.bin)
-          echo "sha256=${DIGEST}" >> "$GITHUB_OUTPUT"
-          gh api "repos/${REPO}/statuses/${HEAD_SHA}" \
-            --method POST \
-            --field state=success \
-            --field context=terraform-plan-digest \
-            --field description="sha256:${DIGEST}" \
-            --field target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          echo "Posted terraform-plan-digest commit status for ${HEAD_SHA}: sha256:${DIGEST}"
-
-      - name: Build and post PR comment (redacted plan + predicted verdict)
-        # Post the speculative-plan diff + guard verdict as a PR comment. Scrub account_id, both
-        # ExternalIds and owner_email (same rec-2285-fixed parsing used in the mask step;
-        # owner_email rides default_tags onto every resource). scripts/ci/redaction_check.py runs
-        # the 12-digit account shape check on the plan text and asserts no secret literal survives
-        # in the body (public-repo safety, Decision 101).
-        if: always() && steps.spec_plan.outcome != 'skipped'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR_NUM: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PREDICTED_VERDICT: ${{ steps.pred_guard.outputs.verdict || 'UNKNOWN' }}
-          PLAN_DIGEST: ${{ steps.digest.outputs.sha256 || 'unavailable' }}
-        working-directory: ${{ env.WORKDIR }}
-        run: |
-          set -euo pipefail
-          # Extract values to scrub using the rec-2285-fixed first-'='-split parsing.
-          ACCOUNT_ID_VAL=""
-          DEV_EXT_ID=""
-          ADM_EXT_ID=""
-          OWNER_EMAIL_VAL=""
-          while IFS= read -r line; do
-            key=${line%%=*}
-            value=${line#*=}
-            key=$(printf '%s' "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            value=$(printf '%s' "$value" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
-            case "$key" in
-              account_id)                  ACCOUNT_ID_VAL="$value" ;;
-              platform_dev_external_id)    DEV_EXT_ID="$value" ;;
-              platform_admin_external_id)  ADM_EXT_ID="$value" ;;
-              owner_email)                 OWNER_EMAIL_VAL="$value" ;;
-            esac
-          done < terraform.personal.tfvars
-
-          # Redact via scripts/ci/redaction_check.py (Python str.replace, not sed: ExternalId trust
-          # secrets may contain '/' or '&' which break sed s/// delimiters). The 12-digit
-          # account-shape check runs THERE, on the untrusted plan text only -- never over the whole
-          # comment, which embeds hex digests whose digit runs false-positive it (rec-3322).
-          PLAN_TEXT=$(terraform show -no-color plan.bin 2>/dev/null || echo "(plan output unavailable)")
-          PLAN_REDACTED=$(printf '%s' "$PLAN_TEXT" | _ACCT="$ACCOUNT_ID_VAL" _DEV="$DEV_EXT_ID" \
-            _ADM="$ADM_EXT_ID" _OWNER="$OWNER_EMAIL_VAL" python3 "$GITHUB_WORKSPACE/scripts/ci/redaction_check.py" redact)
-
-          # Build the PR comment using concatenation (YAML block-scalar constraint: continuation
-          # lines of a bare bash string drop to column 0, which the YAML scanner treats as an
-          # alias token and fails to parse; keep all lines at run: | block indentation).
-          _NL=$'\n'
-          COMMENT="### Terraform Speculative Plan (CD.35 Wave 2 / T2.21)${_NL}"
-          COMMENT+="${_NL}**Predicted guard verdict: ${PREDICTED_VERDICT}**${_NL}"
-          COMMENT+="PR head SHA: \`${HEAD_SHA}\` -- this saved plan will be applied at merge (apply-the-saved-plan path).${_NL}"
-          COMMENT+="Saved-plan sha256 digest (DEP-07): \`${PLAN_DIGEST}\` -- verified at every merge-time fetch; fails closed on mismatch.${_NL}"
-          COMMENT+="A stale saved plan fails closed at merge; recovery is the workflow_dispatch acknowledge-and-retry path.${_NL}"
-          COMMENT+="${_NL}<details>${_NL}<summary>Terraform plan output (sensitive values redacted)</summary>${_NL}"
-          COMMENT+="${_NL}\`\`\`${_NL}${PLAN_REDACTED}${_NL}\`\`\`${_NL}</details>"
-
-          # Redaction self-check: fail the job if any secret LITERAL survives in the body. Literal
-          # assertion, not a shape heuristic -- errexit fails the step on a non-zero exit.
-          printf '%s' "$COMMENT" | _ACCT="$ACCOUNT_ID_VAL" _DEV="$DEV_EXT_ID" \
-            _ADM="$ADM_EXT_ID" _OWNER="$OWNER_EMAIL_VAL" python3 "$GITHUB_WORKSPACE/scripts/ci/redaction_check.py" assert-clean
-
-          gh pr comment "$PR_NUM" --repo "$REPO" --body "$COMMENT" || true
 
   # ---------------------------------------------------------------------------
   # Advisory status job: pull_request ONLY, read-only (CD.35 5.5).
@@ -735,13 +571,13 @@ jobs:
       id-token: write     # OIDC for the read-only PR role
       contents: read
       statuses: write     # post the advisory terraform-converged commit status
-    env:
-      AWS_DEFAULT_REGION: eu-west-2
     steps:
       # Required for `python3 -m scripts.ci.convergence_advisory` below to resolve: this job
       # previously had no checkout (it was two steps -- assume + inline body). scripts/ci/ has no
       # __init__.py; the -m form works via PEP 420 from the repo root, but ONLY after checkout.
       - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/aws-region
 
       - name: Configure AWS credentials (OIDC -- PR read-only role)
         # Best-effort: this advisory job must NEVER red a PR. Before the oidc.tf trust+read grant is
@@ -753,8 +589,8 @@ jobs:
         continue-on-error: true
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-pr
-          aws-region: eu-west-2
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-pr
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Read convergence record and post advisory terraform-converged status
         # Thin adapter (Decision 162): all six-way classification lives in
@@ -842,18 +678,19 @@ jobs:
       pull-requests: write  # best-effort post-merge wake comment
       actions: write        # self-dispatch ci-rca on a re-run failure (workflow_run re-run gap)
     env:
-      AWS_DEFAULT_REGION: eu-west-2
       TF_VAR_aws_profile: ""
       WORKDIR: terraform/personal
 
     steps:
       - uses: actions/checkout@v7
 
+      - uses: ./.github/actions/aws-region
+
       - name: Configure AWS credentials (OIDC -- apply role, main only)
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-apply
-          aws-region: eu-west-2
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-apply
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Read pinned Terraform version
         id: tfver
@@ -898,6 +735,12 @@ jobs:
         # (scripts/ci/ducklake_artifacts.py fetch_reviewed(), fail-closed on any missing per-sha
         # object -- Decision 77 no-TOCTOU is preserved by the ORIGINAL PR-time assert plus this
         # fetch's own fail-closed missing-object check, not by a repeated rebuild-assert here).
+        #
+        # rec-4372: fetch first reads lambda-packages/<artifact-sha>/superseded-by.json. Absent,
+        # the usual route, fetches from artifact-sha's own prefix as above. Present, it follows the
+        # pointer one hop to the merge sha the push run rebuilt from when the PR-time zips predated
+        # an input that moved on main -- identity there rests on that push run's input attribution,
+        # not on a byte match against the PR-time assert.
         if: success()
         uses: ./.github/actions/build-ducklake-artifacts
         with:
@@ -952,7 +795,7 @@ jobs:
       - name: Terraform apply (gated -- plan.bin verbatim, no re-plan)
         id: apply
         # Applies the exact plan.bin the guard inspected -- on push, the same plan.bin the
-        # speculative-plan job showed on the originating PR; on a routed workflow_dispatch, the
+        # trusted plan job showed on the originating PR; on a routed workflow_dispatch, the
         # SANDBOX_FRESH_PLAN_ARTIFACT this run's apply-sandbox job planned, guard-routed, and
         # uploaded (Decision 183). Human approval via tf-gated-apply Environment is the
         # authorization on EITHER route. No re-plan after approval (Decision 77 no-TOCTOU). A
@@ -975,7 +818,7 @@ jobs:
         # content); recovery stays the workflow_dispatch acknowledge-and-retry path only.
         if: success()
         working-directory: ${{ env.WORKDIR }}
-        run: python3 "$GITHUB_WORKSPACE/scripts/ci/stale_plan_signature.py" --wrap -- terraform apply -input=false -lock-timeout=120s plan.bin
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/neon_api_key.sh" run -- python3 "$GITHUB_WORKSPACE/scripts/ci/stale_plan_signature.py" --wrap -- terraform apply -input=false -lock-timeout=120s plan.bin
 
       - name: Write convergence record (always-run, red-on-failure)
         id: record_write

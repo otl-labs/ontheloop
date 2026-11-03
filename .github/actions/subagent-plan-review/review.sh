@@ -59,23 +59,94 @@ if ! command -v claude &> /dev/null; then
   sudo npm install -g @anthropic-ai/claude-code@2.1.148 --omit=dev --omit=optional && sudo npm cache clean --force
 fi
 
-if ! python3 "${WORKSPACE_ROOT}/scripts/terraform_apply_guard.py" --digest plan.json > plan_digest.txt; then
-  _starved_marker "guard digest build failed (infra failure, not a plan rejection)."
+CONTEXT_RE='^[A-Za-z0-9 ().,:_/-]{1,300}$'
+if [[ ! "${CONTEXT_DESCRIPTION:-}" =~ $CONTEXT_RE ]]; then
+  _starved_marker "CONTEXT_DESCRIPTION is empty, too long or has characters outside [A-Za-z0-9 ().,:_/-]; failing closed before any reviewer invocation."
   echo "outcome=starved" >> "$GITHUB_OUTPUT"
   exit 1
 fi
 
-MAX_TURNS=5
-PROMPT="Review the terraform plan digest below for ${CONTEXT_DESCRIPTION}. It has already passed the deterministic guard (no destroy, no out-of-budget IAM/trust change; may include in-budget IAM inline-policy or attachment UPDATEs on managed boundary-carrying CI roles per T2.25). The full plan is at plan.json (Read tool) if you genuinely need more detail than the digest provides. Confirm the plan is a safe, expected sandbox infrastructure change. Reply with exactly the single token PROCEED on its own line if safe to auto-apply, or REVISE followed by the reason if not."
+python3 "${WORKSPACE_ROOT}/scripts/ci/terraform_plan_digest.py" --literals-from . plan.json > plan_digest.txt
+DIGEST_RC=$?
+if [ "$DIGEST_RC" -eq 3 ]; then
+  _starved_marker "digest overflow: actionable content exceeds the reviewer digest cap; apply blocked, convergence record NOT overwritten (Decision 55). Split the change or raise DIGEST_SIZE_CAP by PR; after a PR touching only scripts/ci/, drain with a blank workflow_dispatch of terraform-apply-sandbox."
+  echo "outcome=starved" >> "$GITHUB_OUTPUT"
+  exit 1
+elif [ "$DIGEST_RC" -ne 0 ]; then
+  _starved_marker "plan digest build failed (infra failure, not a plan rejection)."
+  echo "outcome=starved" >> "$GITHUB_OUTPUT"
+  exit 1
+fi
 
-cat plan_digest.txt | "${WORKSPACE_ROOT}/scripts/ci/claude_p_retry.sh" review.json -- \
-  --output-format json --allowedTools "Read" --max-turns "$MAX_TURNS" "$PROMPT" || true
+# The reviewer runs with no tools, from an empty directory outside the checkout (so it loads no
+# CLAUDE.md, .claude/settings.json hooks or .mcp.json), under a curated environment (no AWS_ keys).
+STEP_DIR=$(pwd)
+REVIEW_CWD=$(mktemp -d)
+trap 'rm -rf "$REVIEW_CWD"' EXIT
+case "$(cd "$REVIEW_CWD" && pwd -P)/" in
+  "$(cd "$WORKSPACE_ROOT" && pwd -P)/"*)
+    _starved_marker "reviewer scratch directory is inside the checkout; failing closed."
+    echo "outcome=starved" >> "$GITHUB_OUTPUT"
+    exit 1
+    ;;
+esac
+
+MAX_TURNS=5
+PROMPT="Review the terraform plan digest below for ${CONTEXT_DESCRIPTION}. It has already passed the deterministic guard (no destroy, no out-of-budget IAM/trust change; may include in-budget IAM inline-policy or attachment UPDATEs on managed boundary-carrying CI roles per T2.25). The digest is names-only by design: it lists addresses, types, actions and changed attribute names, and for IAM policy statements, Lambda permissions and function URLs it shows a value only when that value is a literal in the public Terraform source (anything else reads <non-literal>). You have no tools and no file access. Judge whether the shape of the change is a safe, expected sandbox infrastructure change. Reply with exactly the single token PROCEED on its own line if safe to auto-apply, or REVISE followed by the reason if not."
+
+_review() {
+  local out="$1"
+  local -a keep=(PATH="$PATH" HOME="$HOME" CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN")
+  [ -n "${CLAUDE_P_RETRY_BACKOFF_BASE:-}" ] && keep+=(CLAUDE_P_RETRY_BACKOFF_BASE="$CLAUDE_P_RETRY_BACKOFF_BASE")
+  [ -n "${TMPDIR:-}" ] && keep+=(TMPDIR="$TMPDIR")
+  [ -n "${LANG:-}" ] && keep+=(LANG="$LANG")
+  (
+    cd "$REVIEW_CWD" || exit 1
+    env -i "${keep[@]}" "${WORKSPACE_ROOT}/scripts/ci/claude_p_retry.sh" "${STEP_DIR}/${out}" -- \
+      --output-format json --tools "" --strict-mcp-config --max-turns "$MAX_TURNS" "$PROMPT" < "${STEP_DIR}/plan_digest.txt"
+  ) || true
+}
+
+_stats() {
+  python3 - "$1" >&2 <<'PYEOF' || echo "[SUBAGENT-REVIEW] stats num_turns=unknown permission_denials=unknown" >&2
+import json, sys
+
+turns = denials = "unknown"
+try:
+    text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+except OSError:
+    text = ""
+decoder = json.JSONDecoder()
+last = None
+pos = text.find("{")
+while pos != -1:
+    try:
+        obj, end = decoder.raw_decode(text, pos)
+    except ValueError:
+        pos = text.find("{", pos + 1)
+        continue
+    if isinstance(obj, dict) and obj.get("type") == "result":
+        last = obj
+    pos = text.find("{", end)
+if last is not None:
+    if isinstance(last.get("num_turns"), int):
+        turns = last["num_turns"]
+    if isinstance(last.get("permission_denials"), list):
+        denials = len(last["permission_denials"])
+print(f"[SUBAGENT-REVIEW] stats num_turns={turns} permission_denials={denials}")
+PYEOF
+}
+
+_review review.json
+_stats review.json
+VERDICT_FILE=review.json
 VERDICT=$(python3 "${WORKSPACE_ROOT}/scripts/ci/review_verdict.py" review.json)
 
 if [ "$VERDICT" = "STARVED" ]; then
   echo "Reviewer STARVED on first attempt; retrying once at the SAME turn budget (${MAX_TURNS} -- never larger, T2.39 c2)." >&2
-  cat plan_digest.txt | "${WORKSPACE_ROOT}/scripts/ci/claude_p_retry.sh" review_retry.json -- \
-    --output-format json --allowedTools "Read" --max-turns "$MAX_TURNS" "$PROMPT" || true
+  _review review_retry.json
+  _stats review_retry.json
+  VERDICT_FILE=review_retry.json
   VERDICT=$(python3 "${WORKSPACE_ROOT}/scripts/ci/review_verdict.py" review_retry.json)
 fi
 
@@ -87,6 +158,12 @@ case "$VERDICT" in
     ;;
   REVISE)
     echo "Subagent returned REVISE; failing closed." >&2
+    REASON=$(python3 "${WORKSPACE_ROOT}/scripts/ci/review_verdict.py" --reason "$VERDICT_FILE" 2> /dev/null | tr '\r\n' '  ') || true
+    [ -n "${REASON// /}" ] || REASON="(no reason given)"
+    echo "[SUBAGENT-REVIEW] REVISE reason: ${REASON}" >&2
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+      printf '\n## Subagent review REVISE\n\n`[SUBAGENT-REVIEW] REVISE reason: %s`\n' "$(printf '%s' "$REASON" | tr '`' "'")" >> "$GITHUB_STEP_SUMMARY"
+    fi
     echo "outcome=revise" >> "$GITHUB_OUTPUT"
     exit 1
     ;;

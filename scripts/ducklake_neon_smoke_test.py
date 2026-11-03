@@ -14,7 +14,7 @@ for a fresh extension install, to extensions.duckdb.org):
                   The DR proof, run before any production write.
 
 Reuses src/common/ducklake_spike.py for the duckdb-require + S3-credential helpers and fetches the Neon
-DSN JSON from Secrets Manager (docs/contracts/secret-material-handling.yaml RUNTIME-FETCH pattern,
+DSN JSON from SSM Parameter Store (docs/contracts/secret-material-handling.yaml RUNTIME-FETCH pattern,
 Decision 175 -- rehomed from the Decision 37 precedent). The churn gate and the restore drill LOUD-FAIL (Decision
 55): a failed gate raises SmokeTestFailure and is a stop-and-RCA signal -- never silently relax a
 threshold or degrade to pass.
@@ -49,7 +49,7 @@ from scripts.ducklake_smoke.canary import (  # noqa: F401 -- re-exported package
 from scripts.ducklake_smoke.core import (  # noqa: F401 -- re-exported package surface
     CATALOG_ALIAS,
     CATALOG_DR_URL_ENV,
-    DSN_SECRET_ID,
+    DSN_PARAMETER_NAME,
     MAINTENANCE_SMOKE_URL_ENV,
     MAINTENANCE_URL_ENV,
     META_SCHEMA,
@@ -100,6 +100,7 @@ from scripts.ducklake_smoke.lambda_ec_gates import (  # noqa: F401 -- re-exporte
 from scripts.ducklake_smoke.lambda_maintenance_gates import (  # noqa: F401 -- re-exported package surface
     lambda_catalog_dr,
     lambda_maintenance_breaker,
+    lambda_maintenance_create_telemetry,
     lambda_maintenance_gc,
     lambda_maintenance_hot_merge,
     lambda_maintenance_merge,
@@ -108,9 +109,17 @@ from scripts.ducklake_smoke.lambda_ops_gates import (  # noqa: F401 -- re-export
     catalog_restore_drill,
     connect_probe,
     lambda_append_only,
+    lambda_row_rules,
     migrate_ops_recs_columns,
     ops_churn_regate,
     ops_read_your_write,
+)
+from scripts.ducklake_smoke.lambda_telemetry_gates import (  # noqa: F401 -- re-exported package surface
+    lambda_telemetry_production,
+    lambda_telemetry_smoke,
+)
+from scripts.ducklake_smoke.lambda_telemetry_reader_gates import (  # noqa: F401 -- re-exported package surface
+    lambda_telemetry_reader,
 )
 from src.common import catalog_dr as _catalog_dr  # noqa: F401 -- re-exported: smoke._catalog_dr
 from src.common import ducklake_runtime, ducklake_spike, neon_api  # noqa: F401 -- re-exported module aliases
@@ -131,6 +140,7 @@ _LAMBDA_GATES: dict[str, Callable[..., None]] = {
     "lambda_churn": lambda_churn,
     "lambda_churn_incontainer": lambda_churn_incontainer,
     "lambda_reader": lambda_reader,
+    "lambda_row_rules": lambda_row_rules,
     "lambda_warm_reuse": lambda_warm_reuse,
     "lambda_warm_reuse_writer": lambda_warm_reuse_writer,
     "lambda_maintenance_merge": lambda_maintenance_merge,
@@ -138,8 +148,12 @@ _LAMBDA_GATES: dict[str, Callable[..., None]] = {
     "lambda_maintenance_breaker": lambda_maintenance_breaker,
     "lambda_catalog_dr": lambda_catalog_dr,
     "lambda_maintenance_hot_merge": lambda_maintenance_hot_merge,
+    "lambda_maintenance_create_telemetry": lambda_maintenance_create_telemetry,
     "connect_probe": connect_probe,
     "lambda_append_only": lambda_append_only,
+    "lambda_telemetry_production": lambda_telemetry_production,
+    "lambda_telemetry_smoke": lambda_telemetry_smoke,
+    "lambda_telemetry_reader": lambda_telemetry_reader,
 }
 
 
@@ -186,6 +200,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     group.add_argument("--lambda-reader", action="store_true", help="[post-deploy] closed reader path (EC1/boundary)")
     group.add_argument(
+        "--lambda-row-rules",
+        action="store_true",
+        help="[post-deploy] rec-4158 plan B: the writer rejects each contract row-rule class (422 row_rule), nothing stored",
+    )
+    group.add_argument(
         "--lambda-warm-reuse",
         action="store_true",
         dest="lambda_warm_reuse",
@@ -223,6 +242,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="[post-deploy] T2.18 FP-B hot_merge gate: invoke hot_merge, assert files merged, nothing deleted (VP12)",
     )
     group.add_argument(
+        "--lambda-maintenance-create-telemetry",
+        action="store_true",
+        help="[post-deploy] Decision 216: owner-login create_telemetry_tables on maintenance-smoke, single-owner report",
+    )
+    group.add_argument(
         "--connect-probe",
         action="store_true",
         dest="connect_probe",
@@ -242,11 +266,33 @@ def main(argv: Optional[list[str]] = None) -> int:
         "assert 1 history row + no current projection",
     )
     group.add_argument(
+        "--lambda-telemetry-production",
+        action="store_true",
+        help="[post-deploy] production telemetry writer light gate: URL-only, production-bound, writes no test rows",
+    )
+    group.add_argument(
+        "--lambda-telemetry-smoke",
+        action="store_true",
+        help="[post-deploy] smoke telemetry writer twin URL-only proof and disposable vectors",
+    )
+    group.add_argument(
+        "--lambda-telemetry-reader",
+        action="store_true",
+        help="[post-deploy] telemetry reader proof: production-pinned, READ_ONLY, no content, no ops verbs",
+    )
+    group.add_argument(
         "--canary-rehearsal",
         action="store_true",
         dest="canary_rehearsal",
         help="[pre-deploy] OQ.12 full canary rehearsal from CC-web (no TCP/5432): publish candidate layers, "
         "create ephemeral canaries, prove attach + RYW + real-prod read-clone, teardown.",
+    )
+    parser.add_argument(
+        "--project-id",
+        default=None,
+        dest="project_id",
+        help="[--canary-rehearsal] Neon project id; skips the org-level project listing a project-scoped key cannot make "
+        "(default: env NEON_PROJECT_ID)",
     )
     parser.add_argument("--profile", default=None, help="AWS profile override for Secrets Manager / S3 creds")
     parser.add_argument("--region", default="eu-west-2", help="AWS region for SigV4 / metrics")
@@ -280,7 +326,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif args.lambda_warm_reuse_writer:
             lambda_warm_reuse_writer(profile=args.profile, region=args.region, json_output=args.json_output)
         elif args.canary_rehearsal:
-            canary_rehearsal(profile=args.profile, region=args.region, json_output=args.json_output)
+            extra = {"project_id": args.project_id} if args.project_id else {}
+            canary_rehearsal(profile=args.profile, region=args.region, json_output=args.json_output, **extra)
         else:
             gate = _selected_lambda_gate(args)
             gate(profile=args.profile, region=args.region)

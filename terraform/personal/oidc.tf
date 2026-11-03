@@ -8,35 +8,43 @@
 # Two roles, split by trust:
 #   branch (write) -- refs/heads/main + refs/heads/agent/*  -> main-validate / ci-rca portal writes
 #   pr (read-only)  -- refs/pull/*                          -> PR-context read queries
+#   trusted-plan    -- tf-trusted-plan Environment + job_workflow_ref -> speculative plan (oidc_trusted_plan_role.tf)
 # The account ID in ARNs comes from var.account_id (gitignored tfvars); never a committed literal.
 
 locals {
-  # CONTRACTED STEADY STATE (Decision 172 / PLAN-oidc-trust-contraction-closure): the dual-slug
-  # transition (Decision 171 / PLAN-repo-rename-relicense) is over. Both pre-rename name-only
-  # entries were unmintable post-rename and have been removed with live proof -- all five CI
-  # roles verified assuming under the immutable subject before this contraction landed. Every sub
-  # site below MUST iterate this list -- never re-introduce a scalar `github_repo` local. This
-  # list MUST stay identical to terraform/bootstrap's; the two roots cannot reference each other,
-  # so agreement is enforced by tests/checks/iam_tf/test_oidc_trust_slug_invariants.py.
+  # PRE-STAGED STATE (Decision 218 / PLAN-oidc-owner-segment-prestage): the list carries the current
+  # segment and, additively beside it, the otl-labs/ontheloop target segment, so the GitHub
+  # organisation transfer cannot lock CI out. The current segment is removed only by the contract's
+  # predecessor_removal phase, with live proof of the target first. Every sub site below MUST iterate
+  # this list -- never re-introduce a scalar `github_repo` local. This list MUST stay identical to
+  # terraform/bootstrap's; the two roots cannot reference each other, so agreement is enforced by
+  # tests/checks/iam_tf/test_oidc_trust_slug_invariants.py and validate_github_org_transfer.
+  #
+  # CONTRACTED STEADY STATE (history, Decision 172 / PLAN-oidc-trust-contraction-closure): the
+  # dual-slug transition (Decision 171 / PLAN-repo-rename-relicense) ended when both pre-rename
+  # name-only entries, unmintable post-rename, were removed with live proof.
   #
   # IMMUTABLE-SUBJECT ENTRY (Decision 172): a repo SEGMENT of the form
   # "OWNER@OWNER-ID/REPO@REPO-ID", never a full "repo:" sub prefix (every sub site below already
   # renders "repo:${repo}:<suffix>"; a "repo:"-prefixed entry here would render "repo:repo:..."
   # and match nothing). GitHub mints this immutable numeric-id subject for any repository renamed
-  # or transferred after 2026-07-15 -- benjamin-blake/theseus renamed at 2026-08-15T12:55:57Z and
-  # now presents ONLY this shape. The numeric ids -- not the name -- are the durable identity: a
-  # future rename changes only the NAME half, so Decision 172 point 2's pre-stage playbook adds
-  # the future name's immutable entry to this list ADDITIVELY, BEFORE the rename lands, which is
-  # what keeps a future rename from repeating this outage. Never narrow this list to zero entries,
-  # and never remove an entry without live proof of the replacement first -- the exact discipline
-  # this contraction itself followed.
+  # or transferred after 2026-07-15 -- benjamin-blake/theseus renamed at 2026-08-15T12:55:57Z, then
+  # moved to otl-labs/ontheloop in one transfer-and-rename (Decision 218), and now presents ONLY
+  # this shape under the otl-labs segment. The repository id -- not the name -- is the durable
+  # identity: a rename changes only the REPO name half and a transfer the OWNER half (login and
+  # id), so Decision 172 point 2's pre-stage playbook adds the future identity's immutable entry to
+  # this list ADDITIVELY, BEFORE the move lands, which is what keeps a future rename or transfer
+  # from repeating the 2026-08-15 outage. Never narrow this list to zero entries, and never remove
+  # an entry without live proof of the replacement first -- the exact discipline this contraction
+  # itself followed.
   github_repos = [
     "benjamin-blake@217728084/theseus@1252427466",
+    "otl-labs@330441623/ontheloop@1252427466",
   ]
 
   # T2.49 c2 hardening item 3 (single-source, DEP-12 / Decision 144): the RESERVED session-name
   # that discriminates the planner role's fail-closed convergence-write path. Referenced at
-  # EXACTLY 4 coupled sites -- changing this value requires updating all four in the same commit:
+  # EXACTLY 6 coupled sites -- changing this value requires updating all six in the same commit:
   #   1. github_ci_planner trust, main-sub statement: sts:RoleSessionName StringEquals
   #      (oidc_pipeline_roles.tf)
   #   2. github_ci_planner trust, pr-sub statement:   sts:RoleSessionName StringNotEquals
@@ -45,6 +53,10 @@ locals {
   #      (oidc_pipeline_roles.tf)
   #   4. .github/workflows/terraform-drift.yml: configure-aws-credentials role-session-name (a
   #      workflow literal outside Terraform's reach -- MUST equal this value verbatim)
+  #   5. github_ci_planner policy, DriftSessionSecretValueRead: aws:userid StringLike "*:<this>"
+  #      (oidc_pipeline_roles.tf)
+  #   6. github_ci_planner policy, DriftSessionSecretParameterRead: aws:userid StringLike "*:<this>"
+  #      (oidc_pipeline_roles.tf)
   convergence_writer_session_name = "tf-drift-convergence-writer"
 }
 
@@ -62,7 +74,7 @@ resource "aws_iam_openid_connect_provider" "github_actions" {
 # composes ci_ssm_refresh_read via source_policy_documents rather than re-declaring the SSM
 # statements inline (validated credential-free by
 # scripts/checks/iam_tf/validate_invoke_implies_resolve.py, T2.34:c2); github_ci_planner
-# additionally composes the shared 20-statement refresh-read surface via
+# additionally composes the shared 19-statement refresh-read surface via
 # ci_full_refresh_read (which itself sources ci_ssm_refresh_read). IAM read statements stay
 # enumerated with literal ARNs (Decision 35/98) -- composition relocates statements, it never
 # collapses them into a wildcard.
@@ -173,13 +185,16 @@ data "aws_iam_policy_document" "ci_full_refresh_read" {
       "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-pr",
       "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-apply",
       "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-planner",
-      "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-deploy"
+      "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-deploy",
+      # rec-4636: the trusted speculative-plan role (oidc_trusted_plan_role.tf).
+      "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-trusted-plan"
     ]
   }
 
   statement {
-    # IAM read-quartet on the platform roles (codified in platform_roles.tf). Decision 35/98:
-    # enumerated literal ARNs, never a wildcard.
+    # IAM read-quartet on the agent-platform-* execution roles terraform/personal manages. Decision 35/98:
+    # enumerated literal ARNs, never a wildcard. PlatformDev and PlatformAdmin are bootstrap-owned and never
+    # CI-readable (Decision 225).
     sid    = "IAMPlatformRolesRead"
     effect = "Allow"
     actions = [
@@ -189,8 +204,6 @@ data "aws_iam_policy_document" "ci_full_refresh_read" {
       "iam:ListAttachedRolePolicies"
     ]
     resources = [
-      "arn:aws:iam::${var.account_id}:role/PlatformDev",
-      "arn:aws:iam::${var.account_id}:role/PlatformAdmin",
       "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-catalog-dr",
       "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-writer",
       "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-reader",
@@ -199,6 +212,12 @@ data "aws_iam_policy_document" "ci_full_refresh_read" {
       # refresh-readable by github_ci_planner once it enters terraform/personal state, or every
       # subsequent plan against this module fails closed with AccessDenied.
       "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-maintenance-smoke",
+      # Telemetry writer exec role (same refresh-read class as the maintenance-smoke entry above).
+      "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-writer",
+      # Pre-staged for PLAN-telemetry-reader-and-smoke-twin's creates (the telemetry-writer precedent), so the
+      # planner's refresh reads never fail closed.
+      "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-writer-smoke",
+      "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-reader",
       # T2.43 gap (same class as rec-2688 for ducklake-deploy): these prod-class execution
       # roles must be refresh-readable by github_ci_planner once they enter terraform/personal
       # state, or every subsequent plan against this module fails closed with AccessDenied.
@@ -281,14 +300,6 @@ data "aws_iam_policy_document" "ci_full_refresh_read" {
   }
 
   statement {
-    # Neon provider API key -- plan-time provider initialisation (read-only).
-    sid       = "SecretsManagerNeonAPIKeyRead"
-    effect    = "Allow"
-    actions   = ["secretsmanager:Describe*", "secretsmanager:Get*"]
-    resources = ["arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:neon-api-key-*"]
-  }
-
-  statement {
     # Tfvars sourcing: plan/drift fetch this secret to materialise terraform.personal.tfvars.
     # Read-only -- lifecycle is human-owned.
     sid       = "SecretsManagerTfvarsRead"
@@ -298,36 +309,31 @@ data "aws_iam_policy_document" "ci_full_refresh_read" {
   }
 
   statement {
-    # DuckLake Neon catalog DSN -- plan-time provider initialisation (read-only; apply role manages lifecycle).
+    # DuckLake Neon catalog DSN -- refresh-time metadata only. The DSN name does not match the agent-platform-*
+    # metadata prefix, so this statement keeps validate_ci_refresh_read_coverage green. The value read is held
+    # by DriftSessionSecretValueRead (oidc_pipeline_roles.tf), conditioned on the reserved drift session.
     sid       = "SecretsManagerDuckLakeNeonDSNRead"
     effect    = "Allow"
-    actions   = ["secretsmanager:Describe*", "secretsmanager:Get*"]
+    actions   = ["secretsmanager:DescribeSecret", "secretsmanager:GetResourcePolicy"]
     resources = ["arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:ducklake-neon-catalog-dsn-*"]
   }
 
   statement {
-    # T2.43 gap: the scheduled-agent-dispatcher / findings-processor GitHub PAT secret --
-    # read-only; the value is set out-of-band
-    # (docs/contracts/secret-material-handling.yaml, Decision 175), this apply role owns the
-    # secret's lifecycle only.
-    sid       = "SecretsManagerGithubPatRead"
+    # Decision 237: the tfvars SecureString parameter, read by every plan to materialise terraform.personal.tfvars.
+    # The one value read of a /secret/ parameter that validate_planner_secret_value_reads allows without a session condition.
+    sid       = "SecretParameterTfvarsRead"
     effect    = "Allow"
-    actions   = ["secretsmanager:Describe*", "secretsmanager:Get*"]
-    resources = ["arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-github-pat-*"]
+    actions   = ["ssm:GetParameter"]
+    resources = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-terraform-personal-tfvars"]
   }
 
   statement {
-    # Inference credential envelopes (DeepSeek + Anthropic) -- plan-time refresh-read so the
-    # speculative-plan / drift jobs can DescribeSecret these during the provider refresh walk.
-    # Mirrors github_ci_apply's SecretsManagerInferenceCredentialsRead (inference-creds-ci-recovery);
-    # read-only -- the apply role owns the secret lifecycle.
-    sid     = "SecretsManagerInferenceCredentialsRead"
-    effect  = "Allow"
-    actions = ["secretsmanager:Describe*", "secretsmanager:Get*"]
-    resources = [
-      "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-deepseek-api-key-*",
-      "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-anthropic-api-key-*",
-    ]
+    # Decision 237: refresh of aws_ssm_parameter.ducklake_neon_catalog_dsn reads its tags. Metadata only; the value read is
+    # DriftSessionSecretParameterRead (oidc_pipeline_roles.tf), conditioned on the reserved drift session.
+    sid       = "SecretParameterMetadataRead"
+    effect    = "Allow"
+    actions   = ["ssm:ListTagsForResource"]
+    resources = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/ducklake-neon-catalog-dsn"]
   }
 
   statement {
@@ -342,8 +348,8 @@ data "aws_iam_policy_document" "ci_full_refresh_read" {
     # Value-free BY CONSTRUCTION and therefore NOT a widening of Decision 129 pt 2: within Secrets
     # Manager only GetSecretValue returns secret material (AWS named the batch form
     # BatchGetSecretValue, outside the Get* metadata pattern), so Describe*/List*/GetResourcePolicy
-    # cannot read a value. This role's value-capable reads stay in the enumerated per-secret Sids
-    # above -- deliberately NOT restated here. hashicorp/aws v5.100.0 grounding:
+    # cannot read a value. This role's value-capable reads stay in the tfvars Sid above and
+    # DriftSessionSecretValueRead (oidc_pipeline_roles.tf) -- deliberately NOT restated here. hashicorp/aws v5.100.0 grounding:
     # aws_secretsmanager_secret refreshes with DescribeSecret + GetResourcePolicy only.
     sid     = "SecretsManagerMetadataRead"
     effect  = "Allow"

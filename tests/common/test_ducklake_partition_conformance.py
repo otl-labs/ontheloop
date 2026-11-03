@@ -106,12 +106,14 @@ def _insert_history_row(con: Any, spec: schema.ScdTableSpec, ulid: str, merge_ke
 
 
 def _conformance_targets() -> list[str | None]:
-    """None = smoke pair; else every non-control ops table in the generated projection."""
+    """None = smoke pair; else every non-control, non-event ops table in the generated projection."""
     semantics = schema.load_field_semantics()
     targets: list[str | None] = [None]
     for name in schema.ops_table_names():
         if semantics["ops_tables"][name].get("write_mode") == "control":
             continue
+        if schema.is_event_table(name, semantics):
+            continue  # event partition conformance is the kernel's (slice 1's local-DuckLake tests)
         targets.append(name)
     return targets
 

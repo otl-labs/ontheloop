@@ -1,0 +1,1067 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-registration-verbs
+intent: >-
+  Telemetry slice 2a-2, plan 3 part 1 (rec-4024 carrier, T2.36). The separate telemetry writer function
+  (agent-platform-ducklake-telemetry-writer, built by PLAN-telemetry-writer-function and PLAN-telemetry-writer-deploy-wiring)
+  gains its first production verbs: provision_telemetry, register_tenant (the signed caller only), register_project and the
+  telemetry_probe gate action, all bound to the isolated ducklake_smoke catalog by the function's own pins. This proves the
+  counter-row lock live on the catalog backend (Decision 200's lock arm) before part 2's append verb is built on it.
+  Telemetry is the learning signal for recursive self-improvement (PROJECT_CONTEXT); this plan writes nothing to the
+  production ops catalog.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-telemetry-registration-verbs.yaml
+implementation_declared: true
+phase: >-
+  T2.36 (telemetry re-lands on DuckLake). Writer-verb groundwork carried by rec-4024; closes no exit criterion.
+scope:
+- file: src/common/ducklake_telemetry_txn.py
+  action: Create
+  purpose: >-
+    The telemetry writer's one transaction loop (seam 2 of part1-seams-from-part2.md) and its generic request error (seam 5).
+    (1) TelemetryRequestError(Exception) carrying status (int), error_type (str) and a value-free fields mapping; its str()
+    never includes a request value. (1b) invalid_string_field(values: Mapping[str, object]) -> str | None, a pure
+    function returning the name of the first entry whose value is not a str, contains U+0000, or contains any code point
+    in U+D800-U+DFFF (so str.encode("utf-8") succeeds; json.loads joins an escaped surrogate pair into one code point, so
+    only a lone surrogate can remain), else None; it never returns, formats or logs the value. (2) run_telemetry_txn(con, body, *, terminal=(...), max_attempts=OCC_MAX_ATTEMPTS,
+    metric_sink=None, sleep=time.sleep) -> TxnOutcome(result, occ_retries, commit_ms). It owns BEGIN TRANSACTION, the body
+    call, COMMIT, rollback on any error, and classification. TERMINAL FIRST (seam 1): after rollback, any instance of
+    TelemetryRequestError, rt.DuckLakeRuntimeError (which subsumes SchemaGateError, RowRuleViolationError and
+    ReferentialError and covers lock_counter's and purpose_for's refusals, the ducklake_writes.py:421-423 precedent),
+    src.telemetry.gate.AppendError (the GateError/GrainConflictError family) or a caller-supplied extra terminal class
+    re-raises immediately, BEFORE
+    ducklake_writes.is_occ_collision is consulted, because is_occ_collision matches the substring "conflict" and a kernel
+    GrainConflictError message carries "TELEMETRY_GRAIN_CONFLICT: conflicting row". Then an OCC collision retries with
+    ducklake_writes._occ_backoff up to max_attempts and raises OCCRetryExhaustedError on exhaustion (Decision 81 cl.3, one
+    retry policy); any other error propagates (Decision 55). It emits OccRetryCount and CommitLatencyMs through the sink
+    it is given, mirroring ducklake_writes._emit_write_metrics. It imports from ducklake_writes, ducklake_scd2_schema,
+    ducklake_write_rules and src.telemetry.gate only; it never imports ducklake_runtime's facade (Decision 80 discipline)
+    and nothing in ducklake_runtime's closure imports it (the scripts-never-import-telemetry-append fence, recon 5).
+- file: src/common/ducklake_telemetry_registration.py
+  action: Create
+  purpose: >-
+    Tenant and project registration primitives that compose inside the caller's transaction and own no BEGIN/COMMIT (seam
+    3). (1) CallerPrincipal(kind, ref, role_name) frozen dataclass with ref excluded from repr; kind is aws_account or
+    configured (ops_tenants.yaml:51-60), so the cloud edge and a later local adapter (Decision 184 cl.2) use the same port.
+    (2) purpose_for(project_ref, derivation) -> str: the first prefix in the projected prefix_map that project_ref starts
+    with, else the default; the map is read from field_semantics ops_tables.ops_projects.derivations.purpose (projected by
+    this plan from ops_projects.yaml's derivation block, the single source, Decision 210 cl.3), never restated in Python;
+    a missing projection raises DuckLakeRuntimeError. (3) lock_counter(con, counter_name): SELECT count(*) of the
+    ops_entity_counters row (exactly one, else DuckLakeRuntimeError naming provision_telemetry), then UPDATE ... SET
+    current_value = current_value + 1 WHERE counter_name = ? (Decision 84 I-2: the write-write conflict at COMMIT is the
+    serialization point; no id is allocated from it, ids are ULIDs). (4) lookup_tenant / lookup_project read-only lookups
+    on the current tables: (principal_kind, principal_ref) -> tenant_id and (tenant_id, project_ref) -> (project_id,
+    registration); lookup_project first runs invalid_string_field over project_ref and raises TelemetryRequestError(400,
+    bad_request, {field}) before any statement, because part 2's append path reaches it without telemetry_actions. (5)
+    resolve_or_register_tenant(con, principal, *, identity, semantics) -> (tenant_id, created): lookup;
+    on a miss, lock_counter("ops_tenants") then write the first SCD2 version (status active, canonical_tenant_id null).
+    (6) resolve_or_register_project(con, tenant_id, project_ref, *, explicit, attributes, identity, semantics) ->
+    (project_id, created): first runs invalid_string_field over project_ref and any supplied name or remote in
+    attributes, raising TelemetryRequestError(400, bad_request, {field}) before any statement; then lookup; a hit with
+    explicit=True writes a new SCD2 version only when a SUPPLIED name or remote
+    differs (an omitted attribute means unchanged, so a bare re-register never clears one) or registration moves
+    unregistered -> registered (never back); a miss with explicit=False and purpose != real raises
+    TelemetryRequestError(403, project_unregistered, {remedy: register_project}) (project-id.yaml:55-59; part 2's append
+    path); otherwise lock_counter("ops_projects") then insert with registration registered (explicit) or unregistered.
+    (7) The dimension writer used by (5) and (6): schema_gate on the caller-known inputs, then the derived purpose added
+    after the gate, check_write with rules_for(spec) (Decision 210 cl.1), and the history MERGE plus current MERGE built by
+    ducklake_scd2_schema's _build_merge_history_sql / _build_merge_current_sql / _write_params over ordered_columns (history
+    and current in one transaction, Decision 81 cl.8). write_scd2 is NOT used: its schema_gate refuses the derived purpose
+    and it owns its own transaction (recon 7). ULIDs (tenant_id, project_id, the write ulid) are minted once per request
+    outside the retry loop as canonical uppercase (Decision 200 cl.4); a retried attempt re-runs the lookup, so a loser
+    returns the winner's id. (8) Per-container caches: tenant (kind, ref) -> tenant_id and project (tenant_id, project_ref)
+    -> project_id, populated only after run_telemetry_txn returns (a COMMITTED read or registration), never inside the
+    transaction body, so an OCC loser never caches its uncommitted ULID; plus one clear_telemetry_caches() (seam 4), called
+    by the handler when its warm connection reopens. An attribute update carries created_timestamp unchanged and never
+    moves registration back from registered.
+    No function logs or returns principal.ref (ops_tenants.yaml:63-72, Decision 101).
+- file: src/common/ducklake_telemetry_provision.py
+  action: Create
+  purpose: >-
+    provision_telemetry_catalog(con, *, semantics) -> ProvisionResult(tables, counters), the body of ONE run_telemetry_txn
+    transaction (DuckLake commits CREATE, SET PARTITIONED BY and row DML together; verified locally by the critique). In
+    the connection's catalog (ops_catalog, which on this function is always the pinned ducklake_smoke), it first reads
+    which tables exist (duckdb_tables() for the ops_catalog database), then ONLY for an absent table creates and
+    partitions it in the same transaction, so an existing table is never re-ALTERed (no per-deploy snapshot or conflict
+    with in-flight writers, Decision 88; re-laying a live partition spec is reserved to the admin verbs, Decision 204):
+    (1) the four event tables telemetry_sessions/observations/transcripts/agents, CREATE TABLE from
+    EventTableSpec.from_projection's declared columns with NOT NULL on spec.not_null (the structural grain columns plus the
+    required key-plan columns) plus tenant_id and project_id, which the writer always stamps (Decision 200 cl.2); this is
+    deliberately narrower than the projection's nullable:false set, which the kernel's row rules enforce before any SQL
+    (Decision 210 cl.5 defence in depth), and create-only provisioning cannot tighten DDL later without an admin step, then ALTER ... SET PARTITIONED BY the entry's history partition (the session_started_at
+    calendar-day triple, Decision 199 cl.2 / 137); the table name is an attribute so validate_table_registration skips
+    it, and every name is checked against the registry; (2) ops_tenants and ops_projects via create_scd2_tables
+    (calendar-day history, bucket current) only when BOTH halves of a pair are absent; exactly one half present raises a
+    loud DuckLakeRuntimeError naming the admin repair (Decision 55), because create_scd2_tables would re-ALTER the existing
+    half; (3) ops_entity_counters via create_control_table (partitioned on counter_name) when absent; (4) before any
+    seed row is written, every PRE-EXISTING target table is checked read-only against its declared spec: its live
+    partition transforms (the ducklake_table / partition metadata read that ducklake_partition_layout.read_partition_layout
+    performs, restricted to the target tables, i.e. the four event tables, BOTH halves of each SCD2 pair and the counter
+    table (nine physical tables), so an unrelated smoke-catalog table never fails provisioning,
+    normalized with ducklake_partition_spec.normalize_partition_spec and compared as compare_to_declared does) and its
+    column set (an information_schema read in the reconcile_table_columns shape); any mismatch raises a loud
+    DuckLakeRuntimeError naming the table and the drift, never a value, and writes nothing (recon 3.5 item 4: the smoke
+    catalog's legacy ops_entity_counters may be unpartitioned); (5) the ops_tenants and ops_projects counter rows only: a missing, duplicated or below-floor row is rewritten (DELETE that
+    counter_name, one INSERT) at the maximum of its existing values and count(*) of its current table, so a seed never
+    lowers a counter (the ulid floor control_health asserts, ops_entity_counters.yaml); an existing single row at or above
+    the floor is left alone; no other row is touched. Every table is partitioned before any row lands (Decision 137).
+    Create-if-not-exists only: there is NO drop or force-recreate path on this function, so CI's invoke never reaches a
+    destructive verb (fable-consult-telemetry-writer-boundary/ADVICE.md Q2/Q4); a reset of the smoke telemetry tables
+    stays an admin maintenance concern, out of this plan's scope. It never sets inlining (the connection already carries
+    ducklake_default_data_inlining_row_limit = 0, Decision 107).
+- file: src/lambdas/ducklake_telemetry_writer/telemetry_actions.py
+  action: Create
+  purpose: >-
+    The verb bodies, called by the handler with (request, con, deps). TelemetryRequest is a frozen dataclass: action, body
+    (dict), principal (CallerPrincipal), request_bytes (int, the raw body length, seam 6). Each verb declares its allowed
+    keys; any other key is 400 bad_request, and "component" (a string) is allowed on every verb for part 2's C6 stamp
+    (seam 7). (1) provision_telemetry {} -> {ok, tables, counters}; a force_recreate or confirm key is 400 like any unknown
+    key. (2)
+    register_tenant {} -> {ok, tenant_id, created}; principal_kind/principal_ref/tenant_id keys are 400 (self only, no
+    confirm token, Fable Q13). (3) register_project {project_ref, name?, remote?} -> {ok, project_id, created, purpose,
+    registration}; the tenant must already be registered, else 403 tenant_unresolved {remedy: register_tenant}. On the
+    four verbs this plan adds, every string a verb accepts (project_ref, name, remote, component) must be a str with no
+    U+0000 and no code point in U+D800-U+DFFF (str.encode("utf-8") succeeds), checked by ducklake_telemetry_txn's
+    invalid_string_field before any catalog read, else 400 bad_request {field} naming the field, never the value
+    (part 2 reuses the predicate for append_telemetry; the shared writer and reader's same gap is rec-4219): on a Postgres catalog a NUL in a value DuckLake renders into its
+    file-pruning SQL (the lookup and MERGE key filters) raises an unmapped ParserException that echoes the value and
+    pages as a Lambda Error (reproduced by the append-part thread on duckdb 1.5.4 with a Postgres 16 catalog; the local
+    file catalog does not show it). (4)
+    telemetry_probe {} (gate instrumentation, out of contract scope like the writer's probes) -> {ok, meta_schema,
+    data_path_is_smoke, connect_reused, catalog_login, catalog_backend, catalog_sessions, tables (present and
+    partitioned_as_declared per PHYSICAL table, both halves of each SCD2 pair included, from the same read-only check
+    provisioning runs),
+    counters, counter_rows, current_counts}. catalog_login and catalog_backend come from the handler's per-container
+    capture inside the opener (the stub's catalog_login pattern): catalog_backend is "neon", "rds" or "other", classified
+    from the scoped secret's host by its public suffix; the host itself is never returned or logged. catalog_sessions is a
+    MEASUREMENT, not a check: the count of this login's sessions from pg_stat_activity, read through DuckDB's
+    postgres_query on the postgres database DuckLake attaches for the catalog metadata (found in duckdb_databases(), never
+    a hard-coded alias), or null with a reason when that read is unavailable; it sizes the login's CONNECTION LIMIT 10
+    (PLAN-url-only-invoke-guard's migration names this gate as its measurement). Every write verb runs through
+    run_telemetry_txn with the function's metric sink.
+    Responses never carry principal.ref or a hash of it (Decision 101). This module imports src.common telemetry modules;
+    nothing under scripts/ imports it.
+- file: src/lambdas/ducklake_telemetry_writer/handler.py
+  action: Modify
+  purpose: >-
+    The stub created by PLAN-telemetry-writer-function gains: (1) dispatch entries provision_telemetry, register_tenant,
+    register_project (connectionful, through the stub's existing pinned warm-connection opener on the scoped login's
+    secret, TELEMETRY_DSN_SECRET_ID) and telemetry_probe; the opener also captures catalog_backend beside the stub's
+    catalog_login; (2) the
+    principal port at the edge: CallerPrincipal(kind="aws_account", ref=requestContext.authorizer.iam.accountId,
+    role_name=the role-name segment of userArn) built after the stub's 403 identity check, so no AWS event shape crosses
+    into src/common (Decision 184 cl.2); (3) the raw body length passed as TelemetryRequest.request_bytes; (4) error-map
+    rows beside the stub's (missing_caller_identity, bad_request, unknown_action, telemetry_env_unset, runtime):
+    TelemetryRequestError -> its own status and error_type with its value-free fields; the map resolves the most specific
+    class first (RowRuleViolationError subclasses SchemaGateError, and both, like OCCRetryExhaustedError, subclass
+    DuckLakeRuntimeError): RowRuleViolationError -> 422 row_rule before SchemaGateError -> 422
+    schema_gate (row_rule names table, rule and column, never a value); OCCRetryExhaustedError -> 503 occ_exhausted;
+    DuckLakeRuntimeError stays 500 runtime, last; (5) the metric sink is make_metric_sink(namespace=
+    "DuckLakeTelemetryWriter"), the only namespace the function's role may write (recon 6); (6) a reopened warm connection
+    (meta reopened=True) clears the telemetry caches. describe lists the new actions. The handler stays under 300 SLOC.
+- file: src/lambdas/ducklake_telemetry_writer/manifest.yaml
+  action: Modify
+  purpose: >-
+    includes gain src/telemetry/__init__.py, append.py, gate.py, identity.py, timestamps.py (the kernel the provision step
+    reads specs through), src/common/ducklake_partition_layout.py and src/common/ducklake_maintenance_scope.py (the
+    read-only partition check), src/common/ducklake_telemetry_txn.py, src/common/ducklake_telemetry_registration.py,
+    src/common/ducklake_telemetry_provision.py and src/lambdas/ducklake_telemetry_writer/telemetry_actions.py; notes name
+    the four verbs.
+- file: src/lambdas/data-pipeline/manifest.yaml
+  action: Modify
+  purpose: >-
+    Exclude the three new src/common/ducklake_telemetry_*.py modules by name beside the other ducklake excludes (:23-42).
+    The `src/` wildcard would otherwise bundle them, and the existing bundle test only catches a path part equal to
+    "telemetry" (recon 4).
+- file: .github/workflows/deploy-ducklake-lambdas.yml
+  action: Modify
+  purpose: >-
+    The push trigger paths (:85-92) gain 'src/telemetry/**', because the kernel is now bundled into a DuckLake function.
+    No job, step, role or permission changes.
+- file: scripts/convergence_health/code_drift.py
+  action: Modify
+  purpose: >-
+    DUCKLAKE_SOURCE_PATHSPECS (:24-32) gains "src/telemetry", so a kernel change advances the DuckLake drift reference.
+- file: scripts/schema_to_field_semantics.py
+  action: Modify
+  purpose: >-
+    The SCD2 entry projection (_project_contract_table, :274-286) gains an entry-level `derivations` key holding, for each
+    realized derivation that declares a prefix_map, {inputs, prefix_map, default} copied from the resolved contract field
+    (today only ops_projects.purpose); the key is emitted only when non-empty, so no other entry changes. Entry level,
+    not column level: RowRules.from_projection rejects unknown column keys
+    (src/row_rules/rules.py:23-45), while every entry consumer reads with .get() (recon 3). Written branch-free beside the
+    existing straight-line projection so the coverage home tests/test_schema_to_field_semantics.py (499 SLOC, full)
+    covers it through its real generate() calls; no new raise branch.
+- file: config/lambda/ducklake/field_semantics.yaml
+  action: Modify
+  purpose: >-
+    Regenerated by bin/venv-python -m scripts.schema_to_field_semantics after the generator change (the ops_projects entry
+    gains derivations.purpose). It is bundled by the writer, reader, maintenance, maintenance-smoke and telemetry-writer
+    manifests (not catalog-dr), and the push-triggered workflow deploys every listed function, so the merge redeploys all
+    six DuckLake functions through the governed channel (recon 3).
+- file: scripts/ducklake_smoke/lambda_telemetry_gates.py
+  action: Modify
+  purpose: >-
+    The --lambda-telemetry gate (created by PLAN-telemetry-writer-deploy-wiring) gains part 1's vectors after its own cases,
+    each a loud SmokeTestFailure (Decision 55): (1) provision_telemetry twice, both 200 with the same table set, then one
+    telemetry_probe whose catalog_sessions line prints BEFORE the fan-out below (so the measurement survives a
+    connection-limit failure there); (2)
+    register_tenant twice, both 200 with the same 26-char uppercase ULID and created false on the second; (3) a fresh
+    project_ref per run, "synthetic:deploy-smoke-" plus a uuid4 hex (the smoke catalog persists across deploys), sent as
+    four concurrent register_project calls from a thread pool (separate invocations, Decision 82): all 200, one
+    project_id, exactly one created true, purpose synthetic, registration registered; (4) telemetry_probe called twice
+    back-to-back (connect_reused is asserted on the second, since the first may land on a fresh container after the deploy
+    and fan-out): meta_schema ducklake_smoke, data_path_is_smoke true, catalog_login ducklake_telemetry_writer (the scoped
+    login, Decision 213), all nine physical tables present and partitioned_as_declared, exactly one counter row each for
+    ops_tenants and ops_projects, and
+    each counter >= its current count (the ulid floor); (5) register_tenant with a principal_ref key is 400. It prints the
+    markers TELEMETRY_PROVISION_OK, TELEMETRY_TENANT_STABLE, TELEMETRY_PROJECT_CONVERGED, TELEMETRY_PROBE_OK and
+    TELEMETRY_SELF_ONLY_OK, a "catalog_backend=<value>" line and a "catalog_sessions=<value>" line (a measurement, never
+    asserted), and the ids only; never an account id, URL or host (Decision 101). It imports no module that imports src.telemetry.append (the scripts fence, recon 5).
+- file: docs/contracts/ducklake_telemetry_writer.yaml
+  action: Create
+  purpose: >-
+    The new function's Class B contract (a Class B file must list at least one verb, contracts_schema.py:225-229, so it
+    lands with the verbs). contract: id ducklake_telemetry_writer, class B, contract_version 1, status provisional_v0, a
+    description (the AWS_IAM URL-only telemetry writer, env-pinned to ducklake_smoke on a scoped catalog login, telemetry
+    identities never reach ops verbs, Decision 143 cl.3 and Decision 213); governance {auth_type, principal_classes
+    [github_ci_branch, PlatformDev] (both URL-only, Decision 213), admin_only_features [] (the function has no destructive verb by design; a drop stays on
+    the admin maintenance function), write_path, id_allocator (ULIDs; the counter row is a lock only), merge_key};
+    provisional_v0 with
+    re_ratification_trigger first_of ["production_invocations >= 500"] only and no first_production_invocation_date (no
+    production traffic yet, recon 2.1). verbs: describe (the agent-facing discovery verb, as ducklake_writer.yaml
+    contracts it; PLAN-telemetry-writer-function's Decision 118 note), provision_telemetry, register_tenant,
+    register_project, each with payload_schema_ref, response_codes and typed_errors only (closed keys); the
+    payload_schema_ref of provision_telemetry, register_tenant and register_project states that its accepted strings
+    (component, plus project_ref, name and remote on register_project) are str with no U+0000 and no code point in
+    U+D800-U+DFFF, and its 400 response_code and bad_request typed_error name both causes: an unknown key, or an invalid
+    string with the field named, never the value. describe's payload_schema_ref and 400 are unchanged (connectionless;
+    the string rule covers the four verbs telemetry_actions dispatches). attach_check and
+    telemetry_probe are named out of contract scope as gate instrumentation. audit_invariants: telemetry verbs attach only the pinned catalog
+    and take no catalog selector; no verb drops or truncates a table; principal_ref never appears in a response or log;
+    a rejected request string never appears in a response or log.
+    amendment_log [] and
+    previous_versions [].
+- file: docs/contracts/ops_tenants.yaml
+  action: Modify
+  purpose: >-
+    governance.write_path (:157-160) names register_tenant on agent-platform-ducklake-telemetry-writer, in the telemetry
+    catalog only, and keeps the generic-verb refusal sentence. The populated_by of name and plan (:84, :96), which say
+    "Plan 3's register_tenant verb (attribute update)", point to rec-4210 instead, because part 1's register_tenant takes
+    no attribute keys (populated_by is not a drift-compared key). governance.id_allocator's "minted inside the counter-row
+    lock" is reconciled to "minted once per request outside the retry loop and bound inside the locked transaction"
+    (Decision 81 cl.3; the same edit in ops_projects.yaml). One top-level amendment_log entry (prose_improvement,
+    semantic_break false), the telemetry_agents.yaml:310 precedent. No field type, nullability or description changes.
+- file: docs/contracts/ops_projects.yaml
+  action: Modify
+  purpose: >-
+    The same write_path change (:182-185) for register_project, plus "the purpose prefix_map projects into field_semantics
+    as ops_tables.ops_projects.derivations.purpose"; one amendment_log entry as above. The derivation block itself is
+    unchanged (pinned by test_telemetry_dimension_contracts.py:139-146).
+- file: docs/contracts/ops_entity_counters.yaml
+  action: Modify
+  purpose: >-
+    governance.write_path (:125-131) keeps its ops sentences and adds (read against Decision 213 cl.2: the shared writer
+    stays the sole ops_* write authority in ducklake_ops; these writes are in the telemetry catalog only): the telemetry
+    writer's register verbs take a
+    lock-only UPDATE of the ops_tenants / ops_projects row inside the registration transaction (Decision 84 I-2, Decision
+    200 lock arm), and provision_telemetry seeds those two rows (a missing, duplicated or below-floor row is rewritten at
+    the maximum of its values and count(*) of the current table), both in the telemetry catalog only. Two concurrent
+    provisions on a catalog missing a row can both insert it (DuckLake inserts do not conflict); the duplicate is detected
+    loudly (lock_counter refuses anything but exactly one row) and repaired by the next provision. The "no standalone write path" clause is narrowed to the ops verbs. A
+    governance note says control_health runs on production only. One amendment_log entry (governance_note_add, semantic
+    break true, the :153-163 precedent), APPENDED after the existing 2026-10-05 entry so
+    test_telemetry_dimension_contracts.py:136's [0] pin stays true. Keep the pinned substrings (PRESENT in the catalog
+    under check, the ulid floor).
+- file: docs/contracts/storage-substrate.yaml
+  action: Modify
+  purpose: >-
+    Class D: a new top-level amendment_log entry is required (_population.py:374-389). telemetry_tables (:216-237): status
+    stays not_provisioned (it records production residency, which is 2c); the note and reason say the four tables are
+    provisioned in the isolated ducklake_smoke catalog only, by provision_telemetry; write_boundary names the telemetry
+    writer function (append arrives in part 2). ops_entity_counters (:138-158): write_boundary adds the telemetry
+    writer's lock and seed in ducklake_smoke. Keep the pinned substrings (the year/month/day triple, the envelope
+    contract_ref, "blob port").
+- file: docs/contracts/ports.yaml
+  action: Modify
+  purpose: >-
+    Class D (a new amendment_log entry, prose_improvement, semantic_break false). Coupling PC-01's description still says
+    the tenancy enforcement is a property of the shared writer path ("writer registration verb: rec-4024"); it now names
+    the telemetry writer's edge (src/lambdas/ducklake_telemetry_writer/handler.py builds the caller principal from the
+    Function URL's signed identity, Decision 213), still a property of the function_url adapter of ops_verbs. No new port:
+    CallerPrincipal is the internal type that adapter's edge hands the shared registration code, and the in_process
+    adapter supplies kind configured (Decision 184 cl.2, Decision 212 cl.3), so the port registry gains no row
+    (Decision 212 cl.6). The registration verbs are not in ops_verbs' provisional required_verbs today; whether they join
+    the port is owed with T4.23:c4's in_process oracle, recorded in the PC-01 text.
+- file: tests/common/test_ducklake_telemetry_txn.py
+  action: Create
+  purpose: Coverage home and red cases for ducklake_telemetry_txn (fake connection, no duckdb, fast tier).
+- file: tests/common/test_ducklake_telemetry_registration.py
+  action: Create
+  purpose: >-
+    Coverage home for ducklake_telemetry_registration. Pure nodes (purpose, principal repr, caches) need no duckdb; the SQL
+    nodes run on a plain in-memory DuckDB with a catalog attached as ops_catalog and the dimension and counter tables
+    created from the registry DDL, behind a fixture-scoped pytest.importorskip("duckdb") so the module still collects in
+    the fast tier.
+- file: tests/common/test_ducklake_telemetry_registration_integration.py
+  action: Create
+  purpose: >-
+    pytestmark integration (never gates CI, rec-4071): two cursors of one DuckDB instance on a file-backed DuckLake catalog
+    aliased ops_catalog (the test_ducklake_write_rules_integration.py:40-54 fixture shape, INSTALL failure is a FAIL),
+    provisioned through provision_telemetry_catalog itself so the live gate is not provisioning's first real-catalog run,
+    both register the same tenant and the same project_ref concurrently; one COMMIT conflicts, run_telemetry_txn retries it, and
+    both return one id. Decision 200's lock-arm evidence (tenant-id.yaml:43-47, project-id.yaml:63-67).
+- file: tests/common/test_ducklake_telemetry_provision.py
+  action: Create
+  purpose: Coverage home for ducklake_telemetry_provision with a recording fake connection (fast tier).
+- file: tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py
+  action: Create
+  purpose: >-
+    Coverage home for telemetry_actions (map_source_to_test's flat-home-absence mirror, rule 4 / rec-3809, live once the
+    flat tests/test_ducklake_telemetry_writer_handler.py is moved; see the next row), with fakes; includes the
+    contract-verbs pin.
+    test_nul_or_lone_surrogate_in_any_string_is_400_without_the_value is parametrized over every (verb, accepted string
+    field) pair of the four verbs and over U+0000, a lone high surrogate, a lone low surrogate and a non-str value, each
+    embedded with a sentinel: the response is 400 with error_type bad_request and the field named, the fake connection's
+    execute is never called, and the sentinel is absent from the response body and the captured logs. A positive case
+    builds the body with json.loads of the escaped pair \ud83d\ude00 (decoded to U+1F600) and is not refused.
+- file: tests/lambdas/ducklake_telemetry_writer/test_handler.py
+  action: Create
+  purpose: >-
+    Created by git mv of the flat tests/test_ducklake_telemetry_writer_handler.py (the stub's pins, created by
+    PLAN-telemetry-writer-function at that path by its #1441 amendment), keeping every existing node. The
+    pins are then extended to the new dispatch entries, error-map rows (row_rule and schema_gate asserted separately, so a
+    less specific row shadowing a more specific one fails), principal port, metric namespace, request bytes and cache
+    clearing. With no flat home, rule 4 measures handler.py by this file and telemetry_actions.py by
+    test_telemetry_actions.py; part 2 (PLAN-telemetry-append-inline) declares mirror homes for its two new modules on the
+    same routing.
+- file: tests/lambdas/ducklake_telemetry_writer/conftest.py
+  action: Create
+  purpose: >-
+    Only if step 20 needs it: shared fakes for test_handler.py and test_telemetry_actions.py, so each module reaches 100%
+    from its own file without one test module importing another (tests/CLAUDE.md, Decision 131).
+- file: tests/test_ducklake_telemetry_writer_handler.py
+  action: Delete
+  purpose: >-
+    Moved, not dropped (the git mv above). While this flat file exists, the RS-08 rule maps every
+    src/lambdas/ducklake_telemetry_writer/*.py to it, so telemetry_actions.py is measured by the handler tests alone (51% in
+    the build) and part 2's modules would follow; one file holding every module's tests passes 500 SLOC in part 2.
+- file: tests/test_coverage_checker/test_coverage_checker_map.py
+  action: Modify
+  purpose: >-
+    (1) A correction, not a loosening (Decision 181): test_all_lambda_handlers_map_to_distinct_existing_parent_qualified_tests
+    (RS-08, written 2026-07-14) predates rule 4 (rec-3809, 2026-09-14) and pins only the flat shape, so it now tracks the
+    map as it is. For a non-roster lambda, exactly one of tests/test_{slug}_handler.py and
+    tests/lambdas/<slug>/test_handler.py exists (a new guard: a coexisting flat file would silently re-capture every
+    sibling, the trap this amendment fixes), and the result equals the one that exists and is a file. The roster branch
+    and the distinctness, retired-shim and smoke_actions assertions are unchanged. (2) A new node
+    TestMapSourceToTest::test_telemetry_writer_modules_map_to_their_own_mirror_tests pins handler.py and telemetry_actions.py to
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py and test_telemetry_actions.py, both existing. No change to
+    scripts/test_coverage_checker.py. The file stays under 500 SLOC (445 today).
+- file: config/agent/verification_registry/entries/telemetry-writer-stub-handler.yaml
+  action: Modify
+  purpose: >-
+    (PLAN-telemetry-writer-function's graduated shard.) check_spec.command names the moved
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py in place of the flat path; every other field and token is
+    unchanged. The edit triggers validate_verification_registry's differential admission gate: the command fails on an
+    origin/main worktree because the moved file is absent there (an admission by absence, not by behaviour; the five
+    unchanged test paths keep the HEAD leg meaningful) and passes at HEAD.
+- file: tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py
+  action: Modify
+  purpose: >-
+    (Created by PLAN-telemetry-writer-deploy-wiring.) Its happy-path fake is extended IN PLACE to answer provision_telemetry,
+    register_tenant, register_project and telemetry_probe, keeping the node id so that plan's graduated shard
+    telemetry-writer-smoke-gate stays valid; attach_check keeps ignoring D2's decoy meta_schema/data_path keys (the
+    unknown-key 400 applies to the four new verbs only). New red cases, with core._sigv4_invoke and core._function_url
+    patched, cover each part 1 vector, including test_self_only_violation_fails: a 200 to register_tenant with
+    principal_ref must fail the gate (the deployed proof of the self-only property).
+- file: tests/test_field_semantics_telemetry_registration.py
+  action: Modify
+  purpose: The projected ops_projects derivations.purpose equals ops_projects.yaml's derivation block (the single source).
+- file: tests/convergence_health/code_drift/test_ducklake.py
+  action: Modify
+  purpose: Pin "src/telemetry" in DUCKLAKE_SOURCE_PATHSPECS (the :368-377 precedent).
+- file: tests/verify_ci_workflow/test_ducklake_deploy_map_wiring.py
+  action: Modify
+  purpose: >-
+    (Created by PLAN-telemetry-writer-deploy-wiring.) Gains a node pinning 'src/telemetry/**' in the workflow's push paths,
+    parsed as data (the test_ducklake_row_rules_wiring.py:45 pattern).
+- file: tests/lambdas/ducklake_telemetry_writer/test_packaging.py
+  action: Modify
+  purpose: >-
+    (Created by PLAN-telemetry-writer-function.) Gains nodes: the telemetry writer manifest includes the kernel files and
+    the three new src/common modules and telemetry_actions.py; compute_affected_artifacts of each new src/common module
+    is exactly the telemetry writer; data-pipeline's manifest excludes every src/common/ducklake_telemetry_*.py by name.
+- file: tests/checks/contracts/test_telemetry_dimension_contracts.py
+  action: Modify
+  purpose: Pin that the ops_tenants, ops_projects and ops_entity_counters write paths and the substrate rows name the telemetry writer.
+bundled_recommendations: []
+followon_recs:
+- rec-4209
+- rec-4210
+- rec-4219
+infrastructure_dependencies:
+- >-
+  No Terraform. Every runtime resource comes from the three plans merged in #1430 (5433e631): PLAN-url-only-invoke-guard
+  (the boundary Deny on direct invoke, PlatformDev's URL-only grant, the scoped secret agent-platform-ducklake-telemetry-writer-dsn
+  and the ducklake_telemetry_writer login set by the maintenance verb provision_telemetry_login, Decision 213),
+  PLAN-telemetry-writer-function (the function, URL, role, env pins TELEMETRY_META_SCHEMA / TELEMETRY_DATA_PATH /
+  TELEMETRY_DSN_SECRET_ID, DUCKLAKE_FIELD_SEMANTICS_PATH, the DuckLakeTelemetryWriter metric grant, reserved concurrency 5
+  and the blob grant fenced to the smoke catalog's folder) and PLAN-telemetry-writer-deploy-wiring (the deploy map entry,
+  the serving-leg deploy and the --lambda-telemetry smoke step run as github_ci_branch).
+- >-
+  The scoped login holds SELECT/INSERT/UPDATE/DELETE on the ducklake_smoke schema's tables and no CREATE anywhere
+  (ducklake_telemetry_writer_role.sql). Every statement this plan issues is DuckLake metadata DML (DuckLake turns CREATE
+  TABLE, SET PARTITIONED BY, INSERT, UPDATE and DELETE into metadata-table DML plus Parquet on S3), so it needs no grant
+  beyond that; this plan's live gate is the first run of every telemetry verb under the login, the measurement the
+  boundary consult (Q3) asks for, and it reports catalog_sessions for the login's CONNECTION LIMIT 10. A privilege error
+  there is a grant gap reported to the direct-invoke thread, never worked around in code. The same holds for an S3
+  AccessDenied raised while DuckLake cleans up a losing transaction in the 4-way fan-out: the role has no s3:DeleteObject
+  by design, and this gate drives its first OCC conflicts.
+- >-
+  Ordering: this implementation merges only after (a) PLAN-url-only-invoke-guard is applied and verified (Decision 213
+  on main, the login provisioned), (b) PLAN-telemetry-writer-function is merged and applied, and (c)
+  PLAN-telemetry-writer-deploy-wiring is deployed with its --lambda-telemetry step green, and (d) the smoke catalog's
+  pre-existing target tables are known: an admin-directed, read-only reconcile_partitions call on the maintenance function
+  (dry_run true, meta_schema ducklake_smoke, the smoke data_path; PlatformAdmin, run by Benjamin's admin agent) reports
+  which of the nine target tables already exist and any partition drift, and any drift is repaired under Decision 204
+  cl.2's human-directed shape before the merge. If that read cannot run (for example an unclassified smoke table, or the
+  admin role's data-prefix scope), say so to Benjamin with precondition (a); provisioning's own read-only check then
+  fails loud on the first deploy and step 13's exception (1) applies. The merge
+  redeploys all six DuckLake functions (field_semantics.yaml and src/common/ducklake_*.py), production writer and reader
+  included, so it waits for Benjamin's explicit word.
+- >-
+  LAMBDA-DEPLOY DEFERRED for data-pipeline: its manifest edit only excludes the three new src/common modules, so its zip
+  contents are unchanged; proven by VP 7's test_data_pipeline_excludes_every_ducklake_telemetry_module (the
+  PLAN-telemetry-writer-function precedent).
+- >-
+  The RDS catalog swap's cutover waits for this plan's gate to be recorded on Neon (catalog_backend=neon); after the swap
+  the same gate re-runs unchanged and records catalog_backend=rds (Benjamin, 2026-10-08).
+acceptance_criteria:
+- run_telemetry_txn re-raises every terminal class before the OCC-collision check, so a message containing "conflict" from
+  a terminal error is never retried; an OCC collision retries and exhaustion raises OCCRetryExhaustedError.
+- register_tenant returns one canonical ULID per signed principal across calls and never returns or logs the principal.
+- register_project returns one project_id per (tenant, project_ref), derives purpose from the projected prefix_map,
+  refuses an unregistered reserved ref when not explicit (403 project_unregistered) and requires a registered tenant (403
+  tenant_unresolved); on all four verbs, a non-str value, U+0000 or a code point in U+D800-U+DFFF in an accepted string is
+  400 bad_request naming the field, never the value, before any catalog read.
+- provision_telemetry creates and partitions all seven tables before any row lands, seeds only the two telemetry counter
+  rows without ever lowering one, and has no drop path.
+- Two concurrent registrations of the same project_ref on a DuckLake catalog converge on one id (local race test, and the
+  live gate's four concurrent calls).
+- The handler maps registration errors to their statuses, emits metrics only in the DuckLakeTelemetryWriter namespace,
+  and builds the principal at the edge.
+- field_semantics.yaml carries ops_projects derivations.purpose equal to the contract's derivation block, and the
+  generator's --check passes.
+- The telemetry writer bundle includes the kernel and the new modules; data-pipeline excludes them; the deploy workflow
+  triggers on src/telemetry/**; code_drift tracks src/telemetry.
+- The deployed --lambda-telemetry step passes with part 1's vectors on the merge commit and logs catalog_backend=neon.
+- Each telemetry writer module is measured by its own mirror test file at 100% line coverage (handler.py by
+  tests/lambdas/ducklake_telemetry_writer/test_handler.py, telemetry_actions.py by test_telemetry_actions.py), and the flat
+  tests/test_ducklake_telemetry_writer_handler.py no longer exists.
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: The transaction helper classifies terminal errors first, retries OCC collisions and reports its metrics.
+  command: >-
+    bin/venv-python -m pytest tests/common/test_ducklake_telemetry_txn.py::test_commits_once_and_reports_metrics
+    tests/common/test_ducklake_telemetry_txn.py::test_retries_an_occ_collision_then_commits
+    tests/common/test_ducklake_telemetry_txn.py::test_terminal_error_with_conflict_text_is_not_retried
+    tests/common/test_ducklake_telemetry_txn.py::test_request_error_is_terminal_and_rolled_back
+    tests/common/test_ducklake_telemetry_txn.py::test_exhaustion_raises_occ_retry_exhausted
+    tests/common/test_ducklake_telemetry_txn.py::test_non_occ_error_propagates_after_rollback
+    tests/common/test_ducklake_telemetry_txn.py::test_request_error_str_carries_no_value
+    tests/common/test_ducklake_telemetry_txn.py::test_invalid_string_field_names_the_field_never_the_value -q
+  expected: Exit 0, every node passes. Red before because the module and nodes are absent.
+  fix_if: A conflict-text terminal error retried means the classification order is wrong; fix the helper, never the marker list.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-txn-terminal-first
+  expected_literals: []
+- step: 2
+  phase: pre-deploy
+  action: The pure registration pieces work without a database.
+  command: >-
+    bin/venv-python -m pytest tests/common/test_ducklake_telemetry_registration.py::test_purpose_follows_the_registry_prefix_map
+    tests/common/test_ducklake_telemetry_registration.py::test_missing_purpose_projection_is_loud
+    tests/common/test_ducklake_telemetry_registration.py::test_caller_principal_repr_hides_the_ref
+    tests/common/test_ducklake_telemetry_registration.py::test_clear_caches_empties_both_bindings
+    tests/common/test_ducklake_telemetry_registration.py::test_cache_untouched_when_commit_conflicts
+    tests/common/test_ducklake_telemetry_registration.py::test_project_entry_points_refuse_an_invalid_string_before_any_statement -q
+  expected: Exit 0, every node passes. Red before because the module and nodes are absent.
+  fix_if: A purpose test passing on a hard-coded map means the map is restated in Python; read it from the registry.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-registration-pure
+  expected_literals: []
+- step: 3
+  phase: pre-deploy
+  action: >-
+    Registration SQL on a plain in-memory DuckDB catalog attached as ops_catalog: idempotent tenant and project
+    registration, the lock taken only when creating, the derived purpose written after the gate, attribute updates as new
+    versions, the reserved-ref and missing-tenant refusals, the exactly-one-counter-row rule, row rules writing nothing,
+    canonical ULIDs.
+  command: >-
+    bin/venv-python -m pytest tests/common/test_ducklake_telemetry_registration.py::test_register_tenant_is_idempotent_and_returns_one_ulid
+    tests/common/test_ducklake_telemetry_registration.py::test_register_tenant_locks_the_counter_only_when_creating
+    tests/common/test_ducklake_telemetry_registration.py::test_register_project_writes_history_and_current_with_derived_purpose
+    tests/common/test_ducklake_telemetry_registration.py::test_register_project_attribute_update_writes_a_new_version
+    tests/common/test_ducklake_telemetry_registration.py::test_unregistered_reserved_ref_is_refused_unless_explicit
+    tests/common/test_ducklake_telemetry_registration.py::test_lock_requires_exactly_one_counter_row
+    tests/common/test_ducklake_telemetry_registration.py::test_row_rule_violation_writes_nothing
+    tests/common/test_ducklake_telemetry_registration.py::test_minted_ids_are_canonical_uppercase_ulids -q
+  expected: Exit 0 with the SQL nodes passing (duckdb present in the full venv). Red before because the module is absent.
+  fix_if: A second register writing a second version, or the counter moving on a lookup hit, is a registration bug; fix it in the module.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    The nodes need duckdb, which requirements-fast.txt excludes (heavy-exclusion, Decision 104), so venv-less replay would
+    collect them as skips; the full tier's coverage run of the mapped file is the standing guard (rec-2809).
+- step: 4
+  phase: pre-deploy
+  action: Provisioning issues the right DDL in the right order and seeds only the two telemetry counter rows.
+  command: >-
+    bin/venv-python -m pytest tests/common/test_ducklake_telemetry_provision.py::test_provision_creates_and_partitions_every_table_before_any_write
+    tests/common/test_ducklake_telemetry_provision.py::test_event_tables_carry_not_null_and_the_session_day_partition
+    tests/common/test_ducklake_telemetry_provision.py::test_seed_touches_only_the_two_telemetry_counter_rows
+    tests/common/test_ducklake_telemetry_provision.py::test_seed_never_lowers_a_counter
+    tests/common/test_ducklake_telemetry_provision.py::test_provision_issues_no_drop_or_truncate
+    tests/common/test_ducklake_telemetry_provision.py::test_existing_tables_are_never_re_altered
+    tests/common/test_ducklake_telemetry_provision.py::test_half_present_dimension_pair_fails_loud
+    tests/common/test_ducklake_telemetry_provision.py::test_preexisting_table_with_drifted_partition_fails_before_any_seed
+    tests/common/test_ducklake_telemetry_provision.py::test_provision_never_enables_inlining
+    tests/common/test_ducklake_telemetry_provision.py::test_provision_reports_counters_and_tables
+    tests/common/test_ducklake_telemetry_provision.py::test_preexisting_table_with_drifted_columns_fails_before_any_seed
+    tests/common/test_ducklake_telemetry_provision.py::test_duplicated_counter_row_is_repaired_at_the_floor -q
+  expected: Exit 0, every node passes. Red before because the module and nodes are absent.
+  fix_if: An INSERT recorded before a SET PARTITIONED BY for any table breaks Decision 137; reorder.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-provision-ddl
+  expected_literals: []
+- step: 5
+  phase: pre-deploy
+  action: The verbs and the handler edge behave as contracted, with fakes.
+  command: >-
+    bin/venv-python -m pytest tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py::test_register_tenant_refuses_principal_parameters
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py::test_register_tenant_response_never_carries_the_principal
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py::test_register_project_rejects_unknown_keys_but_accepts_component
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py::test_nul_or_lone_surrogate_in_any_string_is_400_without_the_value
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py::test_register_project_requires_a_registered_tenant
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py::test_telemetry_probe_reports_binding_reuse_backend_and_counters
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py::test_catalog_backend_is_classified_without_echoing_the_host
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py::test_provision_refuses_force_recreate_keys
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py::test_contract_verbs_match_the_dispatched_production_verbs
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_dispatch_includes_the_registration_verbs
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_error_map_rows_for_registration_errors
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_principal_port_is_built_at_the_edge_and_never_logged
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_metric_sink_uses_the_telemetry_namespace
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_request_bytes_reach_the_verb
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_reopened_connection_clears_telemetry_caches -q
+  expected: Exit 0, every node passes. Red before because the nodes are absent.
+  fix_if: Any response or captured log containing a 12-digit number or the fake account id fails the run; remove the leak, never the assertion.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-writer-registration-verbs
+  expected_literals: []
+- step: 6
+  phase: pre-deploy
+  action: The registry carries the purpose prefix_map from the contract, and the generator's output is fresh.
+  command: >-
+    bin/venv-python -m scripts.schema_to_field_semantics --check && bin/venv-python -m pytest
+    tests/test_field_semantics_telemetry_registration.py::test_ops_projects_registry_carries_the_purpose_prefix_map -q
+  expected: Exit 0 from both. Red before because the node is absent.
+  fix_if: A --check failure means field_semantics.yaml was hand-edited or not regenerated; regenerate, never hand-edit.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-purpose-prefix-map-projection
+  expected_literals: []
+- step: 7
+  phase: pre-deploy
+  action: Packaging and deploy wiring include the kernel where it runs and nowhere else.
+  command: >-
+    bin/venv-python -m pytest tests/verify_ci_workflow/test_ducklake_deploy_map_wiring.py::test_deploy_push_paths_include_src_telemetry
+    tests/lambdas/ducklake_telemetry_writer/test_packaging.py::test_telemetry_writer_manifest_bundles_the_kernel_and_modules
+    tests/lambdas/ducklake_telemetry_writer/test_packaging.py::test_new_common_modules_affect_only_the_telemetry_writer
+    tests/lambdas/ducklake_telemetry_writer/test_packaging.py::test_data_pipeline_excludes_every_ducklake_telemetry_module
+    tests/convergence_health/code_drift/test_ducklake.py::test_ducklake_pathspecs_include_src_telemetry -q
+  expected: Exit 0, every node passes. Red before because the nodes are absent.
+  fix_if: A data-pipeline leak means an exclude line is missing; add it by name.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-writer-packaging
+  expected_literals: []
+- step: 8
+  phase: pre-deploy
+  action: The gate's new vectors fail loudly on each divergence, and its output carries no account id, URL or host.
+  command: >-
+    bin/venv-python -m pytest tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_registration_vectors_pass_on_a_consistent_writer
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_register_tenant_id_drift_fails
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_concurrent_register_project_divergent_ids_fail
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_probe_below_counter_floor_fails
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_probe_non_smoke_binding_fails
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_probe_undeclared_partition_fails
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_self_only_violation_fails
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_gate_output_never_contains_an_account_id -q
+  expected: Exit 0, every node passes. Red before because the nodes are absent.
+  fix_if: A vector that passes with divergent ids is too weak; tighten the vector.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-registration-gate
+  expected_literals: []
+- step: 9
+  phase: pre-deploy
+  action: >-
+    The dimension, counter, substrate and ports contracts name the telemetry writer and keep their pinned substrings.
+  command: >-
+    bin/venv-python -m pytest tests/checks/contracts/test_telemetry_dimension_contracts.py::test_dimension_write_paths_name_the_telemetry_writer
+    tests/checks/contracts/test_telemetry_dimension_contracts.py::test_substrate_rows_name_the_telemetry_writer
+    tests/checks/contracts/test_telemetry_dimension_contracts.py::test_ports_pc01_names_the_telemetry_writer_edge
+    tests/checks/contracts/test_telemetry_dimension_contracts.py::test_ops_entity_counters_catalog_aware_grain -q
+  expected: Exit 0, every node passes. Red before because the three new nodes are absent.
+  fix_if: A failing pinned-substring node means an edit dropped required text; restore it rather than loosening the pin.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-writer-contract-paths
+  expected_literals: []
+- step: 17
+  phase: pre-deploy
+  action: Every contract, the new Class B file and the Class D substrate edit included, passes the contract-drift gate.
+  command: >-
+    bin/venv-python -c "from scripts.checks.contracts.validate_contract_drift import validate_contract_drift as v;f=[];v(f);assert
+    not f, f;print('CONTRACTS_OK')"
+  expected: Exit 0 and CONTRACTS_OK printed.
+  fix_if: A storage-substrate or ports edit without a new amendment_log entry fails the Class D leg; add the entry.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    Duplicates the registered validate_contract_drift check, which already runs in the pre and full tiers
+    (scripts/checks/contracts/_manifest.py:77-81), and is diff-relative to the merge base, so a standing copy adds nothing.
+- step: 18
+  phase: pre-deploy
+  action: >-
+    Each telemetry writer module maps to its own mirror test file, and every lambda handler still maps to a distinct
+    existing home with exactly one of its flat and mirror files present.
+  command: >-
+    bin/venv-python -m pytest
+    tests/test_coverage_checker/test_coverage_checker_map.py::TestMapSourceToTest::test_telemetry_writer_modules_map_to_their_own_mirror_tests
+    tests/test_coverage_checker/test_coverage_checker_map.py::TestMapSourceToTest::test_all_lambda_handlers_map_to_distinct_existing_parent_qualified_tests
+    -q
+  expected: Exit 0, every node passes. Red before because the new node is absent (and, once present, the flat home wins).
+  fix_if: >-
+    A telemetry writer module mapping to tests/test_ducklake_telemetry_writer_handler.py means either the flat file still
+    exists (finish the move) or the module's own tests/lambdas/ducklake_telemetry_writer/test_<module>.py is missing (create
+    it); never recreate the flat file, special-case the checker or loosen the pin.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-writer-test-homes
+  expected_literals: []
+- step: 19
+  phase: pre-deploy
+  action: >-
+    Nothing live still names the moved flat test file (closure sweep for the Delete row), and the stub-handler shard names
+    the moved file.
+  command: >-
+    ! git grep -n -F tests/test_ducklake_telemetry_writer_handler.py -- config scripts src .github && git grep -q -F
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py --
+    config/agent/verification_registry/entries/telemetry-writer-stub-handler.yaml
+  expected: >-
+    Exit 0 with no output. Red before because the telemetry-writer-stub-handler shard names the flat path. docs/plans and
+    logs are left out because merged plans and generated reports keep the old path as history, and tests/ because a pin
+    may name the old path in an absence assertion.
+  fix_if: >-
+    A hit is a live consumer of the old path: repoint it to tests/lambdas/ducklake_telemetry_writer/test_handler.py, or
+    regenerate it with its own tool if it is a generated file.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    A one-time migration sweep: once the move lands, an absence grep has no revertable counter-example (the
+    no-retired-ci-role-in-live-surfaces precedent), and a stale path left in a live command fails on its own when run
+    (pytest exit 4). A graduated copy would also carry the flat path into config/agent/verification_registry/entries/ and
+    match itself. Step 18's graduated exclusive-or pin guards the flat file itself returning.
+  expected_literals: []
+- step: 20
+  phase: pre-deploy
+  action: Each telemetry writer module reaches 100% line coverage from its own mirror test file alone.
+  command: >-
+    bin/venv-python -m scripts.test_coverage_checker --check-tests --check-coverage --files
+    src/lambdas/ducklake_telemetry_writer/handler.py src/lambdas/ducklake_telemetry_writer/telemetry_actions.py
+  expected: >-
+    Exit 0: both modules have their test file and are at 100% line coverage, each measured by its mapped file alone
+    (step 18 proves which file that is).
+  fix_if: >-
+    A module below 100% needs direct tests in its own file (shared fakes in the declared
+    tests/lambdas/ducklake_telemetry_writer/conftest.py, never imported from another test_ module); never add a
+    coverage_baseline.yaml entry (Decision 159).
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    Duplicates the full tier's per-file coverage check (step 12), which measures every changed source by its mapped test
+    file; a standing copy adds nothing.
+- step: 10
+  phase: pre-deploy
+  action: >-
+    On a real DuckLake catalog provisioned by provision_telemetry_catalog, the lock holds: two concurrent transactions
+    registering the same tenant and the same project_ref converge on one id after one OCC retry (Decision 200 lock arm,
+    local evidence).
+  command: >-
+    bin/venv-python -m pytest tests/common/test_ducklake_telemetry_registration_integration.py -m integration -q
+  expected: Exit 0 with both nodes passing (not skipped). A skip counts as a failure (rec-4071).
+  fix_if: >-
+    Divergent ids mean the lock does not serialize registration: Decision 200's reversal condition fires; stop and return
+    the model to /plan (tenant-id.yaml:43-47). An INSTALL failure is an environment fault to fix, never a skip.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    Needs network for INSTALL ducklake and real DuckLake transactions; CI excludes integration tests (rec-4071), so it
+    cannot be a standing regression guard today.
+- step: 11
+  phase: pre-deploy
+  action: The bundle imports cleanly and the import fences hold.
+  command: bin/venv-python -m scripts.lambda_manifest --check-bundles && .venv/bin/lint-imports
+  expected: Exit 0 from both; the telemetry writer bundle stages and imports its handler; no forbidden import chain.
+  fix_if: A scripts-never-import-telemetry-append failure means something in ducklake_runtime's closure or the gate imports a telemetry module; remove that edge.
+  hermetic: false
+  graduation: not-applicable
+- step: 12
+  phase: pre-deploy
+  action: Fast tier, then the full tier before handoff.
+  command: bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate
+  expected: >-
+    Exit 0 on a completed full run. handoff_policy.timeout_disposition is blocked, so a timeout is not a pass: resume and
+    rerun the full tier from the start.
+  fix_if: Fix the named check at its root cause (Decision 55); never raise a budget or skip a check.
+  hermetic: false
+  graduation: not-applicable
+- step: 13
+  phase: post-deploy
+  action: >-
+    The governed deploy of the merge commit succeeded, each job included. Read with mcp__github__actions_list
+    (list_workflow_runs, workflow deploy-ducklake-lambdas.yml, head_sha $MERGE_SHA) then list_workflow_jobs for that run,
+    writing the jobs JSON to $DEPLOY_JOBS_JSON.
+  command: >-
+    test -s "$DEPLOY_JOBS_JSON" && bin/venv-python -c "import json,os;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));jobs={x['name']:x.get('conclusion')
+    for x in (j.get('jobs') if isinstance(j,dict) else j)};print(jobs);want=['deploy-maintenance','maintenance-smoke','reconcile-gate','deploy-serving','smoke'];assert
+    all(any(n.startswith(w) and c=='success' for n,c in jobs.items()) for w in want),jobs;print('DEPLOY_OK')"
+  expected: Every named job concluded success (a skipped job fails this step), then DEPLOY_OK.
+  fix_if: >-
+    A failed smoke or reconcile-gate job is this plan's to root-cause and fix forward, never a re-run to green, with two
+    named exceptions. (1) A provision refusal on a drifted PRE-EXISTING smoke-catalog table (partition or columns) is not
+    a code fault: the deploy run stays red until an admin-directed repair (Decision 204 cl.2's human-directed shape; for
+    partitions, reconcile_partitions with dry_run false on meta_schema ducklake_smoke; for columns no verb exists today,
+    so file a rec), report it to Benjamin, and acceptance criterion 9 is blocked until then. Precondition (d) exists to
+    prevent this. (2) A maintenance-smoke commit conflict on ducklake_smoke during the first provision is a concurrency
+    collision between two catalog writers: read both jobs' logs, re-dispatch the deploy once (it is idempotent), and file
+    a rec if it recurs.
+  hermetic: false
+  graduation: not-applicable
+- step: 14
+  phase: post-deploy
+  action: >-
+    The live telemetry gate ran part 1's vectors on the merge commit. Save the smoke job's log (mcp__github__get_job_logs
+    for that run's smoke job) to $SMOKE_LOG_FILE; it is the live evidence of the lock on Neon, tagged by backend.
+  command: >-
+    test -s "$SMOKE_LOG_FILE" && bin/venv-python -c "import os,re;L=open(os.environ['SMOKE_LOG_FILE'],encoding='utf-8',errors='replace').read().splitlines();i=next(k
+    for k,l in enumerate(L) if '##[group]Run' in l and '--lambda-telemetry' in l);j=next((k for k in range(i+1,len(L)) if '##[group]Run' in
+    L[k]),len(L));t=chr(10).join(L[i:j]);need=('TELEMETRY_PROVISION_OK','TELEMETRY_TENANT_STABLE','TELEMETRY_PROJECT_CONVERGED','TELEMETRY_PROBE_OK','TELEMETRY_SELF_ONLY_OK','catalog_backend=neon','catalog_sessions=');miss=[n
+    for n in need if n not in t];assert not miss, miss;assert not re.search(r'(?<![0-9])[0-9]{12}(?![0-9])',t),'12-digit number in the telemetry step';assert
+    'arn:aws' not in t,'ARN in the telemetry step';print('TELEMETRY_GATE_LIVE_OK')"
+  expected: >-
+    All seven markers present in the --lambda-telemetry step's own section of the log (its group header to the next step's),
+    with no 12-digit number and no ARN in that section, then TELEMETRY_GATE_LIVE_OK. The scan is scoped to the step because
+    other steps echo configuration (rec-4211). The catalog_sessions value is recorded in the report for the login's
+    connection limit (a measurement, not a pass condition).
+  fix_if: >-
+    A missing PROJECT_CONVERGED with divergent ids fires Decision 200's reversal condition: stop, report to Benjamin and
+    return the model to /plan. A missing PROVISION_OK with a drift refusal is step 13's exception (1), not a vector fault.
+    Any other missing marker is a deploy or vector fault to root-cause.
+  hermetic: false
+  graduation: not-applicable
+- step: 15
+  phase: post-deploy
+  action: >-
+    An independent live run of the same gate from this session as PlatformDev (URL-only invoke, granted by
+    PLAN-url-only-invoke-guard), so the evidence does not rest on the CI log alone.
+  command: >-
+    DUCKLAKE_TELEMETRY_WRITER_URL=$(aws ssm get-parameter --profile agent_platform --region eu-west-2 --name
+    /agent-platform/ducklake/telemetry_writer_url --query Parameter.Value --output text) AWS_PROFILE=agent_platform
+    bin/venv-python -m scripts.ducklake_neon_smoke_test --lambda-telemetry > "${TMPDIR:-/tmp}/telemetry_gate.out" 2>&1 &&
+    for m in TELEMETRY_PROVISION_OK TELEMETRY_TENANT_STABLE TELEMETRY_PROJECT_CONVERGED TELEMETRY_PROBE_OK
+    TELEMETRY_SELF_ONLY_OK catalog_backend=neon; do grep -q "$m" "${TMPDIR:-/tmp}/telemetry_gate.out" || { echo "missing $m";
+    exit 1; }; done && echo LOCAL_GATE_OK
+  expected: Exit 0, all five part 1 markers and catalog_backend=neon in the captured output, then LOCAL_GATE_OK.
+  fix_if: >-
+    An AccessDenied on the URL call means PlatformDev's grant is missing or unconditioned wrongly: report it to the
+    direct-invoke thread, never widen locally. Divergent registration ids fire Decision 200's reversal condition.
+  hermetic: false
+  graduation: not-applicable
+- step: 16
+  phase: post-deploy
+  action: >-
+    No regression on the shared writer: it still refuses the dimensions on its generic verbs, and the telemetry function's
+    errors alarm metric is zero since the deploy.
+  command: >-
+    test -s "$DEPLOY_JOBS_JSON" && DUCKLAKE_WRITER_URL=$(aws ssm get-parameter --profile agent_platform --region eu-west-2
+    --name /agent-platform/ducklake/writer_url --query Parameter.Value --output text) AWS_PROFILE=agent_platform
+    bin/venv-python -c "from scripts.ducklake_smoke import core;w=core._function_url('writer');x=core._sigv4_invoke(w,{'action':'write_ops','table':'ops_projects','record':{}});assert
+    x.status_code==400 and 'write_boundary=' in x.json().get('error',''), x.status_code;print('WRITER_REFUSAL_OK')" && bin/venv-python -c "import
+    datetime as d,json,os,subprocess;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));jobs=j.get('jobs') if isinstance(j,dict) else j;t=[x['completed_at'] for x in jobs if x['name'].startswith('deploy-serving')][0];q=subprocess.run(['aws','cloudwatch','get-metric-statistics','--namespace','AWS/Lambda','--metric-name','Errors','--dimensions','Name=FunctionName,Value=agent-platform-ducklake-telemetry-writer','--start-time',t,'--end-time',d.datetime.now(d.timezone.utc).isoformat(),'--period','3600','--statistics','Sum','--profile','agent_platform','--output','json'],capture_output=True,text=True,check=True);s=sum(p['Sum']
+    for p in json.loads(q.stdout)['Datapoints']);assert s==0,s;st=lambda ns,m,st_,dims:sum(p[st_] for p in json.loads(subprocess.run(['aws','cloudwatch','get-metric-statistics','--namespace',ns,'--metric-name',m]+dims+['--start-time',t,'--end-time',d.datetime.now(d.timezone.utc).isoformat(),'--period','3600','--statistics',st_,'--profile','agent_platform','--output','json'],capture_output=True,text=True,check=True).stdout)['Datapoints']);inv=st('AWS/Lambda','Invocations','Sum',['--dimensions','Name=FunctionName,Value=agent-platform-ducklake-telemetry-writer']);lat=st('DuckLakeTelemetryWriter','CommitLatencyMs','SampleCount',[]);assert
+    inv>0 and lat>0,(inv,lat);print('TELEMETRY_ERRORS_ZERO','invocations',inv,'commit_samples',lat)"
+  expected: >-
+    WRITER_REFUSAL_OK, then TELEMETRY_ERRORS_ZERO with invocations > 0 and commit_samples > 0 over the same window, so a
+    misnamed dimension or an empty window cannot pass vacuously and the DuckLakeTelemetryWriter metric path is proven
+    live (emit_metric swallows a wrong-namespace AccessDenied, src/common/ducklake_metrics.py:43-44).
+  fix_if: A non-zero Errors sum means an unmapped exception reached Lambda; read the function's logs (no values are logged) and map or fix it.
+  hermetic: false
+  graduation: not-applicable
+test_obligations:
+- source: src/common/ducklake_telemetry_txn.py
+  behavior: Terminal errors re-raise before the OCC-collision check; collisions retry; exhaustion is loud.
+  verification_step: 1
+  test_selector: tests/common/test_ducklake_telemetry_txn.py::test_terminal_error_with_conflict_text_is_not_retried
+  red_green_expectation: red before (module absent), green after
+- source: src/common/ducklake_telemetry_registration.py
+  behavior: Purpose comes from the projected prefix_map only.
+  verification_step: 2
+  test_selector: tests/common/test_ducklake_telemetry_registration.py::test_purpose_follows_the_registry_prefix_map
+  red_green_expectation: red before (module absent), green after
+- source: src/common/ducklake_telemetry_registration.py
+  behavior: The caches are written only after commit, so an OCC loser never caches its uncommitted id.
+  verification_step: 2
+  test_selector: tests/common/test_ducklake_telemetry_registration.py::test_cache_untouched_when_commit_conflicts
+  red_green_expectation: red before (module absent), green after
+- source: src/common/ducklake_telemetry_registration.py
+  behavior: Registration is idempotent per principal and per (tenant, project_ref), and the lock moves only when creating.
+  verification_step: 3
+  test_selector: tests/common/test_ducklake_telemetry_registration.py::test_register_tenant_locks_the_counter_only_when_creating
+  red_green_expectation: red before (module absent), green after
+- source: src/common/ducklake_telemetry_txn.py
+  behavior: invalid_string_field names the first non-str, U+0000 or U+D800-U+DFFF field and never returns the value.
+  verification_step: 1
+  test_selector: tests/common/test_ducklake_telemetry_txn.py::test_invalid_string_field_names_the_field_never_the_value
+  red_green_expectation: red before (module absent), green after
+- source: src/common/ducklake_telemetry_registration.py
+  behavior: lookup_project and resolve_or_register_project refuse an invalid string with a 400 before any statement.
+  verification_step: 2
+  test_selector: tests/common/test_ducklake_telemetry_registration.py::test_project_entry_points_refuse_an_invalid_string_before_any_statement
+  red_green_expectation: red before (module absent), green after
+- source: src/common/ducklake_telemetry_provision.py
+  behavior: Every table is created and partitioned before any write; only the two telemetry counter rows are seeded.
+  verification_step: 4
+  test_selector: tests/common/test_ducklake_telemetry_provision.py::test_provision_creates_and_partitions_every_table_before_any_write
+  red_green_expectation: red before (module absent), green after
+- source: src/lambdas/ducklake_telemetry_writer/telemetry_actions.py
+  behavior: register_tenant is self-only and never returns the principal; the contract's verbs equal the dispatched production verbs.
+  verification_step: 5
+  test_selector: tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py::test_register_tenant_refuses_principal_parameters
+  red_green_expectation: red before (module absent), green after
+- source: src/lambdas/ducklake_telemetry_writer/telemetry_actions.py
+  behavior: >-
+    A non-str value, U+0000 or a code point in U+D800-U+DFFF in any string the four verbs accept is a 400 bad_request
+    naming the field, never the value, before any catalog read; a surrogate pair (U+1F600) passes.
+  verification_step: 5
+  test_selector: tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py::test_nul_or_lone_surrogate_in_any_string_is_400_without_the_value
+  red_green_expectation: red before (module absent), green after
+- source: src/lambdas/ducklake_telemetry_writer/handler.py
+  behavior: Registration errors map to their statuses and metrics go to the telemetry namespace.
+  verification_step: 5
+  test_selector: tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_error_map_rows_for_registration_errors
+  red_green_expectation: red before (node absent), green after
+- source: config/agent/verification_registry/entries/telemetry-writer-stub-handler.yaml
+  behavior: The graduated stub-handler check runs the moved handler test file, not the deleted flat path.
+  verification_step: 19
+  command: >-
+    ! git grep -n -F tests/test_ducklake_telemetry_writer_handler.py -- config scripts src .github && git grep -q -F
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py --
+    config/agent/verification_registry/entries/telemetry-writer-stub-handler.yaml
+  red_green_expectation: red before (the shard names the flat path), green after
+- source: src/lambdas/ducklake_telemetry_writer/manifest.yaml
+  behavior: The telemetry writer bundles the kernel and the new modules.
+  verification_step: 7
+  test_selector: tests/lambdas/ducklake_telemetry_writer/test_packaging.py::test_telemetry_writer_manifest_bundles_the_kernel_and_modules
+  red_green_expectation: red before (node absent; then the includes are missing), green after
+- source: src/lambdas/data-pipeline/manifest.yaml
+  behavior: data-pipeline never bundles a ducklake_telemetry module.
+  verification_step: 7
+  test_selector: tests/lambdas/ducklake_telemetry_writer/test_packaging.py::test_data_pipeline_excludes_every_ducklake_telemetry_module
+  red_green_expectation: red before (node absent; then the wildcard bundles the modules), green after
+- source: .github/workflows/deploy-ducklake-lambdas.yml
+  behavior: A kernel change triggers the DuckLake deploy.
+  verification_step: 7
+  test_selector: tests/verify_ci_workflow/test_ducklake_deploy_map_wiring.py::test_deploy_push_paths_include_src_telemetry
+  red_green_expectation: red before (node absent; then the path is missing), green after
+- source: scripts/convergence_health/code_drift.py
+  behavior: A kernel change advances the DuckLake drift reference.
+  verification_step: 7
+  test_selector: tests/convergence_health/code_drift/test_ducklake.py::test_ducklake_pathspecs_include_src_telemetry
+  red_green_expectation: red before (node absent; then the pathspec is missing), green after
+- source: scripts/schema_to_field_semantics.py
+  behavior: The ops_projects entry projects the purpose derivation's prefix_map and default.
+  verification_step: 6
+  test_selector: tests/test_field_semantics_telemetry_registration.py::test_ops_projects_registry_carries_the_purpose_prefix_map
+  red_green_expectation: red before (node absent; then the key is missing), green after
+- source: config/lambda/ducklake/field_semantics.yaml
+  behavior: The generated registry is fresh against the generator.
+  verification_step: 6
+  command: bin/venv-python -m scripts.schema_to_field_semantics --check
+  red_green_expectation: red after the generator edit until regenerated, green after
+- source: scripts/ducklake_smoke/lambda_telemetry_gates.py
+  behavior: Divergent registration ids, a broken counter floor or a non-smoke binding fail the live gate loudly.
+  verification_step: 8
+  test_selector: tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_concurrent_register_project_divergent_ids_fail
+  red_green_expectation: red before (node absent), green after
+- source: docs/contracts/ducklake_telemetry_writer.yaml
+  behavior: The contract's verbs equal the handler's dispatched production verbs.
+  verification_step: 5
+  test_selector: tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py::test_contract_verbs_match_the_dispatched_production_verbs
+  red_green_expectation: red before (contract and node absent), green after
+- source: docs/contracts/ops_tenants.yaml
+  behavior: The write path names the telemetry writer.
+  verification_step: 9
+  test_selector: tests/checks/contracts/test_telemetry_dimension_contracts.py::test_dimension_write_paths_name_the_telemetry_writer
+  red_green_expectation: red before (node absent; then the text names ducklake_writer), green after
+- source: docs/contracts/ops_projects.yaml
+  behavior: The write path names the telemetry writer.
+  verification_step: 9
+  test_selector: tests/checks/contracts/test_telemetry_dimension_contracts.py::test_dimension_write_paths_name_the_telemetry_writer
+  red_green_expectation: red before (node absent; then the text names ducklake_writer), green after
+- source: docs/contracts/ops_entity_counters.yaml
+  behavior: The write path names the registration lock and the provision seed.
+  verification_step: 9
+  test_selector: tests/checks/contracts/test_telemetry_dimension_contracts.py::test_dimension_write_paths_name_the_telemetry_writer
+  red_green_expectation: red before (node absent; then the text lacks the lock), green after
+- source: docs/contracts/ports.yaml
+  behavior: Coupling PC-01 names the telemetry writer's edge as where tenancy is derived.
+  verification_step: 9
+  test_selector: tests/checks/contracts/test_telemetry_dimension_contracts.py::test_ports_pc01_names_the_telemetry_writer_edge
+  red_green_expectation: red before (node absent; then the text names the shared writer path), green after
+- source: docs/contracts/storage-substrate.yaml
+  behavior: The telemetry and counter rows name the telemetry writer boundary.
+  verification_step: 9
+  test_selector: tests/checks/contracts/test_telemetry_dimension_contracts.py::test_substrate_rows_name_the_telemetry_writer
+  red_green_expectation: red before (node absent; then the rows name ducklake_writer), green after
+constraints:
+- >-
+  The telemetry verbs live only on agent-platform-ducklake-telemetry-writer. Do not add them to the shared writer, to
+  VERB_REGISTRY or to ducklake_writer.yaml (recon 7/12). Do not edit ducklake_writes.py or ducklake_scd2_schema.py; reuse
+  their helpers by import.
+- >-
+  No Terraform and no IAM change. Emit metrics only with namespace DuckLakeTelemetryWriter: the role denies any other, and
+  the denial is swallowed silently (recon 6).
+- >-
+  Nothing in ducklake_runtime's import closure, and nothing under scripts/, may import a module that imports
+  src.telemetry.append (the scripts-never-import-telemetry-append contract, .importlinter:148-154).
+- >-
+  Public repository (Decision 101): no account id, ARN, host or a hash of any of them in code, fixtures, logs, responses
+  or gate output. Tests use placeholders only; a 12-digit literal fails test_telemetry_dimension_contracts.py:55.
+- >-
+  Regenerate field_semantics.yaml with the generator, never by hand. Keep every new module, and every file the sibling
+  plans created that this plan grows (lambda_telemetry_gates.py, test_lambda_telemetry_gates.py, test_handler.py moved
+  from the flat path, test_packaging.py), under 500 SLOC; decompose rather than raise a budget (Decision 128). Each telemetry writer module
+  keeps its own mirror test file; never special-case scripts/test_coverage_checker.py to route one.
+- >-
+  The implementation merge redeploys every DuckLake function, so it waits for Benjamin's explicit word, and only after the
+  boundary Deny is verified and the deploy-wiring plan is deployed and green.
+- No rescue agents or workaround loops (Decision 55).
+context:
+- 'Decision-scout: FLAGS_FOUND. CITE 200, 207, 210, 84, 81, 143, 137, 199, 88, 107, 101, 184, 125, 126, 79. NOTE 91 and
+  T2.36:c2 CONFLICT resolved by Decision 213 (PLAN-url-only-invoke-guard, #1430); SPIRIT 143 resolved (S3 is IAM-scoped
+  to the smoke prefixes and the catalog login is scoped to the smoke schema, Decision 213). RELATED 82, 97, 96, 191, 197,
+  209, 144, 118, 128, 181, 48. Decisions triaged: 163 of 163. Roadmap items intersected: 5; CONFLICT: 1; RELATED: 4.'
+- 'gates: decision-scout=FLAGS_FOUND (3 flags, resolved); plan-critique=PROCEED after 4 round(s); round 4 autonomous
+  (r1-r3 REVISE, all fixed; r4 notes J1-J4 folded in); 2026-10-09 amendment (the NUL/lone-surrogate 400 guard): r1 REVISE
+  (A1, A2 fixed; N1-N3, N5 folded in), r2 REVISE (D1 describe kept out of the string rule; notes D2-D4 folded in),
+  r3 PROCEED; 2026-10-12 amendment (test homes): r1 REVISE (R1, R2 fixed), r2 PROCEED (notes folded in), r3 REVISE (A1
+  fixed), r4 PROCEED (notes folded in); round 4 autonomous. Also cites 204 (live partition re-lays are admin-only, so provision ALTERs only on create) and 212 (CallerPrincipal is
+  the port, no cross-port coupling). Out-of-scope critique findings filed as rec-4211
+  (account id in public Actions logs) and rec-4219 (the shared writer and reader NUL gap).'
+- 'Direction: Benjamin "write the plan" (cmsg_012XgaFy8VaDQbxP5D8nC958K9mX5fF3q1N3ruTT1UwZWu) after the split, the A + D
+  choice and the revised design /mnt/project-files/telemetry-slice2/step6b-2a2-plan3-part1-D.md.'
+- 'Depends on the plans merged in #1430: PLAN-telemetry-writer-function creates the handler, manifest, the flat
+  tests/test_ducklake_telemetry_writer_handler.py (moved to test_handler.py here; 2026-10-12 amendment) and
+  test_packaging.py; PLAN-telemetry-writer-deploy-wiring creates the gate module, its test and
+  test_ducklake_deploy_map_wiring.py; this plan extends them. rec-4024''s "no second writer" item is re-grounded on
+  Decision 213 (dated note, 2026-10-08).'
+- 'Amendment 2026-10-12 (test homes; Benjamin routed it to planning, cmsg_012XgaFy8VaDQbxP5D8nC9589ntmJSdv6g8RLpgYVDJNea):
+  reverses #1441 (f91bd9e4), which moved the file flat only because the RS-08 pin required it. decision-scout=FLAGS_FOUND
+  (NOTE 181, resolved: the RS-08 change is a correction tracking rule 4, exact per branch, plus an exclusive-or guard);
+  CITE 131, 59, 128, 130, 159, 176; RELATED 104, 187, 132, 189, 148, 213, 79, 48. Decisions triaged: 168 of 168. Roadmap
+  items intersected: 2; CONFLICT: 0; RELATED: 2. Advice: plan3-part1-test-home/ADVICE.md. The shard repoint is path-only;
+  its provenance is this row, not a note in the Class A verification-registry.yaml (always-ask for Benjamin).'
+- 'Part 2 (append_telemetry) pins against this plan; seams: /mnt/project-files/telemetry-slice2/part1-seams-from-part2.md
+  (seam 4''s reset_warm_connection hook is declined: ducklake_runtime may not import a telemetry module; the handler
+  clears caches on a reopened connection instead).'
+- 'fork: database login | chosen: telemetry-scoped login now, plus PlatformDev URL-only invoke and the smoke-folder blob
+  fence (Benjamin 2026-10-08, cmsg_012XgaFy8VaDQbxP5D8nC958WJTQhMRCDrbX5dcmjWJmGv) | class: asked | persisted: D1'
+- 'Decided with notice: register_tenant is self-only (no principal parameters, no confirm token); the canonical remap is
+  deferred to 2b/2c (rec-4210), a deviation from plan 1''s handoff; smoke telemetry table compaction is rec-4209
+  (Decision 88 cl.1(iii), 191); telemetry_probe tags evidence with
+  catalog_backend for the RDS swap''s re-run; storage-substrate status stays not_provisioned (production residency is
+  2c); the gate''s project is synthetic: so it registers explicitly; no destructive verb on the function
+  (fable-consult-telemetry-writer-boundary/ADVICE.md Q2/Q4), so provisioning is create-if-not-exists and the counter seed
+  never lowers a value.'
+- 'ci-rca: none open (ci_rca_open read 2026-10-08; rec-4189 was fixed by #1428).'
+- 'Facts: /mnt/project-files/telemetry-slice2/recon-part1-under-D.md (db031eaa), recon-2a2-plan3-writer-verbs.md,
+  fable-consult-plan3/ADVICE.md (Q9-13, Q17-21), fable-consult-connections/ADVICE.md.'
+pre_implementation_checklist:
+- Branch confirmed not on main
+- docs/PROJECT_CONTEXT.md read
+- 'Only the plan-cited decision sections read: 84 (I-2), 81 (cl.3, cl.8), 137, 143 (cl.3), 184 (cl.2), 199 (cl.2), 200,
+  207, 210 (cl.1, cl.3, cl.5), and 213'
+- PLAN-url-only-invoke-guard is applied and verified, PLAN-telemetry-writer-function is applied, and PLAN-telemetry-writer-deploy-wiring is deployed with a green --lambda-telemetry step
+- 'Precondition (d) is answered: the read-only reconcile_partitions report on ducklake_smoke is in hand and any target-table drift is repaired, or Benjamin has accepted the first-deploy risk'
+- All files in scope located and readable (the D1/D2-created files exist on main)
+- Acceptance criteria understood and verifiable
+execution_steps:
+- >-
+  Write tests/common/test_ducklake_telemetry_txn.py, then src/common/ducklake_telemetry_txn.py. Run step 1.
+- >-
+  Change scripts/schema_to_field_semantics.py, regenerate config/lambda/ducklake/field_semantics.yaml, add the projection
+  test. Run step 6.
+- >-
+  Write tests/common/test_ducklake_telemetry_registration.py (pure nodes plus the in-memory SQL nodes), then
+  src/common/ducklake_telemetry_registration.py. Run steps 2 and 3.
+- >-
+  Write tests/common/test_ducklake_telemetry_registration_integration.py and run step 10 locally. If the ids diverge,
+  stop: Decision 200's reversal condition fires and the model returns to /plan.
+- >-
+  Write tests/common/test_ducklake_telemetry_provision.py, then src/common/ducklake_telemetry_provision.py. Run step 4.
+- >-
+  Move the handler tests. A branch started before this amendment rebases onto it first (validate_scope_boundary reads
+  scope from the base). git mv tests/test_ducklake_telemetry_writer_handler.py
+  tests/lambdas/ducklake_telemetry_writer/test_handler.py, as its own commit where the branch allows, so review sees a
+  rename; if a mirror test_handler.py already exists, fold the flat file's nodes into it without dropping any, then
+  delete the flat file. Repoint the telemetry-writer-stub-handler shard's command; generalise the RS-08 pin in
+  tests/test_coverage_checker/test_coverage_checker_map.py. Run step 19 and step 18's RS-08 node. If telemetry_actions.py
+  already exists without test_telemetry_actions.py, tests/test_coverage_checker/test_coverage_checker_checks.py::
+  test_unmapped_sources_do_not_grow stays red until the next step adds that file.
+- >-
+  Write telemetry_actions.py and its tests, extend handler.py and test_handler.py, and create
+  docs/contracts/ducklake_telemetry_writer.yaml. Run step 5. Then add
+  TestMapSourceToTest::test_telemetry_writer_modules_map_to_their_own_mirror_tests (it needs test_telemetry_actions.py to
+  exist, since rule 4 falls back only to an existing mirror) and run steps 18 and 20.
+- >-
+  Update the telemetry writer and data-pipeline manifests, the deploy push paths and code_drift, with the wiring tests.
+  Run steps 7 and 11.
+- >-
+  Add the gate vectors and their red cases (the markers TELEMETRY_PROVISION_OK, TELEMETRY_TENANT_STABLE,
+  TELEMETRY_PROJECT_CONVERGED, TELEMETRY_PROBE_OK, TELEMETRY_SELF_ONLY_OK and the catalog_backend line are printed by the
+  gate). Run step 8.
+- >-
+  Amend ops_tenants, ops_projects, ops_entity_counters, storage-substrate and ports, and extend the contract test. Run step 9.
+- >-
+  Run step 17 and step 12 (the fast tier, then a COMPLETED full tier; a timeout is not a pass).
+- >-
+  Closure evidence (implement skill Commit Flows): step 12's completed full tier; push, PR, CI green; postflight. Confirm
+  preconditions (a)-(c) in infrastructure_dependencies hold at merge time, then ask Benjamin for the merge (it redeploys
+  every DuckLake function). On his word, squash-merge.
+- After the merge, run steps 13-16 against the deploy run for the merge commit.
+- 'Report: what was implemented, verification results, the catalog_backend=neon evidence for the RDS swap thread, and the measured catalog_sessions for the direct-invoke thread''s CONNECTION LIMIT.'
+work_areas: []
+rollback: >-
+  Revert the squash commit in a new PR; the governed channel redeploys the previous code. The smoke catalog's telemetry
+  tables and rows are disposable and can stay; nothing on the telemetry function can drop them.

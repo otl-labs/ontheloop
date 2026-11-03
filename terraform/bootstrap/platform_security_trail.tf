@@ -195,6 +195,26 @@ resource "aws_cloudtrail" "platform_security" {
     include_management_events = true
   }
 
+  # Decision 213 cl.4: Lambda data events for the identity-trusting DuckLake functions, so a denied
+  # direct invoke leaves a record. CloudTrail data-resource values are exact ARN strings; the telemetry
+  # writer, smoke twin and reader are named before their functions exist. The management selector above is
+  # unchanged, so the Decision 202 detectors keep their inputs.
+  event_selector {
+    read_write_type           = "All"
+    include_management_events = false
+
+    data_resource {
+      type = "AWS::Lambda::Function"
+      values = [
+        "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer",
+        "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader",
+        "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-writer",
+        "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-writer-smoke",
+        "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-reader",
+      ]
+    }
+  }
+
   depends_on = [
     aws_s3_bucket_policy.platform_security_trail,
     aws_iam_role_policy.platform_security_trail_logs,

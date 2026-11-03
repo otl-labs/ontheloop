@@ -1,0 +1,819 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-late-hook-records
+intent: >-
+  Make turn capture read fresh Claude Code project threads correctly. In those threads the ontheloop plugin loads after the
+  CLI starts, so Claude Code writes the plugin's SessionStart hook records late (after the first turn's Stop), and writes
+  each stdout-printing hook run twice (a heldContent copy and a plain twin). Today that double-counts hook process_events
+  (rec-4633), files the late hooks under the user's first turn, and would let a late SessionStart:resume group cut a turn
+  in half. One claude_code parser bump (6 -> 7) fixes all three. Telemetry is the learning signal of the self-improvement
+  loop (PROJECT_CONTEXT): wrong hook counts and wrong turn spans teach it the wrong lessons.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-telemetry-late-hook-records.yaml
+phase: >-
+  ad_hoc_rec (defect rec-4633, Medium, tagged telemetry-project, plus the late-record findings of
+  /mnt/project-files/project-thread-hooks/FINDINGS.md section 5e; the coordinator asked for this plan on 2026-10-26 and
+  Benjamin said "write the plan" on 2026-10-26, cmsg_012XgaFy8VaDQbxP5D8nC958NK4XsqRAKhnjC7vBuSB7Hi). Closes no roadmap
+  exit criterion: closes_criteria is empty by design. T3.20 owns turn capture, but its only open criteria are c6
+  (SESSION_LOG retirement) and c9 (CI agent capture, rec-4415), and this plan touches neither. V2: src/turn_capture is
+  excluded from every Lambda bundle, and contract prose never reaches config/lambda/ducklake/field_semantics.yaml
+  (generated with include_prose=False), so nothing deploys.
+scope:
+  - file: src/turn_capture/hook_groups.py
+    action: Create
+    purpose: >-
+      The new hook-record rules, pure and stdlib-only over record dicts and parsed timestamps (no import from streams.py,
+      so no cycle): twin_key (rule HG-1), is_late_session_start (HG-2) and late_resume_start (HG-3), with the constants
+      they name. Kept out of streams.py so that file stays under its 500-SLOC limit (471 today; Decision 128, no raise).
+  - file: src/turn_capture/streams.py
+    action: Modify
+    purpose: >-
+      _walk applies HG-1..HG-4: a twin is skipped before _hook_effect and before stream.hooks.append (kind becomes
+      "hook_twin", attached to no turn, counted hook_twin_records); every SessionStart startup, clear or resume hook
+      record attaches to no turn (a late startup or clear record is counted late_session_start_records); a late resume
+      group's first record is still appended to stream.resumes but closes no turn, and Stream gains resume_at
+      (first-record line -> effective boundary line, rule HG-4; on-time groups map to their own line). _background_spawn
+      both selects its boundary and compares notices by effective line (the first resume whose resume_at line is after
+      the spawn's record). Idempotent across the frontier re-assembly (_build_stream re-runs _assemble on the same Rec
+      objects in every non-final pass): the twin key set and every HG verdict are rebuilt on each walk, and a record that
+      arrives already marked "hook_twin" attaches to no turn, so both walks build the same turns (envelope R7). Net
+      growth at most 20 SLOC.
+  - file: src/turn_capture/sessions.py
+    action: Modify
+    purpose: >-
+      _segment_closes (SC-1/SC-2) uses stream.resume_at for the boundary position: the turns of the segment before it and
+      the close anchor both stop at the effective line (turns with start < first.line < effective line), and the next
+      segment starts just before it (start = effective line - 1), so the turn a late group landed in belongs to the
+      segment after it. On-time groups keep start = their own line (v6 unchanged). Resume rows unchanged (they key on the
+      group's first record; SC-3 still makes a resume row due only once its group ends).
+  - file: src/turn_capture/provenance.py
+    action: Modify
+    purpose: >-
+      PV-2 unchanged. open_provenance adds the diagnostics counter pin_after_first_prompt (root only): no pin before the
+      first prompt, but a SessionStart pin record whose hookName is not SessionStart:resume or SessionStart:compact lies
+      later in the parsed stream. Counts only; never a row value.
+  - file: src/turn_capture/observations.py
+    action: Modify
+    purpose: >-
+      Module docstring only: "one process_event per hook attachment" becomes "one process_event per hook run (twins
+      collapse, rule HG-1)". No code change; the behaviour it describes is pinned by VP 1.
+  - file: src/turn_capture/record_turn.py
+    action: Modify
+    purpose: PARSER_VERSION 7, PRODUCER_VERSION "turn-capture-7".
+  - file: config/telemetry/parser_versions.yaml
+    action: Modify
+    purpose: >-
+      claude_code current 7; history entry v7 (build date, regenerated golden_digest, full_output_cap_bytes 8388608,
+      signature_prefixes [hook, gate, precommit, status], a reason naming this plan, rec-4633 and rules HG-1..HG-4).
+  - file: docs/contracts/telemetry_sessions.yaml
+    action: Modify
+    purpose: >-
+      Class A (Benjamin's word before the build merges, exact text pasted inline). The PROVENANCE governance note gains,
+      on a new folded line (max_line_chars 2000): from parser_version 7 a pin written after the first prompt never reaches
+      the open row, which reads NULL (counted pin_after_first_prompt; read-time recovery is rec-4641); a late
+      SessionStart:resume group still counts as a resume, but its boundary is the first prompt of the turn it was written
+      into, so it closes no turn, and its SC-1 close and background-completion boundary use that position. One
+      amendment_log entry (governance_note_add, semantic_break true, notes only). Ends at or under 495 effective lines.
+  - file: docs/contracts/telemetry_observations.yaml
+    action: Modify
+    purpose: >-
+      Class A (Benjamin's word, text inline). The process_event note under field parent_observation_id (its phrases pinned
+      by tests/telemetry/test_contract_lifecycle_friction.py::test_process_event_parentage_declared stay verbatim; new text
+      is added, never reworded) and the governance notes say
+      (parser_version 7): one process_event per hook RUN (twins of rule HG-1 are never rows; the first copy in file order
+      is the row); a SessionStart startup, clear or resume hook record never has an enclosing turn, so its parent is NULL
+      even when Claude Code wrote it after a prompt record (on any surface). Cites rec-4439, the owner of the process_event
+      parentage DQ intent. One amendment_log entry. 491 effective lines today; ends at or under 498 (compact an old
+      block-form amendment_log entry to flow form if needed, wording unchanged).
+  - file: docs/contracts/telemetry-event-envelope.yaml
+    action: Modify
+    purpose: >-
+      Class A (Benjamin's word, text inline). A "PARSER_VERSION 7 (PLAN-telemetry-late-hook-records)" governance line after
+      the PARSER_VERSION 5 lines and before "R8: non-replayable" (tests/telemetry/test_stop_turn_close_contract_notes.py
+      pins that order): rules HG-1..HG-4 in one sentence each, and that every verdict is a function of the record and the
+      records before it in file order, so every prefix agrees (R7). One amendment_log entry.
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      Class D (Decision 212, scout CITE). structural_assumptions SA-02 gains: Claude Code may write a late-loaded plugin's
+      SessionStart hook records after the first turn, records a stdout-printing hook run twice (a heldContent copy and a
+      plain copy sharing toolUseID, hookEvent, hookName, command and durationMs), shares one toolUseID across all hooks of
+      one event, and may write no SessionStart record at all on a resume with a queued prompt (envelope R7's declared
+      exception). One amendment_log entry.
+  - file: tests/turn_capture/test_hook_groups.py
+    action: Create
+    purpose: >-
+      hook_groups.py's mirror file (validate_test_coverage per-file floor). Nodes: test_twin_key_needs_the_full_key,
+      test_twin_key_is_none_without_a_tool_use_id, test_late_startup_is_any_own_prompt_before_it,
+      test_late_resume_compares_hook_start_with_the_latest_reply, test_late_resume_uses_ts_alone_without_duration,
+      test_held_first_record_is_judged_by_the_latest_reply.
+  - file: tests/turn_capture/test_hook_resume_twins.py
+    action: Create
+    purpose: >-
+      rec-4633's acceptance file. Nodes: test_twin_records_emit_one_process_event (startup and resume shapes, held copy
+      first and plain copy first), test_a_twin_after_a_later_prompt_never_opens_a_resume_boundary,
+      test_twins_are_matched_on_the_full_key_never_tool_use_id_alone (two Stop hooks and a PreToolUse/PostToolUse pair
+      sharing one toolUseID each stay two rows).
+  - file: tests/turn_capture/test_streams.py
+    action: Modify
+    purpose: >-
+      streams.py's mirror file (coverage floor). New nodes: test_late_startup_records_attach_to_no_turn,
+      test_late_resume_group_closes_no_turn_and_is_still_a_resume, test_on_time_resume_group_is_unchanged,
+      test_background_spawn_completes_at_the_effective_boundary (a spawn launched before the effective line completes at
+      the late group; a spawn launched inside the turn the late group landed in is NOT completed at it),
+      test_twins_stay_turnless_across_the_frontier_reassembly (a non-final frontier parse over a turn holding twins
+      builds the same turn records as an unwithheld parse). Existing nodes unchanged. Stays under 500 SLOC.
+  - file: tests/turn_capture/test_segment_closes.py
+    action: Modify
+    purpose: >-
+      New nodes test_late_resume_segment_close_is_anchored_before_the_effective_boundary and
+      test_turn_after_a_late_resume_belongs_to_the_next_segment (a late resume followed by an on-time resume: the second
+      SC-1 close exists and its outcome reads the turn the late group landed in).
+  - file: tests/turn_capture/test_sessions.py
+    action: Modify
+    purpose: >-
+      sessions.py's mirror file (coverage floor): new node test_segment_closes_read_the_effective_boundary, so the
+      resume_at lines in sessions.py are covered by their mirror. Existing nodes unchanged.
+  - file: tests/turn_capture/test_provenance.py
+    action: Modify
+    purpose: >-
+      New nodes: test_late_pin_is_counted_never_read_by_the_open_row (PV-2 still NULL; pin_after_first_prompt 1),
+      test_late_resume_pin_is_not_counted_for_the_open_row.
+  - file: tests/turn_capture/test_record_turn.py
+    action: Modify
+    purpose: >-
+      test_new_cases_are_built_from_their_builders registers V7_BUILDERS. SANCTIONED ASSERTION CHANGE:
+      test_finalization_cuts_are_recorded_once_and_survive_a_reset pins PRODUCER_VERSION "turn-capture-7" and
+      PARSER_VERSION 7. Nothing else changes.
+  - file: tests/telemetry/test_parser_version_registry.py
+    action: Modify
+    purpose: CASES gains the three new cases after the existing 50 (no other change).
+  - file: tests/telemetry/test_late_hook_records_contract_notes.py
+    action: Create
+    purpose: >-
+      Nodes: test_sessions_declares_the_late_pin_and_late_resume_rules, test_observations_declares_one_row_per_hook_run,
+      test_envelope_declares_parser_version_7_before_r8, test_ports_sa02_names_late_and_twin_records. Each asserts the
+      named rule tokens (HG-1..HG-4, pin_after_first_prompt, rec-4641) are present, not whole sentences.
+  - file: tests/fixtures/turn_capture_v7_cases.py
+    action: Create
+    purpose: >-
+      Builders for the three new golden cases and V7_BUILDERS; synthetic values only (Decision 101), timestamps in the
+      corpus epoch, the shapes copied from the three observed fresh-thread transcripts (FINDINGS 5d/5e and this planning
+      thread) with every id, sha and path replaced.
+  - file: tests/fixtures/turn_capture/golden/late_startup_group.json
+    action: Create
+    purpose: >-
+      The fresh-thread startup shape: a meta prompt and a prompt in the first second, a reply, a Stop witness, then the
+      late group (pin first as a plain record, held copies sharing the release timestamp, plain twins of the stdout hooks),
+      a second prompt, more plain twins after it, a reply and a witness, then a third prompt with no reply yet (an open
+      turn at the end of the case). The re-walk guard is test_twins_stay_turnless_across_the_frontier_reassembly, which
+      compares turn records and attachment between a frontier parse and a fresh parse of the same prefix. Expected: one hook process_event per run, all with NULL
+      parent; the open row's checkout columns NULL; the turns exactly as without the hook records.
+  - file: tests/fixtures/turn_capture/golden/late_resume_group.json
+    action: Create
+    purpose: >-
+      A synthetic late resume: turn p1 closed by a witness, then prompt p2 whose timestamp is after the resume hooks
+      started, its reply, then the SessionStart:resume group (plain first record whose ts minus durationMs precedes p2's
+      reply), then a witness, then prompt p3, its reply and a witness (p3 ends the group, so SC-3 makes the resume row
+      due). Expected: p2 stays one whole turn; one resume row; the SC-1 close anchored on p1's last record; p2 and p3 in
+      the segment after the boundary; every resume hook process_event with NULL parent.
+  - file: tests/fixtures/turn_capture/golden/resume_hook_twins.json
+    action: Create
+    purpose: >-
+      rec-4633's on-time resume: a resume group written before the next prompt with plain-then-held twins, and one held
+      twin landing after the next prompt. Expected: one process_event per run and exactly one resume boundary.
+  - file: tests/fixtures/turn_capture/golden/index.json
+    action: Modify
+    purpose: Lists the three new cases after the existing 50.
+  - file: tests/telemetry/fixtures/derived_golden_state.yaml
+    action: Modify
+    purpose: >-
+      Re-authored by hand at parser_version 7 under its own AUTHORING RULE (never copied from a verb): header moves to 7;
+      a changed tree's entries are re-derived and cite this plan in their why. Expected movement: none outside the new
+      cases. The one existing case that moves (observed_real_shapes.json, see execution step 6) is in neither derived
+      file; confirm from the regenerated diff.
+  - file: tests/telemetry/fixtures/derived_golden_rollups.yaml
+    action: Modify
+    purpose: >-
+      Same rule. Mandatory new entries: corpus:late_startup_group and corpus:resume_hook_twins final-pass process_event
+      rollups, each counting one process_event per hook run (the double count rec-4633 describes is what these pin down).
+  - file: config/agent/verification_registry/entries/turn-capture-hook-twins.yaml
+    action: Create
+    purpose: Registry row for VP 1 (graduate), written verbatim from the step's command; guard_target src/turn_capture/hook_groups.py.
+  - file: config/agent/verification_registry/entries/turn-capture-late-hook-groups.yaml
+    action: Create
+    purpose: Registry row for VP 2 (graduate); guard_target src/turn_capture/streams.py.
+  - file: config/agent/verification_registry/entries/telemetry-late-hook-records-declared.yaml
+    action: Create
+    purpose: Registry row for VP 3 (graduate); guard_target docs/contracts/telemetry-event-envelope.yaml.
+  - file: tests/fixtures/turn_capture/golden/pin_first_record_without_uuid.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/multiblock_response_interleaved_tool_results.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/meta_and_companion_records.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/tool_result_error.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/tool_result_interrupted.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/hook_blocked_tool_call.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/sidecar_present.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/sidecar_absent.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/subagent_sync.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/subagent_background_with_completion.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/subagent_background_without_completion.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/nested_subagent_depth2.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/hooks_resume_and_compact.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/empty_thinking_and_image_blocks.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/orphan_tool_result.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/unknown_record_and_attachment_types.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/trailing_partial_line.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/malformed_line.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/large_tool_result_over_64k.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/observed_real_shapes.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/secrets.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/hooks_before_first_record.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/mcp_overflow_saved_output.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/full_output_omitted_over_cap.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/reasoning_visibility_forms.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/gate_and_precommit_markers.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/close_cancelled_mid_stream.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/close_cancelled_running_tool.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/close_failed_api_error.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/resume_after_interrupt.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/fork_branch_copied_head.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/fork_session_copied_head.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/fork_session_nested.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/hook_command_names.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/no_reply_session.json
+    action: Modify
+    purpose: expected_rows regenerated at v7 (still empty, rule D-1).
+  - file: tests/fixtures/turn_capture/golden/subagent_usage_final_and_spawn_correction.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/background_notice_statuses.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/resume_segment_closes.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/session_provenance_facts.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/model_call_request_fields.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/stop_witness_closes.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/stop_blocked_witness_first.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/stop_blocked_feedback_first.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/stop_blocked_then_interrupted.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/api_error_self_close.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/stop_witness_not_at_rest.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/prompt_open_row.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/workflow_from_skill.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/subagent_workflow_skills.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+  - file: tests/fixtures/turn_capture/golden/status_markers.json
+    action: Modify
+    purpose: expected_rows regenerated at v7.
+bundled_recommendations:
+  - rec-4633
+followon_recs:
+  - rec-4641
+  - rec-4642
+closes_criteria: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - >-
+    One process_event per hook run: hook records matching on toolUseID, hookEvent, hookName, command and durationMs
+    collapse to the first in file order; a record without a toolUseID never collapses; two different hooks of one event,
+    or a PreToolUse and PostToolUse pair of one tool call, stay separate rows; a twin never opens a resume boundary
+    (VP 1).
+  - >-
+    A SessionStart startup, clear or resume hook record attaches to no turn, even when written after a prompt record (on
+    any surface). A SessionStart:resume group whose first record's hook started before the latest prompt or assistant
+    record already written closes no turn, is still a resume (its resume row is due once the group ends, rule SC-3;
+    execution_attempt order kept), and its SC-1 close,
+    the next segment's start and the background-completion boundary all sit at the first prompt of the turn it was
+    written into; a spawn launched inside that turn is never completed at it. On-time groups behave exactly as at v6
+    (VP 2).
+  - >-
+    PV-2 is unchanged (the open row never reads a pin written after the first prompt), and pin_after_first_prompt counts
+    the root streams where that happened (VP 2).
+  - >-
+    Every rule is decided from the record and the records before it, so incremental capture equals full capture at every
+    line cut of every golden case, the three new cases included (VP 4).
+  - >-
+    The golden corpus is regenerated at parser_version 7 with the registry bumped and three new cases; the only existing
+    row that changes beyond the version stamps is observed_real_shapes.json's SessionStart:startup hook row sh1 (parent
+    p1 -> NULL); the derived golden state and rollups are re-authored by hand at 7 (VP 4).
+  - >-
+    The contracts say the same as the code: telemetry_sessions (late pin, late resume), telemetry_observations (one row
+    per hook run, late startup parent NULL), the envelope's PARSER_VERSION 7 line before R8, and ports.yaml SA-02; all Class
+    A text was pasted inline to Benjamin and he gave his word before the build merged (VP 3).
+  - >-
+    Real transcripts on the build machine (a fresh project thread) parse at v7 with no duplicate hook process_event and no
+    SessionStart:startup hook row under a turn; a fresh project thread started on merged main is captured with the same
+    properties (VP 5, VP 9).
+  - rec-4633 closes through the Resolves trailer against its existing acceptance (VP 1, VP 10).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-4633's acceptance file plus the twin key unit nodes.
+    command: >-
+      bin/venv-python -m pytest tests/turn_capture/test_hook_resume_twins.py
+      tests/turn_capture/test_hook_groups.py::test_twin_key_needs_the_full_key
+      tests/turn_capture/test_hook_groups.py::test_twin_key_is_none_without_a_tool_use_id
+      tests/turn_capture/test_streams.py::test_twins_stay_turnless_across_the_frontier_reassembly -q
+    expected: Exit 0, every node passes. Red before because the files and the module are absent.
+    fix_if: >-
+      A twin still emits, a toolUseID-only match collapses two hooks, or a twin after a later prompt adds a resume. Fix
+      the rule, never the fixture.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: turn-capture-hook-twins
+  - step: 2
+    phase: pre-deploy
+    action: Late-group rules HG-2..HG-4 and the provenance counter.
+    command: >-
+      bin/venv-python -m pytest tests/turn_capture/test_hook_groups.py tests/turn_capture/test_streams.py::test_late_startup_records_attach_to_no_turn
+      tests/turn_capture/test_streams.py::test_late_resume_group_closes_no_turn_and_is_still_a_resume
+      tests/turn_capture/test_streams.py::test_on_time_resume_group_is_unchanged
+      tests/turn_capture/test_streams.py::test_background_spawn_completes_at_the_effective_boundary
+      tests/turn_capture/test_segment_closes.py::test_late_resume_segment_close_is_anchored_before_the_effective_boundary
+      tests/turn_capture/test_segment_closes.py::test_turn_after_a_late_resume_belongs_to_the_next_segment
+      tests/turn_capture/test_sessions.py::test_segment_closes_read_the_effective_boundary
+      tests/turn_capture/test_provenance.py::test_late_pin_is_counted_never_read_by_the_open_row
+      tests/turn_capture/test_provenance.py::test_late_resume_pin_is_not_counted_for_the_open_row -q
+    expected: Exit 0, every node passes. Red before because the nodes and module are absent.
+    fix_if: >-
+      A late resume cuts its turn, an on-time resume changes, or the open row reads a late pin (an R7 purity defect).
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: turn-capture-late-hook-groups
+  - step: 3
+    phase: pre-deploy
+    action: Contract notes and the ports validator.
+    command: >-
+      bin/venv-python -m pytest tests/telemetry/test_late_hook_records_contract_notes.py
+      tests/telemetry/test_stop_turn_close_contract_notes.py -q && bin/venv-python -c "from
+      scripts.checks.contracts.validate_ports_contract import validate_ports_contract as v;f=[];v(f);assert not f,
+      f;print('PORTS_OK')"
+    expected: Exit 0, every node passes, then PORTS_OK. Red before because the test file and texts are absent.
+    fix_if: A note is missing or the PARSER_VERSION 7 line sits after R8.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: telemetry-late-hook-records-declared
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      The golden corpus at v7 and the registry: every case matches, the bump is recorded, incremental equals full at every
+      line cut, finalize and resume schedules emit each row once, and the derived golden layer reconciles at 7.
+    command: >-
+      bin/venv-python -m pytest tests/turn_capture/test_record_turn.py::test_golden_cases_match_expected_rows
+      tests/turn_capture/test_record_turn.py::test_incremental_equals_full_at_every_line_cut
+      tests/turn_capture/test_record_turn.py::test_finalize_resume_schedules_emit_each_row_once
+      tests/turn_capture/test_record_turn.py::test_finalize_equals_virtual_prompt_at_eof
+      tests/turn_capture/test_record_turn.py::test_new_cases_are_built_from_their_builders
+      tests/turn_capture/test_record_turn.py::test_finalization_cuts_are_recorded_once_and_survive_a_reset
+      tests/telemetry/test_parser_version_registry.py tests/telemetry/test_derived_layer_reconciliation.py
+      tests/telemetry_verify/test_derive.py -q
+    expected: Exit 0, every node passes.
+    fix_if: >-
+      Regenerate expected_rows only after steps 1-3 pass. A line-cut failure is a prefix defect in an HG rule, never a
+      test to relax. A derived-layer failure means a hand re-derivation is missing, never a value copied from a verb.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Most of its nodes already belong to graduated standing checks (turn-capture-golden-corpus,
+      turn-capture-r7-incremental-equals-full, turn-capture-finalize-resume-emits-each-row-once and the parser version
+      registry); the rest (test_new_cases_are_built_from_their_builders, test_finalization_cuts_are_recorded_once_and_survive_a_reset)
+      run in the full tier. The new cases join the corpus through the index, not a new check.
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      Local integration (counts only, Decision 101). The build runs in a fresh project thread, so its own root transcript
+      holds a late startup group with twins (seen in three threads). Parse every local root tree at v7 and assert: no two
+      process_events share (tool_use_id, hook_event, command, duration_ms) metadata, no SessionStart startup hook row has a
+      parent, and at least one tree had a SessionStart record after its first prompt.
+    command: |-
+      bin/venv-python -c "
+      import glob, json
+      from collections import Counter
+      from pathlib import Path
+      from src.turn_capture.transcript import FsTree
+      from src.turn_capture.record_turn import record_turn, PARSER_VERSION
+      P = glob.glob(str(Path.home() / '.claude/projects/*/*.jsonl'))
+      dup = par = late = n = 0
+      for p in P:
+          o = record_turn(FsTree(Path(p)), None, project_ref='synthetic:local', session_final=True).observations
+          h = [r for r in o if r.get('observation_type') == 'process_event' and str(r.get('name', '')).startswith('hook:')]
+          m = [json.loads(r['metadata']) for r in h]
+          k = Counter((x.get('tool_use_id'), x.get('hook_event'), x.get('command'), x.get('duration_ms')) for x in m if x.get('tool_use_id'))
+          dup += sum(v - 1 for v in k.values())
+          par += sum(1 for r, x in zip(h, m) if str(x.get('hook_name', '')).startswith('SessionStart:startup') and r.get('parent_observation_ref'))
+          n += len(h)
+          recs = [json.loads(line) for line in open(p) if line.strip()]
+          fp = next((i for i, d in enumerate(recs) if d.get('type') == 'user' and d.get('promptId')), None)
+          late += fp is not None and any(str((d.get('attachment') or {}).get('hookName', '')).startswith('SessionStart:startup') for d in recs[fp:])
+      print('v', PARSER_VERSION, 'trees', len(P), 'hook_rows', n, 'dup', dup, 'startup_with_parent', par, 'trees_with_late_startup', late)
+      assert PARSER_VERSION == 7 and dup == 0 and par == 0 and late >= 1
+      "
+    expected: >-
+      One line with v 7, the tree and hook-row counts, dup 0, startup_with_parent 0 and trees_with_late_startup at least 1.
+      Run at v6 while planning would print dup above zero for this thread's tree.
+    fix_if: >-
+      dup above zero: read the duplicate pair's keys against HG-1 (a CLI shape change is a ports.yaml SA-02 update plus a
+      new fixture). late 0: the machine holds no fresh-thread tree; run in a fresh project thread.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      Live proof against the production writer under a synthetic ref: the c8 smoke with the v7 producer (no writer change;
+      this proves the bumped producer still lands).
+    command: bin/venv-python -m scripts.telemetry_capture.smoke
+    expected: Ends with the PC_SMOKE PASS line; counts only.
+    fix_if: Any failure -> STOP and RCA (Decision 55); never clear a halt and retry.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      rec-4633's acceptance passes on the PR head unchanged (Decision 201: the closure verdict keys on the acceptance as it
+      stands at merge), and the two follow-on recs exist, open and tagged.
+    command: >-
+      bin/venv-python -c "from scripts.ops_data_portal import _fetch_rec_from_reader as f;a=f('rec-4633');b=f('rec-4641');c=f('rec-4642');assert
+      a['acceptance'].strip()=='bin/venv-python -m pytest tests/turn_capture/test_hook_resume_twins.py -q', a['acceptance'];assert
+      all(r['status']=='open' and 'telemetry-project' in (r.get('tags') or []) for r in (a,b,c));print('RECS_OK')" &&
+      bin/venv-python -m pytest tests/turn_capture/test_hook_resume_twins.py -q
+    expected: RECS_OK, then exit 0.
+    fix_if: >-
+      A changed acceptance means someone re-authored it: read the new one and make it pass, or update it through the portal
+      with get_rec_write_guidance first.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: pre-deploy
+    action: Fast tier, then the full tier on the committed, rebased, clean tree before handoff.
+    command: >-
+      bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m
+      scripts.checks.validation_result --verify-head
+    expected: Exit 0 on a completed full run with the head verified; a timeout is not a pass (handoff_policy).
+    fix_if: >-
+      Fix the named check at root cause and rerun from the start; never raise a budget, skip a check or weaken an
+      assertion. tests/turn_capture/test_real_transcript_conformance.py is marked integration, so validate does not run
+      it; run it next to VP 5 as extra real-tree evidence and report its result.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Invokes scripts.validate (recursion refusal); it is the handoff gate itself.
+  - step: 9
+    phase: post-deploy
+    action: >-
+      A fresh project thread started on merged main (the coordinator starts it; nothing deploys, so post-merge) is
+      captured at v7: run in its second turn, after its first Stop pass.
+    command: >-
+      T="$(ls -t ~/.claude/projects/*/*.jsonl | head -1)" && AWS_PROFILE=agent_platform bin/venv-python -m
+      scripts.telemetry_capture probe --tree "$T" --require telemetry_sessions && bin/venv-python -c "import sys,json;from
+      collections import Counter;from pathlib import Path;from src.turn_capture.transcript import FsTree;from
+      src.turn_capture.record_turn import record_turn,PARSER_VERSION;o=record_turn(FsTree(Path(sys.argv[1])),None,project_ref='synthetic:local',session_final=True).observations;h=[r
+      for r in o if r.get('observation_type')=='process_event' and str(r.get('name','')).startswith('hook:')];m=[json.loads(r['metadata'])
+      for r in h];k=Counter((x.get('tool_use_id'),x.get('hook_event'),x.get('command'),x.get('duration_ms')) for x in m if
+      x.get('tool_use_id'));d=sum(v-1 for v in k.values());par=sum(1 for r,x in zip(h,m) if
+      str(x.get('hook_name','')).startswith('SessionStart:startup') and r.get('parent_observation_ref'));print('v',PARSER_VERSION,'hook_rows',len(h),'dup',d,'startup_with_parent',par);assert
+      PARSER_VERSION==7 and d==0 and par==0" "$T"
+    expected: >-
+      The probe's sessions rows above zero with no halt, then one line with v 7, dup 0 and startup_with_parent 0. Counts
+      only.
+    fix_if: 'A duplicate or a halt means inspecting the pair against HG-1 and the halt reason; file a rec and fix forward.'
+    hermetic: false
+  - step: 10
+    phase: post-deploy
+    action: >-
+      After the squash merge carries "Resolves: rec-4633": the closure job closed rec-4633, and the next scheduled
+      telemetry-golden-replay run on main (daily) replays the v7 corpus through the deployed writer and reader. Find the
+      first run whose head is at or after the merge commit with mcp__github__actions_list (list_workflow_runs, workflow
+      telemetry-golden-replay.yml, branch main), then list_workflow_jobs, and save its replay job's log
+      (mcp__github__get_job_logs) to $REPLAY_LOG.
+    command: >-
+      bin/venv-python -c "from scripts.ops_data_portal import _fetch_rec_from_reader as
+      f;s=(f('rec-4633') or {}).get('status');print('rec-4633',s);assert s=='closed'" && grep -E "GOLDEN_SMOKE
+      trees=[1-9][0-9]* expectations=[1-9][0-9]* .*mismatches=0" "$REPLAY_LOG"
+    expected: rec-4633 closed and one matching GOLDEN_SMOKE line from a run that concluded success; report it verbatim.
+    fix_if: >-
+      rec-4633 open: check ci.yml's closure job on the squash commit; close through update_rec with the PR as evidence only
+      if its acceptance passes on main. A replay mismatch with the local harness green is an engine or transport defect:
+      file it through the portal and fix forward; never relax an expectation.
+    hermetic: false
+test_obligations:
+  - source: src/turn_capture/hook_groups.py
+    behavior: Twin key (HG-1) and both lateness verdicts (HG-2, HG-3).
+    verification_step: 2
+    test_selector: tests/turn_capture/test_hook_groups.py::test_late_resume_compares_hook_start_with_the_latest_reply
+    red_green_expectation: red before (module absent), green after
+  - source: src/turn_capture/streams.py
+    behavior: A twin is never a row or a boundary; late startup records attach to no turn; a late resume closes no turn.
+    verification_step: 1
+    test_selector: tests/turn_capture/test_hook_resume_twins.py::test_a_twin_after_a_later_prompt_never_opens_a_resume_boundary
+    red_green_expectation: red before (a second resume boundary today), green after
+  - source: src/turn_capture/sessions.py
+    behavior: SC-1 reads the effective boundary of a late resume.
+    verification_step: 2
+    test_selector: tests/turn_capture/test_sessions.py::test_segment_closes_read_the_effective_boundary
+    red_green_expectation: red before (node absent), green after
+  - source: src/turn_capture/provenance.py
+    behavior: PV-2 never reads a late pin; pin_after_first_prompt counts it.
+    verification_step: 2
+    test_selector: tests/turn_capture/test_provenance.py::test_late_pin_is_counted_never_read_by_the_open_row
+    red_green_expectation: red before (counter absent), green after
+  - source: src/turn_capture/observations.py
+    behavior: The module docstring says one process_event per hook run.
+    verification_step: 8
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: >-
+      Docstring-only edit with no runtime effect; the one-row-per-hook-run behaviour it describes is pinned by VP 1's
+      test_hook_resume_twins.py nodes.
+  - source: src/turn_capture/record_turn.py
+    behavior: The version pin moves to 7 with the corpus and registry.
+    verification_step: 4
+    test_selector: tests/turn_capture/test_record_turn.py::test_finalization_cuts_are_recorded_once_and_survive_a_reset
+    red_green_expectation: red before (pins 6), green after
+  - source: config/telemetry/parser_versions.yaml
+    behavior: The registry records v7 with the regenerated digest.
+    verification_step: 4
+    test_selector: tests/telemetry/test_parser_version_registry.py::test_registry_matches_producer
+    red_green_expectation: red before (current 6 against PARSER_VERSION 7), green after
+  - source: docs/contracts/telemetry_sessions.yaml
+    behavior: The late pin and late resume rules are declared.
+    verification_step: 3
+    test_selector: tests/telemetry/test_late_hook_records_contract_notes.py::test_sessions_declares_the_late_pin_and_late_resume_rules
+    red_green_expectation: red before (module absent), green after
+  - source: docs/contracts/telemetry_observations.yaml
+    behavior: One process_event per hook run and the late startup parent are declared.
+    verification_step: 3
+    test_selector: tests/telemetry/test_late_hook_records_contract_notes.py::test_observations_declares_one_row_per_hook_run
+    red_green_expectation: red before (module absent), green after
+  - source: docs/contracts/telemetry-event-envelope.yaml
+    behavior: The PARSER_VERSION 7 line exists and precedes R8.
+    verification_step: 3
+    test_selector: tests/telemetry/test_late_hook_records_contract_notes.py::test_envelope_declares_parser_version_7_before_r8
+    red_green_expectation: red before (module absent), green after
+  - source: docs/contracts/ports.yaml
+    behavior: SA-02 names the late, twin and missing SessionStart records.
+    verification_step: 3
+    test_selector: tests/telemetry/test_late_hook_records_contract_notes.py::test_ports_sa02_names_late_and_twin_records
+    red_green_expectation: red before (module absent), green after
+  - source: tests/fixtures/turn_capture_v7_cases.py
+    behavior: The committed new cases equal their builders.
+    verification_step: 4
+    test_selector: tests/turn_capture/test_record_turn.py::test_new_cases_are_built_from_their_builders
+    red_green_expectation: red before (builders absent), green after
+  - source: tests/telemetry/fixtures/derived_golden_state.yaml
+    behavior: Hand-derived state expectations at parser_version 7.
+    verification_step: 4
+    test_selector: tests/telemetry_verify/test_derive.py
+    waiver_reason: Hand-authored expectation data; its consumer tests are the guard and fail until the header moves to 7.
+  - source: tests/telemetry/fixtures/derived_golden_rollups.yaml
+    behavior: Hand-derived rollups at parser_version 7, one process_event per hook run in the new cases.
+    verification_step: 4
+    test_selector: tests/telemetry_verify/test_derive.py
+    waiver_reason: Hand-authored expectation data; its consumer tests are the guard and fail until the header moves to 7.
+  - source: config/agent/verification_registry/entries/turn-capture-hook-twins.yaml
+    behavior: Records VP step 1 as a graduated registry check_id, so it keeps running as a standing regression guard.
+    verification_step: 8
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: >-
+      Registry data, not behaviour-capable source; validate_verification_registry executes the row's check_spec and
+      validate_graduation_completeness fails the PR if the graduate step has no row.
+  - source: config/agent/verification_registry/entries/turn-capture-late-hook-groups.yaml
+    behavior: Records VP step 2 as a graduated registry check_id, so it keeps running as a standing regression guard.
+    verification_step: 8
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: >-
+      Registry data, not behaviour-capable source; validate_verification_registry executes the row's check_spec and
+      validate_graduation_completeness fails the PR if the graduate step has no row.
+  - source: config/agent/verification_registry/entries/telemetry-late-hook-records-declared.yaml
+    behavior: Records VP step 3 as a graduated registry check_id, so it keeps running as a standing regression guard.
+    verification_step: 8
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: >-
+      Registry data, not behaviour-capable source; validate_verification_registry executes the row's check_spec and
+      validate_graduation_completeness fails the PR if the graduate step has no row.
+weakening_dispositions:
+  - candidate: '[assertion-changed] tests/turn_capture/test_record_turn.py::test_finalization_cuts_are_recorded_once_and_survive_a_reset'
+    cite: acceptance_criteria[4]
+    disposition: planned-change
+  - candidate: '[constant-changed] src/turn_capture/record_turn.py::PARSER_VERSION'
+    cite: acceptance_criteria[4]
+    disposition: planned-change
+constraints:
+  - >-
+    Rules, pinned (rule ids HG-1..HG-4 go into code docstrings and the contracts). HG-1 twin: a hook attachment record whose
+    (toolUseID, hookEvent, hookName, command, durationMs) equals an earlier hook record's in the same stream is a twin; a
+    record whose toolUseID is not a string is never a twin. HG-2 late session start: a SessionStart:startup or
+    SessionStart:clear hook record with any own prompt record before it in the stream (inherited records never count).
+    HG-3 late resume: the first record of a SessionStart:resume group (the record that would open the group in _walk) is
+    late when its timestamp minus its durationMs (its timestamp alone when durationMs is not an int) is earlier than the
+    latest timestamp of any prompt or assistant record before it in the stream; a record without a timestamp is never
+    late. HG-4 effects: a twin is no row, no boundary, no group start and attaches to no turn; every SessionStart:startup,
+    SessionStart:clear and SessionStart:resume hook record attaches to no turn on every surface (observed_real_shapes sh1
+    included; HG-2's verdict only feeds the late_session_start_records counter); a late resume group is appended to
+    stream.resumes, closes no turn, and its effective boundary (stream.resume_at) is the first prompt record of the turn
+    current when it arrives (its own line when no turn is current); _segment_closes starts the next segment at that
+    effective line, and _background_spawn selects and compares its boundary by resume_at. SessionStart:fork and
+    SessionStart:compact keep v6 behaviour.
+  - >-
+    Purity (envelope R7, Decision 207): every HG verdict reads only the record and the records before it in file order, so
+    a verdict never flips when the file grows; no rule reads the CLI's heldContent flag, a wall clock, git or the
+    environment. A row built differently by two prefixes is a defect, never a test to relax.
+  - >-
+    PV-2 stays as it is: the open row is built at the first Stop pass from a parse cut at the turn's frontier (WT-7), so it
+    can never see a pin written after that Stop (Fable consult F2). Recovery is rec-4641's reader work (Benjamin chose it,
+    decision card cmsg_012XgaFy8VaDQbxP5D8nC958CMhHdLJy4DznnJyzSKNF3y). No new deferral: the runner's existing
+    deferred_no_pin opt-in (rules P-1..P-4) is unchanged.
+  - >-
+    Typed columns only (Benjamin, 2026-10-17): no new column and no new metadata key. The surviving twin keeps its own
+    record's fields; a held copy's release timestamp is accepted as its event_timestamp, never recomputed.
+  - >-
+    No file crosses 500 SLOC, tests included (Decision 128/130); streams.py grows at most 20 SLOC; contracts stay under 500
+    effective lines (telemetry_observations.yaml at or under 498) by relief, never a raise or split (Decision 166);
+    governance lines stay under 2000 characters.
+  - >-
+    Graduated checks (turn-capture-*, telemetry-parser-version-registry) keep resolving and are never weakened; the only
+    assertion change is the sanctioned version pin. Any further weakening candidate the PR surfaces goes into
+    weakening_dispositions or the change is reworked.
+  - 'Public repository (Decision 101): fixtures synthetic; integration and probe steps print counts only.'
+  - Do not touch terraform/personal (rec-4618 pause). No admin credentials; portal calls use AWS_PROFILE=agent_platform.
+  - No rescue agents or workaround loops (Decision 55); a failed live step stops for RCA.
+context:
+  - >-
+    Decision-scout: FLAGS_FOUND. CITE 199, 207, 228, 212, 101, 128. NOTE 228 cl.3 (read the approach as adding a pin
+    deferral; answered: no deferral is added, see constraints). RELATED 210 (late records never move session_started_at:
+    the earliest record is the CLI's first queue-operation, before every hook), 236, 95, 97, 222, 118, 131, 48, 79.
+    ROADMAP T3.20, T3.22, T2.54, T4.23 RELATED. Decisions triaged: 188 of 188. Roadmap items intersected: 4; CONFLICT: 0;
+    RELATED: 4.
+  - 'gates: decision-scout=FLAGS_FOUND (NOTE answered); plan-critique=round 1 REVISE (M1, J1-J5 addressed); round 2 REVISE (J1-J5, M1-M4 addressed); round 3 PROCEED (J1-J3, M1-M2 applied)'
+  - >-
+    Evidence: /mnt/project-files/project-thread-hooks/FINDINGS.md 5d-5e and fresh-thread-checks-22a0f589.md; a third
+    observation in this plan's own planning thread (late group after its first Stop, plain twins right after the held
+    copies). Fable consult: /mnt/project-files/first-turn-capture/fable-independent-advice.md (adopted except metadata.held,
+    refused by the typed-columns rule, and the late_fork_group counter, which K-1 makes undetectable; rec-4642 owns that
+    risk). Presentation: /mnt/project-files/first-turn-capture/step6b-presentation.md.
+  - >-
+    Not fixed, by design: a session of any surface that dies before its first Stop emits nothing (rule D-1, Decision 228
+    cl.3), pinned or not; a resume that writes no SessionStart record (queueSkipAttachments) is envelope R7's declared
+    exception; a fresh start whose SessionStart records never land is never pinned and shows up in the daily completeness
+    run. The coordinator reports the CLI behaviour (held, twinned, dropped plugin SessionStart records) to Anthropic.
+  - >-
+    Declared residuals of HG-3/HG-4, uncounted (late_resume_group counts detected groups only): a held first record of a
+    fast hook can read on time (its timestamp is the group's release time); a group that lands after the NEXT prompt puts
+    its boundary one turn late; a cross-container clock running behind by more than the resume gap could read an on-time
+    group as late; a resume group split around the next prompt (some records on time, a non-twin straggler written after
+    it) registers the straggler as a second late resume (an extra resume row; its SC-1 close is skipped as segment_close_skipped because that segment holds no turn; counted late_resume_group,
+    same class as rec-4633's risk). Late resume groups themselves are unobserved; the fixture is synthetic. Rejected: the Fable
+    late_hook_group_disagreement counter (streams.py SLOC headroom; the residuals stay declared, not measured).
+  - >-
+    Build-merge gate: Class A text (telemetry_sessions, telemetry_observations, envelope) is pasted inline to Benjamin and
+    needs his word before the build merges; the plan PR itself merges under the plan merge gate.
+  - >-
+    rec-4426 (pin base=unknown at CC-web start) is related but not bundled: it is a pin hook race, not a parser rule.
+  - 'ci_rca at planning (2026-10-26): none open; red_overlap verdict clear (no reds, slo_hours 4).'
+pre_implementation_checklist:
+  - Branch confirmed not on main; rebased onto main
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 199, 207, 212, 228 read (only the cited clauses)
+  - envelope R7 and PARSER_VERSION 5 lines, telemetry_sessions PROVENANCE note, ports.yaml SA-02 read
+  - FINDINGS.md 5d-5e, fresh-thread-checks-22a0f589.md and the Fable advice read
+  - PARSER_VERSION is still 6 and the golden index lists 50 cases; otherwise STOP and tell the coordinator
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    1. Precondition: rebase onto main. Confirm PARSER_VERSION 6, 50 golden cases, and no other open plan bumping the
+    parser; if any differs, STOP and tell the coordinator. Run VP 5 once at v6 and keep its output (expect dup above zero
+    in this fresh thread's own tree).
+  - >-
+    2. hook_groups.py (HG-1..HG-3) with test_hook_groups.py at 100% line coverage. Functions take record dicts plus the
+    parsed timestamps the caller already holds, and import nothing from streams.py.
+  - >-
+    3. streams.py (HG-4): in _walk, before the hook branch, a twin is detected on a per-stream key set and gets kind
+    "hook_twin" (attached to no turn, never in stream.hooks, counted hook_twin_records); every SessionStart startup, clear
+    and resume record attaches to no turn (a late startup/clear record is counted late_session_start_records); a late
+    resume group's first record is registered in stream.resumes and stream.resume_at maps it to cur.first.line
+    (late_resume_group), without closing cur; on-time groups map to their own line. _background_spawn selects and compares
+    its boundary by resume_at (effective line). Add the five test_streams.py nodes; keep test_streams.py at 100% coverage of
+    streams.py.
+  - >-
+    4. sessions.py _segment_closes (the SC-1 close stops at the effective line and the next segment starts at effective
+    line - 1, so a turn after a late resume belongs to the next segment) and provenance.py's counter, with their nodes (test_sessions.py, test_segment_closes.py,
+    test_provenance.py). Then test_hook_resume_twins.py. Run VP 1 and VP 2 until green.
+  - >-
+    5. Contracts: telemetry_sessions.yaml, telemetry_observations.yaml, telemetry-event-envelope.yaml (PARSER_VERSION 7
+    before R8), ports.yaml SA-02, each with its amendment_log entry dated the build day; the contract-notes test module.
+    Run VP 3.
+  - >-
+    6. Version and corpus: PARSER_VERSION 7, PRODUCER_VERSION "turn-capture-7", the sanctioned pin change, the three
+    builders and cases, the index and registry CASES. Only after VP 1-3 pass, regenerate every case's expected_rows from
+    record_turn and review the diff by kind: parser_version on every row (producer_version is normalised out of
+    expected_rows); new rows only in the new
+    cases; the one expected change in an existing case is observed_real_shapes.json's SessionStart:startup hook row sh1
+    (parent p1 -> NULL, per HG-4); any other change in an existing case is a defect to explain or fix. Set the registry v7 entry with the
+    regenerated digest. Re-author derived_golden_state.yaml and derived_golden_rollups.yaml by hand at 7. Run VP 4.
+  - 7. Execute VP 5 (local real trees) and VP 6 (live smoke); on an unrecoverable failure stop and RCA (Decision 55).
+  - >-
+    8. VP 7 (recs). Closure per the implement skill's Commit Flows and docs/contracts/git-ops.yaml: VP 8 on the committed
+    clean tree, push, PR whose body holds the rules, VP 5 counts before and after, and the exact Class A text; paste that
+    text inline in the thread for Benjamin's word. Merge (squash, body carries "Resolves: rec-4633") only after code
+    review PROCEED, CI green and his word naming the contract text.
+  - >-
+    9. Ask the coordinator to start a fresh project thread on merged main for VP 9; read VP 10 from the next scheduled
+    golden replay. Post VP 9-10 results as one counts-only PR comment.
+  - 'Report: what was implemented, verification results (counts), and the residuals now owned by rec-4641 and rec-4642.'
+work_areas: []
+rollback: >-
+  Revert in a new PR and bump parser_version to 8 with the v6 behaviour, never back to 6 (the registry is append-only;
+  envelope R5). Stored v7 rows stay valid (no column, type or name rule changed); v6 rows are superseded by version, never
+  rewritten.

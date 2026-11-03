@@ -35,13 +35,6 @@ creds/egress, proceed anyway -- recon degrades to best-effort dedup pointers, an
 prompt's mandatory SETUP section carries the pinned degraded-dedup escape hatch either way (see
 the skill's anatomy row 5).
 
-Then open a telemetry session (the state file `logs/.telemetry-active-session.json` carries the
-session id; Step 9's close reads it):
-
-```bash
-bin/venv-python -m scripts.session.preflight --open-session --workflow audit
-```
-
 ## Step 2: Confirm Harness Branch
 
 ```bash
@@ -159,14 +152,6 @@ To run the audit, open a NEW session on the target model and paste:
 The audit session will write only audits/{slug}-<sha>.yaml + .md and open a PR for
 human review. Summary: {one line on what the audit will assess}.
 ```
-
-Close the telemetry session:
-
-```bash
-bin/venv-python -m scripts.session.postflight --close-session --outcome success
-```
-
-Use `--outcome cancelled` if the prompt was not written or the session was abandoned.
 
 STOP! The audit-prompt composer's mission is complete. Perform no further actions -- do not run
 the audit yourself.

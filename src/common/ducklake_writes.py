@@ -32,7 +32,6 @@ from src.common.ducklake_scd2_schema import (
     WriteResult,
     _build_merge_current_sql,
     _build_merge_history_sql,
-    _build_select_existing_created_sql,
     _write_params,
     check_append_only_guard,
     check_rec_status_transition,
@@ -40,6 +39,7 @@ from src.common.ducklake_scd2_schema import (
     resolve_table_spec,
     schema_gate,
 )
+from src.common.ducklake_write_rules import RowRuleViolationError, check_write, existing_row_select, rules_for
 
 # ---------------------------------------------------------------------------
 # OCC retry budget (CD.33): bounded application-level retry with backoff + jitter, loud-fail on
@@ -168,8 +168,9 @@ def write_scd2(
     has_status_dag = table in STATUS_TRANSITIONS
     merge_history_sql = _build_merge_history_sql(spec)
     merge_current_sql = None if spec.write_mode == "append_only" else _build_merge_current_sql(spec)
-    select_existing_sql = (
-        None if spec.write_mode == "append_only" else _build_select_existing_created_sql(spec, include_status=has_status_dag)
+    rules = rules_for(spec)
+    select_existing_sql, existing_columns = (
+        (None, ()) if spec.write_mode == "append_only" else existing_row_select(spec, rules, has_status_dag)
     )
 
     identity = identity if identity is not None else mint_write_identity()
@@ -184,20 +185,25 @@ def write_scd2(
         attempt += 1
         try:
             con.execute("BEGIN TRANSACTION")
+            prior: dict[str, Any] | None = None
             if spec.write_mode == "append_only":
                 created_ts = created_override if created_override is not None else identity.timestamp
             else:
                 existing = con.execute(select_existing_sql, [key]).fetchall()
+                prior = dict(zip(existing_columns, existing[0], strict=True)) if existing else None
                 if require_exists and not existing:
                     raise ReferentialError(
                         f"update of absent {spec.merge_key}={key!r} in {spec.current_table}: the record does "
                         "not exist (CD.33 cl.8 / D-5). An absent rec loud-fails -- it is not silently created."
                     )
-                if require_exists and has_status_dag and existing:
-                    check_rec_status_transition(table, existing[0][1], record.get("status"))
+                if require_exists and has_status_dag and prior is not None:
+                    check_rec_status_transition(table, prior["status"], record.get("status"))
                 created_ts = (
-                    existing[0][0] if existing else (created_override if created_override is not None else identity.timestamp)
+                    prior["created_timestamp"]
+                    if prior is not None
+                    else (created_override if created_override is not None else identity.timestamp)
                 )
+            check_write(spec, rules, record, created_ts, identity.timestamp, identity.ulid, prior)
             params = _write_params(spec, record, identity, created_ts)
             con.execute(merge_history_sql, params)
             if merge_current_sql is not None:
@@ -205,7 +211,7 @@ def write_scd2(
             _advance_entity_counter(con, spec, key)
             con.execute("COMMIT")
             break
-        except (ReferentialError, AppendOnlyUpdateError, StatusTransitionError):
+        except (ReferentialError, AppendOnlyUpdateError, StatusTransitionError, RowRuleViolationError):
             _safe_rollback(con)
             raise  # terminal failures, never retried
         except Exception as exc:  # noqa: BLE001 -- classify, then retry-or-raise
@@ -357,12 +363,14 @@ def file_scd2(
         raise SchemaGateError(f"file operation must not supply {spec.merge_key!r}: the writer allocates it (Decision 84 I-2)")
     # Fail fast on every OTHER contract violation before touching the catalog: gate a copy with a
     # syntactically-valid placeholder key (the real key does not exist yet).
-    schema_gate({**record, spec.merge_key: f"{spec.entity_id_prefix or 'x-'}0"}, semantics, table=table)
+    placeholder = {**record, spec.merge_key: f"{spec.entity_id_prefix or 'x-'}0"}
+    schema_gate(placeholder, semantics, table=table)
+    identity = identity if identity is not None else mint_write_identity()
+    check_write(spec, rules_for(spec), placeholder, identity.timestamp, identity.timestamp, identity.ulid, None)
 
     merge_history_sql = _build_merge_history_sql(spec)
     merge_current_sql = _build_merge_current_sql(spec)
-    select_existing_sql = _build_select_existing_created_sql(spec)
-    identity = identity if identity is not None else mint_write_identity()
+    select_existing_sql, _ = existing_row_select(spec, None, False)
 
     occ_retries = 0
     start = time.perf_counter()

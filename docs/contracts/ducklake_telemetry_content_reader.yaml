@@ -1,0 +1,95 @@
+---
+# Class B Lambda verb contract for the agent-platform-ducklake-telemetry-content function (Decision 239).
+# Agents read production transcript text only through this function: two masked verbs, every served byte masked inside the
+# function with the read_masked profile (src/sensitive_values), one value-free access-log line per read, a 90-day read window.
+# The function is a stub (Decision 79) until rec-4696 builds its infrastructure and the operator-gated deploy.
+contract:
+  id: ducklake_telemetry_content_reader
+  class: B
+  contract_version: 1
+  status: provisional_v0
+  description: >-
+    Telemetry-scoped, read-only DuckLake runtime Lambda invoked over an AWS_IAM (SigV4) Function URL, URL-only (Decision 213).
+    Env-pinned to the production telemetry catalog (ducklake_telemetry) on the telemetry reader's SELECT-only scoped login,
+    attached READ_ONLY; it takes no catalog selector. It serves exactly the CONTENT_READS registry
+    (src/common/ducklake_content_read_verbs.py): transcript_row_masked (one transcript row by grain key) and
+    session_transcript_masked (one session tree reassembled in order). Masked bytes only; byte-exact reads are a separate
+    function (Decision 239 cl.3, rec-4697).
+  governance:
+    auth_type: >-
+      AWS_IAM SigV4-signed Function URL, invoked URL-only; read-only IAM role (S3 GetObject and List on the production telemetry
+      data prefix, GetObject on the production blob root, the shared telemetry reader login). No verb accepts a principal,
+      tenant, catalog, deadline or window parameter.
+    principal_classes:
+      - PlatformDev
+    admin_only_features: []
+    registry_path: >-
+      src/common/ducklake_content_read_verbs.py (CONTENT_READS, the handler's SERVED_VERBS). The response stamps registry_version
+      and the verb's read_version.
+  provisional_v0:
+    authored_at: "2026-10-29"
+    authored_via: PLAN-telemetry-content-reader (Decision 239)
+    rationale: >-
+      Class B contracts start provisional_v0: the verb set, error taxonomy and payload shapes are validated against real
+      traffic before ratification. The function serves nothing until rec-4696 deploys it.
+    surfacing_note: >-
+      Only the production_invocations condition applies: the trigger declares no day-based condition, so no first production
+      invocation date is recorded. check_re_ratification_trigger schema-validates this block in CI.
+    re_ratification_trigger:
+      first_of:
+        - "production_invocations >= 500"
+    re_ratification_owner: "human + Step 10 multi-perspective critique"
+verbs:
+  describe:
+    payload_schema_ref: >-
+      event envelope {action: "describe"}. Connectionless: the function name, the pinned catalog's meta_schema and the two served
+      verbs with params_schema (session_transcript_masked also advertises the optional boolean include_tool_output).
+    response_codes:
+      200: "body {ok, function, catalog: {meta_schema, data_path_is_smoke}, verbs}"
+  named_read:
+    payload_schema_ref: >-
+      event envelope {action: "named_read", verb, params}. transcript_row_masked params: session_id, producer, event_id,
+      parser_version, offset, max_bytes (base64 pages of the MASKED bytes, at most 3 MiB). session_transcript_masked params:
+      session_id (the root), offset, max_rows, and optional include_tool_output (boolean, default false). A deadline_ms,
+      window, window_days or limit key answers 400 bad_request; a verb outside the served set answers 400 unknown_verb.
+    response_codes:
+      200: "body {ok, verb, registry_version, read_version, rows, row_count}; a row envelope carries the raw content_sha256, masked_sha256, mask_counts, detector and data_class untrusted_transcript"
+      400: "unknown_verb; bad_request; named_read_input (a bound value or include_tool_output refused)"
+      404: "outside_read_window: the session started more than 90 days ago"
+      413: "response_too_large: the envelope exceeds 6,000,000 bytes"
+      500: "grain_conflict, content_not_text, blob_integrity, blob_misconfigured, runtime, version_mismatch, unmapped"
+      503: "blob_unavailable, catalog_unavailable (retryable)"
+      504: "read_deadline_exceeded"
+    typed_errors:
+      unknown_verb: "the verb is not served (400); the body lists the served verbs and never echoes the caller's value"
+      bad_request: "a caller deadline_ms, window, window_days or limit key (400)"
+      named_read_input: "a bound value refused before any SQL (400)"
+      outside_read_window: "the session id's time prefix is more than 90 days old (404), decided before any connection"
+      response_too_large: "serialised response above the 6,000,000-byte guard (413); use a smaller max_rows or max_bytes"
+      grain_conflict: "rows under one grain key differ in a compared column (500)"
+      content_not_text: "a stored payload is not valid UTF-8 (500)"
+      blob_integrity: "a blob failed its HEAD or checksum verification (500)"
+      blob_misconfigured: "the blob root or its access is misconfigured (500)"
+      blob_unavailable: "the blob store is unavailable (503, retryable)"
+      catalog_unavailable: "a dead catalog connection that survived the reopen-once (503, retryable)"
+      read_deadline_exceeded: "a read still running at the Lambda's remaining time minus 10 s was interrupted (504)"
+      runtime: "the production pin refused or DuckLakeRuntimeError (500)"
+      version_mismatch: "DuckDB or extension version mismatch (500)"
+      unmapped: "an exception no row maps: 500 {error_class, request_id, action}, never the message"
+audit_invariants:
+  - "Masked bytes only (Decision 239 cl.2): every served byte is masked inside the function with the read_masked profile over the whole payload before paging; masking done by a caller is never a control."
+  - "No caller SQL and no other event verb cross this boundary (Decision 84 I-3); no caller deadline_ms or window."
+  - "Each named_read writes exactly one telemetry_content_read line with the closed field set {event, role, verb, status, session_id, rows, masked_bytes, mask_counts, request_id}: the assumed-role name masked, never an ARN, account id, session name or text."
+  - "Reads cover sessions started in the last 90 days, decided from the session id before any connection."
+  - "The function is invoked URL-only (Decision 213); the lock and the gated deploy are rec-4696's."
+  - "The catalog attach is READ_ONLY on the shared telemetry reader login (Decision 230 cl.3 as amended by Decision 239)."
+amendment_log:
+  - date: "2026-10-29"
+    semantic_break: false
+    change_class: field_add
+    summary: >-
+      PLAN-telemetry-content-reader (Decision 239): first authoring of the telemetry content reader contract with the describe
+      and named_read verbs, the typed answers and the audit invariants.
+    migration_story: >-
+      A new function, so no existing verb or response changes. It is a stub until rec-4696 deploys it.
+previous_versions: []

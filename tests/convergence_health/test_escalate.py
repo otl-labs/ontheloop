@@ -526,11 +526,11 @@ class TestAcceptanceLint:
 
 class TestEscalatePortalValidators:
     """VP step 2 / AC2: escalate() files (never raises) on a persistently-red high-severity
-    verdict, with the portal's REAL write-time validators applied to the built fields."""
+    verdict, with the portal's REAL row-rule gate applied to the built fields."""
 
     def test_persistent_red_files_rec(self) -> None:
         from scripts.ops_portal.risk_scoring import _derive_computed_fields
-        from scripts.ops_portal.write_validators import _load_write_time_validators
+        from scripts.ops_portal.write_validators import gate_write
 
         captured: dict[str, Any] = {}
 
@@ -548,10 +548,9 @@ class TestEscalatePortalValidators:
         result = escalate(verdict, portal_caller=_caller, open_recs=[])
         assert result == {"action": "file", "rec_id": "rec-1234"}
         # Mirrors file_rec()'s own pre-validation step: it derives risk/automatable/
-        # created_timestamp in-place before running the write-time validator loop.
+        # created_timestamp in-place before running the row-rule gate.
         _derive_computed_fields(captured["fields"])
-        for col, validator in _load_write_time_validators("ops_recommendations"):
-            validator(captured["fields"].get(col), col)
+        gate_write("ops_recommendations", captured["fields"], insert=True)
 
 
 class TestEscalateLiveFetchAndPortal:

@@ -27,6 +27,7 @@ from pydantic import ValidationError
 from scripts.checks import _common, registry
 from scripts.checks.roadmap import _work_item_pilot_model as model
 from scripts.checks.structural._classify import effective_lines
+from scripts.roadmap import roadmap_archive
 
 _ROADMAP_REL_PATH = "docs/ROADMAP-PLATFORM.yaml"
 _DECISIONS_REL_PATH = "docs/DECISIONS.md"
@@ -56,8 +57,8 @@ class _Context:
             self._roadmap_read = True
             path = _common.ROOT / _ROADMAP_REL_PATH
             try:
-                loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-            except (OSError, yaml.YAMLError):
+                loaded = roadmap_archive.hydrate_from_disk(yaml.safe_load(path.read_text(encoding="utf-8")), path)
+            except (OSError, yaml.YAMLError, roadmap_archive.ArchiveIntegrityError):
                 loaded = None
             self._roadmap = loaded if isinstance(loaded, dict) else None
         return self._roadmap

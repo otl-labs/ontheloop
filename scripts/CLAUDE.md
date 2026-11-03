@@ -24,7 +24,7 @@ existing `scripts/checks/`, `scripts/executor/`, `scripts/verifiers/` packages p
 
 ## Invocation
 Always invoke `bin/venv-python` (never bare `python`/`python3`) -- the wrapper auto-detects the
-platform and resolves the correct venv binary. Each Bash tool call is independent; do not rely on
+OS and resolves the correct venv binary. Each Bash tool call is independent; do not rely on
 `source .venv/bin/activate`.
 
 ## Adding a validate.py check
@@ -39,3 +39,7 @@ membership; omit both if invoked directly elsewhere (e.g. `validate_terraform_tr
 Dispatch and the full registration-surface list: see `scripts/checks/registry.py`.
 `validate_check_manifests.py` enforces the grammar; mirror tests live at
 `tests/checks/<domain>/test__manifest.py`.
+
+## User-set settings
+A new environment variable, secret or config key a user sets gets a row in
+`docs/contracts/project-configuration.yaml` in the same change (Decision 224).

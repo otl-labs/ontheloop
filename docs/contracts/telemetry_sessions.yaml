@@ -5,10 +5,10 @@
 # Ratified under the CD.25 pre-codegen contract ratification ritual (tier_item T0.12.6).
 #
 # EVENT JOURNAL (Decision 199): one row per session LIFECYCLE EVENT (open | resume | compact |
-# close | annotate), not one mutated row per session. Session STATE (running vs terminal) and
-# DURATION are derived at read by a named reader verb over a session's own rows -- never stored,
-# never mutated in place. GREENFIELD: no telemetry table is provisioned; this contract remains
-# TARGET-STATE (dq_INTENT only) pending the Phase 4 rebuild (T2.36).
+# close | annotate), not one mutated row per session. Session STATE (running, abandoned or a
+# terminal outcome) and DURATION are derived at read by a named reader verb over a session's own
+# rows -- never stored, never mutated in place. GREENFIELD: the tables are provisioned in the
+# production telemetry catalog (Decision 230), empty; the write-time rules project from this contract (Decision 210).
 contract:
   id: telemetry_sessions
   class: A
@@ -17,275 +17,283 @@ contract:
   ratified_at: "2026-09-24"
   ratified_via: "PLAN-telemetry-event-journal-contracts merge to main (Decision 199)"
   description: >-
-    Class A schema contract for telemetry_sessions, the trace ROOT: an append-only EVENT JOURNAL,
-    one row per session lifecycle event (open | resume | compact | close | annotate), keyed by the
-    shared telemetry-event-envelope.yaml fields plus session_id. Root-unification anchor (Decision
-    95): every telemetry row traces back to a session via session_id; a spawned sub-agent gets its
-    OWN session linked to the spawner via parent_session_id. Session state, duration and friction
-    are DERIVED AT READ from a session's own event rows (Decision 199) -- never stored as a mutable
-    column. Partitioned by the calendar-day triple year(session_started_at), month(session_started_at),
-    day(session_started_at) (Decision 96 cl.1, re-grounded; rec-4065: DuckLake's day() alone is day-of-month).
+    Class A schema contract for telemetry_sessions, the trace ROOT: an append-only EVENT JOURNAL, one row per session lifecycle event (open | resume | compact | close | annotate), keyed by the shared telemetry-event-envelope.yaml fields plus session_id. Root-unification anchor (Decision 95): every
+    telemetry row traces back to a session via session_id; a spawned sub-agent gets its OWN session linked to the spawner via parent_session_id. Session state, duration and friction are DERIVED AT READ from a session's own event rows (Decision 199) -- never stored as a mutable column. Partitioned by
+    the calendar-day triple year(session_started_at), month(session_started_at), day(session_started_at) (Decision 96 cl.1, re-grounded; rec-4065: DuckLake's day() alone is day-of-month).
   projects_to:
+    artifact: config/lambda/ducklake/field_semantics.yaml
+    table: telemetry_sessions
+    generator: scripts/schema_to_field_semantics.py
     note: >-
-      No generated artifact yet. Unlike the ops Class A contracts (which project_to
-      config/lambda/ducklake/field_semantics.yaml), telemetry is not yet on DuckLake; there is NO
-      telemetry field_semantics.yaml. This contract IS the authoritative telemetry field-semantic source
-      until the Phase 4 rebuild (post-T2.26) lands a generator, applying the DuckLake schema-as-code
-      mechanism T2.33 established for the ops tables.
+      The event projection (scripts/field_semantics_event_projection.py) emits this table's entry from slice 2a-2 plan 1's registration onward and runs in-process before then, so no later flip is owed.
 fields:
   event_id:
     $ref: telemetry-event-envelope.yaml#/contract/fields/event_id
     dq_intent_local:
-      not_null:
-        enforced: true
+      not_null: true
     governance_notes_local: Row identity for this event-journal table. Domain tag 'telemetry_sessions:event'.
   event_kind:
     $ref: telemetry-event-envelope.yaml#/contract/fields/event_kind
     dq_intent_local:
-      not_null:
-        enforced: true
+      not_null: true
       accepted_values:
         values: [open, resume, compact, close, annotate]
-        enforced: false
         note: >-
-          The session lifecycle vocabulary. "running" is not a stored value anywhere -- it is the
-          derived state when a session has an open/resume row and no close row (see governance_notes).
+          The session lifecycle vocabulary. "running" is not a stored value anywhere -- it is derived (see `state` and the SESSION STATE paragraph of governance_notes): a root session's state is read from its turns and its latest lifecycle row (Decision 228, see `state`), and a resume after a close makes it running again.
     governance_notes_local: >-
-      Tightened NOT NULL: every telemetry_sessions row states its lifecycle position. compact
-      records a context-compaction event mid-session (a new capability this event-journal shape
-      makes representable, where mint-once-and-mutate could not). The producer's open row is its
-      GENERATION COMMIT MARKER (Decision 207, telemetry-event-envelope.yaml R3/R5).
+      Tightened NOT NULL: every telemetry_sessions row states its lifecycle position. compact records a context-compaction event mid-session (a new capability this event-journal shape makes representable, where mint-once-and-mutate could not). The producer's open row is its GENERATION COMMIT MARKER
+      (Decision 207, telemetry-event-envelope.yaml R3/R5). claude_code resume rows (parser_version 4, rule SC-3) are due once their SessionStart:resume hook group has ended (a later prompt or assistant record), so a session ending inside a resume hook group gets no row for that resume.
     amendment_log:
       - date: "2026-09-28"
         semantic_break: true
         change_class: governance_note_add
         summary: >-
-          PLAN-telemetry-grain-and-generations (rec-4061 R3): named the open row as the producer's
-          generation commit marker, pointing at the envelope's GENERATIONS AND READ-SIDE DEDUPE rule.
+          PLAN-telemetry-grain-and-generations (rec-4061 R3): named the open row as the producer's generation commit marker, pointing at the envelope's GENERATIONS AND READ-SIDE DEDUPE rule.
+      - {date: "2026-10-18", semantic_break: false, change_class: governance_note_add, summary: "PLAN-telemetry-read-side-session-end (Decision 228): the vocabulary note points a root session's running or terminal state at its turns (see state)."}
   event_timestamp:
     $ref: telemetry-event-envelope.yaml#/contract/fields/event_timestamp
     dq_intent_local:
-      not_null:
-        enforced: true
+      not_null: true
     governance_notes_local: >-
-      For the open event this EQUALS session_started_at; for resume/compact/close/annotate it is
-      that event's own source-derived time. duration_seconds (derived) is close.event_timestamp
-      minus session_started_at.
+      For the open event this EQUALS session_started_at; for resume/compact/close/annotate it is that event's own source-derived time. A sub-agent session's open row carries the ROOT start (session_started_at is the tree's pin), so a child's own start is its telemetry_agents open row. A close row's
+      event_timestamp is that of the last root-stream record carrying a uuid and a parseable timestamp at that finalization. duration_seconds (derived) is the latest close's event_timestamp (the later of the producer close and any root turn close) minus session_started_at, wall-clock. From parser_version 4 a segment close (SC-1) carries the anchor of the last root record before its resume boundary.
+    amendment_log:
+      - {date: "2026-10-18", semantic_break: false, change_class: governance_note_add, summary: "PLAN-telemetry-read-side-session-end (Decision 228): duration_seconds' latest close is the later of the producer close and any root turn close."}
+      - {date: "2026-10-14", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-parser-v3 (slice 3b plan P-B): the close anchor is the last root-stream record carrying a uuid and a parseable timestamp."}
+      - {date: "2026-10-05", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-lifecycle-friction-amendment (rec-4146, C9): a sub-agent session's open row carries the ROOT start (session_started_at is the tree's pin); a close row's event_timestamp is the last root-stream uuid record's; duration reads the latest close, wall-clock."}
   session_started_at:
     $ref: telemetry-event-envelope.yaml#/contract/fields/session_started_at
     dq_intent_local:
-      not_null:
-        enforced: true
+      not_null: true
     governance_notes_local: >-
-      The partition basis (governance.partition_by below) and the 48-bit time prefix of
-      session_id's own ULID. Identical across every row of this session (open through its final
-      annotate), by construction.
+      The partition basis (governance.partition_by below) and the 48-bit time prefix of session_id's own ULID. Identical across every row of this session (open through its final annotate), by construction.
   source_ordinal:
     $ref: telemetry-event-envelope.yaml#/contract/fields/source_ordinal
-    governance_notes_local: Orders a session's lifecycle events when two share an event_timestamp.
+    governance_notes_local: >-
+      Orders a session's lifecycle events when two share an event_timestamp. A close row's source_ordinal is that of the last root-stream record carrying a uuid and a parseable timestamp at that finalization (the record its external_ref names); a segment close (SC-1, parser_version 4) takes that of the last such record before its resume boundary.
+    amendment_log:
+      - {date: "2026-10-14", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-parser-v3 (slice 3b plan P-B): the close anchor is the last root-stream record carrying a uuid and a parseable timestamp."}
   external_ref:
     $ref: telemetry-event-envelope.yaml#/contract/fields/external_ref
     dq_intent_local:
-      not_null:
-        enforced: true
-    governance_notes_local: The hash input for this row's event_id; grammar '<source_record_id>#0/<event_kind>'.
+      not_null: true
+    governance_notes_local: >-
+      The hash input for this row's event_id; grammar '<source_record_id>#0/<event_kind>'. The open marker is '<session entity_ref>#0/open'. ONE close row is written per finalization at which the session's open row is due, unless an earlier finalization already wrote the same anchor: its external_ref is the role_ref '<uuid>#0/close' of the last root-stream record carrying a uuid and a parseable timestamp at that finalize. A segment close (SC-2) has the same shape, anchored before its resume boundary; identical keys dedupe, and when records were appended after a SessionEnd cut the segment has two closes with different anchors and the reader takes the latest.
+    amendment_log:
+      - {date: "2026-10-14", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-parser-v3 (slice 3b plan P-B): one close row per finalization at which the open row is due, unless an earlier finalization already wrote the same anchor."}
+      - {date: "2026-10-05", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-lifecycle-friction-amendment (rec-4146, C9): declared the open marker '<session entity_ref>#0/open' and the per-finalization close-row identity '<uuid>#0/close' (last root-stream record carrying a uuid)."}
   entity_ref:
     $ref: telemetry-event-envelope.yaml#/contract/fields/entity_ref
     dq_intent_local:
-      not_null:
-        enforced: true
+      not_null: true
     governance_notes_local: >-
-      The caller-supplied session_ref this row's own session_id derives from (domain tag
-      'telemetry_sessions:session_id'); a sub-agent session's entity_ref is '<sessionId>:<agentId>'
-      (the parent CLI session id plus a deterministic per-agent id).
+      The caller-supplied session_ref this row's own session_id derives from (domain tag 'telemetry_sessions:session_id'); a sub-agent session's entity_ref is '<sessionId>:<agentId>' (the parent CLI session id plus a deterministic per-agent id).
   producer:
     $ref: telemetry-event-envelope.yaml#/contract/fields/producer
     dq_intent_local:
-      not_null:
-        enforced: true
+      not_null: true
     governance_notes_local: e.g. claude_code, litellm, ci_annotate -- whichever surface emitted this lifecycle event.
     amendment_log:
       - date: "2026-09-28"
         semantic_break: true
         change_class: not_null_tighten
         summary: >-
-          PLAN-telemetry-grain-and-generations (Decision 207, rec-4061 R2): producer is now
-          NOT NULL enforced -- it is part of the telemetry grain key.
+          PLAN-telemetry-grain-and-generations (Decision 207, rec-4061 R2): producer is now NOT NULL enforced -- it is part of the telemetry grain key.
   producer_version:
     $ref: telemetry-event-envelope.yaml#/contract/fields/producer_version
   parser_version:
     $ref: telemetry-event-envelope.yaml#/contract/fields/parser_version
     dq_intent_local:
-      not_null:
-        enforced: true
+      not_null: true
   created_timestamp:
     $ref: telemetry-event-envelope.yaml#/contract/fields/created_timestamp
     dq_intent_local:
-      not_null:
-        enforced: true
+      not_null: true
   tenant_id:
     $ref: tenant-id.yaml#/contract/fields/tenant_id
     dq_intent_local:
-      not_null:
-        enforced: true
+      not_null: true
   project_id:
     $ref: project-id.yaml#/contract/fields/project_id
     dq_intent_local:
-      not_null:
-        enforced: true
+      not_null: true
     governance_notes_local: >-
-      Tightened NOT NULL over the project-id.yaml loosest baseline (Invariant 5): every telemetry
-      row inherits a project partition, resolved at the write boundary from the caller-supplied
-      project_ref, auto-registering an 'unregistered' row on first sight (no default, Decision 198).
+      Tightened NOT NULL over the project-id.yaml loosest baseline (Invariant 5): every telemetry row inherits a project partition, resolved at the write boundary from the caller-supplied project_ref, auto-registering an 'unregistered' row on first sight (no default, Decision 198).
   session_id:
     $ref: session-id.yaml#/contract/fields/session_id
     dq_intent_local:
-      not_null:
-        enforced: true
+      not_null: true
     governance_notes_local: >-
-      The trace root's own entity key: every other telemetry row's session_id FK equals this value
-      (write-boundary derivation, telemetry-event-envelope.yaml identity spec), no propagation
-      needed. Every row of this session -- open through its final annotate -- shares this same id.
+      The trace root's own entity key: every other telemetry row's session_id FK equals this value (write-boundary derivation, telemetry-event-envelope.yaml identity spec), no propagation needed. Every row of this session -- open through its final annotate -- shares this same id.
     joins:
       - session_id_join_telemetry_sessions_to_observations
   parent_session_id:
     $ref: session-id.yaml#/contract/fields/session_id
     governance_notes_local: >-
-      Nullable self-reference: the session_id of the run that SPAWNED this session (sub-agent ->
-      spawner), derived from parent_session_ref, or NULL for a top-level run. The cross-agent half
-      of root-unification (Decision 95); parent_observation_id links in-session structure. Stays
-      nullable (a top-level session has no parent).
+      Nullable self-reference: the session_id of the run that SPAWNED this session (sub-agent -> spawner), derived from parent_session_ref, or NULL for a top-level run. The cross-agent half of root-unification (Decision 95); parent_observation_id links in-session structure. Stays nullable (a
+      top-level session has no parent).
     joins:
       - parent_session_id_join_sessions_self_spawn
   workflow:
     type: str
     iceberg_type: string
-    nullable: false
+    nullable: true
     description: >-
-      The workflow that opened the session (Decision 90 four-tier vocabulary): orient | plan | implement |
-      develop-executor, plus operational runners (executor-supervision, scheduled-agent, ...).
+      The workflow that opened the session (Decision 90 four-tier vocabulary): orient | plan | implement | develop-executor, plus operational runners (executor-supervision, scheduled-agent, ...).
     semantics: >-
-      Required dimension; the primary grouping key for per-workflow analytics (duration, rework, outcome
-      rates). REQUIRED in the draft (TelemetrySessions.REQUIRED_FIELDS). accepted_values are NOT closed in
-      the contract -- the workflow set evolves with Decision 90; the closed enum (if any) is ratified into
-      the Phase 4 telemetry DQ config, not here.
-    populated_by: the write boundary at the open event (rec-4024).
-    dq_intent: {not_null: {enforced: false}, required_when: {event_kind: [open]}}
+      Required dimension; the primary grouping key for per-workflow analytics (duration, rework, outcome rates). accepted_values are NOT closed in the contract -- the workflow set evolves with Decision 90. The set is open; a closed set would
+      be declared here and enforced at write (Decision 210 cl.3). From parser_version 6 the claude_code value is the workflow or gate skill the stream's first closed assistant-bearing turn invoked: a root stream's first-prompt command-name tag wins; else the first Skill tool call at or before the open bound whose skill names a workflow (planning reads plan, audit-prompt reads audit, orient, implement and overseer read themselves; plan-critique, decision-scout, code-review and executor-rca read under their own names), an errored call counting because the value is the session's intent; a child's command-name tag is never read; else subagent (a sub-agent) or claude_code (a root). Declared residuals: a workflow begun after the first turn reads the fallback (the price of the R3 open marker), a session running several workflows reads the first, and a final pass that cuts the first turn before its workflow Skill call, with the session then continuing, keeps the fallback already written. Roll-up to the spawning workflow is a read-time join on parent_session_id, never stored; the set stays open; a top-level run's root reads its agent's source_registry key (the run's telemetry_agents.agent_type, so one vocabulary names the agent everywhere), set by that run's producer.
+    populated_by: the claude_code producer, at the open event.
+    dq_intent: {required_when: {event_kind: [open]}}
     amendment_log:
-      - date: "2026-08-26"
-        semantic_break: false
-        change_class: prose_improvement
-        summary: >-
-          Platform cleanse: wording referencing removed product surfaces or the retired
-          legacy query engine trimmed; field meaning unchanged.
+      - {date: "2026-10-29", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): a top-level run's root reads its agent's source_registry key; the stale 'T3.22 c5 owns the top-level vocabulary' sentence is replaced.", migration_story: "Note only; no stored row changes."}
+      - {date: "2026-10-24", semantic_break: true, change_class: governance_note_add, summary: "PLAN-retire-session-cli (rec-4589, parser_version 6): the claude_code workflow is attributed to sub-agent and relay-started streams from the first workflow Skill call within the open bound, gate skills under their own names; the stale REQUIRED_FIELDS sentence is dropped. The value set stays open and no column changes.", migration_story: "Parser v6 re-parses every tree from the start; v5 open rows are superseded by version, never rewritten."}
+      - {date: "2026-08-26", semantic_break: false, change_class: prose_improvement, summary: "Platform cleanse: wording referencing removed product surfaces or the retired legacy query engine trimmed; field meaning unchanged."}
+      - {date: "2026-10-04", semantic_break: false, change_class: type_widen, summary: "PLAN-telemetry-write-conformance (rec-4064 R1): nullable false -> true, matching dq_intent.required_when (open rows only); the projection already treated it as nullable."}
+      - {date: "2026-10-05", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-lifecycle-friction-amendment (fork 2 (a)): dropped the stale 'Phase 4 telemetry DQ config' premise; the set is open and a closed set would be declared here and enforced at write. Meaning unchanged."}
+  state:
+    type: str
+    iceberg_type: string
+    nullable: true
+    description: "Current disposition of the session: running | abandoned | success | failed | cancelled. DERIVED at read by the same reader verb as duration_seconds; never stored, no physical column (data-modeling-standard.yaml derived-state rule)."
+    semantics: >-
+      ROOT session: the state of its latest lifecycle row, ordered by event_timestamp, then source_ordinal, then close ranked last on a tie, then event_id, over every producer's rows after each producer's own R5 dedupe (the envelope's generation rule); annotate rows are excluded. That state is
+      read from the session's turns (SE-1, Decision 228 (PLAN-telemetry-read-side-session-end)): a producer close that is the latest lifecycle row stands as that close's outcome (success | failed | cancelled) only while no turn opened after it; otherwise a latest root turn with a close carrying an outcome is at rest and, idle past the threshold, reads that outcome (success -> success, error -> failed, interrupted -> cancelled, blocked -> failed), else running; a latest turn with no close stopped mid-turn and reads abandoned past the threshold, else running; with no outcome-bearing turn close the session reads abandoned past the threshold, else running (the prior rule). A turn continued after a Stop that dies before its next Stop reads its earlier close's outcome, not abandoned (declared residual). abandoned: not terminal, and as_of minus the session's last event_timestamp across its rows in all four telemetry tables exceeds a governed idle threshold. The idle threshold
+      lives in the reader's named-read registry as versioned data, seeded at 24 h and owned by 2b (PLAN-telemetry-reader-verbs, #1496); a later resume makes the session running again and nothing is stored. SUB-AGENT session (parent_session_id not NULL): state and duration come from its telemetry_agents agent-run open/close
+      pair. An open with no close is running, or abandoned past the same idle threshold; a close maps its agent-run outcome into state as success -> success and failed, timeout or throttled -> failed (the detail stays on telemetry_agents.outcome).
+    populated_by: a named reader verb (PLAN-telemetry-reader-verbs, #1496), bounded to this session's calendar-day partition; the idle threshold is reader registry data, never a column.
+    dq_intent: {accepted_values: {values: [running, abandoned, success, failed, cancelled]}}
+    derivation: {timing: read, derived_by: reader_verb:session_state_and_duration, formula: "ROOT (parent_session_id IS NULL), after R5 dedupe, orderings by event_timestamp, source_ordinal, event_id (NULL ordinal first); tip = the latest lifecycle row (annotate excluded, close last on a tie); idle = as_of - max(event_timestamp over this session's rows in the four telemetry tables) exceeds the governed idle threshold. (1) tip is a close and no root turn opened after the latest producer close (the turn open is not after it) -> its outcome; (2) else the latest root turn has a close with an outcome -> idle ? that outcome mapped (success, error -> failed, interrupted -> cancelled, blocked -> failed) : running; (3) else idle ? abandoned : running (a turn with no close, or the prior rule). SUB-AGENT: its telemetry_agents agent-run open/close pair; open with no close is running (abandoned past the idle threshold); at close success -> success, failed|timeout|throttled -> failed", inputs: [session_id, parent_session_id, event_kind, event_timestamp, source_ordinal, event_id, outcome, telemetry_agents.session_id, telemetry_agents.event_kind, telemetry_agents.event_timestamp, telemetry_agents.outcome, telemetry_observations.session_id, telemetry_observations.event_timestamp, telemetry_observations.observation_type, telemetry_observations.event_kind, telemetry_observations.observation_id, telemetry_observations.outcome, telemetry_observations.source_ordinal, telemetry_observations.event_id, telemetry_transcripts.session_id, telemetry_transcripts.event_timestamp], realized: false}
+    amendment_log:
+      - {date: "2026-10-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-read-side-session-end (Decision 228, amends Decision 199 cl.1): a root session's state is read from its turns (SE-1): the producer close stands only while no turn opened after it, else the latest turn's outcome once idle, abandoned only when stopped mid-turn.", migration_story: "Derived at read; no stored row changes. Sessions without turn outcomes keep the prior rule."}
+      - {date: "2026-10-16", semantic_break: false, change_class: prose_improvement, summary: "PLAN-reader-verbs-decision-notes follow-up (rec-4324): reader-verb ownership pointer moved from rec-4024 to PLAN-telemetry-reader-verbs (#1496); no change in meaning."}
+      - {date: "2026-10-05", semantic_break: true, change_class: field_add, summary: "PLAN-telemetry-lifecycle-friction-amendment (feedback-loop review C9; W3 rulings reader-k1 (a), reader-k3 (a)): new read-derived state field (no column) with its ordering, close-last tie, governed idle threshold and sub-agent branch."}
+  surface:
+    type: str
+    iceberg_type: string
+    nullable: true
+    description: "How the session ran: interactive | subagent | ci_agent | ci_verdict | fargate_persona | lambda_agent | local_agent. DERIVED at read; no physical column."
+    semantics: >-
+      subagent when parent_session_id is set; else interactive when no telemetry_agents row has session_id = this session and a NULL observation_id; else by the latest such row's host_run_ref prefix: gha -> ci_verdict when any model_call observation of the session carries persona_backend, else ci_agent; ecs -> fargate_persona; lambda -> lambda_agent; local -> local_agent. The value set maps the five run surfaces (CC-web interactive root, sub-agent, Fargate/LiteLLM persona, CI claude -p, Actions verdict job) plus the lambda and local hosts.
+    populated_by: "a named reader verb (rec-4713)"
+    dq_intent: {}
+    derivation: {timing: read, derived_by: "reader_verb:session_surface", formula: "subagent when parent_session_id is set; else interactive when no telemetry_agents row has session_id = this session and a NULL observation_id; else by the latest such row's host_run_ref prefix: gha -> ci_verdict when any model_call observation of the session carries persona_backend, else ci_agent; ecs -> fargate_persona; lambda -> lambda_agent; local -> local_agent", inputs: [telemetry_sessions.parent_session_id, telemetry_agents.session_id, telemetry_agents.observation_id, telemetry_agents.host_run_ref, telemetry_observations.observation_type, telemetry_observations.persona_backend], realized: false}
+    amendment_log: [{date: "2026-10-29", semantic_break: false, change_class: field_add, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): read-derived surface classification (no column), served by the reader verb rec-4713 owns.", migration_story: "Read-derived; no stored row changes."}]
   outcome:
     type: str
     iceberg_type: string
     nullable: true
     description: >-
-      Terminal disposition of the session, STORED on the close event's own row: success | failed |
-      cancelled. There is no "running" value stored anywhere -- a session with no close row IS the
-      running state (derived, see governance_notes).
+      Terminal disposition of the session, STORED on a close event's own row: success | failed | cancelled. There is no "running" value stored anywhere -- running is derived (see `state`).
     semantics: >-
-      Observed once, at the close event, and recorded on that row (STORED per the
-      data-modeling-standard.yaml stored-vs-derived rule); SESSION STATE (a session's current
-      running/terminal disposition) is DERIVED at read by a named reader verb: absent a close row,
-      the session is running; present, its outcome IS the session's terminal state. This replaces
-      the retired mutate-outcome-in-place model (contract_version 1), which had no room for the
+      Observed at each finalization and recorded on that finalization's close row (STORED per the data-modeling-standard.yaml stored-vs-derived rule), derived from the transcript, never from SessionEnd hook input. SESSION STATE (a session's current disposition) is DERIVED at read by a named reader
+      verb (see `state`): a resume after a close makes the session running again, so a close row's outcome is the terminal state only while it is the session's latest lifecycle row and no turn opened after it; the verb's outcome is SE-2 (the stored close outcome, or the mapped latest turn outcome once idle). This replaces the retired mutate-outcome-in-place model (contract_version 1), which had no room for the
       resume/compact events this shape now represents.
-    populated_by: the write boundary at the close event (rec-4024); session_postflight.
-    dq_intent: {not_null: {enforced: false}, required_when: {event_kind: [close]}, accepted_values: {values: [success, failed, cancelled], enforced: false}}
+    governance_notes_local: >-
+      claude_code parser_version 3 derives outcome per its close rule: cancelled when the last turn was interrupted (an interrupt sentinel, a user-rejected tool, an aborted stream or a tool_use with no result), failed when it ended in an API-error record (failure_reason carries that record's error kind identifier), otherwise success. A
+      session or sub-agent stream with no closed turn holding an assistant record emits no row in any telemetry table until it has one. SEGMENT CLOSES (parser_version 4, rec-4382): one close row per root resume boundary for a segment holding an assistant-bearing turn, derived from the tree with no finalization cut and anchored as a cut there would anchor it (SC-1, SC-2), so a SessionEnd cut for the same segment usually dedupes; a segment without an assistant turn gets none.
+      A TURN IS CLOSED (parser_version 5, rec-4407) when a later boundary exists, the pass is final or the turn holds a usable Stop witness (the capture shim's own hook_success attachment at a Stop, usable when the turn's last response has ended and no tool is pending) or an API-error record, and the open row's bound is the first closing event of the stream's first closed assistant-bearing turn, else that turn's last record when a boundary or a final pass closed it (WT-9), so the open row's content cannot move while that turn continues. A turn continued after a Stop that dies before its next Stop reads its earlier close's outcome.
+    populated_by: the claude_code producer, at a close event (optional evidence, since Decision 228 cl.3 reads a root session's state from its turns); derived from the transcript at each finalization (rec-4026).
+    dq_intent: {required_when: {event_kind: [close]}, accepted_values: {values: [success, failed, cancelled]}}
     amendment_log:
+      - {date: "2026-10-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-read-side-session-end (Decision 228): a close row's outcome is terminal only while it is the latest lifecycle row and no turn opened after it; the verb's outcome is SE-2."}
+      - {date: "2026-10-18", semantic_break: false, change_class: governance_note_add, summary: "PLAN-telemetry-stop-turn-close (parser_version 5): the no-reply rule names what a closed turn is (a later boundary, a final pass or a usable Stop witness / API-error record) and the open row's bound (WT-9). The v4 residual note on the last segment's close row is left for the read-side session-end plan."}
+      - {date: "2026-10-14", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-parser-v3 (slice 3b plan P-B): claude_code outcome rule on close rows (cancelled, failed with the API-error kind, else success) and the no-reply rule (a stream with no closed assistant turn emits no row in any table until it has one)."}
       - date: "2026-09-24"
         semantic_break: true
         change_class: accepted_values_narrow
         summary: >-
-          PLAN-telemetry-event-journal-contracts (Decision 199): outcome is now STORED once on the
-          close event's own row (event-journal shape) instead of a mutable column overwritten
-          in-place at close; "running" dropped from accepted_values -- it is no longer a stored
-          value, session state is derived at read from row presence instead.
+          PLAN-telemetry-event-journal-contracts (Decision 199): outcome is now STORED once on the close event's own row (event-journal shape) instead of a mutable column overwritten in-place at close; "running" dropped from accepted_values -- it is no longer a stored value, session state is derived
+          at read from row presence instead.
         migration_story: No live populator existed under either scheme; the Phase 4 rebuild (T2.36) builds directly to this shape.
+      - {date: "2026-10-05", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-lifecycle-friction-amendment (C9): one close row per finalization, outcome derived from the transcript (never SessionEnd hook input); a close row's outcome is the terminal state only while it is the latest lifecycle row; the legacy session_postflight populator is dropped."}
   process_event_total:
     type: int
     iceberg_type: bigint
     nullable: true
     description: >-
-      Count of process_event observations in the session. DERIVED at read (roll-up naming: *_total)
-      from telemetry_observations rows with observation_type=process_event sharing this session_id
-      -- replaces the contract_version 1 stored tally process_event_count.
+      Count of process_event observations in the session. DERIVED at read (roll-up naming: *_total) from telemetry_observations rows with observation_type=process_event sharing this session_id -- replaces the contract_version 1 stored tally process_event_count.
     semantics: A read-time aggregate; no physical column (data-modeling-standard.yaml derived-state rule).
-    populated_by: a named reader verb (rec-4024), bounded to this session's calendar-day partition.
-    dq_intent: {not_null: {enforced: false}}
+    populated_by: a named reader verb (PLAN-telemetry-reader-verbs, #1496), bounded to this session's calendar-day partition.
+    dq_intent: {}
     derivation: {timing: read, derived_by: reader_verb:session_process_event_rollup, formula: "count of telemetry_observations rows WHERE session_id = this.session_id AND observation_type = 'process_event'", inputs: [telemetry_observations.session_id, telemetry_observations.observation_type], realized: false}
   rework_total:
     type: int
     iceberg_type: bigint
     nullable: true
     description: >-
-      Count of rework-tier process events in the session. DERIVED at read from
-      telemetry_observations process_event rows whose name matches a rework signature (the
-      friction-classification labels table, rec-4032) -- replaces the stored `tier` column
-      (contract_version 1), which is retired.
-    semantics: A key self-improvement-loop friction signal; no physical column.
-    populated_by: a named reader verb (rec-4024), bounded to this session's calendar-day partition.
-    dq_intent: {not_null: {enforced: false}}
-    derivation: {timing: read, derived_by: reader_verb:session_friction_rollup, formula: "count of telemetry_observations process_event rows whose name matches a rework signature (rec-4032 labels table)", inputs: [telemetry_observations.name, telemetry_observations.observation_type], realized: false}
+      Count of rework runs in the session: at least repeat_threshold consecutive error closes of the same tool inside one turn. DERIVED at read from telemetry_observations facts classified by the reader's governed rules file -- replaces the stored `tier` column (contract_version 1), which is
+      retired.
+    semantics: >-
+      A key self-improvement-loop friction signal; no physical column. The facts are process_events at severity error, warning or critical, plus tool_call closes with outcome error or blocked, read after R5 dedupe. rework_total counts runs: at least repeat_threshold consecutive error closes of the
+      same tool inside one turn; a same-tool blocked close breaks a run. The rules (signatures, dispositions, labels, classes, repeat_threshold) live in a governed, versioned rules file bundled into the reader's named-read registry as data, owned by 2b (PLAN-telemetry-reader-verbs, #1496); classifier_version is stamped on
+      every response and is never a column.
+    populated_by: a named reader verb (PLAN-telemetry-reader-verbs, #1496), bounded to this session's calendar-day partition.
+    dq_intent: {}
+    derivation: {timing: read, derived_by: reader_verb:session_friction_rollup, formula: "count of runs of at least repeat_threshold consecutive tool_call closes with outcome error for the same tool (name) inside one turn (parent_observation_id), ordered by event_timestamp then source_ordinal, a same-tool blocked close breaking a run; repeat_threshold comes from the reader's rules file", inputs: [telemetry_observations.session_id, telemetry_observations.observation_type, telemetry_observations.event_kind, telemetry_observations.observation_id, telemetry_observations.name, telemetry_observations.severity, telemetry_observations.outcome, telemetry_observations.parent_observation_id, telemetry_observations.event_timestamp, telemetry_observations.source_ordinal], realized: false}
+    amendment_log:
+      - {date: "2026-10-16", semantic_break: false, change_class: prose_improvement, summary: "PLAN-reader-verbs-decision-notes follow-up (rec-4324): reader-verb ownership pointer moved from rec-4024 to PLAN-telemetry-reader-verbs (#1496); no change in meaning."}
+      - {date: "2026-10-05", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-lifecycle-friction-amendment (C10, friction-k1 (a), friction-k2 (a)): the facts, the run rule and the input list; the rules live in the reader's governed rules file, not the rec-4032 labels table (later materialised form)."}
   exception_total:
     type: int
     iceberg_type: bigint
     nullable: true
     description: >-
-      Count of exception-tier process events in the session. DERIVED at read, same mechanism as
-      rework_total -- replaces the stored `tier` column.
-    semantics: A key self-improvement-loop friction signal; no physical column.
-    populated_by: a named reader verb (rec-4024), bounded to this session's calendar-day partition.
-    dq_intent: {not_null: {enforced: false}}
-    derivation: {timing: read, derived_by: reader_verb:session_friction_rollup, formula: "count of telemetry_observations process_event rows whose name matches an exception signature (rec-4032 labels table)", inputs: [telemetry_observations.name, telemetry_observations.observation_type], realized: false}
+      Count of labelled exception-class facts in the session. DERIVED at read, same mechanism as rework_total -- replaces the stored `tier` column.
+    semantics: >-
+      A key self-improvement-loop friction signal; no physical column. exception_total counts the facts (process_events at severity error, warning or critical, plus tool_call closes with outcome error or blocked) that the reader's rules file labels exception-class. Each fact gets one label (an exact
+      signature beats the generic rule), and a blocked tool_call whose own hook block is already a fact is not counted twice. classifier_version is stamped on every response and is never a column.
+    populated_by: a named reader verb (PLAN-telemetry-reader-verbs, #1496), bounded to this session's calendar-day partition.
+    dq_intent: {}
+    derivation: {timing: read, derived_by: reader_verb:session_friction_rollup, formula: "count of facts (process_event points at severity error, warning or critical, and tool_call closes with outcome error or blocked) that the reader's rules file labels exception-class, one label per fact (an exact signature beats the generic rule), a blocked tool_call whose own hook block is already a fact not counted twice", inputs: [telemetry_observations.session_id, telemetry_observations.observation_type, telemetry_observations.event_kind, telemetry_observations.observation_id, telemetry_observations.name, telemetry_observations.severity, telemetry_observations.outcome, telemetry_observations.parent_observation_id, telemetry_observations.event_timestamp, telemetry_observations.source_ordinal], realized: false}
+    amendment_log:
+      - {date: "2026-10-05", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-lifecycle-friction-amendment (C10, friction-k2 (a)): one label per fact, no double count of a blocked tool_call already a fact; read from the reader's governed rules file, not the rec-4032 labels table (later materialised form)."}
   duration_seconds:
     type: int
     iceberg_type: bigint
     nullable: true
-    description: Wall-clock session duration in seconds. DERIVED at read; NULL while the session is running (no close row yet).
-    semantics: close.event_timestamp minus session_started_at, computed by the same reader verb that derives session state.
-    populated_by: a named reader verb (rec-4024).
-    dq_intent: {not_null: {enforced: false}}
-    derivation: {timing: read, derived_by: reader_verb:session_state_and_duration, formula: "(close.event_timestamp - session_started_at).total_seconds(), where close is this session's event_kind=close row, if any", inputs: [event_timestamp, session_started_at, event_kind], realized: false}
+    description: Wall-clock session duration in seconds. DERIVED at read; NULL until a close row exists (a root session's latest close, whether a producer close or a root turn close; a sub-agent session's agent-run close).
+    semantics: >-
+      ROOT session (SE-3, Decision 228): the latest close's event_timestamp minus session_started_at, wall-clock, the latest close being the later of the latest producer close and the latest close of any root turn, truncated toward zero to whole seconds (rec-4405), including any idle gap between a close and a later resume. SUB-AGENT session: its agent-run close minus open (telemetry_agents.duration_seconds). Computed by the same reader verb that derives `state`.
+    populated_by: a named reader verb (PLAN-telemetry-reader-verbs, #1496).
+    dq_intent: {}
+    derivation: {timing: read, derived_by: reader_verb:session_state_and_duration, formula: "ROOT: truncate toward zero to whole seconds (the later of the latest producer close and the latest close of any root turn, by event_timestamp, source_ordinal, event_id - session_started_at); NULL when neither exists; SUB-AGENT: telemetry_agents.duration_seconds of its agent-run pair (close minus open)", inputs: [event_timestamp, session_started_at, event_kind, parent_session_id, source_ordinal, event_id, telemetry_observations.session_id, telemetry_observations.observation_type, telemetry_observations.event_kind, telemetry_observations.event_timestamp, telemetry_observations.source_ordinal, telemetry_observations.event_id, telemetry_agents.session_id, telemetry_agents.event_kind, telemetry_agents.event_timestamp], realized: false}
     amendment_log:
+      - {date: "2026-10-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-read-side-session-end (Decision 228, rec-4405): the latest close is the later of the producer close and any root turn close; whole seconds truncated toward zero.", migration_story: "Derived at read; sessions with turn closes read a duration where they read NULL."}
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded from a stored open/close-pair column to a read-derived field over the event-journal rows; field meaning (wall-clock session duration) unchanged."}
+      - {date: "2026-10-05", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-lifecycle-friction-amendment (C9): duration is the latest close minus session_started_at, wall-clock across any resume gap, NULL until a close exists; a sub-agent session takes its agent-run pair; the formula names every input."}
   execution_attempt:
     type: int
     iceberg_type: bigint
-    nullable: false
+    nullable: true
     description: Which attempt this session is for the same unit of work (1-based; >1 on resume/retry).
     semantics: >-
-      Required. Distinguishes a fresh run from a resumed/retried one. A resumed session reuses
-      session_id (its identity is derived from the same session_ref) and appends a resume event;
-      execution_attempt disambiguates the appended rows.
-    populated_by: the write boundary at the open event (rec-4024).
-    dq_intent: {not_null: {enforced: false}, required_when: {event_kind: [open]}}
+      Required. Distinguishes a fresh run from a resumed/retried one. A resumed session reuses session_id (its identity is derived from the same session_ref) and appends a resume event; execution_attempt disambiguates the appended rows.
+    populated_by: the claude_code producer, at the open event.
+    dq_intent: {required_when: {event_kind: [open]}}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded populated_by/semantics wording to the write-boundary/event-journal model and added dq_intent.required_when; field meaning unchanged."}
+      - {date: "2026-10-04", semantic_break: false, change_class: type_widen, summary: "PLAN-telemetry-write-conformance (rec-4064 R1): nullable false -> true, matching dq_intent.required_when (open rows only); the projection already treated it as nullable."}
   branch:
     type: str
     iceberg_type: string
     nullable: true
     description: The git branch the session ran on (e.g. claude/focused-bell-5onhvu).
     semantics: Optional provenance; the harness session branch. Null when not applicable.
-    populated_by: the write boundary at the open event.
-    dq_intent: {not_null: {enforced: false}}
+    populated_by: the claude_code producer at the open event.
+    dq_intent: {}
   rec_ids:
     type: "list[str]"
     iceberg_type: "array<string>"
     nullable: true
     description: Recommendation ids this session addressed (e.g. ["rec-2335"]).
     semantics: >-
-      Optional cross-reference into ops_recommendations.id, joined tenant-locally. array<string>
-      declared explicitly (TELEMETRY_TABLE_DTYPES) to avoid awswrangler null-inference failures on
-      all-null batches. Stored on open (the recs a session was scoped to) and/or annotate rows (recs
-      resolved or filed after close).
-    populated_by: the write boundary at the open or annotate event.
-    dq_intent: {not_null: {enforced: false}}
+      Optional cross-reference into ops_recommendations.id, joined tenant-locally. Stored on open (the recs a session was scoped to) and/or annotate rows (recs resolved or
+      filed after close).
+    populated_by: "unproduced: held:feedback-loop-gate (no producer writes it)"
+    dq_intent: {}
     amendment_log:
+      - {date: "2026-10-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-field-realization (T3.20 c7): dropped the sentence citing TELEMETRY_TABLE_DTYPES and awswrangler null-inference (neither exists in code); field meaning unchanged."}
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to name which event_kind rows carry this field (open/annotate) and to join tenant-locally; field meaning unchanged."}
   plan_slug:
     type: str
@@ -293,16 +301,16 @@ fields:
     nullable: true
     description: The plan slug an implement/plan session is bound to (e.g. ratify-class-a-telemetry-contracts).
     semantics: Optional; links a session to docs/plans/PLAN-{slug}.yaml. Null for non-plan workflows.
-    populated_by: the write boundary at the open event.
-    dq_intent: {not_null: {enforced: false}}
+    populated_by: "unproduced: held:feedback-loop-gate (no producer writes it)"
+    dq_intent: {}
   failure_reason:
     type: str
     iceberg_type: string
     nullable: true
     description: Free-text reason when outcome=failed. NULL on success.
     semantics: Optional failure diagnostic; consumed by ci-rca / friction analysis. Stored on the close event's row alongside outcome.
-    populated_by: the write boundary at the close event.
-    dq_intent: {not_null: {enforced: false}}
+    populated_by: the claude_code producer at the close event.
+    dq_intent: {}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to name the close-event row this field is stored on; field meaning unchanged."}
   failure_phase:
@@ -311,11 +319,9 @@ fields:
     nullable: true
     description: The phase/observation name active when the session failed. NULL on success.
     semantics: >-
-      Optional; correlates to a telemetry_observations.name (observation_type=phase). rec-275 (open) asks
-      that step-level failure telemetry also populate outcome/failure_phase on the failure path -- a CODE
-      change, NOT this contract; recorded as a KNOWN GAP.
-    populated_by: the write boundary at the close event.
-    dq_intent: {not_null: {enforced: false}}
+      Optional; correlates to a telemetry_observations.name (observation_type=phase). rec-275 (open) asks that step-level failure telemetry also populate outcome/failure_phase on the failure path -- a CODE change, NOT this contract; recorded as a KNOWN GAP.
+    populated_by: "unproduced: rec-4599 (no producer writes it)"
+    dq_intent: {}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded populated_by wording to the write-boundary model; field meaning unchanged."}
   files_changed:
@@ -324,8 +330,8 @@ fields:
     nullable: true
     description: Number of files changed in the session's diff.
     semantics: Optional code-impact metric. bigint (integer-promotion safety). Stored on the close event's row.
-    populated_by: the write boundary at the close event.
-    dq_intent: {not_null: {enforced: false}}
+    populated_by: "unproduced: held:feedback-loop-gate (no producer writes it)"
+    dq_intent: {}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to name the close-event row this field is stored on; field meaning unchanged."}
   lines_added:
@@ -334,8 +340,8 @@ fields:
     nullable: true
     description: Lines added across the session's diff.
     semantics: Optional code-impact metric. Stored on the close event's row.
-    populated_by: the write boundary at the close event.
-    dq_intent: {not_null: {enforced: false}}
+    populated_by: "unproduced: held:feedback-loop-gate (no producer writes it)"
+    dq_intent: {}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to name the close-event row this field is stored on; field meaning unchanged."}
   lines_removed:
@@ -344,8 +350,8 @@ fields:
     nullable: true
     description: Lines removed across the session's diff.
     semantics: Optional code-impact metric. Stored on the close event's row.
-    populated_by: the write boundary at the close event.
-    dq_intent: {not_null: {enforced: false}}
+    populated_by: "unproduced: held:feedback-loop-gate (no producer writes it)"
+    dq_intent: {}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to name the close-event row this field is stored on; field meaning unchanged."}
   steps_total:
@@ -354,8 +360,8 @@ fields:
     nullable: true
     description: Total planned steps for the session (denormalised from the plan), STORED because it is known at open.
     semantics: Optional progress metric, observed once at the open event -- not a roll-up, hence no *_total-derivation naming conflict.
-    populated_by: the write boundary at the open event.
-    dq_intent: {not_null: {enforced: false}}
+    populated_by: "unproduced: rec-4599 (no producer writes it)"
+    dq_intent: {}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to clarify this is stored, not a *_total roll-up; field meaning unchanged."}
   steps_completed_total:
@@ -363,12 +369,10 @@ fields:
     iceberg_type: bigint
     nullable: true
     description: >-
-      Steps actually completed in the session. DERIVED at read (roll-up naming: *_total) from
-      telemetry_observations step-kind close rows sharing this session_id -- replaces the
-      contract_version 1 stored tally steps_completed.
+      Steps actually completed in the session. DERIVED at read (roll-up naming: *_total) from telemetry_observations step-kind close rows sharing this session_id -- replaces the contract_version 1 stored tally steps_completed.
     semantics: steps_completed_total/steps_total is the session completion ratio; no physical column.
-    populated_by: a named reader verb (rec-4024), bounded to this session's calendar-day partition.
-    dq_intent: {not_null: {enforced: false}}
+    populated_by: a named reader verb (PLAN-telemetry-reader-verbs, #1496), bounded to this session's calendar-day partition.
+    dq_intent: {}
     derivation: {timing: read, derived_by: reader_verb:session_process_event_rollup, formula: "count of telemetry_observations rows WHERE session_id = this.session_id AND observation_type = 'step' AND event_kind = 'close'", inputs: [telemetry_observations.session_id, telemetry_observations.observation_type, telemetry_observations.event_kind], realized: false}
   scope_drift_files:
     type: "list[str]"
@@ -376,11 +380,11 @@ fields:
     nullable: true
     description: Files touched outside the plan's declared scope (scope-drift detector output).
     semantics: >-
-      Optional governance signal (plan Scope vs actual diff). array<string> declared explicitly
-      (null-inference safety). Empty/null when no drift. Stored on the close event's row.
-    populated_by: the write boundary at the close event.
-    dq_intent: {not_null: {enforced: false}}
+      Optional governance signal (plan Scope vs actual diff). Empty/null when no drift. Stored on the close event's row.
+    populated_by: "unproduced: held:feedback-loop-gate (no producer writes it)"
+    dq_intent: {}
     amendment_log:
+      - {date: "2026-10-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-field-realization (T3.20 c7): dropped the sentence citing TELEMETRY_TABLE_DTYPES and awswrangler null-inference (neither exists in code); field meaning unchanged."}
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to name the close-event row this field is stored on; field meaning unchanged."}
   pr_url:
     type: str
@@ -388,8 +392,8 @@ fields:
     nullable: true
     description: URL of the PR the session opened/merged. A post-close fact, owned by the annotate event_kind.
     semantics: Optional provenance link to GitHub, typically recorded after the session itself has closed.
-    populated_by: the write boundary at an annotate event.
-    dq_intent: {not_null: {enforced: false}, required_when: {event_kind: [annotate]}}
+    populated_by: "unproduced: held:feedback-loop-gate (no producer writes it)"
+    dq_intent: {required_when: {event_kind: [annotate]}}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded to the annotate event_kind (a post-close fact) and added dq_intent.required_when; field meaning unchanged."}
   ci_outcome:
@@ -397,29 +401,29 @@ fields:
     iceberg_type: string
     nullable: true
     description: CI result for the session's PR (e.g. success | failure | pending). A post-close fact, owned by the annotate event_kind.
-    semantics: Optional; the CI verdict correlated to the session, typically known only after close. Open set; enforcement deferred.
-    populated_by: the write boundary at an annotate event.
-    dq_intent: {not_null: {enforced: false}, required_when: {event_kind: [annotate]}}
+    semantics: Optional; the CI verdict correlated to the session, typically known only after close. The set is open; a closed set would be declared here and enforced at write (Decision 210 cl.3).
+    populated_by: "unproduced: held:feedback-loop-gate (no producer writes it)"
+    dq_intent: {required_when: {event_kind: [annotate]}}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded to the annotate event_kind (a post-close fact) and added dq_intent.required_when; field meaning unchanged."}
+      - {date: "2026-10-05", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-lifecycle-friction-amendment (fork 2 (a)): replaced 'enforcement deferred' with the open-set wording; a closed set would be declared here and enforced at write. Meaning unchanged."}
   model_primary:
     type: str
     iceberg_type: string
     nullable: true
     description: The primary model that drove the session (e.g. claude-opus-4-8).
     semantics: >-
-      Optional; the headline model for the run. Per-call model attribution lives on
-      telemetry_observations (observation_type=model_call) and telemetry_agents.model.
-    populated_by: the write boundary at the open event.
-    dq_intent: {not_null: {enforced: false}}
+      Optional; the headline model for the run. Per-call model attribution lives on telemetry_observations (observation_type=model_call) and telemetry_agents.model.
+    populated_by: the claude_code producer at the open event.
+    dq_intent: {}
   coverage_before:
     type: float
     iceberg_type: double
     nullable: true
     description: Test coverage fraction before the session's changes.
     semantics: Optional quality metric; pairs with coverage_after for a coverage delta. double-typed. Stored on the close event's row.
-    populated_by: the write boundary at the close event.
-    dq_intent: {not_null: {enforced: false}}
+    populated_by: "unproduced: rec-4599 (no producer writes it)"
+    dq_intent: {}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to name the close-event row this field is stored on; field meaning unchanged."}
   coverage_after:
@@ -428,81 +432,79 @@ fields:
     nullable: true
     description: Test coverage fraction after the session's changes. A post-close fact, owned by the annotate event_kind.
     semantics: Optional quality metric; coverage_after - coverage_before is the session coverage delta, typically finalised after close.
-    populated_by: the write boundary at an annotate event.
-    dq_intent: {not_null: {enforced: false}, required_when: {event_kind: [annotate]}}
+    populated_by: "unproduced: rec-4599 (no producer writes it)"
+    dq_intent: {required_when: {event_kind: [annotate]}}
     amendment_log:
       - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded to the annotate event_kind (a post-close fact) and added dq_intent.required_when; field meaning unchanged."}
+  harness_session_key:
+    type: str
+    iceberg_type: string
+    nullable: true
+    description: "The harness's own identifier for this session, as the harness spells it (Claude Code: the remote session id, session_<id>); the join key to the harness's own session lists."
+    semantics: "Stored exactly as the source gives it, never normalised at write: Claude Code's environment spells the same session cse_<same suffix>, so a reader joins on the suffix. Set on open rows by a producer that reads it from its source; NULL otherwise. The claude_code producer sets it from parser_version 4 (PLAN-telemetry-capture-producer-fixes) on every stream's open row."
+    populated_by: the claude_code producer, at the open event.
+    dq_intent: {pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$'}
+  checkout_sha:
+    type: str
+    iceberg_type: string
+    nullable: true
+    description: "The git commit (HEAD) the session's checkout was on when this session start or resume began, as the session's own start hook recorded it."
+    semantics: "Per-segment provenance of the code that ran: an open row carries the startup checkout, each resume row its own. Read from the source transcript, never from a live git call, so it is a pure function of the source (envelope R7). NULL when the source does not record it (a checkout whose start hook predates it)."
+    populated_by: the claude_code producer, at the open and resume events.
+    dq_intent: {pattern: '^([0-9a-f]{40}|[0-9a-f]{64})$'}
+  checkout_base_sha:
+    type: str
+    iceberg_type: string
+    nullable: true
+    description: "The merge-base of the checkout with the repository's default branch at that start: the main commit the session's code was cut from."
+    semantics: "The back-validation key: a fix merged to main as commit C reaches this segment's code when C is an ancestor of checkout_base_sha. NULL when it could not be resolved at that moment (a shallow clone, or the default branch not yet fetched), never guessed. Same source and purity rule as checkout_sha."
+    populated_by: the claude_code producer, at the open and resume events.
+    dq_intent: {pattern: '^([0-9a-f]{40}|[0-9a-f]{64})$'}
+  checkout_dirty:
+    type: bool
+    iceberg_type: boolean
+    nullable: true
+    description: "Whether tracked files differed from checkout_sha at that start."
+    semantics: "true means the code that ran is not exactly checkout_sha. NULL when unknown. Same source and purity rule as checkout_sha."
+    populated_by: the claude_code producer, at the open and resume events.
+    dq_intent: {}
+realization:
+  produced: {write_boundary: [event_id, created_timestamp, tenant_id, project_id, session_id, parent_session_id], claude_code: [event_kind, event_timestamp, session_started_at, source_ordinal, external_ref, entity_ref, producer, producer_version, parser_version, workflow, outcome, execution_attempt, branch, failure_reason, model_primary, harness_session_key, checkout_sha, checkout_base_sha, checkout_dirty]}
+  unproduced: {held:feedback-loop-gate: [rec_ids, plan_slug, pr_url, ci_outcome, files_changed, lines_added, lines_removed, scope_drift_files], rec-4599: [steps_total, failure_phase, coverage_before, coverage_after]}
 governance:
   table_class: event
   partition_by: "history=year(session_started_at), month(session_started_at), day(session_started_at)"
   write_path: >-
-    NOT PROVISIONED: no telemetry writer exists today. TARGET (Phase 4, post-T2.26): the DuckLake
-    telemetry writer boundary (rec-4024's append_events verb). Append-only event journal; no SCD2
-    merge, no in-place mutation.
+    Provisioned in the production telemetry catalog (Decision 230); production writes begin at PLAN-telemetry-production-flip; the writer is rec-4024's append verb on the DuckLake telemetry writer boundary. Append-only event journal; no SCD2 merge, no in-place mutation.
 governance_notes: >-
-  EVENT JOURNAL (Decision 199, amending Decision 95 clause 1, Decision 96 clauses 1 and 3, and
-  Decision 97 clauses 1-4): telemetry_sessions is the trace ROOT, now shaped as an append-only
-  journal of lifecycle events rather than one row mutated in place. SESSION STATE (running vs a
-  terminal outcome) and DURATION are DERIVED AT READ by a named reader verb reading this session's
-  own rows, bounded to its single calendar-day partition (answers Decision 81 clause 8 --
-  never an unprunable full scan). Identity (session_id, parent_session_id) is derived at the write
-  boundary per telemetry-event-envelope.yaml's normative hash spec, not minted-once-and-propagated.
-  ROLL-UP RECONCILIATION: process_event_total / rework_total / exception_total / steps_completed_total
-  are DERIVED aggregates of telemetry_observations rows sharing this session_id (rework_total /
-  exception_total from process_event name-signature matching against rec-4032's labels table, not a
-  stored tier column). NULLABILITY AXES: `nullable` is the TARGET-SCHEMA column constraint (Phase 4
-  DDL); `dq_intent.not_null.enforced` is the CURRENT DQ posture (false everywhere now, per-event-kind
-  requirements expressed via dq_intent.required_when instead of a table-wide not-null). A
-  `nullable: false` + `enforced: false` field is "required in the target schema, not yet
-  DQ-enforced", NOT a contradiction. KNOWN GAPS (open recs, future CODE work, not this contract):
-  rec-275 (failure-path step telemetry), rec-2173 (preflight telemetry health re-enable), rec-4024
-  (the writer/reader verbs and dimension contracts this contract's derivations name), rec-4030 (the
-  live legacy UUID4 session_id minter's migration to this contract's derivation model), rec-4032
-  (the friction-classification labels table rework_total/exception_total read from).
+  EVENT JOURNAL (Decision 199, amending Decision 95 clause 1, Decision 96 clauses 1 and 3, and Decision 97 clauses 1-4): telemetry_sessions is the trace ROOT, now shaped as an append-only journal of lifecycle events rather than one row mutated in place. SESSION STATE: running, abandoned or a
+  terminal outcome is DERIVED AT READ into `state` (never stored) by the named reader verb that also derives DURATION, reading this session's own rows bounded to its single calendar-day partition (answers Decision 81 clause 8 -- never an unprunable full scan). A root session's state is read
+  from its turns (Decision 228): its latest lifecycle row (annotate excluded; close ranks last on a tie) stands only while no turn opened after it, so a resume after a close makes the session running again; one close row is written per finalization at which the session's open row is due (unless an earlier finalization already wrote the same anchor), its outcome derived from the transcript. claude_code also writes one close per root resume boundary for the segment before it (SC-1, SC-2: rec-4382, parser_version 4; a SessionEnd cut for the same segment usually dedupes; when records were appended after it the segment has two closes with different anchors and the reader takes the latest), and a resume row is due once its resume hook group has ended (SC-3), so a session ending inside a resume hook group gets no row for that resume. PROVENANCE (parser_version 4, PV-1..PV-4, claude_code): harness_session_key is the last URL path segment of the first remote_session_change attachment at or before the open row's bound, on every stream's open row; checkout_sha, checkout_base_sha and checkout_dirty are read from the SessionStart pin hook's recorded stderr line (open row: the last pin before the first prompt; resume row: the last pin inside its hook group), NULL for unknown or absent facts and never from a live git call. DECLARED RESIDUAL (owner rec-4407): a cloud session's LAST segment closes only through a SessionEnd pass that reaches the writer, which today stops before sending, so it reads running then abandoned; since Decision 228 it instead reads from its turns: its last turn's outcome once idle at rest, abandoned once idle mid-turn (rec-4407 closed). Identity (session_id, parent_session_id) is derived at the write boundary per
+  telemetry-event-envelope.yaml's normative hash spec, not minted-once-and-propagated. ROLL-UP RECONCILIATION: process_event_total / rework_total / exception_total / steps_completed_total are DERIVED aggregates of telemetry_observations rows sharing this session_id (rework_total / exception_total
+  from the facts classified by the reader's governed rules file, not a stored tier column). classifier_version is a reader response stamp, never a column. WINDOW VERBS (Decision 199 cl.1, CD.52): a verb over many sessions is a bounded window of per-session derivations, each reading only its own
+  session's single calendar-day partition. Each window verb declares its own maximum window in the reader's named-read registry and stamps its read_version; there is no contract-wide day count, and each window is an egress line under Decision 88. NULLABILITY AXES: a column is NOT NULL at write when `nullable` is false or dq_intent declares not_null, unless the field carries `required_when`, which then governs (scripts/field_semantics_event_projection.py _is_not_null); every declared rule is write-enforced (Decision 210); a staged rule is spelled with exclude_before or an owned exemption. KNOWN GAPS (open recs, future CODE work, not this contract): rec-275 (failure-path step telemetry), rec-4030 (re-grounding planning_session_ref on this contract's derivation model; the UUID4 minter was retired, not migrated), rec-4032 (the later materialised friction-labels form of the reader's rules file that rework_total/exception_total read).
+  LATE SESSIONSTART RECORDS (parser_version 7, rules HG-1..HG-4, rec-4633, claude_code): in a fresh project thread the pin hook's SessionStart record can be written after the first prompt, so a pin written after the first prompt never reaches the open row, whose checkout columns then read NULL (counted pin_after_first_prompt; read-time recovery is rec-4641). A SessionStart:resume group whose first hook started before the latest prompt or assistant record already written is still a resume (its resume row is due once the group ends, SC-3), but it closes no turn: its boundary is the first prompt of the turn it was written into, and its SC-1 close, the next segment's start and the background-completion boundary all sit at that position.
 amendment_log:
-  - date: "2026-09-26"
-    semantic_break: false
-    change_class: prose_improvement
-    summary: >-
-      rec-4073: governance.partition_by respelled role-prefixed ("history=year(...), month(...),
-      day(...)"), matching the shared ops partition grammar (parse_partition_by); resolved spec
-      unchanged, only the raw field gained the role prefix.
-    migration_story: No live telemetry writer exists (TARGET-STATE only); no runtime migration is required.
-  - date: "2026-09-25"
-    semantic_break: false
-    change_class: prose_improvement
-    summary: >-
-      rec-4065: partition respelled to the calendar-day triple year/month/day(session_started_at)
-      -- DuckLake's bare day() is day-of-month, not calendar day. Description/notes reworded to
-      match; no table exists yet.
-    migration_story: No live telemetry writer exists (TARGET-STATE only); no runtime migration is required.
-  - date: "2026-09-24"
-    semantic_break: false
-    change_class: prose_improvement
-    summary: >-
-      Decision 199: description re-grounded to an append-only event journal (event_kind
-      open|resume|compact|close|annotate); roll-ups moved to read-time derivation. Per-field
-      changes recorded on their own fields' amendment_log entries.
-    migration_story: >-
-      No live telemetry writer exists (TARGET-STATE, dq_INTENT only); Phase 4 (T2.36) builds
-      directly to this contract_version 2 shape.
-  - date: "2026-08-26"
-    semantic_break: false
-    change_class: prose_improvement
-    summary: >-
-      Platform cleanse: references to the removed trading-product surfaces and the retired
-      pre-DuckLake query-engine estate were removed or reworded.
-    migration_story: >-
-      The repository became platform-only; product surfaces and the retired legacy query-engine
-      path were deleted. No live DuckLake field or verb semantics changed.
+  - {date: "2026-10-29", semantic_break: false, change_class: field_add, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): workflow names a top-level run's agent by its source_registry key; new read-derived surface field. Per-field changes are on their own logs."}
+  - {date: "2026-10-26", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-late-hook-records (rec-4633, parser_version 7): governance_notes declare that a pin written after the first prompt never reaches the open row (counted pin_after_first_prompt; read-time recovery is rec-4641) and that a late SessionStart:resume group still counts as a resume but closes no turn, its SC-1 close and the background-completion boundary using the first prompt of the turn it was written into. Notes only; no column or type change."}
+  - {date: "2026-10-25", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-production-catalog bookkeeping: the two not-provisioned-in-production statements now say provisioned in the production telemetry catalog (Decision 230); mechanical status edit, no meaning change."}
+  - {date: "2026-10-24", semantic_break: false, change_class: governance_note_add, summary: "PLAN-telemetry-field-realization (T3.20 c7): realization block (who writes each stored column, or who owns its absence); populated_by names the real writer; KNOWN GAPS rec-4030 wording corrected. No column, type or rule change."}
+  - {date: "2026-10-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-read-side-session-end (Decision 228): SESSION STATE governance reads a root session's state from its turns and duration from the later of the producer close and any root turn close; the v4 last-segment residual is closed.", migration_story: "Derived at read; no stored row changes."}
+  - {date: "2026-10-17", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-capture-producer-fixes (parser_version 4): governance_notes and the event_kind, event_timestamp, source_ordinal, external_ref and outcome field notes gain the segment-close rule (SC-1, SC-2: one close per root resume boundary for a segment holding an assistant-bearing turn, derived from the tree), the resume row due rule (SC-3), the four new fields' claude_code population (PV-1..PV-4) and the declared last-segment residual (owner rec-4407).", migration_story: "Notes only: no field changes. Parser v4 re-parses every tree from the start; v3 rows are superseded by version, never rewritten."}
+  - {date: "2026-10-17", semantic_break: false, change_class: field_add, summary: "PLAN-telemetry-column-additions: four nullable typed columns (harness_session_key, checkout_sha, checkout_base_sha, checkout_dirty).", migration_story: "Nullable additions: every stored row stays valid and reads NULL; no producer emits them before PLAN-telemetry-capture-producer-fixes; the smoke tables gain them through Decision 222's owner step."}
+  - {date: "2026-10-16", semantic_break: false, change_class: prose_improvement, summary: "PLAN-reader-verbs-decision-notes (rec-4324): KNOWN GAPS drops rec-2173 (closed) and rec-4024 (its writer and reader verbs and dimension contracts are built; the reader verbs by PLAN-telemetry-reader-verbs, #1496)."}
+  - {date: "2026-10-14", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-parser-v3 (slice 3b plan P-B): the per-finalization close-row qualifier (open row due, same anchor written once) joins the governance summary; field entries on outcome, event_timestamp, source_ordinal and external_ref carry the rest."}
+  - {date: "2026-10-05", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-lifecycle-friction-amendment (feedback-loop review C9, C10, C13, rec-4146): new read-derived state, close-row identity, friction roll-up facts and rules-file home, WINDOW VERBS note, and the stale enforcement/provisioning premise reworded (projects_to keys, write_path, header, NULLABILITY AXES). Per-field changes are on their own fields' logs."}
+  - {date: "2026-09-26", semantic_break: false, change_class: prose_improvement, summary: "rec-4073: governance.partition_by respelled role-prefixed ('history=year(...), month(...), day(...)'), matching the shared ops partition grammar; resolved spec unchanged. No runtime migration: no live telemetry writer."}
+  - {date: "2026-09-25", semantic_break: false, change_class: prose_improvement, summary: "rec-4065: partition respelled to the calendar-day triple year/month/day(session_started_at); DuckLake's bare day() is day-of-month. No table exists yet."}
+  - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "Decision 199: description re-grounded to an append-only event journal (event_kind open|resume|compact|close|annotate); roll-ups moved to read-time derivation. Per-field changes are on their own fields' logs."}
+  - {date: "2026-08-26", semantic_break: false, change_class: prose_improvement, summary: "Platform cleanse: references to the removed trading-product surfaces and the retired pre-DuckLake query-engine estate were removed or reworded."}
+  - {date: "2026-10-15", semantic_break: false, change_class: prose_improvement, summary: "PLAN-rule-declarations-and-writer-conformance (rec-4158, Decision 210): the dq_intent `enforced` key is retired from every rule leg. not_null is declared by presence (`true`, or `{exclude_before: D}`); an optional column or a loosest-baseline field carries no not_null leg; the other legs lose the key. A declared rule is an enforced rule.", migration_story: "Declarations re-spelled only. No rule is added, removed or re-dated: the declared rule set, read through scripts.contract_rules, is identical before and after, and the generated field_semantics.yaml projection of this contract is unchanged."}
 previous_versions:
   - contract_version: 1
     ratified_at: "2026-06-24"
     ratified_via: "Step 10 multi-perspective critique + PLAN-ratify-class-a-telemetry-contracts merge to main (T0.12.6)"
     superseded_on: "2026-09-24"
     summary: >-
-      Mutate-in-place root row: outcome/started_at/ended_at/duration_seconds/roll-ups stored and
-      overwritten across an open-then-close pair of rows sharing session_id; ULID mint-once
-      identity (target); day(started_at) partition. Superseded by the append-only event-journal
-      shape (Decision 199): per-event rows, read-derived state/duration/friction,
-      write-boundary-derived identity, day(session_started_at) partition.
+      Mutate-in-place root row: outcome/started_at/ended_at/duration_seconds/roll-ups stored and overwritten across an open-then-close pair of rows sharing session_id; ULID mint-once identity (target); day(started_at) partition. Superseded by the append-only event-journal shape (Decision 199):
+      per-event rows, read-derived state/duration/friction, write-boundary-derived identity, day(session_started_at) partition.

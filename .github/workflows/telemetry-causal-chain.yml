@@ -1,0 +1,84 @@
+name: telemetry-causal-chain
+
+# Causal-chain probe of the PRODUCTION telemetry path (T3.2, telemetry slice 5): one tiny synthetic root session is produced by
+# the real claude_code producer, appended through the production telemetry writer, read back through the telemetry reader
+# within an SLA, and earlier probe sessions are re-read to catch rows lost or changed after commit (merge, GC). It is an alarm,
+# not a gate (Decision 210 cl.2): each failing stage exits with its own code and files its own telemetry_verify rec
+# (causal_chain_<stage>); unavailable infrastructure is a red run that files nothing, backstopped by loop_liveness_stale. It is
+# never a required check (Decision 83): no push or pull_request trigger.
+#
+# Cadence: every 6 hours on Benjamin's word (2026-10-28). The cron is the every-N-hours shape
+# scripts/convergence_health/sensor_liveness.py classifies as 21,600 s (Decision 62). Hourly, off GitHub, is rec-4688.
+#
+# Invariants: no terraform, no apply, no deploy, no dispatch of another workflow. The role is the CI branch role, which already
+# invokes the reader and telemetry Function URLs (golden replay uses the same grants). Logs carry counts and class names only;
+# every Function URL and its host is masked (Decision 101). Account-ID masking follows PLAN-actions-account-id-masking.
+
+on:
+  schedule:
+    - cron: '13 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telemetry-causal-chain
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      id-token: write  # OIDC token minting for assume-role
+      contents: read
+      actions: read  # this workflow's earlier successful runs (post-persist leg)
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # skew's git diff against the deploy record and shape_version_at's git show need full history
+
+      - uses: ./.github/actions/aws-region
+
+      - name: Configure AWS credentials (OIDC -- github_ci_branch role, DuckLake reader and telemetry-writer invoke)
+        uses: aws-actions/configure-aws-credentials@v6
+        env:
+          MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve DuckLake serving Function URLs
+        run: |
+          set -euo pipefail
+          for role in writer reader telemetry_writer telemetry_reader; do
+            URL=$(aws lambda get-function-url-config --function-name "agent-platform-ducklake-${role//_/-}" --region "$AWS_REGION" --query FunctionUrl --output text)
+            if [ -z "$URL" ] || [ "$URL" = "None" ]; then
+              echo "::error::Could not resolve the ${role} Function URL via get-function-url-config." >&2
+              exit 1
+            fi
+            HOST=${URL#https://}
+            echo "::add-mask::${URL}"
+            echo "::add-mask::${HOST%%/*}"
+            echo "DUCKLAKE_${role^^}_URL=${URL}" >> "$GITHUB_ENV"
+            echo "Resolved DUCKLAKE_${role^^}_URL (masked)."
+          done
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies (venv)
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Causal-chain probe through the production telemetry path
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: .venv/bin/python -m scripts.ducklake_smoke.lambda_telemetry_causal_chain

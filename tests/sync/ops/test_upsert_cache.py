@@ -141,7 +141,7 @@ class TestUpsertCacheRowExistingCacheParsing:
 class TestWarmSync:
     """warm_sync() -- the single warm-up pass of per-table reader pulls."""
 
-    def test_warm_sync_covers_every_table(self):
+    def test_warm_sync_covers_every_table(self, tmp_path):
         """warm_sync() returns pulled/rows/reader_ok keyed by every _TABLE_TO_LOCAL table."""
         from scripts.sync import ops as sync_ops
 
@@ -153,6 +153,7 @@ class TestWarmSync:
             return 0, None  # reader failure for ops_decisions
 
         with (
+            patch("scripts.sync.ops._LOGS_DIR", tmp_path),
             patch("scripts.sync.ops._TABLE_TO_LOCAL", fake_tables),
             patch("scripts.sync.ops._pull_single_table_with_rows", side_effect=_fake_pull) as mock_pull,
         ):
@@ -165,7 +166,7 @@ class TestWarmSync:
         assert result["rows"]["ops_decisions"] is None
         assert result["reader_ok"] == {"ops_recommendations": True, "ops_decisions": False}
 
-    def test_warm_sync_pulls_tables_in_registration_order(self):
+    def test_warm_sync_pulls_tables_in_registration_order(self, tmp_path):
         """warm_sync() issues one reader pull per table, in _TABLE_TO_LOCAL order."""
         from scripts.sync import ops as sync_ops
 
@@ -176,6 +177,7 @@ class TestWarmSync:
             return 0, None
 
         with (
+            patch("scripts.sync.ops._LOGS_DIR", tmp_path),
             patch("scripts.sync.ops._TABLE_TO_LOCAL", {"ops_recommendations": ".recs.jsonl", "ops_decisions": ".d.jsonl"}),
             patch("scripts.sync.ops._pull_single_table_with_rows", side_effect=_fake_pull),
         ):

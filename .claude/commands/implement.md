@@ -17,13 +17,7 @@ stdout is a one-line summary; Read logs/.preflight-report.json for the full cons
 
 Preflight runs `git fetch origin main` and emits `main_freshness` (status, commits_behind, commits_ahead, main_files_changed_since_branch). The report is slim: roadmap state carries only `next_eligible` + `strategic_pending`; `non_automatable_details` is dropped (Decision 73). Handle constraints (including the `main_freshness` cases) as defined in the **Preflight Constraints** section of your `implement` skill. After Step 2 loads the plan, apply the **Main Divergence Check** from the skill before proceeding to Step 3.
 
-After preflight completes successfully, open a telemetry session:
-```bash
-bin/venv-python -m scripts.session.preflight --open-session --workflow implement
-```
-Save the printed UUID for the `session_postflight --close-session` call in Step 9.
-
-After the session is open, run the pre-implementation gate (fast `--pre` tier):
+After preflight completes successfully, run the pre-implementation gate (fast `--pre` tier):
 ```bash
 bin/venv-python -m scripts.validate --pre
 ```
@@ -123,7 +117,7 @@ client-side.
 
 Apply the appropriate **Commit Flow** (STRATEGIC or IMPLEMENTATION) defined in your `implement` skill. All GitHub operations use the GitHub MCP tools (`mcp__github__*`) -- the `gh` CLI is not available on the web harness. Wait for CI event-driven via `subscribe_pr_activity`; never busy-wait with a sleep timer or a recurring scheduled re-check.
 
-When creating the PR body, emit a `Resolves: rec-NNNN[, rec-MMMM]` trailer if the plan's `bundled_recommendations` list is non-empty. After the merge, execute the **post-merge closeout fallback** from the implement skill: wait for `ci.yml`'s trailer-closure job to conclude on the push run at the merge sha, then act on its per-rec log evidence -- never on elapsed wall-clock time. A rec the job's log names in a refusal marker (Decision 186 or Decision 201) may ONLY be closed via that log's own printed `close_proposed` command, never by a direct `--update-rec ... --status closed` call; a rec the log names as closed, not-found, or errored may use the direct fallback command; anything else (no log line for that rec, an unconcluded or failed job) is left alone until the job concludes.
+When the plan's `bundled_recommendations` list is non-empty, the implementation commit and the PR body carry a `Resolves: rec-NNNN[, rec-MMMM]` trailer, and the merge follows the implement skill's Commit Flow step 4 (premerge, squash-merge with an explicit `commit_message` and `expectedHeadSha`, readback). After the merge, execute the **post-merge closeout fallback** from the implement skill: wait for `ci.yml`'s trailer-closure job to conclude on the push run at the merge sha, then act on its per-rec log evidence -- never on elapsed wall-clock time. A rec the job's log names in a Decision 186 or Decision 201 refusal marker is never closed by a direct `--update-rec ... --status closed` call: after a Decision 201 refusal it takes the route in `docs/contracts/git-ops.yaml#resolves_trailer`, and after a Decision 186 refusal it stays open and is reported to the operator (rec-4088). A rec the log names as closed, not-found, or errored may use the direct fallback command; anything else (no log line for that rec, an unconcluded or failed job) is left alone until the job concludes.
 
 ## Step 8: Capture Friction
 Record friction (parsing errors, ambiguous areas, bugs found) by filing a recommendation via `bin/venv-python -m scripts.ops_data_portal --file-rec ...` with `source=manual` (the Single Portal Invariant, Decision 84). If no friction, this step is a no-op.
@@ -134,13 +128,7 @@ If the friction was a recurring gap or unrecoverable failure, you MUST invoke th
 Friction is filed to the warehouse through `scripts.ops_data_portal` (Decision 84) -- nothing
 under `logs/` is committed.
 
-## Step 9: Report and Close Session
+## Step 9: Report
 Output the final report:
 - **STRATEGIC**: Total recs filed, breakdowns, briefing files created, and next step instructions.
 - **IMPLEMENTATION**: Files changed, verification results (actual outcomes per step), code review findings fixed, bugs fixed, design decisions, and any follow-on rec ids filed for a deferred half.
-
-Finally, close the telemetry session:
-```bash
-bin/venv-python -m scripts.session.postflight --close-session --outcome success
-```
-Use `--outcome failure` if the session ended with unresolved errors. Use `--outcome cancelled` if abandoned.

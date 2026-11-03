@@ -14,12 +14,9 @@ then looks ONLY at accesses on names bound to an ELEMENT of that list within the
 accesses anywhere else in the module or file. Two real consequences of that scoping choice
 (verified against this repo's tree, not assumed):
 
-  * scripts/preflight/recs_cache.py's two named()-adjacent filters never connect: the
-    `named("open_recs")` result at one call site is passed onward to `_tally_rec_counts`
-    unfiltered, and the `status == "open"` filters live in `_derive_open_recs` /
-    `_derive_followon_recs`, which filter a `rows` FUNCTION PARAMETER (never itself assigned
-    from a `named()` call in that function) -- two different data paths that happen to share a
-    module, not one flagged co-occurrence.
+  * scripts/preflight/recs_cache.py's `_derive_followon_recs` and `_derive_open_critical_recs` filter a
+    `rows` FUNCTION PARAMETER (the bounded signal rows) that is never itself assigned from a
+    `named()` call in that function -- a data path the per-function scan never connects.
   * scripts/ci/reconcile_target.py's `validate_rec_id_open` reads `rows[0].get("status")` from
     `rows = reader(rec_id)`, where `reader` is an injected PARAMETER, not a `named()` call in
     that function -- the closure that actually calls `.named("rec_by_id", ...)` lives in a
@@ -32,8 +29,7 @@ Four live input classes, each independently verified against the tree at authori
   (a) SENTINEL verbs (`VERB_FIELDS[verb] is ALL_TABLE_COLUMNS`, e.g. `rec_by_id`) project every
       column -- checked via identity BEFORE any `in` membership test, so a sentinel entry never
       raises TypeError and is never flagged.
-  (b) A verb absent from VERB_FIELDS entirely (e.g. scripts/preflight/alerts.py's
-      `named('budget_breach_recent')`, which is in neither VERB_FIELDS nor NAMED_READS) is
+  (b) A verb absent from VERB_FIELDS entirely (an unregistered verb name) is
       recorded as unresolved and never flagged -- the guard cannot judge a verb it cannot
       resolve, and refusing to guess is safer than a false negative OR a false positive.
   (c) A result reached only through a callable indirection (reconcile_target.py above) is never

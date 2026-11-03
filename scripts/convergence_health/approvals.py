@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
+from scripts import repo_identity
 from scripts.convergence_health.record import _parse_utc
 
 STUCK_APPROVAL_THRESHOLD_HOURS: float = 6.0
@@ -76,8 +77,8 @@ def _make_github_caller(token: str) -> Callable[[str], Any]:
 
 def find_stuck_gated_approvals(
     gh_caller: Optional[Callable[[str], Any]] = None,
-    owner: str = "benjamin-blake",
-    repo: str = "theseus",
+    owner: Optional[str] = None,
+    repo: Optional[str] = None,
     threshold_hours: float = STUCK_APPROVAL_THRESHOLD_HOURS,
     now: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
@@ -86,6 +87,7 @@ def find_stuck_gated_approvals(
     gh_caller is injected for testability. When None, reads GH_TOKEN / GITHUB_TOKEN env vars;
     if neither is set, returns [] without error (graceful degradation).
     """
+    owner, repo = repo_identity.resolve(owner, repo)
     import os  # noqa: PLC0415
 
     if now is None:
@@ -110,8 +112,8 @@ def find_stuck_gated_approvals(
 
 def find_reconcile_runs_since(
     gh_caller: Optional[Callable[[str], Any]] = None,
-    owner: str = "benjamin-blake",
-    repo: str = "theseus",
+    owner: Optional[str] = None,
+    repo: Optional[str] = None,
     per_page: int = 10,
 ) -> list[dict[str, Any]]:
     """Query recent .github/workflows/reconcile.yml Actions runs (any status), newest first.
@@ -122,6 +124,7 @@ def find_reconcile_runs_since(
     None caller result, or a missing GH_TOKEN/GITHUB_TOKEN -- graceful degradation, since this
     signal only ever SUPPRESSES a file action, it never itself triggers escalation.
     """
+    owner, repo = repo_identity.resolve(owner, repo)
     import os  # noqa: PLC0415
 
     token = os.environ.get("GH_TOKEN", "") or os.environ.get("GITHUB_TOKEN", "")
@@ -167,8 +170,8 @@ def has_in_flight_reconcile_for_episode(
 
 def diagnose_stuck_approvals(
     gh_caller: Optional[Callable[[str], Any]] = None,
-    owner: str = "benjamin-blake",
-    repo: str = "theseus",
+    owner: Optional[str] = None,
+    repo: Optional[str] = None,
     threshold_hours: float = 0.0,
     now: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
@@ -178,6 +181,7 @@ def diagnose_stuck_approvals(
     waiting run. At threshold_hours=0 every run object is parsed and returned. Returns [] on any
     error or when the caller yields None. Never escalates or writes.
     """
+    owner, repo = repo_identity.resolve(owner, repo)
     import os  # noqa: PLC0415
 
     if now is None:

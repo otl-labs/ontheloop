@@ -1,0 +1,2136 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "telemetry-content-reader-lock"
+intent: >-
+  Deploy the masked telemetry content reader that PLAN-telemetry-content-reader built as a stub, behind Decision 239
+  cl.5's change lock, and close rec-4696. terraform/bootstrap creates the function with an inert placeholder, its
+  execution role, Function URL, log group, unexpected-invoker alarm and a deploy role bound to a reviewer-gated GitHub
+  Environment. The CI apply boundary refuses every other identity any Lambda or IAM write on the function and on both
+  roles. A deploy workflow builds the artifact with no AWS credentials, shows the operator the commits since the last
+  deploy, and, once the operator approves, deploys exactly the recorded digest with the layers, handler and environment
+  that the approved commit pins. PlatformDev gets masked URL-only invoke and the security trail records every invoke.
+  A protected-path edit hook, CODEOWNERS, boundary_patterns and a repo check are the early warnings. The golden replay
+  gains an opt-in masked read-back leg. The manifest flips to active.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-telemetry-content-reader-lock.yaml
+phase: >-
+  ad_hoc_rec (soft-warn category; no tier_item claimed). Plan 3 of 3 for rec-4481, which plan 2 resolved. It carries
+  rec-4696 (High), the deploy half split off at planning time. It depends on PLAN-sensitive-value-detectors (#1708),
+  PLAN-telemetry-content-reader (#1718) and PLAN-telemetry-top-level-agent-run's production column hold (#1717,
+  validate_reconcile_pending_gate --telemetry-hold); all three are merged. closes_criteria is empty.
+closes_criteria: []
+amends:
+  - dec:239#4
+  - dec:239#6
+  - dec:202#3
+  - dec:101#b
+introduces:
+  - telemetry-content-deploy
+  - DenyTelemetryContentChange
+scope:
+  - file: terraform/bootstrap/telemetry_content_reader.tf
+    action: Create
+    purpose: >-  # pragma: allowlist secret
+      The operator-approved text is pinned verbatim in execution step PINNED-1. Locals (the module's only definition of
+      ducklake_telemetry_content_function = "agent-platform-ducklake-telemetry-content", which platform_dev_policies.tf
+      also uses; the bucket and the data and blob prefixes as literals, since bootstrap reads no personal-root state).
+      (a) aws_iam_role.telemetry_content, agent-platform-ducklake-telemetry-content: the CI apply boundary (Decision 144
+      cl.3) and a lambda.amazonaws.com-only trust.
+      (b) aws_iam_role_policy.telemetry_content over local.telemetry_content_policy_json, with a lifecycle precondition
+      that the whitespace-stripped document is at most 10,240 B (validate_iam_policy_size). Six statements, the
+      telemetry reader's shape plus the blob read:
+        - Logs: logs:CreateLogStream and logs:PutLogEvents on (c) ":*".
+        - TelemetryCatalogDataRead: s3:GetObject on agent-platform-data-lake/ducklake-telemetry/*.
+        - TelemetryCatalogDataList: s3:ListBucket and s3:GetBucketLocation on the bucket, StringLike s3:prefix
+          ducklake-telemetry/*.
+        - TelemetryBlobRead: s3:GetObject on agent-platform-data-lake/telemetry-blobs/ducklake_telemetry/*.
+        - TelemetryReaderDsnRead: secretsmanager:GetSecretValue on the exact ARN of
+          agent-platform-ducklake-telemetry-reader-dsn, looked up by name through a data source (Decision 157).
+        - TelemetryReaderDsnParameterRead: ssm:GetParameter on the literal ARN of
+          parameter/secret/agent-platform-ducklake-telemetry-reader-dsn (Decision 237 cl.2: a declared consumer of an
+          existing login, no secret or parameter change; validate_secret_parameter_grants needs the literal ARN, and
+          secrets-to-ssm-retire removes the Secrets Manager statement).
+      (c) aws_cloudwatch_log_group.telemetry_content, platform-security-telemetry-content-access, retention 365 days
+      (Decision 239 cl.4 needs at least 90), prevent_destroy. It is a platform-security-* resource (Decision 202 cl.3 as
+      amended by Decision 239, PINNED-7): no CI identity holds a write or log-event read grant on it, the
+      detector-tamper alarm pages on its retention and metric-filter changes, PlatformAdmin's existing
+      PlatformSecurityLogGroupManage creates it and its filter, and PlatformDev cannot read it, so an error line that
+      echoes a row never reaches an agent.
+      (d) No S3 object: the function's filename names terraform/bootstrap/telemetry_content_placeholder.zip (its own
+      Create row, PINNED-8), a committed zip whose single member is
+      src/lambdas/ducklake_telemetry_content_reader/handler.py, returning {"statusCode": 503, "body": "{\"error\":
+      \"content_reader_not_deployed\"}"} for every event. Nothing serves content before the first approved deploy,
+      Terraform reads no build artifact (environment-taxonomy conformance), the apply needs no S3 verb, and no
+      CI-writable object can supply the code if the function is ever recreated.
+      (e) aws_lambda_function.telemetry_content: role (a), python3.12, x86_64, memory 1024, timeout 120, reserved
+      concurrency 2, the handler path above, filename (d), no layers, no environment variables, and logging_config
+      { log_format Text, log_group (c) }. lifecycle ignore_changes = [filename, source_code_hash, layers, handler,
+      environment]: the gated job owns code, layers, handler and environment
+      (Decision 239 cl.5 as amended); Terraform owns role, runtime, memory, timeout, concurrency and logging. It
+      depends_on (b) and (c).
+      (f) aws_lambda_function_url.telemetry_content, authorization_type AWS_IAM.
+      (g) aws_ssm_parameter.telemetry_content_url, /agent-platform/ducklake/telemetry_content_reader_url (plan 2's
+      read route resolves it; the CI-writable name is a declared residual, rec-4739).
+      (h) aws_cloudwatch_log_metric_filter.telemetry_content_unexpected_invoker,
+      platform-security-telemetry-content-unexpected-invoker on (c), pattern { ($.event = "telemetry_content_read") &&
+      ($.role != "PlatformDev") }: any other reader, the deploy role included (its describe writes no line), and role
+      "unknown" (plan 2's fallback line) match on purpose. Metric TelemetryContentUnexpectedInvoker in namespace
+      AgentPlatform/TelemetryContent, value 1, default 0.
+      (i) aws_cloudwatch_metric_alarm.telemetry_content_unexpected_invoker,
+      platform-security-telemetry-content-unexpected-invoker: Sum >= 1 over 300 s, one period, notBreaching, to the
+      agent-platform-alerts topic by ARN template (Decision 239 cl.6, the platform_security_alarms.tf shape). The
+      description names the Logs Insights query over (c) that answers who read what.
+      (j) aws_cloudwatch_metric_alarm.telemetry_content_errors, platform-security-telemetry-content-errors (in the
+      family, so no CI alarm write grant reaches it; PINNED-7): Errors plus Url5xxCount > 0 over 15 minutes (the telemetry
+      reader's shape, Decision 55).
+      Every ARN is built from var.account_id and var.aws_region. Nothing names an account id.
+  - file: terraform/bootstrap/telemetry_content_placeholder.zip
+    action: Create
+    purpose: >-
+      The function's pre-deploy code, byte-exact from PINNED-8 (313 B, sha256
+      dd77e55379f28eaab8235d072c8c496850f4bd276c314020eb18caf04092c0f0): one deflated member,
+      src/lambdas/ducklake_telemetry_content_reader/handler.py, whose handler answers 503 content_reader_not_deployed
+      to every event. It is source, not a build artifact; .gitignore's *.zip rule gains a negation for this one path.
+      The IAM pins test pins its digest and member.
+  - file: terraform/bootstrap/telemetry_content_deploy_role.tf
+    action: Create
+    purpose: >-
+      Pinned verbatim in execution step PINNED-2. aws_iam_role.telemetry_content_deploy, named agent-platform-ducklake-telemetry-content-deploy, carries the CI
+      apply boundary. Its name shares the content prefix, so DenyTelemetryContentChange's role resource covers it.
+      Trust has ONE statement: Federated arn:aws:iam::${var.account_id}:oidc-provider/token.actions.githubusercontent.com,
+      action sts:AssumeRoleWithWebIdentity, StringEquals with three keys:
+        - aud: sts.amazonaws.com;
+        - sub: [for repo in local.github_repos : "repo:${repo}:environment:telemetry-content-deploy"] (Decision 172
+          immutable subjects; the local lives in github_ci_apply.tf);
+        - job_workflow_ref: local.telemetry_content_workflow_refs =
+          ["otl-labs/ontheloop/.github/workflows/deploy-telemetry-content.yml@refs/heads/main"] (Decision 238 cl.2 shape).
+      No StringLike, and no ref or pull_request sub. The job_workflow_ref values are local.telemetry_content_workflow_refs
+      in this file, which validate_github_org_transfer's content_deploy_workflow_ref row evaluates.
+      aws_iam_role_policy.telemetry_content_deploy, over local.telemetry_content_deploy_policy_json with the 10,240 B
+      lifecycle precondition, has five statements:
+        - DeployCode: lambda:GetFunction, lambda:GetFunctionConfiguration, lambda:UpdateFunctionCode and
+          lambda:UpdateFunctionConfiguration on the content function ARN only.
+        - LayerRead: lambda:GetLayerVersion on layer:ducklake-deps:* and layer:ducklake-extensions:*.
+        - UrlRead: lambda:GetFunctionUrlConfig on the function.
+        - InvokeUrl: lambda:InvokeFunctionUrl on the function and its :*, unconditioned.
+        - InvokeViaUrlOnly: lambda:InvokeFunction on the same two, with Bool lambda:InvokedViaFunctionUrl = true
+          (Decision 213 cl.1).
+      No iam:*, no PassRole, no PublishVersion, no concurrency, URL-config or permission verbs, no S3. No statement
+      names PlatformDev or PlatformAdmin (Decision 225 cl.1).
+  - file: terraform/bootstrap/github_ci_apply_boundary.tf
+    action: Modify
+    purpose: >-
+      Three edits, pinned verbatim in execution step PINNED-3.
+      (1) DenyTelemetryProdPrefixIO's ArnNotLike list gains the exact role/agent-platform-ducklake-telemetry-content
+      (Decision 230 cl.5 as amended by Decision 239 cl.7). There is no wildcard, so the deploy role stays fenced.
+      (2) A new statement DenyTelemetryContentChange, placed after DenyTelemetryProdPrefixIO:
+        - Effect: Deny.
+        - Action: lambda:Create*, lambda:Delete*, lambda:Publish*, lambda:Put*, lambda:Update*, lambda:TagResource,
+          lambda:UntagResource, iam:Attach*, iam:Delete*, iam:Detach*, iam:PassRole, iam:Put*, iam:Tag*,
+          iam:Untag* and iam:Update*.
+        - Resource: arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-content*
+          and arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-content*.
+        - Condition: ArnNotLike aws:PrincipalArn arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-content-deploy.
+      Every boundary carrier is therefore refused any code, configuration, permission, alias, concurrency or tag change
+      to the function, and any policy, trust, boundary, tag or PassRole action on the execution role or the deploy
+      role. Those carriers include agent-platform-github-ci-deploy, whose UpdateFunctionCode spans
+      function:agent-platform-*, and the CI apply role, whose IAM writes span role/agent-platform-* (Decision 143
+      cl.1, Decision 144 cl.2). PlatformAdmin and root sit outside the boundary (Decision 144 cl.3).
+      (3) Byte recovery. In DenyDuckLakeDirectInvoke, DenyDuckLakeResourcePolicyEdit and DenyDuckLakeEventSourceMapping,
+      the writer pair (name and name:*) becomes function:agent-platform-ducklake-writer* and the reader pair becomes
+      function:agent-platform-ducklake-reader*. Each still covers the same functions and every qualifier. It can only
+      widen a Deny, and only to a future function with that prefix; none exists today.
+      Measured 2026-10-29: 5,266 B today and 5,463 B after all three edits with the real region; 5,311 B and 5,493 B
+      with the test's 12-character placeholders. Both are under Decision 230's 5,632 B review trigger and the 6,144 B
+      AWS limit. The precondition is unchanged.
+  - file: terraform/bootstrap/platform_dev_policies.tf
+    action: Modify
+    purpose: >-
+      Pinned in execution step PINNED-3. DuckLakeInvokeUrl and DuckLakeInvokeViaUrlOnly each gain the function and its
+      :* through local.ducklake_telemetry_content_function, declared once in telemetry_content_reader.tf (a second
+      declaration in the same module is a duplicate-local error); test_url_only_invoke_guard resolves locals across the
+      root's files. Masked reads for agents, Decision 239 cl.1. The comment names Decision 239.
+  - file: terraform/bootstrap/platform_security_trail.tf
+    action: Modify
+    purpose: >-
+      Pinned in execution step PINNED-3. The Lambda data-event selector gains arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-content
+      (Decision 213 cl.4, Decision 202). The comment names the content reader.
+  - file: terraform/personal/ducklake_telemetry_reader.tf
+    action: Modify
+    purpose: >-
+      reserved_concurrent_executions goes from 5 to 3. The reader (3) and the content reader (2) share the reader
+      login's CONNECTION LIMIT 10 at 2 x 5 (Decision 239 cl.1 sums it). The comment names the content reader. This is
+      a non-IAM in-budget update, so the sandbox apply auto-applies it after merge.
+  - file: terraform/github/environments.tf
+    action: Modify
+    purpose: >-
+      Pinned in execution step PINNED-4. github_repository_environment.telemetry_content_deploy, environment
+      "telemetry-content-deploy", with
+      reviewers.users = var.gated_apply_reviewer_user_ids. The settings: prevent_self_review false (sole operator),
+      can_admins_bypass false (the session credential reads as repo admin; probe report), deployment_branch_policy
+      { protected_branches = false, custom_branch_policies = true } (never "protected branches only": main is a
+      ruleset, not classic protection), and lifecycle prevent_destroy, because destroying it fails open (the
+      tf_gated_apply note). github_repository_environment_deployment_policy.telemetry_content_deploy_main has
+      branch_pattern "main". The comment says the operator created the environment in Settings before the build, as for
+      the probe, and that the imports below key it (the root's apply stays the operator's, rec-4355).
+  - file: terraform/github/imports.tf
+    action: Modify
+    purpose: >-
+      Pinned in execution step PINNED-4. Import blocks for the environment and for its deployment policy. The policy's
+      id comes from var.telemetry_content_deploy_main_policy_id, the tf_trusted_plan_main pattern.
+  - file: terraform/github/variables.tf
+    action: Modify
+    purpose: >-
+      Pinned in execution step PINNED-4. variable telemetry_content_deploy_main_policy_id (number), whose default is the
+      id of the main policy on the environment the operator created. The operator reports it (the agent proxy blocks
+      environment reads; PLAN-trusted-plan-identity's VP 8 policy-read precedent), and the build sets it before merge.
+      A default keeps the root's PR plan runnable.
+  - file: .github/workflows/deploy-telemetry-content.yml
+    action: Create
+    purpose: >-
+      Pinned verbatim in execution step PINNED-5. Triggers: push to main whose paths list every include and asset the
+      content reader manifest bundles, the
+      manifest, deploy_config.json, config/lambda/ducklake/field_semantics.static.yaml (the sidecar whose
+      pending_reconcile releases the production column hold), this file and scripts/ci/telemetry_content_deploy.sh, plus
+      workflow_dispatch (both jobs carry if: github.ref == 'refs/heads/main'). Top-level permissions: contents: read. concurrency: group
+      deploy-telemetry-content, cancel-in-progress true: a newer push cancels an older run, so the operator approves only
+      the latest; a cancel between the configuration and code updates leaves approved configuration beside the previously
+      approved code until the next approved run (both operator-approved; decided with notice).
+      Job build: no environment and no id-token. permissions are contents: read, deployments: read and actions: read.
+      It checks out at the triggering sha with persist-credentials false, fetch-depth 0 and no ref input. It runs
+      telemetry_content_deploy.sh check-environment and change-summary (evidence for the operator, not controls: the
+      script is repo code; the controls are the Environment's protection rules and the role's trust), then sets up
+      Python 3.12 and installs pyyaml and pydantic constrained to requirements.txt's pins (pip install -c). It runs python -m
+      scripts.checks.ops_governance.validate_reconcile_pending_gate --telemetry-hold and exports held as a job output;
+      held=true writes the TELEMETRY_PRODUCTION_HOLD notice, a green skip (the deploy-telemetry precedent: production
+      telemetry code never ships ahead of the owner-login column add). It then runs python -m scripts.build_lambda
+      --content-reader-only, exports the sha256 as a job output and uploads the zip in the step "Upload the content zip
+      under its digest" as artifact telemetry-content-<sha256 hex>, retention-days 30 (github-actions-evidence
+      governed_deployment, the class maximum: the deploy job downloads it only after the operator approves).
+      Job deploy: needs build, if needs.build.outputs.held == 'false' (a held run never asks the operator to approve),
+      environment telemetry-content-deploy, permissions id-token: write and contents: read.
+      It checks out (persist-credentials false) only for the script and deploy_config.json, runs
+      ./.github/actions/aws-region, downloads the artifact, and assumes
+      arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-ducklake-telemetry-content-deploy with aws-region
+      from env.AWS_REGION and MASK_AWS_ROLE_ID_ACCOUNT_PART from secrets.AWS_ROLE_ID_ACCOUNT_PART in the step env
+      (validate_actions_account_id_masking R3, validate_project_region). It runs telemetry_content_deploy.sh deploy
+      <zip> "$CONTENT_SHA256" (the digest passed through env, never an inline expression) and then describe. It runs no
+      pip install and no repo Python while it holds the role.
+  - file: scripts/ci/telemetry_content_deploy.sh
+    action: Create
+    purpose: >-
+      Bash, set -euo pipefail, using only aws, curl, jq, sha256sum, base64 and git. Errors name a step, never a value.
+      Subcommands:
+        - check-environment: GET /repos/$GITHUB_REPOSITORY/environments/telemetry-content-deploy with GITHUB_TOKEN.
+          It fails unless protection_rules holds a required_reviewers rule with at least one reviewer,
+          can_admins_bypass is false and deployment_branch_policy.custom_branch_policies is true.
+        - change-summary: finds the environment's latest deployment with a success status. It writes to
+          $GITHUB_STEP_SUMMARY the commits between that sha and HEAD that touched a bundled path (git log --oneline
+          over the workflow's push paths), or "first deploy" when there is none. It then prints deploy_config.json's
+          diff over the same range, under a line saying that CI publishes the layers, so a pin proves which bytes run,
+          not who built them (Decision 239 cl.6 as amended by PINNED-7; rec-4742).
+        - deploy ZIP SHA256: fails unless sha256sum(ZIP) equals SHA256. It masks the STS account id (::add-mask::). For
+          each deploy_config.json layer it resolves arn:aws:lambda:$AWS_REGION:<account>:layer:<name>:<version>, and
+          fails unless get-layer-version's Content.CodeSha256 equals the pin. It then runs update-function-configuration
+          with exactly --handler, --layers and --environment from deploy_config.json, waits for function-updated-v2,
+          runs update-function-code --zip-file fileb://ZIP and waits again. It fails unless the live CodeSha256 equals
+          base64(SHA256 bytes) (Decision 154 gate vector), and unless get-function-configuration reads back exactly
+          deploy_config.json's handler, the resolved layer ARNs and the environment (acceptance 3). Nothing prints a
+          value from the environment.
+        - describe: resolves the URL with get-function-url-config and adds a mask. It POSTs {"action": "describe"} with
+          curl --aws-sigv4 "aws:amz:$AWS_REGION:lambda" and the session token header, and fails unless the served verb
+          set is exactly {session_transcript_masked, transcript_row_masked}.
+  - file: src/lambdas/ducklake_telemetry_content_reader/deploy_config.json
+    action: Create
+    purpose: >-
+      The configuration the gated job deploys. It holds three keys:
+        - handler: src.lambdas.ducklake_telemetry_content_reader.handler.handler.
+        - layers: [{name, version, code_sha256}] for ducklake-deps and ducklake-extensions, the versions and digests
+          live at build time. Layer versions are immutable, and these values carry no account id.
+        - environment: TELEMETRY_META_SCHEMA ducklake_telemetry, TELEMETRY_DATA_PATH
+          s3://agent-platform-data-lake/ducklake-telemetry/, TELEMETRY_BLOB_ROOT
+          s3://agent-platform-data-lake/telemetry-blobs/ducklake_telemetry/, DUCKLAKE_EXTENSION_DIRECTORY
+          /opt/duckdb_extensions, DUCKLAKE_FIELD_SEMANTICS_PATH /var/task/config/lambda/ducklake/field_semantics.yaml,
+          TELEMETRY_DSN_SECRET_ID agent-platform-ducklake-telemetry-reader-dsn and TELEMETRY_DSN_PARAMETER
+          /secret/agent-platform-ducklake-telemetry-reader-dsn. These are the telemetry reader's production values,
+          and the deploy-config test pins them equal to its HCL.
+      The protected package path covers this file. A layer bump or a setting change is a commit inside the run the
+      operator approves.
+  - file: src/lambdas/ducklake_telemetry_content_reader/manifest.yaml
+    action: Modify
+    purpose: >-
+      status stub -> active. The notes name the gated channel (deploy-telemetry-content.yml), Decision 239 cl.5 and
+      deploy_config.json. The includes are unchanged.
+  - file: tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py
+    action: Modify
+    purpose: >-
+      Planned changes, named here (Decision 181). test_manifest_is_a_stub_bundling_the_content_closure becomes
+      test_manifest_is_active_bundling_the_content_closure (status active; artifact, functions, handlers and
+      runtime_config pins unchanged). test_stub_affects_no_artifact becomes test_content_changes_affect_the_content_artifact:
+      compute_affected_artifacts([handler, verbs]) names ducklake_telemetry_content_reader and no other artifact.
+      test_contract_names_the_served_verbs also pins principal_classes == [PlatformDev,
+      agent-platform-ducklake-telemetry-content-deploy].
+  - file: scripts/build_lambda.py
+    action: Modify
+    purpose: >-
+      A new flag, --content-reader-only. It stages the content reader manifest with skip_pip (its dependencies are the
+      pinned layers), writes lambda-packages/ducklake-telemetry-content-reader.zip byte-reproducibly (the existing
+      _zip_staged_dir), and prints "CONTENT_READER_SHA256 <hex>". It never uploads, deploys or resolves an AWS profile.
+      The DuckLake build list is unchanged (Decision 125: deploy-ducklake-lambdas.yml never builds or deploys it).
+  - file: docs/contracts/build-lambda.yaml
+    action: Modify
+    purpose: >-
+      The cli flags list gains --content-reader-only. deploy_channels gains telemetry_content_reader: root
+      terraform/bootstrap, channel_class operator_gated, governed_channel .github/workflows/deploy-telemetry-content.yml,
+      with a note naming the reviewer-gated environment and Decision 239 cl.5. It has no break_glass_only command: an
+      admin update is the Decision 239 cl.6 residual. The note also says the function's pre-deploy code is a committed
+      placeholder zip named by filename in terraform/bootstrap, deliberately not an S3 object, so no CI-writable bytes
+      can supply its code (critique round 2 M1). An amendment_log row names rec-4696.
+  - file: docs/contracts/deploy-paths.yaml
+    action: Modify
+    purpose: >-
+      deploy_code.status gains one sentence for a third, operator-gated channel. That channel is
+      deploy-telemetry-content.yml under agent-platform-ducklake-telemetry-content-deploy. It deploys code and
+      configuration (Decision 239 cl.5, amending 126 cl.1) after the operator approves a run in the
+      telemetry-content-deploy environment, and its recovery is to re-run it from main. A pending approval never blocks
+      another merge or deploy (Decision 93 note). Its recovery note adds that a DuckLake layer republish in
+      terraform/personal needs a deploy_config.json pin commit and an approved run (the coupling is rec-4738's). An
+      amendment_log row names rec-4696.
+  - file: docs/contracts/ducklake_telemetry_content_reader.yaml
+    action: Modify
+    purpose: >-
+      principal_classes gains the deploy role, for describe only, beside PlatformDev. The "stub until rec-4696" lines
+      (the header comment and the two amendment and notes sentences) say the function is deployed through the gated
+      channel. The amendment_log row names rec-4696.
+  - file: docs/contracts/iam-simulate-fixture.yaml
+    action: Modify
+    purpose: >-
+      The standing post-apply fixture simulates one principal, the CI apply role (principal.arn_template;
+      scripts/ci/iam_simulate.principal_arn), so the lock's apply-role rows land here. Three rows, each explicitDeny with a
+      one-line why, by_design naming DenyTelemetryContentChange (Decision 239 cl.5), and required_context_keys
+      aws:PrincipalArn = the apply role's ARN template (the simulator does not populate it, and a negated ArnNotLike over
+      a missing key matches anyone; PLAN-ci-branch-boundary-state-fence):
+      lambda:UpdateFunctionConfiguration on function:agent-platform-ducklake-telemetry-content,
+      iam:UpdateAssumeRolePolicy on role/agent-platform-ducklake-telemetry-content-deploy, and iam:PassRole on
+      role/agent-platform-ducklake-telemetry-content. One amendment_log row names rec-4696. The file is at 646 of its 650
+      effective lines, so the build first rewrites each multi-line amendment_log entry as a one-line flow mapping (the
+      2026-10 entries' form; 24 lines recovered) and asserts the parsed file is unchanged apart from the new rows and
+      entry; VP 16 proves that once against origin/main. No budget raise (Decision 128). The other principals (CI deploy,
+      deploy role, PlatformDev, the execution role) are proven by VP 7 before merge and VP 11 after apply.
+  - file: scripts/checks/ci_guards/validate_content_reader_lock.py
+    action: Create
+    purpose: >-
+      A repo check in the validate_trusted_plan_environment pattern: predicates over parsed workflows, terraform text
+      and CODEOWNERS, each red on synthetic input.
+        (a) Only deploy-telemetry-content.yml references environment telemetry-content-deploy, and no environment name
+            is an expression.
+        (b) That file declares no workflow_call, pull_request or pull_request_target trigger.
+        (c) No other workflow or build_lambda DuckLake list names the content function or artifact.
+        (d) Its push paths cover every manifest include and asset, the manifest, deploy_config.json, the sidecar, the
+            script and itself, and the deploy job runs only when the build's held output is 'false'.
+        (e) The boundary carries DenyTelemetryContentChange with the declared action set, both resources and the single
+            deploy-role exception, and the fence names the execution role exactly.
+        (f) The deploy role's trust is one statement with the three exact StringEquals keys.
+        (g) The script's update-function-configuration call passes exactly --handler, --layers and --environment.
+        (h) terraform/github declares environment telemetry-content-deploy with required reviewers, prevent_self_review
+            false, can_admins_bypass false, custom_branch_policies true, protected_branches false and prevent_destroy; one
+            deployment policy with branch_pattern main; and import blocks for both, the policy's keyed by
+            var.telemetry_content_deploy_main_policy_id.
+        (i) The function logs to the platform-security-telemetry-content-access group, and the unexpected-invoker filter
+            excludes PlatformDev alone.
+      Ownership is not re-checked here: the four lock files join the detector ratchet's PROTECTED set, whose leg (d)
+      requires a CODEOWNERS line and a boundary_patterns entry for each and whose leg (e) refuses narrowing. An early
+      warning, not a control (Decision 239 cl.5; Decision 187: an agent PR can edit the check itself).
+  - file: scripts/checks/ci_guards/_manifest.py
+    action: Modify
+    purpose: >-
+      Entry validate_content_reader_lock, pre=True, full_segment full_after_lint. pre_globs cover .github/workflows/**,
+      terraform/bootstrap/**, terraform/github/**, the content reader package, scripts/ci/telemetry_content_deploy.sh
+      and the check itself; validate_pre_glob_closure decides whether its imports need more.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      A function_to_category row for validate_content_reader_lock and a workflows row for deploy-telemetry-content
+      (tier: not_a_gate, ci_rca: excluded: a rejected or cancelled run concludes failure or cancelled by an operator
+      action, not a regression, and the operator who approved a run sees its result). The file stays at 500
+      effective lines by joining wrapped continuation lines of existing rationales, the #1709 precedent. There is no
+      budget raise. PLAN-ci-policy-plan-time-lambda-arns (#1725) and PLAN-trusted-plan-cutover (#1722) may also add
+      rows to this file; whichever build lands later recovers its lines the same way (VP 3's
+      validate_structural_size_limits catches it).
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      r3_workflows entries for each of the seven inline run bodies in deploy-telemetry-content.yml at their measured
+      counts (at most five lines; the hold step mirrors #1717's registered five). No marker is needed, because a
+      workflow-leg registration is presence-gated (_workflow_shell_bodies.check_workflow_bodies).
+  - file: .claude/hooks/protected_path_guard.py
+    action: Create
+    purpose: >-
+      A PreToolUse hook on Edit, Write, MultiEdit and NotebookEdit. Its declared plan is CLAUDE_ACTIVE_PLAN, else the
+      path in its own marker .claude/protected_edit_plan (gitignored), so declaring one never switches on
+      edit_scope_guard's .claude/active_plan scope enforcement. It blocks (exit 2) a write to a protected path unless the
+      declared plan's scope names that path (a directory or glob row covers what it matches). The protected paths are the detector
+      ratchet's PROTECTED tuple, read from scripts/checks/misc/sensitive_value_detectors.py with ast (its base_protected
+      parser, no import, so the hook stays light and the list has one source), plus
+      terraform/bootstrap/telemetry_content_reader.tf and terraform/bootstrap/telemetry_content_deploy_role.tf.
+      An unreadable or unparseable PROTECTED blocks every write to the two bootstrap files and allows the rest, with a
+      message naming the parse failure.
+      A missing, unreadable or non-naming plan blocks. Every other path and tool passes. The message names the binding
+      control (the operator-approved deploy), how to declare a plan (write its path to .claude/protected_edit_plan; a
+      build whose plan scopes the path does this first), and that Bash edits are not covered. Malformed
+      input JSON allows, the never_on_main precedent. It is an early warning, never a control (Decision 239 cl.5,
+      Decision 181).
+  - file: .claude/settings.json
+    action: Modify
+    purpose: Registers the hook on PreToolUse beside edit_scope_guard.
+  - file: .claude/hooks/hooks.json
+    action: Modify
+    purpose: Re-rendered with bin/venv-python .claude/hooks/plugin_hooks.py render, so project threads load the hook through the ontheloop plugin.
+  - file: scripts/checks/misc/sensitive_value_detectors.py
+    action: Modify
+    purpose: >-
+      PROTECTED gains .github/workflows/deploy-telemetry-content.yml, scripts/ci/telemetry_content_deploy.sh,
+      .claude/hooks/protected_path_guard.py and scripts/checks/ci_guards/validate_content_reader_lock.py (one ratchet,
+      plan 2's precedent). Legs (d) and (e) then require and keep their CODEOWNERS lines and boundary_patterns entries.
+      The package path, which covers deploy_config.json, is already in it.
+  - file: tests/checks/misc/test_sensitive_value_detectors.py
+    action: Modify
+    purpose: The four lock paths are in PROTECTED, and the real tree's ownership legs stay green.
+  - file: .github/CODEOWNERS
+    action: Modify
+    purpose: >-
+      Four lines owned by the operator: /.github/workflows/deploy-telemetry-content.yml,
+      /scripts/ci/telemetry_content_deploy.sh, /.claude/hooks/protected_path_guard.py and
+      /scripts/checks/ci_guards/validate_content_reader_lock.py. The package and bootstrap paths are already owned.
+      Procedural until rec-2827.
+  - file: config/agent/executor/capabilities.yaml
+    action: Modify
+    purpose: >-
+      boundary_patterns gain scripts/ci/telemetry_content_deploy.sh, .claude/hooks/protected_path_guard.py and
+      scripts/checks/ci_guards/validate_content_reader_lock.py under the Decision 239 cl.5 comment that plan 2 placed
+      (Decision 117/185 SSOT). The workflow is already covered by .github/workflows/.
+  - file: scripts/ducklake_smoke/lambda_telemetry_golden_content.py
+    action: Create
+    purpose: >-
+      The golden content leg, its own module so the gates file stays under budget (Decision 128). After a replayed tree
+      passes, it reads session_transcript_masked through the content route (read_route.content_reader) and checks two
+      things for that tree: the reassembled masked text equals mask(sent text, "read_masked") row for row, and every
+      masked_sha256 verifies. A mismatch counts as golden_replay_mismatch (content). Output is counts and tree names
+      only. An unresolved content URL reports SKIPPED content_reader_not_deployed, which is nonzero under
+      --assert-zero-mismatches, never a pass.
+  - file: scripts/ducklake_smoke/lambda_telemetry_golden_gates.py
+    action: Modify
+    purpose: >-
+      An opt-in --content-leg flag, off by default, that calls the content leg after each passing tree. CI's
+      golden-replay job is unchanged until rec-4735.
+  - file: tests/checks/iam_tf/test_telemetry_content_reader_iam.py
+    action: Create
+    purpose: >-
+      rec-4696's acceptance: HCL pins, each with mutation-red cases. It pins:
+        - the execution role's six statements and boundary, its lambda-only trust, and both role policies' 10,240 B
+          preconditions over hoisted locals;
+        - the deploy role's exact trust (one statement, three StringEquals keys, the github_repos expansion) and its
+          verb set, with no iam, PassRole, PublishVersion or s3 verbs;
+        - DenyTelemetryContentChange's actions, resources and single exception;
+        - the fence's exact exception list;
+        - terraform/bootstrap/telemetry_content_placeholder.zip has PINNED-8's sha256 and holds exactly the one handler
+          file returning 503; the function's filename names it, and the file declares no aws_s3_object;
+        - the function's ignore_changes list, reserved concurrency 2 and logging_config naming the
+          platform-security-telemetry-content-access group, with retention 365 and prevent_destroy;
+        - the log group, metric filter and both alarm names in the platform-security-* family, the pattern excluding
+          PlatformDev alone, and both alarms' topic;
+        - no -raw function or role exists;
+        - test_rendered_boundary_under_review_trigger: the boundary, rendered with 12-character account and region
+          placeholders and minified, is at most 5,632 B;
+        - test_simulate_fixture_records_the_lock: iam-simulate-fixture.yaml holds the three apply-role explicitDeny rows
+          with by_design and the aws:PrincipalArn context key (hermetic; the compaction's value check is VP 16, once);
+        - Decision 225: neither new file grants an iam: Allow on PlatformDev or PlatformAdmin, using
+          _ci_platform_role_iam's predicate.
+  - file: tests/checks/iam_tf/test_url_only_invoke_guard.py
+    action: Modify
+    purpose: >-
+      Planned change, named here. _EXACT becomes {writer*, reader*}, mutation cases included. _NAMES and the PlatformDev
+      form set gain telemetry-content. The trail's expected set gains the content function. No assertion is loosened
+      (Decision 181).
+  - file: tests/checks/iam_tf/test_telemetry_prefix_fence.py
+    action: Modify
+    purpose: The fence's expected principal list gains the content execution role (planned change, Decision 239 cl.7).
+  - file: tests/checks/iam_tf/test_telemetry_reader_and_twin_pins.py
+    action: Modify
+    purpose: >-
+      The reader's concurrency pin becomes 3, and test_concurrency_predicate_red_when_a_literal_outgrows_its_login's
+      reader mutation follows it (3 -> 6). A login-sum assertion adds the bootstrap content function to the reader
+      login's total (2 x (3 + 2) <= 10) (planned changes).
+  - file: tests/checks/ci_guards/test_validate_content_reader_lock.py
+    action: Create
+    purpose: Green on the real tree, and red for each predicate (a)-(i) on synthetic input.
+  - file: tests/hooks/test_protected_path_guard.py
+    action: Create
+    purpose: >-
+      It covers these cases:
+        - each PROTECTED entry and each bootstrap file is blocked with no plan, with an unreadable plan, and with a
+          plan that doesn't name it;
+        - an unparseable PROTECTED still blocks the bootstrap files;
+        - it is allowed with a plan naming it;
+        - other paths and the Bash tool pass;
+        - malformed input allows;
+        - a plan named by .claude/protected_edit_plan allows, and that marker is gitignored (git check-ignore);
+        - the settings and hooks.json registration is present.
+  - file: tests/verify_ci_workflow/test_deploy_telemetry_content_workflow.py
+    action: Create
+    purpose: >-
+      Workflow shape:
+        - triggers and the main-only guards;
+        - the environment on deploy only;
+        - build holds no id-token and no environment, and deploy holds no pip or python step;
+        - persist-credentials false everywhere;
+        - the artifact name carries the digest, retention-days is 30, and github-actions-evidence.yaml lists the upload;
+        - the build installs with -c requirements.txt, and the deploy job's assume step carries the account-id mask env;
+        - the concurrency group and cancel-in-progress;
+        - the build runs the --telemetry-hold gate and the deploy job runs only on held == 'false';
+        - the push paths equal the generated bundle list plus the sidecar;
+        - build-lambda.yaml's deploy_channels.telemetry_content_reader names this workflow with channel_class
+          operator_gated and root terraform/bootstrap, and deploy-paths.yaml's deploy_code.status names it.
+  - file: tests/test_ci_telemetry_content_deploy.py
+    action: Create
+    purpose: >-
+      It drives the script under bash --noprofile --norc -e -o pipefail, with fake aws and curl executables on PATH
+      that record their argv and answer from fixtures. It covers:
+        - check-environment is red without reviewers, with admin bypass on, or with protected-branch policy;
+        - change-summary lists commits since the last successful deployment, and prints a deploy_config.json pin
+          change with the layer-provenance line;
+        - deploy is red on a zip digest mismatch, on a layer digest mismatch, on a live CodeSha256 mismatch and on a
+          read-back handler, layer or environment mismatch;
+        - the configuration call carries exactly the three flags;
+        - describe is red on an extra or missing verb;
+        - no output carries the fake account id.
+  - file: tests/lambdas/ducklake_telemetry_content_reader/test_deploy_config.py
+    action: Create
+    purpose: >-
+      deploy_config.json has exactly three keys. Its environment equals the production values in terraform/personal:
+      the telemetry reader's six (ducklake_telemetry_reader.tf with the ducklake_lambdas.tf and secret_parameters.tf
+      locals, the bucket name substituted) and the writer's TELEMETRY_BLOB_ROOT (ducklake_telemetry_writer.tf). Its handler resolves to the package's handler, and each layer pin has a positive version and a
+      44-character base64 digest. A drift between the two readers fails CI.
+  - file: tests/test_build_lambda.py
+    action: Modify
+    purpose: --content-reader-only builds the content zip twice, byte-identical, prints its digest, makes no AWS call and never touches the DuckLake list.
+  - file: tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_content.py
+    action: Create
+    purpose: >-
+      Content-leg cases with fake routes: the leg passes on matching masked text, fails on a mismatch or a bad
+      masked_sha256, and reports SKIPPED content_reader_not_deployed (nonzero under --assert-zero-mismatches) with no
+      URL. A default gates run never calls the content route.
+  - file: docs/contracts/github-actions-evidence.yaml
+    action: Modify
+    purpose: >-
+      One artifact_uploads row (workflow deploy-telemetry-content.yml, job build, step "Upload the content zip under its
+      digest", artifact telemetry-content-${{ steps.build.outputs.sha256 }}, retention_class governed_deployment) and an
+      amendment_log row naming rec-4696 (validate_actions_evidence: the inventory equals every upload step).
+  - file: tests/checks/iam_tf/test_terraform_github_import_blocks.py
+    action: Modify
+    purpose: >-
+      Planned change (Decision 181). _deployment_policy_id expects var.<policy resource name>_policy_id, so each
+      deployment policy has its own id variable (it hard-codes tf_trusted_plan_main_policy_id today). The synthetic
+      gate_main fixture uses gate_main_policy_id, and test_real_tree_deployment_policy_id_variable_is_a_real_id checks
+      every deployment policy's variable (declared, number, positive default). The literal-id red case stays.
+  - file: docs/contracts/github-org-transfer.yaml
+    action: Modify
+    purpose: >-
+      A static breakage_map row content_deploy_workflow_ref (the deploy role's job_workflow_ref values; a rename or
+      transfer makes the role unassumable, fails closed; fix pre-staged additively; rec rec-4696). environment_fail_open
+      also binds telemetry-content-deploy and deploy-telemetry-content.yml: an environment that does not carry over
+      would deploy the content reader unapproved. One amendment_log row. The file is at 499 of its 500 effective lines
+      (validate_structural_size_limits) and these add 13, so the build first rewrites the four multi-line amendment_log
+      entries (2026-10-20 and 2026-10-21) as one-line flow mappings, the 2026-10-24 entries' form: 33 lines recovered,
+      479 after. VP 18 proves the parsed values unchanged against origin/main. No budget raise (Decision 128).
+  - file: scripts/checks/contracts/validate_github_org_transfer.py
+    action: Modify
+    purpose: >-
+      _evaluate_trusted_plan_workflow_ref becomes one instance of a _workflow_ref_evaluator(role file, local name,
+      workflows) factory, unchanged in behaviour; ROW_EVALUATORS gains content_deploy_workflow_ref over
+      terraform/bootstrap/telemetry_content_deploy_role.tf's telemetry_content_workflow_refs and
+      deploy-telemetry-content.yml (exact match, no wildcard, the governing phase's names).
+  - file: tests/checks/contracts/test_validate_github_org_transfer.py
+    action: Modify
+    purpose: >-
+      Planned change: the extension-interface pin names content_deploy_workflow_ref. New: the real row is evaluated
+      green, and a role naming another workflow is red.
+  - file: .gitignore
+    action: Modify
+    purpose: >-
+      Two lines. .claude/protected_edit_plan, the hook's per-session marker, is never committed. After the *.zip
+      build-artifact rule, !terraform/bootstrap/telemetry_content_placeholder.zip keeps the committed placeholder
+      tracked, with a comment saying it is source, not a build.
+  - file: src/lambdas/ducklake_telemetry_content_reader/handler.py
+    action: Modify
+    purpose: >-
+      Docstring only: "A stub package until rec-4696 builds, locks and deploys it" becomes the gated-channel sentence.
+      No behaviour change; it ships in the first approved deploy.
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: >-
+      Three dated trailers, verbatim from PINNED-7 (operator-approved Decision text; critique round 2 H1). Decision 239
+      gains one: cl.4's log group, with the content reader's metric filter and alarms, joins the platform-security-*
+      family (amends Decision 101 point (b) and Decision 202 cl.3; 202 and 237 each extended 101(b) through a numbered
+      Decision), and cl.6 gains the layer-provenance residual (rec-4742). Decisions 202 and 101 each gain a back-pointer
+      naming Decision 239 (validate_supersession_annotations reads the trailer's "amends Decision 101" as an edge). 239's
+      title and envelope stay as ratified, so the new edges live in the trailers, not in docs/decisions-index.json, which
+      is unchanged (validate_decisions_index_freshness). Accretion is metered WARN-only
+      (decision-entry.yaml size_governance, the plan-2 precedent): three amendment-delta WARNs, 239 at 6,540 B, 202 at
+      7,982 B and 101 at 9,038 B. Post-merge, ops_decisions is backfilled (VP 20).
+bundled_recommendations:
+  - rec-4696
+followon_recs:
+  - rec-4735
+  - rec-4738
+  - rec-4739
+  - rec-4740
+  - rec-4742
+  - rec-4743
+infrastructure_dependencies:
+  - "terraform/bootstrap (admin-only, Decision 223): a pre-merge read-only ADMIN plan and candidate-boundary simulate at the PR head (deploy-paths admin_out_of_band.pre_merge_live_plan, VP 6-9), then the operator-directed apply after merge (VP 10)."
+  - "terraform/github (operator): the operator creates the telemetry-content-deploy environment in Settings before the build starts (required reviewer, admin bypass off, deployment branches selected: main). It is inert until the bootstrap apply creates the role. The operator reports its main policy id (the agent proxy blocks environment reads) for the import variable's default; the import blocks key it at the next root apply (rec-4355 re-key pending)."
+  - "terraform/personal (CI plan and apply): reader concurrency 5 -> 3, a non-IAM in-budget update, auto-applies after merge. It must land before the first content deploy, so that both readers share the login's connection limit within it."
+  - "Ordering: bootstrap apply -> iam_simulate (VP 11) -> environment exists -> personal apply green -> no TELEMETRY_PRODUCTION_HOLD (the operator's provision_telemetry_catalog column add for #1717 done) -> first deploy run approved (VP 12) -> masked read-back (VP 13) -> access-log proof (VP 15) -> rec-4696 closed (VP 17). The bootstrap apply pages platform-security-detector-tamper (writes to the family's log group, filter and alarms) and platform-security-platform-role-iam-change (the boundary's new version and PlatformDev's policy); both are expected, and the operator is told first."
+acceptance_criteria:
+  - >-
+    Among boundary-carrying identities, only agent-platform-ducklake-telemetry-content-deploy, under the
+    operator-approved environment, can change the content function's code or configuration; every other one is refused
+    any Lambda write on the function and any IAM write or PassRole on its two roles (iam_simulate rows, VP 7 and 11).
+    PlatformAdmin and root sit outside the boundary (the Decision 239 cl.6 residual).
+  - >-
+    A merge touching a bundled path starts a deploy run that waits for the operator. The run summary lists the commits
+    since the last deployment, and the deployed CodeSha256 equals the digest the credential-free build recorded and a
+    local rebuild of the same commit.
+  - >-
+    The deployed layers, handler and environment are exactly deploy_config.json's (the deploy script reads them back
+    after every deploy and fails otherwise), and each layer's digest matches its pin.
+  - >-
+    PlatformDev invokes the content function only through its URL, and no agent-reachable role can invoke a raw
+    function (none exists).
+  - >-
+    Each read writes a telemetry_content_read line to platform-security-telemetry-content-access, kept 365 days, on
+    which no CI identity holds a write or log-event read grant and which PlatformDev cannot read (VP 15); the security
+    trail records the invoke. A role other than PlatformDev raises the unexpected-invoker alarm, and a retention or
+    metric-filter change to the group, or an alarm-definition change to its alarms, pages the detector-tamper alarm.
+  - The rendered boundary stays at or under 5,632 bytes.
+  - >-
+    Decisions 239, 202 and 101 carry PINNED-7's trailers verbatim, each a whole line equal to PINNED-7's, with no
+    Decision check failing (VP 19), and
+    ops_decisions holds them after the post-merge backfill (VP 20).
+  - >-
+    rec-4696 closes on its acceptance test (VP 17), with the function live and a masked golden read-back that matches as
+    PlatformDev.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-4696's acceptance, and the lock's pins, check, hook, workflow, script, build flag and deploy config (the golden leg is VP 21).
+    command: >-
+      bin/venv-python -m pytest tests/checks/iam_tf/test_telemetry_content_reader_iam.py
+      tests/checks/iam_tf/test_url_only_invoke_guard.py tests/checks/iam_tf/test_telemetry_prefix_fence.py
+      tests/checks/iam_tf/test_telemetry_reader_and_twin_pins.py tests/checks/ci_guards/test_validate_content_reader_lock.py
+      tests/hooks/test_protected_path_guard.py tests/verify_ci_workflow/test_deploy_telemetry_content_workflow.py
+      tests/test_ci_telemetry_content_deploy.py tests/lambdas/ducklake_telemetry_content_reader/test_deploy_config.py
+      tests/test_build_lambda.py tests/checks/misc/test_sensitive_value_detectors.py
+      tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py
+      tests/checks/contracts/test_validate_iam_simulate_fixture_shape.py tests/test_deploy_paths_admin_procedure.py
+      tests/checks/structural/test_size_limits.py tests/checks/iam_tf/test_terraform_github_import_blocks.py
+      tests/checks/ci_guards/test__manifest.py tests/checks/ci_guards/test_validate_ci_rca_taxonomy.py
+      tests/checks/ci_guards/test_validate_composite_action_shell_bodies.py tests/checks/ci_guards/test__workflow_shell_bodies.py
+      tests/checks/ci_guards/test_validate_actions_evidence.py tests/checks/ci_guards/test_validate_actions_account_id_masking.py
+      tests/checks/iam_tf/test_validate_iam_policy_size.py tests/checks/iam_tf/test_validate_secret_parameter_grants.py
+      tests/checks/contracts/test_validate_github_org_transfer.py tests/checks/ci_guards/test_validate_ci_rca_adjudication.py
+      tests/checks/ci_guards/test_validate_ci_rca_taxonomy_accounting.py tests/ci_rca/taxonomy/test_load_and_classify.py
+      tests/checks/iam_tf/test_validate_terraform_no_build_artifact_reads.py -q
+    expected: exit 0. Before the change the new test files do not exist and the modified pins fail.
+    fix_if: >-
+      Fix the HCL, workflow, script or code; never relax a pin. The selection names every reader of the edited files the
+      planning dry run found red; VP 14's full tier covers the rest. Replay cost (vp-red-before.yaml replay_bound): the
+      existing files took about 25 s at planning (80 s with the duckdb golden files, which VP 21 now carries), inside
+      validate_vp_replay's 120 s shared deadline with room for the new files.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: graduate
+    graduation_check_id: telemetry-content-reader-lock
+  - step: 21
+    phase: pre-deploy
+    action: >-
+      The golden replay's opt-in content leg and the default run's untouched content route, on the real-DuckDB replay
+      fixture.
+    command: >-
+      bin/venv-python -m pytest tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py
+      tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_content.py -q
+    expected: >-
+      exit 0 with "passed" (no skips where duckdb is installed). Before the change test_lambda_telemetry_golden_content.py
+      does not exist and --content-leg is unknown.
+    fix_if: Fix the golden module or the gates flag; never weaken the leg's mismatch or SKIPPED cases.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      vp-red-before.yaml hermetic_authoring rule (iii): both files import duckdb at module level (pytest.importorskip),
+      which requirements-fast.txt excludes, so the step stays hermetic false; it is also the slow half of the old VP 1
+      (about 62 s of replays), which would breach validate_vp_replay's 120 s shared deadline if replayed. The full tier
+      (VP 14) runs both files.
+  - step: 2
+    phase: pre-deploy
+    action: The rendered boundary stays at or under Decision 230's review trigger.
+    command: bin/venv-python -m pytest "tests/checks/iam_tf/test_telemetry_content_reader_iam.py::test_rendered_boundary_under_review_trigger" -q
+    expected: exit 0. The test's 12-character placeholders render 5,493 B (5,463 B with the real region, measured at planning).
+    fix_if: Over 5,632 B -- stop. Decision 239's boundary-size reversal condition fires, and where the fence lives is the operator's to re-decide.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: waive
+    graduation_waiver_reason: The node is inside step 1's graduated selection; a second registry entry would duplicate it.
+  - step: 3
+    phase: pre-deploy
+    action: >-
+      The registered lock check and every registered check the planning dry run found reading the edited workflow, HCL,
+      taxonomy or contracts are green on the real tree.
+    command: >-
+      bin/venv-python -c "from scripts.checks.ci_guards.validate_content_reader_lock import validate_content_reader_lock as a;
+      from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as b;
+      from scripts.checks.ci_guards.validate_ci_rca_taxonomy import validate_ci_rca_taxonomy as c;
+      from scripts.checks.ci_guards.validate_actions_evidence import validate_actions_evidence as d;
+      from scripts.checks.ci_guards.validate_actions_account_id_masking import validate_actions_account_id_masking as e;
+      from scripts.checks.ci_guards.validate_project_region import validate_project_region as g;
+      from scripts.checks.iam_tf.validate_iam_policy_size import validate_iam_policy_size as h;
+      from scripts.checks.iam_tf.validate_secret_parameter_grants import validate_secret_parameter_grants as i;
+      from scripts.checks.contracts.validate_github_org_transfer import validate_github_org_transfer as j;
+      from scripts.checks.structural.size_limits import validate_structural_size_limits as k;
+      from scripts.checks.ci_guards.validate_ci_rca_adjudication import validate_ci_rca_adjudication as l;
+      from scripts.checks.iam_tf.validate_terraform_no_build_artifact_reads import validate_terraform_no_build_artifact_reads as m;
+      f=[]; [x(f) for x in (a, b, c, d, e, g, h, i, j, k, l, m)]; print('LOCK_FAILS', len(f)); assert not f, f"
+    expected: LOCK_FAILS 0.
+    fix_if: Read the named predicate; fix the tree, never the predicate.
+    hermetic: true
+    expected_literals: ["LOCK_FAILS 0"]
+    graduation: waive
+    graduation_waiver_reason: All twelve are registered checks that run in every tier (each pre=True), so a registry entry would duplicate them.
+  - step: 19
+    phase: pre-deploy
+    action: PINNED-7's three trailers are in docs/DECISIONS.md and every Decision check is green.
+    command: >-
+      bin/venv-python -c "import pathlib, re; from scripts.checks.decisions.validate_decisions_size import validate_decisions_size as s;
+      from scripts.checks.decisions.validate_decision_entry_conformance import validate_decision_entry_conformance as c;
+      from scripts.checks.decisions.validate_supersession_annotations import validate_supersession_annotations as a;
+      from scripts.checks.decisions.validate_decisions_index_freshness import validate_decisions_index_freshness as x;
+      f=[]; s(f); c(f); a(f); x(f); lines=set(pathlib.Path('docs/DECISIONS.md').read_text(encoding='utf-8').splitlines());
+      p=pathlib.Path('docs/plans/PLAN-telemetry-content-reader-lock.yaml').read_text(encoding='utf-8');
+      want=[ln.strip()[1:] for ln in p.splitlines() if ln.strip().startswith('+[Amendment 2026-10-29')];
+      n=sum(w in lines for w in want); print('TRAILERS', n, 'OF', len(want)); print('DECISION_FAILS', len(f)); assert len(want) == 3 and n == 3 and not f, f"
+    expected: >-
+      TRAILERS 3 OF 3 (each of PINNED-7's added lines is a whole line of docs/DECISIONS.md, byte for byte) and
+      DECISION_FAILS 0. validate_decisions_size prints four WARN lines (WARN tier, never fails): the three
+      amendment-delta lines declared in the DECISIONS.md scope row, and the standing-pressure aggregate (entries over
+      7,373 B), which prints whenever DECISIONS.md changes and whose count these trailers do not move.
+      validate_supersession_annotations also prints three stale-waiver WARNs (128->102, 144->92, 144->98) that main
+      prints today; they are not this plan's.
+    fix_if: >-
+      A Decision check fails -- fix the trailer placement, never its approved words; a wording change goes back to the
+      operator. Run every test that reads docs/DECISIONS.md (grep -rl DECISIONS.md tests/) before pushing.
+    hermetic: true
+    expected_literals: ["TRAILERS 3 OF 3", "DECISION_FAILS 0"]
+    graduation: waive
+    graduation_waiver_reason: The four checks are registered and run in every tier; the trailer count is a one-time insertion check.
+  - step: 14
+    phase: pre-deploy
+    action: Full tier before handoff (Decision 163).
+    command: bin/venv-python -m scripts.validate
+    expected: exit 0.
+    fix_if: In-scope failures are fixed on the branch; out-of-scope failures become recs (Decision 59, 55).
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      vp-red-before.yaml recursion_refusal: a graduated step may not invoke scripts.validate, so the full tier cannot
+      graduate; it runs post-merge on main in every case.
+  - step: 16
+    phase: pre-deploy
+    action: The simulate fixture's compaction preserved every value; only the three lock rows and one log row are new.
+    command: >-
+      bin/venv-python -c "import subprocess,yaml; f='docs/contracts/iam-simulate-fixture.yaml';
+      old=yaml.safe_load(subprocess.run(['git','show','origin/main:'+f],capture_output=True,text=True,check=True).stdout);
+      new=yaml.safe_load(open(f,encoding='utf-8')); lock=[t for t in new['triples'] if 'DenyTelemetryContentChange' in str(t.get('by_design',''))];
+      rest=[t for t in new['triples'] if t not in lock]; same=all(old[k]==new[k] for k in old if k not in ('amendment_log','triples'))
+      and rest==old['triples'] and new['amendment_log'][1:]==old['amendment_log'] and len(lock)==3;
+      print('FIXTURE_VALUES_PRESERVED', same, len(lock)); assert same"
+    expected: FIXTURE_VALUES_PRESERVED True 3
+    fix_if: A value changed in the compaction -- restore it from origin/main; the compaction may only reflow lines.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      A one-time comparison against the pre-change file on origin/main; once merged, origin/main carries the change and
+      the comparison has nothing to prove, so a standing registry entry would go red on the next legitimate edit.
+  - step: 18
+    phase: pre-deploy
+    action: The org-transfer contract's compaction preserved every value; only the new row, its log row and environment_fail_open change.
+    command: >-
+      bin/venv-python -c "import subprocess,yaml; f='docs/contracts/github-org-transfer.yaml';
+      old=yaml.safe_load(subprocess.run(['git','show','origin/main:'+f],capture_output=True,text=True,check=True).stdout);
+      new=yaml.safe_load(open(f,encoding='utf-8')); o={r['id']:r for r in old['breakage_map']}; n={r['id']:r for r in new['breakage_map']};
+      same=new['amendment_log'][:-1]==old['amendment_log'] and all(o[k]==n[k] for k in o if k!='environment_fail_open')
+      and set(n)-set(o)=={'content_deploy_workflow_ref'} and all(old[k]==new[k] for k in old if k not in ('amendment_log','breakage_map'));
+      print('ORG_TRANSFER_VALUES_PRESERVED', same); assert same"
+    expected: ORG_TRANSFER_VALUES_PRESERVED True
+    fix_if: A value changed in the compaction -- restore it from origin/main; the compaction may only reflow lines.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      A one-time comparison against the pre-change file on origin/main; once merged, origin/main carries the change and
+      the comparison has nothing to prove, so a standing registry entry would go red on the next legitimate edit.
+  - step: 4
+    phase: pre-deploy
+    action: "PRE-MERGE GATE (ADMIN): credential check, on the operator's direction (Benjamin 2026-10-29 13:24Z: admin only for named bootstrap steps)."
+    command: >-
+      bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null | grep -q
+      'assumed-role/PlatformAdmin/' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT
+    expected: ADMIN_CHAIN_OK, so this session runs steps 5-9. ADMIN_CHAIN_ABSENT means the PR waits at CI-green and steps 5-9 go to an ADMIN session.
+    fix_if: ADMIN_CHAIN_ABSENT -- hand steps 5-9 to an ADMIN session; never merge without their evidence.
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: "PRE-MERGE GATE (ADMIN): materialise terraform.bootstrap.tfvars from the sanctioned source, values never printed."
+    command: >-
+      (umask 077 && if V=$(aws ssm get-parameter --name /secret/agent-platform-terraform-personal-tfvars --with-decryption
+      --profile agent_platform_admin --query Parameter.Value --output text 2>/dev/null); then S=ssm; else V=$(aws
+      secretsmanager get-secret-value --secret-id agent-platform-terraform-personal-tfvars --profile agent_platform_admin
+      --query SecretString --output text 2>/dev/null) && S=secretsmanager; fi && printf '%s\n' "$V" | grep -E
+      '^[[:space:]]*(account_id|owner_email|platform_dev_external_id|platform_admin_external_id|agent_service_account_user_name)[[:space:]]*='
+      > terraform/bootstrap/terraform.bootstrap.tfvars && chmod 600 terraform/bootstrap/terraform.bootstrap.tfvars && echo "SOURCE $S")
+      && git check-ignore -q terraform/bootstrap/terraform.bootstrap.tfvars
+      && test "$(grep -c -E '^[[:space:]]*(account_id|owner_email|platform_dev_external_id|platform_admin_external_id)[[:space:]]*='
+      terraform/bootstrap/terraform.bootstrap.tfvars)" -eq 4 && echo "BOOTSTRAP TFVARS MATERIALISED (values not printed)"
+    expected: >-
+      SOURCE ssm, then BOOTSTRAP TFVARS MATERIALISED. The four required keys are present (account_id, owner_email and
+      both ExternalIds, which the root declares with no default; PLAN-platform-iam-bootstrap-adopt step 8), the file is
+      mode 600 and gitignored, and no value reaches the terminal. The source is /secret/agent-platform-terraform-personal-tfvars
+      (Decision 237; secrets-to-ssm-retire deletes the Secrets Manager entry). SOURCE secretsmanager means the parameter
+      read failed and the entry still served: report it to the planning thread, because after the retire that path is gone.
+      No SOURCE line means both reads failed (stderr is suppressed so no caller ARN reaches the transcript); re-run each
+      read by hand with --query Parameter.Name or Name to see the error without a value.
+    fix_if: A key missing -- recover per terraform-cc-web-operations.yaml tfvars_and_remote_state_recovery; never paste a value (Decision 101).
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: "PRE-MERGE GATE (ADMIN): read-only terraform plan -lock=false of terraform/bootstrap at the CI-green $PR_HEAD_SHA in a throwaway worktree, with declared counts."
+    command: >-
+      test -n "$PR_HEAD_SHA" && W="${TMPDIR:-/tmp}/content-lock-worktree" && M="${TMPDIR:-/tmp}/content-lock-evidence" &&
+      mkdir -p "$M" && git fetch origin "$PR_HEAD_SHA" && git worktree add --detach "$W" "$PR_HEAD_SHA" && cp
+      terraform/bootstrap/terraform.bootstrap.tfvars "$W/terraform/bootstrap/" && terraform -chdir="$W/terraform/bootstrap"
+      init -input=false -backend-config="region=$(tr -d '[:space:]' < config/aws-region)" > /dev/null && terraform
+      -chdir="$W/terraform/bootstrap" plan -input=false -lock=false
+      -var-file=terraform.bootstrap.tfvars -out="$M/p.tfplan" > /dev/null && terraform -chdir="$W/terraform/bootstrap"
+      show -json "$M/p.tfplan" > "$M/p.json"; rc=$?; rm -f "$M/p.tfplan"; test $rc -eq 0 && M="$M" bin/venv-python -c
+      "import json,os,collections; m=os.environ['M']; d=json.load(open(m+'/p.json')); c=collections.Counter('-'.join(r['change']['actions'])
+      for r in d.get('resource_changes',[]) if r['change']['actions'] not in (['no-op'],['read'])); pol=[r for r in d['resource_changes']
+      if r['address']=='aws_iam_policy.github_ci_apply_boundary'][0]['change']['after']['policy']; open(m+'/boundary.json','w').write(pol);
+      dep=[r for r in d['resource_changes'] if r['address']=='aws_iam_role_policy.telemetry_content_deploy'][0]['change']['after']['policy'];
+      open(m+'/deploy_policy.json','w').write(dep); size=len(json.dumps(json.loads(pol),separators=(',',':')));
+      os.remove(m+'/p.json'); print(json.dumps(dict(c), sort_keys=True), 'BOUNDARY_BYTES', size); ok=dict(c)=={'create':11,'update':3} and size<=5632; print('PRE-MERGE PLAN OK' if ok else 'PRE-MERGE PLAN STOP'); assert ok"
+    expected: >-
+      One line, {"create": 11, "update": 3} and BOUNDARY_BYTES at most 5,632 (the rendered candidate, about 5,463), then
+      PRE-MERGE PLAN OK. The 11 creates are the 9 in telemetry_content_reader.tf (role, role policy, log group,
+      function, URL, SSM parameter, metric filter, two alarms) plus the deploy role and its role policy. Data sources are reads and are not counted. The 3 updates are the boundary, the PlatformDev runtime policy
+      and the trail. Zero destroys and zero replaces. The candidate boundary and deploy-role policy JSON are kept for
+      step 7. Counts, bytes and the sha go on the PR, never addresses with values.
+    fix_if: Unexpected counts -- stop and report the addresses (never values) to the planning thread. A new PR head re-runs steps 6-9.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      PRE-MERGE GATE (ADMIN): IAM's evaluator, with the candidate boundary from step 6 and aws:PrincipalArn supplied on
+      every row (the simulator does not populate it, and a negated ArnNotLike over a missing key matches anyone), proves
+      the lock denies the CI roles, admits the deploy role, and changes nothing else the CI roles do.
+    command: >-
+      M="${TMPDIR:-/tmp}/content-lock-evidence" && test -s "$M/boundary.json" && test -s "$M/deploy_policy.json" && M="$M" bin/venv-python -c
+      "import json,os,subprocess,sys; m=os.environ['M']; run=lambda *a: json.loads(subprocess.run(['aws',*a,'--profile','agent_platform_admin','--output','json'],capture_output=True,text=True,check=True).stdout);
+      acct=run('sts','get-caller-identity')['Account']; reg=open('config/aws-region',encoding='utf-8').read().strip();
+      fn=lambda n: 'arn'+':aws:lambda:'+reg+':'+acct+':function:'+n; role=lambda n: 'arn'+':aws:iam::'+acct+':role/'+n; cand=open(m+'/boundary.json').read();
+      ctx=lambda p: ['--context-entries','ContextKeyName=aws:PrincipalArn,ContextKeyValues='+role(p)+',ContextKeyType=string'];
+      sim=lambda p,a,res: run('iam','simulate-principal-policy','--policy-source-arn',role(p),'--permissions-boundary-policy-input-list',cand,'--action-names',a,'--resource-arns',res,*ctx(p))['EvaluationResults'][0]['EvalDecision'];
+      c='agent-platform-ducklake-telemetry-content'; d=c+'-deploy';
+      custom=lambda a,res: run('iam','simulate-custom-policy','--policy-input-list',open(m+'/deploy_policy.json').read(),'--permissions-boundary-policy-input-list',cand,'--action-names',a,'--resource-arns',res,*ctx(d))['EvaluationResults'][0]['EvalDecision'];
+      got={'deploy_content':sim('agent-platform-github-ci-deploy','lambda:UpdateFunctionCode',fn(c)),
+      'deploy_reader':sim('agent-platform-github-ci-deploy','lambda:UpdateFunctionCode',fn('agent-platform-ducklake-telemetry-reader')),
+      'apply_trust':sim('agent-platform-github-ci-apply','iam:UpdateAssumeRolePolicy',role(d)),
+      'apply_passrole':sim('agent-platform-github-ci-apply','iam:PassRole',role(c)),
+      'apply_reader_config':sim('agent-platform-github-ci-apply','lambda:UpdateFunctionConfiguration',fn('agent-platform-ducklake-telemetry-reader')),
+      'deployrole_code':custom('lambda:UpdateFunctionCode',fn(c)),'deployrole_config':custom('lambda:UpdateFunctionConfiguration',fn(c))};
+      want={'deploy_content':'explicitDeny','deploy_reader':'allowed','apply_trust':'explicitDeny','apply_passrole':'explicitDeny','apply_reader_config':'allowed','deployrole_code':'allowed','deployrole_config':'allowed'};
+      print(json.dumps(got, sort_keys=True)); ok=got==want; print('SIMULATE OK' if ok else 'SIMULATE STOP'); sys.exit(0 if ok else 1)"
+    expected: >-
+      One line of decisions only: deploy_content, apply_trust and apply_passrole are explicitDeny; deploy_reader and
+      apply_reader_config are allowed (the lock narrows nothing else); deployrole_code and deployrole_config are allowed
+      (the deploy role's candidate policy under the candidate boundary, with its own PrincipalArn, passes the single
+      exception). Then SIMULATE OK. The ARNs are built in memory, and the output carries no ARN or account id.
+    fix_if: >-
+      A denial shows allowed -- the statement or its exception is wrong; fix it in this PR and re-run steps 6-7. An
+      allowed row shows denied -- the collapse, the new Deny or its exception over-reaches; fix it and re-run.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: pre-deploy
+    action: >-
+      PRE-MERGE GATE (ADMIN): PlatformAdmin can make every create the apply needs, plus the tag verb the provider's
+      default_tags adds to each and the reads the provider makes after each create, each verb simulated on its own
+      resource ("*" for the actions with no resource type).
+    command: >-
+      bin/venv-python -c
+      "import json,subprocess,sys; run=lambda *a: json.loads(subprocess.run(['aws',*a,'--profile','agent_platform_admin','--output','json'],capture_output=True,text=True,check=True).stdout);
+      acct=run('sts','get-caller-identity')['Account']; reg=open('config/aws-region',encoding='utf-8').read().strip(); adm='arn'+':aws:iam::'+acct+':role/PlatformAdmin';
+      c='agent-platform-ducklake-telemetry-content'; fn='arn'+':aws:lambda:'+reg+':'+acct+':function:'+c; role=lambda n: 'arn'+':aws:iam::'+acct+':role/'+n;
+      lg='arn'+':aws:logs:'+reg+':'+acct+':log-group:platform-security-telemetry-content-access'; al=lambda n: 'arn'+':aws:cloudwatch:'+reg+':'+acct+':alarm:platform-security-telemetry-content-'+n;
+      ps='arn'+':aws:ssm:'+reg+':'+acct+':parameter/agent-platform/ducklake/telemetry_content_reader_url';
+      pairs=[('iam:CreateRole',role(c)),('iam:CreateRole',role(c+'-deploy')),('iam:PutRolePolicy',role(c)),('iam:PutRolePolicy',role(c+'-deploy')),
+      ('iam:TagRole',role(c)),('iam:TagRole',role(c+'-deploy')),('iam:PassRole',role(c)),
+      ('logs:CreateLogGroup',lg),('logs:PutRetentionPolicy',lg),('logs:PutMetricFilter',lg),('logs:TagResource',lg),
+      ('lambda:CreateFunction',fn),('lambda:TagResource',fn),('lambda:PutFunctionConcurrency',fn),('lambda:CreateFunctionUrlConfig',fn),
+      ('ssm:PutParameter',ps),('ssm:AddTagsToResource',ps),
+      ('cloudwatch:PutMetricAlarm',al('unexpected-invoker')),('cloudwatch:TagResource',al('unexpected-invoker')),
+      ('cloudwatch:PutMetricAlarm',al('errors')),('cloudwatch:TagResource',al('errors')),
+      ('iam:GetRole',role(c)),('iam:GetRolePolicy',role(c)),('lambda:GetFunction',fn),('lambda:GetFunctionCodeSigningConfig',fn),
+      ('lambda:ListVersionsByFunction',fn),('lambda:GetFunctionUrlConfig',fn),('lambda:GetFunctionConcurrency',fn),
+      ('logs:DescribeLogGroups','*'),('logs:DescribeMetricFilters','*'),('logs:ListTagsForResource',lg),('cloudwatch:DescribeAlarms','*'),
+      ('cloudwatch:ListTagsForResource',al('errors')),('ssm:GetParameter',ps),('ssm:ListTagsForResource',ps),('ssm:DescribeParameters','*')];
+      d={a+' '+r.rsplit(':',1)[-1].rsplit('/',1)[-1]:run('iam','simulate-principal-policy','--policy-source-arn',adm,'--action-names',a,'--resource-arns',r)['EvaluationResults'][0]['EvalDecision'] for a,r in pairs};
+      bad=sorted(k for k,v in d.items() if v!='allowed'); print('ADMIN_DENIED', bad); print('ADMIN CREATES OK' if not bad else 'ADMIN CREATES STOP'); sys.exit(1 if bad else 0)"
+    expected: >-
+      ADMIN_DENIED [] then ADMIN CREATES OK. The log group, its filter and its tags fall under PlatformAdmin's existing
+      PlatformSecurityLogGroupManage (platform-security-*), the alarms and their tags under CloudWatchAlarmManagement
+      (alarm:*), the parameter under SSMParameterProvisioning, the four reads on "*" under LambdaLogGroupDescribe,
+      PlatformSecurityLogsRead, CloudWatchAlarmDescribe and SSMDescribeParameters, and the rest under IAMFull and
+      LambdaAdminManagement. No S3 verb is needed: the placeholder is a committed file. The output names verbs and
+      resource names only.
+    fix_if: >-
+      A verb denied -- the apply would fail partway; stop and report it to the planning thread (a new admin grant is an
+      always-ask IAM change).
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: pre-deploy
+    action: "CLEANUP (ADMIN): remove scratch evidence and the worktree; also run after any STOP."
+    command: >-
+      rm -rf "${TMPDIR:-/tmp}/content-lock-evidence" && git worktree remove --force "${TMPDIR:-/tmp}/content-lock-worktree"
+      2>/dev/null; git worktree prune && test ! -e "${TMPDIR:-/tmp}/content-lock-evidence" && test ! -e
+      "${TMPDIR:-/tmp}/content-lock-worktree" && echo "SCRATCH CLEARED"
+    expected: SCRATCH CLEARED
+    fix_if: A path survives -- remove it before ending the ADMIN session.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: post-deploy
+    action: >-
+      Operator-directed bootstrap apply, the admin_out_of_band.procedure loop: plan, present, the operator's explicit
+      acceptance, apply. The command re-plans after the apply to prove convergence.
+    command: >-
+      test -n "$MERGED_SHA" && test "$(git rev-parse HEAD)" = "$MERGED_SHA" && terraform -chdir=terraform/bootstrap init
+      -input=false -backend-config="region=$(tr -d '[:space:]' < config/aws-region)" > /dev/null && terraform
+      -chdir=terraform/bootstrap plan -input=false -lock=false
+      -var-file=terraform.bootstrap.tfvars -detailed-exitcode > /dev/null; rc=$?; test $rc -eq 0 && echo "BOOTSTRAP CONVERGED"
+    expected: >-
+      BOOTSTRAP CONVERGED (exit 0, no changes) after the human-accepted apply of the merged sha, from a checkout at that
+      sha. The apply's counts match step 6. Two pages are expected, and the operator is told before the apply:
+      platform-security-detector-tamper, for the apply's writes to the platform-security-* log group, filter and
+      alarms; and platform-security-platform-role-iam-change, for the boundary's new policy version and PlatformDev's
+      policy update.
+    fix_if: Any diff after apply, or an apply error -- stop; nothing is retried without the operator. An AccessDenied on PutMetricFilter right after the policy update is IAM propagation; re-run the apply once on the operator's word.
+    hermetic: false
+    graduation: not-applicable
+  - step: 11
+    phase: post-deploy
+    action: >-
+      The standing live-simulate gate after a boundary change (deploy-paths POST-APPLY, the apply role's fixture), then
+      the live decisions for the other four principals, each row carrying its own aws:PrincipalArn context entry.
+    command: >-
+      bin/venv-python -m scripts.ci.iam_simulate --profile agent_platform_admin --fixture docs/contracts/iam-simulate-fixture.yaml &&
+      bin/venv-python -c "import json,subprocess,sys; run=lambda *a: json.loads(subprocess.run(['aws',*a,'--profile','agent_platform_admin','--output','json'],capture_output=True,text=True,check=True).stdout);
+      acct=run('sts','get-caller-identity')['Account']; reg=open('config/aws-region',encoding='utf-8').read().strip(); fn=lambda n: 'arn'+':aws:lambda:'+reg+':'+acct+':function:'+n; role=lambda n: 'arn'+':aws:iam::'+acct+':role/'+n;
+      s3=lambda k: 'arn'+':aws:s3:::agent-platform-data-lake/'+k;
+      pa=lambda p: ['--context-entries','ContextKeyName=aws:PrincipalArn,ContextKeyValues='+role(p)+',ContextKeyType=string'];
+      sim=lambda p,a,r: run('iam','simulate-principal-policy','--policy-source-arn',role(p),'--action-names',a,'--resource-arns',r,*pa(p))['EvaluationResults'][0]['EvalDecision'];
+      c='agent-platform-ducklake-telemetry-content'; d=c+'-deploy';
+      got={'cideploy_content':sim('agent-platform-github-ci-deploy','lambda:UpdateFunctionCode',fn(c)),
+      'cideploy_reader':sim('agent-platform-github-ci-deploy','lambda:UpdateFunctionCode',fn('agent-platform-ducklake-telemetry-reader')),
+      'deploy_code':sim(d,'lambda:UpdateFunctionCode',fn(c)),'deploy_config':sim(d,'lambda:UpdateFunctionConfiguration',fn(c)),
+      'deploy_reader':sim(d,'lambda:UpdateFunctionCode',fn('agent-platform-ducklake-telemetry-reader')),
+      'dev_url':sim('PlatformDev','lambda:InvokeFunctionUrl',fn(c)),'dev_data':sim('PlatformDev','s3:GetObject',s3('ducklake-telemetry/x')),
+      'exec_data':sim(c,'s3:GetObject',s3('ducklake-telemetry/x'))};
+      want={'cideploy_content':'explicitDeny','cideploy_reader':'allowed','deploy_code':'allowed','deploy_config':'allowed','deploy_reader':'implicitDeny','dev_url':'allowed','dev_data':'explicitDeny','exec_data':'allowed'};
+      print(json.dumps(got, sort_keys=True)); ok=got==want; print('LIVE SIMULATE OK' if ok else 'LIVE SIMULATE STOP'); sys.exit(0 if ok else 1)"
+    expected: >-
+      The fixture run exits 0 with zero mismatches, then one line of decisions only (no ARN or account id) and LIVE
+      SIMULATE OK: CI deploy denied on the content function and allowed on the telemetry reader; the deploy role allowed
+      code and configuration on the content function and implicitly denied elsewhere; PlatformDev allowed the URL and
+      explicitly denied the telemetry data; the execution role allowed the data.
+    fix_if: A by_design denial allowed is a grant leak -- stop and report to the operator. A new grant denied means the boundary ceiling or scope is wrong; fix in HCL through the same gate.
+    hermetic: false
+    graduation: not-applicable
+  - step: 12
+    phase: post-deploy
+    action: >-
+      After the reader-concurrency apply is green, the operator approves the first deploy run. RUN_SHA and ARTIFACT_NAME
+      are read with mcp__github__actions_list and actions_get (the agent proxy blocks raw GitHub API calls): the head sha
+      and the telemetry-content-* artifact of the latest deploy-telemetry-content run whose deploy job concluded success
+      (a held run's deploy job is skipped and never qualifies). Its recorded digest equals a local rebuild of that sha.
+    command: >-
+      test -n "$RUN_SHA" && test -n "$ARTIFACT_NAME" && R="$(pwd)" && W="${TMPDIR:-/tmp}/content-rebuild" && git fetch
+      origin "$RUN_SHA" && git worktree add --detach "$W" "$RUN_SHA" > /dev/null && LOCAL=$(cd "$W" && "$R/.venv/bin/python"
+      -m scripts.build_lambda --content-reader-only | sed -n 's/^CONTENT_READER_SHA256 //p'); git worktree remove --force
+      "$W"; test -n "$LOCAL" && test "$ARTIFACT_NAME" = "telemetry-content-$LOCAL" && echo "DIGEST MATCH"
+    expected: >-
+      DIGEST MATCH. The run's deploy job is green, which means its live CodeSha256 check and its configuration read-back
+      passed, and the local rebuild (the main checkout's interpreter, run in a worktree at the sha) equals the digest the
+      build recorded.
+    fix_if: >-
+      No qualifying run -- the environment is missing, the run waits for the operator, or the build reported
+      TELEMETRY_PRODUCTION_HOLD (the deploy job is skipped until the pending column is added; then re-run the workflow
+      from main with workflow_dispatch). A mismatch -- compare the two zips' member lists and contents; equal contents
+      with different bytes is a toolchain difference to report, different contents mean the CI build is not the
+      commit's bytes: stop, keep the function as is, and report to the operator.
+    hermetic: false
+    graduation: not-applicable
+  - step: 13
+    phase: post-deploy
+    action: rec-4696's acceptance and a live masked golden read-back as PlatformDev.
+    command: >-
+      bin/venv-python -m pytest tests/checks/iam_tf/test_telemetry_content_reader_iam.py -q &&
+      bin/venv-python -c "from scripts.telemetry_capture.read_route import content_reader; v=sorted(content_reader('agent_platform').describe()); print('CONTENT_VERBS', v); assert v == ['session_transcript_masked', 'transcript_row_masked']" &&
+      bin/venv-python -m scripts.ducklake_smoke.lambda_telemetry_golden_gates --profile agent_platform --no-alarms
+      --assert-zero-mismatches --content-leg
+    expected: >-
+      exit 0. CONTENT_VERBS names exactly the two masked verbs (PlatformDev reaches the URL), and the golden run reports
+      every replayed tree matched on the event and content legs, counts only.
+    fix_if: A content mismatch -- read the leg's tree name and the access-log counts; fix forward through the gated channel. AccessDenied -- the PlatformDev grant did not apply; re-check step 11.
+    hermetic: false
+    graduation: not-applicable
+  - step: 15
+    phase: post-deploy
+    action: >-
+      The access log (Decision 239 cl.4): the group keeps 365 days, step 13's reads wrote PlatformDev lines, and
+      PlatformDev cannot read the group. The line count is the named post-apply admin read in this walk.
+    command: >-
+      bin/venv-python -c "import json,subprocess,sys,time; g='platform-security-telemetry-content-access';
+      aws=lambda prof,*a: subprocess.run(['aws',*a,'--profile',prof,'--output','json'],capture_output=True,text=True);
+      groups=json.loads(aws('agent_platform','logs','describe-log-groups','--log-group-name-prefix',g).stdout)['logGroups'];
+      ret=[x.get('retentionInDays') for x in groups if x['logGroupName']==g]; pat='{ ($.event = "telemetry_content_read") && ($.role = "PlatformDev") }';
+      start=str(int((time.time()-7200)*1000)); ev=json.loads(aws('agent_platform_admin','logs','filter-log-events','--log-group-name',g,'--start-time',start,'--filter-pattern',pat).stdout)['events'];
+      dev=aws('agent_platform','logs','filter-log-events','--log-group-name',g,'--start-time',start,'--limit','1'); denied=dev.returncode!=0 and 'AccessDenied' in dev.stderr;
+      print('RETENTION', ret, 'PLATFORMDEV_READ_LINES', len(ev), 'DEV_LOG_READ_DENIED', denied); sys.exit(0 if ret==[365] and len(ev)>=1 and denied else 1)"
+    expected: RETENTION [365] PLATFORMDEV_READ_LINES n (n >= 1) DEV_LOG_READ_DENIED True. Counts only; no line content is printed.
+    fix_if: >-
+      No lines -- the function is not logging to the configured group (read logging_config). DEV_LOG_READ_DENIED False
+      -- a PlatformDev log grant reaches platform-security-*; stop and report it (an agent could read error text).
+    hermetic: false
+    graduation: not-applicable
+  - step: 17
+    phase: post-deploy
+    action: rec-4696 is closed (the squash body's Resolves trailer).
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader;
+      recs,_=fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-4696']); st=[(x['id'], x['status']) for x in recs];
+      print(st); assert st == [('rec-4696', 'closed')]; print('CLOSURE_OK')"
+    expected: "[('rec-4696', 'closed')] then CLOSURE_OK."
+    fix_if: Open -- the closure job did not run on the Resolves trailer; close it with update_rec naming the merged PR.
+    hermetic: false
+    graduation: not-applicable
+  - step: 20
+    phase: post-deploy
+    action: ops_decisions carries PINNED-7's trailers (the sanctioned DECISIONS.md -> ops_decisions ETL, Decision 84 I-2).
+    command: >-
+      bin/venv-python -m scripts.ops_data_portal --backfill-decisions-md && bin/venv-python -c "from src.common.ducklake_reader_client import make_reader;
+      r=make_reader(profile='agent_platform'); got={d: 'metric filter and alarms' in str(r.named('decision_by_id', id=d)[0]['raw_block']) for d in ('dec-239','dec-202','dec-101')};
+      print(got); assert all(got.values()); print('BACKFILL_OK')"
+    expected: "{'dec-239': True, 'dec-202': True, 'dec-101': True} then BACKFILL_OK."
+    fix_if: A row lacks the trailer -- re-run the backfill once the agent_platform chain is reachable (no offline outbox, Decision 84 I-4); never write ops_decisions directly.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: terraform/bootstrap/telemetry_content_reader.tf
+    behavior: Execution role grants and boundary, placeholder code, ignore_changes, concurrency, log retention, alarm pattern.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_telemetry_content_reader_iam.py
+    red_green_expectation: red before (file missing), green after.
+  - source: terraform/bootstrap/telemetry_content_placeholder.zip
+    behavior: The function's only pre-deploy code answers 503 to every event (digest and member pinned).
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_telemetry_content_reader_iam.py
+    red_green_expectation: red before (file missing), green after.
+  - source: terraform/bootstrap/telemetry_content_deploy_role.tf
+    behavior: Exact environment-bound trust and the deploy verb set; no IAM or PlatformDev/PlatformAdmin grant.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_telemetry_content_reader_iam.py
+    red_green_expectation: red before (file missing), green after.
+  - source: terraform/bootstrap/github_ci_apply_boundary.tf
+    behavior: DenyTelemetryContentChange with one exception; fence exception; collapsed pairs; size under the trigger.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_telemetry_content_reader_iam.py
+    red_green_expectation: red before (statement absent), green after.
+  - source: terraform/bootstrap/github_ci_apply_boundary.tf
+    behavior: Decision 213 cl.1 deny forms after the collapse.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_url_only_invoke_guard.py
+    red_green_expectation: red before (expects the collapsed forms), green after.
+  - source: terraform/bootstrap/platform_dev_policies.tf
+    behavior: Masked URL-only invoke on the content function.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_url_only_invoke_guard.py
+    red_green_expectation: red before (content forms absent), green after.
+  - source: terraform/bootstrap/platform_security_trail.tf
+    behavior: Lambda data events for the content function.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_url_only_invoke_guard.py
+    red_green_expectation: red before (ARN absent), green after.
+  - source: terraform/personal/ducklake_telemetry_reader.tf
+    behavior: Reader concurrency 3; the shared login's sum stays within its limit.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_telemetry_reader_and_twin_pins.py
+    red_green_expectation: red before (pin 3 and the sum), green after.
+  - source: terraform/github/environments.tf
+    behavior: Reviewer-gated, main-only, no-admin-bypass, undestroyable environment with import keys.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_content_reader_lock.py
+    red_green_expectation: red before (environment absent), green after.
+  - source: .github/workflows/deploy-telemetry-content.yml
+    behavior: Credential-free build, recorded digest, production column hold, approval gate, script-only deploy.
+    verification_step: 1
+    test_selector: tests/verify_ci_workflow/test_deploy_telemetry_content_workflow.py
+    red_green_expectation: red before (workflow missing), green after.
+  - source: scripts/ci/telemetry_content_deploy.sh
+    behavior: Environment check, change summary, digest and layer gates, exact configuration call, served-verb check.
+    verification_step: 1
+    test_selector: tests/test_ci_telemetry_content_deploy.py
+    red_green_expectation: red before (script missing), green after.
+  - source: scripts/checks/ci_guards/validate_content_reader_lock.py
+    behavior: Keeps every other path off the function and the lock's shape intact.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_content_reader_lock.py
+    red_green_expectation: red before (module missing), green after.
+  - source: scripts/checks/misc/sensitive_value_detectors.py
+    behavior: The four lock files are in the PROTECTED ratchet.
+    verification_step: 1
+    test_selector: tests/checks/misc/test_sensitive_value_detectors.py
+    red_green_expectation: red before (paths absent from PROTECTED), green after.
+  - source: .github/CODEOWNERS
+    behavior: Every lock file has an operator-owned CODEOWNERS line.
+    verification_step: 1
+    test_selector: tests/checks/misc/test_sensitive_value_detectors.py
+    red_green_expectation: red once PROTECTED names the paths without the lines (leg (d)), green after.
+  - source: config/agent/executor/capabilities.yaml
+    behavior: Every lock file matches a boundary_patterns entry.
+    verification_step: 1
+    test_selector: tests/checks/misc/test_sensitive_value_detectors.py
+    red_green_expectation: red once PROTECTED names the paths without the entries (leg (d)), green after.
+  - source: .claude/settings.json
+    behavior: The hook is registered on PreToolUse.
+    verification_step: 1
+    test_selector: tests/hooks/test_protected_path_guard.py
+    red_green_expectation: red before (registration absent), green after.
+  - source: .claude/hooks/hooks.json
+    behavior: The rendered plugin hooks carry the registration for project threads.
+    verification_step: 1
+    test_selector: tests/hooks/test_protected_path_guard.py
+    red_green_expectation: red before (registration absent), green after.
+  - source: .claude/hooks/protected_path_guard.py
+    behavior: Blocks unplanned edits to protected paths.
+    verification_step: 1
+    test_selector: tests/hooks/test_protected_path_guard.py
+    red_green_expectation: red before (hook missing), green after.
+  - source: scripts/build_lambda.py
+    behavior: Reproducible credential-free content build that prints its digest.
+    verification_step: 1
+    test_selector: tests/test_build_lambda.py
+    red_green_expectation: red before (flag missing), green after.
+  - source: src/lambdas/ducklake_telemetry_content_reader/deploy_config.json
+    behavior: The deployed configuration equals the telemetry reader's production values; layer pins well formed.
+    verification_step: 1
+    test_selector: tests/lambdas/ducklake_telemetry_content_reader/test_deploy_config.py
+    red_green_expectation: red before (file missing), green after.
+  - source: scripts/ducklake_smoke/lambda_telemetry_golden_content.py
+    behavior: The content leg compares masked reassembly with the sent text and never passes without a content URL.
+    verification_step: 21
+    test_selector: tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_content.py
+    red_green_expectation: red before (module missing), green after.
+  - source: scripts/ducklake_smoke/lambda_telemetry_golden_gates.py
+    behavior: --content-leg is opt-in; a default run never calls the content route.
+    verification_step: 21
+    test_selector: tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_content.py
+    red_green_expectation: red before (flag missing), green after.
+  - source: terraform/github/imports.tf
+    behavior: One import block per new resource, each id derived from variables.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_terraform_github_import_blocks.py
+    red_green_expectation: red before (resources without import blocks), green after.
+  - source: terraform/github/variables.tf
+    behavior: The policy import id is a declared number variable with a default.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_terraform_github_import_blocks.py
+    red_green_expectation: red before (variable absent), green after.
+  - source: src/lambdas/ducklake_telemetry_content_reader/manifest.yaml
+    behavior: The artifact is active, so content changes flag it for the gated deploy.
+    verification_step: 1
+    test_selector: tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py
+    red_green_expectation: red before (status stub), green after.
+  - source: docs/contracts/build-lambda.yaml
+    behavior: deploy_channels names the gated workflow for the content reader.
+    verification_step: 1
+    test_selector: tests/verify_ci_workflow/test_deploy_telemetry_content_workflow.py
+    red_green_expectation: red before (entry absent), green after.
+  - source: docs/contracts/deploy-paths.yaml
+    behavior: deploy_code.status names the operator-gated channel.
+    verification_step: 1
+    test_selector: tests/verify_ci_workflow/test_deploy_telemetry_content_workflow.py
+    red_green_expectation: red before (sentence absent), green after.
+  - source: docs/contracts/ducklake_telemetry_content_reader.yaml
+    behavior: principal_classes adds the deploy role beside PlatformDev.
+    verification_step: 1
+    test_selector: tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py
+    red_green_expectation: red before (PlatformDev only), green after.
+  - source: docs/contracts/iam-simulate-fixture.yaml
+    behavior: The lock's three apply-role denials are standing simulate rows, and the file stays within its budget.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_telemetry_content_reader_iam.py::test_simulate_fixture_records_the_lock
+    red_green_expectation: red before (rows absent), green after.
+  - source: scripts/checks/ci_guards/_manifest.py
+    behavior: validate_content_reader_lock is registered pre=True with its globs.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test__manifest.py
+    red_green_expectation: red before (entry absent), green after.
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: The new check and workflow are classified for ci-rca.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_ci_rca_taxonomy.py
+    red_green_expectation: red before (rows absent), green after.
+  - source: config/composite_action_body_baseline.yaml
+    behavior: Every inline run body of the new workflow is registered.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_composite_action_shell_bodies.py
+    red_green_expectation: red before (bodies unregistered), green after.
+  - source: docs/contracts/github-actions-evidence.yaml
+    behavior: The digest-named upload is classified governed_deployment, so the inventory equals every upload step.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_actions_evidence.py
+    red_green_expectation: red once the workflow uploads without the row (inventory differs), green after.
+  - source: docs/contracts/github-org-transfer.yaml
+    behavior: The content deploy role's workflow ref and environment are in the transfer breakage map.
+    verification_step: 1
+    test_selector: tests/checks/contracts/test_validate_github_org_transfer.py
+    red_green_expectation: red before (row absent from the real contract), green after.
+  - source: scripts/checks/contracts/validate_github_org_transfer.py
+    behavior: content_deploy_workflow_ref is evaluated exactly, like the trusted-plan refs.
+    verification_step: 1
+    test_selector: tests/checks/contracts/test_validate_github_org_transfer.py
+    red_green_expectation: red before (no evaluator for the row), green after.
+  - source: .gitignore
+    behavior: The hook's per-session plan marker is never committed.
+    verification_step: 1
+    test_selector: tests/hooks/test_protected_path_guard.py
+    red_green_expectation: red before (git check-ignore misses the marker), green after.
+  - source: .gitignore
+    behavior: >-
+      The committed placeholder zip is tracked: validate_terraform_no_build_artifact_reads rule (b) refuses a Terraform
+      filename that names a gitignored path.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_validate_terraform_no_build_artifact_reads.py
+    red_green_expectation: >-
+      test_real_tree_has_no_build_artifact_reads is red once the HCL names the zip without the negation (the planning dry
+      run showed the check red with the line removed), green with it.
+  - source: src/lambdas/ducklake_telemetry_content_reader/handler.py
+    behavior: Docstring only; no behaviour changes.
+    verification_step: 1
+    test_selector: tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py
+    waiver_reason: >-
+      A docstring sentence changes and no behaviour does; the packaging tests stay green across it, so no test can fail
+      without the change.
+constraints:
+  - >-
+    No admin write before merge. The bootstrap apply is the operator's, walked after merge (VP 10). The only admin use
+    is the named pre-merge gate (VP 4-9), the apply, the post-apply simulate (VP 11) and the access-log line count
+    (VP 15), per the operator's 2026-10-29 13:24Z rule. Every other AWS call uses --profile agent_platform.
+  - No Neon resource and no secret or parameter change. The content role reads the existing telemetry reader login.
+  - No account id, ARN or credential in committed text, PR text, thread text or VP output (Decision 101).
+  - >-
+    The IAM, environment, workflow, CODEOWNERS and Decision text and the placeholder bytes are the operator-approved
+    text pinned in PINNED-1 to PINNED-8 (approved inline in the planning thread). Any change to it goes back to the
+    operator before merge.
+  - >-
+    No edit to terraform/personal/oidc_ci_roles.tf. The CI golden content grant is rec-4735, which waits on rec-4480's
+    main-only CI role: the branch role trusts agent/* branches and writes public logs.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Program: rec-4481 plan 3 of 3 (plans 1-2: PLAN-sensitive-value-detectors, PLAN-telemetry-content-reader). Approach and evidence: /mnt/project-files/telemetry-content-reader/plan3-approach.md."
+  - "Operator rulings 2026-10-29: 10:17Z card cmsg_012XgaFy8VaDQbxP5D8nC958GceYrwj4m8SW8B5H3KCdVz (lock the new reader only); 13:24Z cmsg_012XgaFy8VaDQbxP5D8nC9581nPi4zJZGsUF1quNgKjyx1 (PlatformDev default, admin only for named bootstrap steps); 18:48Z card cmsg_012XgaFy8VaDQbxP5D8nC958SWZAbKMvPrfavefinbp9tz (write plan 3; 239 amends 126, #1719); 18:55Z cmsg_012XgaFy8VaDQbxP5D8nC9584zCyzWJTupvwLRcG62Pn3t (HOLDS_BY_GRANT is enough)."
+  - "Approval premise: rec-4695's probe (#1709) found no session credential can approve a pending deployment (the Claude GitHub App has administration read, no Deployments write). If that grant widens, Decision 239's approval-bypass condition fires; the build's environment check catches drift in the environment's own settings."
+  - "V3 resolution: the posted pre-merge gate evidence for the current head (VP 4-9: counts line, simulate line, sha) substitutes for the pre-merge post-deploy evidence the implement V3 Merge Gate and code-review V3 check require; behavioural acceptance (Decision 48) is the post-merge operator-directed walk (VP 10-13), evidenced by a counts-only comment on the merged PR naming the applied sha."
+  - "Decided with notice (detail in each scope row): gated job owns code, layers, handler and env, bootstrap owns identity, URL, logging and concurrency; layer digest pins; placeholder code until the first approval, a committed zip named by filename (no S3 object; critique round 2 H3, M1); the invoker filter excludes PlatformDev alone; reader concurrency 5 -> 3; environment created in Settings then imported (rec-4355); cancel-in-progress kept; the content deploy honours TELEMETRY_PRODUCTION_HOLD (#1717); golden content leg in its own module, off in CI until rec-4735; the hook uses its own gitignored marker; apply-role simulate rows in the shared fixture with aws:PrincipalArn context; active status sets a V3 floor on the bundled code (validate_tier_floor)."
+  - "Decision authority (critique round 2 H1): the access log group, filter and both alarms sit in the platform-security-* family (no CI write or log-event read grant, tamper paging, no PlatformDev read; critique R1-R2), which Decision 101(b) and 202 cl.3 reserve for detector resources. PINNED-7's trailers extend the family through numbered Decision 239 (202 and 237 extended 101(b) the same way, by numbered Decision), operator-approved with the other pinned text; the 239 trailer also adds the layer-provenance residual to cl.6 (rec-4742)."
+  - "Decision 93 note: the reviewer gate on this one function is deliberate until rec-2827 (Decision 239 cl.5). A pending approval never blocks another merge or deploy; bundled shared modules mean a pending run after many telemetry merges."
+  - "Residuals owned elsewhere: other telemetry functions' raw reads and unreviewed deploys, incl. CI apply passing their roles to a new function (Decision 239 cl.6, rec-2827); admin bypass (security project); blob-tier read-back (rec-4699); CI golden content grant (rec-4735 after rec-4480); CI-writable URL parameter (rec-4739); layer pin coupling (rec-4738); layer provenance (rec-4742); maintenance-bundle sizing comments (rec-4740); stale rec-4696 contract pointers (rec-4743); the content reader's Secrets Manager pieces (PINNED-1's DSN data source and TelemetryReaderDsnRead, deploy_config.json's TELEMETRY_DSN_SECRET_ID, the handler's secret read) belong to secrets-to-ssm-cutover and -retire, which must scope them through an admin bootstrap apply and an approved gated run (relayed to the SSM project 2026-10-30)."
+  - "Decision-scout: FLAGS_FOUND, 190 of 190 triaged, 9 roadmap items, CONFLICT 0, RELATED 9. Resolved: 172 (github_repos subjects), 126 (amended by 239, #1719), 202 (platform-security-* family, extended by PINNED-7), 177 (probe phrase folded pre-merge), 93 (note above). CITE: 236, 230, 213, 143, 144, 223, 225, 238, 237, 154, 125, 79, 226, 162, 166, 202, 101."
+  - "gates: decision-scout=FLAGS_FOUND (resolved); plan-critique=REVISE round 1 (18 findings applied), REVISE round 2 (3 High, 2 Medium, 5 Low applied; dry run of the revised text against every test file and registered check that reads an edited file, plus terraform validate), PROCEED round 3 (9 Low applied), REVISE round 4 confirming (M1 VP 1 replay cost and 3 Low applied; VP 5 reads SSM first at the SSM cutover project's request), PROCEED round 5 confirming (3 Low applied, L4 relayed to the SSM project); operator accepted round 5 (card cmsg_012XgaFy8VaDQbxP5D8nC958M9rJcT7j92VhGnqJe7AjJR) and approved PINNED-1..8 2026-10-30 12:15Z (cmsg_012XgaFy8VaDQbxP5D8nC9581ApcmFEM6hjzMF4rLG7X9G); red_overlap=blocked by rec-4718 (shared ci_guards tests), operator override 2026-10-29 21:26Z (cmsg_012XgaFy8VaDQbxP5D8nC958FVGyH7skspbGyQDu9Ahtdz)."
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - The operator has created the telemetry-content-deploy environment in Settings (required reviewer, admin bypass off, deployment branches selected with a main policy) and reported its main policy id
+  - The build writes docs/plans/PLAN-telemetry-content-reader-lock.yaml's path to .claude/protected_edit_plan once the hook lands (step 5), so its own later edits to protected paths pass
+  - PLAN-sensitive-value-detectors and PLAN-telemetry-content-reader merged (#1708, #1718), with Decision 239 on main as amended by #1719
+  - "#1717 merged (ad596e99; validate_reconcile_pending_gate --telemetry-hold exists); rec-4718's red-main overlap is waived by the operator (context gates line)"
+  - The operator approved PINNED-1 to PINNED-8 inline in the planning thread
+  - docs/PROJECT_CONTEXT.md and terraform/CLAUDE.md read (no local init, plan or apply of terraform/personal)
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - |-
+    PINNED-1 (operator-approved, verbatim): terraform/bootstrap/telemetry_content_reader.tf, the whole file.
+    # Telemetry content reader (Decision 239; rec-4696).
+    #
+    # The masked transcript content reader lives in this admin-only root so that no CI identity can change it: the CI apply
+    # boundary's DenyTelemetryContentChange refuses every boundary carrier any Lambda write on the function and any IAM
+    # write or PassRole on its roles, except the deploy role (telemetry_content_deploy_role.tf), which only the
+    # reviewer-gated telemetry-content-deploy Environment can assume (Decision 239 cl.5).
+    #
+    # Terraform owns identity, runtime, memory, timeout, concurrency, URL and logging. The gated job
+    # (.github/workflows/deploy-telemetry-content.yml) owns code, layers, handler and environment, which ignore_changes
+    # hands over. Until the first approved deploy the function runs telemetry_content_placeholder.zip, committed beside
+    # this file, which answers 503 to every event: nothing serves content before the operator approves, Terraform reads no
+    # build artifact, and no CI-writable S3 object can supply the code if the function is ever recreated.
+    #
+    # The access log group, its metric filter and both alarms are platform-security-* resources (Decision 202 cl.3 as
+    # amended by Decision 239): no CI identity holds a write or log-event read grant on them, the detector-tamper alarm
+    # pages on retention, filter and alarm definition changes to them, and PlatformDev cannot read the group (its log reads cover
+    # /aws/lambda/agent-platform-* only), so an error line that echoes a row never reaches an agent.
+
+    locals {
+      ducklake_telemetry_content_function = "agent-platform-ducklake-telemetry-content"
+      telemetry_content_data_prefix       = "ducklake-telemetry"
+      telemetry_content_blob_prefix       = "telemetry-blobs/ducklake_telemetry"
+      telemetry_content_bucket            = "agent-platform-data-lake"
+      telemetry_content_alerts_topic_arn  = "arn:aws:sns:${var.aws_region}:${var.account_id}:agent-platform-alerts"
+    }
+
+    data "aws_secretsmanager_secret" "telemetry_content_reader_dsn" {
+      name = "agent-platform-ducklake-telemetry-reader-dsn"
+    }
+
+    resource "aws_iam_role" "telemetry_content" {
+      # Decision 144 cl.3: the mandatory exec-identity boundary.
+      name                 = "agent-platform-ducklake-telemetry-content"
+      description          = "Telemetry content reader: masked transcript reads over the reader login, data and blob prefixes read-only"
+      permissions_boundary = "arn:aws:iam::${var.account_id}:policy/agent-platform-github-ci-apply-boundary"
+
+      assume_role_policy = jsonencode({
+        Version = "2012-10-17"
+        Statement = [
+          {
+            Effect    = "Allow"
+            Principal = { Service = "lambda.amazonaws.com" }
+            Action    = "sts:AssumeRole"
+          }
+        ]
+      })
+    }
+
+    locals {
+      telemetry_content_policy_json = jsonencode({
+        Version = "2012-10-17"
+        Statement = [
+          {
+            Sid      = "Logs"
+            Effect   = "Allow"
+            Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+            Resource = ["${aws_cloudwatch_log_group.telemetry_content.arn}:*"]
+          },
+          {
+            Sid      = "TelemetryCatalogDataRead"
+            Effect   = "Allow"
+            Action   = ["s3:GetObject"]
+            Resource = ["arn:aws:s3:::${local.telemetry_content_bucket}/${local.telemetry_content_data_prefix}/*"]
+          },
+          {
+            Sid      = "TelemetryCatalogDataList"
+            Effect   = "Allow"
+            Action   = ["s3:ListBucket", "s3:GetBucketLocation"]
+            Resource = ["arn:aws:s3:::${local.telemetry_content_bucket}"]
+            Condition = {
+              StringLike = {
+                "s3:prefix" = ["${local.telemetry_content_data_prefix}/*"]
+              }
+            }
+          },
+          {
+            Sid      = "TelemetryBlobRead"
+            Effect   = "Allow"
+            Action   = ["s3:GetObject"]
+            Resource = ["arn:aws:s3:::${local.telemetry_content_bucket}/${local.telemetry_content_blob_prefix}/*"]
+          },
+          {
+            # Decision 237 cl.2: a declared consumer of the existing reader login, no new secret or parameter.
+            Sid      = "TelemetryReaderDsnRead"
+            Effect   = "Allow"
+            Action   = ["secretsmanager:GetSecretValue"]
+            Resource = [data.aws_secretsmanager_secret.telemetry_content_reader_dsn.arn]
+          },
+          {
+            # The SSM twin of the read above; secrets-to-ssm-retire removes the Secrets Manager statement.
+            Sid      = "TelemetryReaderDsnParameterRead"
+            Effect   = "Allow"
+            Action   = ["ssm:GetParameter"]
+            Resource = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-telemetry-reader-dsn"]
+          },
+        ]
+      })
+    }
+
+    resource "aws_iam_role_policy" "telemetry_content" {
+      name = "DuckLakeTelemetryContentRuntime"
+      role = aws_iam_role.telemetry_content.id
+
+      policy = local.telemetry_content_policy_json
+
+      lifecycle {
+        precondition {
+          # AWS measures the whitespace-stripped document against the 10,240 B inline-policy limit (rec-2793).
+          condition     = length(jsonencode(jsondecode(local.telemetry_content_policy_json))) <= 10240
+          error_message = "Telemetry content reader inline policy exceeds the 10,240 B IAM inline-policy limit (whitespace-stripped measure, rec-2793)."
+        }
+      }
+    }
+
+    resource "aws_cloudwatch_log_group" "telemetry_content" {
+      # Decision 239 cl.4: every read's access line is kept at least 90 days.
+      name              = "platform-security-telemetry-content-access"
+      retention_in_days = 365
+
+      tags = {
+        Name    = "DuckLake Telemetry Content Reader Logs"
+        Purpose = "Decision 239 content reader access log"
+      }
+
+      lifecycle {
+        prevent_destroy = true
+      }
+    }
+
+    resource "aws_lambda_function" "telemetry_content" {
+      function_name = local.ducklake_telemetry_content_function
+      description   = "Decision 239 masked transcript content reader. Deployed only by the operator-approved telemetry-content-deploy job."
+      role          = aws_iam_role.telemetry_content.arn
+      runtime       = "python3.12"
+      handler       = "src.lambdas.ducklake_telemetry_content_reader.handler.handler"
+      architectures = ["x86_64"]
+      timeout       = 120
+      memory_size   = 1024
+
+      # With the telemetry reader's 3, inside the reader login's CONNECTION LIMIT 10 at two slots each (Decision 239 cl.1).
+      reserved_concurrent_executions = 2
+
+      logging_config {
+        log_format = "Text"
+        log_group  = aws_cloudwatch_log_group.telemetry_content.name
+      }
+
+      # One member, src/lambdas/ducklake_telemetry_content_reader/handler.py, answering 503 content_reader_not_deployed to
+      # every event (the IAM pins test pins its digest and decodes it).
+      filename = "${path.module}/telemetry_content_placeholder.zip"
+
+      depends_on = [
+        aws_iam_role_policy.telemetry_content,
+        aws_cloudwatch_log_group.telemetry_content,
+      ]
+
+      tags = {
+        Name    = "DuckLake Telemetry Content Reader"
+        Purpose = "Decision 239 masked content reads"
+      }
+
+      # Decision 239 cl.5: the gated job owns code, layers, handler and environment.
+      lifecycle {
+        ignore_changes = [filename, source_code_hash, layers, handler, environment]
+      }
+    }
+
+    resource "aws_lambda_function_url" "telemetry_content" {
+      function_name      = aws_lambda_function.telemetry_content.function_name
+      authorization_type = "AWS_IAM"
+    }
+
+    resource "aws_ssm_parameter" "telemetry_content_url" {
+      name  = "/agent-platform/ducklake/telemetry_content_reader_url"
+      type  = "String"
+      value = aws_lambda_function_url.telemetry_content.function_url
+
+      tags = {
+        Name    = "DuckLake Telemetry Content Reader URL"
+        Purpose = "Decision 239 endpoint discovery"
+      }
+    }
+
+    resource "aws_cloudwatch_log_metric_filter" "telemetry_content_unexpected_invoker" {
+      # Any reader but PlatformDev, the deploy role included (its describe writes no line); role "unknown", the access
+      # log's fallback line, matches on purpose.
+      name           = "platform-security-telemetry-content-unexpected-invoker"
+      log_group_name = aws_cloudwatch_log_group.telemetry_content.name
+      pattern        = "{ ($.event = \"telemetry_content_read\") && ($.role != \"PlatformDev\") }"
+
+      metric_transformation {
+        name          = "TelemetryContentUnexpectedInvoker"
+        namespace     = "AgentPlatform/TelemetryContent"
+        value         = "1"
+        default_value = "0"
+      }
+    }
+
+    resource "aws_cloudwatch_metric_alarm" "telemetry_content_unexpected_invoker" {
+      alarm_name          = "platform-security-telemetry-content-unexpected-invoker"
+      alarm_description   = "A content read by a role other than PlatformDev (Decision 239 cl.6). Who read what: Logs Insights on platform-security-telemetry-content-access, filter event = 'telemetry_content_read' | stats count() by role, verb, session_id."
+      namespace           = "AgentPlatform/TelemetryContent"
+      metric_name         = aws_cloudwatch_log_metric_filter.telemetry_content_unexpected_invoker.metric_transformation[0].name
+      statistic           = "Sum"
+      period              = 300
+      evaluation_periods  = 1
+      threshold           = 1
+      comparison_operator = "GreaterThanOrEqualToThreshold"
+      treat_missing_data  = "notBreaching"
+      alarm_actions       = [local.telemetry_content_alerts_topic_arn]
+    }
+
+    resource "aws_cloudwatch_metric_alarm" "telemetry_content_errors" {
+      alarm_name          = "platform-security-telemetry-content-errors"
+      alarm_description   = "DuckLake telemetry content reader: AWS/Lambda Errors plus Url5xxCount > 0 over 15m (loud-fail posture, Decision 55). The placeholder's 503 before the first approved deploy pages too."
+      comparison_operator = "GreaterThanThreshold"
+      evaluation_periods  = 1
+      threshold           = 0
+      treat_missing_data  = "notBreaching"
+
+      metric_query {
+        id = "m1"
+
+        metric {
+          metric_name = "Errors"
+          namespace   = "AWS/Lambda"
+          period      = 900
+          stat        = "Sum"
+
+          dimensions = {
+            FunctionName = aws_lambda_function.telemetry_content.function_name
+          }
+        }
+      }
+
+      metric_query {
+        id = "m2"
+
+        metric {
+          metric_name = "Url5xxCount"
+          namespace   = "AWS/Lambda"
+          period      = 900
+          stat        = "Sum"
+
+          dimensions = {
+            FunctionName = aws_lambda_function.telemetry_content.function_name
+          }
+        }
+      }
+
+      metric_query {
+        id          = "e1"
+        expression  = "FILL(m1, 0) + FILL(m2, 0)"
+        label       = "errors plus url 5xx"
+        return_data = true
+      }
+
+      alarm_actions = [local.telemetry_content_alerts_topic_arn]
+      ok_actions    = [local.telemetry_content_alerts_topic_arn]
+    }
+  - |-
+    PINNED-2 (operator-approved, verbatim): terraform/bootstrap/telemetry_content_deploy_role.tf, the whole file.
+    # Telemetry content deploy role (Decision 239 cl.5; rec-4696).
+    #
+    # The only identity the CI apply boundary's DenyTelemetryContentChange lets change the content reader. Trust is ONE
+    # statement: StringEquals on aud, the telemetry-content-deploy Environment sub (a required reviewer, admin bypass off,
+    # main-only deployment policy; terraform/github/environments.tf) and job_workflow_ref naming the deploy workflow at
+    # refs/heads/main (local.telemetry_content_workflow_refs, evaluated by validate_github_org_transfer's
+    # content_deploy_workflow_ref row). No StringLike, no ref or pull_request sub. Its name shares the content prefix, so the boundary's
+    # role resource refuses every other boundary carrier any IAM write or PassRole on it.
+    #
+    # Grants: code and configuration on the content function, the two DuckLake layers' digests, the URL and URL-only invoke
+    # for the served-verb check. No iam, PassRole, PublishVersion, concurrency, URL-config, permission or S3 verb, and no
+    # statement names PlatformDev or PlatformAdmin (Decision 225 cl.1).
+
+    locals {
+      telemetry_content_workflow_refs = [
+        "otl-labs/ontheloop/.github/workflows/deploy-telemetry-content.yml@refs/heads/main",
+      ]
+    }
+
+    resource "aws_iam_role" "telemetry_content_deploy" {
+      name                 = "agent-platform-ducklake-telemetry-content-deploy"
+      description          = "Telemetry content reader deploy: the reviewer-gated telemetry-content-deploy Environment job on main only"
+      permissions_boundary = "arn:aws:iam::${var.account_id}:policy/agent-platform-github-ci-apply-boundary"
+
+      assume_role_policy = jsonencode({
+        Version = "2012-10-17"
+        Statement = [
+          {
+            Effect = "Allow"
+            Principal = {
+              Federated = "arn:aws:iam::${var.account_id}:oidc-provider/token.actions.githubusercontent.com"
+            }
+            Action = "sts:AssumeRoleWithWebIdentity"
+            Condition = {
+              StringEquals = {
+                "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+                "token.actions.githubusercontent.com:sub" = [
+                  for repo in local.github_repos : "repo:${repo}:environment:telemetry-content-deploy"
+                ]
+                "token.actions.githubusercontent.com:job_workflow_ref" = local.telemetry_content_workflow_refs
+              }
+            }
+          }
+        ]
+      })
+    }
+
+    locals {
+      telemetry_content_deploy_policy_json = jsonencode({
+        Version = "2012-10-17"
+        Statement = [
+          {
+            Sid    = "DeployCode"
+            Effect = "Allow"
+            Action = [
+              "lambda:GetFunction",
+              "lambda:GetFunctionConfiguration",
+              "lambda:UpdateFunctionCode",
+              "lambda:UpdateFunctionConfiguration",
+            ]
+            Resource = ["arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_content_function}"]
+          },
+          {
+            Sid    = "LayerRead"
+            Effect = "Allow"
+            Action = ["lambda:GetLayerVersion"]
+            Resource = [
+              "arn:aws:lambda:${var.aws_region}:${var.account_id}:layer:ducklake-deps:*",
+              "arn:aws:lambda:${var.aws_region}:${var.account_id}:layer:ducklake-extensions:*",
+            ]
+          },
+          {
+            Sid      = "UrlRead"
+            Effect   = "Allow"
+            Action   = ["lambda:GetFunctionUrlConfig"]
+            Resource = ["arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_content_function}"]
+          },
+          {
+            Sid    = "InvokeUrl"
+            Effect = "Allow"
+            Action = ["lambda:InvokeFunctionUrl"]
+            Resource = [
+              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_content_function}",
+              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_content_function}:*",
+            ]
+          },
+          {
+            # Decision 213 cl.1: an invoke through the URL also needs InvokeFunction, granted for the URL path only.
+            Sid    = "InvokeViaUrlOnly"
+            Effect = "Allow"
+            Action = ["lambda:InvokeFunction"]
+            Resource = [
+              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_content_function}",
+              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_content_function}:*",
+            ]
+            Condition = {
+              Bool = {
+                "lambda:InvokedViaFunctionUrl" = "true"
+              }
+            }
+          },
+        ]
+      })
+    }
+
+    resource "aws_iam_role_policy" "telemetry_content_deploy" {
+      name = "TelemetryContentDeploy"
+      role = aws_iam_role.telemetry_content_deploy.id
+
+      policy = local.telemetry_content_deploy_policy_json
+
+      lifecycle {
+        precondition {
+          # AWS measures the whitespace-stripped document against the 10,240 B inline-policy limit (rec-2793).
+          condition     = length(jsonencode(jsondecode(local.telemetry_content_deploy_policy_json))) <= 10240
+          error_message = "Telemetry content deploy inline policy exceeds the 10,240 B IAM inline-policy limit (whitespace-stripped measure, rec-2793)."
+        }
+      }
+    }
+  - |-
+    PINNED-3 (operator-approved, verbatim): the boundary, PlatformDev and trail edits, as a unified diff against main.
+    diff --git a/terraform/bootstrap/github_ci_apply_boundary.tf b/terraform/bootstrap/github_ci_apply_boundary.tf
+    index ee0a3747..7cc32e54 100644
+    --- a/terraform/bootstrap/github_ci_apply_boundary.tf
+    +++ b/terraform/bootstrap/github_ci_apply_boundary.tf
+    @@ -168,6 +168,6 @@ locals {
+             # URL-only invariant (Decision 213 cl.1). A handler that trusts requestContext.authorizer.iam is safe
+             # only while every non-URL path to it is closed, so the three statements here and below close those
+    -        # paths for the DuckLake writer, reader and telemetry writer. The telemetry writer is named before
+    -        # its function exists, which IAM accepts. lambda:InvokedViaFunctionUrl is false on a direct call and
+    +        # paths for the DuckLake writer, reader and every telemetry function. Each prefix (writer*, reader*)
+    +        # covers the function and every qualifier; it widens a Deny only to a future function of that prefix. lambda:InvokedViaFunctionUrl is false on a direct call and
+             # true through the Function URL (live-verified 2026-10-06); BoolIfExists also denies a call that
+             # carries no such key at all.
+    @@ -179,8 +179,6 @@ locals {
+             ]
+             Resource = [
+    -          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer",
+    -          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer:*",
+    -          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader",
+    -          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader:*",
+    +          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer*",
+    +          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader*",
+               "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-*",
+             ]
+    @@ -206,8 +204,6 @@ locals {
+             ]
+             Resource = [
+    -          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer",
+    -          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer:*",
+    -          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader",
+    -          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader:*",
+    +          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer*",
+    +          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader*",
+               "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-*",
+             ]
+    @@ -228,8 +224,6 @@ locals {
+               ArnLike = {
+                 "lambda:FunctionArn" = [
+    -              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer",
+    -              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer:*",
+    -              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader",
+    -              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader:*",
+    +              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer*",
+    +              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader*",
+                   "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-*",
+                 ]
+    @@ -259,4 +253,5 @@ locals {
+                   "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-writer",
+                   "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-reader",
+    +              "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-content",
+                   "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-maintenance"
+                 ]
+    @@ -264,4 +259,38 @@ locals {
+             }
+           },
+    +      {
+    +        # Decision 239 cl.5: the content reader's change lock. No boundary carrier but the deploy role, which only the
+    +        # reviewer-gated telemetry-content-deploy Environment can assume, may change the content function's code,
+    +        # configuration, permissions, aliases, concurrency or tags, or write, pass or tag its execution or deploy role.
+    +        # PlatformAdmin and root sit outside the boundary (Decision 144 cl.3).
+    +        Sid    = "DenyTelemetryContentChange"
+    +        Effect = "Deny"
+    +        Action = [
+    +          "lambda:Create*",
+    +          "lambda:Delete*",
+    +          "lambda:Publish*",
+    +          "lambda:Put*",
+    +          "lambda:Update*",
+    +          "lambda:TagResource",
+    +          "lambda:UntagResource",
+    +          "iam:Attach*",
+    +          "iam:Delete*",
+    +          "iam:Detach*",
+    +          "iam:PassRole",
+    +          "iam:Put*",
+    +          "iam:Tag*",
+    +          "iam:Untag*",
+    +          "iam:Update*"
+    +        ]
+    +        Resource = [
+    +          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-content*",
+    +          "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-content*"
+    +        ]
+    +        Condition = {
+    +          ArnNotLike = {
+    +            "aws:PrincipalArn" = "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-content-deploy"
+    +          }
+    +        }
+    +      },
+           {
+             # Presigned PUTs execute as the signing role, so only the writer and its smoke twin may put a blob.
+    diff --git a/terraform/bootstrap/platform_dev_policies.tf b/terraform/bootstrap/platform_dev_policies.tf
+    index 796b4e2f..c4b2c58c 100644
+    --- a/terraform/bootstrap/platform_dev_policies.tf
+    +++ b/terraform/bootstrap/platform_dev_policies.tf
+    @@ -50,5 +50,5 @@ locals {
+             # T2.19 recs cutover: the ops portal runs as PlatformDev at RUNTIME and reaches the closed
+             # DuckLake boundary by SigV4-invoking the writer/reader AWS_IAM Function URLs. Decision 213
+    -        # adds the telemetry writer and reader. Two statements because the permissions boundary denies a direct
+    +        # adds the telemetry writer and reader, Decision 239 cl.1 the masked content reader. Two statements because the permissions boundary denies a direct
+             # invoke (DenyDuckLakeDirectInvoke) and InvokeFunction here carries Bool
+             # lambda:InvokedViaFunctionUrl = true, so it authorizes only the URL path.
+    @@ -65,4 +65,6 @@ locals {
+               "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}",
+               "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}:*",
+    +          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_content_function}",
+    +          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_content_function}:*",
+             ]
+           },
+    @@ -80,4 +82,6 @@ locals {
+               "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}",
+               "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}:*",
+    +          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_content_function}",
+    +          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_content_function}:*",
+             ]
+             Condition = {
+    diff --git a/terraform/bootstrap/platform_security_trail.tf b/terraform/bootstrap/platform_security_trail.tf
+    index 326773db..d5ef4ed6 100644
+    --- a/terraform/bootstrap/platform_security_trail.tf
+    +++ b/terraform/bootstrap/platform_security_trail.tf
+    @@ -198,5 +198,5 @@ resource "aws_cloudtrail" "platform_security" {
+       # Decision 213 cl.4: Lambda data events for the identity-trusting DuckLake functions, so a denied
+       # direct invoke leaves a record. CloudTrail data-resource values are exact ARN strings; the telemetry
+    -  # writer, smoke twin and reader are named before their functions exist. The management selector above is
+    +  # writer, smoke twin and reader are named before their functions exist; Decision 239 adds the content reader. The management selector above is
+       # unchanged, so the Decision 202 detectors keep their inputs.
+       event_selector {
+    @@ -212,4 +212,5 @@ resource "aws_cloudtrail" "platform_security" {
+             "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-writer-smoke",
+             "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-reader",
+    +        "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-content",
+           ]
+         }
+  - |-
+    PINNED-4 (operator-approved, verbatim except the one id): terraform/github, as a unified diff against main. OPERATOR_REPORTED_POLICY_ID is the numeric id the operator reports.
+    diff --git a/terraform/github/environments.tf b/terraform/github/environments.tf
+    index 3727bf5a..30caab3b 100644
+    --- a/terraform/github/environments.tf
+    +++ b/terraform/github/environments.tf
+    @@ -104,2 +104,38 @@ resource "github_repository_environment" "deployment_approval_probe" {
+       }
+     }
+    +
+    +# GitHub Environment: telemetry-content-deploy (Decision 239 cl.5; rec-4696).
+    +#
+    +# The change lock's approval gate. Only the deploy job of deploy-telemetry-content.yml names it, and only that job, on
+    +# main, can assume agent-platform-ducklake-telemetry-content-deploy (sub and job_workflow_ref, terraform/bootstrap), the
+    +# one identity the CI apply boundary lets change the content reader. The job waits for the required reviewer;
+    +# prevent_self_review is false because the operator is the sole reviewer, and can_admins_bypass is false because the
+    +# session credential reads as a repository admin (rec-4695's probe). Never "protected branches only": main is a
+    +# ruleset, not classic protection, so the explicit main policy below is what keeps other branches out. Destroying this
+    +# Environment fails open for the same reason as tf_gated_apply. The operator created it in Settings before the build;
+    +# the import blocks key it (the root's apply stays the operator's, rec-4355).
+    +resource "github_repository_environment" "telemetry_content_deploy" {
+    +  repository          = github_repository.this.name
+    +  environment         = "telemetry-content-deploy"
+    +  prevent_self_review = false
+    +  can_admins_bypass   = false
+    +
+    +  reviewers {
+    +    users = var.gated_apply_reviewer_user_ids
+    +  }
+    +
+    +  deployment_branch_policy {
+    +    protected_branches     = false
+    +    custom_branch_policies = true
+    +  }
+    +
+    +  lifecycle {
+    +    prevent_destroy = true
+    +  }
+    +}
+    +
+    +resource "github_repository_environment_deployment_policy" "telemetry_content_deploy_main" {
+    +  repository     = github_repository.this.name
+    +  environment    = github_repository_environment.telemetry_content_deploy.environment
+    +  branch_pattern = "main"
+    +}
+    diff --git a/terraform/github/imports.tf b/terraform/github/imports.tf
+    index 0a7689a2..82688dfc 100644
+    --- a/terraform/github/imports.tf
+    +++ b/terraform/github/imports.tf
+    @@ -42,2 +42,12 @@ import {
+       id = "${var.repository_name}:deployment-approval-probe"
+     }
+    +
+    +import {
+    +  to = github_repository_environment.telemetry_content_deploy
+    +  id = "${var.repository_name}:telemetry-content-deploy"
+    +}
+    +
+    +import {
+    +  to = github_repository_environment_deployment_policy.telemetry_content_deploy_main
+    +  id = "${var.repository_name}:telemetry-content-deploy:${var.telemetry_content_deploy_main_policy_id}"
+    +}
+    diff --git a/terraform/github/variables.tf b/terraform/github/variables.tf
+    index 4c28a7a0..6c705444 100644
+    --- a/terraform/github/variables.tf
+    +++ b/terraform/github/variables.tf
+    @@ -29,4 +29,10 @@ variable "tf_trusted_plan_main_policy_id" {
+     }
+
+    +variable "telemetry_content_deploy_main_policy_id" {
+    +  description = "Numeric id of the telemetry-content-deploy main deployment branch policy, used only by its import block. Re-read it from the API after a transfer."
+    +  type        = number
+    +  default     = OPERATOR_REPORTED_POLICY_ID
+    +}
+    +
+     variable "admin_bypass_actor_id" {
+       description = "GitHub actor ID granted ruleset bypass. Use 5 for the built-in Repository Admin role (anyone with admin permission). Supplied at apply time."
+  - |-
+    PINNED-5 (operator-approved, verbatim): .github/workflows/deploy-telemetry-content.yml, the whole file.
+    name: deploy-telemetry-content
+
+    # The masked telemetry content reader's only deploy path (Decision 239 cl.5, rec-4696). The build job holds no AWS
+    # credential and no Environment: it checks the Environment's settings, lists the commits since the last approved
+    # deploy, honours the production column hold and records the zip's digest. The deploy job waits in the
+    # reviewer-gated telemetry-content-deploy Environment; once the operator approves, it assumes
+    # agent-platform-ducklake-telemetry-content-deploy (the one identity the CI apply boundary lets change the function)
+    # and deploys exactly the recorded digest with deploy_config.json's handler, layers and environment. It runs no pip
+    # install and no repo Python while it holds the role.
+    #
+    # check-environment and change-summary are evidence for the operator, not controls (the script is repo code); the
+    # controls are the Environment's protection rules and the role's trust. A newer push cancels an older run, so the
+    # operator approves only the latest; a cancel between the configuration and code updates leaves approved configuration
+    # beside the previously approved code until the next approved run. A rejected or cancelled run is an operator action
+    # (ci_rca excluded); a pending approval never blocks another merge or deploy (Decision 93 note).
+
+    on:
+      push:
+        branches: [main]
+        paths:
+          - '.github/workflows/deploy-telemetry-content.yml'
+          - 'config/lambda/ducklake/field_semantics.static.yaml'
+          - 'config/lambda/ducklake/field_semantics.yaml'
+          - 'config/lambda/ducklake/version.yaml'
+          - 'scripts/__init__.py'
+          - 'scripts/aws_profile.py'
+          - 'scripts/ci/telemetry_content_deploy.sh'
+          - 'src/__init__.py'
+          - 'src/common/__init__.py'
+          - 'src/common/ducklake_content_read_verbs.py'
+          - 'src/common/ducklake_control_tables.py'
+          - 'src/common/ducklake_event_content.py'
+          - 'src/common/ducklake_event_read_sql.py'
+          - 'src/common/ducklake_event_read_verbs.py'
+          - 'src/common/ducklake_event_reads.py'
+          - 'src/common/ducklake_handler_errors.py'
+          - 'src/common/ducklake_metrics.py'
+          - 'src/common/ducklake_named_reads.py'
+          - 'src/common/ducklake_partition_spec.py'
+          - 'src/common/ducklake_read_deadline.py'
+          - 'src/common/ducklake_reads.py'
+          - 'src/common/ducklake_runtime.py'
+          - 'src/common/ducklake_scd2_schema.py'
+          - 'src/common/ducklake_spike.py'
+          - 'src/common/ducklake_tables.py'
+          - 'src/common/ducklake_telemetry_blobstore.py'
+          - 'src/common/ducklake_version.py'
+          - 'src/common/ducklake_write_rules.py'
+          - 'src/common/ducklake_write_verbs.py'
+          - 'src/common/ducklake_writes.py'
+          - 'src/lambdas/__init__.py'
+          - 'src/lambdas/ducklake_telemetry_content_reader/__init__.py'
+          - 'src/lambdas/ducklake_telemetry_content_reader/access_log.py'
+          - 'src/lambdas/ducklake_telemetry_content_reader/deploy_config.json'
+          - 'src/lambdas/ducklake_telemetry_content_reader/handler.py'
+          - 'src/lambdas/ducklake_telemetry_content_reader/manifest.yaml'
+          - 'src/lambdas/ducklake_telemetry_content_reader/masked.py'
+          - 'src/row_rules/__init__.py'
+          - 'src/row_rules/rules.py'
+          - 'src/sensitive_values/__init__.py'
+          - 'src/sensitive_values/classes.py'
+          - 'src/sensitive_values/engine.py'
+          - 'src/sensitive_values/profiles.py'
+          - 'src/telemetry/__init__.py'
+          - 'src/telemetry/blobs.py'
+          - 'src/telemetry/identity.py'
+          - 'src/telemetry/request.py'
+          - 'src/telemetry/timestamps.py'
+      workflow_dispatch:
+
+    permissions:
+      contents: read
+
+    concurrency:
+      group: deploy-telemetry-content
+      cancel-in-progress: true
+
+    jobs:
+      build:
+        if: github.ref == 'refs/heads/main'
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        permissions:
+          contents: read
+          deployments: read
+          actions: read
+        outputs:
+          held: ${{ steps.hold.outputs.held }}
+          sha256: ${{ steps.build.outputs.sha256 }}
+        steps:
+          - uses: actions/checkout@v7
+            with:
+              persist-credentials: false
+              fetch-depth: 0
+
+          - name: Environment settings (required reviewer, admin bypass off, main-only policy)
+            env:
+              GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            run: bash scripts/ci/telemetry_content_deploy.sh check-environment
+
+          - name: Commits since the last approved deploy
+            env:
+              GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            run: bash scripts/ci/telemetry_content_deploy.sh change-summary
+
+          - uses: actions/setup-python@v7
+            with:
+              python-version: '3.12'
+
+          - name: Install build_lambda runtime deps (the repo's pinned versions)
+            run: pip install -c requirements.txt pyyaml pydantic
+
+          - name: Production column hold (a declared telemetry column still awaiting its production add)
+            # The deploy-ducklake-lambdas.yml precedent: production telemetry code never ships ahead of the owner-login
+            # column add. A hold is a green skip; the deploy job never asks the operator to approve a held run.
+            id: hold
+            run: |
+              set -euo pipefail
+              python -m scripts.checks.ops_governance.validate_reconcile_pending_gate --telemetry-hold | tee -a "$GITHUB_OUTPUT"
+              if grep -qx 'held=true' "$GITHUB_OUTPUT"; then
+                echo "::notice::TELEMETRY_PRODUCTION_HOLD - the content reader is not deployed until the pending column is added (docs/contracts/deploy-paths.yaml, code-deploy recovery)."
+              fi
+
+          - name: Build the content reader (no AWS credentials)
+            id: build
+            run: |
+              set -euo pipefail
+              python -m scripts.build_lambda --content-reader-only | tee build.log
+              echo "sha256=$(sed -n 's/^CONTENT_READER_SHA256 //p' build.log)" >> "$GITHUB_OUTPUT"
+
+          - name: Upload the content zip under its digest
+            uses: actions/upload-artifact@v7
+            with:
+              name: telemetry-content-${{ steps.build.outputs.sha256 }}
+              path: lambda-packages/ducklake-telemetry-content-reader.zip
+              if-no-files-found: error
+              retention-days: 30
+
+      deploy:
+        needs: build
+        if: github.ref == 'refs/heads/main' && needs.build.outputs.held == 'false'
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        environment: telemetry-content-deploy
+        permissions:
+          id-token: write
+          contents: read
+        steps:
+          - uses: actions/checkout@v7
+            with:
+              persist-credentials: false
+
+          - uses: ./.github/actions/aws-region
+
+          - uses: actions/download-artifact@v8
+            with:
+              name: telemetry-content-${{ needs.build.outputs.sha256 }}
+              path: artifact
+
+          - name: Assume the content deploy role (operator-approved run on main only)
+            uses: aws-actions/configure-aws-credentials@v6
+            env:
+              MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+            with:
+              role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-ducklake-telemetry-content-deploy
+              aws-region: ${{ env.AWS_REGION }}
+
+          - name: Deploy the recorded digest with deploy_config.json
+            env:
+              CONTENT_SHA256: ${{ needs.build.outputs.sha256 }}
+            run: bash scripts/ci/telemetry_content_deploy.sh deploy artifact/ducklake-telemetry-content-reader.zip "$CONTENT_SHA256"
+
+          - name: Served verbs are exactly the two masked verbs
+            run: bash scripts/ci/telemetry_content_deploy.sh describe
+  - |-
+    PINNED-6 (operator-approved, verbatim): .github/CODEOWNERS, as a unified diff against main.
+    diff --git a/.github/CODEOWNERS b/.github/CODEOWNERS
+    index 12080c03..a124bb26 100644
+    --- a/.github/CODEOWNERS
+    +++ b/.github/CODEOWNERS
+    @@ -35 +35,8 @@
+     /tests/lambdas/ducklake_telemetry_content_reader/ @benjamin-blake
+    +
+    +# rec-4696 / Decision 239 cl.5: the content reader's change lock (deploy workflow, deploy script, edit hook, repo check).
+    +# Procedural until rec-2827; the binding control is the reviewer-gated telemetry-content-deploy Environment.
+    +/.github/workflows/deploy-telemetry-content.yml @benjamin-blake
+    +/scripts/ci/telemetry_content_deploy.sh @benjamin-blake
+    +/.claude/hooks/protected_path_guard.py @benjamin-blake
+    +/scripts/checks/ci_guards/validate_content_reader_lock.py @benjamin-blake
+  - |-
+    PINNED-7 (operator-approved, verbatim): docs/DECISIONS.md, three dated trailers, as a unified diff against main.
+    diff --git a/docs/DECISIONS.md b/docs/DECISIONS.md
+    index 954541c9..ccfd0507 100644
+    --- a/docs/DECISIONS.md
+    +++ b/docs/DECISIONS.md
+    @@ -92,6 +92,9 @@ conditions:
+     ```
+
+     **Related:** Decisions 236, 230, 126, 81, 91 (amended), 143, 154, 181, 199, 213, 235, 238, 101.
+    +
+    +[Amendment 2026-10-29: cl.4's log group, with the content reader's metric filter and alarms, joins the platform-security-* name family (amends Decision 101 point (b) and Decision 202 cl.3), so no CI identity holds a write or log-event read grant on them. cl.6 gains a residual: CI publishes the two DuckLake layers, so a layer pin proves which bytes run, not who built them (owner rec-4742). rec-4696.]
+    +
+     ---
+
+     ## Decision 238: No agent-controlled identity reads Terraform state or saved plans -- the speculative plan runs from main's workflow on pull_request_target under a dedicated environment- and workflow-bound role and shows names only (amends Decisions 92 and 144) (Decided)
+    @@ -2546,6 +2549,8 @@ Roadmap refs: rec-4044, rec-4049, rec-4067.
+     >
+     > **Update (2026-10-18):** Clause 6's "email until rec-4049 lands" is discharged by Decision 225: CI holds no IAM grant on PlatformDev, so the platform-role alarm has no sanctioned CI source. Alerts stay unfiltered by actor.
+
+    +[Amendment 2026-10-29, Decision 239: clause 3's detector resources include the telemetry content reader's log group, metric filter and alarms in terraform/bootstrap.]
+    +
+     ---
+
+     ## Decision 201: Closure-time acceptance-verdict precondition -- a verdict LAYER asserted at update_rec, with a static evaluator wired in (amends Decision 103, 186) (Decided)
+    @@ -9035,6 +9040,8 @@ is explicitly deferred. This session's only artefacts are this decision and `doc
+
+     [Amendment 2026-10-27, Decision 237: point (b) gains the /secret/ SSM name family for secret values, a deliberate exclusion from /agent-platform/*.]
+
+    +[Amendment 2026-10-29, Decision 239: point (b)'s platform-security-* family also covers the telemetry content reader's log group, metric filter and alarms in terraform/bootstrap.]
+    +
+     ---
+
+     ## Decision 100: Managed services own their primitives -- no client-tooling substitution for native operations (Decided)
+  - |-
+    PINNED-8 (operator-approved, verbatim bytes): terraform/bootstrap/telemetry_content_placeholder.zip, 313 B, sha256
+    dd77e55379f28eaab8235d072c8c496850f4bd276c314020eb18caf04092c0f0. Write it with:
+    printf '%s' 'UEsDBBQAAAAIAAAAIQCR2pARZwAAAHQAAAA4AAAAc3JjL2xhbWJkYXMvZHVja2xha2VfdGVsZW1ldHJ5X2NvbnRlbnRfcmVhZGVyL2hhbmRsZXIucHkdyzEKg0AQRuHeUwxTJWAhSBrbXGNhWZ0/pJCZMI6iiHd3yeu+4gk+9C0qM/yBDRotTaaBPZ5DQzVHrK508hIl1uVtAh7o1fUt8WhyVPCZGO7mqSLx/9fIjiLwrBZZ8JvtgCS++GpuUEsBAhQDFAAAAAgAAAAhAJHakBFnAAAAdAAAADgAAAAAAAAAAAAAAKQBAAAAAHNyYy9sYW1iZGFzL2R1Y2tsYWtlX3RlbGVtZXRyeV9jb250ZW50X3JlYWRlci9oYW5kbGVyLnB5UEsFBgAAAAABAAEAZgAAAL0AAAAAAA==' | base64 -d > terraform/bootstrap/telemetry_content_placeholder.zip  # pragma: allowlist secret
+    Its one member, src/lambdas/ducklake_telemetry_content_reader/handler.py, reads:
+    def handler(event, context):
+        return {"statusCode": 503, "body": "{\"error\": \"content_reader_not_deployed\"}"}
+  - >-
+    STEP 1: the bootstrap files, verbatim from PINNED-1 to PINNED-3 (create telemetry_content_reader.tf and
+    telemetry_content_deploy_role.tf; edit the boundary, PlatformDev and the trail), the placeholder zip from PINNED-8
+    and its .gitignore negation. Write the IAM pins test with test_rendered_boundary_under_review_trigger; it pins
+    PINNED-8's digest and member.
+  - "STEP 2: terraform/personal concurrency and its pins (incl. the red case's mutation); terraform/github from PINNED-4 with the operator-reported policy id as the default; the import-blocks test's planned change."
+  - "STEP 3: build_lambda --content-reader-only and its test; deploy_config.json (read layer versions and CodeSha256 with --profile agent_platform where it can, else from the latest DuckLake deploy run) and its test."
+  - "STEP 4: the deploy script and its test; the workflow verbatim from PINNED-5 and its test; the shell-body baseline, taxonomy rows and github-actions-evidence row; the org-transfer contract's compaction (VP 18), then its rows, evaluator and test."
+  - "STEP 5: the lock check (with its Decision 170 accounting declaration), its manifest entry and test; PROTECTED, CODEOWNERS (PINNED-6) and boundary_patterns and their test; the hook, its .gitignore marker, settings, hooks.json render and test. Then declare this plan in .claude/protected_edit_plan."
+  - "STEP 6: docs/DECISIONS.md, PINNED-7's three trailers verbatim (VP 19); contracts (build-lambda and deploy-paths with amendment_log rows, the content reader contract, the shared simulate fixture's compaction then its three rows, VP 16); manifest flip to active, the handler docstring and the packaging test's planned changes."
+  - "STEP 7: the golden content module, the gates flag and their test file."
+  - >-
+    STEP 8: VP 1-3, VP 16, VP 18, VP 19, VP 21 and VP 14 (the full tier); VP 1's graduation registry shard. Open the PR, run VP 4-9 on the
+    operator's direction, and merge on code review PROCEED, green CI and the gate evidence. The pinned text was
+    approved in the planning thread; a diff from it goes back to the operator before merge.
+  - "STEP 9: Post-merge walk with the operator: VP 10-13, 15, 17 and 20. The squash body carries `Resolves: rec-4696`; the walk evidence is a counts-only comment on the merged PR."
+  - 'Report: what was implemented, verification results'
+rollback: >-
+  Before the bootstrap apply: revert the squash commit. Nothing is deployed, and the environment is inert without the
+  role. After: the operator, in a bootstrap apply, removes the deploy role and the function, then the boundary
+  statement and the grants. The access log group stays, and so does its resource block (prevent_destroy guards only
+  while the block exists): destroying a platform-security-* resource is break-glass (Decision 202), and PlatformAdmin
+  holds no DeleteLogGroup there, so a rollback that deleted the block would fail partway. The workflow is reverted in the same
+  change, and the reader concurrency goes back to 5. Until then, refusing pending runs keeps the function on its last
+  approved code.

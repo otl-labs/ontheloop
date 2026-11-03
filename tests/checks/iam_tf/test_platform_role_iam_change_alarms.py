@@ -8,6 +8,8 @@ no region literal or provider alias; and no CI identity statement able to write 
 heartbeat alarm is now fed by platform-security-heartbeat-canary (its own declaration, roles, cadence
 and grant are pinned by test_platform_security_heartbeat_canary.py); this module covers the re-shaped
 alarm, the tamper pattern's scheduler-write clause and the extended CI-reach check.
+Denied IAM calls carry requestParameters null, so the role-change filter also matches the role
+CloudTrail names in errorMessage, and the fixture's denied events must carry that real shape.
 Every predicate returns a problem list, so each red case drives the real predicate.
 """
 
@@ -19,7 +21,6 @@ from pathlib import Path
 from typing import Callable
 
 import pytest
-import yaml
 
 from scripts.checks.iam_tf import _read_coverage as rc
 from tests.checks.iam_tf._platform_security_hcl import (
@@ -27,9 +28,17 @@ from tests.checks.iam_tf._platform_security_hcl import (
     _block_body,
     _local_map,
     _local_string,
+    _mask,
     _resource_body,
     _resources,
     _strip_comments,
+)
+from tests.checks.iam_tf._platform_security_patterns import (
+    ALARMS,
+    HEARTBEAT,
+    fixture_problems,
+    pattern_problems,
+    triage_problems,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -56,16 +65,7 @@ def _alarm_names(alarms_text: str) -> set[str]:
     return names
 
 
-ALARMS = {
-    "platform-security-platform-role-iam-change",
-    "platform-security-denied-iam-write",
-    "platform-security-detector-tamper",
-    "platform-security-alerts-topic-change",
-    "platform-security-iam-event-heartbeat",
-}
-HEARTBEAT = "platform-security-iam-event-heartbeat"
 TOPIC_TEMPLATE = "arn:aws:sns:${var.aws_region}:${var.account_id}:agent-platform-alerts"
-_REGEX_ALLOWED = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:_#=@/;,-^$?[]{}|\\*+.")
 _REGION_RE = re.compile(r"\b[a-z]{2}(?:-gov)?-(?:north|south|east|west|central|northeast|southeast|northwest|southwest)-\d\b")
 _READ_VERB_PREFIXES = ("Get", "Describe", "List", "Lookup", "Filter", "Test")
 _DETECTOR_TARGETS = (
@@ -115,7 +115,11 @@ def trail_problems(trail_text: str) -> list[str]:
         for a in ("is_multi_region_trail", "include_global_service_events", "enable_log_file_validation", "enable_logging")
         if not _is_true(body, a)
     ]
-    if not re.search(r'read_write_type\s*=\s*"All"', body) or not re.search(r"include_management_events\s*=\s*true", body):
+    selectors = [_block_body(body, m.end() - 1) for m in re.finditer(r"\bevent_selector\s*\{", _mask(body))]
+    if not any(
+        re.search(r'read_write_type\s*=\s*"All"', s) and re.search(r"include_management_events\s*=\s*true", s)
+        for s in selectors
+    ):
         problems.append("trail does not log All management events")
     if "aws_cloudwatch_log_group.platform_security_trail.arn" not in (_attr(body, "cloud_watch_logs_group_arn") or ""):
         problems.append("trail does not deliver to the platform-security log group")
@@ -200,92 +204,6 @@ def alarm_problems(alarms_text: str) -> list[str]:
                 "threshold": "1",
             }
         problems += [f"{name}: {a} = {get(a)} (expected {v})" for a, v in expected.items() if get(a) != v]
-    return problems
-
-
-def _role_regex_problems(pattern: str) -> list[str]:
-    m = re.search(r"\$\.requestParameters\.roleName\s*=\s*%([^%]*)%", pattern)
-    if m is None:
-        return ["role-change filter lacks a regex roleName clause"]
-    span = m.group(1)
-    alts = span.split("|")
-    if len(alts) != 2 or not all(re.fullmatch(r"\^(?:\[[A-Za-z]{2}\])+\$", a) for a in alts):
-        return ["roleName regex is not two anchored character-class alternatives"]
-    rx = re.compile(span)
-    hits = ["PlatformDev", "platformdev", "PLATFORMDEV", "PlatformAdmin", "platformadmin", "pLaTfOrMaDmIn"]
-    misses = ["agent-platform-github-ci-branch", "PlatformDevX", "xPlatformAdmin", "PlatformAdm"]
-    return [f"roleName regex misses {n}" for n in hits if not rx.fullmatch(n)] + [
-        f"roleName regex matches {n}" for n in misses if rx.fullmatch(n)
-    ]
-
-
-_REQUIRED_CLAUSES = {
-    "platform-security-platform-role-iam-change": (
-        '$.eventSource = "iam.amazonaws.com"',
-        "$.readOnly IS FALSE",
-        '"*:policy/agent-platform-github-ci-apply-boundary"',
-        '"*:policy/platform-security-detector-admin"',
-        '"CreatePolicyVersion"',
-        '"SetDefaultPolicyVersion"',
-        '"DeletePolicy"',
-    ),
-    "platform-security-denied-iam-write": (
-        '$.eventSource = "iam.amazonaws.com"',
-        "$.readOnly IS FALSE",
-        '$.errorCode = "AccessDenied*"',
-    ),
-    "platform-security-detector-tamper": (
-        '$.eventSource = "cloudtrail.amazonaws.com"',
-        '$.requestParameters.roleName = "platform-security-*"',
-        '$.requestParameters.logGroupName = "platform-security-*"',
-        '$.eventName != "CreateLogStream"',
-        '$.requestParameters.bucketName = "platform-security-trail-*"',
-        '$.requestParameters.alarmName = "platform-security-*"',
-        '"DeleteAlarms"',
-        '"DisableAlarmActions"',
-        '$.eventSource = "scheduler.amazonaws.com"',
-    ),
-    "platform-security-alerts-topic-change": (
-        '$.eventSource = "sns.amazonaws.com"',
-        '"*:agent-platform-alerts"',
-        '"*:agent-platform-alerts:*"',
-    ),
-    HEARTBEAT: ('$.eventSource = "iam.amazonaws.com"',),
-}
-
-
-def pattern_problems(patterns: dict[str, str]) -> list[str]:
-    problems = [f"filter set {sorted(patterns)} != alarm set"] if set(patterns) != ALARMS else []
-    with_regex = 0
-    for name, pattern in patterns.items():
-        problems += [f"{name}: missing clause {c}" for c in _REQUIRED_CLAUSES.get(name, ()) if c not in pattern]
-        if len(pattern) > 1024:
-            problems.append(f"{name}: {len(pattern)} characters > 1024")
-        if "${" in pattern or "%{" in pattern:
-            problems.append(f"{name}: carries a template sequence")
-        spans = re.findall(r"%([^%]*)%", pattern)
-        with_regex += bool(spans)
-        if len(spans) > 2:
-            problems.append(f"{name}: {len(spans)} regex spans > 2")
-        problems += [f"{name}: regex uses {sorted(set(s) - _REGEX_ALLOWED)}" for s in spans if set(s) - _REGEX_ALLOWED]
-    if with_regex > 5:
-        problems.append(f"{with_regex} patterns carry a regex (> 5)")
-    role = patterns.get("platform-security-platform-role-iam-change", "")
-    problems += _role_regex_problems(role)
-    if "errorCode" in role:
-        problems.append("role-change filter conditions on errorCode (denied attempts must match)")
-    if set(re.findall(r"\$\.([\w.]+)", patterns.get(HEARTBEAT, ""))) != {"eventSource"}:
-        problems.append("heartbeat is not a bare iam eventSource match")
-    return problems
-
-
-def fixture_problems(fixture_text: str, filter_names: set[str]) -> list[str]:
-    problems = ["fixture carries a twelve-digit number"] if re.search(r"\d{12}", fixture_text) else []
-    events = (yaml.safe_load(fixture_text) or {}).get("events") or []
-    named = {n for e in events for n in e.get("must_match") or []}
-    problems += [f"fixture never names {n}" for n in sorted(filter_names - named)]
-    problems += [f"fixture names unknown filter {n}" for n in sorted(named - filter_names)]
-    problems += [f"fixture event {e.get('name')} lacks an event body" for e in events if not isinstance(e.get("event"), dict)]
     return problems
 
 
@@ -397,6 +315,7 @@ def _patterns() -> dict[str, str]:
 
 _ROLE = "platform-security-platform-role-iam-change"
 _ROLE_RX = "%^[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Dd][Ee][Vv]$|^[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Aa][Dd][Mm][Ii][Nn]$%"
+_ERR_RX = "%role.[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Dd][Ee][Vv]\\s|role.[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Aa][Dd][Mm][Ii][Nn]\\s%"
 _IAM = '$.eventSource = "iam.amazonaws.com"'
 _LOG_GROUP_ARN = '"arn:aws:logs:${var.aws_region}:${var.account_id}:log-group:platform-security-*"'
 
@@ -437,6 +356,9 @@ _PATTERN_REDS: list[tuple] = [
     ("roleName exact case", _ROLE, _ROLE_RX, '"PlatformDev"'),
     ("roleName regex grouped", _ROLE, "%^[Pp]", "%^(?i)[Pp]"),
     ("policyArn clause dropped", _ROLE, "platform-security-detector-admin", "x"),
+    ("errorMessage clause dropped", _ROLE, f" || ($.errorMessage = {_ERR_RX})", ""),
+    ("errorMessage exact case", _ROLE, _ERR_RX, '"*role platformadmin *"'),
+    ("errorMessage unanchored name", _ROLE, "[Mm][Ii][Nn]\\s%", "[Mm][Ii][Nn]%"),
     ("denied clause dropped", "platform-security-denied-iam-write", f"{{ {_IAM} }}"),
     ("three regex spans", HEARTBEAT, f"{{ ({_IAM}) && ($.a = %a%) && ($.b = %b%) && ($.c = %c%) }}"),
     ("interpolated pattern", "platform-security-alerts-topic-change", "sns.amazonaws.com", "${var.x}"),
@@ -449,7 +371,21 @@ _PATTERN_REDS: list[tuple] = [
         "",
     ),
 ]
+_MGMT = '  event_selector {\n    read_write_type           = "All"\n    include_management_events = true\n  }\n'
+
+
+_DEPENDS = "  depends_on = [\n    aws_s3_bucket_policy"
+
+
+def _data_first(mgmt: str) -> str:
+    assert _MGMT in _trail() and _DEPENDS in _trail(), "the selector text this reordering relies on moved"
+    return _trail().replace(_MGMT, "", 1).replace(_DEPENDS, mgmt + "\n" + _DEPENDS, 1)
+
+
 _OTHER_REDS: dict[str, Callable[[], list[str]]] = {
+    "data selector first, write-only management second": lambda: trail_problems(
+        _data_first(_MGMT.replace('"All"', '"WriteOnly"'))
+    ),
     "sixth alarm": lambda: alarm_problems(
         _alarms()
         + '\nresource "aws_cloudwatch_metric_alarm" "platform_security_extra" {\n  alarm_name = "platform-security-x"\n}\n'
@@ -463,6 +399,11 @@ _OTHER_REDS: dict[str, Callable[[], list[str]]] = {
         ),
         ALARMS,
     ),
+    "fixture denied event carries requestParameters": lambda: fixture_problems(
+        _FIXTURE_EVENTS.read_text(encoding="utf-8").replace("requestParameters: null", "requestParameters: {roleName: x}", 1),
+        ALARMS,
+    ),
+    "triage query drops errorMessage": lambda: triage_problems(_alarms().replace("errorCode, errorMessage,", "errorCode,")),
     "non-prefixed address": lambda: naming_problems(
         {**_texts(), "x.tf": 'resource "aws_sns_topic" "d" {\n  name = "platform-security-x"\n}\n'}
     ),
@@ -520,11 +461,17 @@ class TestPlatformRoleIamChangeDetector:
     def test_trail(self) -> None:
         assert trail_problems(_trail()) == []
 
+    def test_trail_selector_order_is_irrelevant(self) -> None:
+        assert trail_problems(_data_first(_MGMT)) == []
+
     def test_bucket(self) -> None:
         assert bucket_problems(_trail()) == []
 
     def test_alarms(self) -> None:
         assert alarm_problems(_alarms()) == []
+
+    def test_triage_query(self) -> None:
+        assert triage_problems(_alarms()) == []
 
     def test_filter_patterns(self) -> None:
         assert pattern_problems(_patterns()) == []

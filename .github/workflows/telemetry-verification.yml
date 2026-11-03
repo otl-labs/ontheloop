@@ -1,0 +1,102 @@
+name: telemetry-verification
+
+# Daily verification of the real captured telemetry sessions (telemetry slice 4, rec-4025, rec-4101). The monitor finds every real root
+# tree of the trailing 28 days that went quiet during the previous UTC day, reads each one through the deployed reader, re-derives
+# every session-bound verb's answer independently from the stored rows and compares it with the reader's, counts orphans in quiescent
+# trees, and runs the four stored-row silent-failure checks. It is an alarm, not a gate (Decision 210 cl.2): each finding class files
+# or updates one telemetry_verify rec, and the workflow is never a required check (Decision 83). Counts only in the log (Decision 101).
+#
+# Triggers: a daily cron in the every-N-hours shape scripts/convergence_health/sensor_liveness.py classifies as 86,400 s (the plain
+# 'M H * * *' daily shape raises there and would blind loop_liveness_stale for every peer), and dispatch on main only with optional
+# quiet_day and skip_trees inputs (a backfill reads the trees a budget-limited run left). No push trigger.
+#
+# Time: the CI role session is 3,600 s from the assume step (the role sets no max_session_duration), so the role is assumed AFTER
+# checkout and the venv install; the session holds the monitor's 2,000 s read budget, its 1,450 s filing reserve and a margin.
+#
+# Invariants: no terraform, no apply, no deploy, no dispatch of another workflow. The role is the CI branch role, which already
+# invokes the reader and ops-writer Function URLs and resolves them in the deploy smoke job. Account-ID masking follows
+# PLAN-actions-account-id-masking.
+
+on:
+  schedule:
+    - cron: '41 */24 * * *'
+  workflow_dispatch:
+    inputs:
+      quiet_day:
+        description: UTC day (YYYY-MM-DD) whose quiet trees are read; default the previous day
+        required: false
+        type: string
+      skip_trees:
+        description: Quiet trees to skip, a previous run's next_skip
+        required: false
+        default: '0'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telemetry-verification
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    permissions:
+      id-token: write  # OIDC token minting for assume-role
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/aws-region
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies (venv)
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Configure AWS credentials (OIDC -- github_ci_branch role, DuckLake reader and ops-writer invoke)
+        uses: aws-actions/configure-aws-credentials@v6
+        env:
+          MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve DuckLake serving Function URLs
+        # Same resolution as deploy-ducklake-lambdas' smoke job; each URL and its bare host are masked (Decision 101).
+        run: |
+          set -euo pipefail
+          for role in writer reader telemetry_reader; do
+            URL=$(aws lambda get-function-url-config --function-name "agent-platform-ducklake-${role//_/-}" --region "$AWS_REGION" --query FunctionUrl --output text)
+            if [ -z "$URL" ] || [ "$URL" = "None" ]; then
+              echo "::error::Could not resolve the ${role} Function URL via get-function-url-config." >&2
+              exit 1
+            fi
+            HOST="${URL#https://}"
+            HOST="${HOST%%/*}"
+            echo "::add-mask::${URL}"
+            echo "::add-mask::${HOST}"
+            echo "DUCKLAKE_${role^^}_URL=${URL}" >> "$GITHUB_ENV"
+            echo "Resolved DUCKLAKE_${role^^}_URL (masked)."
+          done
+
+      - name: Verify the quiet trees
+        env:
+          QUIET_DAY: ${{ inputs.quiet_day }}
+          SKIP_TREES: ${{ inputs.skip_trees }}
+        run: |
+          set -euo pipefail
+          ARGS=()
+          if [ -n "$QUIET_DAY" ]; then ARGS+=(--quiet-day "$QUIET_DAY"); fi
+          if [ -n "$SKIP_TREES" ]; then ARGS+=(--skip-trees "$SKIP_TREES"); fi
+          .venv/bin/python -m scripts.telemetry_verify monitor ${ARGS[@]+"${ARGS[@]}"}

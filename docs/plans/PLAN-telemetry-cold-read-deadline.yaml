@@ -1,0 +1,628 @@
+schema_version: 5
+implementation_declared: true
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-cold-read-deadline
+intent: >-
+  Cold telemetry window reads stop timing out on the DuckLake reader (rec-4474): the reader's telemetry slot reads its
+  many small Parquet files at 8 DuckDB threads instead of 1, and an event-journal read that still cannot finish is
+  interrupted before the Lambda timeout and answers a typed 504 read_deadline_exceeded that the client never retries,
+  so the execution environment (both warm slots and the file cache) survives instead of being reset. Session reads are
+  the inputs slice 4 verification and the feedback loop depend on (PROJECT_CONTEXT telemetry as evidence). Compaction of
+  the telemetry tables, the durable fix, stays with rec-4474 for a later plan.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-telemetry-cold-read-deadline.yaml
+phase: >-
+  ad_hoc_rec (rec-4474, stopgap half; rec-2879 bundled); related tier item T2.36 (telemetry re-lands on DuckLake).
+  Closes no exit criterion. V3: the merge redeploys the DuckLake Lambdas (ducklake_event_reads.py and the new module
+  are in the active ducklake_reader manifest, Decision 79) through deploy-ducklake-lambdas.yml (Decision 126).
+scope:
+- file: src/common/ducklake_read_deadline.py
+  action: Create
+  purpose: >-
+    Leaf module (stdlib plus src.common.ducklake_handler_errors only; no Lambda context, Decision 212).
+    DEADLINE_MARGIN_S = 10.0; RESEND_INTERVAL_S = 0.05; READ_DEADLINE_ERROR_TYPE = "read_deadline_exceeded".
+    fire_after_s(remaining_ms, caller_ms) returns the earlier of remaining_ms / 1000 - DEADLINE_MARGIN_S and
+    caller_ms / 1000 (either may be None; None when both are), never floored, so a spent deadline reads at or below 0.
+    run(con, call, fire_after, on_fire): fire_after None runs call() directly; fire_after <= 0 calls on_fire() and raises
+    the deadline fault without calling call(); otherwise a daemon threading.Timer(fire_after) callback sets a fired flag,
+    calls on_fire(), then calls con.interrupt() again every RESEND_INTERVAL_S until a done Event is set (DuckDB 1.5.4
+    drops an interrupt that arrives before execution starts and honours one only between tasks, so a single send can be
+    lost; verified at plan critique), checking the done Event immediately before each send. The done Event is set, the
+    timer cancelled and joined (timeout 2 * RESEND_INTERVAL_S) in a finally on every path, so no callback thread
+    outlives the call into the next invocation (Lambda freezes threads between invocations). An exception from call() whose class is InterruptException (module
+    _duckdb or duckdb, matched by name like the handler's caller-input classes) is raised as TypedFault(504,
+    READ_DEADLINE_ERROR_TYPE, "reader_deadline") from it only when the flag is set; any other exception, and an
+    InterruptException without the flag, propagates unchanged. runner(remaining_ms, caller_ms, on_fire) returns a
+    callable runner(con, call) that evaluates remaining_ms() (a zero-arg callable or None) and fire_after_s at the moment
+    it is invoked, after the connection was acquired, so an ATTACH never eats the margin.
+- file: src/common/ducklake_event_reads.py
+  action: Modify
+  purpose: >-
+    Imports ducklake_read_deadline at module scope (unlike its function-local reader-only imports), so the staged-bundle
+    handler import check (scripts.lambda_manifest --check-bundles) proves the manifest include. (1) TELEMETRY_THREADS =
+    8 beside TELEMETRY_MEMORY_LIMIT; _telemetry_opener runs SET threads to it and SET
+    pg_use_ctid_scan=false after the memory_limit statement: the extra threads parallelise Parquet I/O only, and catalog
+    scans keep today's serial single-connection shape (the postgres extension opens extra Neon connections beyond its
+    pool for parallel ctid scans; Decision 88 budget). open_connection and the ops slot keep threads=1. (2) An optional
+    named_read envelope field deadline_ms (beside limit, never inside params): for an event verb it must be a positive
+    integer (not a bool), else EventReadInputError(verb, "deadline_ms", ...) before any ATTACH; acquirer_for refuses
+    deadline_ms on a named_read of a non-event verb with DuckLakeRuntimeError before any connect. (3)
+    deadline_guard(action, payload, remaining_ms) returns ducklake_read_deadline.runner(remaining_ms,
+    payload's deadline_ms, a closure marking the telemetry slot interrupted) for a named_read of an event verb, and
+    runner(None, None, a no-op) for every other action. (4) The telemetry acquire passes probe_sql = a catalog-touching
+    probe over the small DuckLake metadata table (__ducklake_metadata_<telemetry alias>.ducklake_metadata) to
+    rt.get_warm_connection on the first acquire after the slot was marked, then clears the mark; otherwise the default
+    SELECT 1. A failed probe reopens through get_warm_connection's existing probe-failure path; no new reopen trigger and
+    no per-acquire catalog round trip.
+- file: src/lambdas/ducklake_reader/handler.py
+  action: Modify
+  purpose: >-
+    Straight-line wiring only (so tests/test_ducklake_reader_handler.py's existing paths cover it, 495 SLOC there):
+    handler() passes getattr(context, "get_remaining_time_in_millis", None) into _handle; _handle obtains
+    ev.deadline_guard(action, payload, remaining_ms) and runs both the first fn(payload, con) call and the reopen-once
+    call through it (each attempt gets its own deadline, computed when it starts). A TypedFault from the guard reaches
+    handler_errors.terminal unchanged (504 body {ok, error_type, reason, request_id, action} and one ducklake_typed_fault
+    log line). ducklake_handler_errors.py is not edited, so the writer bundles' code is unchanged.
+- file: src/lambdas/ducklake_reader/manifest.yaml
+  action: Modify
+  purpose: includes gains src/common/ducklake_read_deadline.py.
+- file: src/lambdas/data-pipeline/manifest.yaml
+  action: Modify
+  purpose: excludes gains src/common/ducklake_read_deadline.py with the comment "reader-bundle only (rec-4474)".
+- file: src/common/ducklake_reader_client.py
+  action: Modify
+  purpose: >-
+    ReadDeadlineExceededError(ReaderInvokeError), raised after one POST when the reader answers 504 with body error_type
+    read_deadline_exceeded (the ResponseTooLargeError shape); _READ_DEADLINE_ERROR_TYPE literal (the client cannot
+    import the reader-only module: data-pipeline bundles this file). Every other 502/503/504 keeps today's two retries
+    and _READER_TRANSIENT_STATUS stays {502, 503, 504} (Decision 155 parity). rec-2879: the retry log line and the
+    comment above the constants stop calling every 5xx a cold-resume (a 502 now means a process exit or a deadline
+    overrun, a 503 catalog_unavailable).
+- file: scripts/agent_sdk/errors.py
+  action: Modify
+  purpose: >-
+    ReaderDeadlineError(AgentToolError) for error_type read_deadline_exceeded, its message telling the agent to narrow
+    the window; the module docstring's status list gains the 504 line.
+- file: scripts/ops_portal/reader_transient.py
+  action: Modify
+  purpose: >-
+    Docstring only: the sentence naming the reader client's cold-resume log line as an uncorrected mislabel is removed
+    (rec-2879 corrects it), and the consumer-impact note records that 504 read_deadline_exceeded carries an error_type
+    and so gates, answered only by event-journal verbs, which none of the listed consumers call.
+- file: docs/contracts/ducklake_reader.yaml
+  action: Modify
+  purpose: >-
+    Class B. named_read: payload_schema_ref names the optional deadline_ms (event verbs only, a positive integer of
+    milliseconds, applied per query attempt); response_codes gain 504 read_deadline_exceeded and the 400 row names
+    deadline_ms, the 500 row and the runtime typed_error name deadline_ms on a non-event verb beside limit on a
+    non-paginable verb; typed_errors gain read_deadline_exceeded ("an event-journal verb still running at the reader's
+    deadline, the Lambda's remaining time when the attempt starts minus 10 s or the caller's deadline_ms if earlier, is
+    interrupted: 504 {error_type, reason: reader_deadline, request_id, action}; never retried; narrow the window"). The
+    no-502 invariant is amended: a deadline answers 504; process-level failures (an interrupt that overruns the margin,
+    for example during query bind or planning where DuckDB does not honour it, out of memory, Runtime.ExitError, an init
+    failure) remain the runtime's 502, rec-4296 owning the exits. A telemetry-slot invariant states threads 8 for I/O
+    overlap on many small files with serial catalog scans (the ops slot keeps 1) and the one catalog probe after an
+    interrupt. amendment_log entry (field_add, semantic_break false, migration_story: additive; a read that used to time
+    out as a retried 502 is now a non-retried typed 504).
+- file: tests/common/test_ducklake_read_deadline.py
+  action: Create
+  purpose: >-
+    Mirror test of the new module, with fake connections whose execute blocks until interrupt() is called:
+    test_deadline_interrupts_and_answers_typed_504 (TypedFault 504, error_type and reason, on_fire called, timer
+    cancelled, the done Event set and the timer thread no longer alive when run returns), test_interrupt_is_resent_until_the_call_returns (a fake that ignores every
+    interrupt sent before its execute starts still answers the 504), test_spent_deadline_answers_504_without_running_the_call,
+    test_runner_reads_remaining_time_when_invoked (a remaining-time callable that falls between building the runner and
+    invoking it), test_unflagged_interrupt_is_not_a_deadline, test_other_errors_pass_through_and_cancel_the_timer,
+    test_no_deadline_runs_the_call_directly, test_fire_after_is_the_earlier_deadline (margin, caller, negative, None);
+    test_contract_declares_the_deadline_answer (named_read 504 row, typed_errors entry, deadline_ms named, the amended
+    no-502 invariant, the amendment_log entry). With a function-level pytest.importorskip("duckdb"), on an in-memory
+    DuckDB and a range query that runs well over 10 s uninterrupted:
+    test_real_duckdb_interrupt_answers_504_and_the_connection_survives (a short fire_after: TypedFault 504, then SELECT 1
+    answers on the same connection), test_real_duckdb_early_interrupt_is_resent (fire_after 0.0001: the 504 arrives
+    within 2 s), test_real_duckdb_spent_deadline_never_runs_the_query (fire_after 0: the 504 without executing) and
+    test_real_duckdb_accepts_the_telemetry_slot_settings (LOAD postgres, then the opener's SET threads and SET
+    pg_use_ctid_scan statements built from ducklake_event_reads' constants, read back with current_setting).
+- file: tests/common/test_ducklake_event_reads.py
+  action: Modify
+  purpose: >-
+    The existing opener test keeps calls[0] as the memory_limit statement; new nodes
+    test_telemetry_opener_sets_threads_and_serial_catalog_scans, test_deadline_ms_is_refused_before_any_attach (0, -1,
+    True, "5" each an EventReadInputError naming deadline_ms, nothing opened), test_deadline_ms_on_an_ops_verb_is_refused,
+    test_deadline_guard_is_identity_off_event_verbs, test_deadline_guard_marks_the_slot_on_a_spent_deadline (an event
+    verb's runner with a remaining time under the margin answers the TypedFault without running the call and marks the
+    slot) and test_interrupted_slot_probes_the_catalog_once (the next acquire passes the catalog probe, a failing probe
+    reopens, the acquire after uses SELECT 1). Stays under 500 SLOC (392 today); the runner's own behaviour is tested in
+    the new module's mirror file.
+- file: tests/lambdas/ducklake_reader/test_event_routing.py
+  action: Modify
+  purpose: >-
+    Through the real handler with the existing wiring fixture and fake contexts: test_event_verb_past_its_deadline_answers_504
+    (remaining time under the margin: body shape, status 504, the ops slot untouched),
+    test_ops_verbs_run_without_a_deadline (an ops read under the same context answers 200) and
+    test_reopen_once_runs_under_the_deadline (a remaining-time callable above the margin on the first attempt, whose
+    query raises the fixture's dead-session error, and below it on the second: the slot reopens, then the second attempt
+    answers 504).
+- file: tests/common/ducklake_reader_client/test_reader_deadline.py
+  action: Create
+  purpose: >-
+    test_deadline_504_is_raised_after_one_post (one requests.post, ReadDeadlineExceededError carrying status and body),
+    test_other_5xx_still_retry_twice (untyped 502, 503 catalog_unavailable, 504 without the type),
+    test_error_type_literal_matches_the_reader (client literal equals ducklake_read_deadline.READ_DEADLINE_ERROR_TYPE)
+    and test_retry_log_does_not_claim_a_cold_resume (rec-2879's re-grounded acceptance names this node).
+- file: tests/test_agent_sdk_errors.py
+  action: Modify
+  purpose: New node test_read_deadline_maps_to_reader_deadline_error.
+bundled_recommendations:
+- rec-2879
+followon_recs:
+- rec-4474
+closes_criteria: []
+infrastructure_dependencies:
+- >-
+  No Terraform, IAM, Lambda size or timeout change. The merge redeploys the DuckLake Lambdas through
+  deploy-ducklake-lambdas.yml (governed CI, Decision 125/126); the coordinator sequences it against any other DuckLake
+  deploy, apply or replay (one at a time).
+- >-
+  data-pipeline (Decision 79 deferral, confirmed at Step 6b): its zip carries ducklake_reader_client.py, but
+  deploy-prod-lambdas.yml does not trigger on src/common/** and none of its bundled entry points calls a named verb
+  (step 8 proves it), so the new 504 is unreachable there; it takes the client change at its next governed deploy.
+acceptance_criteria:
+- >-
+  The telemetry slot runs DuckDB at 8 threads with serial catalog scans (VP 2, VP 3); open_connection and the ops slot
+  keep 1 thread (the existing SET threads=1 nodes in tests/common/test_ducklake_runtime.py, unchanged, in the tiers VP
+  10 runs).
+- >-
+  An event-journal read still running at the deadline is interrupted (re-sent until it lands) and answers 504
+  read_deadline_exceeded through the handler; a deadline already spent answers 504 without running the query; an
+  interrupt the deadline did not fire stays 500 unmapped; ops actions run with no deadline; the interrupted slot is kept
+  and its next acquire runs one catalog probe, reopening if it fails (VP 1-4).
+- >-
+  The client raises ReadDeadlineExceededError after one POST for that answer and keeps today's retries for every other
+  502/503/504; the agent SDK maps it to ReaderDeadlineError; no log line calls a 5xx a cold-resume; data-pipeline
+  never calls a named verb (VP 5-8).
+- The reader contract declares deadline_ms, the 504 and the amended no-502 invariant (VP 1).
+- >-
+  Deployed, forced cold: the busiest day (2026-10-17) and a 3-day window (2026-10-16..18) each answer 200 or a typed
+  504 within 120 s, never the runtime's 502 or a timeout, with Max Memory Used below 900 MB. The busiest day answering
+  200 within 110 s is the target: reported on rec-4474 either way, and a miss is reported, not rolled back (VP 12).
+- >-
+  Deployed: a cold read with deadline_ms 5000 makes the client raise ReadDeadlineExceededError after one call, the
+  reader answers within the 10 s margin of its deadline, and the next read on the same container answers 200 on the
+  kept or probe-reopened slot (VP 13).
+- rec-2879 reads closed; rec-4474 stays open with the measured numbers appended for the compaction plan (VP 14).
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: The deadline runner interrupts a running read (re-sending a lost interrupt) and answers the typed 504; the contract declares it.
+  command: >-
+    bin/venv-python -m pytest
+    tests/common/test_ducklake_read_deadline.py::test_deadline_interrupts_and_answers_typed_504
+    tests/common/test_ducklake_read_deadline.py::test_interrupt_is_resent_until_the_call_returns
+    tests/common/test_ducklake_read_deadline.py::test_spent_deadline_answers_504_without_running_the_call
+    tests/common/test_ducklake_read_deadline.py::test_runner_reads_remaining_time_when_invoked
+    tests/common/test_ducklake_read_deadline.py::test_unflagged_interrupt_is_not_a_deadline
+    tests/common/test_ducklake_read_deadline.py::test_other_errors_pass_through_and_cancel_the_timer
+    tests/common/test_ducklake_read_deadline.py::test_no_deadline_runs_the_call_directly
+    tests/common/test_ducklake_read_deadline.py::test_fire_after_is_the_earlier_deadline
+    tests/common/test_ducklake_read_deadline.py::test_contract_declares_the_deadline_answer -q
+  expected: Exit 0, nine passed. Red before because the module and its test file are absent.
+  fix_if: Fix the module or the contract text the node names; never loosen the flag check or drop the re-send.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: ducklake-reader-read-deadline-answer
+- step: 2
+  phase: pre-deploy
+  action: The telemetry slot's threads and serial catalog scans, deadline_ms validation, the guard's scope and the one catalog probe.
+  command: >-
+    bin/venv-python -m pytest
+    tests/common/test_ducklake_event_reads.py::test_telemetry_opener_sets_threads_and_serial_catalog_scans
+    tests/common/test_ducklake_event_reads.py::test_deadline_ms_is_refused_before_any_attach
+    tests/common/test_ducklake_event_reads.py::test_deadline_ms_on_an_ops_verb_is_refused
+    tests/common/test_ducklake_event_reads.py::test_deadline_guard_is_identity_off_event_verbs
+    tests/common/test_ducklake_event_reads.py::test_deadline_guard_marks_the_slot_on_a_spent_deadline
+    tests/common/test_ducklake_event_reads.py::test_interrupted_slot_probes_the_catalog_once -q
+  expected: Exit 0, six passed. Red before because the nodes are absent.
+  fix_if: >-
+    Fix ducklake_event_reads.py; the ops slot and open_connection must keep threads=1, and the catalog probe must run on
+    one acquire per interrupt, never per acquire (Decision 88).
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: ducklake-reader-telemetry-slot-wiring
+- step: 3
+  phase: pre-deploy
+  action: >-
+    Real DuckDB (the pinned 1.5.4) honours the interrupt, re-sent when the first send is lost, the connection survives,
+    and the telemetry slot's setting names exist.
+  command: >-
+    out=$(bin/venv-python -m pytest
+    tests/common/test_ducklake_read_deadline.py::test_real_duckdb_interrupt_answers_504_and_the_connection_survives
+    tests/common/test_ducklake_read_deadline.py::test_real_duckdb_early_interrupt_is_resent
+    tests/common/test_ducklake_read_deadline.py::test_real_duckdb_spent_deadline_never_runs_the_query
+    tests/common/test_ducklake_read_deadline.py::test_real_duckdb_accepts_the_telemetry_slot_settings -q -rs 2>&1);
+    echo "$out"; echo "$out" | grep -Eq "^4 passed"
+  expected: The pytest output, ending in a summary of 4 passed and none skipped; exit 0.
+  fix_if: >-
+    A skip fails this step: duckdb is missing from the venv, so run bin/venv-python -m pip install -r requirements.txt
+    first; a settings-node skip means the postgres extension is not cached, so run INSTALL postgres once. A failure
+    means the pinned DuckDB's interrupt semantics or a setting name differ: stop and RCA (Decision 99).
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    Needs duckdb (a function-level importorskip would skip, not fail, in venv-less replay); the full tier runs these
+    nodes on every main build.
+- step: 4
+  phase: pre-deploy
+  action: Through the real reader handler, an event verb past its deadline answers 504 and ops actions are untouched.
+  command: >-
+    bin/venv-python -m pytest
+    tests/lambdas/ducklake_reader/test_event_routing.py::test_event_verb_past_its_deadline_answers_504
+    tests/lambdas/ducklake_reader/test_event_routing.py::test_ops_verbs_run_without_a_deadline
+    tests/lambdas/ducklake_reader/test_event_routing.py::test_reopen_once_runs_under_the_deadline -q
+  expected: Exit 0, three passed. Red before because the nodes are absent.
+  fix_if: Fix the handler wiring or deadline_guard; the handler gains no branch of its own.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: ducklake-reader-deadline-routing
+- step: 5
+  phase: pre-deploy
+  action: The client raises the deadline answer after one POST and keeps every other retry.
+  command: >-
+    bin/venv-python -m pytest
+    tests/common/ducklake_reader_client/test_reader_deadline.py::test_deadline_504_is_raised_after_one_post
+    tests/common/ducklake_reader_client/test_reader_deadline.py::test_other_5xx_still_retry_twice
+    tests/common/ducklake_reader_client/test_reader_deadline.py::test_error_type_literal_matches_the_reader
+    tests/common/ducklake_reader_client/test_reader_deadline.py::test_retry_log_does_not_claim_a_cold_resume -q
+  expected: Exit 0, four passed. Red before because the file is absent.
+  fix_if: Fix _invoke; _READER_TRANSIENT_STATUS must stay {502, 503, 504}.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: ducklake-reader-client-deadline-no-retry
+- step: 6
+  phase: pre-deploy
+  action: The agent SDK maps the answer, and the Decision 155 classifier still gates every typed error but catalog_unavailable.
+  command: >-
+    bin/venv-python -m pytest tests/test_agent_sdk_errors.py::test_read_deadline_maps_to_reader_deadline_error
+    tests/ops_data_portal/test_reader_transient.py::TestTransientSetParity
+    tests/ops_data_portal/test_reader_transient.py::TestTransientErrorTypeParity -q
+  expected: Exit 0. Red before because the SDK node is absent; the parity classes pass before and after.
+  fix_if: Fix errors.py; a parity failure means the transient set or allow-list moved, which this plan forbids.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: The parity classes are already standing checks; the SDK node is a one-line mapping its own module runs.
+- step: 7
+  phase: pre-deploy
+  action: rec-2879's re-grounded acceptance passes (no cold-resume label in the reader client, and the node guarding it).
+  command: >-
+    ! grep -q "cold-resume backoff" src/common/ducklake_reader_client.py && bin/venv-python -m pytest
+    tests/common/ducklake_reader_client/test_reader_deadline.py::test_retry_log_does_not_claim_a_cold_resume -q &&
+    echo REC_2879_OK
+  expected: One passed, then REC_2879_OK. Red before because the label is present and the node absent.
+  fix_if: Reword the remaining line; keep the node name rec-2879's acceptance names.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: rec-2879's own acceptance, run once at its closure; step 5 graduates the node.
+- step: 8
+  phase: pre-deploy
+  action: >-
+    data-pipeline no-deploy disposition: none of its bundled entry points calls a named verb or names the new symbols, so
+    the changed client path is unreachable there.
+  command: >-
+    test "$(grep -rlE '\.named\(|_invoke\(|ReadDeadlineExceededError|read_deadline_exceeded|deadline_ms'
+    src/data/handlers scripts/run_scheduled_agent.py scripts/tool_runtime.py scripts/llm scripts/s3_log_store.py
+    scripts/aws_profile.py | wc -l)" -eq 0 && echo DATA_PIPELINE_INERT
+  expected: Prints the marker; zero files match.
+  fix_if: >-
+    A data-pipeline entry point now calls a named verb: it then needs its governed deploy (deploy-prod-lambdas.yml) and a
+    smoke step, never a local build; stop and tell the coordinator.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    An invariant green before and after by construction (the PLAN-recs-related-verb step 18 shape); graduating it would
+    fail the red-before gate as tautological.
+- step: 9
+  phase: pre-deploy
+  action: Coverage, lint, SLOC, and the new module ships in the reader bundle only.
+  command: >-
+    bin/venv-python -m scripts.test_coverage_checker --check-tests --check-coverage --files
+    src/common/ducklake_read_deadline.py src/common/ducklake_event_reads.py src/lambdas/ducklake_reader/handler.py
+    src/common/ducklake_reader_client.py scripts/agent_sdk/errors.py && bin/venv-python -m ruff check src/common
+    src/lambdas/ducklake_reader scripts/agent_sdk scripts/ops_portal tests/common tests/lambdas tests/test_agent_sdk_errors.py
+    && bin/venv-python -c "from scripts.checks.sloc.sloc_limits import validate_sloc_limits as v;f=[];v(f);assert not f,
+    f;print('SLOC_OK')" && bin/venv-python -m scripts.lambda_manifest --check-bundles && bin/venv-python -c "from
+    scripts.lambda_manifest import compute_affected_artifacts as c;a=c(['src/common/ducklake_read_deadline.py']);
+    assert set(a)=={'ducklake_reader'},a;print('BUNDLES_OK')"
+  expected: Exit 0 from each, then SLOC_OK, every artifact's handlers import-resolved, then BUNDLES_OK.
+  fix_if: Cover the new lines from each file's mapped test; fix lint at its source; decompose rather than raise a budget.
+  hermetic: false
+  graduation: not-applicable
+- step: 10
+  phase: pre-deploy
+  action: Fast tier, then the full tier before handoff.
+  command: bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate
+  expected: Exit 0 on a completed full run; a timeout is not a pass (handoff_policy).
+  fix_if: Fix the named check; never skip or weaken one.
+  hermetic: false
+  graduation: not-applicable
+- step: 11
+  phase: post-deploy
+  action: >-
+    The governed deploy of the merge commit succeeded, every job included. Read with mcp__github__actions_list
+    (list_workflow_runs, workflow deploy-ducklake-lambdas.yml, head_sha $MERGE_SHA) then list_workflow_jobs for that
+    run, writing the jobs JSON to $DEPLOY_JOBS_JSON.
+  command: >-
+    test -s "$DEPLOY_JOBS_JSON" && bin/venv-python -c "import json,os;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));
+    jobs={x['name']:x.get('conclusion') for x in (j.get('jobs') if isinstance(j,dict) else j)};print(jobs);
+    want=['deploy-maintenance','maintenance-smoke','reconcile-gate','deploy-serving','smoke']; assert all(any(n.startswith(w)
+    and c=='success' for n,c in jobs.items()) for w in want),jobs;print('DEPLOY_OK')"
+  expected: Every named job concluded success (a skipped job fails this step), then DEPLOY_OK.
+  fix_if: A failed deploy or smoke step is this plan's to root-cause and fix forward, never a re-run to green (Decision 55).
+  hermetic: false
+- step: 12
+  phase: post-deploy
+  action: >-
+    Forced-cold reads on the deployed reader (reset_warm_connection, then one read, retried up to three times until
+    its invocation line shows connect_reused false): the busiest day and a 3-day window, with each read's server line,
+    elapsed time and Max Memory Used from CloudWatch.
+  command: |-
+    export DUCKLAKE_READER_URL=$(aws ssm get-parameter --profile agent_platform --region eu-west-2 --name /agent-platform/ducklake/reader_url --query Parameter.Value --output text) && AWS_PROFILE=agent_platform bin/venv-python - <<'EOF'
+    import json, re, time, boto3
+    from scripts.ducklake_smoke import core
+    U = core._function_url("reader"); G = "/aws/lambda/agent-platform-ducklake-reader"
+    L = boto3.Session(profile_name="agent_platform").client("logs", region_name="eu-west-2")
+    def server(rid):
+        for _ in range(18):
+            ev = L.filter_log_events(logGroupName=G, filterPattern=f'"{rid}"', startTime=int((time.time() - 1800) * 1000))["events"]
+            rep = [e for e in ev if e["message"].startswith("REPORT")]
+            if rep:
+                break
+            time.sleep(10)
+        else:
+            raise SystemExit(f"no REPORT line for {rid} after 3 minutes: report it, never guess")
+        lo, hi = min(e["timestamp"] for e in ev), max(e["timestamp"] for e in ev)
+        body = L.get_log_events(logGroupName=G, logStreamName=ev[0]["logStreamName"], startTime=lo, endTime=hi + 1, startFromHead=True)["events"]
+        inv = [json.loads(e["message"]) for e in body if '"ducklake_invocation"' in e["message"]][-1]
+        mem = int(re.search(r"Max Memory Used: (\d+) MB", rep[0]["message"]).group(1))
+        return inv, mem, "Status: timeout" in rep[0]["message"]
+    def cold(day_from, day_to):
+        for _ in range(3):
+            core._sigv4_invoke(U, {"action": "reset_warm_connection"})
+            t = time.perf_counter()
+            r = core._sigv4_invoke(U, {"action": "named_read", "verb": "sessions_window", "params": {"day_from": day_from, "day_to": day_to, "as_of": "2026-10-19T00:30:00+00:00"}})
+            dt = time.perf_counter() - t
+            inv, mem, timed_out = server(r.headers["x-amzn-RequestId"])
+            if not inv["connect_reused"]:
+                typed = r.status_code == 504 and r.json().get("error_type") == "read_deadline_exceeded"
+                assert (r.status_code == 200 or typed) and dt < 120 and mem < 900 and not timed_out, (r.status_code, dt, mem)
+                return r.status_code, round(dt, 1), inv["elapsed_ms"], mem
+        raise SystemExit("never landed cold after three resets")
+    day = cold("2026-10-17", "2026-10-17")
+    print("COLD_DAY", *day, "target_met" if day[0] == 200 and day[1] < 110 else "target_missed")
+    print("COLD_3DAY", *cold("2026-10-16", "2026-10-18"))
+    print("COLD_READS_OK")
+    EOF
+  expected: >-
+    A COLD_DAY line (status, wall seconds, server ms, memory MB, target_met or target_missed), a COLD_3DAY line, then
+    COLD_READS_OK. Report both lines verbatim; they go on rec-4474 for the compaction plan.
+  fix_if: >-
+    A runtime 502, a timeout, or a read over 120 s means the deadline failed: stop and RCA. Memory at or above 900 MB:
+    stop and RCA before more traffic (rec-4296 exits share this function). target_missed is not a failure: report it to
+    the coordinator with the numbers. If a response lacks the x-amzn-RequestId header, find the log line by time window
+    and say so.
+  hermetic: false
+- step: 13
+  phase: post-deploy
+  action: >-
+    A cold read with deadline_ms 5000 through the client raises ReadDeadlineExceededError after one call, the reader
+    answers within the 10 s margin of that deadline, and the next read on the same container answers 200 on the kept
+    (or probe-reopened) slot.
+  command: |-
+    export DUCKLAKE_READER_URL=$(aws ssm get-parameter --profile agent_platform --region eu-west-2 --name /agent-platform/ducklake/reader_url --query Parameter.Value --output text) && AWS_PROFILE=agent_platform bin/venv-python - <<'EOF'
+    import json, time, boto3
+    from scripts.ducklake_smoke import core
+    from src.common.ducklake_reader_client import DuckLakeReader, ReadDeadlineExceededError
+    U = core._function_url("reader"); G = "/aws/lambda/agent-platform-ducklake-reader"
+    L = boto3.Session(profile_name="agent_platform").client("logs", region_name="eu-west-2")
+    P = {"day_from": "2026-10-16", "day_to": "2026-10-18", "as_of": "2026-10-19T00:30:00+00:00"}
+    def stream_and_line(rid):
+        for _ in range(18):
+            ev = L.filter_log_events(logGroupName=G, filterPattern=f'"{rid}"', startTime=int((time.time() - 1800) * 1000))["events"]
+            if any(e["message"].startswith("REPORT") for e in ev):
+                break
+            time.sleep(10)
+        else:
+            raise SystemExit(f"no REPORT line for {rid} after 3 minutes: report it, never guess")
+        lo, hi = min(e["timestamp"] for e in ev), max(e["timestamp"] for e in ev)
+        body = L.get_log_events(logGroupName=G, logStreamName=ev[0]["logStreamName"], startTime=lo, endTime=hi + 1, startFromHead=True)["events"]
+        return ev[0]["logStreamName"], [json.loads(e["message"]) for e in body if '"ducklake_invocation"' in e["message"]][-1]
+    for _ in range(3):
+        core._sigv4_invoke(U, {"action": "reset_warm_connection"})
+        t = time.perf_counter()
+        try:
+            DuckLakeReader(profile="agent_platform")._invoke({"action": "named_read", "verb": "sessions_window", "params": P, "deadline_ms": 5000})
+            continue
+        except ReadDeadlineExceededError as exc:
+            wall, err = time.perf_counter() - t, exc
+        b = core._sigv4_invoke(U, {"action": "named_read", "verb": "sessions_window", "params": {**P, "day_from": "2026-10-14", "day_to": "2026-10-14"}})
+        (sa, ia), (sb, ib) = stream_and_line(err.body["request_id"]), stream_and_line(b.headers["x-amzn-RequestId"])
+        if sa == sb and not ia["connect_reused"]:
+            break
+    else:
+        raise SystemExit("no cold deadline answer followed by a same-container read in three attempts")
+    late_ms = ia["elapsed_ms"] - (ia["connect_ms"] or 0) - 5000
+    print("CLIENT_DEADLINE", err.status, err.body.get("error_type"), round(wall, 1), "late_ms", round(late_ms))
+    print("NEXT", b.status_code, "reused", ib["connect_reused"], "reopened", ib["reopened"])
+    assert err.status == 504 and err.body["error_type"] == "read_deadline_exceeded" and wall < 60 and late_ms < 10000 and b.status_code == 200
+    print("DEADLINE_OK")
+    EOF
+  expected: >-
+    A CLIENT_DEADLINE line (504, read_deadline_exceeded, wall seconds under 60, late_ms under 10,000), a NEXT line (200,
+    and whether the slot was reused or reopened after the probe), then DEADLINE_OK. Report both lines: late_ms is the
+    evidence for the 10 s margin, and reused or reopened tells the compaction plan whether interrupts break the catalog
+    connection.
+  fix_if: >-
+    late_ms at or above 10,000: the margin is too small for real reads (bind or plan time is not interruptible); stop,
+    report it, and raise DEADLINE_MARGIN_S in a forward fix after RCA. A 500 on the next read means a broken interrupted
+    slot escaped the probe: stop and RCA. A 502 instead of the 504 means the interrupt overran the Lambda timeout: stop
+    and RCA. Three attempts without a cold same-container pair: report it with the CLIENT_DEADLINE line and the unit
+    evidence.
+  hermetic: false
+- step: 14
+  phase: post-deploy
+  action: >-
+    rec-2879 closed through the squash-merge Resolves trailer; rec-4474 stays open with a dated note appended to its
+    existing context carrying the step 12 and 13 lines.
+  command: >-
+    AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
+    make_reader; rows, missing = fetch_recs_by_ids(make_reader(), ['rec-2879','rec-4474']); st={r['id']: r['status']
+    for r in rows}; ctx={r['id']: r['context'] for r in rows}; print(st, missing); assert not missing and st ==
+    {'rec-2879': 'closed', 'rec-4474': 'open'}, st; assert 'telemetry-cold-read-deadline' in ctx['rec-4474'] and
+    ctx['rec-4474'].startswith('2026-10-19 investigation'); print('RECS_OK')"
+  expected: rec-2879 closed, rec-4474 open with its original context kept and this plan's note appended, then RECS_OK.
+  fix_if: >-
+    rec-2879 open: check the trailer and the ci.yml closure job's run, then close it through the portal with this
+    plan's evidence. rec-4474 without the note: append it through the portal (read the context first, write it back
+    with the note added).
+  hermetic: false
+rollback: >-
+  Revert in a new PR (the governed deploy ships the prior code): threads return to 1, and the deadline and the client's
+  no-retry rule go with it. For the threads-specific trigger (a rise in the reader's daily Runtime.ExitError count),
+  forward-fix TELEMETRY_THREADS = 1 alone and keep the deadline. No stored row, catalog object or infrastructure changes.
+test_obligations:
+- source: src/common/ducklake_read_deadline.py
+  behavior: A read past its deadline is interrupted (re-sent until it lands) and answers TypedFault 504; nothing else does.
+  verification_step: 1
+  test_selector: tests/common/test_ducklake_read_deadline.py::test_interrupt_is_resent_until_the_call_returns
+  red_green_expectation: red before (module and test absent), green after
+- source: src/common/ducklake_event_reads.py
+  behavior: Telemetry slot threads and serial catalog scans, deadline_ms validation, the guard's event-verb scope and the one catalog probe.
+  verification_step: 2
+  test_selector: tests/common/test_ducklake_event_reads.py::test_deadline_guard_marks_the_slot_on_a_spent_deadline
+  red_green_expectation: red before (node absent), green after
+- source: src/lambdas/ducklake_reader/handler.py
+  behavior: Event verbs run under the deadline guard on both attempts; ops actions do not.
+  verification_step: 4
+  test_selector: tests/lambdas/ducklake_reader/test_event_routing.py::test_event_verb_past_its_deadline_answers_504
+  red_green_expectation: red before (node absent), green after
+- source: src/lambdas/ducklake_reader/manifest.yaml
+  behavior: The reader bundle ships the new module, so the handler imports resolve in the staged bundle.
+  verification_step: 9
+  command: bin/venv-python -m scripts.lambda_manifest --check-bundles
+  red_green_expectation: red once ducklake_event_reads imports the new module without the include, green after
+- source: src/lambdas/data-pipeline/manifest.yaml
+  behavior: The data-pipeline bundle does not ship the reader-only module.
+  verification_step: 9
+  command: >-
+    bin/venv-python -c "from scripts.lambda_manifest import compute_affected_artifacts as c;a=c(['src/common/ducklake_read_deadline.py']); assert set(a)=={'ducklake_reader'},a;print('BUNDLES_OK')"
+  red_green_expectation: red without the exclude (data-pipeline's src/ wildcard picks the module up), green after
+- source: src/common/ducklake_reader_client.py
+  behavior: The deadline answer is raised after one POST; every other 5xx keeps its retries; no cold-resume label.
+  verification_step: 5
+  test_selector: tests/common/ducklake_reader_client/test_reader_deadline.py::test_deadline_504_is_raised_after_one_post
+  red_green_expectation: red before (file absent), green after
+- source: scripts/agent_sdk/errors.py
+  behavior: read_deadline_exceeded maps to ReaderDeadlineError.
+  verification_step: 6
+  test_selector: tests/test_agent_sdk_errors.py::test_read_deadline_maps_to_reader_deadline_error
+  red_green_expectation: red before (node absent), green after
+- source: scripts/ops_portal/reader_transient.py
+  behavior: Docstring only; classification unchanged.
+  verification_step: 6
+  test_selector: tests/ops_data_portal/test_reader_transient.py::TestTransientErrorTypeParity
+  waiver_reason: A docstring-only edit; the parity classes prove the classifier did not move.
+- source: docs/contracts/ducklake_reader.yaml
+  behavior: deadline_ms, the 504 and the amended no-502 invariant are declared.
+  verification_step: 1
+  test_selector: tests/common/test_ducklake_read_deadline.py::test_contract_declares_the_deadline_answer
+  red_green_expectation: red before (node absent), green after
+constraints:
+- >-
+  Compaction is out of scope (Decisions 88, 143 and 191 own its scope; rec-4474 carries it). No Terraform, IAM, Lambda
+  memory or timeout change, no new verb and no caller SQL (Decision 84 I-3).
+- >-
+  The deadline covers event-journal verbs only: ops reads keep their current failure shape, so Decision 155's
+  consumers (DCG-03, the DQ runner, the CI-RCA gauges) see no change. _READER_TRANSIENT_STATUS and the classifier's
+  allow-list stay unchanged.
+- >-
+  No new reopen trigger (Decision 88 cl.1(i)): the interrupted slot reuses get_warm_connection's existing probe-failure
+  reopen; the catalog probe runs on one acquire per interrupt, never per acquire; catalog scans stay serial.
+- >-
+  The Lambda context is read only in the handler (Decision 212); src/common receives plain numbers and callables.
+- Files stay under 500 SLOC; decompose, never raise a budget (Decision 128).
+- 'Public repository (Decision 101): live steps print statuses, timings and counts only.'
+- No rescue agents or workaround loops (Decision 55); a failed live step stops for RCA.
+context:
+- >-
+  Decision-scout: FLAGS_FOUND (WARN 79 data-pipeline deploy leg: deferred with the note in infrastructure_dependencies
+  and step 8; NOTE 88 reopen discipline: constraint 3; SPIRIT 155: the deadline is scoped to event verbs). CITE 55, 155,
+  125/126, 128, 199. RELATED 143, 191, 107, 82, 84, 215, 214, 140, 118, 212, 163/189, 99. Decisions triaged: 180 of 180.
+  Roadmap items intersected: 7; CONFLICT: 0; RELATED: 7. Report: /mnt/project-files/telemetry-read-latency/decision-scout-report.md.
+- >-
+  gates: decision-scout=FLAGS_FOUND; plan-critique=PROCEED after 3 round(s) (r1 and r2 REVISE, every finding fixed; r3
+  PROCEED, its optional notes N1-N4 folded in: timer join, AC 1's ops-side evidence, the rec-4474 note prefix; N2 is
+  the existing decompose rule)
+- 'Related-work check: scripts.ci_rca.red_overlap verdict clear (no open red, SLO 4 h) at plan time.'
+- >-
+  Direction: Benjamin's "write the plan" (cmsg_012XgaFy8VaDQbxP5D8nC958RMEmw3SWgD5fQMSU5zBGYv) confirmed the Step 6b
+  presentation (/mnt/project-files/telemetry-read-latency/step6b-presentation.md) and its decided-with-notice forks.
+- >-
+  Evidence: /mnt/project-files/telemetry-read-latency/FINDINGS.md (about 0.135 s per cold file; threads 1 vs 8 locally
+  40.7 s vs 7.9 s), the 2026-10-19 reader log (a timeout reset the container) and ADVICE.md (Fable review).
+- >-
+  DuckDB 1.5.4 drops an interrupt sent before execution starts and holds one sent during bind or planning (critique
+  round 1): hence the re-send loop, the spent-deadline short circuit and step 13's late_ms readout.
+- >-
+  Decision 199 cl.1 reversal derived-read-too-costly: the timeout comes from file fan-out on uncompacted tables, not
+  derivation cost (old and new SQL compute in about 1.2 s locally); step 12's numbers are the evidence either way.
+- >-
+  Expected reach (inferred): a busy day fits cold; a 3-day window likely fits; a 7-day window still does not and now
+  answers the typed 504. That gap is rec-4474's compaction plan. The verification monitor's _transient
+  (scripts/telemetry_verify/monitor.py) counts any non-413 failure, this 504 included, as a transient unread day; that
+  stays as is.
+- >-
+  rec-2879's acceptance was re-grounded at planning time to step 7's command (it named the renamed iceberg_reader.py
+  and passed vacuously); its file field stays stale (the portal cannot update it, rec-3047).
+- >-
+  Overlap: slice 2c planning (rec-4292) may later move event verbs to a separate telemetry reader; this plan's
+  deadline module is reader-agnostic so it moves with them. If a 2c build touching ducklake_event_reads.py merges
+  first, rebase onto it.
+- >-
+  Watch after deploy (coordinator, wall-clock): the reader's daily Runtime.ExitError count for three days against the
+  3-39 baseline (rec-4296); a rise triggers the threads-only forward fix in rollback. The ops slot has no memory_limit
+  (DuckDB default), unchanged here.
+pre_implementation_checklist:
+- Branch confirmed not on main
+- docs/PROJECT_CONTEXT.md read
+- Only the plan-cited decision sections read (55, 79, 88 cl.1, 99, 155, 199 cl.1, 212)
+- All files in scope located and readable
+- Acceptance criteria understood and verifiable
+execution_steps:
+- >-
+  Create src/common/ducklake_read_deadline.py per its scope row; add it to the reader manifest's includes and the
+  data-pipeline manifest's excludes.
+- >-
+  Modify src/common/ducklake_event_reads.py: TELEMETRY_THREADS with serial catalog scans, deadline_ms validation,
+  deadline_guard and the interrupted-slot catalog probe, per its scope row.
+- 'Modify src/lambdas/ducklake_reader/handler.py: straight-line wiring only, per its scope row.'
+- >-
+  Modify src/common/ducklake_reader_client.py (ReadDeadlineExceededError, the label fix) and scripts/agent_sdk/errors.py;
+  edit the reader_transient.py docstring.
+- Amend docs/contracts/ducklake_reader.yaml per its scope row, with the amendment_log entry.
+- Write the tests in the scope rows; register the four graduate steps' checks under their graduation_check_id.
+- 'Execute Verification Plan steps 1-10; loop until pass; on an unrecoverable failure stop and RCA (Decision 55).'
+- >-
+  Closure (implement skill Commit Flows; docs/contracts/git-ops.yaml), each outcome reported separately: the readiness
+  check (scripts.session.github_readiness); the coverage diagnostic; set implementation_declared true; rebase on
+  origin/main; step 10's full tier on the committed, clean tree, then scripts.checks.validation_result --verify-head;
+  the postflight evidence file and scripts.session.postflight --evidence; push; PR (body: the three changes, the
+  measured expectations, the data-pipeline deferral note, "Resolves: rec-2879"); CI green on the head. Before merging,
+  read rec-2879 with the recs_by_ids verb and confirm its acceptance (step 7's command) passes on the head. Merge under
+  the standing rule once code review is PROCEED and CI is green, only after the coordinator clears the DuckLake deploy
+  slot (one deploy at a time); squash with "Resolves: rec-2879" in the commit body (Decision 201).
+- >-
+  Post-deploy: steps 11-13; append (never replace) a note prefixed "[<build day> PLAN-telemetry-cold-read-deadline]"
+  with the step 12 and 13 lines to rec-4474's existing context through the portal (read it, then --update-rec with the
+  old context plus the note), then step 14.
+- 'Report: what was implemented, verification results, the measured cold numbers'

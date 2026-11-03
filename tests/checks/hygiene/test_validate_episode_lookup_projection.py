@@ -150,13 +150,20 @@ class TestUnresolvedVerbRecordsSkipped:
         assert result.examined == 0
         assert result.unresolved_verbs == {"budget_breach_recent"}
 
-    def test_real_alerts_file_absent_verb_is_unresolved(self) -> None:
-        root = _common.ROOT
-        path = root / "scripts" / "preflight" / "alerts.py"
-        assert path.is_file()
-        result = scan_paths([path], root)
+    def test_fixture_file_carrying_an_unregistered_verb_is_unresolved(self, tmp_path: Path) -> None:
+        path = _write(
+            tmp_path,
+            "unregistered.py",
+            "def check(reader):\n"
+            "    rows = reader.named('not_a_registered_verb')\n"
+            "    for r in rows:\n"
+            "        if r.get('anything') == 'x':\n"
+            "            return r\n"
+            "    return None\n",
+        )
+        result = scan_paths([path], tmp_path)
         assert result.violations == []
-        assert "budget_breach_recent" in result.unresolved_verbs
+        assert "not_a_registered_verb" in result.unresolved_verbs
 
 
 class TestRegisteredCheckDeclaresOnEveryExitPath:

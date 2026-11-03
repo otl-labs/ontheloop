@@ -1,0 +1,1003 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-verification-verbs
+intent: >-
+  Telemetry slice 4's read-path leg (rec-4025): give verification a bounded way to read what the warehouse actually
+  stored, and prove the deployed engine computes what the contracts say. Three non-agent-facing reader verbs (one root
+  session tree's stored rows, per-day orphan counts over quiet trees, and the window's root sessions with their join
+  keys and conflict stamps) serve the in-session source check, the shadow re-derivation and the completeness check. A
+  post-deploy golden replay workflow sends the golden transcript trees through the deployed telemetry writer and reads
+  them back through the deployed reader on the smoke catalog, asserting the hand-authored derived values, after every
+  successful DuckLake deploy and once a day (so a producer or expectations change is replayed within a day). It also registers the telemetry_verify
+  rec source and its one filing helper, which the replay, the in-session source check and the verification monitor
+  file their alarms through.
+plan_type: IMPLEMENTATION
+implementation_declared: true
+verification_tier: V3
+plan_path: docs/plans/PLAN-telemetry-verification-verbs.yaml
+phase: >-
+  rec-4025 carrier (telemetry slice 4, verification): the second of its four plans (golden harness, verification verbs,
+  in-session source check, verification monitor), approved by Benjamin's "write the plan" on 2026-10-17
+  (cmsg_012XgaFy8VaDQbxP5D8nC958MdLJawKLhVPEQqyXDX82iS) on the approach in
+  /mnt/project-files/telemetry-slice4/step6b-presentation.md. Related tier items, named in context only: T3.20 and
+  T2.36; this plan closes no criterion (the orphan verb is the substrate of T3.20 c3, which the verification monitor
+  plan re-grounds and closes once a scheduled job alarms on it), and rec-4025 stays open as the slice's carrier.
+closes_criteria: []
+scope:
+- file: src/common/ducklake_event_read_sql.py
+  action: Modify
+  purpose: >-
+    Three templates. A tree is the rows sharing one (tenant_id, project_id, session_started_at) key, the root's own: every
+    row of a tree carries the root's pin (Decision 199 cl.2) and its tenant and project, and a session_id is the pin's
+    milliseconds plus a hash over (tenant, project, ref), so the pin alone does not identify a tree. TREE_ROWS_SQL
+    resolves the key server-side from the rows whose session_id = $session_id in any of the four tables inside the
+    root's calendar-day partition, then returns every stored row with that key, read raw (no generation retirement, no
+    dedupe, every parser_version): one UNION ALL branch per table selecting compared_columns(table) plus
+    created_timestamp (the dedupe tie-break), so telemetry_transcripts.content and content_uri, representation-only
+    columns, never leave; each row as table_name and row_json (to_json of the selected columns), plus total_rows (the
+    tree's row count, the same on every page) and roots_in_tree (distinct root session_ids, parent_session_id null,
+    among the key's telemetry_sessions rows: above 1 means two roots of one project share a pin millisecond, which a
+    caller reports, never merges); ordered by table_name, session_id, producer, event_id, parser_version,
+    created_timestamp, row_json; LIMIT $max_rows OFFSET $offset. ORPHAN_COUNTS_SQL carries a {telemetry_joins}
+    placeholder that render_sql fills at render time from the projected joins (field_semantics.yaml telemetry_joins),
+    never at import, composed with the shared R4/R5 dedupe over a window scope and the real-purpose project filter sessions_window uses; per (day, join_id): child_rows (non-null FK
+    values), orphans_quiescent and orphans_pending (child rows whose FK value matches no parent key in the live rows of
+    the same tree key, split by the tree's quiescence: as_of minus the tree's last event_timestamp over all four tables
+    exceeds {idle_seconds}), trees_quiescent, trees_pending, and conflicted_keys (the day's conflicted grain-key count).
+    ROOT_SESSIONS_SQL: over a window, real-purpose projects only, after R4/R5, one row per root session
+    (parent_session_id IS NULL): session_id, entity_ref (the producer's root session ref), harness_session_key and
+    branch (each the first non-null value by event_timestamp, source_ordinal; harness_session_key is the harness's own
+    session id, the join key to its session lists, null on rows written before parser_version 4), session_started_at,
+    last_event_timestamp (the TREE's last event across the four tables under the tree key, the quiescence basis the
+    verification monitor selects trees by), and the three Decision 207 stamps (generations, conflicted_grain_keys, derivation_conflicted)
+    from the same stamp CTEs sessions_window uses, so a conflicted root is reported, never resolved silently; ordered by
+    session_started_at, session_id.
+- file: src/common/ducklake_event_read_verbs.py
+  action: Modify
+  purpose: >-
+    Registry entries, each with telemetry_sessions first in its tables tuple (read-engine.yaml groups a verb by its first
+    table) and a description stating what it returns and that it reads the smoke catalog only until slice 2c:
+    session_tree_rows (params session_id, offset, max_rows; binding tree; int_params offset and max_rows; agent_facing
+    False), telemetry_orphan_counts (params day_from, day_to, as_of; binding window; max_window_days 7; data
+    idle_seconds; agent_facing False) and telemetry_root_sessions (params day_from, day_to; binding window;
+    max_window_days 7; agent_facing False). MAX_TREE_ROWS = 2000 is module data used by the tree binding. The joins are
+    not registry data (render_data takes scalars) and the module stays pure data with no I/O at import: the joins enter
+    only through render_sql's placeholder and event_read_version.
+- file: src/common/ducklake_event_reads.py
+  action: Modify
+  purpose: >-
+    bind_values handles binding "tree": session_id validated as today (canonical ULID, partition bounds from its time
+    prefix); max_rows validated as an integer of at least 1 and clamped to MAX_TREE_ROWS, as max_bytes is clamped today;
+    offset an integer of at least 0. telemetry_joins(semantics=None) returns the projected joins from
+    load_field_semantics() (only when called, never at import). render_sql fills a template's {telemetry_joins}
+    placeholder from the semantics it is given, and event_read_version adds "joins": telemetry_joins(semantics) to its
+    definition only for a verb whose template carries the placeholder, so the orphan verb's stamp moves with the
+    contract's joins and no existing verb's digest moves. No other behaviour change.
+- file: src/common/ducklake_reader_client.py
+  action: Modify
+  purpose: >-
+    VERB_FIELDS gains the three verbs' output columns in the SQL's order (session_tree_rows: table_name, row_json,
+    total_rows, roots_in_tree; telemetry_orphan_counts: day, join_id, child_rows, orphans_quiescent, orphans_pending,
+    trees_quiescent, trees_pending, conflicted_keys; telemetry_root_sessions: session_id, entity_ref,
+    harness_session_key, branch, session_started_at, last_event_timestamp, generations, conflicted_grain_keys,
+    derivation_conflicted).
+- file: scripts/schema_to_field_semantics.py
+  action: Modify
+  purpose: >-
+    generate() gains one top-level key, telemetry_joins: a list of {join_id, child_table, child_column, parent_table,
+    parent_column} for every docs/contracts/_joins.yaml join between two telemetry_* tables, child side by the
+    contract's cardinality, sorted by join_id, computed by a module-local function over the yaml (the generator's
+    import closure stays stdlib, yaml and its existing imports, because the deploy's reconcile-gate job runs it with
+    pyyaml and pydantic only; it never imports scripts.telemetry_verify). The golden harness's oracle loader reads the
+    same contract independently; a parity node pins that the two agree. The contract stays the single rule source and
+    nothing restates the pairs by hand (Decision 210 cl.3); --check fails on drift as for every other projected key.
+- file: config/lambda/ducklake/field_semantics.yaml
+  action: Modify
+  purpose: >-
+    Regenerated by bin/venv-python -m scripts.schema_to_field_semantics (never hand-edited): the telemetry_joins key,
+    and telemetry_verify added to both registry-sourced accepted_values lists (ops_recommendations.source and
+    telemetry_agents.agent_type), so the deployed writer accepts a rec with that source. Redeploys every DuckLake
+    function through the governed channel, as the reader change already does.
+- file: config/agent/data_quality/source_registry.yaml
+  action: Modify
+  purpose: >-
+    One entry, canonical_id telemetry_verify, with description and signal_interpretation as execution_steps[6] pins:
+    the alarm source for telemetry verification findings, alarm not gate (Decision 210 cl.2, Decision 61), one deduped
+    rec per finding class.
+- file: scripts/checks/ops_governance/check_source_registry.py
+  action: Modify
+  purpose: >-
+    SCANNED_PATHS (the complete scan set of hard-coded rec source literals) gains scripts/telemetry_verify/alarms.py.
+- file: tests/checks/ops_governance/test_check_source_registry.py
+  action: Modify
+  purpose: The required-paths assertion gains scripts/telemetry_verify/alarms.py.
+- file: docs/contracts/ducklake_reader.yaml
+  action: Modify
+  purpose: >-
+    Class B audit_invariants: one invariant naming the three verbs, their bounds and audience (none agent-facing), and a
+    second exception to "Rows are derived, never raw" beside transcript_content's, whose "It is the only event verb that
+    does" sentence is amended to name both: session_tree_rows returns the stored rows of exactly one tree key, the
+    compared columns plus created_timestamp (never content or content_uri), paged by offset and max_rows (at most 2000)
+    with a typed 413 when a page exceeds the envelope (Decision 215 cl.6), for verification callers only (the golden
+    replay, the in-session source check and the daily verification monitor on the CI role), which hold rows in memory
+    for the comparison and print counts only. One amendment_log entry. Text in execution_steps[3].
+- file: docs/contracts/read-engine.yaml
+  action: Modify
+  purpose: >-
+    The verbs grouping under telemetry_sessions gains session_tree_rows, telemetry_orphan_counts and
+    telemetry_root_sessions, which validate_read_engine_verbs requires to equal NAMED_READS plus EVENT_READS grouped by
+    first table (pre and full tiers). One amendment_log entry.
+- file: scripts/telemetry_verify/orphans.py
+  action: Create
+  purpose: >-
+    Independent orphan counting over plain rows: orphan_counts(rows_by_table, joins, as_of, idle_seconds) returns the
+    same columns as telemetry_orphan_counts, over rows deduped by scripts.telemetry_verify.dedupe, trees keyed by
+    (tenant_id, project_id, session_started_at), joins from scripts.telemetry_verify.joins.load_telemetry_joins (the
+    contract itself, never the projection).
+- file: scripts/telemetry_verify/rows.py
+  action: Create
+  purpose: >-
+    read_tree(named, session_id, page_rows) pages session_tree_rows through an injected callable with the reader
+    client's named() contract (named(verb, **params) returns the row list) until offset reaches total_rows; on the
+    reader's typed 413 (ResponseTooLargeError) it halves the page size and retries the same offset, down to one row,
+    then re-raises. decode_rows(pages) returns rows_by_table as plain dicts with timestamps parsed to timezone-aware
+    datetimes and integers restored, in the shape scripts.telemetry_verify.dedupe and derive take. A page whose
+    total_rows or roots_in_tree differs from the first page's raises (the tree changed mid-read; the caller re-reads).
+- file: scripts/telemetry_verify/alarms.py
+  action: Create
+  purpose: >-
+    ALARM_SOURCE = "telemetry_verify". raise_alarms(findings, *, scope, alarm_at, now, portal, file, acceptance_for,
+    declared=(), rows=None, reader=None) -> AlarmOutcome (findings maps class -> count; declared is the collection of
+    declared class names, counted and never filed; rows and reader pass through to run_episode's find_rec, the test
+    seam; AlarmOutcome carries filed, updated, unchanged, rate_limited and declared counts and the per-class actions)
+    turns each alarm class with a positive count into one scripts.rec_episode.run_episode call with over_threshold true
+    (file when no open rec of the class exists, else update; never close), the class carried in the title ("telemetry
+    verification alarm: <class>") and context as finding_class=<class> and matched by sub_key on it as an exact
+    delimited token (finding_class=<class> followed by a space, a comma or the end of the context), never a substring,
+    so a class that prefixes another never updates its neighbour's rec; scope is the label
+    the rec text carries (a commit SHA, a day, a window or a tree's root session ref), alarm_at the caller's own
+    per-class map of last-call times, so the rate limit is per class within one caller's state (a tree's verify state;
+    None disables it; a class called under ALARM_MIN_INTERVAL_S = 21,600 s ago is skipped and counted rate_limited),
+    file the rec's file field and acceptance_for(class) the caller's static,
+    lint-valid acceptance command for that class (the scripts/convergence_health/escalate.py precedent). Rec text carries counts, class names, the scope label
+    and parser_version only; priority High; the templates are composed against get_rec_write_guidance()'s field
+    semantics.
+- file: scripts/telemetry_verify/__init__.py
+  action: Modify
+  purpose: Facade re-exports the public surface of orphans, rows and alarms.
+- file: scripts/ducklake_smoke/lambda_telemetry_golden_gates.py
+  action: Create
+  purpose: >-
+    The deployed-engine leg of the golden harness, run by the golden replay workflow (main() with
+    `python -m scripts.ducklake_smoke.lambda_telemetry_golden_gates [--no-alarms] [--assert-zero-mismatches]`;
+    --assert-zero-mismatches exits 0 only after a completed run with skew=0 and mismatches=0). Version guard, before the
+    first append and again after the last read: the deployed reader's describe read_version for every verb the run
+    calls equals the checkout's describe_all(), and the reader's and telemetry writer's deploy records
+    (deploy-records/ducklake/<function>.json, which the CI role already reads in the deploy smoke) name a source_git_sha
+    with no diff against the checkout on deploy-ducklake-lambdas' own push paths (read from that workflow file; git
+    diff --quiet); on any difference the run prints GOLDEN_SMOKE with skew=1 and the counts so far, files nothing and
+    exits 0, because a replay of one commit against another's deployed code proves nothing. It reads the two derived_golden
+    files and the corpus case JSON under tests/fixtures/turn_capture/golden/ as data and builds each tree with
+    src.turn_capture.transcript.MemTree; it never imports tests/ (scripts never import tests). A case whose index entry
+    carries a test-only seam (full_output_cap_bytes, or the scrubber's secrets fixture) is counted seam_skipped and not
+    replayed, since the seams live only in tests/fixtures/turn_capture_corpus.py. For every other tree and pass whose
+    tree is "corpus:<file>" (the verification trees are built by a tests/ helper and are not replayed here): mint one synthetic project_ref for that (tree, pass) the way
+    lambda_telemetry_gates._check_project_fan_out mints its ref and register it with register_project (so every
+    replay's trees are isolated by project and every derived id is fresh, Decision 199 cl.3); run record_turn over the
+    case at that pass kind under that ref; send the batches through the deployed telemetry writer on the send path
+    lambda_telemetry_blob_gates uses (core._sigv4_invoke for appends with transport.chunk and append_body,
+    src.telemetry_client.blob_delivery for rows above the inline threshold); then resolve each expectation's session
+    selector (root, or agent:<agentId>) to its deployed session_id with src.telemetry.identity.derive_entity_key over
+    register_tenant's tenant_id, register_project's project_id, the case's session ref and its pin, and through the
+    deployed reader: session_tree_rows over the root returns exactly the (table, producer, external_ref) set sent, with
+    roots_in_tree 1 (a tree that stores no row, such as no_reply_session, answers as an absent session: no rows and no
+    roots_in_tree assertion, and the sent set is empty), and every session-bound expectation's asserted columns hold (session_state_and_duration,
+    agent_run_state_and_duration, agent_run_token_rollup, session_process_event_rollup, session_friction_rollup,
+    model_call_cost_estimate). Window-verb expectations are counted as window_skipped: the smoke catalog is shared and
+    sessions_window reads real-purpose projects only, so they are proven by the in-memory and local legs and, on real
+    data, by the verification monitor's daily window comparison. URLs come from DUCKLAKE_TELEMETRY_WRITER_URL and
+    DUCKLAKE_READER_URL as the deploy smoke resolves them, else from the SSM parameters the capture transport
+    (/agent-platform/ducklake/telemetry_writer_url) and the reader client (/agent-platform/ducklake/reader_url) read,
+    so an operator can run it from a session. Prints one counts-only line, GOLDEN_SMOKE trees=<n>
+    expectations=<n> window_skipped=<n> reader_calls=<n> writer_calls=<n> elapsed_s=<n> max_response_bytes=<n>
+    seam_skipped=<n> skew=<0 or 1> mismatches=<n>; on any mismatch (skew=0) it files one golden_replay_mismatch:<verb> alarm per verb, and on
+    any failure that stops the run (an unreachable writer or reader, a 5xx, a refused registration), after first
+    re-reading the two deploy records from S3 (independent of the failing call; a deploy-path diff against the
+    checkout there is skew=1, files nothing and exits 0, because a deploy that landed mid-run explains the failure), one
+    golden_replay_error alarm, through alarms.raise_alarms (scope the commit SHA, file this module, acceptance the live
+    re-run AWS_PROFILE=agent_platform bin/venv-python -m scripts.ducklake_smoke.lambda_telemetry_golden_gates
+    --no-alarms --assert-zero-mismatches, which exits 0 only after a completed run at mismatches=0; unless --no-alarms),
+    then exits 1, naming tree and verb or the failure's class only, never a row value or a response body. No boto3
+    import at module level.
+- file: scripts/ducklake_smoke/lambda_ec_gates.py
+  action: Modify
+  purpose: >-
+    _telemetry_read_checks also asserts, against the deployed reader: session_tree_rows on the absent session answers 0
+    rows; a malformed session_id and a max_rows of 0 each answer 400 named_read_input without echoing the value;
+    telemetry_orphan_counts and telemetry_root_sessions answer over today's one-day window. Each new check's failure
+    text names the condition and counts only (status, row_count), never a response body (Decision 101; the
+    pre-existing READER FAIL body echo is rec-4409's).
+- file: .github/workflows/telemetry-golden-replay.yml
+  action: Create
+  purpose: >-
+    Triggers: workflow_run of deploy-ducklake-lambdas (types completed; the job runs only when it concluded success on
+    main, checking out workflow_run.head_sha), a daily schedule in the every-N-hours shape '<minute> */24 * * *' at an
+    unused minute, which scripts/convergence_health/sensor_liveness.py's cron_period_seconds classifies as 86,400 s
+    (the plain 'M H * * *' daily shape raises there and would blind loop_liveness_stale for every peer) (checking out
+    main, so a producer
+    or expectations change is replayed within a day and loop_liveness_stale's cadence and success legs cover the
+    workflow), and workflow_dispatch; no push trigger, so a run never races a deploy started by the same commit;
+    workflow_dispatch runs only on main (job if github.ref == 'refs/heads/main'); the checkout uses fetch-depth 0 for
+    the version guard. One job, timeout-minutes 30, permissions contents read and id-token write, concurrency group
+    telemetry-golden-replay (no cancel), assuming agent-platform-github-ci-branch with the account-ID masking pattern
+    (PLAN-actions-account-id-masking), resolving and masking the writer, reader and telemetry-writer Function URLs
+    exactly as deploy-ducklake-lambdas' smoke job does, installing the venv and running the module. No apply, no deploy,
+    no dispatch of another workflow, never a required check (Decision 83).
+- file: config/ci_rca_taxonomy.yaml
+  action: Modify
+  purpose: >-
+    telemetry-golden-replay: tier not_a_gate, ci_rca excluded, owner platform, rationale: it files its own
+    telemetry_verify recs (golden_replay_mismatch per verb, golden_replay_error for a run that could not complete), and
+    its daily schedule puts it under loop_liveness_stale, which backstops a persistent red (the
+    security-detector-liveness precedent, schedule included).
+- file: config/composite_action_body_baseline.yaml
+  action: Modify
+  purpose: The new workflow's step-body entries, regenerated with the baseline's own update command, never hand-counted.
+- file: tests/common/test_ducklake_event_verification_verbs.py
+  action: Create
+  purpose: >-
+    New module (module-level duckdb = pytest.importorskip("duckdb"), full tier), over the golden chain helper
+    (tests/fixtures/telemetry_golden_chain.py): nodes in execution_steps[4], the whole-corpus nodes parametrized per
+    tree so each parameter stays well inside the full tier's 120 s per-test timeout.
+- file: tests/common/test_ducklake_event_reads.py
+  action: Modify
+  purpose: >-
+    Nodes test_tree_binding_validates_and_clamps_max_rows, test_telemetry_joins_come_from_the_projection,
+    test_orphan_read_version_moves_with_a_projected_join (a semantics fixture with one join changed moves only the
+    orphan verb's stamp) and test_registry_import_reads_no_file (a fresh interpreter, a subprocess whose sitecustomize
+    seam makes load_field_semantics and every open() of field_semantics.yaml raise, imports
+    src.common.ducklake_event_read_verbs and src.common.ducklake_event_reads successfully, so the guard can fail)
+    (fast tier, the module's existing style). Sanctioned assertion change: test_event_verbs_are_described_with_their_class_bounds_and_audience's
+    exact non-agent-facing set gains the three verbs.
+- file: tests/common/test_ducklake_event_read_verbs.py
+  action: Modify
+  purpose: >-
+    Sanctioned fixture change: test_verb_fields_match_event_verb_output_columns' params gain offset 0 and max_rows 10,
+    so the parity loop binds and checks the tree verb; no assertion changes.
+- file: tests/test_field_semantics_telemetry_joins.py
+  action: Create
+  purpose: >-
+    Node test_telemetry_joins_projected_from_the_contract, in a new module beside the existing test_field_semantics_*
+    modules (tests/test_schema_to_field_semantics.py is at 499 of 500 SLOC): the generated telemetry_joins equals
+    scripts.telemetry_verify.joins.load_telemetry_joins over docs/contracts/_joins.yaml (the independent oracle loader),
+    the committed projection carries it, and importing scripts.schema_to_field_semantics does not import
+    scripts.telemetry_verify.
+- file: tests/telemetry_verify/test_orphans.py
+  action: Create
+  purpose: >-
+    Mirror tests for orphans.py: test_orphans_split_by_quiescence (a child row whose parent is missing counts as pending
+    until as_of passes the idle threshold of its tree's own last event, then quiescent; an exact-threshold as_of stays
+    pending), test_co_pinned_trees_in_two_projects_stay_apart and test_finalized_golden_trees_have_no_orphans (every
+    corpus and verification tree, run through record_turn, as plain rows).
+- file: tests/telemetry_verify/test_rows.py
+  action: Create
+  purpose: >-
+    Mirror tests for rows.py over a fake named callable: test_pages_reassemble_to_every_row_once,
+    test_a_moving_total_raises and test_a_413_halves_the_page_until_it_fits.
+- file: tests/telemetry_verify/test_alarms.py
+  action: Create
+  purpose: >-
+    Mirror tests for alarms.py over a fake portal_caller and rows: test_one_episode_per_alarm_class (including two
+    classes where one is a prefix of the other: each files its own rec),
+    test_declared_classes_are_counted_never_filed, test_a_class_is_rate_limited_by_the_callers_map,
+    test_rec_text_carries_counts_classes_and_scope_only and test_telemetry_verify_source_is_registered_and_projected
+    (validate_source("telemetry_verify") passes, an unregistered neighbour raises, and both registry-sourced
+    accepted_values lists in field_semantics.yaml carry it).
+- file: tests/telemetry_verify/test_package_boundary.py
+  action: Modify
+  purpose: >-
+    The direct-import allow-list gains exactly scripts.rec_episode (alarms.py's episode call); the forbidden set is
+    unchanged.
+- file: tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py
+  action: Create
+  purpose: >-
+    Mirror tests for the replay over a fake writer and reader (no network): test_replay_registers_one_project_per_tree_and_pass,
+    test_replay_reports_counts_only_and_skips_window_verbs, test_a_mismatch_names_tree_and_verb_never_a_value (a reader
+    answer that differs: the raised text and the alarm text carry the tree and verb and no planted value; one alarm
+    per verb), test_tree_rows_must_match_the_sent_set_with_one_root (a zero-row tree answers as absent),
+    test_a_run_that_cannot_complete_files_one_error_alarm (a 5xx with a planted body: the body never appears),
+    test_never_imports_tests (AST), test_version_skew_skips_without_alarms (a deployed read_version or a deploy record
+    whose source_git_sha differs from the checkout on a deploy path, before the first append or after the last read:
+    GOLDEN_SMOKE with skew=1, no alarm, exit 0) and test_assert_zero_mismatches_parses_and_lints_as_decidable (the
+    alarm acceptance string parses with the module's own argument parser and passes
+    lint_acceptance_command(require_decidable=True)).
+- file: tests/ducklake_neon_smoke_test/test_lambda_ec_gates.py
+  action: Modify
+  purpose: >-
+    Node test_telemetry_read_checks_cover_the_verification_verbs, with a planted value in the fake reader's rows that
+    must never appear in a raised message. Sanctioned fixture change: _reader_fake answers the two window verbs (which
+    carry no session_id) and max_rows 0.
+- file: tests/test_telemetry_golden_replay_workflow.py
+  action: Create
+  purpose: >-
+    Workflow structure guard in the tests/test_security_detector_liveness_workflow.py style: exactly the three
+    triggers (workflow_run with the conclusion and branch guard, schedule, workflow_dispatch) and no push trigger, the
+    permissions block, the ci-branch role with the masked account-ID pattern, masked URL resolution, the module
+    command, timeout 30, the main-only dispatch guard, fetch-depth 0, the workflow name keying the taxonomy row, the
+    cron classified by sensor_liveness.cron_period_seconds as 86,400 s, and no terraform, deploy or workflow-dispatch
+    step.
+bundled_recommendations: []
+followon_recs:
+- rec-4025
+- rec-4101
+- rec-4409
+- rec-4411
+infrastructure_dependencies:
+- >-
+  LAMBDA-DEPLOY (Decision 79/125/126): src/common/ducklake_event_read_sql.py, ducklake_event_read_verbs.py and
+  ducklake_event_reads.py are in the ducklake_reader bundle and field_semantics.yaml ships to every DuckLake function, so
+  the governed deploy-ducklake-lambdas run on the merge commit redeploys them and runs their smoke gates; VP steps 13
+  and 14 assert the run and the new verbs' read_version. The regenerated projection widens two registry-sourced
+  accepted_values lists by one value and adds telemetry_joins, which only the reader reads; no other rule moves. Only
+  the reader gains behaviour. No Terraform or IAM: the reader's existing grants read the telemetry catalog, and
+  agent-platform-github-ci-branch already invokes the reader and telemetry writer Function URLs and holds
+  lambda:GetFunctionUrlConfig (the deploy smoke job uses exactly these).
+- >-
+  New workflow (not a deploy): telemetry-golden-replay runs after every successful deploy-ducklake-lambdas run on main
+  and once a day, writing only synthetic-project rows to the smoke catalog through the deployed writer. Budget: about
+  18 tree-passes, each one registration, a few appends, one tree read and up to six verb calls, so on the order of 150
+  reader invocations per run and one or two runs a day; GOLDEN_SMOKE reports the call counts, elapsed seconds and the
+  largest response, against the job's 30-minute limit and Decision 215's reader-invocations-doubled baseline (the
+  closure report states the measured run against that baseline). Residual: each run adds its rows and small files to
+  the smoke catalog's 2026-01-01 partition (the corpus timestamps), which the smoke merge does not cover, so reads of
+  the telemetry tables there slow as runs accumulate; rec-4411 owns bounding it (trigger: elapsed_s doubling, or a
+  data-file threshold), tied to T2.36 c5 and rec-4292.
+- >-
+  LAMBDA-DEPLOY DEFERRED (CD.16 / Decision 79), per-artifact reasoned disposition: compute_affected_artifacts flags
+  data-pipeline through src/common/ducklake_reader_client.py (bundled by its src/ wildcard). No build, deploy or smoke
+  test is owed: no data-pipeline handler reads VERB_FIELDS and deploy-prod-lambdas.yml's path triggers exclude the file;
+  the same disposition as PLAN-telemetry-reader-verbs and PLAN-telemetry-cache-token-totals.
+acceptance_criteria:
+- >-
+  On every producer golden tree and verification tree loaded through the golden chain, session_tree_rows returns exactly
+  the tree's stored rows (every grain key once per stored row, the compared columns plus created_timestamp, never
+  content or content_uri), pages reassemble to the same set at any max_rows, total_rows is the tree's row count on
+  every page, roots_in_tree is 1 for every tree that stores a row, and an absent or zero-row session answers no rows;
+  two co-pinned trees in different projects of
+  one catalog stay apart, and two co-pinned roots in one project report roots_in_tree 2 (VP step 3).
+- >-
+  telemetry_orphan_counts equals scripts.telemetry_verify.orphans over the same rows, reports zero orphans on every
+  finalized golden tree, keeps co-pinned trees of different projects apart, and splits a planted orphan into pending
+  and quiescent by as_of exactly at and past the idle threshold; the projected telemetry_joins equal the contract's
+  telemetry joins as the golden harness's loader reads them (VP step 4).
+- >-
+  telemetry_root_sessions returns one row per root session of a real-purpose project in the window, with entity_ref,
+  harness_session_key (null for a tree written before parser_version 4), branch and the three Decision 207 stamps, a
+  conflicted root reported in its stamps, and excludes synthetic and drill projects (VP step 5).
+- >-
+  The tree binding validates and clamps max_rows and offset, the described non-agent-facing set gains the three verbs,
+  importing the registry reads no file, and the orphan verb's stamp moves with a projected join (VP step 6); no
+  pre-existing verb's read_version differs from its origin/main value (VP step 18).
+- >-
+  The golden replay registers one synthetic project per tree and pass, never imports tests/, asserts the sent set and
+  every session-bound expectation through the reader, counts window-verb expectations and seam cases as skipped,
+  prints counts only, and files one alarm per mismatched verb or one error alarm for a run that could not complete,
+  naming only the tree and verb or the failure class (VP step 7); the reader smoke covers the three verbs with
+  counts-only failure text (VP step 8); the workflow runs after every successful deploy and daily, never on push,
+  under the ci-branch role, and never applies, deploys or dispatches (VP step 9).
+- >-
+  telemetry_verify is a registered rec source carried by both registry-sourced accepted_values lists and scanned by
+  check_source_registry; the alarm helper files or updates one rec per class, never closes, rate-limits each class by
+  the caller's own map and never files a declared class (VP step 2).
+- >-
+  ducklake_reader.yaml names the three verbs and the second raw-row exception, read-engine.yaml groups them, and
+  VERB_FIELDS equals each verb's output columns (VP steps 10 and 3).
+- >-
+  After the governed deploy of the merge commit: every deploy and smoke job is green and the deployed describe and a
+  live named_read stamp the merged read_version for each new verb (VP steps 13 and 14); the golden replay run for the
+  merge commit prints GOLDEN_SMOKE with mismatches=0 (VP step 15); session_tree_rows over the implementing session's own
+  captured tree returns root-session rows whose per-table counts equal the writer's telemetry_probe grain counts for
+  its root session ref (VP step 16); rec-4025 and rec-4101 carry this plan's notes (VP step 17).
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: >-
+    Precondition. The golden harness build (PLAN-telemetry-golden-harness) and the column additions build
+    (PLAN-telemetry-column-additions) are merged and on this branch, and the branch is on current main.
+  command: >-
+    git fetch origin main --quiet && git merge-base --is-ancestor origin/main HEAD && test -f
+    scripts/telemetry_verify/derive.py && test -f scripts/telemetry_verify/joins.py && test -f
+    tests/fixtures/telemetry_golden_chain.py && test -f tests/telemetry/fixtures/derived_golden_state.yaml && test -f
+    tests/telemetry/fixtures/derived_golden_rollups.yaml && grep -q "def compose" src/common/ducklake_event_read_sql.py &&
+    grep -q "harness_session_key" docs/contracts/telemetry_sessions.yaml && echo PRECONDITION_OK
+  expected: PRECONDITION_OK.
+  fix_if: >-
+    The ancestry test failing means main moved: rebase onto origin/main and re-run. A missing harness file means the
+    golden harness build has not merged, and an absent harness_session_key means PLAN-telemetry-column-additions' build
+    has not merged: stop and wait (its governed deploy must also be green before this build merges; the sequencing
+    context line). A changed shape (a renamed helper or file) means escalate to the coordinator for a plan amendment,
+    never adapt the scope inline.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    A sequencing precondition on another plan's build, not a behaviour of this change; as a standing guard it would only
+    re-assert that those files exist.
+- step: 2
+  phase: pre-deploy
+  action: The verification library modules (orphans, rows, alarms), the alarm source registration and the boundary.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_verify/test_orphans.py::test_orphans_split_by_quiescence
+    tests/telemetry_verify/test_orphans.py::test_co_pinned_trees_in_two_projects_stay_apart
+    tests/telemetry_verify/test_orphans.py::test_finalized_golden_trees_have_no_orphans
+    tests/telemetry_verify/test_rows.py::test_pages_reassemble_to_every_row_once
+    tests/telemetry_verify/test_rows.py::test_a_moving_total_raises
+    tests/telemetry_verify/test_rows.py::test_a_413_halves_the_page_until_it_fits
+    tests/telemetry_verify/test_alarms.py::test_one_episode_per_alarm_class
+    tests/telemetry_verify/test_alarms.py::test_declared_classes_are_counted_never_filed
+    tests/telemetry_verify/test_alarms.py::test_a_class_is_rate_limited_by_the_callers_map
+    tests/telemetry_verify/test_alarms.py::test_rec_text_carries_counts_classes_and_scope_only
+    tests/telemetry_verify/test_alarms.py::test_telemetry_verify_source_is_registered_and_projected
+    tests/telemetry_verify/test_package_boundary.py::test_oracle_has_no_direct_reader_sql_duckdb_streams_or_tests_import
+    tests/checks/ops_governance/test_check_source_registry.py::TestScannedPaths::test_scanned_paths_includes_portal_and_producer_modules -q
+  expected: >-
+    Exit 0, all thirteen nodes pass. The first eleven are red before because they are absent; the last is red before
+    because SCANNED_PATHS lacks scripts/telemetry_verify/alarms.py.
+  expected_literals: []
+  fix_if: >-
+    An orphan on a finalized golden tree is a producer or oracle defect: decide from _joins.yaml which, file a producer
+    defect through the portal, fix an oracle defect here. A boundary failure means a forbidden direct import; the
+    allow-list gains exactly scripts.rec_episode and nothing else. A
+    source missing from field_semantics.yaml means the projection was not regenerated; regenerate it, never hand-edit it.
+    A close call from alarms means one green was read as global; remove it.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-verify-orphans-rows-and-alarms
+- step: 3
+  phase: pre-deploy
+  action: The tree verb returns exactly the stored rows of one tree key, pages cleanly, and VERB_FIELDS matches every verb.
+  command: >-
+    bin/venv-python -m pytest
+    tests/common/test_ducklake_event_verification_verbs.py::test_tree_rows_return_every_stored_row_exactly_once
+    tests/common/test_ducklake_event_verification_verbs.py::test_tree_rows_page_to_the_same_set_at_any_page_size
+    tests/common/test_ducklake_event_verification_verbs.py::test_co_pinned_trees_stay_apart_and_collisions_are_counted
+    tests/common/test_ducklake_event_read_verbs.py::test_verb_fields_match_event_verb_output_columns -q
+  expected: Exit 0. The first three are red before because they are absent; the last is red before the fixture change.
+  fix_if: >-
+    A missing or duplicated row means the tree key or a table branch is wrong; a page set that differs by page size
+    means the order is not total; a co-pinned tree of another project in the answer means the key lacks tenant or
+    project; fix the SQL. Never relax the exact-set comparison.
+  hermetic: false
+  graduation: graduate
+  graduation_check_id: telemetry-tree-rows-verb-exact
+- step: 4
+  phase: pre-deploy
+  action: The orphan verb agrees with the independent count, and the joins come from the contract through the projection.
+  command: >-
+    bin/venv-python -m pytest
+    tests/common/test_ducklake_event_verification_verbs.py::test_orphan_counts_match_the_independent_count
+    tests/test_field_semantics_telemetry_joins.py::test_telemetry_joins_projected_from_the_contract
+    tests/common/test_ducklake_event_reads.py::test_telemetry_joins_come_from_the_projection -q && bin/venv-python -m
+    scripts.schema_to_field_semantics --check
+  expected: Exit 0 from both. The three nodes are red before because they are absent.
+  fix_if: >-
+    A disagreement decides from _joins.yaml and the quiescence rule which side is wrong; a SQL defect is fixed here, an
+    oracle defect in orphans.py. Projection drift means regenerate, never hand-edit.
+  hermetic: false
+  graduation: graduate
+  graduation_check_id: telemetry-orphan-counts-verb-agrees
+- step: 5
+  phase: pre-deploy
+  action: The root-sessions verb returns the join keys and stamps for real-purpose roots only.
+  command: >-
+    bin/venv-python -m pytest
+    tests/common/test_ducklake_event_verification_verbs.py::test_root_sessions_carry_join_keys_and_stamps_for_real_projects_only
+    -q
+  expected: Exit 0. Red before because the node is absent.
+  fix_if: >-
+    A synthetic or drill root in the answer means the purpose join is missing; a child row means the root filter is; a
+    conflicted root with empty stamps means the stamp CTEs are not joined.
+  hermetic: false
+  graduation: graduate
+  graduation_check_id: telemetry-root-sessions-verb
+- step: 6
+  phase: pre-deploy
+  action: The tree binding and max_rows validation; the described audience set; existing read_versions unchanged.
+  command: >-
+    bin/venv-python -m pytest tests/common/test_ducklake_event_reads.py::test_tree_binding_validates_and_clamps_max_rows
+    tests/common/test_ducklake_event_reads.py::test_event_verbs_are_described_with_their_class_bounds_and_audience
+    tests/common/test_ducklake_event_reads.py::test_read_version_moves_with_every_datum_sql_and_column
+    tests/common/test_ducklake_event_reads.py::test_orphan_read_version_moves_with_a_projected_join
+    tests/common/test_ducklake_event_reads.py::test_registry_import_reads_no_file -q
+  expected: Exit 0, all five nodes pass; the first and the last two are red before because they are absent.
+  fix_if: >-
+    A moved read_version on an existing verb means a shared template changed; revert that part. A described set that
+    differs means a verb's agent_facing flag is wrong.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-tree-binding-and-row-cap
+- step: 7
+  phase: pre-deploy
+  action: The golden replay over fakes.
+  command: >-
+    bin/venv-python -m pytest
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py::test_replay_registers_one_project_per_tree_and_pass
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py::test_replay_reports_counts_only_and_skips_window_verbs
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py::test_a_mismatch_names_tree_and_verb_never_a_value
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py::test_tree_rows_must_match_the_sent_set_with_one_root
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py::test_a_run_that_cannot_complete_files_one_error_alarm
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py::test_never_imports_tests
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py::test_version_skew_skips_without_alarms
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py::test_assert_zero_mismatches_parses_and_lints_as_decidable
+    -q
+  expected: Exit 0, all eight nodes pass. Red before because the module is absent.
+  expected_literals: []
+  fix_if: A row value in a failure or alarm message is a Decision 101 defect; name the tree and verb only.
+  hermetic: false
+  graduation: graduate
+  graduation_check_id: telemetry-golden-replay-over-fakes
+- step: 8
+  phase: pre-deploy
+  action: The reader smoke checks cover the three verbs, with counts-only failure text.
+  command: >-
+    bin/venv-python -m pytest
+    tests/ducklake_neon_smoke_test/test_lambda_ec_gates.py::test_telemetry_read_checks_cover_the_verification_verbs -q
+  expected: Exit 0. Red before because the node is absent.
+  expected_literals: []
+  fix_if: A planted value or a malformed value echoed in a message is a Decision 101 defect.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-reader-smoke-covers-verification-verbs
+- step: 9
+  phase: pre-deploy
+  action: The golden replay workflow's structure and taxonomy row.
+  command: >-
+    bin/venv-python -m pytest tests/test_telemetry_golden_replay_workflow.py -q && grep -c "telemetry-golden-replay:"
+    config/ci_rca_taxonomy.yaml
+  expected: Exit 0, then a count of 1.
+  expected_literals: []
+  fix_if: >-
+    A missing masking pattern fails PLAN-actions-account-id-masking's guard too; follow it. A count of 0 means the
+    taxonomy row is missing.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-golden-replay-workflow-structure
+- step: 10
+  phase: pre-deploy
+  action: The reader and read-engine contracts name the three verbs and the second raw-row exception.
+  command: >-
+    grep -c "session_tree_rows" docs/contracts/ducklake_reader.yaml && grep -c "telemetry_orphan_counts"
+    docs/contracts/ducklake_reader.yaml && grep -c "telemetry_root_sessions" docs/contracts/ducklake_reader.yaml && grep
+    -c "session_tree_rows" docs/contracts/read-engine.yaml
+  expected: Each count is 1 or more.
+  expected_literals: []
+  fix_if: A count of 0 means the invariant text of execution_steps[3] or the read-engine grouping is missing.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    Contract prose presence; validate_contract_drift, the contract loader and validate_read_engine_verbs already gate the
+    files' structure in both tiers, and a standing grep would pin wording rather than behaviour.
+- step: 11
+  phase: pre-deploy
+  action: >-
+    Coverage. Run pytest-cov directly for the scripts/ modules the coverage checker's map does not reach (rec-2641), and
+    the checker for the src/ modules it maps.
+  command: >-
+    bin/venv-python -m pytest tests/telemetry_verify tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py
+    tests/ducklake_neon_smoke_test/test_lambda_ec_gates.py -m "not integration" --cov=scripts.telemetry_verify.orphans
+    --cov=scripts.telemetry_verify.rows --cov=scripts.telemetry_verify.alarms
+    --cov=scripts.ducklake_smoke.lambda_telemetry_golden_gates --cov=scripts.ducklake_smoke.lambda_ec_gates
+    --cov-report=term-missing --cov-fail-under=0 -q && bin/venv-python -m scripts.test_coverage_checker --check-tests --check-coverage
+    --files src/common/ducklake_event_read_sql.py src/common/ducklake_event_read_verbs.py src/common/ducklake_event_reads.py
+    src/common/ducklake_reader_client.py scripts/schema_to_field_semantics.py
+  expected: >-
+    Exit 0 from both; the term-missing report lists no missing line in orphans.py, rows.py, alarms.py or
+    lambda_telemetry_golden_gates.py, and no missing line in lambda_ec_gates.py among the lines this plan adds.
+  fix_if: A coverage gap needs a direct assertion in the module's test, never a pragma.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    A whole-directory coverage run needing pytest-cov, which the venv-less fast tier lacks; the src/ half is the full
+    tier's standing coverage gate, the scripts/ half is rec-2641's mapping gap.
+- step: 12
+  phase: pre-deploy
+  action: Lint and run the full tier on the committed, clean tree before the push, as the handoff policy requires.
+  command: >-
+    bin/venv-python -m ruff check src/common scripts/telemetry_verify scripts/ducklake_smoke scripts/schema_to_field_semantics.py
+    tests/common tests/telemetry_verify tests/ducklake_neon_smoke_test tests/test_schema_to_field_semantics.py
+    tests/test_telemetry_golden_replay_workflow.py && bin/venv-python -m scripts.validate
+  expected: Exit 0 from both.
+  fix_if: Fix the reported finding at its root (Decision 55); never skip, disable or quarantine a test.
+  hermetic: false
+  graduation: not-applicable
+- step: 13
+  phase: post-deploy
+  action: >-
+    The governed deploy of the merge commit succeeded, every job included. Read with mcp__github__actions_list
+    (list_workflow_runs, workflow deploy-ducklake-lambdas.yml, head_sha $MERGE_SHA) then list_workflow_jobs for that run,
+    writing the jobs JSON to $DEPLOY_JOBS_JSON.
+  command: >-
+    test -s "$DEPLOY_JOBS_JSON" && bin/venv-python -c "import json,os;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));
+    jobs={x['name']:x.get('conclusion') for x in (j.get('jobs') if isinstance(j,dict) else j)};print(jobs);
+    want=['deploy-maintenance','maintenance-smoke','reconcile-gate','deploy-serving','smoke']; assert all(any(n.startswith(w)
+    and c=='success' for n,c in jobs.items()) for w in want),jobs;print('DEPLOY_OK')"
+  expected: Every named job concluded success (a skipped job fails this step), then DEPLOY_OK.
+  fix_if: >-
+    A failed deploy or smoke step is this plan's to root-cause and fix forward, never a re-run to green (Decision 55).
+  hermetic: false
+  graduation: not-applicable
+- step: 14
+  phase: post-deploy
+  action: The deployed reader serves the merged verbs.
+  command: >-
+    export DUCKLAKE_READER_URL=$(aws ssm get-parameter --profile agent_platform --region eu-west-2 --name
+    /agent-platform/ducklake/reader_url --query Parameter.Value --output text) && AWS_PROFILE=agent_platform bin/venv-python
+    -c "import datetime as d;from scripts.ducklake_smoke import core;from src.common import ducklake_event_reads as ev;
+    u=core._function_url('reader');desc=core._sigv4_invoke(u,{'action':'describe'}).json()['verbs'];want=ev.describe_all();
+    vs=('session_tree_rows','telemetry_orphan_counts','telemetry_root_sessions');
+    assert all(desc[v]['read_version']==want[v]['read_version'] and desc[v]['agent_facing'] is False for v in vs),[desc.get(v) for v in vs];
+    t=str(d.datetime.now(d.timezone.utc).date());n=d.datetime.now(d.timezone.utc).isoformat();
+    o=core._sigv4_invoke(u,{'action':'named_read','verb':'telemetry_orphan_counts','params':{'day_from':t,'day_to':t,'as_of':n}}).json();
+    r=core._sigv4_invoke(u,{'action':'named_read','verb':'telemetry_root_sessions','params':{'day_from':t,'day_to':t}}).json();
+    assert o['ok'] and r['ok'] and o.get('read_version')==want['telemetry_orphan_counts']['read_version'];
+    print({'orphan_rows':o['row_count'],'roots':r['row_count']});print('LIVE_VERBS_OK')"
+  expected: One line with the two row counts, then LIVE_VERBS_OK.
+  fix_if: >-
+    A read_version mismatch means the deployed reader predates the merge; check the deploy run's head SHA, never relax
+    the comparison. If describe_all or the stamp key is named differently, use the existing names and say so.
+  hermetic: false
+  graduation: not-applicable
+- step: 15
+  phase: post-deploy
+  action: >-
+    The golden replay ran green for the merge commit. Find the telemetry-golden-replay run with event workflow_run
+    created after the deploy run for $MERGE_SHA completed (mcp__github__actions_list list_workflow_runs; never filter
+    on head_sha alone, since a workflow_run run's head_sha is main's head when it starts), confirm it by the checkout
+    SHA its job logs, and save its job log (mcp__github__get_job_logs) to $REPLAY_LOG.
+  command: >-
+    grep -E "GOLDEN_SMOKE trees=[1-9][0-9]* expectations=[1-9][0-9]* window_skipped=[0-9]+ reader_calls=[0-9]+
+    writer_calls=[0-9]+ elapsed_s=[0-9]+ max_response_bytes=[0-9]+ seam_skipped=[0-9]+ skew=0 mismatches=0" "$REPLAY_LOG"
+  expected: >-
+    One matching GOLDEN_SMOKE line and a run concluded success. Report the line verbatim (its elapsed_s and call counts
+    are the budget's first measurement).
+  fix_if: >-
+    A mismatch on the deployed engine with the in-memory and local legs green is an engine or transport defect: name the
+    tree and verb from the failure line, file it through the portal and fix forward; never relax an expectation for one
+    engine. A run that exceeds the job limit means the budget was wrong: report the counts and split the replay by tree
+    across a matrix rather than dropping trees. No such run, or skew=1, means main moved or a later deploy overlapped:
+    dispatch the workflow on main once the deploys settle and read that run.
+  hermetic: false
+  graduation: not-applicable
+- step: 16
+  phase: post-deploy
+  action: >-
+    session_tree_rows over the implementing session's own captured tree (counts only): take the pin day from the
+    capture cursor, find the root through telemetry_root_sessions by its entity_ref (the session's local id,
+    CLAUDE_CODE_SESSION_ID), page the tree with rows.read_tree over the reader client's named(), and compare the root
+    session's per-table row counts with the writer's telemetry_probe grain counts for the same root ref
+    (scripts.telemetry_capture probe). The session must have had at least one Stop pass captured.
+  command: >-
+    T="$(ls -t ~/.claude/projects/*/*.jsonl | head -1)" && AWS_PROFILE=agent_platform bin/venv-python -m
+    scripts.telemetry_capture probe --tree "$T" && AWS_PROFILE=agent_platform bin/venv-python -c "import
+    sys,os,datetime as d;from pathlib import Path;from scripts.telemetry_capture.state import CaptureState,state_dir;
+    from src.common.ducklake_reader_client import make_reader;from scripts.telemetry_verify import rows;t=Path(sys.argv[1]);
+    c=CaptureState(state_dir(t,t.stem)).cursor_on_disk();day=str((d.datetime(1970,1,1,tzinfo=d.timezone.utc)+d.timedelta(milliseconds=c.session_started_at_ms)).date());
+    r=make_reader(profile='agent_platform');roots=r.named('telemetry_root_sessions',day_from=day,day_to=day);
+    me=[x for x in roots if x['entity_ref']==os.environ['CLAUDE_CODE_SESSION_ID']];assert len(me)==1,len(me);
+    pages=rows.read_tree(r.named,me[0]['session_id'],2000);by=rows.decode_rows(pages);
+    print({k:len(v) for k,v in by.items()},'pages',len(pages));print({k:sum(1 for x in v if x['session_id']==me[0]['session_id']) for k,v in
+    by.items()});print('TREE_READ_OK')" "$T"
+  expected: >-
+    The probe's per-table rows for the root ref, the tree's per-table counts with the page count, the root session's
+    per-table counts, then TREE_READ_OK; the root session's counts equal the probe's per table. Report all three lines.
+  fix_if: >-
+    A difference is a tree-key defect unless a Stop pass landed between the two reads; re-read after the next pass
+    before filing it. A root not found means the root's rows have not landed yet (the first sessions row waits for a
+    closed assistant turn); wait for the next pass.
+  hermetic: false
+  graduation: not-applicable
+- step: 17
+  phase: post-deploy
+  action: The carrier, rec-4101 and rec-4411 notes landed (read-back after the closure's portal updates).
+  command: >-
+    AWS_PROFILE=agent_platform bin/venv-python -c "import os;from src.common.ducklake_reader_client import
+    make_reader,fetch_recs_by_ids;rs,missing=fetch_recs_by_ids(make_reader(profile='agent_platform'),['rec-4025','rec-4101','rec-4411']);
+    by={x['id']:x for x in rs};assert not missing and all(by[i]['status']=='open' for i in by),missing;
+    assert all('PLAN-telemetry-verification-verbs' in by[i]['context'] for i in ('rec-4025','rec-4101'));
+    assert all(os.environ['MERGE_SHA'][:8] in by[i]['context'] for i in by);print('NOTES_OK')"
+  expected: NOTES_OK.
+  fix_if: A missing note means the closure's update_rec did not land; re-run it through the portal, never edit a cache.
+  hermetic: false
+  graduation: not-applicable
+- step: 18
+  phase: pre-deploy
+  action: >-
+    Every pre-existing event verb's read_version equals its origin/main value (a worktree at origin/main computes the
+    same stamps).
+  command: >-
+    W="$(mktemp -d)/rv" && git worktree add -q "$W" origin/main && (cd "$W" && "$OLDPWD/bin/venv-python" -c "import
+    json;from src.common import ducklake_event_reads as ev;print(json.dumps({v:r['read_version'] for v,r in
+    ev.describe_all().items() if r.get('kind')=='event_journal'}))") > "$W.json" && bin/venv-python -c "import
+    json,sys;from src.common import ducklake_event_reads as ev;old=json.load(open(sys.argv[1]));new=ev.describe_all();
+    bad=[v for v in old if new[v]['read_version']!=old[v]];print({'compared':len(old),'moved':len(bad)});assert not bad,bad;
+    print('READ_VERSIONS_UNCHANGED')" "$W.json"; rc=$?; git worktree remove --force "$W"; exit $rc
+  expected: One line with compared above 0 and moved 0, then READ_VERSIONS_UNCHANGED.
+  fix_if: A moved stamp means a shared template, the stamp definition or the projection changed for that verb; revert that part.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    A one-time before/after comparison against origin/main at build time; once merged the old values are the new
+    baseline, so a standing guard would compare a revision with itself.
+test_obligations:
+- source: src/common/ducklake_event_read_sql.py
+  behavior: The tree query returns every stored row of one tree key exactly once, compared columns only, in a total order.
+  verification_step: 3
+  test_selector: tests/common/test_ducklake_event_verification_verbs.py::test_tree_rows_return_every_stored_row_exactly_once
+  red_green_expectation: red before (node absent), green after
+- source: src/common/ducklake_event_read_sql.py
+  behavior: Co-pinned trees of different projects stay apart; co-pinned roots of one project are counted.
+  verification_step: 3
+  test_selector: tests/common/test_ducklake_event_verification_verbs.py::test_co_pinned_trees_stay_apart_and_collisions_are_counted
+  red_green_expectation: red before (node absent), green after
+- source: src/common/ducklake_event_read_sql.py
+  behavior: The orphan query agrees with the independent count, split by quiescence.
+  verification_step: 4
+  test_selector: tests/common/test_ducklake_event_verification_verbs.py::test_orphan_counts_match_the_independent_count
+  red_green_expectation: red before (node absent), green after
+- source: src/common/ducklake_event_read_sql.py
+  behavior: The root-sessions query returns real-purpose roots with join keys and stamps.
+  verification_step: 5
+  test_selector: tests/common/test_ducklake_event_verification_verbs.py::test_root_sessions_carry_join_keys_and_stamps_for_real_projects_only
+  red_green_expectation: red before (node absent), green after
+- source: src/common/ducklake_event_read_verbs.py
+  behavior: The three verbs are registered non-agent-facing with their bounds.
+  verification_step: 6
+  test_selector: tests/common/test_ducklake_event_reads.py::test_event_verbs_are_described_with_their_class_bounds_and_audience
+  red_green_expectation: red before (the exact set lacks the three verbs), green after
+- source: src/common/ducklake_event_reads.py
+  behavior: The tree binding validates and clamps max_rows and offset; the joins come from the projection.
+  verification_step: 6
+  test_selector: tests/common/test_ducklake_event_reads.py::test_tree_binding_validates_and_clamps_max_rows
+  red_green_expectation: red before (node absent), green after
+- source: src/common/ducklake_reader_client.py
+  behavior: VERB_FIELDS carries the three verbs' output columns.
+  verification_step: 3
+  test_selector: tests/common/test_ducklake_event_read_verbs.py::test_verb_fields_match_event_verb_output_columns
+  red_green_expectation: red before (the parity loop cannot bind the tree verb), green after
+- source: scripts/schema_to_field_semantics.py
+  behavior: telemetry_joins are projected from the contract by the golden harness's loader.
+  verification_step: 4
+  test_selector: tests/test_field_semantics_telemetry_joins.py::test_telemetry_joins_projected_from_the_contract
+  red_green_expectation: red before (node absent), green after
+- source: config/lambda/ducklake/field_semantics.yaml
+  behavior: The projection carries telemetry_joins and both registry-sourced lists carry telemetry_verify.
+  verification_step: 2
+  test_selector: tests/telemetry_verify/test_alarms.py::test_telemetry_verify_source_is_registered_and_projected
+  red_green_expectation: red before (node absent; the projection lacks the value), green after
+- source: config/agent/data_quality/source_registry.yaml
+  behavior: telemetry_verify is a registered rec source.
+  verification_step: 2
+  test_selector: tests/telemetry_verify/test_alarms.py::test_telemetry_verify_source_is_registered_and_projected
+  red_green_expectation: red before (node absent; validate_source raises on the unregistered value), green after
+- source: scripts/telemetry_verify/orphans.py
+  behavior: Orphans are counted per tree key and split by quiescence.
+  verification_step: 2
+  test_selector: tests/telemetry_verify/test_orphans.py::test_orphans_split_by_quiescence
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_verify/rows.py
+  behavior: Pages reassemble once; a moving total raises; a 413 halves the page.
+  verification_step: 2
+  test_selector: tests/telemetry_verify/test_rows.py::test_a_413_halves_the_page_until_it_fits
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_verify/alarms.py
+  behavior: One rec episode per alarm class, rate-limited per scope, declared classes never filed.
+  verification_step: 2
+  test_selector: tests/telemetry_verify/test_alarms.py::test_one_episode_per_alarm_class
+  red_green_expectation: red before (module absent), green after
+- source: scripts/telemetry_verify/__init__.py
+  behavior: The facade re-exports orphans, rows and alarms.
+  verification_step: 2
+  test_selector: tests/telemetry_verify/test_orphans.py::test_orphans_split_by_quiescence
+  waiver_reason: >-
+    Re-export lines only, no logic; every re-exported name is imported through the facade by the mirror tests of VP
+    step 2, which fail if a name is missing.
+- source: scripts/ducklake_smoke/lambda_telemetry_golden_gates.py
+  behavior: The replay isolates each tree and pass, asserts the sent set and expectations, and reports counts only.
+  verification_step: 7
+  test_selector: tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py::test_replay_registers_one_project_per_tree_and_pass
+  red_green_expectation: red before (module absent), green after
+- source: scripts/ducklake_smoke/lambda_ec_gates.py
+  behavior: The reader smoke covers the three verbs with counts-only failure text.
+  verification_step: 8
+  test_selector: tests/ducklake_neon_smoke_test/test_lambda_ec_gates.py::test_telemetry_read_checks_cover_the_verification_verbs
+  red_green_expectation: red before (node absent), green after
+- source: .github/workflows/telemetry-golden-replay.yml
+  behavior: The replay runs after every successful deploy and daily, never on push; never applies, deploys or dispatches.
+  verification_step: 9
+  test_selector: tests/test_telemetry_golden_replay_workflow.py
+  red_green_expectation: red before (module absent), green after
+- source: scripts/checks/ops_governance/check_source_registry.py
+  behavior: The scan set covers the new alarm module's source literal.
+  verification_step: 2
+  test_selector: tests/checks/ops_governance/test_check_source_registry.py::TestScannedPaths::test_scanned_paths_includes_portal_and_producer_modules
+  red_green_expectation: red before (the required path is absent from SCANNED_PATHS), green after
+- source: config/ci_rca_taxonomy.yaml
+  behavior: The replay workflow is not a gate and files its own recs.
+  verification_step: 9
+  command: grep -c "telemetry-golden-replay:" config/ci_rca_taxonomy.yaml
+  red_green_expectation: count 0 before, 1 after
+- source: config/composite_action_body_baseline.yaml
+  behavior: The new workflow's step bodies are baselined.
+  verification_step: 12
+  command: bin/venv-python -m scripts.validate
+  red_green_expectation: the composite-action body check fails before the entries exist, passes after
+- source: docs/contracts/ducklake_reader.yaml
+  behavior: The reader contract names the three verbs and the second raw-row exception.
+  verification_step: 10
+  command: grep -c "session_tree_rows" docs/contracts/ducklake_reader.yaml
+  red_green_expectation: count 0 before, 1 or more after
+- source: docs/contracts/read-engine.yaml
+  behavior: The verbs grouping lists the three verbs under telemetry_sessions.
+  verification_step: 12
+  command: bin/venv-python -m scripts.validate
+  red_green_expectation: validate_read_engine_verbs fails before the grouping changes, passes after
+constraints:
+- >-
+  Counts only (Decision 101): the replay's output and alarm text, the new smoke checks' failure text and every VP output
+  carry counts, class names, verb names and join ids; never a row value, transcript content, session id or ref in a
+  public log. The tree verb never returns content or content_uri.
+- >-
+  Named verbs only (Decision 84 I-3): every read is one of the registry's verbs; no caller SQL; no new agent-facing verb.
+  The verbs read the smoke catalog only until slice 2c (rec-4292).
+- >-
+  Clause-1 bound (Decision 199 cl.1 and its 2026-10-16 note): session_tree_rows and telemetry_orphan_counts are not
+  clause-1 derivations (state, duration, roll-ups, friction, cost); the tree verb is a bounded raw read and the orphan
+  verb is Decision 210 cl.2's DQ-monitor count. Both still honour the clause's bound: each tree's rows are read only
+  inside that tree's single day(session_started_at) partition (Decision 199 cl.2), the orphan verb sums per-tree counts
+  per day, and both windows are capped at 7 days in the registry. telemetry_root_sessions is a window of per-session
+  reads, as sessions_window is.
+- >-
+  The golden replay is an alarm, not a gate (Decision 210 cl.2): it runs after the deploy, never blocks it, and files
+  golden_replay_mismatch and golden_replay_error recs; the deploy smoke is unchanged except for the three reader
+  checks.
+- >-
+  No two DuckLake deploys at once (Benjamin 2026-10-16): this build merges only when no other DuckLake deploy or apply is
+  in flight; the coordinator sequences it after PLAN-telemetry-column-additions' governed deploy is green. Once the
+  replay workflow exists, a DuckLake merge also waits for an in-flight golden replay to finish (the version guard turns
+  an overlap into skew=1, not a false alarm, but the wait keeps the replay meaningful).
+- >-
+  SLOC: every module under 500 (tests/test_schema_to_field_semantics.py is at 499 and is not modified; the generator's
+  node lives in its own new module); src/common/ducklake_reader_client.py stays under its budget (it is at 405); if the
+  three templates push ducklake_event_read_sql.py past 450, move them into src/common/ducklake_event_read_sql_verify.py
+  re-exported by the existing module, never a budget raise (Decision 128).
+context:
+- >-
+  Approval: Benjamin's "write the plan" (2026-10-17, cmsg_012XgaFy8VaDQbxP5D8nC958MdLJawKLhVPEQqyXDX82iS) approved the
+  four-plan approach in /mnt/project-files/telemetry-slice4/step6b-presentation.md, whose verification verbs row reads
+  "the session-tree rows verb and a per-day orphan-count verb over quiet trees (rec-4101); the golden replay through the
+  deployed writer and reader". This plan runs that replay as its own post-deploy workflow rather than inside the
+  deploy smoke job (plan critique round 1: the smoke job's 15-minute limit, and producer or expectation changes that no
+  DuckLake deploy would exercise); decided with notice.
+- >-
+  Design: /mnt/project-files/telemetry-slice4/plan-ADVICE.md F5 (a non-agent-facing tree verb returning compared
+  columns, transcripts as sha256 and length, plus entity_ref), F6 (a per-day orphan-count verb over quiescent trees,
+  since no captured session has finalized: rec-4382; it discharges rec-4101's precondition), F8 (the deployed-engine
+  leg). The reader's "Rows are derived, never raw" rule gains its second exception; it is Class B, not on the
+  always-ask list, and is shown to Benjamin with the plan.
+- >-
+  Decision scout (/mnt/project-files/telemetry-slice4/decision-scout-report.md): FLAGS_FOUND, resolved by the slice
+  design. CITE for this plan: 199 (cl.1 bound, cl.2 one partition per tree, cl.3 a fresh synthetic project re-derives
+  every id), 84 I-3 (named verbs only), 215 (bounded, fail-closed, non-agent-facing extract verb; the
+  reader-invocations-doubled reversal, which GOLDEN_SMOKE's reader_calls measures), 210 (cl.2 cross-producer orphans
+  are a monitor; cl.3 the contract is the rule source, so the joins are projected, never restated), 207 (conflicts
+  reported, never resolved silently), 213 (the writer only through its URL), 200 (register the synthetic project per
+  tree and pass), 216 (the replay writes only after the deploy's create_telemetry_tables step, because it runs after the
+  deploy completes), 66 (a new rec source registers before first use; the writer enforces registry membership), 79 and 126
+  (governed reader deploy), 83 (never a required check), 88 (egress of the tree and orphan reads). T2.52 c7 asks for the
+  named_read response-size ceiling before raw-row extract verbs: the 6,000,000-byte envelope guard, max_rows 2000 and
+  the 413 page-halving bound a page, and GOLDEN_SMOKE reports the largest response.
+- "gates: decision-scout=FLAGS_FOUND (resolved by the slice design); plan-critique=REVISE round 1 (J1-J12, M1-M12 fixed), REVISE round 2 (J1-J4, M1-M10 fixed), REVISE round 3 (J1, M1-M8 fixed), round 4 PROCEED (R4-N1 to R4-N3 applied, plus the liveness-classifiable daily cron shape the monitor plan's critique found)"
+- "ci-rca: none open (ci_rca_open returned 0 rows on 2026-10-17; rec-4372's DuckLake ZIP fix merged as #1536)."
+- >-
+  Sequencing: build after the golden harness build merges and after PLAN-telemetry-column-additions' governed deploy is
+  green (the root-sessions query reads harness_session_key, which the smoke catalog gains in that deploy), and not
+  concurrently with another DuckLake deploy (Benjamin 2026-10-16: no two applies or deploys at once; the coordinator
+  sequences).
+- "Recs: rec-4409 (filed from this plan's critique) owns the pre-existing READER FAIL body echo; rec-4101 gets a note (execution_steps[10])."
+- >-
+  Tier Item Freshness Gate: T3.20 (in_progress, open c3, c6, c7): no open criterion silently holds; c3's text names a DQ
+  runner path that cannot read telemetry and is re-grounded by the verification monitor plan, which closes it. T2.36
+  (in_progress): this plan reads the smoke catalog only (production residency is slice 2c, rec-4292) and moves no T2.36
+  criterion.
+pre_implementation_checklist:
+- Branch confirmed not on main and rebased on origin/main; VP step 1 passes
+- docs/PROJECT_CONTEXT.md read
+- Decisions 199 (cl.1-3 and the cl.1 note), 84 (I-3), 207 (reader rule), 210 (cl.2, cl.3) and 215 read, only the cited clauses
+- docs/contracts/_joins.yaml telemetry joins, docs/contracts/ducklake_reader.yaml audit_invariants and docs/contracts/read-engine.yaml verbs read
+- All files in scope located and readable
+- Acceptance criteria understood and verifiable
+execution_steps:
+- >-
+  Confirm VP step 1. Read src/common/ducklake_event_read_sql.py (compose, dedupe_ctes, the stamp CTEs, the window
+  scope), the EventRead registry and bind_values, compared_columns, the reader smoke's _telemetry_read_checks,
+  lambda_telemetry_gates' project fan-out and lambda_telemetry_blob_gates' send path, scripts/telemetry_capture/transport.py,
+  scripts/schema_to_field_semantics.py and the deploy smoke job's URL step in .github/workflows/deploy-ducklake-lambdas.yml.
+- >-
+  The joins projection: scripts/schema_to_field_semantics.py's telemetry_joins key, the regeneration, and the node in
+  the new tests/test_field_semantics_telemetry_joins.py (tests/test_schema_to_field_semantics.py, at 499 of 500 SLOC,
+  is not modified). Then the verbs: the three templates over the tree key, the tree
+  binding and max_rows clamp, telemetry_joins() in ducklake_event_reads.py, VERB_FIELDS, read-engine.yaml's grouping,
+  and the two sanctioned test changes (VP step 6).
+- >-
+  scripts/telemetry_verify/orphans.py, rows.py and alarms.py with their mirror tests (VP step 2).
+- >-
+  docs/contracts/ducklake_reader.yaml, two audit_invariants appended after the transcript_content entries, and the
+  transcript_content exception's "It is the only event verb that does" sentence amended to "It and session_tree_rows
+  are the only event verbs that do": (1) "Verification verbs (telemetry slice 4, rec-4025; none agent-facing; smoke
+  catalog only until slice 2c, rec-4292): session_tree_rows(session_id, offset, max_rows) returns every stored row of one
+  tree, the rows sharing the root's tenant_id, project_id and session_started_at (all four tables, every
+  parser_version, no dedupe), as table_name, row_json, total_rows and roots_in_tree, max_rows at most 2000;
+  telemetry_orphan_counts(day_from, day_to, as_of) returns per day and telemetry join the child rows, the orphaned
+  child rows split by whether their tree is quiescent past the idle threshold, the quiescent and pending tree counts
+  and the conflicted grain-key count, over R4/R5-deduped rows of real-purpose projects; telemetry_root_sessions(day_from,
+  day_to) returns each real-purpose root session's session_id, entity_ref, harness_session_key, branch,
+  session_started_at, last_event_timestamp and its Decision 207 stamps. Windows span at most 7 days." (2) "Exception to
+  'Rows are derived, never raw' above: session_tree_rows returns the stored rows of exactly one tree, the compared
+  columns plus created_timestamp and never content or content_uri, for verification callers only (the golden replay,
+  the in-session source check and the daily verification monitor on the CI role), which hold the rows in memory for the
+  comparison and never persist them; a page above the envelope guard answers 413 response_too_large and the caller
+  halves max_rows. Its callers print counts only." Plus an amendment_log entry (change_class field_add, semantic_break false, with a migration_story: additive
+  verbs, no caller changes), in the shape of the 2026-10-16 transcript_content entry; read-engine.yaml's entry uses the
+  same class.
+- >-
+  tests/common/test_ducklake_event_verification_verbs.py over the golden chain:
+  test_tree_rows_return_every_stored_row_exactly_once (every corpus and verification tree, one per catalog: the decoded
+  rows equal the stored rows' compared columns plus created_timestamp, by grain key and every column; content and
+  content_uri absent; roots_in_tree 1), test_tree_rows_page_to_the_same_set_at_any_page_size (max_rows 1, 7 and 2000),
+  test_co_pinned_trees_stay_apart_and_collisions_are_counted (two trees sharing the corpus pin loaded under two projects
+  of one catalog: each tree read returns only its own rows; the same two roots under one project report roots_in_tree
+  2), test_orphan_counts_match_the_independent_count (finalized trees report zero; a planted child row whose parent is
+  absent, inserted directly, reads pending at an exact-threshold as_of and quiescent past it; the verb equals
+  orphans.orphan_counts on every case, including the two-project co-pinned catalog), and
+  test_root_sessions_carry_join_keys_and_stamps_for_real_projects_only (a root sessions row carrying
+  harness_session_key, inserted directly, returns it; a parser_version 3 tree returns null; a conflicting root pair
+  inserted directly shows in its stamps; a synthetic and a drill project's roots excluded).
+- >-
+  scripts/ducklake_smoke/lambda_telemetry_golden_gates.py with its tests (VP step 7), the reader smoke checks with
+  theirs (VP step 8), then .github/workflows/telemetry-golden-replay.yml, its taxonomy row, the step-body baseline (its
+  update command) and tests/test_telemetry_golden_replay_workflow.py (VP step 9).
+- >-
+  The alarm source. Append to config/agent/data_quality/source_registry.yaml: canonical_id telemetry_verify;
+  description "Telemetry verification findings (telemetry slice 4, rec-4025): the golden replay through the deployed
+  writer and reader, the in-session source check (stored rows against a fresh re-parse of the transcript, tokens
+  against Claude Code's cost-state ledger), and the daily verification monitor (re-derived verb outputs, orphans,
+  silent-failure checks and session-list completeness)."; signal_interpretation "Alarm-not-gate (Decision 210 cl.3,
+  Decision 61) -- one deduped rec per finding class (update_rec on persistence; no duplicate filing). Volume tracks how
+  often stored telemetry disagrees with its source or its contract derivations and should be zero; declared residual
+  classes (owner recs named in the finding) are counted, never filed. Never blocks capture, merges or deploys." (the
+  quoted Decision 210 clause is cl.2 in the signal_interpretation: write "Decision 210 cl.2"). Then run bin/venv-python
+  -m scripts.schema_to_field_semantics; its diff must be exactly telemetry_verify added to the two
+  registry-sourced accepted_values lists plus the telemetry_joins key. Any other diff means main's projection drifted:
+  stop and escalate to the coordinator, never commit unrelated projection changes.
+- Execute VP steps 1-11 and 18; loop until each passes.
+- Code review (the code-review skill in a fresh context); fix every blocking finding.
+- >-
+  Closure (implement skill Commit Flows; docs/contracts/git-ops.yaml), each outcome reported separately: the readiness
+  check; set implementation_declared true; rebase on origin/main and re-run VP step 1; VP step 12 on the committed,
+  clean tree, then scripts.checks.validation_result --verify-head; the postflight evidence file and
+  scripts.session.postflight --evidence; push; PR; CI green on the head. No Resolves trailer (rec-4025 stays open).
+  Merge on code review PROCEED and green CI under the standing rule (a CI-run DuckLake deploy with no IAM, spend or
+  manual step and no Class A text), only when no other DuckLake deploy or apply is in flight.
+- >-
+  After merge: VP steps 13-16 against the deploy run and the replay run for the merge commit; then, through the portal,
+  a context note on rec-4025 (naming PLAN-telemetry-verification-verbs, the merge SHA and the GOLDEN_SMOKE line) and on
+  rec-4101 (naming this plan and that the verification monitor plan closes it), and an update_rec on rec-4411
+  (get_rec_write_guidance() first) recording VP step 15's GOLDEN_SMOKE elapsed_s, reader_calls and max_response_bytes
+  as the growth baseline, each note carrying the merge SHA; then VP step 17. On an unrecoverable V3 failure stop and
+  RCA (Decision 55).
+- "Report: what was implemented, each VP step's output (the GOLDEN_SMOKE line and step 16's counts verbatim), the rec-4411 baseline, and any finding filed."
+rollback: >-
+  Revert the squash commit; the governed deploy then redeploys the reader without the three verbs and the projection
+  without telemetry_joins and the new source, and the replay workflow is gone. Stored rows are untouched in either
+  direction; the smoke catalog keeps the replays' synthetic rows. Recs already filed stay open for triage.

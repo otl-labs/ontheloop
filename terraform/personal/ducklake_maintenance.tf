@@ -93,10 +93,31 @@ resource "aws_iam_role_policy" "ducklake_maintenance" {
         Resource = ["${aws_cloudwatch_log_group.ducklake_maintenance.arn}:*"]
       },
       {
-        Sid      = "NeonDsnRead"
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn]
+        # Decision 213: the scoped telemetry login's secret is read here too, so provision_telemetry_login
+        # can set the role's password from it. GetSecretValue only; the function holds no write on it.
+        Sid    = "NeonDsnRead"
+        Effect = "Allow"
+        Action = ["secretsmanager:GetSecretValue"]
+        Resource = [
+          aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn,
+          aws_secretsmanager_secret.ducklake_telemetry_writer_dsn.arn,
+          aws_secretsmanager_secret.ducklake_telemetry_writer_prod_dsn.arn,
+          aws_secretsmanager_secret.ducklake_telemetry_reader_dsn.arn,
+          aws_secretsmanager_secret.ducklake_smoke_maintainer_dsn.arn,
+        ]
+      },
+      {
+        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
+        Sid    = "NeonDsnParameterRead"
+        Effect = "Allow"
+        Action = ["ssm:GetParameter"]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/ducklake-neon-catalog-dsn",
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-telemetry-writer-dsn",
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-telemetry-writer-prod-dsn",
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-telemetry-reader-dsn",
+          "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-smoke-maintainer-dsn",
+        ]
       },
       {
         # T2.19: the operational actions write to the PRODUCTION prefix -- catalog_reinit at
@@ -117,6 +138,26 @@ resource "aws_iam_role_policy" "ducklake_maintenance" {
         Condition = {
           StringLike = {
             "s3:prefix" = ["${local.ducklake_prod_data_prefix}/*"]
+          }
+        }
+      },
+      {
+        # Decision 230: provision_telemetry_catalog seeds the production telemetry catalog's data prefix, and the
+        # telemetry merge and GC read, write and delete there. Object versions are never deleted (no DeleteObjectVersion);
+        # the bucket's noncurrent lifecycle reclaims them. No telemetry-blobs grant here.
+        Sid      = "TelemetryCatalogDataReadWriteDelete"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+        Resource = ["${aws_s3_bucket.data_lake.arn}/${local.ducklake_telemetry_data_prefix}/*"]
+      },
+      {
+        Sid      = "TelemetryCatalogDataList"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket", "s3:GetBucketLocation"]
+        Resource = [aws_s3_bucket.data_lake.arn]
+        Condition = {
+          StringLike = {
+            "s3:prefix" = ["${local.ducklake_telemetry_data_prefix}/*"]
           }
         }
       },
@@ -164,9 +205,8 @@ resource "aws_lambda_function" "ducklake_maintenance" {
   # model (no reserved concurrency, clause 3). See the variable definition above for the quota history.
   reserved_concurrent_executions = var.ducklake_maintenance_reserved_concurrency
 
-  s3_bucket        = aws_s3_bucket.data_lake.id
-  s3_key           = "lambda-packages/ducklake-maintenance.zip"
-  source_code_hash = try(filemd5("${path.module}/../../lambda-packages/ducklake-maintenance.zip"), null)
+  s3_bucket = aws_s3_bucket.data_lake.id
+  s3_key    = "lambda-packages/ducklake-maintenance.zip"
 
   layers = [
     aws_lambda_layer_version.ducklake_deps.arn,
@@ -203,8 +243,8 @@ resource "aws_lambda_function" "ducklake_maintenance" {
   }
 
   # Decision 125 physical decoupling: code deploys go via build_lambda --ducklake-only --deploy
-  # (update-function-code), not terraform. Without this, every rebuild's non-reproducible zip bytes
-  # trip a Terraform diff on this IAM-gated apply path (rec-2646/rec-2654).
+  # (update-function-code), not terraform. No source_code_hash is set (Terraform reads no build artifact);
+  # this block is the conformance marker and a backstop (rec-2646/rec-2654).
   lifecycle {
     ignore_changes = [source_code_hash]
   }

@@ -1,0 +1,91 @@
+name: telemetry-golden-replay
+
+# Golden replay of the telemetry derived layer through the DEPLOYED engine (telemetry slice 4, rec-4025): the producer's golden
+# transcript trees are sent through the deployed telemetry writer into the smoke catalog and read back through the deployed
+# reader, asserting the hand-authored expectations. It is an alarm, not a gate (Decision 210 cl.2): it files its own
+# telemetry_verify recs (golden_replay_mismatch per verb, golden_replay_error for a run that could not complete) and is never a
+# required check (Decision 83).
+#
+# Triggers: after every successful deploy-ducklake-lambdas run on main (checking out that run's head_sha), once a day on main so
+# a producer or expectations change is replayed within a day, and on dispatch (main only). The daily cron is the every-N-hours
+# shape scripts/convergence_health/sensor_liveness.py classifies as 86,400 s (the plain 'M H * * *' daily shape raises there and
+# would blind loop_liveness_stale for every peer). No push trigger: a push-time run would race the deploy the same commit starts.
+#
+# Invariants: no terraform, no apply, no deploy, no dispatch of another workflow. The role is the CI branch role, which already
+# invokes the reader and telemetry-writer Function URLs and reads the deploy records in the deploy smoke job. Account-ID masking
+# follows PLAN-actions-account-id-masking.
+
+on:
+  workflow_run:
+    workflows: [deploy-ducklake-lambdas]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: '23 */24 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telemetry-golden-replay
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    if: >-
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+      || github.event_name == 'schedule'
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write  # OIDC token minting for assume-role
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/aws-region
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Configure AWS credentials (OIDC -- github_ci_branch role, DuckLake reader and telemetry-writer invoke)
+        uses: aws-actions/configure-aws-credentials@v6
+        env:
+          MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve DuckLake serving Function URLs
+        # Same resolution as deploy-ducklake-lambdas' smoke job: the URLs come from the AWS API and are masked (Decision 101).
+        run: |
+          set -euo pipefail
+          for role in writer reader telemetry_writer telemetry_reader; do
+            URL=$(aws lambda get-function-url-config --function-name "agent-platform-ducklake-${role//_/-}" --region "$AWS_REGION" --query FunctionUrl --output text)
+            if [ -z "$URL" ] || [ "$URL" = "None" ]; then
+              echo "::error::Could not resolve the ${role} Function URL via get-function-url-config." >&2
+              exit 1
+            fi
+            echo "::add-mask::${URL}"
+            echo "DUCKLAKE_${role^^}_URL=${URL}" >> "$GITHUB_ENV"
+            echo "Resolved DUCKLAKE_${role^^}_URL (masked)."
+          done
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies (venv)
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Golden replay through the deployed telemetry engine
+        run: .venv/bin/python -m scripts.ducklake_smoke.lambda_telemetry_golden_gates

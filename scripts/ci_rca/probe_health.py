@@ -6,11 +6,10 @@ agent's own confidence rating) and files a deduped source=ci_rca_probe_health re
 self-improving loop cannot silently accumulate unsound RCA output unnoticed.
 
 Mirrors scripts/convergence_health/escalate.py's idempotent escalation pattern (file/update/close
-exactly one rec per episode). Reads ONLY the warm recommendation cache injected by the
-caller (Decision 88 -- zero new reader egress); writes ONLY via scripts.ops_data_portal
-(Decision 84 -- the warm cache is a read source, never a write source). Unlike
-convergence_health._fetch_open_recs, this module never constructs a DuckLake reader --
-open_recs must be supplied by the caller (the preflight warm cache).
+exactly one rec per episode). escalate() reads ONLY the open_recs injected by the caller and never
+constructs a DuckLake reader; writes ONLY via scripts.ops_data_portal (Decision 84). The
+--assert-clear CLI reads signal rows through scripts.preflight.recs_signals_source (a bounded
+reader read, Decision 215) and exits 1 when they are unavailable; it needs reader credentials.
 """
 
 from __future__ import annotations
@@ -72,7 +71,6 @@ def _row_ts(row: dict, field: str = "created_timestamp") -> Optional[datetime]:
 
 def _row_rca_confidence(row: dict) -> Optional[str]:
     """Extract context_v2_json.rca_confidence from a warm-cache row, or None if absent/malformed."""
-    import json  # noqa: PLC0415
 
     ctx_raw = row.get("context_v2_json") or ""
     if not ctx_raw:
@@ -88,7 +86,6 @@ def _row_escape_mode(row: dict) -> Optional[str]:
     """Extract context_v2_json.detection_gap.escape_mode from a warm-cache row, or None if
     absent/malformed. Never reads rca_confidence -- kept separate from _row_rca_confidence so the
     escape_mode gauge cannot accidentally widen/alias the rca_confidence gauge (T1.13:c9 repair)."""
-    import json  # noqa: PLC0415
 
     ctx_raw = row.get("context_v2_json") or ""
     if not ctx_raw:
@@ -318,9 +315,8 @@ def escalate(
 
 
 # ---------------------------------------------------------------------------
-# Exit-code CLI (Decision 103 relevance oracle): credential-free, reads only the local
-# recommendations cache -- never constructs a DuckLake reader (mirrors the module docstring's
-# zero-new-reader-egress contract).
+# Exit-code CLI (Decision 103 relevance oracle): reads signal rows via the bounded reader verbs
+# (no local recommendations cache, Decision 215); needs reader credentials and fails closed.
 # ---------------------------------------------------------------------------
 
 
@@ -343,20 +339,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--assert-clear",
         action="store_true",
         help="Exit 0 if the abstention rate is below threshold, non-zero while it holds. "
-        "Reads only the local recommendations cache; no AWS credentials required.",
+        "Reads signal rows through the DuckLake reader (needs credentials); exits 1 when they are unavailable.",
     )
     args = parser.parse_args(argv)
 
     if args.assert_clear:
-        from scripts.executor.jsonl_store import RECS_JSONL  # noqa: PLC0415
+        from scripts.preflight.recs_signals_source import fetch_recs_signal_inputs  # noqa: PLC0415
 
-        cache_rows: list[dict] = []
-        if RECS_JSONL.exists():
-            for line in RECS_JSONL.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line:
-                    cache_rows.append(json.loads(line))
-        return assert_clear_exit_code(cache_rows)
+        inputs = fetch_recs_signal_inputs()
+        if inputs.status != "ok" or inputs.signal_rows is None:
+            print(f"probe_health --assert-clear: recommendation signals unavailable ({inputs.error})", file=sys.stderr)
+            return 1
+        return assert_clear_exit_code(inputs.signal_rows)
 
     parser.print_help()
     return 2

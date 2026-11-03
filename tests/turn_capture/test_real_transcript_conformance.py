@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
+import re
 import time
 from collections import Counter
 from pathlib import Path
@@ -20,12 +20,15 @@ from typing import Any
 
 import pytest
 
+from src.telemetry.append import prepare_batch
 from src.telemetry.identity import canonical_ref
-from src.telemetry.timestamps import TimestampError, parse_iso8601_utc
+from src.telemetry.timestamps import TimestampError, epoch_ms, parse_iso8601_utc
 from src.turn_capture.record_turn import record_turn
 from src.turn_capture.scrub import scrub_text
-from src.turn_capture.transcript import ROOT, FsTree
+from src.turn_capture.transcript import FsTree
+from tests.fixtures.telemetry_blob_fakes import as_written
 from tests.fixtures.turn_capture_ducklake import create_tables, load_specs, open_local_lake
+from tests.fixtures.turn_capture_real import PrefixTree, discover, raw_inherited, snapshot
 
 pytestmark = pytest.mark.integration
 
@@ -37,30 +40,6 @@ USAGE = (
     ("tokens_cache_read", "cache_read_input_tokens"),
     ("tokens_cache_creation", "cache_creation_input_tokens"),
 )
-
-
-def _discover() -> list[Path]:
-    override = os.environ.get("TURN_CAPTURE_REAL_TRANSCRIPTS")
-    if not override:
-        return sorted(Path.home().glob(".claude/projects/*/*.jsonl"))
-    found: list[Path] = []
-    for item in override.split(os.pathsep):
-        path = Path(item).expanduser()
-        found += sorted(path.glob("*.jsonl")) if path.is_dir() else [path]
-    return found
-
-
-def _snapshot(paths: list[Path], into: Path) -> list[Path]:
-    out = []
-    for i, src in enumerate(paths):
-        dest = into / f"t{i}"
-        dest.mkdir(parents=True)
-        shutil.copy2(src, dest / src.name)
-        session_dir = src.parent / src.stem
-        if session_dir.is_dir():
-            shutil.copytree(session_dir, dest / src.stem)
-        out.append(dest / src.name)
-    return out
 
 
 def _hash(session_id: str) -> str:
@@ -83,6 +62,12 @@ def raw_lines(path: Path, limit: int | None = None) -> tuple[list[tuple[int, dic
         else:
             malformed += 1
     return records, malformed
+
+
+def own_records(path: Path) -> list[tuple[int, dict[str, Any]]]:
+    """The records a stream wrote itself: a fork's copied head is dropped (rule K-1, read independently)."""
+    skip, _ = raw_inherited(path)
+    return [(i, d) for i, d in raw_lines(path)[0] if i not in skip]
 
 
 def _timed(d: dict[str, Any]) -> bool:
@@ -109,11 +94,16 @@ class _Walk:
         self.answered: set[str] = set()
         self.responses: dict[tuple[int, str], dict[str, Any]] = {}
         self.in_group = False
+        self.assistant_turns: set[int] = set()
+        self.owner_final: dict[tuple[int, str], bool] = {}
+        self.seg_assistant = False
 
     def attachment(self, d: dict[str, Any]) -> None:
         name = str((d.get("attachment") or {}).get("hookName") or "")
         if name.startswith("SessionStart:resume") and not self.in_group:
             self.in_group, self.cur = True, None
+            self.n["segment_closes"] += self.seg_assistant
+            self.seg_assistant = False
 
     def results(self, blocks: list[Any]) -> None:
         for b in blocks:
@@ -138,10 +128,17 @@ class _Walk:
         message = d.get("message") or {}
         if not (isinstance(message.get("id"), str) and message["id"] and isinstance(message.get("content"), list)):
             return
-        if self.cur is None:
+        if self.cur is None or (message.get("model") == "<synthetic>" and d.get("isApiErrorMessage") is not True):
+            return
+        self.assistant_turns.add(self.turn)
+        self.seg_assistant = True
+        if d.get("isApiErrorMessage") is True:
             return
         usage = message.get("usage")
         self.responses[(self.turn, message["id"])] = usage if isinstance(usage, dict) else {}
+        self.owner_final[(self.turn, message["id"])] = isinstance(message.get("stop_reason"), str) or (
+            d.get("isAbortedMidStream") is True
+        )
         for b in _blocks(d):
             if (
                 isinstance(b, dict)
@@ -152,15 +149,33 @@ class _Walk:
                 self.uses[b["id"]] = self.turn
                 self.n["opens"] += 1
 
-    def finish(self) -> Counter[str]:
+    def corrected_output(self, spawn_usage: dict[str, Any] | None) -> int:
+        """US-3 from the raw parent spawn result: the output-token delta for the first turn's last, non-final response."""
+        keys = [k for k in self.responses if k[0] == 1]
+        if spawn_usage is None or not keys or self.owner_final[keys[-1]]:
+            return 0
+        usage = self.responses[keys[-1]]
+        inputs = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+        if not all(type(spawn_usage.get(k)) is int and spawn_usage.get(k) == usage.get(k) for k in inputs):
+            return 0
+        new = spawn_usage.get("output_tokens")
+        return (new if type(new) is int else 0) - (
+            usage.get("output_tokens") if type(usage.get("output_tokens")) is int else 0
+        )
+
+    def finish(self, spawn_usage: dict[str, Any] | None = None) -> Counter[str]:
+        if not self.assistant_turns:
+            return Counter()
+        self.n["due"] = 1
         self.n["turns"], self.n["model_calls"] = len(self.seen), len(self.responses)
         self.n["synthetic"] = sum(1 for t in self.uses if t not in self.answered)
         for col, key in USAGE:
             self.n[col] = sum(u.get(key, 0) for u in self.responses.values() if type(u.get(key, 0)) is int)
+        self.n["tokens_output"] += self.corrected_output(spawn_usage)
         return self.n
 
 
-def walk(records: list[tuple[int, dict[str, Any]]]) -> Counter[str]:
+def walk(records: list[tuple[int, dict[str, Any]]], spawn_usage: dict[str, Any] | None = None) -> Counter[str]:
     w = _Walk()
     for _, d in records:
         kind = d.get("type")
@@ -177,7 +192,7 @@ def walk(records: list[tuple[int, dict[str, Any]]]) -> Counter[str]:
             w.prompt(d)
         else:
             w.assistant(d)
-    return w.finish()
+    return w.finish(spawn_usage)
 
 
 def _stream_files(root: Path) -> dict[str, Path]:
@@ -187,16 +202,16 @@ def _stream_files(root: Path) -> dict[str, Path]:
     return files
 
 
-class PrefixTree(FsTree):
-    def __init__(self, root_file: Path, limit: int) -> None:
-        super().__init__(root_file)
-        self.limit = limit
-
-    def read(self, key: str) -> bytes | None:
-        data = super().read(key)
-        if key != ROOT or data is None:
-            return data
-        return b"".join(line + b"\n" for line in data.split(b"\n")[: self.limit])
+def spawn_usages(root: Path) -> dict[str, dict[str, Any]]:
+    """agent id -> the usage dict of its sync spawn result, read from every stream file's raw records."""
+    out: dict[str, dict[str, Any]] = {}
+    for path in _stream_files(root).values():
+        for _, d in own_records(path):
+            info = d.get("toolUseResult") if d.get("type") == "user" else None
+            if isinstance(info, dict) and isinstance(info.get("agentId"), str) and not info.get("isAsync"):
+                if isinstance(info.get("usage"), dict):
+                    out[info["agentId"]] = info["usage"]
+    return out
 
 
 def _keyed(result: Any) -> dict[tuple[str, str], dict[str, Any]]:
@@ -205,13 +220,13 @@ def _keyed(result: Any) -> dict[tuple[str, str], dict[str, Any]]:
 
 @pytest.fixture(scope="module")
 def runs(tmp_path_factory: pytest.TempPathFactory) -> list[dict[str, Any]]:
-    sources = _discover()
+    sources = discover()
     if not sources:
         pytest.fail(
             "no real Claude Code transcripts found: set TURN_CAPTURE_REAL_TRANSCRIPTS or run on a machine that has them"
         )
     out = []
-    for root in _snapshot(sources, tmp_path_factory.mktemp("real")):
+    for root in snapshot(sources, tmp_path_factory.mktemp("real")):
         started = time.perf_counter()
         result = record_turn(FsTree(root), None, project_ref=PROJECT_REF, session_final=True)
         out.append({"root": root, "sid": root.stem, "result": result, "secs": time.perf_counter() - started})
@@ -232,7 +247,8 @@ def test_output_reconciles_with_an_independent_raw_walk(runs: list[dict[str, Any
         for stream, path in _stream_files(run["root"]).items():
             records, bad = raw_lines(path)
             malformed += bad
-            want = walk(records)
+            agent = stream.split(":", 1)[1] if ":" in stream else None
+            want = walk(own_records(path), spawn_usages(run["root"]).get(agent) if agent else None)
             obs = [r for r in result.observations if r["session_ref"] == stream]
             opens = [r for r in obs if r["observation_type"] == "tool_call" and r["event_kind"] == "open"]
             closes = [r for r in obs if r["observation_type"] == "tool_call" and r["event_kind"] == "close"]
@@ -244,6 +260,9 @@ def test_output_reconciles_with_an_independent_raw_walk(runs: list[dict[str, Any
             }  # fmt: skip
             for key, value in got.items():
                 assert value == want[key], f"{tag} stream {_hash(stream)}: {key} produced {value} != raw {want[key]}"
+            if agent is None and want["due"]:
+                session_closes = [r for r in result.sessions if r["event_kind"] == "close" and r["entity_ref"] == stream]
+                assert len(session_closes) == want["segment_closes"] + 1, f"{tag}: segment closes != resume boundaries + eof"
             assert len({r["entity_ref"] for r in closes}) == len(closes), f"{tag}: a tool_call closed twice"
             assert len(closes) == want["closes"] + want["synthetic"], (
                 f"{tag} stream {_hash(stream)}: closes != in-span + synthetic"
@@ -262,7 +281,10 @@ def test_rows_are_unique_valid_and_scrubbed(runs: list[dict[str, Any]]) -> None:
     for run in _live(runs):
         result, tag = run["result"], _hash(run["sid"])
         starts = {r["session_started_at"] for _, rows in result.batches for r in rows}
-        assert len(starts) == 1, f"{tag}: {len(starts)} session_started_at values in one tree"
+        if starts:
+            assert len(starts) == 1, f"{tag}: {len(starts)} session_started_at values in one tree"
+        else:
+            assert not walk(own_records(run["root"]))["due"], f"{tag}: a closed assistant turn emitted no row"
         seen = set()
         for table, rows in result.batches:
             for r in rows:
@@ -286,31 +308,91 @@ def test_rows_are_unique_valid_and_scrubbed(runs: list[dict[str, Any]]) -> None:
                         )
                         generic.update(["long_token"] * len([w for w in value.split() if len(w) >= 40 and w.isalnum()]))
         for r in result.transcripts:
-            assert r["content_bytes"] == len(r["content"].encode()), f"{tag}: content_bytes disagrees"
+            if "content" in r:
+                assert r["content_bytes"] == len(r["content"].encode()), f"{tag}: content_bytes disagrees"
+            else:
+                assert r["content_omitted_reason"] == "oversize" and "content_uri" not in r, f"{tag}: a payload-less row"
     print(f"\nconformance: generic long alphanumeric tokens in stored text (count only): {sum(generic.values())}")
 
 
-def test_sidecars_resolve_untruncated(runs: list[dict[str, Any]]) -> None:
-    checked = 0
+def _stream_closed(run: dict[str, Any], record: dict[str, Any]) -> bool:
+    """A tool_result emits a row only once its turn is closed; the final pass closes every turn but an orphan's."""
+    return run["result"].observations != [] and any(
+        r["external_ref"].startswith(f"{record.get('uuid')}#") for r in run["result"].observations
+    )
+
+
+_SAVED = re.compile(r"Output has been saved to (\S+)")
+
+
+def _persisted_name(info: Any) -> tuple[str, bool]:
+    """(sidecar basename, via the MCP-overflow string) from an independent reading of the raw toolUseResult."""
+    if isinstance(info, dict):
+        return os.path.basename(str(info.get("persistedOutputPath") or "").replace("\\", "/")), False
+    match = _SAVED.search(info) if isinstance(info, str) else None
+    return (os.path.basename(match.group(1).replace("\\", "/")), True) if match else ("", False)
+
+
+def test_persisted_outputs_have_one_full_row_and_results_store_the_visible_text(runs: list[dict[str, Any]]) -> None:
+    checked = mcp = unmatched = 0
     for run in _live(runs):
         tag = _hash(run["sid"])
         rows = {r["external_ref"]: r for r in run["result"].transcripts}
         for path in _stream_files(run["root"]).values():
-            for _, d in raw_lines(path)[0]:
+            for _, d in own_records(path):
                 info = d.get("toolUseResult")
-                name = (
-                    os.path.basename(str(info.get("persistedOutputPath") or "").replace("\\", "/"))
-                    if isinstance(info, dict)
-                    else ""
-                )
-                if not name or not (run["root"].parent / run["sid"] / "tool-results" / name).is_file():
-                    continue
+                name, via_string = _persisted_name(info)
+                unmatched += isinstance(info, str) and not name
+                readable = bool(name) and (run["root"].parent / run["sid"] / "tool-results" / name).is_file()
                 for k, block in enumerate(_blocks(d)):
-                    row = rows.get(f"{d.get('uuid')}#{k}")
-                    if isinstance(block, dict) and block.get("type") == "tool_result" and row is not None:
+                    if not (isinstance(block, dict) and block.get("type") == "tool_result"):
+                        continue
+                    visible, full = rows.get(f"{d.get('uuid')}#{k}"), rows.get(f"{d.get('uuid')}#{k}/full")
+                    if visible is not None:
+                        assert visible["content_truncated"] is False, f"{tag}: a tool_result row marked truncated"
+                    elif isinstance(block.get("content"), str) and block["content"] and _stream_closed(run, d):
+                        raise AssertionError(f"{tag}: a tool_result with in-transcript text has no tool_result row")
+                    if readable and (run["root"].parent / run["sid"] / "tool-results" / name).stat().st_size > 0:
                         checked += 1
-                        assert row["content_truncated"] is False, f"{tag}: a resolvable sidecar was stored truncated"
-    print(f"\nconformance: {checked} resolvable sidecar tool_results stored untruncated")
+                        mcp += via_string
+                        assert full is not None, f"{tag}: a readable persisted output has no tool_output or omission row"
+                        assert full["purpose"] == "tool_output" and full["origin"] == "tool"
+                        if via_string and visible is not None:
+                            assert visible["origin"] == "harness", f"{tag}: an MCP-overflow result is harness text"
+                    else:
+                        assert full is None, f"{tag}: a tool_output row without a readable persisted output"
+    print(
+        f"\nconformance: {checked} readable persisted outputs ({mcp} MCP overflow) each have one full row; "
+        f"{unmatched} unmatched string toolUseResult"
+    )
+
+
+def test_pin_is_the_minimum_raw_timestamp_and_every_row_passes_the_kernel_rules(runs: list[dict[str, Any]]) -> None:
+    from tests.fixtures.turn_capture_corpus import PROJECT, TENANT  # noqa: PLC0415
+
+    specs = load_specs()
+    for run in _live(runs):
+        tag = _hash(run["sid"])
+        stamps = [
+            parse_iso8601_utc(d["timestamp"])
+            for _, d in own_records(run["root"])
+            if isinstance(d.get("timestamp"), str) and _stamp(d)
+        ]
+        assert run["result"].next_cursor.session_started_at_ms == epoch_ms(min(stamps)), (
+            f"{tag}: the pin is not the earliest timestamp"
+        )
+        for (table, rows), _ in zip(run["result"].batches, range(4), strict=True):
+            if rows:  # the core emits above-threshold content inline; spilling is the transport's job (as_written)
+                written = as_written(rows, specs["telemetry_transcripts"].rules.content.threshold)
+                prepare_batch(specs[table], written, tenant_id=TENANT, project_id=PROJECT)
+
+
+def _stamp(d: dict[str, Any]) -> bool:
+    try:
+        parse_iso8601_utc(d["timestamp"])
+        return True
+    except (TimestampError, KeyError, TypeError):
+        return False
 
 
 def test_cross_tree_uniqueness(runs: list[dict[str, Any]]) -> None:
@@ -332,7 +414,8 @@ def _cut_points(root: Path) -> list[int]:
     total = root.read_bytes().count(b"\n")
     prompts = [i + 1 for i, d in records if d.get("type") == "user" and d.get("promptId") and not d.get("sourceToolUseID")]
     step = 50 if total <= MAX_FULL_CUT_LINES else max(50, total // 60)
-    return sorted({*prompts, *range(step, total, step), total})
+    boundary = raw_inherited(root)[1]
+    return sorted({c for c in (*prompts, *range(step, total, step), total, boundary) if c >= boundary and c > 0})
 
 
 def test_incremental_equals_full_at_every_prompt_and_line_cut(runs: list[dict[str, Any]]) -> None:
@@ -349,7 +432,8 @@ def test_incremental_equals_full_at_every_prompt_and_line_cut(runs: list[dict[st
                 assert row == full[key], f"{tag}: {key[0]} row differs between incremental (cut {limit}) and full parse"
                 seen[key] = row
         assert set(seen) == set(full), f"{tag}: incremental emitted {len(seen)} rows, full parse {len(full)}"
-        print(f"\nconformance: {tag}: {len(cuts)} incremental cuts (every prompt plus a line stride)")
+        forks = " (fork boundary leg proven)" if raw_inherited(run["root"])[1] else ""
+        print(f"\nconformance: {tag}: {len(cuts)} incremental cuts (every prompt plus a line stride){forks}")
 
 
 def test_finalized_prefix_at_true_session_ends_is_a_row_subset(runs: list[dict[str, Any]]) -> None:
@@ -361,12 +445,14 @@ def test_finalized_prefix_at_true_session_ends_is_a_row_subset(runs: list[dict[s
             is_resume = d.get("type") == "attachment" and str((d.get("attachment") or {}).get("hookName") or "").startswith(
                 "SessionStart:resume"
             )
-            if is_resume and not in_group and index > 0:
+            if is_resume and not in_group and index > 0 and index >= raw_inherited(run["root"])[1]:
                 ends.append(index)
             in_group = is_resume if d.get("type") == "attachment" else False
         for limit in ends:
             prefix = _keyed(record_turn(PrefixTree(run["root"], limit), None, project_ref=PROJECT_REF, session_final=True))
             for key, row in prefix.items():
+                if key[0] == "telemetry_sessions" and row["event_kind"] == "close":
+                    continue
                 assert key in full and full[key] == row, (
                     f"{tag}: a row of the finalized prefix at a resume boundary is absent or changed in the full parse"
                 )
@@ -392,7 +478,7 @@ def test_loads_into_local_ducklake_with_every_fk_resolving(
         rows = []
         for run in live:
             for r in run["result"].batches[position][1]:
-                if table == "telemetry_transcripts" and len(r["content"].encode()) > 65536:
+                if table == "telemetry_transcripts" and "content" in r and len(r["content"].encode()) > 65536:
                     skipped += 1
                     continue
                 rows.append(r)
@@ -420,6 +506,7 @@ def test_drift_dashboard(runs: list[dict[str, Any]]) -> None:
     unknown: Counter[str] = Counter()
     outcomes: Counter[str] = Counter()
     stops: Counter[str] = Counter()
+    null_stops: Counter[str] = Counter()
     workflows: Counter[str] = Counter()
     for run in runs:
         result = run["result"]
@@ -428,12 +515,15 @@ def test_drift_dashboard(runs: list[dict[str, Any]]) -> None:
             r["outcome"] for r in result.observations if r["observation_type"] == "tool_call" and r["event_kind"] == "close"
         )
         workflows.update(r["workflow"] for r in result.sessions if r["event_kind"] == "open")
-        for _, d in raw_lines(run["root"])[0]:
-            reason = (d.get("message") or {}).get("stop_reason") if d.get("type") == "assistant" else None
-            stops[str(reason)] += d.get("type") == "assistant"
+        for stream, path in _stream_files(run["root"]).items():
+            for _, d in raw_lines(path)[0]:
+                is_assistant = d.get("type") == "assistant"
+                reason = (d.get("message") or {}).get("stop_reason") if is_assistant else None
+                stops[str(reason)] += is_assistant
+                null_stops["subagent" if ":" in stream else "root"] += is_assistant and reason is None
         print(f"\nconformance: tree {_hash(run['sid'])}: parsed in {run['secs']:.2f}s, diagnostics {dict(result.diagnostics)}")
     print(
         f"\nconformance dashboard: unknown types {dict(unknown)}; outcomes {dict(outcomes)}; "
-        f"stop_reasons {dict(stops)}; workflows {dict(workflows)}"
+        f"stop_reasons {dict(stops)}; null stop_reason by stream kind {dict(null_stops)}; workflows {dict(workflows)}"
     )
     assert runs

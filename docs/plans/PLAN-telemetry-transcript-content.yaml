@@ -1,0 +1,1033 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-transcript-content
+intent: >-
+  Telemetry is the learning signal (PROJECT_CONTEXT), and a large tool output is now stored only as an S3 object. This
+  plan lets a signed reader caller get back the exact stored bytes of any transcript row, inline or object, proven
+  against the row's SHA-256 and length. The slice 4 verification harness and later the feedback loop can then read
+  what was captured, not only its size and digest.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+implementation_declared: true
+plan_path: docs/plans/PLAN-telemetry-transcript-content.yaml
+phase: >-
+  rec-4291 carrier: its last item, the content_blobs port's get_blob read. Related tier item, named in context only:
+  T2.36 (slice 2b's read layer; c3 is met and no open criterion belongs to this plan).
+closes_criteria: []
+scope:
+- file: terraform/personal/ducklake_lambdas.tf
+  action: Modify
+  purpose: >-
+    PR A. The reader role's inline policy gains one statement, Sid TelemetryBlobRead: Effect Allow, Action
+    ["s3:GetObject"] only, Resource the object ARN
+    "${aws_s3_bucket.data_lake.arn}/${local.telemetry_blob_data_prefix}/${local.ducklake_telemetry_meta_schema}/*". It
+    has no List, Put or Delete action and no bucket-level ARN, and it is the grant Benjamin approved on 2026-10-15. The
+    reader function's environment gains TELEMETRY_BLOB_ROOT = local.ducklake_telemetry_blob_root. The reader role's
+    header comment (lines 208-209) names the blob read. Nothing else changes; source_code_hash stays in ignore_changes, so
+    the code deploy channel stays the only code owner.
+- file: tests/checks/iam_tf/test_telemetry_infra_pins.py
+  action: Modify
+  purpose: >-
+    PR A. assert_reader_has_no_blob_grant becomes assert_reader_blob_grant_is_get_object_only. It keeps the old
+    predicate's two legs: a reader Allow statement touches the blob prefix when its resources cover a telemetry-blobs
+    probe key or its s3:prefix condition names telemetry-blobs. Exactly one reader statement touches it: actions exactly
+    ["s3:GetObject"], resources exactly the object ARN of telemetry-blobs/<meta_schema>/*, and no probe key under another
+    catalog's prefix is covered by any reader statement. S3ListDataPrefix (ListBucket on the bucket ARN, conditioned on
+    the ducklake/ and smoke prefixes) touches neither leg and passes unchanged. test_reader_has_no_blob_grant becomes
+    test_reader_blob_grant_is_get_object_on_the_blob_prefix. test_reader_guard_rejects_a_blob_grant becomes
+    test_reader_blob_guard_rejects_a_wider_grant: red cases for PutObject, ListBucket with a telemetry-blobs s3:prefix,
+    DeleteObject, a bucket-wide object resource and another catalog's prefix. test_blob_root_only_on_the_writer becomes test_blob_root_on_the_writer_and_reader
+    (both functions carry TELEMETRY_BLOB_ROOT from the same local), and test_blob_root_guard_rejects_a_reader_root
+    becomes test_blob_root_guard_rejects_a_moved_root. It stays under 500 SLOC (445 today): the new predicate replaces
+    the old one, so the net growth is the extra red cases (Decision 128; never a budget raise). Its module docstring's
+    "no reader blob grant" line becomes the GetObject-only pin.
+- file: config/agent/verification_registry/entries/telemetry-infra-pins.yaml
+  action: Delete
+  purpose: >-
+    PR A. Retired by git mv into entries/deprecated/ (the registry's retirement path). check_id is immutable, and two of
+    its nodes assert that the reader has no blob grant, which this plan reverses.
+- file: config/agent/verification_registry/entries/deprecated/telemetry-infra-pins.yaml
+  action: Create
+  purpose: PR A. The git mv destination of the retired shard, byte-identical content.
+- file: config/agent/verification_registry/entries/telemetry-reader-blob-grant-pins.yaml
+  action: Create
+  purpose: >-
+    PR A. The replacement check (command_exit_zero over pytest, plan_slug telemetry-transcript-content), graduated by
+    the differential admission gate against pre-grant main. It carries all eighteen nodes of the retired check, four of
+    them under their new names.
+- file: src/common/ducklake_telemetry_blobstore.py
+  action: Modify
+  purpose: >-
+    PR B. The content_blobs port's read verb, admitted by name by the T2.36 c4 ingestion guard: get_blob(content_uri,
+    sha_hex, size, *, offset, length) -> bytes. In order: content_uri must match
+    ^[0-9A-HJKMNP-TV-Z]{26}/[0-9A-HJKMNP-TV-Z]{26}/[0-9A-HJKMNP-TV-Z]{26}/[0-9a-f]{64}$ and its last segment must equal
+    sha_hex, else BlobIntegrityError(reason "uri_malformed") with no S3 call. Then one head_object with ChecksumMode
+    ENABLED: a stored ChecksumSHA256 absent gives "checksum_absent", one not equal to sha256_hex_to_b64(sha_hex) gives
+    "checksum_mismatch", and a ContentLength other than size gives "length_mismatch". Then one get_object with
+    Range bytes=offset-(offset+length-1) and IfMatch set to the HEAD's ETag, so the bytes come from the object just
+    verified with no s3:GetObjectVersion. A 412 gives "changed_during_read", and a returned length other than the
+    asked length gives "length_mismatch". A 403 on either call gives "forbidden_or_missing" (the reader has no List,
+    so S3 answers 403 for an absent key) and a 404 gives "missing". Throttling, a 5xx or a timeout after botocore's
+    retries is BlobStoreUnavailableError. BlobIntegrityError gains a keyword reason attribute from that closed set,
+    defaulting to "checksum_mismatch", so the writer's existing raise in ducklake_telemetry_blobs.py stays untouched and
+    its typed answers are unchanged. Each error get_blob raises also carries code and status attributes (the botocore
+    Error.Code and HTTP status that _error_shape reads; "" and 0 when absent), because the adapter raises from None and
+    no cause survives. LazyBlobStore gains a get_blob delegate. The module docstring's "imported only by the telemetry
+    writer's bundle" becomes "by the telemetry writer's and the reader's bundles". No function here logs, returns or
+    raises a key, URL, digest or exception message.
+- file: src/common/ducklake_event_content.py
+  action: Create
+  purpose: >-
+    PR B. The transcript_content verb's work after its registry SQL has resolved the row. It is imported
+    function-locally by ducklake_event_reads, and nothing in ducklake_runtime's import closure imports it. It reads the
+    stored rows for the exact grain key; zero rows answers zero rows. Duplicates that agree on every compared column
+    (compared_versions 1) count as one; when they store one payload differently (one inline, one object, same digest),
+    the inline row is served, so storage never flips between pages. Rows that differ under one grain key in any compared column, payload or not
+    (compared_versions above 1; reachable through the concurrent-append race, Decision 207), raise
+    BlobContentFault(500, "grain_conflict", "differing_rows") and never pick one: a catalog condition with its own
+    error_type, so it is never counted as object corruption. Then by storage: (inline) the content column's UTF-8
+    bytes; (object) store.get_blob(...); (omitted) no data, length 0 and the content_omitted_reason. An omitted row's
+    content_bytes is the raw source size, not a stored length, so the caller stops on storage omitted. offset must be
+    below content_bytes (an inline or object row) or 0, else EventReadInputError(param "offset"), which the handler
+    answers 400 named_read_input. max_bytes is clamped to 1..MAX_CHUNK_BYTES (3,145,728). The single response row is
+    exactly {storage, encoding "base64", offset, length, content_bytes, content_sha256, data, omitted_reason}. The data
+    is standard base64, so a multi-byte character split at a chunk edge stays exact bytes. It never echoes content_uri or the bucket. The
+    blob store is a module-level LazyBlobStore built on first object read from TELEMETRY_BLOB_ROOT, TELEMETRY_DATA_PATH
+    and TELEMETRY_META_SCHEMA (no import-time work). With the root unset it raises BlobContentFault(500,
+    "blob_misconfigured", "not_configured"); a root that BlobRoot.from_env refuses (DuckLakeRuntimeError) raises
+    BlobContentFault(500, "blob_misconfigured", "root_invalid") instead of the reader's 500 runtime with its message.
+    Inline and omitted rows are still served. A grant that did not apply surfaces as S3's 403, so it answers
+    blob_integrity "forbidden_or_missing", not blob_misconfigured. Store errors map to
+    BlobContentFault: BlobIntegrityError gives (500, "blob_integrity", its reason), "forbidden_or_missing" included;
+    BlobStoreUnavailableError gives (503, "blob_unavailable", "store_unavailable"); BlobStoreAccessError gives (500,
+    "blob_misconfigured", "store_access"). Each mapped fault copies the store error's code and status into its
+    cause_code and cause_status. BlobContentFault subclasses ducklake_handler_errors.TypedFault. Each page
+    re-resolves the row on the warm telemetry slot, so an 8 MiB object costs at most three catalog reads (Decision 88
+    cl.1). Refusing a conflicted key, rather than serving one flagged version, is this verb's application of Decision
+    207's reader rule: each page re-resolves the row, so any per-page choice between differing versions could splice
+    two stored versions into one reassembled payload.
+- file: src/common/ducklake_event_reads.py
+  action: Modify
+  purpose: >-
+    PR B. bind_values validates the content verb's parameters without echoing a value: producer (a JSON string, non-empty,
+    at most 200 characters, never NUL), event_id (a JSON string holding a canonical ULID), and parser_version, offset and
+    max_bytes (JSON integers, never strings or booleans; parser_version at least 1, offset at least 0, max_bytes at least
+    1). EventRead gains one field, int_params (a tuple of parameter names, default empty). bind_values' integer checks
+    key on it, and describe_all overlays {"type": "integer"} for those names on the shared string params schema, so
+    validation and describe share one source and describe stays truthful. A type map
+    cannot live in entry.data, because render_data refuses any value that is not an integer, a bare identifier or the
+    rules list. int_params does not feed event_read_version, which hashes the derivation (SQL, data, compared columns);
+    adding a key there would re-version every verb. execute_entry hands the resolved rows to ducklake_event_content,
+    imported function-locally, when entry.data is {"response": "content"} (a bare identifier, so render_data accepts it,
+    and it feeds only this verb's read_version). Every other verb's path and read_version is unchanged. It stays under
+    500 SLOC (251 today).
+- file: src/common/ducklake_event_read_verbs.py
+  action: Modify
+  purpose: >-
+    PR B. EVENT_READS gains transcript_content: binding session, params (session_id, producer, event_id, parser_version,
+    offset, max_bytes), agent_facing False, and a description that names the base64 paging and the reassemble-then-hash
+    rule and carries the smoke-only sentence every event verb carries. There is no as_of: stored rows are immutable and
+    the exact grain key selects them. Its SQL reads telemetry_transcripts under the session's partition binding and
+    filters on the full grain key (producer, event_id, parser_version) BEFORE any generation retirement, so a stored row
+    of a non-current parser_version is still served. It selects content, content_uri, content_sha256, content_bytes and
+    content_omitted_reason for every stored row under that key, plus compared_versions: the count of distinct row values
+    over {cmp_transcripts} (the writer's compared columns), the same one-row-value compare conflict_select uses, so a
+    NULL-versus-value difference counts. The content module judges duplicates and conflicts from it, so a conflict in a
+    non-payload column is refused as the sibling verbs' conflicted_grain_keys would report it.
+    NAMED_READS_VERSION stays 6. ducklake_reader.yaml:106 defines registry_version as the registry-format stamp, and the
+    reader verbs plan bumped it for the format change alone ("no verb here changed"). The recs_related bump from 4 to 5
+    (#1460) predates the two-class split. The per-verb read_version moves for this verb, and VERB_FIELDS parity covers
+    its columns.
+- file: src/common/ducklake_event_read_sql.py
+  action: Modify
+  purpose: >-
+    PR B. TRANSCRIPT_CONTENT_SQL: the partition-bound, exact-grain-key select described above with its compared_versions
+    column, without the dedupe and generation-retirement CTEs (the content module refuses differing duplicates).
+- file: src/common/ducklake_handler_errors.py
+  action: Modify
+  purpose: >-
+    PR B. A TypedFault(Exception) base with status, error_type and reason, plus optional cause_code and cause_status
+    ("" and 0 by default). terminal() checks it before the dead-connection predicate and answers status with {ok false,
+    error_type, reason, request_id, action}, never a message. It logs one compact-JSON ducklake_typed_fault line with
+    the function, action, error_type, reason, request id, cause_code and cause_status. It reads those attributes only,
+    never str() of an exception and never __cause__ or __context__ (botocore's AccessDenied text carries the role ARN
+    and account id). The reader handler is unchanged: its existing terminal() path answers the typed fault.
+- file: src/common/ducklake_reader_client.py
+  action: Modify
+  purpose: >-
+    PR B. VERB_FIELDS["transcript_content"] is the response envelope (storage, encoding, offset, length, content_bytes,
+    content_sha256, data, omitted_reason), never the resolve SQL's columns: content_uri never reaches a caller. The version
+    pin stays 6.
+- file: src/lambdas/ducklake_reader/manifest.yaml
+  action: Modify
+  purpose: >-
+    PR B. includes gains src/common/ducklake_event_content.py, src/common/ducklake_telemetry_blobstore.py,
+    src/telemetry/blobs.py and src/telemetry/request.py (blobstore's and blobs' imports). boto3 comes from the layer.
+- file: src/lambdas/data-pipeline/manifest.yaml
+  action: Modify
+  purpose: >-
+    PR B. excludes gains src/common/ducklake_event_content.py (reader-bundle only), like the other event modules; the
+    blob store's "telemetry-writer bundle only" comment becomes "telemetry writer and reader bundles only".
+- file: tests/lambda_manifest/test_bundle_checks.py
+  action: Modify
+  purpose: >-
+    PR B. New test_reader_bundle_carries_the_transcript_content_modules: the reader manifest's includes name
+    src/common/ducklake_event_content.py, src/common/ducklake_telemetry_blobstore.py, src/telemetry/blobs.py and
+    src/telemetry/request.py, and data-pipeline's excludes name src/common/ducklake_event_content.py. Two gaps make
+    this standing assertion necessary: --check-bundles does not run in --pre (the comment at lines 262-264), and
+    check_handler_imports (scripts/lambda_manifest.py:177) imports only the handler module, so a module imported
+    function-locally is never resolved by it. It stays under 500 SLOC (285 today).
+- file: docs/contracts/ducklake_reader.yaml
+  action: Modify
+  purpose: >-
+    PR B. The transcript_content verb: params, the single-row response, base64 paging (MAX_CHUNK_BYTES 3,145,728; for
+    storage inline or object the caller loops while offset + length < content_bytes and checks the reassembled length
+    and SHA-256; storage omitted carries no data and the caller stops), agent_facing false, zero rows for an unknown
+    key, 400 named_read_input, 500 blob_integrity {reason} with the closed reason set (uri_malformed, checksum_absent,
+    checksum_mismatch, length_mismatch, changed_during_read, forbidden_or_missing, missing), 500 grain_conflict
+    {differing_rows}, 500 blob_misconfigured {reason}, 503 blob_unavailable, and that no response or log carries content_uri, the bucket, a
+    key, a digest other than the row's content_sha256, or an exception message. The query_ops declared residual widens
+    honestly: caller SQL naming a table function over s3:// can now read a blob object whose full key it knows (the
+    role has no List), owner rec-4292 before production reads. The same IAM-signed principals can already read that
+    content through transcript_content, so no new principal gains access; only the row check and future tenant scoping
+    are bypassed. That falls short of Decision 143 cl.1 (scope an identity by its worst reachable verb, outside the
+    handler), so the residual names its owner and exit: rec-4292, before production reads, gives telemetry reads their own
+    reader identity (the Decision 213 cl.2 pattern) or closes the query_ops path. The invariant "Rows are derived, never
+    raw" (line 155) gains a stated exception for transcript_content: it returns one stored row's payload bytes by its full
+    grain key, never caller-chosen columns. Line 155's "before any connection or SQL" gains a stated exception too: the
+    offset-at-or-beyond-size refusal needs the row's size, so it answers 400 named_read_input after the resolve SQL,
+    still without the value. The conflict rule is stated: rows under one grain key that differ in any compared column
+    are refused with 500 grain_conflict, never served as one. Every new or amended statement is its own list item, because lines 155 and
+    162 are already 1,607 and 1,244 characters against the 2,000 cap. One amendment_log entry (field_add, semantic_break
+    false: no existing caller's answer changes).
+- file: docs/contracts/read-engine.yaml
+  action: Modify
+  purpose: >-
+    PR B. The declared verb grouping lists transcript_content with the event-journal verbs, and the query_ops rationale's
+    "S3-read-only role" bound names the blob prefix the role now reads; one amendment_log entry.
+- file: docs/contracts/ports.yaml
+  action: Modify
+  purpose: >-
+    PR B (Decision 212 cl.3). A coupling finding PC-06 on content_blobs and ops_verbs, at
+    src/common/ducklake_event_content.py: the reader builds the s3 adapter directly from TELEMETRY_BLOB_ROOT, so the
+    free-tier local plane cannot serve an object row's bytes until the local_directory adapter and an adapter selection
+    exist. Status open, owning item T4.23:c7. The s3 adapter's get_blob is now implemented; verbs stay provisional until
+    T4.23:c16. One amendment_log entry.
+- file: scripts/ducklake_smoke/telemetry_blob_vectors.py
+  action: Modify
+  purpose: >-
+    PR B. multi_chunk_content(tag) returns content of 3,145,728 + 4,097 UTF-8 bytes, ASCII apart from one 4-byte
+    character straddling byte 3,145,728, with heavy quote, backslash and newline runs. content_identity(row, tenant_id,
+    project_id) derives session_id and event_id through src.telemetry.identity, the derivation the writer uses. The
+    module docstring's "imports nothing from src.telemetry beyond the shared blob protocol constants" now also names
+    identity: the derivation is proven independently by the identity golden vectors, so the read-back gate reusing it
+    proves the read path, not the derivation.
+- file: scripts/ducklake_smoke/lambda_telemetry_blob_gates.py
+  action: Modify
+  purpose: >-
+    PR B. _check_readback runs after _check_s3_rejects, so it follows _check_size_mismatch and its own deliveries never
+    become a PUT that test_each_divergence_fails_loudly[put_accepts_anything] counts (that case lets only the first PUT
+    through). Through the reader's transcript_content, it reassembles
+    three rows, each byte-equal to what was written and to the row's SHA-256 and length: the delivered blob row (one
+    chunk), one inline transcript row appended for the purpose, and one multi-chunk object delivered for the purpose
+    (two calls). It takes tenant_id and project_id from the append response and resolves the reader URL through
+    core._function_url("reader"). An offset at the object's size answers 400 named_read_input. It prints
+    TELEMETRY_BLOB_READBACK_OK and blob_read_ms. No vector it adds elicits a 5xx.
+- file: tests/common/test_ducklake_telemetry_blobstore.py
+  action: Modify
+  purpose: >-
+    PR B. New: test_get_blob_verifies_then_reads_the_range (HEAD with ChecksumMode, then a ranged GET with IfMatch on
+    that ETag), test_get_blob_integrity_reasons (each reason, uri_malformed with no S3 call),
+    test_get_blob_store_faults_are_classified_without_the_message (a ClientError whose message carries an ARN and a
+    12-digit run never reaches the raised text, while its code and status reach the raised error's attributes),
+    test_writer_integrity_raise_keeps_its_reason, and
+    test_real_ranged_get_stub_carries_range_and_if_match (aws-marked, a botocore Stubber like
+    test_real_head_stub_carries_checksum_mode, so a parameter-name error cannot hide behind a fake client).
+    test_lazy_store_builds_once_and_delegates also covers the get_blob delegate. It stays under 500 SLOC (322 today).
+- file: tests/common/test_ducklake_event_content.py
+  action: Create
+  purpose: >-
+    PR B. test_object_row_pages_and_reassembles_to_the_stored_bytes (an 8 MiB payload with a 4-byte character
+    straddling each chunk edge: three calls, base64 decoded and concatenated, length and SHA-256 equal),
+    test_inline_row_serves_through_the_same_envelope, test_omitted_row_carries_its_reason_and_no_data,
+    test_unknown_key_answers_zero_rows, test_offset_beyond_size_is_refused_without_the_value, test_max_bytes_is_clamped,
+    test_grain_conflict_is_refused (compared_versions above 1, payload equal or not),
+    test_not_configured_refuses_objects_but_serves_inline,
+    test_store_errors_map_to_typed_faults and test_max_chunk_envelope_stays_under_the_response_cap (the largest chunk in
+    the full Function URL envelope, measured as the handler measures it, below 6,000,000).
+- file: tests/common/test_ducklake_event_reads.py
+  action: Modify
+  purpose: >-
+    PR B. test_content_params_are_validated_without_echo covers each new parameter's refusal (a string where an integer is
+    due, a boolean, a negative, a NUL), naming the parameter, never the value. New
+    test_transcript_content_is_registered_not_agent_facing covers the binding, params, agent_facing False, the integer
+    describe types and the exact-grain-key filter in its SQL. The non-agent-facing roster assertion (lines 250-253)
+    grows from two verbs to three; the "smoke catalog" description check (line 254) stays and passes.
+- file: tests/common/test_ducklake_event_read_verbs.py
+  action: Modify
+  purpose: >-
+    PR B (duckdb, collected by the full tier only). New test_transcript_content_sql_resolves_on_a_real_catalog runs
+    TRANSCRIPT_CONTENT_SQL on the in-memory catalog harness (db.open_memory_catalog): an absent key answers zero rows,
+    the full grain key selects its row, a stored row of a non-current parser_version is still selected, and two
+    differing rows under one key both come back with compared_versions 2 (also when they differ only in a non-payload
+    compared column), while byte-identical duplicates carry compared_versions 1.
+    test_verb_fields_match_event_verb_output_columns (line 322), which executes every EVENT_READS verb's SQL, gains a
+    content-verb branch: it seeds one inline transcript row, supplies the content verb's own parameters, and compares
+    VERB_FIELDS with ducklake_event_content's response over the executed rows, not with the resolve SQL's cursor
+    columns. It stays under 500 SLOC (299 today).
+- file: tests/test_ducklake_handler_errors.py
+  action: Modify
+  purpose: >-
+    PR B. test_typed_fault_answers_status_type_and_reason_only and test_typed_fault_log_never_carries_the_message (a
+    cause whose text carries an ARN and an account-shaped run; the line carries cause_code and cause_status when set).
+- file: tests/lambdas/ducklake_reader/test_event_routing.py
+  action: Modify
+  purpose: >-
+    PR B. Through the real reader handler with a fake store: test_transcript_content_through_the_handler (200 with the
+    row) and test_blob_faults_answer_typed_through_the_handler (500 blob_integrity, 500 grain_conflict, 500
+    blob_misconfigured, 503 blob_unavailable, each with reason only), without editing the handler or its 494-SLOC test
+    file.
+- file: tests/ducklake_neon_smoke_test/test_lambda_telemetry_blob_gates.py
+  action: Modify
+  purpose: >-
+    PR B. MARKERS gains TELEMETRY_BLOB_READBACK_OK. New test_readback_reassembles_on_a_consistent_reader, against the
+    in-memory writer and LiveFake's reader route (the shared fixture below), which serves the real content module. The
+    wired fixture patches only core._sigv4_invoke, and _check_readback resolves the reader URL through
+    core._function_url("reader"), which raises without DUCKLAKE_READER_URL; the fixture therefore also sets
+    DUCKLAKE_READER_URL (monkeypatch.setenv), and every existing node then reaches the reader route. test_each_divergence_fails_loudly gains readback_wrong_bytes, readback_drops_a_chunk and readback_pages
+    (a 500), each failing the gate by name through Wired.override.
+- file: tests/fixtures/telemetry_append_fakes.py
+  action: Modify
+  purpose: >-
+    PR B. The one shared fake reader, since test modules never import each other. LiveFake.invoke answers action
+    named_read by driving the real reader handler, as test_event_routing.py does, so the error mapping cannot drift:
+    the telemetry connection is a fake whose cursor answers the resolve SQL with the bound grain key's rows from
+    self.stored (the payload columns plus compared_versions), and the content module's blob store is a get_blob adapter
+    over self.store (the MemoryBlobStore verify checks, then the byte range). EventReadInputError then answers 400
+    named_read_input and typed faults answer through terminal(), exactly as deployed. _execute also keeps each row's
+    representation columns (content, content_uri), which compare_excluded leaves out of the stored compared dict, beside
+    it, so the grain-conflict compare is unchanged. Every existing writer route is unchanged. It stays under 500 SLOC
+    (226 today).
+- file: tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py
+  action: Modify
+  purpose: >-
+    PR B. The full gate now reaches the read-back vector (lambda_telemetry calls lambda_telemetry_blob), and the wired
+    fixture's fake_invoke ends in a dict lookup with no named_read key: injecting one reader call made seven nodes fail
+    with KeyError (critique round 3). fake_invoke routes named_read to state["live"] beside append_telemetry and
+    begin_blobs. test_blob_vectors_run_after_the_append_vectors gains TELEMETRY_BLOB_READBACK_OK in its marker list.
+    No assertion is weakened: the routing is claim-preserving and the marker claim-additive, so the graduated checks
+    naming this file's nodes (telemetry-registration-gate, telemetry-ownership-gates, telemetry-append-smoke-vectors, telemetry-gate-failure-diagnostics,
+    telemetry-blob-smoke-vectors, telemetry-writer-smoke-gate) keep their check_ids, as the size-mismatch plan's test-body
+    edits did. It stays under 500 SLOC (374 today).
+- file: tests/lambdas/ducklake_telemetry_writer/test_packaging.py
+  action: Modify
+  purpose: >-
+    PR B. The reader now bundles src/telemetry/request.py, src/telemetry/blobs.py and
+    src/common/ducklake_telemetry_blobstore.py, so compute_affected_artifacts returns ducklake_reader and
+    ducklake_telemetry_writer for each (simulated with the patched manifest on 2026-10-16). Two graduated nodes assert
+    the writer alone and reverse. test_manifest_bundles_the_append_modules becomes
+    test_append_modules_bundled_request_shared_with_reader: request.py affects exactly {ducklake_reader,
+    ducklake_telemetry_writer}, and ducklake_telemetry_append.py still affects the writer alone.
+    test_manifest_bundles_the_blob_modules_only becomes test_blob_modules_bundled_adapter_shared_with_reader: blobs.py
+    and the blob store affect exactly {ducklake_reader, ducklake_telemetry_writer}; ducklake_telemetry_blobs.py and
+    ducklake_telemetry_handshake.py still affect the writer alone, and the reader manifest never names them or
+    src/telemetry_client. Every other assertion of both nodes is kept. The whole-file check
+    telemetry-writer-stub-handler stays green, since the file still passes. It stays under 500 SLOC (111 today).
+- file: config/agent/verification_registry/entries/telemetry-append-writer-edge.yaml
+  action: Delete
+  purpose: >-
+    PR B. Retired by git mv into entries/deprecated/. check_id is immutable, and its node
+    test_manifest_bundles_the_append_modules asserts that request.py affects the telemetry writer alone, which the
+    reader manifest edit reverses.
+- file: config/agent/verification_registry/entries/deprecated/telemetry-append-writer-edge.yaml
+  action: Create
+  purpose: PR B. The git mv destination of the retired shard, byte-identical content.
+- file: config/agent/verification_registry/entries/telemetry-append-writer-edge-request-shared.yaml
+  action: Create
+  purpose: >-
+    PR B. The replacement check (command_exit_zero over pytest, plan_slug telemetry-transcript-content, guard_target and
+    guard_symbol as the retired row), graduated by step 18. It carries all nineteen nodes of the retired check, one under
+    its new name.
+- file: config/agent/verification_registry/entries/telemetry-blob-writer-edge.yaml
+  action: Delete
+  purpose: >-
+    PR B. Retired by git mv into entries/deprecated/. check_id is immutable, and its node
+    test_manifest_bundles_the_blob_modules_only asserts that blobs.py and the blob store affect the telemetry writer
+    alone, which the reader manifest edit reverses.
+- file: config/agent/verification_registry/entries/deprecated/telemetry-blob-writer-edge.yaml
+  action: Create
+  purpose: PR B. The git mv destination of the retired shard, byte-identical content.
+- file: config/agent/verification_registry/entries/telemetry-blob-writer-edge-adapter-shared.yaml
+  action: Create
+  purpose: >-
+    PR B. The replacement check (command_exit_zero over pytest, plan_slug telemetry-transcript-content, guard_target and
+    guard_symbol as the retired row), graduated by step 19. It carries all eleven nodes of the retired check, one under
+    its new name.
+bundled_recommendations:
+- rec-4291
+followon_recs:
+- rec-4292
+- rec-4025
+infrastructure_dependencies:
+- >-
+  Two PRs in order. PR A is Terraform plus its HCL pins and the shard retirement and replacement: the reader's
+  TelemetryBlobRead statement and its TELEMETRY_BLOB_ROOT environment variable in terraform/personal/ducklake_lambdas.tf.
+  It merges on green CI and code review. terraform-apply-sandbox then applies the reviewed plan: an in-budget inline
+  policy update on a boundary-carrying managed role auto-applies (environment-taxonomy guard classification, T2.25 /
+  Decision 92 point 5), and a routed gated apply would wait for a human. PR B (everything else) merges only after PR
+  A's apply-sandbox job is green with no gated route, because IAM is applied before any code deploy.
+- >-
+  LAMBDA-DEPLOY (Decisions 79/125/126): PR B redeploys the DuckLake functions through deploy-ducklake-lambdas.yml
+  (src/common/ducklake_*.py and src/lambdas/ducklake_*/** are push paths). The reader is the function that gains
+  behavior. The telemetry writer (blob store) and the ops writer (ducklake_handler_errors.py) redeploy unchanged in
+  behavior, through the same deploy-serving and smoke jobs step 11 asserts. The smoke job's --lambda-telemetry step
+  runs the read-back vector with the reader URL it already resolves.
+- >-
+  LAMBDA-DEPLOY DEFERRED (CD.16 / Decision 79), per-artifact reasoned disposition: compute_affected_artifacts flags
+  data-pipeline through src/common/ducklake_reader_client.py (bundled by its src/ wildcard), its own manifest and, until
+  its exclude line lands, the new content module. No build, deploy or smoke test is owed: its handlers never read
+  VERB_FIELDS, .github/workflows/deploy-prod-lambdas.yml's path triggers include neither file, and the consuming
+  scheduled agents are disabled. The artifact refreshes with its next governed deploy.
+acceptance_criteria:
+- >-
+  The reader role can GetObject under telemetry-blobs/<meta_schema>/ only, with no List, Put or Delete, and the reader
+  function carries TELEMETRY_BLOB_ROOT; HCL pins assert both and reject every wider grant.
+- >-
+  transcript_content returns any transcript row's stored bytes as base64 pages of at most 3 MiB. The caller's
+  reassembled bytes equal the row's content_bytes and content_sha256 for inline, single-chunk and multi-chunk object
+  rows, including a multi-byte character split at a chunk edge. Every response envelope stays under the 6,000,000-byte
+  cap.
+- >-
+  Before serving object bytes, the reader verifies the object by HEAD (checksum and length against the row) and reads
+  the range from that same object (IfMatch on its ETag). Every integrity failure answers 500 blob_integrity with a reason
+  only, a missing configuration or access fault 500 blob_misconfigured, and a store outage 503 blob_unavailable. None
+  carries a key, URL, message, ARN or account id, in the body or the log.
+- >-
+  An unknown grain key answers zero rows, while a stored row of a non-current parser_version is still served. A bad
+  parameter, or a nonzero offset at or beyond the size, answers 400 named_read_input without the value. Differing rows
+  under one grain key are refused with 500 grain_conflict, never resolved.
+- >-
+  On the deployed functions, the CI smoke job and an independent session run both print TELEMETRY_BLOB_READBACK_OK.
+  Between the serving deploy and the end of the CI smoke job, no reader named_read answered 500, and none of the reader's own JSON log events (typed fault,
+  unmapped error, named_read input, named_read invocation) carries an ARN, an account-shaped run, an s3:// URI or a
+  telemetry-blobs key.
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: The reader's blob grant is GetObject only on the blob prefix, its environment names the blob root, and every wider grant is rejected.
+  command: >-
+    bin/venv-python -m pytest
+    tests/checks/iam_tf/test_telemetry_infra_pins.py::test_reader_blob_grant_is_get_object_on_the_blob_prefix
+    tests/checks/iam_tf/test_telemetry_infra_pins.py::test_reader_blob_guard_rejects_a_wider_grant
+    tests/checks/iam_tf/test_telemetry_infra_pins.py::test_blob_root_on_the_writer_and_reader
+    tests/checks/iam_tf/test_telemetry_infra_pins.py::test_blob_root_guard_rejects_a_moved_root
+    tests/checks/iam_tf/test_telemetry_infra_pins.py::test_writer_blob_grant_shape
+    tests/checks/iam_tf/test_telemetry_infra_pins.py::test_grant_guard_rejects_delete
+    -q
+  expected: Exit 0, every node passes. Red before, because the renamed nodes are absent.
+  expected_literals: []
+  fix_if: >-
+    A reader statement with any S3 action beyond GetObject on the blob prefix, a bucket-level resource, or another
+    catalog's prefix is too wide; never widen the pin to pass.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    Its nodes land in PR A, where the replacement shard telemetry-reader-blob-grant-pins is admitted by the
+    differential gate against pre-grant main. PR B's implementation_declared flip cannot see a row PR A added, and a PR
+    B differential against post-PR-A main would be tautological. The typed-errors plan (2026-10-14, its step 8) waived
+    its Terraform step the same way but added no registry row in its PR A; this PR A adds one because the retirement of
+    telemetry-infra-pins has to ride with the rename.
+- step: 2
+  phase: pre-deploy
+  action: get_blob verifies by HEAD, reads the range from that same object, and classifies every fault without its message.
+  command: >-
+    bin/venv-python -m pytest
+    tests/common/test_ducklake_telemetry_blobstore.py::test_get_blob_verifies_then_reads_the_range
+    tests/common/test_ducklake_telemetry_blobstore.py::test_get_blob_integrity_reasons
+    tests/common/test_ducklake_telemetry_blobstore.py::test_get_blob_store_faults_are_classified_without_the_message
+    tests/common/test_ducklake_telemetry_blobstore.py::test_writer_integrity_raise_keeps_its_reason
+    tests/common/test_ducklake_telemetry_blobstore.py::test_no_ducklake_bundle_ingests_from_object_storage
+    -q
+  expected: >-
+    Exit 0, every node passes. Red before, because the get_blob nodes are absent. The ingestion guard stays green with
+    the reader bundle now carrying the blob store: the object read sits inside the one admitted seam.
+  expected_literals: []
+  fix_if: >-
+    A ranged GET without IfMatch, a HEAD without ChecksumMode, or an exception text reaching the raised error. Never
+    read the whole object to hash it per chunk, and never call get_object outside get_blob.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-blob-get-verified
+- step: 3
+  phase: pre-deploy
+  action: transcript_content serves inline, object and omitted rows as exact base64 pages that reassemble to the row, and refuses what it must.
+  command: >-
+    bin/venv-python -m pytest
+    tests/common/test_ducklake_event_content.py::test_object_row_pages_and_reassembles_to_the_stored_bytes
+    tests/common/test_ducklake_event_content.py::test_inline_row_serves_through_the_same_envelope
+    tests/common/test_ducklake_event_content.py::test_omitted_row_carries_its_reason_and_no_data
+    tests/common/test_ducklake_event_content.py::test_unknown_key_answers_zero_rows
+    tests/common/test_ducklake_event_content.py::test_offset_beyond_size_is_refused_without_the_value
+    tests/common/test_ducklake_event_content.py::test_max_bytes_is_clamped
+    tests/common/test_ducklake_event_content.py::test_grain_conflict_is_refused
+    tests/common/test_ducklake_event_content.py::test_not_configured_refuses_objects_but_serves_inline
+    tests/common/test_ducklake_event_content.py::test_store_errors_map_to_typed_faults
+    tests/common/test_ducklake_event_content.py::test_max_chunk_envelope_stays_under_the_response_cap
+    -q
+  expected: Exit 0, every node passes. Red before, because the test file is absent.
+  expected_literals: []
+  fix_if: >-
+    Reassembled bytes that differ from the row, a chunk envelope at or above 6,000,000 bytes, a content_uri in a
+    response, or a conflicted row served.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-transcript-content-pages
+- step: 4
+  phase: pre-deploy
+  action: The verb is registered with its exact-grain-key filter and integer describe types, and its parameters are validated without echo.
+  command: >-
+    bin/venv-python -m pytest
+    tests/common/test_ducklake_event_reads.py::test_transcript_content_is_registered_not_agent_facing
+    tests/common/test_ducklake_event_reads.py::test_content_params_are_validated_without_echo
+    -q
+  expected: Exit 0, both nodes pass. Red before, because both nodes are absent.
+  expected_literals: []
+  fix_if: >-
+    A content verb that is agent-facing, filters on less than the full grain key, or names a refused value in its
+    error.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-transcript-content-registry
+- step: 5
+  phase: pre-deploy
+  action: Typed faults answer status, type and reason only, through the real reader handler, and their log line carries no message.
+  command: >-
+    bin/venv-python -m pytest
+    tests/test_ducklake_handler_errors.py::test_typed_fault_answers_status_type_and_reason_only
+    tests/test_ducklake_handler_errors.py::test_typed_fault_log_never_carries_the_message
+    tests/lambdas/ducklake_reader/test_event_routing.py::test_transcript_content_through_the_handler
+    tests/lambdas/ducklake_reader/test_event_routing.py::test_blob_faults_answer_typed_through_the_handler
+    -q
+  expected: Exit 0, every node passes. Red before, because the nodes are absent.
+  expected_literals: []
+  fix_if: >-
+    A typed fault answered as 500 unmapped, a body or log line carrying an ARN, an account-shaped run or a message, or
+    an edit to the reader handler.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-reader-typed-faults
+- step: 6
+  phase: pre-deploy
+  action: The reader bundle carries the content and blob store modules and their imports, and data-pipeline excludes the content module.
+  command: >-
+    bin/venv-python -m pytest
+    tests/lambda_manifest/test_bundle_checks.py::test_reader_bundle_carries_the_transcript_content_modules -q
+  expected: Exit 0. Red before, because the node is absent.
+  expected_literals: []
+  fix_if: >-
+    A missing reader include fails at import on the deployed reader (the content module is imported function-locally, so
+    no pre-merge import check sees it); a missing data-pipeline exclude drags the module into data-pipeline.zip.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-reader-content-bundle
+- step: 7
+  phase: pre-deploy
+  action: >-
+    The live gate's read-back vector passes on a consistent reader and fails on each named divergence, and the full
+    telemetry gate the CI smoke job runs reaches it.
+  command: >-
+    bin/venv-python -m pytest
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_blob_gates.py::test_readback_reassembles_on_a_consistent_reader
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_blob_gates.py::test_vectors_pass_on_a_consistent_writer
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_blob_gates.py::test_each_divergence_fails_loudly
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_blob_gates.py::test_gate_output_never_carries_a_url_or_identity
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_happy_path_prints_fixed_line
+    tests/ducklake_neon_smoke_test/test_lambda_telemetry_gates.py::test_blob_vectors_run_after_the_append_vectors
+    -q
+  expected: >-
+    Exit 0, every node passes, the full-gate blob node seeing TELEMETRY_BLOB_READBACK_OK. Red before, because the
+    read-back node is absent.
+  expected_literals: []
+  fix_if: >-
+    A gate that passes when the reader returns different bytes, drops a chunk or answers 500, or a vector that elicits a
+    5xx.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-blob-readback-gate
+- step: 8
+  phase: pre-deploy
+  action: The amended contracts pass the drift gate, the size cap and the verb-grouping check.
+  command: >-
+    bin/venv-python -c "from scripts.checks.contracts.validate_contract_drift import validate_contract_drift as
+    v;f=[];v(f);assert not f, f;print('CONTRACTS_OK')" && bin/venv-python -c "from scripts.checks.structural._classify
+    import effective_lines;n=[effective_lines(open(f).read()) for f in
+    ('docs/contracts/ducklake_reader.yaml','docs/contracts/read-engine.yaml')];print(n);assert max(n)<=500;print('SIZE_OK')"
+    && bin/venv-python -m pytest tests/checks/contracts/test_validate_read_engine_verbs.py -q && bin/venv-python -c "from
+    scripts.checks.contracts.validate_ports_contract import validate_ports_contract as v;f=[];v(f);assert not
+    f,f;print('PORTS_OK')"
+  expected: Exit 0, CONTRACTS_OK, SIZE_OK and PORTS_OK printed, and the verb-grouping tests pass.
+  expected_literals: []
+  fix_if: A drift finding, a contract over the cap, a verb grouping that misses transcript_content, or a ports finding.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: The drift, size and verb-grouping checks already run in both tiers; this step only confirms the edits pass them.
+- step: 9
+  phase: pre-deploy
+  action: Fast tier, then the full tier on the committed, rebased, clean tree before each handoff (Decision 163).
+  command: >-
+    bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m
+    scripts.checks.validation_result --verify-head
+  expected: Exit 0 on a completed full run and the head verified; a timeout is not a pass.
+  expected_literals: []
+  fix_if: Any failure; fix the cause, never weaken a check.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: Invokes scripts.validate (the recursion refusal); the tiers are their own standing guard.
+- step: 10
+  phase: post-deploy
+  action: >-
+    PR A's Terraform applied through the guard with no gated route. Read the terraform-apply-sandbox run for PR A's merge
+    commit with mcp__github__actions_list and save its jobs JSON to $TF_APPLY_JOBS_JSON.
+  command: >-
+    test -s "$TF_APPLY_JOBS_JSON" && bin/venv-python -c "import json,os;j=json.load(open(os.environ['TF_APPLY_JOBS_JSON']));jobs={x['name']:x.get('conclusion')
+    for x in (j.get('jobs') if isinstance(j,dict) else j)};print(jobs);assert any(n.startswith('apply-sandbox') and c=='success'
+    for n,c in jobs.items()),jobs;assert not any(n.startswith('gated-apply') and c=='success' for n,c in jobs.items()),jobs;print('TF_APPLY_OK')"
+  expected: apply-sandbox concluded success, gated-apply did not apply, then TF_APPLY_OK.
+  fix_if: >-
+    A routed gated apply needs a human reviewer in GitHub Actions; say so to Benjamin once and wait. A red apply is fixed
+    forward from its log; PR B never merges before this step passes.
+  hermetic: false
+- step: 11
+  phase: post-deploy
+  action: >-
+    PR B's governed deploy succeeded, every job included. Read the deploy-ducklake-lambdas run for PR B's merge commit
+    and save its jobs JSON to $DEPLOY_JOBS_JSON.
+  command: >-
+    test -s "$DEPLOY_JOBS_JSON" && bin/venv-python -c "import json,os;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));jobs={x['name']:x.get('conclusion')
+    for x in (j.get('jobs') if isinstance(j,dict) else j)};print(jobs);want=['deploy-maintenance','maintenance-smoke','reconcile-gate','deploy-serving','smoke'];assert
+    all(any(n.startswith(w) and c=='success' for n,c in jobs.items()) for w in want),jobs;print('DEPLOY_OK')"
+  expected: Every named job concluded success (a skipped job fails this step), then DEPLOY_OK.
+  fix_if: A failed or skipped job; read its log and fix forward, never re-run to green without a cause (Decision 55).
+  hermetic: false
+- step: 12
+  phase: post-deploy
+  action: The CI smoke job ran the read-back vector and every earlier blob vector. Save the smoke job's log to $SMOKE_LOG_FILE.
+  command: >-
+    test -s "$SMOKE_LOG_FILE" && for m in TELEMETRY_READS_OK TELEMETRY_BLOB_DELIVERED_OK TELEMETRY_BLOB_SIZE_MISMATCH_OK
+    TELEMETRY_BLOB_READBACK_OK blob_read_ms=; do grep -q "$m" "$SMOKE_LOG_FILE" || { echo "missing $m"; exit 1; }; done
+    && echo SMOKE_READBACK_OK
+  expected: Every marker present, then SMOKE_READBACK_OK.
+  fix_if: >-
+    A missing marker: the gate names the vector that diverged. A blob_integrity forbidden_or_missing answer on a row the
+    gate just delivered means the grant did not apply, and a blob_misconfigured answer means the environment variable did
+    not; recheck step 10 in both cases.
+  hermetic: false
+- step: 13
+  phase: post-deploy
+  action: An independent live run of the telemetry gate from this session as PlatformDev, so the evidence does not rest on the CI log alone.
+  command: >-
+    DUCKLAKE_TELEMETRY_WRITER_URL=$(aws ssm get-parameter --profile agent_platform --region eu-west-2 --name
+    /agent-platform/ducklake/telemetry_writer_url --query Parameter.Value --output text)
+    DUCKLAKE_READER_URL=$(aws ssm get-parameter --profile agent_platform --region eu-west-2 --name
+    /agent-platform/ducklake/reader_url --query Parameter.Value --output text) AWS_PROFILE=agent_platform bin/venv-python
+    -m scripts.ducklake_neon_smoke_test --lambda-telemetry > "${TMPDIR:-/tmp}/telemetry_readback_gate.out" 2>&1 && grep -q
+    TELEMETRY_BLOB_READBACK_OK "${TMPDIR:-/tmp}/telemetry_readback_gate.out" && echo LOCAL_READBACK_OK
+  expected: Exit 0, then LOCAL_READBACK_OK.
+  fix_if: A proxy block is an environment limit to report with its output, not a pass; any other failure is the reader's or the writer's.
+  hermetic: false
+- step: 14
+  phase: post-deploy
+  action: >-
+    Between the serving deploy and the end of the CI smoke job (plus one minute for log delivery), no reader named_read
+    answered 500, and none of the reader's own JSON log events carries an ARN, an account-shaped run, an s3:// URI or a
+    telemetry-blobs key. The window is bounded so unrelated later reader traffic cannot decide the step. Platform lines (START, END, REPORT, INIT_START) are skipped,
+    UUID tokens are stripped before the account-id match, and the gate's query_ops isolation probe (an expected 500) is
+    excluded by action.
+  command: >-
+    test -s "$DEPLOY_JOBS_JSON" && bin/venv-python -c "import datetime as d,json,os,re,boto3;b=boto3.Session(profile_name='agent_platform',region_name='eu-west-2');jobs=json.load(open(os.environ['DEPLOY_JOBS_JSON']));jobs=jobs.get('jobs')
+    if isinstance(jobs,dict) else jobs;t=d.datetime.fromisoformat([x['completed_at'] for x in jobs if x['name'].startswith('deploy-serving')][0].replace('Z','+00:00'));s=int(t.timestamp()*1000);u=d.datetime.fromisoformat([x['completed_at'] for x in jobs if x['name'].startswith('smoke')][0].replace('Z','+00:00'));e=int(u.timestamp()*1000)+60000;lg=b.client('logs');g='/aws/lambda/agent-platform-ducklake-reader';ev=[e['message'].strip()
+    for pg in lg.get_paginator('filter_log_events').paginate(logGroupName=g,startTime=s,endTime=e) for e in pg['events']];nr='\"action\":\"named_read\"';mine=[m
+    for m in ev if m.startswith('{') and ('\"event\":\"ducklake_typed_fault\"' in m or '\"event\":\"ducklake_named_read_input\"' in m or (nr
+    in m and ('\"event\":\"ducklake_invocation\"' in m or '\"event\":\"ducklake_unmapped_error\"' in m)))];bad=[m for m in mine if
+    '\"event\":\"ducklake_invocation\"' in m and '\"status\":500' in m];uu=re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}');leak=[m
+    for m in mine if re.search(r'arn:aws|(?<![0-9])[0-9]{12}(?![0-9])|s3://|telemetry-blobs/',uu.sub('',m))];print(len(ev),len(mine),len(bad),len(leak));assert
+    mine,'no reader named_read events';assert not bad,'named_read 500s';assert not leak,'leak shapes';print('READER_LOGS_OK')"
+  expected: >-
+    Exit 0 and READER_LOGS_OK, with named_read events present (the read-back calls), zero named_read 500s and zero leak
+    shapes in the reader's own events.
+  fix_if: >-
+    A leak-shape hit: find the line that emits it and remove the value, never the check. A named_read 500: read it
+    first; blob_integrity means a stored object disagrees with its row, and grain_conflict means two stored rows differ
+    under one grain key (Decision 207). The filters key on the compact JSON lines
+    ducklake_metrics.log_invocation and ducklake_handler_errors print (event, action, status); the new typed-fault line
+    must use the same compact separators.
+  hermetic: false
+- step: 15
+  phase: post-deploy
+  action: >-
+    The bundled rec closed with the merge (Resolves: rec-4291 in PR B's squash body), and the follow-on recs carry this
+    plan's notes. Read rec-4291, rec-4292 and rec-4025 with recs_by_ids and save the JSON to $RECS_JSON.
+  command: >-
+    test -s "$RECS_JSON" && bin/venv-python -c "import json,os;r={x['id']:x for x in json.load(open(os.environ['RECS_JSON']))['rows']};assert
+    r['rec-4291']['status']=='closed',r['rec-4291']['status'];assert all('telemetry-transcript-content' in r[k]['context']
+    for k in ('rec-4292','rec-4025'));print('RECS_OK')"
+  expected: RECS_OK.
+  fix_if: >-
+    An open rec-4291 means its acceptance did not pass at the closing commit or the trailer was missing: rerun the
+    acceptance, then close through the portal citing the merge commit.
+  hermetic: false
+- step: 16
+  phase: pre-deploy
+  action: >-
+    Stale-reference sweep for the check PR A retires: it lives only under entries/deprecated/, its replacement exists,
+    and no live shard or test names the old nodes or the old assertion.
+  command: >-
+    test ! -e config/agent/verification_registry/entries/telemetry-infra-pins.yaml && test -f
+    config/agent/verification_registry/entries/deprecated/telemetry-infra-pins.yaml && test -f
+    config/agent/verification_registry/entries/telemetry-reader-blob-grant-pins.yaml && ! grep -rqE --exclude-dir=__pycache__
+    'test_reader_has_no_blob_grant|test_blob_root_only_on_the_writer|test_blob_root_guard_rejects_a_reader_root|test_reader_guard_rejects_a_blob_grant|assert_reader_has_no_blob_grant'
+    config/agent/verification_registry/entries/*.yaml tests && echo SWEEP_OK
+  expected: Exit 0 and SWEEP_OK.
+  expected_literals: []
+  fix_if: A live reference to an old node or the old assertion; move it to the replacement, never edit the deprecated copy.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    A one-time retirement sweep. The registry loader excludes entries/deprecated/, and graduated records are never
+    re-executed as a standing suite, so this is the only check that no live shard names a renamed node.
+- step: 17
+  phase: pre-deploy
+  action: >-
+    The resolve SQL runs on a real in-memory catalog, VERB_FIELDS matches the content verb's response envelope, and
+    VERB_FIELDS covers every registered verb.
+  command: >-
+    bin/venv-python -m pytest
+    tests/common/test_ducklake_event_read_verbs.py::test_transcript_content_sql_resolves_on_a_real_catalog
+    tests/common/test_ducklake_event_read_verbs.py::test_verb_fields_match_event_verb_output_columns
+    tests/common/ducklake_reader_client/test_verb_fields_parity.py::test_verb_fields_covers_every_registered_verb
+    -q
+  expected: Exit 0, every node passes. Red before, because the SQL node is absent.
+  expected_literals: []
+  fix_if: >-
+    A non-current parser_version row that is not selected, an absent key that returns a row, a differing duplicate
+    collapsed in SQL, VERB_FIELDS naming content_uri, or a registered verb missing from VERB_FIELDS.
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: >-
+    Both files need duckdb, a fast-tier heavy exclusion (requirements-fast.txt): test_ducklake_event_read_verbs.py
+    imports it at module scope and test_verb_fields_parity.py importorskips it at module level, so the PR tier cannot
+    collect either; the full tier runs them pre-handoff and on main (the reader verbs plan's precedent).
+- step: 18
+  phase: pre-deploy
+  action: >-
+    The telemetry writer's append edge keeps every graduated claim, and the request grammar module is shared with the
+    reader while the append module stays the writer's alone.
+  command: >-
+    bin/venv-python -m pytest
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_edge.py::test_caps_are_413_at_the_boundaries
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_edge.py::test_request_errors_translate_by_type
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_edge.py::test_response_shape_and_no_value_echo
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_edge.py::test_adversarial_bodies_surface_only_mapped_errors
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_log.py::test_line_fields_and_emf_on_the_five_data_verbs
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_log.py::test_line_never_carries_account_id_or_arn
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_log.py::test_function_keeps_the_text_log_format
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_log.py::test_occ_directive_only_when_recorded
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_log.py::test_masked_commit_retries_is_a_line_field_never_an_emf_member
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_edge.py::test_stats_carry_masked_commit_retries_from_the_outcome
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_dispatch_includes_append_telemetry
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_error_map_rows_for_kernel_errors
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_one_c6_line_per_answered_request
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_invoke_bytes_is_the_escaped_body_length
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_unparseable_bodies_through_handler_are_400
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_masked_exhaustion_logs_its_retry_count
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py::test_probe_reports_grain_counts_for_one_session_day
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py::test_probe_inputs_refused_before_any_catalog_read
+    tests/lambdas/ducklake_telemetry_writer/test_packaging.py::test_append_modules_bundled_request_shared_with_reader
+    -q
+  expected: Exit 0, every node passes. Red before, because the renamed packaging node is absent.
+  expected_literals: []
+  fix_if: >-
+    request.py affecting any artifact beyond the reader and the telemetry writer, or ducklake_telemetry_append.py
+    reaching the reader. Never drop a carried node to pass.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-append-writer-edge-request-shared
+- step: 19
+  phase: pre-deploy
+  action: >-
+    The telemetry writer's blob edge keeps every graduated claim, and the blob store adapter and its protocol module are
+    shared with the reader while the writer-side blob modules stay the writer's alone.
+  command: >-
+    bin/venv-python -m pytest
+    tests/common/test_ducklake_telemetry_handshake.py::test_capabilities_advertise_protocol_and_schema_view
+    tests/common/test_ducklake_telemetry_handshake.py::test_schema_view_comes_from_the_bundled_projection
+    tests/common/test_ducklake_telemetry_handshake.py::test_fingerprint_tracks_the_view
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_edge.py::test_begin_blobs_edge_response_and_refusals
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_dispatch_includes_begin_blobs
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_describe_carries_the_capabilities
+    tests/lambdas/ducklake_telemetry_writer/test_handler.py::test_blob_faults_answer_a_typed_500
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_log.py::test_begin_blobs_line_counts_with_emf
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_log.py::test_lines_never_carry_a_presigned_url
+    tests/lambdas/ducklake_telemetry_writer/test_telemetry_actions.py::test_probe_counts_blob_objects_for_one_session
+    tests/lambdas/ducklake_telemetry_writer/test_packaging.py::test_blob_modules_bundled_adapter_shared_with_reader
+    -q
+  expected: Exit 0, every node passes. Red before, because the renamed packaging node is absent.
+  expected_literals: []
+  fix_if: >-
+    blobs.py or the blob store affecting any artifact beyond the reader and the telemetry writer, or
+    ducklake_telemetry_blobs.py, ducklake_telemetry_handshake.py or src/telemetry_client reaching the reader. Never drop
+    a carried node to pass.
+  hermetic: true
+  graduation: graduate
+  graduation_check_id: telemetry-blob-writer-edge-adapter-shared
+- step: 20
+  phase: pre-deploy
+  action: >-
+    Stale-reference sweep for the two checks PR B retires: they live only under entries/deprecated/, their replacements
+    exist, and no live shard or test names the old packaging nodes.
+  command: >-
+    test ! -e config/agent/verification_registry/entries/telemetry-append-writer-edge.yaml && test ! -e
+    config/agent/verification_registry/entries/telemetry-blob-writer-edge.yaml && test -f
+    config/agent/verification_registry/entries/deprecated/telemetry-append-writer-edge.yaml && test -f
+    config/agent/verification_registry/entries/deprecated/telemetry-blob-writer-edge.yaml && test -f
+    config/agent/verification_registry/entries/telemetry-append-writer-edge-request-shared.yaml && test -f
+    config/agent/verification_registry/entries/telemetry-blob-writer-edge-adapter-shared.yaml && ! grep -rqE
+    --exclude-dir=__pycache__ 'test_manifest_bundles_the_append_modules|test_manifest_bundles_the_blob_modules_only'
+    config/agent/verification_registry/entries/*.yaml tests && echo SWEEP_B_OK
+  expected: Exit 0 and SWEEP_B_OK.
+  expected_literals: []
+  fix_if: A live reference to an old node; move it to the replacement, never edit a deprecated copy.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    A one-time retirement sweep, as step 16 is for PR A. The registry loader excludes entries/deprecated/, so this is
+    the only check that no live shard names a renamed node.
+test_obligations:
+- source: terraform/personal/ducklake_lambdas.tf
+  behavior: The reader can GetObject under the blob prefix only, and carries the blob root.
+  verification_step: 1
+  test_selector: tests/checks/iam_tf/test_telemetry_infra_pins.py::test_reader_blob_grant_is_get_object_on_the_blob_prefix
+  red_green_expectation: red before (node absent), green after
+- source: src/common/ducklake_telemetry_blobstore.py
+  behavior: get_blob verifies by HEAD and reads the verified object's range.
+  verification_step: 2
+  test_selector: tests/common/test_ducklake_telemetry_blobstore.py::test_get_blob_verifies_then_reads_the_range
+  red_green_expectation: red before (node absent), green after
+- source: src/common/ducklake_event_content.py
+  behavior: Pages reassemble to the stored bytes for every storage kind.
+  verification_step: 3
+  test_selector: tests/common/test_ducklake_event_content.py::test_object_row_pages_and_reassembles_to_the_stored_bytes
+  red_green_expectation: red before (module absent), green after
+- source: src/common/ducklake_event_reads.py
+  behavior: The content parameters are validated without echo, with integer types in describe, and the content verb hands off.
+  verification_step: 4
+  test_selector: tests/common/test_ducklake_event_reads.py::test_content_params_are_validated_without_echo
+  red_green_expectation: red before (node absent), green after
+- source: src/common/ducklake_event_read_verbs.py
+  behavior: transcript_content is registered, not agent-facing, and filters on the exact grain key.
+  verification_step: 4
+  test_selector: tests/common/test_ducklake_event_reads.py::test_transcript_content_is_registered_not_agent_facing
+  red_green_expectation: red before (node absent), green after
+- source: src/common/ducklake_event_read_sql.py
+  behavior: The resolve SQL selects the exact grain key's stored rows, any parser_version, and none for an absent key.
+  verification_step: 17
+  test_selector: tests/common/test_ducklake_event_read_verbs.py::test_transcript_content_sql_resolves_on_a_real_catalog
+  red_green_expectation: red before (node absent), green after
+- source: src/common/ducklake_handler_errors.py
+  behavior: A typed fault answers status, type and reason and logs no message.
+  verification_step: 5
+  test_selector: tests/test_ducklake_handler_errors.py::test_typed_fault_log_never_carries_the_message
+  red_green_expectation: red before (node absent), green after
+- source: src/common/ducklake_reader_client.py
+  behavior: VERB_FIELDS carries transcript_content's response envelope, never content_uri.
+  verification_step: 17
+  test_selector: tests/common/test_ducklake_event_read_verbs.py::test_verb_fields_match_event_verb_output_columns
+  red_green_expectation: red with the verb registered and VERB_FIELDS unchanged, green after
+- source: src/lambdas/ducklake_reader/manifest.yaml
+  behavior: The reader bundle carries the content and blob store modules and their imports.
+  verification_step: 6
+  test_selector: tests/lambda_manifest/test_bundle_checks.py::test_reader_bundle_carries_the_transcript_content_modules
+  red_green_expectation: red before (node absent), green after
+- source: src/lambdas/data-pipeline/manifest.yaml
+  behavior: data-pipeline excludes the reader-only content module.
+  verification_step: 6
+  test_selector: tests/lambda_manifest/test_bundle_checks.py::test_reader_bundle_carries_the_transcript_content_modules
+  red_green_expectation: red before (node absent), green after
+- source: scripts/ducklake_smoke/lambda_telemetry_blob_gates.py
+  behavior: The live gate fails when the reader returns wrong bytes, drops a chunk or pages.
+  verification_step: 7
+  test_selector: tests/ducklake_neon_smoke_test/test_lambda_telemetry_blob_gates.py::test_readback_reassembles_on_a_consistent_reader
+  red_green_expectation: red before (node absent), green after
+- source: scripts/ducklake_smoke/telemetry_blob_vectors.py
+  behavior: The multi-chunk content straddles the chunk edge with a 4-byte character; identities match the writer's.
+  verification_step: 7
+  test_selector: tests/ducklake_neon_smoke_test/test_lambda_telemetry_blob_gates.py::test_readback_reassembles_on_a_consistent_reader
+  red_green_expectation: red before (node absent), green after
+- source: docs/contracts/ducklake_reader.yaml
+  behavior: The verb, its typed faults, its no-echo rules, the amended invariant and the widened query_ops residual are documented.
+  verification_step: 8
+  command: bin/venv-python -m pytest tests/checks/contracts/test_validate_read_engine_verbs.py -q
+  waiver_reason: >-
+    Contract prose with an amendment_log entry, guarded by the drift and amendment-log checks in both tiers; its
+    behavior is proven by steps 3, 5 and 12.
+- source: docs/contracts/ports.yaml
+  behavior: The PC-06 coupling and the implemented get_blob are recorded.
+  verification_step: 8
+  command: bin/venv-python -c "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as v;f=[];v(f);assert not f,f;print('PORTS_OK')"
+  waiver_reason: >-
+    A Class D registry row guarded by validate_ports_contract and the drift check in both tiers, which step 8 runs; no
+    code reads the finding.
+- source: docs/contracts/read-engine.yaml
+  behavior: The verb grouping includes transcript_content and the query_ops rationale names the blob prefix.
+  verification_step: 8
+  command: bin/venv-python -m pytest tests/checks/contracts/test_validate_read_engine_verbs.py -q
+  waiver_reason: Guarded by validate_read_engine_verbs in both tiers, which step 8 runs.
+- source: config/agent/verification_registry/entries/deprecated/telemetry-infra-pins.yaml
+  behavior: The retired check survives byte-identical under entries/deprecated/, where the loader never reads it.
+  verification_step: 16
+  command: test -f config/agent/verification_registry/entries/deprecated/telemetry-infra-pins.yaml
+  waiver_reason: >-
+    A git mv destination with no behavior of its own; step 16 proves it exists, the live path is gone and no live shard
+    or test names an old node.
+- source: config/agent/verification_registry/entries/telemetry-reader-blob-grant-pins.yaml
+  behavior: The replacement check carries all eighteen nodes of the retired one.
+  verification_step: 16
+  command: test -f config/agent/verification_registry/entries/telemetry-reader-blob-grant-pins.yaml
+  waiver_reason: >-
+    A registry record admitted by the differential admission gate in PR A (red on pre-grant main, green after); step 16
+    proves it exists and step 1 runs its renamed nodes.
+- source: config/agent/verification_registry/entries/deprecated/telemetry-append-writer-edge.yaml
+  behavior: The retired check survives byte-identical under entries/deprecated/, where the loader never reads it.
+  verification_step: 20
+  command: test -f config/agent/verification_registry/entries/deprecated/telemetry-append-writer-edge.yaml
+  waiver_reason: >-
+    A git mv destination with no behavior of its own; step 20 proves it exists, the live path is gone and no live shard
+    or test names the old node.
+- source: config/agent/verification_registry/entries/deprecated/telemetry-blob-writer-edge.yaml
+  behavior: The retired check survives byte-identical under entries/deprecated/, where the loader never reads it.
+  verification_step: 20
+  command: test -f config/agent/verification_registry/entries/deprecated/telemetry-blob-writer-edge.yaml
+  waiver_reason: >-
+    A git mv destination with no behavior of its own; step 20 proves it exists, the live path is gone and no live shard
+    or test names the old node.
+- source: config/agent/verification_registry/entries/telemetry-append-writer-edge-request-shared.yaml
+  behavior: The replacement check carries all nineteen nodes of the retired one, the packaging node under its new name.
+  verification_step: 18
+  test_selector: tests/lambdas/ducklake_telemetry_writer/test_packaging.py::test_append_modules_bundled_request_shared_with_reader
+  red_green_expectation: red before (node absent), green after
+- source: config/agent/verification_registry/entries/telemetry-blob-writer-edge-adapter-shared.yaml
+  behavior: The replacement check carries all eleven nodes of the retired one, the packaging node under its new name.
+  verification_step: 19
+  test_selector: tests/lambdas/ducklake_telemetry_writer/test_packaging.py::test_blob_modules_bundled_adapter_shared_with_reader
+  red_green_expectation: red before (node absent), green after
+constraints:
+- >-
+  The grant is exactly the one Benjamin approved (card cmsg_012XgaFy8VaDQbxP5D8nC958Y8PmcGbr4QEqpzyWc29unE, 2026-10-15):
+  s3:GetObject on telemetry-blobs/<meta_schema>/* for the reader. No List, Put, Delete or GetObjectVersion; IfMatch on
+  the HEAD's ETag replaces version pinning.
+- >-
+  No response, log line or error carries content_uri, the bucket, a key, a presigned URL, an exception message, an ARN
+  or an account id (Decision 101). Error bodies name a reason from a closed set.
+- >-
+  No vector this plan adds elicits a 5xx. The reader gate's existing query_ops isolation probe answers an expected 500 on
+  purpose (lambda_ec_gates.py), and step 14 excludes it by action. The reader has no paging alarm; adding one is
+  rec-4292's, before production.
+- >-
+  PR A merges only after Benjamin answers the planning thread's card on the widened query_ops residual (cmsg_012XgaFy8VaDQbxP5D8nC958Qs8bbX8DKSdeYD1zPXNgdH). If he accepts
+  it until slice 2c (the recommended option), the build proceeds as written. If he chooses to close it first, this plan
+  is amended before PR A merges.
+- >-
+  PR B merges only after PR A's apply is green (IAM before code; terraform/CLAUDE.md). Both merge under the standing rule
+  (code review PROCEED and green CI): the IAM change is Benjamin's approved grant, ducklake_reader.yaml is Class B and
+  read-engine.yaml and ports.yaml are Class D, and there
+  is no spend, Decision text or manual step. Act only on the final hand-back of each gate.
+- >-
+  The reader handler and tests/test_ducklake_reader_handler.py (494 SLOC) are not edited; typed faults reach the
+  existing terminal() path.
+- No rescue agents or workaround loops (Decision 55); a red apply, deploy or smoke job is fixed forward from its root cause.
+context:
+- >-
+  Direction: Benjamin's "yes to all, write the plan" (2026-10-14) split get_blob into this plan, and his "Grant it" card
+  choice (2026-10-15T16:41Z) approved the reader read grant. Blind consult: /mnt/project-files/telemetry-slice2b/fable-get-blob/.
+- >-
+  Why paging: blobs reach 8 MiB and the reader's buffered response is capped at 6,000,000 bytes (Python Lambdas cannot
+  stream). Base64 avoids double-escaping blow-up and keeps a split multi-byte character exact; 3 MiB chunks give about
+  4.19 MB on the wire, so the 8 MiB cap is three calls.
+- >-
+  Not adopted from the consult. A presigned GET URL: S3's native large-object primitive (Decision 100), but a bearer
+  credential carrying the signing key id that moves the boundary out of the verb catalogue. 404 and 409 codes: an
+  unknown key answers zero rows like every event verb, and differing rows under one key (rare, reachable through the
+  concurrent-append race) are a 500 grain_conflict, a server-side catalog condition the caller cannot fix by changing
+  its request. VersionId pinning: it needs s3:GetObjectVersion, beyond the approved
+  grant, and IfMatch on the ETag gives the same guarantee. A config-gated describe: PR A applies before PR B deploys. A
+  reader paging alarm: rec-4292 owns alarms before production. as_of: stored rows are immutable and the exact grain key
+  selects them.
+- >-
+  Prior verification work this builds on: #1491 (blob route), #1503 (size-mismatch split, every stored blob row's
+  content_bytes equals its object's length) and #1496 (reader verbs and the telemetry slot).
+- >-
+  Overlap: none with the decision notes build. The cache token totals build (#1514) edited ducklake_event_read_sql.py,
+  ducklake_event_read_verbs.py, ducklake_reader_client.py and test_ducklake_event_read_verbs.py; it has merged, and this
+  plan is rebased on it (ac06ced6).
+- >-
+  Decision-scout: FLAGS_FOUND. CITE 84, 88, 199, 207, 212, 213, 215, 126, 144, 176. NOTE 143: the widened query_ops
+  residual names its owner and exit (rec-4292) and goes to Benjamin as a card. NOTE 100: the presigned-GET rejection
+  cites it. Both resolved. RELATED 81, 91, 79, 125, 92, 216, 200, 184, 132, 181, 189, 201, 128, 118, 101, 48, 55.
+  Decisions triaged: 171 of 171. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 4.
+- >-
+  Registry provenance: three graduated checks are retired by git mv and replaced, the registry's own retirement path
+  (the cloudtrail-read-only-no-write-verbs precedent). telemetry-infra-pins goes in PR A (two nodes assert the reader
+  has no blob grant); telemetry-append-writer-edge and telemetry-blob-writer-edge go in PR B (one packaging node each
+  asserts the writer alone bundles a module the reader now bundles). An in-place edit would change a graduated claim
+  under an immutable check_id. The contract requires only the git mv. Earlier retirements also recorded a governance
+  note in verification-registry.yaml, but that contract is Class A, and Class A text needs Benjamin's word under this
+  project's rules; this plan, its commits and the replacements' plan_slug are the record instead.
+- 'gates: decision-scout=FLAGS_FOUND (2 NOTEs, resolved); plan-critique=PROCEED (r4, after r1-r3 REVISE; r4 implementation notes folded in)'
+pre_implementation_checklist:
+- Branch confirmed not on main
+- docs/PROJECT_CONTEXT.md read
+- Only the plan-cited decision sections read
+- All files in scope located and readable; the reader as #1496 left it and the blob store as #1503 left it
+- /mnt/project-files/telemetry-slice2b/fable-get-blob/ADVICE.md read
+execution_steps:
+- >-
+  PR A: terraform/personal/ducklake_lambdas.tf, the HCL pins (step 1), and the git mv of telemetry-infra-pins with its
+  replacement shard (step 16). Code review in a fresh context; fix every blocking finding.
+- >-
+  PR A closure (implement skill Commit Flows; docs/contracts/git-ops.yaml), each outcome reported separately: the
+  readiness check, rebase on origin/main, step 9 on the committed clean tree then --verify-head, the postflight evidence,
+  push, PR, CI green. implementation_declared stays unset (PR B flips it). Merge on code review PROCEED and green CI once
+  Benjamin has answered the query_ops-residual card. Then step 10.
+- >-
+  PR B: src/common/ducklake_telemetry_blobstore.py (step 2 red, then green); ducklake_handler_errors.py (step 5's
+  handler-errors nodes); ducklake_event_content.py, ducklake_event_reads.py, ducklake_event_read_verbs.py,
+  ducklake_event_read_sql.py and ducklake_reader_client.py (steps 3, 4 and 17); then the routing nodes (step 5).
+- >-
+  Both manifests and the bundle test (step 6); the writer packaging test's two renamed nodes, the git mv of
+  telemetry-append-writer-edge and telemetry-blob-writer-edge and their replacement shards (steps 18, 19 and 20); the
+  smoke vectors and gate, LiveFake's reader route and both gate test files (step 7); the three contracts (step 8).
+- Code review (the code-review skill in a fresh context); fix every blocking finding.
+- >-
+  PR B closure (implement skill Commit Flows; docs/contracts/git-ops.yaml), each outcome reported separately: the
+  readiness check, the coverage diagnostic, implementation_declared true, rebase on origin/main, step 9 on the committed
+  clean tree then --verify-head, the postflight evidence, push, PR, CI green. Merge on code review PROCEED and green CI
+  under the standing rule, with Resolves: rec-4291 in the squash body.
+- >-
+  After merge: steps 11 to 14. Then append dated notes through scripts.ops_data_portal (get_rec_write_guidance first;
+  fetch each rec just before update_rec and prepend to its full context; name the merge commit's short SHA and this
+  slug). rec-4292: before production, add a reader paging alarm on blob_integrity and blob_misconfigured (grain_conflict
+  is a Decision 207 catalog condition with its own error_type, counted apart from storage corruption); enforce tenant
+  scoping in transcript_content's resolve step (the row's tenant must match the caller's, the key derived from the row,
+  never a caller value); own the widened query_ops residual (caller SQL can read a blob object whose full key it
+  knows); add the runbook line that a sweep bug shows as forbidden_or_missing, fixed by removing the delete
+  marker; and note that the reader role's description (ducklake_lambdas.tf:216, "ducklake/ + smoke prefixes only") is
+  stale after the grant, left unchanged because a role-attribute update is out of the apply budget and would route to
+  the gated apply. rec-4025: slice 4 can read stored payloads through transcript_content. Then step 15.
+- 'Report: what was implemented and the verification results, including step 13 output and the step 14 counts'
+work_areas: []
+rollback: >-
+  Revert PR B's merge commit: the governed channel redeploys the reader without transcript_content. PR A can stay (an
+  unused GetObject grant and environment variable), or be reverted after PR B; reverting PR A first would turn object
+  reads into blob_integrity forbidden_or_missing (the grant) and blob_misconfigured (the root). Reads write nothing.

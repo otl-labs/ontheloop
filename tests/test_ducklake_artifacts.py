@@ -1,22 +1,34 @@
 """Tests for scripts/ci/ducklake_artifacts.py (T2.42 c4 / rec-2659, DEP-08; fetch_reviewed +
-Decision 154 / rec-2862).
+Decision 154 / rec-2862; rec-4372 push-path attribution + rec-4198 diagnostic-cannot-mask-mismatch).
 
 Covers: byte-mismatch fails closed; on push the assert runs and a missing per-sha object fails
 closed; the dual-write targets BOTH the fixed and per-sha keys; workflow_dispatch (any non-"push"
 event_name) skips the assert; fetch_reviewed() downloads the reviewed per-sha artifacts and
-server-side copies them onto the fixed key with no rebuild, failing closed on any missing object.
+server-side copies them onto the fixed key with no rebuild, failing closed on any missing object;
+rec-4189: the deps layer rebuilds byte-identically across build interpreters and a mismatch names
+the differing zip entries; rec-4372: a push-path mismatch whose every difference traces to a
+moved tracked input proceeds on merge-tree zips, uploaded only to the fixed key and the merge-sha
+prefix, leaving the PR-head prefix untouched and a superseded-by.json pointer behind; rec-4198:
+_zip_entry_diff's own failure can never mask the DUCKLAKE_ZIP_MISMATCH it is composing.
 No live S3 -- boto3 is fully mocked via an injected fake client.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
+import json
+import sys
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+import scripts.build_lambda_packaging as bm
 from scripts.ci.ducklake_artifacts import (
     DUCKLAKE_ARTIFACT_NAMES,
     DucklakeArtifactError,
@@ -26,63 +38,16 @@ from scripts.ci.ducklake_artifacts import (
     fetch_reviewed,
     main,
 )
-
-# ---------------------------------------------------------------------------
-# Fake S3 client -- get_object (per-sha reference read) + upload_file (dual-write)
-# ---------------------------------------------------------------------------
-
-
-class _FakeBody:
-    def __init__(self, data: bytes) -> None:
-        self._data = data
-
-    def read(self) -> bytes:
-        return self._data
-
-
-class _NoSuchKeyError(Exception):
-    pass
-
-
-class _FakeS3Client:
-    """objects: {key: bytes} pre-seeds get_object/download_file reads.
-
-    uploads: list of (local_path, bucket, key) from upload_file.
-    downloads: list of (bucket, key, filename) from download_file.
-    copies: list of (bucket, copy_source, key) from copy_object.
-    """
-
-    def __init__(self, objects: dict[str, bytes] | None = None) -> None:
-        self.objects = objects or {}
-        self.uploads: list[tuple[str, str, str]] = []
-        self.downloads: list[tuple[str, str, str]] = []
-        self.copies: list[tuple[str, dict[str, str], str]] = []
-
-    def get_object(self, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
-        if Key not in self.objects:
-            raise _NoSuchKeyError(f"NoSuchKey: {Key}")
-        return {"Body": _FakeBody(self.objects[Key])}
-
-    def upload_file(self, local_path: str, bucket: str, key: str) -> None:
-        self.uploads.append((local_path, bucket, key))
-
-    def download_file(self, bucket: str, key: str, filename: str) -> None:
-        if key not in self.objects:
-            raise _NoSuchKeyError(f"NoSuchKey: {key}")
-        Path(filename).write_bytes(self.objects[key])
-        self.downloads.append((bucket, key, filename))
-
-    def copy_object(self, Bucket: str, CopySource: dict[str, str], Key: str) -> None:  # noqa: N803
-        self.copies.append((Bucket, CopySource, Key))
-
-
-def _write_packages(tmp_path: Path, names: list[str], content: bytes = b"zip-bytes") -> Path:
-    packages_dir = tmp_path / "lambda-packages"
-    packages_dir.mkdir()
-    for name in names:
-        (packages_dir / name).write_bytes(content)
-    return packages_dir
-
+from scripts.ci.ducklake_inputs import record_inputs
+from tests.fixtures.ducklake_artifact_fakes import (
+    _FakeBody,  # noqa: F401
+    _FakeS3Client,
+    _git_commit_all,
+    _git_init,
+    _NoSuchKeyError,  # noqa: F401
+    _write_packages,
+    _zip_bytes,
+)
 
 # ---------------------------------------------------------------------------
 # assert_and_upload -- push path: byte-identical passes, dual-write happens
@@ -436,3 +401,207 @@ def test_main_default_mode_is_build_and_unaffected_by_fetch_addition() -> None:
     assert rc == 0
     mock_build.assert_called_once()
     mock_assert.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# rec-4189: deps-layer rebuild is byte-identical across build interpreters, and a push-path
+# mismatch names the differing zip entries
+# ---------------------------------------------------------------------------
+
+_HOSTED_PYTHONS = (
+    "/opt/hostedtoolcache/Python/3.12.14/x64/bin/python3",
+    "/opt/hostedtoolcache/Python/3.12.15/x64/bin/python3",
+)
+
+
+def _fake_pip_target(cmd: list[str], **_: Any) -> SimpleNamespace:
+    """Stand-in for `pip install --target`: a package, its dist-info, and a console-script wrapper
+    whose shebang and RECORD hash carry the interpreter that ran pip (cmd[0]), as real pip writes them."""
+    target = Path(cmd[cmd.index("--target") + 1])
+    wrapper = f"#!{cmd[0]}\nimport sys\nfrom ulid.__main__ import entrypoint\n".encode()
+    digest = base64.urlsafe_b64encode(hashlib.sha256(wrapper).digest()).rstrip(b"=").decode()
+    for directory in ("ulid", "bin", "python_ulid-4.0.1.dist-info"):
+        (target / directory).mkdir()
+    (target / "ulid" / "__init__.py").write_text("x = 1\n", encoding="utf-8")
+    (target / "bin" / "ulid").write_bytes(wrapper)
+    (target / "python_ulid-4.0.1.dist-info" / "RECORD").write_bytes(
+        f"../../bin/ulid,sha256={digest},{len(wrapper)}\r\n"
+        "ulid/__init__.py,sha256=abc,6\r\npython_ulid-4.0.1.dist-info/RECORD,,\r\n".encode()
+    )
+    return SimpleNamespace(returncode=0)
+
+
+def test_deps_layer_rebuild_is_byte_identical(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """rec-4189: two builds whose pip ran under interpreters at different paths are byte-identical,
+    and the layer carries no console-script wrapper or build-interpreter path."""
+    built: list[bytes] = []
+    for i, interpreter in enumerate(_HOSTED_PYTHONS):
+        out_dir = tmp_path / f"out{i}"
+        out_dir.mkdir()
+        monkeypatch.setattr(sys, "executable", interpreter)
+        monkeypatch.setattr(bm, "OUTPUT_DIR", out_dir)
+        with patch("scripts.build_lambda_packaging.subprocess.run", side_effect=_fake_pip_target):
+            built.append(bm.build_ducklake_deps_layer(tmp_path / f"build{i}").read_bytes())
+
+    assert _md5_hex(built[0]) == _md5_hex(built[1])
+    with zipfile.ZipFile(io.BytesIO(built[0])) as zf:
+        names = zf.namelist()
+        contents = b"".join(zf.read(name) for name in names)
+    assert any(name.endswith("site-packages/ulid/__init__.py") for name in names)
+    assert not [name for name in names if "/site-packages/bin/" in name]
+    assert not [path for path in _HOSTED_PYTHONS if path.encode() in contents]
+
+
+def _mismatch_message(tmp_path: Path, local: bytes, remote: bytes) -> str:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    packages_dir = _write_packages(tmp_path, ["ducklake-deps-layer.zip"], content=local)
+    client = _FakeS3Client(objects={"lambda-packages/sha/ducklake-deps-layer.zip": remote})
+    with pytest.raises(DucklakeArtifactError) as excinfo:
+        assert_and_upload(["ducklake-deps-layer.zip"], "sha", "push", "b", packages_dir=packages_dir, s3_client=client)
+    assert client.uploads == []
+    return str(excinfo.value)
+
+
+def test_push_byte_mismatch_names_differing_entries(tmp_path: Path) -> None:
+    shared = {f"pkg/m{i:02d}.py": b"same" for i in range(3)}
+    local = _zip_bytes({**shared, "bin/ulid": b"#!/opt/a/python3", "only/local.py": b"l"})
+    remote = _zip_bytes({**shared, "bin/ulid": b"#!/opt/b/python3", "only/remote.py": b"r"})
+    message = _mismatch_message(tmp_path / "small", local, remote)
+    first, *rest = message.splitlines()
+    assert first.startswith("DUCKLAKE_ZIP_MISMATCH ducklake-deps-layer.zip: local=")
+    assert "changed: bin/ulid" in rest[1:]
+    assert "only-local: only/local.py" in rest[1:]
+    assert "only-remote: only/remote.py" in rest[1:]
+    assert not [line for line in rest if "pkg/m" in line]
+
+    many_local = _zip_bytes({f"pkg/m{i:02d}.py": b"a" for i in range(13)})
+    many_remote = _zip_bytes({f"pkg/m{i:02d}.py": b"b" for i in range(13)})
+    capped = _mismatch_message(tmp_path / "many", many_local, many_remote).splitlines()
+    assert "changed: pkg/m09.py" in capped and "changed: pkg/m10.py" not in capped
+    assert "... and 3 more" in capped
+
+
+def test_push_byte_mismatch_reports_container_only_difference(tmp_path: Path) -> None:
+    entries = {"pkg/a.py": b"a" * 200, "pkg/b.py": b"b"}
+    message = _mismatch_message(tmp_path, _zip_bytes(entries), _zip_bytes(entries, zipfile.ZIP_STORED))
+    assert "entry contents identical" in message.splitlines()[1]
+
+
+def test_push_byte_mismatch_without_zip_bytes_says_diff_unavailable(tmp_path: Path) -> None:
+    message = _mismatch_message(tmp_path, b"not-a-zip", b"also-not-a-zip")
+    assert message.splitlines()[0].startswith("DUCKLAKE_ZIP_MISMATCH ducklake-deps-layer.zip: local=")
+    assert message.splitlines()[1].startswith("entry diff unavailable")
+
+
+# ---------------------------------------------------------------------------
+# rec-4198: _zip_entry_diff's own failure can never mask the DUCKLAKE_ZIP_MISMATCH it explains
+# ---------------------------------------------------------------------------
+
+
+def test_push_byte_mismatch_diff_error_cannot_mask_mismatch(tmp_path: Path) -> None:
+    names = ["ducklake-writer.zip"]
+    packages_dir = _write_packages(tmp_path, names, content=b"local-bytes")
+    sha = "shadiag"
+    client = _FakeS3Client(objects={f"lambda-packages/{sha}/ducklake-writer.zip": b"different-remote-bytes"})
+
+    with patch("scripts.ci.ducklake_artifacts.zipfile.ZipFile", side_effect=RuntimeError("boom, not a BadZipFile")):
+        with pytest.raises(DucklakeArtifactError) as excinfo:
+            assert_and_upload(names, sha, "push", "my-bucket", packages_dir=packages_dir, s3_client=client)
+
+    message = str(excinfo.value)
+    assert message.splitlines()[0].startswith("DUCKLAKE_ZIP_MISMATCH ducklake-writer.zip: local=")
+    assert "entry diff unavailable: boom, not a BadZipFile" in message
+    assert client.uploads == []
+
+
+# ---------------------------------------------------------------------------
+# rec-4372: a push-path mismatch whose every difference traces to a moved tracked input proceeds
+# on merge-tree zips; the PR-head prefix is never touched and a superseded-by.json pointer is left
+# ---------------------------------------------------------------------------
+
+
+def test_prmerge_concurrent_same_file_zip_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    manifest_dir = repo / "src" / "lambdas" / "ducklake_writer"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "manifest.yaml").write_text("artifact: ducklake-writer.zip\nincludes:\n  - src/common/foo.py\n")
+    common_dir = repo / "src" / "common"
+    common_dir.mkdir(parents=True)
+    (common_dir / "foo.py").write_text("print('v1')\n")
+
+    _git_init(repo)
+    pr_sha = _git_commit_all(repo, "pr head")
+
+    pr_build_dir = tmp_path / "pr-build"
+    pr_build_dir.mkdir()
+    pr_zip_bytes = _zip_bytes({"src/common/foo.py": (common_dir / "foo.py").read_bytes()})
+    (pr_build_dir / "ducklake-writer.zip").write_bytes(pr_zip_bytes)
+    reference_record = record_inputs(pr_build_dir, ["ducklake-writer.zip"], repo)
+
+    (common_dir / "foo.py").write_text("print('v2 -- edited on main after the PR plan')\n")
+    merge_sha = _git_commit_all(repo, "main moves foo.py")
+
+    packages_dir = repo / "lambda-packages"
+    packages_dir.mkdir()
+    merge_zip_bytes = _zip_bytes({"src/common/foo.py": (common_dir / "foo.py").read_bytes()})
+    (packages_dir / "ducklake-writer.zip").write_bytes(merge_zip_bytes)
+
+    client = _FakeS3Client(
+        objects={
+            f"lambda-packages/{pr_sha}/ducklake-writer.zip": pr_zip_bytes,
+            f"lambda-packages/{pr_sha}/inputs.json": json.dumps(reference_record).encode(),
+        }
+    )
+    monkeypatch.chdir(repo)
+
+    assert_and_upload(
+        ["ducklake-writer.zip"], pr_sha, "push", "my-bucket", packages_dir=packages_dir, s3_client=client, merge_sha=merge_sha
+    )
+
+    pr_prefix_uploads = [key for (_, _, key) in client.uploads if key.startswith(f"lambda-packages/{pr_sha}/")]
+    assert pr_prefix_uploads == []  # the PR-head prefix's zips stay untouched
+    assert (str(packages_dir / "ducklake-writer.zip"), "my-bucket", "lambda-packages/ducklake-writer.zip") in client.uploads
+    assert (
+        str(packages_dir / "ducklake-writer.zip"),
+        "my-bucket",
+        f"lambda-packages/{merge_sha}/ducklake-writer.zip",
+    ) in client.uploads
+
+    put_keys = {key for (_, key, _) in client.put_objects}
+    assert f"lambda-packages/{merge_sha}/inputs.json" in put_keys
+    assert f"lambda-packages/{pr_sha}/superseded-by.json" in put_keys
+    pointer = json.loads(
+        next(body for (_, key, body) in client.put_objects if key == f"lambda-packages/{pr_sha}/superseded-by.json")
+    )
+    assert pointer == {
+        "schema": 1,
+        "artifact_sha": merge_sha,
+        "reason": "DUCKLAKE_ZIP_INPUTS_MOVED",
+        "moved": {"ducklake-writer.zip": ["src/common/foo.py"]},
+    }
+
+
+def test_prmerge_identical_rebuild_fails_closed_without_merge_sha(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a usable merge sha (unset, or equal to artifact_sha), a push mismatch still fails
+    closed even when the record would otherwise attribute it cleanly (rec-4372 guard)."""
+    names = ["ducklake-writer.zip"]
+    packages_dir = _write_packages(tmp_path, names, content=b"local-bytes")
+    sha = "samemergesha"
+    client = _FakeS3Client(
+        objects={
+            f"lambda-packages/{sha}/ducklake-writer.zip": b"remote-bytes",
+            f"lambda-packages/{sha}/inputs.json": b"{}",
+        }
+    )
+    monkeypatch.delenv("GITHUB_SHA", raising=False)
+
+    with pytest.raises(DucklakeArtifactError) as excinfo:
+        assert_and_upload(names, sha, "push", "my-bucket", packages_dir=packages_dir, s3_client=client)
+    assert "not attributed: no merge sha available" in str(excinfo.value)
+    assert client.uploads == []
+
+    with pytest.raises(DucklakeArtifactError) as excinfo2:
+        assert_and_upload(names, sha, "push", "my-bucket", packages_dir=packages_dir, s3_client=client, merge_sha=sha)
+    assert "not attributed: no merge sha available" in str(excinfo2.value)
+    assert client.uploads == []

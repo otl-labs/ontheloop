@@ -543,8 +543,8 @@ def _escalate_dedup_effectiveness(
 
 
 # ---------------------------------------------------------------------------
-# Exit-code CLI (Decision 103 relevance oracle): credential-free, reads only the local
-# recommendations cache -- never constructs a DuckLake reader.
+# Exit-code CLI (Decision 103 relevance oracle): reads the bounded preflight signal rows through the
+# reader and exits 1 when they are unavailable (Decision 215) -- it needs reader credentials.
 # ---------------------------------------------------------------------------
 
 
@@ -567,20 +567,18 @@ def main(argv: list[str] | None = None) -> int:
         "--assert-dedup-clear",
         action="store_true",
         help="Exit 0 if dedup effectiveness is at/above threshold, non-zero while degraded. "
-        "Reads only the local recommendations cache; no AWS credentials required.",
+        "Reads the bounded signal rows through the reader (needs credentials); exits 1 when unavailable.",
     )
     args = parser.parse_args(argv)
 
     if args.assert_dedup_clear:
-        from scripts.executor.jsonl_store import RECS_JSONL  # noqa: PLC0415
+        from scripts.preflight.recs_signals_source import fetch_recs_signal_inputs  # noqa: PLC0415
 
-        cache_rows: list[dict] = []
-        if RECS_JSONL.exists():
-            for line in RECS_JSONL.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line:
-                    cache_rows.append(json.loads(line))
-        return assert_dedup_clear_exit_code(cache_rows)
+        inputs = fetch_recs_signal_inputs()
+        if inputs.signal_rows is None:
+            print(f"recs signals unavailable ({inputs.error}); cannot assert dedup clear", file=sys.stderr)
+            return 1
+        return assert_dedup_clear_exit_code(inputs.signal_rows)
 
     parser.print_help()
     return 2

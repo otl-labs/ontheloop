@@ -21,19 +21,6 @@ pytestmark = pytest.mark.unit
 
 
 # ---------------------------------------------------------------------------
-# _emit_maintenance_metric
-# ---------------------------------------------------------------------------
-
-
-def test_emit_maintenance_metric_forwards_to_rt_emit_metric():
-    with patch.object(h.rt, "emit_metric") as mock_emit:
-        h._emit_maintenance_metric("SomeMetric", 3.0, profile="agent_platform_admin")
-    mock_emit.assert_called_once_with(
-        "SomeMetric", 3.0, namespace=h.maint.MAINTENANCE_CLOUDWATCH_NAMESPACE, profile="agent_platform_admin"
-    )
-
-
-# ---------------------------------------------------------------------------
 # _parse_event / _response
 # ---------------------------------------------------------------------------
 
@@ -127,6 +114,26 @@ def test_handler_maintenance_error_maps_to_500():
     assert body["breaker_tripped"] is True
 
 
+def test_handler_breaker_trip_reason_is_logged(capsys):
+    """A scheduled (async) invoke discards the response body, so the trip reason must reach the
+    Lambda log -- without it a weekly gc_ops trip cannot be attributed to a guard."""
+    raiser = MagicMock(side_effect=DuckLakeMaintenanceError("G2 retention floor violated: 1 snapshot(s) remain"))
+    with patch.dict(h._ACTIONS, {"gc_ops": raiser}):
+        with patch.object(h, "_emit_maintenance_metric"):
+            h.handler({"action": "gc_ops"})
+    out = capsys.readouterr().out
+    assert "MAINTENANCE_FAILURE status=500" in out
+    assert "G2 retention floor violated" in out
+
+
+def test_response_logs_only_server_errors(capsys):
+    h._response(200, {"ok": True})
+    h._response(400, {"ok": False})
+    assert capsys.readouterr().out == ""
+    h._response(500, {"ok": False, "error_type": "runtime"})
+    assert "MAINTENANCE_FAILURE status=500" in capsys.readouterr().out
+
+
 def test_handler_version_mismatch_maps_to_500():
     raiser = MagicMock(side_effect=VersionMismatchError("bad version"))
     with patch.dict(h._ACTIONS, {"catalog_reinit": raiser}):
@@ -151,3 +158,23 @@ def test_handler_catalog_dr_error_maps_to_500():
         r = h.handler({"action": "restore_drill"})
     assert r["statusCode"] == 500
     assert _response_body(r)["error_type"] == "catalog_dr"
+
+
+def test_dispatch_routes_moved_and_new_actions_to_their_modules():
+    from src.lambdas.ducklake_maintenance import health_actions
+
+    assert h._ACTIONS["control_health"] is health_actions.action_control_health
+    assert h._ACTIONS["catalog_stats"] is health_actions.action_catalog_stats
+
+
+def test_dispatch_routes_ensure_catalog_indexes_to_index_actions():
+    from src.lambdas.ducklake_maintenance import index_actions
+
+    assert h._ACTIONS["ensure_catalog_indexes"] is index_actions.action_ensure_catalog_indexes
+
+
+def test_dispatch_routes_the_catalog_actions_to_catalog_actions():
+    from src.lambdas.ducklake_maintenance import catalog_actions
+
+    assert h._ACTIONS["provision_catalog_owner"] is catalog_actions.action_provision_catalog_owner
+    assert h._ACTIONS["provision_telemetry_catalog"] is catalog_actions.action_provision_telemetry_catalog

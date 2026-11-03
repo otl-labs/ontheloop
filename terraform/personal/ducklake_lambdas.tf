@@ -8,22 +8,20 @@
 # GetObject only, so a write from the read role is denied (closed-boundary proof).
 #
 # ---------------------------------------------------------------------------
-# APPLY POSTURE (Decision 35 + 77): HUMAN-GATED via agent_platform_admin.
+# APPLY POSTURE (Decision 77, 126, 144 cl.5): CI plans and applies; the guard decides the route.
 # ---------------------------------------------------------------------------
-# These resources create NEW IAM roles + inline policies, which trip the Decision-77 deterministic
-# guard (scripts/terraform_apply_guard.py, fail-closed on any IAM/trust change). The whole
-# terraform/personal apply for this change therefore routes to the MANUAL agent_platform_admin path,
-# NOT push-to-main auto-apply. IAM must precede the code deploy (terraform CLAUDE.md IAM-precedence):
-#   1. build_lambda --ducklake-only  (uploads the 2 zips + 2 layer zips to S3)
-#   2. terraform -chdir=terraform/personal plan  -> present to human -> apply via agent_platform_admin
-#   3. build_lambda --ducklake-only --deploy  (updates the two functions' code from S3)
+# terraform/personal applies through CI (speculative plan on the PR, apply-sandbox on merge). The
+# deterministic guard (scripts/terraform_apply_guard.py) routes by change class: in-budget inline-policy
+# UPDATEs on these boundary-carrying roles (Decision 144 cl.5 / T2.25), Lambda environment changes and
+# lifecycle changes auto-apply; role CREATION, trust changes, destroys and replaces, out-of-budget IAM
+# and any aws_lambda_function_url change (T2.45) route to the tf-gated-apply Environment. IAM must
+# precede the code that reads it (terraform CLAUDE.md IAM-precedence).
 #
-# CODE/INFRA COUPLING (Decision 125, environment-taxonomy.yaml conformance): RESOLVED. The two
-# aws_lambda_function resources below now carry a lifecycle block ignoring source_code_hash
-# changes, so a code-only redeploy no longer surfaces as a Terraform diff on this IAM-gated apply
-# path. Code deploys now go via `build_lambda --ducklake-only --deploy` (update-function-code,
-# independent of terraform) -- knowingly-interim break-glass status (Decision 125 pt 2-5) pending
-# the governed code-deploy CD channel (tracked as rec-2646's residual scope / A2/B1 follow-on).
+# CODE/INFRA COUPLING (Decision 125/126, environment-taxonomy.yaml conformance): RESOLVED. The two
+# aws_lambda_function resources below carry a lifecycle block ignoring source_code_hash changes, so a
+# code-only redeploy never surfaces as a Terraform diff. Routine code deploys go through the governed
+# code-deploy channel (.github/workflows/deploy-ducklake-lambdas.yml); `build_lambda --ducklake-only
+# --deploy` is break-glass only (Decision 125 pt 2-5).
 #
 # SINGLE-PORTAL NOTE (Decision 78/81): at T2.19 these Function URLs become the CLOSED ops boundary --
 # the writer is the sole ops_* write authority, the reader the sole read authority. ops_data_portal
@@ -42,12 +40,34 @@ locals {
   ducklake_extension_dir    = "/opt/duckdb_extensions"
   # SSOT pin: config/lambda/ducklake/version.yaml -- must be try()-wrapped (validate_terraform_try gate)
   ducklake_version = try(yamldecode(file("${path.module}/../../config/lambda/ducklake/version.yaml")).duckdb_version, "")
+
+  # Telemetry (T2.36): the writer's catalog pin, moved to the production telemetry catalog by Decision 230 (slice 2c's
+  # production flip). The blob root is scoped by the catalog it serves, so smoke-era and production blobs never share a root.
+  ducklake_telemetry_meta_schema = "ducklake_telemetry"
+  telemetry_blob_data_prefix     = "telemetry-blobs"
+  ducklake_telemetry_blob_root   = "s3://${aws_s3_bucket.data_lake.bucket}/${local.telemetry_blob_data_prefix}/${local.ducklake_telemetry_meta_schema}/"
+
+  # Telemetry writer function name; declared here so the pin guard's locals parse sees it.
+  ducklake_telemetry_writer_function = "agent-platform-ducklake-telemetry-writer"
+
+  # Production telemetry catalog (Decision 230): a sibling of ducklake/, never inside it, so the ops catalog's
+  # catalog-wide orphan cleanup never sees telemetry Parquet. The writer pin above holds the same value (Decision 230).
+  ducklake_telemetry_data_prefix      = "ducklake-telemetry"
+  ducklake_telemetry_data_path        = "s3://${aws_s3_bucket.data_lake.bucket}/ducklake-telemetry/"
+  ducklake_telemetry_prod_meta_schema = "ducklake_telemetry"
+  ducklake_telemetry_reader_function  = "agent-platform-ducklake-telemetry-reader"
+
+  # Smoke twin of the telemetry writer (Decision 236 cl.1): pinned to the fixed smoke locals below, never to the
+  # flipping ducklake_telemetry_meta_schema, so the flip cannot move it.
+  ducklake_telemetry_writer_smoke_function = "agent-platform-ducklake-telemetry-writer-smoke"
+  ducklake_smoke_meta_schema               = "ducklake_smoke"
+  ducklake_telemetry_smoke_blob_root       = "s3://${aws_s3_bucket.data_lake.bucket}/${local.telemetry_blob_data_prefix}/${local.ducklake_smoke_meta_schema}/"
 }
 
 # ---------------------------------------------------------------------------
 # Layers (from S3) -- duckdb (pinned via config/lambda/ducklake/version.yaml) + deps, and the 3
-# baked extensions. The layer zips are uploaded to S3 by build_lambda BEFORE the apply; the
-# source_code_hash is try()-guarded so a plan without the local zip (e.g. CI validate) does not fail.
+# baked extensions. The layer zips are uploaded to S3 by build_lambda BEFORE the apply; no
+# source_code_hash is set, so Terraform reads no local zip.
 # ---------------------------------------------------------------------------
 
 resource "aws_lambda_layer_version" "ducklake_deps" {
@@ -56,15 +76,14 @@ resource "aws_lambda_layer_version" "ducklake_deps" {
   s3_bucket           = aws_s3_bucket.data_lake.id
   s3_key              = "lambda-packages/ducklake-deps-layer.zip"
   compatible_runtimes = ["python3.12"]
-  source_code_hash    = try(filemd5("${path.module}/../../lambda-packages/ducklake-deps-layer.zip"), null)
 
   # T2.42 c1 (rec-2646/rec-2654 pattern extended to layers, Decision 126 pt3/pt5, DEP-03): decouples
-  # routine rebuild churn from this IAM-gated apply path -- without this, every rebuild's
-  # non-reproducible zip bytes surface as a layer create+delete (replace) diff, which the Decision-77
-  # guard blocks as a delete action (routes to gated-apply for zero real change). s3_key stays the
+  # routine rebuild churn from this IAM-gated apply path. No source_code_hash is set (Terraform reads no
+  # build artifact) and this block stays as the conformance marker and a backstop. Terraform never
+  # republishes a layer on content change (it did not before either; rec-4253). s3_key stays the
   # fixed literal (unaffected by T2.42 c3's content-addressed upload path).
   #
-  # SILENT-FREEZE GUARD: source_code_hash is now ignored, so Terraform only publishes a new layer
+  # SILENT-FREEZE GUARD: source_code_hash is not set, so Terraform only publishes a new layer
   # version when `description` changes. This description interpolates local.ducklake_version ONLY --
   # a genuine non-duckdb dependency bump (psycopg2-binary / python-ulid / pyyaml) with an unchanged
   # duckdb version leaves the description unchanged, so terraform publishes NO new layer version and
@@ -81,12 +100,11 @@ resource "aws_lambda_layer_version" "ducklake_extensions" {
   s3_bucket           = aws_s3_bucket.data_lake.id
   s3_key              = "lambda-packages/ducklake-extensions-layer.zip"
   compatible_runtimes = ["python3.12"]
-  source_code_hash    = try(filemd5("${path.module}/../../lambda-packages/ducklake-extensions-layer.zip"), null)
 
   # T2.42 c1 (rec-2646/rec-2654 pattern extended to layers, Decision 126 pt3/pt5, DEP-03): decouples
-  # routine rebuild churn from this IAM-gated apply path -- without this, every rebuild's
-  # non-reproducible zip bytes surface as a layer create+delete (replace) diff, which the Decision-77
-  # guard blocks as a delete action (routes to gated-apply for zero real change). s3_key stays the
+  # routine rebuild churn from this IAM-gated apply path. No source_code_hash is set (Terraform reads no
+  # build artifact) and this block stays as the conformance marker and a backstop. Terraform never
+  # republishes a layer on content change (it did not before either; rec-4253). s3_key stays the
   # fixed literal (unaffected by T2.42 c3's content-addressed upload path). This layer's description
   # is fully duckdb-version-driven (local.ducklake_version), so a genuine content bump (a DuckDB
   # version bump) always moves the description and republishes correctly -- no silent-freeze risk.
@@ -120,7 +138,7 @@ resource "aws_cloudwatch_log_group" "ducklake_reader" {
 }
 
 # ---------------------------------------------------------------------------
-# Write-scoped execution role: S3 read+write on the smoke prefix, DSN secret read, metrics, logs.
+# Write-scoped execution role: S3 RW on the ducklake/ + smoke prefixes, DSN secret read, metrics, logs (ops only; telemetry has its own function and role).
 # ---------------------------------------------------------------------------
 
 data "aws_iam_policy_document" "lambda_assume" {
@@ -162,6 +180,13 @@ resource "aws_iam_role_policy" "ducklake_writer" {
         Resource = [aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn]
       },
       {
+        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
+        Sid      = "NeonDsnParameterRead"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/ducklake-neon-catalog-dsn"]
+      },
+      {
         # Writer is the SOLE write authority for ops_* (CD.33 clause 4): RW on the production
         # ducklake/ data path AND the retained smoke prefix (T2.17 gates / rollback).
         Sid    = "S3DataReadWrite"
@@ -200,8 +225,8 @@ resource "aws_iam_role_policy" "ducklake_writer" {
 }
 
 # ---------------------------------------------------------------------------
-# Read-scoped execution role: S3 GetObject ONLY on the smoke prefix (no Put/Delete -> writes denied),
-# DSN secret read, logs. No metrics.
+# Read-scoped execution role: S3 GetObject ONLY on the ducklake/ + smoke prefixes (no Put/Delete -> writes denied), DSN
+# secret read, logs. No metrics, and no telemetry grant: event reads are the telemetry reader's (Decision 236).
 # ---------------------------------------------------------------------------
 
 resource "aws_iam_role" "ducklake_reader" {
@@ -232,6 +257,13 @@ resource "aws_iam_role_policy" "ducklake_reader" {
         Resource = [aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn]
       },
       {
+        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
+        Sid      = "NeonDsnParameterRead"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameter"]
+        Resource = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/ducklake-neon-catalog-dsn"]
+      },
+      {
         # GetObject ONLY -- no PutObject/DeleteObject. A DuckLake write (Parquet PutObject) from this
         # role is denied at S3, which is the closed-boundary proof (write_probe -> write_denied=true).
         # Read-only on the production ducklake/ data path AND the retained smoke prefix.
@@ -259,8 +291,8 @@ resource "aws_iam_role_policy" "ducklake_reader" {
 }
 
 # ---------------------------------------------------------------------------
-# The two Lambda functions (from S3). source_code_hash try()-guarded; code is updated post-apply by
-# build_lambda --ducklake-only --deploy.
+# The two Lambda functions (from S3). No source_code_hash is set; code is updated post-apply by
+# the governed code-deploy channel (Decision 125/126).
 # ---------------------------------------------------------------------------
 
 resource "aws_lambda_function" "ducklake_writer" {
@@ -273,9 +305,8 @@ resource "aws_lambda_function" "ducklake_writer" {
   timeout       = 120
   memory_size   = 3008 # Retained as baseline headroom per human decision (Decision 82 frame correction). Branch-P rationale superseded: EC8 now measures N concurrent invocations (each its own vCPU), not in-container thread contention.
 
-  s3_bucket        = aws_s3_bucket.data_lake.id
-  s3_key           = "lambda-packages/ducklake-writer.zip"
-  source_code_hash = try(filemd5("${path.module}/../../lambda-packages/ducklake-writer.zip"), null)
+  s3_bucket = aws_s3_bucket.data_lake.id
+  s3_key    = "lambda-packages/ducklake-writer.zip"
 
   layers = [
     aws_lambda_layer_version.ducklake_deps.arn,
@@ -295,9 +326,10 @@ resource "aws_lambda_function" "ducklake_writer" {
     aws_cloudwatch_log_group.ducklake_writer,
   ]
 
-  # Decision 125 physical decoupling: code deploys go via build_lambda --ducklake-only --deploy
-  # (update-function-code), not terraform. Without this, every rebuild's non-reproducible zip bytes
-  # trip a Terraform diff on this IAM-gated apply path (rec-2646/rec-2654).
+  # Decision 125 physical decoupling: code deploys go through the governed code-deploy channel
+  # (deploy-ducklake-lambdas.yml; build_lambda --deploy is break-glass), not terraform. No source_code_hash
+  # is set (Terraform reads no build artifact); this block is the conformance marker and a backstop
+  # (rec-2646/rec-2654).
   lifecycle {
     ignore_changes = [source_code_hash]
   }
@@ -318,9 +350,8 @@ resource "aws_lambda_function" "ducklake_reader" {
   timeout       = 120
   memory_size   = 1024
 
-  s3_bucket        = aws_s3_bucket.data_lake.id
-  s3_key           = "lambda-packages/ducklake-reader.zip"
-  source_code_hash = try(filemd5("${path.module}/../../lambda-packages/ducklake-reader.zip"), null)
+  s3_bucket = aws_s3_bucket.data_lake.id
+  s3_key    = "lambda-packages/ducklake-reader.zip"
 
   layers = [
     aws_lambda_layer_version.ducklake_deps.arn,
@@ -340,9 +371,10 @@ resource "aws_lambda_function" "ducklake_reader" {
     aws_cloudwatch_log_group.ducklake_reader,
   ]
 
-  # Decision 125 physical decoupling: code deploys go via build_lambda --ducklake-only --deploy
-  # (update-function-code), not terraform. Without this, every rebuild's non-reproducible zip bytes
-  # trip a Terraform diff on this IAM-gated apply path (rec-2646/rec-2654).
+  # Decision 125 physical decoupling: code deploys go through the governed code-deploy channel
+  # (deploy-ducklake-lambdas.yml; build_lambda --deploy is break-glass), not terraform. No source_code_hash
+  # is set (Terraform reads no build artifact); this block is the conformance marker and a backstop
+  # (rec-2646/rec-2654).
   lifecycle {
     ignore_changes = [source_code_hash]
   }
@@ -383,12 +415,12 @@ output "ducklake_reader_function_url" {
 }
 
 output "ducklake_writer_function_name" {
-  description = "ducklake_writer Lambda function name (build_lambda --ducklake-only --deploy target)."
+  description = "ducklake_writer Lambda function name (code-deploy channel target)."
   value       = aws_lambda_function.ducklake_writer.function_name
 }
 
 output "ducklake_reader_function_name" {
-  description = "ducklake_reader Lambda function name (build_lambda --ducklake-only --deploy target)."
+  description = "ducklake_reader Lambda function name (code-deploy channel target)."
   value       = aws_lambda_function.ducklake_reader.function_name
 }
 
@@ -427,20 +459,50 @@ resource "aws_ssm_parameter" "ducklake_writer_url" {
 # Writer loud-failure visibility (Decision 84 I-4): with the offline outbox retired, a failed
 # write surfaces only at the call site -- which may be a headless GitHub Actions run (ci-rca).
 # This alarm makes writer errors reach a human within 15 minutes regardless of the caller.
+# Url5xxCount is summed because the handler now answers a typed 5xx (a handled return) that never counts in Errors.
 resource "aws_cloudwatch_metric_alarm" "ducklake_writer_errors" {
   alarm_name          = "ducklake-writer-errors"
-  alarm_description   = "ducklake_writer Lambda errors > 0 over 15m. Decision 84 I-4: no outbox buffers a failed ops write; a sustained error here means rec/decision filing is down."
+  alarm_description   = "ducklake_writer: AWS/Lambda Errors plus Url5xxCount > 0 over 15m. Decision 84 I-4: no outbox buffers a failed ops write; a sustained error here means rec/decision filing is down. An operator-run gate that elicits a typed 5xx on purpose pages too (PLAN-ducklake-typed-unmapped-errors)."
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
-  metric_name         = "Errors"
-  namespace           = "AWS/Lambda"
-  period              = 900
-  statistic           = "Sum"
   threshold           = 0
   treat_missing_data  = "notBreaching"
 
-  dimensions = {
-    FunctionName = aws_lambda_function.ducklake_writer.function_name
+  metric_query {
+    id = "m1"
+
+    metric {
+      metric_name = "Errors"
+      namespace   = "AWS/Lambda"
+      period      = 900
+      stat        = "Sum"
+
+      dimensions = {
+        FunctionName = aws_lambda_function.ducklake_writer.function_name
+      }
+    }
+  }
+
+  metric_query {
+    id = "m2"
+
+    metric {
+      metric_name = "Url5xxCount"
+      namespace   = "AWS/Lambda"
+      period      = 900
+      stat        = "Sum"
+
+      dimensions = {
+        FunctionName = aws_lambda_function.ducklake_writer.function_name
+      }
+    }
+  }
+
+  metric_query {
+    id          = "e1"
+    expression  = "FILL(m1, 0) + FILL(m2, 0)"
+    label       = "errors plus url 5xx"
+    return_data = true
   }
 
   alarm_actions = [aws_sns_topic.alerts.arn]

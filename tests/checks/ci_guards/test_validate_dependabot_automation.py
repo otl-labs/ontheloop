@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Callable
 from unittest.mock import patch
 
+import yaml
+
 from scripts.checks import registry
 from scripts.checks.ci_guards.validate_dependabot_automation import (
     _WORKFLOW_ASSERTIONS,
@@ -19,7 +21,10 @@ _SCRIPT_REL_PATH = "scripts/ci/dependabot_auto_merge.sh"
 _SWEEP_SCRIPT_REL_PATH = "scripts/ci/dependabot_stranded_sweep.sh"
 _SEMVER_HELPER_REL_PATH = "scripts/ci/dependabot_semver_class.py"
 
-_JOB_IF = "github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'benjamin-blake/theseus'"
+_JOB_IF = (
+    "github.event.pull_request.user.login == 'dependabot[bot]' && "
+    "(github.repository == 'benjamin-blake/theseus' || github.repository == 'otl-labs/ontheloop')"
+)
 
 _CHECKOUT_STEP = {"uses": "actions/checkout@v7", "with": {"ref": "${{ github.event.pull_request.base.sha }}"}}
 _METADATA_STEP = {
@@ -588,3 +593,9 @@ class TestGuardIsDispatchedOnRequirementsOnlyPrs:
         globs = set(self._entry().pre_globs)
         assert "requirements*.in" in globs
         assert "requirements*.txt" in globs
+
+
+def test_real_auto_merge_gate_accepts_both_full_names() -> None:
+    workflow = Path(__file__).resolve().parents[3] / ".github/workflows/dependabot-auto-merge.yml"
+    data = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+    assert data["jobs"]["auto-merge"]["if"] == _JOB_IF

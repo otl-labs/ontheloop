@@ -23,3 +23,21 @@ variable "owner_email" {
   description = "Owner email for resource tags."
   type        = string
 }
+
+variable "agent_service_account_user_name" {
+  description = "IAM user (the agent_static static-key source profile) permitted to assume PlatformDev and PlatformAdmin. Verify against the live roles' trust policies via `terraform plan` before apply."
+  type        = string
+  default     = "agent-service-account"
+}
+
+variable "platform_dev_external_id" {
+  description = "ExternalId for the PlatformDev AssumeRole trust. Supplied via gitignored terraform.bootstrap.tfvars -- never a committed literal."
+  type        = string
+  sensitive   = true
+}
+
+variable "platform_admin_external_id" {
+  description = "ExternalId for the PlatformAdmin AssumeRole trust. Supplied via gitignored terraform.bootstrap.tfvars -- never a committed literal."
+  type        = string
+  sensitive   = true
+}

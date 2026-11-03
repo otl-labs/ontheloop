@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -29,6 +30,8 @@ from pathlib import Path
 
 import pytest
 import yaml
+
+from scripts.checks.ci_guards import validate_pr_conflict_signal as validator
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "ci" / "pr_conflict_signal.sh"
@@ -399,6 +402,32 @@ class TestDeclaredPrefixSelection:
         harness = _Harness(tmp_path, control)
         harness.run(ARGVS[argv_name])
         assert "transitional prefix retirement notice" not in harness.summary_text
+
+    @pytest.mark.parametrize("argv_name", sorted(ARGVS))
+    def test_declared_prefixes_admit_a_ccr_harness_branch(self, tmp_path: Path, argv_name: str) -> None:
+        control = {
+            "list": {"exit_code": 0, "stdout": "241\tccr-679d754f-m99ugp\tsha241\n"},
+            "mergeable:241": {"exit_code": 0, "stdout": "CONFLICTING"},
+            "comments:241": {"exit_code": 0, "stdout": ""},
+            "comment:241": {"exit_code": 0, "stdout": ""},
+        }
+        harness = _Harness(tmp_path, control)
+        result = harness.run(ARGVS[argv_name])
+        assert harness.call_count("mergeable:241") == 1
+        assert harness.comment_posted("241")
+        assert "ccr-679d754f-m99ugp" not in harness.summary_text
+        assert "ccr-=1" in result.stdout
+
+
+class TestSignalGreenPredicate:
+    def test_signal_green_admits_every_declared_prefix(self) -> None:
+        ci = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+        predicate = ci["jobs"]["signal-green"]["if"]
+        ci_tokens = set(re.findall(r"startsWith\(github\.head_ref, '([^']+)'\)", predicate))
+        lines = validator._join_continuations(SCRIPT.read_text(encoding="utf-8"))
+        declared = set(validator._parse_prefix_array(lines, validator._PREFIX_DECLARATION_RE) or [])
+        assert ci_tokens == declared
+        assert any("ccr-679d754f-m99ugp".startswith(token) for token in ci_tokens)
 
 
 class TestExitStatusContract:
