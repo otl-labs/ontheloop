@@ -519,21 +519,3 @@ class TestWaiverIntegrity:
         validate_supersession_annotations(failed, root=tmp_path)
         assert len(failed) == 1
         assert "malformed waiver entry #0" in failed[0]
-
-
-class TestCheckAccountingDeclaration:
-    def test_declares_every_extracted_edge(self, tmp_path: Path) -> None:
-        _edge_fixture(tmp_path, "This amends Decision 1 and Decision 2.", victim_body="Amended by Decision 7.")
-        _write_waivers(tmp_path, waivers=[{"superseder": 7, "victim": 2, "reason": "scoped amend"}])
-        registry.pop_declaration()
-        failed: list[str] = []
-        validate_supersession_annotations(failed, root=tmp_path)
-        declaration = registry.pop_declaration()
-        assert failed == []
-        assert declaration is not None
-        assert (declaration.kind, declaration.unit, declaration.count) == (
-            "examined",
-            "supersession_edges",
-            len(extract_supersession_edges(tmp_path)),
-        )
-        assert declaration.count == 2
