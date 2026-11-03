@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import NamedTuple
 
 from scripts.checks import _common
+from scripts.checks._marker_guard_state_options import effective_marker
 from scripts.decisions_md import extract_superseded_by, iter_decision_sections
 
 # Bounds this module's public surface to exactly the nine names
@@ -114,7 +115,8 @@ class RegistrySpec:
         require_reason=True (a marker with an empty reason parses as no marker at all, matching
         the incumbent composite-only `_RAISE_APPROVED_RE`'s `\\s+\\S` non-empty-reason
         requirement). The actual gate is enforced by the extractor at construction time
-        (make_flat_extractor / make_section_extractor's own require_reason parameter) -- this
+        (make_flat_extractor / make_section_extractor's own require_reason parameter), and
+        check_state_diff and check_present_markers honour it too (rec-3736) -- this
         field exists so a spec's policy is testable/documented in one place, mirroring
         moved_from_relief. Default False (sloc/prose/coverage/mypy never required a reason);
         True on the composite R3 spec alone.
@@ -459,8 +461,8 @@ def check_state_diff(spec: RegistrySpec, base_reader: Callable[[str], str | None
         if not spec.weakened(base_entry.state, head_entry.state):
             continue  # tightening or no state change -- always free, regardless of any marker.
 
-        marker = head_entry.marker
-        if marker is None or marker == base_entry.marker:
+        marker = effective_marker(spec, head_entry)
+        if marker is None or marker == effective_marker(spec, base_entry):
             violations.append(
                 f"{key}: unauthorized weakening with no fresh `# {spec.token}: dec-NNN <reason>` "
                 "marker on the entry's own line span (a marker citing the same decision as the "
@@ -493,7 +495,7 @@ def check_present_markers(spec: RegistrySpec) -> list[str]:
 
     violations: list[str] = []
     for key, entry in sorted(entries.items()):
-        marker = entry.marker
+        marker = effective_marker(spec, entry)
         if marker is None or key in RETRO_SCAN_GRANDFATHER:
             continue
         if spec.moved_from_relief and _moved_from_path(entry.reason) is not None:
