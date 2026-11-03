@@ -42,7 +42,7 @@ Decided, not yet built; the build items are `deferred_post_mvp`, and the Decisio
 | CI / OIDC | [live] | GitHub-hosted runners; OIDC to personal AWS account; validate.py is the single gate |
 | Instruction Architecture (5-layer) | [live] | CLAUDE.md -> PROJECT_CONTEXT.md -> commands -> skills -> executor prompts |
 | Environment Taxonomy | [live] | The operator deployment's environments (sandbox/SIT/PROD) and their apply guards; defined by Decision 77 |
-| Autonomous Executor | [partial] | repo-owned loop definition (ASL subset) hosted on Step Functions; the legacy Python executor is retired (Decision 244) |
+| Autonomous Executor | [partial] | repo-owned loop definition (ASL subset) hosted on Step Functions; the legacy Python executor is retired (Decision 246) |
 | Scheduled Agents | [partial] | Lambda dispatcher disabled May 2026; migrating to Claude Code scheduled-agent model |
 | Lambda Tooling | [partial] | Per-Lambda manifests and Function URL auth live (Decision 79); the rendered loop definition on Step Functions is T4.19 / T4.1 |
 | DuckLake Lakehouse | [live] | DuckDB + DuckLake catalog on Neon; sole backend for the ops tables (Decision 84) |

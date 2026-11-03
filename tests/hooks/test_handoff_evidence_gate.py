@@ -417,7 +417,7 @@ def test_settings_registers_gate_on_push_and_remote_write_tools() -> None:
     assert original_entry["matcher"] == "Edit|Write|MultiEdit|NotebookEdit|Bash"
     assert len(original_entry["hooks"]) == 4
 
-    gate_entries = [e for e in pre_tool_use if e is not original_entry]
+    gate_entries = [e for e in pre_tool_use if any("handoff_evidence_gate.sh" in h["command"] for h in e["hooks"])]
     assert len(gate_entries) == 1
     gate_entry = gate_entries[0]
     matcher = gate_entry["matcher"]

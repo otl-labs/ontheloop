@@ -29,7 +29,14 @@ from dataclasses import dataclass
 from typing import NamedTuple
 
 from scripts.checks import _common
-from scripts.decisions_md import extract_superseded_by, iter_decision_sections
+from scripts.checks._marker_guard_state_options import (
+    base_corpus,
+    bodies_from_text,
+    effective_marker,
+    mentions,
+    transition_failure,
+)
+from scripts.decisions_md import extract_superseded_by
 
 # Bounds this module's public surface to exactly the nine names
 # docs/contracts/marker-grammar.yaml's binding_surface.exports promises (eight at Slice B, plus
@@ -114,7 +121,8 @@ class RegistrySpec:
         require_reason=True (a marker with an empty reason parses as no marker at all, matching
         the incumbent composite-only `_RAISE_APPROVED_RE`'s `\\s+\\S` non-empty-reason
         requirement). The actual gate is enforced by the extractor at construction time
-        (make_flat_extractor / make_section_extractor's own require_reason parameter) -- this
+        (make_flat_extractor / make_section_extractor's own require_reason parameter), and
+        check_state_diff and check_present_markers honour it too (rec-3736) -- this
         field exists so a spec's policy is testable/documented in one place, mirroring
         moved_from_relief. Default False (sloc/prose/coverage/mypy never required a reason);
         True on the composite R3 spec alone.
@@ -128,6 +136,9 @@ class RegistrySpec:
     gates_deletion: Callable[[state], bool] -- True iff a base state, once its entry is REMOVED at
         head, must be gated (no marker can rescue a deletion -- see check_state_diff). None
         (default) on every incumbent binding.
+    fresh_mention: check_state_diff only -- a marker authorizes only text added to the cited Decision in the change.
+    boundary_match: all three helpers -- a candidate counts only where no letter, digit, underscore or hyphen adjoins it.
+    transition_label: check_state_diff only -- names the gated transition in its message (default weakening).
     """
 
     rel_path: str
@@ -143,6 +154,9 @@ class RegistrySpec:
     state_extractor: Callable[[str], dict[str, StateEntry]] | None = None
     weakened: Callable[[object, object], bool] | None = None
     gates_deletion: Callable[[object], bool] | None = None
+    fresh_mention: bool = False
+    boundary_match: bool = False
+    transition_label: str = "weakening"
 
 
 def _parse_marker(
@@ -262,9 +276,7 @@ def load_decision_bodies() -> dict[int, str]:
         if not md_path.exists():
             continue
         content = md_path.read_text(encoding="utf-8", errors="replace")
-        for heading, raw_block in iter_decision_sections(content):
-            dec_id = int(heading.group(1))
-            bodies.setdefault(dec_id, raw_block)
+        bodies_from_text(content, bodies)
 
     _decision_bodies_cache[root_key] = bodies
     return bodies
@@ -286,8 +298,8 @@ def _expand_ancestor_candidates(target: str) -> list[str]:
     return candidates
 
 
-def _mentions_any(body: str, candidates: list[str]) -> bool:
-    return any(candidate in body for candidate in candidates)
+def _mentions_any(body: str, candidates: list[str], bounded: bool = False) -> bool:
+    return mentions(body, candidates, bounded)
 
 
 def authorization_failure(
@@ -295,6 +307,8 @@ def authorization_failure(
     key: str,
     bodies: dict[int, str],
     mention_candidates: Callable[[str], list[str]] | None = None,
+    *,
+    bounded: bool = False,
 ) -> bool:
     """True (FAIL) iff `dec_id` does not authorize `key`.
 
@@ -316,13 +330,13 @@ def authorization_failure(
     body = bodies.get(_normalize_dec_id(dec_id))
     if body is None:
         return True
-    if _mentions_any(body, candidates):
+    if _mentions_any(body, candidates, bounded):
         return False
 
     superseded_by = extract_superseded_by(body)
     if superseded_by:
         target_body = bodies.get(_normalize_dec_id(superseded_by))
-        if target_body is not None and _mentions_any(target_body, candidates):
+        if target_body is not None and _mentions_any(target_body, candidates, bounded):
             return False
 
     return True
@@ -389,7 +403,7 @@ def check_diff(spec: RegistrySpec, base_reader: Callable[[str], str | None] | No
                 )
                 continue
 
-        if authorization_failure(marker, key, bodies, spec.mention_candidates):
+        if authorization_failure(marker, key, bodies, spec.mention_candidates, bounded=spec.boundary_match):
             msg = (
                 f"{key}: {spec.token} marker cites {marker}, but its body does not authorize this entry "
                 f"(mention `{key}` or a >=2-segment ancestor)."
@@ -439,7 +453,7 @@ def check_state_diff(spec: RegistrySpec, base_reader: Callable[[str], str | None
     current_entries = spec.state_extractor(current_text) if current_text is not None else {}
 
     bodies = load_decision_bodies()
-    violations: list[str] = []
+    base_bodies, violations = base_corpus(spec, reader)
 
     for key in sorted(set(base_entries) | set(current_entries)):
         base_entry = base_entries.get(key)
@@ -459,19 +473,24 @@ def check_state_diff(spec: RegistrySpec, base_reader: Callable[[str], str | None
         if not spec.weakened(base_entry.state, head_entry.state):
             continue  # tightening or no state change -- always free, regardless of any marker.
 
-        marker = head_entry.marker
-        if marker is None or marker == base_entry.marker:
+        marker = effective_marker(spec, head_entry)
+        if marker is None or marker == effective_marker(spec, base_entry):
             violations.append(
-                f"{key}: unauthorized weakening with no fresh `# {spec.token}: dec-NNN <reason>` "
+                f"{key}: unauthorized {spec.transition_label} with no fresh `# {spec.token}: dec-NNN <reason>` "
                 "marker on the entry's own line span (a marker citing the same decision as the "
                 "base entry's never re-authorizes)."
             )
             continue
 
-        if authorization_failure(marker, key, bodies, spec.mention_candidates):
-            violations.append(
-                f"{key}: {spec.token} marker cites {marker}, but its body does not authorize this entry (mention `{key}`)."
-            )
+        if failure := transition_failure(
+            spec,
+            key,
+            marker,
+            authorization_failure(marker, key, bodies, spec.mention_candidates, bounded=spec.boundary_match),
+            bodies,
+            base_bodies,
+        ):
+            violations.append(failure)
 
     return violations
 
@@ -493,12 +512,12 @@ def check_present_markers(spec: RegistrySpec) -> list[str]:
 
     violations: list[str] = []
     for key, entry in sorted(entries.items()):
-        marker = entry.marker
+        marker = effective_marker(spec, entry)
         if marker is None or key in RETRO_SCAN_GRANDFATHER:
             continue
         if spec.moved_from_relief and _moved_from_path(entry.reason) is not None:
             continue
-        if authorization_failure(marker, key, bodies, spec.mention_candidates):
+        if authorization_failure(marker, key, bodies, spec.mention_candidates, bounded=spec.boundary_match):
             violations.append(
                 f"{key}: retroactive scan -- {spec.token} marker cites {marker}, but its body does not "
                 f"authorize this entry (mention `{key}` or a >=2-segment ancestor)."

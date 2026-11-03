@@ -2,10 +2,10 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
-## Decision 244: The legacy Python executor is retired and the STRATEGIC plan type is shelved, both for good -- an item too large for one plan is decomposed by its planner into child work items, which ride the parent's approval only through a deterministic check (supersedes Decision 67; amends Decisions 73, 90, 182, 203 and 229) (Decided)
+## Decision 246: The legacy Python executor is retired and the STRATEGIC plan type is shelved, both for good -- an item too large for one plan is decomposed by its planner into child work items, which ride the parent's approval only through a deterministic check (supersedes Decision 67; amends Decisions 73, 90, 182, 203 and 229) (Decided)
 
 ```yaml
-number: 244
+number: 246
 status: Decided
 decided_date: "2026-11-02"
 supersedes: [67]
@@ -21,7 +21,7 @@ significance:
 
 **Status:** Decided
 **Date:** 2026-11-02
-**Warehouse ID:** dec-244 (per Decision 84 backfill)
+**Warehouse ID:** dec-246 (per Decision 84 backfill)
 
 **Problem:** Decision 67 froze the single-process Python executor (scripts/execute_recommendation.py, scripts/executor/)
 and the STRATEGIC plan type it consumed, pending a reversal (CD.17) keyed to T4.2. That executor was a proof of
@@ -67,7 +67,7 @@ also sweeps the live instruction surfaces for a revived freeze or STRATEGIC rule
 interim practice unenforced by design (every child is human-planned); cl.4 -- T4.4.
 
 ```yaml reversal-conditions
-decision: 244
+decision: 246
 review_by: 2027-06-30
 on_trigger: "re-decide via /plan"
 conditions:
@@ -84,6 +84,124 @@ conditions:
 
 **Related:** Decisions 55, 67, 73, 79, 90, 117, 182, 185, 197, 203, 205, 229, 233, 235, 241; CD.17; T4.4, T4.23, T4.31, T5.6;
 rec-4478, rec-4479.
+
+---
+
+## Decision 245: An agent merge is refused when main has changed, since the PR's base, a file the PR also changes -- a fail-closed presubmit heuristic with no agent override, the post-merge full tier stays the authority (amends Decision 83) (Decided)
+
+```yaml
+number: 245
+status: Decided
+decided_date: "2026-11-03"
+kind:
+  value: direction
+  justification: >-
+    Clause 3 makes a human gate: a refusal only agents face, with no agent override and an operator merge as the
+    release valve, narrowing Decision 83's commitment to autonomous merge; undone, agent merges rest on strict=false
+    alone.
+amends: [83]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant: a standing, no-override refusal of two merge tools that narrows Decision 83's
+    non-wedging property for agent merges. Not a git-ops.yaml note: a contract records the gate's shape, not the
+    authority to refuse a tool call (Decision 203's rejected home). Not amendment_forms: it binds every merging
+    session.
+```
+
+**Status:** Decided
+**Date:** 2026-11-03
+**Warehouse ID:** dec-245 (per Decision 84 backfill)
+
+**Problem:** On 2026-11-03 #1799 merged about 20 hours after its last PR CI, 14 hours after #1805 had merged. Both had shrunk AGENTS.md and made the same S1 budget edit; git folded the two edits into one and the combined main failed the prose ratchet (rec-4866, rec-4869). Required checks can go stale because strict_required_status_checks_policy is false and the agents' merge identity holds the admin bypass (Decision 83), so a PR green on an old main merges untested against the new one. It is the third instance after rec-4372 and rec-4427; in a replay of 38 merges, 22 were behind main and 2 shared a changed file with it.
+
+**Intent:** Keep autonomous merging fast while refusing, at the merge, the stale merge that is cheap to detect.
+
+**Decision:**
+1. **Refusal.** A PreToolUse gate refuses mcp__github__merge_pull_request and mcp__github__enable_pr_auto_merge on this repository when origin/main has changed, since the merge-base of origin/main and the PR head, any file the PR also changes. The remedy is to update the branch on GitHub, wait for the CI-green wake on the new head (Decision 76), then merge. The predicate is keyed on refs, never a pull request number (Decision 234 cl.4); only the GitHub adapter resolves the PR.
+2. **A heuristic, not verification.** CLEAR means only that no file changed on both sides, never that the combined tree passes. It misses semantic conflicts across different files (the rec-4427 shape) and refuses some harmless identical edits (#1824). The post-merge full tier and Main Canary stay the authority (Decision 73 cl.2-3); red-main recovery is unchanged (Decision 226).
+3. **Fail closed, no override (amends Decision 83).** An unresolvable ref, a failed fetch or a crashed gate refuses, and no agent override exists (the Decision 203 cl.3 pattern). This narrows Decision 83's non-wedging property for agent merges only: the ruleset, strict=false and the admin bypass are unchanged, and an operator merge in the GitHub UI is the release valve. The gate is relied on only in surfaces whose fetch of origin was verified: a top-level CC-web session and a claude.ai project thread.
+4. **Evidence on an updated head.** A head made by updating the branch on GitHub carries pr-validate (--pre) evidence only, not a local full-tier attestation; that is Decision 203 cl.2's declared residual, owned by rec-4085. A local rebase plus full tier is not required for this remedy (rec-4790).
+5. **Native primitives deferred (Decision 100).** Strict up-to-date and a GitHub merge queue are not adopted now: strict would re-run CI on about 58% of merges and, like a queue added to the existing ruleset, is skipped by the admin bypass; updating that ruleset is frozen by rec-4624; and the operator judged a serial queue unscalable at agent merge rates. The end state is rec-4874's TAP-style promotion model, whose own Decision reconciles "a red blocks promotion, not work" with Decision 226.
+6. **Coverage (Decision 181 cl.2).** Clauses 1 and 3: the gate and its hook tests. Residuals: GitHub UI merges and different-file conflicts (rec-4874, rec-4451), auto-merge enabled before checks finish (rec-4874), merge on red (rec-4080), agent merges outside the two MCP tools, by gh or REST from a shell (rec-2827). docs/contracts/git-ops.yaml records the mechanism.
+
+```yaml reversal-conditions
+decision: 245
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan; never add an agent override"
+conditions:
+  - id: tap-promotion-lands
+    kind: manual
+    description: "rec-4874's promotion model is decided: retire or re-scope this gate."
+  - id: concurrency-raised
+    kind: manual
+    description: "Executor concurrency rises above 1 (Decision 217 cl.2): re-decide the predicate."
+  - id: false-refusal-or-wedge
+    kind: manual
+    description: "The gate refuses a merge its predicate should CLEAR (a checker defect, not a clause 2 overlap), or a merge surface cannot fetch origin: fix the checker; if it recurs, revisit."
+  - id: ruleset-unfrozen
+    kind: manual
+    description: "The provider models rec-4624's keys, a merge identity without the admin bypass lands (Decision 217 cl.3, rec-2827), or GitHub changes bypass or merge-queue semantics: reassess the native primitives."
+  - id: server-attestation-lands
+    kind: manual
+    description: "rec-4085's server-side attestation lands: re-decide what evidence an updated head needs (clause 4)."
+```
+
+**Related:** Decisions 55, 72, 73, 76, 83, 100, 135, 163, 177, 181, 186, 201, 203, 217, 226, 234, 241, 243; rec-2827, rec-4080, rec-4085, rec-4451, rec-4790, rec-4869, rec-4873, rec-4874.
+
+---
+
+## Decision 244: Graduated verification records are standing regression guards the full tier re-runs, behind a shrink-only known-red list; a claim that later work makes false stays one-time evidence (Decided)
+
+```yaml
+number: 244
+status: Decided
+decided_date: "2026-11-03"
+amends: []
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable change to what a graduated record guarantees, reversing the Q1 verdict of audit
+    criterion-shape-forks-9d25d918 recorded on Decision 197; reversing it re-opens full-tier cost, red-main volume
+    (Decision 226) and human-gated retirements (Decision 235). Not a contract note: verification-registry.yaml owns
+    the record grammar, not what a record promises. Not amendment_forms: the verdict is a recorded walk input, not a
+    clause, and the change also binds T3.7 c7 and CD.29.
+```
+
+**Status:** Decided
+**Date:** 2026-11-03
+**Warehouse ID:** dec-244 (per Decision 84 backfill)
+
+**Problem:** A graduated record runs once, in the change that admits it. On 2026-11-02, 50 of 1,490 records failed on main (3 in August) while plans relied on them as live pins; the 2026-09-26 Q1 verdict (admitted once) left that decay undetected until deferred T3.7.
+
+**Intent:** A record that guards something keeps guarding it; a record that only proved a change happened stays evidence.
+
+**Decision:**
+1. **Standing.** Every live record is a standing regression guard. The full tier re-runs each record that is not a plain pytest call and checks that each pinned test id still resolves; the test suite already re-runs the tests. A red record fails the full tier, before handoff and on main, where Decision 226 routes it. The fast tier does not run it: guard_target does not list a check's inputs, and the cost is minutes.
+2. **Known-red list.** Records red when this lands sit on one committed list, each naming an owning rec. The list only shrinks: a change may remove an id, never add one, and a listed record that passes fails the run until it is removed. It is CD.29's transient quarantine, never a permanent advisory.
+3. **What it bounds.** This catches decay that fails. A record that passes for the wrong reason stays T3.7's to catch (mutation on target, orphan detection).
+4. **What graduates.** A claim that unrelated later work makes false (an exact count, the newest entry, an exact whole set) is not a standing guard; it is waived as one-time evidence (vp-red-before.yaml).
+5. **Leaving.** A red record is fixed at the file it guards, repaired when its claim is unchanged, or retired by git mv to entries/deprecated/ (Decision 176 cl.5). Retiring a live claim needs Decision 235 cl.1's human approval; a record already red before the change that retires it is not red on that change.
+
+**Coverage (Decision 181 cl.2):** cl.1 and cl.2 -- validate_graduated_rerun (full tier) and validate_known_red_shrinks (both tiers); cl.4 -- plan critique, unenforced by design; cl.5 -- Decision 235's gate.
+
+**Options considered:** Admitted once (the 2026-09-26 verdict) -- rejected: reds grew from 3 to 50 and plans rely on records as pins. Re-run when a diff touches guard_target -- rejected: guard_target misses checks that read other files and adds minutes to every DECISIONS.md change. Fast-tier re-run of every record -- rejected: about 7 minutes serial against a 270-second budget.
+
+```yaml reversal-conditions
+decision: 244
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: moment-noise
+    kind: manual
+    description: "More than four red-main events in a quarter are closed by retiring a record that graduated after this Decision."
+  - id: leg-cost
+    kind: manual
+    description: "The full-tier re-run takes more than ten minutes on CI."
+  - id: t3-7-built
+    kind: manual
+    description: "T3.7's mutation and orphan legs are live; re-decide whether the pass/fail re-run still earns its cost."
+```
 
 ---
 
@@ -1177,7 +1295,7 @@ child criteria; the self-review gap -- rec-4476.
 > advice consult as subagents, which gate until their persona flips (cl.4). After a flip, a session
 > runs that gate only as cl.4's outage fallback, so the end state is no nested personas.
 
-> **Amended by Decision 244 (2026-11-02):** Clause 1's interim reading is final: the legacy executor and STRATEGIC plans are retired for good, and the /overseer is no longer an interim coordinator: the coordinator alone starts a planning or implementation agent. Clause 4's CD.17 hold is discharged: CD.17 is superseded with no successor trigger.
+> **Amended by Decision 246 (2026-11-02):** Clause 1's interim reading is final: the legacy executor and STRATEGIC plans are retired for good, and the /overseer is no longer an interim coordinator: the coordinator alone starts a planning or implementation agent. Clause 4's CD.17 hold is discharged: CD.17 is superseded with no successor trigger.
 
 ---
 
@@ -2851,7 +2969,7 @@ live (Decision 67 reversal) -- re-derive the per-push cost basis.
 **Related:** 25, 67, 72, 73, 76, 83, 115, 132, 135, 138, 150, 162, 163, 167, 168, 177, 181, 184,
 187, 189. Roadmap refs: rec-4083, rec-4085, rec-4086, rec-4087, T2.54.
 
-> **Amended by Decision 244 (2026-11-02):** Reversal condition (e) reads as the Decision 185 loop going live (T4.2): the legacy executor never returns.
+> **Amended by Decision 246 (2026-11-02):** Reversal condition (e) reads as the Decision 185 loop going live (T4.2): the legacy executor never returns.
 
 ---
 
@@ -3323,6 +3441,8 @@ conditions:
 > **Amended by Decision 212 (2026-10-06):** Clause 2's storage port is `work_item_storage` in docs/contracts/ports.yaml (Decision 212 clause 4). Tenancy enforcement (Decision 200 clauses 1-2) stays with the cloud function_url ops_verbs adapter, Decision 200 clause 1's write boundary (coupling row PC-01).
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+> **Update (2026-11-03):** Decision 244 reverses this entry's recorded Q1 verdict for decay that fails: graduated records are standing guards the full tier re-runs. T3.7 stays the remedy for records that pass for the wrong reason.
 
 ---
 
@@ -4604,7 +4724,7 @@ governed floor, installs a second measured cause.
 
 > **Update (2026-09-26):** Reversal condition (b) fires: PLAN-vp-replay-deadline-from-shared-budget re-derives validate_vp_replay's replay term to MAX_AGGREGATE_SECONDS (120) alone -- a replayed step's deadline is now the remaining share of that aggregate, never a flat per-step cap, so the 30s term this point's 150s figure used to add on top is retired. Re-derived, not reversed: NON_TEST_BUDGET_SECONDS stays 240 against the calibrated 71.766s static worst (120 + 71.766 = 191.766 < 240, headroom rises from 18.2s to 48.2s); CEILING_SECONDS - NON_TEST_BUDGET_SECONDS is unchanged at 1260. The check's own worst-case green maximum TIGHTENS from 150s to 120s. Reversal condition (a)'s measured-series re-check remains open, owned by rec-4093.
 
-> **Amended by Decision 244 (2026-11-02):** Decision 67 never lifts. The planning skill's file-count heuristic now flags decomposition need, not a STRATEGIC plan; replacing it with this measured breadth number is owed when plan_agent decides splits (T4.31).
+> **Amended by Decision 246 (2026-11-02):** Decision 67 never lifts. The planning skill's file-count heuristic now flags decomposition need, not a STRATEGIC plan; replacing it with this measured breadth number is owed when plan_agent decides splits (T4.31).
 
 ---
 
@@ -10240,7 +10360,7 @@ Tier responsibilities:
 
 > **Update (2026-10-19):** Decision 229 cl.1 reads the freeze above, as an interim reading pending rec-4478, as binding STRATEGIC plans and the autonomous queue consumer: before any loop host, an interactive session or the /overseer may dispatch one human-gated persona step on an operator-chosen work item (a rec today) -- plan_agent drafting its plan, every later step on that approved IMPLEMENTATION plan -- never from the rec queue.
 
-> **Amended by Decision 244 (2026-11-02):** The fourth tier is the Decision 185 loop with its personas. `/develop-executor` and the legacy Python executor are retired, STRATEGIC plans are shelved, and `/implement` executes IMPLEMENTATION plans only; the operational state above is no longer a freeze.
+> **Amended by Decision 246 (2026-11-02):** The fourth tier is the Decision 185 loop with its personas. `/develop-executor` and the legacy Python executor are retired, STRATEGIC plans are shelved, and `/implement` executes IMPLEMENTATION plans only; the operational state above is no longer a freeze.
 
 ---
 
@@ -10504,6 +10624,8 @@ conditions:
 ```
 
 **Related:** Decision 89 (premise reversed here; merge-gate design preserved), Decision 76 (foresaw reversal; deferred follow-up now unblocked), Decision 77 (guard rationale preserved -- guard is the plan-CONTENT control, not a branch-protection substitute), Decision 73 (public flip enabling the apply), Decision 75 (sanctioned premise correction).
+
+> **Update (2026-11-03):** Decision 245 clause 3 narrows the non-wedging property for agent merges: a fail-closed gate refuses a merge whose stale base shares a changed file with main. The ruleset configuration above is unchanged.
 
 ---
 
@@ -11076,7 +11198,7 @@ Key elements:
 
 > **Amended by Decision 226 (2026-10-18):** Clause 3's fixed priority="critical" becomes track-derived (High for a tests-only repair on a CI-tier workflow), and a manual revert PR is a permitted Track B corrective outside terraform/** and governed deploy paths (automated revert stays excluded). Clause 3's L6 pause and clause 4's plan-time block become the red_overlap overlap block; clause 4 as written now applies only to a red past its repair SLO. Clause 5's rec -> plan -> implement recovery stands for Track B, with Track A on the fast lane (Decision 226 cl.1-4). This supersedes the Decision 217 line above for clause 4.
 
-> **Amended by Decision 244 (2026-11-02):** Clause 4's suspension of mandatory discussion when `non_automatable_recommendations > 0` is permanent: Decision 67 never reverses and the executor it waited on is retired. Counts stay informational.
+> **Amended by Decision 246 (2026-11-02):** Clause 4's suspension of mandatory discussion when `non_automatable_recommendations > 0` is permanent: Decision 67 never reverses and the executor it waited on is retired. Counts stay informational.
 
 ---
 
@@ -11351,9 +11473,9 @@ GitHub branch protection is permanently unavailable for this repository. The mer
 **Status:** Superseded
 **Date:** 2026-05-08
 
-**Decision:** Superseded by Decision 244, which retires the legacy Python executor and shelves the STRATEGIC plan type for good and supersedes CD.17; Decision 79 had already lifted the Lambda-deploy clause (per-Lambda gating, CD.16). Kept live rather than archived because roadmap annotations, code comments and contracts still cite "Decision 67" by name (Decision 146's still-cited-live carve-out; compacted under docs/contracts/decision-entry.yaml's `compaction:` section).
+**Decision:** Superseded by Decision 246, which retires the legacy Python executor and shelves the STRATEGIC plan type for good and supersedes CD.17; Decision 79 had already lifted the Lambda-deploy clause (per-Lambda gating, CD.16). Kept live rather than archived because roadmap annotations, code comments and contracts still cite "Decision 67" by name (Decision 146's still-cited-live carve-out; compacted under docs/contracts/decision-entry.yaml's `compaction:` section).
 
-**Superseded by: Decision 244**
+**Superseded by: Decision 246**
 
 ---
 

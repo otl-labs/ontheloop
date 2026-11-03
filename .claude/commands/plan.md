@@ -46,7 +46,7 @@ Suggest 3-5 open recommendations aligned with the task (`bin/venv-python -m scri
 2. Read those files and check `tests/` for existing test coverage.
 3. Conduct an Infrastructure Assessment if `.tf` files are in scope.
 4. Conduct a Lambda Deployment Assessment if Lambda-packaged files are in scope.
-5. Conduct a Complexity Assessment to decide whether the item fits one plan or decomposes into child recs or atomic plans (Decision 244).
+5. Conduct a Complexity Assessment to decide whether the item fits one plan or decomposes into child recs or atomic plans (Decision 246).
 6. Conduct a Data-Model Assessment (`docs/contracts/data-modeling-standard.yaml`) if a table, field_semantics entry, or warehouse write path is in scope.
 7. Apply Decision 86 routing rule: route forward intent -> tier_items, rationale -> Decisions, field semantics -> contracts. No new standing prose-architecture docs under docs/. Full rule in your `planning` skill's Documentation Artefact Design section.
 *(Apply the exact assessment rules from your `planning` skill).*
