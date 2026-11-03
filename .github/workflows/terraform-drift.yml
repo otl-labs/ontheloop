@@ -63,7 +63,7 @@ jobs:
     permissions:
       id-token: write  # REQUIRED for OIDC token minting
       contents: read
-      # CARRY-3 (DEP-11 plan-critique): read-only, needed for the PENDING_GATED_DRIFT branch's
+      # CARRY-3 (DEP-11 plan-critique): read-only, needed for the pending_gated action dispatch's
       # `gh api commits/.../pulls` lookup that resolves the pending PR from a pending_gated
       # marker's commit_sha. This job never comments/writes to a PR (alarm-only, unlike
       # reconcile.yml's wake-comment jobs which hold pull-requests: write) -- read suffices.
@@ -257,114 +257,78 @@ jobs:
           VERDICT=$(PLAN_JSON="$(cat terraform/personal/tfplan.json)" python3 -m scripts.ci.convergence_classify --classify-plan)
           echo "Measured verdict this cycle: ${VERDICT} (never inferred from the bare exit code)."
 
-          if [ "$PRIOR_STATUS" = "red" ] || [ "$PRIOR_STATUS" = "unknown" ]; then
-            echo "Convergence record is ${PRIOR_STATUS}; not re-ticketing this measured ${VERDICT} (one red = one signal; unknown = transient S3 read failure)."
+          if [ "$PRIOR_STATUS" = "unknown" ]; then
+            echo "Convergence record read failed earlier; not re-ticketing this measured ${VERDICT} (one red = one signal)."
             exit 0
           fi
 
+          # Guarded rc-preserving record read: only NoSuchKey is absent; any other error stops the step
+          # before any write, so a transient failure can never write a skeletal default-green record.
+          RC=0
+          EXISTING=$(aws s3 cp "s3://${CONVERGENCE_BUCKET}/${CONVERGENCE_KEY}" - 2>"$RUNNER_TEMP/handle_drift.err") || RC=$?
+          if [ "$RC" -ne 0 ]; then
+            if ! grep -qi "NoSuchKey\|404" "$RUNNER_TEMP/handle_drift.err"; then
+              echo "::error::Convergence record read failed (non-NoSuchKey); writing nothing this cycle."
+              exit 1
+            fi
+            EXISTING="{}"
+          fi
+
+          # Prior red skips the tick, EXCEPT a stale_gated_approval red meeting real drift (it red-flips).
+          SKIP=$(PRIOR_STATUS="$PRIOR_STATUS" EXISTING="$EXISTING" VERDICT="$VERDICT" python3 -m scripts.ci.convergence_classify --skip-on-prior-red)
+          if [ "$SKIP" = "skip" ]; then
+            echo "Convergence record is ${PRIOR_STATUS}; not re-ticketing this measured ${VERDICT} (one red = one signal)."
+            exit 0
+          fi
+
+          file_rec() {
+            .venv/bin/python -m scripts.ops_data_portal --file-rec --source tf_drift --effort S --verification-tier V2 \
+              --file ".github/workflows/terraform-drift.yml" "$@"
+          }
+
           if [ "$VERDICT" = "pending_codification" ]; then
-            EXISTING=$(aws s3 cp "s3://${CONVERGENCE_BUCKET}/${CONVERGENCE_KEY}" - 2>/dev/null || echo "{}")
             OUT=$(EXISTING="$EXISTING" RUN_URL="$RUN_URL" python3 -m scripts.ci.convergence_classify --pending-codification-write)
-            ACTION=$(printf '%s' "$OUT" | sed -n '1p')
-            RECORD=$(printf '%s' "$OUT" | sed -n '2p')
+            ACTION=$(printf '%s\n' "$OUT" | sed -n '1p')
+            RECORD=$(printf '%s\n' "$OUT" | sed -n '2p')
+            PENDING_SHA=$(printf '%s\n' "$OUT" | sed -n '3p')
+            PENDING_RUN_URL=$(printf '%s\n' "$OUT" | sed -n '4p')
             printf '%s' "$RECORD" | aws s3 cp - "s3://${CONVERGENCE_BUCKET}/${CONVERGENCE_KEY}" --content-type application/json
             echo "pending_codification ${ACTION}: ${RECORD}"
-            if [ "$ACTION" != "marked" ]; then
-              echo "::error::CONVERGENCE_STALE_MARKER_ESCALATED a pending_codification marker exceeded its bounded age; escalated to red this cycle."
-              exit 0
+            PENDING_PR_TEXT=""
+            if [ -n "$PENDING_SHA" ]; then
+              PENDING_PR=$(gh api "repos/${REPO}/commits/${PENDING_SHA}/pulls" --jq '.[0].number' 2>/dev/null || echo "")
+              if [ -n "$PENDING_PR" ] && [ "$PENDING_PR" != "null" ]; then PENDING_PR_TEXT=", PR #${PENDING_PR}"; fi
             fi
-            .venv/bin/python -m scripts.ops_data_portal \
-              --file-rec \
-              --source tf_drift \
-              --priority Medium \
-              --effort S \
-              --risk low \
-              --verification-tier V2 \
+            case "$ACTION" in
+              pending_gated_flagged)
+                echo "pending_gated already drift_flagged; no re-filing (one signal per episode)."
+                exit 0 ;;
+              escalated)
+                echo "::error::CONVERGENCE_STALE_MARKER_ESCALATED a pending_codification marker exceeded its bounded age; escalated to red this cycle."
+                file_rec --priority High --risk medium \
+                  --title "Terraform drift check escalated a stale pending delta to a red convergence record" \
+                  --context "A pending_codification marker exceeded the 2.0h bound and the convergence record turned red (drift run ${RUN_URL}).${PENDING_RUN_URL:+ A gated change is waiting (${PENDING_RUN_URL}${PENDING_PR_TEXT}); if the record carries stale_gated_approval it is an unapproved gated change, not out-of-band drift: approve or reject the waiting tf-gated-apply run (after a rejection use acknowledge-and-retry).} Otherwise review the delta and resolve via the dispatch-ack apply path (Decision 183)." \
+                  --acceptance "aws s3 cp s3://agent-platform-data-lake/convergence/personal/sandbox.json - | grep -q 'status.: .green'"
+                exit 0 ;;
+              pending_gated)
+                file_rec --priority Medium --risk low \
+                  --title "Terraform drift check found a pending-gated delta (not out-of-band drift)" \
+                  --context "Scheduled terraform plan (T2.24) detected a state-vs-code delta explained by a routed-pending gated apply awaiting human review (${PENDING_RUN_URL}${PENDING_PR_TEXT}) -- NOT out-of-band infra drift. Approve or reject the gated apply in GitHub Actions; left unapproved past the 2.0h bound the record turns red as an unapproved gated change." \
+                  --acceptance "aws s3 cp s3://agent-platform-data-lake/convergence/personal/sandbox.json - | grep -qv pending_gated"
+                exit 0 ;;
+            esac
+            file_rec --priority Medium --risk low \
               --title "Terraform drift check found a pending-codification delta (state ahead of code, not drift)" \
-              --file ".github/workflows/terraform-drift.yml" \
               --context "Scheduled terraform plan (T2.24) measured resource_changes with NO resource_drift -- a benign code-behind-state delta (e.g. an operator-sanctioned split-apply), not out-of-band infra drift (Decision 190). Status stays at its PRIOR value with a pending_codification marker; a plan_ec==0 cycle self-clears it, and one left unresolved past its bounded age escalates to red automatically." \
               --acceptance "aws s3 cp s3://agent-platform-data-lake/convergence/personal/sandbox.json - | grep -qv pending_codification"
             echo "pending_codification tf_drift rec filed via ops portal."
             exit 0
           fi
 
-          # VERDICT == out_of_band_drift -- unchanged out-of-band red-flip (Decision 92/154).
-          # DEP-11 / CARRY-2 (T2.47): a pending_gated marker means the delta this tick observed is
-          # EXPLAINED by a routed-pending gated-apply awaiting human review, not out-of-band drift.
-          # PENDING_GATED_DRIFT branch -- checked BEFORE the out-of-band red-flip below, and it
-          # NEVER red-flips the record (CARRY-2: status stays green + marker; only the tf_drift
-          # rec's NARRATIVE differs, and only once -- drift_flagged_at makes re-filing idempotent).
-          EXISTING=$(aws s3 cp "s3://${CONVERGENCE_BUCKET}/${CONVERGENCE_KEY}" - 2>/dev/null || echo "{}")
-          PENDING_GATED_PRESENT=$(printf '%s' "$EXISTING" | python3 -c "import json,sys; d=json.load(sys.stdin); print('true' if d.get('pending_gated') else 'false')" 2>/dev/null || echo "false")
-
-          if [ "$PENDING_GATED_PRESENT" = "true" ]; then
-            ALREADY_FLAGGED=$(printf '%s' "$EXISTING" | python3 -c "import json,sys; d=json.load(sys.stdin); print('true' if d.get('pending_gated',{}).get('drift_flagged_at') else 'false')" 2>/dev/null || echo "false")
-            if [ "$ALREADY_FLAGGED" = "true" ]; then
-              echo "pending_gated already drift_flagged; skipping re-filing (idempotent, status stays green, PENDING_GATED_DRIFT)."
-              exit 0
-            fi
-
-            PENDING_SHA=$(printf '%s' "$EXISTING" | python3 -c "import json,sys; print(json.load(sys.stdin).get('pending_gated',{}).get('commit_sha',''))")
-            PENDING_RUN_URL=$(printf '%s' "$EXISTING" | python3 -c "import json,sys; print(json.load(sys.stdin).get('pending_gated',{}).get('run_url',''))")
-            PENDING_PR=$(gh api "repos/${REPO}/commits/${PENDING_SHA}/pulls" --jq '.[0].number' 2>/dev/null || echo "")
-            if [ -n "$PENDING_PR" ] && [ "$PENDING_PR" != "null" ]; then
-              PENDING_PR_TEXT=", PR #${PENDING_PR}"
-            else
-              PENDING_PR_TEXT=""
-            fi
-
-            TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-            RECORD=$(EXISTING="$EXISTING" TS="$TS" python3 -c "
-          import json, os
-          existing = json.loads(os.environ.get('EXISTING', '{}') or '{}')
-          pg = existing.get('pending_gated', {})
-          pg['drift_flagged_at'] = os.environ['TS']
-          existing['pending_gated'] = pg
-          print(json.dumps(existing))
-          ")
-            printf '%s' "$RECORD" | aws s3 cp - "s3://${CONVERGENCE_BUCKET}/${CONVERGENCE_KEY}" \
-              --content-type application/json
-            echo "Stamped pending_gated.drift_flagged_at (status untouched, PENDING_GATED_DRIFT): ${RECORD}"
-
-            READBACK=$(aws s3 cp "s3://${CONVERGENCE_BUCKET}/${CONVERGENCE_KEY}" - 2>/dev/null || echo "")
-            READBACK_STATUS=$(printf '%s' "$READBACK" | python3 -c \
-              "import json,sys; print(json.load(sys.stdin).get('status','green'))" 2>/dev/null || echo "green")
-            if [ "$READBACK_STATUS" = "red" ]; then
-              echo "::error::CONVERGENCE_WRITE_VERIFY PENDING_GATED_DRIFT read-back status is 'red'; must never red-flip on this branch (CARRY-2)."
-              exit 1
-            fi
-            echo "Convergence record read-back verified: status=${READBACK_STATUS} (non-red, PENDING_GATED_DRIFT)."
-
-            # File the drift rec via the ops portal (Single Portal Invariant -- no outbox, fail loud).
-            .venv/bin/python -m scripts.ops_data_portal \
-              --file-rec \
-              --source tf_drift \
-              --priority Medium \
-              --effort S \
-              --risk low \
-              --verification-tier V2 \
-              --title "Terraform drift check found a pending-gated delta (not out-of-band drift)" \
-              --file ".github/workflows/terraform-drift.yml" \
-              --context "Scheduled terraform plan (T2.24) detected a state-vs-code delta fully explained by a routed-pending gated-apply awaiting human review (${PENDING_RUN_URL}${PENDING_PR_TEXT}) -- NOT out-of-band infra drift. The convergence record stays green with its pending_gated marker (Decision 55 anti-masking: no red-flip on an explained delta). Approve or reject the gated apply in GitHub Actions to resolve." \
-              --acceptance "aws s3 cp s3://agent-platform-data-lake/convergence/personal/sandbox.json - | grep -qv pending_gated"
-            echo "PENDING_GATED_DRIFT tf_drift rec filed via ops portal."
-            exit 0
-          fi
-
-          # Absent marker: existing out-of-band red-flip, unchanged. Merge-write red + drift markers.
-          TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          RECORD=$(EXISTING="$EXISTING" TS="$TS" RUN_URL="$RUN_URL" python3 -c "
-          import json, sys, os
-          existing = json.loads(os.environ.get('EXISTING', '{}') or '{}')
-          existing['status'] = 'red'
-          existing['drift_detected_at'] = os.environ['TS']
-          existing['drift_run_url'] = os.environ['RUN_URL']
-          existing['drift_reason'] = 'out-of-band infra drift detected by scheduled terraform plan (T2.24)'
-          print(json.dumps(existing))
-          ")
-
-          printf '%s' "$RECORD" | aws s3 cp - "s3://${CONVERGENCE_BUCKET}/${CONVERGENCE_KEY}" \
-            --content-type application/json
+          # VERDICT == out_of_band_drift: always red-flips (Decision 190 pt 1, drift always wins), with or
+          # without a pending_gated marker; the delegate's record builder pops pending_codification.
+          RECORD=$(EXISTING="$EXISTING" RUN_URL="$RUN_URL" python3 -m scripts.ci.convergence_classify --red-flip)
+          printf '%s' "$RECORD" | aws s3 cp - "s3://${CONVERGENCE_BUCKET}/${CONVERGENCE_KEY}" --content-type application/json
           echo "Wrote red convergence record: ${RECORD}"
 
           # Read-back verify (mirrors apply-sandbox write-verify pattern, rec-2211).
@@ -379,15 +343,8 @@ jobs:
 
           # File the drift rec via the ops portal (Single Portal Invariant -- no outbox, fail loud).
           # source=tf_drift is a CLI arg validated against source_registry.yaml at write time.
-          .venv/bin/python -m scripts.ops_data_portal \
-            --file-rec \
-            --source tf_drift \
-            --priority High \
-            --effort S \
-            --risk medium \
-            --verification-tier V2 \
+          file_rec --priority High --risk medium \
             --title "Terraform drift detected in sandbox: out-of-band infra change" \
-            --file ".github/workflows/terraform-drift.yml" \
             --context "Scheduled terraform plan (T2.24) detected a state-vs-code delta in the sandbox environment. The convergence record has been flipped red. Review the drift in GitHub Actions run ${RUN_URL} and resolve via the dispatch-ack apply path (terraform-apply-sandbox workflow_dispatch naming this run URL or the rec id)." \
             --acceptance "aws s3 cp s3://agent-platform-data-lake/convergence/personal/sandbox.json - | grep -q green"
           echo "tf_drift rec filed via ops portal."

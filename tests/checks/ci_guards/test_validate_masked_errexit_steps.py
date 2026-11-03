@@ -137,21 +137,15 @@ class TestRealNearMissesStaySilent:
         joined = _join_backslash_continuations(body)
         assert _unguarded_assignments(joined) == []
 
-    def test_terraform_apply_sandbox_wake_comment_is_silent(self) -> None:
-        body = _step_run(
-            _TF_APPLY_SANDBOX_WORKFLOW,
-            "apply-sandbox",
-            step_name="Best-effort post-merge SHA->PR wake",
-        )
+    def test_terraform_apply_sandbox_artifact_sha_is_silent(self) -> None:
+        body = _step_run(_TF_APPLY_SANDBOX_WORKFLOW, "apply-sandbox", step_id="artifact_sha")
+        assert '|| echo ""' in body
         joined = _join_backslash_continuations(body)
         assert _unguarded_assignments(joined) == []
 
-    def test_terraform_gated_apply_wake_comment_is_silent(self) -> None:
-        body = _step_run(
-            _TF_APPLY_SANDBOX_WORKFLOW,
-            "gated-apply",
-            step_name="Best-effort post-merge SHA->PR wake",
-        )
+    def test_terraform_gated_apply_drift_guard_capture_is_silent(self) -> None:
+        body = _step_run(_TF_APPLY_SANDBOX_WORKFLOW, "gated-apply", step_id="drift_guard")
+        assert "|| RC=$?" in body
         joined = _join_backslash_continuations(body)
         assert _unguarded_assignments(joined) == []
 
