@@ -38,7 +38,7 @@ scope:
   purpose: >-
     Build PR: three unit tests over the .tf text, beside test_neon_catalog_history_retention.py and using
     tests.fixtures.terraform_hcl_blocks.find_resource_block: test_neon_org_id_has_no_committed_default (the
-    neon_org_id variable block has no default line, variables.tf no longer says "There is no neon_org_id", and no
+    neon_org_id variable block has no default line and carries nullable = false, variables.tf no longer says "There is no neon_org_id", and no
     terraform/personal/*.tf carries a quoted Neon organisation id shape); test_catalog_project_ignores_org_id_and_cannot_be_destroyed
     (the project's lifecycle has prevent_destroy = true and org_id in ignore_changes);
     test_catalog_database_cannot_be_destroyed (the database's lifecycle has prevent_destroy = true). pytestmark unit.
@@ -88,7 +88,7 @@ infrastructure_dependencies:
 acceptance_criteria:
 - >-
   neon_org_id has no committed default and is read from the tfvars parameter, whose value equals the live catalog
-  project's organisation (VP 3, 4, 17); no Neon organisation id shape remains in the tree (VP 5); rec-4543 is closed
+  project's organisation (VP 3, 13, 17; the default's absence VP 4); no Neon organisation id shape remains in the tree (VP 5); rec-4543 is closed
   (VP 9).
 - >-
   The catalog project and database carry prevent_destroy and the project ignores org_id changes (VP 4); the build PR's
@@ -105,9 +105,9 @@ acceptance_criteria:
   /secret/neon-api-key holds a project-scoped key on ducklake-catalog minted in the company-administered organisation
   (VP 13); drift converges and the canary rehearsal passes on it (VP 8, 14); the personal key is refused (VP 16).
 - >-
-  The operator deployment runs unchanged after the last change: a converged drift run and a green record, the maintenance and
-  maintenance-smoke Lambdas invoked without errors, a green ci.yml run on main, and a live recommendation write (VP 17,
-  18).
+  The operator deployment runs unchanged after the last change: a converged drift run and a green record after R1 (VP 8),
+  the maintenance and maintenance-smoke Lambdas invoked without errors and a green ci.yml run on main (VP 17), and a live
+  recommendation write (VP 18).
 - >-
   EVIDENCE.md records every step by kind and UTC time with no id, key, e-mail or card detail (VP 17); NEON-01, NEON-02,
   NEON-03 and NEON-05 are proven and BILL-02 moved, each with its ledger entry (VP 19).
@@ -118,13 +118,16 @@ verification_plan:
     Start gate: the AWS stage is done (AWS-01 proven on origin/main; Decision 242 cl.4 puts Neon after it), the Neon
     rows are still personal, and Decision 226's red-main overlap check is clear for this plan.
   command: >-
+    bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null | grep -q
+    'assumed-role/PlatformAdmin/' && echo ADMIN_CHAIN_OK &&
     git fetch -q origin main && git show origin/main:docs/contracts/account-credential-inventory.yaml |
     bin/venv-python -c "import sys,yaml; d=yaml.safe_load(sys.stdin); r={x['id']:x['status'] for x in d['rows']};
     assert r['AWS-01']=='proven', r['AWS-01']; assert all(r[k]=='personal' for k in ('NEON-01','NEON-02','NEON-03','NEON-05')),
     r; print('START_GATE_OK')" && bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-neon-org-company-assignment.yaml
-  expected: Prints START_GATE_OK, then a JSON line whose verdict is clear (exit 0).
+  expected: Prints ADMIN_CHAIN_OK and START_GATE_OK, then a JSON line whose verdict is clear (exit 0).
   fix_if: >-
-    AWS-01 not proven: stop and tell the coordinator. A Neon row already moved: another thread acted; stop and ask the
+    No ADMIN_CHAIN_OK: this session lacks the admin tier every live step needs; stop and ask the coordinator for an
+    ADMIN session. AWS-01 not proven: stop and tell the coordinator. A Neon row already moved: another thread acted; stop and ask the
     coordinator. A blocked or unavailable overlap verdict: hold and tell the coordinator (Decision 226).
   hermetic: false
   graduation: not-applicable
@@ -229,7 +232,7 @@ verification_plan:
   graduation_waiver_reason: >-
     The contract leg duplicates validate_terraform_cc_web_operations, which already runs in every tier; the rec probe
     and the organisation id sweep for terraform/personal are graduated through VP 4's test_neon_org_id_has_no_committed_default,
-    and a repository-wide id-shape guard belongs in the never-commit hook, not a plan-scoped registry row.
+    and a repository-wide id-shape guard belongs in the never-commit hook, not a plan-scoped registry row (rec-4867).
   expected_literals: []
 - step: 6
   phase: pre-deploy
@@ -270,14 +273,16 @@ verification_plan:
     import json, os, re, sys, urllib.request
     get = lambda p: json.load(urllib.request.urlopen('https://api.github.com/repos/otl-labs/ontheloop/' + p, timeout=30))
     body = [c['body'] for c in get(f"issues/{os.environ['PR_NUMBER']}/comments?per_page=100") if 'terraform/personal speculative plan (trusted' in c['body']][-1]
-    leaks = [n for n, x in (('org', r'\borg-[a-z]+-[a-z]+-\d+'), ('project', r'\b[a-z]+-[a-z]+-\d{8}\b'), ('at', r'@[a-z0-9-]+\.[a-z]'), ('12-digit', r'(?<!\d)\d{12}(?!\d)')) if re.search(x, body)]
+    scan = re.sub(r'\b[0-9a-f]{40,64}\b', '', body)
+    leaks = [n for n, x in (('org', r'\borg-[a-z]+-[a-z]+-\d+'), ('project', r'\b[a-z]+-[a-z]+-\d{8}\b'), ('at', r'@[a-z0-9-]+\.[a-z]'), ('12-digit', r'(?<!\d)\d{12}(?!\d)')) if re.search(x, scan)]
     ok = re.search(r'^State: NO_CHANGES$', body, re.M) and '0 to import, 0 to add, 0 to change, 0 to destroy (0 replaced)' in body and not leaks
     print(json.dumps({'no_changes': bool(ok), 'leaks': leaks})); sys.exit(0 if ok else 'TRUSTED PLAN STOP')
     PY
   expected: 'One JSON line {"no_changes": true, "leaks": []}.'
   fix_if: >-
     CHANGES on any neon_* resource: stop; never merge (the Decision 77 guard would route it, and a route publishes a raw
-    plan file, rec-4230); root-cause first. PLAN_FAILED naming neon_org_id: T1 was skipped or wrong (VP 3). A leak:
+    plan file, rec-4230); root-cause first. CHANGES only on other resources from work merged elsewhere: not this
+    plan's; rebase onto main after that work's apply and re-run. PLAN_FAILED naming neon_org_id: T1 was skipped or wrong (VP 3). A leak:
     stop, delete the comment and root-cause before any re-run (Decision 55).
   hermetic: false
   graduation: not-applicable
@@ -394,7 +399,10 @@ verification_plan:
   expected: Prints C3_C4 (True, 'launch', 604800, True) and C3_C4_OK.
   fix_if: >-
     Name: the operator chose a different company name; record the chosen name's wording in the thread and take the
-    assertion change to the operator. Plan or history changed: stop (Decision 214's neon-tier-or-terms-change condition).
+    assertion change to the operator. History not 604800, or the C4 screenshot shows a plan other than Launch: stop
+    (Decision 214's neon-tier-or-terms-change condition). Only the plan string differs (it read "launch" on 2026-11-03)
+    while the screenshot shows Launch: Neon renamed its tier string; record it and take the assertion change to the
+    coordinator, never a Decision 214 trigger.
     Row C4 missing: the screenshot is not yet checked; a card that is not the company's stops the closing PR (BILL-02's
     approved text says company card).
   hermetic: false
@@ -518,7 +526,7 @@ verification_plan:
     REDACT = r'@|(?<![0-9])[0-9]{12}(?![0-9])|\barn:|\borg-[a-z]+-[a-z]+-[0-9]+|\b[a-z]+-[a-z]+-[0-9]{8}\b|napi_|[A-Za-z0-9_]{50,}|£|\$[0-9]'
     rows = ['T1', 'B1', 'C1', 'C2', 'C3', 'C4', 'K1', 'K2', 'K3', 'K4', 'R1', 'R2']
     assert all(re.search(rf'^\| {r} \|.*\| pass \|$', ev, re.M) for r in rows), [r for r in rows if not re.search(rf'^\| {r} \|.*\| pass \|$', ev, re.M)]
-    assert not re.search(REDACT, ev), 'EVIDENCE.md redaction hit'
+    assert not re.search(REDACT, re.sub(r'\b[0-9a-f]{40,64}\b', '', ev)), 'EVIDENCE.md redaction hit'
     B = boto3.Session(profile_name='agent_platform_admin', region_name='eu-west-2'); cw = B.client('cloudwatch'); t = dt.datetime.fromisoformat(s['t_r1'].replace('Z', '+00:00'))
     m = lambda f, n: sum(p['Sum'] for p in cw.get_metric_statistics(Namespace='AWS/Lambda', MetricName=n, Dimensions=[{'Name': 'FunctionName', 'Value': f}], StartTime=t, EndTime=dt.datetime.now(dt.timezone.utc), Period=3600, Statistics=['Sum'])['Datapoints'])
     lam = {f: (m(f, 'Invocations'), m(f, 'Errors')) for f in ('agent-platform-ducklake-maintenance', 'agent-platform-ducklake-maintenance-smoke')}
@@ -587,7 +595,7 @@ verification_plan:
 - step: 20
   phase: pre-deploy
   action: >-
-    Before each of the two PRs merges (handoff_policy): the full tier on the committed, rebased, clean tree, then attest
+    Before each of the two PRs opens (handoff_policy): the full tier on the committed, rebased, clean tree, then attest
     HEAD (Decision 163 pre-handoff run). Started backgrounded with a 2 h limit from the top-level session.
   command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
   expected: Exit 0 on a completed full-tier run, then --verify-head attests HEAD's tree.
@@ -720,11 +728,16 @@ context:
   Decision-scout FLAGS_FOUND: one NOTE, Decision 224 (id readable in git history; accepted). CITE: 195, 242, 214, 77,
   126, 237, 238, 190, 100, 224, 101; 195 of 195 triaged. No numbered Decision (ownership 195, order 242 cl.4, nothing
   re-created); no project-configuration.yaml row (none exist for terraform/personal inputs, 224 cl.6).
-- 'gates: decision-scout=FLAGS_FOUND (NOTE accepted); plan-critique=pending.'
 - >-
-  red_overlap 2026-11-03: {"verdict": "clear", "slo_hours": 4, "reds": []}. No approved-text sidecar (the variables.tf
-  before-text carries the id); wording rehearsed with validate --pre on a scratch worktree, pinned by VP 6 and 19.
-  Probed: require_mfa, has_mfa, the key list's project_id, drift job logs, the trusted plan comment. UNPROVEN:
+  gates: decision-scout=FLAGS_FOUND (NOTE accepted); plan-critique round 1 REVISE (1 blocking, 10 nits), all fixed but
+  N5a-b (two approved-wording corrections, applied as recommended on decision card
+  cmsg_017f94mmYqSe3q2p9o6tPW3UM6QXyAxeERLNsKyCAS9fmz; the plan merges only after the operator answers it) and N5c (disputed: re-creating a vanished project is a create, which
+  prevent_destroy does not block).
+- >-
+  red_overlap 2026-11-03: {"verdict": "clear", "slo_hours": 4, "reds": []}. No approved-text sidecar: plan_wording_check
+  binds every changed file and the variables.tf before-text carries the id; wording rehearsed with validate --pre on a scratch worktree, pinned by VP 6 and 19.
+  Probed: org plan reads "launch", require_mfa, has_mfa, the key list's project_id, drift job logs and the trusted plan
+  comment (api.github.com through the session proxy). UNPROVEN:
   require-MFA on Launch (VP 10), the sign-up login leaving (VP 15), project-scoped key refusals (VP 13).
 - >-
   kislerdm/neon 0.13.0 source: org_id is ForceNew and refreshed from the API, so a re-pointed id or a transfer plans a
@@ -739,7 +752,7 @@ context:
   neon_org_id or the lifecycle: whichever builds second rebases.
 - >-
   rec-4543's acceptance became VP 4's first node on 2026-11-03 (the negated greps were undecidable, Decision 201);
-  rec-4865 carries BILL-02 to proven. Related: rec-4230 (a ROUTE plan.bin embeds tfvars values), rec-4619, rec-4048.
+  rec-4865 carries BILL-02 to proven; rec-4867 owns a never-commit guard for Neon id shapes. Related: rec-4230 (a ROUTE plan.bin embeds tfvars values), rec-4619, rec-4048.
 pre_implementation_checklist:
 - Branch confirmed not on main
 - docs/PROJECT_CONTEXT.md read
@@ -767,7 +780,7 @@ execution_steps:
   PY
   Expected: TFVARS_WRITTEN with the old and new version numbers, then VP 3 passes. Nothing else changes in Terraform: the value equals the one the catalog was created with.
 - |-
-  Build PR. Apply the scope edits: variables.tf (no default, nullable = false, the description "Neon organisation id that owns the DuckLake catalog project, from the tfvars parameter (never committed). Used only when the project is created: neon_project.ducklake_catalog ignores later org_id changes, because the provider would otherwise replace the project."), the comment replacement, the two lifecycle blocks, the header-comment rewording, the new test file, and the APPROVED BUILD TEXT below in the two contracts (amendment_log entries dated the commit date). Placement: in terraform-cc-web-operations.yaml the first string replaces the first sentence of tfvars_and_remote_state_recovery.recoverable_vars (rest unchanged), the second is a new where_values_live entry after alerts_email, the third a new top amendment_log entry; in deploy-paths.yaml the first replaces the start of the admin_out_of_band.procedure.steps recovery step (rest unchanged), the second is appended to the neon_api_key step that follows it, the third a new top amendment_log entry written as a one-line flow mapping (deploy-paths.yaml is near its size cap). Flip implementation_declared to true. Graduate VP 4 through the implement skill's graduation flow (registry row config/agent/verification_registry/entries/neon-catalog-org-id-guard.yaml, slot test_selector, guard_target terraform/personal/neon_ducklake_catalog.tf). Run VP 4, VP 5, VP 6, terraform fmt -check terraform/personal (provider-free; Decision 119), bin/venv-python -m scripts.validate --pre, then VP 20 (the full tier and --verify-head), and code review. Open the PR titled 'feat(neon-org-company-assignment): take the Neon organisation id out of the repository and block catalog destroy', with 'Resolves: rec-4543' in the squash body. Run VP 7 on its trusted plan comment. Squash-merge on code-review PROCEED, VP 7 and green CI. Record row B1 (PR number, merge SHA). Then VP 8 with AFTER set to the merge time and MERGE_SHA, and VP 9. Report separately (implement skill, Commit Flows): GitHub readiness, validator verdicts, postflight evidence, code review, and the real push and PR outcome.
+  Build PR. Apply the scope edits: variables.tf (no default, nullable = false, the description "Neon organisation id that owns the DuckLake catalog project, from the tfvars parameter (never committed). Used only when the project is created: neon_project.ducklake_catalog ignores later org_id changes, because the provider would otherwise replace the project."), the comment replacement, the two lifecycle blocks, the header-comment rewording, the new test file, and the APPROVED BUILD TEXT below in the two contracts (amendment_log entries dated the commit date, semantic_break false, change_class correction). Placement: in terraform-cc-web-operations.yaml the first string replaces the first sentence of tfvars_and_remote_state_recovery.recoverable_vars (rest unchanged), the second is a new where_values_live entry after alerts_email, the third a new top amendment_log entry; in deploy-paths.yaml the first replaces the start of the admin_out_of_band.procedure.steps recovery step (rest unchanged), the second is appended to the neon_api_key step that follows it, the third a new top amendment_log entry written as a one-line flow mapping (deploy-paths.yaml is near its size cap). Flip implementation_declared to true. Graduate VP 4 through the implement skill's graduation flow (registry row config/agent/verification_registry/entries/neon-catalog-org-id-guard.yaml, slot test_selector, guard_target terraform/personal/neon_ducklake_catalog.tf). Run VP 4, VP 5, VP 6, terraform fmt -check terraform/personal (provider-free; Decision 119), bin/venv-python -m scripts.validate --pre, then VP 20 (the full tier and --verify-head), and code review. Open the PR titled 'feat(neon-org-company-assignment): take the Neon organisation id out of the repository and block catalog destroy', with 'Resolves: rec-4543' in the squash body. Run VP 7 on its trusted plan comment. Squash-merge on code-review PROCEED, VP 7 and green CI. Record row B1 (PR number, merge SHA). Then VP 8 with AFTER set to the merge time and MERGE_SHA, and VP 9. Report separately (implement skill, Commit Flows): GitHub readiness, validator verdicts, postflight evidence, code review, and the real push and PR outcome.
 - |
   APPROVED BUILD TEXT (YAML; per file, every present string appears verbatim in the file after whitespace is collapsed and no absent string does; the amendment_log entries carry the commit date, which is not part of the strings):
   docs/contracts/terraform-cc-web-operations.yaml:
@@ -818,14 +831,14 @@ execution_steps:
   billing:
     BILL-02: {status: moved, payer: company}
   ledger:
-  - {row: NEON-01, status: proven, evidence: "PLAN-neon-org-company-assignment C1 and R2: the company Workspace identity is the organisation's Admin and the founder's personal login has left it (operator screenshot of the members page, verified <date>)"}
+  - {row: NEON-01, status: proven, evidence: "PLAN-neon-org-company-assignment C1, R1 and R2: the company Workspace identity is the organisation's Admin and the founder's personal login has left it (operator screenshot of the members page, verified <date>)"}
   - {row: NEON-02, status: proven, evidence: "PLAN-neon-org-company-assignment C1-C4 and R2: the organisation is assigned in place to the company (company admin, company name and billing, personal login gone); terraform-drift run <run id> converged after the last change"}
   - {row: NEON-03, status: proven, evidence: "PLAN-neon-org-company-assignment: the project never moved; terraform-drift run <run id> converged under the company-minted key after the organisation changed hands"}
   - {row: NEON-05, status: proven, evidence: "PLAN-neon-org-company-assignment K1-K4: a project-scoped key minted by the company admin is /secret/neon-api-key version <n>; terraform-drift run <run id> converged and the canary rehearsal passed on it; the personal key is revoked (read back as refused)"}
-  - {row: BILL-02, status: moved, evidence: "PLAN-neon-org-company-assignment C4: the operator set company billing details and card on the organisation on 2026-10-30, before Decision 242's AWS move (an early operator step, recorded here); the billing page shows the company, Launch and 7-day history; proven on the first company invoice (<follow-on rec>)"}
+  - {row: BILL-02, status: moved, evidence: "PLAN-neon-org-company-assignment C4: the operator set company billing details and card on the organisation on 2026-10-30, before Decision 242's AWS move (an early operator step, recorded here); the billing page shows the company and Launch, and the API reads 7-day history; proven on the first company invoice (<follow-on rec>)"}
   amendment_summary: "PLAN-neon-org-company-assignment: the Neon organisation is assigned in place to the company, so NEON-02, NEON-03 and NEON-06 targets say so; NEON-01, NEON-02, NEON-03 and NEON-05 flip to proven and BILL-02 to moved with payer company, each with one evidence_ledger entry."
 - |-
-  Closing PR: apply APPROVED CLOSING TEXT to docs/contracts/account-credential-inventory.yaml (amendment_log entry dated the commit date), run VP 19, bin/venv-python -m scripts.validate --pre, VP 20, code review; open the PR titled 'feat(neon-org-company-assignment): closing -- record the Neon organisation hand-over'; squash-merge on code-review PROCEED and green CI, reporting readiness, validator verdicts, postflight evidence, review and the real push and PR outcome separately. Post a counts-only comment on the merged PR (steps, UTC times, run ids; no values) after running VP 17's redaction pattern over its text. Write handoff notes for the coordinator: rec-4865 carries the first company-paid Neon invoice (BILL-02 to proven); AWS-07 (the tfvars parameter) is untouched here and moves with the personal-terraform-variables item.
+  Closing PR: apply APPROVED CLOSING TEXT to docs/contracts/account-credential-inventory.yaml (amendment_log entry dated the commit date, semantic_break false, change_class correction), run VP 19, bin/venv-python -m scripts.validate --pre, VP 20, code review; open the PR titled 'feat(neon-org-company-assignment): closing -- record the Neon organisation hand-over'; squash-merge on code-review PROCEED and green CI, reporting readiness, validator verdicts, postflight evidence, review and the real push and PR outcome separately. Post a counts-only comment on the merged PR (steps, UTC times, run ids; no values) after running VP 17's redaction pattern over its text. Write handoff notes for the coordinator: rec-4865 carries the first company-paid Neon invoice (BILL-02 to proven); AWS-07 (the tfvars parameter) is untouched here and moves with the personal-terraform-variables item.
 - |-
   Execute Verification Plan: each VP step in its place in the order above; VP 4-7 belong to the build PR, VP 19 to the closing PR and VP 20 to both; loop until pass; on an unrecoverable V3 failure stop and root-cause (Decision 55); a failed or drifted live step halts this workstream until root-caused, never a silent retry.
 - |-
@@ -841,3 +854,4 @@ rollback: >-
   them). Never move or re-create the catalog as a rollback.
 gate_rounds:
 - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+- {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 10}
