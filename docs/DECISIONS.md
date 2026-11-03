@@ -3141,6 +3141,8 @@ conditions:
 
 [Amendment 2026-10-25, PLAN-telemetry-reader-and-smoke-twin (Decision 236 cl.3): production serves no transcript content until a named consumer needs it (rec-4481).]
 
+> **Update (2026-11-03):** CD.40 is ratified onto this Decision. This is a ratification record, not a clause-1 or clause-5 note: it adds and changes no clause. Each CD.40 clause already lives elsewhere: ops_session_log is retired, not migrated (Decision 78's 2026-09-22 amendment, T2.26); docs/SESSION_LOG.md is retired by deletion (Decisions 127 and 174, #1696), and no earlier history was imported, so no imported-row flag exists; turn-grain rows go through the telemetry writer (clause 1 here, Decision 213); a materialized session aggregate (the audit's ops_sessions, not telemetry_sessions) waits on the derived-read-too-costly condition above, which rec-4833 watches; and the hook-side credential scrub stays a launch criterion (telemetry_transcripts.yaml, T3.20 c1), because snapshot retention defeats redaction after the write.
+
 ---
 
 ## Decision 200: Tenant and project identity for telemetry -- tenant_id and project_id are opaque writer-minted ids, always present, tenancy enforcement stays a cloud-adapter property (amends Decision 197 clause 2) (Decided)
