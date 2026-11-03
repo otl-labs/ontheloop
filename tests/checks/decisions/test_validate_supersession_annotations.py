@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from scripts.checks import registry
@@ -444,3 +445,77 @@ class TestDecisionsMdDedupWarning:
         decisions_path.write_text("## Decision 1: Only one (Decided)\n\n**Status:** Decided\n", encoding="utf-8")
         parse_decisions_md(paths=[decisions_path])
         assert capsys.readouterr().err == ""
+
+
+def _edge_fixture(tmp_path: Path, superseder_body: str, victim_body: str = "No back-pointer here.") -> None:
+    _write_decisions(
+        tmp_path,
+        live=f"## Decision 7: New (Decided)\n\n**Decision:** {superseder_body}\n\n---\n\n"
+        f"## Decision 2: Two (Decided)\n\n**Status:** Decided\n\n---\n\n"
+        f"## Decision 1: One (Decided)\n\n**Status:** {victim_body}\n",
+    )
+
+
+class TestWholeNumberAnnotation:
+    """M1: a longer number sharing the superseder's digits is not an annotation."""
+
+    @pytest.mark.parametrize(
+        ("victim_mention", "expected_failed"),
+        [
+            ("See Decision 52 instead.", ["Decision supersession-annotation guard"]),
+            ("Superseded by Decision 5.", []),
+        ],
+    )
+    def test_prefix_does_not_annotate(self, tmp_path: Path, victim_mention: str, expected_failed: list[str]) -> None:
+        _write_decisions(
+            tmp_path,
+            live="## Decision 5: New (Decided)\n\n**Decision:** Supersedes Decision 1.\n\n---\n\n"
+            f"## Decision 1: Old (Decided)\n\n**Status:** {victim_mention}\n",
+        )
+        _write_waivers(tmp_path)
+        failed: list[str] = []
+        validate_supersession_annotations(failed, root=tmp_path)
+        assert failed == expected_failed
+
+
+class TestSharedGrammarEdges:
+    """M2: plural lists the shared title grammar admits, its documented limit, and participle rejection."""
+
+    @pytest.mark.parametrize(
+        ("body", "expected_victims"),
+        [
+            ("New entry (Supersedes Decisions 1, 2) for scope.", {1, 2}),
+            ("This amends Decisions 1/2.", {1, 2}),
+            ("This amends Decision 1 and Decision 2.", {1, 2}),
+            ("Supersedes Decisions 1, 2.", {1}),
+            ("Built while superseding Decision 1.", set()),
+            ("Recorded rather than amending Decision 1.", set()),
+            ("This entry does not amend Decision 1.", set()),
+            ("Itself superseded by Decision 1 later.", set()),
+        ],
+    )
+    def test_extracted_victims(self, tmp_path: Path, body: str, expected_victims: set[int]) -> None:
+        _edge_fixture(tmp_path, body)
+        assert {v for s, v, _ in extract_supersession_edges(tmp_path) if s == 7} == expected_victims
+
+
+class TestWaiverIntegrity:
+    def test_orphan_waiver_fails_naming_the_pair(self, tmp_path: Path, capsys) -> None:
+        _write_decisions(tmp_path, live="## Decision 1: Something (Decided)\n\n**Status:** Decided\n")
+        _write_waivers(tmp_path, waivers=[{"superseder": 9, "victim": 1, "reason": "names no edge"}])
+        failed: list[str] = []
+        validate_supersession_annotations(failed, root=tmp_path)
+        assert failed == ["Decision supersession-annotation guard"]
+        assert "orphan waiver 9->1" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        "entry",
+        [{"superseder": 2, "reason": "missing victim"}, {"superseder": "x", "victim": 1, "reason": "non-integer"}],
+    )
+    def test_malformed_waiver_entry_fails_cleanly(self, tmp_path: Path, entry: dict) -> None:
+        _write_decisions(tmp_path, live="## Decision 1: Something (Decided)\n\n**Status:** Decided\n")
+        _write_waivers(tmp_path, waivers=[entry])
+        failed: list[str] = []
+        validate_supersession_annotations(failed, root=tmp_path)
+        assert len(failed) == 1
+        assert "malformed waiver entry #0" in failed[0]
