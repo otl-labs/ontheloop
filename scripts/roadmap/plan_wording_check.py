@@ -40,6 +40,7 @@ _MARKER = "# raise-approved: dec-"
 _MANIFEST = Path("logs/debug/selection-manifest.json")
 _VENV = ".venv"
 _ECHO_LINES = 20
+_VERBS = {"create": "creates", "modify": "modifies"}
 
 Runner = Callable[[list[str], Path, int], "subprocess.CompletedProcess[str]"]
 
@@ -275,10 +276,10 @@ def _render(slug: str, result: Result) -> str:
         f"WORDING-CHECK verdict={result.verdict} digest={result.digest} base={result.base} selection={result.selection}{count}"
     ]
     if result.pairs:
-        lines.append(f"fast tier red only on {len(result.pairs)} plan-created evaluator(s); clean with them stood in")
+        lines.append(f"fast tier red only on {len(result.pairs)} plan-built evaluator(s); clean with them stood in")
         lines += [
-            f"pending: docs/contracts/{name} evaluator {check} (the plan creates {module})"
-            for name, check, module in result.pairs
+            f"pending: docs/contracts/{name} evaluator {check} (the plan {_VERBS[action]} {module})"
+            for name, check, module, action in result.pairs
         ]
     if result.reason:
         lines.append(f"reason: {result.reason}")

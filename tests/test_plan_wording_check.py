@@ -29,6 +29,7 @@ _CHECK = "validate_zz_probe"
 _MODULE = f"scripts/checks/roadmap/{_CHECK}.py"
 _GATE = "GATE-FAILURE v1 source=gate check="
 _CONTRACT_BODY = f"contract:\n  id: zz\n  class: D\n  evaluator:\n    check: {_CHECK}\n"
+_REGISTERING = f'from scripts.checks import registry\n\n\n@registry.register("{_CHECK}")\ndef {_CHECK}(f):\n    pass\n'
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -148,19 +149,7 @@ class TestRefusals:
     def test_head_not_on_main(self, tmp_path: Path, repo: Path, tree: Path) -> None:
         _write(tree, "extra.txt", "x")
         _git(tree, "add", "-A")
-        _git(
-            tree,
-            "-c",
-            "user.email=t@example.com",
-            "-c",
-            "user.name=t",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "-m",
-            "x",
-        )
+        _git(tree, "commit", "-q", "-m", "x")
         _place(tree)
         result = _run(tmp_path, tree, FakeRunner())
         assert result.verdict == "FAIL" and "not an ancestor of origin/main" in result.reason
@@ -450,7 +439,7 @@ class TestPlanCreatedEvaluator:
     def test_a_drift_only_red_is_an_attributed_pass(self, tmp_path: Path, tree: Path, monkeypatch) -> None:
         runner = FakeRunner(pre_rc=1, pre_out=f"{_GATE}validate_contract_drift\n")
         result = _contract_run(tmp_path, tree, monkeypatch, runner)
-        assert result.verdict == "PASS" and result.pairs == (("zz-probe.yaml", _CHECK, _MODULE),)
+        assert result.verdict == "PASS" and result.pairs == (("zz-probe.yaml", _CHECK, _MODULE, "create"),)
         sub = [cmd for cmd in runner.commands if "scripts.roadmap.wording_check_pending" in cmd][0]
         assert sub == [
             "bin/venv-python",
@@ -469,7 +458,7 @@ class TestPlanCreatedEvaluator:
         text = pwc._render("demo", _contract_run(tmp_path, tree, monkeypatch, runner))
         lines = text.splitlines()
         assert lines[0].startswith("WORDING-CHECK verdict=PASS ") and lines[0].endswith(" pending_evaluators=1")
-        assert "fast tier red only on 1 plan-created evaluator(s); clean with them stood in" in lines
+        assert "fast tier red only on 1 plan-built evaluator(s); clean with them stood in" in lines
         assert f"pending: docs/contracts/zz-probe.yaml evaluator {_CHECK} (the plan creates {_MODULE})" in lines
         assert "pending_evaluators: 1" in lines[-1] and "round: 1," in lines[-1]
 
@@ -483,13 +472,28 @@ class TestPlanCreatedEvaluator:
         result = _contract_run(tmp_path, tree, monkeypatch, FakeRunner(pre_rc=1, pre_out=out))
         assert result.verdict == "FAIL" and "ruff" in result.reason
 
-    def test_a_modify_row_has_no_pending_pair_and_a_red_stays_a_fail_as_today(
-        self, tmp_path: Path, tree: Path, monkeypatch
-    ) -> None:
+    def test_a_modify_row_whose_module_is_absent_stays_a_fail_as_today(self, tmp_path: Path, tree: Path, monkeypatch) -> None:
         runner = FakeRunner(pre_rc=1, pre_out=f"{_GATE}validate_contract_drift\n")
         result = _contract_run(tmp_path, tree, monkeypatch, runner, "Modify")
         assert result.verdict == "FAIL" and result.reason == "the fast tier (scripts.validate --pre) failed"
         assert not any("scripts.roadmap.wording_check_pending" in cmd for cmd in runner.commands)
+
+    def test_a_modify_row_on_an_unread_existing_check_is_an_attributed_pass(
+        self, tmp_path: Path, repo: Path, monkeypatch
+    ) -> None:
+        _write(repo, _MODULE, _REGISTERING)
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "module")
+        _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        scratch = tmp_path / "scratch_modify"
+        _git(repo, "worktree", "add", "-q", "--detach", str(scratch), "HEAD")
+        runner = FakeRunner(pre_rc=1, pre_out=f"{_GATE}validate_contract_drift\n")
+        result = _contract_run(tmp_path, scratch, monkeypatch, runner, "Modify")
+        assert result.verdict == "PASS" and result.pairs == (("zz-probe.yaml", _CHECK, _MODULE, "modify"),)
+        sub = [cmd for cmd in runner.commands if "scripts.roadmap.wording_check_pending" in cmd][0]
+        assert sub[-3:] == ["--pending", f"zz-probe.yaml:{_CHECK}:modify", "--"]
+        line = f"pending: docs/contracts/zz-probe.yaml evaluator {_CHECK} (the plan modifies {_MODULE})"
+        assert line in pwc._render("demo", result).splitlines()
 
     def test_a_green_fast_tier_records_no_pending_count(self, tmp_path: Path, tree: Path, monkeypatch) -> None:
         result = _contract_run(tmp_path, tree, monkeypatch, FakeRunner())
@@ -538,7 +542,8 @@ class TestRender:
         assert GateRound.model_validate(parsed).verdict == "PASS"
 
     def test_an_attributed_row_parses_with_its_count(self) -> None:
-        result = pwc.Result("PASS", digest="a" * 64, base="b" * 40, selection="complete", pairs=(("x.yaml", "c", "m.py"),))
+        pair = ("x.yaml", "c", "m.py", "create")
+        result = pwc.Result("PASS", digest="a" * 64, base="b" * 40, selection="complete", pairs=(pair,))
         row = pwc._render("demo", result).splitlines()[-1]
         parsed = yaml.safe_load(row.split("  # pragma")[0].removeprefix("  - "))
         assert GateRound.model_validate(parsed).pending_evaluators == 1
