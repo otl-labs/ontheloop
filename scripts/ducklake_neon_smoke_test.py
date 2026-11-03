@@ -14,7 +14,7 @@ for a fresh extension install, to extensions.duckdb.org):
                   The DR proof, run before any production write.
 
 Reuses src/common/ducklake_spike.py for the duckdb-require + S3-credential helpers and fetches the Neon
-DSN JSON from Secrets Manager (docs/contracts/secret-material-handling.yaml RUNTIME-FETCH pattern,
+DSN JSON from SSM Parameter Store (docs/contracts/secret-material-handling.yaml RUNTIME-FETCH pattern,
 Decision 175 -- rehomed from the Decision 37 precedent). The churn gate and the restore drill LOUD-FAIL (Decision
 55): a failed gate raises SmokeTestFailure and is a stop-and-RCA signal -- never silently relax a
 threshold or degrade to pass.
@@ -49,7 +49,7 @@ from scripts.ducklake_smoke.canary import (  # noqa: F401 -- re-exported package
 from scripts.ducklake_smoke.core import (  # noqa: F401 -- re-exported package surface
     CATALOG_ALIAS,
     CATALOG_DR_URL_ENV,
-    DSN_SECRET_ID,
+    DSN_PARAMETER_NAME,
     MAINTENANCE_SMOKE_URL_ENV,
     MAINTENANCE_URL_ENV,
     META_SCHEMA,

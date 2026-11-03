@@ -15,16 +15,16 @@
 # run:   fetch, mask, export TF_VAR_neon_api_key for CMD only, exec CMD. Safe to call repeatedly.
 set -euo pipefail
 
-SECRET_ID="neon-api-key"
+PARAMETER_NAME="/secret/neon-api-key"
 
 fetch_key() {
     local value
-    if ! value=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ID" --query SecretString --output text 2>/dev/null); then
-        echo "neon-api-key: fetch failed (check the secret and the role's GetSecretValue grant)" >&2
+    if ! value=$(aws ssm get-parameter --name "$PARAMETER_NAME" --with-decryption --query Parameter.Value --output text 2>/dev/null); then
+        echo "neon-api-key: fetch failed (check the parameter and the role's GetParameter grant)" >&2
         return 1
     fi
     if [ -z "$value" ] || [ "$value" = "None" ]; then
-        echo "neon-api-key: secret is empty" >&2
+        echo "neon-api-key: parameter is empty" >&2
         return 1
     fi
     printf '%s' "$value"

@@ -8,7 +8,7 @@ scans every contract for the retired key.
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 import re
 from pathlib import Path
 from typing import Any
@@ -82,7 +82,7 @@ def iso_date_error(label: str, value: Any, floor: str | None = None) -> str | No
     if not (isinstance(value, str) and _ISO_DATE.match(value)):
         return f"{label} {value!r} is not an ISO date string"
     try:
-        datetime.date.fromisoformat(value)
+        dt.date.fromisoformat(value)
     except ValueError:
         return f"{label} {value!r} is not a real calendar date"
     if floor is not None and value < floor:

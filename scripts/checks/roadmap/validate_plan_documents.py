@@ -99,6 +99,12 @@ def _changed_sidecar_digest(slug: str, base: str) -> str | None:
     return approved_text.digest(approved_text.load_sidecar(slug, _common.ROOT))
 
 
+def _has_sidecar(slug: str) -> bool:
+    from scripts.roadmap import approved_text  # noqa: PLC0415
+
+    return (_common.ROOT / approved_text.sidecar_rel(slug)).is_file()
+
+
 def _wording_check_gaps(path: Path, doc: Any, base: str) -> list[str]:
     """A plan whose approved-text sidecar the diff adds or changes needs a fresh PASS wording-check row.
 
@@ -107,7 +113,12 @@ def _wording_check_gaps(path: Path, doc: Any, base: str) -> list[str]:
     """
     if doc.schema_version < _MIN_NEW_PLAN_SCHEMA_VERSION:
         return []
-    digest = _changed_sidecar_digest(doc.slug, base)
+    from scripts.roadmap import approved_text  # noqa: PLC0415
+
+    try:
+        digest = _changed_sidecar_digest(doc.slug, base)
+    except (approved_text.ApprovedTextError, UnicodeDecodeError, OSError) as exc:
+        return [f"{path.name}: docs/plans/approved/{doc.slug}.yaml cannot be read: {exc}"]
     if digest is None:
         return []
     rows = [row for row in doc.gate_rounds if row.gate == "wording-check"]
@@ -198,8 +209,7 @@ def validate_plan_documents(
         advisories: list[str] = []
         on_plan_pr = os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
         wording_base = _common.status_diff_base()
-        if wording_base is None:
-            advisories.append("no merge base resolves, so no wording-check row is required (planning SKILL.md Step 8b)")
+        sidecar_unchecked = False
         for path in plan_paths:
             # One parse per plan feeds both the schema verdict and the semantic gates -- this
             # check rides the --pre tier, so a second load() per passing plan is pure waste.
@@ -210,6 +220,8 @@ def validate_plan_documents(
                 continue
             errors.extend(_new_plan_version_failures(path, doc, added_names))
             errors.extend(_test_obligation_failures(path, doc))
+            if wording_base is None and doc.schema_version >= _MIN_NEW_PLAN_SCHEMA_VERSION:
+                sidecar_unchecked = sidecar_unchecked or _has_sidecar(doc.slug)
             gaps = _gate_round_gaps(path, doc, added_names)
             if wording_base is not None:
                 gaps += _wording_check_gaps(path, doc, wording_base)
@@ -221,6 +233,8 @@ def validate_plan_documents(
                         f"{path.name}: context block is {span} rendered lines "
                         f"(advisory cap {CONTEXT_BLOCK_LINE_ADVISORY}) -- link evidence, do not restate it"
                     )
+        if sidecar_unchecked:
+            advisories.append("no merge base resolves, so no wording-check row is required (planning SKILL.md Step 8b)")
         registry.examined(len(plan_paths), unit="plan_documents")
         for advisory in advisories:
             print(f"  WARN: {advisory}")

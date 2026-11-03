@@ -39,6 +39,7 @@ contract:
     check: validate_terraform_cc_web_operations
 
 amendment_log:
+  - {date: "2026-10-30", semantic_break: false, change_class: correction, summary: "PLAN-secrets-to-ssm-cutover (Decision 237): every statement naming the tfvars Secrets Manager entry names the /secret/ SSM parameter and the ssm get-parameter command; ephemeral_runtime_vars.neon_api_key.source names the /secret/neon-api-key parameter."}
   - date: "2026-10-30"
     semantic_break: false
     change_class: prose_improvement
@@ -247,25 +248,25 @@ tfvars_and_remote_state_recovery:
   where_values_live:
     description: >-
       Per-variable recovery source. Prefer materialising the whole set at once from the same
-      Secrets Manager entry CI sources from (see `recovery_procedure` below) over deriving values
+      `/secret/agent-platform-terraform-personal-tfvars` SSM parameter CI sources from (see `recovery_procedure` below) over deriving values
       variable-by-variable; each entry's `source` below also names the state-parsing fallback and
       is the audit trail for where each value lives once recovered.
     account_id:
       declared_in: terraform/personal/variables.tf
       source: >-
-        The `agent-platform-terraform-personal-tfvars` Secrets Manager entry (see
+        The `/secret/agent-platform-terraform-personal-tfvars` SSM parameter (see
         `recovery_procedure`); also derivable from any resource ARN in the remote state, or from
         `aws sts get-caller-identity --profile agent_platform_admin`.
     owner_email:
       declared_in: terraform/personal/providers.tf
       source: >-
-        The `agent-platform-terraform-personal-tfvars` Secrets Manager entry; also present as
+        The `/secret/agent-platform-terraform-personal-tfvars` SSM parameter; also present as
         the `Owner` resource tag value in the remote state -- the GitHub no-reply role-alias
         identity (see `owner_vs_alerts_email` below; this is never the alerts mailbox).
     platform_dev_external_id:
       declared_in: terraform/personal/variables.tf
       source: >-
-        The `agent-platform-terraform-personal-tfvars` Secrets Manager entry; also present as
+        The `/secret/agent-platform-terraform-personal-tfvars` SSM parameter; also present as
         the PlatformDev IAM role's `assume_role_policy` trust document `sts:ExternalId`
         condition in the terraform/bootstrap remote state (`agent-platform-bootstrap-tfstate`,
         which among container profiles only PlatformAdmin can read; terraform/personal state no
@@ -273,7 +274,7 @@ tfvars_and_remote_state_recovery:
     platform_admin_external_id:
       declared_in: terraform/personal/variables.tf
       source: >-
-        The `agent-platform-terraform-personal-tfvars` Secrets Manager entry; also present as
+        The `/secret/agent-platform-terraform-personal-tfvars` SSM parameter; also present as
         the PlatformAdmin IAM role's `assume_role_policy` trust document `sts:ExternalId`
         condition in the terraform/bootstrap remote state (`agent-platform-bootstrap-tfstate`,
         which among container profiles only PlatformAdmin can read; terraform/personal state no
@@ -281,14 +282,14 @@ tfvars_and_remote_state_recovery:
     alerts_email:
       declared_in: terraform/personal/sns_alerts.tf
       source: >-
-        The `agent-platform-terraform-personal-tfvars` Secrets Manager entry; also present as
+        The `/secret/agent-platform-terraform-personal-tfvars` SSM parameter; also present as
         the SNS topic subscription `endpoint` attribute in the remote state -- the deliverable
         alerts-mailbox role-alias (see `owner_vs_alerts_email` below; this is never the Owner
         tag identity).
   ephemeral_runtime_vars:
     neon_api_key:
       declared_in: terraform/personal/providers.tf
-      source: "Secrets Manager neon-api-key, fetched at run time by scripts/ci/neon_api_key.sh run inside each trusted terraform step; never in the tfvars secret"
+      source: "SSM SecureString /secret/neon-api-key, fetched at run time by scripts/ci/neon_api_key.sh run inside each trusted terraform step; never in the tfvars parameter"
   owner_vs_alerts_email: >-
     `owner_email` and `alerts_email` are two different role-alias identities that must never be
     reconciled to the same value: `owner_email` backs the GitHub no-reply identity used for
@@ -304,29 +305,29 @@ tfvars_and_remote_state_recovery:
     also calls: `.github/actions/materialise-tfvars/materialise_tfvars.sh` (Decision 162 R2 extraction; in an ADMIN session, run it on demand through `bash bin/sync-terraform-assets.sh
     --tfvars`, which pins `AWS_PROFILE=agent_platform_admin` for that call and masks its error output -- see
     `operator_only_break_glass.scope` below). It fetches the
-    `agent-platform-terraform-personal-tfvars` Secrets Manager entry under ambient credentials
+    `/secret/agent-platform-terraform-personal-tfvars` SSM parameter under ambient credentials
     (profile-free by design -- see `admin_tier_only` below) and writes its body, via a fail-closed
     temp-file-then-mv, to the gitignored `terraform/personal/terraform.personal.tfvars`, ready to
     pass to `terraform plan`/`apply` via `-var-file` (or individual `-var` flags). The raw command
     is retained as a fallback for a container where running the delegate directly is inconvenient:
-    `aws secretsmanager get-secret-value --secret-id agent-platform-terraform-personal-tfvars
-    --profile agent_platform_admin --query SecretString --output text`, writing its body to the
+    `aws ssm get-parameter --name /secret/agent-platform-terraform-personal-tfvars --with-decryption
+    --profile agent_platform_admin --query Parameter.Value --output text`, writing its body to the
     same destination. State-parsing (after `init`, `terraform state show` / a parse of the state
-    JSON) remains a fallback per-variable path when the Secrets Manager entry itself is
+    JSON) remains a fallback per-variable path when the SSM parameter itself is
     unavailable or stale -- see each `where_values_live` entry's `source` for that variable's
     state location.
   never_paste: >-
     Never paste these values into chat, a PR, or any committed file -- the ExternalIds are
     AssumeRole trust secrets and the account id is shape-blocked by the pre-commit
     `never-commit` hook.
-  admin_tier_only: >-  # pragma: allowlist secret -- GetSecretValue is an IAM action name, not a credential
+  admin_tier_only: >-
     Both recovery paths are admin-tier-only (DEP-13 / T2.44 / Decision 144 pt.3), never reachable
     from `PlatformDev` (the ambient `agent_platform` runtime identity used by every CC-web
-    session). The Secrets Manager materialisation path above requires
-    `secretsmanager:GetSecretValue` on the `agent-platform-terraform-personal-tfvars` secret,
-    which only `PlatformAdmin` holds (AdminOps' wildcard-resource `SecretsManagerAdmin` Sid) --
-    `PlatformDev`'s own `GetSecretValue` grant is scoped to the two inference-credential secret
-    ARNs only (`InferenceCredentialsRead`), never this one. The state-parsing fallback requires
+    session). The SSM materialisation path above requires `ssm:GetParameter` with decryption on the
+    `/secret/agent-platform-terraform-personal-tfvars` parameter, which among container profiles only `PlatformAdmin`
+    holds (AdminOps' `SecretParameterAdmin` Sid on parameter/secret/*, Decision 237) -- `PlatformDev`'s own
+    `ssm:GetParameter` grant on /secret/ is scoped to the two inference-key parameters only
+    (`InferenceCredentialsParameterRead`), never this one. The state-parsing fallback requires
     reading remote state directly -- `tfstate/personal/*` for the personal variables and the
     terraform/bootstrap state for the two ExternalIds -- and among container profiles only
     `PlatformAdmin` (the `agent_platform_admin` profile) may do so: `PlatformDev` is explicitly
@@ -358,9 +359,9 @@ operator_only_break_glass:
     (record-backed sandbox CD, CD.35 / T2.20 Wave 1) Sandbox CD auto-apply
     (`.github/workflows/terraform-apply-sandbox.yml`; push-to-main touching
     `terraform/personal/**` auto-applies behind the guard + subagent plan review). It sources
-    all no-default root-module variables except ephemeral variables (ephemeral_runtime_vars) from the `agent-platform-terraform-personal-tfvars`
-    Secrets Manager entry -- the apply role's `SecretsManagerReadOnly` grant fetches its body
+    all no-default root-module variables except ephemeral variables (ephemeral_runtime_vars) from the
+    `/secret/agent-platform-terraform-personal-tfvars` SSM parameter -- the apply role's `SecretParameterValueRead` grant fetches its body
     to `terraform.personal.tfvars`, which is passed to `terraform plan` via `-var-file`.
-    New no-default variables only require updating that secret -- no per-variable workflow edit -- except ephemeral variables (ephemeral_runtime_vars), which trusted jobs fetch at run time.
+    New no-default variables only require updating that parameter -- no per-variable workflow edit -- except ephemeral variables (ephemeral_runtime_vars), which trusted jobs fetch at run time.
     `TF_VAR_aws_profile=""` is the sole job-level env override (blanks the named-profile default
     so the OIDC credential env vars take effect); `TF_VAR_neon_api_key` is set per terraform process only (ephemeral_runtime_vars).

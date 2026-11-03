@@ -14,12 +14,19 @@ import yaml
 boto3 = pytest.importorskip("boto3")
 
 from scripts import contract_rules  # noqa: E402
+from scripts.preflight import recs_cache  # noqa: E402
 from tests.fixtures.session_preflight_module import preflight as _preflight  # noqa: E402
 from tests.fixtures.yaml_parse_spy import install as install_yaml_parse_spy  # noqa: E402
 
 # 4.85 MB before this plan's fix, ~143 KB after (plan-time prototype). Any single pure-Python
 # parse of the roadmap (747 KB) or of the contracts corpus (1.28 MB) exceeds this bound.
 PURE_PYTHON_YAML_BUDGET = 512 * 1024
+
+# Bound at import, before the package conftest's autouse fixture swaps compute_state_dict for the
+# live_state_dict memo and stubs _landed_followon_rec_ids.
+_REAL_COMPUTE_STATE_DICT = _preflight.platform_roadmap.compute_state_dict
+_REAL_LANDED_FOLLOWON_REC_IDS = recs_cache._landed_followon_rec_ids
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _run_main_under_seams(preflight_report: Path) -> None:
@@ -46,8 +53,8 @@ class TestYamlParseBudget:
         """Measures the credentials-unavailable branch of main() over the REAL repo tree (never a
         tmp fixture -- _common.ROOT is not patched here).
 
-        compute_state_dict is stubbed to {} because its own per-plan-corpus pure-Python parse
-        (about 9 MB in production) is rec-4374's cost to fix, not this guard's. That stub also
+        compute_state_dict is stubbed to {} because the plan-corpus walkers are measured by
+        TestPlanCorpusWalkerBudget below, not here. That stub also
         means _check_endstate_drift's frame needs docs/PROJECT_CONTEXT.md's live
         roadmap_tier_id_set stamp to reach either of its two parses at all (without it the
         function returns before parsing anything) -- a removed stamp would read as this guard's
@@ -69,6 +76,25 @@ class TestYamlParseBudget:
         assert total <= PURE_PYTHON_YAML_BUDGET, (
             f"{total} bytes of pure-Python YAML parsing exceeds the {PURE_PYTHON_YAML_BUDGET}-byte budget -- "
             + "; ".join(f"{e.size}B at {e.stack[:3]}" for e in log.pure_entries)
+        )
+
+
+class TestPlanCorpusWalkerBudget:
+    def test_plan_walkers_stay_under_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The REAL compute_state_dict and _landed_followon_rec_ids over the live docs/plans corpus."""
+        assert yaml.__with_libyaml__
+        log = install_yaml_parse_spy(monkeypatch)
+
+        _REAL_COMPUTE_STATE_DICT(_REPO_ROOT / "docs" / "ROADMAP-PLATFORM.yaml")
+        _REAL_LANDED_FOLLOWON_REC_IDS(_REPO_ROOT / "docs" / "plans")
+
+        assert "platform_roadmap_state.py:compute_followon_state" in log.libyaml_frames
+        assert "preflight/recs_cache.py:_landed_followon_rec_ids" in log.libyaml_frames
+        unmeasurable = [e for e in log.pure_entries if e.size is None]
+        assert not unmeasurable, f"unmeasurable pure-Python YAML parse(s) (never treated as 0): {unmeasurable}"
+        assert log.pure_bytes <= PURE_PYTHON_YAML_BUDGET, (
+            f"{log.pure_bytes} bytes of pure-Python YAML exceeds the {PURE_PYTHON_YAML_BUDGET}-byte budget -- "
+            + "; ".join(f"{e.size}B at {e.stack[:3]}" for e in log.pure_entries[:5])
         )
 
 

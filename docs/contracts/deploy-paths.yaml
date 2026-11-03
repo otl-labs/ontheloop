@@ -35,6 +35,11 @@ amendment_log:
     summary: >-
       PLAN-admin-terraform-assets-session-hook: admin_out_of_band.procedure.steps' terraform/personal
       init line names the session-start hook and the inline TF_CLI_CONFIG_FILE prefix in place of bin/setup-cloud-env.sh.
+  - date: "2026-10-30"
+    semantic_break: false
+    change_class: correction
+    summary: >-
+      PLAN-secrets-to-ssm-cutover (Decision 237 cl.6): scoped_login_provisioning writes the login as an SSM SecureString parameter; the tfvars recovery step and the TF_VAR_neon_api_key step name the SSM store.
   - date: "2026-10-29"
     semantic_break: false
     change_class: governance_note_add
@@ -325,16 +330,16 @@ admin_out_of_band:
     description: >-
       Decision 213 cl.5's narrow carve-out (amends Decision 126 and, for this verb only, Decision 81
       cl.6; Decision 230 cl.3 widens it to one login per catalog binding): an ADMIN-container agent may
-      write a closed-table login's secret value ($LOGIN is one of the four names in catalog_logins.py's
+      write a closed-table login's parameter value ($LOGIN is one of the four names in catalog_logins.py's
       LOGINS) and invoke ducklake_maintenance's provision_telemetry_login only under explicit human direction
       (never self-directed), presenting each mutation and executing it only after the human accepts.
       The password is never displayed, logged or written to disk; no step prints a host, DSN or
-      password. This is the one home for the procedure (agent-led procedures are procedure blocks in the
+      password. Until secrets-to-ssm-retire, mutation 1 writes the SSM parameter and then the same value to the old secret (so a revert stays valid); a failed second write is a STOP: re-run mutation 1 whole before mutation 2. This is the one home for the procedure (agent-led procedures are procedure blocks in the
       owning contract); ducklake_maintenance.yaml's verb entry points here. No container has TCP/5432
       egress, so the migration, the password set and the reach check all run inside the maintenance Lambda.
     procedure:
       mutation_1_write_secret: |-
-        AWS_DEFAULT_REGION=eu-west-2 LOGIN=$LOGIN bin/venv-python -c "import json,os,secrets,boto3;from src.common import ducklake_runtime as rt;from src.lambdas.ducklake_maintenance import catalog_logins as cl;o=rt.fetch_dsn(profile='agent_platform_admin');L=os.environ['LOGIN'];v={'host':o['host'],'dbname':o['dbname'],'sslmode':'require','username':L};v['pass'+'word']=secrets.token_urlsafe(32);boto3.Session(profile_name='agent_platform_admin',region_name='eu-west-2').client('secretsmanager').put_secret_value(SecretId=cl.LOGINS[L].secret_id,SecretString=json.dumps(v));print('SECRET_WRITTEN',L)"
+        AWS_DEFAULT_REGION=eu-west-2 LOGIN=$LOGIN bin/venv-python -c "import json,os,secrets,boto3;from src.common import ducklake_runtime as rt;from src.lambdas.ducklake_maintenance import catalog_logins as cl;o=rt.fetch_dsn(profile='agent_platform_admin');L=os.environ['LOGIN'];v={'host':o['host'],'dbname':o['dbname'],'sslmode':'require','username':L};v['pass'+'word']=secrets.token_urlsafe(32);S=boto3.Session(profile_name='agent_platform_admin',region_name='eu-west-2');N=cl.LOGINS[L].parameter_name;S.client('ssm').put_parameter(Name=N,Value=json.dumps(v),Type='SecureString',Overwrite=True);S.client('secretsmanager').put_secret_value(SecretId=N.removeprefix('/secret/'),SecretString=json.dumps(v));print('SECRET_WRITTEN',L)"
       mutation_2_invoke: |-
         P="${TMPDIR:-/tmp}/provision.json" && AWS_MAX_ATTEMPTS=1 aws lambda invoke --profile agent_platform_admin --region eu-west-2 --cli-read-timeout 300 --function-name agent-platform-ducklake-maintenance --cli-binary-format raw-in-base64-out --payload '{"action":"provision_telemetry_login","confirm":"'$LOGIN'"}' "$P" > /dev/null
       check_result: |-
@@ -342,7 +347,7 @@ admin_out_of_band:
       reruns: >-
         Quarterly rotation repeats mutation 1, mutation 2 and the check. The RDS swap repeats them after
         the maintenance function points at the RDS catalog, so mutation 1 copies the RDS host and dbname
-        (it reads them from the owner DSN secret). A failed check names its cause in the response
+        (it reads them from the owner DSN parameter). A failed check names its cause in the response
         (error_type / error carry only a class and SQLSTATE); a re-run is idempotent but happens only on
         the human's word. Three more triggers (Decision 230): after any catalog_reinit of ducklake_smoke,
         provision_catalog_owner(ducklake_smoke) and then every smoke login; after a DR restore, both owner verbs and then
@@ -444,8 +449,8 @@ admin_out_of_band:
       - "This loop requires local terraform init to have succeeded first."
       - "hashicorp/*-only roots (terraform/, terraform/github, terraform/bootstrap): local terraform init succeeds unconditionally, no proxy dependency."
       - "terraform/personal (third-party kislerdm/neon provider): a stock CC-web session cannot locally init it (Decision 119, direct github.com fetch 403s) -- use the CI-mediated speculative-plan + apply-the-saved-plan pipeline instead for routine changes. On an ADMIN container with the S3 filesystem_mirror synced (Decision 120 -- the session-start hook .claude/hooks/session_start_terraform_assets.sh synced it and wrote $HOME/.terraform-mirror.tfrc; prefix each terraform command with TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc), local init does succeed and this loop is available for terraform/personal."
-      - "Recover the five no-default tfvars (account_id, alerts_email, owner_email, platform_dev_external_id, platform_admin_external_id) per docs/contracts/terraform-cc-web-operations.yaml's tfvars_and_remote_state_recovery section (per-variable declaring file and recovery source, the Secrets Manager materialisation path, and the owner_email/alerts_email non-interchangeability note); never paste their values into chat, a PR, or any committed file."
-      - "terraform/personal also needs the ephemeral variable neon_api_key on every plan and every apply, including apply of a saved plan: set TF_VAR_neon_api_key from the neon-api-key secret under agent_platform_admin inside the same shell command that runs terraform; never write it to a file, a tfvars, chat, or a PR. The tfvars materialisation recovery does not supply it."
+      - "Recover the five no-default tfvars (account_id, alerts_email, owner_email, platform_dev_external_id, platform_admin_external_id) per docs/contracts/terraform-cc-web-operations.yaml's tfvars_and_remote_state_recovery section (per-variable declaring file and recovery source, the SSM materialisation path, and the owner_email/alerts_email non-interchangeability note); never paste their values into chat, a PR, or any committed file."
+      - "terraform/personal also needs the ephemeral variable neon_api_key on every plan and every apply, including apply of a saved plan: set TF_VAR_neon_api_key from the /secret/neon-api-key SSM parameter (aws ssm get-parameter --with-decryption) under agent_platform_admin inside the same shell command that runs terraform; never write it to a file, a tfvars, chat, or a PR. The tfvars materialisation recovery does not supply it."
       - >-
         SPLIT-APPLY (PLAN-dispatch-gated-apply-unlatch, Decision 183): PlatformDev, PlatformAdmin
         and their inline policies live in terraform/bootstrap (Decision 223),

@@ -1,19 +1,25 @@
 variable "github_token" {
-  description = "GitHub admin PAT. Supplied at apply time from Secrets Manager -- never committed. Required scopes: repo, admin:repo_hook, read:org."
+  description = "GitHub token, supplied at run time and never committed: an installation token of the PR-time plan App or of the apply App (rec-4355), or the classic admin PAT (repo, admin:repo_hook, read:org) as rollback until it is revoked. Ephemeral, so no saved plan or state holds it; applying a saved plan needs it set again."
   type        = string
   sensitive   = true
+  ephemeral   = true
+
+  validation {
+    condition     = var.github_token != ""
+    error_message = "github_token is empty; an empty token makes the provider fall back to the gh CLI, then anonymous access."
+  }
 }
 
 variable "github_owner" {
   description = "GitHub organisation or user that owns the repository."
   type        = string
-  default     = "benjamin-blake"
+  default     = "otl-labs"
 }
 
 variable "repository_name" {
   description = "GitHub repository name managed by this module."
   type        = string
-  default     = "theseus"
+  default     = "ontheloop"
 }
 
 variable "main_protection_ruleset_id" {
