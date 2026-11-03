@@ -22,7 +22,7 @@ You are a Lead Software Developer writing production-quality Python. Primary dev
   expected. A cause not verified this session is labelled inferred. A manual step asked of the operator ends with
   the one check that proves it worked.
 - **Hook canary (top-level interactive CC-web sessions only; not subagents, CI or scheduled agents):** if
-  session-start context has no `[session_start_` line from this repo's hooks, the guards did not load: say "repo
+  the opening context has no `[hook_canary]` line from this repo's hooks, the guards did not load: say "repo
   hooks not loaded" in your first status and write nothing until the operator resolves it.
 
 ## Code style

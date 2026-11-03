@@ -597,3 +597,27 @@ class TestEscalateLiveFetchAndPortal:
             pytest.raises(RuntimeError, match="ducklake_reader unreachable"),
         ):
             escalate(self._verdict())
+
+
+def test_pending_codification_context_names_pending_gated_change() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _caller(action: str, fields: dict[str, Any]) -> Any:
+        calls.append((action, fields))
+        return "rec-962"
+
+    marker = {"first_seen": "2026-09-13T00:00:00Z", "last_seen": "2026-09-13T00:00:00Z", "run_url": "https://x/1"}
+    gated = {"commit_sha": "pendsha", "run_url": "https://x/runs/42", "routed_at": "2026-09-13T00:00:00Z"}
+    verdict = HealthVerdict(
+        status="green",
+        red_age_hours=0.0,
+        unapplied_backlog=0,
+        severity="none",
+        pending_codification=marker,
+        pending_gated=gated,
+    )
+    escalate(verdict, portal_caller=_caller, open_recs=[])
+    context = calls[0][1]["context"]
+    assert "pendsha" in context and "https://x/runs/42" in context
+    assert "land the codifying" not in context
+    assert calls[0][1]["title"] == _TITLE_PENDING_CODIFICATION
