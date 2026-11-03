@@ -11,10 +11,11 @@ Parses docs/DECISIONS.md + docs/DECISIONS_ARCHIVE.md via the shared scripts.deci
 hand-rolled header regex, so this stays in lockstep with the ETL and the R1 ratification guard
 (Decision 105). Three sub-checks:
 
-  (a) Supersession forward-pointer (DPI-01): every textual "Supersedes/amends/partially
-      supersedes Decision N" cross-reference must leave the superseder's number on the victim's
-      block (plain "Decision {superseder}" or a "(Superseded by Decision {superseder})" header),
-      unless the edge is listed in config/decision_supersession_waivers.yaml.
+  (a) Supersession forward-pointer (DPI-01): every "supersedes/amends Decision(s) N" cross-reference
+      must leave the superseder's whole number on the victim's block ("Decision {superseder}" not
+      followed by another digit), unless the edge is listed in
+      config/decision_supersession_waivers.yaml. A waiver naming no extracted edge is an orphan and
+      FAILs (delete it); a waived edge that later becomes annotated is a stale waiver and only WARNs.
   (b) Duplicate-number detection (DPI-06 part a): the same decision number heading twice within
       one file is a FAIL; the same number appearing in both DECISIONS.md and DECISIONS_ARCHIVE.md
       is also a FAIL (PLAN-decision-renumber-at-merge; the live_archive_pair_allowlist waiver
@@ -22,12 +23,15 @@ hand-rolled header regex, so this stays in lockstep with the ETL and the R1 rati
   (c) Warehouse-ID conformance (DPI-03 extension): every "**Warehouse ID:** dec-NNN" line must
       equal dec-{header:03d} for its own block's header number.
 
-Documented, spec-accepted regex limits: the edge regex matches only the singular "Supersedes
-Decision N" form (the plural "Supersedes Decisions N, M" form is not matched), and the
-block-owner=superseder heuristic can mis-attribute a cited edge (e.g. a rationale that quotes
-another Decision's supersession sentence) -- both are handled by the waiver file, not by
-regex cleverness. A waived edge that later becomes annotated is a WARN (stale waiver), never a
-FAIL, to avoid waiver-rot build breaks.
+Edges come from the shared title_relation_continuation grammar
+(scripts.decisions_md._extract_title_relation_targets, docs/contracts/decision-entry.yaml field_grammar)
+applied to each whole block, never a hand-rolled regex (Decision 134 clause 3). Its reach: lists
+closed by ")" or ";", slash lists and repeated "Decision" tokens are enumerated; a sentence-final
+bare-number continuation ("Supersedes Decisions 1, 2.") yields only the first victim, a documented
+limit that envelope-bearing entries escape through the Decision 167 union. Participle and gerund forms
+("superseding", "amending", "superseded by") are not edges: the grammar anchors on the whole words
+"amends" and "supersedes". The block-owner=superseder heuristic can mis-attribute a cited edge (e.g. a
+rationale quoting another Decision's supersession sentence); the waiver file handles that.
 """
 
 from __future__ import annotations
@@ -39,26 +43,25 @@ from typing import Optional
 import yaml
 
 from scripts.checks import _common, registry
-from scripts.decisions_md import _iter_decision_sections, extract_entry_envelope
+from scripts.decisions_md import _extract_title_relation_targets, _iter_decision_sections, extract_entry_envelope
 
 _LIVE_REL_PATH = "docs/DECISIONS.md"
 _ARCHIVE_REL_PATH = "docs/DECISIONS_ARCHIVE.md"
 _WAIVERS_REL_PATH = "config/decision_supersession_waivers.yaml"
 
-_EDGE_RE = re.compile(r"(?:Supersedes|supersedes|amends|Amends|partially supersedes)\s+Decision\s+(\d+)")
-_HEADER_SUPERSEDED_RE = re.compile(r"\(Superseded by Decision (\d+)\)")
+_RELATION_WORDS = ("amends", "supersedes")
 _WAREHOUSE_ID_RE = re.compile(r"\*\*Warehouse ID:\*\*\s*(\S+)")
 
 _GUARD_NAME = "Decision supersession-annotation guard"
 
 
 def extract_supersession_edges(root: Path) -> list[tuple[int, int, str]]:
-    """Pure extractor: (superseder, victim, file) for every textual Supersedes/amends/partially
-    supersedes cross-reference in docs/DECISIONS.md + docs/DECISIONS_ARCHIVE.md, UNIONED with
-    every envelope-borne amends/supersedes edge (PLAN-decision-entry-flow-governance, Decision
-    167) -- an envelope-bearing entry that declares `amends: [N]` or `supersedes: [N]` must not
-    silently escape this guard just because it carries no textual "amends Decision N" prose;
-    _EDGE_RE matches only that textual form, which a typed envelope no longer emits.
+    """Pure extractor: (superseder, victim, file) for every textual supersedes/amends
+    cross-reference in docs/DECISIONS.md + docs/DECISIONS_ARCHIVE.md (the shared
+    title_relation_continuation grammar over each whole block), UNIONED with every envelope-borne
+    amends/supersedes edge (PLAN-decision-entry-flow-governance, Decision 167) -- an
+    envelope-bearing entry that declares `amends: [N]` or `supersedes: [N]` must not silently
+    escape this guard just because it carries no textual "amends Decision N" prose.
 
     The containing block's own header number is the superseder; the referenced number is the
     victim. A self-reference (victim == superseder) is impossible by construction and skipped
@@ -77,11 +80,10 @@ def extract_supersession_edges(root: Path) -> list[tuple[int, int, str]]:
         content = path.read_text(encoding="utf-8", errors="replace")
         for heading_match, block in _iter_decision_sections(content):
             superseder = int(heading_match.group(1))
-            for edge_match in _EDGE_RE.finditer(block):
-                victim = int(edge_match.group(1))
-                if victim == superseder:
-                    continue
-                edges.add((superseder, victim, rel_path))
+            for word in _RELATION_WORDS:
+                for victim in _extract_title_relation_targets(block, word):
+                    if victim != superseder:
+                        edges.add((superseder, victim, rel_path))
             envelope = extract_entry_envelope(block)
             if envelope:
                 for victim in list(envelope.get("amends") or []) + list(envelope.get("supersedes") or []):
@@ -116,10 +118,7 @@ def _heading_count(root: Path) -> int:
 
 
 def _is_annotated(superseder: int, victim_block: str) -> bool:
-    if f"Decision {superseder}" in victim_block:
-        return True
-    header_match = _HEADER_SUPERSEDED_RE.search(victim_block)
-    return bool(header_match and int(header_match.group(1)) == superseder)
+    return re.search(rf"\bDecision {superseder}(?!\d)", victim_block) is not None
 
 
 def _load_waivers(root: Path, failed: list[str]) -> Optional[set[tuple[int, int]]]:
@@ -141,7 +140,16 @@ def _load_waivers(root: Path, failed: list[str]) -> Optional[set[tuple[int, int]
             "(a live/archive duplicate number is a FAIL with no waiver, Decision 163)"
         )
         return None
-    return {(int(w["superseder"]), int(w["victim"])) for w in (data.get("waivers") or [])}
+    waived: set[tuple[int, int]] = set()
+    for index, entry in enumerate(data.get("waivers") or []):
+        try:
+            waived.add((int(entry["superseder"]), int(entry["victim"])))
+        except (KeyError, TypeError, ValueError):
+            failed.append(
+                f"{_GUARD_NAME}: malformed waiver entry #{index} in {_WAIVERS_REL_PATH} (needs integer superseder and victim)"
+            )
+            return None
+    return waived
 
 
 def _check_supersession_annotations(root: Path, waived: set[tuple[int, int]], issues: list[str]) -> tuple[bool, int]:
@@ -164,6 +172,12 @@ def _check_supersession_annotations(root: Path, waived: set[tuple[int, int]], is
         issues.append(
             f"  FAIL: Decision {superseder} supersedes/amends Decision {victim} ({fname}) with no "
             f"forward pointer on the victim's block, and no waiver in {_WAIVERS_REL_PATH}."
+        )
+        any_fail = True
+    extracted = {(superseder, victim) for superseder, victim, _ in edges}
+    for superseder, victim in sorted(waived - extracted):
+        issues.append(
+            f"  FAIL: orphan waiver {superseder}->{victim} in {_WAIVERS_REL_PATH} names no extracted edge -- delete it."
         )
         any_fail = True
     return any_fail, len(edges)
