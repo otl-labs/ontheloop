@@ -45,9 +45,10 @@ scope:
       string, zero or negative value is malformed), runs `git fetch --no-tags --no-write-fetch-head origin
       +refs/heads/main:refs/remotes/origin/main +refs/pull/<N>/head:refs/merge-overlap/pr/<N>` into those explicit
       destination refs (never FETCH_HEAD, whose first line is main), retries once with --deepen=500 when merge-base
-      does not resolve in a shallow clone, then calls merge_overlap.overlap("refs/merge-overlap/pr/<N>",
-      "refs/remotes/origin/main"). When tool_input.expectedHeadSha is present and differs from the fetched PR head, it
-      refuses (exit 2) naming both SHAs. Every PR is judged against main, whatever its base (only main-based PRs merge
+      does not resolve in a shallow clone, then calls merge_overlap.overlap(<that checkout root>, "refs/merge-overlap/pr/<N>",
+      "refs/remotes/origin/main"). When tool_input.expectedHeadSha is present it is resolved with `git rev-parse --verify
+      <sha>^{commit}` (so a short or uppercase SHA compares as the full one); if it differs from the fetched PR head, or
+      does not resolve, it refuses (exit 2) naming both values. Every PR is judged against main, whatever its base (only main-based PRs merge
       here today). CLEAR -> exit
       0, no output. OVERLAP -> exit 2, stderr "merge-gate: overlap: OVERLAP: main changed <files> since this PR's base
       <sha12> (<k> commits behind). Update the branch (mcp__github__update_pull_request_branch), `git pull --ff-only`
@@ -59,7 +60,9 @@ scope:
     action: Create
     purpose: >-
       Fail-closed shim in the handoff_evidence_gate.sh pattern: a payload not naming a merge tool exits 0 without
-      starting Python; otherwise it runs the adapter isolated (`$ROOT/bin/venv-python -I`, so a planted stdlib name in
+      starting Python; otherwise it first checks that $ROOT/.claude/hooks/merge_gate.py exists (else exit 2, "merge-gate
+      unavailable (missing adapter)", since bin/venv-python's own missing-script guard is skipped once -I is its
+      first argument), then runs the adapter isolated (`$ROOT/bin/venv-python -I`, so a planted stdlib name in
       .claude/hooks cannot load) under `timeout -k 5 45` and maps
       every exit other than 0 or 2 (crash, timeout, missing interpreter) to exit 2 with "merge-gate
       unavailable (<rc>)". No GITHUB_ACTIONS carve-out.
@@ -74,10 +77,12 @@ scope:
     purpose: >-
       test_settings_registers_gate_on_push_and_remote_write_tools (graduated, shard handoff-gate-registered) assumes
       the handoff group is the only PreToolUse group after the first (len == 1), so appending the merge group breaks
-      it. Select the handoff group by its handoff_evidence_gate.sh command instead (exactly one group names it), keep
-      the node id and every existing assertion on that group; the merge group's presence is asserted by
-      tests/hooks/test_merge_gate.py's registration node. Growth-safe (tests/CLAUDE.md Test-count coupling):
-      a later PreToolUse group no longer breaks it; declared in weakening_dispositions.
+      it. Pinned edit shape: change only the list comprehension at line 420 so gate_entries selects the groups whose
+      hooks name handoff_evidence_gate.sh; every assert line, line 421's `assert len(gate_entries) == 1` included,
+      stays textually identical, and the node id is unchanged. Exactly one handoff group is still asserted, a later
+      PreToolUse group no longer breaks it (tests/CLAUDE.md Test-count coupling), and find_candidates reports no
+      weakening candidate for this shape (measured in critique round 7). The merge group's presence is asserted in
+      tests/hooks/test_merge_gate_shim.py.
   - file: .claude/hooks/hooks.json
     action: Modify
     purpose: >-
@@ -155,7 +160,8 @@ scope:
     action: Create
     purpose: >-
       Split from tests/hooks/test_merge_gate.py by default (decompose before 500 SLOC): the shim's fail-closed nodes
-      (crash, missing interpreter, timeout kill, pinned timeout bound, GITHUB_ACTIONS still gated, planted stdlib name)
+      (crash, missing interpreter, missing adapter denying "merge-gate unavailable (missing adapter)", timeout kill,
+      pinned timeout bound, GITHUB_ACTIONS still gated, planted stdlib name)
       and the registration nodes (settings.json and hooks.json carry the exact matcher and "timeout": 60). Shares
       tests/fixtures/merge_overlap_repos.py; fixture builds module-scoped to protect the --pre budget.
   - file: tests/checks/prose/test_s1_concurrent_merge_premerge.py
@@ -403,7 +409,7 @@ constraints:
   - terraform/github is not touched; strict_required_status_checks_policy stays false and admin bypass stays (Decision 83); operator GitHub-UI merges are unaffected.
   - Never hand-edit .claude/hooks/hooks.json; regenerate it with plugin_hooks.py render.
   - The gate fails closed and has no agent override (Decision 203 cl.3 pattern); a false block is fixed in the checker.
-  - The gate reads git only, never the GitHub API, and writes nothing but fetched refs; merge_overlap.py never names a PR number (Decision 234).
+  - "The overlap predicate reads git only, never the GitHub API, and writes nothing but its fetched refs; merge_overlap.py never names a PR number (Decision 234). Later predicates added to the same seam (rec-4080's check state) bring their own read path under their own plans."
   - "The Decision text and the Decision 83 annotation are operator-approved; place them exactly (sidecar), never re-word."
   - "git-ops.yaml records the mechanism only; the authority, deferral and revisit conditions stay in the Decision."
   - "git-ops.yaml is NEAR_CAP (485 of 500 effective lines at planning base 9593de0b): measure headroom on main at build; compact, never raise."
@@ -424,6 +430,9 @@ context:
   - "The revised handoff registration node selects the handoff group by its command (growth-safe), so unbuilt PLAN-protected-action-gate's own PreToolUse append no longer breaks it; whichever of the two builds second re-renders hooks.json and also checks the other gate's position-pinned registration node (PLAN-protected-action-gate's asserts its group comes after every existing PreToolUse group), widening that plan's scope or this one's by amendment if it breaks."
   - "ports.yaml: the adapter's repo-structure assumptions get SA-04 (Decision 212; SA-02 already records the turn-capture hooks' origin/main assumption, so hook runtimes are in remit); the forge-neutral core takes refs only."
   - "Graduated shards naming tests/hooks/test_handoff_evidence_gate.py are kept unchanged: handoff-gate-registered (its node id and assertions on the handoff group survive the selector change) and handoff-gate-shim-fails-closed (its node is not edited)."
+  - "Re-measure the unbuilt-plan overlaps at build after the rebase (plan_obligations): main 16f53d8d already adds PLAN-ratify-cd40-agent-turn-capture, which scopes docs/DECISIONS.md with blocks anchored on Decision 199, so neither sidecar block collides."
+  - "Inferred, not verified: the remedy's live path (update_pull_request_branch, pr-validate on the new head, the CI-green wake, a CLEAR merge) and whether the harness Stop hook's committer-email check fires on the GitHub-committed update merge after git pull --ff-only. The first real OVERLAP is the live proof; record it in the build report or a rec."
+  - "Former owner/name merges stay owned by rec-2827 (no alias list in the adapter); its post-merge context pointer says so."
   - "rec-4451 (merge-time affected-set re-check) is the natural extension of this seam: its predicate can be added to merge_overlap.py behind the same hook. Not a followon_rec (it is not a half this plan defers); its context gets a pointer after merge."
   - "red_overlap at plan write (9593de0b): verdict clear -- rec-4869 rule repairs_this_red (age 4.39 h, past its 4 h SLO, so only plans bundling a red are clear), rec-4872 rule track_a_in_slo."
   - "Another red open at planning: rec-4872 (test_defect, Track A, flaky process-group test); not this plan's."
@@ -442,6 +451,7 @@ gate_rounds:
   - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 8}
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 7}
   - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 7}
+  - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 10}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -455,7 +465,7 @@ execution_steps:
   - ".claude/settings.json: append the PreToolUse group; then run bin/venv-python .claude/hooks/plugin_hooks.py render."
   - "docs/DECISIONS.md: place sidecar blocks decision-entry and decision-83-annotation exactly, filling {{N}} with the next free number on main and {{DATE}} with the build date; regenerate the decisions index with its generator."
   - "docs/contracts/git-ops.yaml: measure headroom on main first (bin/venv-python -m scripts.roadmap.plan_obligations --plan docs/plans/PLAN-merge-overlap-gate.yaml). Relief when the net add exceeds it (contracts class valves, config/structural_size_budgets.yaml): compact older amendment_log rows per the contract's own compaction convention, or carry the new text on fewer, longer physical lines (the contracts class allows up to 2,000 characters a line, Decision 166 cl.3); every residual in the scope row stays declared in git-ops.yaml, and nothing moves to the Decision; never a budget raise. Then edit per scope; bump contract_version and append the amendment_log row."
-  - "Record the plan's weakening_dispositions as declared (validate_weakening_dispositions); if validate_weakening_candidates lists any other candidate, or does not list the declared one, stop and send a plan-defect report rather than adding or dropping a disposition."
+  - "The plan declares no weakening disposition: if validate_weakening_candidates lists any candidate (the pinned test_handoff_evidence_gate.py edit should produce none), stop and send a plan-defect report rather than adding a disposition."
   - "Commit locally (no push) before VP step 9: --verify-head attests only a full run that started on a clean, committed tree."
   - "Execute Verification Plan steps 1-5 and 7-9; ask the coordinator or operator for step 6 before merge; loop until pass; on an unrecoverable failure stop and send a plan-defect report (Decision 55)."
   - "The implementation commit message carries 'Resolves: rec-4869, rec-4866', and merge_pull_request passes an explicit commit_message carrying it (git-ops.yaml resolves_trailer). The build PR merges only with the operator's OK on the final diff (hooks are always-ask). If the new gate refuses its own merge, update the branch, `git pull --ff-only` the updated head, re-run premerge on it, wait for the CI-green wake, then merge."
@@ -464,11 +474,10 @@ execution_steps:
   - "Closure evidence, recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state (scripts.session.github_readiness; unknown is unproven, never ready); parent validator evidence (VP 9 full tier plus bin/venv-python -m scripts.checks.validation_result --verify-head for the pushed HEAD); structured postflight evidence (write the scripts.session.postflight_evidence.CATEGORIES JSON in the scratchpad, then bin/venv-python -m scripts.session.postflight --evidence <file>); the real outcome - push, build PR, CI green by event-driven wake (never polled), merge SHA."
   - "Report: what was implemented, verification results, the four closure-evidence facts, merge SHA, steps 6 and 10-12 results."
 work_areas: []
-weakening_dispositions:
-  - candidate: "[assertion-changed] tests/hooks/test_handoff_evidence_gate.py::test_settings_registers_gate_on_push_and_remote_write_tools"
-    disposition: growth-safe-pin
-    cite: "tests/hooks/test_handoff_evidence_gate.py::test_settings_registers_gate_on_push_and_remote_write_tools"
 rollback: >-
-  Revert the build PR (or remove the PreToolUse group and re-render hooks.json); merges return to today's ungated flow.
+  Revert the hook, settings.json, hooks.json, git-ops.yaml, ports.yaml and test changes of the build PR (not
+  docs/DECISIONS.md), or just remove the PreToolUse group and re-render hooks.json; merges return to today's ungated
+  flow. The rollback PR's own merge passes through the live gate: if the gate is wedging, the operator's GitHub-UI
+  merge is the valve.
   Project threads keep the installed plugin's hooks.json until the operator updates the plugin again; the Decision
   stays and gains a dated annotation recording the rollback.
