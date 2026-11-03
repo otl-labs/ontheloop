@@ -7,7 +7,7 @@ implement-leg plan resolved via ``_common.resolve_declared_plans`` (content-keye
 path in the diff must be a member of the resolved plan(s)' declared ``scope[].file`` union, or a
 path derived from a ``docs/contracts/implement-scope-boundary.yaml`` ``sanction_rows`` entry whose
 trigger fired for that plan. It also flags a prohibited edit to a resolved plan's own scope-
-governing fields (``scope``, ``acceptance_criteria``, ``verification_plan[].command``/``.expected``)
+governing fields (``scope``, ``acceptance_criteria``, ``verification_plan[].command``/``.expected``/``.expected_literals``)
 -- the CONTENT invariant's plan-field-edit and VP-step-substitution enforcement arms.
 
 Legs (mirrors validate_vp_replay's structure):
@@ -54,6 +54,7 @@ import yaml
 
 from scripts.checks import _common, _marker_guard, registry
 from scripts.preflight.prose_context import _resolve_s1_root_load_set
+from scripts.roadmap.plan_document import PlanDocument
 
 CONTRACT_REL_PATH = "docs/contracts/implement-scope-boundary.yaml"
 
@@ -213,16 +214,29 @@ def _row_derived_paths(
 
 def _check_prohibited_field_edits(row: dict, plan_rel: str, doc, root: Path, base: str, failed: list[str]) -> None:
     """`doc` is the already-loaded (working-tree) PlanDocument -- reused via model_dump() rather
-    than re-reading and re-parsing the same file a second time."""
+    than re-reading and re-parsing the same file a second time. The base-ref plan is normalised
+    through the same PlanDocument model, so both sides compare in one canonical form (an explicit
+    empty `new_imports` or a quoted VP step id is not an edit). A base that parses but fails
+    PlanDocument validation is a loud finding: the arm cannot prove no prohibited edit."""
     prohibited = row.get("prohibited_field_edits") or []
     if not prohibited:
         return
     base_content = _plan_content_at_ref(plan_rel, root, base)
     if base_content is None:
         return  # net-new plan (absent at base) -- nothing to diff a prohibited edit against
+    disposition = row.get("disposition_on_violation", _STOP_DISPOSITION)
+    try:
+        base_content = PlanDocument.model_validate(base_content).model_dump()
+    except Exception as exc:  # noqa: BLE001 -- a malformed base plan is a reported finding, never a raise
+        failed.append(
+            f"scope-boundary {plan_rel}: base plan at {base} fails PlanDocument validation, so the prohibited-field arm "
+            f"cannot prove no prohibited edit: {exc}. Escape: land a schema-conforming amendment of this plan on main "
+            "first (the contract's amendment_procedure); a plan whose own build changes PlanDocument so its unflipped "
+            f"base no longer validates must split the schema change into its own earlier PR. {disposition}"
+        )
+        return
     working_content = doc.model_dump()
 
-    disposition = row.get("disposition_on_violation", _STOP_DISPOSITION)
     for field in prohibited:
         if "[]." in field:
             top, sub = field.split("[].", 1)

@@ -1,18 +1,26 @@
 # On The Loop
 
-This file is a curated projection of `CLAUDE.md`, `docs/ROADMAP-PLATFORM.yaml` and `docs/DECISIONS.md` - the canonical sources of truth for this repository. Where this file conflicts with those sources, the canonical sources win. For agent consumption, load those files directly.
+This file is a curated projection of `CLAUDE.md`, `docs/contracts/north-star.yaml`, `docs/ROADMAP-PLATFORM.yaml` and `docs/DECISIONS.md` - the canonical sources of truth for this repository. Where this file conflicts with those sources, the canonical sources win. For agent consumption, load those files directly.
 
 ## North Star
 
-- **NS.1 - Storage is durable; compute is interchangeable.** S3 + open table format at every scale from GB to PB (DuckLake for the operational data plane per Decision 78). Engines are swappable per workload; data is not migrated to swap engines.
-- **NS.2 - Account ownership reflects IP ownership.** Personal AWS account, not shared work account. AUP, IP, and business-continuity reasons; cost is a tiebreaker.
-- **NS.3 - Compute lives where it economically belongs.** Hybrid by design. Cloud for orchestration and state; local rig for CPU-bound batch where home hardware otherwise idles. (cloud tier; the free tier runs orchestration and state locally, Decision 184 clause 2)
-- **NS.4 - The repo is for agents.** Documentation, configuration, and tooling are optimised for agent consumption. Narrative prose is a side effect, not an output.
-- **NS.5 - Self-describing typed tools over HTTPS, schema-as-code.** Agent surface is verbs (log, update, query, describe) exposed via Lambda Function URLs with AWS_IAM auth. Schema is Pydantic; YAML is generated where needed. (cloud-tier adapter; the free tier reaches the same verbs in-process, Decision 184 clause 2)
+<!-- north-star:begin generated from docs/contracts/north-star.yaml by validate_north_star; edit the contract, never this block -->
+The mission, and each entry's why, failure signal and binding scope, live in `docs/contracts/north-star.yaml`.
+
+- **NS.1** - Every substitutable boundary is a port; the vendor is an adapter; table data and blobs never have to be migrated to swap one.
+- **NS.2** - Source-available now, open source on proof.
+- **NS.3** - Every adapter runs where it economically belongs.
+- **NS.4** - The repo is for agents.
+- **NS.5** - The agent surface is named, typed, self-describing verbs.
+- **NS.6** - Improvement is proven, never asserted.
+- **NS.7** - The core is adopter-owned, and scale is never blocked.
+- **NS.8** - Autonomy is earned, never granted.
+- **NS.9** - Humans hold approval authority outside the engine.
+<!-- north-star:end -->
 
 ## What This Repo Is
 
-This repository is the upstream source of On The Loop, not of any adopter product. It provides the control plane, automation infrastructure, and governance framework on which adopter products are built. This repository's roadmap - tier items, candidate decisions, North Star - lives in `docs/ROADMAP-PLATFORM.yaml`.
+This repository is the upstream source of On The Loop, not of any adopter product. It provides the control plane, automation infrastructure, and governance framework on which adopter products are built. This repository's roadmap - tier items and candidate decisions - lives in `docs/ROADMAP-PLATFORM.yaml`. The north stars live in `docs/contracts/north-star.yaml`.
 
 Tenancy is Decision 200's (`tenant_id` is the customer boundary, `project_id` repository identity); the planes are Decision 209 clause 2's (a multi-tenant, metadata-only control plane over customer-owned data planes).
 
@@ -76,7 +84,8 @@ Decided, not yet built; the build items are `deferred_post_mvp`, and the Decisio
 
 - [CLAUDE.md](CLAUDE.md) - universal agent rules and operational constraints
 - [AGENTS.md](AGENTS.md) - role, environment, code style, safety, and branching rules
-- [docs/ROADMAP-PLATFORM.yaml](docs/ROADMAP-PLATFORM.yaml) - tier items, candidate decisions, North Star, cost projection
+- [docs/contracts/north-star.yaml](docs/contracts/north-star.yaml) - the mission and the north stars, each with its why, failure signal and binding scope
+- [docs/ROADMAP-PLATFORM.yaml](docs/ROADMAP-PLATFORM.yaml) - tier items, candidate decisions, cost projection
 - [docs/DECISIONS.md](docs/DECISIONS.md) - ratified decisions, the rationale behind the Decision numbers cited here
 - [SECURITY.md](SECURITY.md) - vulnerability reporting
 - [EVALUATION-PROMPTS.yaml](EVALUATION-PROMPTS.yaml) - evaluator guided-tour index: 12 architecture/governance questions with answer-loci into canonical sources
