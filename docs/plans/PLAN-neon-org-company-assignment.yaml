@@ -66,6 +66,7 @@ bundled_recommendations:
 - rec-4543
 followon_recs:
 - rec-4865
+- rec-4867
 infrastructure_dependencies:
 - >-
   Infrastructure Dependencies table (terraform/personal in scope; pipeline mechanics are environment-taxonomy.yaml's,
@@ -417,8 +418,8 @@ verification_plan:
   action: >-
     K1 and K2 verified: /secret/neon-api-key moved to the next version, the new key is project-scoped (it cannot read
     the user endpoints, it reads the catalog, and the organisation's key list shows exactly one key, scoped to the
-    catalog), and the catalog's organisation still equals the tfvars value. Writes key_version_new and t_k2 to the
-    state file.
+    catalog), the parameter kept its SecureString, Standard, aws/ssm shape, and the catalog's organisation still equals
+    the tfvars value. Writes key_version_new and t_k2 to the state file.
   command: |-
     bin/venv-python - <<'PY'
     import datetime as dt, json, re, urllib.request, urllib.error, boto3
@@ -431,6 +432,8 @@ verification_plan:
             with urllib.request.urlopen(urllib.request.Request('https://console.neon.tech/api/v2' + p, headers={'Authorization': 'Bearer ' + k, 'Accept': 'application/json'}), timeout=30) as r: return r.status, json.loads(r.read() or b'{}')
         except urllib.error.HTTPError as e: return e.code, None
     ver, new = key('/secret/neon-api-key'); _, old = key(f"/secret/neon-api-key:{s['key_version_before']}")
+    d = ssm.describe_parameters(ParameterFilters=[{'Key': 'Name', 'Values': ['/secret/neon-api-key']}])['Parameters'][0]
+    assert (d['Type'], d['Tier'], d.get('KeyId')) == ('SecureString', 'Standard', 'alias/aws/ssm'), 'parameter shape changed'
     st = json.loads(B.client('s3').get_object(Bucket='agent-platform-data-lake', Key='tfstate/personal/sandbox/terraform.tfstate')['Body'].read())
     a = [r for r in st['resources'] if r['type'] == 'neon_project' and r['name'] == 'ducklake_catalog'][0]['instances'][0]['attributes']
     tv = [l.split('=', 1)[1].strip().strip('"') for l in ssm.get_parameter(Name='/secret/agent-platform-terraform-personal-tfvars', WithDecryption=True)['Parameter']['Value'].splitlines() if re.match(r'\s*neon_org_id\s*=', l)]
@@ -523,7 +526,7 @@ verification_plan:
   phase: post-deploy
   action: >-
     Operator-deployment proof P1, after the first full 6-hourly maintenance cycle that starts after t_r2: the maintenance and
-    maintenance-smoke Lambdas were invoked with zero errors since t_r2, the latest ci.yml run on main succeeded, the
+    maintenance-smoke Lambdas were invoked with zero errors since t_r2, the latest ci.yml run on main created after t_r2 succeeded, the
     tfvars value still equals the live catalog organisation (read with the new key), and EVIDENCE.md carries rows T1,
     B1, C1-C4, K1-K4, R1 and R2 as pass and passes the redaction pattern.
   command: |-
@@ -538,7 +541,8 @@ verification_plan:
     m = lambda f, n: sum(p['Sum'] for p in cw.get_metric_statistics(Namespace='AWS/Lambda', MetricName=n, Dimensions=[{'Name': 'FunctionName', 'Value': f}], StartTime=t, EndTime=dt.datetime.now(dt.timezone.utc), Period=3600, Statistics=['Sum'])['Datapoints'])
     lam = {f: (m(f, 'Invocations'), m(f, 'Errors')) for f in ('agent-platform-ducklake-maintenance', 'agent-platform-ducklake-maintenance-smoke')}
     assert all(i > 0 and e == 0 for i, e in lam.values()), lam
-    ci = json.load(urllib.request.urlopen('https://api.github.com/repos/otl-labs/ontheloop/actions/workflows/ci.yml/runs?branch=main&status=completed&per_page=1', timeout=30))['workflow_runs'][0]['conclusion']
+    wr = json.load(urllib.request.urlopen('https://api.github.com/repos/otl-labs/ontheloop/actions/workflows/ci.yml/runs?branch=main&status=completed&per_page=1&created=%3E' + s['t_r2'], timeout=30))['workflow_runs']
+    ci = wr[0]['conclusion'] if wr else 'no completed ci.yml run on main after t_r2'
     ssm = B.client('ssm'); k = ssm.get_parameter(Name='/secret/neon-api-key', WithDecryption=True)['Parameter']['Value'].strip(); k = json.loads(k).get('api_key', k) if k.startswith('{') else k
     a = [r for r in json.loads(B.client('s3').get_object(Bucket='agent-platform-data-lake', Key='tfstate/personal/sandbox/terraform.tfstate')['Body'].read())['resources'] if r['type'] == 'neon_project' and r['name'] == 'ducklake_catalog'][0]['instances'][0]['attributes']
     live = json.loads(urllib.request.urlopen(urllib.request.Request('https://console.neon.tech/api/v2/projects/' + a['id'], headers={'Authorization': 'Bearer ' + k}), timeout=30).read())['project']['org_id']
@@ -750,7 +754,8 @@ context:
 - >-
   K1-K4 complete PLAN-neon-key-out-of-pr-plans VP 15 (no other thread mints a Neon key meanwhile). No prevent_destroy
   on neon_role.ducklake_ops (re-creatable, rotation route unspecified, cascade unverified; Decision 77 blocks a neon_*
-  replace). neon_org_id is unmasked in Actions logs; ignore_changes keeps it out of every diff.
+  replace). neon_org_id is unmasked in Actions logs: ignore_changes keeps it out of every diff, so only a re-create of
+  the catalog would print it; accepted, as the value is already in git history (Decision 224 NOTE).
 - >-
   Overlap: secrets-to-ssm-retire, neon-key-out-of-pr-plans, trusted-plan-cutover, retire-github-pat-secret,
   protected-action-gate, t2-47-c2-pending-gated-ordering and telemetry-content-reader-lock touch the same files, never
@@ -861,3 +866,4 @@ gate_rounds:
 - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
 - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 10}
 - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 9}
+- {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 4}
