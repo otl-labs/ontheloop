@@ -483,8 +483,8 @@ def _differential_skip_reason(row: dict, live: CheckResult, repo_root: Path) -> 
     return f"skipped -- node in importorskip-guarded fast-tier-excluded file ({found})"
 
 
-def run_differential(row: dict, repo_root: Path | None = None) -> DifferentialOutcome:
-    """Kernel-entry differential (VF-06 c2): origin/main must FAIL, HEAD/live must PASS."""
+def run_differential(row: dict, repo_root: Path | None = None, base_ref: str = "origin/main") -> DifferentialOutcome:
+    """Kernel-entry differential (VF-06 c2): `base_ref` (default origin/main) must FAIL, HEAD/live must PASS."""
     root = Path(repo_root) if repo_root is not None else ROOT
     head_check = materialize_check_in_tree(row, root)
     live = head_check.run()
@@ -496,10 +496,11 @@ def run_differential(row: dict, repo_root: Path | None = None) -> DifferentialOu
             admitted=False, reason=f"not admitted -- check does not pass on HEAD: {live.message or live.actual}"
         )
 
-    revert_runner = make_worktree_revert_runner(row, ref="origin/main", repo_root=root)
+    revert_runner = make_worktree_revert_runner(row, ref=base_ref, repo_root=root)
     if not is_admitted(head_check, revert_runner):
         return DifferentialOutcome(admitted=False, reason="not admitted -- revert did not produce FAIL (tautological)")
-    return DifferentialOutcome(admitted=True, reason="admitted -- fails on origin/main, passes on HEAD")
+    resolved = _run_git(["rev-parse", "--verify", "-q", f"{base_ref}^{{commit}}"], root).stdout.strip() or base_ref
+    return DifferentialOutcome(admitted=True, reason=f"admitted -- fails on {resolved}, passes on HEAD")
 
 
 # ---------------------------------------------------------------------------
