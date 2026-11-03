@@ -4,7 +4,8 @@ For every plan whose implementation_declared flips in this diff:
   (T) outside push context, when the plan bundles recs and the declaration is COMMITTED, the union of
       the Resolves trailers over the branch commits (base..HEAD) must equal the bundled set exactly --
       a trailer only in the PR body never reaches the squash commit. A declaration present only in the
-      working tree prints PENDING (the Commit Flow's --pre runs before the commit).
+      working tree prints PENDING (the Commit Flow's --pre runs before the commit). A trailer-free closure-only
+      branch (late_closure_route resolves the plan's implementation merge X) prints LATE-CLOSURE and is satisfied.
   (A) the approved-text sidecar docs/plans/approved/<slug>.yaml is read AT THE BASE: a build may not add,
       edit or delete it, and when present every bound file must carry exactly the approved words.
 """
@@ -18,6 +19,7 @@ from typing import Any
 import yaml
 
 from scripts.checks import _common, registry
+from scripts.checks.verification import _implementation_merge
 from scripts.rec_trailer import parse_resolves_trailer
 from scripts.roadmap import approved_text
 
@@ -65,6 +67,14 @@ def _check_trailer(plan_rel: str, bundled: list[str], root: Path, base: str) -> 
     found = _committed_trailer_union(root, base)
     if set(found) == set(bundled):
         return None
+    if not found:
+        try:
+            merge = _implementation_merge.late_closure_route(plan_rel, root, base, "HEAD")
+        except _implementation_merge.LateClosureError as exc:
+            return f"{plan_rel}: late closure: {exc}"
+        if merge is not None:
+            print(f"  LATE-CLOSURE {plan_rel}: bundled recs {bundled} closed by implementation merge {merge.sha}")
+            return None
     remedies = "; ".join(trailer_remedy(bundled, found))
     return f"{plan_rel}: branch-commit Resolves trailers {found} != bundled_recommendations {bundled}; {remedies}"
 
