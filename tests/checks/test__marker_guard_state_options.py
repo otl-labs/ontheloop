@@ -160,7 +160,7 @@ class TestBoundaryMatch:
 def _flat(text: str) -> dict[str, _marker_guard.MarkerEntry]:
     out: dict[str, _marker_guard.MarkerEntry] = {}
     for key, entry in _extract(text).items():
-        out[key] = _marker_guard.MarkerEntry(float(entry.state), entry.marker, entry.reason)
+        out[key] = _marker_guard.MarkerEntry(float(str(entry.state)), entry.marker, entry.reason)
     return out
 
 

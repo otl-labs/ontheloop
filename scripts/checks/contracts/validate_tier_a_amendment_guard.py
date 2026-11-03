@@ -124,8 +124,8 @@ def _load(text: str) -> tuple[dict[str, Any], yaml.MappingNode]:
 def _scan(text: str, root: yaml.MappingNode) -> _Scan:
     lines = text.split("\n")
     starts = [0]
-    for match in re.finditer("\n", text):
-        starts.append(match.end())
+    for newline in re.finditer("\n", text):
+        starts.append(newline.end())
     ranges: list[tuple[int, int]] = []
     _scalar_ranges(root, starts, ranges)
     cols = _comment_columns(lines, starts, ranges)

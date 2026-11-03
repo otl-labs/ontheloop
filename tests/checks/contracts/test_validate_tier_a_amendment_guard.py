@@ -126,9 +126,12 @@ def test_authorization_shaped_binds_marker_guard_at_check_name_level(
 ) -> None:
     calls: list[str] = []
     real = _marker_guard.check_state_diff
-    monkeypatch.setattr(
-        _marker_guard, "check_state_diff", lambda spec, base_reader=None: calls.append(spec.token) or real(spec, base_reader)
-    )
+
+    def spy(spec: _marker_guard.RegistrySpec, base_reader: Any = None) -> list[str]:
+        calls.append(spec.token)
+        return real(spec, base_reader)
+
+    monkeypatch.setattr(_marker_guard, "check_state_diff", spy)
     _change(repo)
     _passes(repo, capsys)
     assert calls == [guard.TOKEN]
@@ -415,8 +418,16 @@ def test_unchanged_file_runs_only_the_every_run_legs(
     repo: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seen: list[str] = []
-    monkeypatch.setattr(_marker_guard, "check_state_diff", lambda *a, **k: seen.append("diff") or [])
-    monkeypatch.setattr(guard, "narrowing_violations", lambda *a: seen.append("narrowing") or [])
+
+    def spy(name: str) -> Any:
+        def call(*_a: object, **_k: object) -> list[str]:
+            seen.append(name)
+            return []
+
+        return call
+
+    monkeypatch.setattr(_marker_guard, "check_state_diff", spy("diff"))
+    monkeypatch.setattr(guard, "narrowing_violations", spy("narrowing"))
     _passes(repo, capsys)
     assert seen == ["narrowing"]
 
