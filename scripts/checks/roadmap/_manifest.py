@@ -164,6 +164,8 @@ ENTRIES: tuple[Entry, ...] = (
             "docs/contracts/plan-obligations.yaml",
             "scripts/roadmap/**",
             "scripts/checks/roadmap/**",
+            "scripts/checks/decisions/envelope_rules.py",
+            "scripts/north_star_models.py",
             "scripts/checks/_common.py",
             "scripts/checks/registry.py",
             "scripts/checks/_marker_guard.py",

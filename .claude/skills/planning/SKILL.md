@@ -222,10 +222,10 @@ batch-wave clause below, a rec/tier_item note, or a contract governance note).
 
 Three property tests gate the draft -- checkable assertions on the drafted text, never an
 open-ended "consider whether" prompt:
-1. **Envelope marker cited.** The drafted entry's fenced ```yaml metadata envelope carries a
-   `significance` field naming one of the routing keys plus a non-empty justification
-   (`decision-entry.yaml`'s `metadata_envelope.required_fields`, Decision 167 clause 2) -- a
-   Significance claim made only in narrative prose, with no envelope field, fails this test.
+1. **Envelope fields cited.** The drafted entry's fenced ```yaml envelope carries `significance` (a routing
+   key) and `kind` (answering `docs/contracts/decision-kind.yaml`'s `test`), each with a non-empty justification
+   (`decision-entry.yaml`'s `metadata_envelope.required_fields`, Decision 167 clause 2); a narrative-only claim
+   fails this test.
 2. **Contract-first justification (rec-3015).** The envelope justification names, in one clause,
    why not a contract: the specific `docs/contracts/*.yaml` governance-note home (or in-place
    amendment) considered for this content and the concrete reason it was rejected in favor of a

@@ -38,23 +38,27 @@ from typing import Optional
 import yaml
 
 from scripts.checks import _common, registry
+from scripts.checks.decisions import envelope_rules
 from scripts.checks.decisions._baseline import BaselineReaderFn
 from scripts.checks.decisions._baseline import baseline_decision_numbers as _default_baseline_decision_numbers
 from scripts.decisions_md import (
     _BOLD_STATUS_RE,
     _DECISION_MARKER_BODY,
+    PLACEHOLDER_NUMBER,
     extract_entry_envelope,
     extract_superseded_by,
     is_compacted_stub,
     iter_decision_headings,
+    iter_placeholder_headings,
     status_is_superseded,
 )
+from scripts.north_star_models import load_north_star
 
 _CONTRACT_REL_PATH = "docs/contracts/decision-entry.yaml"
+_KIND_CONTRACT_REL_PATH = "docs/contracts/decision-kind.yaml"
 _DECISIONS_REL_PATHS = ("docs/DECISIONS.md", "docs/DECISIONS_ARCHIVE.md")
 
 _BOLD_DATE_RE = re.compile(r"\*\*Date:\*\*\s*(.+)")
-_NEVER_NUMBERED_DECISION_TEXT = "Never a numbered Decision"
 
 
 def _current_decision_entries(root: Path) -> dict[int, str]:
@@ -167,6 +171,81 @@ def _load_envelope_config(root: Path, failed: list[str]) -> Optional[tuple[list[
     return [str(f) for f in envelope_cfg["required_fields"]], {str(k): str(v) for k, v in routing.items()}
 
 
+def _load_grammar_config(root: Path) -> dict:
+    """The serves/kind/closed-key/number declarations of the entry contract; each rule fires only when declared
+    (the tolerated-absence pattern _load_block_separator_form uses), so an old-style synthetic contract stays valid."""
+    try:
+        data = yaml.safe_load((root / _CONTRACT_REL_PATH).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    cfg = data.get("metadata_envelope") if isinstance(data, dict) else None
+    if not isinstance(cfg, dict):
+        return {}
+    shapes = cfg.get("field_shapes") if isinstance(cfg.get("field_shapes"), dict) else {}
+    serves = shapes.get("serves") if isinstance(shapes.get("serves"), dict) else {}
+    required = [str(f) for f in cfg.get("required_fields") or []]
+    optional = [str(f) for f in cfg.get("optional_fields") or []]
+    return {
+        "kind": "kind" in required,
+        "closed_keys": required + optional if cfg.get("closed_key_set") else None,
+        "serves_target": str(serves["resolves_against"]) if serves.get("resolves_against") else None,
+        "number": bool(cfg.get("number_assignment")),
+    }
+
+
+def _load_kind_values(root: Path, failed: list[str]) -> Optional[list[str]]:
+    try:
+        values = yaml.safe_load((root / _KIND_CONTRACT_REL_PATH).read_text(encoding="utf-8")).get("values")
+    except (OSError, yaml.YAMLError, AttributeError) as exc:
+        failed.append(f"Decision-entry conformance: could not read {_KIND_CONTRACT_REL_PATH}: {exc}")
+        return None
+    if not isinstance(values, list) or not values:
+        failed.append(f"Decision-entry conformance: {_KIND_CONTRACT_REL_PATH} has no values list")
+        return None
+    return [str(v) for v in values]
+
+
+def _load_north_star_doc(root: Path, rel: str, failed: list[str] | None):
+    """The north-star document (ids and carried_by through scripts.north_star_models), or None; a FAIL is appended
+    only when `failed` is given (a new entry needs it), else the WARN rules that need it are skipped."""
+    try:
+        return load_north_star(root / rel)
+    except ValueError as exc:
+        if failed is not None:
+            failed.append(f"Decision-entry conformance: could not read {rel}: {exc}")
+        return None
+
+
+def _placeholder_heading_issues(root: Path) -> list[str]:
+    issues: list[str] = []
+    for rel in _DECISIONS_REL_PATHS:
+        path = root / rel
+        if path.exists():
+            for m in iter_placeholder_headings(path.read_text(encoding="utf-8", errors="replace")):
+                if m.group(1) == PLACEHOLDER_NUMBER:
+                    issues.append(f"  FAIL: {rel} carries an unfilled placeholder heading {m.group(0)!r} (Decision 217 cl.5).")
+    return issues
+
+
+def _warn_lines(current_entries: dict[int, str], new_number_set: set[int], doc) -> list[str]:
+    """Advisory lines (never appended to failed): a baseline serves id that no longer resolves, and a mechanism
+    entry carried by a north star."""
+    ids = doc.ids()
+    warnings: list[str] = []
+    envelopes = {n: extract_entry_envelope(b) for n, b in current_entries.items() if "serves:" in b or "kind:" in b}
+    for n in sorted(envelopes):
+        if n not in new_number_set and envelopes[n]:
+            warnings += envelope_rules.dangling_serves_warnings(n, envelopes[n], ids)
+    carried = {"mission": doc.mission.carried_by, **{p.id: p.carried_by for p in doc.principles}}
+    kinds = {
+        n: str(e["kind"]["value"])
+        for n, e in envelopes.items()
+        if e and isinstance(e.get("kind"), dict) and e["kind"].get("value")
+    }
+    warnings += envelope_rules.carried_by_mechanism_warnings(carried, kinds)
+    return [f"  WARN: {w}." for w in warnings]
+
+
 def _superseded_stub_grammar_issues(
     current_entries: dict[int, str], new_number_set: set[int], required_markers: list[str]
 ) -> tuple[list[str], int]:
@@ -206,8 +285,8 @@ def _superseded_stub_grammar_issues(
 # Module-level alias, not a re-implementation: the compaction-stub predicate is promoted to
 # scripts.decisions_md.is_compacted_stub (DAF-03 / PLAN-decision-corpus-currency) so exactly one
 # definition exists. Retained under this private name because this module's existing test suite
-# (tests/checks/decisions/test_validate_decision_entry_conformance.py) imports it directly and
-# this module is at its 500-SLOC budget -- an import-and-rename edit there is unwarranted churn.
+# (tests/checks/decisions/test_validate_decision_entry_conformance.py) imports it directly -- an
+# import-and-rename edit there is unwarranted churn.
 _is_compacted_stub = is_compacted_stub
 
 
@@ -228,29 +307,6 @@ def _envelope_body_conflicts(envelope: dict, block: str) -> list[str]:
     return conflicts
 
 
-def _significance_issues(envelope: dict, routing_tokens: dict[str, str]) -> list[str]:
-    """Validate the envelope's `significance` claim: present, one of the contract's routing
-    tokens, carrying a non-empty one-line justification, and never one of the routing rows whose
-    own contract text says the content is "Never a numbered Decision"."""
-    significance = envelope.get("significance")
-    if not isinstance(significance, dict) or not significance.get("value"):
-        return ["significance element is missing (required: value naming a routing token, plus a justification)"]
-    value = str(significance["value"])
-    justification = str(significance.get("justification") or "").strip()
-    issues: list[str] = []
-    if value not in routing_tokens:
-        issues.append(f"significance.value {value!r} does not name a decision-entry.yaml significance.routing token")
-        return issues
-    if _NEVER_NUMBERED_DECISION_TEXT in routing_tokens[value]:
-        issues.append(
-            f"significance.value {value!r} routes to a row whose own contract text reads "
-            f"{_NEVER_NUMBERED_DECISION_TEXT!r} -- never a numbered Decision"
-        )
-    if not justification:
-        issues.append("significance.justification is missing or empty")
-    return issues
-
-
 def _new_entry_conformance_issues(
     new_numbers: list[int],
     current_entries: dict[int, str],
@@ -258,6 +314,10 @@ def _new_entry_conformance_issues(
     block_separator_form: str | None,
     envelope_required_fields: list[str],
     routing_tokens: dict[str, str],
+    grammar: dict | None = None,
+    kind_values: list[str] | None = None,
+    north_star_ids: set[str] | None = None,
+    baseline_max: int = 0,
 ) -> list[str]:
     """Full envelope-conformance sweep over new-in-diff decision numbers: required markers, the
     block_separator obligation, metadata-envelope well-formedness, the number-match sub-check,
@@ -286,13 +346,12 @@ def _new_entry_conformance_issues(
             issues.append(
                 f"  FAIL: Decision {n} is new (absent from the origin/main baseline) but carries no well-formed "
                 "metadata envelope (a fenced ```yaml block immediately after the heading, per "
-                "docs/contracts/decision-entry.yaml metadata_envelope)."
+                f"docs/contracts/decision-entry.yaml metadata_envelope): {envelope_rules.malformed_envelope_detail(block)}."
             )
             continue
 
-        missing_fields = [f for f in envelope_required_fields if f != "significance" and not envelope.get(f)]
-        if missing_fields:
-            issues.append(f"  FAIL: Decision {n} envelope is missing required field(s): {missing_fields}")
+        for field_issue in envelope_rules.required_field_issues(envelope, envelope_required_fields):
+            issues.append(f"  FAIL: Decision {n} {field_issue}")
 
         if "number" in envelope_required_fields and envelope.get("number") is not None and int(envelope["number"]) != n:
             issues.append(
@@ -300,8 +359,20 @@ def _new_entry_conformance_issues(
             )
 
         if "significance" in envelope_required_fields:
-            for sig_issue in _significance_issues(envelope, routing_tokens):
+            for sig_issue in envelope_rules.significance_issues(envelope, routing_tokens):
                 issues.append(f"  FAIL: Decision {n} {sig_issue}.")
+
+        grammar = grammar or {}
+        rule_issues: list[str] = []
+        if kind_values is not None:
+            rule_issues += envelope_rules.kind_issues(envelope, kind_values)
+        if north_star_ids is not None:
+            rule_issues += envelope_rules.serves_issues(envelope, north_star_ids)
+        if grammar.get("closed_keys") is not None:
+            rule_issues += envelope_rules.unknown_key_issues(envelope, grammar["closed_keys"])
+        if grammar.get("number"):
+            rule_issues += envelope_rules.number_issues(envelope.get("number"), baseline_max)
+        issues += [f"  FAIL: Decision {n} {r}." for r in rule_issues]
 
         for conflict in _envelope_body_conflicts(envelope, block):
             issues.append(f"  FAIL: Decision {n} envelope conflicts with its bold-marker twin on {conflict}.")
@@ -340,6 +411,13 @@ def validate_decision_entry_conformance(
     new_number_set = set(new_numbers)
 
     issues, superseded_checked = _superseded_stub_grammar_issues(current_entries, new_number_set, required_markers)
+    grammar = _load_grammar_config(root)
+    if grammar.get("number"):
+        issues += _placeholder_heading_issues(root)
+    if grammar.get("serves_target"):
+        doc = _load_north_star_doc(root, grammar["serves_target"], None)
+        for line in _warn_lines(current_entries, new_number_set, doc) if doc else []:
+            print(line)
 
     if not new_numbers:
         if issues:
@@ -351,7 +429,7 @@ def validate_decision_entry_conformance(
                 "  PASS: no genuinely-new decision entries in this diff (origin/main baseline unchanged); "
                 "no baseline-present Superseded entry is a malformed stub."
             )
-        registry.examined(superseded_checked, unit="superseded_status_entries")
+        registry.examined(superseded_checked, unit="decision_entries_checked")
         return
 
     envelope_config = _load_envelope_config(root, failed)
@@ -361,9 +439,26 @@ def validate_decision_entry_conformance(
     envelope_required_fields, routing_tokens = envelope_config
 
     block_separator_form = _load_block_separator_form(root)
+    kind_values = _load_kind_values(root, failed) if grammar.get("kind") else None
+    north_star_ids = None
+    if grammar.get("serves_target") and any("serves:" in current_entries[n] for n in new_numbers):
+        doc = _load_north_star_doc(root, grammar["serves_target"], failed)
+        north_star_ids = doc.ids() if doc else set()
+    if (grammar.get("kind") and kind_values is None) or (north_star_ids is not None and not north_star_ids):
+        registry.skipped("declared contract unavailable")
+        return
 
     issues += _new_entry_conformance_issues(
-        new_numbers, current_entries, required_markers, block_separator_form, envelope_required_fields, routing_tokens
+        new_numbers,
+        current_entries,
+        required_markers,
+        block_separator_form,
+        envelope_required_fields,
+        routing_tokens,
+        grammar,
+        kind_values,
+        north_star_ids,
+        max(baseline_numbers, default=0),
     )
 
     if issues:
