@@ -51,9 +51,7 @@ def _modified_entries(current_entries: list[dict], root: Path | None = None) -> 
     return modified
 
 
-def _late_closure_state(
-    added: list[dict], root: Path, failed: list[str]
-) -> tuple[dict[str, str], set[str]]:
+def _late_closure_state(added: list[dict], root: Path, failed: list[str]) -> tuple[dict[str, str], set[str]]:
     """({check_id: X^} for committed late-closure shards, {check_id} for working-tree-only ones).
 
     Only ADDED shards whose plan_slug names a plan with a late_closure_route X and whose check_id is one of that

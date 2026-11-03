@@ -82,8 +82,16 @@ def build_main(
     return repo, sha
 
 
-def closure_branch(repo: Path, *, shard: str = SHARD_ID, extra_files: dict[str, str] | None = None, plan_extra: dict | None = None,
-                   message: str = "closure\n", bundled: list[str] | None = None, commit: bool = True) -> str | None:
+def closure_branch(
+    repo: Path,
+    *,
+    shard: str = SHARD_ID,
+    extra_files: dict[str, str] | None = None,
+    plan_extra: dict | None = None,
+    message: str = "closure\n",
+    bundled: list[str] | None = None,
+    commit: bool = True,
+) -> str | None:
     fx.branch(repo, "closure")
     write_plan_doc(repo, plan_doc(True, bundled, plan_extra))
     fx.write(repo, f"config/agent/verification_registry/entries/{shard}.yaml", shard_text(shard))
