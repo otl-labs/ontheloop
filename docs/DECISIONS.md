@@ -2,6 +2,60 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 244: Graduated verification records are standing regression guards the full tier re-runs, behind a shrink-only known-red list; a claim that later work makes false stays one-time evidence (Decided)
+
+```yaml
+number: 244
+status: Decided
+decided_date: "2026-11-03"
+amends: []
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable change to what a graduated record guarantees, reversing the Q1 verdict of audit
+    criterion-shape-forks-9d25d918 recorded on Decision 197; reversing it re-opens full-tier cost, red-main volume
+    (Decision 226) and human-gated retirements (Decision 235). Not a contract note: verification-registry.yaml owns
+    the record grammar, not what a record promises. Not amendment_forms: the verdict is a recorded walk input, not a
+    clause, and the change also binds T3.7 c7 and CD.29.
+```
+
+**Status:** Decided
+**Date:** 2026-11-03
+**Warehouse ID:** dec-244 (per Decision 84 backfill)
+
+**Problem:** A graduated record runs once, in the change that admits it. On 2026-11-02, 50 of 1,490 records failed on main (3 in August) while plans relied on them as live pins; the 2026-09-26 Q1 verdict (admitted once) left that decay undetected until deferred T3.7.
+
+**Intent:** A record that guards something keeps guarding it; a record that only proved a change happened stays evidence.
+
+**Decision:**
+1. **Standing.** Every live record is a standing regression guard. The full tier re-runs each record that is not a plain pytest call and checks that each pinned test id still resolves; the test suite already re-runs the tests. A red record fails the full tier, before handoff and on main, where Decision 226 routes it. The fast tier does not run it: guard_target does not list a check's inputs, and the cost is minutes.
+2. **Known-red list.** Records red when this lands sit on one committed list, each naming an owning rec. The list only shrinks: a change may remove an id, never add one, and a listed record that passes fails the run until it is removed. It is CD.29's transient quarantine, never a permanent advisory.
+3. **What it bounds.** This catches decay that fails. A record that passes for the wrong reason stays T3.7's to catch (mutation on target, orphan detection).
+4. **What graduates.** A claim that unrelated later work makes false (an exact count, the newest entry, an exact whole set) is not a standing guard; it is waived as one-time evidence (vp-red-before.yaml).
+5. **Leaving.** A red record is fixed at the file it guards, repaired when its claim is unchanged, or retired by git mv to entries/deprecated/ (Decision 176 cl.5). Retiring a live claim needs Decision 235 cl.1's human approval; a record already red before the change that retires it is not red on that change.
+
+**Coverage (Decision 181 cl.2):** cl.1 and cl.2 -- validate_graduated_rerun (full tier) and validate_known_red_shrinks (both tiers); cl.4 -- plan critique, unenforced by design; cl.5 -- Decision 235's gate.
+
+**Options considered:** Admitted once (the 2026-09-26 verdict) -- rejected: reds grew from 3 to 50 and plans rely on records as pins. Re-run when a diff touches guard_target -- rejected: guard_target misses checks that read other files and adds minutes to every DECISIONS.md change. Fast-tier re-run of every record -- rejected: about 7 minutes serial against a 270-second budget.
+
+```yaml reversal-conditions
+decision: 244
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: moment-noise
+    kind: manual
+    description: "More than four red-main events in a quarter are closed by retiring a record that graduated after this Decision."
+  - id: leg-cost
+    kind: manual
+    description: "The full-tier re-run takes more than ten minutes on CI."
+  - id: t3-7-built
+    kind: manual
+    description: "T3.7's mutation and orphan legs are live; re-decide whether the pass/fail re-run still earns its cost."
+```
+
+---
+
 ## Decision 243: North stars are a Tier A file -- a mission and nine entries in the Decision 196 shape, each with a failure signal, a binding scope and its carrying Decisions, under a declared partial order (amends Decision 196 clause 3) (Decided)
 
 ```yaml
@@ -3234,6 +3288,8 @@ conditions:
 > **Amended by Decision 212 (2026-10-06):** Clause 2's storage port is `work_item_storage` in docs/contracts/ports.yaml (Decision 212 clause 4). Tenancy enforcement (Decision 200 clauses 1-2) stays with the cloud function_url ops_verbs adapter, Decision 200 clause 1's write boundary (coupling row PC-01).
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+> **Update (2026-11-03):** Decision 244 reverses this entry's recorded Q1 verdict for decay that fails: graduated records are standing guards the full tier re-runs. T3.7 stays the remedy for records that pass for the wrong reason.
 
 ---
 
