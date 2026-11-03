@@ -36,8 +36,11 @@ scope:
 - file: tests/checks/iam_tf/test_neon_catalog_org_id.py
   action: Create
   purpose: >-
-    Build PR: three unit tests over the .tf text, beside test_neon_catalog_history_retention.py and using
-    tests.fixtures.terraform_hcl_blocks.find_resource_block: test_neon_org_id_has_no_committed_default (the
+    Build PR: three unit tests over the .tf text, beside test_neon_catalog_history_retention.py. The two resource tests
+    slice their block with tests.fixtures.terraform_hcl_blocks.find_resource_block; the variable test slices the
+    variable block with a regex inside the new module (find_resource_block matches resource headers only, and the
+    fixture is not in scope). The module carries no literal Neon id shape (VP 5 sweeps the tree).
+    test_neon_org_id_has_no_committed_default (the
     neon_org_id variable block has no default line and carries nullable = false, variables.tf no longer says "There is no neon_org_id", and no
     terraform/personal/*.tf carries a quoted Neon organisation id shape); test_catalog_project_ignores_org_id_and_cannot_be_destroyed
     (the project's lifecycle has prevent_destroy = true and org_id in ignore_changes);
@@ -105,7 +108,7 @@ acceptance_criteria:
   /secret/neon-api-key holds a project-scoped key on ducklake-catalog minted in the company-administered organisation
   (VP 13); drift converges and the canary rehearsal passes on it (VP 8, 14); the personal key is refused (VP 16).
 - >-
-  The operator deployment runs unchanged after the last change: a converged drift run and a green record after R1 (VP 8),
+  The operator deployment runs unchanged after the last change: a converged drift run and a green record after R2 (VP 8),
   the maintenance and maintenance-smoke Lambdas invoked without errors and a green ci.yml run on main (VP 17), and a live
   recommendation write (VP 18).
 - >-
@@ -172,6 +175,7 @@ verification_plan:
     N = '/secret/agent-platform-terraform-personal-tfvars'
     s = json.load(open('/mnt/project-files/neon-catalog-transfer/build-state.json'))
     p = ssm.get_parameter(Name=N, WithDecryption=True)['Parameter']; old = ssm.get_parameter(Name=f"{N}:{s['tfvars_version_before']}", WithDecryption=True)['Parameter']['Value']
+    assert p['Version'] == s['tfvars_version_before'] + 1, ('another writer touched the parameter', p['Version'])
     lines = [l for l in p['Value'].splitlines() if re.match(r'\s*neon_org_id\s*=', l)]
     assert len(lines) == 1, ('neon_org_id lines', len(lines))
     assert [l for l in p['Value'].splitlines() if l not in lines and l.strip()] == [l for l in old.splitlines() if l.strip()], 'other lines changed'
@@ -189,8 +193,9 @@ verification_plan:
     PY
   expected: Prints TFVARS_OK with the new version number (tfvars_version_before + 1).
   fix_if: >-
-    Zero or two lines, or other lines changed: the write was wrong; restore the previous version on the operator's word
-    (rollback) and re-run T1. Values differ: stop; never open the build PR (ignore_changes would hide a wrong value from
+    Another writer touched the parameter (version not +1): stop and tell the coordinator; never restore over that
+    write. Zero or two lines, or other lines changed, at version +1: the write was wrong; restore the previous version on
+    the operator's word (rollback) and re-run T1. Values differ: stop; never open the build PR (ignore_changes would hide a wrong value from
     every plan). A changed type, tier or key: stop and tell the coordinator.
   hermetic: false
   graduation: not-applicable
@@ -291,7 +296,7 @@ verification_plan:
   action: >-
     Zero-change proof (operator ruling 2026-10-26; Decision 190): the first completed terraform-drift run on main
     created after AFTER succeeded and reads clean (exit 0) or measured converged, and the convergence record is green.
-    With MERGE_SHA set, the push apply of that commit succeeded too. Run after the merge, after K2 and after R1.
+    With MERGE_SHA set, the push apply of that commit succeeded too. Run after the merge, after K2, after R1 and after R2.
   command: |-
     test -n "$AFTER" && bin/venv-python - <<'PY'
     import json, os, re, sys, urllib.request, boto3
@@ -436,8 +441,10 @@ verification_plan:
     PY
   expected: Prints KEY (True, True, True, True, 200, True, 200, 1, True) and KEY_SCOPED_OK with the new version.
   fix_if: >-
-    Version not +1: another writer touched the parameter; stop and ask the coordinator. The new key reads /users/me:
-    it is a personal key; the operator revokes it and mints a project-scoped one (K1). Two or more organisation keys,
+    Version not +1: another writer touched the parameter; stop and ask the coordinator. The new key reads /users/me
+    while the organisation key list shows it as one key scoped to the catalog: Neon's refusal behaviour differs from
+    the unproven expectation; stop and ask the operator, never revoke on this alone. The new key reads /users/me and is
+    not in the organisation key list: it is a personal key; the operator revokes it and mints a project-scoped one (K1). Two or more organisation keys,
     or one not scoped to the catalog: the operator revokes the extra or wrong key first. The catalog unreadable: the
     paste was wrong; restore the previous version on the operator's word (rollback).
   hermetic: false
@@ -515,8 +522,8 @@ verification_plan:
 - step: 17
   phase: post-deploy
   action: >-
-    Operator-deployment proof P1, after the first full 6-hourly maintenance cycle that starts after t_r1: the maintenance and
-    maintenance-smoke Lambdas were invoked with zero errors since t_r1, the latest ci.yml run on main succeeded, the
+    Operator-deployment proof P1, after the first full 6-hourly maintenance cycle that starts after t_r2: the maintenance and
+    maintenance-smoke Lambdas were invoked with zero errors since t_r2, the latest ci.yml run on main succeeded, the
     tfvars value still equals the live catalog organisation (read with the new key), and EVIDENCE.md carries rows T1,
     B1, C1-C4, K1-K4, R1 and R2 as pass and passes the redaction pattern.
   command: |-
@@ -527,7 +534,7 @@ verification_plan:
     rows = ['T1', 'B1', 'C1', 'C2', 'C3', 'C4', 'K1', 'K2', 'K3', 'K4', 'R1', 'R2']
     assert all(re.search(rf'^\| {r} \|.*\| pass \|$', ev, re.M) for r in rows), [r for r in rows if not re.search(rf'^\| {r} \|.*\| pass \|$', ev, re.M)]
     assert not re.search(REDACT, re.sub(r'\b[0-9a-f]{40,64}\b', '', ev)), 'EVIDENCE.md redaction hit'
-    B = boto3.Session(profile_name='agent_platform_admin', region_name='eu-west-2'); cw = B.client('cloudwatch'); t = dt.datetime.fromisoformat(s['t_r1'].replace('Z', '+00:00'))
+    B = boto3.Session(profile_name='agent_platform_admin', region_name='eu-west-2'); cw = B.client('cloudwatch'); t = dt.datetime.fromisoformat(s['t_r2'].replace('Z', '+00:00'))
     m = lambda f, n: sum(p['Sum'] for p in cw.get_metric_statistics(Namespace='AWS/Lambda', MetricName=n, Dimensions=[{'Name': 'FunctionName', 'Value': f}], StartTime=t, EndTime=dt.datetime.now(dt.timezone.utc), Period=3600, Statistics=['Sum'])['Datapoints'])
     lam = {f: (m(f, 'Invocations'), m(f, 'Errors')) for f in ('agent-platform-ducklake-maintenance', 'agent-platform-ducklake-maintenance-smoke')}
     assert all(i > 0 and e == 0 for i, e in lam.values()), lam
@@ -541,7 +548,7 @@ verification_plan:
   expected: Prints P1 with invocation and error counts (errors 0) per Lambda, ('success', True), then P1_OK.
   fix_if: >-
     A Lambda error: read its log group for the window and root-cause before the closing PR (a catalog connection failure
-    after R1 is a stop for the coordinator). ci.yml red: wait for main to recover under its own ci-rca process; this plan
+    after R1 or R2 is a stop for the coordinator). ci.yml red: wait for main to recover under its own ci-rca process; this plan
     never fixes main inline. A redaction hit: rewrite the row by kind.
   hermetic: false
   graduation: not-applicable
@@ -696,7 +703,7 @@ constraints:
   enters the repository, a PR, memory, chat or the shared folder (Decision 101). Evidence is recorded by kind and UTC
   time; commands read ids from Terraform state at run time and print none.
 - >-
-  Size: deploy-paths.yaml is NEAR_CAP (479 of 500 effective lines at plan time; this build adds one line). Measure it
+  Size: deploy-paths.yaml is NEAR_CAP (491 of 500 effective lines on main 03ac4f9d; this build adds one line). Measure it
   against main at build time with scripts.roadmap.plan_obligations; if the edit would cross 500, compact an existing
   note in that file in the same PR, never raise the budget (Decision 128).
 - >-
@@ -729,8 +736,8 @@ context:
   126, 237, 238, 190, 100, 224, 101; 195 of 195 triaged. No numbered Decision (ownership 195, order 242 cl.4, nothing
   re-created); no project-configuration.yaml row (none exist for terraform/personal inputs, 224 cl.6).
 - >-
-  gates: decision-scout=FLAGS_FOUND (NOTE accepted); plan-critique round 1 REVISE, fixed (commit body). Two approved-wording
-  corrections (NEON-01, BILL-02) await decision card cmsg_017f94mmYqSe3q2p9o6tPW3UM6QXyAxeERLNsKyCAS9fmz before merge.
+  gates: decision-scout=FLAGS_FOUND (NOTE accepted); plan-critique rounds in gate_rounds (fixes in commit bodies). The
+  NEON-01 and BILL-02 corrections were approved on card cmsg_017f94mmYqSe3q2p9o6tPW3UM6QXyAxeERLNsKyCAS9fmz.
 - >-
   red_overlap 2026-11-03: {"verdict": "clear", "slo_hours": 4, "reds": []}. No approved-text sidecar: plan_wording_check
   binds every changed file and the variables.tf before-text carries the id; wording rehearsed with validate --pre on a scratch worktree, pinned by VP 6 and 19.
@@ -738,12 +745,12 @@ context:
   comment (api.github.com through the session proxy). UNPROVEN:
   require-MFA on Launch (VP 10), the sign-up login leaving (VP 15), project-scoped key refusals (VP 13).
 - >-
-  kislerdm/neon 0.13.0 source: org_id is ForceNew and refreshed from the API, so a re-pointed id or a transfer plans a
-  replace of the sole system of record (Decision 84); hence the lifecycle blocks.
+  Live 2026-11-03: one organisation (Launch, one Admin, no organisation keys, require_mfa off); the 2026-10-25 interim
+  personal key; no neon_org_id in the tfvars; agent_platform is a dormant sign-up-day project.
 - >-
-  Live (2026-11-03): the founder's login is in one organisation (Launch, one Admin, no organisation keys, require_mfa
-  off); the key is the 2026-10-25 interim personal key; the tfvars has no neon_org_id; agent_platform is a dormant
-  sign-up-day project unknown to the repository.
+  K1-K4 complete PLAN-neon-key-out-of-pr-plans VP 15 (no other thread mints a Neon key meanwhile). No prevent_destroy
+  on neon_role.ducklake_ops (re-creatable, rotation route unspecified, cascade unverified; Decision 77 blocks a neon_*
+  replace). neon_org_id is unmasked in Actions logs; ignore_changes keeps it out of every diff.
 - >-
   Overlap: secrets-to-ssm-retire, neon-key-out-of-pr-plans, trusted-plan-cutover, retire-github-pat-secret,
   protected-action-gate, t2-47-c2-pending-gated-ordering and telemetry-content-reader-lock touch the same files, never
@@ -811,9 +818,9 @@ execution_steps:
   R1, leave (operator, Neon console, signed in with the personal login): Organization settings > People > Leave organization. Run VP 15, then VP 8 with AFTER set to t_r1 (dispatch allowed). If Neon refuses, stop (constraints, fallback).
   Members page (operator, signed in as the company Admin): a screenshot of Organization settings > People with e-mails cropped; the agent checks it shows one member, an Admin, and records it in row R1 by kind (NEON-01's evidence).
   K4, revoke (operator, personal login): Account settings > API keys > revoke the key created on 2026-10-25. Run VP 16; row K4.
-  R2, delete the personal Neon account (operator): Account settings > Delete account (Neon allows reactivation for 30 days). Row R2 on the operator's word.
+  R2, delete the personal Neon account (operator): Account settings > Delete account (Neon allows reactivation for 30 days). Row R2 on the operator's word. Then record t_r2 (bin/venv-python -c "import datetime as d, json; S='/mnt/project-files/neon-catalog-transfer/build-state.json'; s=json.load(open(S)); s['t_r2']=d.datetime.now(d.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'); json.dump(s, open(S, 'w'), indent=1); print('T_R2', s['t_r2'])") and run VP 8 with AFTER set to t_r2 (dispatch allowed): that run is the last change's drift proof the closing ledger cites.
 - |-
-  Operator-deployment proof P1: after the first full 6-hourly maintenance cycle after t_r1, run VP 17. Then the live write: call get_rec_write_guidance(), then update_rec through bin/venv-python -m scripts.ops_data_portal on rec-4865 appending exactly 'Organisation assigned in place to the company; moved on <YYYY-MM-DD>.' (the R1 date), and run VP 18 with MOVE_DATE set to that date. Row P1 with counts and run ids only.
+  Operator-deployment proof P1: after the first full 6-hourly maintenance cycle after t_r2, run VP 17. Then the live write: call get_rec_write_guidance(), then update_rec through bin/venv-python -m scripts.ops_data_portal on rec-4865 appending exactly 'Organisation assigned in place to the company; moved on <YYYY-MM-DD>.' (the R1 date), and run VP 18 with MOVE_DATE set to that date. Row P1 with counts and run ids only.
 - |
   APPROVED CLOSING TEXT (YAML; closing PR; the inventory's maintenance.stage_rule: flip the row, update its owning side, append one evidence_ledger entry, never reorder or delete rows; placeholders <date>, <run id>, <n> and <follow-on rec> are the only variance):
   targets:
@@ -853,3 +860,4 @@ rollback: >-
 gate_rounds:
 - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
 - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 10}
+- {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 9}
