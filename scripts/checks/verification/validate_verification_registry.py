@@ -8,23 +8,26 @@ Reads exclusively through scripts.verification_graduation's loader (load_entries
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from scripts import verification_graduation
 from scripts.checks import _common, registry
+from scripts.checks.verification import _implementation_merge as _im
 
 
-def _added_entries(current_entries: list[dict]) -> list[dict]:
+def _added_entries(current_entries: list[dict], root: Path | None = None) -> list[dict]:
     """Entries present now but absent from origin/main, matched by check_id (VF-06 c2).
 
     Returns [] when origin/main does not resolve (advisory -- the caller's own reachability
     check is what decides whether to skip the whole differential leg, not this helper)."""
-    baseline = verification_graduation.entries_at_ref("origin/main", repo_root=_common.ROOT)
+    baseline = verification_graduation.entries_at_ref("origin/main", repo_root=root or _common.ROOT)
     if baseline is None:
         return []
     baseline_ids = {e.get("check_id") for e in baseline if isinstance(e, dict)}
     return [e for e in current_entries if isinstance(e, dict) and e.get("check_id") not in baseline_ids]
 
 
-def _modified_entries(current_entries: list[dict]) -> list[dict]:
+def _modified_entries(current_entries: list[dict], root: Path | None = None) -> list[dict]:
     """Entries present in BOTH current and origin/main (same check_id) whose parsed record
     mapping differs from the baseline -- closes the silent-modification hole: a record whose
     check_spec is edited in place, without a new check_id, was previously invisible to the
@@ -34,7 +37,7 @@ def _modified_entries(current_entries: list[dict]) -> list[dict]:
     every record at width=200, so a byte/text-based detector would select all 476 records instead
     of only the ones whose content genuinely changed. Returns [] when origin/main does not
     resolve (mirrors _added_entries)."""
-    baseline = verification_graduation.entries_at_ref("origin/main", repo_root=_common.ROOT)
+    baseline = verification_graduation.entries_at_ref("origin/main", repo_root=root or _common.ROOT)
     if baseline is None:
         return []
     baseline_by_id = {e.get("check_id"): e for e in baseline if isinstance(e, dict)}
@@ -48,7 +51,52 @@ def _modified_entries(current_entries: list[dict]) -> list[dict]:
     return modified
 
 
-def _run_added_entry_differentials(candidates: list[dict], failed: list[str]) -> None:
+def _late_closure_state(
+    added: list[dict], root: Path, failed: list[str]
+) -> tuple[dict[str, str], set[str]]:
+    """({check_id: X^} for committed late-closure shards, {check_id} for working-tree-only ones).
+
+    Only ADDED shards whose plan_slug names a plan with a late_closure_route X and whose check_id is one of that
+    plan's graduation_check_ids qualify. The route is evaluated once per plan; git failures read as no route."""
+    bases: dict[str, str] = {}
+    pending: set[str] = set()
+    base = _common.status_diff_base(root) or "origin/main"
+    by_plan: dict[str, list[dict]] = {}
+    for row in added:
+        slug = row.get("plan_slug")
+        if isinstance(slug, str) and slug:
+            by_plan.setdefault(f"docs/plans/PLAN-{slug}.yaml", []).append(row)
+    for plan_rel, rows in by_plan.items():
+        committed = _common._plan_declared_at_ref(plan_rel, root, "HEAD") and not _common._plan_declared_at_ref(
+            plan_rel, root, base
+        )
+        working = not committed and bool(_common.resolve_declared_plans([plan_rel], root, base))
+        if not (committed or working):
+            continue
+        try:
+            merge = _im.late_closure_route(plan_rel, root, base, "HEAD" if committed else None)
+        except _im.LateClosureError as exc:
+            failed.append(f"verification-registry late closure: {exc}")
+            continue
+        if merge is None:
+            continue
+        ids = _im.graduation_check_ids(_im._plan_at(plan_rel, root, base))
+        for row in rows:
+            if row.get("check_id") in ids:
+                if working:
+                    pending.add(row["check_id"])
+                else:
+                    bases[row["check_id"]] = merge.parent
+    return bases, pending
+
+
+def _run_added_entry_differentials(
+    candidates: list[dict],
+    failed: list[str],
+    root: Path | None = None,
+    bases: dict[str, str] | None = None,
+    pending: set[str] | None = None,
+) -> None:
     """VF-06 c2 (added) + the modified-record close (c2'): for each added-or-modified entry in
     this diff, run the REAL differential admission gate.
 
@@ -60,10 +108,17 @@ def _run_added_entry_differentials(candidates: list[dict], failed: list[str]) ->
     plural = "y" if len(candidates) == 1 else "ies"
     print(f"  Differential admission gate: {len(candidates)} added-or-modified entr{plural} in this diff.")
 
+    root = root or _common.ROOT
     for row in candidates:
         cid = row.get("check_id", "?")
+        if cid in (pending or ()):
+            print(f"    PENDING: {cid} (late-closure declaration not committed; the committed run decides)")
+            continue
         try:
-            outcome = verification_graduation.run_differential(row, repo_root=_common.ROOT)
+            if cid in (bases or {}):
+                outcome = verification_graduation.run_differential(row, repo_root=root, base_ref=bases[cid])
+            else:
+                outcome = verification_graduation.run_differential(row, repo_root=root)
         except verification_graduation.GraduationError as exc:
             failed.append(f"verification-registry differential: check_id={cid}: error -- {exc}")
             continue
@@ -72,7 +127,8 @@ def _run_added_entry_differentials(candidates: list[dict], failed: list[str]) ->
         elif not outcome.admitted:
             failed.append(f"verification-registry differential: check_id={cid}: not admitted -- {outcome.reason}")
         else:
-            print(f"    admitted: {cid} ({outcome.reason})")
+            late = f" [late-closure base {bases[cid]}]" if cid in (bases or {}) else ""
+            print(f"    admitted: {cid} ({outcome.reason}){late}")
 
 
 def _schema_errors(entries: list, canonical_slots: frozenset[str]) -> list[str]:
@@ -114,7 +170,7 @@ def _placement_errors(shard_files: list, entries_by_path: dict) -> list[str]:
 
 
 @registry.register("validate_verification_registry", owner="platform")
-def validate_verification_registry(failed: list[str]) -> None:
+def validate_verification_registry(failed: list[str], root: Path | None = None) -> None:
     """Validate config/agent/verification_registry/entries/*.yaml against the CD.29 contract
     (--pre, T3.1).
 
@@ -129,12 +185,13 @@ def validate_verification_registry(failed: list[str]) -> None:
        empty-baseline misread of every live record as newly added).
     """
     print("\n=== Verification registry (T3.1) ===")
-    entries_dir = _common.ROOT / verification_graduation.REGISTRY_ENTRIES_REL
+    root = root if root is not None else _common.ROOT
+    entries_dir = root / verification_graduation.REGISTRY_ENTRIES_REL
 
-    flat_path = _common.ROOT / verification_graduation.REGISTRY_DIR_REL / verification_graduation.LEGACY_FLAT_BASENAME
+    flat_path = root / verification_graduation.REGISTRY_DIR_REL / verification_graduation.LEGACY_FLAT_BASENAME
     if flat_path.exists():
         failed.append(
-            f"verification-registry: {flat_path.relative_to(_common.ROOT)} has resurrected -- "
+            f"verification-registry: {flat_path.relative_to(root)} has resurrected -- "
             "records belong one-per-file under entries/<check_id>.yaml, never a flat monolith"
         )
 
@@ -163,7 +220,7 @@ def validate_verification_registry(failed: list[str]) -> None:
     entries = list(entries_by_path.values())
 
     # Lazy-import CANONICAL_SLOTS to avoid a module-level import of scripts.verification_checks.
-    root_str = str(_common.ROOT)
+    root_str = str(root)
     import sys as _sys  # noqa: PLC0415
 
     injected = root_str not in _sys.path
@@ -186,15 +243,16 @@ def validate_verification_registry(failed: list[str]) -> None:
 
     print(f"  OK: {len(entries)} graduated checks, all valid.")
 
-    if not _common.origin_main_reachable(_common.ROOT):
+    if not _common.origin_main_reachable(root):
         print("  SKIP (differential gate): origin/main unreachable (advisory locally, authoritative in CI).")
         registry.skipped("origin/main unreachable")
         return
 
-    added = _added_entries(entries)
-    modified = _modified_entries(entries)
+    added = _added_entries(entries, root)
+    modified = _modified_entries(entries, root)
     candidates = added + modified
     if candidates:
-        _run_added_entry_differentials(candidates, failed)
+        bases, pending = _late_closure_state(added, root, failed)
+        _run_added_entry_differentials(candidates, failed, root, bases, pending)
 
     registry.examined(len(entries), unit="graduated_checks")
