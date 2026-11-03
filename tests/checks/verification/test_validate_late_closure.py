@@ -246,3 +246,12 @@ def test_merge_step_sidecar_plan_fails_leg_t_as_today(tmp_path, monkeypatch):
     repo, _ = build_main(tmp_path, monkeypatch, sidecar=True)
     closure_branch(repo)
     assert any("!= bundled_recommendations" in f for f in _merge(repo))
+
+
+def test_added_shard_without_a_plan_flip_runs_the_origin_main_differential(tmp_path, monkeypatch):
+    repo, _ = build_main(tmp_path, monkeypatch)
+    fx.git(repo, "checkout", "-b", "feature")
+    fx.write(repo, SHARD, shard_text())
+    commit_all(repo, "shard only")
+    failed = _registry(repo)
+    assert len(failed) == 1 and "tautological" in failed[0]

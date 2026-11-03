@@ -193,3 +193,36 @@ def test_recover_refuses_a_closure_merge(tmp_path, monkeypatch, capsys):
     repo, x, closure = _merged_closure(tmp_path, monkeypatch)
     assert ms.main(["recover", "--slug", SLUG, "--root", str(repo), "--sha", closure]) == 2
     assert f"RECOVER refused: late closure, recs closed by {x}" in capsys.readouterr().out
+
+
+def _ambiguous(tmp_path, monkeypatch) -> tuple[Path, str]:
+    repo, x = build_main(tmp_path, monkeypatch)
+    fx.write(repo, SRC, "x = 2\n")
+    commit_all(repo, "again\n\nResolves: rec-1\n")
+    fx.push_main(repo)
+    closure_branch(repo)
+    return repo, x
+
+
+def test_premerge_fails_on_competing_anchors(tmp_path, monkeypatch, capsys):
+    repo, _ = _ambiguous(tmp_path, monkeypatch)
+    assert _premerge(repo, tmp_path) == 1
+    assert "PREMERGE LATE-CLOSURE ERROR" in capsys.readouterr().out
+
+
+def test_readback_of_x_fails_on_competing_anchors(tmp_path, monkeypatch, capsys):
+    repo, x = _ambiguous(tmp_path, monkeypatch)
+    fx.git(repo, "checkout", "main")
+    fx.git(repo, "merge", "--ff-only", "closure")
+    fx.push_main(repo)
+    assert _readback(repo, x) == 1
+    assert "READBACK LATE-CLOSURE ERROR" in capsys.readouterr().out
+
+
+def test_recover_does_not_refuse_as_late_on_competing_anchors(tmp_path, monkeypatch, capsys):
+    repo, _ = _ambiguous(tmp_path, monkeypatch)
+    closure = fx.git(repo, "rev-parse", "HEAD")
+    with patch.object(ms, "_fetch_rows", side_effect=RuntimeError("no creds")):
+        assert ms.main(["recover", "--slug", SLUG, "--root", str(repo), "--sha", closure]) == 2
+    out = capsys.readouterr().out
+    assert "RECOVER refused: late closure" not in out and "rec reader unavailable" in out

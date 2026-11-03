@@ -262,3 +262,32 @@ def test_two_candidates_raise_only_for_a_closure(tmp_path, monkeypatch):
     closure_branch(repo)
     with pytest.raises(im.LateClosureError):
         _route(repo)
+
+
+def test_unparseable_plan_at_ref_is_none(tmp_path, monkeypatch):
+    fx.clear_ci_env(monkeypatch)
+    repo = fx.make_repo(tmp_path)
+    fx.write(repo, PLAN, "key: [unclosed\n")
+    commit_all(repo, "broken plan")
+    assert _find(repo, "HEAD") is None
+
+
+def test_no_adding_commit_reads_as_none(tmp_path, monkeypatch):
+    repo, _ = build_main(tmp_path, monkeypatch)
+    real = im._git
+    monkeypatch.setattr(im, "_git", lambda root, *a: "" if "--diff-filter=A" in a else real(root, *a))
+    assert _find(repo) is None
+
+
+def test_working_tree_git_failure_reads_as_no_route(tmp_path, monkeypatch):
+    repo, _ = build_main(tmp_path, monkeypatch)
+    closure_branch(repo, commit=False)
+    real = im._git
+    monkeypatch.setattr(im, "_git", lambda root, *a: None if a[0] == "ls-files" else real(root, *a))
+    assert im.late_closure_route(PLAN, repo, "main", head=None) is None
+
+
+def test_head_plan_not_declared_true_gives_no_route(tmp_path, monkeypatch):
+    repo, _ = build_main(tmp_path, monkeypatch)
+    closure_branch(repo, plan_extra={"implementation_declared": "yes"})
+    assert _route(repo) is None
