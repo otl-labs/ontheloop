@@ -111,6 +111,8 @@ def test_pending_pairs_admits_a_modified_evaluator(tmp_path: Path) -> None:
     _write(hop, "scripts/checks/roadmap/_helper.py", '_NAME = "zz-probe.yaml"\n')
     for tree in (absent, elsewhere, unregistered, reads, hop):
         assert wp.pending_pairs(tree, {_CONTRACT}, plan) == [], tree.name
+    misnamed = "scripts/checks/other/registers.py"
+    assert wp.pending_pairs(elsewhere, {_CONTRACT}, _plan((misnamed, "Modify"))) == []
 
 
 def test_a_modified_evaluator_stand_in_still_checks_registration_and_sequencing(tmp_path: Path) -> None:
@@ -126,7 +128,15 @@ def test_a_modified_evaluator_stand_in_still_checks_registration_and_sequencing(
         with wp.stand_in([], modified=[("zz-probe.yaml", _CHECK)]):
             return _population.resolve_evaluator("zz-probe.yaml", spec, check_module_resolver=resolver, **kwargs)
 
-    assert not _population.resolve_evaluator("zz-probe.yaml", spec, root=tmp_path, check_module_resolver=lambda n: module)[0]
+    bare = _population.resolve_evaluator(
+        "zz-probe.yaml",
+        spec,
+        root=tmp_path,
+        registered_checks=on,
+        sequenced_names={_CHECK},
+        check_module_resolver=lambda n: module,
+    )
+    assert not bare[0] and "neither" in bare[1]
     unregistered, unsequenced = resolve({}, {_CHECK}), resolve(on, set())
     assert not unregistered[0] and "not a registered check" in unregistered[1]
     assert not unsequenced[0] and "not sequenced" in unsequenced[1]

@@ -20,11 +20,12 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
-Pair = tuple[str, str, str, str]
+Kind = Literal["create", "modify"]
+Pair = tuple[str, str, str, Kind]
 Runner = Callable[[list[str], Path, int], "subprocess.CompletedProcess[str]"]
 
 _CONTRACTS = "docs/contracts/"
@@ -33,7 +34,8 @@ _ADMITTED_GATES = frozenset({"validate_contract_drift", "pytest_diff"})
 _DRIFT = "validate_contract_drift"
 _TAIL_LINES = 20
 _MODULE = "scripts.roadmap.wording_check_pending"
-_MODIFY = "modify"
+_CREATE: Kind = "create"
+_MODIFY: Kind = "modify"
 
 
 def _contract_check(tree: Path, rel: str) -> str | None:
@@ -78,7 +80,7 @@ def pending_pairs(tree: Path, sidecar_files: set[str], plan: Any) -> list[Pair]:
     """
     if plan is None:
         return []
-    created = [e.file for e in plan.scope if _action(e) == "create"]
+    created = [e.file for e in plan.scope if _action(e) == _CREATE]
     modified = [e.file for e in plan.scope if _action(e) == _MODIFY]
     pairs: list[Pair] = []
     for rel in sorted(sidecar_files):
@@ -90,7 +92,7 @@ def pending_pairs(tree: Path, sidecar_files: set[str], plan: Any) -> list[Pair]:
             continue
         modules = [f for f in created if f.startswith(_CHECKS) and Path(f).name == f"{check}.py"]
         if modules and not any((tree / f).exists() for f in modules):
-            pairs.append((parts[2], check, modules[0], "create"))
+            pairs.append((parts[2], check, modules[0], _CREATE))
             continue
         module = _unread_module(tree, parts[2], check, modified)
         if module is not None:
@@ -144,7 +146,7 @@ def attribute(tree: Path, output: str, pairs: list[Pair], runner: Runner, timeou
 
 @contextlib.contextmanager
 def stand_in(pairs: list[tuple[str, str]], modified: Iterable[tuple[str, str]] = ()) -> Iterator[None]:
-    """Make validate_contract_drift's evaluator resolution succeed for exactly the listed (basename, check) pairs.
+    """Stand in validate_contract_drift's evaluator resolution for exactly the listed (basename, check) pairs.
 
     A created pair's whole resolution is stood in. A modified pair's evidence leg only: the original resolve_evaluator
     runs with module_contains_literal answering True for that basename, so registration, sequencing and the module

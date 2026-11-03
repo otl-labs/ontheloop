@@ -40,6 +40,7 @@ _MARKER = "# raise-approved: dec-"
 _MANIFEST = Path("logs/debug/selection-manifest.json")
 _VENV = ".venv"
 _ECHO_LINES = 20
+_VERBS = {"create": "creates", "modify": "modifies"}
 
 Runner = Callable[[list[str], Path, int], "subprocess.CompletedProcess[str]"]
 
@@ -265,9 +266,6 @@ def run(
             return Result("PASS", "", digest, base, selection, "", round_, pairs)
         reason = f"{reason}; {why}"
     return Result("FAIL", reason, digest, base, selection, _failing_lines(output), round_)
-
-
-_VERBS = {"create": "creates", "modify": "modifies"}
 
 
 def _render(slug: str, result: Result) -> str:
