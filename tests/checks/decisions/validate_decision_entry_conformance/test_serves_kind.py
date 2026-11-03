@@ -11,7 +11,7 @@ import yaml
 from scripts.checks import registry
 from scripts.checks.decisions.validate_decision_entry_conformance import validate_decision_entry_conformance
 
-REPO = Path(__file__).resolve().parents[3]
+REPO = Path(__file__).resolve().parents[4]
 
 _ENTRY_CONTRACT = """\
 required_markers: [Status, Date, Decision]

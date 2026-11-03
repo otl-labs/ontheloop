@@ -286,7 +286,7 @@ def _superseded_stub_grammar_issues(
 # Module-level alias, not a re-implementation: the compaction-stub predicate is promoted to
 # scripts.decisions_md.is_compacted_stub (DAF-03 / PLAN-decision-corpus-currency) so exactly one
 # definition exists. Retained under this private name because this module's existing test suite
-# (tests/checks/decisions/test_validate_decision_entry_conformance.py) imports it directly -- an
+# (tests/checks/decisions/validate_decision_entry_conformance/test_entry_rules.py) imports it directly -- an
 # import-and-rename edit there is unwarranted churn.
 _is_compacted_stub = is_compacted_stub
 
