@@ -1,12 +1,15 @@
-"""Plan-created evaluators for the wording check: derive them, attribute a red fast tier to them, stand them in.
+"""Plan-built evaluators for the wording check: derive them, attribute a red fast tier to them, stand them in.
 
-A sidecar can create a Class D contract whose evaluator check the same plan's build creates. In the scratch tree that
-evaluator does not exist yet, so validate_contract_drift is red for a reason the build itself resolves. This module
-derives such pairs from the plan's scope, decides whether a red fast tier is explained by them alone, and runs a
-sub-run in the scratch tree with exactly those pairs stood in. It lives only on the wording check's side: nothing under
-scripts/checks, scripts/validate.py or the workflows names it (Decision 235 clause 5).
+A sidecar can create a Class D contract whose evaluator check the same plan's build creates, or an existing check the
+build extends to read it. In the scratch tree that evaluator does not exist yet, or does not read the contract yet, so
+validate_contract_drift is red for a reason the build itself resolves. This module derives such pairs from the plan's
+scope, decides whether a red fast tier is explained by them alone, and runs a sub-run in the scratch tree with exactly
+those pairs stood in: a created evaluator's whole resolution, a modified one's reading only. It lives only on the
+wording check's side: nothing under scripts/checks, scripts/validate.py or the workflows names it (Decision 235
+clause 5).
 
-CLI (run inside the scratch tree): python -m scripts.roadmap.wording_check_pending [--pending NAME.yaml:CHECK ...] [-- TESTS]
+CLI (run inside the scratch tree):
+python -m scripts.roadmap.wording_check_pending [--pending NAME.yaml:CHECK[:modify] ...] [-- TESTS]
 """
 
 from __future__ import annotations
@@ -15,13 +18,14 @@ import argparse
 import contextlib
 import subprocess
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
-Pair = tuple[str, str, str]
+Kind = Literal["create", "modify"]
+Pair = tuple[str, str, str, Kind]
 Runner = Callable[[list[str], Path, int], "subprocess.CompletedProcess[str]"]
 
 _CONTRACTS = "docs/contracts/"
@@ -30,6 +34,8 @@ _ADMITTED_GATES = frozenset({"validate_contract_drift", "pytest_diff"})
 _DRIFT = "validate_contract_drift"
 _TAIL_LINES = 20
 _MODULE = "scripts.roadmap.wording_check_pending"
+_CREATE: Kind = "create"
+_MODIFY: Kind = "modify"
 
 
 def _contract_check(tree: Path, rel: str) -> str | None:
@@ -45,11 +51,37 @@ def _contract_check(tree: Path, rel: str) -> str | None:
     return check if isinstance(check, str) and check else None
 
 
+def _action(entry: Any) -> str:
+    return str(entry.action).rsplit(".", 1)[-1].lower()
+
+
+def _unread_module(tree: Path, basename: str, check: str, modified: list[str]) -> str | None:
+    from scripts.checks.contracts import _population
+
+    candidates = [f for f in modified if f.startswith(_CHECKS) and Path(f).name == f"{check}.py" and (tree / f).is_file()]
+    if not candidates:
+        return None
+    registered = _population._find_check_module(check, tree)
+    for rel in candidates:
+        module = tree / rel
+        if registered != module:
+            continue
+        files = [module, *_population.one_hop_scripts_imports(module, tree)]
+        if not any(_population.module_contains_literal(f, basename) for f in files):
+            return rel
+    return None
+
+
 def pending_pairs(tree: Path, sidecar_files: set[str], plan: Any) -> list[Pair]:
-    """(contract basename, evaluator check, the created module) for each Class D evaluator the plan Creates and T lacks."""
+    """(contract basename, evaluator check, module, "create" or "modify") for each Class D evaluator the plan builds.
+
+    A Create row counts when T lacks its module. A Modify row counts when T registers the check in that module and
+    neither the module nor its one-hop scripts/ imports read the contract yet (Decision 168 clause 2's evidence leg).
+    """
     if plan is None:
         return []
-    created = [e.file for e in plan.scope if str(e.action).rsplit(".", 1)[-1].lower() == "create"]
+    created = [e.file for e in plan.scope if _action(e) == _CREATE]
+    modified = [e.file for e in plan.scope if _action(e) == _MODIFY]
     pairs: list[Pair] = []
     for rel in sorted(sidecar_files):
         parts = rel.split("/")
@@ -60,7 +92,11 @@ def pending_pairs(tree: Path, sidecar_files: set[str], plan: Any) -> list[Pair]:
             continue
         modules = [f for f in created if f.startswith(_CHECKS) and Path(f).name == f"{check}.py"]
         if modules and not any((tree / f).exists() for f in modules):
-            pairs.append((parts[2], check, modules[0]))
+            pairs.append((parts[2], check, modules[0], _CREATE))
+            continue
+        module = _unread_module(tree, parts[2], check, modified)
+        if module is not None:
+            pairs.append((parts[2], check, module, _MODIFY))
     return pairs
 
 
@@ -85,9 +121,9 @@ def attribute(tree: Path, output: str, pairs: list[Pair], runner: Runner, timeou
 
     failed = {m.signature for m in parse_markers(output) if m.source == "gate"}
     if _DRIFT not in failed:
-        return f"the red fast tier does not include {_DRIFT}, which a plan-created evaluator always reddens"
+        return f"the red fast tier does not include {_DRIFT}, which a plan-built evaluator always reddens"
     if not failed <= _ADMITTED_GATES:
-        return "the red fast tier includes checks a plan-created evaluator cannot explain: " + ", ".join(
+        return "the red fast tier includes checks a plan-built evaluator cannot explain: " + ", ".join(
             sorted(failed - _ADMITTED_GATES)
         )
     tests: list[str] = []
@@ -95,7 +131,7 @@ def attribute(tree: Path, output: str, pairs: list[Pair], runner: Runner, timeou
         tests = _failed_test_files(tree, output)
         if not tests:
             return "pytest_diff failed and no failing test file under tests/ can be named from its summary lines"
-    args = [f"{name}:{check}" for name, check, _ in pairs]
+    args = [f"{name}:{check}:{_MODIFY}" if action == _MODIFY else f"{name}:{check}" for name, check, _, action in pairs]
     cmd = ["bin/venv-python", "-m", _MODULE, "--pending", *args, "--", *tests]
     try:
         proc = runner(cmd, tree, timeout)
@@ -109,18 +145,35 @@ def attribute(tree: Path, output: str, pairs: list[Pair], runner: Runner, timeou
 
 
 @contextlib.contextmanager
-def stand_in(pairs: list[tuple[str, str]]) -> Iterator[None]:
-    """Make validate_contract_drift's evaluator resolution succeed for exactly the listed (basename, check) pairs."""
+def stand_in(pairs: list[tuple[str, str]], modified: Iterable[tuple[str, str]] = ()) -> Iterator[None]:
+    """Stand in validate_contract_drift's evaluator resolution for exactly the listed (basename, check) pairs.
+
+    A created pair's whole resolution is stood in. A modified pair's evidence leg only: the original resolve_evaluator
+    runs with module_contains_literal answering True for that basename, so registration, sequencing and the module
+    lookup still decide.
+    """
     from scripts.checks.contracts import _population
 
     original = _population.resolve_evaluator
-    listed = set(pairs)
+    original_literal = _population.module_contains_literal
+    listed, reads = set(pairs), set(modified)
 
     def wrapper(contract_basename: str, evaluator: Any, **kwargs: Any) -> tuple[bool, str]:
         check = getattr(evaluator, "check", None)
         if check is not None and (contract_basename, check) in listed:
             return True, f"stood in: the plan creates check {check}"
-        return original(contract_basename, evaluator, **kwargs)
+        if check is None or (contract_basename, check) not in reads:
+            return original(contract_basename, evaluator, **kwargs)
+
+        def reads_it(module_path: Path, literal: str) -> bool:
+            return literal == contract_basename or original_literal(module_path, literal)
+
+        _population.module_contains_literal = reads_it
+        try:
+            ok, detail = original(contract_basename, evaluator, **kwargs)
+        finally:
+            _population.module_contains_literal = original_literal
+        return (True, f"stood in: the plan modifies check {check} to read it") if ok else (False, detail)
 
     _population.resolve_evaluator = wrapper
     try:
@@ -150,14 +203,15 @@ def _run_pytest(args: list[str]) -> int:
     return int(pytest.main(args))
 
 
-def _parse_pairs(raw: list[str]) -> list[tuple[str, str]] | None:
-    pairs: list[tuple[str, str]] = []
+def _parse_pairs(raw: list[str]) -> tuple[list[tuple[str, str]], list[tuple[str, str]]] | None:
+    created: list[tuple[str, str]] = []
+    modified: list[tuple[str, str]] = []
     for item in raw:
-        name, sep, check = item.partition(":")
-        if not sep or not name or not check:
+        fields = item.split(":")
+        if len(fields) not in (2, 3) or not all(fields) or fields[2:] not in ([], [_MODIFY]):
             return None
-        pairs.append((name, check))
-    return pairs
+        (modified if len(fields) == 3 else created).append((fields[0], fields[1]))
+    return created, modified
 
 
 def main(argv: list[str] | None = None, test_runner: Callable[[list[str]], int] | None = None) -> int:
@@ -169,13 +223,13 @@ def main(argv: list[str] | None = None, test_runner: Callable[[list[str]], int] 
     parser = argparse.ArgumentParser(prog=f"python -m {_MODULE}")
     parser.add_argument("--pending", nargs="*", default=[])
     ns = parser.parse_args(args)
-    pairs = _parse_pairs(ns.pending)
-    if pairs is None:
-        print("malformed --pending argument: expected NAME.yaml:CHECK", file=sys.stderr)
+    parsed = _parse_pairs(ns.pending)
+    if parsed is None:
+        print("malformed --pending argument: expected NAME.yaml:CHECK or NAME.yaml:CHECK:modify", file=sys.stderr)
         return 2
     from scripts.checks import registry
 
-    with stand_in(pairs):
+    with stand_in(*parsed):
         failed: list[str] = []
         registry.resolve(_DRIFT)(failed)
         for label in failed:

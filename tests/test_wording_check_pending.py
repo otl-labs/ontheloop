@@ -1,4 +1,4 @@
-"""Tests for scripts/roadmap/wording_check_pending.py: plan-created evaluators, their attribution and the stand-in."""
+"""Tests for scripts/roadmap/wording_check_pending.py: plan-built evaluators, their attribution and the stand-in."""
 
 from __future__ import annotations
 
@@ -51,9 +51,9 @@ def tree(tmp_path: Path) -> Path:
 class TestPendingPairs:
     def test_a_created_evaluator_module_is_pending(self, tree: Path) -> None:
         pairs = wp.pending_pairs(tree, {_CONTRACT}, _plan((_MODULE_REL, "Create")))
-        assert pairs == [("zz-probe.yaml", _CHECK, _MODULE_REL)]
+        assert pairs == [("zz-probe.yaml", _CHECK, _MODULE_REL, "create")]
 
-    def test_a_modify_row_an_absent_row_and_no_plan_are_not_pending(self, tree: Path) -> None:
+    def test_a_modify_row_t_lacks_an_absent_row_and_no_plan_are_not_pending(self, tree: Path) -> None:
         assert wp.pending_pairs(tree, {_CONTRACT}, _plan((_MODULE_REL, "Modify"))) == []
         assert wp.pending_pairs(tree, {_CONTRACT}, _plan(("scripts/other.py", "Create"))) == []
         assert wp.pending_pairs(tree, {_CONTRACT}, None) == []
@@ -85,6 +85,73 @@ class TestPendingPairs:
         assert wp.pending_pairs(tree, {"docs/contracts/sub/zz-probe.yaml", "docs/other.yaml"}, plan) == []
 
 
+def _registering(extra: str = "") -> str:
+    head = f'"""Reads zz-probe.yaml (a docstring is not evidence)."""\n{extra}from scripts.checks import registry\n'
+    return f'{head}\n\n@registry.register("{_CHECK}")\ndef {_CHECK}(failed):\n    return None\n'
+
+
+def _modified_tree(root: Path, module_text: str, rel: str = _MODULE_REL) -> Path:
+    _write(root, _CONTRACT, _CONTRACT_TEXT)
+    _write(root, rel, module_text)
+    return root
+
+
+def test_pending_pairs_admits_a_modified_evaluator(tmp_path: Path) -> None:
+    plan = _plan((_MODULE_REL, "Modify"))
+    admitted = _modified_tree(tmp_path / "admitted", _registering())
+    assert wp.pending_pairs(admitted, {_CONTRACT}, plan) == [("zz-probe.yaml", _CHECK, _MODULE_REL, "modify")]
+    assert wp.pending_pairs(admitted, {_CONTRACT}, _plan((_MODULE_REL, "Delete"))) == []
+    absent = tmp_path / "absent"
+    _write(absent, _CONTRACT, _CONTRACT_TEXT)
+    elsewhere = _modified_tree(tmp_path / "elsewhere", _registering(), "scripts/checks/other/registers.py")
+    _write(elsewhere, _MODULE_REL, "X = 1\n")
+    unregistered = _modified_tree(tmp_path / "unregistered", f"def {_CHECK}(failed):\n    return None\n")
+    reads = _modified_tree(tmp_path / "reads", _registering('_PATH = "docs/contracts/zz-probe.yaml"\n'))
+    hop = _modified_tree(tmp_path / "hop", _registering("from scripts.checks.roadmap import _helper\n"))
+    _write(hop, "scripts/checks/roadmap/_helper.py", '_NAME = "zz-probe.yaml"\n')
+    for tree in (absent, elsewhere, unregistered, reads, hop):
+        assert wp.pending_pairs(tree, {_CONTRACT}, plan) == [], tree.name
+    misnamed = "scripts/checks/other/registers.py"
+    assert wp.pending_pairs(elsewhere, {_CONTRACT}, _plan((misnamed, "Modify"))) == []
+
+
+def test_a_modified_evaluator_stand_in_still_checks_registration_and_sequencing(tmp_path: Path) -> None:
+    from scripts.checks.contracts import _population
+    from scripts.contracts_schema import EvaluatorSpec
+
+    module = tmp_path / _MODULE_REL
+    _write(tmp_path, _MODULE_REL, "X = 1\n")
+    original, spec, on = _population.module_contains_literal, EvaluatorSpec(check=_CHECK), {_CHECK: object()}
+
+    def resolve(registered: dict[str, Any], sequenced: set[str], resolver: Any = lambda n: module) -> tuple[bool, str]:
+        kwargs = {"root": tmp_path, "registered_checks": registered, "sequenced_names": sequenced}
+        with wp.stand_in([], modified=[("zz-probe.yaml", _CHECK)]):
+            return _population.resolve_evaluator("zz-probe.yaml", spec, check_module_resolver=resolver, **kwargs)
+
+    bare = _population.resolve_evaluator(
+        "zz-probe.yaml",
+        spec,
+        root=tmp_path,
+        registered_checks=on,
+        sequenced_names={_CHECK},
+        check_module_resolver=lambda n: module,
+    )
+    assert not bare[0] and "neither" in bare[1]
+    unregistered, unsequenced = resolve({}, {_CHECK}), resolve(on, set())
+    assert not unregistered[0] and "not a registered check" in unregistered[1]
+    assert not unsequenced[0] and "not sequenced" in unsequenced[1]
+    assert resolve(on, {_CHECK}, lambda n: None) == (False, f"could not resolve a source module for check {_CHECK!r}")
+    assert resolve(on, {_CHECK}) == (True, f"stood in: the plan modifies check {_CHECK} to read it")
+    assert _population.module_contains_literal is original
+
+    def boom(name: str) -> Path:
+        raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError):
+        resolve(on, {_CHECK}, boom)
+    assert _population.module_contains_literal is original
+
+
 class Recorder:
     def __init__(self, rc: int = 0, out: str = "", raises: BaseException | None = None) -> None:
         self.rc, self.out, self.raises = rc, out, raises
@@ -97,7 +164,7 @@ class Recorder:
         return subprocess.CompletedProcess(cmd, self.rc, self.out, "")
 
 
-_PAIRS = [("zz-probe.yaml", _CHECK, _MODULE_REL)]
+_PAIRS = [("zz-probe.yaml", _CHECK, _MODULE_REL, "create")]
 _PENDING = ["--pending", f"zz-probe.yaml:{_CHECK}", "--"]
 
 
@@ -108,6 +175,12 @@ class TestAttribute:
         cmd, cwd, timeout = runner.calls[0]
         assert cmd == ["bin/venv-python", "-m", "scripts.roadmap.wording_check_pending", *_PENDING]
         assert (cwd, timeout) == (tree, 600)
+
+    def test_a_modify_pair_is_passed_with_its_modify_suffix(self, tree: Path) -> None:
+        runner = Recorder()
+        pairs = [*_PAIRS, ("other.yaml", "validate_other", "scripts/checks/x/validate_other.py", "modify")]
+        assert wp.attribute(tree, f"{_DRIFT_MARKER}\n", pairs, runner, 600) is None
+        assert runner.calls[0][0][-4:] == ["--pending", f"zz-probe.yaml:{_CHECK}", "other.yaml:validate_other:modify", "--"]
 
     def test_drift_plus_tests_passes_the_failing_files_that_exist(self, tree: Path) -> None:
         _write(tree, "tests/test_a.py", "")
@@ -229,6 +302,18 @@ class TestCli:
         capsys.readouterr()
         assert seen[0][0] == "tests/test_a.py" and "--randomly-seed=20260710" in seen[0] and "-n" not in seen[0]
         assert "--timeout" in seen[0] and "--timeout-method=thread" in seen[0]
+
+    def test_a_modify_suffix_is_a_modified_pair_and_other_shapes_exit_two(self, monkeypatch, tmp_path, capsys) -> None:
+        self._contracts(monkeypatch, tmp_path)
+        seen: list[tuple[list[Any], list[Any]]] = []
+        real = wp.stand_in
+        monkeypatch.setattr(wp, "stand_in", lambda p, m=(): seen.append((list(p), list(m))) or real(p, m))
+        assert wp.main(["--pending", f"zz-probe.yaml:{_CHECK}:modify", "--"]) == 1
+        assert seen == [([], [("zz-probe.yaml", _CHECK)])] and "not a registered check" in capsys.readouterr().out
+        for bad in (f"zz-probe.yaml:{_CHECK}:other", f"zz-probe.yaml:{_CHECK}:modify:x", f"zz-probe.yaml:{_CHECK}:"):
+            assert wp.main(["--pending", bad, "--"]) == 2, bad
+            assert "malformed" in capsys.readouterr().err
+        assert len(seen) == 1
 
     @pytest.mark.parametrize("bad", ["nocolon", ":check", "name:"])
     def test_a_malformed_pending_argument_exits_two(self, bad: str, capsys) -> None:
