@@ -264,4 +264,24 @@ ENTRIES: tuple[Entry, ...] = (
         ),
         full_segment="full_after_lint",
     ),
+    Entry(
+        name="validate_graduated_rerun",
+        module="scripts.checks.verification.validate_graduated_rerun",
+        attr="validate_graduated_rerun",
+        pre=False,
+        full_segment="full_after_lint",
+    ),
+    Entry(
+        name="validate_known_red_shrinks",
+        module="scripts.checks.verification.validate_known_red_shrinks",
+        attr="validate_known_red_shrinks",
+        pre=True,
+        pre_globs=(
+            "config/agent/verification_registry/known_red.yaml",
+            "scripts/checks/verification/**",
+            "scripts/checks/_common.py",
+            "scripts/checks/registry.py",
+        ),
+        full_segment="full_after_lint",
+    ),
 )

@@ -198,8 +198,8 @@ class TestRegistryShardRepair:
         doc = _load(REPO_ROOT / "docs" / "contracts" / "verification-registry.yaml")
         assert "plan-obligations-command-wired" in doc["governance_notes"]
         assert "PLAN-project-alignment" in doc["governance_notes"]
-        newest = doc["amendment_log"][0]
-        assert "PLAN-project-alignment" in newest["summary"] and newest["semantic_break"] is False
+        entry = next(e for e in doc["amendment_log"] if "PLAN-project-alignment" in e["summary"])
+        assert entry["semantic_break"] is False
 
 
 class TestStaleReferenceSweep:
