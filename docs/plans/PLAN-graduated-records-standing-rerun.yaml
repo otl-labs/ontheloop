@@ -25,17 +25,21 @@ scope:
       Partitions records into SUITE-COVERED and RUN. SUITE-COVERED: primitive_slot test_selector, and
       command_exit_zero records whose argv starts with exactly [bin/venv-python|python, -m, pytest] (no shell; a
       command_output_matches pytest record asserts on output the suite never checks, so it is RUN); in either case a
-      record whose pinned test is integration-marked (a pytest.mark.integration decorator on the node or its class, or
-      a module-level pytestmark naming it, found by _graduated_rerun_nodes) is RUN instead, because the full tier's
-      unit run passes -m "not integration". Every pytest node argument of a SUITE-COVERED record is resolved through
+      record is RUN instead when any pytest argument can select an integration-marked test: a node id whose function or
+      class carries a pytest.mark.integration decorator or whose module pytestmark names it, or a bare file or
+      directory argument containing any such test (a -k expression is not evaluated, so the whole file counts), found
+      by _graduated_rerun_nodes, because the full tier's unit run passes -m "not integration". Every pytest node argument of a SUITE-COVERED record is resolved through
       _graduated_rerun_nodes (unresolvable = red). RUN records execute in a ThreadPoolExecutor of
       min(8, os.cpu_count() or 1) workers; each command-slot record runs in a child process (this module's
-      one-record entry point, python -m with the check_id, start_new_session=True) under a 300-second wall-clock limit,
+      one-record entry point, python -m with the check_id and --root <tree>, started from HEAD's repository root so it
+      imports HEAD's code even when the tree under test is an origin/main worktree, start_new_session=True; the child
+      calls materialize_check_in_tree(row, tree)) under a 300-second wall-clock limit,
       and on expiry the whole process group is killed and the record is red with "timed out after 300 s"; pure-Python
       slots (grep_count, file_presence) run in-process through materialize_check_in_tree(row, ROOT).run(). Each non-PASS
       record is re-run once, alone, under the same limit after the pool drains, and is red only if that serial run is
       also non-PASS (a record that passes alone is printed as load-sensitive, never silently dropped); a
-      GraduationError from materialization is red (Decision 55). Prints the header "=== Graduated record re-run ===".
+      GraduationError from materialization is red (Decision 55). Prints the header "=== Graduated record re-run ===" and, after it, one summary line
+      "<N> graduated_records examined, <R> red (<L> listed), <S> load-sensitive".
       Fails, one failure line per record naming check_id, guard_target and the first line of the failure output
       (Decision 142's fingerprint needs the id): an unlisted red record; a listed record that is not red ("passes;
       remove it from known_red.yaml"); a listed id that is not a live record ("retired or renamed; remove it"); a
@@ -60,8 +64,9 @@ scope:
       (rec-4115's measured design: file existence, then an ast walk of the Class/function segments with any
       "[...]" suffix stripped; a bare file or directory argument resolves by existence; flags such as -q, -k and
       -m are skipped, and a -k/-m expression argument is skipped with it). Returns the unresolved node ids, and
-      separately reports whether a resolved node is integration-marked (decorator on the function or its class, or a
-      module-level pytestmark naming integration). No pytest import, no collection.
+      separately reports whether an argument can select an integration-marked test (a node whose function or class
+      carries the decorator or whose module pytestmark names integration, or a bare file or directory containing any
+      such test). No pytest import, no collection.
   - file: scripts/checks/verification/_manifest.py
     action: Modify
     purpose: >-
@@ -92,7 +97,8 @@ scope:
       a record that fails in the pool but passes alone is not red and is reported load-sensitive
       (TestRerun::test_load_sensitive_record_passes_serial_confirm); the shell-wrapped pytest command is RUN, not
       suite-covered (TestRerun::test_shell_wrapped_pytest_is_run); a record pinning an integration-marked test is RUN
-      (TestRerun::test_integration_marked_pin_is_run); a record that exceeds the wall-clock limit (limit patched to
+      (TestRerun::test_integration_marked_pin_is_run), including a bare-file argument with a -k expression over a
+      file holding an integration-marked class (the gc-guards-g2-g3-g4-discriminate shape); a record that exceeds the wall-clock limit (limit patched to
       about 1 s, command sleeps) is red, named, and its process group is gone
       (TestRerun::test_hung_record_times_out_red); examined() count equals records evaluated.
   - file: tests/checks/verification/test_validate_known_red_shrinks.py
@@ -107,7 +113,7 @@ scope:
     purpose: >-
       Resolution cases: file::function, file::Class::method, nested class, [param] suffix, bare file, directory,
       missing file, missing function (TestResolve::test_missing_function_unresolved), flags and -k expressions skipped,
-      integration marker found on a function, a class and a module pytestmark
+      integration marker found on a function, a class, a module pytestmark and anywhere in a bare-file argument
       (TestResolve::test_integration_marker_detected).
   - file: docs/DECISIONS.md
     action: Modify
@@ -265,7 +271,8 @@ verification_plan:
     expected: Exit 0.
     fix_if: Any bound file differs from the sidecar beyond a filled {{N}}/{{DATE}} -- stop and ask; never re-derive the sidecar.
     hermetic: false
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: Base-relative to origin/main; vacuous after merge, when origin/main holds the bound text.
   - step: 9
     phase: pre-deploy
     action: Decisions index regenerated for the new entry
@@ -301,8 +308,8 @@ verification_plan:
     command: >-
       mcp__github__actions_list (workflow ci.yml, branch main, head_sha set to the squash-merge SHA) then
       mcp__github__get_job_logs for main-validate; find the "=== Graduated record re-run ===" header and the
-      validate_graduated_rerun examined line (unit graduated_records) after it.
-    expected: main-validate conclusion success; the log shows validate_graduated_rerun examined records and failed none.
+      summary line "<N> graduated_records examined, <R> red (<L> listed), <S> load-sensitive" after it.
+    expected: main-validate conclusion success; the summary line shows R equal to L and validate_graduated_rerun failed none.
     fix_if: >-
       A record green locally but red on the CI runner is an environment difference -- route it as red main
       (Decision 226), fix the record's surface or retire it with operator approval; never add it to the list.
@@ -393,9 +400,9 @@ context:
   - "Operator ruling: Benjamin chose 'Re-run in the full tier' on 2026-11-03 (reverses audit criterion-shape-forks-9d25d918 Q1); the wording approval is recorded in the handoff, not here."
   - "Measured 2026-11-02/03 on main 4e62d4b3 and cc6b11b5: 50 of 1,490 records red (42 non-pytest, 7 pytest-based incl. rec-4115's stale ids, 1 load-sensitive: plan-obligations-no-glob-no-raise fails under a 4-worker pool, passes alone). RUN-partition cost about 141 s on 4 workers plus about 178 s serial for 35 shell-wrapped pytest records."
   - "Rehearsal (Decision 163 NOTE): a tree with one added Decision, its regenerated index and one added roadmap tier item turned no green record red; the sidecar tree turned no green record red either."
-  - "Integration-marked pins (the full tier's unit run passes -m 'not integration'; measured 2026-11-03: 0 of 1,517 records pin an integration-marked node by decorator or pytestmark) are routed to the RUN partition, so the Decision's 'the test suite already re-runs the tests' holds for every SUITE-COVERED record (critique r1)."
+  - "Integration-marked pins (the full tier's unit run passes -m 'not integration'; measured 2026-11-03: no pinned node id is integration-marked, but gc-guards-g2-g3-g4-discriminate runs a bare file with -k selecting the integration-marked TestG4RealDryRunSizeColumn, rec-3773's anchor) are routed to the RUN partition whenever any argument can select one, so the Decision's 'the test suite already re-runs the tests' holds for every SUITE-COVERED record (critique r1, r2). That class skips itself without network, so running it is safe."
   - "main-validate runs venv-less (bin/venv-python falls back to the PATH interpreter, Decision 148) and with origin/main equal to HEAD; three records use git show origin/main and pass there. Step 12 is the CI proof; locally unproven."
-  - "Stripping a [param] suffix means a stale parameter id still resolves (4 records pin parametrized ids on 2026-11-03); declared residual with the integration one above."
+  - "Stripping a [param] suffix means a stale parameter id still resolves (4 records pin parametrized ids on 2026-11-03); declared residual with the integration one above. Also residual: 37 of 1,691 SUITE-COVERED pinned node ids sit in modules with a module-level importorskip or skip mark and run only where the dependency is installed (critique r2)."
   - "RUN records execute in the live checkout, as the admission differential ran them in a tree of the repo; about 11 records mention logs/ or validation_result. A record that writes tracked files is a defect for rec-4871's triage, not this plan's; VP 11 runs on the committed tree so uncommitted edits do not mask a result."
   - "Rejected alternative (critique r1 frame challenge): one parametrized pytest over the records would get xdist, per-test timeouts and xfail(strict=True) for the list for free, but the records spawn pytest themselves (nested pytest under xdist), validate.py's recursion guard refuses that, and the records are governed data, not tests; the custom pool keeps the GATE-FAILURE lines ci-rca fingerprints."
   - "rec-4115 stays open: this plan resolves node ids in the full tier only; its --pre promotion and its five stale shards are its own (they go on the list owned by rec-4115). rec-3286 (repair path) stays open; the follow-on triage needs it for claim-preserving repairs."
@@ -411,6 +418,7 @@ gate_rounds:
   - {gate: wording-check, round: 2, verdict: PASS, digest: c6a53fc1ddcabf202160e1ba6874ebc19f02cd2d49a95903aad9447d7b49fc78, base: cc6b11b52066ba6c9fad2aa0b64186c301ec02b1, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 3, verdict: PASS, digest: c6a53fc1ddcabf202160e1ba6874ebc19f02cd2d49a95903aad9447d7b49fc78, base: 03ac4f9da9b7341e84f776865ddfad313c53f4cb, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 9}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
