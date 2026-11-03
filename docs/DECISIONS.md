@@ -17,17 +17,21 @@ significance:
     temporary, and fixes how oversized work splits for every later planner. Not a contract note: the plan schema can
     enforce a type list but cannot retire a Decision or dispose of a candidate decision. Not amendment_forms: a
     note cannot retire a Decision, and Decision 67 already carries two clause-level amendments.
+kind:
+  value: direction
+  justification: >-
+    Clause 4 changes what satisfies a human gate (a child work item rides its parent's human approval when a
+    deterministic check passes), so undoing the entry would move that gate.
 ```
 
 **Status:** Decided
 **Date:** 2026-11-02
 **Warehouse ID:** dec-246 (per Decision 84 backfill)
 
-**Problem:** Decision 67 froze the single-process Python executor (scripts/execute_recommendation.py, scripts/executor/)
-and the STRATEGIC plan type it consumed, pending a reversal (CD.17) keyed to T4.2. That executor was a proof of
-concept; its successor is the Decision 185 loop with the Decision 205 and 229 personas, so the freeze can never
-reverse. Yet AGENTS.md, three skills and the plan schema still treat it as temporary, and no rule says how an item too
-large for one plan splits once STRATEGIC plans are gone.
+**Problem:** Decision 67 froze the single-process Python executor and the STRATEGIC plan type it consumed, pending a
+reversal (CD.17) keyed to T4.2. That executor was a proof of concept; its successor is the Decision 185 loop with the
+Decision 205 and 229 personas, so the freeze can never reverse. Yet AGENTS.md, three skills and the plan schema still
+treat it as temporary, and no rule says how an item too large for one plan splits once STRATEGIC plans are gone.
 
 **Intent:** Work too large for one plan splits into smaller work items that each get their own plan, never into a plan
 of plans, and a split carries the parent's approval only as far as a mechanical check can prove it.
@@ -62,9 +66,8 @@ of plans, and a split carries the parent's approval only as far as a mechanical 
    superseded with no successor trigger. Decisions 73, 90, 182, 203 and 229 carry dated notes saying what each
    re-keys to; anything else keyed to either's reversal re-keys to T4.2's completion.
 
-**Coverage (Decision 181 cl.2):** cl.2 -- the plan schema and tests/decisions/test_decision_67_supersession.py, which
-also sweeps the live instruction surfaces for a revived freeze or STRATEGIC rule; cl.1 -- T5.6; cl.3 and cl.5 -- T4.31,
-interim practice unenforced by design (every child is human-planned); cl.4 -- T4.4.
+**Coverage (Decision 181 cl.2):** cl.2 -- the plan schema and tests/decisions/test_decision_67_supersession.py; cl.1 --
+T5.6; cl.3 and cl.5 -- T4.31, interim practice unenforced by design (every child is human-planned); cl.4 -- T4.4.
 
 ```yaml reversal-conditions
 decision: 246
@@ -3229,6 +3232,8 @@ conditions:
 [Amendment 2026-10-18, Decision 228: clause 1's root session state and duration read from turn evidence; a producer close is optional evidence.]
 
 [Amendment 2026-10-25, PLAN-telemetry-reader-and-smoke-twin (Decision 236 cl.3): production serves no transcript content until a named consumer needs it (rec-4481).]
+
+> **Update (2026-11-03):** CD.40 is ratified onto this Decision. This is a ratification record, not a clause-1 or clause-5 note: it adds and changes no clause. Each CD.40 clause already lives elsewhere: ops_session_log is retired, not migrated (Decision 78's 2026-09-22 amendment, T2.26); docs/SESSION_LOG.md is retired by deletion (Decisions 127 and 174, #1696), and no earlier history was imported, so no imported-row flag exists; turn-grain rows go through the telemetry writer (clause 1 here, Decision 213); a materialized session aggregate (the audit's ops_sessions, not telemetry_sessions) waits on the derived-read-too-costly condition above, which rec-4833 watches; and the hook-side credential scrub stays a launch criterion (telemetry_transcripts.yaml, T3.20 c1), because snapshot retention defeats redaction after the write.
 
 ---
 
