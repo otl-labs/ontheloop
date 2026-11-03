@@ -107,13 +107,15 @@ def _run_added_entry_differentials(
     print(f"  Differential admission gate: {len(candidates)} added-or-modified entr{plural} in this diff.")
 
     root = root or _common.ROOT
+    bases = bases or {}
+    pending = pending or set()
     for row in candidates:
         cid = row.get("check_id", "?")
-        if cid in (pending or ()):
+        if cid in pending:
             print(f"    PENDING: {cid} (late-closure declaration not committed; the committed run decides)")
             continue
         try:
-            if cid in (bases or {}):
+            if cid in bases:
                 outcome = verification_graduation.run_differential(row, repo_root=root, base_ref=bases[cid])
             else:
                 outcome = verification_graduation.run_differential(row, repo_root=root)
@@ -125,7 +127,7 @@ def _run_added_entry_differentials(
         elif not outcome.admitted:
             failed.append(f"verification-registry differential: check_id={cid}: not admitted -- {outcome.reason}")
         else:
-            late = f" [late-closure base {bases[cid]}]" if cid in (bases or {}) else ""
+            late = f" [late-closure base {bases[cid]}]" if cid in bases else ""
             print(f"    admitted: {cid} ({outcome.reason}){late}")
 
 
