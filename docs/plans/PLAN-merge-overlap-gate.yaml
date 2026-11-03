@@ -5,7 +5,7 @@ handoff_policy:
 slug: merge-overlap-gate
 intent: >-
   Refuse an agent merge when main has changed, since the PR's base, a file the PR also changes, until the branch is
-  updated and PR CI re-runs on the combined tree. On 2026-11-03 #1799 merged about 14 hours after its last CI run, on
+  updated with main (the CI re-run on the updated head is procedural; merging before it succeeds is rec-4080's). On 2026-11-03 #1799 merged about 14 hours after its last CI run, on
   top of #1805, which made the same 4-byte AGENTS.md shrink and the same S1 budget edit (16955 -> 16951); git folded
   the identical budget-line edits, the combined tree measured 16947 and main went red (rec-4866, rec-4869). The gate
   is a best-effort pre-merge check: the post-merge full tier stays the authority (TAP-style). Its authority is a new
@@ -22,8 +22,8 @@ scope:
     purpose: >-
       Forge-neutral git logic keyed on refs, never a PR number (Decision 234 cl.4): overlap(root, head_ref,
       base_ref="origin/main") -> Verdict(kind CLEAR|OVERLAP|UNAVAILABLE, merge_base, behind, files). merge_base = git
-      merge-base base_ref head_ref; files = the sorted intersection of `git diff --name-only merge_base base_ref` and
-      `git diff --name-only merge_base head_ref`. CLEAR when empty (behind may be > 0); OVERLAP with the shared paths;
+      merge-base base_ref head_ref; files = the sorted intersection of `git diff --no-renames --name-only merge_base
+      base_ref` and `git diff --no-renames --name-only merge_base head_ref` (so a rename on one side still intersects). CLEAR when empty (behind may be > 0); OVERLAP with the shared paths;
       UNAVAILABLE on any git failure or unresolvable ref (never CLEAR). It never fetches; callers fetch. CLI: `python
       -m scripts.session.merge_overlap check --head REF [--base REF]` prints one line, `MERGE-OVERLAP <KIND>
       behind=<k> base=<sha12> files=<a,b>`, and exits 0 CLEAR, 1 OVERLAP, 2 UNAVAILABLE.
@@ -32,8 +32,13 @@ scope:
     purpose: >-
       GitHub-specific plumbing adapter only (the Decision 203 hook-adapter pattern): reads the PreToolUse payload; for
       tool_name mcp__github(-full)?__(merge_pull_request|enable_pr_auto_merge) whose tool_input owner/repo names this
-      checkout's origin repository, it runs `git fetch --no-tags origin main refs/pull/<pullNumber>/head` (one
-      --deepen=500 retry on a shallow clone), then merge_overlap.overlap(FETCH'd PR head, "origin/main"). CLEAR -> exit
+      checkout's origin repository (owner/repo parsed from the last two path parts of `git remote get-url origin`,
+      .git stripped, compared casefolded), it validates pullNumber as a positive integer (1799 or 1799.0; a bool,
+      string, zero or negative value is malformed), runs `git fetch --no-tags origin
+      +refs/heads/main:refs/remotes/origin/main +refs/pull/<N>/head:refs/remotes/origin/pr/<N>` into those explicit
+      destination refs (never FETCH_HEAD, whose first line is main), retries once with --deepen=500 when merge-base
+      does not resolve in a shallow clone, then calls merge_overlap.overlap("refs/remotes/origin/pr/<N>",
+      "refs/remotes/origin/main"). CLEAR -> exit
       0, no output. OVERLAP -> exit 2, stderr "merge-overlap-gate: OVERLAP: main changed <files> since this PR's base
       <sha12> (<k> commits behind). Update the branch (mcp__github__update_pull_request_branch), wait for the CI-green
       wake on the new head (subscribe_pr_activity, never poll), then merge." A fetch failure, UNAVAILABLE, a missing pullNumber or malformed JSON on a
@@ -49,7 +54,8 @@ scope:
     action: Modify
     purpose: >-
       Append one PreToolUse group, matcher "^mcp__github(-full)?__(merge_pull_request|enable_pr_auto_merge)$", command
-      `bash "$CLAUDE_PROJECT_DIR/.claude/hooks/merge_overlap_gate.sh"`. Existing groups unchanged and in order.
+      `bash "$CLAUDE_PROJECT_DIR/.claude/hooks/merge_overlap_gate.sh"`, "timeout": 60 (as the handoff group: above the
+      shim's 45+5 s cap, since a harness timeout does not block). Existing groups unchanged and in order.
   - file: .claude/hooks/hooks.json
     action: Modify
     purpose: >-
@@ -69,23 +75,33 @@ scope:
       Decision. push_pr_ci_merge_flow's green-confirmation step names the gate (Decision {{N}}) and its remedy (update
       the branch, wait for the CI-green wake, merge). merge_step_coverage names the hook files, matcher and exit
       codes, and the residual owners: GitHub-UI merges and different-file conflicts (rec-4874, rec-4451), the updated
-      head carrying only --pre evidence (rec-4085), merge on red (rec-4080), auto-merge enabled before checks finish
-      (rec-4874), agent merges by gh or REST from a shell (rec-2827). Add the three new paths to referenced_repo_paths; contract_version 10 -> 11 with one amendment_log
-      row. Net added effective lines at most 8 (headroom 15 at planning base 9593de0b; three unbuilt plans also edit this file).
+      head carrying only --pre evidence (rec-4085), merge on red or before the updated head's checks succeed
+      (rec-4080), auto-merge enabled before checks finish (rec-4874), agent merges by gh or REST from a shell
+      (rec-2827). Add the three new paths to referenced_repo_paths; contract_version one more than origin/main's at
+      build (11 -> 12 at planning base 9593de0b) with one amendment_log row. Net added effective lines at most 8 (headroom 15 at planning base 9593de0b; three unbuilt plans also edit this file).
+  - file: tests/fixtures/merge_overlap_repos.py
+    action: Create
+    purpose: >-
+      Shared fixture builder for the three new test files (cross-test imports are banned): a local bare origin with
+      main and refs/pull/<N>/head, a clone whose origin URL maps to https://github.com/otl-labs/ontheloop through
+      url.<bare>.insteadOf, and helpers to advance main and update a PR branch.
   - file: tests/test_session_merge_overlap.py
     action: Create
     purpose: >-
-      Fixture-repo tests of merge_overlap (local bare origin): not behind -> CLEAR; behind with disjoint files -> CLEAR
+      Fixture-repo tests of merge_overlap (tests/fixtures/merge_overlap_repos.py): not behind -> CLEAR; behind with disjoint files -> CLEAR
       with behind > 0; behind with a shared file -> OVERLAP listing exactly the shared paths; branch updated by merging
-      main in -> CLEAR; unresolvable ref -> UNAVAILABLE; CLI line format and exit codes 0/1/2.
+      main in -> CLEAR; a rename on main of a file the PR modifies -> OVERLAP; unresolvable ref -> UNAVAILABLE; CLI line format and exit codes
+      0/1/2.
   - file: tests/hooks/test_merge_overlap_gate.py
     action: Create
     purpose: >-
       Runs the shim as the harness does (subprocess, payload on stdin) against a fixture repo whose origin carries
       refs/pull/N/head: OVERLAP -> exit 2 and stderr names the files and update_pull_request_branch; CLEAR -> exit 0,
       empty stdout and stderr; enable_pr_auto_merge gated the same; fetch failure, malformed JSON or a missing
-      pullNumber on a merge tool -> exit 2; another repository -> exit 0; a non-merge tool -> exit 0; adapter crash
-      (broken interpreter path) -> exit 2. Both .claude/settings.json and .claude/hooks/hooks.json register the shim
+      pullNumber (absent, bool, string, zero, negative) on a merge tool -> exit 2, 1799.0 accepted; the repository
+      named in a different letter case is still gated; another repository -> exit 0; a non-merge tool -> exit 0; a
+      shallow clone resolves after the deepen retry; adapter crash (broken interpreter path) -> exit 2; the PR head is
+      read from refs/remotes/origin/pr/<N>, never FETCH_HEAD. Both .claude/settings.json and .claude/hooks/hooks.json register the shim
       on PreToolUse with the exact matcher.
   - file: tests/checks/prose/test_s1_concurrent_merge_premerge.py
     action: Create
@@ -106,7 +122,7 @@ acceptance_criteria:
   - scripts.session.merge_overlap reads OVERLAP for the real #1799 head (7f07dfa9) against caebb40f^, naming AGENTS.md and config/prose_budgets.yaml, and CLEAR for the real #1823 head (5a1ecc75) against 2215125d^.
   - The shim denies (exit 2) merge_pull_request and enable_pr_auto_merge on OVERLAP, UNAVAILABLE, fetch failure, malformed input and adapter failure, and allows CLEAR, other repositories and other tools.
   - .claude/settings.json and the rendered .claude/hooks/hooks.json register the shim with the exact matcher; hooks.json equals the render.
-  - git-ops.yaml names the gate (citing the new Decision), its remedy and its residual owners; contract_version is 11.
+  - git-ops.yaml names the gate (citing the new Decision), its remedy and its residual owners; its contract_version is one more than origin/main's at build.
   - docs/DECISIONS.md carries the new Decision and the Decision 83 annotation exactly as the sidecar approves (approved_text verify exits 0), and the warehouse holds the Decision row after the post-merge backfill.
   - Before the plugin update, a claude.ai project thread fetches origin main and refs/pull/N/head; after it, a real merge_pull_request call on a stale PR is refused by the hook before GitHub is contacted, in a fresh top-level session and a fresh project thread.
   - rec-4869 and rec-4866 read closed after the squash merge (Resolves trailer).
@@ -171,12 +187,15 @@ verification_plan:
     action: >-
       Operator or coordinator step, before the build PR merges (Decision 83: the gate fails closed, so the fetch it
       needs must be proven where most merges run): in a claude.ai project thread on this repository, run the command.
-    command: git fetch --no-tags origin main refs/pull/1799/head && git rev-parse FETCH_HEAD && echo FETCH-OK
+    command: >-
+      git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+      +refs/pull/1799/head:refs/remotes/origin/pr/1799 && git rev-parse refs/remotes/origin/pr/1799 && echo FETCH-OK
     expected: prints 7f07dfa9a6c03285917d12e4cd977c81984d66a9 and FETCH-OK
     fix_if: >-
       the fetch fails in a project thread: do not merge the build; send a plan-defect report (the gate would wedge
       project-thread merges) -- a design change, never an override
     hermetic: false
+    graduation: not-applicable
   - step: 7
     phase: pre-deploy
     action: Re-run the hook render-parity and registration-order guards this change touches.
@@ -189,17 +208,40 @@ verification_plan:
     graduation_waiver_reason: Existing standing guards already selected by --pre for these files.
   - step: 8
     phase: pre-deploy
+    action: Check the git-ops.yaml edit against main (AC5).
+    command: >-
+      bin/venv-python -c "import subprocess, yaml; base = yaml.safe_load(subprocess.run(['git', 'show',
+      'origin/main:docs/contracts/git-ops.yaml'], capture_output=True, text=True, check=True).stdout); head =
+      yaml.safe_load(open('docs/contracts/git-ops.yaml', encoding='utf-8')); assert head['contract']['contract_version']
+      == base['contract']['contract_version'] + 1; assert 'merge_overlap_gate' in str(head['merge_step_coverage']);
+      assert 'merge_overlap_gate' in str(head['push_pr_ci_merge_flow']); assert all(x in
+      str(head['referenced_repo_paths']) for x in ('scripts/session/merge_overlap.py',
+      '.claude/hooks/merge_overlap_gate.py', '.claude/hooks/merge_overlap_gate.sh')); print('GITOPS-OK')" &&
+      bin/venv-python -m pytest tests/checks/contracts/test_validate_git_ops_contract.py -q
+    expected: prints GITOPS-OK and the contract tests pass
+    fix_if: >-
+      the version is not base+1 (another plan bumped it first: rebase and re-bump), or a section does not name the
+      gate or a path
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      PR-relative to origin/main (the version delta is vacuous once merged); validate_git_ops_contract (pre, ungated)
+      keeps resolving referenced_repo_paths on every PR.
+  - step: 9
+    phase: pre-deploy
     action: >-
-      Fast tier, then the full tier before handoff (handoff_policy): bin/venv-python -m scripts.validate --pre in the
-      foreground (exit 0), then this command as one backgrounded Bash call with a 2 h limit from the top-level session.
-    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
-    expected: --pre exited 0 first (recorded); then this command exits 0 for HEAD
+      Fast tier, then the full tier before handoff (handoff_policy): this command as one backgrounded Bash call with a
+      2 h limit from the top-level session.
+    command: >-
+      bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate &&
+      bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: exit 0; --verify-head reads the full tier's recorded verdict for HEAD, never the backgrounded run's own exit status
     fix_if: >-
       a failure in this plan's files is fixed at root and the full tier rerun from the start; a failure only in another
       open red's tests (for example rec-4872) is not this build's to fix: log it and follow the implement skill's go/no-go
     hermetic: false
     graduation: not-applicable
-  - step: 9
+  - step: 10
     phase: post-deploy
     action: >-
       Operator step: update the ontheloop plugin on claude.ai (Customize > Plugins). Then, in a fresh top-level session
@@ -218,7 +260,7 @@ verification_plan:
       update for project threads); a fetch failure in a surface is the new Decision's false-refusal-or-wedge condition, never an
       override
     hermetic: false
-  - step: 10
+  - step: 11
     phase: post-deploy
     action: After the squash merge, ETL the new Decision to the warehouse and prove its row exists.
     command: >-
@@ -229,7 +271,7 @@ verification_plan:
     expected: exit 0 and the marker with the Decision number
     fix_if: a missing row after a clean backfill means the entry did not parse; re-run step 5 against main
     hermetic: false
-  - step: 11
+  - step: 12
     phase: post-deploy
     action: Confirm both bundled recs closed.
     command: >-
@@ -262,6 +304,19 @@ test_obligations:
     verification_step: 2
     test_selector: tests/hooks/test_merge_overlap_gate.py
     red_green_expectation: red before (no registration), green after.
+  - source: docs/contracts/git-ops.yaml
+    behavior: Names the gate, its remedy and residual owners, resolves the new paths, and bumps contract_version once.
+    verification_step: 8
+    command: bin/venv-python -m pytest tests/checks/contracts/test_validate_git_ops_contract.py -q
+    waiver_reason: >-
+      Contract prose recording the mechanism; step 8's assertions check the edit against main and
+      validate_git_ops_contract (pre, ungated) resolves the referenced paths. No new evaluated semantics.
+  - source: tests/fixtures/merge_overlap_repos.py
+    behavior: Builds the bare-origin and refs/pull fixtures the three test files share.
+    verification_step: 1
+    test_selector: tests/test_session_merge_overlap.py
+    waiver_reason: >-
+      A test helper; it is exercised by every node of steps 1-3, which fail if the fixture builds the wrong shape.
   - source: .claude/hooks/hooks.json
     behavior: Equals the render of .claude/settings.json.
     verification_step: 7
@@ -280,7 +335,7 @@ constraints:
 context:
   - "Incident: #1805 (fce3096b) and #1799 (caebb40f) both cut from 05bb51dc; both shrank AGENTS.md 4 bytes and set S1 16955 -> 16951. #1799's head 7f07dfa9 was last pushed 16:15Z 11-02, #1805 merged 23:18Z, #1799 merged 13:10Z 11-03 with no re-run. Caught by main-validate run 41641928705 (rec-4866) and Main Canary run 41643822253 (rec-4869). Corrective #1823 (2215125d); main-validate run 41647681702 on it: success."
   - "Same class as rec-4372 and rec-4427 (closed). rec-4427's shape (disjoint files) is NOT caught by this gate; it stays post-merge, owned by rec-4451 and rec-4874."
-  - "Measured re-run tax (git replay of 38 merged PRs, #1764-#1824): 22 merged behind main; 2 had file overlap (#1799; #1824, a benign identical S1 edit). PR-CI wall time on recent runs: about 2-5 min. Branch merge-base stands in for CI's tested base, so the rule can only be stricter than needed."
+  - "Measured re-run tax. Planning replay: the 38 merged PRs among the first 60 rows of GitHub's closed-PR list (sorted by update; numbers #1764-#1824): 22 behind main, 2 overlapping (#1799; #1824, a benign identical S1 edit). Critique round 1's replay of all 57 squash merges whose subjects carry #1764-#1824: 32 behind (56%), 3 overlapping (#1765 on docs/DECISIONS.md and three config files, #1799, #1824). PR-CI wall time on recent runs: about 2-5 min. Branch merge-base stands in for CI's tested base, so the rule can only be stricter than needed."
   - "Live probe (planning, CC-web top-level session): git fetch origin refs/pull/1799/head succeeded through the proxy. Project-thread fetch: UNPROVEN until VP 6 (pre-merge)."
   - "Decision routing: decision-scout round 2 flagged Decision 167 (a fail-closed, no-override refusal of a tool call is a numbered Decision; Decision 203 rejected git-ops.yaml alone as its home). The Fable consult, re-asked with that finding, reversed its round-1 view and accepted the repo's routing. The operator chose a numbered Decision."
   - "Advice reconciled: Fable consult (NRSR, bors, Zuul, GitHub merge queue, Uber SubmitQueue) -> adopt server-side update-branch remedy, adapt the overlap predicate as a labelled best-effort presubmit, reject local rebase + full tier. Sonnet scout on Anthropic's Scion (anthropic.com/research/redesigning-source-control) -> no global merge-queue lock at agent scale; post-merge and pre-deploy testing with automated bisect and revert; quotes via a summarising fetch. Operator chose the overlap gate plus rec-4874 (TAP-style promotion) over a merge queue on scalability grounds."
@@ -288,7 +343,9 @@ context:
   - "Approved text: the operator approved the Decision text and the Decision 83 annotation (sidecar docs/plans/approved/merge-overlap-gate.yaml, digest f109bfcaf1b35e1fb49cbf542b5433637d82f294f8e9430917c4b10158aa1cbb) on 2026-11-03 in this planning session. Decision number 244 at planning; the build fills the next free number."
   - "Adjacent merge_pull_request gates owned elsewhere: rec-4080 (merge on red), rec-4755 (trailer gate), rec-2827 (protected-path self-merge); this hook is the seam they can extend."
   - "Other plans touching these files (plan_obligations at 9593de0b): unbuilt PLAN-protected-action-gate, PLAN-hook-canary-evidence, PLAN-telemetry-capture-hooks and PLAN-telemetry-content-reader-lock scope .claude/settings.json and/or hooks.json; PLAN-merge-race-attestation and PLAN-retire-strategic-plans-and-legacy-executor scope docs/contracts/git-ops.yaml; ten unbuilt plans scope docs/DECISIONS.md (a new entry is a prepend; a number collision is resolved by scripts.session.rebase_resolve / decision_renumber). Whichever builds second rebases, re-renders hooks.json and re-measures git-ops.yaml headroom."
-  - "Transition: until the operator updates the claude.ai plugin, project threads merge ungated (status quo); top-level sessions read .claude/settings.json at once. The gate applies to this plan's own build merge once settings.json is on the branch."
+  - "Transition: until the operator updates the claude.ai plugin, project threads merge ungated (status quo); a top-level session reads .claude/settings.json at session start, so the gate binds sessions started after merge. Inferred, not verified: whether the building session's own hooks pick up the branch's settings.json mid-session (Claude Code snapshots hooks at session start)."
+  - "Interaction with unbuilt PLAN-merge-race-attestation (critique B5): its validate_deferred_test_attestation fails a PR whose fast tier deferred a heavy-dependency test unless the head carries a Full-Tier-Attestation trailer, and this gate's remedy (update_pull_request_branch) makes a GitHub-authored merge head with no trailer. Whichever of the two builds second reconciles: either merge-race-attestation treats a GitHub update merge whose first parent is an attested head under its delta rule, or git-ops' remedy names the local rebase route for deferring PRs; if Decision clause 4's sentence then becomes untrue, add a dated Decision 177 annotation. Estimated frequency: about 10% of PRs defer (rec-4451) times about 5% overlap."
+  - "rec-4451 (merge-time affected-set re-check) is the natural extension of this seam: its predicate can be added to merge_overlap.py behind the same hook. Not a followon_rec (it is not a half this plan defers); its context gets a pointer after merge."
   - "red_overlap at plan write (9593de0b): verdict clear -- rec-4869 rule repairs_this_red (age 4.39 h, past its 4 h SLO, so only plans bundling a red are clear), rec-4872 rule track_a_in_slo."
   - "Another red open at planning: rec-4872 (test_defect, Track A, flaky process-group test); not this plan's."
   - "Owning planning session: this CC-web /plan session on branch agent/vigilant-gates-xof7ey (session 01G2j5Rh3biHPRdem7nrTZjS). Plan defects come back here through the coordinator."
@@ -299,6 +356,7 @@ gate_rounds:
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND}
   - {gate: wording-check, round: 1, verdict: PASS, digest: 5bb24ce5d074159b5929b1416f2d43ceaff14345f10207b8509394c66aed6fd0, base: cd3e407fa4021bbef4710a86c51141c2890d1e21, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: PASS, digest: f109bfcaf1b35e1fb49cbf542b5433637d82f294f8e9430917c4b10158aa1cbb, base: 9593de0bd90914c661696512867c4f76cc45d3aa, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 15}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -312,11 +370,14 @@ execution_steps:
   - ".claude/settings.json: append the PreToolUse group; then run bin/venv-python .claude/hooks/plugin_hooks.py render."
   - "docs/DECISIONS.md: place sidecar blocks decision-entry and decision-83-annotation exactly, filling {{N}} with the next free number on main and {{DATE}} with the build date; regenerate the decisions index with its generator."
   - "docs/contracts/git-ops.yaml: measure headroom on main first (bin/venv-python -m scripts.roadmap.plan_obligations --plan docs/plans/PLAN-merge-overlap-gate.yaml). Relief when the net add exceeds it (contracts class valves, config/structural_size_budgets.yaml): compact older amendment_log rows per the contract's own compaction convention, or defer the residual-owner list to the new Decision's clause 6 and cite it in one line; never a budget raise. Then edit per scope; bump contract_version and append the amendment_log row."
-  - "Commit locally (no push) before VP step 8: --verify-head attests only a full run that started on a clean, committed tree."
-  - "Execute Verification Plan steps 1-5, 7 and 8; ask the coordinator or operator for step 6 before merge; loop until pass; on an unrecoverable failure stop and send a plan-defect report (Decision 55)."
+  - "Commit locally (no push) before VP step 9: --verify-head attests only a full run that started on a clean, committed tree."
+  - "Execute Verification Plan steps 1-5 and 7-9; ask the coordinator or operator for step 6 before merge; loop until pass; on an unrecoverable failure stop and send a plan-defect report (Decision 55)."
   - "The implementation commit message carries 'Resolves: rec-4869, rec-4866', and merge_pull_request passes an explicit commit_message carrying it (git-ops.yaml resolves_trailer). The build PR merges only with the operator's OK on the final diff (hooks are always-ask). If the new gate refuses its own merge, update the branch and wait for pr-validate green."
-  - "After merge: run step 10, ask the operator for the plugin update, then run steps 9 and 11."
-  - "Report: what was implemented, verification results, merge SHA, steps 6 and 9-11 results."
+  - "Before merge, scripts.session.merge_step premerge previews both recs' acceptance. If rec-4866's literal grep (S1 16947) previews fails because an S1 ratchet landed first, do not weaken it: route per git-ops resolves_trailer (fix-forward, or strengthen via update_rec with the operator's word, Decision 235), or drop rec-4866 from the trailer by plan amendment and close it later through merge_step recover."
+  - "After merge: run step 11, ask the operator for the plugin update, then run steps 10 and 12; then update_rec rec-4451's context with one sentence naming .claude/hooks/merge_overlap_gate.py and scripts/session/merge_overlap.py as the seam its predicate extends."
+  - "Report: what was implemented, verification results, merge SHA, steps 6 and 10-12 results."
 work_areas: []
 rollback: >-
   Revert the build PR (or remove the PreToolUse group and re-render hooks.json); merges return to today's ungated flow.
+  Project threads keep the installed plugin's hooks.json until the operator updates the plugin again; the Decision
+  stays and gains a dated annotation recording the rollback.
