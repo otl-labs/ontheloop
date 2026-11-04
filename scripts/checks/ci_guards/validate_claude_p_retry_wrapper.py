@@ -80,7 +80,7 @@ def _wrapper_actions(actions_root: Path) -> set[str]:
         if path.suffix in ACTION_SUFFIXES and path.is_file():
             try:
                 body = path.read_text(encoding="utf-8")
-            except OSError:
+            except (OSError, UnicodeDecodeError):
                 continue
             if WRAPPER in body:
                 found.add(f".github/actions/{path.relative_to(actions_root).parts[0]}")

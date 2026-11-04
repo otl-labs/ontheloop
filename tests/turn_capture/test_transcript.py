@@ -232,3 +232,15 @@ def test_project_ref_pin_ignores_non_startup_non_hook_and_inherited_records() ->
     forked = [{**copied, "forkedFrom": {"sessionId": "x", "messageUuid": "c1"}}, prompt("u1", 2, "p1", "hi"), own]
     assert project_ref_pin(MemTree(make_files(forked))) == "own/ref"
     assert project_ref_pin(MemTree({"x/y.jsonl": ""} | {"s.jsonl": ""})) is None
+
+
+def test_host_run_bytes_on_both_trees_and_none_when_absent(tmp_path: Path) -> None:
+    files = make_files([prompt("u1", 1, "p1", "hi")])
+    assert MemTree(files).host_run() is None
+    with_sidecar = {**files, f"{SID}/host-run.json": "{}"}
+    target = tmp_path / f"{SID}.jsonl"
+    target.write_text(files[f"{SID}.jsonl"], encoding="utf-8")
+    assert FsTree(target).host_run() is None
+    (tmp_path / SID).mkdir()
+    (tmp_path / SID / "host-run.json").write_text("{}", encoding="utf-8")
+    assert MemTree(with_sidecar).host_run() == b"{}" and FsTree(target).host_run() == b"{}"

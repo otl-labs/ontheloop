@@ -6,7 +6,13 @@ import json
 
 import pytest
 
-from src.turn_capture.host_run import parse_host_run, render_host_run_ref, resolve_pin
+from src.turn_capture.host_run import (
+    parse_host_run,
+    render_host_run_ref,
+    resolve_pin,
+    valid_host_facts,
+    valid_project_ref,
+)
 from src.turn_capture.record_turn import record_turn
 from src.turn_capture.transcript import MemTree
 from tests.fixtures import turn_capture_v8_cases as cases
@@ -38,6 +44,8 @@ def test_a_valid_sidecar_parses_and_renders_the_host_run_ref() -> None:
     "mutate",
     [
         lambda b: b.update(schema_version=2),
+        lambda b: b.update(host=[]),
+        lambda b: b["host"].pop("job"),
         lambda b: b.update(extra=1),
         lambda b: b.pop("agent"),
         lambda b: b.update(agent="Bad Agent"),
@@ -118,3 +126,14 @@ def test_the_withheld_policy_stores_only_empty_digest_omissions() -> None:
     assert withheld
     assert all(r.get("content") is None and r["content_bytes"] == 0 for r in withheld)
     assert len({r["content_sha256"] for r in withheld}) == 1
+
+
+def test_the_exported_validators_share_the_sidecar_grammar() -> None:
+    host = _sidecar()["host"]
+    assert valid_host_facts(host) and not valid_host_facts({**host, "kind": "ecs"}) and not valid_host_facts("gha")
+    assert valid_project_ref("ontheloop") and not valid_project_ref("has space")
+
+
+def test_a_root_with_no_close_or_assistant_yet_has_no_top_level_rows() -> None:
+    files = {**make_files([prompt("u1", 1, "p1", "hi")]), f"{SID}/host-run.json": cases.sidecar()}
+    assert not [r for r in _rows(files, final=False) if r["entity_ref"].endswith("/run")]

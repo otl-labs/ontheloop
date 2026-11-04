@@ -296,6 +296,7 @@ def _locked_pass(
     loaded = state.load_cursor(root)
     if not loaded.valid:
         diag[loaded.status] += 1
+    project_ref: str | None
     if loaded.cursor is not None:
         project_ref, pin_token = loaded.cursor.project_ref, "pinned"
     else:

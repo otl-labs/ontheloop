@@ -270,3 +270,15 @@ class TestClaudePCapturePairing:
 
     def test_the_real_tree_passes(self) -> None:
         assert subject._check_pairing(_REPO_ROOT) == []
+
+
+class TestPairingScanRobustness:
+    def test_an_unreadable_action_file_is_skipped(self, tmp_path: Path) -> None:
+        actions = tmp_path / "actions"
+        (actions / "bad").mkdir(parents=True)
+        (actions / "bad" / "action.yml").write_bytes(b"\xff\xfe")
+        assert subject._wrapper_actions(actions) == set()
+
+    def test_a_non_mapping_job_is_ignored(self, tmp_path: Path) -> None:
+        workflow = "name: agent\njobs:\n  odd: not-a-mapping\n"
+        assert _pairing(tmp_path, workflow=workflow, switch=None) == []
