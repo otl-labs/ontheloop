@@ -36,8 +36,8 @@ scope:
     PR 3: test_predecessor_forgotten_not_destroyed is replaced by the standing guard test_subscription_at_pinned_address:
     aws_sns_topic_subscription.alerts_email sits on aws_sns_topic.alerts with protocol email and endpoint
     var.alerts_email, whose variable declares no default; no count or for_each on it; nothing transitional is left (no
-    company_alerts_email variable or resource, and no removed block naming an aws_sns_topic_subscription); the file
-    carries no at-sign. It pins no comment wording and no subscription count (Decision 244 cl.4)
+    company_alerts_email variable or resource; Terraform itself rejects a removed block beside the restored resource);
+    the file carries no at-sign. It pins no comment wording and no subscription count (Decision 244 cl.4)
     (weakening_dispositions).
 - file: docs/contracts/terraform-cc-web-operations.yaml
   action: Modify
@@ -80,8 +80,10 @@ infrastructure_dependencies:
   in the Environment | CI and operator | -- | 5 | bootstrap Owner tags (A1) | after PR 3's apply | human-directed
   admin apply (Decision 126) | -- | 6 | S4 drops the transitional keys | after VP 8 | agent, on the operator's word.
 - >-
-  Required checks: terraform-validate (Decision 119: no local init, validate or plan of terraform/personal;
-  provider-free terraform fmt -check only), the trusted plan job and its digest status, and pr-validate. The bootstrap
+  Required checks: pr-validate and terraform-validate (terraform/github/repo.tf; Decision 119: no local init, validate
+  or plan of terraform/personal, provider-free terraform fmt -check only). The trusted plan job is advisory (Decision
+  83): it saves plan.bin, the terraform-plan-digest status and the names-only comment, then its fit_check step fails
+  when the reviewer digest is OPAQUE or OVERFLOW, as PR 3's post-S3 plan is expected to (constraints). The bootstrap
   root is planned and applied in an ADMIN session (terraform/bootstrap/CLAUDE.md), never by CI. No scope file is under
   terraform/bootstrap, so no pre-merge bootstrap plan step is owed (deploy-paths.yaml admin_out_of_band); the
   2026-11-04 read-only baseline plan read 42 no-op and 19 Owner-tagged resources.
@@ -146,7 +148,7 @@ verification_plan:
   phase: pre-deploy
   action: >-
     PR 3 subscription shape, the standing guard: the one subscription at the pinned address on var.alerts_email, no
-    meta-argument, nothing transitional left, no at-sign in the file.
+    meta-argument, no company_alerts_email variable or resource, no at-sign in the file.
   command: >-
     bin/venv-python -m pytest -q
     tests/checks/iam_tf/test_alerts_email_subscription.py::test_subscription_at_pinned_address
@@ -249,8 +251,9 @@ verification_plan:
   action: >-
     PR 3, after its trusted plan is re-run following S3: the comment's head line is newer than T_S3 and reads CHANGES,
     no import, create, destroy or replace; every row an update whose changed attributes are among tags_all, tags and
-    policy; at least one aws_iam_role row; no drift line; the guard predicts BLOCKED (tf-gated-apply at merge);
-    nothing leaks.
+    policy; at least one aws_iam_role row; no drift line; the guard predicts BLOCKED (tf-gated-apply at merge); the
+    reviewer digest fit is FITS, OPAQUE or OVERFLOW, and every address unknown at plan time is a data source or a row
+    whose changed attributes include policy; nothing leaks.
   command: |-
     test -n "$PR_NUMBER" && test -n "$T_S3" && bin/venv-python - <<'PY'
     import json, os, re, sys, urllib.request
@@ -262,11 +265,18 @@ verification_plan:
     rows = [r for r in re.findall(r'^\| ([^|]+?) \| ([^|]+?) \| ([^|]*?) \|$', body, re.M) if r[0] != 'Resource' and not set(r[0]) <= set('-')]
     tagonly = bool(rows) and all(r[1] == 'update' and set(x.strip() for x in r[2].split(',')) <= {'tags_all', 'tags', 'policy'} for r in rows)
     counts = re.search(r'^0 to import, 0 to add, \d+ to change, 0 to destroy \(0 replaced\)\.$', body, re.M)
+    fit = (re.search(r'^Reviewer digest fit: (\w+)$', body, re.M) or [None, 'MISSING'])[1]
+    unknown = re.findall(r'`([^`]+)`', (re.search(r'^Unknown at plan time: (.*)$', body, re.M) or [None, ''])[1])
+    policy_rows = {r[0] for r in rows if 'policy' in [x.strip() for x in r[2].split(',')]}
+    unknown_ok = all(a.startswith('data.') or a in policy_rows for a in unknown)
     ok = (fresh and 'State: CHANGES' in body and counts and tagonly and any(r[0].startswith('aws_iam_role.') for r in rows)
-          and 'Drift detected outside Terraform' not in body and 'Predicted guard verdict: BLOCKED' in body and not leaks)
-    print(json.dumps({'fresh': fresh, 'updates': len(rows), 'tag_only': tagonly, 'leaks': leaks})); sys.exit(0 if ok else 'TRUSTED PLAN STOP')
+          and 'Drift detected outside Terraform' not in body and 'Predicted guard verdict: BLOCKED' in body
+          and fit in ('FITS', 'OPAQUE', 'OVERFLOW') and unknown_ok and not leaks)
+    print(json.dumps({'fresh': fresh, 'updates': len(rows), 'tag_only': tagonly, 'fit': fit, 'unknown_ok': unknown_ok, 'leaks': leaks})); sys.exit(0 if ok else 'TRUSTED PLAN STOP')
     PY
-  expected: One JSON line with fresh true, an update count, tag_only true and no leaks.
+  expected: >-
+    One JSON line with fresh true, an update count, tag_only true, fit FITS, OPAQUE or OVERFLOW, unknown_ok true and
+    no leaks.
   fix_if: >-
     Not fresh: the re-run has not finished. Any create, destroy, other attribute or drift line: stop; do not merge, and
     restore owner_email (S3 rollback) if the window cannot be kept (constraints, S3 window).
@@ -275,21 +285,24 @@ verification_plan:
 - step: 7
   phase: post-deploy
   action: >-
-    Convergence proof (Decision 190): with MERGE_SHA set, every terraform-apply-sandbox run for that commit succeeded
-    (for PR 3 that includes the approved gated-apply job); the first completed terraform-drift run on main created
-    after AFTER succeeded and reads clean or measured converged, with no e-mail-shaped text in its log; the convergence
-    record is green. Run after PR 3's gated apply and after S4 (dispatching terraform-drift.yml is allowed: a
-    read-only plan).
+    Convergence proof (Decision 190): with MERGE_SHA set, every terraform-apply-sandbox run for that commit completed
+    with success (for PR 3 that includes the approved gated-apply job); the first completed terraform-drift run on main
+    created after the later of AFTER and those runs' completion succeeded and reads clean or measured converged, with
+    no e-mail-shaped text in its log; the convergence record is green. Run before S3 (AFTER = now), after PR 3's gated
+    apply (MERGE_SHA) and after S4 (AFTER). A terraform-drift dispatch is allowed only once no apply for MERGE_SHA is
+    still running: it reads the infrastructure but writes the convergence record and may file a tf_drift rec.
   command: |-
-    test -n "$AFTER" && bin/venv-python - <<'PY'
+    test -n "$AFTER$MERGE_SHA" && bin/venv-python - <<'PY'
     import json, os, re, sys, urllib.request, boto3
     R = 'https://api.github.com/repos/otl-labs/ontheloop/'
     get = lambda p, raw=False: (lambda r: r.read().decode('utf-8', 'replace') if raw else json.load(r))(urllib.request.urlopen(R + p, timeout=60))
+    after = os.environ.get('AFTER', '')
     if os.environ.get('MERGE_SHA'):
         ap = get('actions/workflows/terraform-apply-sandbox.yml/runs?head_sha=' + os.environ['MERGE_SHA'])['workflow_runs']
-        assert ap and all(r['conclusion'] == 'success' for r in ap), [(r['id'], r['conclusion']) for r in ap]
-    runs = sorted((r for r in get('actions/workflows/terraform-drift.yml/runs?branch=main&per_page=50')['workflow_runs'] if r['created_at'] > os.environ['AFTER'] and r['status'] == 'completed'), key=lambda r: r['created_at'])
-    assert runs, 'no completed drift run after AFTER yet'
+        assert ap and all(r['status'] == 'completed' and r['conclusion'] == 'success' for r in ap), [(r['id'], r['status'], r['conclusion']) for r in ap]
+        after = max([after] + [r['updated_at'] for r in ap])
+    runs = sorted((r for r in get('actions/workflows/terraform-drift.yml/runs?branch=main&per_page=50')['workflow_runs'] if r['created_at'] > after and r['status'] == 'completed'), key=lambda r: r['created_at'])
+    assert runs, 'no completed drift run after the apply or AFTER yet'
     d = runs[0]; log = ''.join(get(f"actions/jobs/{j['id']}/logs", raw=True) for j in get(f"actions/runs/{d['id']}/jobs")['jobs'])
     clean = re.search(r'Z Drift check: no changes detected \(exit 0\); cycle is clean\.$', log, re.M) or re.search(r'Z Measured verdict this cycle: converged ', log)
     leak = re.search(r'@[a-z0-9-]+\.[a-z]', log)
@@ -340,7 +353,8 @@ verification_plan:
     tfvars from the parameter into the gitignored terraform.bootstrap.tfvars (umask 077), plan the whole root (no
     -target, Decision 223 cl.2) to a file and print names only: every change is an in-place update of tags_all or
     tags. The operator's word on that summary directs terraform apply of the same plan file. With MODE=after, a fresh
-    plan shows no change and the CI apply role, PlatformDev and PlatformAdmin read the operations role alias. The
+    plan shows no change, every Owner tag in the bootstrap remote state is the operations role alias, and the CI apply
+    role, PlatformDev and PlatformAdmin read it live. The
     tfvars and plan files are deleted on any failure and after MODE=after.
   command: |-
     test -n "$MODE" && umask 077 && M="${TMPDIR:-/tmp}/tf-company-emails" && TV=terraform/bootstrap/terraform.bootstrap.tfvars && mkdir -p "$M" && aws ssm get-parameter --name /secret/agent-platform-terraform-personal-tfvars --with-decryption --profile agent_platform_admin --region "$(tr -d '[:space:]' < config/aws-region)" --query Parameter.Value --output text | grep -E '^[[:space:]]*(account_id|owner_email|platform_dev_external_id|platform_admin_external_id)[[:space:]]*=' > "$TV" && git check-ignore -q "$TV" && test "$(grep -c = "$TV")" -eq 4 && AWS_PROFILE=agent_platform_admin terraform -chdir=terraform/bootstrap init -input=false -backend-config="region=$(tr -d '[:space:]' < config/aws-region)" > /dev/null && AWS_PROFILE=agent_platform_admin terraform -chdir=terraform/bootstrap plan -input=false -var-file=terraform.bootstrap.tfvars -out="$M/owner.tfplan" > /dev/null && terraform -chdir=terraform/bootstrap show -json "$M/owner.tfplan" | MODE="$MODE" bin/venv-python -c "
@@ -353,13 +367,15 @@ verification_plan:
     if os.environ['MODE'] == 'plan':
         print('BOOTSTRAP_PLAN', {'updates': len(ch), 'other': bad}); sys.exit(0 if ch and not bad else 'BOOTSTRAP STOP')
     own = json.load(open(os.path.join(os.environ.get('TMPDIR', '/tmp'), 'tf-company-emails', 'aliases.json')))['operations']
-    iam = boto3.Session(profile_name='agent_platform_admin').client('iam')
+    B = boto3.Session(profile_name='agent_platform_admin', region_name=open('config/aws-region').read().strip()); iam = B.client('iam')
     live = [{t['Key']: t['Value'] for t in iam.list_role_tags(RoleName=n)['Tags']}.get('Owner') == own for n in ('agent-platform-github-ci-apply', 'PlatformDev', 'PlatformAdmin')]
-    print('BOOTSTRAP_AFTER', {'changes': len(ch), 'roles_ok': live}); sys.exit(0 if not ch and all(live) else 'BOOTSTRAP STOP')
+    st = json.loads(B.client('s3').get_object(Bucket='agent-platform-bootstrap-tfstate', Key='terraform.tfstate')['Body'].read())
+    owners = [i['attributes']['tags_all']['Owner'] for r in st['resources'] if r.get('mode') == 'managed' for i in r['instances'] if 'Owner' in ((i.get('attributes') or {}).get('tags_all') or {})]
+    print('BOOTSTRAP_AFTER', {'changes': len(ch), 'tagged': len(owners), 'wrong': sum(o != own for o in owners), 'roles_ok': live}); sys.exit(0 if not ch and owners and all(o == own for o in owners) and all(live) else 'BOOTSTRAP STOP')
     "; rc=$?; if [ $rc -ne 0 ] || [ "$MODE" = after ]; then rm -f "$M/owner.tfplan" "$TV"; fi; test $rc -eq 0
   expected: >-
     MODE=plan prints BOOTSTRAP_PLAN with an update count (19 Owner-tagged resources on 2026-11-04) and other [];
-    MODE=after prints BOOTSTRAP_AFTER with changes 0 and three true roles.
+    MODE=after prints BOOTSTRAP_AFTER with changes 0, the tagged count, wrong 0 and three true roles.
   fix_if: >-
     Any other address, action or attribute: stop and resolve it with the operator before any apply; never apply a
     mixed plan (the files are already deleted). An apply error: stop and root-cause (Decision 55).
@@ -471,14 +487,33 @@ verification_plan:
     (Decision 226). Never read the verdict from a pipe's exit status.
   hermetic: false
   graduation: not-applicable
+- step: 15
+  phase: pre-deploy
+  action: >-
+    PR 3, before merge: rec-3904's and rec-3950's acceptance commands, verbatim from the warehouse, pass on the branch,
+    so the Resolves trailer's closure job cannot refuse them (they are line-based greps; VP 3 ignores line breaks).
+  command: >-
+    grep -q 'company alerts role alias' terraform/personal/sns_alerts.tf && grep -q 'authenticate-on-unsubscribe'
+    terraform/personal/sns_alerts.tf && grep -q 'company operations role alias'
+    docs/contracts/terraform-cc-web-operations.yaml && grep -c 'GitHub no-reply'
+    docs/contracts/terraform-cc-web-operations.yaml | grep -qx 0 && echo RECS_ACCEPTANCE_OK
+  expected: Prints RECS_ACCEPTANCE_OK (exit 0).
+  fix_if: >-
+    A miss: a wrapped line split one of the phrases; re-wrap the placed text so each phrase sits on one line (whitespace
+    is the allowed variance), never edit either acceptance (Decision 201).
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    Moment claim (Decision 244 cl.4): the trailer-closure job runs the same commands once at merge; VP 2's graduated
+    test and validate_terraform_cc_web_operations stay the standing checks.
 test_obligations:
 - source: terraform/personal/sns_alerts.tf
   behavior: the one subscription sits at the pinned address on var.alerts_email and nothing transitional is left.
   verification_step: 2
   test_selector: tests/checks/iam_tf/test_alerts_email_subscription.py::test_subscription_at_pinned_address
   red_green_expectation: >-
-    Red before: after PLAN-terraform-company-emails-forget there is no alerts_email resource block, a removed block
-    names it and the transitional variable and resource remain (assertion_failed). Green after PR 3.
+    Red before: after PLAN-terraform-company-emails-forget there is no alerts_email resource block and the
+    transitional variable and resource remain (assertion_failed). Green after PR 3.
 - source: docs/contracts/terraform-cc-web-operations.yaml
   behavior: the tfvars recovery table drops company_alerts_email with the variable, and the owner wording names the company alias.
   verification_step: 3
@@ -537,9 +572,9 @@ constraints:
   3's trusted plan, and the A1 bootstrap apply. Operator: the tf-gated-apply approval of PR 3, and O1 if it is still
   open (PLAN-terraform-company-emails execution_steps).
 - >-
-  Order is fixed: start (alias file), VP 1, PR 3 open (VP 2, VP 3, VP 14), VP 4, S3, VP 5, PR 3 re-plan, VP 6, merge,
-  approval, VP 7, VP 8, VP 12, A1 (VP 9 plan, apply, VP 9 after), S4, VP 10, VP 7, PR 4 (VP 11, VP 14), VP 13. PR 4
-  opens only after O1's row reads pass.
+  Order is fixed: start (alias file), VP 1, PR 3 open (VP 2, VP 3, VP 15, VP 14), VP 4, VP 7 (AFTER = now), S3, VP 5,
+  PR 3 re-plan, VP 6, merge, approval, VP 7 (MERGE_SHA), VP 8, VP 12, A1 (VP 9 plan, apply, VP 9 after), S4, VP 10, VP
+  7 (AFTER), PR 4 (VP 11, VP 14), VP 13. PR 4 opens only after O1's row reads pass.
 - >-
   S3 window. S3 creates a tfvars-only diff on main until PR 3's saved plan applies. With the confirmed successor
   persisted (PLAN-terraform-company-emails-forget VP 5; VP 4 shows no drift line), Decision 190 measures it as
@@ -554,7 +589,15 @@ constraints:
   (S3 repeated before its plan). Red during the approval wait: the gated apply still applies and the drift guard
   refuses the green write; the heal is the same empty acknowledge-and-retry (main's plan is then a no-op). Never heal
   with a guard-routed dispatch or reconcile route (ii): both upload plan.bin, which embeds every tfvars value, as a
-  public artifact (rec-4230).
+  public artifact (rec-4230). The coordinator holds every other terraform/personal merge and every apply, reconcile or
+  drift dispatch by another thread from S3 until PR 3's gated apply completes (a merge would make PR 3's saved plan
+  stale); the agent tells the coordinator when it is released.
+- >-
+  Expected advisory failure: after S3 the re-run trusted plan job concludes failure at its fit_check step (reviewer
+  digest OPAQUE for policies unknown at plan time, or OVERFLOW for the tag updates) after saving plan.bin, the digest
+  status and the comment. That is not a halt: PR 3 merges on green pr-validate and terraform-validate, VP 6, VP 15
+  and code review, and the operator's tf-gated-apply approval reviews the names-only plan. Any other failed step
+  halts.
 - >-
   Masking: PLAN-terraform-company-emails' *_email arm is on main, so no drift, dispatch or reconcile log prints an
   owner value. S3 adds previous_owner_email (the founder's no-reply value) so the mask also hides the prior value
@@ -618,6 +661,7 @@ pre_implementation_checklist:
 - All files in scope located and readable
 - Acceptance criteria understood and verifiable
 - Start gate met (VP 1) and the coordinator has relayed that no other thread is writing the tfvars parameter
+- The coordinator has agreed to hold other terraform/personal merges and dispatches from S3 until PR 3's gated apply (constraints, S3 window)
 execution_steps:
 - |-
   Start. Read docs/PROJECT_CONTEXT.md, this plan and the handoff notes the two earlier plans left in /mnt/project-files/terraform-company-emails/. Write the session's alias file as PLAN-terraform-company-emails execution_steps (start) shows, and follow that plan's conventions for every live step (present, wait for the word, verify, one EVIDENCE.md row, times and versions in build-state.json). Run VP 1.
@@ -701,16 +745,23 @@ execution_steps:
       # (alerts_email = "..."). NOT hardcoded -- no email address is committed to source.
       # The subscription is created in PENDING state; the recipient must click the confirmation
       # link in the initial subscription email before alarms can page (VP9 manual step).
+      #
+      # ---------------------------------------------------------------------------
+      # APPLY POSTURE (Decision 35 + 77): HUMAN-GATED via agent_platform_admin.
+      # ---------------------------------------------------------------------------
+      # aws_sns_topic and aws_sns_topic_subscription are NOT IAM-sensitive resources, but they
+      # are created together with the DR Lambda (IAM role + policy), so they ride the same
+      # human-gated admin apply for the T2.18 FP-B apply pass.
     after: |-
       # Shared SNS alerts topic (T2.18 FP-B / Decision 39): SNS is the canonical alarm primitive, and every
       # CloudWatch alarm in both roots targets this topic.
       #
       # The one e-mail subscription's endpoint is the company alerts role alias, from the tfvars parameter
       # (alerts_email; never committed). CI may subscribe but never unsubscribe or reconfigure a subscription
-      # (github_ci_apply_policy.tf), so a new endpoint is a successor subscription beside this one: the operator
-      # confirms it with authenticate-on-unsubscribe (never by opening the mail's link) and proves a page, a
-      # removed block forgets the predecessor and the operator deletes it in the console, then a moved block
-      # returns the successor to this address (PLAN-terraform-company-emails, -forget and -closing).
+      # (terraform/bootstrap/github_ci_apply_policy.tf), so a new endpoint is a successor subscription beside this
+      # one: the operator confirms it with authenticate-on-unsubscribe (never by opening the mail's link) and
+      # proves a page, a removed block forgets the predecessor and the operator deletes it in the console, then a
+      # moved block returns the successor to this address (PLAN-terraform-company-emails, -forget and -closing).
   - id: sns-alerts-email-description
     file: terraform/personal/sns_alerts.tf
     before: |-
@@ -747,7 +798,7 @@ execution_steps:
       from = aws_sns_topic_subscription.company_alerts_email
       to   = aws_sns_topic_subscription.alerts_email
     }
-  ) and APPROVED PR 3 TEXT to the contract, sns_alerts.tf and the runbook (the entry removal deletes the whole company_alerts_email key from where_values_live). Replace the test with test_subscription_at_pinned_address. Flip implementation_declared to true. Graduate VP 2 (registry row config/agent/verification_registry/entries/alerts-subscription-pinned-address.yaml, slot test_selector, guard_target terraform/personal/sns_alerts.tf). Run VP 2, VP 3, terraform fmt -check terraform/personal (provider-free; Decision 119), bin/venv-python -m scripts.validate --pre, VP 14 and code review. Open the PR titled 'feat(terraform-company-emails-closing): move the Owner tag to the operations alias and return the alerts subscription to its address', with 'Resolves: rec-3904, rec-3950' in the implementation commit and the squash body, and wait for green CI and VP 4 (do not merge). Then S3, right after VP 7 reads the record green (AFTER = now, dispatch allowed) and only when the operator can approve tf-gated-apply within the hour (constraints, S3 window). Record v_s3_before, present the command, wait for the word, run it, then VP 5, record T_S3, row S3:
+  ) and APPROVED PR 3 TEXT to the contract, sns_alerts.tf and the runbook (the entry removal deletes the whole company_alerts_email key from where_values_live). Replace the test with test_subscription_at_pinned_address. Flip implementation_declared to true. Graduate VP 2 (registry row config/agent/verification_registry/entries/alerts-subscription-pinned-address.yaml, slot test_selector, guard_target terraform/personal/sns_alerts.tf). Run VP 2, VP 3, VP 15, terraform fmt -check terraform/personal (provider-free; Decision 119), bin/venv-python -m scripts.validate --pre, VP 14 and code review. Open the PR titled 'feat(terraform-company-emails-closing): move the Owner tag to the operations alias and return the alerts subscription to its address', with 'Resolves: rec-3904, rec-3950' in the implementation commit and the squash body, and wait for green CI and VP 4 (do not merge). Then S3, right after VP 7 reads the record green (AFTER = now, dispatch allowed) and only when the operator can approve tf-gated-apply within the hour (constraints, S3 window). Record v_s3_before, present the command, wait for the word, run it, then VP 5, record T_S3, row S3:
   bin/venv-python - <<'PY'
   import json, os, re, boto3
   A = json.load(open(os.path.join(os.environ.get('TMPDIR', '/tmp'), 'tf-company-emails', 'aliases.json')))
@@ -761,7 +812,7 @@ execution_steps:
   assert ssm.get_parameter(Name=N)['Parameter']['Version'] == p['Version'], 'parameter changed since read'
   print('TFVARS_WRITTEN', p['Version'], '->', ssm.put_parameter(Name=N, Value=new, Type='SecureString', Overwrite=True)['Version'])
   PY
-  Then, on the operator's word, re-run PR 3's latest terraform-plan-trusted run (GitHub Actions re-run of that run id), run VP 6, squash-merge on code-review PROCEED, VP 6 and green CI, and tell the operator the tf-gated-apply approval is waiting (names-only plan in the PR comment: Owner tag updates and policies unknown at plan time whose documents only name tag-changed resources; the move is a no-op). After the approval: VP 7 with AFTER = the gated-apply completion and MERGE_SHA, VP 8 and VP 12. Row B3 (PR number, merge SHA, apply and gated-apply run ids). Report readiness, validator verdicts, postflight evidence, review and the real push and PR outcome separately (implement skill, Commit Flows).
+  Then, on the operator's word, re-run PR 3's latest terraform-plan-trusted run (GitHub Actions re-run of that run id), run VP 6, squash-merge on code-review PROCEED, VP 6, VP 15 and green required checks (the trusted job's fit_check failure is expected, constraints), and tell the operator the tf-gated-apply approval is waiting (names-only plan in the PR comment: Owner tag updates and policies unknown at plan time whose documents only name tag-changed resources; the move is a no-op). After the approval: VP 7 with MERGE_SHA and no AFTER (the step takes the gated apply's completion time), VP 8 and VP 12; tell the coordinator the hold is released. Row B3 (PR number, merge SHA, apply and gated-apply run ids). Report readiness, validator verdicts, postflight evidence, review and the real push and PR outcome separately (implement skill, Commit Flows).
 - |-
   A1, bootstrap Owner tags (agent in an ADMIN session; Decision 126 human-directed apply), after VP 8. Run VP 9 with MODE=plan and present its summary (counts and addresses only, never plan text, which prints old and new tag values). On the operator's word on that summary, run, in the same session:
   AWS_PROFILE=agent_platform_admin terraform -chdir=terraform/bootstrap apply -input=false "${TMPDIR:-/tmp}/tf-company-emails/owner.tfplan" > /dev/null && echo A1_APPLIED; rm -f "${TMPDIR:-/tmp}/tf-company-emails/owner.tfplan" terraform/bootstrap/terraform.bootstrap.tfvars
@@ -789,7 +840,7 @@ execution_steps:
     AWS-10: {status: proven, owner_today: company, location: "terraform/personal/providers.tf, terraform/bootstrap/main.tf", target: "Owner holds the company operations role alias; Account keeps personal, which names this account (Decision 242 cl.5)"}
     AWS-11: {status: proven, owner_today: company, target: The company alerts role alias}
   ledger:
-  - {row: AWS-07, status: proven, evidence: "PLAN-terraform-company-emails S1, -forget S2 and -closing S3 and S4: owner_email holds the company operations role alias and alerts_email the company alerts role alias; no founder value is left in the parameter (verified <date>)"}
+  - {row: AWS-07, status: proven, evidence: "PLAN-terraform-company-emails S1, -forget S2 and -closing S3 and S4: owner_email holds the company operations role alias and alerts_email the company alerts role alias; no founder contact value is left in the parameter (verified <date>)"}
   - {row: AWS-10, status: proven, evidence: "PLAN-terraform-company-emails-closing B3 and A1: every Owner-tagged resource in both roots carries the company operations role alias (terraform-apply-sandbox run <run id> and the bootstrap admin apply, verified <date>); the Account tag names this account (Decision 242 cl.5)"}
   - {row: AWS-11, status: proven, evidence: "PLAN-terraform-company-emails C1 and P1 and -forget C2: the alerts topic's only e-mail subscription is the company alerts role alias, confirmed, and an alarm page reached it before the founder's subscription was deleted (verified <date>)"}
   inventory_amendment: "PLAN-terraform-company-emails-closing: AWS-07, AWS-10 and AWS-11 flip to proven with owner company, each with one evidence_ledger entry; AWS-10's location names providers.tf and its target records that the Account tag names this account (Decision 242 cl.5); AWS-11's target names the company alerts role alias."
@@ -803,12 +854,13 @@ execution_steps:
   Report: what was implemented, verification results, the evidence path, and every item still waiting on the operator.
 rollback: >-
   S3 before PR 3's apply: on the operator's word, put back the version recorded before it (constraints, S3 window).
-  PR 3 after its apply: forward only. The address move reverses with a forward PR carrying moved { from =
-  aws_sns_topic_subscription.alerts_email, to = aws_sns_topic_subscription.company_alerts_email } and the transitional
-  variable (a no-change move; never a plain revert, which would forget the subscription and create a new pending
+  PR 3 after its apply: forward only. The address move reverses with a forward PR that deletes PR 3's moved block (two
+  opposite moves form a cycle Terraform rejects) and carries moved { from = aws_sns_topic_subscription.alerts_email, to
+  = aws_sns_topic_subscription.company_alerts_email } and the transitional variable (a no-change move; never a plain revert, which would forget the subscription and create a new pending
   one); the Owner tags revert with the S3 rollback carried by a PR's saved plan through the gated approval. A1:
   re-apply bootstrap with the previous owner_email version materialised, on the operator's word. S4: put back the
   version (main declares neither key, so nothing changes in Terraform). PR 4: revert the PR (docs only). Never move a
   subscription with a replace: it AccessDenies through CI.
 gate_rounds:
 - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+- {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 10}

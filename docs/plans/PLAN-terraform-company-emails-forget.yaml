@@ -70,8 +70,8 @@ acceptance_criteria:
   alerts_email in the tfvars parameter equals the company alerts role alias and company_alerts_email; every other
   line is unchanged, and the drift plan stays clean (VP 7, VP 4).
 - >-
-  EVIDENCE.md records B2, C2 and S2 by kind and UTC time with no address, id or ARN, and no PR text this plan wrote
-  matches the redaction pattern (VP 8).
+  EVIDENCE.md records B2, C2 and S2 by kind and UTC time with no e-mail address, AWS account id or ARN (PR numbers,
+  merge SHAs and run ids are allowed), and no PR text this plan wrote matches the redaction pattern (VP 8).
 verification_plan:
 - step: 1
   phase: pre-deploy
@@ -154,20 +154,24 @@ verification_plan:
 - step: 4
   phase: post-deploy
   action: >-
-    Convergence proof (Decision 190): with MERGE_SHA set, every terraform-apply-sandbox run for that commit succeeded;
-    the first completed terraform-drift run on main created after AFTER succeeded and reads clean or measured
-    converged, with no e-mail-shaped text in its log; the convergence record is green. Run after PR 2's merge and after
-    S2 (dispatching terraform-drift.yml is allowed: a read-only plan).
+    Convergence proof (Decision 190): with MERGE_SHA set, every terraform-apply-sandbox run for that commit completed
+    with success; the first completed terraform-drift run on main created after the later of AFTER and those runs'
+    completion succeeded and reads clean or measured converged, with no e-mail-shaped text in its log; the convergence
+    record is green. Run after PR 2's apply (MERGE_SHA) and after S2 (AFTER). A terraform-drift dispatch is allowed
+    only once that apply concluded: it reads the infrastructure but writes the convergence record and may file a
+    tf_drift rec.
   command: |-
-    test -n "$AFTER" && bin/venv-python - <<'PY'
+    test -n "$AFTER$MERGE_SHA" && bin/venv-python - <<'PY'
     import json, os, re, sys, urllib.request, boto3
     R = 'https://api.github.com/repos/otl-labs/ontheloop/'
     get = lambda p, raw=False: (lambda r: r.read().decode('utf-8', 'replace') if raw else json.load(r))(urllib.request.urlopen(R + p, timeout=60))
+    after = os.environ.get('AFTER', '')
     if os.environ.get('MERGE_SHA'):
         ap = get('actions/workflows/terraform-apply-sandbox.yml/runs?head_sha=' + os.environ['MERGE_SHA'])['workflow_runs']
-        assert ap and all(r['conclusion'] == 'success' for r in ap), [(r['id'], r['conclusion']) for r in ap]
-    runs = sorted((r for r in get('actions/workflows/terraform-drift.yml/runs?branch=main&per_page=50')['workflow_runs'] if r['created_at'] > os.environ['AFTER'] and r['status'] == 'completed'), key=lambda r: r['created_at'])
-    assert runs, 'no completed drift run after AFTER yet'
+        assert ap and all(r['status'] == 'completed' and r['conclusion'] == 'success' for r in ap), [(r['id'], r['status'], r['conclusion']) for r in ap]
+        after = max([after] + [r['updated_at'] for r in ap])
+    runs = sorted((r for r in get('actions/workflows/terraform-drift.yml/runs?branch=main&per_page=50')['workflow_runs'] if r['created_at'] > after and r['status'] == 'completed'), key=lambda r: r['created_at'])
+    assert runs, 'no completed drift run after the apply or AFTER yet'
     d = runs[0]; log = ''.join(get(f"actions/jobs/{j['id']}/logs", raw=True) for j in get(f"actions/runs/{d['id']}/jobs")['jobs'])
     clean = re.search(r'Z Drift check: no changes detected \(exit 0\); cycle is clean\.$', log, re.M) or re.search(r'Z Measured verdict this cycle: converged ', log)
     leak = re.search(r'@[a-z0-9-]+\.[a-z]', log)
@@ -178,8 +182,9 @@ verification_plan:
     PY
   expected: Prints DRIFT with the run id, event, success, clean, no_leak and record green (exit 0).
   fix_if: >-
-    Not clean or red: read the run's measured verdict and stop (Decision 55). Never heal with a guard-routed dispatch,
-    whose plan.bin is a public artifact (rec-4230). A leak: stop, tell the coordinator and the operator.
+    Not clean or red: read the run's measured verdict and stop (Decision 55); the only heal is constraints'
+    merge-to-apply gap. Never heal with a guard-routed dispatch, whose plan.bin is a public artifact (rec-4230). A
+    leak: stop, tell the coordinator and the operator.
   hermetic: false
   graduation: not-applicable
 - step: 5
@@ -205,7 +210,7 @@ verification_plan:
   hermetic: false
   graduation: not-applicable
 - step: 6
-  phase: post-deploy
+  phase: pre-deploy
   action: >-
     Subscription state, by MODE, printing roles only: two_confirmed (before PR 2 and again before C2: both confirmed,
     the successor's ConfirmationWasAuthenticated printed), successor_only (after C2: exactly one e-mail subscription,
@@ -295,6 +300,27 @@ verification_plan:
     (Decision 226). Never read the verdict from a pipe's exit status.
   hermetic: false
   graduation: not-applicable
+- step: 10
+  phase: pre-deploy
+  action: >-
+    Quiet pipeline, immediately before PR 2's squash-merge: no terraform-apply-sandbox, reconcile or terraform-drift
+    run other than pull_request runs is queued, in progress or waiting, so PR 2's apply starts at once and takes the
+    state lock ahead of every drift cycle but one created in the next few minutes. Scheduled ticks are created at
+    irregular times (seven in the 48 hours to 2026-11-04 06:35Z, none at the cron minute), so no safe minute exists;
+    constraints name the recovery for that residue.
+  command: |-
+    bin/venv-python - <<'PY'
+    import json, sys, urllib.request
+    get = lambda w: json.load(urllib.request.urlopen(f'https://api.github.com/repos/otl-labs/ontheloop/actions/workflows/{w}/runs?per_page=100', timeout=30))['workflow_runs']
+    busy = {w: [r['id'] for r in get(w) if r['status'] != 'completed' and r['event'] != 'pull_request'] for w in ('terraform-apply-sandbox.yml', 'reconcile.yml', 'terraform-drift.yml')}
+    print('QUIET', json.dumps(busy)); sys.exit(0 if not any(busy.values()) else 'NOT QUIET')
+    PY
+  expected: Prints QUIET with three empty lists (exit 0).
+  fix_if: >-
+    NOT QUIET: do not merge; wait for the named runs to finish and run it again (a gate, not a retry of a failed
+    step). A run waiting on tf-gated-apply for another PR: tell the coordinator, who owns the hold.
+  hermetic: false
+  graduation: not-applicable
 test_obligations:
 - source: terraform/personal/sns_alerts.tf
   behavior: the founder's subscription is forgotten with destroy = false and the successor is unchanged.
@@ -311,14 +337,26 @@ constraints:
   in SNS's IAM model; rec-4896), so Decision 223 cl.4's admin split-apply cannot delete the subscription and C2 is the
   operator's console act, proven by VP 6.
 - >-
-  Order is fixed: start (alias file), VP 1, VP 6 MODE=two_confirmed, PR 2, VP 4, VP 5, VP 6 MODE=two_confirmed, C2,
-  VP 6 MODE=successor_only, S2, VP 7, VP 4, VP 8. C2 runs only after VP 5 passes; nothing old is deleted before
-  PLAN-terraform-company-emails proved the successor pages.
+  Order is fixed: start (alias file), VP 1, VP 6 MODE=two_confirmed, PR 2 (VP 2, VP 9, open, VP 3, VP 10, merge), VP
+  4, VP 5 (the hold is released), VP 6 MODE=two_confirmed, C2, VP 6 MODE=successor_only, S2, VP 7, VP 4, VP 8. C2
+  runs only after VP 5 passes; nothing old is deleted before PLAN-terraform-company-emails proved the successor pages.
 - >-
   Why the forget is its own PR: C1 changed the successor's computed attributes without an apply, so every plan until
   one applies carries it as resource_drift, and Decision 190's classifier reads any resource_drift beside a planned
   change as out_of_band_drift (an immediate red). PR 2's apply persists the refreshed state, so the closing plan's
   tfvars window (an Owner diff) measures as pending_codification instead.
+- >-
+  Merge-to-apply gap. Drift serialises with apply only through the S3 state lock (terraform-drift.yml), so a drift
+  cycle that plans a terraform/personal merge commit before its apply takes the lock, from C1 until VP 5, sees that
+  change beside C1's resource_drift and red-flips. So: the coordinator holds every other terraform/personal merge and
+  every terraform-apply-sandbox, reconcile or terraform-drift dispatch by another thread from
+  PLAN-terraform-company-emails C1 until VP 5 passes (expected the same day; the agent tells the coordinator when it
+  is released); PR 2 merges only on VP 10; and a drift dispatch waits for the MERGE_SHA apply (VP 4). If a cycle
+  still lands in the gap: review its tf_drift rec (Decision 55; the drift names aws_sns_topic_subscription
+  .company_alerts_email only), then on the operator's word dispatch terraform-apply-sandbox's acknowledge-and-retry
+  (acknowledge_red_commit = the red commit; deploy-paths.yaml heal_verb_selection). Its fresh plan at main HEAD is the
+  forget or nothing, which the guard passes, so nothing routes and no plan.bin artifact is uploaded (rec-4230 concerns
+  routed dispatches only). Then VP 4 and VP 5.
 - >-
   Parameter writes are read-modify-write with a version check and keep every other line (neon_org_id included); the
   coordinator serialises them with rec-4048 and any other writer.
@@ -344,7 +382,7 @@ context:
   closes with the closing plan, which bundles it once the subscription is back at its pinned address.
 - >-
   Decision-scout FLAGS_FOUND for the three-plan design, NOTEs adopted: Decision 223 cl.4 (console deletion, not an
-  admin split-apply; rec-4896 owns the ineffective grant), Decision 237 cl.3 (agent SSM writes on the word). CITE:
+  admin split-apply; rec-4896 owns the ineffective grant and routing a cl.4 amendment), Decision 237 cl.3 (agent SSM writes on the word). CITE:
   195, 242, 101, 77, 126, 238, 190, 223, 237, 202. No numbered Decision.
 - >-
   Probed 2026-11-04 (read-only, PlatformAdmin): the remote state object and SNS subscription attributes are readable;
@@ -360,6 +398,7 @@ pre_implementation_checklist:
 - All files in scope located and readable
 - Acceptance criteria understood and verifiable
 - Start gate met (VP 1) and the coordinator has relayed that no other thread is writing the tfvars parameter
+- The coordinator confirms the terraform/personal merge and dispatch hold set at PLAN-terraform-company-emails C1 is still in place (constraints, merge-to-apply gap)
 execution_steps:
 - |-
   Start. Read docs/PROJECT_CONTEXT.md, this plan and the handoff notes PLAN-terraform-company-emails left in /mnt/project-files/terraform-company-emails/. Write the session's alias file as PLAN-terraform-company-emails execution_steps (start) shows, and follow that plan's conventions for every live step (present, wait for the word, verify, one EVIDENCE.md row, times and versions in build-state.json). Run VP 1, then VP 6 with MODE=two_confirmed.
@@ -374,7 +413,7 @@ execution_steps:
         destroy = false
       }
     }
-  Replace the test with test_predecessor_forgotten_not_destroyed. Flip implementation_declared to true. Run VP 2, terraform fmt -check terraform/personal (provider-free; Decision 119), bin/venv-python -m scripts.validate --pre, VP 9 and code review. Open the PR titled 'feat(terraform-company-emails-forget): forget the founder's alerts subscription' (no Resolves trailer: bundled_recommendations is empty). Run VP 3 on its trusted plan comment. Squash-merge on code-review PROCEED, VP 3 and green CI. Then VP 4 with AFTER = the merge time and MERGE_SHA, and VP 5. Row B2 (PR number, merge SHA, run ids). Report readiness, validator verdicts, postflight evidence, review and the real push and PR outcome separately (implement skill, Commit Flows).
+  Replace the test with test_predecessor_forgotten_not_destroyed. Flip implementation_declared to true. Run VP 2, terraform fmt -check terraform/personal (provider-free; Decision 119), bin/venv-python -m scripts.validate --pre, VP 9 and code review. Open the PR titled 'feat(terraform-company-emails-forget): forget the founder's alerts subscription' (no Resolves trailer: bundled_recommendations is empty); its body names, without values, the texts that read stale until the closing plan's PR 3 (the transitional comment's "beside the predecessor", the sns_alerts.tf header's endpoint paragraph and the contract's where_values_live.alerts_email source, whose endpoint attribute leaves the state). Run VP 3 on its trusted plan comment. Squash-merge on code-review PROCEED, VP 3, green CI and, immediately before, VP 10. Then VP 4 with MERGE_SHA and no AFTER (the step takes the apply's completion time), and VP 5; tell the coordinator the hold is released. Row B2 (PR number, merge SHA, run ids). Report readiness, validator verdicts, postflight evidence, review and the real push and PR outcome separately (implement skill, Commit Flows).
 - |-
   C2, delete the founder's subscription (operator, SNS console, in the region config/aws-region names), only after VP 5 passes. The agent first re-runs VP 6 with MODE=two_confirmed. Then: Amazon SNS > Topics > agent-platform-alerts > Subscriptions: select the e-mail subscription whose endpoint is not on the company domain (the founder's; the company row must stay), Delete, confirm. Then VP 6 with MODE=successor_only; row C2.
 - |-
@@ -398,11 +437,15 @@ execution_steps:
   Report: what was implemented, verification results, the evidence path, and every item still waiting on the operator.
 rollback: >-
   PR 2 before merge: close it. After its apply, forward only: the founder's subscription is unmanaged but still live
-  until C2; to manage it again, revert the removed block and re-import it in an ADMIN session (terraform import
-  aws_sns_topic_subscription.alerts_email by its subscription ARN, read at run time and never printed; import blocks
-  are refused by the trusted-plan screen) on the operator's word, then VP 4. C2: the operator subscribes the old
+  until C2. To manage it again (Decision 126's operator-directed break-glass tier, never a routine apply): open a PR
+  restoring the resource block; on the operator's word, in an ADMIN session on that branch, terraform import
+  aws_sns_topic_subscription.alerts_email by its subscription ARN (read at run time and never printed; import blocks
+  are refused by the trusted-plan screen); re-run the PR's trusted plan, which must read NO_CHANGES, merge, then VP 4.
+  Only before S2: after S2 undo S2 first (S2 rollback), or the restored block would plan a replacement CI cannot
+  perform. C2: the operator subscribes the old
   address again in the console and confirms it from that inbox (unmanaged; the company subscription keeps paging
   throughout). S2: on the operator's word, put back the version recorded before it (main reads alerts_email in no
   resource, so nothing changes in Terraform).
 gate_rounds:
 - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+- {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 7}
