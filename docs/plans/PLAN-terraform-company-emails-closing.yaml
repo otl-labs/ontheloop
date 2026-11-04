@@ -124,13 +124,14 @@ verification_plan:
     parts = {k: v.split('@') for k, v in A.items()}
     assert parts['alerts'][1] == parts['operations'][1] != 'users.noreply.github.com' and os.stat(F).st_mode & 0o077 == 0, 'alias file domain or mode'
     R = open('config/aws-region').read().strip(); B = boto3.Session(profile_name='agent_platform_admin', region_name=R)
-    assert 'assumed-role/PlatformAdmin/' in B.client('sts').get_caller_identity()['Arn'], 'admin chain'
+    from scripts.aws_identity import caller_arn
+    assert 'assumed-role/PlatformAdmin/' in caller_arn('agent_platform_admin'), 'admin chain (the proxy re-signs project-region STS calls, so read the real caller)'
     subprocess.run(['git', 'fetch', '-q', 'origin', 'main'], check=True)
     prior = yaml.safe_load(subprocess.run(['git', 'show', 'origin/main:docs/plans/PLAN-terraform-company-emails-forget.yaml'], capture_output=True, text=True, check=True).stdout)
     assert prior['implementation_declared'] is True, 'PLAN-terraform-company-emails-forget not built'
     ev = open('/mnt/project-files/terraform-company-emails/EVIDENCE.md', encoding='utf-8').read()
     assert all(re.search(rf'^\| {r} \|.*\| pass \|$', ev, re.M) for r in ('B2', 'C2', 'S2')), 'plan 2 evidence rows'
-    if 'v_s3_before' in json.load(open('/mnt/project-files/terraform-company-emails/build-state.json')):
+    if 't_s3' in json.load(open('/mnt/project-files/terraform-company-emails/build-state.json')):
         print('START_OK resumed after S3'); raise SystemExit(0)
     kv = dict(re.findall(r'^\s*([a-z_]+)\s*=\s*"?([^"\n]*)"?\s*$', B.client('ssm').get_parameter(Name='/secret/agent-platform-terraform-personal-tfvars', WithDecryption=True)['Parameter']['Value'], re.M))
     assert sorted(kv) == ['account_id', 'alerts_email', 'company_alerts_email', 'neon_org_id', 'owner_email', 'platform_admin_external_id', 'platform_dev_external_id'], sorted(kv)
@@ -172,12 +173,13 @@ verification_plan:
     APPROVED PR 3 TEXT's blocks applied, whole-file and whitespace aside, {{DATE}} the only variance (approved_text
     verify, the check validate_merge_step runs for a sidecar); in sns_alerts.tf, whose code PR 3 also restructures,
     each block's after words are present and its before words gone; where_values_live has no company_alerts_email
-    key, and outside docs/plans the name survives only in the contract's amendment_log and the two tests that pin it;
+    key, and outside docs/plans the name survives only in the moved block's from line, the contract's amendment_log and
+    the two tests that pin it;
     the contract check passes. The approved text is read from the plan at that base, and PR 3 changes the plan only
     in implementation_declared.
   command: |-
     bin/venv-python - <<'PY'
-    import subprocess, yaml
+    import re, subprocess, yaml
     from pathlib import Path
     from scripts.roadmap import approved_text as at
     from scripts.checks.contracts.validate_terraform_cc_web_operations import validate_terraform_cc_web_operations as vt
@@ -197,12 +199,15 @@ verification_plan:
     if 'company_alerts_email' in yaml.safe_dump({k: v for k, v in c.items() if k != 'amendment_log'}):
         bad.append('contract names company_alerts_email outside amendment_log')
     keep = ('docs/contracts/terraform-cc-web-operations.yaml', 'tests/test_materialise_tfvars_delegate.py', 'tests/checks/iam_tf/test_alerts_email_subscription.py')
-    bad += [l.split(':')[0] for l in subprocess.run(['git', 'grep', '-n', 'company_alerts_email', '--', '.', ':!docs/plans'], capture_output=True, text=True).stdout.splitlines() if not l.startswith(keep)]
+    hits = [l.split(':', 2) for l in subprocess.run(['git', 'grep', '-n', 'company_alerts_email', '--', '.', ':!docs/plans'], capture_output=True, text=True).stdout.splitlines()]
+    moved = [h for h in hits if h[0] == TF and re.fullmatch(r'\s*from\s*=\s*aws_sns_topic_subscription\.company_alerts_email\s*', h[2])]
+    bad += [h[0] for h in hits if h[0] not in keep and h not in moved] + ([] if len(moved) == 1 else ['moved block from line'])
     f = []; vt(f); assert not bad and not f, (bad, f); print('PR3_TEXT_OK', len(w['blocks']))
     PY
   expected: Prints PR3_TEXT_OK 9 (exit 0).
   fix_if: >-
-    A missing or stale block: restore the approved text; any other wording, including one a review asks for, goes to
+    A file named by the sweep: a transitional reference PR 3 must remove, or (in a file a later plan added) one to read
+    and tell the coordinator about. A missing or stale block: restore the approved text; any other wording, including one a review asks for, goes to
     the coordinator, then the operator, before merge.
   hermetic: false
   graduation: waive
@@ -387,9 +392,7 @@ verification_plan:
     test -n "$MODE" && umask 077 && M="${TMPDIR:-/tmp}/tf-company-emails" && TV="$M/bootstrap.tfvars" && mkdir -p "$M" && aws ssm get-parameter --name /secret/agent-platform-terraform-personal-tfvars --with-decryption --profile agent_platform_admin --region "$(tr -d '[:space:]' < config/aws-region)" --query Parameter.Value --output text | grep -E '^[[:space:]]*(account_id|owner_email|platform_dev_external_id|platform_admin_external_id)[[:space:]]*=' > "$TV" && test "$(grep -c = "$TV")" -eq 4 && AWS_PROFILE=agent_platform_admin terraform -chdir=terraform/bootstrap init -input=false -backend-config="region=$(tr -d '[:space:]' < config/aws-region)" > /dev/null && AWS_PROFILE=agent_platform_admin terraform -chdir=terraform/bootstrap plan -input=false -var-file="$TV" -out="$M/owner.tfplan" > /dev/null && terraform -chdir=terraform/bootstrap show -json "$M/owner.tfplan" | MODE="$MODE" bin/venv-python -c "
     import json, os, sys, boto3
     p = json.load(sys.stdin); ch = [r for r in p.get('resource_changes', []) if r['change']['actions'] not in (['no-op'], ['read'])]
-    def names(c):
-        b, a = c.get('before') or {}, c.get('after') or {}; u = c.get('after_unknown') or {}
-        return sorted(k for k in set(b) | set(a) if b.get(k) != a.get(k) or u.get(k))
+    from scripts.ci.plan_names_core import changed_names as names
     bad = [(r['address'], r['change']['actions'], names(r['change'])) for r in ch if r['change']['actions'] != ['update'] or not set(names(r['change'])) <= {'tags_all', 'tags'}]
     if os.environ['MODE'] == 'plan':
         print('BOOTSTRAP_PLAN', {'updates': len(ch), 'other': bad}); sys.exit(0 if ch and not bad else 'BOOTSTRAP STOP')
@@ -560,7 +563,7 @@ test_obligations:
   verification_step: 3
   command: |-
     bin/venv-python - <<'PY'
-    import subprocess, yaml
+    import re, subprocess, yaml
     from pathlib import Path
     from scripts.roadmap import approved_text as at
     from scripts.checks.contracts.validate_terraform_cc_web_operations import validate_terraform_cc_web_operations as vt
@@ -580,7 +583,9 @@ test_obligations:
     if 'company_alerts_email' in yaml.safe_dump({k: v for k, v in c.items() if k != 'amendment_log'}):
         bad.append('contract names company_alerts_email outside amendment_log')
     keep = ('docs/contracts/terraform-cc-web-operations.yaml', 'tests/test_materialise_tfvars_delegate.py', 'tests/checks/iam_tf/test_alerts_email_subscription.py')
-    bad += [l.split(':')[0] for l in subprocess.run(['git', 'grep', '-n', 'company_alerts_email', '--', '.', ':!docs/plans'], capture_output=True, text=True).stdout.splitlines() if not l.startswith(keep)]
+    hits = [l.split(':', 2) for l in subprocess.run(['git', 'grep', '-n', 'company_alerts_email', '--', '.', ':!docs/plans'], capture_output=True, text=True).stdout.splitlines()]
+    moved = [h for h in hits if h[0] == TF and re.fullmatch(r'\s*from\s*=\s*aws_sns_topic_subscription\.company_alerts_email\s*', h[2])]
+    bad += [h[0] for h in hits if h[0] not in keep and h not in moved] + ([] if len(moved) == 1 else ['moved block from line'])
     f = []; vt(f); assert not bad and not f, (bad, f); print('PR3_TEXT_OK', len(w['blocks']))
     PY
   red_green_expectation: >-
@@ -655,8 +660,8 @@ constraints:
   file (the contract, the runbook, the test, sns_alerts.tf) and every apply, reconcile or drift dispatch by another
   thread from S3 until PR 3's gated apply completes (a terraform/personal merge would make PR 3's saved plan stale,
   and a shared-file merge makes Decision 245's merge gate refuse PR 3); the agent tells the coordinator when it is
-  released. Immediately before S3, bin/venv-python -m scripts.session.merge_overlap check --head HEAD must print
-  CLEAR (else update the branch first, before S3). If the gate still refuses after S3: update the branch on GitHub,
+  released. Immediately before S3, with the local HEAD equal to PR 3's pushed head, git fetch -q origin main &&
+  bin/venv-python -m scripts.session.merge_overlap check --head HEAD must print CLEAR (else update the branch first, before S3). If the gate still refuses after S3: update the branch on GitHub,
   wait for the CI-green wake on the new head (its trusted plan re-runs on the push), run VP 6 on the new head's
   comment, then merge.
 - >-
@@ -680,10 +685,11 @@ constraints:
   organic second proof of paging. A page outside this list is triaged before the next step. Each tfvars window may
   also file one tf_drift rec (pending_codification), closed by the next clean cycle.
 - >-
-  No e-mail address (company aliases included), account id, ARN, token or link enters the repository, a PR, memory,
+  No contact address of the founder or the company (role aliases included), account id, ARN, token or link enters the repository, a PR, memory,
   chat or the shared folder (Decision 101): the build reads the role aliases from the session's alias file at run time
   and prints roles and booleans; evidence is kind and UTC time; bootstrap plan text, which prints tag values, is never
-  shown (VP 9 prints names only).
+  shown (VP 9 prints names only). The build transcript's copy of the aliases is PLAN-terraform-company-emails'
+  Decision 224 exception (its constraints; rec-4897).
 - >-
   A failed or drifted step halts this workstream until root-caused; never a silent retry; no rescue agents or
   workaround loops (Decision 55). Never apply terraform/personal out of band (rec-3189).
@@ -859,21 +865,23 @@ execution_steps:
     after: >-
       after the `terraform apply` that creates a subscription, AWS sends a subscription-confirmation e-mail to the
       company alerts role alias. Do not open its link, which confirms without authentication: confirm with `aws sns
-      confirm-subscription --authenticate-on-unsubscribe true` and the token from the link (the
-      `terraform/personal/sns_alerts.tf` header). The page-out is live once confirmed.
+      confirm-subscription --topic-arn <the alerts topic> --token <the token from the link>
+      --authenticate-on-unsubscribe true` (the `terraform/personal/sns_alerts.tf` header gives the steps). The
+      page-out is live once confirmed.
 - |-
   PR 3 (declares this plan; after VP 1). Apply the sns_alerts.tf shape in scope (removed block, transitional comment, variable and resource out; alerts_email resource back on var.alerts_email; then the moved block:
     moved {
       from = aws_sns_topic_subscription.company_alerts_email
       to   = aws_sns_topic_subscription.alerts_email
     }
-  ) and APPROVED PR 3 TEXT to the contract, sns_alerts.tf and the runbook (the entry removal deletes the whole company_alerts_email key from where_values_live). Replace the test with test_subscription_at_pinned_address. Flip implementation_declared to true. Graduate VP 2 (registry row config/agent/verification_registry/entries/alerts-subscription-pinned-address.yaml, slot test_selector, guard_target terraform/personal/sns_alerts.tf). Run VP 2, VP 3, VP 15, terraform fmt -check terraform/personal (provider-free; Decision 119), bin/venv-python -m scripts.validate --pre, VP 14 and code review. Open the PR titled 'feat(terraform-company-emails-closing): move the Owner tag to the operations alias and return the alerts subscription to its address', with 'Resolves: rec-3904, rec-3950' in the implementation commit and the squash body (the PR body carries no commit trailer: a Co-Authored-By address trips VP 13), and wait for green CI and VP 4 (do not merge). Then S3, right after VP 7 reads the record green (AFTER = now, dispatch allowed) and only when the operator can approve tf-gated-apply within the hour (constraints, S3 window). Record v_s3_before, present the command, wait for the word, run it, then VP 5, record T_S3, row S3:
+  ) and APPROVED PR 3 TEXT to the contract, sns_alerts.tf and the runbook (the entry removal deletes the whole company_alerts_email key from where_values_live). Replace the test with test_subscription_at_pinned_address. Flip implementation_declared to true. Graduate VP 2 (registry row config/agent/verification_registry/entries/alerts-subscription-pinned-address.yaml, slot test_selector, guard_target terraform/personal/sns_alerts.tf). Run VP 2, VP 3, VP 15, terraform fmt -check terraform/personal (provider-free; Decision 119), bin/venv-python -m scripts.validate --pre, VP 14 and code review. Open the PR titled 'feat(terraform-company-emails-closing): move the Owner tag to the operations alias and return the alerts subscription to its address', with 'Resolves: rec-3904, rec-3950' in the implementation commit and the squash body (the PR body carries no commit trailer: a Co-Authored-By address trips VP 13), and wait for green CI and VP 4 (do not merge). Then S3, right after VP 7 reads the record green (AFTER = now, dispatch allowed) and only when the operator can approve tf-gated-apply within the hour (constraints, S3 window). Record v_s3_before, present the command, wait for the word, run it, record t_s3 (UTC now, YYYY-MM-DDTHH:MM:SSZ) in build-state.json at once, then VP 5 (T_S3 = t_s3), row S3:
   bin/venv-python - <<'PY'
   import json, os, re, boto3
   A = json.load(open(os.path.join(os.environ.get('TMPDIR', '/tmp'), 'tf-company-emails', 'aliases.json')))
   N = '/secret/agent-platform-terraform-personal-tfvars'
   ssm = boto3.Session(profile_name='agent_platform_admin', region_name=open('config/aws-region').read().strip()).client('ssm')
   p = ssm.get_parameter(Name=N, WithDecryption=True)['Parameter']; t = p['Value']
+  assert p['Version'] == json.load(open('/mnt/project-files/terraform-company-emails/build-state.json'))['v_s3_before'], 'parameter changed since v_s3_before'
   m = re.search(r'^[ \t]*owner_email[ \t]*=[ \t]*"?([^"\n]*)"?[ \t]*$', t, re.M)
   assert m and not re.search(r'^[ \t]*previous_owner_email[ \t]*=', t, re.M), 'unexpected owner lines'
   new = t[:m.start()] + 'owner_email = "' + A['operations'] + '"' + t[m.end():]
@@ -889,10 +897,11 @@ execution_steps:
 - |-
   S4, drop the transitional keys (agent, on the operator's word on this command, after VP 8 and A1). Record v_s4_before, present, wait for the word, run, then VP 10 and VP 7 with AFTER = the write time (main declares neither key, so the plan is unchanged), row S4:
   bin/venv-python - <<'PY'
-  import re, boto3
+  import json, re, boto3
   N = '/secret/agent-platform-terraform-personal-tfvars'
   ssm = boto3.Session(profile_name='agent_platform_admin', region_name=open('config/aws-region').read().strip()).client('ssm')
   p = ssm.get_parameter(Name=N, WithDecryption=True)['Parameter']
+  assert p['Version'] == json.load(open('/mnt/project-files/terraform-company-emails/build-state.json'))['v_s4_before'], 'parameter changed since v_s4_before'
   t, n1 = re.subn(r'^[ \t]*company_alerts_email[ \t]*=.*\n?', '', p['Value'], flags=re.M)
   t, n2 = re.subn(r'^[ \t]*previous_owner_email[ \t]*=.*\n?', '', t, flags=re.M); assert (n1, n2) == (1, 1), (n1, n2)
   assert ssm.get_parameter(Name=N)['Parameter']['Version'] == p['Version'], 'parameter changed since read'
@@ -902,11 +911,11 @@ execution_steps:
   APPROVED CLOSING TEXT (YAML; PR 4; every present string appears verbatim in the inventory after whitespace is collapsed; placeholders <date> and <run id> are the only variance; each ledger entry also carries date: the commit date, and the amendment_log entry carries the commit date, semantic_break false, change_class correction; maintenance.stage_rule: flip the rows, update owner_today, append the ledger entries, never reorder or delete rows):
   present:
   - "location: \"terraform/personal/providers.tf, terraform/bootstrap/main.tf\""
-  - "target: \"Owner holds the company operations role alias; Account keeps personal, which names this account (Decision 242 cl.5)\""
+  - "target: \"Owner holds the company operations role alias in both roots; the Account tag, where set, keeps personal, which names this account (Decision 242 cl.5)\""
   - "target: The company alerts role alias"
   rows:
     AWS-07: {status: proven, owner_today: company}
-    AWS-10: {status: proven, owner_today: company, location: "terraform/personal/providers.tf, terraform/bootstrap/main.tf", target: "Owner holds the company operations role alias; Account keeps personal, which names this account (Decision 242 cl.5)"}
+    AWS-10: {status: proven, owner_today: company, location: "terraform/personal/providers.tf, terraform/bootstrap/main.tf", target: "Owner holds the company operations role alias in both roots; the Account tag, where set, keeps personal, which names this account (Decision 242 cl.5)"}
     AWS-11: {status: proven, owner_today: company, target: The company alerts role alias}
   ledger:
   - {row: AWS-07, status: proven, evidence: "PLAN-terraform-company-emails S1, -forget S2 and -closing S3 and S4: owner_email holds the company operations role alias and alerts_email the company alerts role alias; no founder contact value is left in the parameter, and neon_org_id names the company organisation (NEON-02) (verified <date>)"}
@@ -938,3 +947,4 @@ gate_rounds:
 - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 10}
 - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 9}
 - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 7}
+- {gate: plan-critique, round: 4, verdict: REVISE, blocking: 3, nits: 7}

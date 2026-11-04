@@ -94,6 +94,7 @@ bundled_recommendations:
 - rec-3975
 followon_recs:
 - rec-4894
+- rec-4897
 weakening_dispositions:
 - candidate: "[assertion-changed] tests/test_materialise_tfvars_delegate.py::TestDelegateBehaviour::test_masks_under_github_actions"
   disposition: planned-change
@@ -154,7 +155,8 @@ verification_plan:
     parts = {k: v.split('@') for k, v in A.items()}
     assert parts['alerts'][1] == parts['operations'][1] != 'users.noreply.github.com' and os.stat(F).st_mode & 0o077 == 0, 'alias file domain or mode'
     B = boto3.Session(profile_name='agent_platform_admin', region_name=open('config/aws-region').read().strip())
-    assert 'assumed-role/PlatformAdmin/' in B.client('sts').get_caller_identity()['Arn'], 'admin chain'
+    from scripts.aws_identity import caller_arn
+    assert 'assumed-role/PlatformAdmin/' in caller_arn('agent_platform_admin'), 'admin chain (the proxy re-signs project-region STS calls, so read the real caller)'
     subprocess.run(['git', 'fetch', '-q', 'origin', 'main'], check=True)
     inv = yaml.safe_load(subprocess.run(['git', 'show', 'origin/main:docs/contracts/account-credential-inventory.yaml'], capture_output=True, text=True, check=True).stdout)
     rows = {x['id']: x['status'] for x in inv['rows']}; assert all(rows[k] == 'personal' for k in ('AWS-07', 'AWS-10', 'AWS-11')), 'rows moved'
@@ -368,7 +370,8 @@ verification_plan:
 - step: 9
   phase: post-deploy
   action: >-
-    Subscription state, by MODE, printing roles only: pending_successor (after PR 1's apply: the predecessor
+    Subscription state, by MODE, printing roles and states only (confirmed: an ARN; pending; deleted: SNS's Deleted
+    row, unsubscribed and awaiting purge; other): pending_successor (after PR 1's apply: the predecessor
     confirmed, the successor on the company alerts role alias pending), two_confirmed (after C1: both confirmed, the
     successor's ConfirmationWasAuthenticated read and printed).
   command: |-
@@ -378,7 +381,7 @@ verification_plan:
     R = open('config/aws-region').read().strip(); B = boto3.Session(profile_name='agent_platform_admin', region_name=R); sns = B.client('sns')
     topic = f"arn:aws:sns:{R}:{B.client('sts').get_caller_identity()['Account']}:agent-platform-alerts"
     subs = [s for s in sns.list_subscriptions_by_topic(TopicArn=topic)['Subscriptions'] if s['Protocol'] == 'email']
-    state = lambda s: 'pending' if s['SubscriptionArn'] == 'PendingConfirmation' else 'confirmed'
+    state = lambda s: 'confirmed' if s['SubscriptionArn'].startswith('arn:') else {'PendingConfirmation': 'pending', 'Deleted': 'deleted'}.get(s['SubscriptionArn'], 'other')
     succ = [s for s in subs if s['Endpoint'] == A['alerts']]; pred = [s for s in subs if s['Endpoint'] != A['alerts']]
     auth = [sns.get_subscription_attributes(SubscriptionArn=s['SubscriptionArn'])['Attributes'].get('ConfirmationWasAuthenticated') for s in succ if state(s) == 'confirmed']
     got = {'successor': [state(s) for s in succ], 'predecessor': [state(s) for s in pred], 'successor_authenticated': auth}
@@ -391,8 +394,9 @@ verification_plan:
     Prints SUBS with the mode and the per-role states and exits 0; two_confirmed exits 0 only when
     successor_authenticated reads ['true'], or with C1_FALLBACK=1 set once row C1 records the fallback.
   fix_if: >-
-    pending_successor with no successor: PR 1's apply did not create it, read the apply run. two_confirmed still
-    pending: the confirmation token expired or was mistyped; the operator repeats C1 (the console's Request
+    pending_successor with no successor: PR 1's apply did not create it, read the apply run. Any deleted or other row:
+    someone unsubscribed it (a deleted successor leaves the founder as the only subscriber); stop and tell the
+    coordinator. two_confirmed still pending: the confirmation token expired or was mistyped; the operator repeats C1 (the console's Request
     confirmation button re-sends the mail).
   hermetic: false
   graduation: not-applicable
@@ -542,7 +546,9 @@ constraints:
   Merge-time reviewer: after the guard passes, terraform-apply-sandbox's Subagent plan review (T2.39; an LLM given
   only the names-only digest, never this plan) gates the apply; PR 1's digest lists one create, and VP 8 prints the
   verdict. On REVISE the apply is skipped and the record turns red (nothing was created); on STARVED the apply is
-  skipped and the record is left as it was (Decision 55). Either way the failed push run files a ci_rca rec (Decision
+  skipped and the record is left as it was (Decision 55). The same heal covers a stale saved plan at merge
+  (PLAN_STALE_CONCURRENT_WRITER: another terraform/personal apply landed between PR 1's trusted plan and its merge,
+  since the hold starts only at C1), which also turns the record red. Either way the failed push run files a ci_rca rec (Decision
   226): tell the coordinator at once, since past its repair SLO it blocks every thread's dispatch. Once that rec and
   the REVISE reason are reviewed, the heal on the operator's word is one terraform-apply-sandbox dispatch while
   main's plan is guard PASS (acknowledge_red_commit = the red commit when the record is red, else blank; a fresh
@@ -559,6 +565,10 @@ constraints:
   dispatch or reconcile log prints one. ::add-mask:: masks Actions logs only, never a PR comment body; the trusted
   comment is names-only and VP 7 scans it. _SCRUB_SPECS covers alerts_email and owner_email, not the transitional
   keys, which no plan text prints (accepted defence-in-depth gap).
+- >-
+  deploy-paths.yaml's admin-loop step says to recover the six no-default tfvars; from PR 1 until the closing plan's
+  S4 there are seven (company_alerts_email). The contract's recoverable_vars is the authority and names seven; the
+  step defers to it, so a break-glass recovery reads the contract.
 - >-
   Registry shards kept: trusted-plan-env (node id tests/test_trusted_plan_env.py) keeps selecting the whole file, so
   PR 1's added test joins it with no shard edit.
@@ -582,12 +592,14 @@ constraints:
   platform-security-alerts-topic-change on PR 1's Subscribe and on C1's confirmation; the smoke alarm's ALARM and OK
   mails in P1. A page outside this list is triaged before the next step.
 - >-
-  No e-mail address (company aliases included), account id, ARN, token or confirmation link enters the repository,
+  No contact address of the founder or the company (role aliases included), account id, ARN, token or confirmation link enters the repository,
   a PR, memory, chat or the shared folder (Decision 101): the build reads the role aliases from the session's alias
   file at run time and prints roles and booleans; evidence is kind and UTC time; screenshots are checked in the
-  thread and never saved. Recorded residual: the build session's own transcript holds the two aliases (they come
-  from the operator's message and the start step passes them as arguments), and src/sensitive_values has no e-mail
-  scrub class; company role aliases are published contact points, not credentials (Decision 224 cl.2).
+  thread and never saved. Exception to Decision 224 cl.1-2 (an e-mail is a private value, never in a log or
+  telemetry), pending the operator's acceptance: each build session's own transcript holds the two aliases, which
+  reach it from the operator's 2026-11-03 message and again as the start step's arguments, and src/sensitive_values
+  has no e-mail scrub class (rec-4897). Context records the acceptance by message id and date before the plan PR
+  merges; without it the plan does not merge.
 - >-
   A failed or drifted step halts this workstream until root-caused; never a silent retry; no rescue agents or
   workaround loops (Decision 55). Never apply terraform/personal out of band (rec-3189).
@@ -596,7 +608,8 @@ context:
   Approval: the operator pre-agreed to every blind-consult recommendation on design forks
   (cmsg_017f94mmYqSe3q2p9o6tPW3U7KRAw4mzGP2yMgJoEhb4gf, 2026-11-03); terraform-company-emails/ADVICE.md records the
   consult and each adaptation. The sidecar still needs the operator's word on
-  terraform-company-emails/step6b-presentation.md before this plan merges (always-ask wording).
+  terraform-company-emails/step6b-presentation.md before this plan merges (always-ask wording), as does the Decision
+  224 transcript exception (constraints).
 - >-
   Three plans, one declaring PR each, so every flip-keyed gate (scope boundary, sidecar and trailer equality,
   weakening, graduation, green-after replay) covers each terraform change: this plan (PR 1),
@@ -609,7 +622,7 @@ context:
   Decision-scout FLAGS_FOUND, NOTEs adopted: Decision 223 cl.4 (console deletion, not an admin split-apply), Decision
   237 cl.3 (agent SSM writes on the word, Neon T1 precedent), Decision 127 cl.2 (runbook corrections only); SPIRIT
   NOTE Decision 238 (names-only public logs are rec-4894). CITE: 195, 242, 198, 101, 77, 126, 238, 183, 190, 201,
-  162, 240, 223, 237, 127, 202, 92, 224, 226, 119, 163, 55, 245. Decisions triaged: 197 of 197. Roadmap items intersected: 2; CONFLICT: 0;
+  162, 240, 223, 237, 127, 202, 92, 224, 226, 119, 163, 55, 245, 244. Decisions triaged: 197 of 197. Roadmap items intersected: 2; CONFLICT: 0;
   RELATED: 2. No numbered Decision: ownership is Decision 195, the move Decision 242.
 - >-
   Consult adaptations (ADVICE.md): confirmation and paging proof are operator steps; masking covers every *_email key;
@@ -629,7 +642,7 @@ context:
 pre_implementation_checklist:
 - Branch confirmed not on main
 - docs/PROJECT_CONTEXT.md read
-- Only the plan-cited decision sections (195, 242, 198, 101, 77, 126, 238, 183, 190, 201, 162, 240, 223, 237, 127, 202, 92, 224, 226, 119, 163, 55, 245)
+- Only the plan-cited decision sections (195, 242, 198, 101, 77, 126, 238, 183, 190, 201, 162, 240, 223, 237, 127, 202, 92, 224, 226, 119, 163, 55, 245, 244)
 - All files in scope located and readable
 - Acceptance criteria understood and verifiable
 - Start gate met (VP 1) and the coordinator has relayed that no other thread is writing the tfvars parameter
@@ -637,7 +650,7 @@ pre_implementation_checklist:
 - The operator is available to give the code-owner word on PR 1's final diff (constraints, code-owned paths)
 execution_steps:
 - |-
-  Start. Read docs/PROJECT_CONTEXT.md, this plan and /mnt/project-files/terraform-company-emails/HANDOFF-implementation.md (written when this plan merged; if absent, ask the coordinator). In each session, first write the alias file from the operator's alias list (project memory; the operator's 2026-11-03 message), never into the repository, a PR, memory, chat or the shared folder:
+  Start. Read docs/PROJECT_CONTEXT.md, this plan and /mnt/project-files/terraform-company-emails/HANDOFF-implementation.md (written when this plan merged; if absent, ask the coordinator). In each session, first write the alias file from the operator's alias list (the operator's 2026-11-03 message in the project thread), never into the repository, a PR, memory, chat or the shared folder, and write nothing about it to memory:
   mkdir -p "${TMPDIR:-/tmp}/tf-company-emails" && (umask 077 && bin/venv-python -c "import json, sys; json.dump({'operations': sys.argv[1], 'alerts': sys.argv[2]}, open(sys.argv[3], 'w'))" "<the operations role alias>" "<the alerts role alias>" "${TMPDIR:-/tmp}/tf-company-emails/aliases.json")
   Conventions for every live step: present the exact step or command and its expected result in the thread; for an operator step wait for the operator's typed word that it is done, for an agent mutation wait for the operator's typed word on that exact command, one word per mutation; then verify with the VP step named and append one row to /mnt/project-files/terraform-company-emails/EVIDENCE.md: | step | what | UTC time as YYYY-MM-DDTHH:MMZ | evidence kind | pass |. Record every time and version the VP steps read (t_*, v_*_before, run ids) in build-state.json. Evidence names workflow run ids only, never job ids or job URLs (job ids are 12 digits and trip VP 12's account-id clause). Run VP 1, then VP 2 (baseline, once).
 - |-
@@ -662,7 +675,7 @@ execution_steps:
 - |-
   C1, confirm (operator, the same day as PR 1's apply, once the coordinator has confirmed the hold in constraints' C1 drift window and git show origin/main:docs/plans/PLAN-terraform-company-emails-forget.yaml reads with implementation_declared false, so plan 2 can start the same day). The confirmation mail reaches the company inbox through the alerts alias. Do not open its link: opening it confirms without authentication. Copy the link address, URL-decode it (a mail gateway may rewrite "Token=" as "Token%3D"), take the value after "Token=" up to the next "&", and in AWS CloudShell (in the region config/aws-region names) run:
   T=$(aws sns list-topics --query "Topics[?ends_with(TopicArn, ':agent-platform-alerts')].TopicArn" --output text); read -rsp 'Token: ' K; echo; aws sns confirm-subscription --topic-arn "$T" --token "$K" --authenticate-on-unsubscribe true --query 'length(SubscriptionArn)' --output text; unset K
-  Expected: one number (the ARN's length; the ARN itself is not printed). Then the agent runs VP 9 with MODE=two_confirmed; row C1. Fallback: if the link was opened (by a person or a mail scanner) VP 9 reads successor_authenticated ['false']; continue, record it in row C1, re-run VP 9 MODE=two_confirmed after P1's OK page (a scanner that opened the confirmation link may also open the unsubscribe link in a page), and file a Medium rec to re-subscribe with authentication (after PLAN-terraform-company-emails-forget's C2 an unauthenticated successor is the only subscriber, so that plan's C2 waits for the operator's answer on it; the predecessor has the same property today). Later VP 9 runs set C1_FALLBACK=1.
+  Expected: one number (the ARN's length; the ARN itself is not printed). Then the agent runs VP 9 with MODE=two_confirmed; row C1. Fallback: if the link was opened (by a person or a mail scanner) VP 9 reads successor_authenticated ['false']; continue, and record it in row C1's evidence-kind column (its result column stays pass, which plan 1's VP 12 and the forget plan's VP 1 read), re-run VP 9 MODE=two_confirmed after P1's OK page (a scanner that opened the confirmation link may also open the unsubscribe link in a page), and file a Medium rec to re-subscribe with authentication (after PLAN-terraform-company-emails-forget's C2 an unauthenticated successor is the only subscriber, so that plan's C2 waits for the operator's answer on it; the predecessor has the same property today). Later VP 9 runs set C1_FALLBACK=1.
 - |-
   P1, paging proof (operator, CloudShell, after VP 9 two_confirmed). The agent records T_P1 (UTC now) in build-state.json, then the operator runs:
   aws cloudwatch set-alarm-state --alarm-name ducklake-telemetry-writer-smoke-errors --state-value ALARM --state-reason "company alerts paging proof"
@@ -694,3 +707,4 @@ gate_rounds:
 - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 4, nits: 9}
 - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 9}
 - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 9}
+- {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 7}
