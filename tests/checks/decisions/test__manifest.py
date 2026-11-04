@@ -116,7 +116,11 @@ class TestGatedEntryInputClosures:
 _CLOSURE_INPUTS: dict[str, tuple[str, ...]] = {
     "validate_decision_entry_conformance": (
         "docs/contracts/decision-entry.yaml",
+        "docs/contracts/decision-kind.yaml",
+        "docs/contracts/north-star.yaml",
         "scripts/decisions_md.py",
+        "scripts/north_star_models.py",
+        "scripts/checks/decisions/envelope_rules.py",
         "scripts/checks/decisions/_baseline.py",
         "scripts/checks/_common.py",
         "scripts/checks/registry.py",

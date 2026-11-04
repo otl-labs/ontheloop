@@ -13,8 +13,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from scripts.decisions_md import (
+    PLACEHOLDER_DATE,
+    PLACEHOLDER_NUMBER,
     _iter_decision_sections,
     extract_entry_envelope,
+    iter_decision_headings,
+    iter_placeholder_headings,
     parse_decisions_md,
 )
 
@@ -245,3 +249,71 @@ class TestByteReconstructionPreservedUnderEnvelope:
         base_rows = parse_decisions_md(paths=[base_path])
         changed_rows = parse_decisions_md(paths=[changed_path])
         assert base_rows[0]["content_hash"] != changed_rows[0]["content_hash"]
+
+
+_DRAFT = (
+    "## Decision {{N}}: Draft title\n\n"
+    '```yaml\nnumber: {{N}}\ndecided_date: "{{DATE}}"\nsignificance:\n  value: numbered_decision\n  justification: r.\n'
+    "kind:\n  value: direction\n  justification: j.\nserves: [NS.1]\n```\n"
+)
+
+
+class TestServesKindShapes:
+    def test_well_formed_serves_and_kind_are_accepted(self) -> None:
+        block = "## Decision 1: X\n\n```yaml\nnumber: 1\nserves: [NS.1]\nkind: {value: direction, justification: j}\n```\n"
+        assert extract_entry_envelope(block) == {
+            "number": 1,
+            "serves": ["NS.1"],
+            "kind": {"value": "direction", "justification": "j"},
+        }
+
+    def test_scalar_serves_is_rejected(self) -> None:
+        assert extract_entry_envelope("## Decision 1: X\n\n```yaml\nnumber: 1\nserves: NS.1\n```\n") is None
+
+    def test_non_string_serves_item_is_rejected(self) -> None:
+        assert extract_entry_envelope("## Decision 1: X\n\n```yaml\nnumber: 1\nserves: [1]\n```\n") is None
+
+    def test_string_kind_is_rejected(self) -> None:
+        assert extract_entry_envelope("## Decision 1: X\n\n```yaml\nnumber: 1\nkind: direction\n```\n") is None
+
+    def test_row_keys_carry_kind_mapping_and_serves_list(self, tmp_path: Path) -> None:
+        path = tmp_path / "DECISIONS.md"
+        path.write_text(
+            "## Decision 1: X\n\n```yaml\nnumber: 1\nserves: [NS.2]\nkind: {value: mechanism, justification: j}\n```\n\n"
+            "## Decision 2: Y\n\n**Status:** Decided\n",
+            encoding="utf-8",
+        )
+        rows = parse_decisions_md(paths=[path])
+        assert rows[0]["kind"] == {"value": "mechanism", "justification": "j"}
+        assert rows[0]["serves"] == ["NS.2"]
+        assert rows[1]["kind"] == {} and rows[1]["serves"] == []
+
+
+class TestPlaceholderGrammar:
+    def test_iterator_matches_placeholder_and_digits_only(self) -> None:
+        text = "## Decision {{N}}: A\n\n### Decision 7: B\n\n## Decision {{X}}: C\n\n## Decision 9:\nbody\n"
+        assert [m.group(1) for m in iter_placeholder_headings(text)] == ["{{N}}", "7"]
+
+    def test_digits_iterator_never_sees_placeholder_headings(self) -> None:
+        assert iter_decision_headings("## Decision {{N}}: A\n") == []
+
+    def test_placeholder_draft_parses_only_with_the_flag(self) -> None:
+        assert extract_entry_envelope(_DRAFT) is None
+        env = extract_entry_envelope(_DRAFT, placeholder=True)
+        assert env is not None
+        assert env["number"] == PLACEHOLDER_NUMBER and env["decided_date"] == PLACEHOLDER_DATE
+        assert env["kind"]["value"] == "direction"
+
+    def test_placeholder_flag_still_rejects_a_wrong_shape(self) -> None:
+        assert extract_entry_envelope(_DRAFT.replace("serves: [NS.1]", "serves: NS.1"), placeholder=True) is None
+
+    def test_placeholder_number_is_rejected_without_the_flag_even_with_a_digit_heading(self) -> None:
+        assert extract_entry_envelope("## Decision 3: X\n\n```yaml\nnumber: {{N}}\n```\n") is None
+
+    def test_approved_text_fills_both_placeholders(self) -> None:
+        import re
+
+        from scripts.roadmap import approved_text
+
+        assert re.escape(PLACEHOLDER_NUMBER) in approved_text._PLACEHOLDERS
+        assert re.escape(PLACEHOLDER_DATE) in approved_text._PLACEHOLDERS

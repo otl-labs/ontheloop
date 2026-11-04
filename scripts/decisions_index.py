@@ -36,6 +36,12 @@ every projected field on every row still has a real, disclosed read cost even th
 mechanically enforces it -- and significance is a per-entry authoring-time claim the index's
 consumers (decision-scout triage) have no use for.
 
+`serves` and `kind` (PLAN-decision-serves-kind-grammar, Decision 243 clause 8) ARE projected, on live rows that
+carry a well-formed typed envelope only: `serves` is the envelope's north-star id list ([] when undeclared) and
+`kind` is {"value": <direction|mechanism>} (the value only, for read cost) or null when the envelope has no kind.
+Pre-envelope rows and archive rows carry neither key (Decision 179 read cost). Neither key reaches a warehouse
+surface (Decision 84).
+
 `live` derivation (PLAN-decision-scout-bounded-retrieval): whether the decision number is headed
 in docs/DECISIONS.md, via scripts.decisions_md.decision_header_numbers(paths=[docs/DECISIONS.md])
 -- never a second parse of by_number's cross-file dict, which is last-occurrence-wins across the
@@ -92,7 +98,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from scripts.decisions_md import decision_header_numbers, derive_currency, parse_decisions_md
+from scripts.decisions_md import decision_header_numbers, derive_currency, extract_entry_envelope, parse_decisions_md
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _EXPORT_PATH = _REPO_ROOT / "docs" / "decisions-index.json"
@@ -230,6 +236,10 @@ def build_index() -> dict[str, Any]:
             entry["triage_excerpt_truncated"] = excerpt_truncated
             entry["category_tags"] = _derive_category_tags(by_number[n]["title"], excerpt)
             entry["currency"] = derive_currency(by_number[n], inbound_supersedes, inbound_amends)
+            if extract_entry_envelope(by_number[n]["raw_block"]) is not None:
+                kind_value = by_number[n]["kind"].get("value")
+                entry["serves"] = by_number[n]["serves"]
+                entry["kind"] = {"value": kind_value} if kind_value else None
         decisions.append(entry)
 
     return {
