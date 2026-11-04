@@ -24,7 +24,7 @@ never edit any audited surface.
 
 ## 2. CANDIDATE OBSERVATIONS vs VERDICTS
 
-This prompt hands you FACTS (GROUNDING MAP) and CANDIDATE hypotheses (C1-C19). It hands you no
+This prompt hands you FACTS (GROUNDING MAP) and CANDIDATE hypotheses (C1-C21). It hands you no
 verdicts. ASSUME NO CANDIDATE IS A REAL DEFECT UNTIL YOU TRACE IT. A run that merely confirms the
 candidates below has failed. Your value is in adjudication, in what you find that is not listed, and in
 the timing model.
@@ -60,8 +60,8 @@ Candidates (neutral hypotheses; the anchors are in the GROUNDING MAP):
 - C8. Main Canary runs the same full tier as `main-validate` and re-runs unchanged SHAs. Its observed
   start-to-start interval varies widely. Beyond its decided backstop role for plans-only merges
   (Decision 205 clause 5), what it detects that `main-validate` does not may be undefined.
-- C9. Production deploy channels trigger on push in parallel with the full tier, so they may deploy a
-  commit whose full tier later fails.
+- C9. The deploy channels (including the prod-class Lambdas) trigger on push in parallel with the full
+  tier, so they may deploy a commit whose full tier later fails.
 - C10. Decision 217's scale-readiness triggers key on executor concurrency, which is frozen at 1.
   Merges from interactive sessions may already exceed what those triggers were meant to detect.
 - C11. The reserved vocabulary ("promotion" is a gated deploy between deploy tiers) and the
@@ -84,6 +84,11 @@ Candidates (neutral hypotheses; the anchors are in the GROUNDING MAP):
 - C19. The fraction of time main is red may grow with merge rate. Red-main recovery makes a handoff
   during a red wait for a green full tier, so at H10 the time in which any handoff can complete may
   shrink sharply.
+- C20. `attests_head` requires exact tree equality. Every merge to main, plans-only merges included
+  (Decision 205 clause 5 makes each plan its own PR), may invalidate every in-flight local full tier, so
+  plan merges may cost handoff liveness as well as CI capacity.
+- C21. The null case: the current design, with point fixes, may suffice at H0 and well beyond. rec-4790
+  may describe one incident rather than a rate.
 
 ## 3. READ FIRST: disambiguation traps
 
@@ -105,8 +110,14 @@ Candidates (neutral hypotheses; the anchors are in the GROUNDING MAP):
   scope). Name which one you mean every time.
 - "merge gate" names two kinds of control. Here it means a client-side PreToolUse hook
   (`.claude/hooks/merge_gate.sh`, Decision 245) that only agent merges through two MCP tools face.
-  Server-side merge controls (the ruleset's required checks, a GitHub merge queue) are different: they
-  bind every merge surface. Never credit one with the other's coverage.
+  Server-side merge controls (the ruleset's required checks, a GitHub merge queue) apply on every merge
+  surface, EXCEPT to actors holding the ruleset bypass (`terraform/github/repo.tf` around lines 77-81).
+  The agents' merge identity holds that bypass (Decision 245 Problem; rec-4080). Never credit one kind
+  of control with the other's coverage.
+- "prod" and "production". `deploy-prod-lambdas.yml` deploys the "prod-class Lambdas"
+  (`docs/contracts/deploy-paths.yaml` around line 258) into the single existing deploy tier, sandbox.
+  There is no PROD tier (`single_account_rule`). In this prompt, "production" means the live deployment
+  in that single account that users and the loop rely on. It never means the reserved PROD tier.
 - "attestation" names two strengths of evidence. Local: `logs/debug/validation-result.json` written by
   `scripts/checks/validation_result.py` and checked by `--verify-head`; the agent can write it
   (rec-4085). Server-side: a verdict produced by CI for a SHA, which the subject cannot forge. EC5 and
@@ -137,12 +148,12 @@ Candidates (neutral hypotheses; the anchors are in the GROUNDING MAP):
 | ID | Surface | State |
 |---|---|---|
 | S1 | Presubmit and merge path: `ci.yml` `pr-validate` (fast tier, `--pre`), `terraform-validate`, `signal-green`; `.github/workflows/pr-conflict-signal.yml`; the merge gate (`.claude/hooks/merge_gate.sh`, `.claude/hooks/merge_gate.py`, `scripts/session/merge_overlap.py`); the main ruleset (`terraform/github/repo.tf`) | built |
-| S2 | Agent handoff path: `git-ops.yaml` `handoff_sequence`, `rebase_phase_distinction`, `handoff_evidence_gate`; `scripts/session/rebase_resolve.py`; `docs/contracts/mechanical-conflicts.yaml`; `scripts/checks/validation_result.py`; `.claude/hooks/handoff_evidence_gate.py`; `.claude/skills/implement/SKILL.md` ("Pre-Push Rebase", "IMPLEMENTATION Commit Flow") | built |
+| S2 | Agent handoff path: `git-ops.yaml` `handoff_sequence`, `rebase_phase_distinction`, `handoff_evidence_gate`; `scripts/session/rebase_resolve.py`; `docs/contracts/mechanical-conflicts.yaml`; `scripts/checks/validation_result.py`; `.claude/hooks/handoff_evidence_gate.py`; `.claude/skills/implement/SKILL.md` ("Pre-Push Rebase", "IMPLEMENTATION Commit Flow"); `docs/contracts/overseer-dispatch.yaml` (subagent handoff, liveness watchdog) | built |
 | S3 | Post-merge verification: `ci.yml` `main-validate` and the trailer jobs (`trailer-census`, `trailer-acceptance-evaluate`, `trailer-junit-verdict`, `trailer-closure`); `.github/workflows/main-canary.yml` | built |
 | S4 | CI-RCA attribution and red-main recovery: `.github/workflows/ci-rca.yml`; `scripts/ci_rca/` (notably `vacuous_pass.py`, `red_overlap.py`, `fingerprint.py`); `docs/contracts/ci-rca-lifecycle.yaml`; `docs/contracts/red-main-recovery.yaml` | built |
 | S5 | Deploy and promotion: `.github/workflows/deploy-ducklake-lambdas.yml`, `deploy-prod-lambdas.yml`, `terraform-apply-sandbox.yml`; `docs/contracts/deploy-paths.yaml`; `environment-taxonomy.yaml`; the promotion train (Decision 24, Decision 73 clause 5) | deploy-on-push built; promotion train designed-unbuilt |
 | S6 | Designed-unbuilt scale commitments: rec-4874, rec-4790, rec-4873, rec-4114, Decision 217 clauses 1-8, roadmap T4.7, T4.8, T4.9a, T4.21, T4.24 | designed-unbuilt |
-| S7 | Shared GitHub Actions capacity: every workflow under `.github/workflows/` that runs on push, pull_request, workflow_run or schedule; the verdict personas (roadmap T4.28-T4.30 on T4.32); the Fargate compute plane (T4.15; `docs/contracts/ports.yaml` `persona_compute_host`, `verdict_plane`) | workflows built; personas and Fargate plane designed-unbuilt |
+| S7 | Shared GitHub Actions capacity: every workflow under `.github/workflows/` that runs on push, pull_request, pull_request_target, issue_comment or other GitHub events, workflow_run or schedule; Decision 205 clause 3's planned move of repo-scoped scheduled agents to path-filtered push-to-main triggers; the verdict personas (roadmap T4.28-T4.30 on T4.32); the Fargate compute plane (T4.15; `docs/contracts/ports.yaml` `persona_compute_host`, `verdict_plane`) | workflows built; personas and Fargate plane designed-unbuilt |
 
 REQUESTER DIRECTIONS (inputs recorded when this prompt was composed; you may argue against any of them
 with evidence, but never ignore one):
@@ -162,12 +173,15 @@ with evidence, but never ignore one):
 Vocabulary you use in your output:
 
 - BASE: the commit from SETUP step 1. BASE_DATE: `git show -s --format=%cI <sha>` converted to UTC.
-  "BASE_DATE minus N days" means that instant minus N x 24 hours. Every git read uses `<sha>`, never a
-  moving `origin/main`.
+  "BASE_DATE minus N days" means that instant minus N x 24 hours. Every git read uses `<sha>` (your
+  working tree is BASE from SETUP step 1 onward), never a moving `origin/main`. "Most recent" for any
+  GitHub sample means created at or before BASE_DATE.
 - Merge rate: first-parent commits reachable from BASE per UTC day (all merges are squash merges).
-- H0: the merge count on the busiest UTC day in the 30 days before BASE_DATE. Peak hour: the most
-  merges in any 60-minute window in the 7 days before BASE_DATE. H10 = 10 x H0; H100 = 100 x H0. Scale
-  the peak hour by the same multiple.
+- H0: the merge count on the busiest UTC day in the 30 days before BASE_DATE. P0: the most merges in any
+  60-minute window in the 7 days before BASE_DATE. For any horizon H (merges per day), r_day(H) = H / 24
+  merges per hour and r_peak(H) = P0 x (H / H0) merges per hour. H10 = 10 x H0; H100 = 100 x H0.
+- Production: the live deployment in the single account that users and the loop rely on (see the "prod"
+  trap in section 3). Never the reserved PROD tier.
 - Per-commit post-merge model: RD1. Batched post-merge model: one full-tier run covers several merges,
   and a red needs culprit finding.
 - Time-to-push: wall clock from an agent's commit being ready to an accepted push. Time-to-merge: from
@@ -175,7 +189,8 @@ Vocabulary you use in your output:
 - Stranding: an agent session that stops making progress and has no pending wake.
 
 Out of scope (one line each): the content of individual checks inside `scripts.validate`, beyond tier
-membership and duration; Terraform guard classification and IAM policy content, beyond the deploy
+membership, duration and their behaviour under concurrent merges (for example the ratchets C5 names);
+Terraform guard classification and IAM policy content, beyond the deploy
 trigger and identity question in DD-D; telemetry table design and reader code (the telemetry named
 verbs ARE in scope as measurement sources, SETUP step 4); the frozen executor's code
 (`scripts/executor/`); adopter products; recommendation-queue hygiene; GitHub Environment protection
@@ -195,7 +210,9 @@ Run, in order:
    Do this ONCE. Use the literal `<sha>` everywhere afterwards: file reads (`git show <sha>:<path>`), git
    logs, the deliverable filenames, the branch and `meta.audited_commit`. If `git rev-parse
    --is-shallow-repository` prints `true`, run `git fetch --unshallow origin main`; it changes no
-   tracked file.
+   tracked file. Then run `git switch -c audit/ci-merge-throughput-scaling-<sha> <sha>`, so that every
+   working-tree read (preflight, `rg`, `yaml.safe_load` projections) sees BASE. This is the branch you
+   commit on later.
 2. Cache generation: `bin/venv-python -m scripts.session.preflight --roadmap-detail full`. It writes
    `logs/.preflight-report.json` (roadmap state, CI-RCA counts, branch freshness).
 3. Recommendation reads (there is no local recommendations cache). Any ONE of these sources suffices:
@@ -214,13 +231,21 @@ Run, in order:
 6. External sources: if WebFetch is available, re-read the Scion post (URL in section 3) and GitHub's
    Actions limits page (https://docs.github.com/en/actions/reference/limits).
 
+Precedence: the repository's AGENTS.md rules bind you. If AGENTS.md's hook-canary rule fires for your
+session (no `[hook_canary]` line in your opening context), it wins over everything below. Do the
+read-only work, write nothing, and end the turn with a status that says "repo hooks not loaded".
+
+Reads beyond the EMPIRICAL PASS: you may read at most 10 recent runs of any other workflow, to get the
+job durations DD-B needs. Where you do not, use that job's `timeout-minutes` as an upper bound and say
+so in `capacity_model.assumptions`.
+
 Degraded paths. Never abort; set the flag, apply the stated effect, and proceed:
 
 - IF step 2 fails, or IF every source in step 3 fails: set `meta.degraded_dedup=true`; set every
   finding's `confidence` to HYPOTHESIS and its `roadmap_crossref.dedup_hit_count` to null; still grep
   `docs/ROADMAP-PLATFORM.yaml` and `docs/DECISIONS.md` locally and record those searches in
-  `roadmap_crossref.dedup_search_terms`. A failure of some step 3 sources while another works is not
-  degraded; note it in `meta.contract_notes`.
+  `roadmap_crossref.dedup_search_terms`. Run E4 from `CI` push-run conclusions (E3) alone. A failure of
+  some step 3 sources while another works is not degraded; note it in `meta.contract_notes`.
 - IF step 4 fails: set `meta.degraded_telemetry_reads=true`; adjudicate C16 from GitHub evidence and
   rec-4790 alone; cap the confidence of C16, C10 and Q7 at HYPOTHESIS.
 - IF the GitHub tools are unavailable or rate-limited: set `meta.degraded_github_reads=true`; skip the
@@ -228,8 +253,8 @@ Degraded paths. Never abort; set the flag, apply the stated effect, and proceed:
   HYPOTHESIS`; set the affected `capacity_model` fields to null and say why in its `note`.
 - IF WebFetch is unavailable: set `meta.external_unverified=true`; rely on the compose-time external
   facts in G9; cap Q6 and Q7 `confidence` at HYPOTHESIS for any claim that rests only on G9.
-- IF `git fetch --unshallow` fails: note it in `meta.contract_notes` and mark E1 and E2 derived values
-  HYPOTHESIS.
+- IF `git fetch --unshallow` fails: note it in `meta.contract_notes`; set `capacity_model.confidence` and
+  every finding resting on E1 or E2 to HYPOTHESIS.
 - IF an anchor does not resolve: record it in `meta.stale_anchors`, find the current location if you
   can, and continue.
 - IF any repository check fails for reasons unrelated to your two files: record it in
@@ -333,15 +358,19 @@ experiences (C10)? Verdict enum: `triggers_correct | triggers_mis_keyed | trigge
 Q8. Sequencing and timing. Place every finding, plus every planned item you judged relevant, in
 `sequencing_plan` with exactly one horizon:
 
-- `now`: addresses pain at H0, or its trigger is already crossed or is projected to cross before the
-  growth model's next doubling date.
-- `next`: its trigger is projected to cross between the next doubling date and `projected_date_h10`.
-- `later`: its trigger is projected to cross after `projected_date_h10`, including beyond H100.
+Horizons are keyed to merge rate, so they hold whether or not the growth fit is usable. Express each
+entry's trigger as the merge rate (merges per day) at which it fires, `trigger_rate_per_day`:
+
+- `now`: addresses pain at H0, or `trigger_rate_per_day` is at most 2 x H0 (crossed already, or within
+  one doubling).
+- `next`: `trigger_rate_per_day` is above 2 x H0 and at most H10.
+- `later`: `trigger_rate_per_day` is above H10, including beyond H100.
 - `not_recommended`: ONLY for a planned item (rec or roadmap id) you judged relevant and recommend not
   building. Never use it for a finding.
 
-Each entry carries a trigger metric, threshold, current value, measurement source, dependencies and the
-Decisions it amends or reverses. Compare your order against the roadmap's: rec-4874's scope, Decision
+Where the growth fit is usable (E1), also give `projected_date` for the trigger rate. Otherwise leave it
+null. Each entry carries the trigger metric, threshold, current value, measurement source, dependencies
+and the Decisions it amends or reverses. Compare your order against the roadmap's: rec-4874's scope, Decision
 217's coverage homes, and the critical path in `docs/PROJECT_CONTEXT.md` ("Roadmap end-state map").
 Verdict enum: `aligned | partially_aligned | misaligned`.
 
@@ -355,6 +384,8 @@ own.
 - Which constraint binds first: the 20-job cap, the GITHUB_TOKEN rate limit, or the trigger rate?
 - Is the sandbox deploy tier now production in practice (Decision 73 clause 5's premise), and what
   follows if so?
+- Should plans-only merges ride the main merge path at all, or invalidate in-flight handoff evidence
+  (C20)?
 - What does an adopter on a private, minutes-billed repository inherit from this design?
 
 ## 8. RUBRIC
@@ -384,24 +415,40 @@ finding to fill a cell.
   E3). Count every point where the agent ends its turn waiting on a wake, and name the wake source for
   each. Flag any wait with no wake source, or one whose source does not reach a subagent (AGENTS.md "a
   subagent never receives the completion").
-- DD-B (feeds Q3, Q4). The capacity model. Use this method so two runs agree:
-  - `jobs_per_push_to_main`: count every job, across all workflows, whose trigger fires on every push to
-    main with no path filter and whose `if:` depends only on the event type. List separately, in the
-    note, path-filtered jobs and jobs whose `if:` depends on commit content.
-  - `jobs_per_pr_update`: the same rule for a pull_request synchronize event on an agent branch.
-  - Open agent PRs at horizon H follow Little's law: merges per hour at H times the median time-to-merge
-    in hours (E5). Assume time-to-merge stays constant unless you argue otherwise.
-  - Slot demand at the peak hour: (peak-hour merges at H) x (jobs per push x mean job minutes / 60 +
-    PR-side jobs per merged PR x mean PR job minutes / 60 + persona jobs per merged PR x assumed persona
-    minutes / 60), plus the hourly average of scheduled jobs. State every input and assumption.
-  - `saturation_merges_per_day`: the daily rate (scaled by the observed day-to-peak-hour ratio) at which
-    peak-hour slot demand equals the cap. Use peak-hour demand for `binding_constraint`, and report
-    daily-average demand in the note.
-  - Red occupancy at H: min(1, reds per day at H x mean red window in hours / 24). Reds per day at H =
-    merges per day at H x reds per merge (E4, separating flakes from real regressions).
+- DD-B (feeds Q3, Q4). The capacity model. Use these definitions so two runs agree. Record every input
+  value and its source in `capacity_model.assumptions`. You may deviate from a definition only by
+  recording the alternative and why.
+  - Job counting: a matrix job counts once per expanded leg, and a reusable-workflow call counts its
+    called jobs. `jobs_per_push_to_main` counts every job, across all workflows, whose trigger fires on
+    every push to main with no path filter and whose `if:` depends only on the event type.
+    `jobs_per_pr_update` applies the same rule to a `pull_request` synchronize event on an agent branch,
+    including `pull_request_target` workflows. List separately in `note`: path-filtered jobs, jobs whose
+    `if:` depends on commit content or actor (for example a Dependabot-only job), and comment- or
+    review-triggered workflows.
+  - PR updates per merged PR (U) and median time-to-merge in hours (M): from E5.
+  - Open agent PRs at H: r_day(H) x M (Little's law over the day). Hold M constant unless you argue
+    otherwise.
+  - Job-minutes per merge: jobs_per_push_to_main x their mean minutes, plus U x jobs_per_pr_update x
+    their mean minutes. Durations come from E3, or from the "Reads beyond the EMPIRICAL PASS" allowance.
+  - Persona job-minutes per merge: one job per persona per qualifying PR update, using the PR kinds the
+    roadmap items name (T4.28 implementation PRs; T4.29 ready plan PRs; T4.30 draft plan PRs). Assume
+    persona minutes, state the figure, and set `persona_jobs_per_pr_update` accordingly.
+  - Peak-hour slot demand at H: r_peak(H) x job-minutes per merge / 60, plus scheduled job-minutes per
+    hour / 60. Report it three ways: as is (`peak_hour_slot_demand_at`); with plans-only merges running
+    only the fast tier (C17, using E8's plans-only share); and with the personas added
+    (`..._with_personas_at`).
+  - `saturation_merges_per_day`: the H at which as-is peak-hour slot demand equals
+    `concurrent_job_cap`.
+  - Red occupancy at H: a red is a `main-validate` run concluding failure on a push to main (not a
+    recommendation). The red window is the time from the first such run to the completion of the next
+    successful `main-validate` run on main (E3/E4). Reds per merge = red runs / push runs in E3. Report
+    flakes separately, and exclude them from the regression rate. `red_occupancy_at` = min(1, H x reds per
+    merge x mean red window in hours / 24).
   - GITHUB_TOKEN calls per hour for `pr-conflict-signal`: calls per open PR per push (read
-    `scripts/ci/pr_conflict_signal.sh`) x pushes per hour x open agent PRs, against 1,000 per hour.
-  - Recompute slot demand with plans-only merges running only the fast tier (C17). Report both values.
+    `scripts/ci/pr_conflict_signal.sh`) x r_peak(H) x open agent PRs at H, against the 1,000 per hour
+    limit.
+  - Decision 205 clause 3 adds path-filtered push triggers for repo-scoped scheduled agents. Estimate
+    their extra job-minutes per merge in `note` and say whether they change `binding_constraint`.
 - DD-C (feeds Q3, Q5). The coupling map of per-push `main-validate`. List every consumer that depends on
   one full-tier run per push-to-main commit: CI-RCA's PR lookup and `HEAD^` diff; `trailer-junit-verdict`'s
   same-run junit; Decision 226's `workflow_tier` classification; anything else you find. For each, state
@@ -435,8 +482,12 @@ G1. Presubmit and merge (S1)
   (`scripts/session/merge_overlap.py`). Remedy: update the branch on GitHub, wait for the CI-green wake,
   merge. Clause 2: "A heuristic, not verification". Clause 5 defers strict up-to-date checks and a GitHub
   merge queue, and names rec-4874's model as the end state. Its Problem section cites a replay of 38
-  merges: 22 behind main, 2 sharing a changed file. The `git-ops.yaml` `push_pr_ci_merge_flow` text
-  (around line 265) states no attempt cap for the update-branch loop.
+  merges: 22 behind main, 2 sharing a changed file. Clause 5 also records that strict mode, "like a
+  queue added to the existing ruleset, is skipped by the admin bypass". The `git-ops.yaml`
+  `push_pr_ci_merge_flow` text (around line 265) states no attempt cap for the update-branch loop.
+- The repository moved to the `otl-labs` organisation on 2026-10-24
+  (`docs/contracts/github-org-transfer.yaml` `amendment_log`). The concurrent-job cap applies to the
+  organisation, not to one repository, so any sibling repository in the organisation shares it.
 
 G2. Agent handoff and merge volume (S2)
 
@@ -452,6 +503,10 @@ G2. Agent handoff and merge volume (S2)
 - AGENTS.md (around lines 145-147): the full tier "runs well past the 10-min foreground cap on CC-web:
   start it backgrounded with a 2 h limit from the top-level session (a subagent never receives the
   completion)".
+- `docs/contracts/overseer-dispatch.yaml`: the author subagent "Commits and pushes its own artefact"
+  (around line 52); the overseer keeps "the liveness watchdog, the safety-net trigger" (around lines
+  73-74) and a `liveness:` block (around line 281). Decide whether these are compensating controls for
+  C2 and C16 by the property-match rule.
 - rec-4790 (open, High, 2026-10-30): the full tier takes about 20-25 minutes; main then merged roughly
   every 10-15 minutes. One PR hit five rebases, four discarded full-tier runs and a final `tree_mismatch`
   push refusal; the operator pushed it by hand. It names options (a)-(c) and says the choice changes
@@ -536,7 +591,10 @@ G5. Deploy and promotion (S5)
   in a non-cancelling concurrency group.
 - `environment-taxonomy.yaml` (a Decision 77 contract): `axis_a` rows sandbox / SIT / PROD (around lines
   141-172); `single_account_rule` (around line 396): SIT and PROD are future-state, and standing one up
-  is "separately decided"; `general_conformance` reserves "promotion".
+  is "a deliberate, separately-decided step"; `general_conformance` reserves "promotion". The sandbox
+  row reads `money_real: "no (mocked)"`.
+- `docs/contracts/deploy-paths.yaml` (around line 258) names "the three prod-class Lambdas" on a
+  governed code-deploy channel; `deploy-prod-lambdas.yml` deploys them into the sandbox tier.
 - Decision 73 clause 5: "Sandbox tolerates red `main`; SIT and PROD do not", with green-streak promotion
   of 24h and 7d. Decision 24: GitHub Environments with tag-marked single-branch promotion; never built.
 
@@ -549,8 +607,9 @@ G6. Designed-unbuilt (S6)
 - Decision 217 (2026-10-14) cites the Scion post. Clause 1: overlap block for red main (pulled forward by
   Decision 226). Clause 2: textual conflicts; above concurrency 1 a bounded rebase step owns every
   textual conflict. Clause 3: one non-bypass executor GitHub App. Clauses 5-7: per-file Decision split
-  and generated index, home T4.24 (`deferred_post_mvp`). Its reversal conditions `concurrency-raised` and
-  `red-window-growth` are `kind: manual`.
+  and generated index, home T4.24 (`deferred_post_mvp`). Its reversal conditions `concurrency-raised`,
+  `red-window-growth` and `rate-limit-breach` ("A GitHub primary or secondary rate limit is hit by agent
+  traffic") are `kind: manual`.
 - Roadmap: T4.8 (semantic locks and leases; `deferred_post_mvp`; inert until concurrency rises above 1);
   T4.7 (plan staleness; `deferred_post_mvp`); T4.9a (verdict callback and merge authority;
   `not_started`); T4.21 (base-ref required check, non-bypass App identity; `not_started`).
@@ -563,9 +622,13 @@ G7. Shared capacity (S7)
 - Roadmap T4.28 (code_reviewer), T4.29 (plan_critic), T4.30 (decision_scout): "an Actions verdict job",
   all `not_started`, on T4.32 (persona foundation, `not_started`). T4.15 (implement_agent on Fargate,
   `not_started`).
-- Decision 205 clause 1 (event-origin, verdict-shaped LLM personas on GitHub-hosted runners) and clause 6
-  (the compute plane covers planning and implementation only). Decision 234 clause 3 (subscription rule)
-  and clause 5 (local adapters post-MVP).
+- Decision 205 clause 1 (event-origin, verdict-shaped LLM personas on GitHub-hosted runners); clause 3
+  ("Repo-scoped scheduled agents move from cron to path-filtered push-to-main triggers"); clause 6 (the
+  compute plane covers planning and implementation only). Decision 234 clause 3 (subscription rule) and
+  clause 5 (local adapters post-MVP).
+- Workflows on other events: `terraform-plan-trusted.yml` (`pull_request_target`), `claude.yml`
+  (`issue_comment`, `issues`, `pull_request_review`, `pull_request_review_comment`),
+  `dependabot-auto-merge.yml` (`pull_request`).
 - `docs/contracts/ports.yaml` `verdict_plane` (around line 243): adapters `github_actions` (implemented)
   and `verdict_app` (pending, T4.2:c9).
 
@@ -594,6 +657,9 @@ G9. External facts (compose-time; re-verify per SETUP step 6)
 - GitHub Actions limits page: concurrent jobs on standard GitHub-hosted runners are Free 20, Pro 40, Team
   60, Enterprise 500. The GITHUB_TOKEN rate limit is 1,000 requests per hour per repository. The workflow
   trigger rate limit is 500 runs per 10 seconds.
+- GitHub's merge-queue configuration page requires the `merge_group` event for Actions and offers a
+  build concurrency of 1-100 `merge_group` dispatches and a maximum group size. It does not state which
+  plans or repository types can use a merge queue: availability for this organisation is unverified.
 
 ## 11. EMPIRICAL PASS
 
@@ -602,10 +668,13 @@ Hard bounds. Do NOT exceed any cap. Tag each finding `evidence_kind: observed` (
 as `E<n>:<kind>-<id>`, for example `E3:run-41643822253` or `E5:pr-1799`.
 
 - E1 (Q1, Q3, Q8). Merge rate and growth: `git log <sha> --first-parent --since=<BASE_DATE minus 30
-  days> --until=<BASE_DATE> --format=%cI`. Compute per-UTC-day counts, H0, the peak hour, and the median
+  days> --until=<BASE_DATE> --format=%cI`. Compute per-UTC-day counts, H0, P0, and the median
   inter-merge interval on the H0 day. Also count merges per ISO week for at least the last 4 complete
-  weeks; fit a log-linear trend; report `doubling_time_days`, `projected_date_h10` and
-  `projected_date_h100` (null with a reason if the fit is not meaningful).
+  weeks, and fit a least-squares line to ln(weekly count). The fit is usable iff the slope is positive and
+  R^2 >= 0.6. If usable, report `doubling_time_days`, and project `projected_date_h10` and
+  `projected_date_h100` as the dates the fitted daily rate (weekly / 7) reaches H10 and H100. If not
+  usable, set all three to null, record the slope and R^2 in `capacity_model.growth.fit`, and rely on
+  Q8's rate-keyed horizons alone.
 - E2 (Q2). Hotspots: `git log <sha> --first-parent --since=<BASE_DATE minus 14 days> --until=<BASE_DATE>
   --name-only --format=`. List paths touched by at least 5 merges. Classify each against
   `mechanical-conflicts.yaml`: derived, roster, decision_numbering, excluded or unlisted.
@@ -613,22 +682,32 @@ as `E<n>:<kind>-<id>`, for example `E3:run-41643822253` or `E5:pr-1799`.
   (`main-validate` job duration, and queue time if reported); at most 30 of the most recent `pr-validate`
   runs; at most 20 Main Canary runs (duration, conclusion, head-SHA repeats, start-to-start gap).
 - E4 (Q3, Q5). Reds: CI-RCA recommendations created in the 30 days before BASE_DATE (the `ci_rca_since`
-  verb, else `scripts.recs_related --terms "ci_rca"`). For at most 10 of them, record whether
-  `main-validate` on the anchor commit and Main Canary both went red, the open-to-close window, and
-  whether the cause was a flake or a real regression.
+  verb, else `scripts.recs_related --terms "ci_rca"`). For at most 10 of them, record: whether
+  `main-validate` on the anchor commit went red; whether the first Main Canary run whose head contains
+  the anchor commit went red; the rec's open-to-close window; and whether the cause was a flake or a real
+  regression. Red windows for `capacity_model` come from run conclusions (DD-B), not from rec windows.
 - E5 (Q1, Q2, Q3). Merge timing: at most 15 of the most recently merged PRs before BASE. Record commits
   behind main at merge, time from creation to merge, time from the last successful `pr-validate` to
   merge, and the number of head updates.
-- E6 (Q5). Deploy versus verdict: at most 20 of the most recent push runs of each Lambda deploy workflow,
-  joined by head SHA to that commit's `CI` push run (conclusion and completion time).
-- E7 (Q1, Q9, C16). Stranding: all open PRs (age, last update, mergeable state), and `sessions_window`
-  over the 7 UTC days before BASE_DATE (state counts, how many root sessions read `abandoned`, the
-  idle threshold). Judge what share of stranding such a read can see: a session waiting on a wake that
+- E6 (Q5). Deploy versus verdict: at most 20 of the most recent push runs of each of
+  `deploy-ducklake-lambdas`, `deploy-prod-lambdas` and `terraform-apply-sandbox`, joined by head SHA to
+  that commit's `CI` push run (conclusion and completion time).
+- E7 (Q1, Q9, C16). Stranding: all open PRs (age, last update, mergeable state), and one
+  `sessions_window` call with `day_from` = the UTC date of BASE_DATE minus 6 days, `day_to` = the UTC date
+  of BASE_DATE (both inclusive), and `as_of` = BASE_DATE. Record state counts, how many root sessions
+  read `abandoned`, and the idle threshold. Judge what share of stranding such a read can see: a session waiting on a wake that
   never comes may read `running` until the idle threshold. Never invent a rate.
-- E8 (Q3, C17). Merge risk mix: for the E2 window, classify each merge by the paths it changed:
-  plans-only (`docs/plans/`), other docs-only (`docs/`), code (any `scripts/`, `src/`, `tests/`,
-  `.github/`, `.claude/`), terraform (`terraform/`), deploy-path (any path filter of a deploy workflow).
-  A merge may fall in several classes; report counts per class.
+- E8 (Q3, C17, C20). Merge risk mix: for the E2 window, give each merge exactly ONE class, the first
+  that matches in this order:
+  1. deploy-path: any changed path matches a `push` path filter of `deploy-ducklake-lambdas.yml`,
+     `deploy-prod-lambdas.yml` or `terraform-apply-sandbox.yml`.
+  2. terraform: any path under `terraform/`.
+  3. code: any path under `scripts/`, `src/`, `tests/`, `.github/`, `.claude/` or `bin/`.
+  4. config: any path under `config/`.
+  5. plans-only: every path under `docs/plans/`.
+  6. docs-only: every path under `docs/` or `audits/`.
+  7. other.
+  Report counts per class.
 
 Counterfactual tests. Apply each as an operation, and record the answer in the finding's
 `compensating_controls_considered` or in the rejected candidate's `control_property_match`:
@@ -653,7 +732,7 @@ Phases, in order:
 - P2 Trace: the end-to-end path of one change (commit to production).
 - P3 Deep-dives DD-A to DD-D.
 - P4 Empirical pass E1-E8.
-- P5 Adjudicate C1-C19 and anything new (N1, ...).
+- P5 Adjudicate C1-C21 and anything new (N1, ...).
 - P6 Rate the rubric.
 - P7 Dedup every finding.
 - P8 Fill `capacity_model` and the decision blocks.
@@ -677,8 +756,8 @@ Before filing any finding, search these ownership surfaces:
 
 Record `dedup_search_terms` and `dedup_hit_count` on every finding. A hit means you assess the owner's
 sufficiency (`planned-insufficient` or `planned-unbuilt` in findings, or `rejected_candidates` when fully
-covered), never a fresh discovery. A finding without a recorded negative search is `confidence:
-HYPOTHESIS`. Known owners to start from: rec-4874, rec-4790, rec-4873, rec-4451, rec-4085, rec-4080,
+covered), never a fresh discovery. A finding without a recorded search (terms and hit count, zero or
+not) is `confidence: HYPOTHESIS`. Known owners to start from: rec-4874, rec-4790, rec-4873, rec-4451, rec-4085, rec-4080,
 rec-4087, rec-2827, rec-4114, rec-4266, rec-4321, rec-4322, rec-4428, rec-4441, rec-4755, rec-3221; T4.7,
 T4.8, T4.9a, T4.15, T4.21, T4.24, T4.28-T4.32; Decisions 73, 163, 203, 205, 217, 226, 245.
 
@@ -694,8 +773,13 @@ and which of its reversal conditions (if any) has fired.
 - Decision 163 point 3: the local pre-handoff full tier on the committed, rebased tree.
 - Decision 203: the handoff evidence gate, no agent override. Decision 245: the merge gate, no agent
   override.
-- Decision 205 clause 5: plans-only merges run the fast tier on main, backstopped by Main Canary.
-  Clauses 1 and 6: persona placement. Decision 234: persona hosts and credentials.
+- Decision 205 clause 5: an approved plan merges in its own PR before a separate implementation PR, and
+  plans-only merges run the fast tier on main, backstopped by Main Canary. Clause 3: repo-scoped
+  scheduled agents move to path-filtered push-to-main triggers. Clauses 1 and 6: persona placement.
+  Decision 234: persona hosts and credentials.
+- Decision 76: wakes are event-driven; sessions never sleep-poll for CI or merge state.
+- Decision 100: managed services own their primitives (no client-tooling substitute for a native
+  operation). rec-4624: updates to the main ruleset are frozen until the provider models two keys.
 - Decision 77 (`environment-taxonomy.yaml`): the `single_account_rule` and the reserved vocabulary.
   Decision 77 and Decision 126: Terraform applies the PR-time saved plan on push; the deploy model.
 - CD.21: self-hosted runners retired; GitHub-hosted runners only.
@@ -721,16 +805,16 @@ audit:
     github_plan: free_public
     decisions_reversible: true
   question_answers:
-    - {q: Q1, verdict: viable|degraded|non_viable, basis: [<finding ids>], prose: ""}
-    - {q: Q2, verdict: sufficient|partial|insufficient, basis: [], prose: ""}
-    - {q: Q3, verdict: sufficient_until_trigger|approaching_limit|exceeded, basis: [], prose: ""}
-    - {q: Q4, verdict: placement_sound|placement_needs_change|placement_blocking, basis: [], prose: ""}
-    - {q: Q5, verdict: deploys_sound|deploys_partially_gated|deploys_ungated, basis: [], prose: ""}
-    - {q: Q6, verdict: holds_at_h100|holds_at_h10|holds_at_h0_only|failing_at_h0, basis: [], prose: "",
+    - {q: Q1, verdict: viable|degraded|non_viable, confidence: CONFIRMED|HYPOTHESIS, basis: [<finding ids>], prose: ""}
+    - {q: Q2, verdict: sufficient|partial|insufficient, confidence: CONFIRMED|HYPOTHESIS, basis: [], prose: ""}
+    - {q: Q3, verdict: sufficient_until_trigger|approaching_limit|exceeded, confidence: CONFIRMED|HYPOTHESIS, basis: [], prose: ""}
+    - {q: Q4, verdict: placement_sound|placement_needs_change|placement_blocking, confidence: CONFIRMED|HYPOTHESIS, basis: [], prose: ""}
+    - {q: Q5, verdict: deploys_sound|deploys_partially_gated|deploys_ungated, confidence: CONFIRMED|HYPOTHESIS, basis: [], prose: ""}
+    - {q: Q6, verdict: holds_at_h100|holds_at_h10|holds_at_h0_only|failing_at_h0, confidence: CONFIRMED|HYPOTHESIS, basis: [], prose: "",
        external_checklist: [{property: EC1..EC12, rating: met|partial|missed,
                              holds_at_h10: true|false, holds_at_h100: true|false, evidence: ""}]}
-    - {q: Q7, verdict: triggers_correct|triggers_mis_keyed|triggers_missing, basis: [], prose: ""}
-    - {q: Q8, verdict: aligned|partially_aligned|misaligned, basis: [], prose: ""}
+    - {q: Q7, verdict: triggers_correct|triggers_mis_keyed|triggers_missing, confidence: CONFIRMED|HYPOTHESIS, basis: [], prose: ""}
+    - {q: Q8, verdict: aligned|partially_aligned|misaligned, confidence: CONFIRMED|HYPOTHESIS, basis: [], prose: ""}
     - {q: Q9, answers: [{question: "", answer: "", basis: [<finding ids>]}]}
   per_surface_assessment:
     - {surface: S1..S7, maturity: frontier|strong|solid|nascent, strengths: "", top_gaps: [<finding ids>]}
@@ -738,25 +822,31 @@ audit:
     - {surface: S1..S7, dimension: VD1..VD9, rating: strong|adequate|weak|absent|n/a,
        evidence: "file:line|item-id|E<n>:<kind>-<id>", note: ""}
   capacity_model:
+    confidence: CONFIRMED|HYPOTHESIS
+    assumptions: [{name: "", value: "", source: "", rationale: ""}]   # every DD-B input and deviation
     jobs_per_push_to_main: <int>
     jobs_per_pr_update: <int>
-    persona_jobs_per_pr_event: <int>
+    persona_jobs_per_pr_update: <int>
     mean_full_tier_minutes: <float>
     concurrent_job_cap: <int>
-    growth: {weekly_counts: {<ISO week>: <int>}, doubling_time_days: <float|null>,
+    p0_peak_hour_merges: <int>
+    growth: {weekly_counts: {<ISO week>: <int>}, fit: {slope_per_week: <float>, r_squared: <float>, usable: true|false},
+             doubling_time_days: <float|null>,
              projected_date_h10: <YYYY-MM-DD|null>, projected_date_h100: <YYYY-MM-DD|null>}
     open_prs_at: {h0: <float>, h10: <float>, h100: <float>}
     peak_hour_slot_demand_at: {h0: <float>, h10: <float>, h100: <float>}
     peak_hour_slot_demand_with_plans_only_fast_at: {h0: <float>, h10: <float>, h100: <float>}
+    peak_hour_slot_demand_with_personas_at: {h0: <float>, h10: <float>, h100: <float>}
     saturation_merges_per_day: <float|null>
     red_occupancy_at: {h0: <float>, h10: <float>, h100: <float>}
     pr_conflict_signal_calls_per_hour_at: {h0: <int>, h10: <int>, h100: <int>}
     github_token_limit_per_hour: <int>
     binding_constraint: concurrent_jobs|github_token_rate|trigger_rate|red_window_slo|other|undetermined
-    capacity_levers:
+    capacity_levers:           # lever-level records; a finding that adopts a lever cites it, and its
+                               # sequencing_plan entry must agree with the horizon here
       - {lever: plan_upgrade|larger_runners|shard_full_tier|risk_proportional_tier|move_workload_off_actions|reduce_per_push_jobs|other,
          effect: "", cost: "", horizon: now|next|later|not_recommended}
-    note: ""                   # every input and assumption DD-B asks you to state
+    note: ""                   # job-count lists and other notes DD-B asks for
   handoff_remedy:
     verdict: attestation_carry_over|push_on_fast_tier_full_in_ci|server_side_merge_queue|other
     mechanism: ""
@@ -784,9 +874,12 @@ audit:
                               confidence: CONFIRMED|HYPOTHESIS}
     deploy_prod_lambdas: {}
     terraform_apply_sandbox_routine: {}
-  sequencing_plan:             # the SOLE record of horizon, ordering and dependencies
+  sequencing_plan:             # the SOLE record of horizon, ordering and dependencies for findings
+                               # and planned items (capacity_levers and workload_placement triggers are
+                               # lever-level inputs it must agree with)
     - {item: <finding id | rec-NNNN | T-id>, horizon: now|next|later|not_recommended,
-       trigger_metric: "", threshold: "", current_value: "", measurement_source: "",
+       trigger_metric: "", threshold: "", trigger_rate_per_day: <float|null>, projected_date: <YYYY-MM-DD|null>,
+       current_value: "", measurement_source: "",
        depends_on: [<items>], decisions_amended_or_reversed: [], note: ""}
   findings:
     - {id: CMTS-01, surfaces: [S1..S7], candidates: [<C or N ids>], question: Q1..Q9, dimension: VD1..VD9,
@@ -802,12 +895,12 @@ audit:
        effort: XS|S|M|L|XL}
   rejected_candidates:
     - {candidate: <C or N id>, why_dismissed: "", compensating_control: "",
-       control_property_match: "", decision_or_item_id: ""}
+       control_property_match: "", decision_or_item_id: "", confidence: CONFIRMED|HYPOTHESIS}
   inconclusive_candidates:
     - {candidate: <C or N id>, what_blocked: "", what_would_decide: ""}
   summary: {total_findings: <int>, novel_count: <int>, planned_insufficient_count: <int>,
             planned_unbuilt_count: <int>, top_improvements: [<finding ids>],
-            highest_leverage_change: <finding id>,
+            highest_leverage_change: <finding id | null when there are no findings>,
             maturity_S1: <level>, maturity_S2: <level>, maturity_S3: <level>, maturity_S4: <level>,
             maturity_S5: <level>, maturity_S6: <level>, maturity_S7: <level>}
 ```
@@ -819,9 +912,10 @@ Invariants (state them, and satisfy them):
   `rejected_candidates`, undecidable ones in `inconclusive_candidates`; neither is a finding.
   `rubric_ratings`, `question_answers`, `capacity_model`, `handoff_remedy`, `workload_placement`,
   `deploy_channel_gating` and `sequencing_plan` are systems of record that findings reference; they are
-  never re-counted. `top_improvements` and `highest_leverage_change` MUST be finding ids.
+  never re-counted. `top_improvements` and `highest_leverage_change` MUST be finding ids (empty list and
+  null when there are no findings).
 - Every finding id appears in exactly one `sequencing_plan` entry, with a horizon other than
-  `not_recommended`. Every C1-C19 id appears in at least one finding's `candidates`, in
+  `not_recommended`. Every C1-C21 id appears in at least one finding's `candidates`, in
   `rejected_candidates`, or in `inconclusive_candidates`.
 - `summary.maturity_S<n>` MUST equal the `per_surface_assessment` maturity for that surface.
 - `control_property_match` is REQUIRED whenever a compensating control is the reason for dismissal. Name
@@ -830,9 +924,11 @@ Invariants (state them, and satisfy them):
 - CONFIRMED requires the behavior to be traced to file:line or to an observed sampled artifact; anything
   less is HYPOTHESIS.
 - Meta flags have readers: `degraded_dedup` caps every finding's `confidence` at HYPOTHESIS;
-  `degraded_github_reads` nulls the affected `capacity_model` fields and makes rate-dependent findings
-  HYPOTHESIS; `degraded_telemetry_reads` caps C16, C10 and Q7 at HYPOTHESIS; `external_unverified` caps
-  Q6 and Q7 confidence. State each applied effect in `meta.contract_notes`.
+  `degraded_github_reads` nulls the affected `capacity_model` fields and sets `capacity_model.confidence`
+  and rate-dependent findings to HYPOTHESIS; `degraded_telemetry_reads` caps at HYPOTHESIS the
+  `confidence` of every finding or rejected candidate adjudicating C10 or C16, and of Q7's answer;
+  `external_unverified` caps Q6's and Q7's answer `confidence`. State each applied effect in
+  `meta.contract_notes`.
 
 Write `audits/ci-merge-throughput-scaling-<sha>.md`, a companion report of at most 1500 words: the
 executive layer a human reads first. Order: a 5-line synopsis; answers to Q1-Q9 in one or two sentences
@@ -873,9 +969,10 @@ framing must not foreclose it.
 
 1. Reuse BASE from SETUP step 1; do not fetch-and-derive again. `<sha>` is in both filenames, the branch
    name and `meta.audited_commit`.
-2. `git switch -c audit/ci-merge-throughput-scaling-<sha> <sha>`, so the PR diff is only the two
-   deliverables. This is a deliberate, documented exception to the session-branch rule: the audit needs a
-   clean two-file diff off the audited base. The handoff evidence gate exempts `audits/*` and admits the
+2. You are already on `audit/ci-merge-throughput-scaling-<sha>`, created from `<sha>` in SETUP step 1
+   (`git branch --show-current` confirms it). The PR diff is therefore only the two deliverables. This
+   is a deliberate, documented exception to the session-branch rule: the audit needs a clean two-file
+   diff off the audited base. The handoff evidence gate exempts `audits/*` and admits the
    `audit/` destination prefix (`git-ops.yaml` `handoff_evidence_gate`), so no full-tier run is needed.
    The CI-green comment wake does not fire for `audit/` branches; that does not matter, because you end
    your turn without merging.
@@ -885,10 +982,13 @@ framing must not foreclose it.
    `meta.contract_notes`; never fix it.
 4. `git add` the two files only, then `git -c user.name=Claude -c user.email=noreply@anthropic.com commit
    -m "audit(ci-merge-throughput-scaling): findings at <sha>"`, appending any attribution trailer lines
-   your session's instructions require. Then run `git push -u origin HEAD` as its own command.
-5. IF the push is refused (for example by a proxy that admits only a session-assigned branch): first add a
-   line saying so to `meta.contract_notes` in both the committed YAML and the files you are about to send.
-   Then call `mcp__github__create_branch` (branch `audit/ci-merge-throughput-scaling-<sha>`, from `main`)
+   your session's instructions require. IF a pre-commit hook refuses the commit, read its message. If it
+   flags content in your deliverables (for example a 12-digit number shaped like an account id), reword
+   that content, re-run the YAML parse, and commit again. Never pass `--no-verify`. Then run `git push -u
+   origin HEAD` as its own command.
+5. IF the push is refused (for example by a proxy that admits only a session-assigned branch): add a line
+   saying so to `meta.contract_notes`, then fold it into your commit with `git add` of the two files and
+   `git commit --amend --no-edit`. Then call `mcp__github__create_branch` (branch `audit/ci-merge-throughput-scaling-<sha>`, from `main`)
    and `mcp__github__push_files` with the two files and the same commit message. Note that this branch
    base is the current main, not BASE; the PR diff is still the two files. IF that also fails, end the
    turn with a message naming the local commit SHA and both errors.
@@ -908,8 +1008,8 @@ framing must not foreclose it.
 - Read-only toward GitHub and AWS, except the calls in COMMIT / PR MECHANICS steps 4-6. No workflow
   dispatch, no re-run, no comment.
 - Public repository: never write AWS account ids, ARNs, ExternalIds, credentials or internal hostnames
-  into the deliverables. Cite file paths, run ids and session-free aggregates only; never quote a
-  telemetry session id.
+  into the deliverables. Cite file paths, workflow run ids and session-free aggregates only. Never quote
+  a telemetry session id or a 12-digit job id.
 - Fewer than about six surviving findings is a valid result: state it, and do not pad. Precision over
   volume. A finding that only restates a planned item's own text is a rejected candidate, not a finding.
 - Severity, verdicts and maturity are yours. Nothing in this prompt pre-classifies them.
