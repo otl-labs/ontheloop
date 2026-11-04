@@ -43,8 +43,8 @@ scope:
   action: Modify
   purpose: >-
     New TestDelegateBehaviour::test_masks_every_email_value: under GITHUB_ACTIONS both modes print ::add-mask:: for
-    owner_email, alerts_email and company_alerts_email placeholder values (on stderr in --stdout mode), and print
-    nothing with GITHUB_ACTIONS unset; run under the literal composite argv bash --noprofile --norc -e -o pipefail
+    owner_email, alerts_email and company_alerts_email placeholder values (on stderr in --stdout mode), and print no
+    ::add-mask:: line on either stream with GITHUB_ACTIONS unset; run under the literal composite argv bash --noprofile --norc -e -o pipefail
     (Decision 162 R2) with the existing fake aws shim. Planned change to TestDelegateBehaviour::test_masks_under_github_actions:
     its mask count becomes five and its two "never masked" assertions on the owner and alerts placeholders become
     "masked" assertions (weakening_dispositions).
@@ -107,7 +107,8 @@ infrastructure_dependencies:
   not restated). | order | dependency | timing | owner | -- | 1 | S1: the tfvars parameter carries company_alerts_email
   | before PR 1 opens: PR 1 declares the variable with no default, and main ignores an undeclared tfvars key (a
   warning that names the key only) | agent, on the operator's word | -- | 2 | PR 1's saved plan creates the successor
-  subscription (sns:Subscribe is granted to the apply role, Decision 143) | merge, guard PASS | CI | -- | 3 | C1 and
+  subscription (sns:Subscribe is granted to the apply role, Decision 143) | merge, guard PASS, then the merge-time
+  subagent plan review (constraints) | CI | -- | 3 | C1 and
   P1 | the same day as PR 1's apply | operator.
 - >-
   Required checks: pr-validate and terraform-validate (terraform/github/repo.tf; Decision 119: no local init, validate
@@ -243,7 +244,8 @@ verification_plan:
   action: >-
     PR 1 masking and scrub tests: every *_email tfvars value is masked by materialise_tfvars.sh in both modes under
     the literal composite argv, redaction_check scrubs and asserts on the alerts value, and trusted_plan_env exports
-    _ALERTS.
+    _ALERTS. The graduated selector is the materialise test alone (the registry slot holds one node id); the other
+    two run in the full tier's pytest suite.
   command: >-
     bin/venv-python -m pytest -q
     tests/test_materialise_tfvars_delegate.py::TestDelegateBehaviour::test_masks_every_email_value
@@ -323,23 +325,26 @@ verification_plan:
 - step: 8
   phase: post-deploy
   action: >-
-    Convergence proof (Decision 190): with MERGE_SHA set, every terraform-apply-sandbox run for that commit
-    completed with success; the first completed terraform-drift run on main created after the later of AFTER and
-    those runs' completion succeeded and reads clean or measured converged, with no e-mail-shaped text in its log;
-    the convergence record is green; neither the drift log nor the MERGE_SHA apply logs carry e-mail-shaped text. A
-    terraform-drift dispatch is allowed only once that apply concluded: it reads the infrastructure but writes the
-    convergence record and may file a tf_drift rec.
+    Convergence proof (Decision 190): the apply runs (every terraform-apply-sandbox run for MERGE_SHA, or the one
+    heal dispatch APPLY_RUN names) completed with success, and the merge-time review's verdict is printed; the first
+    completed terraform-drift run on main created after the later of AFTER (UTC, YYYY-MM-DDTHH:MM:SSZ) and those
+    runs' completion succeeded and reads clean or measured converged; the convergence record is green; neither the
+    drift log nor the apply logs carry e-mail-shaped text. A terraform-drift dispatch is allowed only once that apply
+    concluded: it reads the infrastructure but writes the convergence record and may file a tf_drift rec.
   command: |-
-    test -n "$AFTER$MERGE_SHA" && bin/venv-python - <<'PY'
+    test -n "$AFTER$MERGE_SHA$APPLY_RUN" && bin/venv-python - <<'PY'
     import json, os, re, sys, urllib.request, boto3
     R = 'https://api.github.com/repos/otl-labs/ontheloop/'
     get = lambda p, raw=False: (lambda r: r.read().decode('utf-8', 'replace') if raw else json.load(r))(urllib.request.urlopen(R + p, timeout=60))
     after = os.environ.get('AFTER', ''); alog = ''
-    if os.environ.get('MERGE_SHA'):
-        ap = get('actions/workflows/terraform-apply-sandbox.yml/runs?head_sha=' + os.environ['MERGE_SHA'])['workflow_runs']
-        assert ap and all(r['status'] == 'completed' and r['conclusion'] == 'success' for r in ap), [(r['id'], r['status'], r['conclusion']) for r in ap]
+    assert not after or re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ', after), 'AFTER must read YYYY-MM-DDTHH:MM:SSZ'
+    if os.environ.get('APPLY_RUN') or os.environ.get('MERGE_SHA'):
+        ap = [get('actions/runs/' + os.environ['APPLY_RUN'])] if os.environ.get('APPLY_RUN') else get('actions/workflows/terraform-apply-sandbox.yml/runs?head_sha=' + os.environ['MERGE_SHA'])['workflow_runs']
+        assert ap and all(r['status'] == 'completed' for r in ap), 'apply run not completed yet'
+        alog = ''.join(get(f"actions/jobs/{j['id']}/logs", raw=True) for r in ap for j in get(f"actions/runs/{r['id']}/jobs")['jobs'] if j['conclusion'] != 'skipped')
+        print('REVIEWER', re.findall(r'Reviewer verdict: (\w+)', alog))
+        assert all(r['conclusion'] == 'success' for r in ap), [(r['id'], r['conclusion']) for r in ap]
         after = max([after] + [r['updated_at'] for r in ap])
-        alog = ''.join(get(f"actions/jobs/{j['id']}/logs", raw=True) for r in ap for j in get(f"actions/runs/{r['id']}/jobs")['jobs'])
     runs = sorted((r for r in get('actions/workflows/terraform-drift.yml/runs?branch=main&per_page=50')['workflow_runs'] if r['created_at'] > after and r['status'] == 'completed'), key=lambda r: r['created_at'])
     assert runs, 'no completed drift run after the apply or AFTER yet'
     d = runs[0]; log = ''.join(get(f"actions/jobs/{j['id']}/logs", raw=True) for j in get(f"actions/runs/{d['id']}/jobs")['jobs'])
@@ -350,8 +355,11 @@ verification_plan:
     print('DRIFT', d['id'], d['event'], d['conclusion'], 'clean' if clean else 'NOT_CLEAN', 'leak' if leak else 'no_leak', 'record', rec['status'])
     sys.exit(0 if d['conclusion'] == 'success' and clean and not leak and rec['status'] == 'green' else 'DRIFT STOP')
     PY
-  expected: Prints DRIFT with the run id, event, success, clean, no_leak and record green (exit 0).
+  expected: >-
+    With an apply run selected, prints REVIEWER ['PROCEED']; then DRIFT with the run id, event, success, clean,
+    no_leak and record green (exit 0).
   fix_if: >-
+    A failed apply run: REVIEWER names the merge-time review's verdict; follow constraints (merge-time reviewer).
     Not clean or red: read the run's measured verdict and stop (Decision 55); constraints (C1 drift window) name the
     only heal. Never heal with a guard-routed dispatch, whose plan.bin is a public artifact (rec-4230). A leak: an unmasked value reached a public log; stop, tell the
     coordinator and the operator, and do not continue to the next step.
@@ -503,13 +511,15 @@ test_obligations:
     (the wording rehearsal's tree, gate_rounds).
 constraints:
 - >-
-  Approved text is verbatim: the sidecar binds PR 1; context gives the approval. Allowed variance: the amendment_log
+  Approved text is verbatim: the sidecar binds PR 1; context records the operator's approval of it by message id and
+  date before the plan PR merges. Allowed variance: the amendment_log
   date. Any other wording change, including one critique or code review asks for, goes to the coordinator, then the
   operator, before merge.
 - >-
   Live acts and who runs them. Agent, only after the operator's typed word on the exact command in the build thread,
-  one word per mutation (Decision 237 cl.3 read as the Neon T1 precedent, PLAN-neon-org-company-assignment): S1 and a
-  rollback restore. Operator, in the AWS console or CloudShell under their own sign-in: O1, C1 and P1. PlatformAdmin
+  one word per mutation (Decision 237 cl.3 read as the Neon T1 precedent, PLAN-neon-org-company-assignment): S1, a
+  rollback restore, and any terraform-apply-sandbox or terraform-drift dispatch (a drift dispatch writes the
+  convergence record). Operator, in the AWS console or CloudShell under their own sign-in: O1, C1 and P1. PlatformAdmin
   is denied sns:ConfirmSubscription, sns:Unsubscribe, sns:Publish and cloudwatch:SetAlarmState (iam simulate,
   2026-11-04), so C1 and P1 cannot be agent steps.
 - >-
@@ -526,7 +536,20 @@ constraints:
   terraform-apply-sandbox, reconcile or terraform-drift dispatch by another thread until that VP 5 passes, and plan 2
   starts right after P1 (the same day). If a red lands anyway: stop and tell the coordinator; once its tf_drift rec
   is reviewed (Decision 55), the only heal is the operator-worded empty acknowledge-and-retry while main's plan is
-  guard PASS (no route, no artifact), never a guard-routed dispatch or reconcile route (ii) (rec-4230).
+  guard PASS (no route, no artifact), never a guard-routed dispatch or reconcile route (ii) (rec-4230); then VP 8
+  with APPLY_RUN = that dispatch run's id.
+- >-
+  Merge-time reviewer: after the guard passes, terraform-apply-sandbox's Subagent plan review (T2.39; an LLM given
+  only the names-only digest, never this plan) gates the apply; PR 1's digest lists one create, and VP 8 prints the
+  verdict. On REVISE the apply is skipped and the record turns red (nothing was created); on STARVED the apply is
+  skipped and the record is left as it was (Decision 55). Either way the failed push run files a ci_rca rec (Decision
+  226): tell the coordinator at once, since past its repair SLO it blocks every thread's dispatch. Once that rec and
+  the REVISE reason are reviewed, the heal on the operator's word is one terraform-apply-sandbox dispatch while
+  main's plan is guard PASS (acknowledge_red_commit = the red commit when the record is red, else blank; a fresh
+  review of the same change), then VP 8 with APPLY_RUN. A second REVISE, or a reason naming a real defect: stop; a
+  PR removes the successor resource block only (the variable and its contract entry stay, so no wording changes; its
+  trusted plan reads NO_CHANGES, since nothing was created) and merges, an acknowledged dispatch writes the record green, and a rec records the reviewer's judgement
+  (Decision 55) before this plan is re-planned.
 - >-
   Order is fixed: start (alias file), VP 1, VP 2, S1, PR 1 (VP 4, VP 5, VP 6, VP 13, open, VP 7, code-owner word,
   merge, VP 8, VP 9, VP 11), the coordinator hold, C1, P1, then VP 12; O1 runs any time before VP 12. Successor first: nothing old is retired here;
@@ -540,9 +563,13 @@ constraints:
   Registry shards kept: trusted-plan-env (node id tests/test_trusted_plan_env.py) keeps selecting the whole file, so
   PR 1's added test joins it with no shard edit.
 - >-
-  Unbuilt plans sharing scope files (plan_obligations, 2026-11-04): account-id-out-of-session-output,
-  neon-key-out-of-pr-plans and trusted-plan-cutover. Whichever
-  builds second rebases onto the first and re-runs this plan's VP 4 to VP 6.
+  Plans sharing scope files (plan_obligations, 2026-11-04): account-id-out-of-session-output is unbuilt; whichever
+  of it and PR 1 builds second rebases onto the first and re-runs this plan's VP 4 to VP 6.
+  neon-key-out-of-pr-plans (#1654) and trusted-plan-cutover (#1728, #1735, #1736) read as unbuilt only because their
+  plans predate implementation_declared; both are on main.
+- >-
+  Waiting (git-ops never_poll): for a drift run (VP 8) or the alarm's OK evaluation (VP 10), arm a Monitor until-loop
+  bounded at two hours, or end the turn with a send_later wake; never a foreground sleep or polling loop.
 - >-
   red_overlap at planning (2026-11-04): blocked on repair SLO only (rec-4872, rec-4888, rec-4890; no shared files).
   VP 1 re-runs it at the build's start; the plan PR merges only after the operator answers the unrelated-CI card.
@@ -551,14 +578,16 @@ constraints:
   coordinator serialises them with rec-4048 and any other writer. A rec-4048 build that lands first changes the
   baseline key set in VP 1 and VP 3; stop and re-plan the affected commands through /plan.
 - >-
-  Expected detector pages (Decision 202 cl.5, never filtered by actor), each evidence, not an incident:
+  Expected detector pages (Decision 202 cl.6, never filtered by actor), each evidence, not an incident:
   platform-security-alerts-topic-change on PR 1's Subscribe and on C1's confirmation; the smoke alarm's ALARM and OK
   mails in P1. A page outside this list is triaged before the next step.
 - >-
   No e-mail address (company aliases included), account id, ARN, token or confirmation link enters the repository,
   a PR, memory, chat or the shared folder (Decision 101): the build reads the role aliases from the session's alias
   file at run time and prints roles and booleans; evidence is kind and UTC time; screenshots are checked in the
-  thread and never saved.
+  thread and never saved. Recorded residual: the build session's own transcript holds the two aliases (they come
+  from the operator's message and the start step passes them as arguments), and src/sensitive_values has no e-mail
+  scrub class; company role aliases are published contact points, not credentials (Decision 224 cl.2).
 - >-
   A failed or drifted step halts this workstream until root-caused; never a silent retry; no rescue agents or
   workaround loops (Decision 55). Never apply terraform/personal out of band (rec-3189).
@@ -629,7 +658,7 @@ execution_steps:
   PY
   Expected: TFVARS_WRITTEN with the old and new version numbers; nothing changes in Terraform (main does not declare the key).
 - |-
-  PR 1 (declares this plan). Apply the scope edits: the masking arm in both loops of materialise_tfvars.sh, the _ALERTS spec, label and docstring in redaction_check.py, the _ALERTS export and header in trusted_plan_env.sh, the three new tests and the two planned test changes (weakening_dispositions), the new test module, and the sidecar docs/plans/approved/terraform-company-emails.yaml verbatim in terraform-cc-web-operations.yaml and sns_alerts.tf (amendment_log date = the commit date). Flip implementation_declared to true. Graduate VP 4 through the implement skill's graduation flow (registry row config/agent/verification_registry/entries/terraform-email-tfvars-masking.yaml, slot test_selector = tests/test_materialise_tfvars_delegate.py::TestDelegateBehaviour::test_masks_every_email_value, the materialise_tfvars.sh test; guard_target .github/actions/materialise-tfvars/materialise_tfvars.sh). Run VP 4, VP 5, VP 6, terraform fmt -check terraform/personal (provider-free; Decision 119), bin/venv-python -m scripts.validate --pre, VP 13 and code review. Open the PR titled 'feat(terraform-company-emails): mask every e-mail tfvars value and add the company alerts subscription' with 'Resolves: rec-3975' in the implementation commit and the squash body. Run VP 7 on its trusted plan comment. Present the final diff to the operator and wait for the code-owner word (constraints); squash-merge (admin bypass) on that word, code-review PROCEED, VP 7 and green CI. If the merge gate refuses (Decision 245: main changed a file PR 1 also changes), update the branch on GitHub, wait for the CI-green wake, re-run VP 7 on the new head's comment and ask for the code-owner word on the updated diff. Then VP 8 with MERGE_SHA and no AFTER (the step takes the apply's completion time), VP 9 with MODE=pending_successor, and VP 11. Row B1 (PR number, merge SHA, run ids). Report readiness, validator verdicts, postflight evidence, review and the real push and PR outcome separately (implement skill, Commit Flows).
+  PR 1 (declares this plan). Apply the scope edits: the masking arm in both loops of materialise_tfvars.sh, the _ALERTS spec, label and docstring in redaction_check.py, the _ALERTS export and header in trusted_plan_env.sh, the three new tests and the two planned test changes (weakening_dispositions), the new test module, and the sidecar docs/plans/approved/terraform-company-emails.yaml verbatim in terraform-cc-web-operations.yaml and sns_alerts.tf (amendment_log date = the commit date). Flip implementation_declared to true. Graduate VP 4 through the implement skill's graduation flow (registry row config/agent/verification_registry/entries/terraform-email-tfvars-masking.yaml, slot test_selector = tests/test_materialise_tfvars_delegate.py::TestDelegateBehaviour::test_masks_every_email_value, the materialise_tfvars.sh test; guard_target .github/actions/materialise-tfvars/materialise_tfvars.sh). Run VP 4, VP 5, VP 6, terraform fmt -check terraform/personal (provider-free; Decision 119), bin/venv-python -m scripts.validate --pre, VP 13 and code review. Open the PR titled 'feat(terraform-company-emails): mask every e-mail tfvars value and add the company alerts subscription' with 'Resolves: rec-3975' in the implementation commit and the squash body; the PR body carries no commit trailer (a Co-Authored-By address trips VP 12). Run VP 7 on its trusted plan comment. Present the final diff to the operator and wait for the code-owner word (constraints); squash-merge (admin bypass) on that word, code-review PROCEED, VP 7 and green CI. If the merge gate refuses (Decision 245: main changed a file PR 1 also changes), update the branch on GitHub, wait for the CI-green wake, re-run VP 7 on the new head's comment and ask for the code-owner word on the updated diff. Then VP 8 with MERGE_SHA and no AFTER (the step takes the apply's completion time), VP 9 with MODE=pending_successor, and VP 11. Row B1 (PR number, merge SHA, run ids). Report readiness, validator verdicts, postflight evidence, review and the real push and PR outcome separately (implement skill, Commit Flows).
 - |-
   C1, confirm (operator, the same day as PR 1's apply, once the coordinator has confirmed the hold in constraints' C1 drift window and git show origin/main:docs/plans/PLAN-terraform-company-emails-forget.yaml reads with implementation_declared false, so plan 2 can start the same day). The confirmation mail reaches the company inbox through the alerts alias. Do not open its link: opening it confirms without authentication. Copy the link address, URL-decode it (a mail gateway may rewrite "Token=" as "Token%3D"), take the value after "Token=" up to the next "&", and in AWS CloudShell (in the region config/aws-region names) run:
   T=$(aws sns list-topics --query "Topics[?ends_with(TopicArn, ':agent-platform-alerts')].TopicArn" --output text); read -rsp 'Token: ' K; echo; aws sns confirm-subscription --topic-arn "$T" --token "$K" --authenticate-on-unsubscribe true --query 'length(SubscriptionArn)' --output text; unset K
@@ -652,7 +681,10 @@ rollback: >-
   false); a pending successor then expires unconfirmed (UNPROVEN timing) and a confirmed one is deleted by the
   operator in the SNS console. The predecessor pages throughout, so paging is never at risk. The masking change
   reverts with a partial revert of its three files and their tests (a full revert of PR 1 would also drop the
-  successor block, whose destroy AccessDenies through CI) and re-exposes nothing (no owner or alerts value is written before the later plans). C1
+  successor block, whose destroy AccessDenies through CI). Before S1 it re-exposes nothing; after S1 it would unmask
+  company_alerts_email in drift, dispatch and reconcile logs (only the trusted job masks every *_email key itself),
+  so it then waits for the successor's forget and S1's rollback. PR 1 merged but not applied (a merge-time review
+  REVISE or STARVED): nothing was created; constraints (merge-time reviewer) name the heal and the removal PR. C1
   and P1 change no configuration.
 gate_rounds:
 - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
@@ -661,3 +693,4 @@ gate_rounds:
 - {gate: wording-check, round: 2, verdict: PASS, digest: 4b6a2f38d4d83c967798704f1c5ec56e6051b0e041d6628cf8b3cf96cfcfbbac, base: 9e6fb21b52cb268780d2f9ecc6e7d55f036e0e91, selection: complete}  # pragma: allowlist secret
 - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 4, nits: 9}
 - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 9}
+- {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 9}
