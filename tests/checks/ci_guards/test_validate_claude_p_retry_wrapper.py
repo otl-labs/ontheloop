@@ -282,3 +282,10 @@ class TestPairingScanRobustness:
     def test_a_non_mapping_job_is_ignored(self, tmp_path: Path) -> None:
         workflow = "name: agent\njobs:\n  odd: not-a-mapping\n"
         assert _pairing(tmp_path, workflow=workflow, switch=None) == []
+
+    def test_the_capture_action_is_not_a_wrapper_call_site_though_it_names_the_wrapper(self, tmp_path: Path) -> None:
+        actions = tmp_path / "actions"
+        for name in ("telemetry-ci-capture", "plan-review"):
+            (actions / name).mkdir(parents=True)
+            (actions / name / "action.yml").write_text("description: uses scripts/ci/claude_p_retry.sh\n", encoding="utf-8")
+        assert subject._wrapper_actions(actions) == {".github/actions/plan-review"}

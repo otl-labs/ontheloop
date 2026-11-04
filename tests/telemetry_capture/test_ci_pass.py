@@ -257,3 +257,8 @@ def test_no_github_environment_read_outside_the_hook_veto() -> None:
     paths += sorted((REPO / "src/turn_capture").glob("*.py"))
     assert [hit for path in paths for hit in _github_env_reads(path)] == []
     assert len(_github_env_reads(REPO / "scripts/telemetry_capture/switch.py")) == 1
+
+
+def test_a_quoted_pin_flag_value_resolves_like_the_hook_side_reader(tmp_path: Path) -> None:
+    quoted = PIN_HOOK.replace("--project-ref=example/project", '--project-ref="example/project"')
+    assert ci_pass.project_ref_home(repo(tmp_path, hooks=settings(quoted))) == "example/project"

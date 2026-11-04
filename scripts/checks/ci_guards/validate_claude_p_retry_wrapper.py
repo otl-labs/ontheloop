@@ -82,7 +82,7 @@ def _wrapper_actions(actions_root: Path) -> set[str]:
                 body = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
-            if WRAPPER in body:
+            if WRAPPER in body and path.relative_to(actions_root).parts[0] != Path(CAPTURE_ACTION).name:
                 found.add(f".github/actions/{path.relative_to(actions_root).parts[0]}")
     return found
 
@@ -152,7 +152,8 @@ def _check_pairing(root: Path) -> list[str]:
     sites_in: dict[str, int] = {}
     for wf in sorted((root / ".github" / "workflows").glob("*.yml")):
         rel = f".github/workflows/{wf.name}"
-        jobs = (_load(wf) or {}).get("jobs") if isinstance(_load(wf), dict) else None
+        doc = _load(wf)
+        jobs = doc.get("jobs") if isinstance(doc, dict) else None
         for name, job in (jobs or {}).items():
             if not isinstance(job, dict):
                 continue

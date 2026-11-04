@@ -27,7 +27,7 @@ from scripts.telemetry_capture import switch
 from scripts.telemetry_capture.runner import ClientFactory, run_pass
 from scripts.telemetry_capture.transport import Budget
 from src.turn_capture.host_run import ACTIONS_EVENTS, SCHEMA_VERSION, valid_host_facts, valid_project_ref
-from src.turn_capture.transcript import HOST_RUN_FILE, PIN_FLAG, PIN_SCRIPT_STEM, hook_script
+from src.turn_capture.transcript import HOST_RUN_FILE, PIN_FLAG, PIN_SCRIPT_STEM, hook_script, unquoted
 
 SETTINGS_FILE = Path(".claude") / "settings.json"
 DEFAULT_BUDGET_S = 180.0
@@ -94,7 +94,7 @@ def project_ref_home(repo_root: Path) -> str | None:
     for command in commands:
         stem, tokens = hook_script(command)
         if stem == PIN_SCRIPT_STEM:
-            refs += [t[len(PIN_FLAG) :] for t in tokens if t.startswith(PIN_FLAG)]
+            refs += [unquoted(t[len(PIN_FLAG) :]) for t in tokens if t.startswith(PIN_FLAG)]
     return refs[0] if len(refs) == 1 and valid_project_ref(refs[0]) else None
 
 
