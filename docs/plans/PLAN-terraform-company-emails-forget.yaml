@@ -54,7 +54,7 @@ infrastructure_dependencies:
   not restated). | order | dependency | timing | owner | -- | 1 | PLAN-terraform-company-emails complete (successor
   confirmed and proven to page) | before PR 2 opens | VP 1 | -- | 2 | PR 2's saved plan forgets the predecessor and
   persists the refreshed successor (a forget is no delete, so the guard predicts PASS; the merge-time subagent plan
-  review then gates the apply and has probably never seen a forget (inferred, not checked): constraints) | merge, on
+  review then gates the apply and has likely never seen a forget: constraints) | merge, on
   the operator's word | CI | -- | 3 | C2
   deletes the founder's subscription | after VP 5 and VP 4 pass | operator, SNS console | -- | 4 | S2 sets alerts_email | after
   C2 (main no longer reads alerts_email in any resource) | agent, on the operator's word.
@@ -137,7 +137,7 @@ verification_plan:
 - step: 3
   phase: pre-deploy
   action: >-
-    PR 2 open: its trusted plan comment for the PR's current head reads CHANGES with zero counts, exactly one row, the forget of
+    PR 2 open: its trusted plan comment for the PR's current head reads CHANGES with zero counts, no changed output, exactly one row, the forget of
     aws_sns_topic_subscription.alerts_email, no refresh drift outside the chronic classes (aws_iam_role and aws_lambda_function addresses, which every recent trusted comment names: role use and the governed Lambda code deploys; rec-4631) except the successor (its confirmation,
     C1), a PASS guard prediction and a saved plan, and leaks nothing.
   command: |-
@@ -154,7 +154,7 @@ verification_plan:
     odd = [a for a in re.findall(r'`([^`]+)`', (re.search(r'^Drift detected outside Terraform: (.*)$', body, re.M) or [None, ''])[1]) if not a.startswith(CHRONIC)]
     ok = ('State: CHANGES' in body and '0 to import, 0 to add, 0 to change, 0 to destroy (0 replaced).' in body
           and rows == [('aws_sns_topic_subscription.alerts_email', 'forget')] and set(odd) <= {'aws_sns_topic_subscription.company_alerts_email'}
-          and 'Predicted guard verdict: PASS' in body and 'This saved plan is applied at merge' in body and not leaks)
+          and 'Changed outputs:' not in body and 'Predicted guard verdict: PASS' in body and 'This saved plan is applied at merge' in body and not leaks)
     print(json.dumps({'one_forget': bool(ok), 'odd_drift': odd, 'leaks': leaks})); sys.exit(0 if ok else 'TRUSTED PLAN STOP')
     PY
   expected: >-
@@ -243,8 +243,9 @@ verification_plan:
     Prints STATE with names ['company_alerts_email'], successor_pending False and the authenticated flag, the apply
     run ids and record green (exit 0). Only then is the hold released.
   fix_if: >-
-    An apply run not completed: wait for it and re-run. An apply run failed, or the record not green: the hold stays;
-    read the run and follow constraints (merge-time reviewer); stop. alerts_email still in state: PR 2's apply did not
+    An apply run not completed: wait for it and re-run. An apply run failed: the hold stays; read the run and follow
+    constraints (merge-time reviewer); stop. The record not green after a successful apply: a drift cycle landed in
+    the gap; the hold stays; follow constraints (merge-to-apply gap), whose heal ends in VP 5 and VP 4 with APPLY_RUN. alerts_email still in state: PR 2's apply did not
     run its forget; read the apply run and follow constraints (merge-time reviewer); stop. successor_pending True: the apply did not
     persist the refresh; stop before C2 and tell the coordinator, since the closing plan's tfvars window depends on it.
   hermetic: false
@@ -420,7 +421,11 @@ constraints:
 - >-
   Merge-time reviewer: after the guard passes, terraform-apply-sandbox's Subagent plan review (T2.39; an LLM given
   only the names-only digest, never this plan) gates the apply. PR 2's digest lists one entry, the forget, rendered
-  actions=[forget], which it has probably not been shown before (inferred, not checked); VP 4 prints the verdict. On REVISE the apply is skipped and
+  actions=[forget], which it has likely never been shown: the only earlier forgets (#1540, PLAN-platform-iam-personal-release)
+  were IAM-sensitive and routed to tf-gated-apply, whose gated-apply job has no Subagent plan review step
+  (terraform-apply-sandbox.yml), and the chain renders a forget as the "other" bucket (plan_names_core.py
+  action_bucket), a "forget" row (terraform_personal_plan_report.py) and actions=[forget] (terraform_plan_digest.py);
+  VP 4 prints the verdict. On REVISE the apply is skipped and
   the record turns red; on STARVED the apply is skipped and the record is left as it was (Decision 55), though the
   next drift cycle then reads the pending forget beside the chronic drift and red-flips it (or crashes while rec-4255
   is open). A stale saved plan at merge
@@ -444,23 +449,31 @@ constraints:
   Masking hand-off: PLAN-terraform-company-emails' "Masking first" says the later plans' holds block other threads'
   reconcile dispatches across their windows; this plan's hold ends at VP 5, before S2, and that is safe: reconcile
   reads the red commit from the convergence record and runs from its checkout, the record is green before C2 (VP 4),
-  and every commit after PR 1's merge masks every *_email value.
+  and every commit after PR 1's merge masks every *_email value. S2 also stays after VP 5 for masking: until the forget
+  is applied, a drift cycle or heal dispatch runs a plain terraform plan that renders the pending forget, endpoint
+  included (inferred from Terraform's renderer, not checked), and the *_email mask hides that founder value only while
+  the parameter's alerts_email still holds it; so no reorder of S2 before VP 5 is safe, and the rollback undoes S2
+  before restoring the block for the same reason.
 - >-
   Parameter writes are read-modify-write with a version check and keep every other line (neon_org_id included); the
   coordinator serialises them with rec-4048 and any other writer.
 - >-
   Expected detector pages (Decision 202 cl.6, never filtered by actor), each evidence, not an incident:
   platform-security-alerts-topic-change on C2's deletion, the first page after the founder's subscription is gone:
-  the operator says in row C2 whether it reached the company inbox (evidence the alias alone pages). If it did not
-  arrive within 15 minutes, the agent reads the topic's delivery metrics since T_C2 and stops before S2, telling the
-  operator at once (the successor is now the only subscriber): T_C2=<from build-state.json> bin/venv-python -c "import
+  the operator says in row C2 whether it reached the company inbox (evidence the alias alone pages). The page's
+  latency is CloudTrail delivery plus the alarm's period, so if the operator has not seen it the agent reads the
+  alarm's history and the topic's delivery metrics since T_C2: T_C2=<from build-state.json> bin/venv-python -c "import
   datetime as d, os, boto3; cw = boto3.Session(profile_name='agent_platform_admin',
   region_name=open('config/aws-region').read().strip()).client('cloudwatch'); t =
-  d.datetime.fromisoformat(os.environ['T_C2'].replace('Z', '+00:00')); n = d.datetime.now(d.timezone.utc); m = lambda x:
-  sum(p['Sum'] for p in cw.get_metric_statistics(Namespace='AWS/SNS', MetricName=x, Dimensions=[{'Name': 'TopicName',
-  'Value': 'agent-platform-alerts'}], StartTime=t, EndTime=n, Period=60, Statistics=['Sum'])['Datapoints']);
-  print('C2_PAGE', {'delivered': m('NumberOfNotificationsDelivered'), 'failed': m('NumberOfNotificationsFailed')})"
-  (failed above 0, or delivered 0: the alias does not page). The forget itself makes no AWS call. A page outside this
+  d.datetime.fromisoformat(os.environ['T_C2'].replace('Z', '+00:00')); n = d.datetime.now(d.timezone.utc); h =
+  cw.describe_alarm_history(AlarmName='platform-security-alerts-topic-change', HistoryItemType='StateUpdate',
+  StartDate=t, EndDate=n)['AlarmHistoryItems']; m = lambda x: sum(p['Sum'] for p in
+  cw.get_metric_statistics(Namespace='AWS/SNS', MetricName=x, Dimensions=[{'Name': 'TopicName', 'Value':
+  'agent-platform-alerts'}], StartTime=t, EndTime=n, Period=60, Statistics=['Sum'])['Datapoints']); print('C2_PAGE',
+  {'to_alarm': sum('to ALARM' in x['HistorySummary'] for x in h), 'delivered': m('NumberOfNotificationsDelivered'),
+  'failed': m('NumberOfNotificationsFailed')})". No ALARM transition yet: wait for the alarm's next evaluation and re-read
+  (a Monitor or send_later wake, never a sleep). An ALARM transition with delivered 0 or failed above 0: the alias did
+  not page; stop before S2 and tell the operator at once (the successor is now the only subscriber). The forget itself makes no AWS call. A page outside this
   list is triaged before the next step.
 - >-
   No contact address of the founder or the company (role aliases included), account id, ARN, token or link enters the repository, a PR, memory,
@@ -518,7 +531,7 @@ pre_implementation_checklist:
 - The coordinator confirms the terraform/personal merge and dispatch hold set at PLAN-terraform-company-emails C1 is still in place (constraints, merge-to-apply gap)
 execution_steps:
 - |-
-  Start. Read docs/PROJECT_CONTEXT.md, this plan and the handoff notes PLAN-terraform-company-emails left in /mnt/project-files/terraform-company-emails/. Write the session's alias file as PLAN-terraform-company-emails execution_steps (start) shows, and follow that plan's conventions for every live step (present, wait for the word, verify, one EVIDENCE.md row, times and versions in build-state.json). Run VP 1, then VP 6 with MODE=two_confirmed (with C1_FALLBACK=1 when PLAN-terraform-company-emails row C1 records the fallback).
+  Start. Read docs/PROJECT_CONTEXT.md, this plan and the handoff notes PLAN-terraform-company-emails left in /mnt/project-files/terraform-company-emails/. Write the session's alias file as PLAN-terraform-company-emails execution_steps (start) shows, and follow that plan's conventions for every live step (present, wait for the word, verify, one EVIDENCE.md row, times and versions in build-state.json). Run VP 1 (read-only, so resume-safe), then VP 6 with MODE=two_confirmed (with C1_FALLBACK=1 when PLAN-terraform-company-emails row C1 records the fallback). On a resumed session, pick the mode from the record instead: once EVIDENCE.md carries row C2 or build-state.json carries T_C2, run VP 6 with MODE=successor_only and continue from the first step whose row is missing, never repeating a step that has a row.
 - |-
   PR 2 (declares this plan). In sns_alerts.tf replace the aws_sns_topic_subscription.alerts_email resource block with:
     # CI cannot unsubscribe (github_ci_apply_policy.tf): forget the founder's subscription and let the operator
@@ -532,7 +545,7 @@ execution_steps:
     }
   Replace the test with test_predecessor_forgotten_not_destroyed. Flip implementation_declared to true. Run VP 2, terraform fmt -check terraform/personal (provider-free; Decision 119), bin/venv-python -m scripts.validate --pre, VP 9 and code review. Open the PR titled 'feat(terraform-company-emails-forget): forget the founder's alerts subscription' (no Resolves trailer: bundled_recommendations is empty); its body names, without values, the texts that read stale until the closing plan's PR 3 (the transitional comment's "beside the predecessor"; the sns_alerts.tf header's endpoint paragraph; the contract's owner_vs_alerts_email, whose "alerts_email backs the SNS alerts subscription endpoint" reads stale while main reads alerts_email in no resource; the contract's where_values_live.alerts_email source, whose state copy is now the successor's subscription endpoint, which differs from the parameter's alerts_email until S2 and matches it after; the runbook's SNS endpoint and confirmation paragraphs, docs/runbooks/ducklake-catalog-operations.md "The SNS email subscription endpoint is set" and "Activating page-out"; and terraform/bootstrap/github_ci_apply_policy.tf, docs/contracts/iam-simulate-fixture.yaml and scripts/checks/iam_tf/_write_companions.py, which name aws_sns_topic_subscription.alerts_email and are accurate again after PR 3, need no edit); the body carries no commit trailer (a Co-Authored-By address trips VP 8). Run VP 3 on its trusted plan comment. Squash-merge on code-review PROCEED, VP 3, green CI, the operator's word on the merge and, immediately before, VP 10. If the merge gate refuses (Decision 245: main changed a file PR 2 also changes), update the branch on GitHub, wait for the CI-green wake, re-run VP 3 on the new head's comment and VP 10, then merge; the merged head then carries PR CI's --pre evidence only (Decision 245 cl.4's declared residual), not VP 9's full-tier attestation, and the report says so. Then, as soon as the apply run concludes, VP 5 with MERGE_SHA; tell the coordinator the hold is released; then VP 4 with MERGE_SHA and no AFTER (the step takes the apply's completion time). Row B2 (PR number, merge SHA, the merge word's message id, workflow run ids; never job ids or job URLs, whose 12 digits trip VP 8's account-id clause). Report readiness, validator verdicts, postflight evidence, review and the real push and PR outcome separately (implement skill, Commit Flows).
 - |-
-  C2, delete the founder's subscription (operator, SNS console, in the region config/aws-region names), only after VP 5 and VP 4 pass. The agent first re-runs VP 6 with MODE=two_confirmed (with C1_FALLBACK=1 when PLAN-terraform-company-emails row C1 records the fallback). If it reads successor_authenticated ['false'] (that fallback), name that plan's re-subscribe rec and ask the operator whether C2 goes ahead, since afterwards the unauthenticated successor is the only subscriber; carry the answer and the rec in the close-out notes. Then record T_C2 (UTC now, YYYY-MM-DDTHH:MM:SSZ) in build-state.json, and the operator: Amazon SNS > Topics > agent-platform-alerts > Subscriptions: select the e-mail subscription whose endpoint is not the company alerts alias (the founder's; the alerts-alias row must stay), Delete, confirm. Then VP 6 with MODE=successor_only; row C2.
+  C2, delete the founder's subscription (operator, SNS console, in the region config/aws-region names), only after VP 5 and VP 4 pass. The agent first re-runs VP 6 with MODE=two_confirmed (with C1_FALLBACK=1 when PLAN-terraform-company-emails row C1 records the fallback). If it reads successor_authenticated ['false'] (that fallback), name that plan's re-subscribe rec and ask the operator whether C2 goes ahead, since afterwards the unauthenticated successor is the only subscriber; carry the answer and the rec in the close-out notes. Then record T_C2 (UTC now, YYYY-MM-DDTHH:MM:SSZ) in build-state.json, and the operator: Amazon SNS > Topics > agent-platform-alerts > Subscriptions: select the e-mail subscription whose endpoint is not the company alerts alias (the founder's; the alerts-alias row must stay), Delete, confirm. Then VP 6 with MODE=successor_only, and wait for the platform-security-alerts-topic-change page (constraints, expected detector pages) before row C2 and S2; row C2 records whether it reached the company inbox.
 - |-
   S2, alerts value (agent, on the operator's word on this command). First record v_s2_before (the version only, read without decryption):
   bin/venv-python - <<'PY'
@@ -585,3 +598,4 @@ rollback: >-
 gate_rounds:
 - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
 - {gate: plan-critique, round: 1, verdict: PROCEED, blocking: 0, nits: 8}
+- {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 6}
