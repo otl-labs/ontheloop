@@ -64,6 +64,7 @@ bundled_recommendations:
 - rec-3950
 followon_recs:
 - rec-4895
+- rec-4898
 weakening_dispositions:
 - candidate: "[test-removed] tests/checks/iam_tf/test_alerts_email_subscription.py::test_predecessor_forgotten_not_destroyed"
   disposition: planned-change
@@ -96,7 +97,8 @@ acceptance_criteria:
   the convergence record green and the drift plan clean after each terraform/personal change (VP 7).
 - >-
   The one e-mail subscription sits at aws_sns_topic_subscription.alerts_email on var.alerts_email, the company alerts
-  role alias, and nothing transitional is left in the code (VP 2, VP 4, VP 8).
+  role alias, and nothing transitional is left in the code (VP 2, VP 3's repository sweep, VP 4, VP 8; the name
+  survives only in the moved block's from line, the contract's amendment_log and the two tests that pin it).
 - >-
   The tfvars parameter holds exactly its six baseline keys again, with company values for owner_email and alerts_email
   and every other value unchanged (VP 10).
@@ -114,7 +116,8 @@ verification_plan:
     Start gate: the session's alias file is valid; the admin chain works; PLAN-terraform-company-emails-forget is
     declared on origin/main and its rows B2, C2 and S2 read pass; the parameter holds the six baseline keys plus
     company_alerts_email, with alerts_email and company_alerts_email both the company alerts role alias and
-    owner_email not yet the operations alias; the topic has one e-mail subscription, the company one, confirmed;
+    owner_email not yet the operations alias; the topic has one live e-mail subscription, the company one, confirmed
+    (a Deleted row, unsubscribed and awaiting SNS's purge, is ignored);
     Decision 226's red-main overlap check is clear.
   command: |-
     bin/venv-python - <<'PY' && bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-terraform-company-emails-closing.yaml
@@ -138,7 +141,8 @@ verification_plan:
     assert kv['alerts_email'] == kv['company_alerts_email'] == A['alerts'] and kv['owner_email'] != A['operations'], 'tfvars values'
     topic = f"arn:aws:sns:{R}:{B.client('sts').get_caller_identity()['Account']}:agent-platform-alerts"
     subs = [s for s in B.client('sns').list_subscriptions_by_topic(TopicArn=topic)['Subscriptions'] if s['Protocol'] == 'email']
-    assert len(subs) == 1 and subs[0]['Endpoint'] == A['alerts'] and subs[0]['SubscriptionArn'] != 'PendingConfirmation', 'subscription'
+    live = [s for s in subs if s['SubscriptionArn'] != 'Deleted']
+    assert len(live) == 1 and live[0]['Endpoint'] == A['alerts'] and live[0]['SubscriptionArn'].startswith('arn:'), 'subscription'
     print('START_OK')
     PY
   expected: >-
@@ -225,7 +229,8 @@ verification_plan:
     import json, os, re, sys, urllib.request
     get = lambda p: json.load(urllib.request.urlopen('https://api.github.com/repos/otl-labs/ontheloop/' + p, timeout=30))
     head = get(f"pulls/{os.environ['PR_NUMBER']}")['head']['sha']
-    body = [c['body'] for c in get(f"issues/{os.environ['PR_NUMBER']}/comments?per_page=100") if 'terraform/personal speculative plan (trusted' in c['body'] and f'PR head `{head}`' in c['body']][-1]
+    cs = [c['body'] for c in get(f"issues/{os.environ['PR_NUMBER']}/comments?per_page=100") if 'terraform/personal speculative plan (trusted' in c['body'] and f'PR head `{head}`' in c['body']]
+    body = cs[-1] if cs else sys.exit('TRUSTED PLAN NOT POSTED for this head yet')
     scan = re.sub(r'\b[0-9a-f]{40,64}\b', '', body)
     leaks = [n for n, x in (('at', r'@[a-z0-9-]+\.[a-z]'), ('12-digit', r'(?<!\d)\d{12}(?!\d)'), ('arn', r'\barn:')) if re.search(x, scan)]
     ok = (re.search(r'^State: NO_CHANGES$', body, re.M) and '0 to import, 0 to add, 0 to change, 0 to destroy (0 replaced)' in body
@@ -235,7 +240,8 @@ verification_plan:
   expected: >-
     One JSON line {"no_changes_no_drift": true, "leaks": []}.
   fix_if: >-
-    A change on alerts_email's endpoint: S2 of the forget plan has not run or holds another value; stop, never merge
+    TRUSTED PLAN NOT POSTED: the trusted plan job has not finished for this head; wait for its check to conclude and
+    re-run. A change on alerts_email's endpoint: S2 of the forget plan has not run or holds another value; stop, never merge
     (a replace AccessDenies through CI). A drift line: some resource changed outside Terraform; do not run S3, because
     the classifier would read the window as out_of_band_drift (an immediate red); triage the drift with the
     coordinator first. A refusal: stop.
@@ -281,7 +287,7 @@ verification_plan:
     get = lambda p: json.load(urllib.request.urlopen('https://api.github.com/repos/otl-labs/ontheloop/' + p, timeout=30))
     head = get(f"pulls/{os.environ['PR_NUMBER']}")['head']['sha']
     cs = [c for c in get(f"issues/{os.environ['PR_NUMBER']}/comments?per_page=100") if 'terraform/personal speculative plan (trusted' in c['body'] and f'PR head `{head}`' in c['body']]
-    c = cs[-1]; body = c['body']; fresh = max(c['created_at'], c['updated_at']) > os.environ['T_S3']
+    c = cs[-1] if cs else sys.exit('TRUSTED PLAN NOT POSTED for this head yet'); body = c['body']; fresh = max(c['created_at'], c['updated_at']) > os.environ['T_S3']
     scan = re.sub(r'\b[0-9a-f]{40,64}\b', '', body)
     leaks = [n for n, x in (('at', r'@[a-z0-9-]+\.[a-z]'), ('12-digit', r'(?<!\d)\d{12}(?!\d)'), ('arn', r'\barn:')) if re.search(x, scan)]
     rows = [r for r in re.findall(r'^\| ([^|]+?) \| ([^|]+?) \| ([^|]*?) \|$', body, re.M) if r[0] != 'Resource' and not set(r[0]) <= set('-')]
@@ -300,7 +306,8 @@ verification_plan:
     One JSON line with fresh true, an update count, tag_only true, fit FITS, OPAQUE or OVERFLOW, unknown_ok true and
     no leaks.
   fix_if: >-
-    Not fresh: the re-run has not finished. Any create, destroy, other attribute or drift line: stop; do not merge, and
+    Not fresh or TRUSTED PLAN NOT POSTED: the re-run has not finished for this head. Any create, destroy, other
+    attribute or drift line: stop; do not merge, and
     restore owner_email (S3 rollback) if the window cannot be kept (constraints, S3 window).
   hermetic: false
   graduation: not-applicable
@@ -330,8 +337,9 @@ verification_plan:
         assert all(r['conclusion'] == 'success' for r in ap), [(r['id'], r['conclusion']) for r in ap]
         after = max([after] + [r['updated_at'] for r in ap])
     runs = sorted((r for r in get('actions/workflows/terraform-drift.yml/runs?branch=main&per_page=50')['workflow_runs'] if r['created_at'] > after and r['status'] == 'completed'), key=lambda r: r['created_at'])
-    assert runs, 'no completed drift run after the apply or AFTER yet'
-    d = runs[0]; log = ''.join(get(f"actions/jobs/{j['id']}/logs", raw=True) for j in get(f"actions/runs/{d['id']}/jobs")['jobs'])
+    dlog = lambda d: ''.join(get(f"actions/jobs/{j['id']}/logs", raw=True) for j in get(f"actions/runs/{d['id']}/jobs")['jobs'] if j['conclusion'] != 'skipped')
+    d, log = next(((d, l) for d, l in ((d, dlog(d)) for d in runs) if not re.search(r'Z (?:##\[notice\]|::notice::)Lock held by an in-flight apply', l)), (None, ''))
+    assert d, 'no completed drift cycle after the apply or AFTER yet (lock-skip runs are not cycles)'
     clean = re.search(r'Z Drift check: no changes detected \(exit 0\); cycle is clean\.$', log, re.M) or re.search(r'Z Measured verdict this cycle: converged ', log)
     leak = re.search(r'@[a-z0-9-]+\.[a-z]', log + alog)
     s3 = boto3.Session(profile_name='agent_platform_admin', region_name=open('config/aws-region').read().strip()).client('s3')
@@ -341,7 +349,9 @@ verification_plan:
     PY
   expected: >-
     With an apply run selected, prints REVIEWER [] for PR 3's routed apply; then DRIFT with the run id, event, success,
-    clean, no_leak and record green (exit 0).
+    clean, no_leak and record green (exit 0). A drift run that skipped its cycle because the state lock was held is
+    passed over, never read as a cycle (the match is anchored after the log timestamp, because every drift log also
+    echoes the notice inside its printed run script).
   fix_if: >-
     Not clean or red: read the run's measured verdict and stop (Decision 55); constraints name the only heals. Never
     heal with a guard-routed dispatch, whose plan.bin is a public artifact (rec-4230). A leak: stop, tell the
@@ -548,8 +558,9 @@ verification_plan:
   hermetic: true
   graduation: waive
   graduation_waiver_reason: >-
-    Moment claim (Decision 244 cl.4): the trailer-closure job runs the same commands once at merge; VP 2's graduated
-    test and validate_terraform_cc_web_operations stay the standing checks.
+    Moment claim (Decision 244 cl.4): the trailer-closure job runs the same commands once at merge, so this is
+    one-time evidence for that closure; no standing check guards the two phrases, and none is owed once both recs
+    are closed.
 test_obligations:
 - source: terraform/personal/sns_alerts.tf
   behavior: the one subscription sits at the pinned address on var.alerts_email and nothing transitional is left.
@@ -661,14 +672,16 @@ constraints:
   thread from S3 until PR 3's gated apply completes (a terraform/personal merge would make PR 3's saved plan stale,
   and a shared-file merge makes Decision 245's merge gate refuse PR 3); the agent tells the coordinator when it is
   released. Immediately before S3, with the local HEAD equal to PR 3's pushed head, git fetch -q origin main &&
-  bin/venv-python -m scripts.session.merge_overlap check --head HEAD must print CLEAR (else update the branch first, before S3). If the gate still refuses after S3: update the branch on GitHub,
-  wait for the CI-green wake on the new head (its trusted plan re-runs on the push), run VP 6 on the new head's
-  comment, then merge.
+  bin/venv-python -m scripts.session.merge_overlap check --head HEAD must print CLEAR (else update the branch first, before S3: wait for the CI-green wake, bring the local branch to
+  the new head, and re-run VP 3, VP 4 and VP 15 on it). If the gate still refuses after S3: update the branch on
+  GitHub, wait for the CI-green wake on the new head (its trusted plan re-runs on the push), bring the local branch to
+  it, run VP 3 and VP 15, run VP 6 on the new head's comment, then merge. VP 3 is the only binding of APPROVED PR 3
+  TEXT (no sidecar binds PR 3), so no merge follows a change of head without it.
 - >-
   Expected advisory failure: after S3 the re-run trusted plan job concludes failure at its fit_check step (reviewer
   digest OPAQUE for policies unknown at plan time, or OVERFLOW for the tag updates) after saving plan.bin, the digest
-  status and the comment. That is not a halt: PR 3 merges on green pr-validate and terraform-validate, VP 6, VP 15
-  and code review, and the operator's tf-gated-apply approval reviews the names-only plan. Any other failed step
+  status and the comment. That is not a halt: PR 3 merges on green pr-validate and terraform-validate, VP 3, VP 6,
+  VP 15 and code review, and the operator's tf-gated-apply approval reviews the names-only plan. Any other failed step
   halts.
 - >-
   Masking: PLAN-terraform-company-emails' *_email arm is on main, so no drift, dispatch or reconcile log prints an
@@ -680,9 +693,11 @@ constraints:
   bootstrap key list in VP 9 and the baseline key set; stop and re-plan the affected commands through /plan.
 - >-
   Expected detector pages (Decision 202 cl.6, never filtered by actor), each evidence, not an incident:
-  platform-security-alerts-topic-change on PR 3's topic tag write; platform-security-platform-role-iam-change (and
-  platform-security-detector-tamper if its filter covers tag writes) on A1. Each reaches the company inbox, the
-  organic second proof of paging. A page outside this list is triaged before the next step. Each tfvars window may
+  platform-security-platform-role-iam-change (and platform-security-detector-tamper if its filter covers tag writes)
+  on A1. platform-security-alerts-topic-change probably does not fire on PR 3's topic tag write (its filter matches
+  topicArn or subscriptionArn and TagResource carries resourceArn; inferred), and its absence is not an incident. A
+  page that fires reaches the company inbox; none is needed as proof of paging (plan 1's P1 is that proof). A page
+  outside this list is triaged before the next step. Each tfvars window may
   also file one tf_drift rec (pending_codification), closed by the next clean cycle.
 - >-
   No contact address of the founder or the company (role aliases included), account id, ARN, token or link enters the repository, a PR, memory,
@@ -889,7 +904,7 @@ execution_steps:
   assert ssm.get_parameter(Name=N)['Parameter']['Version'] == p['Version'], 'parameter changed since read'
   print('TFVARS_WRITTEN', p['Version'], '->', ssm.put_parameter(Name=N, Value=new, Type='SecureString', Overwrite=True)['Version'])
   PY
-  Then, on the operator's word, re-run PR 3's latest terraform-plan-trusted run (GitHub Actions re-run of that run id), run VP 6, squash-merge on code-review PROCEED, VP 6, VP 15 and green required checks (the trusted job's fit_check failure is expected, constraints), and tell the operator the tf-gated-apply approval is waiting (names-only plan in the PR comment: Owner tag updates and policies unknown at plan time whose documents only name tag-changed resources; the move is a no-op). After the approval: VP 7 with MERGE_SHA and no AFTER (the step takes the gated apply's completion time), VP 8 and VP 12; tell the coordinator the hold is released. Row B3 (PR number, merge SHA, apply and gated-apply run ids). Report readiness, validator verdicts, postflight evidence, review and the real push and PR outcome separately (implement skill, Commit Flows).
+  Then, on the operator's word, re-run PR 3's latest terraform-plan-trusted run (GitHub Actions re-run of that run id), run VP 6, then squash-merge on code-review PROCEED, VP 3 and VP 15 re-run on the head being merged (the local branch at its pushed head), VP 6 and green required checks (the trusted job's fit_check failure is expected, constraints); VP 3 is the only binding of APPROVED PR 3 TEXT, so it re-runs after every change of head, and tell the operator the tf-gated-apply approval is waiting (names-only plan in the PR comment: Owner tag updates and policies unknown at plan time whose documents only name tag-changed resources; the move is a no-op). After the approval: VP 7 with MERGE_SHA and no AFTER (the step takes the gated apply's completion time), VP 8 and VP 12; tell the coordinator the hold is released. Row B3 (PR number, merge SHA, apply and gated-apply run ids). Report readiness, validator verdicts, postflight evidence, review and the real push and PR outcome separately (implement skill, Commit Flows).
 - |-
   A1, bootstrap Owner tags (agent in an ADMIN session; Decision 126 human-directed apply), after VP 8. Run VP 9 with MODE=plan and present its summary (counts and addresses only, never plan text, which prints old and new tag values). On the operator's word on that summary, run, in the same session:
   AWS_PROFILE=agent_platform_admin terraform -chdir=terraform/bootstrap apply -input=false "${TMPDIR:-/tmp}/tf-company-emails/owner.tfplan" > /dev/null && echo A1_APPLIED; rm -f "${TMPDIR:-/tmp}/tf-company-emails/owner.tfplan" "${TMPDIR:-/tmp}/tf-company-emails/bootstrap.tfvars"
@@ -925,7 +940,7 @@ execution_steps:
 - |-
   PR 4 (closing; docs only, after VP 10 and VP 7, O1's row and NEON-02 reading proven on origin/main; re-run Decision 226's red_overlap check, bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-terraform-company-emails-closing.yaml, before it opens). Apply APPROVED CLOSING TEXT to docs/contracts/account-credential-inventory.yaml. Run VP 11, bin/venv-python -m scripts.validate --pre, VP 14 and code review. Open the PR titled 'feat(terraform-company-emails-closing): closing -- record the company e-mail move in the inventory' (no Resolves trailer: both recs closed with PR 3; the PR body carries no commit trailer, which VP 13 would flag). Squash-merge on code-review PROCEED, VP 11 and green CI (a Decision 245 merge-gate refusal: update the branch on GitHub, wait for the CI-green wake, re-run VP 11, merge). Row B4. Report readiness, validator verdicts, postflight evidence, review and the real push and PR outcome separately (implement skill, Commit Flows).
 - |-
-  Close out: VP 13 with PRS = PR 3,PR 4. Post a counts-only comment on PR 4 (steps, UTC times, run ids; no values) after running VP 13's redaction pattern over its text. Write handoff notes for the coordinator: AWS-07, AWS-10 and AWS-11 proven; rec-3904 and rec-3950 closed; rec-4894, rec-4895 and rec-4896 open; O1's outcome.
+  Close out: VP 13 with PRS = PR 3,PR 4. Post a counts-only comment on PR 4 (steps, UTC times, run ids; no values) after running VP 13's redaction pattern over its text. Write handoff notes for the coordinator: AWS-07, AWS-10 and AWS-11 proven; rec-3904 and rec-3950 closed; rec-4894, rec-4895, rec-4896 and rec-4898 open; O1's outcome. rec-3950 closes when PR 3 merges, before any Owner tag moves: if the tf-gated-apply approval is declined, the gated apply fails or A1 does not complete, the halt report and the handoff notes say that rec-3950 reads closed while Owner is unchanged, and the agent files a rec (get_rec_write_guidance, then file_rec) for the Owner move.
 - |-
   Execute Verification Plan: each VP step in its place in the order above; VP 2-6 belong to PR 3, VP 11 to PR 4, VP 14 to both; loop until pass; on an unrecoverable V3 failure stop and root-cause (Decision 55); a failed or drifted live step halts this workstream until root-caused, never a silent retry.
 - |-
@@ -948,3 +963,4 @@ gate_rounds:
 - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 9}
 - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 7}
 - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 3, nits: 7}
+- {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 5}

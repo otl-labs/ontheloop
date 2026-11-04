@@ -185,8 +185,9 @@ verification_plan:
         assert all(r['conclusion'] == 'success' for r in ap), [(r['id'], r['conclusion']) for r in ap]
         after = max([after] + [r['updated_at'] for r in ap])
     runs = sorted((r for r in get('actions/workflows/terraform-drift.yml/runs?branch=main&per_page=50')['workflow_runs'] if r['created_at'] > after and r['status'] == 'completed'), key=lambda r: r['created_at'])
-    assert runs, 'no completed drift run after the apply or AFTER yet'
-    d = runs[0]; log = ''.join(get(f"actions/jobs/{j['id']}/logs", raw=True) for j in get(f"actions/runs/{d['id']}/jobs")['jobs'])
+    dlog = lambda d: ''.join(get(f"actions/jobs/{j['id']}/logs", raw=True) for j in get(f"actions/runs/{d['id']}/jobs")['jobs'] if j['conclusion'] != 'skipped')
+    d, log = next(((d, l) for d, l in ((d, dlog(d)) for d in runs) if not re.search(r'Z (?:##\[notice\]|::notice::)Lock held by an in-flight apply', l)), (None, ''))
+    assert d, 'no completed drift cycle after the apply or AFTER yet (lock-skip runs are not cycles)'
     clean = re.search(r'Z Drift check: no changes detected \(exit 0\); cycle is clean\.$', log, re.M) or re.search(r'Z Measured verdict this cycle: converged ', log)
     leak = re.search(r'@[a-z0-9-]+\.[a-z]', log + alog)
     s3 = boto3.Session(profile_name='agent_platform_admin', region_name=open('config/aws-region').read().strip()).client('s3')
@@ -196,7 +197,9 @@ verification_plan:
     PY
   expected: >-
     With an apply run selected, prints REVIEWER ['PROCEED']; then DRIFT with the run id, event, success, clean,
-    no_leak and record green (exit 0).
+    no_leak and record green (exit 0). A drift run that skipped its cycle because the state lock was held is passed
+    over, never read as a cycle (the match is anchored after the log timestamp, because every drift log also echoes
+    the notice inside its printed run script).
   fix_if: >-
     A failed apply run: REVIEWER names the merge-time review's verdict; the predecessor is still in state, so C2 must
     not run; follow constraints (merge-time reviewer). A cycle measured pending_codification for another thread's merged
