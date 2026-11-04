@@ -97,6 +97,16 @@ class TestGatedEntryInputClosures:
             "scripts/checks/verification/**",
         } <= self._globs("validate_hermeticity_flags")
 
+    def test_admin_root_premerge_gate_covers_plan_obligations_decision_draft_closure(self) -> None:
+        """The gate imports plan_obligations, whose closure now includes the decision-draft report."""
+        assert {
+            "scripts/roadmap/plan_decision_drafts.py",
+            "scripts/roadmap/approved_text.py",
+            "scripts/checks/decisions/envelope_rules.py",
+            "scripts/north_star_models.py",
+            "scripts/decisions_md.py",
+        } <= self._globs("validate_admin_root_premerge_gate")
+
     def test_verifier_hermeticity_covers_its_scan_dir_and_rule_module(self) -> None:
         """AST-scans scripts/verifiers/*.py against clock/randomness/network rosters that live in
         the check's own module."""
