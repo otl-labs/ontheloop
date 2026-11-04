@@ -363,7 +363,7 @@ verification_plan:
         assert all(r['conclusion'] == 'success' for r in ap), [(r['id'], r['conclusion']) for r in ap]
         after = max([after] + [r['updated_at'] for r in ap])
     ev = os.environ.get('EVENT', '')
-    runs = sorted((r for r in get('actions/workflows/terraform-drift.yml/runs?branch=main&per_page=50')['workflow_runs'] if r['created_at'] > after and r['status'] == 'completed' and (not ev or r['event'] == ev)), key=lambda r: r['created_at'])
+    runs = sorted((r for r in get('actions/workflows/terraform-drift.yml/runs?branch=main&per_page=50')['workflow_runs'] if r['updated_at' if ev else 'created_at'] > after and r['status'] == 'completed' and (not ev or r['event'] == ev)), key=lambda r: r['created_at'])
     dlog = lambda d: ''.join(get(f"actions/jobs/{j['id']}/logs", raw=True) for j in get(f"actions/runs/{d['id']}/jobs")['jobs'] if j['conclusion'] != 'skipped')
     d, log = next(((d, l) for d, l in ((d, dlog(d)) for d in runs) if not re.search(r'Z (?:##\[notice\]|::notice::)Lock held by an in-flight apply', l)), (None, ''))
     assert d, 'no completed drift cycle after the apply or AFTER yet (lock-skip runs are not cycles)'
@@ -376,7 +376,9 @@ verification_plan:
     PY
   expected: >-
     With an apply run selected, prints REVIEWER [] for PR 3's routed apply; then DRIFT with the run id, event, success,
-    its completion time, clean, no_leak and record green (exit 0); with EVENT=schedule only scheduled runs are read. A drift run that skipped its cycle because the state lock was held is
+    its completion time, clean, no_leak and record green (exit 0); with EVENT=schedule only scheduled runs are read,
+    selected by completion after AFTER (spacing), where every other mode selects by creation after AFTER (a cycle
+    that planned after the apply). A drift run that skipped its cycle because the state lock was held is
     passed over, never read as a cycle (the match is anchored after the log timestamp, because every drift log also
     echoes the notice inside its printed run script).
   fix_if: >-
@@ -725,12 +727,16 @@ constraints:
   chronic drift reads pending_codification instead, which turns red PENDING_CODIFICATION_BOUND_HOURS (2.0) after S3
   (scripts/ci/convergence_classify.py), so the window's budget from S3 to the gated apply is at most two hours, and
   only until the first drift tick once rec-4255 is closed; past it the heals below apply. The hourly cron (17 * * * *) cannot be held. Scheduled ticks are irregular
-  (seven in the 48 hours to 2026-11-04 06:35Z against an hourly cron), so S3, and every repeat of it, runs right after
-  a schedule-event drift run completes: the operator's word on S3 is asked first, so waiting for it cannot use up
-  the spacing; then VP 7 with EVENT=schedule and AFTER = the word's UTC time reads the next scheduled run, and S3 runs
-  within 15 minutes of that run's completion (DRIFT prints it), else waits for the next one (a dispatched run proves
-  the record green but gives no spacing from the cron); if no scheduled run completes within two hours of the word,
-  ask the operator whether S3 goes ahead without the spacing (the heals below still apply). And the agent records rec-4255's status in
+  (seven in the 48 hours to 2026-11-04 06:35Z against an hourly cron; scheduled runs 5.5 to 9 hours apart on
+  2026-11-03 and 2026-11-04), so S3, and every repeat of it, runs right after a schedule-event drift run completes.
+  The operator's words on S3 and on PR 3's trusted-plan re-run are asked together first, so waiting for them cannot
+  use up the spacing; then VP 7 with EVENT=schedule and AFTER = the word's UTC time reads the first scheduled run to
+  complete after it; when it has, the agent posts one line ("S3 now") and runs S3 only once the operator acknowledges
+  it in the thread, within 15 minutes of that run's completion (DRIFT prints it), so the gated approval stays within
+  the hour; a missed window waits for the next scheduled run, re-running VP 7 with AFTER = the missed run's printed
+  completion time (a dispatched run proves the record green but gives no spacing from the cron). At the measured
+  cadence the expected path is that no scheduled run completes within two hours of the word: the agent then asks the
+  operator whether S3 goes ahead without the spacing (the heals below still apply). And the agent records rec-4255's status in
   build-state.json at S3 (open: a tick in the window crashes; closed: it turns the record red). So: PR 3 is open and green with VP 4
   passing before S3; S3 runs only when the operator can approve tf-gated-apply within the hour; the agent then re-runs
   PR 3's terraform-plan-trusted run (a re-run, never an empty commit), checks VP 6 and VP 16 and merges. In each branch below, restore
@@ -1032,7 +1038,7 @@ execution_steps:
       from = aws_sns_topic_subscription.company_alerts_email
       to   = aws_sns_topic_subscription.alerts_email
     }
-  ) and APPROVED PR 3 TEXT to the contract, sns_alerts.tf and the runbook (the entry removal deletes the whole company_alerts_email key from where_values_live). Before replacing the test, git grep -l test_predecessor_forgotten_not_destroyed -- config/agent/verification_registry must print nothing (PLAN-terraform-company-emails-forget waives its graduation); a hit means a graduated record pins it: stop and route a plan amendment through the coordinator, since retiring that record needs the operator's word (Decision 244 cl.5). Replace the test with test_subscription_at_pinned_address. Flip implementation_declared to true. Graduate VP 2 (registry row config/agent/verification_registry/entries/alerts-subscription-pinned-address.yaml, slot test_selector, guard_target terraform/personal/sns_alerts.tf). Run VP 2, VP 3, VP 15, terraform fmt -check terraform/personal (provider-free; Decision 119), bin/venv-python -m scripts.validate --pre, VP 14 and code review. Open the PR titled 'feat(terraform-company-emails-closing): move the Owner tag to the operations alias and return the alerts subscription to its address', with 'Resolves: rec-3904, rec-3950' in the implementation commit and the squash body (the PR body carries no commit trailer: a Co-Authored-By address trips VP 13), and wait for green CI and VP 4 (do not merge). Then S3, only when the operator can approve tf-gated-apply within the hour (constraints, S3 window): present the command and wait for the word; then VP 7 with EVENT=schedule and AFTER = the word's UTC time; within 15 minutes of that run's completion, record v_s3_before (start step's command) and run the command (it records t_s3, UTC, in build-state.json as it writes), then VP 5, row S3:
+  ) and APPROVED PR 3 TEXT to the contract, sns_alerts.tf and the runbook (the entry removal deletes the whole company_alerts_email key from where_values_live). Before replacing the test, git grep -l test_predecessor_forgotten_not_destroyed -- config/agent/verification_registry must print nothing (PLAN-terraform-company-emails-forget waives its graduation); a hit means a graduated record pins it: stop and route a plan amendment through the coordinator, since retiring that record needs the operator's word (Decision 244 cl.5). Replace the test with test_subscription_at_pinned_address. Flip implementation_declared to true. Graduate VP 2 (registry row config/agent/verification_registry/entries/alerts-subscription-pinned-address.yaml, slot test_selector, guard_target terraform/personal/sns_alerts.tf). Run VP 2, VP 3, VP 15, terraform fmt -check terraform/personal (provider-free; Decision 119), bin/venv-python -m scripts.validate --pre, VP 14 and code review. Open the PR titled 'feat(terraform-company-emails-closing): move the Owner tag to the operations alias and return the alerts subscription to its address', with 'Resolves: rec-3904, rec-3950' in the implementation commit and the squash body (the PR body carries no commit trailer: a Co-Authored-By address trips VP 13), and wait for green CI and VP 4 (do not merge). Then S3, only when the operator can approve tf-gated-apply within the hour (constraints, S3 window): present the command and the trusted-plan re-run together and wait for both words; then VP 7 with EVENT=schedule and AFTER = the words' UTC time; post "S3 now" and, once the operator acknowledges it within 15 minutes of that run's completion, record v_s3_before (start step's command) and run the command (a missed window: constraints, S3 window) (it records t_s3, UTC, in build-state.json as it writes), then VP 5, row S3:
   bin/venv-python - <<'PY'
   import json, os, re, boto3
   from datetime import datetime, timezone
@@ -1050,7 +1056,7 @@ execution_steps:
   s['t_s3'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'); json.dump(s, open(S, 'w'), indent=1)
   print('TFVARS_WRITTEN', p['Version'], '->', v, 't_s3', s['t_s3'])
   PY
-  Then, on the operator's word, re-run PR 3's latest terraform-plan-trusted run (GitHub Actions re-run of that run id), run VP 6, then squash-merge on code-review PROCEED, VP 3 and VP 15 re-run on the head being merged (the local branch at its pushed head), VP 6, VP 16 immediately before the merge and green required checks (the trusted job's fit_check failure is expected, constraints); VP 3 is the only binding of APPROVED PR 3 TEXT, so it re-runs after every change of head, and tell the operator the tf-gated-apply approval is waiting (names-only plan in the PR comment: Owner tag updates and policies unknown at plan time whose documents only name tag-changed resources; the move is a no-op). After the approval: VP 7 with MERGE_SHA and no AFTER (the step takes the gated apply's completion time), VP 8 and VP 12; tell the coordinator the hold is released. Row B3 (PR number, merge SHA, apply and gated-apply run ids). If an update-branch remedy changed the head (constraints, S3 window), the merged head carries PR CI's --pre evidence only (Decision 245 cl.4's declared residual), not VP 14's full-tier attestation, and the report says so. Report readiness, validator verdicts, postflight evidence, review and the real push and PR outcome separately (implement skill, Commit Flows).
+  Then, on the operator's word (asked together with the S3 word), re-run PR 3's latest terraform-plan-trusted run (GitHub Actions re-run of that run id), run VP 6, then squash-merge on code-review PROCEED, VP 3 and VP 15 re-run on the head being merged (the local branch at its pushed head), VP 6, VP 16 immediately before the merge and green required checks (the trusted job's fit_check failure is expected, constraints); VP 3 is the only binding of APPROVED PR 3 TEXT, so it re-runs after every change of head, and tell the operator the tf-gated-apply approval is waiting (names-only plan in the PR comment: Owner tag updates and policies unknown at plan time whose documents only name tag-changed resources; the move is a no-op). After the approval: VP 7 with MERGE_SHA and no AFTER (the step takes the gated apply's completion time), VP 8 and VP 12; tell the coordinator the hold is released. Row B3 (PR number, merge SHA, apply and gated-apply run ids). If an update-branch remedy changed the head (constraints, S3 window), the merged head carries PR CI's --pre evidence only (Decision 245 cl.4's declared residual), not VP 14's full-tier attestation, and the report says so. Report readiness, validator verdicts, postflight evidence, review and the real push and PR outcome separately (implement skill, Commit Flows).
 - |-
   S3 rollback (only where constraints, S3 window, or a VP fix_if calls for it, and only while no apply of PR 3's saved plan has started; afterwards a revert is re-planned, see rollback; agent, on the operator's word on this command). Record v_rb_before (start step's command), present, wait for the word, run, then VP 5 with ROLLBACK=1, which must print S3_ROLLBACK_OK before any acknowledge-and-retry or other dispatch; row S3-RB (kind and UTC time). Key-scoped: it restores owner_email from v_s3_before, drops previous_owner_email and keeps every other line of the current version; it also clears t_s3, so a later VP 1 runs its full checks and a repeated S3 records a new t_s3:
   bin/venv-python - <<'PY'
@@ -1131,3 +1137,4 @@ gate_rounds:
 - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 9}
 - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 5}
 - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 7}
+- {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 2}
