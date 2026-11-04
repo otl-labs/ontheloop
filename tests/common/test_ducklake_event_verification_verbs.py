@@ -268,3 +268,15 @@ def test_root_sessions_carry_join_keys_and_stamps_for_real_projects_only() -> No
         for project in ("01ARZ3NDEKTSV4RRFFQ69G5FB1", "01ARZ3NDEKTSV4RRFFQ69G5FB2"):
             _append(con, chain.emit(tree, True), project)
         assert [r["session_id"] for r in _roots(con)] == [ids["root"]]
+
+
+def test_root_sessions_returns_host_run_ref_for_top_level_roots_only() -> None:
+    with chain.loaded("corpus:ci_rca_hook_pin_and_host_run", True) as (con, _rows, ids):
+        (root,) = _roots(con)
+        assert root["session_id"] == ids["root"] and root["host_run_ref"] == "gha:123456789/1/rca/1"
+    with chain.loaded("verification:subagent_nonfinal_midstream", True) as (con, _rows, _ids):
+        (interactive,) = _roots(con)
+        assert interactive["host_run_ref"] is None
+    with chain.loaded("corpus:subagent_sync", True) as (con, _rows, _ids):
+        (with_children,) = _roots(con)
+        assert with_children["host_run_ref"] is None

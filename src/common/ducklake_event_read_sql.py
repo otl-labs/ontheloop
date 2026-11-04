@@ -395,7 +395,9 @@ ORPHAN_COUNTS_SQL = compose(
 )
 
 # telemetry_root_sessions: one row per root session of a real-purpose project in the window, with the harness's own session key
-# and branch (each the first non-null value by event_timestamp, source_ordinal, event_id), the tree-wide last event and the
+# and branch (each the first non-null value by event_timestamp, source_ordinal, event_id), the root's top-level run identity
+# (host_run_ref of its own telemetry_agents rows with no observation_id; NULL for an interactive root),
+# the tree-wide last event and the
 # Decision 207 stamps. The verification monitor selects trees by last_event_timestamp, so it is the TREE's, not the root's.
 _FIRST = (
     "min_by({c}, struct_pack(t := event_timestamp, o := coalesce(source_ordinal, -1), e := event_id)) "
@@ -407,6 +409,9 @@ ROOT_SESSIONS_SQL = compose(
     "min(session_started_at) AS session_started_at, max(parent_session_id) AS parent_session_id, "
     + ", ".join(f"{_FIRST.format(c=c)} AS {c}" for c in ("entity_ref", "harness_session_key", "branch"))
     + " FROM s GROUP BY session_id), "
+    "ar AS (SELECT session_id, "
+    + _FIRST.format(c="host_run_ref")
+    + " AS host_run_ref FROM a WHERE observation_id IS NULL GROUP BY session_id), "
     "tl AS (SELECT "
     + _TREE_KEY
     + ", max(event_timestamp) AS last_event_timestamp FROM ("
@@ -416,10 +421,11 @@ ROOT_SESSIONS_SQL = compose(
     + ") "
     "SELECT rt.session_id AS session_id, rt.entity_ref AS entity_ref, rt.harness_session_key AS harness_session_key, "
     "rt.branch AS branch, rt.session_started_at AS session_started_at, tl.last_event_timestamp AS last_event_timestamp, "
+    "ar.host_run_ref AS host_run_ref, "
     + STAMPS_SELECT
     + " FROM rt LEFT JOIN tl USING ("
     + _TREE_KEY
-    + ") "
+    + ") LEFT JOIN ar ON ar.session_id = rt.session_id "
     + STAMPS_JOIN.format(sid="rt.session_id")
     + " WHERE rt.parent_session_id IS NULL AND rt."
     + _REAL

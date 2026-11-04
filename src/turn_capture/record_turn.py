@@ -23,6 +23,7 @@ from typing import Any
 
 from src.telemetry.timestamps import epoch_ms
 from src.turn_capture.cursor import CaptureCursor, CursorError
+from src.turn_capture.host_run import HostRun, parse_host_run, top_level_agent_rows
 from src.turn_capture.observations import build_observations
 from src.turn_capture.sessions import build_agents, build_sessions, stream_due
 from src.turn_capture.streams import ParsedTree, parse_tree
@@ -30,8 +31,8 @@ from src.turn_capture.transcript import ROOT, TranscriptTree, read_lines, sessio
 from src.turn_capture.transcripts import Ctx, Sidecars, build_transcripts
 
 PRODUCER = "claude_code"
-PARSER_VERSION = 7
-PRODUCER_VERSION = "turn-capture-7"
+PARSER_VERSION = 8
+PRODUCER_VERSION = "turn-capture-8"
 FULL_OUTPUT_CAP_BYTES = 8388608
 BILLING_SHAPES = ("fixed_non_rollover_allowance",)
 TABLES = ("telemetry_observations", "telemetry_transcripts", "telemetry_agents", "telemetry_sessions")
@@ -60,7 +61,8 @@ def _build_all(parsed: ParsedTree, ctx: Ctx, sidecars: Sidecars, diag: Counter[s
     built = {
         "telemetry_observations": build_observations(parsed, ctx, diag, sidecars),
         "telemetry_transcripts": build_transcripts(parsed, ctx, sidecars, diag),
-        "telemetry_agents": build_agents(parsed, ctx, diag),
+        "telemetry_agents": build_agents(parsed, ctx, diag)
+        + (top_level_agent_rows(parsed, ctx, ctx.host) if ctx.host is not None else []),
         "telemetry_sessions": build_sessions(parsed, ctx, diag),
     }
     deferred = {s.session_ref for s in parsed.streams.values() if not stream_due(s)}
@@ -78,6 +80,14 @@ def _build_all(parsed: ParsedTree, ctx: Ctx, sidecars: Sidecars, diag: Counter[s
             unique.append(row)
         built[table] = unique
     return built
+
+
+def _host(tree: TranscriptTree) -> HostRun | None:
+    return parse_host_run(tree.host_run())
+
+
+def _policy(host: HostRun | None) -> str:
+    return "full" if host is None else host.content_policy
 
 
 def _pin_moment(session_started_at_ms: int) -> datetime:
@@ -159,6 +169,7 @@ def _count_closes(prior: Rows, current: Rows, end_tree: Rows, diag: Counter[str]
 
 def _repin(tree: TranscriptTree, cursor: CaptureCursor, started_ms: int, cap: int) -> CaptureCursor:
     """Re-pin *cursor* to an earlier record only if its emission set, as persisted, holds no row."""
+    host = _host(tree)
     ctx = Ctx(
         cursor.producer,
         PRODUCER_VERSION,
@@ -166,6 +177,8 @@ def _repin(tree: TranscriptTree, cursor: CaptureCursor, started_ms: int, cap: in
         _pin_moment(cursor.session_started_at_ms),
         cursor.billing_shape,
         cap,
+        host,
+        _policy(host),
     )
     emitter = _Emitter(tree, ctx, Sidecars(tree, cursor), Counter())
     if emitter.emit(cursor.finalize_cuts, cursor.lines_consumed, cursor.finalized, None):
@@ -206,8 +219,12 @@ def record_turn(
         )
         matches = not resend_tree and (cursor.producer, cursor.parser_version) == (PRODUCER, PARSER_VERSION)
         base = cursor if matches else cursor.reset(PARSER_VERSION)
-    ctx = Ctx(PRODUCER, PRODUCER_VERSION, PARSER_VERSION, pin, billing_shape, cap)
+    host_bytes = tree.host_run()
+    host = parse_host_run(host_bytes)
+    ctx = Ctx(PRODUCER, PRODUCER_VERSION, PARSER_VERSION, pin, billing_shape, cap, host, _policy(host))
     diag: Counter[str] = Counter()
+    if host_bytes is not None and host is None:
+        diag["host_run_malformed"] += 1
     sidecars = Sidecars(tree, base)
     emitter = _Emitter(tree, ctx, sidecars, diag)
     key, parsed = emitter.parse(None, session_final)

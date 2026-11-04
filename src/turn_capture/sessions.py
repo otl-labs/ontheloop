@@ -31,6 +31,7 @@ from src.turn_capture.transcripts import Ctx, text_of
 from src.turn_capture.witness import interrupted
 
 AGENT_TYPE = "claude-code-subagent"
+
 WORKFLOWS = ("orient", "plan", "implement", "develop-executor", "audit", "overseer")
 WORKFLOW_SKILLS = {
     "orient": "orient",
@@ -102,12 +103,13 @@ AGENT_COLUMNS = (
     "error",
     "lambda_request_id",
     "workflow_run_id",
+    "host_run_ref",
 )
 _ERROR_KIND = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _COMMAND_NAME = re.compile(r"<command-name>/?([A-Za-z][A-Za-z0-9_-]*)</command-name>")
 
 
-def _first_model(stream: Stream, bound: int | None = None) -> str | None:
+def first_model(stream: Stream, bound: int | None = None) -> str | None:
     for rec in stream.recs:
         if rec.kind == "assistant" and not is_api_error(rec.data) and (bound is None or rec.line <= bound):
             model = rec.data["message"].get("model")
@@ -142,7 +144,7 @@ def _workflow(stream: Stream, bound: int, root: bool, diag: Counter[str]) -> str
     return "claude_code" if root else "subagent"
 
 
-def _open_bound(stream: Stream) -> int | None:
+def open_bound(stream: Stream) -> int | None:
     """Rule WT-9: the first closing event of the first closed assistant-bearing turn, else that turn's last record line."""
     for turn in stream.turns:
         if turn.closed and turn.last_assistant is not None:
@@ -152,10 +154,10 @@ def _open_bound(stream: Stream) -> int | None:
 
 def stream_due(stream: Stream) -> bool:
     """Rule D-1: a stream's rows exist only once its open row is due."""
-    return _open_bound(stream) is not None
+    return open_bound(stream) is not None
 
 
-def _close_outcome(turn: Turn, diag: Counter[str]) -> dict[str, str]:
+def close_outcome(turn: Turn, diag: Counter[str]) -> dict[str, str]:
     """Rule C-3: cancelled when the last turn was interrupted, failed on an API-error record, else success."""
     if interrupted(turn):
         return {"outcome": "cancelled"}
@@ -201,9 +203,20 @@ def _provenance(facts: Facts) -> dict[str, Any]:
     return dict(zip(("checkout_sha", "checkout_base_sha", "checkout_dirty"), facts, strict=True))
 
 
-def _segment_closes(ctx: Ctx, stream: Stream, diag: Counter[str]) -> list[dict[str, Any]]:
-    """Rules SC-1/SC-2: one close per root resume boundary for the segment before it, derived from the tree."""
-    rows: list[dict[str, Any]] = []
+def _open_facts(ctx: Ctx, stream: Stream, root: bool, diag: Counter[str]) -> Facts:
+    """Rule PV-2, then for a sidecar root the host-recorded checkout_sha where the hook pin gave none (never host.sha)."""
+    sha, base, dirty = open_provenance(stream, root, diag)
+    host = ctx.host if root else None
+    if sha is None and host is not None and host.checkout_sha is not None:
+        diag["checkout_from_host_run"] += 1
+        sha = host.checkout_sha
+    return sha, base, dirty
+
+
+def root_close_points(stream: Stream, final: bool, diag: Counter[str]) -> list[tuple[Rec, dict[str, str]]]:
+    """Every close of the ROOT stream as (closing record, outcome columns): rules SC-1/SC-2, one per resume boundary for the
+    segment before it, then (on a final parse) rule C-1's close at the root's last record. Derived from the tree alone."""
+    points: list[tuple[Rec, dict[str, str]]] = []
     start = -1
     for boundary in stream.resumes:
         effective = stream.resume_at[boundary.line]
@@ -214,14 +227,15 @@ def _segment_closes(ctx: Ctx, stream: Stream, diag: Counter[str]) -> list[dict[s
         if anchor is None or not any(t.last_assistant is not None for t in turns):
             diag["segment_close_skipped"] += 1
         else:
-            ext = role_ref(anchor.data["uuid"], 0, "close")
-            rows.append(
-                _row(ctx, anchor, stream, ext, "close", anchor.ts, anchor.line, None, **_close_outcome(turns[-1], diag))
-            )
+            points.append((anchor, close_outcome(turns[-1], diag)))
             if boundary.ts is not None and anchor.ts is not None and boundary.ts < anchor.ts:
                 diag["resume_before_close"] += 1
         start = effective - 1
-    return rows
+    if final:
+        anchor = next((r for r in reversed(stream.recs) if r.data.get("uuid") and r.ts is not None), None)
+        if anchor is not None:
+            points.append((anchor, close_outcome(stream.turns[-1], diag)))
+    return points
 
 
 def build_sessions(parsed: ParsedTree, ctx: Ctx, diag: Counter[str] | None = None) -> list[dict[str, Any]]:
@@ -229,7 +243,7 @@ def build_sessions(parsed: ParsedTree, ctx: Ctx, diag: Counter[str] | None = Non
     parents = {sp.agent_id: parsed.streams[sp.parent].session_ref for sp in parsed.spawns}
     rows: list[dict[str, Any]] = []
     for stream in emitting_streams(parsed):
-        bound = _open_bound(stream)
+        bound = open_bound(stream)
         if bound is None:
             continue
         pin = next((r for r in stream.recs if r.ts is not None), None)
@@ -245,12 +259,12 @@ def build_sessions(parsed: ParsedTree, ctx: Ctx, diag: Counter[str] | None = Non
                 ctx.started,
                 0 if child or pin is None else pin.line,
                 parents.get(stream.key),
-                workflow=_workflow(stream, bound, root, diag),
+                workflow=ctx.host.agent if root and ctx.host is not None else _workflow(stream, bound, root, diag),
                 execution_attempt=1,
                 branch=_branch(stream, bound),
-                model_primary=_first_model(stream, bound),
+                model_primary=first_model(stream, bound),
                 harness_session_key=harness_session_key(stream, bound, diag),
-                **_provenance(open_provenance(stream, root, diag)),
+                **_provenance(_open_facts(ctx, stream, root, diag)),
             )
         )
         for n, rec in enumerate(stream.resumes):
@@ -275,25 +289,26 @@ def build_sessions(parsed: ParsedTree, ctx: Ctx, diag: Counter[str] | None = Non
                 _row(ctx, rec, stream, role_ref(rec.uuid, 0, "compact"), "compact", rec.ts, rec.line, parents.get(stream.key))
             )
         if root:
-            rows += _segment_closes(ctx, stream, diag)
-        if parsed.final and root:
-            anchor = next((r for r in reversed(stream.recs) if r.data.get("uuid") and r.ts is not None), None)
-            if anchor is not None:
+            for anchor, outcome in root_close_points(stream, parsed.final, diag):
                 ext = role_ref(anchor.data["uuid"], 0, "close")
-                rows.append(
-                    _row(
-                        ctx,
-                        anchor,
-                        stream,
-                        ext,
-                        "close",
-                        anchor.ts,
-                        anchor.line,
-                        None,
-                        **_close_outcome(stream.turns[-1], diag),
-                    )
-                )
+                rows.append(_row(ctx, anchor, stream, ext, "close", anchor.ts, anchor.line, None, **outcome))
     return rows
+
+
+def agent_row_base(ctx: Ctx, kind: str, when: Any, ordinal: int, ext: str, **cols: Any) -> dict[str, Any]:
+    row: dict[str, Any] = dict.fromkeys(AGENT_COLUMNS)
+    row.update(
+        event_kind=kind,
+        event_timestamp=when,
+        session_started_at=ctx.started,
+        source_ordinal=ordinal,
+        external_ref=ext,
+        producer=ctx.producer,
+        producer_version=ctx.producer_version,
+        parser_version=ctx.parser_version,
+    )
+    row.update(cols)
+    return {k: v for k, v in row.items() if v is not None}
 
 
 def _agent_row(ctx: Ctx, spawn: Spawn, child: Stream, ext: str, kind: str, rec: Rec, **cols: Any) -> dict[str, Any]:
@@ -302,27 +317,22 @@ def _agent_row(ctx: Ctx, spawn: Spawn, child: Stream, ext: str, kind: str, rec: 
     spec = spec if isinstance(spec, dict) else {}
     name = spec.get("subagent_type")
     version = use.rec.data.get("version")
-    row: dict[str, Any] = dict.fromkeys(AGENT_COLUMNS)
-    row.update(
-        event_kind=kind,
-        event_timestamp=rec.ts,
-        session_started_at=ctx.started,
-        source_ordinal=rec.line,
-        external_ref=ext,
+    return agent_row_base(
+        ctx,
+        kind,
+        rec.ts,
+        rec.line,
+        ext,
         entity_ref=use.tool_id,
         session_ref=child.session_ref,
         observation_ref=use.tool_id,
-        producer=ctx.producer,
-        producer_version=ctx.producer_version,
-        parser_version=ctx.parser_version,
         agent_type=AGENT_TYPE,
         agent_name=name if isinstance(name, str) else None,
-        model=_first_model(child),
+        model=first_model(child),
         version=version if isinstance(version, str) else None,
         trigger="subagent_background" if spec.get("run_in_background") is True else "subagent_sync",
+        **cols,
     )
-    row.update(cols)
-    return {k: v for k, v in row.items() if v is not None}
 
 
 def _notice_close(notice: Rec, diag: Counter[str]) -> dict[str, str]:

@@ -9,7 +9,9 @@ Tests:
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -21,6 +23,9 @@ WRAPPER = ROOT / "scripts" / "ci" / "claude_p_retry.sh"
 
 _STUB_CLAUDE = """\
 #!/usr/bin/env bash
+if [ -n "${CLAUDE_STUB_ARGV_FILE:-}" ]; then
+    printf '%s\\n' "$*" >> "$CLAUDE_STUB_ARGV_FILE"
+fi
 COUNT=0
 if [ -f "$CLAUDE_STUB_COUNTER_FILE" ]; then
     COUNT=$(cat "$CLAUDE_STUB_COUNTER_FILE")
@@ -215,3 +220,83 @@ class TestEnforcementCheck:
 
         violations = _check_claude_p_raw_invocations(ROOT / ".github" / "workflows")
         assert violations == [], f"Real workflows have unwrapped claude -p: {violations}"
+
+
+UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _manifest(out: Path) -> list[dict]:
+    path = Path(f"{out}.sessions.jsonl")
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_each_attempt_runs_under_its_own_session_id(stub_env, tmp_path):
+    env, _ = stub_env
+    env["CLAUDE_STUB_BEHAVIOR"] = "always_transient"
+    argv = tmp_path / "argv"
+    env["CLAUDE_STUB_ARGV_FILE"] = str(argv)
+    _run_wrapper(env, tmp_path / "out.txt")
+    ids = [re.search(r"--session-id (\S+)", line).group(1) for line in argv.read_text().splitlines()]
+    assert len(ids) == 3 and len(set(ids)) == 3 and all(UUID.match(i) for i in ids)
+    assert all(line.startswith("-p --session-id ") for line in argv.read_text().splitlines())
+    starts = [m for m in _manifest(tmp_path / "out.txt") if "attempt" in m]
+    assert [m["session_id"] for m in starts] == ids
+    assert [m["attempt"] for m in starts] == [1, 2, 3]
+    assert all(re.match(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$", m["started_at"]) for m in starts)
+
+
+def test_manifest_appends_start_and_result_lines_across_invocations(stub_env, tmp_path):
+    env, counter = stub_env
+    out = tmp_path / "out.txt"
+    env["CLAUDE_STUB_BEHAVIOR"] = "transient_then_proceed"
+    assert _run_wrapper(env, out).returncode == 0
+    counter.unlink()
+    env["CLAUDE_STUB_BEHAVIOR"] = "always_revise"
+    assert _run_wrapper(env, out).returncode != 0
+    lines = _manifest(out)
+    assert len(lines) == 6
+    results = [m for m in lines if "exit" in m]
+    assert [(m["exit"], m["transient"]) for m in results] == [(1, True), (0, False), (1, False)]
+    starts = {m["session_id"] for m in lines if "attempt" in m}
+    assert {m["session_id"] for m in results} == starts and len(starts) == 3
+    assert [m["attempt"] for m in lines if "attempt" in m] == [1, 2, 1]
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--session-id", "--session-id=abc", "--resume", "-r", "--continue", "-c", "--fork-session", "--no-session-persistence"],
+)
+def test_session_identity_flags_are_refused(stub_env, tmp_path, flag):
+    env, counter = stub_env
+    env["CLAUDE_STUB_BEHAVIOR"] = "transient_then_proceed"
+    result = _run_wrapper(env, tmp_path / "out.txt", [flag])
+    assert result.returncode == 1 and not counter.exists()
+    assert not Path(f"{tmp_path / 'out.txt'}.sessions.jsonl").exists()
+
+
+def test_manifest_write_failure_is_not_fatal(stub_env, tmp_path):
+    env, _ = stub_env
+    env["CLAUDE_STUB_BEHAVIOR"] = "transient_then_proceed"
+    out = tmp_path / "out.txt"
+    Path(f"{out}.sessions.jsonl").mkdir()
+    assert _run_wrapper(env, out).returncode == 0
+
+
+def test_wrapper_runs_under_env_i(stub_env, tmp_path):
+    env, _ = stub_env
+    env["CLAUDE_STUB_BEHAVIOR"] = "transient_then_proceed"
+    out = tmp_path / "out.txt"
+    keep = {k: env[k] for k in ("PATH", "CLAUDE_STUB_BEHAVIOR", "CLAUDE_STUB_COUNTER_FILE", "CLAUDE_P_RETRY_BACKOFF_BASE")}
+    cmd = [
+        "env",
+        "-i",
+        *[f"{k}={v}" for k, v in keep.items()],
+        "bash",
+        str(WRAPPER),
+        str(out),
+        "--",
+        "--output-format",
+        "text",
+    ]
+    assert subprocess.run(cmd, capture_output=True, text=True).returncode == 0
+    assert len(_manifest(out)) == 4

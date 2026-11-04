@@ -79,7 +79,7 @@ def split_route_pending(result: Any) -> tuple[Any, int]:
 
 def test_every_golden_case_loads_with_every_fk_resolving(tmp_path: Path) -> None:
     specs = load_specs()
-    full_outputs = omissions = 0
+    full_outputs = omissions = withheld = 0
     for name in case_names():
         files, _ = load_case(name)
         with case_cap(name):
@@ -87,7 +87,8 @@ def test_every_golden_case_loads_with_every_fk_resolving(tmp_path: Path) -> None
         result, held_back = split_route_pending(whole)
         assert held_back == ROUTE_PENDING.get(name, 0), (name, held_back)
         full_outputs += sum(r["purpose"] == "tool_output" and "content" in r for r in result.transcripts)
-        omissions += sum("content_omitted_reason" in r for r in result.transcripts)
+        omissions += sum(r.get("content_omitted_reason") == "oversize" for r in result.transcripts)
+        withheld += sum(r.get("content_omitted_reason") == "withheld_by_policy" for r in result.transcripts)
         con = open_local_lake(tmp_path / name.removesuffix(".json"))
         create_tables(con, specs)
         load(con, specs, result)
@@ -105,7 +106,7 @@ def test_every_golden_case_loads_with_every_fk_resolving(tmp_path: Path) -> None
         stored = con.execute("SELECT coalesce(max(strlen(content)), 0) FROM lake.telemetry_transcripts").fetchone()[0]
         assert stored <= ROUTE_PENDING_BYTES, name
         con.close()
-    assert full_outputs >= 2 and omissions == 1
+    assert full_outputs >= 2 and omissions == 1 and withheld == 5
 
 
 def test_replay_mutation_and_generation_bump_on_a_nested_tree(tmp_path: Path) -> None:

@@ -127,6 +127,7 @@ def completeness_line(result: completeness.CompletenessResult, status: str, find
             "listed_unjoinable": result.listed_unjoinable,
             "listed_scope_unknown": result.listed_scope_unknown,
             "captured_without_key": result.captured_without_key,
+            "captured_host_runs": result.captured_host_runs,
             "alarms": _alarms(findings),
         }
     )

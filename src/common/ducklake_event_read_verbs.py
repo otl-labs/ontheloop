@@ -216,7 +216,8 @@ EVENT_READS: dict[str, EventRead] = {
             description=(
                 "Verification only. One row per root session of a real-purpose project over at most "
                 f"{MAX_WINDOW_DAYS} UTC days: session_id, entity_ref, harness_session_key, branch, session_started_at, the "
-                "tree's last event and the Decision 207 stamps. " + _PRODUCTION
+                "tree's last event, host_run_ref (the root's top-level run identity, NULL for an interactive root) and the "
+                "Decision 207 stamps. " + _PRODUCTION
             ),
         ),
         EventRead(

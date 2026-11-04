@@ -133,6 +133,17 @@ def test_keyless_captures_explain_listed_rows() -> None:
     assert cp.compare_sessions(roots, [_listed("A")], judged_day=DAY).unexplained_not_captured == 0
 
 
+def test_host_run_roots_count_as_captured_host_runs() -> None:
+    ci = {**_root(None), "host_run_ref": "gha:1/1/rca/1"}
+    result = cp.compare_sessions(
+        [ci, _root(None), _root("session_K")], [_listed("A"), _listed("B"), _listed("K")], judged_day=DAY
+    )
+    assert (result.captured_host_runs, result.captured_without_key, result.captured_not_listed) == (1, 1, 0)
+    assert result.listed_not_captured == 2 and result.unexplained_not_captured == 1
+    elsewhere = {**ci, "session_started_at": OTHER_DAY.isoformat()}
+    assert cp.compare_sessions([elsewhere], [], judged_day=DAY).captured_host_runs == 0
+
+
 @pytest.mark.parametrize(
     "name, pages",
     [

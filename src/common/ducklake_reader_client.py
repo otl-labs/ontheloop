@@ -277,6 +277,7 @@ VERB_FIELDS: dict[str, tuple[str, ...] | object] = {
         "branch",
         "session_started_at",
         "last_event_timestamp",
+        "host_run_ref",
         "generations",
         "conflicted_grain_keys",
         "derivation_conflicted",

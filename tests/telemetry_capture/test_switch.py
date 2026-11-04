@@ -39,7 +39,9 @@ def load(name: str) -> ModuleType:
 
 def test_the_committed_switch_is_on_and_still_guarded() -> None:
     data = yaml.safe_load((REPO / switch.SWITCH_FILE).read_text(encoding="utf-8"))
-    assert data == {"enabled": True}
+    assert data["enabled"] is True
+    assert data["ci_repository"] == "otl-labs/ontheloop"
+    assert [e["workflow"] for e in data["ci_workflows"]] == [".github/workflows/ci-rca.yml"]
     assert switch.capture_mode(REMOTE, REPO) == switch.ON
     assert switch.capture_mode({}, REPO) == switch.OFF
     assert switch.capture_mode({**REMOTE, "GITHUB_ACTIONS": "true"}, REPO) == switch.OFF
@@ -216,3 +218,72 @@ def test_switch_read_failure_never_raises(tmp_path: Path, monkeypatch: pytest.Mo
     assert switch.switch_state(repo(tmp_path / "b", "enabled: true\n")) == (True, "working_tree")
     monkeypatch.setattr(switch.subprocess, "run", real_run)
     assert switch.switch_state(tmp_path / "nowhere") == (False, "working_tree")
+
+
+def test_switch_show_timeout_after_a_resolved_ref_reads_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _git_repo(tmp_path / "a", "enabled: false\n", "enabled: true\n")
+    _origin(root)
+    real = switch._git
+
+    def timing_out_show(repo_root: Path, *args: str):
+        return None if args and args[0] == "show" else real(repo_root, *args)
+
+    monkeypatch.setattr(switch, "_git", timing_out_show)
+    assert switch.switch_state(root) == (False, "origin_main")
+    assert switch.capture_mode(REMOTE, root) == switch.OFF
+
+
+CI_YAML = (
+    "enabled: true\nci_repository: otl-labs/ontheloop\nci_workflows:\n"
+    "  - {workflow: .github/workflows/ci-rca.yml, agent: ci_rca, content_policy: full}\n"
+)
+GATE = {"workflow_path": ".github/workflows/ci-rca.yml", "ref": "refs/heads/main", "repository": "otl-labs/ontheloop"}
+
+
+def test_ci_gate_reads_ci_only_for_an_allow_listed_main_run(tmp_path: Path) -> None:
+    root = _git_repo(tmp_path / "a", CI_YAML, "enabled: false\n")
+    _origin(root)
+    gate = switch.ci_gate(root, **GATE)
+    assert (gate.mode, gate.reason, gate.source) == (switch.CI, None, "origin_main")
+    assert gate.entry == {"workflow": GATE["workflow_path"], "agent": "ci_rca", "content_policy": "full"}
+    refusals = [
+        ({"repository": "otl-labs/probe"}, "repository_mismatch"),
+        ({"ref": "refs/heads/work"}, "ref_not_main"),
+        ({"workflow_path": ".github/workflows/other.yml"}, "not_allow_listed"),
+    ]
+    for override, reason in refusals:
+        refused = switch.ci_gate(root, **{**GATE, **override})
+        assert (refused.mode, refused.entry, refused.reason) == (switch.OFF, None, reason)
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("enabled: false\nci_repository: otl-labs/ontheloop\n", "switch_off"),
+        (":\n- {", "switch_off"),
+        ("enabled: true\nci_repository: otl-labs/ontheloop\nci_workflows: nope\n", "not_allow_listed"),
+        (CI_YAML + "  - {workflow: .github/workflows/ci-rca.yml, agent: ci_rca, content_policy: full}\n", "malformed_entry"),
+        (CI_YAML.replace("content_policy: full", "content_policy: raw"), "malformed_entry"),
+        (CI_YAML.replace("agent: ci_rca", "agent: CI-RCA"), "malformed_entry"),
+        (CI_YAML.replace("agent: ci_rca, ", ""), "malformed_entry"),
+    ],
+)
+def test_ci_gate_off_reasons(tmp_path: Path, text: str, reason: str) -> None:
+    gate = switch.ci_gate(repo(tmp_path, text), **GATE)
+    assert (gate.mode, gate.reason) == (switch.OFF, reason)
+
+
+def test_ci_gate_reads_main_first_and_switch_mode_honours_it(tmp_path: Path) -> None:
+    root = _git_repo(tmp_path / "a", "enabled: false\n", CI_YAML)
+    _origin(root)
+    assert switch.ci_gate(root, **GATE).reason == "switch_off"
+    on = _git_repo(tmp_path / "b", CI_YAML, "enabled: false\n")
+    _origin(on)
+    gate = switch.ci_gate(on, **GATE)
+    actions = {"GITHUB_ACTIONS": "true"}
+    assert switch.switch_mode(actions, on, gate) == (switch.CI, "origin_main")
+    assert switch.switch_mode({**actions, "OTL_TURN_CAPTURE": "off"}, on, gate) == (switch.OFF, None)
+    assert switch.switch_mode(actions, on) == (switch.OFF, None)
+    assert switch.capture_mode({**REMOTE, **actions}, on) == switch.OFF
+    refused = switch.ci_gate(on, **{**GATE, "ref": "refs/heads/work"})
+    assert switch.switch_mode(actions, on, refused) == (switch.OFF, "origin_main")

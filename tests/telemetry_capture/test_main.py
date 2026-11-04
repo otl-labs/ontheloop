@@ -17,6 +17,7 @@ from scripts.telemetry_capture.state import CaptureState, state_dir
 from scripts.telemetry_capture.transport import CaptureUnavailable
 from src.turn_capture.cursor import CaptureCursor
 from tests.fixtures.turn_capture_corpus import SID, assistant, hook, jsonl, prompt, text_block, tool_result, tool_use_block
+from tests.fixtures.turn_capture_v8_cases import sidecar
 
 PIN = 'bash "$CLAUDE_PROJECT_DIR/.claude/hooks/session_start_log_turn.sh" --project-ref=example/project'
 
@@ -478,3 +479,40 @@ def test_run_builds_the_event_wait_and_passes_the_lock_wait(monkeypatch: pytest.
         stop["wait"]() == "witness_wait_timeout" and prompt_call["wait"]() == "prompt_wait_timeout" and failure["wait"] is None
     )
     assert 750 < stop["budget"].remaining() <= 755 and 725 < prompt_call["budget"].remaining() <= 730
+
+
+def test_pass_accepts_a_sidecar_only_tree_and_refuses_a_conflicted_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(cli, "run_pass", lambda *a, **kw: PassResult("sent", {"rows": {}, "diag": {}}))
+    out: list[str] = []
+    only = tmp_path / "only"
+    only.mkdir()
+    root = only / f"{SID}.jsonl"
+    root.write_text(jsonl([prompt("u1", 1, "p1", "go")]), encoding="utf-8")
+    (only / SID).mkdir()
+    (only / SID / "host-run.json").write_text(sidecar(), encoding="utf-8")
+    assert cli.main(["pass", "--tree", str(root)], out=out.append) == 0
+    conflicted = tmp_path / "conflicted"
+    conflicted.mkdir()
+    pinned = conflicted / f"{SID}.jsonl"
+    pinned.write_text(
+        jsonl([hook("h0", 0.5, "SessionStart:startup", command=PIN.replace("example/project", "other/project"))])
+    )
+    (conflicted / SID).mkdir()
+    (conflicted / SID / "host-run.json").write_text(sidecar(), encoding="utf-8")
+    assert cli.main(["pass", "--tree", str(pinned)], out=out.append) == 1 and out[-1] == "refused: pin_conflict"
+
+
+def test_ci_pass_is_registered_and_delegates(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake(args, env, repo_root, factory, out):
+        seen.update(manifest=args.manifest, job=args.job, event=args.event_name, budget=args.budget_s, env=env)
+        return 0
+
+    monkeypatch.setattr(cli.ci_pass, "main_ci_pass", fake)
+    argv = ["ci-pass", "--manifest", "a*", "--manifest", "b", "--workflow-path", "w", "--ref", "r", "--repository", "o/r"]
+    argv += ["--run-id", "1", "--run-attempt", "1", "--job", "rca", "--event-name", "push", "--sha", "x" * 40]
+    assert cli.main(argv, env={"K": "v"}) == 0
+    assert seen == {"manifest": ["a*", "b"], "job": "rca", "event": "push", "budget": 180.0, "env": {"K": "v"}}

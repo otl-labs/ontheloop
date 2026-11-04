@@ -327,10 +327,11 @@ fields:
     iceberg_type: string
     nullable: true
     description: GitHub Actions workflow run id, when the agent ran from CI. NULL otherwise.
-    semantics: Run provenance (GitHub Actions correlation). Null for non-CI runs. Filled, with host_run_ref, by the CI capture producer (owner stays T3.20:c9).
-    populated_by: "unproduced: T3.20:c9 (no producer writes it)"
+    semantics: Run provenance (GitHub Actions correlation). Null for non-CI runs. Filled, with host_run_ref, on the top-level run rows of a claude -p run in GitHub Actions (the run id; the host-run sidecar's host.run_id).
+    populated_by: the claude_code producer from parser_version 8, on a top-level run row whose tree carries a host-run sidecar (a sub-agent row leaves it NULL).
     dq_intent: {}
     amendment_log:
+      - {date: "2026-10-30", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-claude-p-capture-adapter (rec-4424): populated_by names the claude_code producer from parser_version 8 (the unproduced owner entry T3.20:c9 is retired for this column). Meaning unchanged."}
       - {date: "2026-10-29", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): semantics notes the CI capture producer fills it with host_run_ref (owner stays T3.20:c9). Meaning unchanged."}
   host_run_ref:
     type: str
@@ -343,18 +344,24 @@ fields:
       widen (Decision 210 cl.3). No prefix's character class admits ':' after the prefix, so an ARN cannot match; it never carries an ARN,
       account id or hostname (Decision 101); the per-host typed columns (workflow_run_id, lambda_request_id) stay as typed join keys.
       A sub-agent row's host_run_ref is NULL at write (null_or_zero_when on the sub-agent triggers).
-    populated_by: "unproduced: T3.20:c9 (no producer writes it)"
+    populated_by: the claude_code producer from parser_version 8, on a top-level run row (open and close) whose tree carries a host-run sidecar; NULL on a sub-agent row.
     dq_intent:
+      required_when: {trigger: [workflow_run, workflow_dispatch, push, schedule, eventbridge, manual, smoke_test]}
       pattern: "^(gha:[0-9]{1,20}/[0-9]{1,6}/[A-Za-z0-9_.-]{1,100}/[1-9][0-9]{0,2}|ecs:[A-Za-z0-9_.-]{1,255}/[A-Za-z0-9-]{1,64}|lambda:[A-Za-z0-9-]{1,64}|local:[A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,128})$"
       null_or_zero_when: {trigger: [subagent_sync, subagent_background]}
     governance_notes_local: >-
-      No required_when here: Decision 222 cl.1's additive production add refuses a column carrying one, so
-      PLAN-claude-p-capture-adapter adds required_when {trigger: [the top-level values]} after the production add.
+      required_when {trigger: [the seven top-level values]} lands after the production column add (Decision 222 cl.1 refuses an additive add
+      of a column that carries a rule), so a top-level run row must carry it. It is undated (required_when is not a dateable rule kind) and
+      cannot trip older rows: no producer writes a top-level trigger before parser_version 8, a sub-agent row carries subagent_sync or
+      subagent_background, and the deploy smoke vector carries no trigger. A gha value is built from the host-run sidecar the CI capture pass
+      writes: gha:<run id>/<run attempt>/<job id>/<retry ordinal>, the ordinal being the claude -p attempt's rank by start time across the
+      job's wrapper manifests (1 for a job that ran the agent once).
     amendment_log:
+      - {date: "2026-10-30", semantic_break: true, change_class: not_null_tighten, summary: "PLAN-telemetry-claude-p-capture-adapter (rec-4424): host_run_ref is required when the row's trigger is one of the seven top-level values (write-enforced required_when, undated); populated_by names the claude_code producer from parser_version 8.", migration_story: "census: 0 violators (2026-10-30): no stored row carries a top-level trigger (every stored telemetry_agents row is a sub-agent row with subagent_sync or subagent_background), and the deploy smoke vector carries no trigger. The production column add (provision_telemetry_catalog, Decision 230 cl.4) precedes this rule (Decision 222 cl.1)."}
       - {date: "2026-10-29", semantic_break: false, change_class: field_add, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): one generic nullable host_run_ref column with a four-prefix pattern (gha, ecs, lambda, local), NULL on a sub-agent run.", migration_story: "Additive nullable column; no stored row changes. Production add owed (provision_telemetry_catalog, Decision 230 cl.4); until then it is pending_reconcile and the governed deploy holds the production telemetry writer and reader."}
 realization:
-  produced: {write_boundary: [event_id, created_timestamp, tenant_id, project_id, session_id, observation_id, agent_run_id], claude_code: [event_kind, event_timestamp, session_started_at, source_ordinal, external_ref, entity_ref, producer, producer_version, parser_version, agent_type, agent_name, model, version, trigger, outcome, error]}
-  unproduced: {T4.32:c1: [provider], rec-4711: [lambda_request_id, findings_count, recs_created, queue_entries_written], T3.20:c9: [workflow_run_id, host_run_ref]}
+  produced: {write_boundary: [event_id, created_timestamp, tenant_id, project_id, session_id, observation_id, agent_run_id], claude_code: [event_kind, event_timestamp, session_started_at, source_ordinal, external_ref, entity_ref, producer, producer_version, parser_version, agent_type, agent_name, model, version, trigger, outcome, error, workflow_run_id, host_run_ref]}
+  unproduced: {T4.32:c1: [provider], rec-4711: [lambda_request_id, findings_count, recs_created, queue_entries_written]}
 run_shapes:
   sub_agent:
     session_id: child
@@ -369,11 +376,11 @@ run_shapes:
     session_id: root
     observation_id: "null"
     entity_ref: "<root session entity_ref>/run"
-    external_ref: "'<root session entity_ref>/run#0/open' and '<root session entity_ref>/run#0/close'"
+    external_ref: "'<root session entity_ref>/run#0/open' for the open row; a close row is keyed by its closing record like the root's session close rows ('<closing record uuid>#0/run_close'), one per root session close row, so a growing tree never rebuilds a ref with other content (a run that is never resumed has exactly one)"
     agent_type: "the source_registry key of the agent (e.g. ci_rca)"
     triggers: [workflow_run, workflow_dispatch, push, schedule, eventbridge, manual, smoke_test]
     host_run_ref: required
-    rows: "one open row timed at the root's open row and one close row written by the final pass, timed at the root's latest close row, outcome from the host's terminal result"
+    rows: "one open row timed at the root's open row and, from the final pass, one close row per root session close row, timed and outcome-ed like it (C-3)"
     one_run_per: "root session (a claude -p retry attempt is a new session, so a new run with its own retry ordinal)"
     state: "root state stays derived from the root's own session rows (STATE_CTES, parent_session_id IS NULL); the pair is run provenance, and agent_run_state_and_duration and agent_run_token_rollup over the root return it"
 governance:
@@ -385,7 +392,10 @@ governance:
 governance_notes: >-
   TOP-LEVEL RUN: a CI job running claude -p, a Fargate task, a Lambda or a local unattended run is its root session plus one open/close
   pair here (run_shapes.top_level: session_id the root, observation_id NULL, entity_ref '<root session entity_ref>/run', host_run_ref
-  required); telemetry_sessions.surface tells the five run surfaces apart at read. EVENT JOURNAL: telemetry_agents replaces the ROOTLESS telemetry_agent_invocations -- the
+  required); telemetry_sessions.surface tells the five run surfaces apart at read. From parser_version 8 the claude_code producer writes these rows for a
+  claude -p run in GitHub Actions: ci-pass writes a host-run sidecar beside the root transcript (project_ref, agent as the source_registry key, content
+  policy and host facts), rule P-5 lets the sidecar pin the project when the hook pin is absent (a disagreement defers the pass), the open row carries
+  agent_type, trigger (the host event name), workflow_run_id and host_run_ref, and the close rows mirror the root's session close rows. EVENT JOURNAL: telemetry_agents replaces the ROOTLESS telemetry_agent_invocations -- the
   canonical addition is session_id (+ optional observation_id), rooting every agent row to its
   session, now shaped as an open+close row pair keyed by the DERIVED agent_run_id (Decision 199,
   amending Decision 95 clause 4, Decision 96 clauses 1 and 3, and Decision 97 clauses 1-4). Token
@@ -398,6 +408,7 @@ governance_notes: >-
   carries `required_when`, which then governs (scripts/field_semantics_event_projection.py _is_not_null); every declared rule is write-enforced (Decision 210); a staged rule is spelled with exclude_before or an owned exemption. Provisioned in the production telemetry catalog (Decision 230). KNOWN GAP: rec-2173 (preflight telemetry health) and
   the broader Phase 4 re-provisioning (rec-4024) are CODE follow-ons, not this contract.
 amendment_log:
+  - {date: "2026-10-30", semantic_break: false, change_class: governance_note_add, summary: "PLAN-telemetry-claude-p-capture-adapter (rec-4424): governance note for the claude_code top-level run rows from parser_version 8 (host-run sidecar, rule P-5, close rows keyed by the closing record), run_shapes.top_level states the close-row ref and count, and realization moves workflow_run_id and host_run_ref to produced.claude_code. Per-field changes are on their own fields' logs.", migration_story: "Note and realization only; no stored row changes."}
   - {date: "2026-10-29", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-top-level-agent-run (rec-4416): contract.description and the header comment name both run shapes (sub-agent and top-level). Meaning of the sub-agent shape unchanged."}
   - {date: "2026-10-29", semantic_break: false, change_class: field_add, summary: "PLAN-telemetry-top-level-agent-run (rec-4416, Decisions 199, 210, 222): top-level run shape (run_shapes), host_run_ref, closed trigger set, top-level entity_ref rule; lambda_request_id and the three work metrics move to owner rec-4711. Per-field changes are on their own fields' logs.", migration_story: "Additive; no stored row changes (every stored row is a sub-agent row). Production column add owed for host_run_ref."}
   - {date: "2026-10-25", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-production-catalog bookkeeping: the two not-provisioned-in-production statements now say provisioned in the production telemetry catalog (Decision 230); mechanical status edit, no meaning change."}
