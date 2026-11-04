@@ -35,7 +35,7 @@ from src.lambdas.ducklake_maintenance_smoke import telemetry_actions
 DATA_PATH = os.environ.get("DUCKLAKE_DATA_PATH", rt.SMOKE_DATA_PATH)
 META_SCHEMA = os.environ.get("DUCKLAKE_META_SCHEMA", rt.SMOKE_META_SCHEMA)
 EXTENSION_DIRECTORY = os.environ.get("DUCKLAKE_EXTENSION_DIRECTORY", rt.LAMBDA_EXTENSION_DIRECTORY)
-DSN_SECRET_ID = os.environ.get("DUCKLAKE_DSN_SECRET_ID", rt.DSN_SECRET_ID)
+DSN_PARAMETER_NAME = os.environ.get("DUCKLAKE_DSN_PARAMETER", rt.DSN_PARAMETER_NAME)
 
 # Table scope: ducklake_smoke_* only (this Lambda never targets the production catalog).
 _SCOPE_TABLES = maint.GC_TABLE_SCOPE
@@ -44,7 +44,7 @@ _HOT_SCOPE_TABLES = maint.HOT_TABLE_SCOPE
 
 def _open_connection() -> Any:
     """Open a smoke-scoped baked-extension connection to the Neon catalog (always ducklake_smoke)."""
-    dsn = rt.fetch_dsn(DSN_SECRET_ID)
+    dsn = rt.fetch_dsn(DSN_PARAMETER_NAME)
     return rt.open_connection(dsn=dsn, data_path=DATA_PATH, meta_schema=META_SCHEMA, extension_directory=EXTENSION_DIRECTORY)
 
 

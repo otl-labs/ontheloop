@@ -12,19 +12,19 @@ Some rules below restate root rules for proximity. Root `CLAUDE.md` is authorita
 
 ## AWS context
 - Region: `eu-west-2`
-- Account: personal platform account (ID supplied via gitignored `terraform/personal/terraform.personal.tfvars`; never committed).
+- Account: personal AWS account (ID supplied via gitignored `terraform/personal/terraform.personal.tfvars`; never committed).
 - Profile: `agent_platform` (PlatformDev, runtime) for agent operations; `agent_platform_admin` (PlatformAdmin) for provisioning (creates IAM + OIDC).
-- Personal-account infra lives in the isolated `terraform/personal/` root module (own provider + state); it is the only live root module. The legacy work-account root's `.tf` files (retained for a while as architectural-evolution artefacts per CD.21, never applied) were removed in the platform cleanse.
+- Personal-account infra lives in the isolated `terraform/personal/` root module (own provider + state); it is the only live root module. The legacy work-account root's `.tf` files (retained for a while as architectural-evolution artefacts per CD.21, never applied) were removed in the Decision 178 cleanse.
 - The personal account has no SCP restricting IAM users or external OIDC (Decisions 36/37 do not apply to this account). OIDC provider + CI roles are created in `terraform/personal/oidc.tf`.
 
 ## Running terraform/personal/ on CC-web
 **This project runs ONLY on Claude Code on the web. There is no operator local machine.**
 
-Read `docs/contracts/terraform-cc-web-operations.yaml` before touching `terraform/personal/` -- it
-carries the full CC-web operating procedure (provider-mirror init, remote-state variable recovery,
-the speculative-plan + apply-the-saved-plan pipeline, alarm-only drift detection, the convergence
-anchor, and the operator-only break-glass loop). This stub carries only what the ROUTINE
-(non-admin) loop needs unaided.
+Read `docs/contracts/terraform-cc-web-operations.yaml` (provider-mirror init, remote-state variable
+recovery, the operator-only break-glass loop) and `docs/contracts/terraform-personal-cd.yaml` (the
+speculative-plan + apply-the-saved-plan pipeline, alarm-only drift detection, the convergence anchor)
+before touching `terraform/personal/`. This stub carries only what the ROUTINE (non-admin) loop
+needs unaided.
 
 **Agents never run terraform apply as a self-directed, routine action; operators may always invoke
 it directly. The sole agent exception is the human-gated break-glass admin tier in

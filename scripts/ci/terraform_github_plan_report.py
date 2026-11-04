@@ -9,11 +9,25 @@ path with python3 from .github/workflows/terraform-github-plan.yml.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+def _load_core() -> Any:
+    spec = importlib.util.spec_from_file_location("plan_names_core", Path(__file__).with_name("plan_names_core.py"))
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_core = _load_core()
+action_bucket = _core.action_bucket
+changed_names = _core.changed_names
 
 RULESET_TYPE = "github_repository_ruleset"
 BYPASS = "bypass_actors"
@@ -72,30 +86,6 @@ def load_visibility(path: str | Path | None) -> dict[str, str]:
     return out
 
 
-def _has_true(node: Any) -> bool:
-    if node is True:
-        return True
-    if isinstance(node, dict):
-        return any(_has_true(v) for v in node.values())
-    if isinstance(node, list):
-        return any(_has_true(v) for v in node)
-    return False
-
-
-def _changed_names(change: dict[str, Any]) -> list[str]:
-    before = change.get("before") or {}
-    after = change.get("after") or {}
-    unknown = change.get("after_unknown") or {}
-    before = before if isinstance(before, dict) else {}
-    after = after if isinstance(after, dict) else {}
-    unknown = unknown if isinstance(unknown, dict) else {}
-    names = set()
-    for key in set(before) | set(after) | set(unknown):
-        if before.get(key) != after.get(key) or _has_true(unknown.get(key)):
-            names.add(key)
-    return sorted(names)
-
-
 def classify(plan: dict[str, Any], visibility: dict[str, str]) -> Report:
     rep = Report(visibility=dict(visibility))
     bypass_vis = visibility.get("ruleset_bypass_actors", "unknown")
@@ -105,21 +95,18 @@ def classify(plan: dict[str, Any], visibility: dict[str, str]) -> Report:
         change = rc.get("change") or {}
         actions = list(change.get("actions") or [])
         importing = bool(change.get("importing"))
-        if importing:
-            rep.imports += 1
-        elif actions in (["no-op"], ["read"], []):
+        bucket = action_bucket(actions, importing)
+        if bucket is None:
             continue
-        elif actions == ["create"]:
-            rep.add += 1
-        elif actions == ["update"]:
-            rep.change += 1
-        elif actions == ["delete"]:
-            rep.destroy += 1
-        elif sorted(actions) == ["create", "delete"]:
+        if bucket == "import":
+            rep.imports += 1
+        elif bucket == "replace":
             rep.replace += 1
             rep.add += 1
             rep.destroy += 1
-        names = _changed_names(change)
+        elif bucket != "other":
+            setattr(rep, bucket, getattr(rep, bucket) + 1)
+        names = changed_names(change)
         bypass_only = (
             rc.get("type") == RULESET_TYPE
             and actions == ["update"]

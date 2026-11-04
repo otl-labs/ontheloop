@@ -11,10 +11,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.fixtures.decision_entry import authored_bytes, cap_bytes, decision_entry
+
 pytestmark = pytest.mark.unit
 
 _REPO = Path(__file__).resolve().parents[3]
-_CAP_BYTES = 6144
 _REVERSAL_IDS = (
     "capped-bill-exceeds-rds",
     "wall-p95-over-budget-after-tuning",
@@ -32,17 +33,11 @@ def _decision_number() -> int:
     return int(match.group(1))
 
 
-def _entry(text: str, number: int) -> str:
-    match = re.search(rf"^## Decision {number}:.*?(?=^## Decision \d+:)", text, re.MULTILINE | re.DOTALL)
-    assert match is not None, f"Decision {number} not found"
-    return match.group(0)
-
-
 def test_decision_entry_and_annotations():
     n = _decision_number()
     text = (_REPO / "docs/DECISIONS.md").read_text(encoding="utf-8")
-    entry = _entry(text, n)
-    assert len(entry.encode("utf-8")) <= _CAP_BYTES
+    entry = decision_entry(text, n)
+    assert authored_bytes(entry) <= cap_bytes()
 
     envelope = yaml.safe_load(re.search(r"```yaml\n(.*?)\n```", entry, re.DOTALL).group(1))
     assert envelope["number"] == n and envelope["amends"] == [107, 88]
@@ -59,5 +54,5 @@ def test_decision_entry_and_annotations():
     assert conditions["decision"] == n and [c["id"] for c in conditions["conditions"]] == list(_REVERSAL_IDS)
 
     for amended in (107, 88):
-        body = _entry(text, amended)
+        body = decision_entry(text, amended)
         assert re.search(rf"^\[Amendment \d{{4}}-\d{{2}}-\d{{2}}, Decision {n}:", body, re.MULTILINE), amended

@@ -178,12 +178,18 @@ def main() -> None:
         print("[SKIP] validate.py invoked from within a pytest run (PYTEST_CURRENT_TEST set). Exiting.")
         sys.exit(0)
 
-    parser = argparse.ArgumentParser(description="Local CI validation. Run before every commit.")
+    parser = argparse.ArgumentParser(description="Local CI validation. Run before every commit.", allow_abbrev=False)
     parser.add_argument(
         "--pre",
         action="store_true",
         help="Run diff-aware lint/format/mypy/pytest + prompt validation only. Skips terraform and dependencies. "
-        "Use for per-step validation during implementation. Subject to a 5-minute wall-clock budget.",
+        "Use for per-step validation during implementation. Subject to a 5-minute wall-clock budget. "
+        "Outside GitHub Actions it re-executes in the CI-shaped fast-tier environment.",
+    )
+    parser.add_argument(
+        "--full-env",
+        action="store_true",
+        help="Run --pre in the current interpreter instead of the CI-shaped environment; the result does not predict PR CI.",
     )
     parser.add_argument(
         "--verifier-coverage",
@@ -221,6 +227,10 @@ def main() -> None:
         "a `# raise-approved: dec-NNN` marker.",
     )
     args = parser.parse_args()
+    if args.pre and (args.full_env or args.ignore_budget):
+        from scripts.checks.deps import fast_tier_env  # noqa: PLC0415
+
+        print(fast_tier_env.FULL_ENV_BANNER)
 
     full_started_at: str | None = None
     if not any((args.pre, args.verifier_coverage, args.terraform_only, args.update_sloc_budgets)):
@@ -626,5 +636,13 @@ def main() -> None:
         sys.exit(1)
 
 
-if __name__ == "__main__":
+def _entrypoint() -> None:
+    # Kept out of main(): many tests drive main() with --pre and every environment guard stripped.
+    from scripts.checks.deps import fast_tier_env  # noqa: PLC0415
+
+    fast_tier_env.reexec_pre_if_needed(sys.argv, os.environ)
     main()
+
+
+if __name__ == "__main__":
+    _entrypoint()

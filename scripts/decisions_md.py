@@ -74,6 +74,15 @@ _DECISION_HEADING_RE = re.compile(
     re.MULTILINE,
 )
 
+# The approved-text placeholders (scripts.roadmap.approved_text fills both; a test pins the match). Held here so this
+# parser stays a leaf: a drafted entry's heading and envelope may carry them (placeholder=True paths only).
+PLACEHOLDER_NUMBER = "{{N}}"
+PLACEHOLDER_DATE = "{{DATE}}"
+_SENTINELS = {PLACEHOLDER_NUMBER: "PLACEHOLDERNUMBERSENTINEL", PLACEHOLDER_DATE: "PLACEHOLDERDATESENTINEL"}
+_PLACEHOLDER_HEADING_RE = re.compile(
+    r"^#{2,3}[ \t]+Decision[ \t]+(" + re.escape(PLACEHOLDER_NUMBER) + r"|\d+):[ \t]*(\S.*)$", re.MULTILINE
+)
+
 # ISO-shaped date prefix (YYYY-MM or YYYY-MM-DD). The decided_date Status-suffix fallback is
 # restricted to this shape (DAF-01 fix: dec-067's fallback previously harvested the clause
 # status line "remove when reversal condition is met" as a "date").
@@ -311,7 +320,7 @@ def derive_currency(row: dict, inbound_supersedes: set[int], inbound_amends: set
 # continuation, an "and N" or "and Decision(s) N" (_TITLE_RELATION_AND_RE) continuation, or a
 # "+ Decision(s) N" (_TITLE_RELATION_PLUS_RE) continuation (dec-153: "amends Decision 73
 # enforcement + Decision 135") -- optionally preceded by a qualifier on the prior target
-# (_TITLE_RELATION_QUALIFIER_RE: "point P"/"cl.N"/"clause N", or a single bare descriptive word
+# (_TITLE_RELATION_QUALIFIER_RE: a clause qualifier, see _CLAUSE_QUALIFIER, or a single bare descriptive word
 # like "enforcement"; a qualifier is consumed but is never itself a number source, and the bare
 # word alternative explicitly excludes "and" so it never steals that continuation's own
 # keyword). CFG-06 widened the comma and "and" continuations to accept BOTH the bare-number and
@@ -330,8 +339,21 @@ def derive_currency(row: dict, inbound_supersedes: set[int], inbound_amends: set
 # unrecognized trailing prose -- is not a valid continuation and silently ends the scan for that
 # anchor occurrence.
 _TITLE_RELATION_SEED_RE = re.compile(r"\s+Decisions?\s+(\d+)\b", re.IGNORECASE)
-_TITLE_RELATION_QUALIFIER_RE = re.compile(r"\s*(?:point\s+\d+|cl\.\s*\d+|clause\s+\d+|(?!and\b)[A-Za-z]+)", re.IGNORECASE)
-_BARE_NUMBER_BOUNDARY_RE = r"(?=[),;]|\s+(?:and\b|point\s+\d+|cl\.\s*\d+|clause\s+\d+)|\Z)"
+# A clause qualifier owns every number it enumerates, so a clause list is never read as Decision
+# targets (dec-213: "amends Decision 81 cl.1/5/6/7, 91 cl.1" must not yield 5, 6, 7). Singular
+# qualifiers (clause, cl., point, pt, section, the section sign) own ONE clause reference, widened
+# only by a range ("1-2"), a slash list ("1/5/6/7") or a sub-clause suffix ("3(2)", "1(ii)").
+# Plural qualifiers (clauses, points, pts, sections, double section sign) also own a comma list
+# closed by at most one final "and N", so a later target after a plural qualifier must repeat the
+# "Decision" token. The bare-number boundary recognises the same qualifiers.
+_CLAUSE_REF = r"\d+[a-z]?(?:\([^)\s]*\))*(?:\s*[-/]\s*\d+[a-z]?(?:\([^)\s]*\))*)*"
+_CLAUSE_QUALIFIER = (
+    r"(?:(?:clauses|points|pts\.?|sections|\u00a7\u00a7)\s*" + _CLAUSE_REF + r"(?:\s*,\s*" + _CLAUSE_REF + r")*"
+    r"(?:\s*,?\s*(?:and|&)\s*" + _CLAUSE_REF + r")?"
+    r"|(?:clause|cl\.|point|pt\.?|section|\u00a7)\s*" + _CLAUSE_REF + r")"
+)
+_TITLE_RELATION_QUALIFIER_RE = re.compile(r"\s*(?:" + _CLAUSE_QUALIFIER + r"|(?!and\b)[A-Za-z]+)", re.IGNORECASE)
+_BARE_NUMBER_BOUNDARY_RE = r"(?=[),;]|\s+(?:and\b|" + _CLAUSE_QUALIFIER + r")|\Z)"
 _TITLE_RELATION_AND_RE = re.compile(
     r"\s*,?\s*and\s+(Decisions?\s+)?(\d+)\b(?(1)|" + _BARE_NUMBER_BOUNDARY_RE + r")", re.IGNORECASE
 )
@@ -431,6 +453,15 @@ def iter_decision_headings(content: str) -> list[re.Match[str]]:
     return list(_DECISION_HEADING_RE.finditer(content))
 
 
+def iter_placeholder_headings(content: str) -> list[re.Match[str]]:
+    """Return every '## Decision <placeholder|n>: <title>' heading match (group(1) is the placeholder or digits).
+
+    The title must start on the heading line, so an anchor such as '## Decision 229:' then a newline is not a heading.
+    iter_decision_headings' digits-only grammar is unchanged: a placeholder heading never parses as a Decision.
+    """
+    return list(_PLACEHOLDER_HEADING_RE.finditer(content))
+
+
 def decision_header_numbers(paths: Optional[list[Path]] = None) -> set[int]:
     """Return the set of decision numbers headed '## Decision N:' / '### Decision N:' across paths.
 
@@ -484,9 +515,12 @@ _iter_decision_sections = iter_decision_sections
 # info string like ```yaml reversal-conditions (Decision 133's monitored stanza, matched by
 # scripts/preflight/decision_conditions.py on that exact info string).
 _ENVELOPE_FENCE_RE = re.compile(r"\A#{2,3}\s+Decision\s+\d+:[^\n]*\n+```yaml\n(.*?)\n```", re.DOTALL)
+_PLACEHOLDER_FENCE_RE = re.compile(
+    r"\A#{2,3}\s+Decision\s+(?:\d+|" + re.escape(PLACEHOLDER_NUMBER) + r"):[^\n]*\n+```yaml\n(.*?)\n```", re.DOTALL
+)
 
 
-def _envelope_has_well_formed_shape(data: dict) -> bool:
+def _envelope_has_well_formed_shape(data: dict, placeholder: bool = False) -> bool:
     """Type-check the handful of envelope fields every downstream consumer assumes a shape for
     (parse_decisions_md's list()/str() coercions, the conformance check's int(number)) -- a
     scalar where a list is expected (e.g. 'amends: 150' instead of 'amends: [150]') or a
@@ -494,7 +528,9 @@ def _envelope_has_well_formed_shape(data: dict) -> bool:
     exactly as malformed as unparseable YAML, so it is rejected at the same layer.
     """
     number = data.get("number")
-    if number is not None and not (isinstance(number, int) and not isinstance(number, bool)):
+    if number == PLACEHOLDER_NUMBER and placeholder:
+        pass
+    elif number is not None and not (isinstance(number, int) and not isinstance(number, bool)):
         return False
     for list_field in ("amends", "supersedes"):
         value = data.get(list_field)
@@ -505,10 +541,14 @@ def _envelope_has_well_formed_shape(data: dict) -> bool:
     significance = data.get("significance")
     if significance is not None and not isinstance(significance, dict):
         return False
-    return True
+    serves = data.get("serves")
+    if serves is not None and not (isinstance(serves, list) and all(isinstance(s, str) for s in serves)):
+        return False
+    kind = data.get("kind")
+    return kind is None or isinstance(kind, dict)
 
 
-def extract_entry_envelope(block: str) -> Optional[dict]:
+def extract_entry_envelope(block: str, placeholder: bool = False) -> Optional[dict]:
     """Parse the typed metadata envelope from a heading-inclusive raw block, or None.
 
     Returns None when no fenced ```yaml block immediately follows the heading, the fence's
@@ -518,15 +558,30 @@ def extract_entry_envelope(block: str) -> Optional[dict]:
     or a downstream consumer's own type-shaped access; scripts.checks.decisions.
     validate_decision_entry_conformance is the layer that turns "no well-formed envelope on a
     new entry" into a FAIL.
+
+    placeholder=True (drafts only) also accepts the approved-text number placeholder in the heading and the envelope
+    number: each placeholder token is swapped for a bare sentinel word before YAML parsing (an unquoted placeholder is
+    not valid YAML) and the number reads back as PLACEHOLDER_NUMBER.
     """
-    m = _ENVELOPE_FENCE_RE.match(block)
+    m = (_PLACEHOLDER_FENCE_RE if placeholder else _ENVELOPE_FENCE_RE).match(block)
     if not m:
         return None
+    text = m.group(1)
+    if placeholder:
+        for token, sentinel in _SENTINELS.items():
+            text = text.replace(token, sentinel)
     try:
-        data = yaml.safe_load(m.group(1))
+        data = yaml.safe_load(text)
     except yaml.YAMLError:
         return None
-    if not isinstance(data, dict) or not _envelope_has_well_formed_shape(data):
+    if not isinstance(data, dict):
+        return None
+    if placeholder:
+        for key, value in data.items():
+            for token, sentinel in _SENTINELS.items():
+                if value == sentinel:
+                    data[key] = token
+    if not _envelope_has_well_formed_shape(data, placeholder):
         return None
     return data
 
@@ -586,6 +641,8 @@ def parse_decisions_md(paths: Optional[list[Path]] = None) -> list[dict]:
                 if envelope and envelope.get("supersedes")
                 else _extract_title_borne_supersedes(raw_title),
                 "significance": envelope.get("significance", {}) if envelope else {},
+                "kind": envelope.get("kind") or {} if envelope else {},
+                "serves": list(envelope.get("serves") or []) if envelope else [],
                 "raw_block": raw_block,
                 "content_hash": content_hash,
                 "created_timestamp": now_iso,

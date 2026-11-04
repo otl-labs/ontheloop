@@ -72,6 +72,19 @@ class TestGatedEntryInputClosures:
             "scripts/checks/_scaffolding.py",
         } <= self._globs("validate_verification_registry")
 
+    def test_verification_registry_covers_the_late_closure_route_inputs(self) -> None:
+        """The late-closure route reads the trailer parser, the approved-text sidecar owner and every plan's
+        graduation steps and bundled list."""
+        assert {
+            "scripts/rec_trailer.py",
+            "scripts/roadmap/approved_text.py",
+            "docs/plans/PLAN-*.yaml",
+        } <= self._globs("validate_verification_registry")
+
+    def test_merge_step_covers_the_ops_portal_gate_modules(self) -> None:
+        """The route reads trailer_closure_gate.py, closure_gate.py and ops_portal/_common.py."""
+        assert "scripts/ops_portal/**" in self._globs("validate_merge_step")
+
     def test_hermeticity_flags_covers_both_tier_command_builders(self) -> None:
         """Promoted into --pre -- it guards the FAST TIER'S OWN flags, so a full-only placement
         meant the fast tier could drop --disable-socket or the fixed seed and only learn about it
@@ -83,6 +96,16 @@ class TestGatedEntryInputClosures:
             "scripts/checks/_scaffolding.py",
             "scripts/checks/verification/**",
         } <= self._globs("validate_hermeticity_flags")
+
+    def test_admin_root_premerge_gate_covers_plan_obligations_decision_draft_closure(self) -> None:
+        """The gate imports plan_obligations, whose closure now includes the decision-draft report."""
+        assert {
+            "scripts/roadmap/plan_decision_drafts.py",
+            "scripts/roadmap/approved_text.py",
+            "scripts/checks/decisions/envelope_rules.py",
+            "scripts/north_star_models.py",
+            "scripts/decisions_md.py",
+        } <= self._globs("validate_admin_root_premerge_gate")
 
     def test_verifier_hermeticity_covers_its_scan_dir_and_rule_module(self) -> None:
         """AST-scans scripts/verifiers/*.py against clock/randomness/network rosters that live in

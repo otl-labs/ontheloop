@@ -11,10 +11,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.fixtures.decision_entry import authored_bytes, cap_bytes, decision_entry
+
 pytestmark = pytest.mark.unit
 
 _REPO = Path(__file__).resolve().parents[3]
-_CAP_BYTES = 6144
 _REVERSAL_IDS = ("managed-rotation-wanted", "pattern-grant-needed", "second-gate-wanted")
 _TOKENS = ("/secret/", "SecureString", "SecretParameterAdmin", "aws/ssm", "Decision 181 cl.2", "GetParametersByPath")
 
@@ -26,17 +27,11 @@ def _decision_number() -> int:
     return int(match.group(1))
 
 
-def _entry(text: str, number: int) -> str:
-    match = re.search(rf"^## Decision {number}:.*?(?=^## Decision \d+:)", text, re.MULTILINE | re.DOTALL)
-    assert match is not None, f"Decision {number} not found"
-    return match.group(0)
-
-
 def test_decision_entry_and_annotations() -> None:
     n = _decision_number()
     text = (_REPO / "docs/DECISIONS.md").read_text(encoding="utf-8")
-    entry = _entry(text, n)
-    assert len(entry.encode("utf-8")) <= _CAP_BYTES
+    entry = decision_entry(text, n)
+    assert authored_bytes(entry) <= cap_bytes()
 
     envelope = yaml.safe_load(re.search(r"```yaml\n(.*?)\n```", entry, re.DOTALL).group(1))
     assert envelope["number"] == n and envelope["amends"] == [101, 213, 230] and envelope["status"] == "Decided"
@@ -55,6 +50,6 @@ def test_decision_entry_and_annotations() -> None:
     assert entry.rstrip().endswith("---")
 
     for amended in (101, 213, 230):
-        body = _entry(text, amended)
+        body = decision_entry(text, amended)
         assert re.search(rf"^\[Amendment \d{{4}}-\d{{2}}-\d{{2}}, Decision {n}:", body, re.MULTILINE), amended
         assert body.rstrip().endswith("---")

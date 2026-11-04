@@ -22,6 +22,10 @@ delegate over this module's `evaluate_plan`/`net_new_v4_implementation_plan_path
 also exposes an advisory CLI: `bin/venv-python -m scripts.roadmap.plan_obligations --plan <path>`
 always exits 0, including when the plan has unmet obligations -- the registered check is the
 gate, this CLI is a report.
+
+Derived findings (companions and headroom computed from repo state, rows in the same contract's
+`derived_findings`) live in scripts/roadmap/plan_lint: evaluate_plan appends its gating lines,
+build_report prints its advisory ones.
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from typing import Any, Iterator
 import yaml
 
 from scripts.checks import _common
+from scripts.roadmap import plan_decision_drafts, plan_lint
 
 ROOT = _common.ROOT
 _CONTRACT_PATH = ROOT / "docs" / "contracts" / "plan-obligations.yaml"
@@ -363,7 +368,9 @@ def evaluate_plan(path: Path, rules: list[dict[str, Any]] | None = None) -> list
         rules, rule_error = load_obligation_map()
         if rule_error:
             return [f"{path.name}: {rule_error}"]
-    return [f"{path.name}: {finding}" for finding in _derive_findings(_scope_rows(data), rules)]
+    findings = _derive_findings(_scope_rows(data), rules)
+    findings.extend(plan_lint.derive(data, ROOT, report=False).gating)
+    return [f"{path.name}: {finding}" for finding in findings]
 
 
 def net_new_v4_implementation_plan_paths() -> list[Path]:
@@ -420,6 +427,13 @@ def build_report(path: Path) -> str:
                 lines.append(f"{path}: {len(pointers)} obligation(s) enforced elsewhere (never gating):")
                 lines.extend(f"  - {pointer}" for pointer in pointers)
 
+    if not error and data is not None and not _is_grandfathered(data):
+        advisory = plan_lint.derive(data, ROOT, report=True).advisory
+        if advisory:
+            lines.append(f"{path}: derived findings (advisory, never gating):")
+            lines.extend(f"  - {line}" for line in advisory)
+
+    lines.extend(plan_decision_drafts.report_for_plan(path))
     return "\n".join(lines)
 
 
@@ -427,9 +441,14 @@ def main(argv: list[str] | None = None) -> int:
     """Advisory CLI. ALWAYS exits 0, including on unmet obligations -- the registered check
     (validate_plan_scope_closure) is the gate this report only informs."""
     parser = argparse.ArgumentParser(description="Plan registration-obligation report (advisory; always exits 0)")
-    parser.add_argument("--plan", required=True, help="Path to a docs/plans/PLAN-{slug}.yaml file")
+    which = parser.add_mutually_exclusive_group(required=True)
+    which.add_argument("--plan", help="Path to a docs/plans/PLAN-{slug}.yaml file")
+    which.add_argument("--decision-draft", help="Path to a drafted Decision file: print its decision_drafts section only")
     args = parser.parse_args(argv)
-    print(build_report(Path(args.plan)))
+    if args.decision_draft:
+        print("\n".join(plan_decision_drafts.report_for_draft(args.decision_draft)))
+    else:
+        print(build_report(Path(args.plan)))
     return 0
 
 

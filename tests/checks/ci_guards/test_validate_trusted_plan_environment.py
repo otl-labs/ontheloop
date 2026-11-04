@@ -41,16 +41,14 @@ def _job(workflows: dict[str, dict[str, Any]], job: str) -> dict[str, Any]:
 
 
 def test_real_tree_is_green(real_workflows, real_terraform, real_codeowners) -> None:
-    assert v.run_all(real_workflows, real_terraform, real_codeowners) == [[]] * 8
+    assert v.run_all(real_workflows, real_terraform, real_codeowners, v._repo_reader()) == [[]] * 9
 
 
-def test_real_tree_governs_both_probe_jobs_and_skips_the_dispatch_only_job(real_workflows) -> None:
+def test_real_tree_governs_the_single_plan_job(real_workflows) -> None:
     governed = {jid for jid, _ in v._governed(_TRUSTED, real_workflows[_TRUSTED])}
-    assert governed == {"claims-probe", "claims-probe-no-env", "live-assume"}
-    wf = real_workflows[_TRUSTED]
-    assert not v._can_run_on_prt(wf, _job(real_workflows, "live-assume"))
-    assert v._can_run_on_prt(wf, _job(real_workflows, "claims-probe"))
-    assert v._can_run_on_prt(wf, _job(real_workflows, "claims-probe-no-env"))
+    assert governed == {"plan"}
+    assert v._can_run_on_prt(real_workflows[_TRUSTED], _job(real_workflows, "plan"))
+    assert v.TEMP_NO_ENV_JOBS == frozenset()
 
 
 def test_a_third_workflow_naming_the_environment(wfs) -> None:
@@ -89,13 +87,17 @@ def test_missing_trusted_file(wfs) -> None:
 
 
 def test_id_token_job_without_the_environment(wfs) -> None:
-    del _job(wfs, "claims-probe")["environment"]
+    del _job(wfs, "plan")["environment"]
     assert any("without environment" in x for x in v.check_minting_jobs(wfs))
 
 
-def test_no_env_job_outside_the_temp_allowlist(wfs, monkeypatch) -> None:
-    monkeypatch.setattr(v, "TEMP_NO_ENV_JOBS", frozenset())
-    assert any("claims-probe-no-env" in x for x in v.check_minting_jobs(wfs))
+def test_a_no_env_probe_job_now_fails(wfs) -> None:
+    wfs[_TRUSTED]["jobs"]["claims-probe-no-env"] = {
+        "if": _job(wfs, "plan")["if"],
+        "permissions": {"id-token": "write", "contents": "read"},
+        "steps": [],
+    }
+    assert any("claims-probe-no-env" in x and "without environment" in x for x in v.check_minting_jobs(wfs))
 
 
 @pytest.mark.parametrize(
@@ -108,7 +110,7 @@ def test_no_env_job_outside_the_temp_allowlist(wfs, monkeypatch) -> None:
     ],
 )
 def test_unguarded_if_forms(wfs, condition) -> None:
-    job = _job(wfs, "claims-probe")
+    job = _job(wfs, "plan")
     if condition is None:
         del job["if"]
     else:
@@ -126,7 +128,7 @@ def test_guard_forms_that_pass() -> None:
 
 @pytest.mark.parametrize("expr", ["github.event.pull_request.head.ref", "github.head_ref"])
 def test_run_body_interpolating_pr_controlled_value(wfs, expr) -> None:
-    _job(wfs, "claims-probe")["steps"].append({"run": f"echo ${{{{ {expr} }}}}"})
+    _job(wfs, "plan")["steps"].append({"run": f"echo ${{{{ {expr} }}}}"})
     assert v.check_run_bodies(wfs)
 
 
@@ -181,18 +183,18 @@ def test_missing_import_block(real_terraform) -> None:
 
 @pytest.mark.parametrize("key", ["ref", "repository"])
 def test_checkout_with_ref_or_repository(wfs, key) -> None:
-    _job(wfs, "claims-probe")["steps"][0]["with"][key] = "${{ github.event.pull_request.head.sha }}"
+    _job(wfs, "plan")["steps"][0]["with"][key] = "${{ github.event.pull_request.head.sha }}"
     assert v.check_checkouts(wfs)
 
 
 def test_checkout_without_persist_credentials_false(wfs) -> None:
-    del _job(wfs, "claims-probe")["steps"][0]["with"]["persist-credentials"]
+    del _job(wfs, "plan")["steps"][0]["with"]["persist-credentials"]
     assert v.check_checkouts(wfs)
 
 
 def test_unowned_script_and_unowned_action(wfs, real_codeowners) -> None:
-    _job(wfs, "claims-probe")["steps"].append({"run": "python3 -I scripts/ci/unowned.py"})
-    _job(wfs, "live-assume")["steps"].append({"uses": "./.github/actions/unowned"})
+    _job(wfs, "plan")["steps"].append({"run": "python3 -I scripts/ci/unowned.py"})
+    _job(wfs, "plan")["steps"].append({"uses": "./.github/actions/unowned"})
     out = v.check_owned_and_isolated(wfs, real_codeowners)
     assert any("scripts/ci/unowned.py" in x for x in out)
     assert any(".github/actions/unowned" in x for x in out)
@@ -200,7 +202,7 @@ def test_unowned_script_and_unowned_action(wfs, real_codeowners) -> None:
 
 @pytest.mark.parametrize("body", ["python3 scripts/ci/oidc_claims_probe.py", "python3 -m scripts.ci.oidc_claims_probe"])
 def test_python_without_isolated_mode(wfs, real_codeowners, body) -> None:
-    _job(wfs, "claims-probe")["steps"].append({"run": body})
+    _job(wfs, "plan")["steps"].append({"run": body})
     assert any("without -I" in x for x in v.check_owned_and_isolated(wfs, real_codeowners))
 
 
@@ -213,13 +215,13 @@ def test_codeowners_matching_forms() -> None:
 
 @pytest.mark.parametrize("body", ["python3 -I ./scripts/ci/unowned.py", "python3 -I $GITHUB_WORKSPACE/scripts/ci/unowned.py"])
 def test_unowned_script_in_dotted_forms(wfs, real_codeowners, body) -> None:
-    _job(wfs, "claims-probe")["steps"].append({"run": body})
+    _job(wfs, "plan")["steps"].append({"run": body})
     assert any("scripts/ci/unowned.py" in x for x in v.check_owned_and_isolated(wfs, real_codeowners))
 
 
 @pytest.mark.parametrize("body", ["/usr/bin/python3 x.py", "python3.12 x.py", "env python3 x.py", "bin/venv-python x.py"])
 def test_python_invocation_forms_without_isolated_mode(wfs, real_codeowners, body) -> None:
-    _job(wfs, "claims-probe")["steps"].append({"run": body})
+    _job(wfs, "plan")["steps"].append({"run": body})
     assert any("without -I" in x for x in v.check_owned_and_isolated(wfs, real_codeowners))
 
 
@@ -271,7 +273,7 @@ def test_pass_line_ignores_unrelated_earlier_failures(capsys) -> None:
     failed = ["other-check: unrelated"]
     v.validate_trusted_plan_environment(failed)
     assert failed == ["other-check: unrelated"]
-    assert "PASS: predicates (a)-(h)" in capsys.readouterr().out
+    assert "PASS: predicates (a)-(i)" in capsys.readouterr().out
 
 
 def test_no_pass_line_when_this_check_fails(monkeypatch, capsys) -> None:
@@ -285,7 +287,7 @@ def test_no_pass_line_when_this_check_fails(monkeypatch, capsys) -> None:
     ["cat x.py | python3", '"python3" x.py', "$(which python3) x.py", "echo hi && python3", "python3 -XI x.py"],
 )
 def test_more_python_forms_without_isolated_mode(wfs, real_codeowners, body) -> None:
-    _job(wfs, "claims-probe")["steps"].append({"run": body})
+    _job(wfs, "plan")["steps"].append({"run": body})
     assert any("without -I" in x for x in v.check_owned_and_isolated(wfs, real_codeowners))
 
 
@@ -303,7 +305,7 @@ def test_isolated_flag_clusters_that_pass(flag) -> None:
     ],
 )
 def test_unowned_module_and_workspace_expression_forms(wfs, real_codeowners, body) -> None:
-    _job(wfs, "claims-probe")["steps"].append({"run": body})
+    _job(wfs, "plan")["steps"].append({"run": body})
     assert any("scripts/ci/unowned" in x for x in v.check_owned_and_isolated(wfs, real_codeowners))
 
 
@@ -334,3 +336,102 @@ def test_empty_workflow_file_fails_cleanly(tmp_path, monkeypatch) -> None:
     failed: list[str] = []
     v.validate_trusted_plan_environment(failed)
     assert any("unreadable" in x for x in failed)
+
+
+def _reader(files: dict[str, str]):
+    return lambda rel: files.get(rel)
+
+
+def _own(*paths: str) -> str:
+    return "".join(f"/{p} @o\n" for p in paths)
+
+
+def test_git_fetch_or_checkout_in_a_governed_run_body(wfs) -> None:
+    _job(wfs, "plan")["steps"].append({"run": "git fetch origin +refs/pull/1/merge:x"})
+    assert any("git fetch or git checkout" in x for x in v.check_checkouts(wfs))
+    wfs2 = copy.deepcopy(wfs)
+    _job(wfs2, "plan")["steps"][-1] = {"run": "git checkout main -- terraform/personal"}
+    assert any("git fetch or git checkout" in x for x in v.check_checkouts(wfs2))
+
+
+def test_git_in_a_composite_run_body_is_found(wfs) -> None:
+    _job(wfs, "plan")["steps"].append({"uses": "./.github/actions/x"})
+    files = {".github/actions/x/action.yml": "runs:\n  using: composite\n  steps:\n    - run: git fetch origin\n"}
+    assert any("git fetch" in x for x in v.check_checkouts(wfs, _reader(files)))
+
+
+def test_unowned_script_reached_through_a_composite(wfs) -> None:
+    _job(wfs, "plan")["steps"].append({"uses": "./.github/actions/x"})
+    files = {
+        ".github/actions/x/action.yml": (
+            "runs:\n  using: composite\n  steps:\n    - run: python3 -I scripts/ci/deep.py\n"
+            "    - run: bash ${{ github.action_path }}/helper.sh\n"
+        )
+    }
+    out = v.check_owned_and_isolated(wfs, _own(".github/actions/x/"), _reader(files))
+    assert any("scripts/ci/deep.py" in x for x in out)
+    assert not any("helper.sh" in x for x in out)
+    out = v.check_owned_and_isolated(wfs, "", _reader(files))
+    assert any(".github/actions/x/helper.sh" in x for x in out)
+
+
+def test_unowned_module_in_an_executed_scripts_import_closure(wfs) -> None:
+    _job(wfs, "plan")["steps"].append({"run": "python3 -I scripts/ci/entry.py"})
+    files = {
+        "scripts/ci/entry.py": "import sys\nsys.path.append('.')\nfrom scripts.ci import helper\n",
+        "scripts/ci/helper.py": "from scripts.lib.deep import thing\n",
+        "scripts/lib/deep.py": "x = 1\n",
+    }
+    owned = _own("scripts/ci/entry.py", "scripts/ci/helper.py", "scripts/__init__.py", "scripts/ci/__init__.py")
+    out = v.check_owned_and_isolated(wfs, owned, _reader(files))
+    assert any("imports scripts/lib/deep.py" in x for x in out)
+    assert any("imports scripts/lib/__init__.py" in x for x in out)
+    assert not any("imports scripts/ci/helper.py" in x for x in out)
+
+
+def test_package_init_that_does_not_exist_yet_must_still_be_owned(wfs) -> None:
+    _job(wfs, "plan")["steps"].append({"run": "python3 -I scripts/ci/entry.py"})
+    files = {"scripts/ci/entry.py": "from scripts.ci.helper import x\n", "scripts/ci/helper.py": "x = 1\n"}
+    out = v.check_owned_and_isolated(
+        wfs, _own("scripts/ci/entry.py", "scripts/ci/helper.py", "scripts/__init__.py"), _reader(files)
+    )
+    assert any("scripts/ci/__init__.py" in x for x in out)
+
+
+def test_executed_script_inserting_the_repo_root_first(wfs) -> None:
+    _job(wfs, "plan")["steps"].append({"run": "python3 -I scripts/ci/entry.py"})
+    files = {"scripts/ci/entry.py": "import sys\nsys.path.insert(0, '.')\n"}
+    out = v.check_owned_and_isolated(wfs, _own("scripts/ci/entry.py"), _reader(files))
+    assert any("sys.path position 0" in x for x in out)
+    files = {"scripts/ci/entry.py": "import sys\nsys.path.append('.')\n"}
+    assert not any("position 0" in x for x in v.check_owned_and_isolated(wfs, _own("scripts/ci/entry.py"), _reader(files)))
+
+
+def test_comment_lines_in_run_bodies_name_no_executed_path(wfs) -> None:
+    _job(wfs, "plan")["steps"].append({"run": "# parity with scripts/checks/other.py\necho ok"})
+    out = v.check_owned_and_isolated(wfs, _own("scripts/ci/x.py"), _reader({}))
+    assert not any("other.py" in x for x in out)
+
+
+@pytest.mark.parametrize("uses", ["actions/checkout@v7", "actions/checkout@" + "a" * 39, "docker://alpine:3", "o/r@main"])
+def test_tag_or_short_sha_pinned_action_in_a_governed_job(wfs, uses) -> None:
+    _job(wfs, "plan")["steps"].append({"uses": uses})
+    assert any("40-hex" in x for x in v.check_pinned_actions(wfs))
+
+
+def test_sha_pinned_action_with_a_version_comment_passes(wfs) -> None:
+    _job(wfs, "plan")["steps"].append({"uses": "o/r@" + "a" * 40})
+    assert v.check_pinned_actions(wfs) == []
+
+
+def test_unpinned_action_inside_a_composite_is_found(wfs) -> None:
+    _job(wfs, "plan")["steps"].append({"uses": "./.github/actions/x"})
+    files = {".github/actions/x/action.yml": "runs:\n  using: composite\n  steps:\n    - uses: o/r@v1\n"}
+    assert any("o/r@v1" in x for x in v.check_pinned_actions(wfs, _reader(files)))
+
+
+def test_unparseable_inputs_degrade_to_empty_results() -> None:
+    assert v._safe_yaml(None) is None
+    assert v._safe_yaml("a: [unclosed") is None
+    assert v._imported_paths("def (:", lambda rel: None) == set()
+    assert v._inserts_repo_root_first("def (:") is False

@@ -8,10 +8,11 @@ from pathlib import Path
 
 import yaml
 
+from tests.fixtures.decision_entry import authored_bytes, cap_bytes, decision_entry
+
 _ROOT = Path(__file__).resolve().parents[3]
 _DECISIONS = (_ROOT / "docs" / "DECISIONS.md").read_text(encoding="utf-8")
 _CONTRACTS = _ROOT / "docs" / "contracts"
-_DECISION_CAP_BYTES = 6144
 
 
 def _norm(text: str) -> str:
@@ -34,7 +35,7 @@ def _standard_statement() -> str:
 def test_decision_annotations() -> None:
     number = int(re.match(r"Decision (\d+):", _standard_statement().strip()).group(1))
     body = _section(number)
-    assert len(body.encode("utf-8")) <= _DECISION_CAP_BYTES
+    assert authored_bytes(decision_entry(_DECISIONS, number)) <= cap_bytes()
     annotation = re.search(r"^\[Amendment \d{4}-\d{2}-\d{2}, rec-4158:.*?\]$", body, re.MULTILINE | re.DOTALL)
     assert annotation, f"Decision {number} must end with a dated [Amendment ..., rec-4158: ...] annotation"
     text = _norm(annotation.group(0))
@@ -111,9 +112,9 @@ def test_ops_recommendations_names_one_authority() -> None:
 def test_roadmap_is_regrounded() -> None:
     roadmap = yaml.safe_load((_ROOT / "docs" / "ROADMAP-PLATFORM.yaml").read_text(encoding="utf-8"))
     flat = yaml.safe_dump(roadmap, width=10_000)
-    assert (
-        "Amendment 2026-10-04, rec-4158, Decision 210 cl.3 -- schema and write-time rules live in the owning Class A" in flat
-    )
+    contract = yaml.safe_load((_ROOT / "docs" / "contracts" / "north-star.yaml").read_text(encoding="utf-8"))
+    ns5 = next(e for e in contract["principles"] if e["id"] == "NS.5")["detail"]
+    assert "owning Class A contract" in ns5 and "Decision 210" in ns5
     assert (
         "Amendment 2026-10-04, rec-4158 / Decision 210 cl.3 -- for the ops tables the owning Class A contract displaces"
         in flat

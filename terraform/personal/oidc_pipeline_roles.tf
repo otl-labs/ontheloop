@@ -19,7 +19,7 @@
 #     drift workflow (which sets this exact role-session-name) can satisfy this statement.
 #   - PR-sub statement: sub in {pull_request, ref:refs/pull/*} AND sts:RoleSessionName
 #     StringNotEquals the reserved name -- a PR-context assumption can NEVER present the
-#     reserved session-name (the speculative-plan workflow sets a distinct, non-reserved
+#     reserved session-name (the ducklake-artifacts job sets a distinct, non-reserved
 #     value), so it structurally cannot satisfy the main-sub statement either.
 # A PR-context assumption therefore cannot obtain the reserved session-name under ANY
 # statement -- the trust half of the fail-closed guarantee. The permission half (below) adds
@@ -27,7 +27,8 @@
 # that omits the reserved name gains no convergence-write eligibility.
 #
 # Capability union (plan + drift, unconditioned except ConvergenceRecordWrite):
-#   from github_ci_plan  -- TfplanWrite, DucklakeBuildInputsRead, DucklakeLambdaPackagesWrite.
+#   from github_ci_plan  -- DucklakeBuildInputsRead, DucklakeLambdaPackagesWrite (the saved-plan write moved to the
+#                            trusted plan role, Decision 238).
 #   from github_ci_drift -- TfstateNativeLockFile, DuckLakeWriterInvoke (writer-only, Decision
 #                            84 closed boundary), ConvergenceRecordWrite (now FAIL-CLOSED,
 #                            aws:userid-conditioned -- see validate_convergence_writer_isolation
@@ -113,17 +114,6 @@ data "aws_iam_policy_document" "github_ci_planner" {
   source_policy_documents = [data.aws_iam_policy_document.ci_full_refresh_read.json]
 
   statement {
-    # From github_ci_plan: persist plan.bin keyed by PR head SHA for the apply-the-saved-plan
-    # merge path (T2.21). No convergence/personal/* grant here -- ConvergenceRecordWrite below
-    # is the sole, conditioned allow on that prefix. Write only (N3 item 3): the PR job uploads with
-    # aws s3 cp, and the merge-time fetch runs under the apply role.
-    sid       = "TfplanWrite"
-    effect    = "Allow"
-    actions   = ["s3:PutObject"]
-    resources = ["${aws_s3_bucket.data_lake.arn}/tfplan/personal/*"]
-  }
-
-  statement {
     # From github_ci_plan: vendored DuckLake build inputs (read-only, rec-2512).
     sid     = "DucklakeBuildInputsRead"
     effect  = "Allow"
@@ -170,8 +160,9 @@ data "aws_iam_policy_document" "github_ci_planner" {
     effect  = "Allow"
     actions = ["lambda:InvokeFunctionUrl", "lambda:GetFunctionUrlConfig"]
     resources = [
-      aws_lambda_function.ducklake_writer.arn,
-      "${aws_lambda_function.ducklake_writer.arn}:*",
+      # rec-4685: name Lambdas by built ARN, not resource reference; a reference defers this document read to apply whenever the Lambda changes.
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}:*",
     ]
   }
 
@@ -182,8 +173,8 @@ data "aws_iam_policy_document" "github_ci_planner" {
     effect  = "Allow"
     actions = ["lambda:InvokeFunction"]
     resources = [
-      aws_lambda_function.ducklake_writer.arn,
-      "${aws_lambda_function.ducklake_writer.arn}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}:*",
     ]
     condition {
       test     = "Bool"
@@ -216,8 +207,8 @@ data "aws_iam_policy_document" "github_ci_planner" {
 
   statement {
     # Neon provider API key and catalog DSN value reads for the reserved drift session only (site 5/6,
-    # local.convergence_writer_session_name). PR sessions hold no value read on either secret; PR plans run
-    # with a stub key and skip refresh. Standing check: validate_planner_secret_value_reads.
+    # local.convergence_writer_session_name). PR sessions hold no value read on either secret; the PR-time plan
+    # runs under the trusted plan role. Standing check: validate_planner_secret_value_reads.
     sid     = "DriftSessionSecretValueRead"
     effect  = "Allow"
     actions = ["secretsmanager:GetSecretValue"]

@@ -1,21 +1,24 @@
 name: terraform-plan-trusted
 
-# Claims-only skeleton for the trusted speculative plan (PLAN-trusted-plan-identity, rec-4636). The
-# job_workflow_ref claim carries this file's path, so the final filename is fixed now; rec-4637 replaces
-# the body. Runs main's definition on pull_request_target: the PR is data, never steps, so no job checks
-# out the PR head or merge ref. Never workflow_call. validate_trusted_plan_environment polices this file.
+# Trusted speculative plan for terraform/personal PRs (rec-4637, Decision 238). Runs main's definition on
+# pull_request_target: the PR is data, never steps, so no job checks out the PR head or merge ref. The PR's
+# Terraform is overlaid from the merge tree, screened as text before any credential exists, planned under
+# agent-platform-github-ci-trusted-plan from the S3 provider mirror, and reported by names only. No LLM runs
+# here (Decision 205 cl.2). The job is advisory and never a required check (Decision 83). Provider or lockfile
+# changes and new resource types are refused and get no saved plan: after merge they apply by a blank
+# workflow_dispatch of terraform-apply-sandbox. Never workflow_call. validate_trusted_plan_environment polices
+# this file; every local path it executes is code-owned.
 
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
     paths:
       - 'terraform/personal/**'
-  workflow_dispatch: {}
 
 permissions: {}
 
 concurrency:
-  group: terraform-plan-trusted-${{ github.event.pull_request.number || github.run_id }}
+  group: terraform-plan-trusted-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 defaults:
@@ -23,46 +26,20 @@ defaults:
     shell: bash
 
 jobs:
-  claims-probe:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+  plan:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
     environment: tf-trusted-plan
     permissions:
       contents: read
       id-token: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-
-      - name: Print the allowlisted OIDC claims
-        run: python3 -I scripts/ci/oidc_claims_probe.py --audience sts.amazonaws.com --require job_workflow_ref
-
-  # TEMPORARY: rec-4637 deletes this job. It answers whether a bare pull_request_target token carries ref:refs/heads/main.
-  claims-probe-no-env:
-    if: github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-
-      - name: Print the allowlisted OIDC claims
-        run: python3 -I scripts/ci/oidc_claims_probe.py --audience sts.amazonaws.com
-
-  live-assume:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    environment: tf-trusted-plan
-    permissions:
-      contents: read
-      id-token: write
+      pull-requests: write
+      statuses: write
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      TF_VAR_aws_profile: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -70,8 +47,17 @@ jobs:
 
       - uses: ./.github/actions/aws-region
 
-      - name: Configure AWS credentials (OIDC -- trusted plan role)
-        uses: aws-actions/configure-aws-credentials@v6
+      - name: Overlay the PR's Terraform
+        id: overlay
+        run: python3 -I scripts/ci/trusted_plan_overlay.py | tee "$RUNNER_TEMP/overlay.txt"
+
+      - name: Screen the PR's Terraform
+        id: screen
+        run: python3 -I scripts/ci/terraform_hcl_screen.py screen --root terraform/personal | tee "$RUNNER_TEMP/screen.txt"
+
+      - name: Assume the trusted plan role
+        id: assume
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
         env:
           MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
         with:
@@ -79,5 +65,129 @@ jobs:
           role-session-name: tf-trusted-plan
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Print the assumed identity without the account id
-        run: aws sts get-caller-identity --query Arn --output text | sed -E 's#^arn:aws:sts::[0-9]+:##'
+      - name: Read pinned Terraform version
+        id: tfver
+        run: echo "version=$(cat config/terraform-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Terraform
+        id: setup_tf
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: ${{ steps.tfver.outputs.version }}
+          terraform_wrapper: false
+
+      - name: Sync the provider mirror
+        id: mirror
+        run: aws s3 sync "s3://agent-platform-data-lake/tf-provider-mirror/" "$RUNNER_TEMP/tf-mirror" --only-show-errors
+
+      - name: Terraform init (hermetic, from the mirror)
+        id: init
+        uses: ./.github/actions/terraform-init-retry
+        with:
+          working-directory: terraform/personal
+          plugin-dir: ${{ runner.temp }}/tf-mirror
+
+      - name: Terraform plan (full refresh, output to a private log)
+        id: plan
+        working-directory: terraform/personal
+        run: >-
+          bash "$GITHUB_WORKSPACE/scripts/ci/trusted_plan_env.sh" --
+          bash "$GITHUB_WORKSPACE/scripts/ci/neon_api_key.sh" run --
+          bash "$GITHUB_WORKSPACE/scripts/ci/quiet_run.sh" "$RUNNER_TEMP/tf-plan.log" --
+          terraform plan -lock=false -input=false -out=plan.bin
+
+      - name: Render the plan as JSON (private file)
+        id: show
+        working-directory: terraform/personal
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/quiet_run.sh" "$RUNNER_TEMP/tf-show.log" --stdout "$RUNNER_TEMP/plan.json" -- terraform show -json plan.bin
+
+      - name: Backstop (Terraform's own parsed configuration)
+        id: backstop
+        run: python3 -I scripts/ci/terraform_hcl_screen.py backstop --plan-json "$RUNNER_TEMP/plan.json"
+
+      - name: Deterministic apply guard (predicted verdict)
+        id: guard
+        run: |
+          rc=0
+          python3 -I scripts/terraform_apply_guard.py "$RUNNER_TEMP/plan.json" > "$RUNNER_TEMP/guard.log" 2>&1 || rc=$?
+          case "$rc" in
+            0) echo "verdict=PASS" >> "$GITHUB_OUTPUT" ;;
+            2) echo "verdict=BLOCKED" >> "$GITHUB_OUTPUT" ;;
+            *) echo "verdict=ERROR" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Persist saved plan to S3
+        id: persist
+        working-directory: terraform/personal
+        run: aws s3 cp plan.bin "s3://agent-platform-data-lake/tfplan/personal/${PR_NUMBER}/${HEAD_SHA}.bin" --only-show-errors
+
+      - name: Emit and post plan digest (DEP-07)
+        id: digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        working-directory: terraform/personal
+        run: |
+          DIGEST=$(python3 -I "$GITHUB_WORKSPACE/scripts/ci/plan_digest.py" emit plan.bin)
+          echo "sha256=${DIGEST}" >> "$GITHUB_OUTPUT"
+          gh api "repos/${REPO}/statuses/${HEAD_SHA}" \
+            --method POST \
+            --field state=success \
+            --field context=terraform-plan-digest \
+            --field description="sha256:${DIGEST}" \
+            --field target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > /dev/null
+
+      # Fails the advisory job when the reviewer digest cannot review this plan. It runs only on this PR's own plan, after
+      # plan.bin and its digest status are saved; the job is not a required check (Decision 83), and both comment steps
+      # still run (!cancelled()).
+      - name: Fail when the reviewer digest cannot review this plan
+        id: fit_check
+        run: python3 -I scripts/ci/terraform_plan_digest.py --literals-from terraform/personal --fit-check "$RUNNER_TEMP/plan.json"
+
+      - name: Post the refusal comment
+        if: ${{ !cancelled() && steps.overlay.conclusion != 'skipped' && steps.assume.conclusion != 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OVERLAY: ${{ steps.overlay.outcome }}
+          SCREEN: ${{ steps.screen.outcome }}
+        run: |
+          category=ASSUME_FAILED
+          if [ "$OVERLAY" = failure ]; then category=OVERLAY_REFUSED; elif [ "$SCREEN" = failure ]; then category=SCREEN_REFUSED; fi
+          BODY=$(python3 -I scripts/ci/terraform_personal_plan_report.py --refusal "$category" --head-sha "$HEAD_SHA" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --overlay-file "$RUNNER_TEMP/overlay.txt" --screen-file "$RUNNER_TEMP/screen.txt")
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$BODY"
+
+      - name: Post the plan comment
+        if: ${{ !cancelled() && steps.assume.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          O_TFVER: ${{ steps.tfver.outcome }}
+          O_SETUP: ${{ steps.setup_tf.outcome }}
+          O_MIRROR: ${{ steps.mirror.outcome }}
+          O_INIT: ${{ steps.init.outcome }}
+          O_PLAN: ${{ steps.plan.outcome }}
+          O_SHOW: ${{ steps.show.outcome }}
+          O_BACKSTOP: ${{ steps.backstop.outcome }}
+          O_PERSIST: ${{ steps.persist.outcome }}
+          O_DIGEST: ${{ steps.digest.outcome }}
+          VERDICT: ${{ steps.guard.outputs.verdict }}
+          PLAN_SHA: ${{ steps.digest.outputs.sha256 }}
+        run: |
+          category=OK
+          for pair in O_TFVER:INIT_FAILED O_SETUP:INIT_FAILED O_MIRROR:INIT_FAILED O_INIT:INIT_FAILED O_PLAN:PLAN_FAILED \
+            O_SHOW:PLAN_FAILED O_BACKSTOP:BACKSTOP_REFUSED O_PERSIST:PERSIST_FAILED O_DIGEST:PERSIST_FAILED; do
+            name=${pair%%:*}
+            if [ "${!name}" = failure ] && [ "$category" = OK ]; then category=${pair#*:}; fi
+          done
+          if [ "$category" = OK ] && [ "$VERDICT" = ERROR ]; then category=GUARD_ERROR; fi
+          saved=no
+          if [ "$O_PERSIST" = success ] && [ "$O_DIGEST" = success ]; then saved=yes; fi
+          python3 -I scripts/ci/terraform_plan_digest.py --literals-from terraform/personal --fit-report "$RUNNER_TEMP/plan.json" > "$RUNNER_TEMP/fit.txt" 2>/dev/null || true
+          BODY=$(bash "$GITHUB_WORKSPACE/scripts/ci/trusted_plan_env.sh" --scrub-only -- python3 -I "$GITHUB_WORKSPACE/scripts/ci/terraform_personal_plan_report.py" \
+            --category "$category" --head-sha "$HEAD_SHA" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --plan-json "$RUNNER_TEMP/plan.json" --verdict "$VERDICT" --fit-file "$RUNNER_TEMP/fit.txt" --plan-sha256 "$PLAN_SHA" --saved-plan "$saved")
+          printf '%s' "$BODY" | bash "$GITHUB_WORKSPACE/scripts/ci/trusted_plan_env.sh" --scrub-only -- python3 -I "$GITHUB_WORKSPACE/scripts/ci/redaction_check.py" assert-clean
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$BODY"

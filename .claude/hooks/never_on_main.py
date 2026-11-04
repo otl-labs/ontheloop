@@ -3,12 +3,17 @@
 
 Triggered for Edit, Write, MultiEdit, NotebookEdit, and Bash. Allows
 read-only Bash commands (git status, ls, etc.) but blocks any Bash
-command that runs 'git commit' or 'git push' — including:
+command that runs 'git commit' or 'git push' - including:
 
 - Simple form: 'git commit -m ...'
 - Compound: 'cd /tmp && git commit ...'  or  'echo done; git commit'
 - Env-prefixed: 'GIT_DIR=foo git commit'
 - Working-dir override: 'git -C /path commit'  or  'git --git-dir=foo commit'
+
+Edit/Write/MultiEdit/NotebookEdit are blocked on main only when the target
+(file_path, or notebook_path) resolves inside the repo top-level. Writes that
+resolve outside the repo (memory, scratchpad) pass. A missing target key or an
+undeterminable top-level keeps blocking.
 
 Behaviour:
 - exit 0: allow tool invocation
@@ -33,7 +38,7 @@ If a real incident occurs from any of these, harden then.
 
 ## Testing
 Set CLAUDE_HOOK_BRANCH_OVERRIDE=main to simulate being on main without
-actually switching branches. This is a TEST-ONLY escape hatch — never
+actually switching branches. This is a TEST-ONLY escape hatch - never
 set this env var in your shell rc.
 """
 
@@ -48,7 +53,7 @@ import sys
 _MUTATING_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 
 # Split a Bash command on shell sequencing separators. Single '|' (pipe)
-# is intentionally excluded — it's a data-flow operator, not a "then run"
+# is intentionally excluded - it's a data-flow operator, not a "then run"
 # separator, and chaining a pipe into 'git commit' is exotic enough to
 # leave as a known-limitation bypass.
 _SEPARATOR_RE = re.compile(r"\s*(?:&&|\|\||;)\s*")
@@ -102,6 +107,31 @@ def _bash_blocks_on_main(command: str) -> bool:
     return False
 
 
+def _repo_toplevel() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    top = result.stdout.strip()
+    return os.path.realpath(top) if result.returncode == 0 and top else None
+
+
+def _target_inside_repo(tool_input: dict) -> bool:
+    target = tool_input.get("file_path") or tool_input.get("notebook_path")
+    top = _repo_toplevel()
+    if not isinstance(target, str) or not target or top is None:
+        return True
+    resolved = os.path.realpath(target)
+    return resolved == top or resolved.startswith(top + os.sep)
+
+
 def _should_block(tool_name: str, tool_input: dict) -> bool:
     if tool_name in _MUTATING_TOOLS:
         return True
@@ -126,12 +156,14 @@ def main() -> int:
     if branch != "main":
         return 0
 
+    if tool_name in _MUTATING_TOOLS and not _target_inside_repo(tool_input):
+        return 0
+
     sys.stderr.write(
         f"BLOCKED by .claude/hooks/never_on_main.py: cannot use {tool_name} while on 'main' branch.\n"
-        "On Claude Code on the web you are already on a harness-assigned claude/ session branch --\n"
+        "On Claude Code on the web you are already on the harness-assigned session branch --\n"
         "verify with: git branch --show-current\n"
-        "If the result is still 'main', create a new branch before retrying:\n"
-        "  git checkout -b claude/your-slug\n"
+        "If the result is still 'main', stop and tell the operator; agents never create their own branch.\n"
         "See docs/contracts/git-ops.yaml for the full branching topology.\n"
     )
     return 2

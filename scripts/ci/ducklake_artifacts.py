@@ -2,12 +2,12 @@
 """T2.42 c4 (rec-2659) + DEP-08: tested DuckLake build byte-identity-assert + dual-write upload.
 
 Extracted from the "Build DuckLake lambda packages" step duplicated 5x across
-terraform-apply-sandbox.yml (apply-sandbox, speculative-plan, gated-apply) and reconcile.yml
+terraform-apply-sandbox.yml (apply-sandbox, ducklake-artifacts, gated-apply) and reconcile.yml
 (apply-reconcile, gated-apply-reconcile). The .github/actions/build-ducklake-artifacts composite
 action is the caller for its 'assert' and 'skip-assert' modes: it runs `python -m
 scripts.build_lambda --ducklake-only --skip-upload` to produce the seven zips under
 lambda-packages/, then calls assert_and_upload() below to byte-check (push path only) and
-dual-write them to S3. The action's third mode, 'upload-only' (the PR speculative-plan job's
+dual-write them to S3. The action's third mode, 'upload-only' (the PR ducklake-artifacts job's
 first-upload path, which also builds three more artifacts -- ducklake-maintenance-smoke.zip,
 ducklake-telemetry-writer.zip and ducklake-telemetry-reader.zip -- not in DUCKLAKE_ARTIFACT_NAMES below), does not
 call this module at all: it runs `build_lambda
@@ -17,9 +17,9 @@ a fixed+per-sha dual-write, scripts/build_lambda_deploy.py) handle the upload di
 event_name convention (matches the original inline bash's `if [ "${{ github.event_name }}" =
 "push" ]` gate): pass the literal string "push" to run the byte-identity assert before uploading
 -- the apply-time path re-verifying the freshly rebuilt zips are byte-identical to what the
-originating PR's speculative-plan job uploaded (Decision 77 no-TOCTOU: the applied layer content
+originating PR's ducklake-artifacts job uploaded (Decision 77 no-TOCTOU: the applied layer content
 must not skew from the reviewed plan). Pass any other value (e.g. "workflow_dispatch",
-"pull_request") to skip the assert and upload directly -- the PR speculative-plan job populating
+"pull_request") to skip the assert and upload directly -- the PR ducklake-artifacts job populating
 S3 for the first time, or a fresh workflow_dispatch plan with no prior PR artifact to compare
 against. The calling composite action's own `mode: assert|skip-assert` input decides which string
 to pass here -- independent of the workflow's REAL triggering github.event_name (Reconcile is
@@ -37,7 +37,7 @@ rebuild with no approval-wait exposure window.
 
 rec-4372 (Decision 154 Update, 2026-10-17): the push-path assert's PR-time reference can go stale
 -- its window runs from the PR's last speculative plan to its own merge, with no upper bound, and
-main can edit a packaged file in between. The 'upload-only' mode (the PR speculative-plan job's
+main can edit a packaged file in between. The 'upload-only' mode (the PR ducklake-artifacts job's
 first-upload path above) now also records scripts/ci/ducklake_inputs.record_inputs() as
 lambda-packages/<artifact_sha>/inputs.json alongside the ten built zips. On a push-path mismatch,
 assert_and_upload reads that record, computes the current tree's own record, and calls
@@ -258,7 +258,7 @@ def upload_only(
     root: str | Path = ".",
     s3_client: Any = None,
 ) -> None:
-    """PR speculative-plan first-upload path: run build_lambda's own build+dual-write unchanged
+    """PR ducklake-artifacts first-upload path: run build_lambda's own build+dual-write unchanged
     (all ten zips, including the three outside DUCKLAKE_ARTIFACT_NAMES), then record and upload
     scripts.ci.ducklake_inputs.record_inputs() as lambda-packages/<artifact_sha>/inputs.json.
     Never calls assert_and_upload. Raises DucklakeArtifactError (fail loud, before merge) if the
@@ -454,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
     --mode build (default): build (unless --skip-build) then assert_and_upload() -- the existing
     rebuild path (the composite action's 'assert' / 'skip-assert' modes).
     --mode upload-only: upload_only() -- the composite action's 'upload-only' mode (the PR
-    speculative-plan job's first upload): build_lambda's own build+dual-write, unchanged, then
+    ducklake-artifacts job's first upload): build_lambda's own build+dual-write, unchanged, then
     record and upload inputs.json. Never calls assert_and_upload.
     --mode fetch: fetch_reviewed() -- downloads the reviewed per-sha artifacts (following a
     superseded-by.json pointer one hop when one exists, rec-4372) and server-side copies them

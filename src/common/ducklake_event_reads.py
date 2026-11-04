@@ -316,13 +316,13 @@ def execute_entry(con: Any, entry: EventRead, params: Any, limit: Any = None) ->
 
 
 def _telemetry_opener(
-    meta_schema: str, data_path: str, extension_directory: str, dsn_secret_id: str | None = None, read_only: bool = False
+    meta_schema: str, data_path: str, extension_directory: str, dsn_parameter: str | None = None, read_only: bool = False
 ) -> Callable[[], Any]:
     options: dict[str, Any] = {"read_only": True} if read_only else {}
 
     def opener() -> Any:
         con = rt.open_connection(
-            dsn=rt.fetch_dsn() if dsn_secret_id is None else rt.fetch_dsn(dsn_secret_id),
+            dsn=rt.fetch_dsn() if dsn_parameter is None else rt.fetch_dsn(dsn_parameter),
             data_path=data_path,
             meta_schema=meta_schema,
             extension_directory=extension_directory,
@@ -364,10 +364,10 @@ def deadline_guard(
 
 
 def telemetry_acquirer(
-    meta_schema: str, data_path: str, extension_directory: str, *, dsn_secret_id: str | None = None, read_only: bool = False
+    meta_schema: str, data_path: str, extension_directory: str, *, dsn_parameter: str | None = None, read_only: bool = False
 ) -> Callable[..., tuple[Any, dict[str, Any]]]:
     """The telemetry-slot acquire callable: opened lazily; the first acquire after a deadline interrupt probes the catalog."""
-    opener = _telemetry_opener(meta_schema, data_path, extension_directory, dsn_secret_id, read_only)
+    opener = _telemetry_opener(meta_schema, data_path, extension_directory, dsn_parameter, read_only)
 
     def acquire(force_reopen: bool = False) -> tuple[Any, dict[str, Any]]:
         probe = _catalog_probe_sql() if TELEMETRY_SLOT in _INTERRUPTED_SLOTS else "SELECT 1"
@@ -393,7 +393,7 @@ def acquirer_for(
     extension_directory: str,
     *,
     pin: Callable[[], tuple[str, str]],
-    dsn_secret_id: str | None = None,
+    dsn_parameter: str | None = None,
     read_only: bool = False,
 ) -> Callable[..., tuple[Any, dict[str, Any]]]:
     """The connection acquirer for this request: the handler's own ops acquirer, unchanged, for everything but an event verb.
@@ -411,7 +411,7 @@ def acquirer_for(
     params = payload.get("params")
     bind_values(_event_reads()[verb], {} if params is None else params)
     _deadline_ms(verb, payload)
-    return telemetry_acquirer(meta_schema, data_path, extension_directory, dsn_secret_id=dsn_secret_id, read_only=read_only)
+    return telemetry_acquirer(meta_schema, data_path, extension_directory, dsn_parameter=dsn_parameter, read_only=read_only)
 
 
 def _described_params(entry: EventRead) -> dict[str, Any]:

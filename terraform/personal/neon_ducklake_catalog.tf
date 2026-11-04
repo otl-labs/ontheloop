@@ -34,24 +34,20 @@
 # After Phase 0, Phase 1 auto-applies cleanly: the neon-api-key secret + the apply-role grant already
 # exist, and the Neon creates + DSN-secret create return guard exit 0.
 
-# The neon provider is pinned in main.tf's required_providers block (Terraform allows only one such
-# block per module). Its checksums are committed in .terraform.lock.hcl (supply-chain control).
+# The neon provider and its pin live in providers.tf (required_providers allows one block per module). Its
+# checksums are committed in .terraform.lock.hcl (supply-chain control).
 #
-# Neon provider API key: the ephemeral input variable var.neon_api_key, supplied per run (trusted CI
+# Neon provider API key: the ephemeral input variable var.neon_api_key (providers.tf), supplied per run (trusted CI
 # fetches it with scripts/ci/neon_api_key.sh; the admin loop follows deploy-paths admin_out_of_band;
-# pattern: secret-material-handling provider_credential_ephemeral_input). It is never in state or a
-# saved plan, and PR speculative plans pass a stub with -refresh=false. The provider pin stays at
-# 0.13.0: the configure-time ephemeral spike is valid for that version only.
-provider "neon" {
-  api_key = var.neon_api_key
-}
+# pattern: secret-material-handling provider_credential_ephemeral_input). It is never in state or a saved plan.
+# The provider pin stays at 0.13.0: the configure-time ephemeral spike is valid for that version only.
 
 # ---------------------------------------------------------------------------
 # Neon project -- the catalog. Free tier: 0.5 GB storage, 100 CU-hours/mo, scale-to-zero. pg_version
-# 16 matches the prior RDS engine. org_id is required by Neon's org-based model (every account, incl.
-# personal, has a default organization) -- it is an identifier, not a secret. No allowed_ips (free-tier
-# posture -- see APPLY POSTURE above). The project auto-creates a default branch + endpoint; the scoped
-# role and the catalog database below live on that default branch.
+# 16 matches the prior RDS engine. org_id comes from the tfvars parameter (var.neon_org_id, never
+# committed, rec-4543) and is ignored after creation, because the provider makes it ForceNew. No
+# allowed_ips (free-tier posture -- see APPLY POSTURE above). The project auto-creates a default branch +
+# endpoint; the scoped role and the catalog database below live on that default branch.
 # ---------------------------------------------------------------------------
 
 resource "neon_project" "ducklake_catalog" {
@@ -63,6 +59,12 @@ resource "neon_project" "ducklake_catalog" {
   # 7 days (604800s), the paid Launch plan maximum: the point-in-time window Decisions 88 cl.3 and 107 rely on
   # between weekly dumps. The earlier 21600 (6h) was the free-plan ceiling.
   history_retention_seconds = 604800
+
+  # The catalog is the ops tables' sole system of record (Decision 84): no plan may destroy or replace it.
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [org_id]
+  }
 }
 
 # Scoped, non-owner role for catalog access. Distinct from the project's auto-created owner role so the
@@ -80,6 +82,10 @@ resource "neon_database" "ducklake_ops" {
   branch_id  = neon_project.ducklake_catalog.default_branch_id
   name       = "ducklake_ops"
   owner_name = neon_role.ducklake_ops.name
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # ---------------------------------------------------------------------------

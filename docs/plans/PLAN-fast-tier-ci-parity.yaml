@@ -1,0 +1,467 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: fast-tier-ci-parity
+intent: >-
+  Make the agent container's `scripts.validate --pre` (today the CC-web container, later the Fargate containers; anywhere CI is unset) a true prediction of PR CI's fast tier. PR CI runs --pre venv-less on
+  requirements-fast.txt + requirements-dev.txt (no duckdb, psycopg2, pytz or radon, by design); in the agent container it runs in the
+  full .venv, so duckdb-dependent failures pass there and red PR CI (7 of 29 red PR runs in the Telemetry project).
+  The agent container's --pre now re-executes itself by default in a cached CI-shaped environment. PR CI's fast tier is
+  unchanged and stays light. The plan-time collectability check (rec-2809) was split out at planning time into
+  PLAN-hermetic-fast-tier-collectability, built after this plan (Benjamin 2026-10-30).
+plan_type: IMPLEMENTATION
+verification_tier: V2
+implementation_declared: true
+plan_path: docs/plans/PLAN-fast-tier-ci-parity.yaml
+phase: >-
+  ad_hoc_rec soft-warn category (rec-2779; joint review J-13 / TEL-F05 / IAM-F15); no tier_item criterion
+  claimed, so the Tier Item Freshness Gate is skipped. Wave 1 plan F of the Project Review build.
+scope:
+  - file: scripts/checks/deps/fast_tier_env.py
+    action: Create
+    purpose: >-
+      Stdlib-only module (validate.py imports it on every --pre, including jobs with only pyyaml+pydantic).
+      (1) ensure_env(repo_root) builds or reuses a venv under ${XDG_CACHE_HOME:-~/.cache}/ontheloop/fast-tier-env/<fp>,
+      fp = sha256 of scripts.checks.deps.fast_tier_harness_support.environment_fingerprint (Python version +
+      requirements-fast.txt + requirements-dev.txt bytes) plus the UTC date, so the requirements-fast.txt floors
+      re-resolve at least daily the way CI resolves them on every run (critique F10); a HarnessError from
+      environment_fingerprint (missing requirements file) is re-raised as FastTierEnvError (F15). Install sequence is the
+      module constant INSTALL_REQUIREMENTS =
+      ("requirements-fast.txt", "requirements-dev.txt"), installed as two sequential installs in that order, as ci.yml's
+      pr-validate step does; uv (`uv venv --python sys.executable`, `uv pip install --python <env python> -r <file>`)
+      when `uv` is on PATH, else `sys.executable -m venv` + `<env python> -m pip install -r <file>`. Build IN PLACE
+      at the fingerprint path, never in a staging dir that is renamed: uv and pip write console scripts (lint-imports,
+      pytest, mypy, pre-commit) with an absolute shebang naming the install-time interpreter, so a renamed env's scripts
+      exit 127 and validate_import_contracts (scripts/import_governance.py runs <env>/bin/lint-imports) would fail every
+      parity run (critique round 4 J1, reproduced). Concurrency: hold an exclusive lock file <cache>/<fp>.lock
+      (fcntl.flock; msvcrt.locking on Windows) for the whole check-build-stamp sequence; .ready is written last; a dir
+      whose .ready does not match the fingerprint is incomplete (a killed build) and is removed and rebuilt under the
+      lock; a waiter that acquires the lock after a winner finished sees a matching .ready and reuses it. On success
+      prune only sibling fingerprint dirs whose .ready is more than 24 hours old and whose lock is not held, so an env
+      another worktree or session is running from today is never deleted (F11; disk is a fixed per-session allowance). Raises FastTierEnvError naming the
+      failed command and its output. (2) child_env(environ, env_python) returns the re-exec environment: PATH prefixed
+      with the env's bin dir; OTL_VENV_PYTHON=<env python>; OTL_FAST_TIER_ENV=<fp>; PYTHONPATH, PYTHONHOME and
+      VIRTUAL_ENV removed; every AWS_* variable removed except AWS_REGION and AWS_DEFAULT_REGION (CI's pr-validate
+      exports both via .github/actions/aws-region; F5), and AWS_CONFIG_FILE / AWS_SHARED_CREDENTIALS_FILE pointed at
+      os.devnull, and AWS_EC2_METADATA_DISABLED=true so the SDK cannot fall back to an instance-metadata role (CI's
+      pr-validate job has no credentials; Benjamin 2026-10-30; round 5 F5). CI is never set. (3)
+      reexec_pre_if_needed(argv, environ) returns without action when "--pre" is not in argv, "--full-env" or
+      "--ignore-budget" is in argv (the bypass is an emergency escape whose audit rec must still reach the portal, which
+      the credential-free child cannot do -- critique round 3 F1; validate.py prints FULL_ENV_BANNER for it too), CI ==
+      "true", PYTEST_CURRENT_TEST is set, _VALIDATE_DEPTH >= 1, or OTL_FAST_TIER_ENV is set to any value (a presence
+      test, so a run crossing 00:00 UTC never re-execs a second time -- round 3 F3); otherwise prints one banner line ("CI-parity: running --pre in the CI-shaped fast-tier environment <path>; it
+      predicts PR CI's fast tier only, not the full tier"; <path> is the env python), flushes sys.stdout and sys.stderr (execve discards
+      block-buffered output on a pipe; F8), chdirs to the repo root (PYTHONPATH is scrubbed, so `-m scripts.validate`
+      needs cwd at the root; F9) and os.execve's [env python, "-m", "scripts.validate", *argv[1:]] -- on os.name == "nt", where exec does not
+      replace the process, it instead runs that argv with subprocess.run(env=child_env, cwd=repo_root) and
+      sys.exit(returncode) so the caller sees the child's real status (round 2 F3) (argv[0] may be a
+      path such as scripts/validate.py from scripts/execute_recommendation.py; F9). On FastTierEnvError prints the
+      cause, the remedy and "--full-env runs in the current interpreter (not CI-predictive)" to stderr and exits 1
+      (Decision 55; never a silent fallback). FULL_ENV_BANNER = "CI-parity: OFF (--full-env) -- this --pre result is not
+      CI-predictive" is a module constant validate.py prints. (4) CLI:
+      `python -m scripts.checks.deps.fast_tier_env --ensure` builds/reuses and prints the env python path (exit 1 on
+      FastTierEnvError). Under 500 SLOC; 100% line coverage (Decision 159 new-file floor).
+  - file: tests/checks/deps/test_fast_tier_env.py
+    action: Create
+    purpose: >-
+      Tests use no network and install no package. Every class except TestConsoleScriptsRunFromFinalPath injects or
+      monkeypatches the builder's subprocess runner and os.execve; that one class creates a real venv offline:
+      TestReexecDecision (every no-op condition, including --ignore-budget and an OTL_FAST_TIER_ENV value from a
+      previous UTC date; the execve argv is argv[1:]-based for both `validate` and
+      `scripts/validate.py` argv[0]; cwd is the repo root; the banner text; the FastTierEnvError and HarnessError exit-1
+      path naming --full-env), TestBannerSurvivesExec (a real subprocess whose stdout is a pipe runs a tiny script that
+      prints a line and calls the module's flush-then-execve helper into `python -c pass`; the parent reads the line --
+      proves the flush, which monkeypatched execve cannot), TestChildEnv (PATH prefix, override var, marker, scrubbed
+      vars, credential stripping with AWS_REGION and AWS_DEFAULT_REGION kept, AWS_EC2_METADATA_DISABLED=true),
+      TestEnvBuild (uv path, pip fallback path,
+      two sequential installs in INSTALL_REQUIREMENTS order, built in place -- the injected runner's venv-create target
+      is the final fingerprint dir on both the uv and pip paths and no rename occurs, cache reuse on matching .ready, date-bucketed
+      fingerprint, prune only unlocked siblings older than 24 hours, the Windows lock branch with os.name patched to
+      "nt" and msvcrt.locking stubbed, lock contention (a second builder blocks, then
+      reuses the winner's env), an incomplete dir without a matching .ready is rebuilt, failure leaves no .ready), TestConsoleScriptsRunFromFinalPath
+      (ensure_env on the pip-fallback path with uv hidden from PATH, a tmp_path cache root, and the runner passing the
+      venv-create command through for real while stubbing the two requirements installs: `sys.executable -m venv`
+      seeds pip offline through ensurepip, and `<env>/bin/pip --version` -- a console script with an absolute shebang --
+      exits 0 from the final fingerprint path; skipped with a printed reason only when `import ensurepip` fails, which
+      setup-python and the agent container's interpreter never do; the uv path's in-place property is covered by
+      TestEnvBuild through the injected runner -- round 5 F2), TestWindowsReexec (os.name patched to "nt":
+      subprocess.run is called with the child env and cwd, and the exit code propagates; execve is never called), TestInstallSequenceMatchesCi (parses
+      .github/workflows/ci.yml with yaml.safe_load, takes the pr-validate job's step named "Install fast-tier
+      dependencies only", extracts the ordered `-r <file>` arguments of its pip install lines, and asserts they equal
+      INSTALL_REQUIREMENTS -- the drift pin for "built the same way CI builds it").
+  - file: scripts/validate.py
+    action: Modify
+    purpose: >-
+      New `_entrypoint()`: a function-scope import of scripts.checks.deps.fast_tier_env, then
+      `reexec_pre_if_needed(sys.argv, os.environ)`, then `main()`; the `if __name__ == "__main__":` block calls
+      `_entrypoint()` instead of `main()`. The hook is deliberately NOT inside main(): about 44 existing tests
+      (tests/validate/test_budget.py and siblings, tests/checks/registry/test_resolution.py) drive main() with --pre
+      while stripping every environment guard, and would otherwise build an env and execve the pytest worker away
+      (critique F1). argparse gains `--full-env` (help: run --pre in the current interpreter instead of the CI-shaped
+      environment; the result does not predict PR CI), and when args.pre and (args.full_env or args.ignore_budget)
+      main() prints fast_tier_env.FULL_ENV_BANNER. The ArgumentParser gets allow_abbrev=False, so an abbreviated
+      "--pr" or "--full-e" cannot slip past the hook's literal argv match (round 3 F5). --pre's help text says a run
+      outside GitHub Actions re-executes in the CI-shaped environment. Other behaviour change, disclosed: inside the
+      credential-free child (which also lacks radon) a budget-breach rec is not filed -- the portal write fails into its
+      existing caught warning; CI's breach record in the uploaded selection manifest is unaffected (Benjamin's fork 1). Net additions stay under 15 lines (SLOC 468 today, cap 500; Decision
+      128); added lines covered by tests/validate/test_ci_parity_flag.py (config/coverage_baseline.yaml entry 73.0 must
+      not drop).
+  - file: tests/validate/test_ci_parity_flag.py
+    action: Create
+    purpose: >-
+      TestEntrypoint (_entrypoint calls reexec_pre_if_needed with sys.argv and os.environ, then main, in that order --
+      both patched), TestMainNeverReexecs (main() under argv ["validate", "--pre"] with _VALIDATE_DEPTH=0 and
+      PYTEST_CURRENT_TEST/CI removed, using test_budget.py's stub pattern, never calls reexec_pre_if_needed),
+      TestFullEnvBanner (main() under ["validate", "--pre", "--full-env"] and under ["validate", "--pre",
+      "--ignore-budget"] prints FULL_ENV_BANNER; under ["validate", "--pre"] it does not; an abbreviated "--pr" is
+      rejected by argparse).
+  - file: bin/venv-python
+    action: Modify
+    purpose: >-
+      Honour OTL_VENV_PYTHON right after the existing missing-script guard (so a missing hook script still exits 1, never
+      Python's 2, which Claude Code reads as a hook block -- round 3 F4) and before the .venv probe: when set, exec it if it is an executable file, else print "ERROR: OTL_VENV_PYTHON
+      is set but not executable: <path>" and exit 1 (fail loud; never fall through to .venv or the PATH fallback). Unset
+      leaves today's .venv-then-fallback logic byte-for-byte unchanged. Header comment gains one paragraph naming the
+      CI-parity re-exec as the only setter.
+  - file: tests/test_venv_python.py
+    action: Modify
+    purpose: >-
+      New class TestVenvPythonOverride: override wins over a present .venv; a non-executable override exits 1 with the
+      error text and does not run .venv; unset override keeps .venv resolution (regression); a missing .py script under the override still exits 1. A module-level autouse
+      fixture delenvs OTL_VENV_PYTHON and OTL_FAST_TIER_ENV for every test (covering tests that pass no env= and inherit
+      os.environ implicitly, and helpers that copy it), so the existing fallback and fail-loud tests stay meaningful when
+      they run inside the CI-parity child (round 1 F16, completed in round 2 F4); TestVenvPythonOverride sets the
+      variable explicitly per test.
+  - file: config/agent/verification_registry/entries/fast-tier-env-reexec-decision.yaml
+    action: Create
+    purpose: Graduation row for VP step 1 (test_selector, node tests/checks/deps/test_fast_tier_env.py::TestReexecDecision, guard_target scripts/checks/deps/fast_tier_env.py).
+  - file: config/agent/verification_registry/entries/fast-tier-env-install-matches-ci.yaml
+    action: Create
+    purpose: Graduation row for VP step 2 (test_selector, node tests/checks/deps/test_fast_tier_env.py::TestInstallSequenceMatchesCi, guard_target scripts/checks/deps/fast_tier_env.py).
+  - file: config/agent/verification_registry/entries/venv-python-override.yaml
+    action: Create
+    purpose: Graduation row for VP step 3 (test_selector, node tests/test_venv_python.py::TestVenvPythonOverride, guard_target bin/venv-python).
+  - file: config/agent/verification_registry/entries/validate-main-never-reexecs.yaml
+    action: Create
+    purpose: Graduation row for VP step 4 (test_selector, node tests/validate/test_ci_parity_flag.py::TestMainNeverReexecs, guard_target scripts/validate.py).
+  - file: config/agent/verification_registry/entries/validate-full-env-banner.yaml
+    action: Create
+    purpose: Graduation row for VP step 5 (test_selector, node tests/validate/test_ci_parity_flag.py::TestFullEnvBanner, guard_target scripts/validate.py).
+  - file: config/agent/verification_registry/entries/fast-tier-env-child-env.yaml
+    action: Create
+    purpose: Graduation row for VP step 6 (test_selector, node tests/checks/deps/test_fast_tier_env.py::TestChildEnv, guard_target scripts/checks/deps/fast_tier_env.py).
+  - file: docs/plans/PLAN-fast-tier-ci-parity.yaml
+    action: Modify
+    purpose: Implementing-plan bookkeeping only (implementation_declared true at handoff).
+bundled_recommendations:
+  - rec-2779
+followon_recs:
+  - rec-4760
+  - rec-4761
+infrastructure_dependencies: []
+acceptance_criteria:
+  - >-
+    An agent-container `bin/venv-python -m scripts.validate --pre` (CI unset) prints the CI-parity banner and runs in an
+    interpreter where duckdb, psycopg2, pytz and radon are absent; its bin/venv-python subprocesses resolve to that
+    interpreter.
+  - >-
+    tests/telemetry/test_append.py (module-level importorskip on duckdb) collects 0 tests under the CI-shaped
+    interpreter and passes under the full .venv -- the measured 2026-10-29 shape of the CI-red class.
+  - With CI=true, --pre never re-executes (PR CI behaviour unchanged); --full-env runs in the current interpreter and says the result is not CI-predictive.
+  - An environment that cannot be built makes --pre exit 1 naming the cause, the remedy and --full-env.
+  - The env builder's install file sequence equals ci.yml pr-validate's, pinned by a test.
+  - The CI-shaped run carries no AWS credentials (environment, files or instance metadata) and keeps the region.
+  - rec-2779 is recorded superseded by the merged mechanism (Benjamin 2026-10-30).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: >-
+      Run TestReexecDecision. The test file does not exist on the un-implemented tree, so red-before classifies
+      target_absent; after the change every re-exec condition passes.
+    command: bin/venv-python -m pytest tests/checks/deps/test_fast_tier_env.py::TestReexecDecision -q
+    expected: exit 0, all tests in the class pass.
+    fix_if: >-
+      A no-op condition re-execs (recursion or CI change) or the failure path exits 0 -- fix fast_tier_env.py; never
+      loosen an assertion.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: graduate
+    graduation_check_id: fast-tier-env-reexec-decision
+  - step: 2
+    phase: pre-deploy
+    action: Run the ci.yml drift pin.
+    command: bin/venv-python -m pytest tests/checks/deps/test_fast_tier_env.py::TestInstallSequenceMatchesCi -q
+    expected: exit 0; the extracted ci.yml sequence equals INSTALL_REQUIREMENTS.
+    fix_if: >-
+      Mismatch -- ci.yml is the source of truth for CI's install; change INSTALL_REQUIREMENTS to match it, never the
+      parser to ignore a line.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: graduate
+    graduation_check_id: fast-tier-env-install-matches-ci
+  - step: 3
+    phase: pre-deploy
+    action: Run the bin/venv-python override tests (the class does not exist today, pytest exit 4).
+    command: bin/venv-python -m pytest tests/test_venv_python.py::TestVenvPythonOverride -q
+    expected: exit 0; override wins, a bad override fails loud, unset keeps .venv.
+    fix_if: A bad override falls through to .venv or PATH -- fix the wrapper to exit 1.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: graduate
+    graduation_check_id: venv-python-override
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      Run TestMainNeverReexecs: main() driven the way the existing validate tests drive it never calls the re-exec hook,
+      so the full tier's tests cannot execve the pytest worker away (critique F1).
+    command: bin/venv-python -m pytest tests/validate/test_ci_parity_flag.py::TestMainNeverReexecs -q
+    expected: exit 0, the class passes.
+    fix_if: The hook is reached from main() -- move it back to _entrypoint(); never add a test-only environment switch.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: graduate
+    graduation_check_id: validate-main-never-reexecs
+  - step: 5
+    phase: pre-deploy
+    action: Run TestFullEnvBanner (the test file does not exist today, pytest exit 4).
+    command: bin/venv-python -m pytest tests/validate/test_ci_parity_flag.py::TestFullEnvBanner -q
+    expected: exit 0, the class passes.
+    fix_if: A banner missing or an abbreviation accepted -- fix validate.py's argparse and banner branch.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: graduate
+    graduation_check_id: validate-full-env-banner
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      Run TestChildEnv: the re-exec environment strips AWS credentials (Benjamin's fork) and disables instance metadata
+      while keeping AWS_REGION and AWS_DEFAULT_REGION, scrubs PYTHONPATH/PYTHONHOME/VIRTUAL_ENV, and sets the override
+      and marker.
+    command: bin/venv-python -m pytest tests/checks/deps/test_fast_tier_env.py::TestChildEnv -q
+    expected: exit 0, the class passes.
+    fix_if: A credential path survives into the child -- fix child_env; never relax the assertion.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: graduate
+    graduation_check_id: fast-tier-env-child-env
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      Run the whole new test modules and the wrapper suite once, for coverage of every branch (100% floor on the new
+      module).
+    command: >-
+      bin/venv-python -m pytest tests/checks/deps/test_fast_tier_env.py tests/test_venv_python.py
+      tests/validate/test_ci_parity_flag.py --cov=scripts.checks.deps.fast_tier_env --cov-report=term-missing
+      --cov-fail-under=100
+    expected: exit 0; fast_tier_env.py at 100% line coverage (the run fails under 100).
+    fix_if: A missed line -- add the test for that branch; never add a pragma no cover to reach 100%.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      The 100% new-file floor is already a standing gate (Decision 159 coverage baseline) and steps 1-6 graduate the
+      behaviour nodes; a whole-module coverage run as a registry row would duplicate both.
+  - step: 8
+    phase: pre-deploy
+    action: >-
+      Real build and the measured failure shape: build the CI-shaped env for real, confirm the excluded packages are
+      absent, that bin/venv-python resolves to it under the override, that the duckdb-guarded file collects 0 there
+      (pytest exit 5) while it passes in the full .venv, and that a console script runs from the final path.
+    command: >-
+      P=$(bin/venv-python -m scripts.checks.deps.fast_tier_env --ensure) &&
+      "$P" -c "import importlib.util as u, sys; sys.exit(any(u.find_spec(n) for n in ('duckdb','psycopg2','pytz','radon')))" &&
+      test "$(OTL_VENV_PYTHON="$P" bin/venv-python -c 'import sys; print(sys.executable)')" = "$P" &&
+      { "$P" -m pytest tests/telemetry/test_append.py -q; test $? -eq 5; } &&
+      bin/venv-python -m pytest tests/telemetry/test_append.py -q &&
+      "$(dirname "$P")/lint-imports" --help >/dev/null &&
+      du -sh "$(dirname "$(dirname "$P")")"
+    expected: >-
+      exit 0 overall; the parity run reports 1 skipped and 0 collected, the full-venv run passes; the env's disk size is
+      printed for the report (measured against the per-session allowance).
+    fix_if: >-
+      An excluded package importable in the env -- the install sequence differs from CI's; fix it. Build fails with
+      network errors -- read the proxy status per /root/.ccr/README.md, then re-run; never switch the step to
+      --full-env.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: pre-deploy
+    action: >-
+      End-to-end on the implementation branch: the default agent-container --pre re-executes, runs in the env (the
+      banner names the env path the --ensure CLI prints) and passes; --full-env prints the not-CI-predictive banner.
+      The CI=true no-op is proven by step 1's unit tests, not here.
+    command: >-
+      bin/venv-python -m scripts.validate --pre 2>&1 | tee /tmp/pre-parity.log; test ${PIPESTATUS[0]} -eq 0 &&
+      grep -q "CI-parity: running --pre in the CI-shaped fast-tier environment" /tmp/pre-parity.log &&
+      grep -qF "$(bin/venv-python -m scripts.checks.deps.fast_tier_env --ensure)" /tmp/pre-parity.log &&
+      bin/venv-python -m scripts.validate --pre --full-env 2>&1 | grep -q "CI-parity: OFF (--full-env)"
+    expected: exit 0; both banners found; the parity run's summary reads All checks passed.
+    fix_if: >-
+      A check fails only in the parity run -- that is a real CI-predictive failure: fix it in scope or file a rec
+      (Decision 59), never run the handoff on --full-env. A check that misbehaves only because credentials are absent
+      but CI is unset -- record it in the report and file a rec.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: pre-deploy
+    action: Full-tier handoff obligation on the committed, rebased, clean tree, then attest the evidence covers HEAD.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: exit 0; the Validation Summary lists no failure and --verify-head attests HEAD.
+    fix_if: >-
+      In-scope failure -- fix, commit, re-run from the start; out-of-scope -- file a rec (Decision 59, Decision 55).
+      Never skip or weaken a check.
+    hermetic: false
+    graduation: not-applicable
+  - step: 11
+    phase: post-deploy
+    action: >-
+      After the squash merge, record rec-2779 as superseded by the merged mechanism (Benjamin 2026-10-30), then confirm
+      its status. rec-2779 carries no context_v2_json, so no closure_* kwarg is passed (update_rec would refuse it); the
+      merge sha lives in the resolution text (round 4 M1). No Resolves trailer: rec-2779 is superseded, not resolved by
+      an acceptance verdict.
+    command: >-
+      git fetch origin main --quiet &&
+      bin/venv-python -c "from scripts.ops_data_portal import update_rec as u; import subprocess;
+      sha = subprocess.check_output(['git', 'rev-parse', 'origin/main'], text=True).strip();
+      u('rec-2779', {'status': 'superseded', 'resolution': 'Superseded by PLAN-fast-tier-ci-parity at ' + sha + ': the
+      agent-container --pre runs CI-shaped, so a copied importorskip guard that hides a test from CI fails locally before
+      push; no skill prose (Benjamin 2026-10-30).'})" &&
+      bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader;
+      rows, _ = fetch_recs_by_ids(make_reader(), ['rec-2779']); print({r['id']: r['status'] for r in rows})"
+    expected: rec-2779 superseded.
+    fix_if: Portal unreachable -- restore the agent_platform chain and re-run; never edit a local cache.
+    hermetic: false
+test_obligations:
+  - source: scripts/checks/deps/fast_tier_env.py
+    behavior: Agent-container --pre re-executes in a CI-shaped env exactly when it should and fails loud when the env cannot be built.
+    verification_step: 1
+    test_selector: tests/checks/deps/test_fast_tier_env.py::TestReexecDecision
+    red_green_expectation: red before (module and test absent, exit 4), green after.
+  - source: scripts/checks/deps/fast_tier_env.py
+    behavior: The env builder installs the same requirements files, in the same order, as ci.yml's pr-validate job.
+    verification_step: 2
+    test_selector: tests/checks/deps/test_fast_tier_env.py::TestInstallSequenceMatchesCi
+    red_green_expectation: red before (module and test absent, exit 4), green after.
+  - source: bin/venv-python
+    behavior: OTL_VENV_PYTHON wins when executable and fails loud when not.
+    verification_step: 3
+    test_selector: tests/test_venv_python.py::TestVenvPythonOverride
+    red_green_expectation: red before (class absent, exit 4), green after.
+  - source: scripts/validate.py
+    behavior: Only the module entry point re-execs; main() never does.
+    verification_step: 4
+    test_selector: tests/validate/test_ci_parity_flag.py::TestMainNeverReexecs
+    red_green_expectation: red before (test file absent, exit 4), green after.
+  - source: scripts/validate.py
+    behavior: --full-env and --ignore-budget print the not-CI-predictive banner; abbreviations are rejected.
+    verification_step: 5
+    test_selector: tests/validate/test_ci_parity_flag.py::TestFullEnvBanner
+    red_green_expectation: red before (test file absent, exit 4), green after.
+  - source: scripts/checks/deps/fast_tier_env.py
+    behavior: The CI-shaped run carries no AWS credentials, keeps the region, and scrubs leaking interpreter variables.
+    verification_step: 6
+    test_selector: tests/checks/deps/test_fast_tier_env.py::TestChildEnv
+    red_green_expectation: red before (module and test absent, exit 4), green after.
+  - source: config/agent/verification_registry/entries/fast-tier-env-reexec-decision.yaml
+    behavior: Records a VP step's graduation.
+    verification_step: 10
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      A registry row is itself an executable check; validate_verification_registry and validate_graduation_completeness
+      run it in every tier and fail on a missing or non-resolving shard, which is the red-green proof.
+  - source: config/agent/verification_registry/entries/fast-tier-env-install-matches-ci.yaml
+    behavior: Records a VP step's graduation.
+    verification_step: 10
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      A registry row is itself an executable check; validate_verification_registry and validate_graduation_completeness
+      run it in every tier and fail on a missing or non-resolving shard, which is the red-green proof.
+  - source: config/agent/verification_registry/entries/venv-python-override.yaml
+    behavior: Records a VP step's graduation.
+    verification_step: 10
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      A registry row is itself an executable check; validate_verification_registry and validate_graduation_completeness
+      run it in every tier and fail on a missing or non-resolving shard, which is the red-green proof.
+  - source: config/agent/verification_registry/entries/validate-main-never-reexecs.yaml
+    behavior: Records a VP step's graduation.
+    verification_step: 10
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      A registry row is itself an executable check; validate_verification_registry and validate_graduation_completeness
+      run it in every tier and fail on a missing or non-resolving shard, which is the red-green proof.
+  - source: config/agent/verification_registry/entries/validate-full-env-banner.yaml
+    behavior: Records a VP step's graduation.
+    verification_step: 10
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      A registry row is itself an executable check; validate_verification_registry and validate_graduation_completeness
+      run it in every tier and fail on a missing or non-resolving shard, which is the red-green proof.
+  - source: config/agent/verification_registry/entries/fast-tier-env-child-env.yaml
+    behavior: Records a VP step's graduation.
+    verification_step: 10
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      A registry row is itself an executable check; validate_verification_registry and validate_graduation_completeness
+      run it in every tier and fail on a missing or non-resolving shard, which is the red-green proof.
+constraints:
+  - >-
+    PR CI's fast tier is unchanged: no package added to requirements-fast.txt, no ci.yml edit, no budget raise (Benjamin, 18 Oct; BUILD-SEAMS F).
+  - No instruction-file prose (skills, AGENTS.md, CLAUDE.md) is added; prose budgets are at zero headroom.
+  - Fail loud, never a silent fallback to the full venv (Decision 55, Decision 148).
+  - No rescue agents or workaround loops (Decision 55).
+  - Files owned by other wave-1 plans stay untouched (A, C, E, G; coordinator notes 2026-10-29).
+context:
+  - >-
+    Split at planning time (Benjamin 2026-10-30, after the bundle's critique round 5 returned REVISE): this plan keeps
+    the CI-parity re-exec and rec-2779; rec-2809's plan-time collectability check moved to
+    PLAN-hermetic-fast-tier-collectability, built after this one. Predecessor rounds 1-5 ran on the bundle; this plan's
+    critique starts a new series. Log: /mnt/project-files/plan-f/critique-log.md.
+  - Measured 2026-10-29 at bad6ae55 and re-measured 2026-10-30 at 87e0a790 - tests/telemetry/test_append.py passes 46 in .venv, collects 0 (exit 5) in a uv-built requirements-fast + requirements-dev venv; warm uv build 3 s.
+  - Evidence of the class - TEL-F05 (7 CI-red rounds, digests 65, 77, 83, 88, 95, 112, 141); IAM-F15 (0 CI-red); joint review J-13.
+  - Fable consult - /mnt/project-files/plan-f/fable-brief/BRIEF.md and ADVICE.md; dispositions in the step 6b record.
+  - Reuse - fast_tier_harness_support.environment_fingerprint.
+  - Gotcha - the re-exec lives in _entrypoint(), never main(); about 44 tests drive main() with every guard stripped (critique F1).
+  - Gotcha - graduation worktrees symlink .venv; the OTL_VENV_PYTHON override is what keeps their subprocesses CI-shaped.
+  - Fargate (future agent containers) - parity triggers on CI unset; the first build needs package-index access or a uv cache baked into the image (warm build 3 s).
+  - Decision 148 point 2's resolution order gains OTL_VENV_PYTHON ahead of .venv (fail-loud tail kept); the dated amendment note is owned by rec-4761 for a Decision-text pass with Benjamin after this merges (round 3 F6, round 5 F4; DECISIONS.md is always-ask).
+  - --full-env is not a third tier (Decision 153 point 4) - same pre sequence, scope, budget and advisory role; only the interpreter differs.
+  - The audit harness keeps its own ensure_fast_environment (combined install, audit-corpus semantics); unifying it is out of scope (critique F12, informational). Its staging-then-rename build has the console-script shebang defect this plan avoids; owned by rec-4760 (round 5 F6, Decision 59).
+  - Credential parity is AWS-scoped by the human's fork; other ambient secrets (GitHub token, Neon) are not stripped (round 5 R3, informational).
+  - "fork: run --pre CI-shaped by default in the agent container (CI unset) vs an opt-in flag | chosen: default | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: this plan (Benjamin, write the plan, 2026-10-30)"
+  - "fork: strip AWS credentials in the CI-shaped run | chosen: yes | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: this plan (Benjamin 2026-10-30)"
+  - "fork: rec-2779 prose rule vs close as superseded by the mechanism | chosen: close | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: this plan + rec-2779 status superseded at merge (Benjamin 2026-10-30)"
+  - "fork: split the parity bundle on a round-5 REVISE | chosen: split | class: asked | precedent: none | precedent_kind: none | reversible: yes | persisted: this plan (Benjamin 2026-10-30)"
+  - "fork: wrapper override var vs forcing the PATH fallback | chosen: override, fail loud on bad value | class: consistency-only | precedent: Decision 148 | precedent_kind: decision | reversible: yes | persisted: bin/venv-python"
+  - "fork: drift pin vs shared CI script or lock file | chosen: drift pin (both others edit PR CI) | class: consistency-only | precedent: BUILD-SEAMS F keep-CI-light | precedent_kind: answered-fork | reversible: yes | persisted: tests/checks/deps/test_fast_tier_env.py"
+  - Decision-scout verdict FLAGS_FOUND on the bundle (WARN 131 concerned the moved check's mirror test); CITE 73, 148, 55, 189, 163, 128, 159, 182, 208, 103.
+  - "red_overlap (Decision 226): verdict clear, no reds, 2026-10-30"
+  - "gates: decision-scout=FLAGS_FOUND; plan-critique=PROCEED after 1 round(s) of series 2 (series 1 = bundle rounds 1-5, REVISE, split by Benjamin); nits folded: VP11 fetch before rev-parse, named Windows lock case"
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - Create scripts/checks/deps/fast_tier_env.py and its tests (steps 1, 2, 6).
+  - Modify bin/venv-python and tests/test_venv_python.py (step 3).
+  - Modify scripts/validate.py (hook and --full-env) and create tests/validate/test_ci_parity_flag.py (steps 4, 5).
+  - Create the six graduation rows.
+  - Execute Verification Plan -- run each pre-deploy step; loop until pass; on an unrecoverable failure stop and RCA (Decision 55).
+  - >-
+    Independent code review: dispatch the code-review skill in a fresh-context subagent over the branch diff; address
+    every finding or record why not, and re-run steps 9 and 10 after any change.
+  - >-
+    Closure evidence, recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state; parent
+    validator evidence (VP step 10 full-tier exit 0 plus bin/venv-python -m scripts.checks.validation_result
+    --verify-head for the pushed HEAD); structured postflight evidence (write the
+    scripts.session.postflight_evidence.CATEGORIES JSON in the scratchpad, then bin/venv-python -m
+    scripts.session.postflight --evidence <file>); the real outcome -- push, PR, CI green by event-driven wake (never
+    polled), code review PROCEED, squash-merge, then VP step 11.
+  - >-
+    Merge under the project's standing rule (code review PROCEED and CI green). Squash with
+    mcp__github__merge_pull_request(merge_method="squash"); no Resolves trailer (rec-2779 is superseded by step 11, not
+    resolved by an acceptance verdict).
+  - 'Report: what was implemented, verification results'
+rollback: Revert the squash commit; --full-env is the in-place escape until then.

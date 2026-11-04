@@ -22,6 +22,7 @@ _FILES = [
     ".github/workflows/terraform-apply-sandbox.yml",
     ".github/workflows/reconcile.yml",
     ".github/workflows/terraform-drift.yml",
+    ".github/workflows/terraform-plan-trusted.yml",
     ".github/actions/terraform-init-retry/action.yml",
     ".github/actions/terraform-init-retry/neon_api_key_check.sh",
 ]
@@ -156,17 +157,27 @@ def test_refresh_false_on_drift_plan_fails(tree: Path) -> None:
         "run -- terraform plan -detailed-exitcode",
         "run -- terraform plan -refresh=false -detailed-exitcode",
     )
-    assert any("-refresh=false outside the speculative plan" in f for f in _run(tree))
+    assert any("-refresh=false on a personal-root plan" in f for f in _run(tree))
 
 
-def test_refresh_false_missing_from_speculative_plan_fails(tree: Path) -> None:
+def test_refresh_false_on_trusted_plan_fails(tree: Path) -> None:
     _edit(
         tree,
-        ".github/workflows/terraform-apply-sandbox.yml",
-        "terraform plan -refresh=false -lock=false",
+        ".github/workflows/terraform-plan-trusted.yml",
         "terraform plan -lock=false",
+        "terraform plan -refresh=false -lock=false",
     )
-    assert any("speculative plan must run -refresh=false" in f for f in _run(tree))
+    assert any("-refresh=false on a personal-root plan" in f for f in _run(tree))
+
+
+def test_trusted_plan_without_the_neon_wrapper_fails(tree: Path) -> None:
+    _edit(
+        tree,
+        ".github/workflows/terraform-plan-trusted.yml",
+        'bash "$GITHUB_WORKSPACE/scripts/ci/neon_api_key.sh" run --\n',
+        "",
+    )
+    assert any("not run through" in f for f in _run(tree))
 
 
 def test_dispatch_plan_without_run_prefix_fails(tree: Path) -> None:

@@ -353,3 +353,13 @@ def test_secure_string_parameter_value_is_named_never_printed(literals: frozense
     assert "aws_ssm_parameter.example" in digest
     assert "sentinel" not in digest
     assert "value" in digest
+
+
+def test_main_refuses_when_the_scripts_package_resolves_outside_the_repo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    import scripts.ci.terraform_plan_digest as digest
+
+    monkeypatch.setattr(digest, "_ROOT", tmp_path)
+    assert main([str(tmp_path / "plan.json")]) == 2
+    assert "did not resolve under the repo root" in capsys.readouterr().err

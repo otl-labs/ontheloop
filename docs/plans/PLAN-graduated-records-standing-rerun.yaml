@@ -1,0 +1,446 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "graduated-records-standing-rerun"
+implementation_declared: true
+intent: >-
+  Make graduated verification records standing regression guards: the full tier re-runs every record (statically
+  resolving the pinned test ids the test suite already runs) and fails on a red one, except records on a committed,
+  shrink-only known-red list holding today's reds; the reversal of the 2026-09-26 "admitted once" verdict is recorded
+  as a new Decision, and moment-shaped claims stop graduating as standing guards.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-graduated-records-standing-rerun.yaml
+phase: >-
+  Ad-hoc recommendation work (rec-4831 plus duplicates rec-3341, rec-3247, rec-3119); no tier_item criterion is
+  closed. Touches deferred T3.7 (c7) and pending CD.29 by appended annotation only; T3.7 stays deferred_post_mvp
+  (Decision 93) and CD.29 stays pending.
+closes_criteria: []
+scope:
+  - file: scripts/checks/verification/validate_graduated_rerun.py
+    action: Create
+    purpose: >-
+      Registered check validate_graduated_rerun (full tier only). Loads live records through
+      scripts.verification_graduation.load_entries (never a hand-rolled glob, Decision 176) and the known-red list.
+      Partitions records into SUITE-COVERED and RUN. SUITE-COVERED: primitive_slot test_selector, and
+      command_exit_zero records whose argv starts with exactly [bin/venv-python|python, -m, pytest] (no shell; a
+      command_output_matches pytest record asserts on output the suite never checks, so it is RUN); in either case a
+      record is RUN instead when any pytest argument can select an integration-marked test: a node id whose function or
+      class carries a pytest.mark.integration decorator or whose module pytestmark names it, or a bare file or
+      directory argument containing any such test (a -k expression is not evaluated, so the whole file counts), found
+      by _graduated_rerun_nodes, because the full tier's unit run passes -m "not integration". Every pytest node argument of a SUITE-COVERED record is resolved through
+      _graduated_rerun_nodes (unresolvable = red). RUN records execute in a ThreadPoolExecutor of
+      min(8, os.cpu_count() or 1) workers; each command-slot record runs in a child process (this module's
+      one-record entry point, python -m with the check_id and --root <tree>, started from HEAD's repository root so it
+      imports HEAD's code even when the tree under test is an origin/main worktree, start_new_session=True; the child
+      calls materialize_check_in_tree(row, tree)) under a 300-second wall-clock limit,
+      and on expiry the whole process group is killed and the record is red with "timed out after 300 s"; pure-Python
+      slots (grep_count, file_presence) run in-process through materialize_check_in_tree(row, ROOT).run(). Each non-PASS
+      record is re-run once, alone, under the same limit after the pool drains, and is red only if that serial run is
+      also non-PASS (a record that passes alone is printed as load-sensitive, never silently dropped); a
+      GraduationError from materialization is red (Decision 55). Prints the header "=== Graduated record re-run ===" and, after it, one summary line
+      "<N> graduated_records examined, <R> red (<L> listed), <S> load-sensitive".
+      Fails, one failure line per record naming check_id, guard_target and the first line of the failure output
+      (Decision 142's fingerprint needs the id): an unlisted red record; a listed record that is not red ("passes;
+      remove it from known_red.yaml"); a listed id that is not a live record ("retired or renamed; remove it"); a
+      duplicate listed id; a malformed or missing list file. Declares registry.examined(<records evaluated>,
+      unit="graduated_records"). Public helpers red_records(root) and live_ids(root). Under 400 SLOC; if it grows
+      past, move the partition or pool into its own underscore module rather than raising any budget.
+    new_imports: [scripts.verification_graduation, scripts.checks.verification._graduated_rerun_nodes]
+  - file: scripts/checks/verification/validate_known_red_shrinks.py
+    action: Create
+    purpose: >-
+      Registered check validate_known_red_shrinks (fast and full tiers), in its own module so its import closure stays
+      small (scripts.checks._common, scripts.checks.registry, yaml, subprocess only; never
+      scripts.verification_graduation, whose closure validate_pre_glob_closure would demand in pre_globs). Reads the
+      list at HEAD and at the base, git merge-base HEAD origin/main, falling back to origin/main (git show, Decision
+      176 cl.4), and fails when HEAD holds a check_id the base list lacks; registry.skipped when no base ref resolves or
+      the base has no list file (the introducing change only). Comparing against the merge base keeps a branch green
+      when main has removed a different id since it branched.
+  - file: scripts/checks/verification/_graduated_rerun_nodes.py
+    action: Create
+    purpose: >-
+      Pure static resolution of a pytest node id "path.py[::Class[::Nested]]::function[param]" against the tree
+      (rec-4115's measured design: file existence, then an ast walk of the Class/function segments with any
+      "[...]" suffix stripped; a bare file or directory argument resolves by existence; flags such as -q, -k and
+      -m are skipped, and a -k/-m expression argument is skipped with it). Returns the unresolved node ids, and
+      separately reports whether an argument can select an integration-marked test (a node whose function or class
+      carries the decorator or whose module pytestmark names integration, or a bare file or directory containing any
+      such test). No pytest import, no collection.
+  - file: scripts/checks/verification/_manifest.py
+    action: Modify
+    purpose: >-
+      Two Entries (Decision 169: registered here, never in validate.py): validate_graduated_rerun with pre=False and
+      full_segment="full_after_lint"; validate_known_red_shrinks (module scripts.checks.verification.validate_known_red_shrinks) with pre=True,
+      pre_globs=("config/agent/verification_registry/known_red.yaml", "scripts/checks/verification/**",
+      "scripts/checks/_common.py", "scripts/checks/registry.py") and full_segment="full_after_lint"; re-measure with
+      validate_pre_glob_closure (VP 10) and add any glob it names, never prune its finding.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: Two function_to_category rows, validate_graduated_rerun and validate_known_red_shrinks, both code_regression.
+  - file: config/agent/verification_registry/known_red.yaml
+    action: Create
+    purpose: >-
+      The known-red list: {schema_version: 1, entries: [{check_id, owner_rec, entered_at}]}, sorted by check_id,
+      holding exactly the live records red on the build's origin/main base (VP step 7 measures it). owner_rec is
+      the follow-on triage rec rec-4871, except the records whose only defect is an unresolvable
+      pinned test id, which name rec-4115. No counts, no other fields (Decision 176 cl.3 anti-accretion).
+  - file: tests/checks/verification/test_validate_graduated_rerun.py
+    action: Create
+    purpose: >-
+      Mirror tests over a tmp-path tree with patched _common.ROOT (registry shards written through shard_path_for's
+      layout): an unlisted red record fails naming its check_id
+      (TestRerun::test_unlisted_red_record_fails); a listed red record passes
+      (TestRerun::test_listed_red_record_passes); a listed green record fails (TestRerun::test_listed_green_record_fails);
+      a listed retired id fails (TestRerun::test_listed_id_not_live_fails); a duplicate id fails; a stale pinned node
+      id on a test_selector record and on a plain-pytest command record fails (TestRerun::test_stale_node_id_fails);
+      a record that fails in the pool but passes alone is not red and is reported load-sensitive
+      (TestRerun::test_load_sensitive_record_passes_serial_confirm); the shell-wrapped pytest command is RUN, not
+      suite-covered (TestRerun::test_shell_wrapped_pytest_is_run); a record pinning an integration-marked test is RUN
+      (TestRerun::test_integration_marked_pin_is_run), including a bare-file argument with a -k expression over a
+      file holding an integration-marked class (the gc-guards-g2-g3-g4-discriminate shape); a record that exceeds the wall-clock limit (limit patched to
+      about 1 s, command sleeps) is red, named, and its process group is gone
+      (TestRerun::test_hung_record_times_out_red); examined() count equals records evaluated.
+  - file: tests/checks/verification/test_validate_known_red_shrinks.py
+    action: Create
+    purpose: >-
+      Shrink leg against a temporary git repo with an origin/main ref: an added id fails
+      (TestShrink::test_added_id_fails); a removed id passes (TestShrink::test_removed_id_passes); no base list is
+      skipped (TestShrink::test_no_base_list_skips); an id main removed after the branch point does not fail a branch
+      that still lists it (TestShrink::test_merge_base_comparison).
+  - file: tests/checks/verification/test__graduated_rerun_nodes.py
+    action: Create
+    purpose: >-
+      Resolution cases: file::function, file::Class::method, nested class, [param] suffix, bare file, directory,
+      missing file, missing function (TestResolve::test_missing_function_unresolved), flags and -k expressions skipped,
+      integration marker found on a function, a class, a module pytestmark and anywhere in a bare-file argument
+      (TestResolve::test_integration_marker_detected).
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: >-
+      Exactly the sidecar (docs/plans/approved/graduated-records-standing-rerun.yaml blocks decision-new and
+      decision-197-update): the new Decision above the current top entry, and an appended Update line on Decision
+      197 (its 2026-09-26 amendment line is not edited, Decision 177).
+  - file: docs/ROADMAP-PLATFORM.yaml
+    action: Modify
+    purpose: >-
+      Exactly the sidecar (blocks roadmap-t3-7-c7, roadmap-cd-29): appended amendment brackets on T3.7 c7 and CD.29;
+      no status or state changes.
+  - file: docs/contracts/verification-registry.yaml
+    action: Modify
+    purpose: >-
+      Exactly the sidecar (blocks registry-version, registry-governance-note, registry-log-compaction):
+      contract_version 7 -> 8, the STANDING governance note with its amendment_log row, and two older log rows
+      compacted to flow style with their words unchanged (the file is near its 500-line contracts-class limit:
+      494 effective lines on 2026-11-03 after PLAN-late-closure-gates, and the note alone would overrun it).
+  - file: docs/contracts/vp-red-before.yaml
+    action: Modify
+    purpose: >-
+      Exactly the sidecar (blocks vp-red-before-moment-claims, vp-red-before-version, vp-red-before-amendment-log):
+      the moment-claim sentence in graduation_disposition_authoring, contract_version 7 -> 8 and its amendment_log row.
+  - file: tests/test_project_alignment_contract.py
+    action: Modify
+    purpose: >-
+      Exactly the sidecar (block alignment-test-log-lookup), operator-approved under Decision 235 cl.1:
+      test_verification_registry_records_the_in_place_edit finds the PLAN-project-alignment amendment row anywhere
+      in the log instead of at position 0, keeping its semantic_break assertion; any new registry amendment row
+      otherwise breaks it.
+  - file: docs/plans/approved/graduated-records-standing-rerun.yaml
+    action: Create
+    purpose: The operator-approved sidecar binding every always-ask word of this plan (committed in the plan PR).
+bundled_recommendations: [rec-4831, rec-3341, rec-3247, rec-3119]
+followon_recs: [rec-4871]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - The full tier fails when a live graduated record that is not on known_red.yaml is red, naming the record.
+  - The full tier fails when a known_red.yaml entry passes, is not a live record, or is duplicated.
+  - The full tier fails when a pinned pytest node id of a test_selector or plain-pytest record does not resolve.
+  - A record that fails only under the parallel pool and passes alone is not red, and is reported load-sensitive.
+  - The fast tier fails a change that adds an id to known_red.yaml; removing one passes.
+  - known_red.yaml holds exactly the live records red on the build's origin/main base, and HEAD adds no red record.
+  - DECISIONS.md, the roadmap, both contracts and the alignment test match the sidecar word for word.
+  - rec-4831, rec-3341, rec-3247 and rec-3119 are closed through the trailer; the triage follow-on rec stays open.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: An unlisted red record fails the full-tier re-run and names itself; a listed one passes
+    command: bin/venv-python -m pytest "tests/checks/verification/test_validate_graduated_rerun.py::TestRerun::test_unlisted_red_record_fails" "tests/checks/verification/test_validate_graduated_rerun.py::TestRerun::test_listed_red_record_passes" -q
+    expected: Both pass.
+    fix_if: The red record is not reported, or reported without its check_id.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: graduated-rerun-unlisted-red-fails
+  - step: 2
+    phase: pre-deploy
+    action: The known-red list is strict -- a listed green record, a listed non-live id and a stale pinned node id all fail
+    command: bin/venv-python -m pytest "tests/checks/verification/test_validate_graduated_rerun.py::TestRerun::test_listed_green_record_fails" "tests/checks/verification/test_validate_graduated_rerun.py::TestRerun::test_listed_id_not_live_fails" "tests/checks/verification/test_validate_graduated_rerun.py::TestRerun::test_stale_node_id_fails" -q
+    expected: All three pass.
+    fix_if: A green listed record or a retired id is tolerated (the list would stop shrinking), or a moved test id passes.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: graduated-rerun-known-red-strict
+  - step: 3
+    phase: pre-deploy
+    action: >-
+      A load-sensitive record is confirmed serially and not called red; shell-wrapped pytest and integration-marked
+      pins are run, not skipped; a hung record times out red
+    command: bin/venv-python -m pytest "tests/checks/verification/test_validate_graduated_rerun.py::TestRerun::test_load_sensitive_record_passes_serial_confirm" "tests/checks/verification/test_validate_graduated_rerun.py::TestRerun::test_shell_wrapped_pytest_is_run" "tests/checks/verification/test_validate_graduated_rerun.py::TestRerun::test_integration_marked_pin_is_run" "tests/checks/verification/test_validate_graduated_rerun.py::TestRerun::test_hung_record_times_out_red" -q
+    expected: All four pass.
+    fix_if: >-
+      A timing-only failure reds main, a shell command containing pytest or a pin the unit run deselects escapes the
+      re-run, or a hung record stalls the tier instead of failing by name.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: graduated-rerun-serial-confirm
+  - step: 4
+    phase: pre-deploy
+    action: The list only shrinks
+    command: bin/venv-python -m pytest tests/checks/verification/test_validate_known_red_shrinks.py -q
+    expected: Passes, including test_added_id_fails, test_removed_id_passes, test_no_base_list_skips and test_merge_base_comparison.
+    fix_if: An added id passes the fast tier.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: known-red-list-only-shrinks
+  - step: 5
+    phase: pre-deploy
+    action: Static node-id resolution
+    command: bin/venv-python -m pytest tests/checks/verification/test__graduated_rerun_nodes.py -q
+    expected: Passes, including TestResolve::test_missing_function_unresolved.
+    fix_if: A missing function or class resolves, or a [param] suffix or a -k expression makes a real node unresolvable.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: graduated-rerun-node-ids-resolve
+  - step: 6
+    phase: pre-deploy
+    action: Both checks are registered in the right tiers and taxonomy
+    command: >-
+      bin/venv-python -c "from scripts.checks import registry; f=[s.name for s in registry.full_sequence()];
+      p=[s for s in registry.pre_sequence() if s.name=='validate_known_red_shrinks']; import yaml;
+      t=yaml.safe_load(open('config/ci_rca_taxonomy.yaml'))['function_to_category'];
+      assert 'validate_graduated_rerun' in f and 'validate_known_red_shrinks' in f, f;
+      assert not [s for s in registry.pre_sequence() if s.name=='validate_graduated_rerun'];
+      assert p and 'config/agent/verification_registry/known_red.yaml' in p[0].pre_globs, p;
+      assert t['validate_graduated_rerun']==t['validate_known_red_shrinks']=='code_regression'; print('REGISTERED_OK')"
+      && bin/venv-python -m pytest tests/checks/registry/test_sequences.py -q
+    expected: Exit 0.
+    fix_if: The re-run leaked into --pre (budget), or the shrink leg is missing from --pre.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Decision 187's tier-demotion gate already guards losing pre or full_segment, and validate_ci_rca_taxonomy covers
+      the rows; the residual this leaves (promoting the re-run into --pre) is guarded only by the fast-tier budget and
+      review.
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      The list is exactly main's reds and the build adds none: run the new module's evaluation (HEAD's code) against
+      an origin/main worktree's records and against HEAD's records; HEAD's red set equals the list, and the list
+      equals main's red set restricted to records live at HEAD.
+    command: |-
+      bin/venv-python - <<'PY'
+      from pathlib import Path
+      import yaml
+      from scripts.verification_graduation import git_worktree
+      from scripts.checks.verification import validate_graduated_rerun as g
+      lst = {e["check_id"] for e in yaml.safe_load(open("config/agent/verification_registry/known_red.yaml"))["entries"]}
+      head = g.red_records(Path("."))
+      with git_worktree("origin/main") as w:
+          main = g.red_records(Path(w))
+      live = g.live_ids(Path("."))
+      assert head == lst, ("head", sorted(head ^ lst))
+      assert lst == main & live, ("main", sorted(lst ^ (main & live)))
+      print("KNOWN_RED_EXACT", len(lst))
+      PY
+    expected: >-
+      Exit 0 and KNOWN_RED_EXACT with the count printed (about 50 on 2026-11-03's main; the build records its own).
+      Two full RUN passes take several minutes: run it backgrounded, not in the 10-minute foreground.
+    fix_if: >-
+      HEAD has a red record not red on main: the build caused it -- fix the surface, never list it (Decision 181). A
+      main red missing from the list: add it (this is the introducing change). red_records and live_ids are the
+      module's public helpers the check itself uses.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Base-relative to origin/main at build time; after merge the list only shrinks and validate_graduated_rerun enforces the same equality on every full-tier run.
+  - step: 8
+    phase: pre-deploy
+    action: The governed text matches the operator-approved sidecar word for word
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug graduated-records-standing-rerun --base origin/main
+      && bin/venv-python -m pytest -q
+      tests/test_project_alignment_contract.py::TestRegistryShardRepair::test_verification_registry_records_the_in_place_edit
+    expected: Exit 0.
+    fix_if: Any bound file differs from the sidecar beyond a filled {{N}}/{{DATE}} -- stop and ask; never re-derive the sidecar.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Base-relative to origin/main; vacuous after merge, when origin/main holds the bound text.
+  - step: 9
+    phase: pre-deploy
+    action: Decisions index regenerated for the new entry
+    command: bin/venv-python -m scripts.decisions_index --check
+    expected: Exit 0.
+    fix_if: Run --write and commit docs/decisions-index.json.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Already enforced by the decisions-index freshness check in the fast tier.
+  - step: 10
+    phase: pre-deploy
+    action: Fast tier
+    command: bin/venv-python -m scripts.validate --pre
+    expected: Exit 0.
+    fix_if: Diagnose the named check (Decision 55).
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-tier run; not a single kernel check.
+  - step: 11
+    phase: pre-deploy
+    action: Full tier before handoff, on the committed, rebased tree (includes the new re-run)
+    command: bin/venv-python -m scripts.validate
+    expected: >-
+      Exit 0 via scripts.checks.validation_result --verify-head; validate_graduated_rerun reports its examined count and
+      its wall time is under ten minutes (the Decision's leg-cost reversal condition).
+    fix_if: Diagnose the named failing check on the branch; a failure outside this scope is a rec, not an inline patch.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-tier run; not a single kernel check.
+  - step: 12
+    phase: post-deploy
+    action: The first main-validate run on the merge commit is green with the new check enforcing
+    command: >-
+      mcp__github__actions_list (workflow ci.yml, branch main, head_sha set to the squash-merge SHA) then
+      mcp__github__get_job_logs for main-validate; find the "=== Graduated record re-run ===" header and the
+      summary line "<N> graduated_records examined, <R> red (<L> listed), <S> load-sensitive" after it.
+    expected: main-validate conclusion success; the summary line shows R equal to L and validate_graduated_rerun failed none.
+    fix_if: >-
+      A record green locally but red on the CI runner is an environment difference -- route it as red main
+      (Decision 226), fix the record's surface or retire it with operator approval; never add it to the list.
+    hermetic: false
+    graduation: not-applicable
+  - step: 13
+    phase: post-deploy
+    action: Bundled recs closed
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; r,m=fetch_recs_by_ids(make_reader(profile='agent_platform'),
+      ['rec-4831','rec-3341','rec-3247','rec-3119']); s={x['id']:x['status'] for x in r}; assert all(v=='closed' for v in s.values()) and not m, (s,m); print('CLOSED', s)"
+    expected: All four closed.
+    fix_if: Re-run the ci.yml closure job's verdict; never close by hand without the trailer verdict.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/checks/verification/validate_graduated_rerun.py
+    behavior: an unlisted red graduated record fails the full tier and names itself
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_graduated_rerun.py::TestRerun::test_unlisted_red_record_fails
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/checks/verification/validate_graduated_rerun.py
+    behavior: the known-red list is strict (green, retired and duplicate entries fail)
+    verification_step: 2
+    test_selector: tests/checks/verification/test_validate_graduated_rerun.py::TestRerun::test_listed_green_record_fails
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/checks/verification/validate_known_red_shrinks.py
+    behavior: the list only shrinks
+    verification_step: 4
+    test_selector: tests/checks/verification/test_validate_known_red_shrinks.py::TestShrink::test_added_id_fails
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/checks/verification/_graduated_rerun_nodes.py
+    behavior: an unresolvable pinned node id is reported
+    verification_step: 5
+    test_selector: tests/checks/verification/test__graduated_rerun_nodes.py::TestResolve::test_missing_function_unresolved
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/checks/verification/_manifest.py
+    behavior: the re-run is full-tier only and the shrink leg is in both tiers
+    verification_step: 6
+    command: bin/venv-python -m pytest tests/checks/registry/test_sequences.py -q
+    red_green_expectation: green before and after; step 6's assertion is red before (names absent)
+  - source: tests/test_project_alignment_contract.py
+    behavior: the alignment test still finds its amendment row after a newer row lands
+    verification_step: 8
+    test_selector: tests/test_project_alignment_contract.py::TestRegistryShardRepair::test_verification_registry_records_the_in_place_edit
+    red_green_expectation: red before on the sidecar tree (row not first), green after
+  - source: scripts/checks/verification/validate_graduated_rerun.py
+    behavior: a hung record is red and named instead of stalling the full tier
+    verification_step: 3
+    test_selector: tests/checks/verification/test_validate_graduated_rerun.py::TestRerun::test_hung_record_times_out_red
+    red_green_expectation: red before (module absent), green after
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: both new checks classify as code_regression
+    verification_step: 6
+    command: bin/venv-python -m pytest tests/checks/registry/test_sequences.py -q
+    waiver_reason: >-
+      A taxonomy row is data the existing validate_ci_rca_taxonomy gate already requires for every registered check
+      (fast tier, step 10); step 6's assertion pins both rows to code_regression, so a new test would duplicate the gate.
+  - source: config/agent/verification_registry/known_red.yaml
+    behavior: the list holds exactly main's reds and HEAD adds none
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_graduated_rerun.py::TestRerun::test_listed_red_record_passes
+    red_green_expectation: red before (module and list absent), green after; step 7 proves the committed list is exact
+  - source: docs/ROADMAP-PLATFORM.yaml
+    behavior: the T3.7 c7 and CD.29 annotations match the approved sidecar word for word
+    verification_step: 8
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug graduated-records-standing-rerun --base origin/main
+    red_green_expectation: red before (bound text absent), green after
+  - source: docs/contracts/verification-registry.yaml
+    behavior: the STANDING note, version bump and compacted log rows match the approved sidecar
+    verification_step: 8
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug graduated-records-standing-rerun --base origin/main
+    red_green_expectation: red before (bound text absent), green after
+  - source: docs/contracts/vp-red-before.yaml
+    behavior: the moment-claim rule, version bump and log row match the approved sidecar
+    verification_step: 8
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug graduated-records-standing-rerun --base origin/main
+    red_green_expectation: red before (bound text absent), green after
+constraints:
+  - Every edit to docs/DECISIONS.md, docs/ROADMAP-PLATFORM.yaml, docs/contracts/verification-registry.yaml, docs/contracts/vp-red-before.yaml and tests/test_project_alignment_contract.py is exactly the sidecar; a build that cannot reproduce it stops and asks (never re-derive it).
+  - Never add a record to known_red.yaml that is not red on origin/main, and never edit a graduated record to make it pass (Decisions 181, 235). Retiring a record is out of scope here (the follow-on triage rec owns it, with operator approval).
+  - The re-run stays out of the fast tier (budget, Decision 128 / selection_budget.py); only the shrink leg runs there, gated on the list file.
+  - load_entries / entries_at_ref are the only registry read path (Decision 176); the list holds no counts and indexes nothing.
+  - No new dependency; stdlib ast and concurrent.futures only.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout r1 FLAGS_FOUND (Decisions triaged: 193 of 193; Roadmap items intersected: 6; CONFLICT: 0; RELATED: 4). CITE 235, 181, 226, 176, 170, 169, 187, 142, 167, 177. WARN Decision 197 (Q1 verdict) -> resolved by the operator's card choice 2026-11-03 and the new Decision. NOTE 163 -> rehearsal below. NOTE 176 -> list holds no counts. Report: /mnt/project-files/graduated-rerun/SCOUT.md (session evidence, not a repo file)."
+  - "Operator ruling: Benjamin chose 'Re-run in the full tier' on 2026-11-03 (reverses audit criterion-shape-forks-9d25d918 Q1); the wording approval is recorded in the handoff, not here."
+  - "Measured 2026-11-02/03 on main 4e62d4b3 and cc6b11b5: 50 of 1,490 records red (42 non-pytest, 7 pytest-based incl. rec-4115's stale ids, 1 load-sensitive: plan-obligations-no-glob-no-raise fails under a 4-worker pool, passes alone). RUN-partition cost about 141 s on 4 workers plus about 178 s serial for 35 shell-wrapped pytest records."
+  - "Rehearsal (Decision 163 NOTE): a tree with one added Decision, its regenerated index and one added roadmap tier item turned no green record red; the sidecar tree turned no green record red either."
+  - "Integration-marked pins (the full tier's unit run passes -m 'not integration'; measured 2026-11-03: no pinned node id is integration-marked, but gc-guards-g2-g3-g4-discriminate runs a bare file with -k selecting the integration-marked TestG4RealDryRunSizeColumn, rec-3773's anchor) are routed to the RUN partition whenever any argument can select one, so the Decision's 'the test suite already re-runs the tests' holds for every SUITE-COVERED record (critique r1, r2). That class skips itself without network, so running it is safe."
+  - "main-validate runs venv-less (bin/venv-python falls back to the PATH interpreter, Decision 148) and with origin/main equal to HEAD; three records use git show origin/main and pass there. Step 12 is the CI proof; locally unproven."
+  - "Stripping a [param] suffix means a stale parameter id still resolves (4 records pin parametrized ids on 2026-11-03); declared residual with the integration one above. Also residual: 37 of 1,691 SUITE-COVERED pinned node ids sit in modules with a module-level importorskip or skip mark and run only where the dependency is installed (critique r2)."
+  - "RUN records execute in the live checkout, as the admission differential ran them in a tree of the repo; about 11 records mention logs/ or validation_result. A record that writes tracked files is a defect for rec-4871's triage, not this plan's; VP 11 runs on the committed tree so uncommitted edits do not mask a result."
+  - "Rejected alternative (critique r1 frame challenge): one parametrized pytest over the records would get xdist, per-test timeouts and xfail(strict=True) for the list for free, but the records spawn pytest themselves (nested pytest under xdist), validate.py's recursion guard refuses that, and the records are governed data, not tests; the custom pool keeps the GATE-FAILURE lines ci-rca fingerprints."
+  - "rec-4115 stays open: this plan resolves node ids in the full tier only; its --pre promotion and its five stale shards are its own (they go on the list owned by rec-4115). rec-3286 (repair path) stays open; the follow-on triage needs it for claim-preserving repairs."
+  - "Decision 235 reading (scout): a record red before the retiring change is not 'red on the change'; retiring a live claim still needs per-record operator approval (the follow-on rec)."
+  - "LAMBDA-DEPLOY DEFERRED (CD.16 / Decision 79): docs/ROADMAP-PLATFORM.yaml is a packaged asset of the active data-pipeline artifact; the edit is an appended annotation with no packaged code change and refreshes with the artifact's next governed deploy."
+  - "Graduated checks kept (none weakened): project-alignment-contract-shape (names tests/test_project_alignment_contract.py; the sidecar's log-lookup edit keeps it green)."
+  - "Unbuilt plans sharing files (whichever builds second rebases; Decision numbers renumber at merge): PLAN-merge-race-attestation (_manifest.py, ci_rca_taxonomy.yaml, 13 lines headroom); PLAN-retire-strategic-plans-and-legacy-executor and PLAN-work-graph-edge-model (DECISIONS.md, roadmap); others per plan_obligations."
+  - "red_overlap 2026-11-03 on 03ac4f9d: blocked by rec-4847 (slo_breached, test_defect, local-clone CI test, shared []), rec-4866 and rec-4869 (overlap, product_regression, prose ratchet S1; shared only transitive test files: prose limits, marker guard, plan_lint derivations, plan_wording_check). Deferral rationale: this plan touches none of their files (config/prose_budgets.yaml, AGENTS.md, tests/test_session_rebase_resolve.py) and does not repair them; the S1 ratchet was lowered on main by #1823 (2215125d) with closure pending, and rec-4847 has its own owner. The build rebases on main and its full-tier step proves no overlap."
+  - "Sidecar re-anchor 2026-11-03 (wording-check round 4): PLAN-late-closure-gates (#1828) landed contract_version 7 and a new governance paragraph in verification-registry.yaml, so blocks registry-version and registry-governance-note re-anchor and the version numbers in registry-version and the registry log row move from 6 -> 7 to 7 -> 8. No other replacement word changed. Covered by the operator's 2026-11-03 14:02Z ruling that wording changes keeping the approved meaning need no re-approval, and the 13:09Z anchor-only re-anchor ruling. Digest trail: c6a53fc1 (approved, base cc6b11b5 and 03ac4f9d) -> 91e20432 (base c7a746a4)."
+  - "Owning planning thread: 'Fix never-rerun Decision and roadmap checks'."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: wording-check, round: 1, verdict: FAIL, digest: 3cbbf21b6e5677cb2c3a98d11b3726a36a97dd4eae03666d650e201d9553df37, base: cc6b11b52066ba6c9fad2aa0b64186c301ec02b1, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 2, verdict: PASS, digest: c6a53fc1ddcabf202160e1ba6874ebc19f02cd2d49a95903aad9447d7b49fc78, base: cc6b11b52066ba6c9fad2aa0b64186c301ec02b1, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 3, verdict: PASS, digest: c6a53fc1ddcabf202160e1ba6874ebc19f02cd2d49a95903aad9447d7b49fc78, base: 03ac4f9da9b7341e84f776865ddfad313c53f4cb, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 4, verdict: PASS, digest: 91e20432850e51bcc906bdfe5a694e9a9eabbf7b297b0de1343b1579a905b67d, base: c7a746a404068747898ff3af84e9ec98079ffedd, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 9}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 0}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections (176, 181, 197, 226, 235) read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Write scripts/checks/verification/_graduated_rerun_nodes.py and its mirror test; run VP 5."
+  - "Write scripts/checks/verification/validate_graduated_rerun.py (public helpers red_records(root) and live_ids(root)) and validate_known_red_shrinks.py, each with its mirror test; run VP 1-4."
+  - "Register both in scripts/checks/verification/_manifest.py and config/ci_rca_taxonomy.yaml; run VP 6 and any obligation the registry's own tests name."
+  - "Generate config/agent/verification_registry/known_red.yaml from red_records on an origin/main worktree (owner_rec per the scope row, entered_at today); run VP 7."
+  - "Apply the sidecar to the five bound files exactly, indenting bound text to its host block (approved_text compares words, not indentation: 2 spaces inside governance_notes, amendment_log and graduation_disposition_authoring; the STANDING paragraph must stay inside the governance_notes block scalar); regenerate docs/decisions-index.json; run VP 8-9."
+  - "Run VP 10, then commit, rebase and run VP 11 (full tier, backgrounded with a 2 h limit); open the PR; merge on code review PROCEED and green CI with the Resolves trailer for the four bundled recs."
+  - "Post-merge: VP 12 and VP 13; report to the coordinator."
+weakening_dispositions:
+  - candidate: "[assertion-changed] tests/test_project_alignment_contract.py::TestRegistryShardRepair::test_verification_registry_records_the_in_place_edit"
+    disposition: planned-change
+    cite: "acceptance_criteria[6]"
+rollback: >-
+  Revert the implementation PR: the checks, the list and the Decision go together; the registry returns to admitted-once
+  semantics and Decision 197's recorded verdict stands again.

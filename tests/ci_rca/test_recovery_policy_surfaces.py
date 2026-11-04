@@ -10,6 +10,8 @@ from pathlib import Path
 
 import yaml
 
+from tests.fixtures.decision_entry import authored_bytes, cap_bytes, decision_entry
+
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT = ROOT / "docs" / "contracts" / "red-main-recovery.yaml"
 
@@ -64,7 +66,7 @@ class TestDecisionEntry:
         assert "**Fast lane for A**" in entry
 
     def test_entry_stays_under_the_size_cap(self) -> None:
-        assert len(_entry(226).encode("utf-8")) < 6144
+        assert authored_bytes(decision_entry(_read("docs/DECISIONS.md"), 226)) <= cap_bytes()
 
 
 class TestContractPolicy:

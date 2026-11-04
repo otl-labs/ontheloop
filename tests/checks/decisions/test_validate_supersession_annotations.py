@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
+from scripts.checks import registry
 from scripts.checks.decisions.validate_supersession_annotations import (
     extract_supersession_edges,
     validate_supersession_annotations,
@@ -33,7 +35,6 @@ def _write_decisions(root: Path, live: str = "", archive: str | None = "") -> No
 def _write_waivers(
     root: Path,
     waivers: list[dict] | None = None,
-    live_archive_pair_allowlist: list[int] | None = None,
     raw_text: str | None = None,
 ) -> None:
     config_dir = root / "config"
@@ -42,7 +43,7 @@ def _write_waivers(
     if raw_text is not None:
         path.write_text(raw_text, encoding="utf-8")
         return
-    data = {"waivers": waivers or [], "live_archive_pair_allowlist": live_archive_pair_allowlist or []}
+    data = {"waivers": waivers or []}
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
 
 
@@ -271,7 +272,7 @@ class TestDuplicateNumberSubCheck:
         validate_supersession_annotations(failed, root=tmp_path)
         assert failed == ["Decision supersession-annotation guard"]
 
-    def test_live_archive_pair_warns_when_not_allowlisted(self, tmp_path: Path, capsys) -> None:
+    def test_live_archive_pair_fails(self, tmp_path: Path, capsys) -> None:
         _write_decisions(
             tmp_path,
             live="## Decision 7: Live copy (Decided)\n\n**Status:** Decided\n",
@@ -280,21 +281,41 @@ class TestDuplicateNumberSubCheck:
         _write_waivers(tmp_path)
         failed: list[str] = []
         validate_supersession_annotations(failed, root=tmp_path)
-        assert failed == []
+        assert failed == ["Decision supersession-annotation guard"]
         out = capsys.readouterr().out
-        assert "WARN" in out and "Decision 7" in out
+        assert "FAIL" in out and "Decision 7 appears in both" in out
 
-    def test_live_archive_pair_silenced_by_allowlist(self, tmp_path: Path, capsys) -> None:
-        _write_decisions(
-            tmp_path,
-            live="## Decision 7: Live copy (Decided)\n\n**Status:** Decided\n",
-            archive="## Decision 7: Archive copy (Decided)\n\n**Status:** Decided\n",
-        )
-        _write_waivers(tmp_path, live_archive_pair_allowlist=[7])
+    def test_retired_allowlist_key_fails(self, tmp_path: Path, capsys) -> None:
+        _write_decisions(tmp_path, live="## Decision 7: Live copy (Decided)\n\n**Status:** Decided\n")
+        _write_waivers(tmp_path, raw_text="waivers: []\nlive_archive_pair_allowlist: []\n")
         failed: list[str] = []
         validate_supersession_annotations(failed, root=tmp_path)
-        assert failed == []
-        assert "Decision 7" not in capsys.readouterr().out
+        assert len(failed) == 1 and "live_archive_pair_allowlist" in failed[0] and "retired" in failed[0]
+
+
+class TestAccounting:
+    def test_run_declares_the_heading_count(self, tmp_path: Path) -> None:
+        _write_decisions(
+            tmp_path,
+            live=(
+                "## Decision 1: One (Decided)\n\n**Status:** Decided\n\n## Decision 2: Two (Decided)\n\n**Status:** Decided\n"
+            ),
+            archive="## Decision 3: Three (Decided)\n\n**Status:** Decided\n",
+        )
+        _write_waivers(tmp_path)
+        registry.pop_declaration()
+        validate_supersession_annotations([], root=tmp_path)
+        declaration = registry.pop_declaration()
+        assert declaration is not None and declaration.kind == "examined"
+        assert declaration.count == 3 and declaration.unit == "decisions"
+
+    def test_missing_waiver_file_declares_skipped(self, tmp_path: Path) -> None:
+        _write_decisions(tmp_path, live="## Decision 1: One (Decided)\n\n**Status:** Decided\n")
+        registry.pop_declaration()
+        failed: list[str] = []
+        validate_supersession_annotations(failed, root=tmp_path)
+        declaration = registry.pop_declaration()
+        assert failed and declaration is not None and declaration.kind == "skipped"
 
 
 class TestWarehouseIdSubCheck:
@@ -424,3 +445,77 @@ class TestDecisionsMdDedupWarning:
         decisions_path.write_text("## Decision 1: Only one (Decided)\n\n**Status:** Decided\n", encoding="utf-8")
         parse_decisions_md(paths=[decisions_path])
         assert capsys.readouterr().err == ""
+
+
+def _edge_fixture(tmp_path: Path, superseder_body: str, victim_body: str = "No back-pointer here.") -> None:
+    _write_decisions(
+        tmp_path,
+        live=f"## Decision 7: New (Decided)\n\n**Decision:** {superseder_body}\n\n---\n\n"
+        f"## Decision 2: Two (Decided)\n\n**Status:** Decided\n\n---\n\n"
+        f"## Decision 1: One (Decided)\n\n**Status:** {victim_body}\n",
+    )
+
+
+class TestWholeNumberAnnotation:
+    """M1: a longer number sharing the superseder's digits is not an annotation."""
+
+    @pytest.mark.parametrize(
+        ("victim_mention", "expected_failed"),
+        [
+            ("See Decision 52 instead.", ["Decision supersession-annotation guard"]),
+            ("Superseded by Decision 5.", []),
+        ],
+    )
+    def test_prefix_does_not_annotate(self, tmp_path: Path, victim_mention: str, expected_failed: list[str]) -> None:
+        _write_decisions(
+            tmp_path,
+            live="## Decision 5: New (Decided)\n\n**Decision:** Supersedes Decision 1.\n\n---\n\n"
+            f"## Decision 1: Old (Decided)\n\n**Status:** {victim_mention}\n",
+        )
+        _write_waivers(tmp_path)
+        failed: list[str] = []
+        validate_supersession_annotations(failed, root=tmp_path)
+        assert failed == expected_failed
+
+
+class TestSharedGrammarEdges:
+    """M2: plural lists the shared title grammar admits, its documented limit, and participle rejection."""
+
+    @pytest.mark.parametrize(
+        ("body", "expected_victims"),
+        [
+            ("New entry (Supersedes Decisions 1, 2) for scope.", {1, 2}),
+            ("This amends Decisions 1/2.", {1, 2}),
+            ("This amends Decision 1 and Decision 2.", {1, 2}),
+            ("Supersedes Decisions 1, 2.", {1}),
+            ("Built while superseding Decision 1.", set()),
+            ("Recorded rather than amending Decision 1.", set()),
+            ("This entry does not amend Decision 1.", set()),
+            ("Itself superseded by Decision 1 later.", set()),
+        ],
+    )
+    def test_extracted_victims(self, tmp_path: Path, body: str, expected_victims: set[int]) -> None:
+        _edge_fixture(tmp_path, body)
+        assert {v for s, v, _ in extract_supersession_edges(tmp_path) if s == 7} == expected_victims
+
+
+class TestWaiverIntegrity:
+    def test_orphan_waiver_fails_naming_the_pair(self, tmp_path: Path, capsys) -> None:
+        _write_decisions(tmp_path, live="## Decision 1: Something (Decided)\n\n**Status:** Decided\n")
+        _write_waivers(tmp_path, waivers=[{"superseder": 9, "victim": 1, "reason": "names no edge"}])
+        failed: list[str] = []
+        validate_supersession_annotations(failed, root=tmp_path)
+        assert failed == ["Decision supersession-annotation guard"]
+        assert "orphan waiver 9->1" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        "entry",
+        [{"superseder": 2, "reason": "missing victim"}, {"superseder": "x", "victim": 1, "reason": "non-integer"}],
+    )
+    def test_malformed_waiver_entry_fails_cleanly(self, tmp_path: Path, entry: dict) -> None:
+        _write_decisions(tmp_path, live="## Decision 1: Something (Decided)\n\n**Status:** Decided\n")
+        _write_waivers(tmp_path, waivers=[entry])
+        failed: list[str] = []
+        validate_supersession_annotations(failed, root=tmp_path)
+        assert len(failed) == 1
+        assert "malformed waiver entry #0" in failed[0]

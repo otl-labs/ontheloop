@@ -163,6 +163,7 @@ class TestPrunedEdgesRoster:
 
 _REGISTRY_SEQUENCE_SYMBOLS = frozenset({"_ALL_ENTRIES", "pre_sequence", "full_sequence"})
 _MANIFEST_PROBE_PATH = "scripts/checks/ci_guards/_manifest.py"
+_PLAN_DOCUMENT = "scripts.roadmap.plan_document"
 _PLAN_DOCUMENT_PROBE_PATH = "scripts/roadmap/plan_document.py"
 
 
@@ -216,17 +217,27 @@ class TestRowRationaleIsStructural:
 
     def test_any_gated_check_calling_load_plan_globs_plan_document(self) -> None:
         """The scripts.checks._common row's own rationale: 3 of 5 load_plan callers declare no
-        globs (always run), the other 2 already glob scripts/roadmap/** themselves -- so a NEW
-        caller that globs neither would silently under-declare its own dependency."""
+        globs (always run), the other 2 glob plan_document's whole closure themselves -- so a NEW
+        caller, or a new plan_document import outside scripts/roadmap/, that leaves a closure path
+        unglobbed would silently under-declare the caller's dependency."""
         root = _common.ROOT
+        view = vpgc._closure_view(root)
+        plan_document_paths = sorted(
+            path
+            for path in filter(None, (vpgc._module_to_repo_path(m, root) for m in vpgc._closure_modules(view, _PLAN_DOCUMENT)))
+            if not vpgc._module_body_is_trivial(path, root)
+        )
+        assert _PLAN_DOCUMENT_PROBE_PATH in plan_document_paths
         violations = []
         for entry in vpgc._gated_entries():
             module_path = vpgc._module_to_repo_path(entry.module, root)
             if module_path is None:
                 continue
             source = (root / module_path).read_text(encoding="utf-8")
-            if _calls_load_plan(source) and not _globs_cover(entry.pre_globs, _PLAN_DOCUMENT_PROBE_PATH):
-                violations.append(entry.name)
+            if _calls_load_plan(source):
+                violations.extend(
+                    f"{entry.name}: {path}" for path in plan_document_paths if not _globs_cover(entry.pre_globs, path)
+                )
         assert violations == []
 
     def test_references_registry_sequence_or_all_entries_detects_each_symbol(self) -> None:

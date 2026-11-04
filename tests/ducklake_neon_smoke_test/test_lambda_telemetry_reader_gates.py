@@ -16,6 +16,7 @@ from botocore.exceptions import ClientError
 
 from scripts.ducklake_smoke import core, lambda_telemetry_reader_gates
 from src.common.ducklake_event_read_verbs import EVENT_READS
+from src.common.ducklake_reader_client import VERB_FIELDS
 from tests.fixtures.ducklake_smoke_fakes import _Resp
 
 SUCCESS_LINE = (
@@ -43,6 +44,7 @@ HEALTH_OK = {"ok": True, "rows": [{"table_name": t, "record_count": 0} for t in 
 EMPTY_OK = {"ok": True, "rows": [], "row_count": 0}
 INPUT_400 = {"ok": False, "error_type": "named_read_input", "error": "session_id is not canonical"}
 MARKER = "MARKER"
+USAGE_VERBS = ("model_usage_rollup", "tool_use_rollup", "session_startup_baseline")
 
 
 def _j(status, payload):
@@ -76,6 +78,7 @@ def wired(monkeypatch):
         "ops_verb": _Resp(400, {"ok": False, "error_type": "unknown_verb"}),
         "health": _Resp(200, HEALTH_OK),
         "window": _j(200, EMPTY_OK),
+        "usage": {name: _j(200, EMPTY_OK) for name in USAGE_VERBS},
         "absent": _j(200, EMPTY_OK),
         "bad_session": _j(400, INPUT_400),
         "tree": _j(200, EMPTY_OK),
@@ -96,6 +99,8 @@ def wired(monkeypatch):
                 return state["content"]
             if verb == "open_recs_tally":
                 return state["ops_verb"]
+            if verb in USAGE_VERBS:
+                return state["usage"][verb]
             params = payload.get("params") or {}
             refused = MARKER in str(params.get("session_id", "")) or params.get("max_rows") == 0
             if verb == "session_state_and_duration":
@@ -134,6 +139,9 @@ def test_happy_path_prints_the_fixed_line(wired, capsys):
         "open_recs_tally",
         "telemetry_health_count",
         "sessions_window",
+        "model_usage_rollup",
+        "tool_use_rollup",
+        "session_startup_baseline",
         "session_state_and_duration",
         "session_state_and_duration",
         "session_tree_rows",
@@ -230,3 +238,24 @@ def test_reader_gate_refuses_a_malformed_session_without_echo(wired, capsys):
         saved, wired[key] = wired[key], answer
         _gate_fails(wired, capsys, match)
         wired[key] = saved
+
+
+def test_reader_gate_reads_the_usage_verbs(wired, capsys):
+    lambda_telemetry_reader_gates.lambda_telemetry_reader()
+    assert capsys.readouterr().out.strip().splitlines() == [SUCCESS_LINE]
+    sent = [p for p, _ in wired["sent"] if p.get("verb") in USAGE_VERBS]
+    assert [p["verb"] for p in sent] == list(USAGE_VERBS) and all(set(p["params"]) == {"day_from", "day_to"} for p in sent)
+    for verb in USAGE_VERBS:
+        columns = dict.fromkeys(VERB_FIELDS[verb])
+        wired["usage"][verb] = _j(200, {"ok": True, "rows": [columns], "row_count": 1})
+        lambda_telemetry_reader_gates.lambda_telemetry_reader()
+        capsys.readouterr()
+        short = dict.fromkeys(list(columns)[1:], PLANTED)
+        for status, body, match in (
+            (200, {"ok": True, "rows": [short], "row_count": 1}, f"{verb} rows do not carry exactly"),
+            (500, {"ok": False, "error_type": "unmapped", "rows": [{"x": PLANTED}]}, f"{verb} status=500 error_type=unmapped"),
+            (504, {"ok": False, "error_type": "read_deadline_exceeded"}, f"{verb} status=504"),
+        ):
+            wired["usage"][verb] = _j(status, body)
+            _gate_fails(wired, capsys, match)
+        wired["usage"][verb] = _j(200, EMPTY_OK)

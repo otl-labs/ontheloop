@@ -62,6 +62,11 @@ def render_data(data: Mapping[str, Any]) -> dict[str, str]:
     return out
 
 
+_TREE_NOTE = (
+    f" (one tree is the rows sharing the root's tenant, project and session_started_at), at most {MAX_WINDOW_DAYS} UTC days."
+)
+
+
 def _derived_rows_note(rows: str) -> str:
     return f"{rows} Derived rows only, never a raw row or transcript content. {_PRODUCTION}"
 
@@ -143,6 +148,42 @@ EVENT_READS: dict[str, EventRead] = {
             paginable=True,
             description=_derived_rows_note(
                 f"One derived row per root session of a real-purpose project over at most {MAX_WINDOW_DAYS} UTC days."
+            ),
+        ),
+        EventRead(
+            verb="model_usage_rollup",
+            tables=(sql.OBSERVATIONS, sql.SESSIONS),
+            sql=sql.MODEL_USAGE_ROLLUP_SQL,
+            params=("day_from", "day_to"),
+            binding="window",
+            max_window_days=MAX_WINDOW_DAYS,
+            description=_derived_rows_note(
+                "Per-model token totals, one row per tree and model over the root and every sub-agent session's model calls"
+                + _TREE_NOTE
+            ),
+        ),
+        EventRead(
+            verb="tool_use_rollup",
+            tables=(sql.OBSERVATIONS, sql.SESSIONS, sql.AGENTS),
+            sql=sql.TOOL_USE_ROLLUP_SQL,
+            params=("day_from", "day_to"),
+            binding="window",
+            max_window_days=MAX_WINDOW_DAYS,
+            description=_derived_rows_note(
+                "Tool-call counts, one row per tree, root or sub-agent, agent name, workflow, tool name and MCP server"
+                + _TREE_NOTE
+            ),
+        ),
+        EventRead(
+            verb="session_startup_baseline",
+            tables=(sql.OBSERVATIONS, sql.SESSIONS, sql.AGENTS),
+            sql=sql.STARTUP_BASELINE_SQL,
+            params=("day_from", "day_to"),
+            binding="window",
+            max_window_days=MAX_WINDOW_DAYS,
+            description=_derived_rows_note(
+                "Each session's and sub-agent's first model call and its token classes, one row per session of each tree"
+                + _TREE_NOTE
             ),
         ),
         EventRead(

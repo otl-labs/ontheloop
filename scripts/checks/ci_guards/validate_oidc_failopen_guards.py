@@ -3,7 +3,7 @@
 Standing guard closing the exact defect class this plan's incident review found: of 26
 assume-role steps in .github/workflows, only 7 declare `continue-on-error: true`, and of those
 only 4 carried a NEGATIVE-branch classifier that actually surfaces a failed assume -- the other
-3 (terraform-apply-sandbox's advisory-status and speculative-plan, terraform-drift's assume)
+3 (terraform-apply-sandbox's advisory-status and ducklake-artifacts, formerly speculative-plan, terraform-drift's assume)
 either had no `id` at all or gated every downstream step on a POSITIVE `== 'success'` check, so a
 failed assume silently skipped every substantive step and the job still reported success. An
 assume-role failure and "nothing to do" are indistinguishable without an explicit negative-branch

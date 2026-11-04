@@ -1,0 +1,828 @@
+terraform {
+  required_providers {
+    aws = { source = "hashicorp/aws", version = "~> 5.0" }
+  }
+}
+
+provider "aws" {
+  region                      = "eu-west-2"
+  skip_credentials_validation = true
+  skip_requesting_account_id  = true
+  skip_metadata_api_check     = true
+}
+
+variable "gen" {
+  type    = string
+  default = "v1"
+}
+
+variable "aws_region" {
+  type    = string
+  default = "eu-west-2"
+}
+
+variable "account_id" {
+  type    = string
+  default = "ACCOUNT-PLACEHOLDER"
+}
+
+locals {
+  convergence_writer_session_name          = "tf-drift-convergence-writer"
+  ducklake_writer_function                 = "agent-platform-ducklake-writer"
+  ducklake_reader_function                 = "agent-platform-ducklake-reader"
+  ducklake_telemetry_writer_function       = "agent-platform-ducklake-telemetry-writer"
+  ducklake_telemetry_reader_function       = "agent-platform-ducklake-telemetry-reader"
+  ducklake_telemetry_writer_smoke_function = "agent-platform-ducklake-telemetry-writer-smoke"
+  ducklake_maintenance_smoke_function      = "agent-platform-ducklake-maintenance-smoke"
+  scheduled_agent_dispatcher_function      = "agent-platform-scheduled-agent-dispatcher"
+  findings_processor_function              = "agent-platform-findings-processor"
+  matrix                                   = ["alpha", "beta"]
+}
+
+resource "terraform_data" "data_lake" {
+  input = var.gen
+}
+
+resource "terraform_data" "ducklake_catalog_dr" {
+  input = var.gen
+}
+
+resource "terraform_data" "counters" {
+  input = var.gen
+}
+
+resource "terraform_data" "alerts" {
+  input = var.gen
+}
+
+data "aws_iam_policy_document" "github_ci_matrix" {
+  source_policy_documents = [data.aws_iam_policy_document.ci_ssm_refresh_read.json]
+
+  statement {
+    sid       = "MatrixBase"
+    actions   = ["s3:ListBucket"]
+    resources = [terraform_data.data_lake.id]
+  }
+
+  dynamic "statement" {
+    for_each = local.matrix
+    content {
+      sid       = "Matrix${statement.value}"
+      actions   = ["sqs:SendMessage", "sqs:ReceiveMessage"]
+      resources = ["arn:aws:sqs:${var.aws_region}:${var.account_id}:${statement.value}", terraform_data.alerts.id]
+    }
+  }
+}
+
+data "aws_iam_policy_document" "ci_ssm_refresh_read" {
+  statement {
+    # SSM parameter refresh-time reads on /agent-platform/*. Sourced by every CI role that
+    # invokes the DuckLake reader/writer (branch, pr, plan via ci_full_refresh_read, drift via
+    # ci_full_refresh_read).
+    sid       = "SSMParameterRead"
+    effect    = "Allow"
+    actions   = ["ssm:Get*", "ssm:Describe*", "ssm:List*"]
+    resources = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/agent-platform/*"]
+  }
+
+  statement {
+    # ssm:DescribeParameters has no resource-level scoping; Resource: "*" required.
+    sid       = "SSMDescribeParameters"
+    effect    = "Allow"
+    actions   = ["ssm:DescribeParameters"]
+    resources = ["*"]
+  }
+}
+data "aws_iam_policy_document" "ci_full_refresh_read" {
+  # Composes the shared SSM fragment so plan/drift never re-declare it inline.
+  source_policy_documents = [data.aws_iam_policy_document.ci_ssm_refresh_read.json]
+
+  statement {
+    # Read tfstate to run a real speculative plan / drift plan. Read-only: NO PutObject /
+    # DeleteObject on the state object itself. Byte-identical between plan and drift (verified
+    # 2026-06-05); composed here rather than declared per-role.
+    sid       = "TfstateRead"
+    effect    = "Allow"
+    actions   = ["s3:GetObject"]
+    resources = ["${terraform_data.data_lake.id}/tfstate/personal/*"]
+  }
+
+  statement {
+    # Bucket-level access + refresh-time bucket-config reads the AWS provider issues on every
+    # plan for all managed aws_s3_bucket resources.
+    sid    = "DataLakeBucketRead"
+    effect = "Allow"
+    actions = [
+      "s3:ListBucket",
+      "s3:GetBucketLocation",
+      "s3:GetBucketVersioning",
+      "s3:GetBucketPolicy",
+      "s3:GetEncryptionConfiguration",
+      "s3:GetBucketPublicAccessBlock",
+      "s3:GetBucketTagging",
+      "s3:GetAccelerateConfiguration",
+      "s3:GetBucketRequestPayment",
+      "s3:GetBucketLogging",
+      "s3:GetLifecycleConfiguration",
+      "s3:GetReplicationConfiguration",
+      "s3:GetBucketObjectLockConfiguration",
+      "s3:GetBucketCORS",
+      "s3:GetBucketWebsite",
+      "s3:GetBucketAcl",
+      "s3:GetBucketOwnershipControls",
+      # T2.43 gap: aws_s3_bucket_notification.data_lake_prod_triggers refresh-reads this.
+      "s3:GetBucketNotification"
+    ]
+    resources = [
+      terraform_data.data_lake.id,
+      terraform_data.ducklake_catalog_dr.id,
+    ]
+  }
+
+  statement {
+    # DynamoDB refresh-time reads the provider issues on aws_dynamodb_table every plan.
+    # No Create/Update/Put/Delete (write actions).
+    sid    = "DynamoDBRead"
+    effect = "Allow"
+    actions = [
+      "dynamodb:DescribeTable",
+      "dynamodb:DescribeContinuousBackups",
+      "dynamodb:DescribeTimeToLive",
+      "dynamodb:ListTagsOfResource"
+    ]
+    resources = [terraform_data.counters.id]
+  }
+
+  statement {
+    # IAM read-quartet the provider issues on each managed aws_iam_role during plan.
+    # Scoped to the managed CI roles -- read-only (no PutRolePolicy / UpdateAssumeRolePolicy).
+    # Literal ARNs per the IAMPlatformRolesRead convention (refresh-read grants do not create
+    # Terraform dependency edges onto the resources they read). Decision 35/98: enumerated,
+    # never a service or path wildcard on iam: read actions. T2.49 / DEP-12 (Decision 144): the
+    # four retired CI roles (plan, drift, ducklake-deploy, prod-deploy) are replaced by two
+    # merged roles -- planner (plan+drift) and deploy (ducklake-deploy+prod-deploy) -- so this
+    # list shrinks by two entries (net -2, helps the rec-2793 headroom). planner/deploy are
+    # listed so github_ci_apply can refresh-read them once they enter terraform/personal state,
+    # the same class of grant the retired roles had (rec-2688; mirrors how github-ci-drift's own
+    # ARN was added here when T2.24 landed).
+    sid    = "IAMCIRolesRead"
+    effect = "Allow"
+    actions = [
+      "iam:GetRole",
+      "iam:GetRolePolicy",
+      "iam:ListRolePolicies",
+      "iam:ListAttachedRolePolicies"
+    ]
+    resources = [
+      "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-branch",
+      "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-pr",
+      "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-apply",
+      "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-planner",
+      "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-deploy",
+      # rec-4636: the trusted speculative-plan role (oidc_trusted_plan_role.tf).
+      "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-trusted-plan"
+    ]
+  }
+
+  statement {
+    # IAM read-quartet on the agent-platform-* execution roles terraform/personal manages. Decision 35/98:
+    # enumerated literal ARNs, never a wildcard. PlatformDev and PlatformAdmin are bootstrap-owned and never
+    # CI-readable (Decision 225).
+    sid    = "IAMPlatformRolesRead"
+    effect = "Allow"
+    actions = [
+      "iam:GetRole",
+      "iam:GetRolePolicy",
+      "iam:ListRolePolicies",
+      "iam:ListAttachedRolePolicies"
+    ]
+    resources = [
+      "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-catalog-dr",
+      "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-writer",
+      "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-reader",
+      "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-maintenance",
+      # T2.18 c9 split gap (same class as rec-2688 for ducklake-deploy): the smoke exec role must be
+      # refresh-readable by github_ci_planner once it enters terraform/personal state, or every
+      # subsequent plan against this module fails closed with AccessDenied.
+      "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-maintenance-smoke",
+      # Telemetry writer exec role (same refresh-read class as the maintenance-smoke entry above).
+      "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-writer",
+      # Pre-staged for PLAN-telemetry-reader-and-smoke-twin's creates (the telemetry-writer precedent), so the
+      # planner's refresh reads never fail closed.
+      "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-writer-smoke",
+      "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-reader",
+      # T2.43 gap (same class as rec-2688 for ducklake-deploy): these prod-class execution
+      # roles must be refresh-readable by github_ci_planner once they enter terraform/personal
+      # state, or every subsequent plan against this module fails closed with AccessDenied.
+      "arn:aws:iam::${var.account_id}:role/agent-platform-scheduled-agent-dispatcher",
+      "arn:aws:iam::${var.account_id}:role/agent-platform-findings-processor"
+    ]
+  }
+
+  statement {
+    # OIDC provider refresh-read.
+    sid       = "OIDCProviderRead"
+    effect    = "Allow"
+    actions   = ["iam:GetOpenIDConnectProvider"]
+    resources = ["arn:aws:iam::${var.account_id}:oidc-provider/token.actions.githubusercontent.com"]
+  }
+
+  statement {
+    # Lambda refresh-time reads. Layer ARNs stay enumerated (mixed ducklake-*/data-pipeline-*
+    # naming); function ARNs use the account-wide function:agent-platform-* prefix (Decision 129 /
+    # T2.43 rec-2702 anti-recurrence) so a future agent-platform-* function auto-covers -- keeps
+    # this role's data-plane read surface identical to github_ci_apply's (the parity the
+    # validate_ci_refresh_read_coverage verifier relies on).
+    sid     = "LambdaRead"
+    effect  = "Allow"
+    actions = ["lambda:Get*", "lambda:List*"]
+    resources = [
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:layer:ducklake-pgclient",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:layer:ducklake-pgclient:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:layer:ducklake-deps",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:layer:ducklake-deps:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:layer:ducklake-extensions",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:layer:ducklake-extensions:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:layer:data-pipeline-deps",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:layer:data-pipeline-deps:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-*",
+    ]
+  }
+
+  statement {
+    # EventBridge refresh-time reads. Broadened to the account-wide rule/agent-platform-* prefix
+    # (Decision 129 / T2.43 rec-2702 anti-recurrence) -- mirrors the LambdaRead broadening above.
+    sid     = "EventBridgeRead"
+    effect  = "Allow"
+    actions = ["events:Describe*", "events:List*"]
+    resources = [
+      "arn:aws:events:${var.aws_region}:${var.account_id}:rule/agent-platform-*",
+    ]
+  }
+
+  statement {
+    # SNS refresh-time reads.
+    sid       = "SNSRead"
+    effect    = "Allow"
+    actions   = ["sns:Get*", "sns:List*"]
+    resources = [terraform_data.alerts.id]
+  }
+
+  statement {
+    # sns:GetSubscriptionAttributes has no resource-level scoping; Resource: "*" required.
+    sid       = "SNSSubscriptionRead"
+    effect    = "Allow"
+    actions   = ["sns:GetSubscriptionAttributes"]
+    resources = ["*"]
+  }
+
+  statement {
+    # CloudWatch refresh-time reads; cloudwatch:DescribeAlarms has no resource-level scoping.
+    sid       = "CloudWatchAlarmsRead"
+    effect    = "Allow"
+    actions   = ["cloudwatch:Describe*", "cloudwatch:List*"]
+    resources = ["*"]
+  }
+
+  statement {
+    # CloudWatch Logs refresh-time reads; logs:DescribeLogGroups has no resource-level scoping.
+    sid       = "CloudWatchLogsRead"
+    effect    = "Allow"
+    actions   = ["logs:Describe*", "logs:List*"]
+    resources = ["*"]
+  }
+
+  statement {
+    # Tfvars sourcing: plan/drift fetch this secret to materialise terraform.personal.tfvars.
+    # Read-only -- lifecycle is human-owned.
+    sid       = "SecretsManagerTfvarsRead"
+    effect    = "Allow"
+    actions   = ["secretsmanager:Describe*", "secretsmanager:Get*"]
+    resources = ["arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-terraform-personal-tfvars-*"]
+  }
+
+  statement {
+    # DuckLake Neon catalog DSN -- refresh-time metadata only. The DSN name does not match the agent-platform-*
+    # metadata prefix, so this statement keeps validate_ci_refresh_read_coverage green. The value read is held
+    # by DriftSessionSecretValueRead (oidc_pipeline_roles.tf), conditioned on the reserved drift session.
+    sid       = "SecretsManagerDuckLakeNeonDSNRead"
+    effect    = "Allow"
+    actions   = ["secretsmanager:DescribeSecret", "secretsmanager:GetResourcePolicy"]
+    resources = ["arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:ducklake-neon-catalog-dsn-*"]
+  }
+
+  statement {
+    # Decision 237: the tfvars SecureString parameter, read by every plan to materialise terraform.personal.tfvars.
+    # The one value read of a /secret/ parameter that validate_planner_secret_value_reads allows without a session condition.
+    sid       = "SecretParameterTfvarsRead"
+    effect    = "Allow"
+    actions   = ["ssm:GetParameter"]
+    resources = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-terraform-personal-tfvars"]
+  }
+
+  statement {
+    # Decision 237: refresh of aws_ssm_parameter.ducklake_neon_catalog_dsn reads its tags. Metadata only; the value read is
+    # DriftSessionSecretParameterRead (oidc_pipeline_roles.tf), conditioned on the reserved drift session.
+    sid       = "SecretParameterMetadataRead"
+    effect    = "Allow"
+    actions   = ["ssm:ListTagsForResource"]
+    resources = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/ducklake-neon-catalog-dsn"]
+  }
+
+  statement {
+    # PLANNER-SIDE MIRROR of the apply role's SecretsManagerMetadataRead
+    # (terraform/bootstrap/github_ci_apply.tf). Without it the one-PR autonomy claim fails
+    # asymmetrically: a PR adding a new agent-platform-* secret would be write- and read-covered on
+    # the apply role but NOT on this plan-capable role, so the speculative plan (and the hourly
+    # drift plan) would AccessDeny on the new secret's DescribeSecret while the merge-time apply
+    # succeeded -- the per-secret Sids above each cover exactly one existing ARN and cover nothing
+    # new. The prefix closes that gap for every future agent-platform-* secret with no further
+    # grant edit (the rec-2702 resource-axis anti-recurrence).
+    # Value-free BY CONSTRUCTION and therefore NOT a widening of Decision 129 pt 2: within Secrets
+    # Manager only GetSecretValue returns secret material (AWS named the batch form
+    # BatchGetSecretValue, outside the Get* metadata pattern), so Describe*/List*/GetResourcePolicy
+    # cannot read a value. This role's value-capable reads stay in the tfvars Sid above and
+    # DriftSessionSecretValueRead (oidc_pipeline_roles.tf) -- deliberately NOT restated here. hashicorp/aws v5.100.0 grounding:
+    # aws_secretsmanager_secret refreshes with DescribeSecret + GetResourcePolicy only.
+    sid     = "SecretsManagerMetadataRead"
+    effect  = "Allow"
+    actions = ["secretsmanager:Describe*", "secretsmanager:List*", "secretsmanager:GetResourcePolicy"]
+    resources = [
+      "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-*",
+    ]
+  }
+}
+data "aws_iam_policy_document" "github_ci_branch" {
+  # DRY composition (T2.34): the shared SSM refresh-read fragment, not re-declared inline.
+  source_policy_documents = [data.aws_iam_policy_document.ci_ssm_refresh_read.json]
+
+  statement {
+    sid    = "S3ReadWrite"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject"
+    ]
+    resources = ["${terraform_data.data_lake.id}/*"]
+  }
+
+  statement {
+    # CD.35 / T2.20 single-writer enforcement: among CI roles the convergence record is written
+    # ONLY by the sanctioned writer set {github_ci_apply (Wave 1), github_ci_planner main-sub
+    # (T2.49 / DEP-12, reserved session only)}. This branch role (ci-rca, agent/* CI) MUST be
+    # able to READ the record (ci-rca
+    # anchors its refusal dedup on the red record's commit) but must NOT write or delete it --
+    # an explicit Deny makes the two-member writer-set integrity claim true at the IAM layer
+    # (explicit Deny overrides the bucket-wide S3ReadWrite Allow above; GetObject is untouched).
+    # Full privilege-tiering landed at Wave 4 / T2.23 (bootstrap root); this Deny is the Wave-1
+    # enforcement among CI roles.
+    sid    = "DenyConvergenceRecordWrite"
+    effect = "Deny"
+    actions = [
+      "s3:PutObject",
+      "s3:DeleteObject"
+    ]
+    resources = ["${terraform_data.data_lake.id}/convergence/personal/*"]
+  }
+
+  statement {
+    # The agent/* trust runs unreviewed code under this role, so it must not read, overwrite or delete Terraform
+    # state, saved plans or review transcripts (rec-4632); the bucket-wide S3ReadWrite Allow above is overridden.
+    sid    = "DenyStatePlanAndReviewTranscriptIO"
+    effect = "Deny"
+    actions = [
+      "s3:GetObject",
+      "s3:GetObjectVersion",
+      "s3:PutObject",
+      "s3:DeleteObject",
+      "s3:DeleteObjectVersion"
+    ]
+    resources = [
+      "${terraform_data.data_lake.id}/tfstate/*",
+      "${terraform_data.data_lake.id}/tfplan/*",
+      "${terraform_data.data_lake.id}/ci-rca-evidence/review-transcripts/*"
+    ]
+  }
+
+  statement {
+    sid    = "S3List"
+    effect = "Allow"
+    actions = [
+      "s3:ListBucket",
+      "s3:GetBucketLocation"
+    ]
+    resources = [terraform_data.data_lake.id]
+  }
+
+  statement {
+    sid    = "DynamoDBCounters"
+    effect = "Allow"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:Query",
+      "dynamodb:Scan",
+      "dynamodb:UpdateItem"
+    ]
+    resources = [terraform_data.counters.id]
+  }
+
+  statement {
+    # T2.19 recs cutover (rec-2111): CI/DQ reads recs over the DuckLake reader Function URL and
+    # may write recs via the writer. The Function URL needs BOTH lambda:InvokeFunctionUrl and
+    # lambda:InvokeFunction (live-verified 2026-10-06); InvokeFunction sits in its own statement below
+    # because it carries the via-URL condition (Decision 213), InvokeFunctionUrl stays unconditioned.
+    # lambda:GetFunctionUrlConfig lets the runner RESOLVE the reader/writer URL via the AWS API
+    # when neither DUCKLAKE_*_URL env nor a terraform-init'd checkout is present (the CI case) --
+    # ducklake_reader_client / ops_data_portal fall back to get_function_url_config (post-cutover DQ).
+    sid     = "DuckLakeInvokeCI"
+    effect  = "Allow"
+    actions = ["lambda:InvokeFunctionUrl", "lambda:GetFunctionUrlConfig"]
+    resources = [
+      # rec-4685: name Lambdas by built ARN, not resource reference; a reference defers this document read to apply whenever the Lambda changes.
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}:*",
+    ]
+  }
+
+  statement {
+    # Decision 213 cl.1: a direct invoke is denied by the permissions boundary, and this grant only
+    # authorizes the Function-URL path (lambda:InvokedViaFunctionUrl is true on a URL call).
+    sid     = "DuckLakeInvokeCIViaUrlOnly"
+    effect  = "Allow"
+    actions = ["lambda:InvokeFunction"]
+    resources = [
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}:*",
+    ]
+    condition {
+      test     = "Bool"
+      variable = "lambda:InvokedViaFunctionUrl"
+      values   = ["true"]
+    }
+  }
+
+  statement {
+    # T2.18 c9 split (bundled Decision amending Decision 81 cl.1): deploy-ducklake-lambdas.yml's
+    # smoke job invokes the four maintenance smoke gates (--lambda-maintenance-merge/gc/breaker/
+    # hot-merge) post-deploy, the autonomous c9 gate. Scoped to the SMOKE function ARN ONLY -- this
+    # is the whole point of the split: github_ci_branch (the always-on public-repo CI identity) must
+    # NEVER be granted invoke on the admin ducklake_maintenance ARN (see DuckLakeInvokeCI above,
+    # which deliberately omits it, and ducklake_maintenance.tf, which grants no CI invoke at all).
+    sid     = "MaintenanceSmokeInvokeCI"
+    effect  = "Allow"
+    actions = ["lambda:InvokeFunction", "lambda:InvokeFunctionUrl", "lambda:GetFunctionUrlConfig"]
+    resources = [
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_maintenance_smoke_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_maintenance_smoke_function}:*",
+    ]
+  }
+
+  statement {
+    # Telemetry writer (PLAN-telemetry-writer-function): the deploy smoke job (companion plan) runs as this role.
+    # InvokeFunctionUrl and GetFunctionUrlConfig are required for the AWS_IAM URL; InvokeFunction is URL-only
+    # (see the next statement). The boundary also denies direct invoke, and the companion plan's gate asserts
+    # a direct invoke is AccessDenied. github_ci_pr, github_ci_planner and github_ci_deploy get no grant.
+    sid     = "TelemetryWriterInvokeCI"
+    effect  = "Allow"
+    actions = ["lambda:InvokeFunctionUrl", "lambda:GetFunctionUrlConfig"]
+    resources = [
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_function}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_smoke_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_smoke_function}:*",
+    ]
+  }
+
+  statement {
+    sid     = "TelemetryWriterInvokeCIViaUrlOnly"
+    effect  = "Allow"
+    actions = ["lambda:InvokeFunction"]
+    resources = [
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_function}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_smoke_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_smoke_function}:*",
+    ]
+    condition {
+      test     = "Bool"
+      variable = "lambda:InvokedViaFunctionUrl"
+      values   = ["true"]
+    }
+  }
+
+  statement {
+    # Decision 236 cl.2: the telemetry reader is invoked by github_ci_branch alone, URL-only, like the writer. The
+    # branch role's agent/* trust is rec-4480's review, not changed here.
+    sid     = "TelemetryReaderInvokeCI"
+    effect  = "Allow"
+    actions = ["lambda:InvokeFunctionUrl", "lambda:GetFunctionUrlConfig"]
+    resources = [
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}:*",
+    ]
+  }
+
+  statement {
+    sid       = "TelemetryReaderInvokeCIViaUrlOnly"
+    effect    = "Allow"
+    actions   = ["lambda:InvokeFunction"]
+    resources = ["arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}", "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}:*"]
+    condition {
+      test     = "Bool"
+      variable = "lambda:InvokedViaFunctionUrl"
+      values   = ["true"]
+    }
+  }
+
+  statement {
+    # T2.43: the deploy-prod-lambdas.yml smoke job assumes this role to invoke each prod-class
+    # function and assert observable output (mirrors the ducklake smoke job reusing this role's
+    # DuckLakeInvokeCI grant above -- these three functions have no Function URL, so plain
+    # lambda:InvokeFunction is sufficient; no InvokeFunctionUrl/GetFunctionUrlConfig needed).
+    sid     = "ProdLambdaInvokeCI"
+    effect  = "Allow"
+    actions = ["lambda:InvokeFunction"]
+    resources = [
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.scheduled_agent_dispatcher_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.findings_processor_function}",
+    ]
+  }
+
+  statement {
+    # rec-4044 / Decision 202: the three SecurityDetectorLiveness* Sids together grant exactly the
+    # four reads of security-detector-liveness.yml's probe (scripts/ci/security_detector_probe.py).
+    # DescribeAlarms is on "*" (no resource scoping). Read-only: no write on the detector or topic.
+    sid       = "SecurityDetectorLivenessRead"
+    effect    = "Allow"
+    actions   = ["cloudwatch:DescribeAlarms"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "SecurityDetectorLivenessAlarmHistoryRead"
+    effect    = "Allow"
+    actions   = ["cloudwatch:DescribeAlarmHistory"]
+    resources = ["arn:aws:cloudwatch:${var.aws_region}:${var.account_id}:alarm:platform-security-*"]
+  }
+
+  statement {
+    sid       = "SecurityDetectorLivenessTopicRead"
+    effect    = "Allow"
+    actions   = ["sns:ListSubscriptionsByTopic", "sns:GetTopicAttributes"]
+    resources = [terraform_data.alerts.id]
+  }
+}
+data "aws_iam_policy_document" "github_ci_planner" {
+  # DRY composition (T2.34): the shared 19-statement refresh-read surface, not re-declared
+  # inline -- identical to the pre-merge plan/drift roles. ci_full_refresh_read itself
+  # composes ci_ssm_refresh_read.
+  source_policy_documents = [data.aws_iam_policy_document.ci_full_refresh_read.json]
+
+  statement {
+    # From github_ci_plan: persist plan.bin keyed by PR head SHA for the apply-the-saved-plan
+    # merge path (T2.21). No convergence/personal/* grant here -- ConvergenceRecordWrite below
+    # is the sole, conditioned allow on that prefix. Write only (N3 item 3): the PR job uploads with
+    # aws s3 cp, and the merge-time fetch runs under the apply role.
+    sid       = "TfplanWrite"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${terraform_data.data_lake.id}/tfplan/personal/*"]
+  }
+
+  statement {
+    # From github_ci_plan: vendored DuckLake build inputs (read-only, rec-2512).
+    sid     = "DucklakeBuildInputsRead"
+    effect  = "Allow"
+    actions = ["s3:GetObject"]
+    resources = [
+      "${terraform_data.data_lake.id}/ducklake-pgclient/*",
+      "${terraform_data.data_lake.id}/ducklake-extensions/*"
+    ]
+  }
+
+  statement {
+    # From github_ci_plan: upload the rebuilt DuckLake zips (rec-2512). No DeleteObject.
+    sid       = "DucklakeLambdaPackagesWrite"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${terraform_data.data_lake.id}/lambda-packages/*"]
+  }
+
+  statement {
+    # From github_ci_drift: native S3 locking coexistence. Scoped to the EXACT lock object key
+    # -- NO write on the state object terraform.tfstate itself.
+    sid     = "TfstateNativeLockFile"
+    effect  = "Allow"
+    actions = ["s3:PutObject", "s3:DeleteObject"]
+    resources = [
+      "${terraform_data.data_lake.id}/tfstate/personal/sandbox/terraform.tfstate.tflock"
+    ]
+  }
+
+  statement {
+    # rec-4335: the PR-time terraform/github plan (terraform-github-plan.yml) reads that root's
+    # state. GetObject on the ONE state object only -- no PutObject (the plan runs -lock=false, so
+    # no .tflock write) and no other key under tfstate/github/.
+    sid       = "TfstateGithubRead"
+    effect    = "Allow"
+    actions   = ["s3:GetObject"]
+    resources = ["${terraform_data.data_lake.id}/tfstate/github/terraform.tfstate"]
+  }
+
+  statement {
+    # From github_ci_drift: WRITER-only invoke (Decision 84 closed reader/writer boundary) --
+    # files the drift rec via the ops portal. The reader is explicitly excluded.
+    sid     = "DuckLakeWriterInvoke"
+    effect  = "Allow"
+    actions = ["lambda:InvokeFunctionUrl", "lambda:GetFunctionUrlConfig"]
+    resources = [
+      # rec-4685: name Lambdas by built ARN, not resource reference; a reference defers this document read to apply whenever the Lambda changes.
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}:*",
+    ]
+  }
+
+  statement {
+    # Decision 213 cl.1: lambda:InvokeFunction authorizes only the Function-URL path (the permissions
+    # boundary denies a direct invoke); the Function URL needs this action alongside InvokeFunctionUrl.
+    sid     = "DuckLakeWriterInvokeViaUrlOnly"
+    effect  = "Allow"
+    actions = ["lambda:InvokeFunction"]
+    resources = [
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}:*",
+    ]
+    condition {
+      test     = "Bool"
+      variable = "lambda:InvokedViaFunctionUrl"
+      values   = ["true"]
+    }
+  }
+
+  statement {
+    # c2 FAIL-CLOSED convergence write (Decision 92 pt2, hardening item 1): the SOLE allow on
+    # convergence/personal/* in this policy, conditioned on aws:userid matching the RESERVED
+    # session (site 3/6, local.convergence_writer_session_name) -- default-deny for every other
+    # session identity. Combined with the trust partition above, a PR-context assumption can
+    # neither obtain the reserved session-name nor satisfy this condition. Standing semantic
+    # check: scripts/checks/iam_tf/validate_convergence_writer_isolation.py asserts this is the
+    # ONLY convergence-write Allow and that it carries this exact condition (grep-presence
+    # cannot see a second, unconditioned Allow added alongside this one -- the semantic check
+    # can). Drift NEVER writes the record green -- green is written solely by a converged apply
+    # (T2.20 anti-masking anchor).
+    sid       = "ConvergenceRecordWrite"
+    effect    = "Allow"
+    actions   = ["s3:GetObject", "s3:PutObject"]
+    resources = ["${terraform_data.data_lake.id}/convergence/personal/*"]
+    condition {
+      test     = "StringLike"
+      variable = "aws:userid"
+      values   = ["*:${local.convergence_writer_session_name}"]
+    }
+  }
+
+  statement {
+    # Neon provider API key and catalog DSN value reads for the reserved drift session only (site 5/6,
+    # local.convergence_writer_session_name). PR sessions hold no value read on either secret; PR plans run
+    # with a stub key and skip refresh. Standing check: validate_planner_secret_value_reads.
+    sid     = "DriftSessionSecretValueRead"
+    effect  = "Allow"
+    actions = ["secretsmanager:GetSecretValue"]
+    resources = [
+      "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:neon-api-key-*",
+      "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:ducklake-neon-catalog-dsn-*",
+    ]
+    condition {
+      test     = "StringLike"
+      variable = "aws:userid"
+      values   = ["*:${local.convergence_writer_session_name}"]
+    }
+  }
+
+  statement {
+    # Decision 237: the SSM twin of DriftSessionSecretValueRead, for the same reserved drift session only (site 6/6,
+    # local.convergence_writer_session_name). Standing check: validate_planner_secret_value_reads.
+    sid     = "DriftSessionSecretParameterRead"
+    effect  = "Allow"
+    actions = ["ssm:GetParameter"]
+    resources = [
+      "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/neon-api-key",
+      "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/ducklake-neon-catalog-dsn",
+    ]
+    condition {
+      test     = "StringLike"
+      variable = "aws:userid"
+      values   = ["*:${local.convergence_writer_session_name}"]
+    }
+  }
+}
+data "aws_iam_policy_document" "github_ci_pr" {
+  # T2.34 / Decision 92 NOTE (INTENTIONAL EXPANSION): github_ci_pr gains read-only
+  # ssm:Get*/Describe*/List* on parameter/agent-platform/* via the shared fragment. This is a
+  # permission expansion on a role that runs on pull_request events -- accepted deliberately
+  # (read-only, path-scoped, mirrors the other invoking roles' DuckLake Function-URL resolution
+  # fallback) so the invoke-implies-resolve invariant (T2.34:c2) holds universally, with no
+  # exceptions, across every CI role that invokes the DuckLake reader/writer.
+  source_policy_documents = [data.aws_iam_policy_document.ci_ssm_refresh_read.json]
+
+  statement {
+    # CD.35 / T2.20 advisory terraform-converged PR status. The read-only PR role reads the
+    # convergence record at PR time to derive the advisory status. Granted on the record prefix
+    # ONLY (convergence/personal/*) -- NOT tfstate/: the "github_ci_pr cannot read tfstate"
+    # invariant must stay cleanly auditable, which is precisely why the record lives in its own
+    # prefix outside tfstate/. Read-only (GetObject); this role never writes the record.
+    sid       = "S3ReadConvergenceRecord"
+    effect    = "Allow"
+    actions   = ["s3:GetObject"]
+    resources = ["${terraform_data.data_lake.id}/convergence/personal/*"]
+  }
+
+  statement {
+    # PLAN-ci-provider-mirror-terraform-init-hardening (rec-2836): read-only, path-scoped grant
+    # so the terraform-validate job's pull_request leg can consume the Decision 120 S3-backed
+    # provider filesystem_mirror instead of a direct github.com checksum fetch. GetObject only --
+    # no write action, no wider resource. Mirrors S3ReadConvergenceRecord's shape immediately
+    # above (single-purpose, prefix-scoped read grant on this same bucket).
+    sid       = "S3ReadProviderMirror"
+    effect    = "Allow"
+    actions   = ["s3:GetObject"]
+    resources = ["${terraform_data.data_lake.id}/tf-provider-mirror/*"]
+  }
+
+  statement {
+    sid    = "S3List"
+    effect = "Allow"
+    actions = [
+      "s3:ListBucket",
+      "s3:GetBucketLocation"
+    ]
+    resources = [terraform_data.data_lake.id]
+  }
+
+  statement {
+    # T2.19 recs cutover (rec-2111): PR CI reads recs over the DuckLake reader Function URL.
+    # The Function URL needs BOTH lambda:InvokeFunctionUrl and lambda:InvokeFunction (live-verified
+    # 2026-10-06); InvokeFunction sits in its own statement below with the via-URL condition
+    # (Decision 213). PR CI is read-only (no rec writes) but scoped to writer ARNs for consistency /
+    # future-compat. lambda:GetFunctionUrlConfig lets the runner resolve the URL via the AWS API (no
+    # env / no terraform-init'd checkout) -- mirrors the branch role's DuckLakeInvokeCI grant.
+    sid     = "DuckLakeInvokeCI"
+    effect  = "Allow"
+    actions = ["lambda:InvokeFunctionUrl", "lambda:GetFunctionUrlConfig"]
+    resources = [
+      # rec-4685: name Lambdas by built ARN, not resource reference; a reference defers this document read to apply whenever the Lambda changes.
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}:*",
+    ]
+  }
+
+  statement {
+    # Decision 213 cl.1: URL-only InvokeFunction, as on the branch role.
+    sid     = "DuckLakeInvokeCIViaUrlOnly"
+    effect  = "Allow"
+    actions = ["lambda:InvokeFunction"]
+    resources = [
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}:*",
+    ]
+    condition {
+      test     = "Bool"
+      variable = "lambda:InvokedViaFunctionUrl"
+      values   = ["true"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "github_ci_branch" {
+  name   = "github_ci_branch"
+  role   = "ci-role-placeholder"
+  policy = data.aws_iam_policy_document.github_ci_branch.json
+}
+
+resource "aws_iam_role_policy" "github_ci_planner" {
+  name   = "github_ci_planner"
+  role   = "ci-role-placeholder"
+  policy = data.aws_iam_policy_document.github_ci_planner.json
+}
+
+resource "aws_iam_role_policy" "github_ci_pr" {
+  name   = "github_ci_pr"
+  role   = "ci-role-placeholder"
+  policy = data.aws_iam_policy_document.github_ci_pr.json
+}
+
+resource "aws_iam_role_policy" "github_ci_matrix" {
+  name   = "github_ci_matrix"
+  role   = "ci-role-placeholder"
+  policy = data.aws_iam_policy_document.github_ci_matrix.json
+}

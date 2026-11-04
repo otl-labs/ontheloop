@@ -13,10 +13,11 @@ response body, an error message, an ARN, an account id or a URL (Decision 101).
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 
 from scripts.ducklake_smoke import core, lambda_ec_gates, lambda_telemetry_gates
 from src.common.ducklake_event_read_verbs import EVENT_READS
+from src.common.ducklake_reader_client import VERB_FIELDS
 
 _FUNCTION_NAME = "agent-platform-ducklake-telemetry-reader"
 _PROD_META_SCHEMA = "ducklake_telemetry"
@@ -24,6 +25,7 @@ _LOGIN = "ducklake_telemetry_reader"
 _SERVED = frozenset(EVENT_READS) - {"transcript_content"}
 _TABLES = frozenset({"telemetry_sessions", "telemetry_observations", "telemetry_transcripts", "telemetry_agents"})
 _OPS_VERB = "open_recs_tally"
+_USAGE_VERBS = ("model_usage_rollup", "tool_use_rollup", "session_startup_baseline")
 _SUCCESS = (
     "LAMBDA_TELEMETRY_READER OK unsigned=403 describe=200 attach_check=ok query_ops=400 content=400 direct_invoke=denied"
 )
@@ -124,6 +126,13 @@ def _check_reads(url: str, profile: str | None, region: str) -> None:
         _invoke(url, {"action": "named_read", "verb": "sessions_window", "params": params}, profile, region),
         "sessions_window",
     )
+    for verb in _USAGE_VERBS:
+        body = _expect_ok(_invoke(url, {"action": "named_read", "verb": verb, "params": window}, profile, region), verb)
+        usage_rows = body.get("rows")
+        if not isinstance(usage_rows, list) or any(
+            set(row) != set(cast(tuple[str, ...], VERB_FIELDS[verb])) for row in usage_rows
+        ):
+            raise _fail(f"{verb} rows do not carry exactly the declared columns")
 
 
 def _check_sessions(url: str, profile: str | None, region: str) -> None:

@@ -14,7 +14,7 @@ def _text() -> str:
 def test_project_context_preserves_roadmap_end_state_orientation() -> None:
     text = _text()
 
-    assert "Platform roadmap end-state map" in text
+    assert "Roadmap end-state map" in text
     assert "T2.18 DuckLake maintenance" in text
     assert "T2.36 telemetry rebuild on DuckLake" in text
     assert "T4.2 Lambda Durable Function agent personas" in text

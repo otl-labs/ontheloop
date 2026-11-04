@@ -25,7 +25,7 @@ from scripts.decisions_index import (
     check_index_freshness,
     main,
 )
-from scripts.decisions_md import decision_header_numbers, parse_decisions_md, status_is_superseded
+from scripts.decisions_md import decision_header_numbers, extract_entry_envelope, parse_decisions_md, status_is_superseded
 
 
 def _live_rows(idx: dict) -> list[dict]:
@@ -56,8 +56,13 @@ class TestDeterminism:
         skeleton_keys = {"number", "title", "status", "decided_date", "supersedes", "superseded_by", "amends", "live"}
         retrieval_aid_keys = {"triage_excerpt", "triage_excerpt_source", "triage_excerpt_truncated", "category_tags"}
         live_keys = skeleton_keys | retrieval_aid_keys | {"currency"}
+        enveloped = {r["decision_id"] for r in parse_decisions_md() if extract_entry_envelope(r["raw_block"]) is not None}
         for entry in idx["decisions"]:
-            expected_keys = live_keys if entry["live"] else skeleton_keys
+            expected_keys = (
+                live_keys | {"serves", "kind"}
+                if entry["live"] and entry["number"] in enveloped
+                else (live_keys if entry["live"] else skeleton_keys)
+            )
             assert set(entry.keys()) == expected_keys, entry["number"]
 
 

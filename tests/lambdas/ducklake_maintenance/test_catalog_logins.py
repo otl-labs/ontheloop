@@ -38,10 +38,10 @@ def test_closed_table_names_exactly_four_logins_and_two_owner_roles():
     }
     assert set(cl.DATA_PATHS) == set(cl.OWNER_ROLES)
     assert cl.DATA_PATHS["ducklake_telemetry"] == "s3://agent-platform-data-lake/ducklake-telemetry/"
-    secrets = [login.secret_id for login in cl.LOGINS.values()]
+    secrets = [login.parameter_name for login in cl.LOGINS.values()]
     assert len(secrets) == len(set(secrets))
     for login in cl.LOGINS.values():
-        assert login.name in login.secret_id.replace("-", "_").replace("agent_platform_", "")
+        assert login.name in login.parameter_name.replace("-", "_").replace("agent_platform_", "")
         assert login.owner_role == cl.OWNER_ROLES[login.schema]
     assert cl.LOGINS["ducklake_telemetry_writer"].connection_limit == 20
     assert cl.LOGINS["ducklake_telemetry_writer_prod"].connection_limit == 10

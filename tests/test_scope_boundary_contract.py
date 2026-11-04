@@ -379,3 +379,48 @@ class TestWeakeningSurfacingContract:
         doc = _load_contract()
         entries = [e for e in doc["amendment_log"] if "test-weakening-surfacing" in (e.get("summary") or "")]
         assert len(entries) == 1
+
+
+class TestPlanDefectLoop:
+    """PLAN-plan-defect-loop: the escalation, amendment procedure and plan-time declaration clauses."""
+
+    def test_escalation_names_the_report_fields_and_routing(self) -> None:
+        escalation = _load_contract()["deviation_trigger"]["escalation"]
+        for field in ("plan, branch, failing_check", "evidence", "defect_class", "proposed_amendment"):
+            assert field in escalation
+        for defect_class in ("scope_companion", "vp_text", "approved_text", "contract", "repeated_failure"):
+            assert defect_class in escalation
+        assert "never build to planner" in escalation
+        assert "Decision 229 cl.2" in escalation
+
+    def test_escalation_keeps_the_always_ask_exceptions(self) -> None:
+        escalation = _load_contract()["deviation_trigger"]["escalation"]
+        assert "standing direction" in escalation
+        assert (
+            "an approved_text or contract fix, or any loosened assertion, still needs the human's own approval" in escalation
+        )
+        assert "nothing is loosened to obtain green" in escalation
+
+    def test_amendment_procedure_names_the_prohibited_field_edits_case_and_commit_subject(self) -> None:
+        procedure = _load_contract()["sanction_rows"]["implementing_plan_bookkeeping"]["amendment_procedure"]
+        assert "prohibited_field_edits" in procedure
+        assert "plan({slug}): scope amendment -- <reason>" in procedure
+
+    def test_hand_written_test_clause_records_the_two_plan_time_declarations(self) -> None:
+        ineligible = _load_contract()["sanction_row_eligibility"]["ineligible"]
+        assert "tests/test_session_preflight_decomposition.py's frozen_report_key set" in ineligible
+        assert "config/structural_size_budgets.yaml" in ineligible
+        assert "declared at plan time, never sanctioned" in ineligible
+
+    def test_one_amendment_log_entry_names_this_plan(self) -> None:
+        entries = [e for e in _load_contract()["amendment_log"] if "PLAN-plan-defect-loop" in (e.get("summary") or "")]
+        assert len(entries) == 1
+        assert entries[0]["date"] == "2026-10-31"
+
+    def test_contract_stays_within_the_effective_line_cap(self) -> None:
+        lines = [
+            ln
+            for ln in CONTRACT_PATH.read_text(encoding="utf-8").splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")
+        ]
+        assert len(lines) <= 500

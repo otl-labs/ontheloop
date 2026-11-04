@@ -57,6 +57,9 @@ PENDING_CODIFICATION_BOUND_HOURS = 2.0
 RED_CAUSE_OUT_OF_BAND_DRIFT = "out_of_band_drift"
 RED_CAUSE_APPLY_FAILURE = "apply_failure"
 
+STALE_GATED_APPROVAL = "stale_gated_approval"
+_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
 _RUN_ID_RE = re.compile(r"/runs/(\d+)")
 
 
@@ -116,6 +119,14 @@ def render_convergence_red_refusal(record: dict[str, Any]) -> str:
         reason = record.get("drift_reason") or "out-of-band infra drift"
         run_url = record.get("drift_run_url") or ""
         detected_at = record.get("drift_detected_at") or "an unknown time"
+        if record.get(STALE_GATED_APPROVAL):
+            return (
+                f"CONVERGENCE_RED main is non-converged due to an unapproved gated change ({reason}), "
+                f"detected {detected_at} ({run_url}); the last-successful-apply commit {commit} is stale "
+                "provenance, not the cause of this red. Approve or reject the waiting tf-gated-apply run "
+                "(an approval writes green); after a rejection, resolve via the acknowledge-and-retry dispatch "
+                f"(workflow_dispatch acknowledge_red_commit={commit}, Decision 183)."
+            )
         return (
             f"CONVERGENCE_RED main is non-converged due to MEASURED out-of-band drift ({reason}), "
             f"detected {detected_at} ({run_url}); the last-successful-apply commit {commit} is stale "
@@ -145,6 +156,8 @@ def render_convergence_advisory_red_description(record: dict[str, Any]) -> str:
     cause = derive_red_cause(record)
     if cause == RED_CAUSE_OUT_OF_BAND_DRIFT:
         run_ref = _drift_run_ref(record.get("drift_run_url") or "")
+        if record.get(STALE_GATED_APPROVAL):
+            return f"main non-converged: unapproved gated change (run {run_ref}); approve or reject it. Advisory only."
         return f"main non-converged (out-of-band drift, run {run_ref}); {commit} was last apply. Advisory only."
     return f"main is non-converged (last sandbox apply RED at {commit}). Advisory only -- not a required check."
 
@@ -205,6 +218,27 @@ def apply_pending_codification_write(existing_record: Optional[dict[str, Any]], 
     return record
 
 
+def _strict_ts(ts: Any) -> Optional[datetime]:
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.strptime(ts, _TS_FORMAT).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _pending_gated(record: dict[str, Any]) -> Optional[dict[str, Any]]:
+    pending = record.get("pending_gated")
+    return pending if isinstance(pending, dict) and pending else None
+
+
+def _marker_postdates_route(marker: Any, pending: Optional[dict[str, Any]]) -> bool:
+    if pending is None or not isinstance(marker, dict):
+        return False
+    first_seen, routed_at = _strict_ts(marker.get("first_seen")), _strict_ts(pending.get("routed_at"))
+    return first_seen is not None and routed_at is not None and first_seen >= routed_at
+
+
 def escalate_stale_pending_codification(
     existing_record: Optional[dict[str, Any]], now: datetime, run_url: str
 ) -> dict[str, Any]:
@@ -213,9 +247,14 @@ def escalate_stale_pending_codification(
     status, never left to coexist and confuse a reader) and drift_reason/drift_run_url/
     drift_detected_at are set exactly as the out-of-band-drift write already does, so every
     existing red-status reader (reconcile_target, convergence_advisory, the refusal renderer)
-    handles it identically to a directly-measured drift red."""
+    handles it identically to a directly-measured drift red.
+
+    When the marker began at or after a routed gated change (pending_gated.routed_at), the red is
+    an unapproved gated change, not drift: stale_gated_approval is set and drift_reason names the
+    pending commit and run. derive_red_cause is unchanged (Decision 190 pt 4 / Decision 142)."""
     record = dict(existing_record) if isinstance(existing_record, dict) else {}
-    record.pop("pending_codification", None)
+    marker = record.pop("pending_codification", None)
+    pending = _pending_gated(record)
     record["status"] = "red"
     record["drift_detected_at"] = _format_ts(now)
     record["drift_run_url"] = run_url
@@ -224,7 +263,67 @@ def escalate_stale_pending_codification(
         f"{PENDING_CODIFICATION_BOUND_HOURS:.1f}h bound without self-clearing -- escalated to "
         "out-of-band drift (the benign code-behind-state classification is no longer trusted)"
     )
+    if pending is not None and _marker_postdates_route(marker, pending):
+        record[STALE_GATED_APPROVAL] = {key: pending.get(key, "") for key in ("routed_at", "commit_sha", "run_url")}
+        record["drift_reason"] = (
+            f"a routed gated change (commit {pending.get('commit_sha', '') or 'unknown'}, "
+            f"run {pending.get('run_url', '') or 'unknown'}) was left unapproved past the "
+            f"{PENDING_CODIFICATION_BOUND_HOURS:.1f}h bound -- an unapproved gated change, not out-of-band drift"
+        )
     return record
+
+
+def build_out_of_band_red_record(existing_record: Optional[dict[str, Any]], now: datetime, run_url: str) -> dict[str, Any]:
+    """Out-of-band red-flip: red + drift markers; the pending_codification marker and any
+    stale_gated_approval are superseded by the red (Decision 190 pt 3). pending_gated is kept."""
+    record = dict(existing_record) if isinstance(existing_record, dict) else {}
+    record.pop("pending_codification", None)
+    record.pop(STALE_GATED_APPROVAL, None)
+    pending = _pending_gated(record)
+    reason = "out-of-band infra drift detected by scheduled terraform plan (T2.24)"
+    if pending is not None:
+        reason += f"; a gated change routed at commit {pending.get('commit_sha', '') or 'unknown'} was awaiting approval"
+    record["status"] = "red"
+    record["drift_detected_at"] = _format_ts(now)
+    record["drift_run_url"] = run_url
+    record["drift_reason"] = reason
+    return record
+
+
+def should_skip_on_prior_red(prior_status: str, record: dict[str, Any], verdict: str) -> bool:
+    """A prior red or unknown record skips the tick (one red = one signal), EXCEPT a
+    stale_gated_approval red meeting real drift, which falls through to the red-flip."""
+    if prior_status == "unknown":
+        return True
+    if prior_status != "red":
+        return False
+    return not (record.get(STALE_GATED_APPROVAL) and verdict == OUT_OF_BAND_DRIFT)
+
+
+def drift_guard_refuses(rc: int, record_text: str, stderr: str) -> bool:
+    """FAIL-CLOSED gated-apply drift guard: True blocks the green write. Passes only when it
+    positively clears it (absent record, green, red without drift fields, stale-gated red, or a
+    drift red that does not postdate pending_gated.routed_at)."""
+    if rc != 0:
+        return re.search(r"NoSuchKey|404", stderr, re.IGNORECASE) is None
+    if not record_text.strip():
+        return False
+    try:
+        record = json.loads(record_text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return True
+    if not isinstance(record, dict):
+        return True
+    if record.get("status") != "red" or record.get(STALE_GATED_APPROVAL):
+        return False
+    if not (record.get("drift_detected_at") or record.get("drift_run_url")):
+        return False
+    pending = record.get("pending_gated")
+    detected = _strict_ts(record.get("drift_detected_at"))
+    routed = _strict_ts(pending.get("routed_at")) if isinstance(pending, dict) else None
+    if detected is None or routed is None:
+        return True
+    return detected > routed
 
 
 def self_clear_pending_codification(existing_record: Optional[dict[str, Any]], now: datetime) -> Optional[dict[str, Any]]:
@@ -246,12 +345,17 @@ def self_clear_pending_codification(existing_record: Optional[dict[str, Any]], n
 
 
 def decide_pending_codification_action(existing_record: Optional[dict[str, Any]], now: datetime) -> str:
-    """ "escalate" when the existing pending_codification marker has gone stale, else "mark"."""
+    """Decision order escalate > pending_gated > pending_gated_flagged > mark. "pending_gated" is
+    the first routed-pending tick (stamps drift_flagged_at once); later ticks are
+    "pending_gated_flagged" and file nothing."""
     record = existing_record or {}
     marker = record.get("pending_codification")
     if isinstance(marker, dict) and pending_codification_is_stale(marker, now):
         return "escalate"
-    return "mark"
+    pending = _pending_gated(record)
+    if pending is None:
+        return "mark"
+    return "pending_gated_flagged" if pending.get("drift_flagged_at") else "pending_gated"
 
 
 def _read_json_env(name: str) -> dict[str, Any]:
@@ -283,12 +387,62 @@ def _cmd_pending_codification_write() -> int:
     existing = _read_json_env("EXISTING")
     run_url = os.environ.get("RUN_URL", "")
     now = datetime.now(timezone.utc)
-    if decide_pending_codification_action(existing, now) == "escalate":
-        print("escalated")
-        print(json.dumps(escalate_stale_pending_codification(existing, now, run_url)))
+    action = decide_pending_codification_action(existing, now)
+    if action == "escalate":
+        record, label = escalate_stale_pending_codification(existing, now, run_url), "escalated"
     else:
-        print("marked")
-        print(json.dumps(apply_pending_codification_write(existing, now, run_url)))
+        record, label = apply_pending_codification_write(existing, now, run_url), "marked" if action == "mark" else action
+        if action == "pending_gated":
+            record["pending_gated"].setdefault("drift_flagged_at", _format_ts(now))
+    pending = _pending_gated(record) or {}
+    print(label)
+    print(json.dumps(record))
+    print(pending.get("commit_sha", ""))
+    print(pending.get("run_url", ""))
+    return 0
+
+
+def _cmd_red_flip() -> int:
+    print(
+        json.dumps(
+            build_out_of_band_red_record(_read_json_env("EXISTING"), datetime.now(timezone.utc), os.environ.get("RUN_URL", ""))
+        )
+    )
+    return 0
+
+
+def _cmd_skip_on_prior_red() -> int:
+    skip = should_skip_on_prior_red(
+        os.environ.get("PRIOR_STATUS", ""), _read_json_env("EXISTING"), os.environ.get("VERDICT", "")
+    )
+    print("skip" if skip else "proceed")
+    return 0
+
+
+def _cmd_drift_guard() -> int:
+    try:
+        rc = int(os.environ.get("RC", "1"))
+    except ValueError:
+        rc = 1
+    stderr = ""
+    err_file = os.environ.get("ERR_FILE", "")
+    if err_file and os.path.exists(err_file):
+        with open(err_file, encoding="utf-8", errors="replace") as handle:
+            stderr = handle.read()
+    refused = drift_guard_refuses(rc, os.environ.get("REC_JSON", ""), stderr)
+    line = f"refused={'true' if refused else 'false'}"
+    out = os.environ.get("GITHUB_OUTPUT", "")
+    if out:
+        with open(out, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    else:
+        print(line)
+    if refused:
+        print(
+            "::warning::gated-apply drift guard REFUSED the green write: a drift red postdates the route (or the "
+            "record read failed). The record stays as it was; review the drift, then use the acknowledge-and-retry "
+            "dispatch (Decision 183)."
+        )
     return 0
 
 
@@ -309,6 +463,9 @@ _COMMANDS = {
     "--refusal": _cmd_refusal,
     "--pending-codification-write": _cmd_pending_codification_write,
     "--self-clear": _cmd_self_clear,
+    "--red-flip": _cmd_red_flip,
+    "--skip-on-prior-red": _cmd_skip_on_prior_red,
+    "--drift-guard": _cmd_drift_guard,
 }
 
 

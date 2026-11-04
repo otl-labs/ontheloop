@@ -127,10 +127,11 @@ data "aws_iam_policy_document" "github_ci_branch" {
     effect  = "Allow"
     actions = ["lambda:InvokeFunctionUrl", "lambda:GetFunctionUrlConfig"]
     resources = [
-      aws_lambda_function.ducklake_writer.arn,
-      "${aws_lambda_function.ducklake_writer.arn}:*",
-      aws_lambda_function.ducklake_reader.arn,
-      "${aws_lambda_function.ducklake_reader.arn}:*",
+      # rec-4685: name Lambdas by built ARN, not resource reference; a reference defers this document read to apply whenever the Lambda changes.
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}:*",
     ]
   }
 
@@ -141,10 +142,10 @@ data "aws_iam_policy_document" "github_ci_branch" {
     effect  = "Allow"
     actions = ["lambda:InvokeFunction"]
     resources = [
-      aws_lambda_function.ducklake_writer.arn,
-      "${aws_lambda_function.ducklake_writer.arn}:*",
-      aws_lambda_function.ducklake_reader.arn,
-      "${aws_lambda_function.ducklake_reader.arn}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}:*",
     ]
     condition {
       test     = "Bool"
@@ -164,8 +165,8 @@ data "aws_iam_policy_document" "github_ci_branch" {
     effect  = "Allow"
     actions = ["lambda:InvokeFunction", "lambda:InvokeFunctionUrl", "lambda:GetFunctionUrlConfig"]
     resources = [
-      aws_lambda_function.ducklake_maintenance_smoke.arn,
-      "${aws_lambda_function.ducklake_maintenance_smoke.arn}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_maintenance_smoke_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_maintenance_smoke_function}:*",
     ]
   }
 
@@ -178,10 +179,10 @@ data "aws_iam_policy_document" "github_ci_branch" {
     effect  = "Allow"
     actions = ["lambda:InvokeFunctionUrl", "lambda:GetFunctionUrlConfig"]
     resources = [
-      aws_lambda_function.ducklake_telemetry_writer.arn,
-      "${aws_lambda_function.ducklake_telemetry_writer.arn}:*",
-      aws_lambda_function.ducklake_telemetry_writer_smoke.arn,
-      "${aws_lambda_function.ducklake_telemetry_writer_smoke.arn}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_function}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_smoke_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_smoke_function}:*",
     ]
   }
 
@@ -190,10 +191,10 @@ data "aws_iam_policy_document" "github_ci_branch" {
     effect  = "Allow"
     actions = ["lambda:InvokeFunction"]
     resources = [
-      aws_lambda_function.ducklake_telemetry_writer.arn,
-      "${aws_lambda_function.ducklake_telemetry_writer.arn}:*",
-      aws_lambda_function.ducklake_telemetry_writer_smoke.arn,
-      "${aws_lambda_function.ducklake_telemetry_writer_smoke.arn}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_function}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_smoke_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_writer_smoke_function}:*",
     ]
     condition {
       test     = "Bool"
@@ -209,8 +210,8 @@ data "aws_iam_policy_document" "github_ci_branch" {
     effect  = "Allow"
     actions = ["lambda:InvokeFunctionUrl", "lambda:GetFunctionUrlConfig"]
     resources = [
-      aws_lambda_function.ducklake_telemetry_reader.arn,
-      "${aws_lambda_function.ducklake_telemetry_reader.arn}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}:*",
     ]
   }
 
@@ -218,7 +219,7 @@ data "aws_iam_policy_document" "github_ci_branch" {
     sid       = "TelemetryReaderInvokeCIViaUrlOnly"
     effect    = "Allow"
     actions   = ["lambda:InvokeFunction"]
-    resources = [aws_lambda_function.ducklake_telemetry_reader.arn, "${aws_lambda_function.ducklake_telemetry_reader.arn}:*"]
+    resources = ["arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}", "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_telemetry_reader_function}:*"]
     condition {
       test     = "Bool"
       variable = "lambda:InvokedViaFunctionUrl"
@@ -235,8 +236,8 @@ data "aws_iam_policy_document" "github_ci_branch" {
     effect  = "Allow"
     actions = ["lambda:InvokeFunction"]
     resources = [
-      aws_lambda_function.scheduled_agent_dispatcher.arn,
-      aws_lambda_function.findings_processor.arn,
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.scheduled_agent_dispatcher_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.findings_processor_function}",
     ]
   }
 
@@ -369,10 +370,11 @@ data "aws_iam_policy_document" "github_ci_pr" {
     effect  = "Allow"
     actions = ["lambda:InvokeFunctionUrl", "lambda:GetFunctionUrlConfig"]
     resources = [
-      aws_lambda_function.ducklake_writer.arn,
-      "${aws_lambda_function.ducklake_writer.arn}:*",
-      aws_lambda_function.ducklake_reader.arn,
-      "${aws_lambda_function.ducklake_reader.arn}:*",
+      # rec-4685: name Lambdas by built ARN, not resource reference; a reference defers this document read to apply whenever the Lambda changes.
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}:*",
     ]
   }
 
@@ -382,10 +384,10 @@ data "aws_iam_policy_document" "github_ci_pr" {
     effect  = "Allow"
     actions = ["lambda:InvokeFunction"]
     resources = [
-      aws_lambda_function.ducklake_writer.arn,
-      "${aws_lambda_function.ducklake_writer.arn}:*",
-      aws_lambda_function.ducklake_reader.arn,
-      "${aws_lambda_function.ducklake_reader.arn}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_writer_function}:*",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.ducklake_reader_function}:*",
     ]
     condition {
       test     = "Bool"

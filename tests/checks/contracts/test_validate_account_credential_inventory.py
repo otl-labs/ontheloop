@@ -166,7 +166,11 @@ _RED: list[tuple[str, _Mutator, str]] = [
     ("company row owned by founder", _set("GH-03", owner_today="founder"), "disagrees with status company"),
     ("retired row owned by founder", _set("GH-05", status="retired", owner_today="founder"), "disagrees with status retired"),
     ("stays row owned by company", _set("GH-02", owner_today="company"), "disagrees with status stays"),
-    ("billing proven paid personally", _set("BILL-01", status="proven"), "payer 'personal' disagrees with status proven"),
+    (
+        "billing proven paid personally",
+        _set("BILL-01", status="proven", payer="personal"),
+        "payer 'personal' disagrees with status proven",
+    ),
     ("billing company paid personally", _set("BILL-07", payer="personal"), "disagrees with status company"),
     (
         "billing stays paid by company",
@@ -227,7 +231,7 @@ class TestValidateAccountCredentialInventory:
 
     def test_billing_stays_paid_personally_is_green(self, tmp_path: Path) -> None:
         def mutate(d: dict[str, Any]) -> None:
-            _row(d, "BILL-01").update(status="stays")
+            _row(d, "BILL-01").update(status="stays", payer="personal")
             d["evidence_ledger"].append({"date": _LATEST, "row": "BILL-01", "status": "stays", "evidence": "t"})
 
         _build(tmp_path, _mutated(mutate))

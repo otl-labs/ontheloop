@@ -55,7 +55,7 @@ def wiring(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]]:
     state: dict[str, Any] = {"opened": 0, "kwargs": [], "secrets": [], "fail_first": False, "readonly": True, "cons": []}
     monkeypatch.setenv("TELEMETRY_META_SCHEMA", rt.TELEMETRY_PROD_META_SCHEMA)
     monkeypatch.setenv("TELEMETRY_DATA_PATH", rt.TELEMETRY_PROD_DATA_PATH)
-    monkeypatch.setenv("TELEMETRY_DSN_SECRET_ID", _SECRET)
+    monkeypatch.setenv("TELEMETRY_DSN_PARAMETER", _SECRET)
 
     def open_connection(**kwargs: Any) -> FakeCon:
         state["opened"] += 1
@@ -65,8 +65,8 @@ def wiring(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]]:
         state["cons"].append(con)
         return con
 
-    def fetch_dsn(secret_id: str = "", **_: Any) -> dict[str, str]:
-        state["secrets"].append(secret_id)
+    def fetch_dsn(parameter_name: str = "", **_: Any) -> dict[str, str]:
+        state["secrets"].append(parameter_name)
         return {"username": "ducklake_telemetry_reader"}
 
     monkeypatch.setattr(rt, "open_connection", open_connection)
@@ -297,8 +297,8 @@ def test_event_shapes_are_parsed(wiring: dict[str, Any]) -> None:
     assert h.handler([1, 2])["statusCode"] == 400  # type: ignore[arg-type]
 
 
-def test_unset_secret_id_fails_closed_before_any_connect(wiring: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("TELEMETRY_DSN_SECRET_ID")
+def test_unset_parameter_fails_closed_before_any_connect(wiring: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TELEMETRY_DSN_PARAMETER")
     for payload in (_READ, {"action": "attach_check"}):
         status, body = _call(payload)
         assert status == 500 and body["error_type"] == "runtime"

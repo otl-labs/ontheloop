@@ -258,6 +258,7 @@ _FILES = [
     ".github/workflows/terraform-apply-sandbox.yml",
     ".github/workflows/reconcile.yml",
     ".github/workflows/terraform-drift.yml",
+    ".github/workflows/terraform-plan-trusted.yml",
     ".github/actions/terraform-init-retry/action.yml",
     ".github/actions/terraform-init-retry/neon_api_key_check.sh",
 ]

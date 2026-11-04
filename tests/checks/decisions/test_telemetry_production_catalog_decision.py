@@ -11,10 +11,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.fixtures.decision_entry import authored_bytes, cap_bytes, decision_entry
+
 pytestmark = pytest.mark.unit
 
 _REPO = Path(__file__).resolve().parents[3]
-_CAP_BYTES = 6144
 _REVERSAL_IDS = ("owner-role-refused", "measured-grants-drift", "boundary-headroom")
 _TOKENS = (
     "provision_catalog_owner",
@@ -37,28 +38,11 @@ def _decision_number() -> int:
     return int(match.group(1))
 
 
-def _entry(text: str, number: int) -> str:
-    match = re.search(rf"^## Decision {number}:.*?(?=^## Decision \d+:)", text, re.MULTILINE | re.DOTALL)
-    assert match is not None, f"Decision {number} not found"
-    return match.group(0)
-
-
-def _authored(entry: str) -> str:
-    """The entry before its dated trailers: the cap is an authoring norm, and later trailers are sanctioned
-    accretion metered WARN-only (docs/contracts/decision-entry.yaml size_governance)."""
-    match = re.search(r"^\[Amendment \d{4}-\d{2}-\d{2}, Decision \d+:", entry, re.MULTILINE)
-    if match is None:
-        return entry
-    trailers = entry[match.start() :].rstrip().removesuffix("---").splitlines()
-    assert all(not line or line.startswith("[Amendment ") for line in trailers), "only dated trailers follow the body"
-    return entry[: match.start()]
-
-
 def test_decision_entry_and_annotations() -> None:
     n = _decision_number()
     text = (_REPO / "docs/DECISIONS.md").read_text(encoding="utf-8")
-    entry = _entry(text, n)
-    assert len(_authored(entry).encode("utf-8")) <= _CAP_BYTES
+    entry = decision_entry(text, n)
+    assert authored_bytes(entry) <= cap_bytes()
 
     envelope = yaml.safe_load(re.search(r"```yaml\n(.*?)\n```", entry, re.DOTALL).group(1))
     assert envelope["number"] == n and envelope["amends"] == [81, 126, 213, 216] and envelope["status"] == "Decided"
@@ -80,13 +64,6 @@ def test_decision_entry_and_annotations() -> None:
     assert entry.rstrip().endswith("---")
 
     for amended in (216, 213, 126, 81):
-        body = _entry(text, amended)
+        body = decision_entry(text, amended)
         assert re.search(rf"^\[Amendment \d{{4}}-\d{{2}}-\d{{2}}, Decision {n}:", body, re.MULTILINE), amended
         assert body.rstrip().endswith("---")
-
-
-def test_authored_span_admits_only_dated_trailers() -> None:
-    body = "## Decision 1: x\n\nbody\n\n"
-    assert _authored(body + "[Amendment 2026-10-29, Decision 2: y.]\n\n---\n\n") == body
-    with pytest.raises(AssertionError):
-        _authored(body + "[Amendment 2026-10-29, Decision 2: y.]\n\nmore body\n\n---\n\n")

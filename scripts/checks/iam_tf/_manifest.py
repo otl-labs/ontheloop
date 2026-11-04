@@ -42,6 +42,13 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_policy_document_plan_time_refs",
+        module="scripts.checks.iam_tf.validate_policy_document_plan_time_refs",
+        attr="validate_policy_document_plan_time_refs",
+        pre=True,
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_ci_refresh_read_coverage",
         module="scripts.checks.iam_tf.validate_ci_refresh_read_coverage",
         attr="validate_ci_refresh_read_coverage",

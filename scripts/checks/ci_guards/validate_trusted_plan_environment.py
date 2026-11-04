@@ -12,13 +12,21 @@ on synthetic input; the registered check loads the real tree.
   (e) no run body in TRUSTED_WORKFLOWS interpolates PR-controlled expressions
   (f) terraform/github declares ENV with a main-only deployment policy, and import blocks for both
   (g) governed checkouts take no ref or repository input and set persist-credentials false
-  (h) governed jobs execute only code-owned local paths, and every python call is isolated (-I)
+  (h) governed jobs execute only code-owned local paths (including the run bodies and local actions of every composite
+      they use, and the static import closure of every executed .py file), every python call is isolated (-I), and no
+      executed .py file inserts the repo root at sys.path position 0 (each appends it, so the stdlib always wins)
+  (i) every non-local uses: in a governed job (and in the composites it uses) is pinned to a 40-hex commit SHA
+
+Predicates (g) also refuse git fetch and git checkout in a governed run body: only scripts/ci/trusted_plan_overlay.py
+touches the PR's ref.
 """
 
 from __future__ import annotations
 
+import ast
 import fnmatch
 import re
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import yaml
@@ -28,8 +36,7 @@ from scripts.verify_ci_workflow import _load
 
 ENV = "tf-trusted-plan"
 TRUSTED_WORKFLOWS = frozenset({"terraform-plan-trusted.yml", "terraform-github-plan.yml"})
-# rec-4637 (S3) removes this entry together with the job.
-TEMP_NO_ENV_JOBS = frozenset({("terraform-plan-trusted.yml", "claims-probe-no-env")})
+TEMP_NO_ENV_JOBS: frozenset[tuple[str, str]] = frozenset()
 
 _PRT = "pull_request_target"
 _DISPATCH = "github.event_name == 'workflow_dispatch'"
@@ -38,6 +45,9 @@ _PR_EXPR_RE = re.compile(r"\$\{\{[^}]*(?:github\.event\.pull_request\.|github\.h
 _SCRIPT_PATH_RE = re.compile(
     r"(?<![\w./-])(?:\./|\"?\$\{?GITHUB_WORKSPACE\}?\"?/|\$\{\{\s*github\.workspace\s*\}\}/)?(scripts/[\w./-]+)"
 )
+_ACTION_PATH_RE = re.compile(r"\$\{\{\s*github\.action_path\s*\}\}/([\w./-]+)")
+_GIT_REF_RE = re.compile(r"(?<![\w-])git\s+(?:fetch|checkout)\b")
+_SHA_PIN_RE = re.compile(r"@[0-9a-f]{40}(?:\s|$)")
 _MODULE_RE = re.compile(r"(?<!\S)-m\s+(scripts(?:\.\w+)+)")
 _PYTHON_RE = re.compile(r"(?<![\w.-])(?:[\w./$-]*/)?(?:[\w-]*-)?python[\d.]*(?=\s|$|[;|&)\"'])(\s+\S+)?")
 _ISOLATED_FLAG_RE = re.compile(r"-[A-VYZa-z]*I[A-Za-z]*")
@@ -76,6 +86,48 @@ def _steps(job: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _run_bodies(job: dict[str, Any]) -> list[str]:
     return [s["run"] for s in _steps(job) if isinstance(s.get("run"), str)]
+
+
+Reader = Callable[[str], "str | None"]
+
+
+def _no_read(_path: str) -> str | None:
+    return None
+
+
+def _walk_steps(
+    steps: list[dict[str, Any]], read: Reader, seen: set[str], action_dir: str | None
+) -> Iterator[tuple[str, str, str | None]]:
+    """Yield (kind, text, action_dir) for every run body and uses: of the steps and of the local composites they use."""
+    for step in steps:
+        if isinstance(step.get("run"), str):
+            yield "run", step["run"], action_dir
+        uses = str(step.get("uses", ""))
+        if not uses:
+            continue
+        yield "uses", uses, action_dir
+        if uses.startswith("./") and uses[2:].rstrip("/") not in seen:
+            directory = uses[2:].rstrip("/")
+            seen.add(directory)
+            text = read(f"{directory}/action.yml")
+            parsed = _safe_yaml(text)
+            runs = parsed.get("runs") if isinstance(parsed, dict) else None
+            inner = runs.get("steps") if isinstance(runs, dict) else None
+            if isinstance(inner, list):
+                yield from _walk_steps([x for x in inner if isinstance(x, dict)], read, seen, directory)
+
+
+def _safe_yaml(text: str | None) -> Any:
+    if text is None:
+        return None
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
+
+
+def _expanded(job: dict[str, Any], read: Reader) -> list[tuple[str, str, str | None]]:
+    return list(_walk_steps(_steps(job), read, set(), None))
 
 
 def _strip_parens(text: str) -> str:
@@ -256,10 +308,12 @@ def check_terraform(files: dict[str, str]) -> list[str]:
     return out
 
 
-def check_checkouts(workflows: dict[str, dict[str, Any]]) -> list[str]:
+def check_checkouts(workflows: dict[str, dict[str, Any]], read: Reader = _no_read) -> list[str]:
     out = []
     for name in sorted(TRUSTED_WORKFLOWS & workflows.keys()):
         for jid, job in _governed(name, workflows[name]):
+            if any(kind == "run" and _GIT_REF_RE.search(text) for kind, text, _ in _expanded(job, read)):
+                out.append(f"g: {name}:{jid} runs git fetch or git checkout in a run body")
             for step in _steps(job):
                 if not str(step.get("uses", "")).startswith("actions/checkout@"):
                     continue
@@ -291,19 +345,110 @@ def _owned(path: str, codeowners: str) -> bool:
     return owned
 
 
-def check_owned_and_isolated(workflows: dict[str, dict[str, Any]], codeowners: str) -> list[str]:
+def _imported_paths(text: str, read: Reader) -> set[str]:
+    """Repo paths of the scripts.* and src.* modules (and their package __init__.py files) a Python file imports."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    found: set[str] = set()
+
+    def add_module(dotted: str, submodule: bool = False) -> None:
+        parts = dotted.split(".")
+        if parts[0] not in ("scripts", "src"):
+            return
+        base = "/".join(parts)
+        if submodule:
+            if read(base + ".py") is not None:
+                found.add(base + ".py")
+            return
+        found.update("/".join(parts[:i]) + "/__init__.py" for i in range(1, len(parts)))
+        found.add(base + ".py" if read(base + ".py") is not None else base + "/__init__.py")
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                add_module(alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            add_module(node.module)
+            for alias in node.names:
+                add_module(f"{node.module}.{alias.name}", submodule=True)
+    return found
+
+
+def _inserts_repo_root_first(text: str) -> bool:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "insert"
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "path"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == 0
+        ):
+            return True
+    return False
+
+
+def _closure(py_paths: set[str], read: Reader) -> set[str]:
+    seen: set[str] = set()
+    todo = sorted(py_paths)
+    while todo:
+        path = todo.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        text = read(path) if path.endswith(".py") else None
+        if text is not None:
+            todo.extend(sorted(_imported_paths(text, read) - seen))
+    return seen
+
+
+def _executed_paths(expanded: list[tuple[str, str, str | None]]) -> list[str]:
+    paths = [text[2:].rstrip("/") for kind, text, _ in expanded if kind == "uses" and text.startswith("./")]
+    for kind, raw, directory in expanded:
+        if kind != "run":
+            continue
+        text = re.sub(r"(?m)^\s*#.*$", "", raw)
+        paths += _SCRIPT_PATH_RE.findall(text)
+        paths += [m.replace(".", "/") + ".py" for m in _MODULE_RE.findall(text)]
+        if directory:
+            paths += [f"{directory}/{f}" for f in _ACTION_PATH_RE.findall(text)]
+    return paths
+
+
+def check_owned_and_isolated(workflows: dict[str, dict[str, Any]], codeowners: str, read: Reader = _no_read) -> list[str]:
     out = []
     for name in sorted(TRUSTED_WORKFLOWS & workflows.keys()):
         wf = workflows[name]
         for jid, job in _governed(name, wf):
-            paths = [str(s["uses"])[2:].rstrip("/") for s in _steps(job) if str(s.get("uses", "")).startswith("./")]
-            paths += [p for body in _run_bodies(job) for p in _SCRIPT_PATH_RE.findall(body)]
-            paths += [m.replace(".", "/") + ".py" for body in _run_bodies(job) for m in _MODULE_RE.findall(body)]
+            expanded = _expanded(job, read)
+            paths = _executed_paths(expanded)
+            closure = _closure({p for p in paths if p.endswith(".py")}, read)
             out += [
-                f"h: {name}:{jid} executes {p}, which no CODEOWNERS pattern covers" for p in paths if not _owned(p, codeowners)
+                f"h: {name}:{jid} executes {p}, which no CODEOWNERS pattern covers"
+                for p in dict.fromkeys(paths)
+                if not _owned(p, codeowners)
             ]
-        for jid, job in _governed(name, wf):
-            for body in _run_bodies(job):
+            out += [
+                f"h: {name}:{jid} imports {p}, which no CODEOWNERS pattern covers"
+                for p in sorted(closure - set(paths))
+                if not _owned(p, codeowners)
+            ]
+            out += [
+                f"h: {name}:{jid} runs {p}, which inserts the repo root at sys.path position 0 (append it instead)"
+                for p in sorted(closure)
+                if p.endswith(".py") and _inserts_repo_root_first(read(p) or "")
+            ]
+            for kind, body, _ in expanded:
+                if kind != "run":
+                    continue
                 for m in _PYTHON_RE.finditer(body):
                     flag = (m.group(1) or "").strip()
                     if not _ISOLATED_FLAG_RE.fullmatch(flag):
@@ -311,7 +456,19 @@ def check_owned_and_isolated(workflows: dict[str, dict[str, Any]], codeowners: s
     return out
 
 
-def run_all(workflows: dict[str, dict[str, Any]], terraform: dict[str, str], codeowners: str) -> list[list[str]]:
+def check_pinned_actions(workflows: dict[str, dict[str, Any]], read: Reader = _no_read) -> list[str]:
+    out = []
+    for name in sorted(TRUSTED_WORKFLOWS & workflows.keys()):
+        for jid, job in _governed(name, workflows[name]):
+            for kind, text, _ in _expanded(job, read):
+                if kind == "uses" and not text.startswith("./") and not _SHA_PIN_RE.search(text + " "):
+                    out.append(f"i: {name}:{jid} uses {text.split('#')[0].strip()} without a 40-hex commit SHA pin")
+    return out
+
+
+def run_all(
+    workflows: dict[str, dict[str, Any]], terraform: dict[str, str], codeowners: str, read: Reader = _no_read
+) -> list[list[str]]:
     return [
         check_environment_references(workflows),
         check_prt_minting(workflows),
@@ -319,9 +476,20 @@ def run_all(workflows: dict[str, dict[str, Any]], terraform: dict[str, str], cod
         check_minting_jobs(workflows),
         check_run_bodies(workflows),
         check_terraform(terraform),
-        check_checkouts(workflows),
-        check_owned_and_isolated(workflows, codeowners),
+        check_checkouts(workflows, read),
+        check_owned_and_isolated(workflows, codeowners, read),
+        check_pinned_actions(workflows, read),
     ]
+
+
+def _repo_reader() -> Reader:
+    def read(rel: str) -> str | None:
+        try:
+            return (_common.ROOT / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    return read
 
 
 @registry.register("validate_trusted_plan_environment", owner="platform")
@@ -343,10 +511,10 @@ def validate_trusted_plan_environment(failed: list[str]) -> None:
         failed.append("trusted-plan-environment: inputs unreadable, so no predicate ran")
         registry.examined(0, unit="fence_predicates")
         return
-    violations = [x for group in run_all(workflows, terraform, codeowners) for x in group]
+    violations = [x for group in run_all(workflows, terraform, codeowners, _repo_reader()) for x in group]
     for violation in violations:
         print(f"  FAIL: {violation}")
         failed.append(f"trusted-plan-environment: {violation}")
-    registry.examined(8, unit="fence_predicates")
+    registry.examined(9, unit="fence_predicates")
     if not violations:
-        print("  PASS: predicates (a)-(h)")
+        print("  PASS: predicates (a)-(i)")

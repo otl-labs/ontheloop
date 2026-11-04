@@ -10,8 +10,8 @@ and asserts the Neon key never reaches a PR-triggered plan:
       NotAction Allow fails closed.
   (2) exactly one aws_iam_role_policy and zero aws_iam_role_policy_attachment resources target the planner role.
   (3) the reserved session name is a role-session-name value in terraform-drift.yml only.
-  (4) -refresh=false is on the speculative-plan job's plan command and on no other terraform plan; every other
-      terraform plan or apply of the personal root runs through `neon_api_key.sh run --`.
+  (4) -refresh=false appears on no personal-root terraform plan, and every personal-root terraform plan or apply
+      runs through `neon_api_key.sh run --` (the trusted plan wraps it in trusted_plan_env.sh and quiet_run.sh).
   (5) no aws_secretsmanager_secret_version data source exists under terraform/personal.
   (6) every job that runs `neon_api_key.sh run --` also uses the terraform-init-retry composite, which carries
       the neon_api_key_check.sh delegate step, and the delegate execs `neon_api_key.sh check`.
@@ -51,14 +51,15 @@ _SESSION_LOCAL_RE = re.compile(r'convergence_writer_session_name\s*=\s*"([^"]+)"
 _PLANNER = "github_ci_planner"
 
 _WORKFLOW_DIR = Path(".github") / "workflows"
-_PERSONAL_WORKFLOWS = ("terraform-apply-sandbox.yml", "reconcile.yml", "terraform-drift.yml")
-_SPECULATIVE_JOB = ("terraform-apply-sandbox.yml", "speculative-plan")
+_PERSONAL_WORKFLOWS = ("terraform-apply-sandbox.yml", "reconcile.yml", "terraform-drift.yml", "terraform-plan-trusted.yml")
 _ACTION_DIR = Path(".github") / "actions" / "terraform-init-retry"
 _INIT_RETRY_USES = "./.github/actions/terraform-init-retry"
 _RUN_PREFIX_RE = re.compile(r"neon_api_key\.sh\"?\s+run\s+--")
 _TF_CMD_RE = re.compile(
     r"^(?:\w+=\$\()?(?:[A-Za-z_]\w*=\S+\s+)*"
+    r"(?:bash\s+\S*trusted_plan_env\.sh\"?\s+--\s+)?"
     r"(?:bash\s+\S*neon_api_key\.sh\"?\s+run\s+--\s+)?"
+    r"(?:bash\s+\S*quiet_run\.sh\"?\s+\S+\s+--\s+)?"
     r"(?:python3\s+\S*stale_plan_signature\.py\"?\s+--wrap\s+--\s+)?"
     r"terraform\s+(plan|apply)\b"
 )
@@ -258,18 +259,11 @@ def _logical_commands(run: str) -> list[str]:
 
 def _check_command(name: str, job_id: str, cmd: str, m: re.Match[str], key: str, failed: list[str]) -> tuple[bool, bool]:
     """Check one terraform plan/apply command. Returns (wrapped, has_refresh_false)."""
-    speculative = (name, job_id) == _SPECULATIVE_JOB and m.group(1) == "plan"
     has_refresh_false = "-refresh=false" in cmd
     wrapped = bool(_RUN_PREFIX_RE.search(cmd))
     where = f"{key} {name}:{job_id}"
-    if speculative:
-        if not has_refresh_false or wrapped:
-            failed.append(
-                f"{where} speculative plan must run -refresh=false with a stub key and no neon_api_key.sh run prefix"
-            )
-        return wrapped, has_refresh_false
     if has_refresh_false:
-        failed.append(f"{where} -refresh=false outside the speculative plan: {cmd[:90]}")
+        failed.append(f"{where} -refresh=false on a personal-root plan: {cmd[:90]}")
     if not wrapped:
         failed.append(f"{where} personal-root terraform {m.group(1)} is not run through neon_api_key.sh run --: {cmd[:90]}")
     return wrapped, has_refresh_false
@@ -320,10 +314,8 @@ def _check_workflows(root: Path, session_name: str, key: str, failed: list[str])
             e, r = _check_job(name, job_id, job, key, failed)
             examined += e
             refresh_false += r
-    if refresh_false != 1:
-        failed.append(
-            f"{key} -refresh=false must appear on exactly one plan command (the speculative plan), found {refresh_false}"
-        )
+    if refresh_false != 0:
+        failed.append(f"{key} -refresh=false must appear on no personal-root plan command, found {refresh_false}")
     return examined
 
 

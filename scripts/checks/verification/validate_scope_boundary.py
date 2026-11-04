@@ -7,7 +7,7 @@ implement-leg plan resolved via ``_common.resolve_declared_plans`` (content-keye
 path in the diff must be a member of the resolved plan(s)' declared ``scope[].file`` union, or a
 path derived from a ``docs/contracts/implement-scope-boundary.yaml`` ``sanction_rows`` entry whose
 trigger fired for that plan. It also flags a prohibited edit to a resolved plan's own scope-
-governing fields (``scope``, ``acceptance_criteria``, ``verification_plan[].command``/``.expected``)
+governing fields (``scope``, ``acceptance_criteria``, ``verification_plan[].command``/``.expected``/``.expected_literals``)
 -- the CONTENT invariant's plan-field-edit and VP-step-substitution enforcement arms.
 
 Legs (mirrors validate_vp_replay's structure):
@@ -32,6 +32,12 @@ is what lets a plan's own Verification Plan dispatch the enforcing leg against i
 tree before anything is committed (ambient resolution would see no flip yet, since
 ``implementation_declared`` is set only at the commit-flow step).
 
+The scope_file_is_prose_gated sanction kind (prose_budgets_ratchet_down) sanctions
+config/prose_budgets.yaml only when a prose-gated surface is in declared scope AND the registry's
+base-to-working diff is decrease-only (every entry value <= base, every other byte identical); it
+is inert when the plan declares the registry itself, and never appends to ``failed`` -- a diff it
+declines to sanction falls through to the ordinary out-of-scope STOP.
+
 A malformed contract or plan is a reported finding, never a raise (Decision 55: fail loud via
 ``failed``, not an uncaught exception). A ``sanction_rows`` entry naming a ``trigger.kind`` this
 module does not implement is a loud failure, never a silently-skipped row.
@@ -40,12 +46,15 @@ module does not implement is a loud failure, never a silently-skipped row.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import cast
 
 import yaml
 
-from scripts.checks import _common, registry
+from scripts.checks import _common, _marker_guard, registry
+from scripts.preflight.prose_context import _resolve_s1_root_load_set
+from scripts.roadmap.plan_document import PlanDocument
 
 CONTRACT_REL_PATH = "docs/contracts/implement-scope-boundary.yaml"
 
@@ -108,6 +117,50 @@ def _secrets_baseline_keys(baseline_rel: str, root: Path, base: str, failed: lis
     return keys
 
 
+_ENTRY_LINE_RE = re.compile(r"^(\s*[^\s#][^#]*?:\s*)\d+(\s*(?:#.*)?)$")
+
+
+def _prose_ratchet_sanction(row: dict, plan_scope_files: set[str], root: Path, base: str) -> list[str]:
+    """Sanctioned path for the scope_file_is_prose_gated kind: the registry, only when the plan's
+    declared scope meets a prose-gated surface and the registry diff is decrease-only. Prints why
+    it declined; never appends to `failed` (the out-of-scope STOP reports the path)."""
+    registry_rel = cast(str, (row.get("trigger") or {}).get("registry_path"))
+    if registry_rel in plan_scope_files:
+        return []
+    working_path = root / registry_rel
+    if not working_path.exists():
+        print(f"  NOTE: {registry_rel} absent in the working tree -- prose_budgets_ratchet_down not applied.")
+        return []
+    working_text = working_path.read_text(encoding="utf-8")
+    extract = _marker_guard.make_flat_extractor("raise-approved")
+    gated = {k for k in extract(working_text) if "/" in k}
+    for member in _resolve_s1_root_load_set(root):
+        try:
+            gated.add(member.resolve().relative_to(root.resolve()).as_posix())
+        except ValueError:
+            print(f"  NOTE: S1 member {member} resolves outside {root} -- skipped.")
+    if not plan_scope_files & gated:
+        return []
+    result = _common.run(["git", "show", f"{base}:{registry_rel}"], capture_output=True, text=True, encoding="utf-8", cwd=root)
+    if result.returncode != 0:
+        print(f"  NOTE: {registry_rel} absent at base ref {base!r} -- prose_budgets_ratchet_down not applied.")
+        return []
+    base_text = result.stdout
+
+    def shape(text: str) -> list[str]:
+        return [_ENTRY_LINE_RE.sub(r"\g<1>#\g<2>", ln) for ln in text.splitlines()]
+
+    base_vals = extract(base_text)
+    working_vals = extract(working_text)
+    lowered_only = shape(base_text) == shape(working_text) and all(
+        k in base_vals and v.value <= base_vals[k].value for k, v in working_vals.items()
+    )
+    if not lowered_only:
+        print(f"  NOTE: prose_budgets_ratchet_down sanctions only lowered values in {registry_rel}; other text changed")
+        return []
+    return [cast(str, (row.get("sanctions") or {}).get("path_template", ""))]
+
+
 def _row_derived_paths(
     kind: str | None,
     row: dict,
@@ -154,21 +207,36 @@ def _row_derived_paths(
         if plan_scope_files & baseline_key_memo[baseline_path]:
             return [sanctions.get("path_template", "")]
         return []
+    if kind == "scope_file_is_prose_gated":
+        return _prose_ratchet_sanction(row, plan_scope_files, root, base)
     return None
 
 
 def _check_prohibited_field_edits(row: dict, plan_rel: str, doc, root: Path, base: str, failed: list[str]) -> None:
     """`doc` is the already-loaded (working-tree) PlanDocument -- reused via model_dump() rather
-    than re-reading and re-parsing the same file a second time."""
+    than re-reading and re-parsing the same file a second time. The base-ref plan is normalised
+    through the same PlanDocument model, so both sides compare in one canonical form (an explicit
+    empty `new_imports` or a quoted VP step id is not an edit). A base that parses but fails
+    PlanDocument validation is a loud finding: the arm cannot prove no prohibited edit."""
     prohibited = row.get("prohibited_field_edits") or []
     if not prohibited:
         return
     base_content = _plan_content_at_ref(plan_rel, root, base)
     if base_content is None:
         return  # net-new plan (absent at base) -- nothing to diff a prohibited edit against
+    disposition = row.get("disposition_on_violation", _STOP_DISPOSITION)
+    try:
+        base_content = PlanDocument.model_validate(base_content).model_dump()
+    except Exception as exc:  # noqa: BLE001 -- a malformed base plan is a reported finding, never a raise
+        failed.append(
+            f"scope-boundary {plan_rel}: base plan at {base} fails PlanDocument validation, so the prohibited-field arm "
+            f"cannot prove no prohibited edit: {exc}. Escape: land a schema-conforming amendment of this plan on main "
+            "first (the contract's amendment_procedure); a plan whose own build changes PlanDocument so its unflipped "
+            f"base no longer validates must split the schema change into its own earlier PR. {disposition}"
+        )
+        return
     working_content = doc.model_dump()
 
-    disposition = row.get("disposition_on_violation", _STOP_DISPOSITION)
     for field in prohibited:
         if "[]." in field:
             top, sub = field.split("[].", 1)

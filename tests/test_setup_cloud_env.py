@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
-import stat
 import subprocess
-import tempfile
 from pathlib import Path
 
 import botocore.session
@@ -14,107 +13,11 @@ import pytest
 
 SETUP_SCRIPT = Path("bin/setup-cloud-env.sh")
 
-_INSTALL_TERRAFORM_IF = 'if [ "${INSTALL_TERRAFORM:-0}" = "1" ]; then'
-_DELEGATE_CALL = 'bash "$REPO_ROOT/.github/actions/materialise-tfvars/materialise_tfvars.sh"'
-
-
-def _extract_install_terraform_block(script: str) -> str:
-    """Return the INSTALL_TERRAFORM=1 branch's full if/else/fi block, delimited by the unique
-    `if [ "${INSTALL_TERRAFORM:-0}" = "1" ]; then` literal and its MATCHING `else`/`fi` -- found
-    by tracking if/then-fi nesting depth, not a hardcoded line number, so a future edit inside the
-    block (like this plan's own insertion) cannot silently make the extraction hit the WRONG
-    (nested, mirror-sync) `else` at depth 2 instead of the outer one at depth 1.
-    """
-    lines = script.splitlines()
-    start = next(i for i, line in enumerate(lines) if line.strip() == _INSTALL_TERRAFORM_IF)
-    depth = 1
-    end = None
-    for i in range(start + 1, len(lines)):
-        stripped = lines[i].strip()
-        if stripped.endswith("; then") or stripped == "then":
-            depth += 1
-        elif stripped == "fi":
-            depth -= 1
-            if depth == 0:
-                end = i
-                break
-    assert end is not None, "no matching outer fi found for the INSTALL_TERRAFORM=1 branch"
-    return "\n".join(lines[start : end + 1])
-
-
-class TestAdminTfvarsFetch:
-    def test_admin_branch_calls_shared_delegate(self) -> None:
-        script = SETUP_SCRIPT.read_text(encoding="utf-8")
-        block = _extract_install_terraform_block(script)
-        assert block.count(_DELEGATE_CALL) == 1
-        # Warn-and-continue, not bare -- the call must sit inside its OWN if/else, never a bare
-        # statement that would abort the script under inherited errexit on a failed fetch.
-        delegate_line_idx = next(i for i, line in enumerate(block.splitlines()) if _DELEGATE_CALL in line)
-        block_lines = block.splitlines()
-        assert "if" in block_lines[delegate_line_idx]
-        else_idx = next(i for i in range(delegate_line_idx, len(block_lines)) if block_lines[i].strip() == "else")
-        assert else_idx > delegate_line_idx
-        assert "WARNING" in block_lines[else_idx + 1]
-
-    def test_failed_fetch_does_not_abort(self) -> None:
-        # Executes the REAL extracted block (not a grep) under the literal errexit invocation
-        # bin/setup-cloud-env.sh itself runs under (`set -euo pipefail`), with a stub delegate
-        # that exits 1 to simulate a failed fetch -- proving the warn-and-continue construct
-        # actually suppresses errexit rather than aborting before the session_start hooks.
-        script = SETUP_SCRIPT.read_text(encoding="utf-8")
-        block = _extract_install_terraform_block(script)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            fake_repo_root = tmp_path / "repo"
-            delegate_dir = fake_repo_root / ".github" / "actions" / "materialise-tfvars"
-            delegate_dir.mkdir(parents=True)
-            stub_delegate = delegate_dir / "materialise_tfvars.sh"
-            stub_delegate.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
-            stub_delegate.chmod(stub_delegate.stat().st_mode | stat.S_IEXEC)
-
-            fake_bin = tmp_path / "bin"
-            fake_bin.mkdir()
-            fake_aws = fake_bin / "aws"
-            # Simulate a failed/absent mirror sync (non-fatal) so the block reaches the delegate
-            # call without a real network dependency -- the mirror-sync branch is not under test.
-            fake_aws.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
-            fake_aws.chmod(fake_aws.stat().st_mode | stat.S_IEXEC)
-
-            fake_home = tmp_path / "home"
-            fake_home.mkdir()
-
-            marker = "POST_FETCH_LINE_REACHED"
-            harness = (
-                'log() { printf "[setup] %s\\n" "$*"; }\n'
-                f"REPO_ROOT={fake_repo_root}\n"
-                f"HOME={fake_home}\n"
-                "INSTALL_TERRAFORM=1\n"
-                f"{block}\n"
-                f"echo {marker}\n"
-            )
-
-            env = dict(os.environ)
-            env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
-
-            result = subprocess.run(
-                ["bash", "-euo", "pipefail", "-c", harness],
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=30,
-            )
-
-        assert result.returncode == 0, result.stderr
-        assert marker in result.stdout
-        assert "WARNING: materialise-tfvars fetch failed" in result.stdout
-
 
 def test_shared_session_bootstrap_steps_are_ordered_after_prerequisites() -> None:
     script = SETUP_SCRIPT.read_text(encoding="utf-8")
     ordered_commands = (
         'bash "$REPO_ROOT/bin/sync-deps.sh"',
-        'bash "$REPO_ROOT/bin/ensure-github-mcp-server.sh"',
         "bash .claude/hooks/session_start_aws.sh",
         "bash .claude/hooks/session_start_precommit.sh",
         "bash .claude/hooks/session_start_sync_main.sh",
@@ -129,24 +32,28 @@ def test_shared_session_bootstrap_steps_are_ordered_after_prerequisites() -> Non
 def test_setup_contract_uses_delegated_bootstrap_commands() -> None:
     script = SETUP_SCRIPT.read_text(encoding="utf-8")
     assert script.count('bash "$REPO_ROOT/bin/sync-deps.sh"') == 1
-    assert script.count('bash "$REPO_ROOT/bin/ensure-github-mcp-server.sh"') == 1
     assert script.count("bash .claude/hooks/session_start_aws.sh") == 1
     assert script.count("bash .claude/hooks/session_start_precommit.sh") == 1
     assert script.count("bash .claude/hooks/session_start_sync_main.sh") == 1
 
 
-def test_github_readiness_runs_after_mcp_install_and_before_precommit() -> None:
+def test_github_readiness_runs_before_precommit() -> None:
     script = Path("bin/setup-cloud-env.sh").read_text(encoding="utf-8")
-    readiness = script.index("bash .claude/hooks/session_start_github_readiness.sh")
-    assert readiness > script.index("ensure-github-mcp-server.sh")
-    assert readiness < script.index("bash .claude/hooks/session_start_precommit.sh")
+    assert script.index("bash .claude/hooks/session_start_github_readiness.sh") < script.index(
+        "bash .claude/hooks/session_start_precommit.sh"
+    )
 
 
-def test_github_mcp_token_comment_writes_the_proxy_placeholder() -> None:
+def test_github_mcp_server_is_neither_installed_nor_declared() -> None:
     script = SETUP_SCRIPT.read_text(encoding="utf-8")
-    assert "#     printf 'proxy-injected\\n' > \"$HOME/.config/gh-mcp/token\"\n" in script
+    assert "ensure-github-mcp-server" not in script
+    assert "gh-mcp" not in script
     assert "<PAT>" not in script
     assert "GITHUB_MCP_PAT" not in script
+    servers = json.loads(Path(".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+    assert "github-full" not in servers
+    for name, server in servers.items():
+        assert "github-mcp-server" not in " ".join([server.get("command", ""), *server.get("args", [])]), name
 
 
 _PLACEHOLDER_NAME = "aws-proxy-placeholder-credentials"
@@ -220,7 +127,6 @@ def test_proxy_template_resolves_agent_static_through_credential_process(
 def test_placeholder_install_precedes_first_aws_call() -> None:
     script = SETUP_SCRIPT.read_text(encoding="utf-8")
     install = script.index("install -m 0755")
-    assert install < script.index("aws s3 sync")
     assert install < script.index("bash .claude/hooks/session_start_aws.sh")
     assert install < script.index('bash "$REPO_ROOT/bin/sync-deps.sh"')
 
@@ -253,6 +159,38 @@ def test_admin_template_sets_install_terraform_inline() -> None:
     script = SETUP_SCRIPT.read_text(encoding="utf-8")
     admin = "\n".join(_header_block(script, "# ADMIN environment", "# Identity checks"))
     assert "cd /home/user/ontheloop && INSTALL_TERRAFORM=1 bash bin/setup-cloud-env.sh" in admin
-    assert "BEFORE or AFTER" in admin
+    assert "the agent proxy never signs its requests" in admin
     dev = "\n".join(_header_block(script, "# DEV environment", "# boto3 then resolves"))
     assert "INSTALL_TERRAFORM" not in dev
+
+
+def _role_max_session(resource: str) -> int:
+    tf = Path("terraform/bootstrap/platform_roles.tf").read_text(encoding="utf-8")
+    match = re.search(r'resource "aws_iam_role" "' + resource + r'" \{.*?max_session_duration\s*=\s*(\d+)', tf, re.DOTALL)
+    assert match is not None
+    return int(match.group(1))
+
+
+def test_template_duration_seconds_fit_each_roles_max_session_duration() -> None:
+    script = SETUP_SCRIPT.read_text(encoding="utf-8")
+    dev = "\n".join(_header_block(script, "# DEV environment", "# boto3 then resolves"))
+    admin = "\n".join(_header_block(script, "# ADMIN environment", "# and set this"))
+    dev_seconds = int(re.search(r"duration_seconds = (\d+)", dev).group(1))
+    admin_seconds = int(re.search(r"duration_seconds = (\d+)", admin).group(1))
+    assert dev_seconds <= _role_max_session("platform_dev")
+    assert admin_seconds <= _role_max_session("platform_admin")
+
+
+def _code_lines(script: str) -> str:
+    return "\n".join(ln for ln in script.splitlines() if not ln.lstrip().startswith("#"))
+
+
+def test_setup_fetches_no_terraform_assets() -> None:
+    script = SETUP_SCRIPT.read_text(encoding="utf-8")
+    code = _code_lines(script)
+    assert not re.search(r"aws\s+(s3|secretsmanager|ssm|sts)\b", code)
+    assert "materialise_tfvars" not in code
+    assert "tf-provider-mirror" not in code
+    assert 'bash "$REPO_ROOT/bin/sync-deps.sh"' in code
+    admin = "\n".join(_header_block(script, "# ADMIN environment", "# Identity checks"))
+    assert "the agent proxy never signs its requests" in admin

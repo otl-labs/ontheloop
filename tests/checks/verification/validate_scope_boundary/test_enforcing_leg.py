@@ -9,8 +9,11 @@ trigger kind's own arms live in test_secrets_baseline_row.py.
 
 from __future__ import annotations
 
+import copy
+from collections.abc import Callable
 from pathlib import Path
 
+import pytest
 import yaml as _yaml
 
 from .conftest import (
@@ -25,6 +28,63 @@ from .conftest import (
     _write_plan,
     validate_scope_boundary,
 )
+
+_V5_POLICY = {"full_validation_required_before_commit": True, "timeout_disposition": "blocked"}
+
+
+def _v5_plan(slug: str, scope: list[dict], vp: list[dict] | None = None, declared: bool = False) -> dict:
+    plan = _plan_dict(slug, scope, vp, declared)
+    plan.update({"schema_version": 5, "handoff_policy": dict(_V5_POLICY)})
+    return plan
+
+
+def _flip_repo(tmp_path: Path, slug: str, base: dict, working: dict, rows: dict | None = None) -> tuple[Path, str]:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _write_contract(repo, rows)
+    rel = f"docs/plans/PLAN-{slug}.yaml"
+    (repo / "docs" / "plans").mkdir(parents=True, exist_ok=True)
+    (repo / rel).write_text(_yaml.dump(base), encoding="utf-8")
+    base_sha = _commit_all(repo, "base")
+    _git(repo, ["update-ref", "refs/remotes/origin/main", base_sha])
+    (repo / rel).write_text(_yaml.dump(working), encoding="utf-8")
+    _commit_all(repo, "working")
+    return repo, rel
+
+
+def _normalisation_scope() -> list[dict]:
+    return [
+        {"file": "scripts/foo.py", "action": "Modify", "purpose": "x", "new_imports": ["scripts.a.b"]},
+        {"file": "scripts/bar.py", "action": "Modify", "purpose": "y", "new_imports": []},
+    ]
+
+
+def _normalisation_vp() -> list[dict]:
+    return [{**_DUMMY_VP_STEP, "command": "echo hi", "expected": "hi", "expected_literals": ["lit"]}]
+
+
+def _edit_scope(plan: dict, **changes: object) -> None:
+    plan["scope"][0].update(changes)
+
+
+_PROHIBITED_CASES: dict[str, tuple[Callable[[dict], None], str]] = {
+    "scope_file": (lambda p: _edit_scope(p, file="scripts/other.py"), "'scope'"),
+    "scope_action": (lambda p: _edit_scope(p, action="Create"), "'scope'"),
+    "scope_purpose": (lambda p: _edit_scope(p, purpose="a different purpose"), "'scope'"),
+    "scope_new_imports_emptied": (lambda p: _edit_scope(p, new_imports=[]), "'scope'"),
+    "scope_new_imports_swapped": (lambda p: _edit_scope(p, new_imports=["scripts.c.d"]), "'scope'"),
+    "scope_row_added": (
+        lambda p: p["scope"].append({"file": "scripts/new.py", "action": "Create", "purpose": "z", "new_imports": []}),
+        "'scope'",
+    ),
+    "acceptance_criteria": (lambda p: p.update(acceptance_criteria=["a DIFFERENT criterion"]), "'acceptance_criteria'"),
+    "vp_command": (lambda p: p["verification_plan"][0].update(command="echo weakened"), "field 'command'"),
+    "vp_expected": (lambda p: p["verification_plan"][0].update(expected="weakened"), "field 'expected'"),
+    "vp_expected_literals": (
+        lambda p: p["verification_plan"][0].update(expected_literals=["other"]),
+        "field 'expected_literals'",
+    ),
+}
 
 
 class TestEnforcingLeg:
@@ -298,3 +358,47 @@ class TestEnforcingLeg:
         failed: list[str] = []
         validate_scope_boundary(failed, changed_files=[rel, "scripts/foo.py"], root=repo)
         assert failed == []
+
+    def test_empty_new_imports_at_base_is_not_a_scope_edit(self, tmp_path: Path) -> None:
+        scope = [{"file": "scripts/foo.py", "action": "Modify", "purpose": "x", "new_imports": []}]
+        base = _v5_plan("sb-empty-ni", scope)
+        repo, rel = _flip_repo(tmp_path, "sb-empty-ni", base, _v5_plan("sb-empty-ni", scope, declared=True))
+        failed: list[str] = []
+        validate_scope_boundary(failed, changed_files=[rel, "scripts/foo.py"], root=repo)
+        assert not any("prohibited plan-field edit" in f for f in failed), failed
+
+    def test_quoted_step_ids_at_base_match_integer_working_steps(self, tmp_path: Path) -> None:
+        scope = [{"file": "scripts/foo.py", "action": "Modify", "purpose": "x"}]
+        base = _v5_plan("sb-quoted-ids", scope, [{**_DUMMY_VP_STEP, "step": "1"}])
+        working = _v5_plan("sb-quoted-ids", scope, [{**_DUMMY_VP_STEP, "step": 1}], declared=True)
+        repo, rel = _flip_repo(tmp_path, "sb-quoted-ids", base, working)
+        failed: list[str] = []
+        validate_scope_boundary(failed, changed_files=[rel, "scripts/foo.py"], root=repo)
+        assert not any("deleted" in f or "prohibited plan-field edit" in f for f in failed), failed
+
+    @pytest.mark.parametrize("case", sorted(_PROHIBITED_CASES))
+    def test_genuine_prohibited_edit_still_caught_with_empty_new_imports(self, tmp_path: Path, case: str) -> None:
+        mutate, needle = _PROHIBITED_CASES[case]
+        base = _v5_plan("sb-pin", _normalisation_scope(), _normalisation_vp())
+        working = copy.deepcopy(base)
+        working["implementation_declared"] = True
+        mutate(working)
+        rows = {k: copy.deepcopy(v) for k, v in _DEFAULT_SANCTION_ROWS.items()}
+        old = rows["implementing_plan_bookkeeping"]["prohibited_field_edits"]
+        rows["implementing_plan_bookkeeping"]["prohibited_field_edits"] = [*old, "verification_plan[].expected_literals"]
+        repo, rel = _flip_repo(tmp_path, "sb-pin", base, working, rows)
+        failed: list[str] = []
+        validate_scope_boundary(failed, changed_files=[rel, "scripts/foo.py", "scripts/other.py"], root=repo)
+        assert not any("could not load plan" in f or "fails PlanDocument validation" in f for f in failed), failed
+        assert any("prohibited plan-field edit" in f and needle in f for f in failed), failed
+        if not case.startswith("scope_"):
+            assert not any("'scope'" in f for f in failed), failed
+
+    def test_schema_invalid_base_plan_fails_closed(self, tmp_path: Path) -> None:
+        scope = [{"file": "scripts/foo.py", "action": "Modify", "purpose": "x"}]
+        base = _v5_plan("sb-bad-base", scope)
+        base["plan_type"] = "NOT_A_PLAN_TYPE"
+        repo, rel = _flip_repo(tmp_path, "sb-bad-base", base, _v5_plan("sb-bad-base", scope, declared=True))
+        failed: list[str] = []
+        validate_scope_boundary(failed, changed_files=[rel, "scripts/foo.py"], root=repo)
+        assert any("fails PlanDocument validation" in f and rel in f for f in failed), failed
