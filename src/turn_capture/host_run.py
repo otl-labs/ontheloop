@@ -134,6 +134,10 @@ def resolve_pin(tree: TranscriptTree) -> tuple[str | None, str]:
     return (pinned, "pinned") if pinned is not None else (None, "no_pin")
 
 
+# telemetry_agents.outcome is the closed set success|failed|timeout|throttled; an interrupted run (C-3 cancelled) is a failed run.
+_AGENT_OUTCOME = {"cancelled": "failed"}
+
+
 def top_level_agent_rows(parsed: ParsedTree, ctx: Ctx, host: HostRun) -> list[dict[str, Any]]:
     """The root's top-level run rows (run_shapes.top_level): the open row once the root's open row is due (rule D-1), and one
     close row per root session close row, keyed by the closing record like it, so every cut of a growing tree builds the same
@@ -164,6 +168,6 @@ def top_level_agent_rows(parsed: ParsedTree, ctx: Ctx, host: HostRun) -> list[di
     for anchor, outcome in root_close_points(stream, parsed.final, Counter()):
         ext = role_ref(anchor.data["uuid"], 0, "run_close")
         rows.append(
-            agent_row_base(ctx, "close", anchor.ts, anchor.line, ext, version=version, outcome=outcome["outcome"], **cols)
+            agent_row_base(ctx, "close", anchor.ts, anchor.line, ext, version=version, outcome=_AGENT_OUTCOME.get(outcome["outcome"], outcome["outcome"]), **cols)
         )
     return rows

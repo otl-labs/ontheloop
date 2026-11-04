@@ -116,7 +116,8 @@ def test_top_level_run_shape_is_declared_and_write_enforced() -> None:
 
     realization = agents.realization
     assert realization is not None
-    assert "host_run_ref" in realization.unproduced["T3.20:c9"]
+    assert {"host_run_ref", "workflow_run_id"} <= set(realization.produced["claude_code"])
+    assert "T3.20:c9" not in realization.unproduced
     assert "T3.22:c5" not in realization.unproduced
     assert set(realization.unproduced["rec-4711"]) >= {"lambda_request_id", "findings_count"}
 

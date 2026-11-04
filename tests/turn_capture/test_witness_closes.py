@@ -253,7 +253,7 @@ def test_session_open_bound_is_the_first_close() -> None:
     key = ("telemetry_sessions", f"{SID}#0/open")
     assert early[key] == full[key] and "harness_session_key" not in full[key]
     stream = parse_tree(MemTree(files), None, False).streams[ROOT]
-    assert sessions._open_bound(stream) == stream.turns[0].closes[0].line == 2
+    assert sessions.open_bound(stream) == stream.turns[0].closes[0].line == 2
     plain = parse_tree(
         MemTree(
             make_files([prompt("u1", 1, "p1", "go"), assistant("a1", 2, "m1", [text_block("k")]), prompt("u2", 4, "p2", "x")])
@@ -261,7 +261,7 @@ def test_session_open_bound_is_the_first_close() -> None:
         None,
         False,
     )
-    assert sessions._open_bound(plain.streams[ROOT]) == 1
+    assert sessions.open_bound(plain.streams[ROOT]) == 1
 
 
 def test_every_witness_schedule_emits_each_row_once() -> None:

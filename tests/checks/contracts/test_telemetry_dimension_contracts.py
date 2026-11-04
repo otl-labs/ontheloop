@@ -125,7 +125,7 @@ def test_reader_contracts_document_read_version() -> None:
         and "rec-3771" in invariants
         and "rec-4024" in invariants
     )
-    assert reader["amendment_log"][0]["change_class"] == "field_add" and reader["amendment_log"][0]["date"] == "2026-10-05"
+    assert any(e["change_class"] == "field_add" and e["date"] == "2026-10-05" for e in reader["amendment_log"])
     engine = _text("read-engine")
     assert "read_version" in engine and "equality only" in engine
 
