@@ -231,9 +231,20 @@ Run, in order:
 6. External sources: if WebFetch is available, re-read the Scion post (URL in section 3) and GitHub's
    Actions limits page (https://docs.github.com/en/actions/reference/limits).
 
-Precedence: the repository's AGENTS.md rules bind you. If AGENTS.md's hook-canary rule fires for your
-session (no `[hook_canary]` line in your opening context), it wins over everything below. Do the
-read-only work, write nothing, and end the turn with a status that says "repo hooks not loaded".
+Precedence: the repository's AGENTS.md rules bind you, with one documented exception: the audit branch
+in COMMIT / PR MECHANICS step 2 is this repository's sanctioned audit pattern. If AGENTS.md's
+hook-canary rule fires for your session (no `[hook_canary]` line in your opening context), it wins over
+everything below. Create no branch, cache or file, do no further work, and end the turn with the status
+"repo hooks not loaded".
+
+Budget: if context or time runs short, finish in this priority order and drop the rest:
+1. Q1, Q2, Q3 and Q8, with their findings and `sequencing_plan`.
+2. `capacity_model`.
+3. Q5 and Q4, with their blocks.
+4. Q6, Q7 and Q9.
+5. `rubric_ratings`.
+Set `meta.partial: true` and list what you dropped in `meta.omitted`. Always write both deliverables and
+open the PR.
 
 Reads beyond the EMPIRICAL PASS: you may read at most 10 recent runs of any other workflow, to get the
 job durations DD-B needs. Where you do not, use that job's `timeout-minutes` as an upper bound and say
@@ -241,7 +252,11 @@ so in `capacity_model.assumptions`.
 
 Degraded paths. Never abort; set the flag, apply the stated effect, and proceed:
 
-- IF step 2 fails, or IF every source in step 3 fails: set `meta.degraded_dedup=true`; set every
+- IF the `git fetch` in step 1 fails: use the existing local `origin/main` ref as BASE, and record the
+  failure and that ref's commit date in `meta.contract_notes`.
+- IF step 2 fails: note it in `meta.contract_notes`, and read roadmap state directly from
+  `docs/ROADMAP-PLATFORM.yaml` instead. This is not degraded dedup.
+- IF every source in step 3 fails: set `meta.degraded_dedup=true`; set every
   finding's `confidence` to HYPOTHESIS and its `roadmap_crossref.dedup_hit_count` to null; still grep
   `docs/ROADMAP-PLATFORM.yaml` and `docs/DECISIONS.md` locally and record those searches in
   `roadmap_crossref.dedup_search_terms`. Run E4 from `CI` push-run conclusions (E3) alone. A failure of
@@ -267,8 +282,9 @@ say when a principle should yield to cost or a deliberate constraint.
 
 - NSP-1 No serial global step on the merge path. Throughput must not be bounded by one-at-a-time work
   whose duration is a full-tier run. Scion's post says a conventional merge queue "doesn't make much
-  sense at agent scale", and Decision 73 chose forward-fix over pre-merge full-tier gating. Weigh this
-  against cheap, bounded serial steps.
+  sense at agent scale", and Decision 73 chose forward-fix over pre-merge full-tier gating. Scion's scale
+  (over 30,000 merges a day) far exceeds this repository's H100. Weigh this against cheap, bounded or
+  parallel serial steps, for example batched merge-queue groups, at this repository's scale.
 - NSP-2 Liveness. Every wait an agent enters is bounded, observable and wakes its waiter. When a bound is
   exceeded, the outcome is an escalation, never silence.
 - NSP-3 Production consumes only trees with a passing authoritative verdict, or the exception is
@@ -332,8 +348,11 @@ retirement. Is a separate environment needed at H0, H10 or H100? Verdict enum (o
 
 Q6. Industry rating at scale. Rate the whole pipeline against this EXTERNAL CHECKLIST, property by
 property (`external_checklist`, rating `met | partial | missed`; `partial` requires a named,
-property-matched compensating control in `evidence`). For each property, also say whether the current
-design holds it at H10 and at H100.
+property-matched compensating control in `evidence`). Rate the PROPERTY each row names, not the named
+mechanism: a deliberately deferred mechanism (for example batched postsubmit under RD1, or a merge
+queue under Decision 245 clause 5) whose property is achieved some other way, at the scale where it is
+needed, may rate `met` or `partial`. For each property, also say whether the current design holds it
+at H10 and at H100.
 
 - EC1 Presubmit/postsubmit split with a bounded fast presubmit (Google TAP).
 - EC2 Batched postsubmit with automated culprit finding (TAP-style culprit finding or bisection).
@@ -368,7 +387,16 @@ entry's trigger as the merge rate (merges per day) at which it fires, `trigger_r
 - `not_recommended`: ONLY for a planned item (rec or roadmap id) you judged relevant and recommend not
   building. Never use it for a finding.
 
-Where the growth fit is usable (E1), also give `projected_date` for the trigger rate. Otherwise leave it
+An entry whose trigger is an event, not a rate, sets `trigger_rate_per_day: null`, names the event in
+`trigger_event`, and is placed by this rule:
+- `now`: the event has happened or is declared imminent (RD4's personas).
+- `next`: the event's owner is a roadmap item `not_started` or `in_progress`, or an open recommendation.
+- `later`: the owner is `deferred_post_mvp`, or the event is gated on a Decision reversal (for example
+  executor unfreeze, Decision 67).
+
+A planned-unbuilt or planned-insufficient finding gets one entry (the finding's id), which cites its
+owner in `depends_on`; the owner does not get a second entry. Where the growth fit is usable (E1), also
+give `projected_date` for the trigger rate. Otherwise leave it
 null. Each entry carries the trigger metric, threshold, current value, measurement source, dependencies
 and the Decisions it amends or reverses. Compare your order against the roadmap's: rec-4874's scope, Decision
 217's coverage homes, and the critical path in `docs/PROJECT_CONTEXT.md` ("Roadmap end-state map").
@@ -381,7 +409,10 @@ own.
   deploys?
 - What does a single red cost today: merges landing on a red base during the red window, at H0 and H10?
 - Do the verdict personas' Actions triggers multiply per-PR job count, and by how much?
-- Which constraint binds first: the 20-job cap, the GITHUB_TOKEN rate limit, or the trigger rate?
+- Which constraint binds first: the 20-job cap, the GITHUB_TOKEN rate limit, GitHub's workflow trigger
+  rate limit, red occupancy, or the operator's capacity to handle escalations?
+- How many human-only escalations per day reach the single operator at H10 and H100, and which design
+  choices remove them?
 - Is the sandbox deploy tier now production in practice (Decision 73 clause 5's premise), and what
   follows if so?
 - Should plans-only merges ride the main merge path at all, or invalidate in-flight handoff evidence
@@ -390,8 +421,10 @@ own.
 
 ## 8. RUBRIC
 
-Rate every surface S1-S7 on every dimension. Enum: `strong | adequate | weak | absent | n/a`. `n/a` is
-correct and costless where a dimension does not structurally apply. Never manufacture a rating or a
+Rate every surface S1-S7 on every dimension. Enum: `strong | adequate | weak | absent | n/a`. Rate S6
+(designed-unbuilt) on whether its DESIGN, if built as specified, would meet the dimension at the scale
+it targets; rate every other surface on what is built at BASE. `n/a` is correct and costless where a
+dimension does not structurally apply. Never manufacture a rating or a
 finding to fill a cell.
 
 | Dim | Name | Principle | Served questions |
@@ -420,7 +453,8 @@ finding to fill a cell.
   recording the alternative and why.
   - Job counting: a matrix job counts once per expanded leg, and a reusable-workflow call counts its
     called jobs. `jobs_per_push_to_main` counts every job, across all workflows, whose trigger fires on
-    every push to main with no path filter and whose `if:` depends only on the event type.
+    every push to main with no path filter and whose `if:` is true for every push to main (event type,
+    or a ref condition such as `refs/heads/main`).
     `jobs_per_pr_update` applies the same rule to a `pull_request` synchronize event on an agent branch,
     including `pull_request_target` workflows. List separately in `note`: path-filtered jobs, jobs whose
     `if:` depends on commit content or actor (for example a Dependabot-only job), and comment- or
@@ -431,8 +465,11 @@ finding to fill a cell.
   - Job-minutes per merge: jobs_per_push_to_main x their mean minutes, plus U x jobs_per_pr_update x
     their mean minutes. Durations come from E3, or from the "Reads beyond the EMPIRICAL PASS" allowance.
   - Persona job-minutes per merge: one job per persona per qualifying PR update, using the PR kinds the
-    roadmap items name (T4.28 implementation PRs; T4.29 ready plan PRs; T4.30 draft plan PRs). Assume
-    persona minutes, state the figure, and set `persona_jobs_per_pr_update` accordingly.
+    roadmap items name: T4.28 "every PR changing code"; T4.29 ready plan PRs; T4.30 draft plan PRs. Use
+    E8's classes as the PR-kind proxy, and treat every plans-only PR as both draft and ready once. Assume
+    persona minutes and state the figure. `persona_jobs_per_pr_update` is the resulting weighted mean (a
+    float). The CI-RCA agent is not in the persona scenario: it runs on failures and is priced through
+    reds. `..._with_personas_at` builds on the as-is figure.
   - Peak-hour slot demand at H: r_peak(H) x job-minutes per merge / 60, plus scheduled job-minutes per
     hour / 60. Report it three ways: as is (`peak_hour_slot_demand_at`); with plans-only merges running
     only the fast tier (C17, using E8's plans-only share); and with the personas added
@@ -440,13 +477,21 @@ finding to fill a cell.
   - `saturation_merges_per_day`: the H at which as-is peak-hour slot demand equals
     `concurrent_job_cap`.
   - Red occupancy at H: a red is a `main-validate` run concluding failure on a push to main (not a
-    recommendation). The red window is the time from the first such run to the completion of the next
-    successful `main-validate` run on main (E3/E4). Reds per merge = red runs / push runs in E3. Report
-    flakes separately, and exclude them from the regression rate. `red_occupancy_at` = min(1, H x reds per
-    merge x mean red window in hours / 24).
-  - GITHUB_TOKEN calls per hour for `pr-conflict-signal`: calls per open PR per push (read
-    `scripts/ci/pr_conflict_signal.sh`) x r_peak(H) x open agent PRs at H, against the 1,000 per hour
-    limit.
+    recommendation). A red window runs from the completion of the first red run to the completion of the
+    next successful `main-validate` run on main (E3/E4). Reds per merge = red runs / push runs in E3,
+    flakes INCLUDED (a flake also blocks handoffs). A red counts as a flake iff a re-run on the same SHA
+    concluded success, or its CI-RCA rec classifies it as flaky; report `flake_share` separately.
+    `red_occupancy_at` = min(1, H x reds per merge x mean red window in hours / 24).
+  - GITHUB_TOKEN calls per hour at H: sum over every workflow that calls the GitHub API with the token
+    (G7). For `pr-conflict-signal`, use calls per open PR per push (read `scripts/ci/pr_conflict_signal.sh`)
+    x r_peak(H) x open agent PRs at H. Compare the total with the 1,000 per hour per-repository limit, and
+    note the 200-PR list cap. Separately, describe in `note` the agent identity's own API traffic from
+    concurrent sessions, and GitHub's secondary limits on content creation (wake comments). Those limits
+    are not on the per-repository token.
+  - Operator escalations per day at H: human-only actions the pipeline routes to the operator (an
+    operator merge as Decision 245's release valve, a hand push as in rec-4790, `tf-gated-apply`
+    approvals, human-stop rebase conflicts). Scale each from E5, E2 and the rec-4790 case, and state
+    the assumptions.
   - Decision 205 clause 3 adds path-filtered push triggers for repo-scoped scheduled agents. Estimate
     their extra job-minutes per merge in `note` and say whether they change `binding_constraint`.
 - DD-C (feeds Q3, Q5). The coupling map of per-push `main-validate`. List every consumer that depends on
@@ -626,9 +671,15 @@ G7. Shared capacity (S7)
   ("Repo-scoped scheduled agents move from cron to path-filtered push-to-main triggers"); clause 6 (the
   compute plane covers planning and implementation only). Decision 234 clause 3 (subscription rule) and
   clause 5 (local adapters post-MVP).
-- Workflows on other events: `terraform-plan-trusted.yml` (`pull_request_target`), `claude.yml`
-  (`issue_comment`, `issues`, `pull_request_review`, `pull_request_review_comment`),
-  `dependabot-auto-merge.yml` (`pull_request`).
+- Non-push, non-schedule triggers (the complete set at compose time): `pull_request`: `ci.yml`,
+  `codeql.yml`, `dependabot-auto-merge.yml`, `terraform-apply-sandbox.yml` (path-filtered),
+  `terraform-github-plan.yml` (path-filtered); `pull_request_target`: `terraform-plan-trusted.yml`
+  (path-filtered); `workflow_run`: `ci-rca.yml` (of six workflows), `telemetry-golden-replay.yml` (of
+  `deploy-ducklake-lambdas`); comment and review events: `claude.yml` (`issue_comment`, `issues`,
+  `pull_request_review`, `pull_request_review_comment`).
+- `GITHUB_TOKEN` (or `github.token`) is referenced in 15 workflow files. The 1,000-per-hour limit is per
+  repository, shared by every workflow. `scripts/ci/pr_conflict_signal.sh` (around line 85) lists open
+  PRs with `gh pr list ... --limit 200`.
 - `docs/contracts/ports.yaml` `verdict_plane` (around line 243): adapters `github_actions` (implemented)
   and `verdict_app` (pending, T4.2:c9).
 
@@ -660,6 +711,8 @@ G9. External facts (compose-time; re-verify per SETUP step 6)
 - GitHub's merge-queue configuration page requires the `merge_group` event for Actions and offers a
   build concurrency of 1-100 `merge_group` dispatches and a maximum group size. It does not state which
   plans or repository types can use a merge queue: availability for this organisation is unverified.
+  Whether larger GitHub-hosted runners (a C18 lever) are available on the Free plan was not verified at
+  compose time; check before relying on that lever.
 
 ## 11. EMPIRICAL PASS
 
@@ -669,20 +722,23 @@ as `E<n>:<kind>-<id>`, for example `E3:run-41643822253` or `E5:pr-1799`.
 
 - E1 (Q1, Q3, Q8). Merge rate and growth: `git log <sha> --first-parent --since=<BASE_DATE minus 30
   days> --until=<BASE_DATE> --format=%cI`. Compute per-UTC-day counts, H0, P0, and the median
-  inter-merge interval on the H0 day. Also count merges per ISO week for at least the last 4 complete
-  weeks, and fit a least-squares line to ln(weekly count). The fit is usable iff the slope is positive and
+  inter-merge interval on the H0 day. Also count merges per ISO week for the last 4 complete ISO weeks
+  before BASE_DATE (extend the `--since` bound to BASE_DATE minus 42 days for this count only), and fit
+  a least-squares line to ln(weekly count). The fit is usable iff the slope is positive and
   R^2 >= 0.6. If usable, report `doubling_time_days`, and project `projected_date_h10` and
   `projected_date_h100` as the dates the fitted daily rate (weekly / 7) reaches H10 and H100. If not
   usable, set all three to null, record the slope and R^2 in `capacity_model.growth.fit`, and rely on
   Q8's rate-keyed horizons alone.
 - E2 (Q2). Hotspots: `git log <sha> --first-parent --since=<BASE_DATE minus 14 days> --until=<BASE_DATE>
   --name-only --format=`. List paths touched by at least 5 merges. Classify each against
-  `mechanical-conflicts.yaml`: derived, roster, decision_numbering, excluded or unlisted.
+  `mechanical-conflicts.yaml`: derived, roster, decision_numbering, excluded or unlisted. Classify a
+  `docs/contracts/*.yaml` path as `roster_amendment_log_only`: only its `amendment_log` hunks resolve
+  mechanically.
 - E3 (Q1, Q3, Q4). Durations: at most 50 of the most recent completed `CI` runs on push to main
   (`main-validate` job duration, and queue time if reported); at most 30 of the most recent `pr-validate`
   runs; at most 20 Main Canary runs (duration, conclusion, head-SHA repeats, start-to-start gap).
 - E4 (Q3, Q5). Reds: CI-RCA recommendations created in the 30 days before BASE_DATE (the `ci_rca_since`
-  verb, else `scripts.recs_related --terms "ci_rca"`). For at most 10 of them, record: whether
+  verb, else `scripts.recs_related --terms "ci_rca"`). For the 10 most recent of them, record: whether
   `main-validate` on the anchor commit went red; whether the first Main Canary run whose head contains
   the anchor commit went red; the rec's open-to-close window; and whether the cause was a flake or a real
   regression. Red windows for `capacity_model` come from run conclusions (DD-B), not from rec windows.
@@ -692,7 +748,8 @@ as `E<n>:<kind>-<id>`, for example `E3:run-41643822253` or `E5:pr-1799`.
 - E6 (Q5). Deploy versus verdict: at most 20 of the most recent push runs of each of
   `deploy-ducklake-lambdas`, `deploy-prod-lambdas` and `terraform-apply-sandbox`, joined by head SHA to
   that commit's `CI` push run (conclusion and completion time).
-- E7 (Q1, Q9, C16). Stranding: all open PRs (age, last update, mergeable state), and one
+- E7 (Q1, Q9, C16). Stranding: all PRs open when you read them (record the read time; age, last update,
+  mergeable state), and one
   `sessions_window` call with `day_from` = the UTC date of BASE_DATE minus 6 days, `day_to` = the UTC date
   of BASE_DATE (both inclusive), and `as_of` = BASE_DATE. Record state counts, how many root sessions
   read `abandoned`, and the idle threshold. Judge what share of stranding such a read can see: a session waiting on a wake that
@@ -772,7 +829,7 @@ and which of its reversal conditions (if any) has fired.
 - Decision 83: `strict_required_status_checks_policy = false` and the admin bypass (non-wedging).
 - Decision 163 point 3: the local pre-handoff full tier on the committed, rebased tree.
 - Decision 203: the handoff evidence gate, no agent override. Decision 245: the merge gate, no agent
-  override.
+  override; clause 5 deliberately defers strict up-to-date checks and a GitHub merge queue.
 - Decision 205 clause 5: an approved plan merges in its own PR before a separate implementation PR, and
   plans-only merges run the fast tier on main, backstopped by Main Canary. Clause 3: repo-scoped
   scheduled agents move to path-filtered push-to-main triggers. Clauses 1 and 6: persona placement.
@@ -798,7 +855,11 @@ audit:
          methodology_version: 1,
          scope_surfaces: [S1, S2, S3, S4, S5, S6, S7],
          degraded_dedup: false, degraded_github_reads: false, degraded_telemetry_reads: false,
-         external_unverified: false, contract_notes: "", stale_anchors: []}
+         external_unverified: false, partial: false, omitted: [],
+         contract_notes: "", stale_anchors: []}
+  # Any numeric field may be null where a degraded path says so.
+  deep_dives: {dd_a: "", dd_b: "", dd_c: "", dd_d: ""}       # each deep-dive's result (formulas, inventories, maps)
+  empirical: {e1: "", e2: "", e3: "", e4: "", e5: "", e6: "", e7: "", e8: ""}   # each sample's tables or summary
   requester_directions:      # RD1-RD5 as recorded; Q3, Q8 and capacity_model read horizons from here
     per_commit_post_merge_until_trigger: true
     horizons: {h0_merges_per_day: <E1 value>, h10: <10 x h0>, h100: <100 x h0>}
@@ -838,10 +899,13 @@ audit:
     peak_hour_slot_demand_with_plans_only_fast_at: {h0: <float>, h10: <float>, h100: <float>}
     peak_hour_slot_demand_with_personas_at: {h0: <float>, h10: <float>, h100: <float>}
     saturation_merges_per_day: <float|null>
+    flake_share: <float>
     red_occupancy_at: {h0: <float>, h10: <float>, h100: <float>}
     pr_conflict_signal_calls_per_hour_at: {h0: <int>, h10: <int>, h100: <int>}
+    github_token_calls_per_hour_at: {h0: <int>, h10: <int>, h100: <int>}   # all workflows
     github_token_limit_per_hour: <int>
-    binding_constraint: concurrent_jobs|github_token_rate|trigger_rate|red_window_slo|other|undetermined
+    operator_escalations_per_day_at: {h0: <float>, h10: <float>, h100: <float>}
+    binding_constraint: concurrent_jobs|github_token_rate|workflow_trigger_rate_limit|red_occupancy|operator_capacity|other|undetermined
     capacity_levers:           # lever-level records; a finding that adopts a lever cites it, and its
                                # sequencing_plan entry must agree with the horizon here
       - {lever: plan_upgrade|larger_runners|shard_full_tier|risk_proportional_tier|move_workload_off_actions|reduce_per_push_jobs|other,
@@ -878,7 +942,8 @@ audit:
                                # and planned items (capacity_levers and workload_placement triggers are
                                # lever-level inputs it must agree with)
     - {item: <finding id | rec-NNNN | T-id>, horizon: now|next|later|not_recommended,
-       trigger_metric: "", threshold: "", trigger_rate_per_day: <float|null>, projected_date: <YYYY-MM-DD|null>,
+       trigger_metric: "", threshold: "", trigger_rate_per_day: <float|null>, trigger_event: "",
+       projected_date: <YYYY-MM-DD|null>,
        current_value: "", measurement_source: "",
        depends_on: [<items>], decisions_amended_or_reversed: [], note: ""}
   findings:
@@ -916,7 +981,8 @@ Invariants (state them, and satisfy them):
   null when there are no findings).
 - Every finding id appears in exactly one `sequencing_plan` entry, with a horizon other than
   `not_recommended`. Every C1-C21 id appears in at least one finding's `candidates`, in
-  `rejected_candidates`, or in `inconclusive_candidates`.
+  `rejected_candidates`, or in `inconclusive_candidates`. A candidate that bundles several claims may
+  appear in more than one list, one claim per entry, each naming the claim it decides.
 - `summary.maturity_S<n>` MUST equal the `per_surface_assessment` maturity for that surface.
 - `control_property_match` is REQUIRED whenever a compensating control is the reason for dismissal. Name
   the property the control exercises, cite where it operates (mechanism or file:line), and state why the
@@ -927,7 +993,8 @@ Invariants (state them, and satisfy them):
   `degraded_github_reads` nulls the affected `capacity_model` fields and sets `capacity_model.confidence`
   and rate-dependent findings to HYPOTHESIS; `degraded_telemetry_reads` caps at HYPOTHESIS the
   `confidence` of every finding or rejected candidate adjudicating C10 or C16, and of Q7's answer;
-  `external_unverified` caps Q6's and Q7's answer `confidence`. State each applied effect in
+  `external_unverified` caps Q6's and Q7's answer `confidence` where the answer rests only on G9;
+  `partial` and `omitted` tell the reader which sections are missing. State each applied effect in
   `meta.contract_notes`.
 
 Write `audits/ci-merge-throughput-scaling-<sha>.md`, a companion report of at most 1500 words: the
@@ -946,6 +1013,9 @@ Assign severity AFTER judgment, by defect class. Never inherit it from this prom
   compensating controls you judged insufficient. This includes a per-agent wait with no wake source.
 - medium: redundancy, ambiguity, inconsistency, or a scale limit expected only past H10, with a clear fix.
 - low: clarity or wording.
+
+Apply the classes top-down; the first that matches wins. A scale limit that is not critical is high if
+its trigger rate is at most H10, and medium if above H10.
 
 Compensating controls must PROPERTY-MATCH: they exercise the same property AND would fail if the defect
 were real (apply the counterfactual to the control). A control that cannot catch the break neither lowers
@@ -978,7 +1048,8 @@ framing must not foreclose it.
    your turn without merging.
 3. Pre-push gate: both files must exist, and the YAML must parse (`bin/venv-python -c "import yaml;
    yaml.safe_load(open('audits/ci-merge-throughput-scaling-<sha>.yaml'))"`). Repository-wide validation is
-   advisory outside CI. Record any unrelated `bin/venv-python -m scripts.validate --pre` failure in
+   advisory outside CI. Running `bin/venv-python -m scripts.validate --pre` is optional. If you run it
+   before committing and it fails for reasons unrelated to your files, record that in
    `meta.contract_notes`; never fix it.
 4. `git add` the two files only, then `git -c user.name=Claude -c user.email=noreply@anthropic.com commit
    -m "audit(ci-merge-throughput-scaling): findings at <sha>"`, appending any attribution trailer lines
