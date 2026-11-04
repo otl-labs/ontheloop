@@ -98,7 +98,7 @@ Candidates (neutral hypotheses; the anchors are in the GROUNDING MAP):
   three-hourly). OUT OF SCOPE: the production telemetry smoke canary (Decision 236); the security
   heartbeat canary (`terraform/bootstrap/platform_security_heartbeat_canary.tf`); the session hook
   canary (`.claude/hooks/hook_canary.sh`). Do not treat an out-of-scope canary as a CI signal.
-- "TAP" names two things. IN SCOPE: Google's Test Automation Platform model (fast presubmit, batched
+- "TAP" names two things. IN SCOPE: Google's "Test Automation Platform" model (fast presubmit, batched
   postsubmit, culprit finding), which the repository says it follows (`docs/contracts/git-ops.yaml`
   `two_tier_presubmit_model.description`, "Google TAP style"). NOT THE SAME THING: "THE TAP RULE" in
   `git-ops.yaml` `trailer_acceptance_gate.source_admission`, a rule for rec-closure verdict sources
