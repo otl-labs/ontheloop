@@ -306,7 +306,7 @@ verification_plan:
   phase: pre-deploy
   action: >-
     PR 1 open: its trusted plan comment (Decision 238) for the PR's current head reads CHANGES with exactly one create, the successor
-    subscription, no drift line, a PASS guard prediction and a saved plan, and leaks nothing.
+    subscription, no refresh drift outside the chronic classes (aws_iam_role and aws_lambda_function addresses, which every recent trusted comment names: role use and the governed Lambda code deploys; rec-4631), a PASS guard prediction and a saved plan, and leaks nothing.
   command: |-
     test -n "$PR_NUMBER" && bin/venv-python - <<'PY'
     import json, os, re, sys, urllib.request
@@ -317,16 +317,19 @@ verification_plan:
     scan = re.sub(r'\b[0-9a-f]{40,64}\b', '', body)
     leaks = [n for n, x in (('at', r'@[a-z0-9-]+\.[a-z]'), ('12-digit', r'(?<!\d)\d{12}(?!\d)'), ('arn', r'\barn:')) if re.search(x, scan)]
     rows = [r for r in re.findall(r'^\| ([^|]+?) \| ([^|]+?) \|', body, re.M) if r[0] != 'Resource' and not set(r[0]) <= set('-')]
+    CHRONIC = ('aws_iam_role.', 'aws_lambda_function.')
+    odd = [a for a in re.findall(r'`([^`]+)`', (re.search(r'^Drift detected outside Terraform: (.*)$', body, re.M) or [None, ''])[1]) if not a.startswith(CHRONIC)]
     ok = ('State: CHANGES' in body and '0 to import, 1 to add, 0 to change, 0 to destroy (0 replaced).' in body
-          and rows == [('aws_sns_topic_subscription.company_alerts_email', 'create')] and 'Drift detected outside Terraform' not in body
+          and rows == [('aws_sns_topic_subscription.company_alerts_email', 'create')] and not odd
           and 'Predicted guard verdict: PASS' in body and 'This saved plan is applied at merge' in body and not leaks)
-    print(json.dumps({'one_create': bool(ok), 'leaks': leaks})); sys.exit(0 if ok else 'TRUSTED PLAN STOP')
+    print(json.dumps({'one_create': bool(ok), 'odd_drift': odd, 'leaks': leaks})); sys.exit(0 if ok else 'TRUSTED PLAN STOP')
     PY
   expected: >-
-    One JSON line {"one_create": true, "leaks": []}.
+    One JSON line {"one_create": true, "odd_drift": [], "leaks": []}.
   fix_if: >-
     TRUSTED PLAN NOT POSTED: the trusted plan job has not finished for this head; wait for its check to conclude and
-    re-run. Any other change, a drift line or a refusal category: stop; do not merge. A missing value error means S1
+    re-run. Any other change, a drifted address in odd_drift or a refusal category: stop; do not merge, and triage the
+    drift with the coordinator. A missing value error means S1
     has not run or the key is misspelt.
   hermetic: false
   graduation: not-applicable
@@ -405,7 +408,7 @@ verification_plan:
   fix_if: >-
     pending_successor with no successor: PR 1's apply did not create it, read the apply run. two_confirmed with
     successor [] after a pending_successor pass: the unconfirmed subscription expired before C1 (SNS's retention is
-    UNPROVEN) and the next drift cycle measures out_of_band_drift; stop (Decision 55) and tell the coordinator; once
+    UNPROVEN) and the next drift cycle measures out_of_band_drift (or crashes while rec-4255 is open); stop (Decision 55) and tell the coordinator; once
     its tf_drift rec is reviewed, the heal is the operator-worded acknowledge-and-retry dispatch (constraints, C1 drift
     window), which re-creates the subscription and re-sends the confirmation mail; then VP 8 with APPLY_RUN, VP 9
     MODE=pending_successor, and C1 again. Any deleted or other row:
@@ -547,12 +550,16 @@ constraints:
   then the admin-bypass squash-merge while PRs are authored as the operator (rec-2827; PLAN-trusted-plan-cutover PR 3
   precedent). Code review PROCEED is not that word.
 - >-
-  C1 drift window: C1 changes the successor's computed attributes without an apply, so from C1 until
-  PLAN-terraform-company-emails-forget's apply persists them (its VP 5), any terraform/personal change waiting to
-  apply sits beside resource_drift and Decision 190 reads it as out_of_band_drift (a red that refuses later applies,
-  PR 2's included). So before C1 the agent asks the coordinator to hold every other terraform/personal merge and every
-  terraform-apply-sandbox, reconcile or terraform-drift dispatch by another thread until that VP 5 passes, and plan 2
-  starts right after P1 (the same day). If a red lands anyway: stop and tell the coordinator; once its tf_drift rec
+  C1 drift window: C1 changes the successor's computed attributes without an apply, adding it to the refresh drift
+  every plan already carries (aws_iam_role and aws_lambda_function addresses on every recent trusted comment, PRs
+  1764 and 1834: role use and the governed Lambda code deploys; rec-4631). Decision 190's classifier reads any
+  resource_drift beside a waiting change as out_of_band_drift, so a drift cycle that plans a merged-but-unapplied
+  terraform/personal change turns the record red at any time (a red that refuses later applies, PR 2's included);
+  while rec-4255 is open that cycle crashes in Handle drift instead (no record change). No drift run among the 300
+  since 2026-09-07 reached exit 2. So before C1 the agent asks the coordinator to hold every other terraform/personal
+  merge and every terraform-apply-sandbox, reconcile or terraform-drift dispatch by another thread until
+  PLAN-terraform-company-emails-forget's VP 5 passes: nothing else then applies before PR 2, so PR 2's saved plan
+  cannot go stale and its own merge-to-apply gap is the only one; plan 2 starts right after P1 (the same day). If a red lands anyway: stop and tell the coordinator; once its tf_drift rec
   is reviewed (Decision 55), the only heal is the operator-worded empty acknowledge-and-retry while main's plan is
   guard PASS (no route, no artifact), never a guard-routed dispatch or reconcile route (ii) (rec-4230); then VP 8
   with APPLY_RUN = that dispatch run's id.
@@ -656,7 +663,8 @@ context:
   red_overlap at VP 1. rec-3975 re-grounded 2026-11-04 to VP 4's files.
 - >-
   Overlap: rec-4048 (ExternalIds, same parameter), rec-4546, MAIL-02 (rec-3906) and rec-3903 stay separate.
-  Related: rec-2850, rec-4230, rec-4255, rec-4050, rec-4233 (drift ticks 4-7 h apart, so VP 8 may dispatch).
+  Related: rec-2850, rec-4230, rec-4255, rec-4050, rec-4233 (drift ticks 4-7 h apart, so VP 8 may dispatch), rec-4631
+  (refresh drift on unchanged resources red-latches an exit-2 cycle).
 pre_implementation_checklist:
 - Branch confirmed not on main
 - docs/PROJECT_CONTEXT.md read

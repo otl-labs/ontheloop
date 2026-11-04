@@ -37,7 +37,8 @@ scope:
     aws_sns_topic_subscription.alerts_email sits on aws_sns_topic.alerts with protocol email and endpoint
     var.alerts_email, whose variable declares no default; no count or for_each on it; nothing transitional is left (no
     company_alerts_email variable or resource; Terraform itself rejects a removed block beside the restored resource);
-    the file carries no at-sign. It pins no comment wording and no subscription count (Decision 244 cl.4)
+    the restored resource has no lifecycle block (so no ignore_changes can hide endpoint drift); the file carries no
+    at-sign. It pins no comment wording and no subscription count (Decision 244 cl.4)
     (weakening_dispositions).
 - file: docs/contracts/terraform-cc-web-operations.yaml
   action: Modify
@@ -74,7 +75,7 @@ infrastructure_dependencies:
   Infrastructure Dependencies table (terraform/personal in scope; pipeline mechanics are environment-taxonomy.yaml's,
   not restated). | order | dependency | timing | owner | -- | 1 | PLAN-terraform-company-emails-forget complete
   (successor-only subscription, its confirmed state persisted, alerts_email = company alias) | before PR 3 opens |
-  VP 1 | -- | 2 | PR 3's first trusted plan is NO_CHANGES with no drift line | before S3 | VP 4 | -- | 3 | S3 sets
+  VP 1 | -- | 2 | PR 3's first trusted plan is NO_CHANGES with no drift beyond the chronic classes | before S3 | VP 4 | -- | 3 | S3 sets
   owner_email and the transitional previous_owner_email | the operator can approve within the hour | agent, on the
   operator's word | -- | 4 | PR 3's saved plan (Owner tag updates; the move is a no-op) routes to tf-gated-apply at
   merge (aws_iam_role and aws_iam_openid_connect_provider tag updates are out of budget; the merge-time subagent
@@ -222,8 +223,8 @@ verification_plan:
   phase: pre-deploy
   action: >-
     PR 3 open, before S3: its trusted plan comment for the PR's current head reads NO_CHANGES with zero counts (the moved block is a no-op move),
-    carries no drift line (PLAN-terraform-company-emails-forget persisted the confirmed successor), has a saved plan,
-    and leaks nothing.
+    carries no refresh drift outside the chronic classes (aws_iam_role and aws_lambda_function addresses, which every recent trusted comment names: role use and the governed Lambda code deploys; rec-4631) (PLAN-terraform-company-emails-forget persisted the confirmed successor),
+    has a saved plan, and leaks nothing.
   command: |-
     test -n "$PR_NUMBER" && bin/venv-python - <<'PY'
     import json, os, re, sys, urllib.request
@@ -233,18 +234,19 @@ verification_plan:
     body = cs[-1] if cs else sys.exit('TRUSTED PLAN NOT POSTED for this head yet')
     scan = re.sub(r'\b[0-9a-f]{40,64}\b', '', body)
     leaks = [n for n, x in (('at', r'@[a-z0-9-]+\.[a-z]'), ('12-digit', r'(?<!\d)\d{12}(?!\d)'), ('arn', r'\barn:')) if re.search(x, scan)]
+    CHRONIC = ('aws_iam_role.', 'aws_lambda_function.')
+    odd = [a for a in re.findall(r'`([^`]+)`', (re.search(r'^Drift detected outside Terraform: (.*)$', body, re.M) or [None, ''])[1]) if not a.startswith(CHRONIC)]
     ok = (re.search(r'^State: NO_CHANGES$', body, re.M) and '0 to import, 0 to add, 0 to change, 0 to destroy (0 replaced)' in body
-          and 'Drift detected outside Terraform' not in body and 'This saved plan is applied at merge' in body and not leaks)
-    print(json.dumps({'no_changes_no_drift': bool(ok), 'leaks': leaks})); sys.exit(0 if ok else 'TRUSTED PLAN STOP')
+          and not odd and 'This saved plan is applied at merge' in body and not leaks)
+    print(json.dumps({'no_changes': bool(ok), 'odd_drift': odd, 'leaks': leaks})); sys.exit(0 if ok else 'TRUSTED PLAN STOP')
     PY
   expected: >-
-    One JSON line {"no_changes_no_drift": true, "leaks": []}.
+    One JSON line {"no_changes": true, "odd_drift": [], "leaks": []}.
   fix_if: >-
     TRUSTED PLAN NOT POSTED: the trusted plan job has not finished for this head; wait for its check to conclude and
     re-run. A change on alerts_email's endpoint: S2 of the forget plan has not run or holds another value; stop, never merge
-    (a replace AccessDenies through CI). A drift line: some resource changed outside Terraform; do not run S3, because
-    the classifier would read the window as out_of_band_drift (an immediate red); triage the drift with the
-    coordinator first. A refusal: stop.
+    (a replace AccessDenies through CI). An address in odd_drift: some other resource changed outside Terraform; do
+    not run S3; triage the drift with the coordinator first. A refusal: stop.
   hermetic: false
   graduation: not-applicable
 - step: 5
@@ -278,7 +280,7 @@ verification_plan:
   action: >-
     PR 3, after its trusted plan is re-run following S3: the comment for the PR's current head is newer than T_S3 and reads CHANGES,
     no import, create, destroy or replace; every row an update whose changed attributes are among tags_all, tags and
-    policy; at least one aws_iam_role row; no drift line; the guard predicts BLOCKED (tf-gated-apply at merge); the
+    policy; at least one aws_iam_role row; no drift outside the chronic classes; the guard predicts BLOCKED (tf-gated-apply at merge); the
     reviewer digest fit is FITS, OPAQUE or OVERFLOW, and every address unknown at plan time is a data source or a row
     whose changed attributes include policy; nothing leaks.
   command: |-
@@ -297,17 +299,19 @@ verification_plan:
     unknown = re.findall(r'`([^`]+)`', (re.search(r'^Unknown at plan time: (.*)$', body, re.M) or [None, ''])[1])
     policy_rows = {r[0] for r in rows if 'policy' in [x.strip() for x in r[2].split(',')]}
     unknown_ok = all(a.startswith('data.') or a in policy_rows for a in unknown)
+    CHRONIC = ('aws_iam_role.', 'aws_lambda_function.')
+    odd = [a for a in re.findall(r'`([^`]+)`', (re.search(r'^Drift detected outside Terraform: (.*)$', body, re.M) or [None, ''])[1]) if not a.startswith(CHRONIC)]
     ok = (fresh and 'State: CHANGES' in body and counts and tagonly and any(r[0].startswith('aws_iam_role.') for r in rows)
-          and 'Drift detected outside Terraform' not in body and 'Predicted guard verdict: BLOCKED' in body
+          and not odd and 'Predicted guard verdict: BLOCKED' in body
           and fit in ('FITS', 'OPAQUE', 'OVERFLOW') and unknown_ok and not leaks)
-    print(json.dumps({'fresh': fresh, 'updates': len(rows), 'tag_only': tagonly, 'fit': fit, 'unknown_ok': unknown_ok, 'leaks': leaks})); sys.exit(0 if ok else 'TRUSTED PLAN STOP')
+    print(json.dumps({'fresh': fresh, 'updates': len(rows), 'tag_only': tagonly, 'fit': fit, 'unknown_ok': unknown_ok, 'odd_drift': odd, 'leaks': leaks})); sys.exit(0 if ok else 'TRUSTED PLAN STOP')
     PY
   expected: >-
-    One JSON line with fresh true, an update count, tag_only true, fit FITS, OPAQUE or OVERFLOW, unknown_ok true and
-    no leaks.
+    One JSON line with fresh true, an update count, tag_only true, fit FITS, OPAQUE or OVERFLOW, unknown_ok true,
+    odd_drift [] and no leaks.
   fix_if: >-
     Not fresh or TRUSTED PLAN NOT POSTED: the re-run has not finished for this head. Any create, destroy, other
-    attribute or drift line: stop; do not merge, and
+    attribute or an address in odd_drift: stop; do not merge, and
     restore owner_email (S3 rollback) if the window cannot be kept (constraints, S3 window).
   hermetic: false
   graduation: not-applicable
@@ -654,10 +658,11 @@ constraints:
   7 (AFTER), red_overlap, PR 4 (VP 11, VP 14), VP 13. PR 4 opens only after O1's row reads pass and NEON-02 is
   company-owned.
 - >-
-  S3 window. S3 creates a tfvars-only diff on main until PR 3's saved plan applies. With the confirmed successor
-  persisted (PLAN-terraform-company-emails-forget VP 5; VP 4 shows no drift line), Decision 190 measures it as
-  pending_codification (no red) and escalates to red after 2 hours, including while the gated apply waits (rec-4050);
-  while rec-4255 is open an exit-2 drift cycle crashes instead (no record change). So: PR 3 is open and green with VP 4
+  S3 window. S3 creates a tfvars-only diff on main until PR 3's saved plan applies. A drift cycle in that window
+  plans exit 2: while rec-4255 is open it crashes in Handle drift (a failed terraform-drift run, no record change;
+  tell the coordinator); once rec-4255 is fixed it measures out_of_band_drift (red at once), not pending_codification,
+  because every plan carries chronic refresh drift on aws_iam_role and aws_lambda_function addresses (role use and the
+  governed Lambda code deploys; rec-4631), including while the gated apply waits. So: PR 3 is open and green with VP 4
   passing before S3; S3 runs only when the operator can approve tf-gated-apply within the hour; the agent then re-runs
   PR 3's terraform-plan-trusted run (a re-run, never an empty commit), checks VP 6 and merges. Red before PR 3 merges:
   restore owner_email (S3 rollback); main's plan is then a no-op and the empty acknowledge-and-retry heals it; repeat
@@ -693,12 +698,13 @@ constraints:
   bootstrap key list in VP 9 and the baseline key set; stop and re-plan the affected commands through /plan.
 - >-
   Expected detector pages (Decision 202 cl.6, never filtered by actor), each evidence, not an incident:
-  platform-security-platform-role-iam-change (and platform-security-detector-tamper if its filter covers tag writes)
-  on A1. platform-security-alerts-topic-change probably does not fire on PR 3's topic tag write (its filter matches
+  platform-security-platform-role-iam-change and platform-security-detector-tamper on A1 (the tamper filter matches
+  TagRole on platform-security-* roles and PutBucketTagging on the trail bucket; inferred from the filter text, not
+  observed), so the operator should expect both. platform-security-alerts-topic-change probably does not fire on PR 3's topic tag write (its filter matches
   topicArn or subscriptionArn and TagResource carries resourceArn; inferred), and its absence is not an incident. A
   page that fires reaches the company inbox; none is needed as proof of paging (plan 1's P1 is that proof). A page
-  outside this list is triaged before the next step. Each tfvars window may
-  also file one tf_drift rec (pending_codification), closed by the next clean cycle.
+  outside this list is triaged before the next step. A drift cycle in the S3 window is handled by constraints (S3
+  window), not by this list.
 - >-
   No contact address of the founder or the company (role aliases included), account id, ARN, token or link enters the repository, a PR, memory,
   chat or the shared folder (Decision 101): the build reads the role aliases from the session's alias file at run time
@@ -940,7 +946,7 @@ execution_steps:
 - |-
   PR 4 (closing; docs only, after VP 10 and VP 7, O1's row and NEON-02 reading proven on origin/main; re-run Decision 226's red_overlap check, bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-terraform-company-emails-closing.yaml, before it opens). Apply APPROVED CLOSING TEXT to docs/contracts/account-credential-inventory.yaml. Run VP 11, bin/venv-python -m scripts.validate --pre, VP 14 and code review. Open the PR titled 'feat(terraform-company-emails-closing): closing -- record the company e-mail move in the inventory' (no Resolves trailer: both recs closed with PR 3; the PR body carries no commit trailer, which VP 13 would flag). Squash-merge on code-review PROCEED, VP 11 and green CI (a Decision 245 merge-gate refusal: update the branch on GitHub, wait for the CI-green wake, re-run VP 11, merge). Row B4. Report readiness, validator verdicts, postflight evidence, review and the real push and PR outcome separately (implement skill, Commit Flows).
 - |-
-  Close out: VP 13 with PRS = PR 3,PR 4. Post a counts-only comment on PR 4 (steps, UTC times, run ids; no values) after running VP 13's redaction pattern over its text. Write handoff notes for the coordinator: AWS-07, AWS-10 and AWS-11 proven; rec-3904 and rec-3950 closed; rec-4894, rec-4895, rec-4896 and rec-4898 open; O1's outcome. rec-3950 closes when PR 3 merges, before any Owner tag moves: if the tf-gated-apply approval is declined, the gated apply fails or A1 does not complete, the halt report and the handoff notes say that rec-3950 reads closed while Owner is unchanged, and the agent files a rec (get_rec_write_guidance, then file_rec) for the Owner move.
+  Close out: post a counts-only comment on PR 4 (steps, UTC times, run ids; no values), then run VP 13 with PRS = PR 3,PR 4, which reads it with every other PR text; a hit is edited out at once. Write handoff notes for the coordinator: AWS-07, AWS-10 and AWS-11 proven; rec-3904 and rec-3950 closed; rec-4894, rec-4895, rec-4896 and rec-4898 open; O1's outcome. If the Neon closing PR stalls, PR 4 waits on NEON-02 and AWS-10 and AWS-11 stay unflipped although their recs are closed: say so in the handoff notes with the date. rec-3950 closes when PR 3 merges, before any Owner tag moves: if the tf-gated-apply approval is declined, the gated apply fails or A1 does not complete, the halt report and the handoff notes say that rec-3950 reads closed while Owner is unchanged, and the agent files a rec (get_rec_write_guidance, then file_rec) for the Owner move.
 - |-
   Execute Verification Plan: each VP step in its place in the order above; VP 2-6 belong to PR 3, VP 11 to PR 4, VP 14 to both; loop until pass; on an unrecoverable V3 failure stop and root-cause (Decision 55); a failed or drifted live step halts this workstream until root-caused, never a silent retry.
 - |-
@@ -964,3 +970,4 @@ gate_rounds:
 - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 7}
 - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 3, nits: 7}
 - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 5}
+- {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 5}
