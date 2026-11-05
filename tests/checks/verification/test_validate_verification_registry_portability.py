@@ -49,6 +49,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     _git(root, "init", "-q")
     _git(root, "config", "user.email", "t@example.com")
     _git(root, "config", "user.name", "T")
+    _git(root, "config", "commit.gpgsign", "false")
     _write(root, _row("live-rg", command=["bash", "-c", "rg x"]))
     _write(root, _row("live-plain"))
     _git(root, "add", "-A")
