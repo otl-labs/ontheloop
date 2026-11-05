@@ -54,7 +54,10 @@ Candidates (neutral; each is a hypothesis to test, not a claim):
 - C4. `docs/contracts/project-configuration.yaml` row `ports.run_persona.litellm.api_key` names the
   variable `ANTHROPIC_API_KEY`, while the primary inference role's current selection is
   DeepSeek-direct.
-- C5. The DeepSeek key lives in AWS Secrets Manager; the GitHub Environments declared in
+- C5. The DeepSeek key's current read source is AWS Secrets Manager, and Decision 237 moves secret
+  values to SSM SecureString parameters under `/secret/` (a parameter for the DeepSeek key is
+  declared; its header says nothing reads it until the secrets-to-ssm cutover); the GitHub
+  Environments declared in
   `terraform/github/environments.tf` are `tf-gated-apply`, `tf-trusted-plan` and
   `deployment-approval-probe`; T4.2 c9 requires the LLM key to be reachable only from the verdict
   workflow ref. No verdict-job credential path was found at compose time.
@@ -86,6 +89,23 @@ Candidates (neutral; each is a hypothesis to test, not a claim):
   `scripts/smoke_test_inference_credentials.py`; `scripts/llm/client.py` is a Gemini-CLI transport.
   Whether the persona image uses the LiteLLM Python SDK in-process or a LiteLLM proxy server is not
   stated in the rows read.
+- C16. T4.32 carries `decomposition_hints` naming three atomic plans, and T4.28-T4.30 each carry
+  full add-to-remove criteria; the path to the goal may already be dispatchable with no further
+  design work beyond per-plan detail.
+- C17. A verdict persona may need only its own T4.10a contract (three of the seven) plus the
+  shared schema and validator, so T4.10a may split into a verdict-persona slice that unblocks
+  T4.32 early.
+- C18. Besides interactive `/plan` and `/implement`, two more surfaces consume the in-session gates
+  today: `/overseer` (`docs/contracts/overseer-dispatch.yaml` `gate_request_trampoline` dispatches
+  decision-scout, plan-critique and code-review) and the repo-less coordinator contract
+  (`docs/contracts/coordinator.yaml` `roles.structure` lets workers run verdict gates as subagents;
+  `standing_authorisation` merges on "critique PROCEED" and "code review PROCEED"). The persona items'
+  flip criteria name only the `/plan` and `/implement` text.
+
+Candidates C16 and C17 are sufficiency- or over-scope-shaped on purpose: a verdict of "the design is
+ready" or "the design is over-built" is as reachable as "the design has gaps". Every candidate C1-C18
+lands exactly once, in `findings[]` (field `origin`) or `rejected_candidates[]` (field
+`candidate`).
 
 ## 3. READ FIRST -- DISAMBIGUATION TRAPS
 
@@ -98,9 +118,14 @@ Candidates (neutral; each is a hypothesis to test, not a claim):
    one of decision_scout, plan_critic, code_reviewer (their roadmap and contract names); the skill
    names are decision-scout, plan-critique, code-review. Map them; do not treat them as six things.
 4. "Claude projects" means the hosted multi-session workspace whose coordinator cannot read the
-   repository (`docs/contracts/coordinator.yaml` header). It is NOT GitHub Projects, NOT the
-   `.claude/` directory, and NOT the repo's own `/overseer`. The work breakdown you produce is
-   shaped for that coordinator's lifecycle (Section 14).
+   repository (`docs/contracts/coordinator.yaml` header). It is NOT GitHub Projects and NOT the
+   `.claude/` directory. The work breakdown you produce is shaped for that coordinator's lifecycle
+   (Section 14).
+4a. "Interim coordinator" (Decision 229 clause 1) names TWO things here: the repo's `/overseer`
+   skill (an in-repo session that composes `/plan` and `/implement`; T4.28's intent names it) and
+   the repo-less Claude-projects coordinator (`docs/contracts/coordinator.yaml` calls itself a
+   reading of the same clause). Both consume the gates; both are in scope for flip mechanics
+   (DD-C). The Claude-projects coordinator is the one that EXECUTES your work breakdown.
 5. "code-review" is the repo skill `.claude/skills/code-review/SKILL.md`, not Claude Code's
    built-in `/code-review` or `/security-review`, and not `claude.yml` (the operator's first-party
    `@claude` workflow, a reasoned exemption under Decision 184 clause 4 / T4.2 c10).
@@ -141,7 +166,11 @@ Vocabulary:
 Out of scope (one line each): plan_agent/implement_agent/Fargate/T4.15/T4.31 beyond their edges to
 the verdict personas; the loop host (T4.1, T4.19-T4.22); scheduled agents (T4.12); the
 user-owned CLI backend (T4.27) and sandbox host (T4.34) except as bundle candidates; re-deciding
-which provider fills the primary role (Section 13 do-not-flag).
+which provider fills the primary role (Section 13 do-not-flag); other fresh-context subagent
+checks that are not one of the three gates -- `/plan` Step 10's REPORT-ONLY deliverable critique
+(`.claude/commands/plan.md` line ~107), the `/audit` verification subagents and the project-alignment
+sign-off (a human gate). Name any of these in Q8 if you judge it should join the migration; do not
+rate it.
 
 TRUST-NOTHING CLAUSE: obtain every file, line, size, status and count by reading the file -- trust
 no number quoted here; re-derive from the repo and record any non-resolving anchor in
@@ -151,6 +180,9 @@ no number quoted here; re-derive from the repo and record any non-resolving anch
 
 Run these first. NEVER abort on a failure -- take the named degraded path.
 
+0. Hook canary (repo rule, AGENTS.md): if your opening context has no `[hook_canary]` line from this
+   repo's hooks, say "repo hooks not loaded" as your first status, write nothing, and end the turn
+   -- the operator resolves it. This is the one sanctioned stop in this prompt.
 1. `git fetch origin main` then `git rev-parse --short origin/main`. This sha IS the audited tree;
    use it in the deliverable filenames, the branch name and `meta.audited_commit`. Then
    `git switch -c audit/verdict-personas-on-actions-<sha> origin/main` now, so everything you read
@@ -159,19 +191,23 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
 2. `bin/venv-python -m scripts.session.preflight --roadmap-detail full` -- writes
    `logs/.preflight-report.json` (gitignored; expected). Recommendations have NO local cache in
    this repo; rec dedup uses the live reader (step 3).
-   - IF this fails (creds/egress down): set `meta.degraded_dedup = true` and continue.
-3. Rec dedup probe: `bin/venv-python -m scripts.recs_related --terms "litellm verdict persona" --limit 5 --table`.
-   - IF this fails, or `meta.degraded_dedup` is already true: do NOT abort -- set
-     `meta.degraded_dedup = true`, mark every `roadmap_crossref` confidence HYPOTHESIS (set the
-     finding's `confidence: HYPOTHESIS`) and `dedup_hit_count: null`, and dedup against the roadmap
-     and `docs/DECISIONS.md` only, proceeding.
+   - IF this fails: record the error in `meta.contract_notes` and continue to step 3 (the rec
+     reader may still be up).
+3. Rec dedup probe -- run it whatever step 2 did:
+   `bin/venv-python -m scripts.recs_related --terms "litellm verdict persona" --limit 5 --table`.
+   - IF this fails: do NOT abort -- set `meta.degraded_dedup = true`, set every finding whose
+     classification rests on a rec search to `confidence: HYPOTHESIS` with
+     `roadmap_crossref.dedup_hit_count: null`, dedup against the roadmap and `docs/DECISIONS.md`
+     only, and use the rec descriptions given in Section 10 as the only rec content for
+     `bundle_dispositions` (mark those rows `confidence: HYPOTHESIS`). Proceed.
 4. Roadmap parse check:
    `bin/venv-python -c "import yaml; d=yaml.safe_load(open('docs/ROADMAP-PLATFORM.yaml')); print(len(d['tier_items']))"`.
    IF it errors, record it in `meta.contract_notes` and read the YAML as text.
-5. External lookups (Q2, Q3, Q6 only): you MAY use web search/fetch, at most 12 lookups in total --
-   do NOT exceed -- solely to confirm current external practice and current DeepSeek / LiteLLM
-   capabilities (tool calling, structured output, context window, model versioning, data
-   retention). Record each URL in the evidence field that uses it. IF web access is unavailable:
+5. External lookups (Q2, Q3, Q6, Q7 cost estimates, Q8 cost seed only): you MAY use web
+   search/fetch, at most 12 lookups in total -- do NOT exceed -- solely to confirm current external
+   practice, current DeepSeek / LiteLLM capabilities (tool calling, structured output, context
+   window, model versioning, data retention) and current DeepSeek and GitHub Actions pricing. A
+   figure you could not look up is answered from your own knowledge and marked HYPOTHESIS. Record each URL in the evidence field that uses it. IF web access is unavailable:
    set `meta.web_unavailable = true`, answer from your own knowledge, and mark every checklist row
    and finding that depends on an external fact `confidence: HYPOTHESIS`.
 
@@ -217,8 +253,10 @@ Each question has its own answer slot (`question_answers[]`). Verdict enums are 
 - Q3 INDUSTRY PRACTICE (EXTERNAL CHECKLIST). Rate the designed verdict chain property by property
   against the external checklist below. Each row goes into `external_checklist` with rating
   `met | partial | missed` judged against the DESIGN (criteria text) plus anything already built;
-  `partial` requires an argued property-matched compensating control in `evidence`. Verdict:
-  `sufficient | partial | insufficient`.
+  `partial` requires an argued property-matched compensating control in `evidence`. The list is a
+  floor, not a ceiling: add any further practice you judge material (for example check-run
+  identity via a GitHub App, required-check and ruleset bypass rules, merge-queue interaction) as
+  rows `X17`, `X18`, ... with `executor_added: true`. Verdict: `sufficient | partial | insufficient`.
   - X1 No untrusted code with secrets: no `pull_request_target`; secretless `pull_request` plus
     `workflow_run` split (GitHub Security Lab "pwn request" guidance).
   - X2 Least-privilege `GITHUB_TOKEN`: `permissions: {}` default, per-job minimum grants.
@@ -247,25 +285,35 @@ Each question has its own answer slot (`question_answers[]`). Verdict enums are 
   - X16 Offline regression set for prompt/model changes before they go live.
 - Q4 STRANGLER SOUNDNESS. Is add -> dual-run (N >= 20, pre-registered agreement) -> flip -> remove
   a sound and measurable migration for each persona, given C8 (model family change), C9 (verdict
-  vocabularies), C13 (how the interactive session waits) and the fallback rule? Propose the
-  agreement measure each persona's dual-run plan should pre-register. Verdict:
+  vocabularies), C13 (how the interactive session waits), C18 (the `/overseer` and coordinator
+  consumers) and the fallback rule? Propose the agreement measure each persona's dual-run plan
+  should pre-register. State how merge authority is redefined at each flip: what counts as
+  "critique PROCEED" / "code review PROCEED" for `standing_authorisation` and the overseer once
+  the verdict is a check run, and how a worker or overseer session waits on it. Verdict:
   `sufficient | partial | insufficient`.
 - Q5 EXECUTION READINESS FOR CLAUDE PROJECTS. Produce the `execution_plan` block (Section 14): an
   ordered set of work packages a repo-less coordinator can dispatch under
   `docs/contracts/coordinator.yaml` with no further design work, each with dependencies, file
   ownership (disjoint files run in parallel), always_ask classes triggered, design state and a
   paste-ready `/plan` seed. The question's verdict rates how much of the path is dispatchable now:
-  `ready | ready_with_forks | not_ready`.
+  `ready` = every WP on `critical_path` is `design_state: designed`; `ready_with_forks` = none is
+  `undesigned` but at least one is `needs_operator_fork`; `not_ready` = at least one is
+  `undesigned`. Any of the three is a valid outcome.
 - Q6 BUNDLING. What should be bundled into the work packages along the way, sequenced separately,
   or deferred? Assess at least: T4.26 (ci-rca and subagent-plan-review onto the LiteLLM lane) and
-  rec-4506; rec-4415, rec-4028, rec-4433, rec-4434; rec-4476; rec-4490; rec-4477; rec-4566; SHA
-  pinning of existing workflows; T4.13 c1-c4; T4.17 c1 and c5; T4.14 fixtures. Record each in
+  rec-4506; rec-4415, rec-4028, rec-4433, rec-4434; rec-4476; rec-4490; rec-4477; rec-4566 (retire
+  the saved-login credential path in the `claude_cli` credential row and the
+  `subscription_stored_login` auth value); the Decision 237 secrets-to-ssm cutover for the
+  inference keys; SHA pinning of existing workflows; T4.13 c1-c4; T4.17 c1 and c5; T4.14 fixtures. Record each in
   `bundle_dispositions`. Verdict: `sufficient | partial | insufficient` (is the design's own
   bundling adequate).
 - Q7 OPERATOR TOUCHPOINTS. List every point on the path that needs the operator (always_ask items:
   IAM, spend with a monthly estimate, Decision or governing-contract text, public-surface files,
-  manual/admin steps, secret values set out of band, loosened tests) and every open design fork the
-  coordinator cannot settle on advisor evidence alone. Verdict: `minimal | moderate | heavy`.
+  manual/admin steps, secret values set out of band, loosened tests, the coordinator's
+  `write_the_plan` approval per plan, contract rewording for C18) and every open design fork the
+  coordinator cannot settle on advisor evidence alone. Count `operator_touchpoints` rows EXCLUDING
+  the routine per-plan `write_the_plan` approvals. Verdict: `minimal` = 0-4 rows, `moderate` =
+  5-10, `heavy` = more than 10.
 - Q8 QUESTIONS THE REQUESTER DID NOT THINK TO ASK. Answer each seed below AND add your own:
   - Is DeepSeek's quality on long, tool-heavy repository review adequate for a BLOCKING gate, and
     what evidence would show it before flip (without an LLM grader, Decision 231)?
@@ -299,12 +347,17 @@ a finding to fill a cell. S5 is rated only on VD3, VD4 and VD6; mark its other c
   c7's MCP surface: in the schema-validated input, via an MCP read capability, from the image's
   baked copy of `main`, or not at all. Mark any read with no designed source.
 - DD-B Credential path (feeds Q3, Q7): trace how the DeepSeek key would reach a verdict job: secret
-  home today, candidate delivery (Environment secret vs OIDC role reading Secrets Manager), which
-  Terraform root would own it (`terraform/github` vs `terraform/bootstrap` vs `terraform/personal`),
-  and which steps are always_ask.
-- DD-C Flip mechanics (feeds Q4, Q5): for each persona, the exact interactive command/skill text
-  that changes at flip (anchors in Section 10), the rollback flag's home
-  (`docs/contracts/project-configuration.yaml`, Decision 224), and the visible fallback path.
+  home today (Secrets Manager) and after Decision 237's cutover (SSM SecureString under `/secret/`,
+  value verbs granted per exact parameter to a declared consumer), candidate delivery (GitHub
+  Environment secret vs an OIDC role bound to the verdict workflow ref reading the parameter),
+  which Terraform root would own each piece (`terraform/github`, `terraform/bootstrap`,
+  `terraform/personal`), and which steps are always_ask.
+- DD-C Flip mechanics (feeds Q4, Q5, Q7): for each persona, the exact text that changes at flip in
+  EVERY gate consumer -- interactive `/plan` and `/implement` (anchors in Section 10), `/overseer`
+  (`docs/contracts/overseer-dispatch.yaml` `gate_request_trampoline`), and the coordinator contract
+  (`docs/contracts/coordinator.yaml` `roles.structure`, `standing_authorisation`) -- the rollback
+  flag's home (`docs/contracts/project-configuration.yaml`, Decision 224), and the visible
+  fallback path.
 
 ## 10. GROUNDING MAP
 
@@ -336,7 +389,9 @@ Decisions (`docs/DECISIONS.md`, locate with `rg -n "^## Decision N:"`): 205 (eve
 integrity, credential lane, plans in git), 229 (persona-first migration; clause 4 strangler; its
 2026-11-02 update on in-session gates), 173 (tiers are roles), 122 (CD.28 ratified: DeepSeek-direct
 tier 1), 206, 212, 217, 224, 231 (persona evaluation offline, never an LLM grader), 234 (clause 3:
-a verdict persona on someone else's PR uses a team API key through LiteLLM), 235, 241.
+a verdict persona on someone else's PR uses a team API key through LiteLLM), 235, 237 (secret
+values as SSM SecureString parameters under `/secret/`; value verbs enumerated per parameter),
+241.
 
 Contracts and config:
 - `docs/contracts/inference-provider.yaml`: `tier_model` (roles); `model_id_formats.litellm_tier_models`
@@ -345,8 +400,13 @@ Contracts and config:
 - `docs/contracts/project-configuration.yaml` rows `ports.run_persona.litellm.model`,
   `ports.run_persona.litellm.api_key` (variable `ANTHROPIC_API_KEY`), `ports.run_persona.claude_cli.credential`.
 - `docs/contracts/ports.yaml`: `persona_compute_host` port; coupling PC-08, PC-09.
-- `docs/contracts/coordinator.yaml`: repo-less coordinator rules -- `lifecycle`, `standing_authorisation`,
-  `always_ask`, `templates.handoff_note`, `coordinator_operations.parallelism`.
+- `docs/contracts/coordinator.yaml` (status draft): repo-less coordinator rules -- `lifecycle.steps`
+  (intake, plan, presentation, write_the_plan, critique, plan_pr, handoff, build, close_out;
+  `write_the_plan` is the operator's only planning gate), `roles.structure`,
+  `standing_authorisation`, `always_ask.items` (eight items), `templates.handoff_note`,
+  `coordinator_operations.parallelism`.
+- `docs/contracts/overseer-dispatch.yaml` `gate_request_trampoline` (around line 79): `/overseer`
+  dispatches decision-scout, plan-critique and code-review as fresh sibling subagents.
 - `docs/contracts/instruction-architecture.yaml` `gate_subagent_retrieval` (around line 195): the
   scout's triage source is the committed `docs/decisions-index.json`, chosen so the gate is
   credential-free and hermetic.
@@ -367,6 +427,10 @@ Code and workflows:
   `anthropics/claude-code-action@v1`.
 - `terraform/personal/inference_credentials.tf`: Secrets Manager secret
   `agent-platform-deepseek-api-key` (value set out of band, Decision 37).
+  `terraform/personal/secret_parameters.tf` line ~11: SSM parameter name
+  `/secret/agent-platform-deepseek-api-key` (Decision 237; header: values copied out of band,
+  nothing reads them until the secrets-to-ssm cutover). `terraform/bootstrap/platform_dev_policies.tf`
+  line ~104 grants PlatformDev a read on that parameter.
 - `terraform/github/environments.tf`: environments `tf-gated-apply`, `tf-trusted-plan`,
   `deployment-approval-probe`.
 - Gate dispatch today: `.claude/skills/planning/SKILL.md` "Decision Scout Gate" (line ~248) and
@@ -388,7 +452,8 @@ rec-4433), rec-4416 (top-level agent run shape, closed), rec-4028 (LiteLLM telem
 open), rec-4332 (resume journal, open), rec-4415 (CI agent capture, open), rec-4476 (self-review
 gap, open), rec-4477 (image channel, open), rec-4478 (Decision 67 supersession, open), rec-4490
 (deterministic scout fingerprint in interactive /plan, open), rec-4043 (separate admin principal,
-open; T4.2 c15), rec-4506 (ci-rca model choice by replay and pulling T4.26 forward), rec-4566.
+open; T4.2 c15), rec-4506 (ci-rca model choice by replay and pulling T4.26 forward), rec-4566 (retire the saved-login
+credential path after Decision 234, open).
 
 ## 11. EMPIRICAL PASS
 
@@ -397,9 +462,11 @@ Static design review dominates this audit; the empirical pass is small and bound
 - Sample <= 5 recently merged plan files in `docs/plans/` (by `git log` date on `main`) -- do NOT
   exceed -- and for each compute the inputs DD-A says the decision_scout and plan_critic personas
   would need; record whether any input lacks a designed source.
-- Sample <= 5 recently merged code PRs (`git log --merges` or squash commits on `main`) -- do NOT
-  exceed -- and record diff size (files, lines) against what a single DeepSeek context window can
-  hold with the code-review skill's required reads.
+- Sample <= 5 recently merged code PRs -- do NOT exceed. A code PR is a squash commit on `main`
+  (`git log --first-parent origin/main`) that changes at least one file outside `docs/` and
+  `audits/`. Record diff size (files, lines; `git show --stat`) against the context window of the
+  primary role's current DeepSeek model (a Section 5 step 5 lookup, else your own knowledge marked
+  HYPOTHESIS) plus the code-review skill's required reads.
 - Counterfactual per sample: "If the in-session gate were deleted today and only the designed
   Actions persona existed, would this sample have received a verdict over the same inputs?" A
   sample answering no is an observed gap.
@@ -410,7 +477,7 @@ Static design review dominates this audit; the empirical pass is small and bound
 
 - P1 Read: Section 10 anchors, the three skills, the five roadmap items, Decisions 205/229/234 in
   full, `docs/contracts/coordinator.yaml` in full.
-- P2 Trace: adjudicate C1-C15.
+- P2 Trace: adjudicate C1-C18.
 - P3 Deep-dives DD-A, DD-B, DD-C.
 - P4 Empirical pass (Section 11).
 - P5 Rate the rubric (Section 8) and the external checklist (Q3).
@@ -425,8 +492,9 @@ text and `candidate_decisions[]`), `docs/DECISIONS.md` headers and clauses, and 
 (`bin/venv-python -m scripts.recs_related --terms "<terms>" --table`, paging with `--exclude` as
 needed, at most 3 pages per finding). Record `dedup_search_terms` and `dedup_hit_count` on the
 finding. A hit means a sufficiency assessment (`planned-insufficient` / `planned-unbuilt`) or a
-`rejected_candidates` row -- never a fresh discovery. A finding without a recorded negative
-search is HYPOTHESIS.
+`rejected_candidates` row -- never a fresh discovery. A `novel` finding requires a recorded
+negative search (`dedup_hit_count: 0` on the terms you list); a `novel` finding without one is
+HYPOTHESIS. A `planned-*` finding records the hits that found its owning item.
 
 DO NOT FLAG (deliberate constraints; you may assess how they are implemented, never whether they
 should exist):
@@ -460,7 +528,8 @@ audit:
     - {q: Q1, verdict: sufficient|partial|insufficient, basis: [<finding ids>], prose: ""}
     - {q: Q2, verdict: sufficient|partial|insufficient, basis: [], prose: ""}
     - {q: Q3, verdict: sufficient|partial|insufficient, basis: [], prose: "",
-       external_checklist: [{property: X1..X16, rating: met|partial|missed, evidence: ""}]}
+       external_checklist: [{property: X1..X16 then X17.. if added, rating: met|partial|missed, evidence: "",
+                            executor_added: false}]}
     - {q: Q4, verdict: sufficient|partial|insufficient, basis: [], prose: "",
        agreement_measures: [{persona: decision_scout|plan_critic|code_reviewer, measure: "", n: <int >= 20>}]}
     - {q: Q5, verdict: ready|ready_with_forks|not_ready, basis: [], prose: "see execution_plan"}
@@ -471,19 +540,21 @@ audit:
     - {surface: S1..S5, maturity: frontier|strong|solid|nascent, strengths: "", top_gaps: [<finding ids>]}
   rubric_ratings:
     - {surface: S1..S5, dimension: VD1..VD7, rating: strong|adequate|weak|absent|n/a,
-       evidence: "file:line|item-id", note: ""}
+       evidence: "file:line|item-id, or empty for n/a", note: ""}
   execution_plan:
     critical_path: [<WP ids in order>]
     packages:
       - wp_id: WP-01
         title: ""
-        kind: plan_and_build|plan_only|operator_action
+        kind: plan_and_build|plan_only|operator_action   # operator_action: a step only the operator
+                                                         # performs (no planning worker); also listed
+                                                         # in operator_touchpoints
         roadmap_closes: ["T4.32:c1", ...]     # item:criterion ids; [] if none
         recs_absorbed: [rec-NNNN, ...]
         depends_on: [WP ids]
         wave: <int, 1 = startable now>
         files_owned: [<paths or globs>]       # packages in one wave must be disjoint
-        always_ask: [iam_security|spend|decision_or_contract_text|public_surface|manual_admin|non_ci_deploy|loosened_tests]
+        always_ask: [iam_security|spend|decision_or_contract_text|public_surface|manual_admin|non_ci_deploy|loosened_tests|secret_publishing_run]
         design_state: designed|needs_operator_fork|undesigned
         open_forks: [""]                      # each a one-line decision_prompt with a marked recommendation
         plan_seed: ""                         # paste-ready /plan prompt, <= 120 words, names items, recs and Decisions
@@ -496,7 +567,9 @@ audit:
     - {candidate: "<item or rec id>", disposition: bundle|sequence_separately|defer|reject,
        into_wp: "<WP id or empty>", rationale: "", cost: "", confidence: CONFIRMED|HYPOTHESIS}
   findings:
-    - {id: VPA-01, surface: S1..S5|shared, question: Q1..Q8, dimension: VD1..VD7,
+    - {id: VPA-01, origin: C1..C18|novel, surface: S1..S5|shared,
+       affected_surfaces: [S1..S5],   # required when surface is shared; [] otherwise
+       question: <primary Q1..Q8>, dimension: <primary VD1..VD7>,   # secondary ones go in gap prose
        title, evidence: "file:line|item-id|url", evidence_kind: static|observed,
        current_behavior, ideal_behavior, gap, compensating_controls_considered: "",
        change_type: add|rescope|enforce|unify|persist|clarify|retune_gate,
@@ -504,10 +577,11 @@ audit:
        severity_rationale, confidence: CONFIRMED|HYPOTHESIS,
        roadmap_crossref: {classification: novel|planned-insufficient|planned-unbuilt,
                           item_ids: [], dedup_search_terms: [], dedup_hit_count: <int|null>, note: ""},
-       effort: XS|S|M|L, depends_on: [finding ids],
+       effort: XS|S|M|L|XL, depends_on: [finding ids],
        sequencing: {safe_to_queue_now: true|false, blocked_behind: [finding, WP or roadmap ids], note: ""}}
   rejected_candidates:
-    - {candidate, why_dismissed, compensating_control, control_property_match, decision_or_item_id}
+    - {candidate: "C1..C18, or a short label for a hypothesis you raised yourself", why_dismissed,
+       compensating_control, control_property_match, decision_or_item_id}
   summary: {total_findings, novel_count, planned_insufficient_count, planned_unbuilt_count,
             top_improvements: [finding ids], highest_leverage_change: <finding id>,
             maturity_S1: <value>, maturity_S2: <value>, maturity_S3: <value>,
@@ -519,15 +593,22 @@ iam_security = "IAM and security changes"; spend = "Spend"; decision_or_contract
 text and governing contract text"; public_surface = "Public-surface files"; manual_admin =
 "Manual or admin steps outside CI" (includes setting a secret value out of band); non_ci_deploy =
 "Deploys not run by the repo's reviewed CI channel"; loosened_tests = "Loosened tests or
-assertions".
+assertions"; secret_publishing_run = "A manual pipeline run on a path known to publish secrets,
+until that leak is fixed". These are all eight items; re-read the list and record any drift in
+`meta.contract_notes`.
 
 execution_plan rules:
-- Every WP is one planning worker's scope under the coordinator lifecycle (intake -> /plan ->
-  alignment sign-off -> critique -> plan PR -> handoff -> build -> close_out). Size each to one
+- Every `plan_and_build` or `plan_only` WP is one planning worker's scope under the coordinator
+  lifecycle (`lifecycle.steps`: intake, plan, presentation, write_the_plan, critique, plan_pr,
+  handoff, build, close_out); an `operator_action` WP has no worker and appears in `packages` (so
+  it can sit on `critical_path` and be a `depends_on` target) AND in `operator_touchpoints`. Size each
+  plan WP to one
   IMPLEMENTATION plan; split by concern where a roadmap item's `decomposition_hints` does.
 - Every open roadmap criterion on the path to the goal (T4.10a, T4.32, T4.28-T4.30 criteria, plus
   any T4.2 criterion those items discharge) appears in exactly one WP's `roadmap_closes`, or is
-  named in `summary`-adjacent prose of Q5 as deliberately left out with a reason.
+  named in Q5's `prose` as deliberately left out with a reason. A T4.2 criterion is "discharged" by
+  one of those items exactly when that item's criterion text says it discharges it (for example
+  T4.32 c1 "discharges T4.2 c4, c8, ..."); no other T4.2 criterion is in this coverage rule.
 - `design_state: undesigned` means a design decision no Decision or criterion has made; such a WP
   must list the fork in `open_forks`.
 - `plan_seed` follows the repo's `/plan` conventions: names the roadmap items and criteria, the
@@ -570,7 +651,11 @@ break neither lowers severity nor justifies dismissal.
 
 Maturity, computed LAST per surface, top-down, first match wins:
 - frontier = 0 open critical or high findings on the surface AND every Q3 `external_checklist` row
-  rated met or partial (none missed). For S5, the checklist condition reads only X1-X4 and X11.
+  rated met or partial (none missed). The checklist rates the one designed verdict chain, so the
+  condition is the same for S1-S4. S5 is a different, built system: its top tier gates on finding
+  counts alone (0 open critical or high).
+- Counting findings per surface: a finding counts against its `surface`, or, when `surface` is
+  `shared`, against every surface in its `affected_surfaces`.
 - strong = 0 critical AND <= 1 high.
 - solid = <= 1 critical.
 - nascent = otherwise.
@@ -585,19 +670,27 @@ prompt's framing does not foreclose it. Rating a designed-but-unbuilt surface: r
    `audit/verdict-personas-on-actions-<sha>` created from it. This is a deliberate, documented
    exception to the `claude/*` session-branch convention: the audit needs a clean two-file diff off
    the audited base. The branch base MUST equal `meta.audited_commit`.
-2. Pre-push gate: both deliverables parse cleanly
-   (`bin/venv-python -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" audits/verdict-personas-on-actions-<sha>.yaml`)
-   and the counting invariant holds. Repo-wide validation is advisory outside CI; if an unrelated
-   `validate --pre` failure appears, record it in `meta.contract_notes` -- never fix it.
-3. `git add` exactly the two deliverables. Commit with
-   `git -c user.name=Claude -c user.email=noreply@anthropic.com commit --no-gpg-sign -m "audit: verdict personas on Actions readiness"`;
-   if a signing configuration or hook rejects `--no-gpg-sign`, commit without that flag and note it
-   in `meta.contract_notes` only if a later amend is impossible (do not amend). Then
-   `git push -u origin HEAD`; on a network error retry up to 4 times (2s, 4s, 8s, 16s).
-4. Open the PR via `mcp__github__create_pull_request` (owner `otl-labs`, repo `ontheloop`,
-   base `main`, ready for review, NOT draft), title
+2. Pre-push gate: the YAML parses
+   (`bin/venv-python -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" audits/verdict-personas-on-actions-<sha>.yaml`),
+   the counting invariant and the C1-C18 coverage rule hold, and the report is within its cap
+   (`wc -w audits/verdict-personas-on-actions-<sha>.md` <= 1500). Repo-wide validation is advisory
+   outside CI; if an unrelated `validate --pre` failure appears, record it in `meta.contract_notes`
+   before committing -- never fix it.
+3. `git add` exactly the two deliverables, then
+   `git commit -m "audit: verdict personas on Actions readiness"` using the session's configured
+   identity and signing (do not override the author, do not disable or force signing, do not
+   amend). If a pre-commit hook rejects the commit, fix the cause inside your two deliverables and
+   commit again; never bypass the hook.
+4. Run `git push -u origin HEAD` as a tool call on its own (no pipe, redirect or second command --
+   a repo hook rejects other forms). On a network error retry up to 4 times (2s, 4s, 8s, 16s).
+   IF the push still fails, or fails for a non-network reason: do not open a PR; end the turn with a
+   final message naming the branch, the commit sha, the exact error and the `summary:` block.
+5. Open the PR via `mcp__github__create_pull_request` (owner `otl-labs`, repo `ontheloop`,
+   base `main`, head your branch, ready for review, NOT draft), title
    `audit: verdict personas on GitHub Actions via DeepSeek and LiteLLM (S1-S5)`, body = a 2-3
-   sentence lede plus the `summary:` block in a yaml fence. Then END THE TURN -- do not poll, do not
+   sentence lede plus the `summary:` block in a yaml fence. IF the tool is unavailable or the call
+   fails: end the turn with a final message naming the pushed branch, the sha, the error and the
+   intended title and body, so the human can open it. Then END THE TURN -- do not poll, do not
    merge, do not subscribe, do not self-approve. The human disposes of the PR.
 
 ## 17. GUARDRAILS
