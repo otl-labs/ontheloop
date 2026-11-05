@@ -93,5 +93,6 @@ Can models far cheaper than Claude execute a hard, self-contained repository aud
 
 ## Disposition
 
-- Five run PRs are closed and their branches deleted: #1872, #1874, #1875, #1877 and #1878. Their summaries, findings and rejected candidates are kept in the YAML record.
-- #1861 stays open, pending the operator's call: merge it as the audit of record, or close it too.
+- #1861, the top-ranked run, is merged as the audit of record (squash `53eabb04`).
+- The other five run PRs are closed: #1872, #1874, #1875, #1877 and #1878. Their summaries, findings and rejected candidates are kept in the YAML record, and GitHub keeps each closed PR's commits.
+- Deleting their branches is left to the operator, because the composing session cannot delete branches.
