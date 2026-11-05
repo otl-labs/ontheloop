@@ -3,6 +3,7 @@ CODEOWNERS closure (rec-4769). The test_deployment_approval_probe_workflow.py pa
 
 from __future__ import annotations
 
+import ast
 import re
 from typing import Any
 
@@ -160,14 +161,18 @@ class TestTerraform:
         assert 'branch_pattern = "main"' in block and "github_repository_environment.approved_text.environment" in block
 
     def test_each_new_address_is_exempt_or_carries_an_import_block(self) -> None:
-        from tests.checks.iam_tf import test_terraform_github_import_blocks as imports
-
+        source = (ROOT / "tests" / "checks" / "iam_tf" / "test_terraform_github_import_blocks.py").read_text(encoding="utf-8")
+        exempt = next(
+            {ast.literal_eval(key) for key in node.value.keys}
+            for node in ast.parse(source).body
+            if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "EXEMPT"
+        )
         text = "\n".join(p.read_text(encoding="utf-8") for p in (ROOT / "terraform" / "github").glob("*.tf"))
         for address in (
             "github_repository_environment.approved_text",
             "github_repository_environment_deployment_policy.approved_text_main",
         ):
-            assert address in imports.EXEMPT or re.search(rf"to\s*=\s*{re.escape(address)}\b", text), address
+            assert address in exempt or re.search(rf"to\s*=\s*{re.escape(address)}\b", text), address
 
     def test_never_an_oidc_subject(self) -> None:
         for root in ("bootstrap", "personal"):

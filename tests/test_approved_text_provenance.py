@@ -3,19 +3,14 @@ the two real seams (critique r5 B1)."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-from scripts.checks.roadmap import validate_plan_documents as plan_documents
-from scripts.checks.verification import validate_merge_step as merge_step
-from scripts.roadmap import approved_text, approved_text_github, approved_words
+from scripts.roadmap import approved_text, approved_words
 from scripts.roadmap import approved_text_provenance as prov
-from tests import test_approved_text_github as api
-from tests.checks.roadmap import test_validate_plan_documents as plan_fx
 from tests.fixtures import merge_step_repos as fx
 
 HISTORY = yaml.safe_load((Path(__file__).parent / "fixtures/approved_text/sidecar-history.yaml").read_text(encoding="utf-8"))
@@ -182,113 +177,44 @@ class TestGrandfather:
         assert prov.is_failure(prov.Verdict(kind), "enforce") is False
 
 
-class TestSidecarApprovalLeg:
-    """validate_plan_documents' leg: every node patches the push context so a main checkout reads like a session."""
+class TestDeadline:
+    def test_a_fresh_budget_has_time_left(self) -> None:
+        deadline = prov.Deadline(30)
+        assert not deadline.expired() and 0 < deadline.remaining() <= 30
 
-    _DIGEST = "d" * 64
-
-    def _run(self, tmp_path, capsys, monkeypatch, triple, *, event="pull_request", push=None):
-        module = plan_documents
-        monkeypatch.setenv("GITHUB_EVENT_NAME", event)
-        monkeypatch.setattr(module._common, "push_context_base", lambda root=None: push)
-        monkeypatch.setattr(module._common, "status_diff_base", lambda root=None: "basesha")
-        monkeypatch.setattr(module, "_changed_sidecar_digest", lambda slug, base: self._DIGEST)
-        monkeypatch.setattr(module, "_has_sidecar", lambda slug: True)
-        calls: list[Any] = []
-        monkeypatch.setattr(module, "_sidecar_provenance", lambda *a: calls.append(a) or triple)
-        monkeypatch.setattr(approved_text_github, "remedy", lambda slug, sidecar, root: f"dispatch for {slug} at {'e' * 40}")
-        monkeypatch.setattr(approved_text, "load_sidecar", lambda slug, root: object())
-        data = plan_fx._plan_with_linked_obligation()
-        data["schema_version"] = 5
-        data["handoff_policy"] = {"full_validation_required_before_commit": True, "timeout_disposition": "blocked"}
-        row = {
-            "gate": "wording-check",
-            "round": 1,
-            "verdict": "PASS",
-            "digest": self._DIGEST,
-            "base": "e" * 40,
-            "selection": "complete",
-        }
-        data["gate_rounds"] = [*plan_fx._CRITIQUED, row]
-        failed, out = plan_fx._validate(tmp_path, data, capsys, added=set())
-        return failed, out, calls
-
-    def _verdict(self, kind, mode="enforce"):
-        return (prov.Verdict(kind, "why"), mode, None)
-
-    @pytest.mark.parametrize("kind", [prov.MISSING, prov.UNVERIFIED])
-    def test_a_changed_sidecar_without_approval_fails_on_the_plan_pr(self, tmp_path, capsys, monkeypatch, kind) -> None:
-        failed, out, _ = self._run(tmp_path, capsys, monkeypatch, self._verdict(kind))
-        assert failed == ["Plan document schema validation"] and f"approval {kind} (why)" in out and f"at {'e' * 40}" in out
-
-    @pytest.mark.parametrize("kind", [prov.APPROVED, prov.GRANDFATHERED])
-    def test_approved_and_grandfathered_pass(self, tmp_path, capsys, monkeypatch, kind) -> None:
-        failed, out, calls = self._run(tmp_path, capsys, monkeypatch, self._verdict(kind))
-        assert failed == [] and "PASS:" in out and len(calls) == 1
-
-    @pytest.mark.parametrize("kind", [prov.MISSING, prov.UNVERIFIED])
-    def test_an_advisory_answer_warns_without_a_pass_line(self, tmp_path, capsys, monkeypatch, kind) -> None:
-        failed, out, _ = self._run(tmp_path, capsys, monkeypatch, self._verdict(kind, "advisory"), event="workflow_dispatch")
-        assert failed == [] and f"WARN: {kind} (advisory)" in out and "PASS:" not in out
-
-    def test_a_patched_push_context_skips_the_lookup_with_examined_kept(self, tmp_path, capsys, monkeypatch) -> None:
-        from scripts.checks import registry
-
-        declared: list[Any] = []
-        monkeypatch.setattr(registry, "examined", lambda n, unit="": declared.append((n, unit)))
-        failed, out, _ = self._run(tmp_path, capsys, monkeypatch, (None, "skip", None), push="abc123")
-        assert failed == [] and "SKIP: approval lookup (on main)" in out and declared == [(1, "plan_documents")]
-        assert "PASS:" in out
+    def test_a_spent_budget_is_expired(self, monkeypatch) -> None:
+        clock = iter([100.0, 131.0])
+        monkeypatch.setattr(prov.time, "monotonic", lambda: next(clock))
+        deadline = prov.Deadline(30)
+        assert deadline.expired()
 
 
-class TestSeams:
-    """Both real `_sidecar_provenance` seams in a tmp git repository; only http_get and GRANDFATHER_REF are patched."""
+class TestUnreadableRefCopies:
+    def test_a_plan_missing_at_the_ref_counts_as_undeclared(self, tmp_path, monkeypatch) -> None:
+        repo, ref = _pinned_repo(tmp_path, monkeypatch)
+        assert prov._plan_declared_at("docs/plans/PLAN-nothing.yaml", repo, ref) is False
 
-    def _setup(self, tmp_path, monkeypatch, runs_for) -> tuple[Path, api.Api, str]:
+    def test_an_unparsable_plan_at_the_ref_counts_as_undeclared(self, tmp_path, monkeypatch) -> None:
+        repo, _ = _pinned_repo(tmp_path, monkeypatch)
+        fx.write(repo, f"docs/plans/PLAN-{SLUG}.yaml", "a: [unclosed\n")
+        fx.git(repo, "add", "-A")
+        fx.git(repo, "commit", "-m", "bad plan")
+        assert prov._plan_declared_at(f"docs/plans/PLAN-{SLUG}.yaml", repo, fx.git(repo, "rev-parse", "HEAD")) is False
+
+    def test_an_unparsable_sidecar_at_the_ref_is_not_grandfathered(self, tmp_path, monkeypatch) -> None:
+        repo, _ = _pinned_repo(tmp_path, monkeypatch)
+        fx.write(repo, f"docs/plans/approved/{SLUG}.yaml", "blocks: [unclosed\n")
+        fx.git(repo, "add", "-A")
+        fx.git(repo, "commit", "-m", "bad sidecar")
+        ref = fx.git(repo, "rev-parse", "HEAD")
+        assert prov.grandfather(SLUG, _sidecar([BLOCK]), repo, ref) is None
+
+    def test_the_default_ref_is_the_pinned_constant(self, tmp_path, monkeypatch) -> None:
         repo, ref = _pinned_repo(tmp_path, monkeypatch)
         monkeypatch.setattr(prov, "GRANDFATHER_REF", ref)
-        monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
-        double = api.Api([api.approval_run(SLUG, d, ref) for d in runs_for])
-        monkeypatch.setattr(approved_text_github, "http_get", double)
-        return repo, double, ref
+        verdict = prov.grandfather(SLUG, _sidecar([BLOCK]), repo)
+        assert verdict is not None and verdict.kind == prov.GRANDFATHERED
 
-    def test_plan_documents_seam_evaluates_the_head_copy(self, tmp_path, monkeypatch) -> None:
-        old = approved_words.approved_digest(_sidecar([BLOCK]))
-        repo, _, _ = self._setup(tmp_path, monkeypatch, [old])
-        fx.write_sidecar(repo, SLUG, [{**BLOCK, "after": "BETA GAMMA!"}])
-        verdict, mode, info = plan_documents._sidecar_provenance(SLUG, repo, False, prov.Deadline(30))
-        assert (verdict.kind, mode, info) == (prov.MISSING, "enforce", None)
-        fx.write_sidecar(repo, SLUG, [BLOCK])
-        verdict, mode, info = plan_documents._sidecar_provenance(SLUG, repo, False, prov.Deadline(30))
-        assert (verdict.kind, mode, info) == (prov.GRANDFATHERED, "enforce", None)
-
-    def test_merge_step_seam_skips_on_a_push_and_never_calls_the_api(self, tmp_path, monkeypatch) -> None:
-        repo, double, _ = self._setup(tmp_path, monkeypatch, [])
-        triple = merge_step._sidecar_provenance(SLUG, _sidecar([BLOCK]), repo, True, prov.Deadline(30))
-        assert triple == (None, "skip", None) and double.calls == []
-
-    def test_merge_step_seam_reads_approved_for_the_base_sidecar_digest(self, tmp_path, monkeypatch) -> None:
-        sidecar = _sidecar([{**BLOCK, "after": "BETA GAMMA!"}])
-        repo, _, _ = self._setup(tmp_path, monkeypatch, [approved_words.approved_digest(sidecar)])
-        verdict, mode, info = merge_step._sidecar_provenance(SLUG, sidecar, repo, False, prov.Deadline(30))
-        assert (verdict.kind, mode, info) == (prov.APPROVED, "enforce", None)
-
-    def test_merge_step_seam_returns_the_informational_line_for_a_grandfathered_sidecar(self, tmp_path, monkeypatch) -> None:
-        repo, double, _ = self._setup(tmp_path, monkeypatch, [])
-        verdict, mode, info = merge_step._sidecar_provenance(SLUG, _sidecar([BLOCK]), repo, False, prov.Deadline(30))
-        assert (verdict.kind, mode) == (prov.GRANDFATHERED, "enforce")
-        assert info == "lookup (informational): MISSING auth=anonymous" and len(double.run_list_calls()) == 1
-
-    def test_the_informational_line_carries_the_token_path(self, tmp_path, monkeypatch) -> None:
-        repo, _, _ = self._setup(tmp_path, monkeypatch, [])
-        monkeypatch.setenv("APPROVED_TEXT_GH_TOKEN", "t")
-        _, _, info = merge_step._sidecar_provenance(SLUG, _sidecar([BLOCK]), repo, False, prov.Deadline(30))
-        assert info == "lookup (informational): MISSING auth=token"
-
-    def test_the_remedy_names_the_event_payload_head_sha(self, tmp_path, monkeypatch) -> None:
-        repo, _, _ = self._setup(tmp_path, monkeypatch, [])
-        payload = tmp_path / "event.json"
-        payload.write_text(json.dumps({"pull_request": {"head": {"sha": "9" * 40}}}), encoding="utf-8")
-        monkeypatch.setenv("GITHUB_EVENT_PATH", str(payload))
-        text = approved_text_github.remedy(SLUG, _sidecar([BLOCK]), repo)
-        assert f"sha={'9' * 40}" in text and f"slug={SLUG}" in text and "approved-text-approval.yml" in text
+    def test_a_verdict_prints_its_kind_and_detail(self) -> None:
+        assert str(prov.Verdict(prov.MISSING, "why")) == "MISSING why"
+        assert str(prov.Verdict(prov.APPROVED)) == "APPROVED"

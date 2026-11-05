@@ -14,6 +14,8 @@ For every plan whose implementation_declared flips in this diff:
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,7 +26,7 @@ import yaml
 from scripts.checks import _common, registry
 from scripts.checks.verification import _implementation_merge
 from scripts.rec_trailer import parse_resolves_trailer
-from scripts.roadmap import approved_text, approved_text_github
+from scripts.roadmap import approved_text, approved_text_github, review_page
 from scripts.roadmap import approved_text_provenance as provenance
 
 _REMEDY_ADD = "add a commit whose message carries: Resolves: {ids}"
@@ -96,6 +98,28 @@ def _sidecar_provenance(
     return approved_text_github.resolve(slug, sidecar, root, in_push, deadline, informational=True)
 
 
+def _head_sha(root: Path) -> str:
+    path = os.environ.get("GITHUB_EVENT_PATH")
+    if path:
+        try:
+            sha = json.loads(Path(path).read_text(encoding="utf-8"))["pull_request"]["head"]["sha"]
+            if isinstance(sha, str) and sha:
+                return sha
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    return _git(root, "rev-parse", "HEAD").stdout.strip() or "HEAD"
+
+
+def _remedy(slug: str, sidecar: approved_text.Sidecar, root: Path) -> str:
+    approved = approved_text.approved_digest(sidecar)
+    return (
+        f"dispatch approved-text-approval.yml from main with slug={slug} sha={_head_sha(root)} digest={approved} "
+        f"fingerprint={review_page.fingerprint(approved)} and have the operator approve it on the run page "
+        "(git-ops.yaml approved_text_binding); dispatch at the PR's final head, and if the head moves before the tap, "
+        "re-run pr-validate after it (the approval stands while the sidecar is unchanged)"
+    )
+
+
 def _provenance_leg(
     slug: str, sidecar: approved_text.Sidecar, root: Path, in_push: bool, deadline: provenance.Deadline, notes: _Notes
 ) -> list[str]:
@@ -109,7 +133,7 @@ def _provenance_leg(
     if verdict.kind not in (provenance.MISSING, provenance.UNVERIFIED):
         return []
     if provenance.is_failure(verdict, mode):
-        return [f"{rel}: approval {verdict.kind} ({verdict.detail}); {approved_text_github.remedy(slug, sidecar, root)}"]
+        return [f"{rel}: approval {verdict.kind} ({verdict.detail}); {_remedy(slug, sidecar, root)}"]
     notes.advisory.append(f"{verdict.kind} (advisory): {rel} ({verdict.detail})")
     return []
 

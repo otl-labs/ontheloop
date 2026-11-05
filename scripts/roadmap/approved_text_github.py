@@ -181,29 +181,6 @@ def lookup(slug: str, approved: str, root: Path, deadline: prov.Deadline, repo: 
     return Verdict(prov.MISSING, f"no approved run titled `{title}` on main")
 
 
-def head_sha(root: Path) -> str:
-    path = os.environ.get("GITHUB_EVENT_PATH")
-    if path:
-        try:
-            sha = json.loads(Path(path).read_text(encoding="utf-8"))["pull_request"]["head"]["sha"]
-            if isinstance(sha, str) and sha:
-                return sha
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
-    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, encoding="utf-8")
-    return result.stdout.strip() if result.returncode == 0 else "HEAD"
-
-
-def remedy(slug: str, sidecar: approved_words.Sidecar, root: Path) -> str:
-    approved = approved_words.approved_digest(sidecar)
-    return (
-        f"dispatch {WORKFLOW_FILE} from main with slug={slug} sha={head_sha(root)} digest={approved} "
-        f"fingerprint={approved_words.fingerprint(approved)} and have the operator approve it on the run page "
-        "(git-ops.yaml approved_text_binding); dispatch at the PR's final head, and if the head moves before the tap, "
-        "re-run pr-validate after it (the approval stands while the sidecar is unchanged)"
-    )
-
-
 def resolve(
     slug: str,
     sidecar: approved_words.Sidecar,

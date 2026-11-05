@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from scripts.checks.roadmap import _plan_sidecar_approval
 from scripts.checks.roadmap import validate_plan_documents as module
 from scripts.checks.roadmap.validate_plan_documents import validate_plan_documents
 
@@ -18,7 +19,9 @@ def _approved_provenance(monkeypatch):
     from scripts.roadmap import approved_text_provenance as prov
 
     approved = prov.Verdict(prov.APPROVED, "run 1 approver operator-fixture")
-    monkeypatch.setattr(module, "_sidecar_provenance", lambda slug, root, in_push, deadline: (approved, "enforce", None))
+    monkeypatch.setattr(
+        _plan_sidecar_approval, "sidecar_provenance", lambda slug, root, in_push, deadline: (approved, "enforce", None)
+    )
 
 
 _SCOUTED = {"gate": "decision-scout", "round": 1, "verdict": "NO_FLAGS"}

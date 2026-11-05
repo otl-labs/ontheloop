@@ -321,3 +321,154 @@ class TestCli:
         argv = ["wake", "--slug", SLUG, "--sha", "b" * 40, "--digest", DIGEST, "--run-id", "55"]
         assert gh.main(argv) == 1
         assert capsys.readouterr().out.strip() == "wake: ERROR HTTP 500 from x"
+
+
+class _Response:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self) -> bytes:
+        return self.payload
+
+
+class TestTransport:
+    def _urlopen(self, monkeypatch, answer):
+        seen: list[Any] = []
+
+        def fake(request, timeout):
+            seen.append((request, timeout))
+            if isinstance(answer, Exception):
+                raise answer
+            return _Response(answer)
+
+        monkeypatch.setattr(gh.urllib.request, "urlopen", fake)
+        return seen
+
+    def test_get_parses_the_body_and_sends_the_bearer_token(self, monkeypatch):
+        seen = self._urlopen(monkeypatch, b'{"a": 1}')
+        assert gh.http_get("https://api.github.com/x", "tok", 3) == {"a": 1}
+        request, timeout = seen[0]
+        assert request.get_header("Authorization") == "Bearer tok" and timeout == 3
+
+    def test_get_without_a_token_sends_no_authorization(self, monkeypatch):
+        seen = self._urlopen(monkeypatch, b"[]")
+        assert gh.http_get("https://api.github.com/x", None, 3) == []
+        assert seen[0][0].get_header("Authorization") is None
+
+    def test_post_sends_the_json_body(self, monkeypatch):
+        seen = self._urlopen(monkeypatch, b"{}")
+        assert gh.http_post("https://api.github.com/x", "tok", {"body": "hi"}, 3) == {}
+        request, _ = seen[0]
+        assert request.get_method() == "POST" and json.loads(request.data) == {"body": "hi"}
+        assert request.get_header("Content-type") == "application/json"
+
+    def test_an_http_error_names_the_status_without_the_query(self, monkeypatch):
+        error = urllib.error.HTTPError("https://api.github.com/x?page=2", 403, "no", {}, None)
+        self._urlopen(monkeypatch, error)
+        with pytest.raises(gh.GitHubError, match=r"HTTP 403 from https://api.github.com/x$"):
+            gh.http_get("https://api.github.com/x?page=2", None, 1)
+
+    def test_a_timeout_maps_to_github_error(self, monkeypatch):
+        self._urlopen(monkeypatch, TimeoutError("slow"))
+        with pytest.raises(gh.GitHubError, match="request failed"):
+            gh.http_get("https://api.github.com/x", None, 1)
+
+    @pytest.mark.parametrize("payload", [b"not json", b"\xff\xfe"], ids=["json", "utf8"])
+    def test_an_unparsable_body_maps_to_github_error(self, monkeypatch, payload):
+        self._urlopen(monkeypatch, payload)
+        with pytest.raises(gh.GitHubError, match="unparsable body"):
+            gh.http_get("https://api.github.com/x?p=1", None, 1)
+
+
+class TestMalformedBodies:
+    def test_a_jobs_body_without_the_array_reads_unverified(self, repo, monkeypatch):
+        root, main_sha, _ = repo
+        double = Api([approval_run(SLUG, DIGEST, main_sha)], jobs={9100: {"jobs": "x"}})
+        verdict, _ = _lookup([], root, double=double, monkeypatch=monkeypatch)
+        assert verdict.kind == prov.UNVERIFIED and "jobs array" in verdict.detail
+
+    def test_an_approvals_body_that_is_not_a_list_reads_unverified(self, repo, monkeypatch):
+        root, main_sha, _ = repo
+        double = Api([approval_run(SLUG, DIGEST, main_sha)], approvals={9100: {"x": 1}})
+        verdict, _ = _lookup([], root, double=double, monkeypatch=monkeypatch)
+        assert verdict.kind == prov.UNVERIFIED and "not a list" in verdict.detail
+
+    def test_an_approver_without_a_login_is_unknown(self):
+        entries = [{"state": "approved", "environments": [{"name": gh.ENVIRONMENT}], "user": {}}]
+        assert gh._approver(entries) == "unknown"
+
+    def test_a_pulls_body_that_is_not_a_list_fails_the_wake(self, monkeypatch, capsys):
+        monkeypatch.setattr(gh, "http_get", Api([], pulls={"x": 1}))
+        argv = ["wake", "--slug", SLUG, "--sha", "b" * 40, "--digest", DIGEST, "--run-id", "55"]
+        assert gh.main(argv) == 1
+        assert "wake: ERROR pulls list is not a list" in capsys.readouterr().out
+
+
+class TestResolve:
+    def _repo(self, tmp_path, monkeypatch):
+        fx.clear_ci_env(monkeypatch)
+        root = fx.make_repo(tmp_path)
+        fx.write(root, "doc.md", "alpha beta gamma delta\n")
+        fx.write_sidecar(root, SLUG, [BLOCK])
+        fx.git(root, "add", "-A")
+        fx.git(root, "commit", "-m", "base")
+        fx.push_main(root)
+        ref = fx.git(root, "rev-parse", "HEAD")
+        monkeypatch.setattr(prov, "GRANDFATHER_REF", ref)
+        sidecar = approved_words.parse_sidecar(fx.sidecar_text(SLUG, [BLOCK]))
+        return root, ref, sidecar
+
+    def test_a_push_skips_without_a_lookup(self, tmp_path, monkeypatch):
+        root, _, sidecar = self._repo(tmp_path, monkeypatch)
+        double = Api([])
+        monkeypatch.setattr(gh, "http_get", double)
+        out = gh.resolve(SLUG, sidecar, root, True, prov.Deadline(30), informational=True, event_name="pull_request")
+        assert out == (None, "skip", None) and double.calls == []
+
+    def test_pull_request_context_enforces_and_reads_the_event_env(self, tmp_path, monkeypatch):
+        root, _, sidecar = self._repo(tmp_path, monkeypatch)
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+        changed = approved_words.parse_sidecar(fx.sidecar_text(SLUG, [{**BLOCK, "after": "BETA GAMMA!"}]))
+        monkeypatch.setattr(gh, "http_get", Api([]))
+        verdict, mode, info = gh.resolve(SLUG, changed, root, False, prov.Deadline(30), informational=False)
+        assert (verdict.kind, mode, info) == (prov.MISSING, "enforce", None)
+
+    def test_other_events_are_advisory(self, tmp_path, monkeypatch):
+        root, _, sidecar = self._repo(tmp_path, monkeypatch)
+        changed = approved_words.parse_sidecar(fx.sidecar_text(SLUG, [{**BLOCK, "after": "BETA GAMMA!"}]))
+        monkeypatch.setattr(gh, "http_get", Api([]))
+        _, mode, _ = gh.resolve(SLUG, changed, root, False, prov.Deadline(30), informational=False, event_name="push")
+        assert mode == "advisory"
+
+    def test_a_grandfathered_sidecar_carries_one_informational_lookup_line(self, tmp_path, monkeypatch):
+        root, _, sidecar = self._repo(tmp_path, monkeypatch)
+        double = Api([])
+        monkeypatch.setattr(gh, "http_get", double)
+        args = (SLUG, sidecar, root, False, prov.Deadline(30))
+        verdict, mode, info = gh.resolve(*args, informational=True, event_name="pull_request")
+        assert (verdict.kind, mode, info) == (prov.GRANDFATHERED, "enforce", "lookup (informational): MISSING auth=anonymous")
+        assert len(double.run_list_calls()) == 1
+        verdict, _, info = gh.resolve(*args, informational=False, event_name="pull_request")
+        assert verdict.kind == prov.GRANDFATHERED and info is None
+
+
+class TestCliErrors:
+    def test_check_reports_an_unreadable_sidecar(self, tmp_path, capsys):
+        assert gh.main(["check", "--slug", "nope", "--root", str(tmp_path)]) == 2
+        assert "APPROVED-TEXT ERROR" in capsys.readouterr().out
+
+    def test_check_reports_an_unparsable_sidecar(self, tmp_path, capsys):
+        fx.write(tmp_path, f"docs/plans/approved/{SLUG}.yaml", "schema_version: 9\n")
+        assert gh.main(["check", "--slug", SLUG, "--root", str(tmp_path)]) == 2
+        assert "APPROVED-TEXT ERROR" in capsys.readouterr().out
+
+    def test_approvals_reports_a_failed_read(self, monkeypatch, capsys):
+        monkeypatch.setattr(gh, "http_get", Api([], fail=gh.GitHubError("HTTP 404 from x")))
+        assert gh.main(["approvals", "--run-id", "7", "--repo", "a/b"]) == 2
+        assert capsys.readouterr().out.strip() == "approvals: ERROR HTTP 404 from x"

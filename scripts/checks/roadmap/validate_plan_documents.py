@@ -8,6 +8,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from scripts.checks import _common, registry
+from scripts.checks.roadmap import _plan_sidecar_approval
+from scripts.roadmap import approved_text_provenance as prov
 
 _NON_BEHAVIOR_PREFIXES = ("tests/", "docs/plans/")
 _DOCUMENTATION_SUFFIXES = {".md", ".rst", ".txt"}
@@ -133,45 +135,11 @@ def _wording_check_gaps(path: Path, doc: Any, base: str) -> list[str]:
     ]
 
 
-def _sidecar_provenance(slug: str, root: Path, in_push: bool, deadline: Any) -> tuple[Any, str, str | None]:
-    """The core over the working-tree sidecar (the HEAD copy the PR proposes) with the GitHub lookup."""
-    from scripts.roadmap import approved_text, approved_text_github  # noqa: PLC0415
-
-    sidecar = approved_text.load_sidecar(slug, root)
-    return approved_text_github.resolve(slug, sidecar, root, in_push, deadline, informational=False)
-
-
-def _approval_findings(path: Path, doc: Any, base: str, in_push: bool, deadline: Any) -> tuple[list[str], list[str]]:
-    """(failures, advisories) for a plan whose sidecar the diff adds or changes: it needs the operator's GitHub approval
-    or a grandfather (rec-4769). Runs only on the digest _wording_check_gaps reads; a malformed sidecar stays its gap."""
+def _approval_gaps(path: Path, doc: Any, base: str, in_push: bool, deadline: Any) -> tuple[list[str], list[str]]:
     if doc.schema_version < _MIN_NEW_PLAN_SCHEMA_VERSION or not _has_sidecar(doc.slug):
         return [], []
-    from scripts.roadmap import approved_text, approved_text_provenance  # noqa: PLC0415
-
-    try:
-        if _changed_sidecar_digest(doc.slug, base) is None:
-            return [], []
-        verdict, mode, _ = _sidecar_provenance(doc.slug, _common.ROOT, in_push, deadline)
-    except (approved_text.ApprovedTextError, UnicodeDecodeError, OSError):
-        return [], []
-    if verdict is None:
-        print("  SKIP: approval lookup (on main)")
-        return [], []
-    if verdict.kind not in (approved_text_provenance.MISSING, approved_text_provenance.UNVERIFIED):
-        return [], []
-    message = f"{path.name}: docs/plans/approved/{doc.slug}.yaml approval {verdict.kind} ({verdict.detail})"
-    if approved_text_provenance.is_failure(verdict, mode):
-        from scripts.roadmap import approved_text_github  # noqa: PLC0415
-
-        sidecar = approved_text.load_sidecar(doc.slug, _common.ROOT)
-        return [f"{message}; {approved_text_github.remedy(doc.slug, sidecar, _common.ROOT)}"], []
-    return [], [f"{verdict.kind} (advisory): {message}"]
-
-
-def _provenance_deadline() -> Any:
-    from scripts.roadmap import approved_text_provenance  # noqa: PLC0415
-
-    return approved_text_provenance.Deadline(approved_text_provenance.DEADLINE_SECONDS)
+    changed = lambda: _changed_sidecar_digest(doc.slug, base)  # noqa: E731
+    return _plan_sidecar_approval.approval_findings(path.name, doc.slug, _common.ROOT, changed, in_push, deadline)
 
 
 def _is_documentation(file: str) -> bool:
@@ -252,7 +220,7 @@ def validate_plan_documents(
         on_plan_pr = os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
         wording_base = _common.status_diff_base()
         in_push = _common.push_context_base(_common.ROOT) is not None
-        deadline = _provenance_deadline()
+        deadline = prov.Deadline(prov.DEADLINE_SECONDS)
         sidecar_unchecked = False
         for path in plan_paths:
             # One parse per plan feeds both the schema verdict and the semantic gates -- this
@@ -269,7 +237,7 @@ def validate_plan_documents(
             gaps = _gate_round_gaps(path, doc, added_names)
             if wording_base is not None:
                 gaps += _wording_check_gaps(path, doc, wording_base)
-                approval_failures, approval_advisories = _approval_findings(path, doc, wording_base, in_push, deadline)
+                approval_failures, approval_advisories = _approval_gaps(path, doc, wording_base, in_push, deadline)
                 errors += approval_failures
                 advisories += approval_advisories
             (errors if on_plan_pr else advisories).extend(gaps)
