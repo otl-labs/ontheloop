@@ -350,8 +350,8 @@ Contracts and config:
 - `docs/contracts/instruction-architecture.yaml` `gate_subagent_retrieval` (around line 195): the
   scout's triage source is the committed `docs/decisions-index.json`, chosen so the gate is
   credential-free and hermetic.
-- `config/agent/executor/capabilities.yaml` `boundary_patterns`: lists `.claude/agents/`-style
-  executor paths; `.claude/skills/` and `.claude/commands/` are absent (rec-4476).
+- `config/agent/executor/capabilities.yaml` `boundary_patterns`: lists `.claude/agents/` (line ~32);
+  `.claude/skills/` and `.claude/commands/` are absent (rec-4476).
 - Absent at compose time: `docs/contracts/executor-personas.yaml`, `docs/contracts/personas/`,
   `scripts/personas/`, any `persona-verdict*.yml` workflow.
 
