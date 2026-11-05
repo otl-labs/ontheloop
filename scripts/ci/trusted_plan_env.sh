@@ -3,8 +3,8 @@
 # Usage: trusted_plan_env.sh [--scrub-only] -- CMD [ARGS...]
 #
 # Reads the tfvars through materialise_tfvars.sh --stdout into a shell variable (a pipe, never a file; that
-# script's ::add-mask:: lines arrive on stderr, which the runner reads), masks owner_email, exports the four
-# scrub variables redaction_check.py reads (_ACCT/_DEV/_ADM/_OWNER) and, unless --scrub-only, TF_VAR_<key>
+# script's ::add-mask:: lines arrive on stderr, which the runner reads), masks every *_email value, exports the
+# five scrub variables redaction_check.py reads (_ACCT/_DEV/_ADM/_OWNER/_ALERTS) and, unless --scrub-only, TF_VAR_<key>
 # for every tfvars line, then execs CMD. --scrub-only is for the comment step: that process never holds a
 # TF_VAR_* value. Writes nothing to disk, GITHUB_ENV or GITHUB_OUTPUT and prints no value; a line that is not
 # "key = value" fails closed with a fixed message that never echoes the line.
@@ -59,7 +59,8 @@ _ACCT="${vars[account_id]:-}"
 _DEV="${vars[platform_dev_external_id]:-}"
 _ADM="${vars[platform_admin_external_id]:-}"
 _OWNER="${vars[owner_email]:-}"
-export _ACCT _DEV _ADM _OWNER
+_ALERTS="${vars[alerts_email]:-}"
+export _ACCT _DEV _ADM _OWNER _ALERTS
 
 if [ "$scrub_only" -eq 0 ]; then
     for key in "${!vars[@]}"; do
