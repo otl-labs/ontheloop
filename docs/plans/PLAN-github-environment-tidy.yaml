@@ -176,7 +176,8 @@ verification_plan:
       test ! -e .github/workflows/deployment-approval-probe.yml && test ! -e scripts/session/deployment_approval_probe.py
       && test ! -e tests/test_session_deployment_approval_probe.py && test ! -e tests/test_deployment_approval_probe_workflow.py
       && ! git grep -n -e deployment_approval_probe -e deployment-approval-probe -- . ':!docs/plans/' ':!docs/audit-prompts/'
-      ':!docs/contracts/github-org-transfer.yaml' ':!terraform/github/environments.tf' && echo SWEEP_CLEAN
+      ':!docs/contracts/github-org-transfer.yaml' ':!terraform/github/environments.tf'
+      && ! grep -q deployment_approval_probe terraform/github/environments.tf && echo SWEEP_CLEAN
     expected: Prints the clean marker.
     fix_if: Any file still exists or git grep names a live reference; remove or rewire it.
     hermetic: true
@@ -288,9 +289,12 @@ verification_plan:
   - step: 10
     phase: post-deploy
     action: >-
-      LEG 3, real role, right after merge. Record the tf-trusted-plan count; open a throwaway PR adding one comment line
-      to terraform/personal/feature_flags.tf (not an IAM file, no resource change; its push carries Decision 203
-      handoff evidence for that tree); read the trusted plan run; close the PR unmerged and delete its branch.
+      LEG 3, real role, after merge. The throwaway PR reuses the build's own harness-assigned session branch (agents
+      never create a branch, git-ops.yaml branch_rule): git fetch origin main, git reset --hard origin/main on that
+      branch, commit one comment line in terraform/personal/feature_flags.tf (not an IAM file, no resource change), push
+      with --force-with-lease (the branch holds only already-merged history, git-ops.yaml) carrying Decision 203
+      handoff evidence for that tree, open the PR, record the tf-trusted-plan count before it, read the trusted plan
+      run, then close the PR unmerged. No branch is created or deleted.
     command: >-
       gh api "repos/otl-labs/ontheloop/deployments?environment=tf-trusted-plan&per_page=100" --jq length;
       echo 'RUN BEFORE AND AFTER (gh as in VP 5). VIA MCP: actions_list list_workflow_runs for terraform-plan-trusted.yml
@@ -358,6 +362,16 @@ test_obligations:
     verification_step: 2
     test_selector: tests/checks/ci_guards/test_validate_composite_action_shell_bodies.py
     waiver_reason: Removing entries for a deleted workflow is data cleanup the existing baseline test already reads.
+weakening_dispositions:
+  - candidate: "[test-file-deleted] tests/test_session_deployment_approval_probe.py::*"
+    disposition: retirement
+    cite: scripts/session/deployment_approval_probe.py
+  - candidate: "[test-file-deleted] tests/test_deployment_approval_probe_workflow.py::*"
+    disposition: retirement
+    cite: .github/workflows/deployment-approval-probe.yml
+# The build adds the planned-change entry for the environment pin in tests/checks/ci_guards/test_terraform_plan_trusted.py
+# (cite acceptance_criteria[2]) with the exact candidate string validate_weakening_candidates reports, and corrects the
+# two strings above if the reported form differs (implementing-plan bookkeeping).
 constraints:
   - No role trust, IAM, secret, Lambda or Neon change. No Decision text edit (Decision 238 cl.2 and Decision 239 stand as written).
   - The flip lands only after VP 5 and VP 6 pass; a surprise in either stops the flip and goes to the operator.
@@ -370,7 +384,10 @@ constraints:
   - Never print an OIDC token or Authorization header; the claims probe prints allowlisted claims only (Decision 101).
   - AWS calls use PlatformDev (--profile agent_platform), never the ADMIN environment's inherited profile.
   - "The merge needs the operator's word (always-ask list: security-adjacent workflow change plus an operator Settings step)."
-  - Leg 3 is ready to open the moment the flip merges; the coordinator holds other terraform/personal PRs until VP 10 reads green.
+  - >-
+    Leg 3 opens as soon as its push is allowed: the push needs a fresh full tier on the post-merge tree (Decision 203,
+    about 30 to 40 min), so leg 3 is one to two hours after merge, not immediate; the coordinator holds other
+    terraform/personal PRs until VP 10 reads green.
   - >-
     No terraform/github apply runs between OPERATOR STEP B and the merge: main's config still declares the probe, so an
     apply would re-create it (VP 7 would then show a destroy).
@@ -395,6 +412,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 11}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 8}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 8}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 6, escalated: true, escalation_choice: "one more round"}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -402,7 +420,11 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - The operator is available for OPERATOR STEP A within the session
 execution_steps:
-  - Write the temporary probe workflow (each push carries handoff evidence, Decision 203); run VP 5 and VP 6 (operator approves the claims job); delete the probe workflow in the next commit and push.
+  - >-
+    Write the temporary probe workflow; run VP 5 and VP 6 (operator approves the claims job); delete the probe workflow
+    in the next commit and push. Each of the two pushes carries handoff evidence for its exact tree (Decision 203),
+    which can mean a full-tier run per push; a red validate on the probe commit (the fence flags the temporary file)
+    passes the gate with a warning.
   - >-
     Make the scope edits and commit them locally; run VP 1-4 and the fast tier; set implementation_declared and commit
     it with the trailer "Resolves: rec-4914" in that branch commit message (validate_merge_step reads branch commits,
@@ -412,16 +434,25 @@ execution_steps:
     terraform/github apply may run until the merge (main still declares the probe; the content-reader lock set-up may
     prompt one); this keeps the window in which main still
     declares the probe short (other terraform/github PR plans in that window show a create of the probe Environment,
-    expected and not acted on). Then push, open the PR and run VP 7.
+    or fail on its import if the import was never applied; expected and not acted on). Then push, open the PR and run VP 7.
   - >-
     Ask the operator for the merge word with the VP 5-7 evidence inline; run merge_step premerge; squash-merge with an
     explicit commit_message carrying "Resolves: rec-4914", equal to bundled_recommendations (rec-4913 stays open until its live proof; a closed rec is never reopened); supersede
     rec-4716 with update_rec (status superseded, resolution naming rec-4914 and the merge SHA), under --profile
     agent_platform.
   - >-
-    Run VP 10 immediately; on green run bin/venv-python -m scripts.rec_trailer_acceptance census and evaluate for
-    rec-4913 at the merge SHA, then close it with update_rec carrying that acceptance_verdict, closing_sha the merge SHA
-    and a resolution naming the VP 10 run URL (not a verdict-less close, Decision 201 cl.3 residual rec-3999); then VP 11.
+    Run VP 10 immediately. On green, close rec-4913 with a verdict. The census CLI reads only HEAD's Resolves trailer
+    and takes no rec id, and the merge trailer deliberately omits rec-4913, so use the Python entry points: in a detached
+    worktree at the merge SHA (git worktree add --detach <scratch dir> <merge sha>), call
+    scripts.rec_trailer_acceptance.census(['rec-4913'], repo_root=<worktree>, profile='agent_platform'), write
+    {"ids": ["rec-4913"], "entries": <that result>} to a scratch file, run bin/venv-python -m
+    scripts.rec_trailer_acceptance evaluate --payload <file> from that worktree (it keys the record to HEAD, the merge
+    SHA), then call scripts.ops_data_portal.update_rec('rec-4913', {"status": "closed", "resolution": <VP 10 run URL and
+    merge SHA>}, profile='agent_platform', acceptance_verdict=<that record>, closing_sha=<merge sha>). If any of those
+    calls fails or the API differs from this description, fall back to bin/venv-python -m scripts.ops_data_portal
+    --update-rec rec-4913 --status closed --resolution naming the VP 10 run URL and merge SHA (a verdict-less close,
+    Decision 201 cl.2 treats an absent record as a no-op; residual owned by rec-3999) and say so in the report. Remove
+    the worktree; then VP 11.
   - 'Report: what was implemented, verification results'
 rollback: >-
   If VP 10 fails, a forward-fix PR restores environment: tf-trusted-plan as a string and the old predicate (a), never a
