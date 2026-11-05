@@ -20,8 +20,9 @@ scope:
     purpose: >-
       The approval surface's small closure (critique r4 B4: render and wake must not import approved_text.py, whose
       verify CLI reaches scripts.checks._common and the plan schema). Moves here from approved_text.py unchanged: the
-      Sidecar and Block models, words, sidecar_rel, parse_sidecar, ApprovedTextError, the _PLACEHOLDERS regexes and the
-      placeholder-aware matcher (_token_matches, find_all). Imports only the standard library, yaml, pydantic and
+      Sidecar and Block models, words, sidecar_rel, parse_sidecar, ApprovedTextError, the _PLACEHOLDERS regexes, the
+      placeholder-aware matcher (_token_matches, find_all) and digest() (the wording-check digest the page header also
+      shows, critique r7 B1). Imports only the standard library, yaml, pydantic and
       review_page. Adds approved_digest(sidecar): per block, drop the longest common word suffix of `before` and
       `after` first, then the longest common prefix of what remains, and keep one row [file, removed words, added words]; hash the sorted
       rows (block order and ids do not count; each block's removal stays paired with its addition). In an equal-length
@@ -36,17 +37,21 @@ scope:
       absolute or holds `..` or `.git/`, and wording that carries a control, bidi-override or zero-width code point
       (Unicode category Cc other than newline and tab, or Cf), so the page cannot read differently from the bound
       words; locates each block in D with the matcher (by `before`, else by `after`, else "place not found at main
-      <sha>"); prints review_page.render's Markdown for $GITHUB_STEP_SUMMARY.
+      <sha>"); prints review_page.render's Markdown for $GITHUB_STEP_SUMMARY, and refuses output over 1 MiB (the step
+      summary cap, past which GitHub drops the page while the job still succeeds) so approve never waits on an empty
+      page.
     new_imports: [scripts.roadmap.review_page]
   - file: scripts/roadmap/approved_text.py
     action: Modify
     purpose: >-
       Re-exports the moved names from approved_words unchanged, so every importer (_implementation_merge, merge_step,
       rebase_resolve, plan_wording_check, plan_decision_drafts, the checks, the tests) keeps working; also re-exports
-      approved_digest. `record` also prints `approved=<hex>` and `fingerprint=<four words>`. verify, digest(),
-      sidecar_state and the git helpers stay here; digest() is unchanged (wording-check rows and --expect keep their
-      meaning). The file shrinks, so its SLOC budget only falls.
-    new_imports: [scripts.roadmap.approved_words]
+      approved_digest and digest(). `record` also prints `approved=<hex>` and `fingerprint=<four words>`
+      (review_page.fingerprint). verify, sidecar_state and the git helpers stay here; digest() moves unchanged
+      (wording-check rows and --expect keep their meaning, and patches of `approved_text.digest`, such as
+      test_validate_plan_documents.py's, still bind through `_changed_sidecar_digest`'s attribute call). The file
+      shrinks, so its SLOC budget only falls.
+    new_imports: [scripts.roadmap.approved_words, scripts.roadmap.review_page]
   - file: scripts/roadmap/review_page.py
     action: Create
     purpose: >-
@@ -90,8 +95,9 @@ scope:
   - file: scripts/roadmap/approved_text_github.py
     action: Create
     purpose: >-
-      GitHub change-surface adapter (stdlib urllib through one module function `http_get(url, token, timeout)`, the
-      caller tests monkeypatch, since tests/conftest.py denies sockets; the deployment_approval_probe.py transport shape,
+      GitHub change-surface adapter (stdlib urllib through two module functions, `http_get(url, token, timeout)` for
+      every read and `http_post(url, token, body, timeout)`, which only wake calls; tests monkeypatch both, since
+      tests/conftest.py denies sockets; the deployment_approval_probe.py transport shape,
       not shared: that probe is session-only; token from APPROVED_TEXT_GH_TOKEN, a variable only this module reads,
       anonymous otherwise, since the repository is public). The repository is `--repo OWNER/NAME` when given, else
       scripts.repo_identity.full_name() (GITHUB_REPOSITORY in Actions); session commands always pass --repo, since the
@@ -132,8 +138,9 @@ scope:
       `_sidecar_provenance(slug, sidecar, root, in_push)` (the core over the base sidecar it is given, with the GitHub
       lookup and mode(in_push, GITHUB_EVENT_NAME == pull_request)), which the check-level tests monkeypatch and
       TestSeams runs for real. On skip it prints the SKIP line and still declares examined. When the base sidecar is GRANDFATHERED under enforce it still runs the lookup once and
-      prints `lookup (informational): <verdict>`, never failing on it, so a build PR's own CI log shows the token
-      path working (VP 9). Its cost is bounded and ends by itself: only a build PR that declares a grandfathered
+      prints `lookup (informational): <verdict> auth=token|anonymous`, never failing on it, so a build PR's own CI log
+      shows the token path working (VP 9; the repository is public, so an anonymous read also answers, and only
+      auth=token proves the wiring, critique r7 N3). Its cost is bounded and ends by itself: only a build PR that declares a grandfathered
       sidecar plan runs it, once, within the 30 s deadline, and the grandfathered set is the sidecars on main at
       GRANDFATHER_REF, each built once (critique r4 N8). An advisory line suppresses the summary PASS line; the
       examined declaration still counts the plans verify checked (the printed line, not check accounting, carries the
@@ -199,7 +206,8 @@ scope:
       inputs slug, sha, digest and fingerprint (string, required); top-level permissions {}. Job render: if github.ref
       == 'refs/heads/main', permissions {contents: read}, no secrets, no id-token; checkout main with
       persist-credentials false (the repository is public, so the fetch below needs no credential), setup Python
-      3.12, pip install -r requirements-fast.txt; a shell guard refuses a SHA that is not ^[0-9a-f]{40}$ and a SLUG that is
+      3.12, `pip install pyyaml==6.0.3 pydantic==2.14.2` (requirements.txt's pins; the page's code imports nothing
+      else, so the job executes no other requirement file, critique r7 N5); a shell guard refuses a SHA that is not ^[0-9a-f]{40}$ and a SLUG that is
       not ^[a-z0-9-]+$ before any git call; `git fetch origin --end-of-options "$SHA"`, `git show --end-of-options
       "$SHA:docs/plans/approved/$SLUG.yaml"` into $RUNNER_TEMP (data only; nothing from $SHA is executed, Decision 238 cl.3), then, with the checked-out
       main workspace as --base-file-dir (no shell loop over sidecar-named files), `python -m
@@ -208,7 +216,8 @@ scope:
       never waits. Inputs reach shell only through env (never ${{ }} inside run:). Job approve: needs render,
       environment approved-text, permissions {}, one echo step. Job wake: needs approve, continue-on-error true,
       permissions {contents: read, pull-requests: write}; checkout main with persist-credentials false, setup Python
-      3.12, pip install -r requirements-fast.txt (validate_workflow_dependency_install), then `python -m
+      3.12, the same pinned `pip install pyyaml==6.0.3 pydantic==2.14.2` (validate_workflow_dependency_install's
+      `pip install <pkgs>` shape), then `python -m
       scripts.roadmap.approved_text_github wake` with env APPROVED_TEXT_GH_TOKEN: ${{ github.token }}. Every action is
       pinned by 40-hex SHA with its version comment, the pins ghas-probe.yml and terraform-plan-trusted.yml already
       use (actions/checkout 3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, actions/setup-python
@@ -346,12 +355,13 @@ scope:
     purpose: >-
       Static workflow and Terraform shape (the test_deployment_approval_probe_workflow.py pattern): dispatch-only,
       permissions per job, no secrets or id-token, the main-only guard, inputs only through env, environment name,
-      render passes --expect-approved and --fingerprint, the wake job installs dependencies, run-name grammar equal to
+      render passes --expect-approved and --fingerprint, both jobs install exactly pyyaml and pydantic at
+      requirements.txt's pins, run-name grammar equal to
       approved_text_github's parser, every `uses:` is SHA-pinned, both checkouts set persist-credentials false, the wake step sets
       APPROVED_TEXT_GH_TOKEN, the Terraform resource attributes, and each new address being EXEMPT or carrying an
       import block (so rec-4911 needs no edit here). In ci.yml, scoped to pr-validate so later ci.yml changes need no
-      edit to this code-owned test: it holds `actions: read`, only its Validate fast tier step sets
-      APPROVED_TEXT_GH_TOKEN, and that step sets no GH_TOKEN. CODEOWNERS lists the workflow and every path of the
+      edit to this code-owned test: it holds `actions: read`, only its step whose name starts with "Validate fast
+      tier" (the full name carries a parenthesised list) sets APPROVED_TEXT_GH_TOKEN, and that step sets no GH_TOKEN. CODEOWNERS lists the workflow and every path of the
       render and wake jobs' import closure (scripts.dependency_graph forward_closure of approved_words and
       approved_text_github), and that closure holds nothing under scripts/checks/ and neither approved_text.py nor
       plan_document.py.
@@ -518,11 +528,12 @@ verification_plan:
       github_repository_environment_deployment_policy.approved_text_main as creates, and its TF_GITHUB_PLAN_REPORT line
       reads import=0, add=2, destroy=0 and replace=0; the change, gated and drift counts equal those of main's latest
       terraform-github plan (the standing visibility-gated ruleset row, PR #1784's report), re-measured at build. The
-      pr-validate log's `lookup (informational)` line for this sidecar reads MISSING or APPROVED, never UNVERIFIED,
-      which proves the APPROVED_TEXT_GH_TOKEN read in pull-request CI before merge.
+      pr-validate log's `lookup (informational)` line for this sidecar reads MISSING or APPROVED with auth=token,
+      never UNVERIFIED, which proves the APPROVED_TEXT_GH_TOKEN read in pull-request CI before merge.
     fix_if: >-
       any other create, any destroy or replace, or a change count above main's (a gated row is tolerated only when
-      main's plan shows the same row); or the lookup line reads UNVERIFIED (fix the token wiring before merge)
+      main's plan shows the same row); or the lookup line reads UNVERIFIED or auth=anonymous (fix the token wiring
+      before merge)
     hermetic: false
     graduation: waive
     graduation_waiver_reason: CI-delegated provider plan on a live PR.
@@ -545,8 +556,8 @@ verification_plan:
       mcp__github__actions_run_trigger(method=run_workflow, owner=otl-labs, repo=ontheloop,
       workflow_id=approved-text-approval.yml, ref=main, inputs={slug: approved-text-operator-approval, sha: <the build's
       merge sha>, digest: <record's approved=>, fingerprint: <record's fingerprint=>}); after the operator's tap,
-      bin/venv-python -m scripts.roadmap.approved_text_github check --slug approved-text-operator-approval --repo
-      otl-labs/ontheloop
+      git fetch origin main (so the ancestry check finds the dispatch's head_sha), then bin/venv-python -m
+      scripts.roadmap.approved_text_github check --slug approved-text-operator-approval --repo otl-labs/ontheloop
     expected: >-
       the run's render summary shows the wording, both digests and the fingerprint, and the run name carries the
       fingerprint; check prints a lookup line reading APPROVED with the run id and approver benjamin-blake, and a
@@ -719,9 +730,10 @@ context:
   - "Digest evidence (prototype over git history, 2026-11-04): equal for t2-47 #1818, rec-4478 #1815 to #1842 and a contract_version 12 to 13 move (merge-race-attestation bumps it); different for rec-4478 #1801 to #1815 (main dropped one word in two replaced spans: one extra tap), glossary-sweep #1807 and the synthetic edits. Adds-only (r1) missed a widened removal (critique r1 B10)."
   - "Live reads 2026-11-04: run objects carry display_title, head_branch, head_sha, path, event; runs/{id}/approvals (user.login, state, environments[].name) and runs/{id}/jobs return 200 through the proxy for run 40115703173; /environments/* is refused (403), so the adapter never reads it. The per-workflow runs endpoint answers 404 for a workflow main does not carry yet (critique r4 live read), so the adapter lists the repository-wide runs (179 workflow_dispatch runs on main). The session proxy refuses the pre-transfer repository name (403), so session commands pass --repo. The token path in PR CI is proved before merge by VP 9's informational lookup line on the build PR."
   - "Operator rulings and approvals: 2026-11-03 13:09Z anchor-only re-anchors need no re-approval; 23:10Z approve at planning, builds never re-ask (PLAN-coordinator-approve-once owns the coordinator.yaml side; notify the coordinator when this lands). 2026-11-04 16:50Z and 19:37Z design and every recommendation (PRESENTATION.md, REVIEW-OPTIONS.md under /mnt/project-files/rec-4769/; rec-4905 split off)."
-  - "PENDING operator: the B10 card (recommended: bind removed words, drafted) and approval of the reworded sidecar clauses 2 and 6 and git-ops-binding's owner list, which since critique r6 B2 also name an agent merge on red through the admin bypass (rec-4080; wording-check round 6). Probe trial run 41898821488 (phone approval) still waiting; outcome goes in the PR body."
+  - "PENDING operator: the B10 card (recommended: bind removed words, drafted) and approval of the reworded sidecar clauses 2 and 6 and git-ops-binding's owner list, which since critique r6 B2 also name an agent merge on red through the admin bypass (rec-4080), plus critique r7's clause 3 and git-ops-binding accuracy fixes (wording-check round 7). Probe trial run 41898821488 (phone approval) still waiting; outcome goes in the PR body."
   - "Unbuilt plans on shared files (plan_obligations 2026-11-04): retire-strategic (PR #1806, open and dirty; build after it, or first if it stalls, since its overlaps are anchor-only), merge-race-attestation (git-ops.yaml, _manifest.py, taxonomy), ci-branch-state-fence, ci-policy-plan-time-lambda-arns, neon-key-out-of-pr-plans, telemetry-content-reader-lock, telemetry-producer-admission-plan-review-capture, trusted-plan-cutover, trusted-plan-identity (taxonomy, baseline, environments.tf), billing-shape-local, decision-229-subagent-scope, github-org-transfer-contract, telemetry-owner-provisioning (DECISIONS.md), pr-plan-opaque-iam-policy-check (baseline), protected-action-gate (CODEOWNERS), telemetry-capture-hooks, telemetry-claude-p-capture-adapter, telemetry-late-hook-records (ports.yaml), work-graph-edge-model (ports.yaml, validate_plan_documents.py); telemetry-content-reader-lock and trusted-plan-identity also scope CODEOWNERS, DECISIONS.md and test_terraform_github_import_blocks.py (the shared EXEMPT map), and trusted-plan-cutover CODEOWNERS; whichever builds second rebases. A re-anchor changing only anchors or a placeholder-replaced number keeps the digest; any other removed-word change goes back to the operator before this build."
   - "Critique r5 dispositions without a code change: N2 (the run page's code is code-owned only procedurally until rec-2827) is already declared by clause 6's 'Clause 4 is procedural', since clause 4 is the final-diff word on CODEOWNERS paths; the operator may still ask for it to be spelled out. N3: git-ops.yaml's unbound first sentence still points the schema at approved_text.py, which re-exports it, and referenced_repo_paths gains no new path (fixing either needs a new bound block and git-ops.yaml is NEAR_CAP; the next git-ops.yaml edit refreshes both). N7 UNPROVEN: GitHub's run-name length limit; the longest slug today is 49 characters (a title of about 165), and a truncated title reads MISSING (fails closed); VP 11 proves this slug only."
+  - "Critique r7 dispositions: N8 and N9 reworded clause 3 ('a run whose gated job an Environment reviewer approved and that then succeeded', matching the adapter's approve-job key) and git-ops-binding ('a missing or unreadable approval fails in pull-request CI only and is advisory elsewhere'), both inside the pending operator approval (wording-check round 7). N10: clause 2's '(operator, 2026-11-04)' is set to the date of the operator's card answer when it comes. N11 accepted: planning-step-8b's 'Then push it' stays, since the block is byte-neutral at a zero-headroom prose budget and the step's subject is the plan."
   - "Declared residuals (decision-new clause 6): words, not place, are bound, so a re-anchor may move any block to another match in its file (rec-4907; the run page shows its location, plan-critique reviews re-anchors); operator-only by grant (approval-bypass condition); an agent merge on red through the admin bypass (rec-4080, as Decision 245 cl.6 and git-ops.yaml's residual_agent_obligation row declare); checks judged by their own copy (rec-2827)."
   - "Why an Environment approval: agent PRs are authored as the sole code owner, so neither a PR review nor CODEOWNERS can carry the operator's word, and commit statuses are agent-writable; an Environment approval needs a grant agents lack. A two-PR split (critique r3 Q2) was not taken: the red window for new sidecar PRs lasts only until the operator's apply, which the handoff asks for at merge, and the UI-merge valve covers it."
   - "Adding the approval surface to CODEOWNERS (critique r3 B5, narrowed by the r4 split) means a later change to approved_words.py, review_page.py, approved_text_provenance.py, approved_text_github.py, scripts/repo_identity.py, the two package __init__ files, the workflow or their tests and fixtures needs the operator's final-diff word; so does the github-org-transfer post-transfer sweep's edit of repo_identity's fallback constant. approved_text.py, the plan schema and scripts/checks stay out (without the split, approved_text.py's closure pulled in _common.py, plan_document.py, contract_rules.py, plan_gate_rounds.py and vp_literals.py)."
@@ -742,6 +754,8 @@ gate_rounds:
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 10}
   - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 2, nits: 9}
   - {gate: wording-check, round: 6, verdict: PASS, digest: 48e535a867f4f26e58d19e02841a523a3137799361f6983a259440a715632b55, base: 2db2392a48fc064e5efb00aa2c0d5f388c19b8d7, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 11}
+  - {gate: wording-check, round: 7, verdict: PASS, digest: abfa8e44d747f0ad623e54a8d02cb750746bb728f1b3bc906bb47a5789e9eca3, base: 2db2392a48fc064e5efb00aa2c0d5f388c19b8d7, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
