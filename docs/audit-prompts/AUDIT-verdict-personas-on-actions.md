@@ -89,7 +89,7 @@ Candidates (neutral; each is a hypothesis to test, not a claim):
   `scripts/smoke_test_inference_credentials.py`; `scripts/llm/client.py` is a Gemini-CLI transport.
   Whether the persona image uses the LiteLLM Python SDK in-process or a LiteLLM proxy server is not
   stated in the rows read.
-- C16. T4.32 carries `decomposition_hints` naming three atomic plans, and T4.28-T4.30 each carry
+- C16. T4.32 carries `decomposition_hints` listing three atomic plans (two with plan names), and T4.28-T4.30 each carry
   full add-to-remove criteria; the path to the goal may already be dispatchable with no further
   design work beyond per-plan detail.
 - C17. A verdict persona may need only its own T4.10a contract (three of the seven) plus the
@@ -103,9 +103,12 @@ Candidates (neutral; each is a hypothesis to test, not a claim):
   flip criteria name only the `/plan` and `/implement` text.
 
 Candidates C16 and C17 are sufficiency- or over-scope-shaped on purpose: a verdict of "the design is
-ready" or "the design is over-built" is as reachable as "the design has gaps". Every candidate C1-C18
-lands exactly once, in `findings[]` (field `origin`) or `rejected_candidates[]` (field
-`candidate`).
+ready" or "the design is over-built" is as reachable as "the design has gaps". "Not stated in the
+rows read" is not the same as undesigned: if the gap is plan-level detail a planning worker settles
+inside an existing criterion, it is `designed` (Section 14). Every candidate C1-C18 lands in
+`findings[]` (field `origin`) or `rejected_candidates[]` (field `candidate`) -- once, or split
+across one row of each only when its parts adjudicate differently, each row's text naming the part
+it covers.
 
 ## 3. READ FIRST -- DISAMBIGUATION TRAPS
 
@@ -169,7 +172,8 @@ user-owned CLI backend (T4.27) and sandbox host (T4.34) except as bundle candida
 which provider fills the primary role (Section 13 do-not-flag); other fresh-context subagent
 checks that are not one of the three gates -- `/plan` Step 10's REPORT-ONLY deliverable critique
 (`.claude/commands/plan.md` line ~107), the `/audit` verification subagents and the project-alignment
-sign-off (a human gate). Name any of these in Q8 if you judge it should join the migration; do not
+sign-off (a human gate), and the coordinator's `advisor_consults` (read-only advice subagents that
+decide nothing). Name any of these in Q8 if you judge it should join the migration; do not
 rate it.
 
 TRUST-NOTHING CLAUSE: obtain every file, line, size, status and count by reading the file -- trust
@@ -211,7 +215,7 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
    set `meta.web_unavailable = true`, answer from your own knowledge, and mark every checklist row
    and finding that depends on an external fact `confidence: HYPOTHESIS`.
 
-Repo-wide `validate` is advisory outside CI; do not run it as a gate (Section 16).
+Repo-wide `validate` is advisory outside CI; running it is optional and never a gate (Section 16).
 
 ## 6. NORTH STAR
 
@@ -242,7 +246,8 @@ Each question has its own answer slot (`question_answers[]`). Verdict enums are 
 - Q1 PREREQUISITE COMPLETENESS. Is the designed dependency chain (T4.10a -> T4.32 -> T4.30, T4.29,
   T4.28, with the recs their criteria name) complete and correctly ordered to reach the goal in
   Section 1 -- every prerequisite named, no circular or missing edge, nothing that silently blocks
-  on a deferred or toxic item (T4.1, T4.9a, T4.15)? Enumerate the full prerequisite set you find,
+  on a deferred item or on an item no persona child may inherit as an edge (T4.1, T4.9a, T4.15 --
+  each persona item's intent says "never T4.1, T4.9a or T4.15")? Enumerate the full prerequisite set you find,
   including any not yet named in the roadmap. Verdict: `sufficient | partial | insufficient`.
 - Q2 DEEPSEEK-VIA-LITELLM FITNESS. Can the three personas, as their skills work today, run on the
   primary role's current DeepSeek models through the designed LiteLLM transport and run_persona
@@ -253,7 +258,9 @@ Each question has its own answer slot (`question_answers[]`). Verdict enums are 
 - Q3 INDUSTRY PRACTICE (EXTERNAL CHECKLIST). Rate the designed verdict chain property by property
   against the external checklist below. Each row goes into `external_checklist` with rating
   `met | partial | missed` judged against the DESIGN (criteria text) plus anything already built;
-  `partial` requires an argued property-matched compensating control in `evidence`. The list is a
+  `met` = the design (or what is built) provides the property; `partial` = it provides the property
+  only in part AND you argue a property-matched compensating control in `evidence` for the rest;
+  otherwise `missed`. The list is a
   floor, not a ceiling: add any further practice you judge material (for example check-run
   identity via a GitHub App, required-check and ruleset bypass rules, merge-queue interaction) as
   rows `X17`, `X18`, ... with `executor_added: true`. Verdict: `sufficient | partial | insufficient`.
@@ -289,7 +296,10 @@ Each question has its own answer slot (`question_answers[]`). Verdict enums are 
   consumers) and the fallback rule? Propose the agreement measure each persona's dual-run plan
   should pre-register. State how merge authority is redefined at each flip: what counts as
   "critique PROCEED" / "code review PROCEED" for `standing_authorisation` and the overseer once
-  the verdict is a check run, and how a worker or overseer session waits on it. Verdict:
+  the verdict is a check run, and how a worker or overseer session waits on it. Also state which
+  gate version reviews the WP that changes, flips or removes that same gate (in-session from the
+  branch, or the Actions persona from `main`), and whether a persona may gate its own flip PR.
+  Verdict:
   `sufficient | partial | insufficient`.
 - Q5 EXECUTION READINESS FOR CLAUDE PROJECTS. Produce the `execution_plan` block (Section 14): an
   ordered set of work packages a repo-less coordinator can dispatch under
@@ -311,23 +321,33 @@ Each question has its own answer slot (`question_answers[]`). Verdict enums are 
   IAM, spend with a monthly estimate, Decision or governing-contract text, public-surface files,
   manual/admin steps, secret values set out of band, loosened tests, the coordinator's
   `write_the_plan` approval per plan, contract rewording for C18) and every open design fork the
-  coordinator cannot settle on advisor evidence alone. Count `operator_touchpoints` rows EXCLUDING
-  the routine per-plan `write_the_plan` approvals. Verdict: `minimal` = 0-4 rows, `moderate` =
+  coordinator cannot settle on advisor evidence alone. For each, state whether it can be settled
+  BEFORE wave 1 (for example as one merged plan or Decision naming the admin mutation, IAM grant or
+  spend) or must wait inside its acting worker -- `docs/contracts/coordinator.yaml` `approvals`
+  says an approval counts only in the acting worker and covers exactly the text shown. Count the
+  `operator_touchpoints` rows whose `touchpoint_kind` is `always_ask` or `design_fork` (rows of kind
+  `plan_approval` are listed but not counted). Verdict: `minimal` = 0-4 rows, `moderate` =
   5-10, `heavy` = more than 10.
 - Q8 QUESTIONS THE REQUESTER DID NOT THINK TO ASK. Answer each seed below AND add your own:
   - Is DeepSeek's quality on long, tool-heavy repository review adequate for a BLOCKING gate, and
     what evidence would show it before flip (without an LLM grader, Decision 231)?
-  - Should code_reviewer flip before the plan-PR personas given the operator's start order, or does
-    plan-PR routing (T4.32 c4) make the scout first?
+  - The operator's START ORDER (T4.2's 2026-10-19 annotation in `docs/ROADMAP-PLATFORM.yaml`, line
+    ~5898) is T4.32, then T4.28, T4.30 and T4.29, then T4.15, then T4.31, "a start order, not
+    completion edges". Should code_reviewer flip before the plan-PR personas, or does plan-PR
+    routing (T4.32 c4) make the scout first?
+  - Bootstrap: the WPs that change the three gates are themselves reviewed by those gates; is that
+    safe at every step?
   - What happens to in-flight plans and branches at each flip?
-  - What is the monthly Actions-minutes and DeepSeek token cost at current PR volume?
+  - What is the monthly Actions-minutes and DeepSeek token cost at current PR volume (count PRs merged
+    to `main` in the last 30 days with `git log --first-parent --since=30.days origin/main`)?
   - Does moving gates off the session change the interactive session's wall-clock loop materially?
 
 ## 8. RUBRIC
 
 Rate every surface S1-S5 on every dimension: `strong | adequate | weak | absent | n/a`. `n/a` is
 correct and costless where a dimension does not structurally apply; never manufacture a rating or
-a finding to fill a cell. S5 is rated only on VD3, VD4 and VD6; mark its other cells `n/a`.
+a finding to fill a cell. S5 is rated only on VD3, VD4 and VD6; mark its other cells `n/a`. A
+finding may target S5 only on one of those three dimensions.
 
 | Dim | Name | Serves |
 |---|---|---|
@@ -459,8 +479,9 @@ credential path after Decision 234, open).
 
 Static design review dominates this audit; the empirical pass is small and bounded.
 
-- Sample <= 5 recently merged plan files in `docs/plans/` (by `git log` date on `main`) -- do NOT
-  exceed -- and for each compute the inputs DD-A says the decision_scout and plan_critic personas
+- Sample <= 5 recently merged IMPLEMENTATION plan files in `docs/plans/` (newest first by
+  `git log` date on `main`) whose `context` records a decision-scout verdict, i.e. plans that went
+  through the gates -- do NOT exceed -- and for each compute the inputs DD-A says the decision_scout and plan_critic personas
   would need; record whether any input lacks a designed source.
 - Sample <= 5 recently merged code PRs -- do NOT exceed. A code PR is a squash commit on `main`
   (`git log --first-parent origin/main`) that changes at least one file outside `docs/` and
@@ -490,7 +511,8 @@ Static design review dominates this audit; the empirical pass is small and bound
 Before filing any finding, search the ownership surfaces: the roadmap (`tier_items[]` criteria
 text and `candidate_decisions[]`), `docs/DECISIONS.md` headers and clauses, and open recs
 (`bin/venv-python -m scripts.recs_related --terms "<terms>" --table`, paging with `--exclude` as
-needed, at most 3 pages per finding). Record `dedup_search_terms` and `dedup_hit_count` on the
+needed -- `--exclude` takes the comma-joined rec ids the previous page printed as `next_exclude` --
+at most 3 pages per finding). Record `dedup_search_terms` and `dedup_hit_count` on the
 finding. A hit means a sufficiency assessment (`planned-insufficient` / `planned-unbuilt`) or a
 `rejected_candidates` row -- never a fresh discovery. A `novel` finding requires a recorded
 negative search (`dedup_hit_count: 0` on the terms you list); a `novel` finding without one is
@@ -549,7 +571,9 @@ audit:
         kind: plan_and_build|plan_only|operator_action   # operator_action: a step only the operator
                                                          # performs (no planning worker); also listed
                                                          # in operator_touchpoints
-        roadmap_closes: ["T4.32:c1", ...]     # item:criterion ids; [] if none
+        roadmap_closes: ["T4.32:c1", ...]     # item:criterion ids; a criterion split across WPs
+                                              # is written "T4.10a:c1 (part: <which>)" in each,
+                                              # and the parts together must cover it; [] if none
         recs_absorbed: [rec-NNNN, ...]
         depends_on: [WP ids]
         wave: <int, 1 = startable now>
@@ -562,7 +586,18 @@ audit:
         effort: XS|S|M|L|XL
         basis: [<finding ids>]
     operator_touchpoints:
-      - {wp_id: "", item: "", always_ask: <class from the enum above>, monthly_cost_estimate: "" }
+      - {wp_id: "", item: "", touchpoint_kind: always_ask|design_fork|plan_approval,
+         always_ask: <class from the enum above, or empty unless touchpoint_kind is always_ask>,
+         settle_before_wave_1: true|false,
+         monthly_cost_estimate: "<filled only when always_ask is spend, else empty>"}
+  coordinator_intake: |
+    <plain-text block the operator pastes into the Claude-projects coordinator's memory or shared
+    store; it must stand alone because that coordinator cannot read the repository. Contents, in
+    order: (1) one workstream line per WP in wave order -- "WP-NN <title> | wave N | depends on ... |
+    waits on operator: yes/no"; (2) the waiting-on-operator list (one line per counted touchpoint,
+    with the reply needed); (3) up to 5 standing-instruction candidates, each one line; (4) one
+    intake brief per wave-1 WP: the plan_seed, file ownership and the default picked at each fork.
+    No secrets, account ids or hostnames.>
   bundle_dispositions:
     - {candidate: "<item or rec id>", disposition: bundle|sequence_separately|defer|reject,
        into_wp: "<WP id or empty>", rationale: "", cost: "", confidence: CONFIRMED|HYPOTHESIS}
@@ -609,8 +644,14 @@ execution_plan rules:
   named in Q5's `prose` as deliberately left out with a reason. A T4.2 criterion is "discharged" by
   one of those items exactly when that item's criterion text says it discharges it (for example
   T4.32 c1 "discharges T4.2 c4, c8, ..."); no other T4.2 criterion is in this coverage rule.
-- `design_state: undesigned` means a design decision no Decision or criterion has made; such a WP
-  must list the fork in `open_forks`.
+- `kind`: `plan_and_build` = one plan then its build; `plan_only` = a plan, contract or Decision
+  change with no separate build; `operator_action` = a step only the operator performs.
+- `design_state`: `designed` = existing Decisions and criteria settle every design choice, leaving
+  only plan-level detail; `needs_operator_fork` = a real choice remains that existing text frames
+  but does not make, and only the operator may make it (a taste, IAM or infrastructure fork, per
+  `docs/contracts/coordinator.yaml` `routing.table`); `undesigned` = a design decision no Decision or
+  criterion has made or framed. Every non-`designed` WP lists its forks in `open_forks`. An
+  `operator_action` WP is `designed` when the action is fully specified.
 - `plan_seed` follows the repo's `/plan` conventions: names the roadmap items and criteria, the
   recs to bundle, the governing Decisions; contains no secret, account id or hostname.
 
@@ -629,10 +670,13 @@ CONFIRMED requires the behavior traced to file:line or an observed sampled artif
 is HYPOTHESIS. A design gap is CONFIRMED when the absence is traced (the criteria text read and the
 missing element shown absent from every owning item searched).
 
-Write `audits/verdict-personas-on-actions-<sha>.md`, <= 1500 words, the layer the operator and the
-coordinator read first: (1) a 5-line answer to "how do we get there", (2) the critical path as a
-numbered list of WP titles with waves, (3) operator touchpoints, (4) top findings, (5) bundling
-recommendations, (6) Q8 highlights. It restates no finding counts beyond what `summary` holds.
+Write `audits/verdict-personas-on-actions-<sha>.md`, <= 1500 words excluding the intake block, the
+layer the operator reads first: (0) one line naming any degraded mode (`degraded_dedup`,
+`web_unavailable`, stale anchors) or "no degraded mode", (1) a 5-line answer to "how do we get
+there", (2) the critical path as a numbered list of WP titles with waves, (3) operator touchpoints
+and which can be settled before wave 1, (4) top findings, (5) bundling recommendations, (6) Q8
+highlights, (7) the `coordinator_intake` block verbatim in a fenced block. Any count it states must
+equal or derive from `summary`.
 
 ## 15. SEVERITY + MATURITY
 
@@ -650,10 +694,10 @@ if the defect were real (apply the counterfactual to the control). A control tha
 break neither lowers severity nor justifies dismissal.
 
 Maturity, computed LAST per surface, top-down, first match wins:
-- frontier = 0 open critical or high findings on the surface AND every Q3 `external_checklist` row
+- frontier = 0 critical or high findings on the surface AND every Q3 `external_checklist` row
   rated met or partial (none missed). The checklist rates the one designed verdict chain, so the
   condition is the same for S1-S4. S5 is a different, built system: its top tier gates on finding
-  counts alone (0 open critical or high).
+  counts alone (0 critical or high).
 - Counting findings per surface: a finding counts against its `surface`, or, when `surface` is
   `shared`, against every surface in its `affected_surfaces`.
 - strong = 0 critical AND <= 1 high.
@@ -667,18 +711,21 @@ prompt's framing does not foreclose it. Rating a designed-but-unbuilt surface: r
 ## 16. COMMIT / PR MECHANICS
 
 1. The base was derived ONCE in Section 5 step 1 and you are on
-   `audit/verdict-personas-on-actions-<sha>` created from it. This is a deliberate, documented
-   exception to the `claude/*` session-branch convention: the audit needs a clean two-file diff off
-   the audited base. The branch base MUST equal `meta.audited_commit`.
+   `audit/verdict-personas-on-actions-<sha>` created from it. This is a deliberate exception to
+   the harness-assigned session branch (`docs/contracts/git-ops.yaml` agent branch prefixes
+   `agent/`, `claude/`, `ccr-`): the audit needs a clean two-file diff off the audited base, and
+   `audit/` is a registered extra push destination in the same file. The branch base MUST equal
+   `meta.audited_commit`. IF that branch name already exists locally or on the remote (a rerun),
+   append `-r2` (then `-r3`, ...) to the branch name only; the deliverable filenames keep `<sha>`.
 2. Pre-push gate: the YAML parses
    (`bin/venv-python -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" audits/verdict-personas-on-actions-<sha>.yaml`),
    the counting invariant and the C1-C18 coverage rule hold, and the report is within its cap
-   (`wc -w audits/verdict-personas-on-actions-<sha>.md` <= 1500). Repo-wide validation is advisory
-   outside CI; if an unrelated `validate --pre` failure appears, record it in `meta.contract_notes`
-   before committing -- never fix it.
+   (`wc -w` on the `.md`, minus the intake block, <= 1500). Running `bin/venv-python -m
+   scripts.validate --pre` is OPTIONAL (advisory outside CI); if you run it and an unrelated failure
+   appears, record it in `meta.contract_notes` before committing -- never fix it.
 3. `git add` exactly the two deliverables, then
-   `git commit -m "audit: verdict personas on Actions readiness"` using the session's configured
-   identity and signing (do not override the author, do not disable or force signing, do not
+   `git commit -m "audit: verdict personas on Actions readiness"` (append any attribution trailer
+   lines your harness instructs for commits) using the session's configured identity and signing (do not override the author, do not disable or force signing, do not
    amend). If a pre-commit hook rejects the commit, fix the cause inside your two deliverables and
    commit again; never bypass the hook.
 4. Run `git push -u origin HEAD` as a tool call on its own (no pipe, redirect or second command --
@@ -688,7 +735,8 @@ prompt's framing does not foreclose it. Rating a designed-but-unbuilt surface: r
 5. Open the PR via `mcp__github__create_pull_request` (owner `otl-labs`, repo `ontheloop`,
    base `main`, head your branch, ready for review, NOT draft), title
    `audit: verdict personas on GitHub Actions via DeepSeek and LiteLLM (S1-S5)`, body = a 2-3
-   sentence lede plus the `summary:` block in a yaml fence. IF the tool is unavailable or the call
+   sentence lede plus the `summary:` block in a yaml fence, plus any PR footer your harness
+   instructs. IF the tool is unavailable or the call
    fails: end the turn with a final message naming the pushed branch, the sha, the error and the
    intended title and body, so the human can open it. Then END THE TURN -- do not poll, do not
    merge, do not subscribe, do not self-approve. The human disposes of the PR.
