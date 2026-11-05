@@ -1,0 +1,212 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: capture-hook-status-message
+intent: >-
+  Restore Claude Code turn capture for every new cloud session (CC-web and project threads), lost since 2026-11-03
+  because Claude Code 2.1.317+ records a remote session's hook attachment command as a label ("command hook N") unless
+  the hook sets statusMessage. Adding a statusMessage that carries the tokens the parser already accepts (P-2, WT-2,
+  PV-1, H-1) brings the pin, the Stop witness, the checkout facts and the hook names back with no parser change.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-capture-hook-status-message.yaml
+phase: >-
+  hotfix (soft-warn exception category; no tier_item claimed and no criterion closed, so the Tier Item Freshness Gate is
+  skipped). The outage is rec-4939's (Critical); rec-4939 stays open and owns the durable parser fix.
+closes_criteria: []
+scope:
+  - file: .claude/settings.json
+    action: Modify
+    purpose: >-
+      Add one statusMessage key to each of the five capture registrations, nothing else changes (command, order,
+      groups, timeouts): the SessionStart pin hook gets "session_start_log_turn.sh --project-ref=ontheloop"; the Stop,
+      StopFailure and UserPromptSubmit shim entries get "stop_log_turn.py"; the SessionEnd entry gets
+      "session_end_log_turn.py". No other hook gains one.
+  - file: .claude/hooks/hooks.json
+    action: Modify
+    purpose: >-
+      Regenerated, never hand-edited: bin/venv-python .claude/hooks/plugin_hooks.py render. render copies each hook
+      object with {**hook}, so the plugin copies carry the same statusMessage behind the unchanged GATE prefix.
+  - file: tests/hooks/test_capture_hook_registration.py
+    action: Modify
+    purpose: >-
+      Two new nodes (named in test_obligations). test_capture_hooks_carry_their_status_message: every capture
+      registration in .claude/settings.json and in the committed .claude/hooks/hooks.json carries the expected
+      statusMessage, no non-capture hook carries one, and the SessionStart statusMessage's --project-ref value equals
+      the command's --project-ref value. test_the_recorded_status_message_satisfies_the_parser_rules: for each
+      registration, an attachment whose command IS the registered statusMessage (the 2.1.317+ remote shape) gives
+      project_ref_pin == the command's ref (SessionStart), is_witness_record True with the witness stderr (Stop),
+      pin_facts parsed from the pin stderr with the pin recognised by hook_script stem (PV-1), and hook_name ==
+      hook:<script stem> (all five); and a label-shaped attachment ("command hook 9") gives project_ref_pin None and
+      is_witness_record False, pinning the failure this plan works around.
+bundled_recommendations: []
+followon_recs: []
+infrastructure_dependencies:
+  - >-
+    None. No .tf, no Lambda-packaged file (compute_affected_artifacts over the three scope files is empty), no
+    migration, no admin step. The plugin on claude.ai re-syncs from main by itself (Benjamin 2026-11-05 23:16Z; the
+    synced manifest's updatedAt 2026-11-04T00:10:54Z trails the last hooks commit 9e6fb21b by 10 s), so there is no
+    marketplace step.
+acceptance_criteria:
+  - >-
+    Each of the five capture registrations carries its statusMessage in .claude/settings.json and in the regenerated
+    .claude/hooks/hooks.json, the pin's statusMessage names the same project_ref as its command, and no other hook
+    changed (VP 1, VP 3).
+  - >-
+    An attachment recorded in the 2.1.317+ shape (command equal to the statusMessage) satisfies P-1..P-4, WT-2, PV-1 and
+    H-1 through the unchanged parser functions (VP 2).
+  - >-
+    The installed Claude Code (2.1.318 or newer) under CLAUDE_CODE_REMOTE=true records the statusMessage as the
+    attachment command for the branch's real capture registrations, in both the settings shape (CC-web) and the plugin
+    shape (project thread): pin ontheloop, at least one Stop witness, checkout known, no label (VP 4).
+  - >-
+    After merge, a new CC-web session and a new project thread each appear as a root session in sessions_window (VP 5).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The registrations carry their statusMessage in settings and in the plugin render, and the refs agree.
+    command: >-
+      bin/venv-python -m pytest -q
+      tests/hooks/test_capture_hook_registration.py::test_capture_hooks_carry_their_status_message
+    expected: exit 0; the node passes. Red before (node absent on main).
+    fix_if: Fix .claude/settings.json and re-render hooks.json, never the assertion.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: graduate
+    graduation_check_id: capture-hooks-status-message
+  - step: 2
+    phase: pre-deploy
+    action: The recorded statusMessage satisfies the unchanged parser rules; the label shape does not.
+    command: >-
+      bin/venv-python -m pytest -q
+      tests/hooks/test_capture_hook_registration.py::test_the_recorded_status_message_satisfies_the_parser_rules
+    expected: exit 0; the node passes. Red before (node absent on main).
+    fix_if: Fix the statusMessage text, never the parser and never the assertion.
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: graduate
+    graduation_check_id: capture-hooks-status-message-parser-parity
+  - step: 3
+    phase: pre-deploy
+    action: >-
+      The existing hook suites stay green, including the plugin render parity and the existing capture registration
+      nodes, and the parser suites the nodes call.
+    command: >-
+      bin/venv-python -m pytest -q tests/hooks/test_capture_hook_registration.py tests/hooks/test_plugin_hooks.py
+      tests/turn_capture/test_witness.py tests/turn_capture/test_transcript.py
+    expected: exit 0; every test passes.
+    fix_if: Fix the settings or the render, never an existing assertion.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Whole-file re-run of suites that --pre's pytest_diff selects for this diff and the full tier runs on main; the new
+      behaviour is graduated by steps 1 and 2.
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      End to end on the installed CLI: the branch's real capture registrations and hook scripts in a scratch project,
+      a local mock Messages API, CLAUDE_CODE_REMOTE=true, an empty environment (no AWS credentials, no scripts package,
+      so no capture pass can start or send). Settings shape, then plugin shape. On main both print FAIL with a
+      "command hook" label (recorded 2026-11-05 on 2.1.318 in context).
+    command: >-
+      bin/venv-python /mnt/project-files/capture-pin-outage/statusmessage-probe/probe.py --settings .claude/settings.json
+      && bin/venv-python /mnt/project-files/capture-pin-outage/statusmessage-probe/probe.py --plugin --settings
+      .claude/settings.json
+    expected: >-
+      exit 0; two JSON lines, each with verdict PASS, pin ontheloop, stop_witnesses at least 1,
+      pin_facts_checkout_known true and labels_seen empty; claude_version 2.1.317 or newer.
+    fix_if: >-
+      A label still recorded means the installed CLI ignores statusMessage: stop, do not merge, report to the
+      coordinator (rec-4939 becomes the only route).
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: post-deploy
+    action: >-
+      After the squash merge: one new CC-web session on main and one new project thread (any prompt, one Stop each);
+      then read sessions_window.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from scripts.preflight.session_history import
+      read_session_history; import json; print(json.dumps(read_session_history(window_days=1, limit=20),
+      default=str))"
+    expected: >-
+      status ok and at least two root sessions whose start is after the merge time, one of them the project thread.
+    fix_if: >-
+      No row within 30 minutes of a Stop: read that session's diagnostics.jsonl for the pass outcome and report to the
+      coordinator; revert the merge commit only if the change itself broke a hook.
+    hermetic: false
+test_obligations:
+  - source: .claude/settings.json
+    behavior: >-
+      Every capture registration carries a statusMessage whose tokens satisfy P-1..P-4, WT-2, PV-1 and H-1, with the
+      pin's ref equal to the command's.
+    verification_step: 1
+    test_selector: tests/hooks/test_capture_hook_registration.py::test_capture_hooks_carry_their_status_message
+    red_green_expectation: red before (node absent; and no statusMessage on main), green after.
+  - source: .claude/hooks/hooks.json
+    behavior: The plugin copies carry the same statusMessage as the settings registrations.
+    verification_step: 1
+    test_selector: tests/hooks/test_capture_hook_registration.py::test_capture_hooks_carry_their_status_message
+    red_green_expectation: red before (node absent; and no statusMessage in the committed render), green after.
+  - source: tests/hooks/test_capture_hook_registration.py
+    behavior: The recorded-statusMessage shape passes the unchanged parser rules and the label shape does not.
+    verification_step: 2
+    test_selector: tests/hooks/test_capture_hook_registration.py::test_the_recorded_status_message_satisfies_the_parser_rules
+    red_green_expectation: red before (node absent on main), green after.
+constraints:
+  - >-
+    No parser, parser_version, contract, Decision or roadmap text changes (rec-4939 owns all of them); no change to any
+    hook's command, order, group or timeout; no statusMessage on any non-capture hook.
+  - hooks.json is regenerated with plugin_hooks.py render, never hand-edited.
+  - No backfill (Benjamin 2026-11-05 23:06Z, cmsg_012XgaFy8VaDQbxP5D8nC958SfwRW7tKqig7Jh42xnxq7L, postmortem D2).
+  - No marketplace or plugin update step (Benjamin 2026-11-05 23:16Z, cmsg_012XgaFy8VaDQbxP5D8nC958NFKNS26G1aaM7M2kjPVkK2).
+  - No rescue agents or workaround loops (Decision 55).
+  - "Approach confirmed by Benjamin (write the plan) 2026-11-05 23:33Z, cmsg_012XgaFy8VaDQbxP5D8nC9587mgXBGnC6zuMqkkJ7AWkuv."
+context:
+  - "Postmortem: /mnt/project-files/capture-pin-outage/POSTMORTEM.md s3 (mechanism), s7.1 (this fix)."
+  - >-
+    Probe 2026-11-05 23:12-23:25Z, CLI 2.1.318, mock API, CLAUDE_CODE_REMOTE=true: current main settings record
+    "command hook" (pin None, witness 0) in both shapes; the same settings plus statusMessage record the statusMessage
+    (pin ontheloop, witness 1, PV-1 facts) in both shapes. Without CLAUDE_CODE_REMOTE the statusMessage is recorded too,
+    so local and CI runs that load these settings see the same tokens. A silent exit-0 hook writes no record, so a
+    skipped plugin copy stays invisible. Tool: /mnt/project-files/capture-pin-outage/statusmessage-probe/.
+  - >-
+    Known costs: the statusMessage shows as the hook's spinner text; every non-capture hook's process_event name still
+    falls back to hookName (H-2); the behaviour was read from the minified binary and observed only on 2.1.318 under a
+    mock API, not documented, so a later CLI can change it again (rec-4942 owns the release canary); no effect on
+    sessions already running.
+  - "Open PRs (2026-11-05 23:15Z): none touches the scope files; #1856 edits transcript.py elsewhere (host_run), no overlap."
+  - >-
+    Decision-scout verdict FLAGS_FOUND (three NOTE, no WARN or BLOCK); CITE list: Decision 228. Decisions triaged: 197 of
+    197. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1. Decision 228's reversal condition turn-evidence-lost fired
+    from 2026-11-03; this plan restores the Stop witness, so clause 1 stands unchanged and is not re-decided.
+  - >-
+    Scout NOTE dispositions (decided with notice): Decision 224 cl.6 -- the project.ref row in
+    docs/contracts/project-configuration.yaml (Class D) still holds (the value stays in .claude/settings.json, now also
+    mirrored in the statusMessage, and VP 1 pins the two equal); its note moves with rec-4939. Decision 212 -- SA-02 in
+    docs/contracts/ports.yaml gains the command-field assumption under rec-4942, which already owns it. Decision 48 --
+    the end-to-end proof is VP 4 (CLI probe) and VP 5 (reader read-back, Decision 236 cl.2); the fix is "expected"
+    until VP 5 passes.
+  - "red_overlap verdict 2026-11-05: clear (slo_hours 4, reds [])."
+  - >-
+    Unbuilt plans scoping the same files (plan_obligations): PLAN-protected-action-gate and
+    PLAN-telemetry-content-reader-lock add PreToolUse hooks; whichever builds second rebases and re-renders hooks.json.
+    PLAN-hook-canary-evidence and PLAN-telemetry-capture-hooks are already built (their hooks are on main).
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    .claude/settings.json: add the five statusMessage keys exactly as scope row 1 reads; then run
+    bin/venv-python .claude/hooks/plugin_hooks.py render and commit the regenerated .claude/hooks/hooks.json.
+  - tests/hooks/test_capture_hook_registration.py -- add the two nodes as scope row 3 reads.
+  - Execute Verification Plan steps 1-4 -- run each step; loop until pass; on a VP 4 FAIL stop and report (Decision 55).
+  - Merge under the standing rule once code review is PROCEED and CI is green, then run VP 5.
+  - 'Report: what was implemented, verification results, the VP 5 session ids.'
+rollback: Revert the squash commit; the settings return to the label-recorded shape (capture stays broken, nothing else changes).
