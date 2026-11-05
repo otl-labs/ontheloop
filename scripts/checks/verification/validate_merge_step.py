@@ -7,12 +7,15 @@ For every plan whose implementation_declared flips in this diff:
       working tree prints PENDING (the Commit Flow's --pre runs before the commit). A trailer-free closure-only
       branch (late_closure_route resolves the plan's implementation merge X) prints LATE-CLOSURE and is satisfied.
   (A) the approved-text sidecar docs/plans/approved/<slug>.yaml is read AT THE BASE: a build may not add,
-      edit or delete it, and when present every bound file must carry exactly the approved words.
+      edit or delete it, and when present every bound file must carry exactly the approved words, and the base
+      sidecar needs provenance (the operator's GitHub approval, or grandfathered; rec-4769): MISSING or UNVERIFIED
+      fails in pull-request CI, is advisory elsewhere, and is skipped on a push.
 """
 
 from __future__ import annotations
 
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +24,8 @@ import yaml
 from scripts.checks import _common, registry
 from scripts.checks.verification import _implementation_merge
 from scripts.rec_trailer import parse_resolves_trailer
-from scripts.roadmap import approved_text
+from scripts.roadmap import approved_text, approved_text_github
+from scripts.roadmap import approved_text_provenance as provenance
 
 _REMEDY_ADD = "add a commit whose message carries: Resolves: {ids}"
 _REMEDY_REWRITE = (
@@ -79,7 +83,38 @@ def _check_trailer(plan_rel: str, bundled: list[str], root: Path, base: str) -> 
     return f"{plan_rel}: branch-commit Resolves trailers {found} != bundled_recommendations {bundled}; {remedies}"
 
 
-def _check_sidecar(slug: str, root: Path, base: str) -> list[str]:
+@dataclass
+class _Notes:
+    info: list[str] = field(default_factory=list)
+    advisory: list[str] = field(default_factory=list)
+
+
+def _sidecar_provenance(
+    slug: str, sidecar: approved_text.Sidecar, root: Path, in_push: bool, deadline: provenance.Deadline
+) -> tuple[provenance.Verdict | None, str, str | None]:
+    """The core over the base sidecar with the GitHub lookup: (verdict, mode, info); verdict None when skipped."""
+    return approved_text_github.resolve(slug, sidecar, root, in_push, deadline, informational=True)
+
+
+def _provenance_leg(
+    slug: str, sidecar: approved_text.Sidecar, root: Path, in_push: bool, deadline: provenance.Deadline, notes: _Notes
+) -> list[str]:
+    rel = approved_text.sidecar_rel(slug)
+    verdict, mode, info = _sidecar_provenance(slug, sidecar, root, in_push, deadline)
+    if info:
+        notes.info.append(info)
+    if verdict is None:
+        notes.info.append("SKIP: approval lookup (on main)")
+        return []
+    if verdict.kind not in (provenance.MISSING, provenance.UNVERIFIED):
+        return []
+    if provenance.is_failure(verdict, mode):
+        return [f"{rel}: approval {verdict.kind} ({verdict.detail}); {approved_text_github.remedy(slug, sidecar, root)}"]
+    notes.advisory.append(f"{verdict.kind} (advisory): {rel} ({verdict.detail})")
+    return []
+
+
+def _check_sidecar(slug: str, root: Path, base: str, in_push: bool, deadline: provenance.Deadline, notes: _Notes) -> list[str]:
     state = approved_text.sidecar_state(slug, root, base)
     if state in ("added", "changed", "deleted"):
         rel = approved_text.sidecar_rel(slug)
@@ -90,7 +125,10 @@ def _check_sidecar(slug: str, root: Path, base: str) -> list[str]:
         sidecar = approved_text.load_sidecar_at(base, slug, root)
     except approved_text.ApprovedTextError as exc:
         return [f"{approved_text.sidecar_rel(slug)}: {exc}"]
-    return approved_text.verify(sidecar, root, base) if sidecar else []
+    if not sidecar:
+        return []
+    failures = approved_text.verify(sidecar, root, base)
+    return failures or _provenance_leg(slug, sidecar, root, in_push, deadline, notes)
 
 
 @registry.register("validate_merge_step", owner="platform")
@@ -110,6 +148,8 @@ def validate_merge_step(
     in_push = (_common.push_context_base(root) if push_base is _UNSET else push_base) is not None
     plans = _common.resolve_declared_plans(changed_files, root, diff_base)
     errors: list[str] = []
+    notes = _Notes()
+    deadline = provenance.Deadline(provenance.DEADLINE_SECONDS)
     for plan_rel in plans:
         data = yaml.safe_load((root / plan_rel).read_text(encoding="utf-8")) or {}
         bundled = list(data.get("bundled_recommendations") or [])
@@ -118,10 +158,16 @@ def validate_merge_step(
             if error:
                 errors.append(error)
         slug = Path(plan_rel).stem.removeprefix(_PLAN_PREFIX)
-        errors.extend(f"{plan_rel}: approved text: {m}" for m in _check_sidecar(slug, root, diff_base))
+        errors.extend(
+            f"{plan_rel}: approved text: {m}" for m in _check_sidecar(slug, root, diff_base, in_push, deadline, notes)
+        )
+    for line in notes.info:
+        print(f"  {line}")
+    for line in notes.advisory:
+        print(f"  {line}")
     for error in errors:
         print(f"  FAIL: {error}")
     failed.extend(errors)
-    if not errors:
+    if not errors and not notes.advisory:
         print(f"  PASS: {len(plans)} declared plan(s) examined.")
     registry.examined(len(plans), unit="plans")
