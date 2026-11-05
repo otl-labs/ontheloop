@@ -1,0 +1,449 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: ci-flake-reap-state-duckdb-threads
+intent: >-
+  Repair two CI-RCA flakes at their measured causes so main's full tier stops reddening on them: the process probe counts a
+  process mid-reap (state X) as dead, and every test DuckDB connection that runs production read-verb SQL opens at the
+  runtime's thread count, guarded by a parity node and a sweep node, so DuckDB 1.5.4's parallel-window race cannot fire in
+  tests either.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-ci-flake-reap-state-duckdb-threads.yaml
+phase: >-
+  Red-main repair (Decision 226) of the ci_rca recs rec-4872 (Track A) and rec-4890 (Track B); no tier_item criterion is
+  closed. Soft-warn exception category ci_rca, so the Tier Item Freshness Gate is skipped.
+scope:
+  - file: tests/fixtures/process_probes.py
+    action: Modify
+    purpose: >-
+      pid_is_dead counts state X (EXIT_DEAD, shown while the reaper collects the child) as dead alongside Z and an absent
+      stat file, through an exported DEAD_STATES; an optional proc_root parameter (default Path("/proc")) lets a unit test
+      point it at a fake stat file. pid_state and read_published_pid are unchanged.
+  - file: tests/checks/test__process_group.py
+    action: Modify
+    purpose: >-
+      test_kills_the_detached_childs_whole_group asserts on the loop's latched observation instead of probing again; new
+      class TestPidIsDeadStates (including test_exit_dead_counts_as_dead, the rec-4872 closure artifact) pins the probe's
+      state table over fake stat files. test_reap_timeout_closes_pipes_and_reaps_the_shell is untouched: it already asserts
+      its single latched pid_state and polls past X until the stat file is gone. Graduated shard process-group-kill-and-reap
+      is kept: it is a suite-covered command record whose seven pinned node ids validate_graduated_rerun resolves statically
+      (the test suite runs the nodes), and none of those ids changes.
+  - file: tests/fixtures/duckdb_connect.py
+    action: Create
+    purpose: >-
+      The single test-side seam for DuckDB connections that run production read-verb SQL: RUNTIME_THREADS = 1 and connect(),
+      which opens an in-memory connection and issues SET threads=RUNTIME_THREADS. duckdb is imported inside connect(), never
+      at module scope (fast-tier importers must not pay for it).
+  - file: tests/fixtures/telemetry_read_db.py
+    action: Modify
+    purpose: >-
+      open_memory_catalog and open_local_lake take their connection from duckdb_connect.connect(), called through the module
+      attribute (from tests.fixtures import duckdb_connect) so the parity node's spy reaches it, and the module docstring's
+      lazy-import sentence says duckdb is now imported by the seam; nothing else changes.
+  - file: tests/common/test_ducklake_event_read_verbs.py
+    action: Modify
+    purpose: >-
+      test_health_count_reads_metadata_only takes its connection from the seam, and the module docstring names the two new
+      nodes. (1) test_fixture_connections_run_with_the_runtime_thread_count (the rec-4890 closure artifact) captures the one
+      SET threads statement ducklake_runtime.open_connection issues (FakeCon from tests/fixtures/ducklake_fakes.py and the
+      patches tests/common/test_ducklake_runtime.py:125-128 applies, with that file's _DSN shape), derives the runtime's
+      thread count from it, and asserts the seam and open_memory_catalog each report that derived count through
+      current_setting('threads') -- the expectation comes from the runtime, never from RUNTIME_THREADS. open_local_lake is
+      proven to route through the seam without a network fetch: a spy on telemetry_read_db's duckdb_connect.connect raises a
+      sentinel, and the call must raise it before any INSTALL (this module is not integration-marked, and every real
+      open_local_lake caller today is). (2)
+      test_verb_sql_modules_open_duckdb_only_through_the_seam parses every tests/**/*.py with ast. A module is verb-SQL when
+      an ast.Name id, an ast.Attribute attr or an ImportFrom alias is NAMED_READS, EVENT_READS or render_sql, or when an
+      Import or ImportFrom names one of src.common's ducklake_event_read_verbs, ducklake_event_reads, ducklake_event_read_sql,
+      ducklake_named_reads or ducklake_content_read_verbs; a verb-SQL module must contain no call to <m>.connect where <m> is
+      duckdb or an alias bound by import duckdb as <m> or <m> = pytest.importorskip("duckdb"), nor to a name bound by from
+      duckdb import connect [as <name>] (call nodes only, so docstrings and the node's own literals never match; measured at
+      planning, alias tracking adds no file). An opener reached through a helper call is out of its reach: the one known
+      instance, tests/common/test_ducklake_read_deadline.py's _duckdb().connect(), runs ad hoc range/sort SQL, not verb SQL. Measured at planning: exactly the five rewired files plus
+      tests/test_ducklake_reader_handler.py match, and that file (its real-DuckDB node runs ad hoc SQL only) is the one
+      named exclusion, a constant carrying that reason. Home beside the parity node: --pre's diff-aware selection would not
+      select a fast-tier sweep for an edit to another test file, so the full tier (pre-handoff and main) gates it either way.
+      Non-vacuity floor: the node also asserts that this module and the five rewired files classify as verb-SQL, so a rename
+      of the names or modules it keys on fails rather than passing on zero matches. Size: about +60-75 SLOC (392 -> about
+      455-465 of 500, re-measured at build time); if the build would cross 500, stop and amend the plan, never raise the
+      budget.
+  - file: tests/common/test_ducklake_event_read_dedupe.py
+    action: Modify
+    purpose: _load takes its connection from the seam.
+  - file: tests/common/ducklake_reader_client/test_verb_fields_parity.py
+    action: Modify
+    purpose: >-
+      _con takes its connection from the seam, and the module docstring's description of the copied _con harness says so.
+      Graduated shards recs-read-model-parity, verb-fields-match-registry-sql and verb-fields-version-pin-matches are kept:
+      their node ids are unchanged.
+  - file: tests/test_session_preflight_cache_serving.py
+    action: Modify
+    purpose: _con takes its connection from the seam.
+  - file: tests/recs_related/test_verb_sql.py
+    action: Modify
+    purpose: >-
+      _con takes its connection from the seam: it runs NAMED_READS["recs_related"], the one named read with window functions
+      (count(*) OVER ()), so it carries the same duckdb/duckdb#22846 exposure.
+bundled_recommendations:
+  - rec-4872
+  - rec-4890
+followon_recs:
+  - rec-3791
+infrastructure_dependencies: []
+acceptance_criteria:
+  - pid_is_dead returns True for a stat file in state X or Z and for an absent stat file, and False for R, S and D.
+  - test_kills_the_detached_childs_whole_group asserts on the observation that ended its poll loop, never on a fresh probe.
+  - >-
+    The seam and open_memory_catalog each report the thread count ducklake_runtime.open_connection issues (1 today) and
+    open_local_lake opens through the seam; a change on either side fails
+    test_fixture_connections_run_with_the_runtime_thread_count.
+  - >-
+    No test module that runs production read-verb SQL calls duckdb.connect itself: the five rewired test files open through
+    the seam, tests/test_ducklake_reader_handler.py is the one named exclusion, and
+    test_verb_sql_modules_open_duckdb_only_through_the_seam fails on any new direct duckdb opener (duckdb or an alias of it;
+    an opener behind a helper call is out of its reach).
+  - >-
+    rec-4872 and rec-4890 close on the squash merge's Resolves trailer with fixed_by_sha equal to the merge commit and
+    repair_track_confirmed test_defect.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The probe's state table, including X, over fake stat files.
+    command: bin/venv-python -m pytest -q tests/checks/test__process_group.py::TestPidIsDeadStates
+    expected: >-
+      Exit 0. Red before: the class does not exist on origin/main; against the unmodified probe its nodes fail (the old
+      pid_is_dead takes no proc_root and reads X as alive).
+    fix_if: X or Z reads as alive, or R, S or D reads as dead -- fix DEAD_STATES or the stat parse; never edit the table.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: process-probe-dead-states
+    expected_literals: []
+  - step: 2
+    phase: pre-deploy
+    action: >-
+      The latch. The kill test's assert reads the observation that ended its poll loop, not a fresh probe of the grandchild.
+    command: "test -f tests/checks/test__process_group.py && ! grep -n 'assert pid_is_dead(grandchild_pid)' tests/checks/test__process_group.py"
+    expected: Exit 0 with no output. Red before (line 40 on origin/main asserts a fresh probe).
+    fix_if: A line still asserts a fresh pid_is_dead probe -- assert the latched variable the loop set instead.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      One-time claim over one file that complements step 1; with X counted as dead a re-introduced re-probe is harmless, and
+      the kill node itself stays pinned by the process-group-kill-and-reap record and run by the suite.
+    expected_literals: []
+  - step: 3
+    phase: pre-deploy
+    action: The process-group classes, including the repaired node, still pass against real processes.
+    command: >-
+      bin/venv-python -m pytest -q tests/checks/test__process_group.py::TestKillAndReapSignalTargeting
+      tests/checks/test__process_group.py::TestKillAndReapBoundedWait
+      tests/checks/verification/test__vp_replay_budget.py::TestRunBoundedTimeoutKillsTheProcessGroup
+    expected: Exit 0.
+    fix_if: A node fails -- read its assertion; never add a retry, skip or xfail (Decision 55).
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      The process-group-kill-and-reap record pins the seven test__process_group.py node ids, none of which changes, and the
+      suite runs them on every main push; the test__vp_replay_budget.py class is pinned by no record and is suite-run only.
+    expected_literals: []
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      The class guards: thread parity with the runtime, and the sweep that no verb-SQL test module opens DuckDB outside the
+      seam.
+    command: >-
+      bin/venv-python -m pytest -q
+      tests/common/test_ducklake_event_read_verbs.py::test_fixture_connections_run_with_the_runtime_thread_count
+      tests/common/test_ducklake_event_read_verbs.py::test_verb_sql_modules_open_duckdb_only_through_the_seam
+    expected: >-
+      Exit 0. Red before: neither node exists on origin/main; with the seam present but the fixtures and test files not yet
+      rewired, the parity node fails with assert 4 == 1 (measured on a prototype at 211f307c: DuckDB defaults to 4 threads
+      here and on the runner) and the sweep names the five unrewired files.
+    fix_if: >-
+      A connection reports a thread count other than the runtime's, or the sweep names a file -- route it through
+      duckdb_connect.connect(); never change the runtime to match the test and never widen the exclusion to pass.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      duckdb is absent from the fast tier (requirements-fast.txt heavy-exclusion), so the nodes cannot replay in venv-less
+      pr-validate; the full tier runs them before handoff and on every main push, which is the standing guard.
+    expected_literals: []
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      No bare connection opener remains at the rewired sites, and the seam is the one place the remaining files connect.
+    command: >-
+      F="tests/fixtures/telemetry_read_db.py tests/common/test_ducklake_event_read_verbs.py
+      tests/common/test_ducklake_event_read_dedupe.py tests/common/ducklake_reader_client/test_verb_fields_parity.py
+      tests/test_session_preflight_cache_serving.py tests/recs_related/test_verb_sql.py"; for f in $F; do test -f "$f" ||
+      exit 1; done; ! grep -n 'duckdb\.connect(' $F && test "$(grep -c 'duckdb\.connect(' tests/fixtures/duckdb_connect.py)" = 1
+    expected: Exit 0 with no grep output. Red before (seven openers on origin/main, and the seam file is absent).
+    fix_if: >-
+      A real opener remains -- replace it with duckdb_connect.connect(); a message, comment or docstring literal matched --
+      reword it (the AST sweep ignores literals, this grep does not).
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Moment claim over a fixed file list (Decision 244 cl.4); step 4's sweep node is the standing guard for the class.
+    expected_literals: []
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      Every test module that imports telemetry_read_db directly or through tests/fixtures/telemetry_golden_chain.py, plus the
+      four rewired files that do not, passes on the new connections. The list is derived, not restated.
+    command: >-
+      bin/venv-python -m pytest -q -n 4 $(grep -rlE 'telemetry_read_db|telemetry_golden_chain' tests/ --include='test_*.py')
+      tests/common/test_ducklake_event_read_dedupe.py tests/common/ducklake_reader_client/test_verb_fields_parity.py
+      tests/test_session_preflight_cache_serving.py tests/recs_related/test_verb_sql.py
+    expected: >-
+      Exit 0 (16 importer modules at planning, plus the four; measured on main 34c25c58 before the change: 1031 passed, 1
+      skipped in about 6 minutes at -n 4). Time the run the same way after the change and report it; more than double the
+      baseline is reported as a threads=1 cost, not hidden.
+    fix_if: >-
+      A node fails -- if it needed the default thread count, that is a test-side parity defect to fix in the test; never
+      special-case the seam.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Not hermetic: open_local_lake fetches the ducklake extension over the network, and the command's file list is derived
+      at run time; the full tier runs the non-integration nodes of every one of these modules before handoff and on every
+      main push (its -m "not integration" filter skips the integration-marked ones this step runs).
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      Merge-time readiness without running warehouse text: both recs hold exactly this plan's acceptance strings and a
+      closure_artifact that resolves to an existing node, and the plan's own literal acceptance commands pass. The sandboxed
+      preview of the warehouse acceptance is merge_step premerge at merge time (execution_steps[7]).
+    command: >-
+      bin/venv-python -c "import json; from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; from
+      scripts.ops_portal.closure_gate import artifact_exists; want = {'rec-4872': 'bin/venv-python -m pytest -q
+      tests/checks/test__process_group.py::TestPidIsDeadStates
+      tests/checks/test__process_group.py::TestKillAndReapSignalTargeting::test_kills_the_detached_childs_whole_group',
+      'rec-4890': 'bin/venv-python -m pytest -q
+      tests/common/test_ducklake_event_read_verbs.py::test_fixture_connections_run_with_the_runtime_thread_count
+      tests/common/test_ducklake_event_read_verbs.py::test_verb_sql_modules_open_duckdb_only_through_the_seam
+      tests/common/test_ducklake_event_read_verbs.py::test_verb_fields_match_event_verb_output_columns'}; rows, _ =
+      fetch_recs_by_ids(make_reader(), list(want)); got = {r['id']: (r['acceptance'],
+      json.loads(r['context_v2_json']).get('closure_artifact')) for r in rows}; print(got); assert all(got[k][0] == v for k,
+      v in want.items()), got; assert all(artifact_exists(a) for _, a in got.values()), got" && bin/venv-python -m pytest -q
+      tests/checks/test__process_group.py::TestPidIsDeadStates
+      tests/checks/test__process_group.py::TestKillAndReapSignalTargeting::test_kills_the_detached_childs_whole_group
+      tests/common/test_ducklake_event_read_verbs.py::test_fixture_connections_run_with_the_runtime_thread_count
+      tests/common/test_ducklake_event_read_verbs.py::test_verb_sql_modules_open_duckdb_only_through_the_seam
+      tests/common/test_ducklake_event_read_verbs.py::test_verb_fields_match_event_verb_output_columns
+    expected: >-
+      Prints both recs' acceptance and closure_artifact, the string and artifact assertions hold, and the five literal nodes
+      pass; exit 0. The folded command joins with spaces, matching the stored strings.
+    fix_if: >-
+      An acceptance string differs or an artifact does not resolve (a node was renamed) -- restamp with correct_rec_context
+      before merge, never edit a test to fit; a node fails -- fix the code, never the acceptance.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: pre-deploy
+    action: Fast tier.
+    command: bin/venv-python -m scripts.validate --pre
+    expected: Exit 0.
+    fix_if: Fix the reported check on the branch (Git-ops step 6).
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: pre-deploy
+    action: Full tier on the rebased head, with the handoff verdict.
+    command: bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: >-
+      The verdict check exits 0 for HEAD. Start the full tier backgrounded with a 2 h limit from the top-level session; its
+      verdict is the verify-head exit, never a pipe's status.
+    fix_if: >-
+      A failure in this plan's files -- fix and rerun from the start (timeout_disposition blocked); one only in another open
+      red's tests -- follow the implement skill's go/no-go.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: post-deploy
+    action: >-
+      The first main-validate run on the merge commit is green (trailer-closure runs after it, and its junit feeds the
+      acceptance verdict).
+    command: >-
+      mcp__github__actions_list(method=list_workflow_runs, owner=otl-labs, repo=ontheloop, resource_id=ci.yml,
+      workflow_runs_filter={branch: main, event: push}), pick the run whose head_sha is MERGE_SHA, then
+      mcp__github__get_job_logs(owner=otl-labs, repo=ontheloop, job_id=<its main-validate job>, return_content=true) and
+      read the Validation Summary.
+    expected: The run's conclusion is success and its Validation Summary reads All checks passed; record the run id.
+    fix_if: >-
+      Red in this plan's files -- forward-fix on a new branch (Decision 226); red only in another open red's tests -- record
+      it, and step 11 may still pass since trailer-closure keys on the acceptance verdict.
+    hermetic: false
+  - step: 11
+    phase: post-deploy
+    action: >-
+      The squash merge's "Resolves: rec-4872, rec-4890" trailer closed both recs, fix-bound to the merge commit. First export
+      MERGE_SHA as the sha the merge_pull_request result returned; run after ci.yml's trailer-closure job on that commit
+      finishes (it follows main-validate, about 16-20 minutes after the merge).
+    command: >-
+      test -n "$MERGE_SHA" && bin/venv-python -c "import json, os; from src.common.ducklake_reader_client import
+      fetch_recs_by_ids, make_reader; m = os.environ['MERGE_SHA']; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-4872',
+      'rec-4890']); st = {x['id']: (x['status'], json.loads(x['context_v2_json']).get('fixed_by_sha'),
+      json.loads(x['context_v2_json']).get('repair_track_confirmed')) for x in rows}; print(st); assert len(st) == 2 and
+      all(v == ('closed', m, 'test_defect') for v in st.values()), st"
+    expected: Both rows print as closed, the merge sha and test_defect; exit 0.
+    fix_if: >-
+      Still open: read the trailer-closure job log. ClosureArtifactRequired despite the stamp -- confirm the acceptance verdict
+      holds, then close through ci-rca-lifecycle closure_dependency.manual_route with the stamped --closure-artifact and
+      --closure-fix-sha "$MERGE_SHA" in one call. An AcceptanceVerdictRefused is never closed by hand: fix the code and let a
+      trailer close it. A report_unavailable verdict (main-validate emitted no junit) routes the same manual way.
+    hermetic: false
+test_obligations:
+  - source: tests/fixtures/process_probes.py
+    behavior: A process in state X or Z, or with no stat file, counts as dead; R, S and D count as alive.
+    verification_step: 1
+    test_selector: tests/checks/test__process_group.py::TestPidIsDeadStates
+    red_green_expectation: >-
+      Red before: the TestPidIsDeadStates nodes fail against the unmodified probe (no proc_root, X alive). Green after.
+  - source: tests/checks/test__process_group.py
+    behavior: The kill test's assert uses the loop's latched observation.
+    verification_step: 2
+    command: "test -f tests/checks/test__process_group.py && ! grep -n 'assert pid_is_dead(grandchild_pid)' tests/checks/test__process_group.py"
+    waiver_reason: >-
+      A test module; its new TestPidIsDeadStates nodes are the evidence for process_probes.py, and step 2 checks the latch.
+  - source: tests/fixtures/duckdb_connect.py
+    behavior: connect() opens a connection at the runtime's thread count.
+    verification_step: 4
+    test_selector: tests/common/test_ducklake_event_read_verbs.py::test_fixture_connections_run_with_the_runtime_thread_count
+    red_green_expectation: Red before (the seam does not exist). Green after.
+  - source: tests/fixtures/telemetry_read_db.py
+    behavior: open_memory_catalog opens at the runtime's thread count and open_local_lake opens through the seam.
+    verification_step: 4
+    test_selector: tests/common/test_ducklake_event_read_verbs.py::test_fixture_connections_run_with_the_runtime_thread_count
+    red_green_expectation: Red before (both openers report 4 threads here and on the runner). Green after.
+  - source: tests/common/test_ducklake_event_read_verbs.py
+    behavior: No verb-SQL test module opens DuckDB outside the seam; this file's own opener is rewired.
+    verification_step: 4
+    test_selector: tests/common/test_ducklake_event_read_verbs.py::test_verb_sql_modules_open_duckdb_only_through_the_seam
+    red_green_expectation: Red before (the sweep names the five unrewired files). Green after.
+  - source: tests/common/test_ducklake_event_read_dedupe.py
+    behavior: The dedupe nodes pass on a seam connection.
+    verification_step: 6
+    test_selector: tests/common/test_ducklake_event_read_dedupe.py
+    waiver_reason: A test module whose only change is its connection opener; steps 4 and 5 check the rewire, step 6 runs it.
+  - source: tests/common/ducklake_reader_client/test_verb_fields_parity.py
+    behavior: The verb-fields parity nodes pass on a seam connection.
+    verification_step: 6
+    test_selector: tests/common/ducklake_reader_client/test_verb_fields_parity.py
+    waiver_reason: A test module whose only change is its connection opener; steps 4 and 5 check the rewire, step 6 runs it.
+  - source: tests/test_session_preflight_cache_serving.py
+    behavior: The cache-serving nodes pass on a seam connection.
+    verification_step: 6
+    test_selector: tests/test_session_preflight_cache_serving.py
+    waiver_reason: A test module whose only change is its connection opener; steps 4 and 5 check the rewire, step 6 runs it.
+  - source: tests/recs_related/test_verb_sql.py
+    behavior: The recs_related verb-SQL nodes pass on a seam connection.
+    verification_step: 6
+    test_selector: tests/recs_related/test_verb_sql.py
+    waiver_reason: A test module whose only change is its connection opener; steps 4 and 5 check the rewire, step 6 runs it.
+constraints:
+  - "Test-only change: no file outside tests/ is edited apart from plan and registry bookkeeping (this plan's implementation_declared flip and step 1's graduated shard, both closure_gate bookkeeping prefixes), so repair_track_confirmed resolves to test_defect and no Lambda is affected."
+  - Do not bump DuckDB; that is rec-3791's work under config/lambda/ducklake/version.yaml's lockstep policy.
+  - Never skip, xfail, retry or quarantine a test to get green, and never change the runtime to match a test (Decision 55).
+  - No module-scope duckdb import in tests/fixtures/duckdb_connect.py or tests/fixtures/telemetry_read_db.py.
+  - No cross-test imports; shared helpers come from tests/fixtures/ (tests/CLAUDE.md).
+  - Python 3.12, type hints, ruff, line length 127, ASCII only, no new comments unless the why is non-obvious.
+context:
+  - >-
+    Decision-scout r1 FLAGS_FOUND. Decisions triaged: 197 of 197. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1 (T4.23, broad tests/ prefix only).
+    CITE 226, 186, 201, 181, 163, 189, 99. NOTE 235: the one surfaced weakening candidate is planned-change below; X-as-dead
+    and threads=1 fixtures are non-weakening (X is post-exit; threads=1 is production's own setting,
+    src/common/ducklake_runtime.py:293-296) -- operator-confirmed 2026-11-05. Decision 99/103: the engine bump is rec-3791.
+  - >-
+    red_overlap at plan write (main 34c25c58, exit 1): rec-4872, rec-4890 repairs_this_red; rec-4899 overlap via three
+    selector-shared test files. Deferral of rec-4899 (operator, 2026-11-05): its cause is repaired on main (PR 1855; Main
+    Canary green on runs 41947014400, 42008100562); its remaining acceptance is PLAN-registry-command-portability's build.
+  - >-
+    rec-4872 evidence: failing junit (run 41668729614) 0.009s vs 0.159s passing (run 41735791932), so the 0.1s loop at
+    tests/checks/test__process_group.py:38 exited on its first probe; X seen in 4 of 3000 local reaps (Z, X, gone). PID
+    recycling is refuted: cyclic PID allocation cannot reuse a PID within 9 ms.
+  - >-
+    rec-4890 evidence: assertion inside DuckDB's scheduler thread = duckdb/duckdb#22846. Upstream minimal query here: 1.5.4
+    threads=2 37 of 1500 connections fail, threads=1 0 of 1500, 1.5.6 threads=2 0 of 1500. Window users: 14 of 16
+    EVENT_READS and NAMED_READS recs_related.
+  - >-
+    Production not exposed (read-only probes, 2026-11-04): runtime connections issue SET threads=1 (pinned by
+    tests/common/test_ducklake_runtime.py:141); telemetry reader logs show no INTERNAL Error in 14-day retention. That
+    setting exists for vCPU starvation, not this race: the parity node follows it, so raising it before rec-3791 would
+    expose production and tests together.
+  - >-
+    Rec bookkeeping at planning, operator-approved 2026-11-05 (correct_rec_context, read back): both recs' title, diagnosis,
+    legacy context, gap_explanation, acceptance (steps 1 and 4 plus the failing node) and closure_artifact; rec-4890 stays
+    Track B and its preventive names the two step-4 nodes and rec-3791. A renamed node is restamped before merge.
+  - >-
+    Scope rule: a test module running production read-verb SQL opens DuckDB through the seam (the sweep's definition);
+    test_ducklake_reader_handler.py (ad hoc SQL) is the exclusion. Branch at main 34c25c58; no unbuilt plan edits scope.
+  - >-
+    Prototype on a discarded worktree of 211f307c: steps 1, 3, 4's parity node (red-before assert 4 == 1) and 6 green;
+    --pre failed only ruff on unformatted edits; the surfacer listed exactly the weakening candidate below. Critique r1
+    added tests/recs_related/test_verb_sql.py and the sweep node after the prototype.
+  - "Owner of this plan's handoff: this planning session."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 7}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 7}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 9}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 6}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+  - rec-4872 and rec-4890 read back with the acceptance and closure_artifact this plan names
+execution_steps:
+  - >-
+    tests/fixtures/process_probes.py: add DEAD_STATES = frozenset({"Z", "X"}); pid_is_dead(pid, proc_root=Path("/proc"))
+    reads proc_root / str(pid) / "stat", returns True on FileNotFoundError or ProcessLookupError and otherwise state in
+    DEAD_STATES; update its docstring to name X (EXIT_DEAD, mid-reap) and rec-4872.
+  - >-
+    tests/checks/test__process_group.py: in test_kills_the_detached_childs_whole_group, set dead = pid_is_dead(...) before
+    the loop, loop while not dead and before the deadline (sleep, then re-probe into dead), and assert dead; add
+    TestPidIsDeadStates with test_exit_dead_counts_as_dead (a tmp_path/<pid>/stat file in state X) and a parametrised table
+    (Z and X dead, R, S and D alive, absent dead, and a comm containing a space and a parenthesis).
+  - >-
+    Create tests/fixtures/duckdb_connect.py: RUNTIME_THREADS = 1; connect() imports duckdb, opens duckdb.connect(), executes
+    f"SET threads={RUNTIME_THREADS}" and returns the connection. Module docstring: why (the runtime issues SET threads=1;
+    duckdb/duckdb#22846 races at threads >= 2; rec-4890), without the literal text duckdb.connect( (step 5 counts it). The
+    same literal must not appear anywhere in telemetry_read_db.py or the five rewired test files either, including the sweep node's messages and
+    docstrings (step 5 greps them).
+  - >-
+    tests/fixtures/telemetry_read_db.py: open_memory_catalog and open_local_lake call duckdb_connect.connect() in place of
+    duckdb.connect() (a top-level import of the seam module is fine: it imports no duckdb).
+  - >-
+    The five test files: replace each duckdb.connect() named in scope with duckdb_connect.connect() and refresh
+    test_verb_fields_parity.py's docstring; add the two nodes to tests/common/test_ducklake_event_read_verbs.py per its
+    scope row. The DSN literal in the parity node carries the allowlist-secret pragma test_ducklake_runtime.py:37 uses.
+  - Execute Verification Plan steps 1-7 -- loop until pass; on unrecoverable failure stop and RCA (Decision 55).
+  - >-
+    Commit Flow, in the implement skill's order (.claude/skills/implement/SKILL.md Commit Flows): (a) bin/venv-python -m
+    scripts.session.github_readiness, each state reported on its own, unknown never PASS; (b) set implementation_declared:
+    true in this plan file; (c) step 8 (--pre); (d) write the retrospective and run bin/venv-python -m scripts.session.postflight
+    --evidence <file> before the commit; (e) commit with the body trailer "Resolves: rec-4872, rec-4890" (git commit -m
+    "fix(ci-flake-reap-state-duckdb-threads): ..." -m "Resolves: rec-4872, rec-4890"; validate_merge_step checks branch
+    trailers against bundled_recommendations), rebase on origin/main, then step 9 (full tier, backgrounded with a 2 h limit)
+    on the committed, rebased, clean tree with --verify-head exit 0; loop until pass; on an unexpected red stop and report.
+  - >-
+    Open the PR; its body repeats the Resolves trailer and carries the VP compliance table. Subscribe to PR activity; on code
+    review PROCEED and the green-CI wake, write the squash message (the implementation commit's body, trailer included) to a
+    file, run bin/venv-python -m scripts.session.merge_step premerge --slug ci-flake-reap-state-duckdb-threads
+    --message-file <file> (no --expect: the plan has no approved-text sidecar), merge with merge_method squash, that
+    commit_message and expectedHeadSha=<the HEAD premerge printed>, export MERGE_SHA from the merge result, then
+    bin/venv-python -m scripts.session.merge_step readback --slug ci-flake-reap-state-duckdb-threads --sha "$MERGE_SHA",
+    unsubscribe, and run steps 10 and 11.
+  - >-
+    Report, each separately: readiness states, validator verdicts (steps 1-9), postflight evidence, code review verdict, and
+    the real push, PR and merge outcome (PR URL, merge SHA, the main-validate run id and its Validation Summary, both recs'
+    step-11 read-back).
+weakening_dispositions:
+  - candidate: "[assertion-changed] tests/checks/test__process_group.py::TestKillAndReapSignalTargeting::test_kills_the_detached_childs_whole_group"
+    disposition: planned-change
+    cite: "acceptance_criteria[1]"
+rollback: Revert the squash commit; the change is test-only and touches no runtime path.
