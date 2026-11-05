@@ -1,7 +1,7 @@
 """Shared helper (never a test_ module) for the telemetry event-read tests: the four journals and ops_projects built from the
 field_semantics event projection under TELEMETRY_CATALOG_ALIAS, in an in-memory DuckDB or a local DuckLake.
 
-duckdb is imported lazily inside the functions, never at module scope (fast-tier importers must not pay for it).
+duckdb is imported lazily by the duckdb_connect seam, never at module scope (fast-tier importers must not pay for it).
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from src.common import ducklake_runtime as rt
+from tests.fixtures import duckdb_connect
 
 ALIAS = rt.TELEMETRY_CATALOG_ALIAS
 TABLES = ("telemetry_sessions", "telemetry_observations", "telemetry_transcripts", "telemetry_agents")
@@ -26,9 +27,7 @@ def projects_columns() -> list[tuple[str, str]]:
 
 
 def open_memory_catalog() -> Any:
-    import duckdb  # noqa: PLC0415
-
-    con = duckdb.connect()
+    con = duckdb_connect.connect()
     con.execute("SET TimeZone='UTC'")
     con.execute(f"ATTACH ':memory:' AS {ALIAS}")
     create_tables(con)
@@ -48,10 +47,8 @@ def create_tables(con: Any, *, partitioned: bool = False) -> None:
 
 def open_local_lake(tmp_path: Path) -> Any:
     """A local DuckLake catalog under the telemetry alias; FAILS (never skips) when the extension cannot load (rec-4071)."""
-    import duckdb  # noqa: PLC0415
-
     tmp_path.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect()
+    con = duckdb_connect.connect()
     try:
         con.execute("INSTALL ducklake; LOAD ducklake")
     except Exception as exc:  # noqa: BLE001
