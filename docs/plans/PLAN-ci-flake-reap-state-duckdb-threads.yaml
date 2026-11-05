@@ -39,17 +39,21 @@ scope:
   - file: tests/fixtures/telemetry_read_db.py
     action: Modify
     purpose: >-
-      open_memory_catalog and open_local_lake take their connection from duckdb_connect.connect(), and the module docstring's
+      open_memory_catalog and open_local_lake take their connection from duckdb_connect.connect(), called through the module
+      attribute (from tests.fixtures import duckdb_connect) so the parity node's spy reaches it, and the module docstring's
       lazy-import sentence says duckdb is now imported by the seam; nothing else changes.
   - file: tests/common/test_ducklake_event_read_verbs.py
     action: Modify
     purpose: >-
-      test_health_count_reads_metadata_only takes its connection from the seam. Two new nodes. (1)
-      test_fixture_connections_run_with_the_runtime_thread_count (the rec-4890 closure artifact) captures the one SET threads
-      statement ducklake_runtime.open_connection issues (FakeCon from tests/fixtures/ducklake_fakes.py and the patches
-      tests/common/test_ducklake_runtime.py:125-128 applies, with that file's _DSN shape), derives the runtime's thread count
-      from it, and asserts the seam, open_memory_catalog and open_local_lake each report that derived count through
-      current_setting('threads'); the expectation comes from the runtime, never from RUNTIME_THREADS. (2)
+      test_health_count_reads_metadata_only takes its connection from the seam, and the module docstring names the two new
+      nodes. (1) test_fixture_connections_run_with_the_runtime_thread_count (the rec-4890 closure artifact) captures the one
+      SET threads statement ducklake_runtime.open_connection issues (FakeCon from tests/fixtures/ducklake_fakes.py and the
+      patches tests/common/test_ducklake_runtime.py:125-128 applies, with that file's _DSN shape), derives the runtime's
+      thread count from it, and asserts the seam and open_memory_catalog each report that derived count through
+      current_setting('threads') -- the expectation comes from the runtime, never from RUNTIME_THREADS. open_local_lake is
+      proven to route through the seam without a network fetch: a spy on telemetry_read_db's duckdb_connect.connect raises a
+      sentinel, and the call must raise it before any INSTALL (this module is not integration-marked, and every real
+      open_local_lake caller today is). (2)
       test_verb_sql_modules_open_duckdb_only_through_the_seam parses every tests/**/*.py with ast. A module is verb-SQL when
       an ast.Name id, an ast.Attribute attr or an ImportFrom alias is NAMED_READS, EVENT_READS or render_sql, or when an
       Import or ImportFrom names one of src.common's ducklake_event_read_verbs, ducklake_event_reads, ducklake_event_read_sql,
@@ -58,6 +62,9 @@ scope:
       tests/test_ducklake_reader_handler.py match, and that file (its real-DuckDB node runs ad hoc SQL only) is the one
       named exclusion, a constant carrying that reason. Home beside the parity node: --pre's diff-aware selection would not
       select a fast-tier sweep for an edit to another test file, so the full tier (pre-handoff and main) gates it either way.
+      Non-vacuity floor: the node also asserts that this module and the five rewired files classify as verb-SQL, so a rename
+      of the names or modules it keys on fails rather than passing on zero matches. Size: about +45 SLOC (392 -> about 440 of
+      500); if the build would cross 500, stop and amend the plan, never raise the budget.
   - file: tests/common/test_ducklake_event_read_dedupe.py
     action: Modify
     purpose: _load takes its connection from the seam.
@@ -85,8 +92,9 @@ acceptance_criteria:
   - pid_is_dead returns True for a stat file in state X or Z and for an absent stat file, and False for R, S and D.
   - test_kills_the_detached_childs_whole_group asserts on the observation that ended its poll loop, never on a fresh probe.
   - >-
-    The seam, open_memory_catalog and open_local_lake each report the thread count ducklake_runtime.open_connection issues
-    (1 today); a change on either side fails test_fixture_connections_run_with_the_runtime_thread_count.
+    The seam and open_memory_catalog each report the thread count ducklake_runtime.open_connection issues (1 today) and
+    open_local_lake opens through the seam; a change on either side fails
+    test_fixture_connections_run_with_the_runtime_thread_count.
   - >-
     No test module that runs production read-verb SQL calls duckdb.connect itself: the five rewired test files open through
     the seam, tests/test_ducklake_reader_handler.py is the one named exclusion, and
@@ -111,7 +119,7 @@ verification_plan:
     phase: pre-deploy
     action: >-
       The latch. The kill test's assert reads the observation that ended its poll loop, not a fresh probe of the grandchild.
-    command: "! grep -n 'assert pid_is_dead(grandchild_pid)' tests/checks/test__process_group.py"
+    command: "test -f tests/checks/test__process_group.py && ! grep -n 'assert pid_is_dead(grandchild_pid)' tests/checks/test__process_group.py"
     expected: Exit 0 with no output. Red before (line 40 on origin/main asserts a fresh probe).
     fix_if: A line still asserts a fresh pid_is_dead probe -- assert the latched variable the loop set instead.
     hermetic: true
@@ -132,8 +140,8 @@ verification_plan:
     hermetic: true
     graduation: waive
     graduation_waiver_reason: >-
-      Already graduated: the process-group-kill-and-reap record pins these TestKillAndReap node ids and the suite runs them
-      on every main push; none of the ids changes.
+      The process-group-kill-and-reap record pins the seven test__process_group.py node ids, none of which changes, and the
+      suite runs them on every main push; the test__vp_replay_budget.py class is pinned by no record and is suite-run only.
     expected_literals: []
   - step: 4
     phase: pre-deploy
@@ -145,9 +153,9 @@ verification_plan:
       tests/common/test_ducklake_event_read_verbs.py::test_fixture_connections_run_with_the_runtime_thread_count
       tests/common/test_ducklake_event_read_verbs.py::test_verb_sql_modules_open_duckdb_only_through_the_seam
     expected: >-
-      Exit 0. Red before: neither node exists on origin/main; with the nodes present and nothing else changed, the parity
-      node fails with assert 4 == 1 (measured on a prototype at 211f307c: DuckDB defaults to 4 threads here and on the
-      runner) and the sweep names the five unrewired files.
+      Exit 0. Red before: neither node exists on origin/main; with the seam present but the fixtures and test files not yet
+      rewired, the parity node fails with assert 4 == 1 (measured on a prototype at 211f307c: DuckDB defaults to 4 threads
+      here and on the runner) and the sweep names the five unrewired files.
     fix_if: >-
       A connection reports a thread count other than the runtime's, or the sweep names a file -- route it through
       duckdb_connect.connect(); never change the runtime to match the test and never widen the exclusion to pass.
@@ -167,7 +175,9 @@ verification_plan:
       tests/test_session_preflight_cache_serving.py tests/recs_related/test_verb_sql.py"; for f in $F; do test -f "$f" ||
       exit 1; done; ! grep -n 'duckdb\.connect(' $F && test "$(grep -c 'duckdb\.connect(' tests/fixtures/duckdb_connect.py)" = 1
     expected: Exit 0 with no grep output. Red before (seven openers on origin/main, and the seam file is absent).
-    fix_if: An opener remains -- replace it with duckdb_connect.connect().
+    fix_if: >-
+      A real opener remains -- replace it with duckdb_connect.connect(); a message, comment or docstring literal matched --
+      reword it (the AST sweep ignores literals, this grep does not).
     hermetic: true
     graduation: waive
     graduation_waiver_reason: >-
@@ -192,7 +202,8 @@ verification_plan:
     graduation: waive
     graduation_waiver_reason: >-
       Not hermetic: open_local_lake fetches the ducklake extension over the network, and the command's file list is derived
-      at run time; the full tier runs every one of these modules before handoff and on every main push.
+      at run time; the full tier runs the non-integration nodes of every one of these modules before handoff and on every
+      main push (its -m "not integration" filter skips the integration-marked ones this step runs).
   - step: 7
     phase: pre-deploy
     action: >-
@@ -288,7 +299,7 @@ test_obligations:
   - source: tests/checks/test__process_group.py
     behavior: The kill test's assert uses the loop's latched observation.
     verification_step: 2
-    command: "! grep -n 'assert pid_is_dead(grandchild_pid)' tests/checks/test__process_group.py"
+    command: "test -f tests/checks/test__process_group.py && ! grep -n 'assert pid_is_dead(grandchild_pid)' tests/checks/test__process_group.py"
     waiver_reason: >-
       A test module; its new TestPidIsDeadStates nodes are the evidence for process_probes.py, and step 2 checks the latch.
   - source: tests/fixtures/duckdb_connect.py
@@ -297,7 +308,7 @@ test_obligations:
     test_selector: tests/common/test_ducklake_event_read_verbs.py::test_fixture_connections_run_with_the_runtime_thread_count
     red_green_expectation: Red before (the seam does not exist). Green after.
   - source: tests/fixtures/telemetry_read_db.py
-    behavior: open_memory_catalog and open_local_lake open at the runtime's thread count.
+    behavior: open_memory_catalog opens at the runtime's thread count and open_local_lake opens through the seam.
     verification_step: 4
     test_selector: tests/common/test_ducklake_event_read_verbs.py::test_fixture_connections_run_with_the_runtime_thread_count
     red_green_expectation: Red before (both openers report 4 threads here and on the runner). Green after.
@@ -372,6 +383,7 @@ gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 7}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 7}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 9}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -392,7 +404,9 @@ execution_steps:
   - >-
     Create tests/fixtures/duckdb_connect.py: RUNTIME_THREADS = 1; connect() imports duckdb, opens duckdb.connect(), executes
     f"SET threads={RUNTIME_THREADS}" and returns the connection. Module docstring: why (the runtime issues SET threads=1;
-    duckdb/duckdb#22846 races at threads >= 2; rec-4890), without the literal text duckdb.connect( (step 5 counts it).
+    duckdb/duckdb#22846 races at threads >= 2; rec-4890), without the literal text duckdb.connect( (step 5 counts it). The
+    same literal must not appear anywhere in telemetry_read_db.py or the five rewired test files either, including the sweep node's messages and
+    docstrings (step 5 greps them).
   - >-
     tests/fixtures/telemetry_read_db.py: open_memory_catalog and open_local_lake call duckdb_connect.connect() in place of
     duckdb.connect() (a top-level import of the seam module is fine: it imports no duckdb).
