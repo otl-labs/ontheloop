@@ -7,7 +7,8 @@ intent: >-
   Stop speculative Terraform plans creating GitHub deployment records by running the tf-trusted-plan job with
   deployment: false, adopted only after live proof that the Environment still binds the OIDC subject and still refuses a
   non-main ref (rec-4913), and retire the inert deployment-approval-probe Environment, workflow, script and tests now that
-  rec-4695 is closed (rec-4914, superseding rec-4716), so the Deployments panel shows only real approvals and releases.
+  rec-4695 is closed (rec-4914, superseding rec-4716), so the Deployments panel gains no new speculative-plan records
+  and loses the probe's failed one (the 13 old tf-trusted-plan records stay).
 plan_type: IMPLEMENTATION
 verification_tier: V3
 plan_path: docs/plans/PLAN-github-environment-tidy.yaml
@@ -99,10 +100,11 @@ infrastructure_dependencies:
     OPERATOR STEP A (his click, during VP 6): approve the one pending deployment-approval-probe job of the temporary probe
     workflow in the Actions UI. It is the Environment's required reviewer; no agent can approve (rec-4695).
   - >-
-    OPERATOR STEP B (admin mutation, needs his own words naming it; after VP 6, before the PR opens): delete the
+    OPERATOR STEP B (admin mutation, needs his own words naming it; after VP 8 and VP 9, just before the PR opens): delete the
     deployment-approval-probe Environment in Settings, Environments. Inferred, not verified: this also deletes its 6
     deployment records (the red X); the check that proves it is gh api
-    "repos/otl-labs/ontheloop/deployments?environment=deployment-approval-probe&per_page=100" --jq length returning 0. Deleting first makes the PR-time terraform-github-plan refresh drop the object, so the PR plan shows no
+    "repos/otl-labs/ontheloop/deployments?environment=deployment-approval-probe&per_page=100" --jq length returning 0; a non-zero count is recorded and reported, and deleting records is out of scope and
+    always-ask. Deleting first makes the PR-time terraform-github-plan refresh drop the object, so the PR plan shows no
     destroy (precedent: PLAN-deployment-approval-probe rollback note); the operator's next routine terraform/github
     apply then has nothing to do for it. If he prefers, the alternative is to leave the Environment and destroy it by
     his hand apply after merge; the PR-time plan then goes red with TF_GITHUB_PLAN_DESTRUCTIVE on exactly that one
@@ -121,7 +123,8 @@ acceptance_criteria:
     tf-trusted-plan deployment count is unchanged.
   - >-
     VP 6: a job naming {name: deployment-approval-probe, deployment: false} waits for the operator's approval, then its
-    OIDC token's sub is repo:<repo>:environment:deployment-approval-probe and the environment claim is present; the
+    OIDC token's sub is the immutable form repo:otl-labs@<owner id>/ontheloop@<repo id>:environment:deployment-approval-probe
+    and the environment claim is present; the
     environment's deployment count is unchanged.
   - >-
     The plan job of terraform-plan-trusted.yml declares environment {name: tf-trusted-plan, deployment: false}, and
@@ -221,7 +224,11 @@ verification_plan:
       LEG 2, same run. Job claims: environment {name: deployment-approval-probe, deployment: false}; permissions
       {contents: read, id-token: write}; SHA-pinned checkout with persist-credentials false; python3 -I
       scripts/ci/oidc_claims_probe.py --audience sts.amazonaws.com --require sub --require environment --require
-      job_workflow_ref. Tell the operator it waits for his approval (OPERATOR STEP A) with the run link.
+      job_workflow_ref. This last use knowingly breaks the probe Environment's own invariant (never a job holding
+      id-token, environments.tf and the workflow header); it is safe because no role trusts the
+      environment:deployment-approval-probe sub (the sub forms trusted under terraform/personal and terraform/bootstrap
+      are main, agent/*, pull_request, refs/pull/*, tf-gated-apply and tf-trusted-plan). Tell the operator it waits for
+      his approval (OPERATOR STEP A) with the run link.
     command: >-
       gh api "repos/otl-labs/ontheloop/deployments?environment=deployment-approval-probe&per_page=100" --jq length;
       echo 'RUN BEFORE AND AFTER (gh as in VP 5). VIA MCP: get_job_logs for the claims job'
@@ -289,15 +296,16 @@ verification_plan:
       echo 'RUN BEFORE AND AFTER (gh as in VP 5). VIA MCP: actions_list list_workflow_runs for terraform-plan-trusted.yml
       on the throwaway PR, get_job_logs for the assume step, pull_request_read get_comments for the plan comment'
     expected: >-
-      The assume step succeeds as agent-platform-github-ci-trusted-plan; the plan comment posts with category OK, no
-      changes and the SAVED_PLAN sentence of scripts/ci/terraform_personal_plan_report.py ("This saved plan is applied
+      The assume step succeeds as agent-platform-github-ci-trusted-plan; the plan comment posts with category OK and the
+      SAVED_PLAN sentence of scripts/ci/terraform_personal_plan_report.py ("This saved plan is applied
       at merge (apply-the-saved-plan path); a stale plan fails closed at merge."); the count is unchanged.
     fix_if: >-
       ASSUME_FAILED: open the forward-fix PR restoring the string form at once (rollback note), tell the operator, and
       leave rec-4913 open (it was never closed) with the run URL added by update_rec; until the forward-fix merges any
       terraform/personal PR gets no saved plan (recovery: blank workflow_dispatch of terraform-apply-sandbox). The count
       grew: the same forward-fix, then report. The job fails before any step runs (not ASSUME_FAILED; for example a
-      custom deployment protection rule): the same forward-fix, then report.
+      custom deployment protection rule): the same forward-fix, then report. A non-empty plan caused by pre-existing
+      terraform/personal drift is not a leg failure (the PR is closed unmerged, so nothing applies).
     hermetic: false
   - step: 11
     phase: post-deploy
@@ -307,8 +315,12 @@ verification_plan:
       rows,_=r.fetch_recs_by_ids(r.make_reader(),['rec-4913','rec-4914','rec-4716']); print({x['id']: x['status'] for x in rows})"
     expected: rec-4913 closed (after VP 10 green), rec-4914 closed, rec-4716 superseded.
     fix_if: >-
-      rec-4914 still open: the trailer job did not run; close it with update_rec naming the merge SHA. rec-4716 not
-      superseded or rec-4913 not closed after a green VP 10: write it with update_rec under --profile agent_platform.
+      rec-4914 still open: diagnose first with bin/venv-python -m scripts.session.merge_step readback --slug
+      github-environment-tidy --sha <merge sha> and the trailer-closure job's per-rec marker, then route per
+      docs/contracts/git-ops.yaml resolves_trailer (Decision 201): a trailer readback finds missing goes to merge_step
+      recover; a transport failure or merge-leg refusal may use the sanctioned --update-rec fallback; after an
+      acceptance-verdict refusal no manual close is allowed, the route is fix-forward. The update_rec writes in this
+      plan cover only rec-4716 (superseded) and rec-4913 (after a green VP 10, with its acceptance verdict).
     hermetic: false
 test_obligations:
   - source: scripts/checks/ci_guards/validate_trusted_plan_environment.py
@@ -382,6 +394,7 @@ gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 11}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 8}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 8}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -391,18 +404,24 @@ pre_implementation_checklist:
 execution_steps:
   - Write the temporary probe workflow (each push carries handoff evidence, Decision 203); run VP 5 and VP 6 (operator approves the claims job); delete the probe workflow in the next commit and push.
   - >-
-    Make the scope edits and commit them locally; run VP 1-4 and the fast tier; set implementation_declared, commit,
-    rebase on origin/main; run VP 8 (full tier) and VP 9 (code review) on that head.
+    Make the scope edits and commit them locally; run VP 1-4 and the fast tier; set implementation_declared and commit
+    it with the trailer "Resolves: rec-4914" in that branch commit message (validate_merge_step reads branch commits,
+    not the squash message); rebase on origin/main; run VP 8 (full tier) and VP 9 (code review) on that head.
   - >-
-    Only then ask the operator for OPERATOR STEP B (his words) and wait for it; this keeps the window in which main still
+    Only then ask the operator for OPERATOR STEP B (his words) and wait for it, telling him in the same message that no
+    terraform/github apply may run until the merge (main still declares the probe; the content-reader lock set-up may
+    prompt one); this keeps the window in which main still
     declares the probe short (other terraform/github PR plans in that window show a create of the probe Environment,
     expected and not acted on). Then push, open the PR and run VP 7.
   - >-
-    Ask the operator for the merge word with the VP 5-7 evidence inline; squash-merge with "Resolves: rec-4914", equal
-    to bundled_recommendations (rec-4913 stays open until its live proof; a closed rec is never reopened); supersede
+    Ask the operator for the merge word with the VP 5-7 evidence inline; run merge_step premerge; squash-merge with an
+    explicit commit_message carrying "Resolves: rec-4914", equal to bundled_recommendations (rec-4913 stays open until its live proof; a closed rec is never reopened); supersede
     rec-4716 with update_rec (status superseded, resolution naming rec-4914 and the merge SHA), under --profile
     agent_platform.
-  - Run VP 10 immediately; on green close rec-4913 with update_rec (resolution naming the VP 10 run URL and the merge SHA); then VP 11.
+  - >-
+    Run VP 10 immediately; on green run bin/venv-python -m scripts.rec_trailer_acceptance census and evaluate for
+    rec-4913 at the merge SHA, then close it with update_rec carrying that acceptance_verdict, closing_sha the merge SHA
+    and a resolution naming the VP 10 run URL (not a verdict-less close, Decision 201 cl.3 residual rec-3999); then VP 11.
   - 'Report: what was implemented, verification results'
 rollback: >-
   If VP 10 fails, a forward-fix PR restores environment: tf-trusted-plan as a string and the old predicate (a), never a
