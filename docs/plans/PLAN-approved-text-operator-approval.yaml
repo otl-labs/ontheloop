@@ -20,7 +20,8 @@ scope:
     purpose: >-
       The approval surface's small closure (critique r4 B4: render and wake must not import approved_text.py, whose
       verify CLI reaches scripts.checks._common and the plan schema). Moves here from approved_text.py unchanged: the
-      Sidecar and Block models, words, sidecar_rel, parse_sidecar, ApprovedTextError, the _PLACEHOLDERS regexes, the
+      Sidecar and Block models, words, SIDECAR_DIR, sidecar_rel, parse_sidecar, ApprovedTextError, the _PLACEHOLDERS
+      regexes, the
       placeholder-aware matcher (_token_matches, find_all) and digest() (the wording-check digest the page header also
       shows, critique r7 B1). Imports only the standard library, yaml, pydantic and
       review_page. Adds approved_digest(sidecar): per block, drop the longest common word suffix of `before` and
@@ -36,7 +37,8 @@ scope:
       not 64 hex or differs from approved_digest, a W that is not review_page.fingerprint(H), a block file that is
       absolute or holds `..` or `.git/`, and wording that carries a control, bidi-override or zero-width code point
       (Unicode category Cc other than newline and tab, or Cf), so the page cannot read differently from the bound
-      words; locates each block in D with the matcher (by `before`, else by `after`, else "place not found at main
+      words; locates each block in D by comparing tokens with _token_matches, so an `after` carrying {{N}} or {{DATE}}
+      matches main's filled text (find_all's plain == would not; by `before`, else by `after`, else "place not found at main
       <sha>"); prints review_page.render's Markdown for $GITHUB_STEP_SUMMARY, and refuses output over 1 MiB (the step
       summary cap, past which GitHub drops the page while the job still succeeds) so approve never waits on an empty
       page.
@@ -105,8 +107,9 @@ scope:
       scripts.repo_identity.full_name() (GITHUB_REPOSITORY in Actions); session commands always pass --repo, since the
       fallback constant is the pre-transfer name the session proxy refuses (critique r4 B2). So a session's --pre
       prints `UNVERIFIED (advisory)` for a changed sidecar; that is expected, and the session read is `check --repo
-      otl-labs/ontheloop`. lookup(slug, approved_digest, root): root is the repository the ancestry check runs in (each
-      seam passes its own, so TestSeams runs it in its tmp repository); list the repository's runs with event workflow_dispatch and branch main, any status (GET
+      otl-labs/ontheloop`. lookup(slug, approved_digest, root, deadline): root is the repository the ancestry check runs
+      in (each seam passes its own, so TestSeams runs it in its tmp repository) and deadline the check's shared
+      Deadline; list the repository's runs with event workflow_dispatch and branch main, any status (GET
       /repos/{owner}/{repo}/actions/runs, per_page 100, at most 10 pages, so the 1000 newest; not the per-workflow
       endpoint, which answers 404 until main carries the workflow, critique r4 B1); keep runs whose path is
       .github/workflows/approved-text-approval.yml, whose display_title equals `approved-text <slug> <fingerprint>
@@ -120,7 +123,8 @@ scope:
       No /environments read: the session proxy refuses that path (403, critique r1 live read), and with
       can_admins_bypass false GitHub records an approval only from a required reviewer, whose set Terraform owns
       (environments.tf, reviewers from var.gated_apply_reviewer_user_ids). Each request has a 10 s timeout. Each check
-      creates one `Deadline(30)` at the start of its provenance leg and passes it to every lookup it makes, so a PR
+      creates one `Deadline(30)` at the start of its provenance leg and passes it through its seam to every lookup it
+      makes (the informational one included), so a PR
       changing several sidecars spends at most 30 s per check and 60 s for the two, inside selection_budget's 270 s
       NON_TEST_BUDGET_SECONDS (Decision 73 cl.1); any HTTP error, timeout, deadline, unparsable body or missing
       git object is UNVERIFIED with the reason; an answered query with no match is MISSING, including an approval
@@ -142,7 +146,7 @@ scope:
       _check_sidecar: after approved_text.verify passes on the base sidecar, call approved_text_provenance.provenance
       on it; under enforce append a failure for MISSING or UNVERIFIED naming the dispatch remedy (git-ops.yaml
       approved_text_binding), and otherwise print the advisory line. The leg calls a module function
-      `_sidecar_provenance(slug, sidecar, root, in_push)` (the core over the base sidecar it is given, with the GitHub
+      `_sidecar_provenance(slug, sidecar, root, in_push, deadline)` (the core over the base sidecar it is given, with the GitHub
       lookup and mode(in_push, GITHUB_EVENT_NAME == pull_request)). It returns (verdict, mode, info), and the leg routes
       on verdict and mode and prints info when present, so the check-level tests monkeypatch it to any triple
       (APPROVED with enforce and no info by default; MISSING or UNVERIFIED with enforce or advisory; skip) and
@@ -164,13 +168,18 @@ scope:
       line. Like _wording_check_gaps, the leg runs only when the diff base resolves: pr-validate's fetch-depth 0
       guarantees that in pull-request CI, and the graduated node
       test_an_unresolved_merge_base_warns_once_and_requires_nothing keeps its meaning (critique r9 B1 withdrew the r8
-      N3 fail-closed branch, which would have broken it). The failure names the run to
+      N3 fail-closed branch, which would have broken it). The one existing advisory becomes "no merge base resolves,
+      so no wording-check row or approval lookup is required" (still printed once, so the node's count == 1 holds).
+      The leg runs only on the non-None digest `_wording_check_gaps` already read inside its try, so a malformed
+      sidecar stays a gap, never an exception (test_a_malformed_sidecar_is_a_gap_not_an_exception keeps its
+      meaning). The failure names the run to
       dispatch (slug, the PR head sha from $GITHUB_EVENT_PATH's pull_request.head.sha, else HEAD; approved digest;
       fingerprint), since pull-request CI checks out a merge commit the wake would never match. It also says: dispatch
       at the PR's final head; if the head moves before the tap, re-run pr-validate after it (the approval stands while
       the sidecar is unchanged; the wake comment only reaches a PR whose head is the dispatched sha). The push context
       comes from one `_common.push_context_base(_common.ROOT)` call in the check, which the leg tests monkeypatch
-      (critique r4 B3). The leg calls a module function `_sidecar_provenance(slug, root, in_push)`: the core over the
+      (critique r4 B3). The leg calls a module function `_sidecar_provenance(slug, root, in_push, deadline)`: the core
+      over the
       working-tree sidecar under root (the HEAD copy the PR proposes, never the diff base's; whether it changed is
       `_changed_sidecar_digest`'s call), with the GitHub lookup and mode(in_push, GITHUB_EVENT_NAME == pull_request),
       and returns (verdict, mode, info) like validate_merge_step's (info always None here). The check-level tests monkeypatch it, as they already do `_changed_sidecar_digest`, and TestSeams runs it for
@@ -334,9 +343,13 @@ scope:
       examined kept), so the graduated shard reads the same on main's branch-main checkout as on a session branch
       (critique r4 B3); a changed sidecar without approval fails on the plan PR and warns off it, GRANDFATHERED and
       APPROVED pass, UNVERIFIED fails on the plan PR, an advisory MISSING or UNVERIFIED warns without a PASS line,
-      and the remedy names the PR head sha from a fixture event payload. TestSeams (critique r5 B1) runs both real
+      and the remedy names the PR head sha from a fixture event payload (and HEAD when none is set). An autouse
+      fixture deletes APPROVED_TEXT_GH_TOKEN and GITHUB_EVENT_PATH, which pr-validate exports to the whole step that
+      runs pytest and tests/conftest.py does not clear; nodes that need either set it (critique r10 B1). TestSeams
+      (critique r5 B1) runs both real
       `_sidecar_provenance` seams in a tmp git repository and monkeypatches only approved_text_github.http_get (a
-      recorder answering from fixtures; the repository's refs/remotes/origin/main covers each fixture run's head_sha)
+      recorder answering from fixtures, rewriting each fixture run's head_sha to a commit the tmp repository's
+      refs/remotes/origin/main covers)
       and GRANDFATHER_REF (a fixture commit): (a) validate_plan_documents' seam, with pull_request, on a working tree
       that rewords a sidecar present and undeclared at the fixture ref, while the runs list holds one approved run
       titled with the old copy's approved digest, reads MISSING (it evaluates the HEAD copy, so the old approval and
@@ -366,8 +379,9 @@ scope:
       title that do not hide an older approved one, and the wake comment target (pulls.json; http_post recorded, its
       body carrying the marker and the visible line); the list call is
       the repository-wide runs endpoint with the event and branch filters; `--repo` overrides repo_identity; `check
-      --digest` overrides the working-tree digest; only APPROVED_TEXT_GH_TOKEN is read, and an autouse fixture
-      deletes it (nodes that need it set it), since CI exports it to the whole `validate --pre` step.
+      --digest` overrides the working-tree digest; only APPROVED_TEXT_GH_TOKEN is read, and the same autouse fixture
+      as tests/test_approved_text_provenance.py's deletes it and GITHUB_EVENT_PATH (nodes that need either set it),
+      since CI exports both to the whole `validate --pre` step.
   - file: tests/test_approved_text_approval_workflow.py
     action: Create
     purpose: >-
@@ -787,6 +801,7 @@ gate_rounds:
   - {gate: wording-check, round: 7, verdict: PASS, digest: abfa8e44d747f0ad623e54a8d02cb750746bb728f1b3bc906bb47a5789e9eca3, base: 2db2392a48fc064e5efb00aa2c0d5f388c19b8d7, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 8, verdict: PROCEED, blocking: 0, nits: 11}
   - {gate: plan-critique, round: 9, verdict: REVISE, blocking: 1, nits: 9}
+  - {gate: plan-critique, round: 10, verdict: REVISE, blocking: 1, nits: 8}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -808,7 +823,7 @@ execution_steps:
     approved-text-approval.yml, ci.yml, deployment-approval-probe.yml header, Terraform files, ports.yaml, taxonomy
     and baseline rows; measure ci_rca_taxonomy.yaml and git-ops.yaml against main and apply their NEAR_CAP rows
     (taxonomy: compact; git-ops: stop and report).
-  - Apply the sidecar blocks exactly (git-ops.yaml, planning SKILL.md, DECISIONS.md); config/prose_budgets.yaml changes only if SKILL.md's measured size moves; pin GRANDFATHER_REF to the merge-base at the final rebase.
+  - Apply the sidecar blocks exactly (git-ops.yaml, planning SKILL.md, DECISIONS.md) and regenerate docs/decisions-index.json (implement-scope-boundary's decisions_index_regeneration row; validate_decisions_index_freshness fails without it); config/prose_budgets.yaml changes only if SKILL.md's measured size moves; pin GRANDFATHER_REF to the merge-base at the final rebase.
   - Execute the Verification Plan pre-deploy steps; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55).
   - >-
     Before code review, post on the build PR the V3 evidence for its CI-green head (see the V3 resolution context
