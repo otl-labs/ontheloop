@@ -27,7 +27,8 @@ scope:
     action: Modify
     purpose: >-
       Regenerated, never hand-edited: bin/venv-python .claude/hooks/plugin_hooks.py render. render copies each hook
-      object with {**hook}, so the plugin copies carry the same statusMessage behind the unchanged GATE prefix.
+      object with {**hook} and gates only its command, so each plugin copy carries the same statusMessage, ungated,
+      which is the text a plugin hook run records.
   - file: tests/hooks/test_capture_hook_registration.py
     action: Modify
     purpose: >-
@@ -61,7 +62,8 @@ acceptance_criteria:
     attachment command for the branch's real capture registrations, in both the settings shape (CC-web) and the plugin
     shape (project thread): pin ontheloop, at least one Stop witness, checkout known, no label (VP 4).
   - >-
-    After merge, a new CC-web session and a new project thread each appear as a root session in sessions_window (VP 6).
+    After merge, a new project thread and a new CC-web session each pin ontheloop and record a Stop witness in their own
+    transcript (VP 6), and each appears in sessions_window with the session_started_at it reported (VP 7).
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -105,6 +107,10 @@ verification_plan:
   - step: 4
     phase: pre-deploy
     action: >-
+      Preconditions: /mnt/project-files is mounted (project-thread containers) and claude --version is 2.1.317 or newer;
+      either missing means BLOCKED, never skip or PASS. --plugin builds the plugin from plugin_hooks.render(settings),
+      not from the committed hooks.json (committed parity is VP 1 and VP 3). The CLI writes only SessionStart and Stop
+      records in a -p run, so the StopFailure, UserPromptSubmit and SessionEnd statusMessages rest on VP 2 alone.
       End to end on the installed CLI: the branch's real capture registrations and hook scripts in a scratch project,
       a local mock Messages API, CLAUDE_CODE_REMOTE=true, an empty environment (no AWS credentials, no scripts package,
       so no capture pass can start or send). Settings shape, then plugin shape. On main both print FAIL with a
@@ -138,16 +144,43 @@ verification_plan:
   - step: 6
     phase: post-deploy
     action: >-
-      After the squash merge: one new CC-web session on main and one new project thread (any prompt, one Stop each);
-      then read sessions_window.
+      Self-check inside two NEW sessions started after the merge: (a) a project thread the build thread asks the
+      coordinator to start (message_coordinator) with this command as its first task; (b) a CC-web session Benjamin
+      opens on main (operator step) and pastes this command into after one prompt. Each reports the printed line back
+      to the build thread. The JSON's started_at is that session's session_started_at (rule session_pin). (b) waits for
+      Benjamin (offline overnight from 2026-11-05 23:42Z): the build thread reports 6a and 7 for 6a, leaves 6b and 7 for
+      6b open as his named operator step, and keeps the thread open until they pass.
     command: >-
-      AWS_PROFILE=agent_platform bin/venv-python -c "from scripts.preflight.session_history import
-      read_session_history; import json; print(json.dumps(read_session_history(window_days=1, limit=20),
-      default=str))"
+      bin/venv-python -c "import glob,os,json,pathlib; from src.turn_capture.transcript import FsTree, ROOT, read_lines,
+      session_pin, project_ref_pin; from src.turn_capture.witness import is_witness_record;
+      f=max(glob.glob(os.path.expanduser('~/.claude/projects/*/*.jsonl')),key=os.path.getmtime); t=FsTree(pathlib.Path(f));
+      lines=read_lines(t.read(ROOT) or b''); print(json.dumps({'transcript':os.path.basename(f),
+      'started_at':session_pin(lines).isoformat(),'pin':project_ref_pin(t),'witnesses':sum(1 for i in lines if i.data and
+      is_witness_record(i.data))}))"
     expected: >-
-      status ok and at least two root sessions whose start is after the merge time, one of them the project thread.
+      In each session: pin ontheloop and witnesses at least 1, with started_at after the merge SHA's commit time. (On
+      this planning thread before the fix it printed pin null, witnesses 0.) A project thread writes its SessionStart
+      records after its first Stop, so run it from the second turn on.
     fix_if: >-
-      No row within 30 minutes of a Stop: read that session's diagnostics.jsonl for the pass outcome and report to the
+      pin null with a label command: the session did not load the merged hooks (check its checkout or the plugin sync);
+      report to the coordinator, never a forward fix in this plan.
+    hermetic: false
+  - step: 7
+    phase: post-deploy
+    action: >-
+      Warehouse read-back through the telemetry reader (Decision 236 cl.2), within one hour of each session's first
+      Stop: each started_at from VP 6 matches a sessions_window row in the project.
+    command: >-
+      STARTS="<started_at of 6a> <started_at of 6b>" AWS_PROFILE=agent_platform bin/venv-python -c "import os,json;
+      from datetime import datetime,timedelta,timezone; from scripts.preflight import _common; now=datetime.now(timezone.utc);
+      rows=list(_common._make_event_reader().named('sessions_window', day_from=(now.date()-timedelta(days=1)).isoformat(),
+      day_to=now.date().isoformat(), as_of=now.isoformat())); seen={datetime.fromisoformat(str(r['session_started_at'])) for r
+      in rows}; want=[datetime.fromisoformat(x) for x in os.environ['STARTS'].split()]; miss=[w.isoformat() for w in want
+      if w not in seen]; print(json.dumps({'rows':len(rows),'missing':miss})); assert want and not miss, miss;
+      print('SESSIONS_LANDED')"
+    expected: Exit 0, missing empty, then SESSIONS_LANDED.
+    fix_if: >-
+      A start missing after one hour: read that session's diagnostics.jsonl for the last pass outcome and report to the
       coordinator; revert the merge commit only if the change itself broke a hook.
     hermetic: false
 test_obligations:
@@ -189,7 +222,8 @@ context:
     Known costs: the statusMessage shows as the hook's spinner text; every non-capture hook's process_event name still
     falls back to hookName (H-2); the behaviour was read from the minified binary and observed only on 2.1.318 under a
     mock API, not documented, so a later CLI can change it again (rec-4942 owns the release canary); no effect on
-    sessions already running.
+    sessions already running; the plugin check hook warns of drift in project threads on this branch until the merge
+    syncs the plugin.
   - "Open PRs (2026-11-05 23:15Z): none touches the scope files; #1856 edits transcript.py elsewhere (host_run), no overlap."
   - >-
     Decision-scout verdict FLAGS_FOUND (three NOTE, no WARN or BLOCK); CITE list: Decision 228. Decisions triaged: 197 of
@@ -204,11 +238,16 @@ context:
     until VP 6 passes.
   - "red_overlap verdict 2026-11-05: clear (slo_hours 4, reds [])."
   - >-
+    Proof substitution (approved with the approach, 23:33Z): postmortem s7.1's live CC-web session on the PR branch is
+    replaced by VP 4 before merge plus VP 6-7 after it, because a branch session cannot exercise the plugin shape
+    (project threads load the plugin from main) and each hour of delay loses about one session.
+  - >-
     Unbuilt plans scoping the same files (plan_obligations): PLAN-protected-action-gate and
     PLAN-telemetry-content-reader-lock add PreToolUse hooks; whichever builds second rebases and re-renders hooks.json.
     PLAN-hook-canary-evidence and PLAN-telemetry-capture-hooks are already built (their hooks are on main).
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -220,7 +259,22 @@ execution_steps:
     .claude/settings.json: add the five statusMessage keys exactly as scope row 1 reads; then run
     bin/venv-python .claude/hooks/plugin_hooks.py render and commit the regenerated .claude/hooks/hooks.json.
   - tests/hooks/test_capture_hook_registration.py -- add the two nodes as scope row 3 reads.
-  - Execute Verification Plan steps 1-5 -- run each step; loop until pass; on a VP 4 FAIL stop and report (Decision 55).
-  - Merge under the standing rule once code review is PROCEED and CI is green, then run VP 6.
-  - 'Report: what was implemented, verification results, the VP 6 session ids.'
+  - >-
+    Execute Verification Plan steps 1-4 -- run each step; loop until pass; on a VP 4 FAIL stop and report (Decision 55).
+    Commit, then run VP 5 on the committed clean HEAD (verify-head fails on a dirty tree), then push.
+  - >-
+    Closure evidence, recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state
+    (bin/venv-python -m scripts.session.github_readiness); parent validator evidence (VP 5 full-tier exit 0 plus
+    bin/venv-python -m scripts.checks.validation_result --verify-head for the pushed HEAD); structured postflight evidence
+    (write the scripts.session.postflight_evidence.CATEGORIES JSON in the scratchpad, then bin/venv-python -m
+    scripts.session.postflight --evidence <file>); the real outcome - push, build PR, CI green by event-driven wake
+    (never polled), merge SHA.
+  - >-
+    Merge under the standing rule once independent code review is PROCEED and every check is green; then VP 6 (ask the
+    coordinator for the new project thread; ask Benjamin for the CC-web session) and VP 7.
+  - >-
+    After VP 7 passes: update_rec on rec-4939 (via scripts.ops_data_portal, get_rec_write_guidance first) adding a
+    context note that the statusMessage stopgap is live from merge SHA <sha>, the rec stays open; priority is
+    Benjamin's call (postmortem D4).
+  - 'Report: what was implemented, the four closure facts (PR number, merge SHA, verify-head verdict), and the VP 6-7 lines.'
 rollback: Revert the squash commit; the settings return to the label-recorded shape (capture stays broken, nothing else changes).
