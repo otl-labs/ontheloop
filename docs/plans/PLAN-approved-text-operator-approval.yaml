@@ -147,7 +147,8 @@ scope:
       _check_sidecar: after approved_text.verify passes on the base sidecar, call approved_text_provenance.provenance
       on it; under enforce append a failure for MISSING or UNVERIFIED naming the dispatch remedy (git-ops.yaml
       approved_text_binding) with the build PR's head sha (from $GITHUB_EVENT_PATH's pull_request.head.sha, else
-      HEAD, as validate_plan_documents does), and otherwise print the advisory line. The leg calls a module function
+      HEAD; each check keeps its own small reader, since importing the helper's would leave
+      scripts/checks/roadmap/ outside this Entry's pre_globs), and otherwise print the advisory line. The leg calls a module function
       `_sidecar_provenance(slug, sidecar, root, in_push, deadline)` (the core over the base sidecar it is given, with the GitHub
       lookup and mode(in_push, GITHUB_EVENT_NAME == pull_request)). It returns (verdict, mode, info), and the leg routes
       on verdict and mode and prints info when present, so the check-level tests monkeypatch it to any triple
@@ -165,6 +166,11 @@ scope:
   - file: scripts/checks/roadmap/validate_plan_documents.py
     action: Modify
     purpose: >-
+      The leg's code and seam live in scripts/checks/roadmap/_plan_sidecar_approval.py (its own row), so this file
+      gains only the imports, the push_context_base call, one Deadline(30) per run, one call per plan on the digest
+      _wording_check_gaps read, the reworded no-merge-base advisory and the PASS-line suppression. Its mirror only
+      stubs APPROVED, so every line it gains must run under that stub: the advisory flag folds into the PASS guard
+      (for example `elif not advisory:`), never a statement that runs only when the flag is set.
       Beside _wording_check_gaps: a plan whose sidecar the diff adds or changes needs provenance of the HEAD sidecar
       APPROVED or GRANDFATHERED; MISSING and UNVERIFIED fail under enforce (the plan PR) and otherwise print a WARN
       line. Like _wording_check_gaps, the leg runs only when the diff base resolves: pr-validate's fetch-depth 0
@@ -180,14 +186,45 @@ scope:
       at the PR's final head; if the head moves before the tap, re-run pr-validate after it (the approval stands while
       the sidecar is unchanged; the wake comment only reaches a PR whose head is the dispatched sha). The push context
       comes from one `_common.push_context_base(_common.ROOT)` call in the check, which the leg tests monkeypatch
-      (critique r4 B3). The leg calls a module function `_sidecar_provenance(slug, root, in_push, deadline)`: the core
+      (critique r4 B3). The leg calls the helper's seam `sidecar_provenance(slug, root, in_push, deadline)`: the core
       over the
       working-tree sidecar under root (the HEAD copy the PR proposes, never the diff base's; whether it changed is
       `_changed_sidecar_digest`'s call), with the GitHub lookup and mode(in_push, GITHUB_EVENT_NAME == pull_request),
       and returns (verdict, mode, info) like validate_merge_step's (info always None here). The check-level tests monkeypatch it, as they already do `_changed_sidecar_digest`, and TestSeams runs it for
       real (critique r5 B1). On skip it prints the SKIP line and still declares examined. An advisory line suppresses
       the summary PASS line (accounting as for validate_merge_step).
-    new_imports: [scripts.roadmap.approved_text_provenance, scripts.roadmap.approved_text_github]
+    new_imports: [scripts.checks.roadmap._plan_sidecar_approval, scripts.roadmap.approved_text_provenance]
+  - file: scripts/checks/roadmap/_plan_sidecar_approval.py
+    action: Create
+    purpose: >-
+      validate_plan_documents' approval leg and its seam, as that row describes them (build-time amendment
+      2026-11-05). validate_test_coverage measures each changed source's per-file line coverage by running its mirror
+      test alone and needs 100%, and the check's mirror test is NEAR_CAP, so the leg's branches and seam could not be
+      covered there. Holds `sidecar_provenance(slug, root, in_push, deadline)` and the leg function the check calls once
+      per plan (the enforce failure with its dispatch remedy, the WARN and SKIP lines), which returns the gaps and
+      whether a line was advisory. Imports only the standard library, approved_words (parsing the working-tree
+      sidecar, approved_digest), review_page (the remedy's fingerprint), approved_text_provenance and
+      approved_text_github. The render and wake jobs never import it, so it stays out of CODEOWNERS.
+    new_imports: [scripts.roadmap.approved_words, scripts.roadmap.review_page, scripts.roadmap.approved_text_provenance, scripts.roadmap.approved_text_github]
+  - file: tests/checks/roadmap/test__plan_sidecar_approval.py
+    action: Create
+    purpose: >-
+      The helper's mirror test, covering every line of _plan_sidecar_approval.py from this file alone.
+      TestSidecarApprovalLeg moves here from tests/test_approved_text_provenance.py, its nodes otherwise unchanged:
+      each monkeypatches `_plan_sidecar_approval.sidecar_provenance` and the check's `_common.push_context_base` (to
+      None, or to a sha for one node proving the skip with examined kept), so the graduated shard reads the same on
+      main's branch-main checkout as on a session branch (critique r4 B3). A changed sidecar without approval fails on
+      the plan PR and warns off it; GRANDFATHERED and APPROVED pass; UNVERIFIED fails on the plan PR; an advisory
+      MISSING or UNVERIFIED warns without a PASS line; and the remedy names the PR head sha from a fixture event
+      payload (and HEAD when none is set). A copy of tests/test_approved_text_provenance.py's autouse fixture deletes
+      APPROVED_TEXT_GH_TOKEN and GITHUB_EVENT_PATH and pins GITHUB_REPOSITORY; the class builds its own plan fixtures,
+      since validate_no_cross_test_imports (Decision 131 cl.2) forbids importing test_validate_plan_documents.py's
+      helpers. TestSeamUnit runs the real
+      `sidecar_provenance` in a tmp git repository, with approved_text_github.lookup monkeypatched: it skips on
+      in_push without a lookup, and under pull_request it reads a reworded sidecar's HEAD copy as MISSING and an
+      unchanged grandfathered one as GRANDFATHERED (GRANDFATHER_REF monkeypatched to a tmp commit). TestSeams stays
+      the end-to-end proof through http_get. If tests/checks/roadmap/conftest.py is created (the NEAR_CAP relief),
+      these nodes override its autouse stub.
   - file: tests/checks/verification/test_validate_merge_step.py
     action: Modify
     purpose: >-
@@ -196,15 +233,20 @@ scope:
       (test_exact_sidecar_passes, test_real_tree_run_passes, the _late_merge nodes) keeps its meaning and never
       reaches the network or depends on GITHUB_ACTIONS; the graduated shard merge-step-check-tests (this whole file) is
       kept. New class TestProvenanceLeg overrides it: MISSING and UNVERIFIED fail under enforce, an advisory MISSING
-      or UNVERIFIED prints no PASS line, the enforce remedy names the PR head sha from a fixture event payload (and HEAD
+      or UNVERIFIED prints no PASS line, a GRANDFATHERED triple carrying info prints its `lookup (informational)` line
+      (the line VP 9 reads), the enforce remedy names the PR head sha from a fixture event payload (and HEAD
       when GITHUB_EVENT_PATH is unset), and on a main push the lookup is skipped while examined is still declared.
+      Its seam nodes run the real `_sidecar_provenance` in a tmp git repository with approved_text_github.lookup
+      monkeypatched: in_push skips without a lookup, pull_request reads APPROVED, and a base sidecar grandfathered at a
+      monkeypatched GRANDFATHER_REF returns GRANDFATHERED with one `lookup (informational)` line. That keeps
+      validate_merge_step.py at 100% from this mirror alone (validate_test_coverage; build-time amendment 2026-11-05).
   - file: tests/checks/roadmap/test_validate_plan_documents.py
     action: Modify
     purpose: >-
-      An autouse fixture (about four lines) monkeypatches `_sidecar_provenance` to APPROVED, so
+      An autouse fixture (about four lines) monkeypatches `_plan_sidecar_approval.sidecar_provenance` to APPROVED, so
       test_a_fresh_pass_row_satisfies_the_plan_pr, the _sidecar_plan nodes and every other node keep their meaning
       and never reach the network; the graduated shard wording-check-row-required-on-plan-pr (TestWordingCheckRecord)
-      is kept. The leg's new nodes live in tests/test_approved_text_provenance.py (graduated, VP 1). NEAR_CAP (489 of
+      is kept. The leg's new nodes live in tests/checks/roadmap/test__plan_sidecar_approval.py (graduated, VP 1). NEAR_CAP (489 of
       500 SLOC on 2026-11-04, about +4 here): measure against main at build time; if the fixture would cross 500, put
       it in tests/checks/roadmap/conftest.py instead (the decomposition; no shard changes).
   - file: tests/checks/roadmap/conftest.py
@@ -223,7 +265,7 @@ scope:
     action: Modify
     purpose: >-
       Entry validate_plan_documents' pre_globs gain scripts/repo_identity.py (reached through approved_text_github;
-      its scripts/roadmap/** glob already covers the rest).
+      its scripts/roadmap/** and scripts/checks/roadmap/** globs already cover the rest, the helper included).
   - file: .github/workflows/approved-text-approval.yml
     action: Create
     purpose: >-
@@ -288,7 +330,7 @@ scope:
       /scripts/roadmap/approved_text_provenance.py, /scripts/roadmap/approved_text_github.py and
       /scripts/repo_identity.py, every row `/`-anchored like the file's existing entries (re-derived with scripts.dependency_graph at build; the shape test fails if the closure
       grows past this list), plus the tests and fixtures that pin them (/tests/test_approved_text_provenance.py,
-      /tests/test_approved_text_github.py, /tests/test_approved_text_approval_workflow.py, /tests/test_review_page.py,
+      /tests/test_approved_text_github.py, /tests/test_approved_text_approval_workflow.py, /tests/test_review_page.py, /tests/test_approved_words.py,
       /tests/fixtures/approved_text/ and /tests/fixtures/approved_text_github/). A later change to what the run page
       shows or what the digest binds then needs the operator's final-diff word (clause 4's CODEOWNERS paths).
       approved_text.py stays out: verify is a check judged by its own copy (rec-2827), and its CLI reaches
@@ -342,21 +384,18 @@ scope:
       number changed to a word; equal when that number moves from N to N+1 (whatever the frozen copy reads). `record` prints the approved= and fingerprint= lines. Grandfather true only at the pinned ref, same
       digest, plan undeclared, UNVERIFIED when the ref is missing; mode(in_push, on_pr) and is_failure per context:
       skip on in_push (a push and an on-main schedule), enforce on on_pr, advisory otherwise (workflow_dispatch off main,
-      schedule off main, local runs). TestSidecarApprovalLeg (validate_plan_documents' new leg): every node
-      monkeypatches the check's `_common.push_context_base` (to None, or to a sha for one node proving the skip with
-      examined kept), so the graduated shard reads the same on main's branch-main checkout as on a session branch
-      (critique r4 B3); a changed sidecar without approval fails on the plan PR and warns off it, GRANDFATHERED and
-      APPROVED pass, UNVERIFIED fails on the plan PR, an advisory MISSING or UNVERIFIED warns without a PASS line,
-      and the remedy names the PR head sha from a fixture event payload (and HEAD when none is set). An autouse
+      schedule off main, local runs); a plan missing or unparsable at GRANDFATHER_REF counts as undeclared (as
+      _common._plan_declared_at_ref reads it); Deadline's expiry (its clock monkeypatched). TestSidecarApprovalLeg lives in
+      tests/checks/roadmap/test__plan_sidecar_approval.py, the mirror of the module holding the leg. An autouse
       fixture deletes APPROVED_TEXT_GH_TOKEN and GITHUB_EVENT_PATH and sets GITHUB_REPOSITORY to
       fixture-owner/fixture-repo, all three of which pr-validate exports to the whole step that runs pytest and
       tests/conftest.py does not clear; nodes that need another value set it, and expected URLs derive from
       repo_identity.full_name() (critique r10 B1, r11 N1). TestSeams
-      (critique r5 B1) runs both real
-      `_sidecar_provenance` seams in a tmp git repository and monkeypatches only approved_text_github.http_get (a
+      (critique r5 B1) runs both real seams (validate_merge_step's `_sidecar_provenance` and
+      `_plan_sidecar_approval.sidecar_provenance`) in a tmp git repository and monkeypatches only approved_text_github.http_get (a
       recorder answering from fixtures, rewriting each fixture run's head_sha to a commit the tmp repository's
       refs/remotes/origin/main covers)
-      and GRANDFATHER_REF (a fixture commit): (a) validate_plan_documents' seam, with pull_request, on a working tree
+      and GRANDFATHER_REF (a fixture commit): (a) validate_plan_documents' seam (`_plan_sidecar_approval.sidecar_provenance`), with pull_request, on a working tree
       that rewords a sidecar present and undeclared at the fixture ref, while the runs list holds one approved run
       titled with the old copy's approved digest, reads MISSING (it evaluates the HEAD copy, so the old approval and
       the grandfather do not carry over), and the unchanged copy reads GRANDFATHERED; (b) validate_merge_step's seam
@@ -368,13 +407,32 @@ scope:
     purpose: >-
       Each render form on this plan's own sidecar blocks, read from the frozen copy in
       tests/fixtures/approved_text/sidecar-history.yaml (git-ops-binding renders Was / Becomes, planning-step-8b
-      renders Edited in place, decision-83-update renders New text) plus a synthetic pure deletion; location lines;
-      placeholder display; escaping (a block whose words carry ** or <del> cannot restyle the page); fingerprint is
-      four words, stable, and changes with the digest; a block whose `before` is absent from the base renders from
-      `after`'s place, and one found nowhere renders with "place not found at main"; base texts come from a pinned
-      fixture copy, never the working tree; `approved_words render` refuses a bad slug, a digest mismatch, a
-      fingerprint that does not match the digest, a block file that is absolute or holds `..` or `.git/`, and wording
-      with a Cc (other than newline and tab) or Cf code point.
+      renders Edited in place, decision-83-update renders New text, decision-new renders New text placed before its
+      anchor) plus a synthetic pure deletion and an insertion with an empty `before`; location lines as
+      the caller passes them (a heading, a YAML key, "place not found at main <sha>"); placeholder display; escaping
+      (a block whose words carry ** or <del> cannot restyle the page); fingerprint is four words, stable, and changes
+      with the digest. It imports only review_page: render's block locating and refusals are approved_words code, so
+      their nodes live in tests/test_approved_words.py.
+  - file: tests/test_approved_words.py
+    action: Create
+    purpose: >-
+      approved_words.py's mirror test (build-time amendment 2026-11-05). The mirror rule maps
+      scripts/roadmap/approved_words.py here, and validate_test_coverage measures that file's per-file coverage by
+      running this file alone and needs 100%; test_unmapped_sources_do_not_grow fails while this file is absent.
+      Every node imports from approved_words (only the re-export node also imports approved_text), and builds small sidecars inline or reads
+      the pinned fixtures, never the live sidecar or the working tree. Moved names: Sidecar refuses empty blocks and
+      duplicate ids; parse_sidecar refuses bad YAML and a schema miss as ApprovedTextError; words; sidecar_rel;
+      _token_matches with and without a placeholder; find_all compares plainly; digest is stable; and
+      approved_text's re-exports are the same objects. approved_digest: shared prefix and suffix drop out; a pure
+      insertion and a pure deletion each keep their words; a number or date is recorded as its placeholder only in an
+      equal-length replace run; block order and ids do not count. render: a successful page for a small sidecar;
+      each refusal (a slug that is not [a-z0-9-]+, a digest that is not 64 hex or is not approved_digest, a fingerprint
+      that does not match, a block file that is absolute or holds `..` or `.git/`, wording with a Cc code point other
+      than newline and tab or a Cf one); output over 1 MiB refused; and a block located by `before`, by `after` (main
+      already carries it) or nowhere ("place not found at main <sha>", the sha from the tmp git repository's HEAD),
+      with base texts from tests/fixtures/approved_text/review_page_base.yaml; each location-line kind (the nearest
+      preceding Markdown heading, a top-level YAML key, nothing before the place); and a --sidecar-file that does not
+      parse.
   - file: tests/test_approved_text_github.py
     action: Create
     purpose: >-
@@ -385,9 +443,14 @@ scope:
       title that do not hide an older approved one, and the wake comment target (pulls.json; http_post recorded, its
       body carrying the marker and the visible line); the list call is
       the repository-wide runs endpoint with the event and branch filters; `--repo` overrides repo_identity; `check
-      --digest` overrides the working-tree digest; only APPROVED_TEXT_GH_TOKEN is read, and the same autouse fixture
-      as tests/test_approved_text_provenance.py's clears it and GITHUB_EVENT_PATH and pins GITHUB_REPOSITORY, since CI
-      exports all three to the whole `validate --pre` step.
+      --digest` overrides the working-tree digest; only APPROVED_TEXT_GH_TOKEN is read, and a copy of
+      tests/test_approved_text_provenance.py's autouse fixture clears it and GITHUB_EVENT_PATH and pins GITHUB_REPOSITORY, since CI
+      exports all three to the whole `validate --pre` step. The real http_get and http_post each run against a
+      monkeypatched urllib.request.urlopen (a response, an HTTPError, a timeout; no socket), so the adapter's own
+      transport lines are covered from this mirror alone. Also named: `approvals --run-id` prints each approval's
+      state, environments and login; wake prints `wake: <n> open PRs at <sha> auth=token|anonymous` after its reads
+      and `wake: ERROR <reason>` with a non-zero exit on a failed read; an unparsable body and a missing git object in
+      the ancestry check each read UNVERIFIED.
   - file: tests/test_approved_text_approval_workflow.py
     action: Create
     purpose: >-
@@ -397,7 +460,9 @@ scope:
       requirements.txt, run-name grammar equal to
       approved_text_github's parser, every `uses:` is SHA-pinned, both checkouts set persist-credentials false, the wake step sets
       APPROVED_TEXT_GH_TOKEN, the Terraform resource attributes, and each new address being EXEMPT or carrying an
-      import block (so rec-4911 needs no edit here). In ci.yml, scoped to pr-validate so later ci.yml changes need no
+      import block (so rec-4911 needs no edit here; EXEMPT is read by parsing
+      tests/checks/iam_tf/test_terraform_github_import_blocks.py with ast.literal_eval, never by import, which
+      validate_no_cross_test_imports refuses). In ci.yml, scoped to pr-validate so later ci.yml changes need no
       edit to this code-owned test: it holds `actions: read`, only its step whose name starts with "Validate fast
       tier" (the full name carries a parenthesised list) sets APPROVED_TEXT_GH_TOKEN, and that step sets no GH_TOKEN. CODEOWNERS lists the workflow and every path of the
       render and wake jobs' import closure (scripts.dependency_graph forward_closure of approved_words and
@@ -488,7 +553,7 @@ verification_plan:
   - step: 1
     phase: pre-deploy
     action: Run rec-4769's acceptance (provenance core, approved digest on real history and the synthetic edits).
-    command: bin/venv-python -m pytest tests/test_approved_text_provenance.py -q
+    command: bin/venv-python -m pytest tests/test_approved_text_provenance.py tests/checks/roadmap/test__plan_sidecar_approval.py -q
     expected: exit 0; red before (module absent).
     fix_if: an anchor-only fixture pair differs, a word-change pair matches, or mode() enforces or skips on the wrong event
     hermetic: true
@@ -497,10 +562,10 @@ verification_plan:
     graduation_check_id: approved-text-provenance
   - step: 2
     phase: pre-deploy
-    action: Run the review-page renderer tests.
-    command: bin/venv-python -m pytest tests/test_review_page.py -q
+    action: Run the review-page renderer and approved_words tests.
+    command: bin/venv-python -m pytest tests/test_review_page.py tests/test_approved_words.py -q
     expected: exit 0; red before (module absent).
-    fix_if: a block renders in the wrong form, or quoted wording can inject Markdown
+    fix_if: a block renders in the wrong form, quoted wording can inject Markdown, or render accepts what it must refuse
     hermetic: true
     expected_literals: [" passed"]
     graduation: graduate
@@ -659,7 +724,12 @@ test_obligations:
   - source: scripts/roadmap/approved_words.py
     behavior: render refuses a bad slug, a digest or fingerprint mismatch, an unconfined block path and a control, bidi or zero-width code point.
     verification_step: 2
-    test_selector: tests/test_review_page.py
+    test_selector: tests/test_approved_words.py
+    red_green_expectation: red before (module absent), green after.
+  - source: scripts/roadmap/approved_words.py
+    behavior: The moved names, approved_digest's branches and render's block locating and output cap, each exercised from approved_words directly, at 100% line coverage from this mirror alone.
+    verification_step: 2
+    test_selector: tests/test_approved_words.py
     red_green_expectation: red before (module absent), green after.
   - source: scripts/roadmap/approved_text.py
     behavior: record prints the approved= and fingerprint= lines; the moved names re-export unchanged.
@@ -689,12 +759,22 @@ test_obligations:
   - source: scripts/checks/roadmap/validate_plan_documents.py
     behavior: A plan PR adding or changing a sidecar without approval fails (a WARN off the plan PR); approved and grandfathered pass; advisory MISSING or UNVERIFIED warns; a patched push context skips with examined kept.
     verification_step: 1
-    test_selector: tests/test_approved_text_provenance.py::TestSidecarApprovalLeg
+    test_selector: tests/checks/roadmap/test__plan_sidecar_approval.py::TestSidecarApprovalLeg
     red_green_expectation: red before (no provenance leg or seam), green after.
-  - source: scripts/checks/roadmap/validate_plan_documents.py
+  - source: scripts/checks/roadmap/_plan_sidecar_approval.py
     behavior: The real seam evaluates the HEAD sidecar, so a reworded grandfathered sidecar reads MISSING.
     verification_step: 1
     test_selector: tests/test_approved_text_provenance.py::TestSeams
+    red_green_expectation: red before (seam absent), green after.
+  - source: scripts/checks/roadmap/_plan_sidecar_approval.py
+    behavior: From its mirror alone, the real seam skips on in_push without a lookup, reads a reworded sidecar MISSING and an unchanged grandfathered one GRANDFATHERED.
+    verification_step: 1
+    test_selector: tests/checks/roadmap/test__plan_sidecar_approval.py::TestSeamUnit
+    red_green_expectation: red before (module absent), green after.
+  - source: scripts/checks/verification/validate_merge_step.py
+    behavior: From its mirror alone, the real seam skips on in_push without a lookup, reads APPROVED under pull_request, and returns GRANDFATHERED with one informational lookup line.
+    verification_step: 4
+    test_selector: tests/checks/verification/test_validate_merge_step.py::TestProvenanceLeg
     red_green_expectation: red before (seam absent), green after.
   - source: scripts/checks/verification/validate_merge_step.py
     behavior: The real seam skips the lookup in push context, looks up the base sidecar's approved digest in pull_request CI, and returns the informational line for a grandfathered sidecar.
@@ -784,7 +864,8 @@ context:
   - "Critique r7 dispositions: N8 and N9 reworded clause 3 ('a run whose gated job an Environment reviewer approved and that then succeeded', matching the adapter's approve-job key) and git-ops-binding ('a missing or unreadable approval fails in pull-request CI only and is advisory elsewhere'), both inside the pending operator approval (wording-check round 7). N10: clause 2's '(operator, 2026-11-04)' is set to the date of the operator's card answer when it comes. N11 accepted: planning-step-8b's 'Then push it' stays, since the block is byte-neutral at a zero-headroom prose budget and the step's subject is the plan."
   - "coordinator.yaml:82 ('It approves the exact wording pasted at presentation') reads against clause 1 ('A chat word alone no longer binds wording') until PLAN-coordinator-approve-once is amended to dispatch the approval run. The owning thread 'Plan the coordinator skill' gets that ask in this plan's handoff message, sent at this plan's merge, not at the build's (critique r8 N6)."
   - "Critique r9 N8 accepted without a wording change: git-ops-binding's 'advisory elsewhere' is read with clause 3's 'The post-merge full tier does not re-run the lookup' (main skips it, which never fails either); another reworded sentence would mean another operator re-read for no change in behaviour."
-  - "Fast-tier breadth, declared (scripts.checks.deps.selection_budget --plan, 2026-11-05): n_selected 305 of a census of 1035, predicted CI test half 252.5-959.5 s, predicted outcome breadth_waived, no pre-commit global input; KEEP the scope (the tool's declare-or-split verdict), so the waiver is expected at review."
+  - "Fast-tier breadth, declared (scripts.checks.deps.selection_budget --plan, 2026-11-05): n_selected 307 of a census of 1039 (re-measured after the build-time amendment), predicted CI test half 252.6-959.6 s, predicted outcome breadth_waived, no pre-commit global input; KEEP the scope (the tool's declare-or-split verdict), so the waiver is expected at review."
+  - "Build-time amendment 2026-11-05 (the build thread, through the coordinator): the plan declared no mirror test for approved_words.py, so the full tier failed validate_test_coverage and test_unmapped_sources_do_not_grow, validate_scope_boundary refused the undeclared tests/test_approved_words.py, and the graduated decomposed-sources-route-to-test-packages record was red only as a consequence. validate_test_coverage measures per-file coverage only once no mirror test is missing, each source by its mirror test alone, at 100% (both checks read 100.0 on main 6c56dd20). So the same amendment also moves the coverage the plan had placed outside a mirror: approved_words' render refusals and block locating to tests/test_approved_words.py; validate_plan_documents' leg and seam to a helper module with its own mirror (the check's mirror is NEAR_CAP), with TestSidecarApprovalLeg; real-seam nodes into test_validate_merge_step.py; and the adapter's real transport into its mirror. TestSeams stays the end-to-end proof. The sidecar is unchanged. VP 1 and VP 2 now name two test files each, so their registry rows are command_exit_zero (the backlog-health-package-suite shape), not test_selector, whose node_id is one pytest argument (critique r14 N3)."
   - "Critique r11 dispositions: N6 accepted: the plan-PR leg rides _wording_check_gaps, so it inherits its schema_version >= 5 floor; every sidecar plan today is v5 and a new plan below v5 is refused (_new_plan_version_failures), so only an existing v4 plan gaining a sidecar escapes the plan-PR leg, and validate_merge_step still fails its build closed. N7: the placeholder rule applies in equal-length replace runs only, so a re-anchor that also adds or drops words around a replaced number re-asks the operator (fail closed); WORDING-CHANGES.md says so beside clause 2. N11 accepted: VP 1 graduates the whole of tests/test_approved_text_provenance.py, so the build measures it, and any later split renames VP 1's selector through its own plan."
   - "Declared residuals (decision-new clause 6): words, not place, are bound, so a re-anchor may move any block to another match in its file (rec-4907; the run page shows its location, plan-critique reviews re-anchors); operator-only by grant (approval-bypass condition); an agent merge on red through the admin bypass (rec-4080, as Decision 245 cl.6 and git-ops.yaml's residual_agent_obligation row declare); checks judged by their own copy (rec-2827)."
   - "Why an Environment approval: agent PRs are authored as the sole code owner, so neither a PR review nor CODEOWNERS can carry the operator's word, and commit statuses are agent-writable; an Environment approval needs a grant agents lack. A two-PR split (critique r3 Q2) was not taken: the red window for new sidecar PRs lasts only until the operator's apply, which the handoff asks for at merge, and the UI-merge valve covers it."
@@ -814,6 +895,8 @@ gate_rounds:
   - {gate: plan-critique, round: 11, verdict: PROCEED, blocking: 0, nits: 11}
   - {gate: plan-critique, round: 12, verdict: PROCEED, blocking: 0, nits: 4}
   - {gate: wording-check, round: 8, verdict: PASS, digest: 432f7f823bb5413a5d08c983a4df8f035df66cf85a8c5bd2825a49920c8c0b68, base: 66ab746e003dd6f801a08292daaa65e3e46edadd, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 13, verdict: PROCEED, blocking: 0, nits: 6}
+  - {gate: plan-critique, round: 14, verdict: PROCEED, blocking: 0, nits: 3}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -830,12 +913,16 @@ execution_steps:
     record's approved= and fingerprint= lines); confirm with scripts.dependency_graph that the render and wake jobs'
     closure is exactly the CODEOWNERS list.
   - approved_text_provenance.py and approved_text_github.py as scoped, with their tests and fixtures (copy the history fixtures from git, never hand-write them).
-  - validate_merge_step.py and validate_plan_documents.py -- the provenance legs and seams, then their two test files.
+  - validate_merge_step.py, validate_plan_documents.py and _plan_sidecar_approval.py -- the provenance legs and seams, then their test files (test_validate_merge_step.py, test_validate_plan_documents.py and test__plan_sidecar_approval.py).
   - >-
     approved-text-approval.yml, ci.yml, deployment-approval-probe.yml header, Terraform files, ports.yaml, taxonomy
     and baseline rows; measure ci_rca_taxonomy.yaml and git-ops.yaml against main and apply their NEAR_CAP rows
     (taxonomy: compact; git-ops: stop and report).
   - Apply the sidecar blocks exactly (git-ops.yaml, planning SKILL.md, DECISIONS.md) and regenerate docs/decisions-index.json (implement-scope-boundary's decisions_index_regeneration row; validate_decisions_index_freshness fails without it); config/prose_budgets.yaml changes only if SKILL.md's measured size moves; pin GRANDFATHER_REF to the merge-base at the final rebase.
+  - >-
+    Before the full tier, run `bin/venv-python -m scripts.test_coverage_checker --check-tests --check-coverage` (a
+    diagnostic, not the gate): every changed source must have its mirror test and read 100% from that mirror alone
+    (build-time amendment 2026-11-05).
   - Execute the Verification Plan pre-deploy steps; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55).
   - >-
     Before code review, post on the build PR the V3 evidence for its CI-green head (see the V3 resolution context
