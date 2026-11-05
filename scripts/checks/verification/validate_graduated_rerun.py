@@ -16,9 +16,11 @@ import argparse
 import contextlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +37,7 @@ HEAD_ROOT = Path(__file__).resolve().parents[3]
 _CHILD_SLOTS = frozenset({"command_exit_zero", "command_output_matches", "metric_under_threshold", "test_selector"})
 _MODULE = "scripts.checks.verification.validate_graduated_rerun"
 _PYTEST_HEADS = ("bin/venv-python", "python")
+_RG_STUB = '#!/bin/sh\necho "rg: command not found (stubbed: the CI runner has no ripgrep)" >&2\nexit 127\n'
 
 
 @dataclass(frozen=True)
@@ -86,7 +89,26 @@ def _run_in_process(row: dict, root: Path) -> tuple[bool, str]:
     return result.status.value == "PASS", _first_line(result.message or result.actual)
 
 
-def _run_child(row: dict, root: Path) -> tuple[bool, str]:
+def _make_rg_stub_dir() -> str:
+    """A directory holding an executable rg that fails as on the CI runner, which never installs ripgrep."""
+    directory = tempfile.mkdtemp(prefix="rg-stub-")
+    stub = Path(directory) / "rg"
+    stub.write_text(_RG_STUB, encoding="utf-8")
+    stub.chmod(0o755)
+    return directory
+
+
+def _run_child(row: dict, root: Path, rg_stub_dir: str | None = None) -> tuple[bool, str]:
+    owned = rg_stub_dir is None
+    stub_dir = _make_rg_stub_dir() if rg_stub_dir is None else rg_stub_dir
+    try:
+        return _run_child_with_stub(row, root, stub_dir)
+    finally:
+        if owned:
+            shutil.rmtree(stub_dir, ignore_errors=True)
+
+
+def _run_child_with_stub(row: dict, root: Path, stub_dir: str) -> tuple[bool, str]:
     cmd = [sys.executable, "-m", _MODULE, "--check-id", str(row["check_id"]), "--root", str(root)]
     proc = subprocess.Popen(
         cmd,
@@ -97,6 +119,7 @@ def _run_child(row: dict, root: Path) -> tuple[bool, str]:
         encoding="utf-8",
         errors="replace",
         start_new_session=True,
+        env={**os.environ, "PATH": stub_dir + os.pathsep + os.environ.get("PATH", "")},
     )
     try:
         out, err = proc.communicate(timeout=RECORD_TIMEOUT_S)
@@ -112,9 +135,9 @@ def _run_child(row: dict, root: Path) -> tuple[bool, str]:
     return bool(payload["passed"]), str(payload.get("detail", ""))
 
 
-def _run_record(row: dict, root: Path) -> tuple[bool, str]:
+def _run_record(row: dict, root: Path, rg_stub_dir: str | None = None) -> tuple[bool, str]:
     if row.get("primitive_slot") in _CHILD_SLOTS:
-        return _run_child(row, root)
+        return _run_child(row, root, rg_stub_dir)
     return _run_in_process(row, root)
 
 
@@ -129,17 +152,23 @@ def evaluate(root: Path) -> list[Outcome]:
             to_run.append(row)
         else:
             outcomes[verdict.check_id] = verdict
-    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
-        pooled = list(pool.map(lambda r: _run_record(r, root), to_run))
-    for row, (passed, detail) in zip(to_run, pooled, strict=True):
-        ident = (row.get("check_id", "?"), row.get("guard_target", ""))
-        if passed:
-            outcomes[ident[0]] = Outcome(*ident, red=False)
-            continue
-        again, detail2 = _run_record(row, root)
-        outcomes[ident[0]] = (
-            Outcome(*ident, red=False, load_sensitive=True) if again else Outcome(*ident, red=True, detail=detail2 or detail)
-        )
+    stub_dir = _make_rg_stub_dir()
+    try:
+        with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
+            pooled = list(pool.map(lambda r: _run_record(r, root, stub_dir), to_run))
+        for row, (passed, detail) in zip(to_run, pooled, strict=True):
+            ident = (row.get("check_id", "?"), row.get("guard_target", ""))
+            if passed:
+                outcomes[ident[0]] = Outcome(*ident, red=False)
+                continue
+            again, detail2 = _run_record(row, root, stub_dir)
+            outcomes[ident[0]] = (
+                Outcome(*ident, red=False, load_sensitive=True)
+                if again
+                else Outcome(*ident, red=True, detail=detail2 or detail)
+            )
+    finally:
+        shutil.rmtree(stub_dir, ignore_errors=True)
     return [outcomes[str(r.get("check_id", "?"))] for r in rows]
 
 
