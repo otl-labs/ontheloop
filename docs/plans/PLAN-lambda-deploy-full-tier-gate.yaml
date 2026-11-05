@@ -112,14 +112,15 @@ scope:
   - file: .github/workflows/telemetry-golden-replay.yml
     action: Modify
     purpose: >-
-      For a workflow_run event, a step before the second checkout downloads artifact deploy-manifest from the
-      triggering run (actions/download-artifact with run-id github.event.workflow_run.id and github-token
-      github.token; permissions gain actions: read) and sets outputs replay (manifest deploy == true) and sha; when
-      replay is false the remaining steps are skipped and the job is green (a no-op deploy run deployed nothing to
-      replay); a successful triggering run with no deploy-manifest artifact fails the job red (never a skip); the second checkout's ref becomes that sha for workflow_run (main HEAD for schedule and dispatch, as
-      today). So a no-op run's pending replay cannot replace a deploying run's pending replay, the replay-or-skip
-      decision runs in a first job outside the concurrency group, and the replay job carries the job-level concurrency
-      group (moved from workflow level) with needs on that first job. Header comment updated. Decision 236 cl.1's ordering and tagging are unchanged.
+      One design: a new first job (decision) holds actions: read and, for a workflow_run event, downloads artifact
+      deploy-manifest from the triggering run (actions/download-artifact with run-id github.event.workflow_run.id and
+      github-token github.token) and outputs replay (manifest deploy == true) and sha; for schedule and dispatch it
+      outputs replay true and sha main HEAD. A successful triggering run with no deploy-manifest artifact fails the
+      decision job red (never a skip). The existing replay job keeps its current if: text, ANDs in
+      needs.decision.outputs.replay == 'true', needs decision, checks out needs.decision.outputs.sha in its second
+      checkout, and carries the concurrency group moved from workflow level to job level, so a no-op run's pending
+      replay can never replace a deploying run's pending replay (the decision job sits outside the group). Workflow
+      permissions stay {contents: read}. Header comment updated. Decision 236 cl.1's ordering and tagging are unchanged.
   - file: .github/workflows/convergence-health.yml
     action: Modify
     purpose: >-
@@ -148,7 +149,9 @@ scope:
       "src/row_rules", "src/telemetry", "config/lambda/ducklake") -- the deleted push globs, so ducklake_maintenance_smoke
       (missed today) is watched; PROD_SOURCE_PATHSPECS keeps its nine entries; their comments say they are the single
       path source for the gate and the sensor, and that src/lambdas/ducklake_* also matches
-      ducklake_telemetry_content_reader (operator-only deploy, Decision 239), exactly as today's push glob did. Injectable resolver for tests. Under the 500 SLOC limit.
+      ducklake_telemetry_content_reader (operator-only deploy, Decision 239), exactly as today's push glob did. Injectable resolver for tests; the import of scripts.ci.deploy_gate stays
+      lazy inside the detectors (as code_drift's other imports are), so one module instance and one GateError class
+      serve the sensor and its tests. Under the 500 SLOC limit.
   - file: scripts/build_lambda_deploy.py
     action: Modify
     purpose: >-
@@ -251,7 +254,9 @@ scope:
   - file: tests/ci/test_deploy_gate.py
     action: Create
     purpose: >-
-      Fixture git repo (linear and merge histories) plus a fake API object, in-process through main(argv): newest
+      Measure at build: like scripts/ci/deploy_gate.py it is new and unregistered, so the 500-SLOC limit applies;
+      decompose into a tests/ci/deploy_gate/ package (and the module into a facade package) rather than register a
+      budget. Fixture git repo (linear and merge histories) plus a fake API object, in-process through main(argv): newest
       green picks the newest first-parent commit whose main-validate full-tier step passed; a target whose tree lacks
       scripts/ci/deploy_gate.py skips with pre_gate_target (red before: rule 0 absent); freshness exits 1 on an absent
       record; a run whose main-validate
@@ -324,17 +329,21 @@ scope:
   - file: tests/test_telemetry_golden_replay_workflow.py
     action: Modify
     purpose: >-
-      The checkout nodes accept the manifest sha for workflow_run (the step reading deploy-manifest precedes it; a
-      no-op manifest skips the replay; a missing manifest is red); actions: read is added at JOB level only (the node
-      at line 48 pins the job dict and the workflow-level permissions stay {contents: read}), and the step-index
-      assertions (lines 66-72) shift by the inserted step, asserting the same order; the other nodes unchanged, so
+      Matches the two-job design: the assertions at lines 49-50 become two jobs (decision, then the replay job) and
+      job-level concurrency on the replay job; new nodes pin the decision job's actions: read, its manifest download
+      and outputs, the replay job's needs and replay condition, and the second checkout's ref on the decision sha; the
+      line-48 permissions dict, the existing if: node (lines 36-37) and the replay job's step indices stay as they
+      are; the other nodes unchanged, so
       graduated record telemetry-reader-url-masked-in-scheduled-workflows is kept as it is.
 bundled_recommendations:
   - rec-4912
 followon_recs:
   - rec-4918
   - rec-4919
-infrastructure_dependencies: []
+infrastructure_dependencies:
+  - >-
+    data-pipeline (status active, prod channel): src/data/handlers/CLAUDE.md is a prod watched path, so the build
+    merge deploys and smokes it through the gated prod channel (VP 9, VP 10). No IAM, Terraform or new resource.
 acceptance_criteria:
   - rec-4912's acceptance command exits 0.
   - Both channels deploy only through the gate; the gate deploys the newest main commit whose main-validate full-tier step passed and never a commit whose full tier did not pass (VP 1, 2).
@@ -477,9 +486,11 @@ verification_plan:
     hermetic: false
   - step: 11
     phase: post-deploy
-    action: Golden replay after the forced DuckLake deploy.
+    action: >-
+      Golden replay after the forced DuckLake deploy; DISPATCH_SHA is the head_sha of the step-10 ducklake dispatch
+      run, so a later no-op deploy's skipped replay is never read instead.
     command: >-
-      curl -fsS "https://api.github.com/repos/otl-labs/ontheloop/actions/workflows/telemetry-golden-replay.yml/runs?event=workflow_run&per_page=1"
+      curl -fsS "https://api.github.com/repos/otl-labs/ontheloop/actions/workflows/telemetry-golden-replay.yml/runs?event=workflow_run&head_sha=$DISPATCH_SHA&per_page=1"
       | bin/venv-python -c "import json,sys; r=json.load(sys.stdin)['workflow_runs'][0]; print(r['id'], r['conclusion'],
       r['head_sha'])"
     expected: >-
@@ -630,6 +641,7 @@ context:
   - "Critique round 1 REVISE (9 blocking, 11 nits), all applied: caller gate jobs carry id-token write and inherit secrets; --force via the inputs expression; drift freshness accepts a record ahead of the target; golden_gates.deploy_paths, the topology record and the map-wiring helpers scoped; step names off github.sha; VP 6 digest, VP 9/11/12 commands fixed; nits 1-11 folded in."
   - "Critique round 2 REVISE (4 blocking, 10 nits), all applied: R3 baseline, code_drift conftest (stub plus resolver fixture) and map-wiring _runs/smoke-needs edits scoped; decide rule 0 pre_gate_target so a pre-merge commit's late wake is never deployed; nits 1-10 folded in (ci_rca owner, tests/ci/__init__.py, constant kept, stale push prose, replay job-level permission, VP 7/9 wording, absent-record freshness, retention class, concurrency note)."
   - "Critique round 3 REVISE (3 blocking, 9 nits): absent record recognised by the CLI's (404) HeadObject text; VP 7 expects pre_gate_target and VP 9 reads VP 7's manifest records; build-lambda.yaml deploy_record fields rewritten. Nits applied: never-roll-back now rule 1; replay decision job outside the concurrency group; GH_TOKEN pinned by the wiring test; lazy imports; VP 9 head_sha filter; content-reader note; VP 13 profile; delenv; cutover replay note."
+  - "Residual (critique round 4 nit 2): the wiring test pins the full-tier step's command and name, so a future Decision 205 cl.5 plan-only fast-tier switch built INSIDE scripts/validate.py would pass under the same step name. The builder adds this to rec-4874's context with update_rec: whoever implements cl.5 renames that step or has the gate check a full-tier marker."
   - "Builder follow-ons (Low, file at build with file_rec): the governed_jobs diagnostic id ACTIONS_DEPLOY_GATE_GATE is unreachable by ci-rca, which sees the reusable job as gate / gate inside the caller run (add to rec-4918's context); stale push-trigger prose outside scope in pyproject.toml:34 and scripts/ducklake_smoke/lambda_maintenance_gates.py:77,129."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
@@ -637,6 +649,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 9, nits: 11}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 4, nits: 10}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 3, nits: 9}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
