@@ -5,16 +5,17 @@ handoff_policy:
 slug: telemetry-capture-deferral-warning
 intent: >-
   Make a Claude Code session whose turn capture keeps deferring (deferred_no_pin) or stays halted say so within two turns:
-  the agent and the human see one in-session warning, a version-scoped telemetry_verify alarm rec leaves the container, and
+  the agent and the human see one in-session warning, a telemetry_verify alarm rec (one open rec for the class, its context naming the Claude Code version) leaves
+  the container, and
   the operator verify command reports an unpinned tree as a finding, so the next capture break is a minutes-long noisy
   outage instead of a multi-day silent one (rec-4941, from the 2026-11-05 capture-pin outage).
 plan_type: IMPLEMENTATION
 verification_tier: V2
 plan_path: docs/plans/PLAN-telemetry-capture-deferral-warning.yaml
 phase: >-
-  T3.20 (in_progress) detection hardening from the capture-pin outage postmortem. No exit criterion is closed: T3.20's only
-  open criterion is c9 (unattended CI agents, owned by the CI agent capture plans), which this plan neither closes nor
-  forecloses. closes_criteria is therefore empty.
+  rec-4941 detection hardening (soft-warn category ad_hoc_rec) from the capture-pin outage postmortem, related to T3.20
+  (in_progress); no exit criterion is closed: T3.20's only open criterion is c9 (unattended CI agents, owned by the CI agent
+  capture plans), which this plan neither closes nor forecloses. closes_criteria is therefore empty.
 closes_criteria: []
 scope:
   - file: scripts/telemetry_capture/capture_warning.py
@@ -29,7 +30,9 @@ scope:
       and that carry an outcome (verify records and UserPromptSubmit passes are ignored), the persistent reason is
       "deferred_no_pin" when the trailing run of passes with outcome deferred and diag.deferred_no_pin is at least
       TRIGGER_PASSES long, "halted" when the trailing run of outcome halted is at least TRIGGER_PASSES long, else None; the
-      streak is that run's length. Rule DW-2 (warning, once per episode): prompt_warning(transcript_path, session_id) returns
+      streak is that run's length; persistent(transcript_path, session_id) returns (reason or None, streak) and
+      alarm_marker(transcript_path, session_id) returns the alarm marker dict or None (both read-only, used by DW-2, DW-3,
+      verify and VP step 9). Rule DW-2 (warning, once per episode): prompt_warning(transcript_path, session_id) returns
       the JSON line to print, or None. It returns a line when the reason is set and the marker is absent, names another
       reason, or holds a streak at least REARM_EVERY below the current one; it then writes the marker {reason, streak, at}
       by temp file plus os.replace (a failed write still returns the line: loud beats silent). When the latest Stop pass
@@ -46,7 +49,9 @@ scope:
       {"unpinned_tree": streak}, scope "claude_code=<version or unknown>", alarm_at None, file this module's path,
       acceptance_for scripts.telemetry_capture.verify.acceptance_for, declared (), parser_version PARSER_VERSION, then
       writes the alarm marker {action, version, at} (the episode action, or "alarm_error:<ExceptionClass>" with attempts
-      incremented). Returns the action token; never raises. unpinned(tree_path, session_id) is True when the persistent
+      incremented). Returns the action token; never raises. raise_alarms matches the one open rec on finding_class only, so
+      every tree and version updates the same rec and scope= in its context is last-writer-wins: the version names the
+      latest affected release, not a per-version rec. unpinned(tree_path, session_id) is True when the persistent
       reason is deferred_no_pin and project_ref_pin(FsTree(tree)) is None (both imported lazily).
   - file: .claude/hooks/stop_log_turn.py
     action: Modify
@@ -77,7 +82,11 @@ scope:
       _load: a lost cursor reads status unpinned_tree (and counts unpinned_tree = 1) when capture_warning.unpinned(self.path,
       self.session_id) holds, else no_cursor as today; unpinned_tree joins PER_TREE_SKIPS (so it is BENIGN: no
       incomplete_streak bump, no verify_incomplete) and ALARM_CLASSES (so the VERIFY line's alarms field names it and
-      --assert-zero accepts it). verify never files unpinned_tree itself: the detached runner is the single filer, so the
+      --assert-zero accepts it). Shape that fits (measured by the critique on a scratch copy with ruff format at 127 columns:
+      about +3 SLOC, 496 -> about 499): append "unpinned_tree" inside PER_TREE_SKIPS's existing line (127 columns exactly),
+      add `| {"unpinned_tree"}` after the ALARM_CLASSES set the way DECLARED_CLASSES extends its set (appending inside the
+      set's own line pushes it past 127 and ruff explodes it to about +11 SLOC), and a 2-line branch in _load. verify never
+      files unpinned_tree itself: the detached runner is the single filer, so the
       rec's context carries one scope shape. Size: 496 SLOC of 500 at planning (measured by the decision scout); the change
       is at most 4 SLOC, and if the build would cross 500 the build stops and amends the plan (move the new branch into
       capture_warning or decompose verify.py into a facade package, Decision 128), never raises the budget.
@@ -117,7 +126,9 @@ acceptance_criteria:
   - >-
     A version value that does not match ^\d+\.\d+\.\d+$ is never recorded or printed; capture_warning imports only the
     stdlib at module level.
-  - SA-02 states the two new Claude Code assumptions and ports.yaml carries the amendment_log row.
+  - >-
+    SA-02 states the two new Claude Code assumptions (asserted by test_sa02_states_the_deferral_warning_assumptions) and
+    ports.yaml carries the amendment_log row.
   - rec-4941 closes on the squash merge's Resolves trailer.
 verification_plan:
   - step: 1
@@ -211,17 +222,27 @@ verification_plan:
   - step: 9
     phase: post-deploy
     action: >-
-      Fresh-session read-back (Decision 48 NOTE). In the first fresh cloud session started on main after the merge whose
-      tree defers, the warning appears in the agent's opening context on its third prompt at the latest. If the
-      statusMessage fix or rec-4939 has restored pinning before then, record UNPROVEN-LIVE with the reason; the channel's
-      delivery stays evidenced by hook_canary and the shape-parity node.
+      Fresh-session read-back of all three deliverables (Decision 48 NOTE). In the first fresh cloud session started on main
+      after the merge whose tree defers, on its third or a later prompt (a quick prompt can run before the second detached
+      Stop pass, which first waits for its witness, writes its record): count the trailing deferred Stop passes from
+      diagnostics.jsonl through DW-1, print the alarm marker, count the warning records in the transcript, and read back the
+      open unpinned_tree rec. If the statusMessage fix or rec-4939 has restored pinning before then, record UNPROVEN-LIVE
+      with the reason; the channel's delivery stays evidenced by hook_canary and the shape-parity node.
     command: >-
-      T="$(ls -t ~/.claude/projects/*/*.jsonl | head -1)"; bin/venv-python -m scripts.telemetry_capture status --tree "$T";
-      grep -c 'telemetry_capture\] WARNING' "$T" || true
+      T="$(ls -t ~/.claude/projects/*/*.jsonl | head -1)"; bin/venv-python -c "import json, sys; from pathlib import Path;
+      from scripts.telemetry_capture import capture_warning as cw; t = Path(sys.argv[1]); reason, streak =
+      cw.persistent(t, t.stem); print(json.dumps({'reason': reason, 'streak': streak, 'alarm': cw.alarm_marker(t,
+      t.stem)}))" "$T"; grep -c 'telemetry_capture\] WARNING' "$T"; AWS_PROFILE=agent_platform bin/venv-python -c "from
+      src.common.ducklake_reader_client import make_reader; print(make_reader().named('recs_by_title_prefix',
+      title_prefix='telemetry verification alarm: unpinned_tree%'))"
     expected: >-
-      Either the status shows a deferred_no_pin streak of at least 2 and the grep counts at least 1 warning record, or the
-      status shows outcome sent (pinning restored) and the report records UNPROVEN-LIVE.
-    fix_if: The tree defers on 2+ Stop passes but no warning is recorded -- the channel assumption in SA-02 is wrong; file a rec.
+      Live: reason deferred_no_pin with streak at least 2, the alarm marker's action is file, update or unchanged, the grep
+      counts at least 1 warning record, and the reader returns one open rec with source telemetry_verify; record its id.
+      Recovered: reason null with the latest Stop pass sent, recorded as UNPROVEN-LIVE with the reason.
+    fix_if: >-
+      The tree defers on 2+ Stop passes but no warning is recorded -- the SA-02 channel assumption is wrong; file a rec. The
+      alarm marker reads alarm_error:* or no rec is returned -- that is a finding: file a rec naming the token (the detached
+      filing failed in the container, the failure class the postmortem section 5 names).
     hermetic: false
 test_obligations:
   - source: scripts/telemetry_capture/capture_warning.py
@@ -234,18 +255,26 @@ test_obligations:
     verification_step: 2
     test_selector: tests/telemetry_capture/test_deferred_no_pin_surface.py::test_stop_paths_print_nothing_new
     red_green_expectation: >-
-      Red before for the UserPromptSubmit half (no line printed); the Stop half is green before and after by design and
-      guards against a regression.
+      Red before: the node holds both halves -- the UserPromptSubmit twin (one warning line over a two-deferral tree, none
+      over a fresh tree, witness still first on stderr) fails on origin/main; the Stop and StopFailure half (empty stdout,
+      stderr exactly the witness line, over the same two-deferral tree) is green before and after by design.
   - source: scripts/telemetry_capture/runner.py
     behavior: A deferred pass records a validated cli_version; a hostile value is dropped.
     verification_step: 2
     test_selector: tests/telemetry_capture/test_deferred_no_pin_surface.py::test_deferred_pass_records_only_a_valid_version
     red_green_expectation: Red before (no cli_version field). Green after.
   - source: scripts/telemetry_capture/__main__.py
-    behavior: The detached run files the alarm once per tree; verify exits 1 on unpinned_tree.
+    behavior: The detached run files the alarm once per tree.
     verification_step: 2
     test_selector: tests/telemetry_capture/test_deferred_no_pin_surface.py::test_detached_run_files_one_version_scoped_alarm
     red_green_expectation: Red before (raise_alarms never called on a deferred pass). Green after.
+  - source: scripts/telemetry_capture/__main__.py
+    behavior: >-
+      verify exits 1 on unpinned_tree; --assert-zero unpinned_tree exits 1 on an unpinned tree and 0 on a pinned completed
+      tree with root_checked at least 1 (the acceptance command the filed alarm rec carries).
+    verification_step: 1
+    test_selector: tests/telemetry_capture/test_deferred_no_pin_surface.py::test_verify_reports_unpinned_tree
+    red_green_expectation: Red before (status no_cursor, exit 2, and --assert-zero unpinned_tree refused as not an alarm class). Green after.
   - source: scripts/telemetry_capture/verify.py
     behavior: An unpinned tree reads unpinned_tree, a fresh tree still reads no_cursor.
     verification_step: 1
@@ -253,11 +282,11 @@ test_obligations:
     red_green_expectation: Red before (status no_cursor, exit 2). Green after.
   - source: docs/contracts/ports.yaml
     behavior: SA-02 records the two new Claude Code assumptions.
-    verification_step: 5
-    command: bin/venv-python -m pytest -q tests/checks/contracts/test_validate_ports_contract.py
-    waiver_reason: >-
-      Prose-only Class D assumption text that no code reads; validate_ports_contract checks its shape and the critique
-      checks its wording against execution_steps[4].
+    verification_step: 2
+    test_selector: tests/telemetry_capture/test_deferred_no_pin_surface.py::test_sa02_states_the_deferral_warning_assumptions
+    red_green_expectation: >-
+      Red before (SA-02 lacks the additionalContext and version-field sentence). Green after; validate_ports_contract
+      (step 5) checks the file's shape.
   - source: tests/telemetry_capture/test_deferred_no_pin_surface.py
     behavior: The test module itself.
     verification_step: 2
@@ -298,6 +327,8 @@ context:
     rec (one per tree; rec-4940 cannot see sessions that never push); F3 triggers deferred_no_pin and halted, halted never
     files; F4 two Stop passes (a project thread's first Stop defers before its SessionStart records land); F5 re-arm every
     25 passes, clear on recovery. Fable advice: /mnt/project-files/capture-pin-outage/deferral-warning/fable-advice.md.
+    Divergence from it: Fable had verify return completed with counts; the plan makes unpinned_tree a PER_TREE_SKIPS
+    status special-cased in _verify_exit, so verify never files and the runner is the single filer (critique r1 N7).
   - >-
     Size at planning (plan_obligations): verify.py 496 of 500 SLOC NEAR_CAP (relief rule in its scope row, re-measured at
     build time); runner.py 410; __main__.py 339; stop_log_turn.py 71; ports.yaml 448 of 500 effective lines.
@@ -309,6 +340,7 @@ context:
   - "Owner of this plan's handoff: this planning session."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 8}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -332,17 +364,24 @@ execution_steps:
     scripts/telemetry_capture/verify.py per their scope rows.
   - >-
     Create tests/telemetry_capture/test_deferred_no_pin_surface.py with: test_second_deferred_stop_emits_one_warning,
-    test_verify_reports_unpinned_tree (no cursor, two deferred Stop passes, no pin: VERIFY status=unpinned_tree,
-    alarms=unpinned_tree, exit 1, no portal call; a tree with no passes: status=no_cursor, exit 2),
+    test_verify_reports_unpinned_tree (driven through cli.main with a fake reader_factory and verify.credentials_available
+    monkeypatched to True, so no boto3 lookup runs; no cursor, two deferred Stop passes, no pin: VERIFY
+    status=unpinned_tree, alarms=unpinned_tree, exit 1, no portal call; --assert-zero unpinned_tree on that tree exits 1;
+    on a pinned completed tree, with run_verify returning a completed result whose counts hold root_checked 1, exits 0;
+    a tree with no passes: status=no_cursor, exit 2),
     test_first_stop_deferral_alone_stays_quiet, test_halted_streak_warns_without_filing,
-    test_recovery_clears_marker_and_rearm_fires, test_stop_paths_print_nothing_new,
+    test_recovery_clears_marker_and_rearm_fires, test_stop_paths_print_nothing_new (both halves named in its
+    test_obligations row),
     test_deferred_pass_records_only_a_valid_version, test_capture_warning_imports_only_the_stdlib (AST over module-level
     imports, plus STATE_DIRNAME parity), test_warning_json_matches_hook_canary_shape (the hookSpecificOutput keys and
     hookEventName equal the canary's printed JSON), test_detached_run_files_one_version_scoped_alarm (raise_alarms
     monkeypatched: called once with {"unpinned_tree": 2} and scope claude_code=2.1.318 after the second pass, not again
     after the third; a raising fake is retried until ALARM_ATTEMPTS then stops), test_prompt_warning_record_is_not_a_witness
     (a UserPromptSubmit hook_success record carrying the warning, in both its heldContent and plain copies, is not
-    is_witness_record and leaves record_turn's turn rows equal to the same tree without it).
+    is_witness_record and leaves record_turn's turn rows equal to the same tree without it),
+    test_sa02_states_the_deferral_warning_assumptions (SA-02's assumption text in docs/contracts/ports.yaml contains
+    "hookSpecificOutput.additionalContext" and "version field"; rec-4942 edits SA-02 too, so whichever lands second keeps
+    both sentences).
   - >-
     SA-02 sentence (append to the assumption text): "It also assumes a UserPromptSubmit hook's exit-0 stdout JSON reaches
     the agent's context through hookSpecificOutput.additionalContext and the user through systemMessage where the surface
