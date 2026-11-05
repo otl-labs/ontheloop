@@ -25,14 +25,18 @@ scope:
       the channel's function list (ducklake = _build_ducklake_function_zip_keys() keys, prod =
       _build_prod_function_names(); the drift sensor's hardcoded _PROD_FUNCTION_NAMES equals it today and the build
       points the sensor at the same builder). newest_green_sha(api, git, *, limit=50,
-      settled_before=None) walks `git rev-list --first-parent -n <limit> origin-or-HEAD` newest first and, for each
+      settled_before=None) walks `git rev-list --first-parent -n <limit> origin/main` (fetched first; the runner checkout and a session's
+      build branch both have it) newest first and, for each
       commit, lists `GET /repos/{repo}/actions/workflows/ci.yml/runs?head_sha=<sha>&event=push&branch=main`; a commit
       is green only when a run with that head_sha has conclusion success AND its latest-attempt jobs (`/jobs?filter=latest`)
       hold a job named main-validate with conclusion success whose step named exactly "Validate full tier (ruff, mypy,
       pytest, DQ runner, verifier harness)" concluded success (so a Decision 205 cl.5 fast-tier-only run never counts);
       with settled_before set, the run's updated_at must be at or before it. Commits whose CI is absent, running or red
       are passed over. Any HTTP or JSON error raises GateError (never falls back to HEAD); no green commit within the
-      limit returns None. decide(target, records, pathspecs, git, force) applies, in order: (1) any record missing, its
+      limit returns None. decide(target, records, pathspecs, git, force) applies, in order: (0) the target predates the gate (`git cat-file
+      -e <target>:scripts/ci/deploy_gate.py` fails) -> skip, pre_gate_target (a pre-merge commit's late CI wake must
+      never be deployed by the new workflow: its build_lambda_deploy.py would record GITHUB_SHA and its tree has no
+      freshness module); (1) any record missing, its
       source_git_sha null, or unresolvable in history -> deploy, reason baseline_unknown; (2) target a strict ancestor
       of any record's sha -> skip, newer_deployed (never roll back); (3) unless force, every record equals target ->
       skip, already_deployed; (4) unless force, `git log -1 --format=%H <target> -- <pathspecs>` equals the same lookup
@@ -47,7 +51,8 @@ scope:
       commit -> skip, no_green_in_window, exit 0, with a ::notice:: line (the drift sensor's HEAD ceiling is the
       independent alarm for a gate that never finds green). `freshness --channel C --expected-sha S FN...` replaces the
       four inline deploy-record freshness asserts: exit 1 with the existing DEPLOY_RECORD_STALE message when a record's
-      source_git_sha differs from S, else prints OK lines. The repository comes from GITHUB_REPOSITORY (default
+      source_git_sha differs from S or the record is absent (NoSuchKey; today's `aws s3 cp` under set -e also fails
+      closed), else prints OK lines. The repository comes from GITHUB_REPOSITORY (default
       otl-labs/ontheloop), the API base from GITHUB_API_URL, the token from GITHUB_TOKEN or GH_TOKEN (unauthenticated
       reads work on this public repository; a token raises the rate limit).
   - file: .github/workflows/deploy-gate.yml
@@ -88,7 +93,8 @@ scope:
       file, comments included. Header comment: the trigger paragraph says what wakes it, Decision
       {{N}}, and that a held function catches up when its hold-clearing sidecar change ships. Concurrency stays one
       group, cancel-in-progress false, default queue (a replaced pending run loses nothing: every run deploys the
-      newest green). Structural size: 476 of the 500 ci_workflows lines at planning base (Decision 166); measure at
+      newest green; accepted: a pending forced dispatch replaced by a later pending workflow_run run loses its force,
+      and the operator re-dispatches; the header comment says so). Structural size: 476 of the 500 ci_workflows lines at planning base (Decision 166); measure at
       build and stay under it by these extractions, never a raise.
   - file: .github/workflows/deploy-prod-lambdas.yml
     action: Modify
@@ -122,8 +128,14 @@ scope:
       now be AHEAD of the settled target: fresh when L_R == L_T, or when `git merge-base L_T L_R` prints L_T (L_R = the
       latest watched commit reachable from the record, L_T = the same at the target), read from runner stdout so the
       graduated convergence-drift-reachability-tests oracle still passes; the HEAD ceiling uses the same rule against
-      HEAD. The prod detector reads its function list from build_lambda_config._build_prod_function_names() instead of
-      the hardcoded _PROD_FUNCTION_NAMES (equal today). Independent ceiling: a function is also stale when its record does not reach HEAD's latest
+      HEAD. The prod detector reads its function list from build_lambda_config._build_prod_function_names(); the
+      _PROD_FUNCTION_NAMES constant stays (scripts/convergence_health/__init__.py re-exports it) and equals that list.
+      _is_fresh(record, latest_sha, runner, pathspecs) keeps its positional signature and the equality-first order;
+      the ref-less HEAD lookup `git log -1 --format=%H -- <pathspecs>` stays as today's call (the graduated
+      ops-row-rules-wiring node selects it by argv[4] == "--"). Both detectors take an injectable target_resolver
+      (default: deploy_gate.newest_green_sha) so tests never reach the GitHub API. The rec context text and the
+      PATHSPECS comments no longer say "push to main" or "kept in sync with on.push.paths"; they name the gate and
+      Decision {{N}}. Independent ceiling: a function is also stale when its record does not reach HEAD's latest
       watched commit and that commit's committer date is more than 6 h old (a resolver defect cannot silence the
       alarm). GateError or no green -> fall back to HEAD (today's behaviour, fail toward alarming) and say so in the
       rec context. DUCKLAKE_SOURCE_PATHSPECS becomes ("src/lambdas/ducklake_*", "src/common/ducklake_*.py",
@@ -174,13 +186,13 @@ scope:
     action: Modify
     purpose: >-
       governed_jobs gains deploy-gate.yml job gate (critical step: its assume-role step, diagnostic id
-      ACTIONS_DEPLOY_GATE_GATE); artifact_uploads gains the deploy-manifest upload (retention_class per the file's
-      taxonomy for a cross-run handoff read by telemetry-golden-replay); amendment_log row (field_add).
+      ACTIONS_DEPLOY_GATE_GATE); artifact_uploads gains the deploy-manifest upload (retention_class governed_deployment,
+      retention-days 7 (the class allows 7-30), read across runs by telemetry-golden-replay); amendment_log row (field_add).
   - file: config/ci_rca_taxonomy.yaml
     action: Modify
     purpose: >-
-      workflows map gains deploy-gate (validate_ci_rca_adjudication needs every workflow name): tier not_a_gate,
-      ci_rca excluded, rationale "workflow_call only; it never runs alone, and its failures are failures of the two
+      workflows map gains deploy-gate (validate_ci_rca_adjudication needs every workflow name) as one flow-style row:
+      owner `platform`, tier not_a_gate, ci_rca excluded, rationale "workflow_call only; it never runs alone, and its failures are failures of the two
       watched caller runs". The ci-rca.yml filter is unchanged. The file is at 490 of 500 effective lines; the row is
       at most four lines, and if other plans landing first leave less headroom, compact rather than raise.
   - file: src/data/handlers/CLAUDE.md
@@ -206,11 +218,31 @@ scope:
     purpose: >-
       The asserted job set gains 'gate' and the command also asserts every other job lists gate in needs (a stronger
       check; the existing assertions stay).
+  - file: tests/ci/__init__.py
+    action: Create
+    purpose: Empty package marker for the new tests/ci directory (every test directory carries one).
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      r3_workflows (Decision 162, validate_composite_action_shell_bodies): register each new inline run key at its
+      measured count, every one at most 2 (deploy-gate.yml's gate steps, the five renamed freshness steps -- four in
+      deploy-ducklake-lambdas.yml, one in deploy-prod-lambdas.yml -- and telemetry-golden-replay.yml's manifest step),
+      and drop the five stale `...source-git-sha-github-sha...` freshness keys (counts 10 today). A shrink and a
+      rename, never a raise.
+  - file: tests/convergence_health/code_drift/conftest.py
+    action: Modify
+    purpose: >-
+      GitRunnerStub learns the new git call shapes (`rev-list --first-parent`, `merge-base L_T L_R`, the committer
+      date lookup for the ceiling) instead of raising on argv.index("--"); an autouse fixture injects a target_resolver
+      that raises GateError unless a test supplies one, so every existing node falls back to HEAD (today's behaviour)
+      and no test reaches the GitHub API.
   - file: tests/ci/test_deploy_gate.py
     action: Create
     purpose: >-
       Fixture git repo (linear and merge histories) plus a fake API object, in-process through main(argv): newest
-      green picks the newest first-parent commit whose main-validate full-tier step passed; a run whose main-validate
+      green picks the newest first-parent commit whose main-validate full-tier step passed; a target whose tree lacks
+      scripts/ci/deploy_gate.py skips with pre_gate_target (red before: rule 0 absent); freshness exits 1 on an absent
+      record; a run whose main-validate
       succeeded with the full-tier step skipped or absent is not green; a red, running or missing run is passed over;
       a PR-event run is ignored; settled_before excludes a just-finished run; an HTTP error raises GateError (CLI exit
       2); none green -> no_green_in_window skip; decide rules 1-5 each, never rolling back, force bypassing 3-4 but
@@ -259,7 +291,10 @@ scope:
       test_telemetry_smoke_runs_the_production_gate keep their assertions); and
       test_production_telemetry_deploy_holds_while_a_column_add_is_pending asserts config/lambda/ducklake through
       DUCKLAKE_SOURCE_PATHSPECS instead of the workflow text, which would otherwise be satisfied only by a comment.
-      Node ids unchanged, so graduated
+      Two more edits for the new gate job (a reusable-workflow call with no steps): _runs() reads
+      `.get("steps", [])` so the three nodes that walk every job do not KeyError; and
+      test_smoke_job_waits_for_maintenance_smoke's exact needs set gains gate (smoke reads needs.gate.outputs.sha).
+      Neither weakens a node: same invariant, plus one dependency. Node ids unchanged, so graduated
       records telemetry-owner-provisioning-wiring, telemetry-production-deploy-hold-wiring,
       telemetry-twin-gates-production-deploy and telemetry-writer-smoke-gate are kept as they are.
   - file: config/agent/verification_registry/entries/telemetry-writer-packaging.yaml
@@ -277,7 +312,9 @@ scope:
     action: Modify
     purpose: >-
       The checkout nodes accept the manifest sha for workflow_run (the step reading deploy-manifest precedes it; a
-      no-op manifest skips the replay); actions: read is the only permission added; the other nodes unchanged, so
+      no-op manifest skips the replay; a missing manifest is red); actions: read is added at JOB level only (the node
+      at line 48 pins the job dict and the workflow-level permissions stay {contents: read}), and the step-index
+      assertions (lines 66-72) shift by the inserted step, asserting the same order; the other nodes unchanged, so
       graduated record telemetry-reader-url-masked-in-scheduled-workflows is kept as it is.
 bundled_recommendations:
   - rec-4912
@@ -398,9 +435,11 @@ verification_plan:
     expected: >-
       one workflow_run run per channel created after the merge, each conclusion success, its gate job's assume step
       success and a DEPLOY-GATE line in the log (the session may read the same runs with mcp__github__actions_list).
-      The ducklake run skips (no_source_change: the build touches no ducklake path); the prod run deploys
-      (source_changed: src/data/handlers/CLAUDE.md is a prod watched path), so the coordinator schedules the build
-      merge itself as a prod deploy
+      Each run's reason matches VP 7's rehearsal plus what merged since: the ducklake run skips (no_source_change)
+      unless a ducklake-watched path merged after 5d63b006; the prod run deploys (source_changed:
+      src/data/handlers/CLAUDE.md is a prod watched path), so the coordinator schedules the build merge itself as a
+      prod deploy. per_page=1 may return a pre-merge commit's late wake: that run skips with pre_gate_target; read the
+      next run for the merge commit
     fix_if: >-
       the assume step fails (the sub differs from ref:refs/heads/main -- stop, RCA, no IAM edit without the operator)
       or no run appears (workflow_run did not fire: check the CI run's head_branch and event)
@@ -514,6 +553,16 @@ test_obligations:
     verification_step: 8
     command: bin/venv-python -m scripts.validate
     waiver_reason: A graduated registry record; validate_graduated_rerun in the full tier (step 8) runs its command against the edited workflow.
+  - source: tests/convergence_health/code_drift/conftest.py
+    behavior: The drift tests' git stub and resolver fixture keep every detector test hermetic.
+    verification_step: 4
+    test_selector: tests/convergence_health/code_drift/
+    waiver_reason: Test infrastructure only; step 4 runs the whole directory, and every new node there fails without the stub's new call shapes.
+  - source: config/composite_action_body_baseline.yaml
+    behavior: Registers the new inline run keys at 2 lines or fewer and drops the five stale freshness keys.
+    verification_step: 8
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: A ratchet baseline; validate_composite_action_shell_bodies (pre, step 8) fails on any unregistered key or raise.
   - source: config/ci_rca_taxonomy.yaml
     behavior: deploy-gate is adjudicated (excluded) so every workflow name has a row.
     verification_step: 5
@@ -564,10 +613,12 @@ context:
   - "Owning planning session: this claude.ai project thread (cmsg_012XgaFy8VaDQbxP5D8nC958P3oo6qza5MDNg2FU2fYLiC), branch claude/project-thread-poa7h8. Plan defects come back here through the coordinator. The build touches the governed DuckLake deploy channel; the coordinator schedules it and the step-10 dispatch."
   - 'red_overlap (2026-11-05, 211f307c): {"verdict": "blocked", "slo_hours": 4, "reds": [rec-4872 test_defect, rec-4890 and rec-4899 product_regression; every "shared": []]}. No red shares a file with this scope, and CI push runs on main have been green since 2026-11-04 20:24Z (latest run 42033168286 on 57dedaf9 success), so the open reds do not pause the post-merge VP 9-13 deploys; the builder re-runs red_overlap before merge.'
   - "Critique round 1 REVISE (9 blocking, 11 nits), all applied: caller gate jobs carry id-token write and inherit secrets; --force via the inputs expression; drift freshness accepts a record ahead of the target; golden_gates.deploy_paths, the topology record and the map-wiring helpers scoped; step names off github.sha; VP 6 digest, VP 9/11/12 commands fixed; nits 1-11 folded in."
+  - "Critique round 2 REVISE (4 blocking, 10 nits), all applied: R3 baseline, code_drift conftest (stub plus resolver fixture) and map-wiring _runs/smoke-needs edits scoped; decide rule 0 pre_gate_target so a pre-merge commit's late wake is never deployed; nits 1-10 folded in (ci_rca owner, tests/ci/__init__.py, constant kept, stale push prose, replay job-level permission, VP 7/9 wording, absent-record freshness, retention class, concurrency note)."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: wording-check, round: 1, verdict: PASS, digest: 5ef4d973fc8434bc7abd564bf79d4186782bcfc9c46fd84878d77d4fde196f0d, base: 211f307ca9a1855b2a2760b917eed63980d778ea, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 9, nits: 11}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 4, nits: 10}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
