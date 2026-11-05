@@ -9,8 +9,9 @@ keep going.
 Audit the PATH from today's state to this goal: the three interactive gating subagents that
 `/plan` and `/implement` dispatch in-session today -- decision-scout, plan-critique and
 code-review -- run instead as GitHub Actions verdict jobs ("verdict personas") whose model calls
-go to DeepSeek models through LiteLLM, and the in-session gates are flipped and removed (kept only
-as the outage fallback). The design for that path already exists (roadmap items T4.10a, T4.32,
+go to DeepSeek models through LiteLLM, and the in-session gates are flipped and then removed as the
+primary gate (the in-session path survives only as the visible outage fallback, Decision 229
+clause 4). The design for that path already exists (roadmap items T4.10a, T4.32,
 T4.28, T4.29, T4.30 and Decisions 205, 229, 173, 234); most of it is unbuilt. You assess whether
 that design is complete, correctly ordered and in line with industry practice, and you produce
 an ordered, dispatch-ready work breakdown that a repo-less coordinator session in a hosted
@@ -36,7 +37,7 @@ Adjudicate every candidate to exactly one of:
 | CONFIRMED-defect, no owning item/rec | `findings[]` | `novel` |
 | Owned by a roadmap item/rec whose remedy is insufficient | `findings[]` | `planned-insufficient` |
 | Owned by a roadmap item/rec whose remedy is sufficient but unbuilt, AND the gap matters to sequencing or the work breakdown | `findings[]` | `planned-unbuilt` |
-| Owned and fully covered, nothing to add | `rejected_candidates[]` | -- |
+| Owned and fully covered, nothing to add -- including owned, sufficient, unbuilt AND not material to sequencing or the work breakdown | `rejected_candidates[]` | -- |
 | Not a defect | `rejected_candidates[]`, naming the compensating control | -- |
 
 Candidates (neutral; each is a hypothesis to test, not a claim):
@@ -106,9 +107,9 @@ Candidates C16 and C17 are sufficiency- or over-scope-shaped on purpose: a verdi
 ready" or "the design is over-built" is as reachable as "the design has gaps". "Not stated in the
 rows read" is not the same as undesigned: if the gap is plan-level detail a planning worker settles
 inside an existing criterion, it is `designed` (Section 14). Every candidate C1-C18 lands in
-`findings[]` (field `origin`) or `rejected_candidates[]` (field `candidate`) -- once, or split
-across one row of each only when its parts adjudicate differently, each row's text naming the part
-it covers.
+`findings[]` (field `origin`) or `rejected_candidates[]` (field `candidate`) at least once; a
+candidate whose parts adjudicate differently, or that yields more than one distinct defect, may
+appear in several rows, each row's text naming the part it covers.
 
 ## 3. READ FIRST -- DISAMBIGUATION TRAPS
 
@@ -150,6 +151,10 @@ it covers.
    a GitHub check-run conclusion. Name which one you mean.
 11. CD.28 is still listed in `candidate_decisions[]` and is ratified by Decision 122; cite it as
    "CD.28 (ratified, Decision 122)".
+12. Criterion ids are item-local: T4.2 c4 ("LiteLLM is the only LLM transport") is not T4.32 c4 (the
+   scout-input fingerprint and plan-PR routing). T4.32 c1 says both "discharges T4.2 c4" and "the
+   plan-PR routing of c4" (the latter is T4.32's own c4, as T4.29 c1 and T4.30 c1 read it). Always
+   write criteria as `<item>:c<N>`.
 
 ## 4. SCOPE
 
@@ -217,7 +222,7 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
    `bin/venv-python -c "import yaml; d=yaml.safe_load(open('docs/ROADMAP-PLATFORM.yaml')); print(len(d['tier_items']))"`.
    IF it errors, record it in `meta.contract_notes` and read the YAML as text.
 5. External lookups (Q2, Q3, Q6, Q7 cost estimates, Q8 cost seed only): you MAY use web
-   search/fetch, at most 12 lookups in total -- do NOT exceed -- solely to confirm current external
+   search/fetch, at most 12 lookups in total (each search and each page fetch counts as one) -- do NOT exceed -- solely to confirm current external
    practice, current DeepSeek / LiteLLM capabilities (tool calling, structured output, context
    window, model versioning, data retention) and current DeepSeek and GitHub Actions pricing. A
    figure you could not look up is answered from your own knowledge and marked HYPOTHESIS. Record each URL in the evidence field that uses it. IF web access is unavailable:
@@ -261,7 +266,9 @@ Each question has its own answer slot (`question_answers[]`). Verdict enums are 
 - Q2 DEEPSEEK-VIA-LITELLM FITNESS. Can the three personas, as their skills work today, run on the
   primary role's current DeepSeek models through the designed LiteLLM transport and run_persona
   litellm backend? Cover: tool calling and the MCP read surface (C2, C3), context-window fit for
-  each persona's inputs, structured output, model-version pinning (C7), timeouts/retries/fallback to
+  each persona's inputs, which tier-1 model each persona should use (`deepseek/deepseek-chat` or
+  `deepseek/deepseek-reasoner`; the selection's home is `ports.run_persona.litellm.model` /
+  `docs/contracts/inference-provider.yaml`), structured output, model-version pinning (C7), timeouts/retries/fallback to
   the tier-2 role, credential naming (C4), and what a persona must change (prompt, input
   projection) versus what stays the same. Verdict: `sufficient | partial | insufficient`.
 - Q3 INDUSTRY PRACTICE (EXTERNAL CHECKLIST). Rate the designed verdict chain property by property
@@ -320,7 +327,9 @@ Each question has its own answer slot (`question_answers[]`). Verdict enums are 
   paste-ready `/plan` seed. Also say whether `docs/contracts/coordinator.yaml` (status draft) is
   complete enough to run this workstream as written, for example whether its `critique` and
   `plan_pr` steps assume an in-session gate. `critical_path` = the WPs, in dependency order, on the
-  longest `depends_on` chain from wave 1 to the last REMOVE criterion of T4.28-T4.30. The verdict
+  longest `depends_on` chain (counted in WPs, wave-0 WPs included) that ends at a WP closing any of
+  T4.28:c7, T4.29:c6 or T4.30:c6 (the REMOVE criteria); on a tie, choose the chain containing a
+  non-`designed` WP, else the one ending latest in the operator's start order. The verdict
   reads ONLY the WPs on `critical_path`: `ready` = all are `design_state: designed`;
   `ready_with_forks` = none is `undesigned` and at least one is `needs_operator_fork`; `not_ready` =
   at least one is `undesigned`. Report off-path WPs that are not `designed` in the prose. Any of the
@@ -342,7 +351,10 @@ Each question has its own answer slot (`question_answers[]`). Verdict enums are 
   spend) or must wait inside its acting worker -- `docs/contracts/coordinator.yaml` `approvals`
   says an approval counts only in the acting worker and covers exactly the text shown. Count the
   `operator_touchpoints` rows whose `touchpoint_kind` is `always_ask` or `design_fork` (rows of kind
-  `plan_approval` are listed but not counted). Verdict: `minimal` = 0-4 rows, `moderate` =
+  `plan_approval` are listed but not counted). Row grain: one row per distinct operator act (one
+  decision, one approval of one text, one manual step); an act that serves several WPs is one row
+  naming them all in `wp_ids`; one WP needing two acts has two rows. Every class in a WP's
+  `always_ask` list is covered by at least one row naming that WP. Verdict: `minimal` = 0-4 rows, `moderate` =
   5-10, `heavy` = more than 10.
 - Q8 QUESTIONS THE REQUESTER DID NOT THINK TO ASK. Answer each seed below AND add your own:
   - Is DeepSeek's quality on long, tool-heavy repository review adequate for a BLOCKING gate, and
@@ -356,8 +368,10 @@ Each question has its own answer slot (`question_answers[]`). Verdict enums are 
   - What happens to in-flight plans and branches at each flip?
   - What is the monthly Actions-minutes and DeepSeek token cost at current volume? Persona runs are
     per head-SHA push, not per PR: estimate PRs per month (`git log --first-parent --since=30.days
-    origin/main`, split into plan PRs and code PRs) times runs per PR (pushes per PR, estimated from
-    your Section 11 samples' PR commit counts) times tokens per run.
+    origin/main`; a plan PR adds or changes a file under `docs/plans/`, a code PR is as defined in
+    Section 11, a PR that is both counts in both) times runs per PR (commits per PR read with
+    `mcp__github__pull_request_read` for your <= 5 Section 11 code-PR samples; if that tool is
+    unavailable, assume 3 and mark HYPOTHESIS) times tokens per run.
   - Does moving gates off the session change the interactive session's wall-clock loop materially?
 
 ## 8. RUBRIC
@@ -505,7 +519,7 @@ Static design review dominates this audit; the empirical pass is small and bound
 - Sample <= 5 recently merged code PRs -- do NOT exceed. A code PR is a squash commit on `main`
   (`git log --first-parent origin/main`) that changes at least one file outside `docs/` and
   `audits/`. Record diff size (files, lines; `git show --stat`) against the context window of the
-  primary role's current DeepSeek model (a Section 5 step 5 lookup, else your own knowledge marked
+  tier-1 model you recommend for code_reviewer in Q2 (if the two tier-1 models differ, record both) (a Section 5 step 5 lookup, else your own knowledge marked
   HYPOTHESIS) plus the code-review skill's required reads.
 - Counterfactual per sample: "If the in-session gate were deleted today and only the designed
   Actions persona existed, would this sample have received a verdict over the same inputs?" A
@@ -578,7 +592,7 @@ audit:
        agreement_measures: [{persona: decision_scout|plan_critic|code_reviewer, measure: "", n: <int >= 20>,
                              agreement_miss_disposition: ""}]}   # what the coordinator does if the
                                                                 # pre-registered agreement is missed
-    - {q: Q5, verdict: ready|ready_with_forks|not_ready, basis: [], prose: "see execution_plan"}
+    - {q: Q5, verdict: ready|ready_with_forks|not_ready, basis: [], prose: "<required content per Q5 and the execution_plan rules; points at execution_plan>"}
     - {q: Q6, verdict: sufficient|partial|insufficient, basis: [], prose: "see bundle_dispositions"}
     - {q: Q7, verdict: minimal|moderate|heavy, basis: [], prose: "see execution_plan.operator_touchpoints"}
     - {q: Q8, answers: [{question: "", answer: "", basis: []}]}
@@ -600,7 +614,8 @@ audit:
                                               # and the parts together must cover it; [] if none
         recs_absorbed: [rec-NNNN, ...]
         depends_on: [WP ids]
-        wave: <int; 0 = an operator_action settled before any plan starts, 1 = startable now>
+        wave: <int; 0 = an operator_action settled before any plan starts, 1 = startable now,
+               otherwise 1 + the highest wave among depends_on>
         files_owned: [<paths or globs>]       # packages in one wave must be disjoint
         always_ask: [iam_security|spend|decision_or_contract_text|public_surface|manual_admin|non_ci_deploy|loosened_tests|secret_publishing_run]
         design_state: designed|needs_operator_fork|undesigned
@@ -610,7 +625,7 @@ audit:
         effort: XS|S|M|L|XL
         basis: [<finding ids>]
     operator_touchpoints:
-      - {wp_id: "", item: "", touchpoint_kind: always_ask|design_fork|plan_approval,
+      - {wp_ids: [""], item: "<the operator act, one line>", touchpoint_kind: always_ask|design_fork|plan_approval,
          always_ask: <class from the enum above, or empty unless touchpoint_kind is always_ask>,
          settle_before_wave_1: true|false,
          monthly_cost_estimate: "<filled only when always_ask is spend, else empty>"}
@@ -758,7 +773,7 @@ prompt's framing does not foreclose it. Rating a designed-but-unbuilt surface: r
    the harness-assigned session branch (`docs/contracts/git-ops.yaml` agent branch prefixes
    `agent/`, `claude/`, `ccr-`): the audit needs a clean two-file diff off the audited base, and
    `audit/` is a registered extra push destination in the same file. The branch base MUST equal
-   `meta.audited_commit` (with any `-rN` suffix Section 5 step 1 added).
+   `meta.audited_commit`; the branch name carries any `-rN` suffix Section 5 step 1 added.
 2. Pre-push gate: the YAML parses
    (`bin/venv-python -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" audits/verdict-personas-on-actions-<sha>.yaml`),
    the counting invariant and the C1-C18 coverage rule hold, and the report is within its cap
@@ -771,7 +786,7 @@ prompt's framing does not foreclose it. Rating a designed-but-unbuilt surface: r
    amend). If a pre-commit hook rejects the commit, fix the cause inside your two deliverables and
    commit again; never bypass the hook.
 4. Run `git push -u origin HEAD` as a tool call on its own (no pipe, redirect or second command --
-   a repo hook rejects other forms). On a network error retry up to 4 times (2s, 4s, 8s, 16s).
+   a repo hook rejects other forms). On a network error retry up to 4 times (with whatever backoff your harness allows).
    IF the push still fails, or fails for a non-network reason: do not open a PR; end the turn with a
    final message naming the branch, the commit sha, the exact error and the `summary:` block.
 5. Open the PR via `mcp__github__create_pull_request` (owner `otl-labs`, repo `ontheloop`,
