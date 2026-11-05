@@ -14,8 +14,8 @@ from scripts.checks.roadmap import validate_plan_documents as plan_documents
 from scripts.checks.verification import validate_merge_step as merge_step
 from scripts.roadmap import approved_text, approved_text_github, approved_words
 from scripts.roadmap import approved_text_provenance as prov
+from tests import test_approved_text_github as api
 from tests.checks.roadmap import test_validate_plan_documents as plan_fx
-from tests.fixtures import approved_text_github as api
 from tests.fixtures import merge_step_repos as fx
 
 HISTORY = yaml.safe_load((Path(__file__).parent / "fixtures/approved_text/sidecar-history.yaml").read_text(encoding="utf-8"))
