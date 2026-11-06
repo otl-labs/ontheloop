@@ -31,10 +31,14 @@ resource "aws_sns_topic" "alerts" {
   }
 }
 
-resource "aws_sns_topic_subscription" "alerts_email" {
-  topic_arn = aws_sns_topic.alerts.arn
-  protocol  = "email"
-  endpoint  = var.alerts_email
+# CI cannot unsubscribe (github_ci_apply_policy.tf): forget the founder's subscription and let the operator
+# delete it in the console once the company successor pages (PLAN-terraform-company-emails-forget).
+removed {
+  from = aws_sns_topic_subscription.alerts_email
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 # Transitional (PLAN-terraform-company-emails): the company successor beside the predecessor. CI may
