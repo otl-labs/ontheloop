@@ -17,7 +17,7 @@ import yaml
 
 from scripts.roadmap import approved_words
 
-GRANDFATHER_REF = "2b8c4326aa349de7d7d7ec2ede1b1869cb0bd1a7"  # pragma: allowlist secret
+GRANDFATHER_REF = "6aa531d2037a4bfe3e38d3d0241726e0a734cc58"  # pragma: allowlist secret
 DEADLINE_SECONDS = 30
 
 APPROVED = "APPROVED"
