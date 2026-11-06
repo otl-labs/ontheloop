@@ -60,12 +60,6 @@ You are a Lead Software Developer writing production-quality Python. Primary dev
 **Hard rule: on `main`, never `Edit`/`Write`/`MultiEdit`/`NotebookEdit` a file inside the repo, or run `git commit` / `git push`.** On CC-web you are already on the harness-assigned session branch (`git branch --show-current`); agents never create their own. The PreToolUse hook `.claude/hooks/never_on_main.py` enforces this; writes outside the repo (memory, scratchpad) and read-only commands pass.
 
 ## Temporary Operational Constraints
-- **STRATEGIC plans suspended (Decision 67):** during this window all plans must be
-  IMPLEMENTATION type -- STRATEGIC plan-type declarations are refused (enforced by /plan,
-  the planning skill, and plan-critique). The planning skill's complexity heuristic (>5 files
-  or >8 steps) is also suspended -- author the work as a single larger IMPLEMENTATION plan OR
-  split it into multiple atomic IMPLEMENTATION plans yourself. Restores when CD.17 / T4.2
-  reverses.
 - **Lambda deployment -- per-Lambda gating (Decision 79):** only `status: active` artifacts need
   build + deploy + smoke-test (V3); see the planning skill's Lambda Deployment assessment.
 
@@ -97,12 +91,14 @@ skills, slash commands -- are optimised for agent loading efficiency, not human 
 
 ## Skills and slash commands
 
-Decision 90 four-tier workflow: `/orient` (read-only; writes nothing; picks the item) -> `/plan` (writes
-`docs/plans/PLAN-{slug}.yaml`) -> `/implement` -> `/develop-executor` (frozen, Decision 67). `/audit` composes
-`docs/audit-prompts/AUDIT-{slug}.md` and audits nothing. `/overseer` composes `/plan` and `/implement` subagents to
-drive a roadmap item or audit; it is not a fifth tier, never bypasses the workflow or the Decision 67 freeze, is
-human-gated and IMPLEMENTATION-only, and does not consume the recommendation queue. Each skill's description has
-the rest.
+Decision 90 workflow: `/orient` (read-only; writes nothing; picks the item) -> `/plan` (writes
+`docs/plans/PLAN-{slug}.yaml`) -> `/implement`; the fourth tier is the Decision 185 loop, and the legacy
+`/develop-executor` is retired (Decision 247). Plans are IMPLEMENTATION or REPORT-ONLY: work too large for one plan
+splits into child recs or atomic IMPLEMENTATION plans, each planned on its own (Decision 247). `/audit` composes
+`docs/audit-prompts/AUDIT-{slug}.md` and audits nothing. `/overseer` is being retired: it is not a fifth tier, never
+bypasses the workflow, and starts no planning or implementation agent of its own -- the coordinator dispatches each,
+one human-gated persona step on an operator-chosen rec, never the recommendation queue, hub and spoke (Decision 229
+cl.1-2). Each skill's description has the rest.
 
 When a slash command instructs you to "apply" or "invoke" a skill, use the `Skill` tool - never `Read` a `SKILL.md`.
 

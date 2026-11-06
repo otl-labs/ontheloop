@@ -36,7 +36,7 @@ When reading `logs/.preflight-report.json`, apply these conditionals:
 - **`main_freshness.commits_behind > 0`** -- Retain `main_freshness.main_files_changed_since_branch` for the Step 4 Main Divergence Assessment. Non-blocking at this step.
 - **`cron_review_fresh: false`** -- Note to human (non-blocking).
 - **`open_recommendations > 0`** -- Surface counts and ask whether to address. Wait.
-- **`non_automatable_recommendations > 0`** -- Informational. Surface counts; do not require per-rec discussion. Individual review is suspended per Decision 73 until CD.17 / T4.2 reverses (Decision 67's Lambda-deploy clause was lifted by Decision 79; the STRATEGIC clause survives).
+- **`non_automatable_recommendations > 0`** -- Informational. Surface counts; do not require per-rec discussion. Individual review stays suspended for good (Decision 73 cl.4 as amended by Decision 247).
   - If `non_automatable_softcap_breached` is true (count > 250), surface as a planning context note.
 - **`friction_patterns`, `metrics_anomalies` non-empty** -- Surface as planning context.
 - **`data_quality.last_run.verdict == "FAIL"`** -- Surface as planning context: N failures across
@@ -138,8 +138,7 @@ When a plan creates or modifies documentation artefacts, apply these rules:
 
 
 ## Complexity Assessment (Workflow Step 4)
-- **Scope files > 5** OR **estimated steps > 8** suggests **STRATEGIC** (a heuristic). **Freeze override (active, AGENTS.md Temporary Operational Constraints):** STRATEGIC is suspended -- author one larger IMPLEMENTATION plan or split it into atomic IMPLEMENTATION plans now.
-- If STRATEGIC (only valid when freeze is lifted), Work Areas must have precise lists, clear order, and concrete names.
+- **Scope files > 5** OR **estimated steps > 8** suggests the item may be too large for one plan (a heuristic). Plan types are IMPLEMENTATION and REPORT-ONLY only (Decision 247; the schema refuses STRATEGIC): author one larger IMPLEMENTATION plan, or decompose -- file child recs or split into atomic IMPLEMENTATION plans now, each planned on its own.
 - If IMPLEMENTATION (and complex), execution steps must have explicit pre/post-conditions.
 - **Presentation Rule:** The classification MUST be presented to the human and confirmed, not assumed.
 - **Size headroom (Decisions 128, 166):** `plan_obligations --plan` reports each scope file's headroom (SLOC, structural lines, prose bytes) and the unbuilt plans editing the same file. Plan a crossing as a decomposition (facade package, Decision 80/104/124) or the class relief valve, never a default raise: a raise is a Decision-cited exception (`# raise-approved: dec-NNN`), never a bare `--update-sloc-budgets` re-seed. A NEAR_CAP row carries a relief step measured against main at build time, never a fixed line count.
@@ -310,7 +309,7 @@ handoff_policy:
 slug: "{slug}" # must match the filename PLAN-{slug}.yaml
 intent: >- # 1-2 sentences: how this work contributes toward the North Star
   ...
-plan_type: IMPLEMENTATION # IMPLEMENTATION | STRATEGIC | REPORT-ONLY
+plan_type: IMPLEMENTATION # IMPLEMENTATION | REPORT-ONLY
 verification_tier: V2 # V1 | V2 | V3
 plan_path: docs/plans/PLAN-{slug}.yaml # must match the filename slug exactly
 phase: >- # tier_item id from docs/ROADMAP-PLATFORM.yaml
@@ -358,8 +357,7 @@ execution_steps: # REQUIRED non-empty for IMPLEMENTATION plans
   - Specific file to create/modify -- what it must do
   - Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)
   - 'Report: what was implemented, verification results'
-work_areas: [] # STRATEGIC plans only (required there, forbidden otherwise);
-  # entry shape: {area, scope, rationale, complexity: XS|S|M|L|XL}
+work_areas: [] # always empty (STRATEGIC retired, Decision 247); omit on new plans
 rollback: optional rollback note # optional str; omit if not applicable
 # fallback_reevaluation: OPTIONAL, only if this plan names a CD.27-gated tier item
 # (validate_fallback_reevaluation); never on an ordinary plan. 4 fields, extra=forbid:
@@ -429,7 +427,7 @@ This gate reviews the PLAN artefact, not the report deliverable. For REPORT-ONLY
 
 ## Report Critique Gate (Workflow Step 10, REPORT-ONLY only)
 
-**Applies only when Plan Type is REPORT-ONLY.** For IMPLEMENTATION and STRATEGIC plans, Step 10 is a no-op; skip to Step 11.
+**Applies only when Plan Type is REPORT-ONLY.** For IMPLEMENTATION plans, Step 10 is a no-op; skip to Step 11.
 
 **Why this gate exists:** Step 9 critiques the PLAN artefact only; a REPORT-ONLY plan's substantive deliverable (e.g. `docs/REPORT-{slug}.md`, named in Scope) carries its own correctness burden -- design soundness, internal consistency, alignment with live repo state, blast radius -- and needs independent fresh-context critique before the planning mission completes.
 
@@ -452,7 +450,7 @@ The human may explicitly state "skip report critique" after this step's purpose 
 ## Confirmation Messages (Workflow Step 12)
 Emit the handoff naming the explicit plan path so the human can paste it directly.
 
-- **IMPLEMENTATION / STRATEGIC:** use this block (STRATEGIC scopes into recs; IMPLEMENTATION executes directly):
+- **IMPLEMENTATION:** use this block:
   ```
   Planning complete. The plan is merged to main at docs/plans/PLAN-{slug}.yaml.
   To implement, open a NEW Claude Code session and paste:

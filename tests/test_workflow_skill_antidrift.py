@@ -63,7 +63,7 @@ def test_handoff_full_tier_runs_after_commit_and_rebase() -> None:
     skill = _IMPLEMENT_SKILL.read_text(encoding="utf-8")
     command = _IMPLEMENT_CMD.read_text(encoding="utf-8")
 
-    commit_flow = skill[skill.index("### IMPLEMENTATION Commit Flow") : skill.index("### STRATEGIC Commit Flow")]
+    commit_flow = skill[skill.index("### IMPLEMENTATION Commit Flow") :]
     verify_head_line = "bin/venv-python -m scripts.checks.validation_result --verify-head"
     assert (
         commit_flow.index("git commit")

@@ -1,11 +1,11 @@
 ---
-description: Implements IMPLEMENTATION plans directly or scopes STRATEGIC plans into atomic recommendations for the executor. Run after /plan.
+description: Implements IMPLEMENTATION plans directly. Run after /plan.
 argument-hint: [docs/plans/PLAN-slug.yaml]
 ---
 
 # Implement Workflow
 
-**Intent**: For IMPLEMENTATION plans: execute the Ordered Execution Steps directly. For STRATEGIC plans: research Work Areas and produce atomic, automatable recommendations for the executor.
+**Intent**: Execute an IMPLEMENTATION plan's Ordered Execution Steps directly.
 
 *Note: For detailed guidelines on how to execute each step below, invoke your `implement` skill via the Skill tool. For the canonical git-ops procedure (branching, rebase rules, PR/CI/merge flow), see `docs/contracts/git-ops.yaml`.*
 
@@ -39,7 +39,7 @@ bin/venv-python scripts/roadmap/find_plan.py
 ```
 If either command prints `NOT_FOUND`, list `docs/plans/PLAN-*.yaml` and ask the human which plan to implement.
 
-Read the entire plan file. Extract Intent, Plan Type, Verification Tier, Work Areas (STRATEGIC) or Execution Steps (IMPLEMENTATION), Verification Plan, and Constraints.
+Read the entire plan file. Extract Intent, Plan Type, Verification Tier, Execution Steps, Verification Plan, and Constraints.
 **If no plan file exists, STOP.**
 Also read `docs/PROJECT_CONTEXT.md`. Read only the decisions cited in the plan context (locate each via `rg "^## Decision N:" docs/DECISIONS.md`); do not load the full file.
 
@@ -50,16 +50,6 @@ Also read `docs/PROJECT_CONTEXT.md`. Read only the decisions cited in the plan c
 2. Present summary of scope to the human, and explicitly state you are executing autonomously without breaking into recs. Include a fun titbit to confirm understanding.
 3. Execute each Ordered Execution Step sequentially.
 4. Proceed to Step 4.
-
-### For STRATEGIC Plans
-1. Research each Work Area by reading files/modules.
-2. Identify dependencies.
-3. Break into atomic recs (effort `<= M`).
-4. Write full context (executor should not need to read the plan).
-5. Define acceptance command and verification steps.
-6. Apply the **Quality Gate Validation**, **Dedup Gate**, and **JIT Context Injection** from your `implement` skill.
-7. File approved recs using `bin/venv-python -m scripts.ops_data_portal --file-rec ...`. For recs `> M` effort, create `docs/plans/briefings/BRIEFING-rec-NNN.md`.
-8. Skip Steps 4-5 and proceed directly to Step 6.
 
 ## Step 4: Verification Plan (IMPLEMENTATION only -- MANDATORY)
 **You MUST execute this step. Do not skip it.**
@@ -115,7 +105,7 @@ is unreachable, the write FAILS LOUDLY (Decision 84 I-4, no offline outbox) -- r
 connectivity and re-file before declaring; never skip this step silently and never compose the id
 client-side.
 
-Apply the appropriate **Commit Flow** (STRATEGIC or IMPLEMENTATION) defined in your `implement` skill. All GitHub operations use the GitHub MCP tools (`mcp__github__*`) -- the `gh` CLI is not available on the web harness. Wait for CI event-driven via `subscribe_pr_activity`; never busy-wait with a sleep timer or a recurring scheduled re-check.
+Apply the appropriate **Commit Flow** (the IMPLEMENTATION Commit Flow) defined in your `implement` skill. All GitHub operations use the GitHub MCP tools (`mcp__github__*`) -- the `gh` CLI is not available on the web harness. Wait for CI event-driven via `subscribe_pr_activity`; never busy-wait with a sleep timer or a recurring scheduled re-check.
 
 When the plan's `bundled_recommendations` list is non-empty, the implementation commit and the PR body carry a `Resolves: rec-NNNN[, rec-MMMM]` trailer, and the merge follows the implement skill's Commit Flow step 4 (premerge, squash-merge with an explicit `commit_message` and `expectedHeadSha`, readback). After the merge, execute the **post-merge closeout fallback** from the implement skill: wait for `ci.yml`'s trailer-closure job to conclude on the push run at the merge sha, then act on its per-rec log evidence -- never on elapsed wall-clock time. A rec the job's log names in a Decision 186 or Decision 201 refusal marker is never closed by a direct `--update-rec ... --status closed` call: after a Decision 201 refusal it takes the route in `docs/contracts/git-ops.yaml#resolves_trailer`, and after a Decision 186 refusal it stays open and is reported to the operator (rec-4088). A rec the log names as closed, not-found, or errored may use the direct fallback command; anything else (no log line for that rec, an unconcluded or failed job) is left alone until the job concludes.
 
@@ -130,5 +120,4 @@ under `logs/` is committed.
 
 ## Step 9: Report
 Output the final report:
-- **STRATEGIC**: Total recs filed, breakdowns, briefing files created, and next step instructions.
 - **IMPLEMENTATION**: Files changed, verification results (actual outcomes per step), code review findings fixed, bugs fixed, design decisions, and any follow-on rec ids filed for a deferred half.

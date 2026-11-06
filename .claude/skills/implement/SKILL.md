@@ -1,6 +1,6 @@
 ---
 name: implement
-description: Deep methodology for executing implementation plans, including live verification protocols, strategic scoping gates, code review integration, and commit flows.
+description: Deep methodology for executing implementation plans, including live verification protocols, code review integration, and commit flows.
 model: sonnet
 ---
 
@@ -77,8 +77,8 @@ Track Attempts per step (see VP Compliance Gate below). This rule governs what a
 - If a step **FAILS** and is then re-run with an **EMPTY `git diff`** since the prior attempt (i.e. nothing in the tree changed) and the re-run goes green, the step is **NONDETERMINISTIC** -- record it as NONDETERMINISTIC in the VP compliance table, never as PASS. An empty-diff green is evidence the failure was flaky, not fixed, and a silent PASS would hide that.
 - Re-runs stay capped at the existing 3-fix-attempt bound. The nondeterminism rule does not license looping toward green -- it only names what an unexplained green means. On a NONDETERMINISTIC result, STOP and raise the alarm (Decision 55: RCA-first, no rescue loops).
 - A genuine fix requires a real code change (a **non-empty** `git diff` since the prior attempt). After such a change, the step must pass **two consecutive times** to count as PASS. These two confirmation passes verify an ALREADY-APPLIED fix and are **not** additional fix attempts -- they do not consume the 3-attempt fix budget, which governs diagnose-and-change cycles only.
-- **Interactive-era alarm (now):** while the executor is frozen (Decision 67) the alarm is STOP plus one plan-defect report (`deviation_trigger.escalation`: to the coordinator if one exists, else the human); files nothing.
-- **Forward-note (T3.19, `deferred_post_mvp`):** when the executor goes live (CD.17 reversal) this alarm flips to auto-filing a rec via `scripts.ops_data_portal` (Decision 84; CD.29's quarantine-that-files-a-rec) -- do not build that path now.
+- **Interactive-era alarm (now):** until the Decision 185 loop is live (T4.2) the alarm is STOP plus one plan-defect report (`deviation_trigger.escalation`: to the coordinator if one exists, else the human); files nothing.
+- **Forward-note (T3.19, `deferred_post_mvp`):** when the Decision 185 loop goes live (T4.2) this alarm flips to auto-filing a rec via `scripts.ops_data_portal` (Decision 84; CD.29's quarantine-that-files-a-rec) -- do not build that path now.
 - **Distinguish from declared non-determinism:** a VP step's DETECTED nondeterminism (this rule -- an agent-observed flaky re-run) is not the same thing as a verifier's DECLARED `Hermeticity.NON_HERMETIC_BY_CONSTRUCTION` property (a typed, audited characteristic of the verifier itself). Never silently relabel a detected-flaky VP step as "expected non-hermetic behavior" to justify passing it -- the two are orthogonal, and only the latter is a designed exemption.
 
 ### Deviation trigger
@@ -179,8 +179,7 @@ Do not re-author any of this here.
 
 ### Decomposition-hint exemption inheritance (T-1.12 subset g)
 
-A STRATEGIC parent tier_item that was split into atomic IMPLEMENTATION plans under the freeze
-override (AGENTS.md Temporary Operational Constraints / CD.17; the T2.19 pattern) carries a
+A parent tier_item that was split into atomic IMPLEMENTATION plans (the T2.19 pattern) carries a
 `decomposition_hints` block naming its children:
 ```yaml
 decomposition_hints:
@@ -198,8 +197,7 @@ PARENT's live `bootstrap_completion_exempt` value as the single source of truth 
 resolution that never writes the parent's `decomposition_hints` or the child's flag) lives at
 `docs/contracts/tier-item-lifecycle.yaml#decomposition_hint_inheritance` -- read it in full.
 Canonical examples: T-1.12 is `bootstrap_completion_exempt: true` (inherit `true`, T1.12 is
-`false` (inherit `false`). This is not a license to author STRATEGIC children: the freeze stays
-in force and atomic children remain IMPLEMENTATION plans.
+`false` (inherit `false`). Children are always IMPLEMENTATION plans (Decision 247).
 
 ### Parallel-with-code-review state machine
 
@@ -298,22 +296,6 @@ ratified shape; re-run preflight; run `bin/venv-python -m scripts.validate --pre
 tier_item status here), the batch-wave bundling rule (Decision 150), and the rejection-handling
 rule. Do not re-author it here.
 
-## Strategic Scoping Rules (Workflow Step 3 -- STRATEGIC Plans only)
-
-### JIT Context Injection
-When breaking a STRATEGIC plan into atomic recommendations, review `docs/PROJECT_CONTEXT.md`. Copy any relevant "Known Gotchas" or constraints directly into the recommendation's `context` field. Autonomous executors no longer read `copilot-instructions.md` by default, so they rely entirely on the JIT context you provide.
-
-### Quality Gate Validation
-Before filing each recommendation using `bin/venv-python -m scripts.ops_data_portal`, apply this gate. FAIL if any check fails:
-1. **Acceptance Command:** Must be a single inline command in backticks. FAIL if: contains `python -c`, contains `--pre` flag, has trailing prose, or uses line numbers. Must be behavioural.
-2. **Target File:** Verify `"file"` field exists relative to repo root.
-3. **Effort Threshold:** If `L` or `XL`, REQUIRE human confirmation before filing.
-4. **Context Quality:** FAIL if context is vague or < 50 characters.
-
-### Dedup Gate
-Before filing, search for open recs targeting the same file with at least 3 keyword matches. If duplicates found:
-- Surface: "Found potential duplicate(s). Options: (1) supersede existing, (2) file both, (3) skip this one?" Wait for human.
-
 ## Commit Flows (Workflow Step 7 -- MANDATORY)
 **Execute the commit flow autonomously once Step 6 completes -- the plan was approved during /plan.**
 
@@ -361,7 +343,7 @@ post-merge job. After approval, the gated-apply job applies the same saved plan.
 record. The authoritative baseline is still the next planning session's convergence-record re-check (not the
 wake). The gated apply gates the JOB, never from a laptop.
 
-### Pre-Push Rebase (applies to both flows)
+### Pre-Push Rebase
 See `docs/contracts/git-ops.yaml` `rebase_phase_distinction.commit_flow_time`; once pushed, use
 `--force-with-lease` (never `--force`).
 
@@ -392,6 +374,3 @@ Then via GitHub MCP (owner/repo from `git remote get-url origin`):
    route, a Decision 186 refusal stays open and is reported, a merge-leg refusal or a non-refusal
    per-rec log line permits the fallback, a trailer readback found missing goes to `merge_step
    recover` (never the fallback); anything else waits.
-
-### STRATEGIC Commit Flow
-STRATEGIC plans are suspended (Decision 67). When restored, use the same MCP PR/subscribe/merge pattern, committing `docs/plans/briefings/` with a `scope({slug}): ...` message.
