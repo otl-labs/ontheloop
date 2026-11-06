@@ -6,73 +6,59 @@ block's `before` words replaced by its `after` words. Whitespace and line wrappi
 only tolerated difference is a filled `{{N}}` or `{{DATE}}` placeholder.
 
 CLI:
-  record --slug S                          print `digest=<hex> blocks=<n>` for the working-tree sidecar
+  record --slug S                          print `digest=<hex> blocks=<n>`, `approved=<hex>` and `fingerprint=<words>`
   verify --slug S [--base REF] [--expect H] check the working tree against the sidecar read AT THE BASE
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
-import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+
+from scripts.roadmap import review_page
+from scripts.roadmap.approved_words import (
+    _PLACEHOLDERS as _PLACEHOLDERS,
+)
+from scripts.roadmap.approved_words import (
+    SIDECAR_DIR as SIDECAR_DIR,
+)
+from scripts.roadmap.approved_words import (
+    ApprovedTextError as ApprovedTextError,
+)
+from scripts.roadmap.approved_words import (
+    Block as Block,
+)
+from scripts.roadmap.approved_words import (
+    Sidecar as Sidecar,
+)
+from scripts.roadmap.approved_words import (
+    _token_matches as _token_matches,
+)
+from scripts.roadmap.approved_words import (
+    approved_digest as approved_digest,
+)
+from scripts.roadmap.approved_words import (
+    digest as digest,
+)
+from scripts.roadmap.approved_words import (
+    find_all as find_all,
+)
+from scripts.roadmap.approved_words import (
+    parse_sidecar as parse_sidecar,
+)
+from scripts.roadmap.approved_words import (
+    sidecar_rel as sidecar_rel,
+)
+from scripts.roadmap.approved_words import (
+    words as words,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
-SIDECAR_DIR = "docs/plans/approved"
-_PLACEHOLDERS = {r"\{\{N\}\}": r"\d+", r"\{\{DATE\}\}": r"\d{4}-\d{2}-\d{2}"}
 _CONTEXT_WORDS = 8
-
-
-class ApprovedTextError(Exception):
-    """A sidecar block cannot be applied to its base text (message names the block id)."""
-
-
-class Block(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    id: str
-    file: str
-    before: str
-    after: str
-
-
-class Sidecar(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: Literal[1]
-    slug: str
-    blocks: list[Block]
-
-    @model_validator(mode="after")
-    def _check_blocks(self) -> Sidecar:
-        if not self.blocks:
-            raise ValueError("blocks must not be empty")
-        ids = [b.id for b in self.blocks]
-        if len(set(ids)) != len(ids):
-            raise ValueError("block ids must be unique")
-        return self
-
-
-def words(text: str) -> list[str]:
-    return text.split()
-
-
-def sidecar_rel(slug: str) -> str:
-    return f"{SIDECAR_DIR}/{slug}.yaml"
-
-
-def parse_sidecar(text: str) -> Sidecar:
-    try:
-        return Sidecar.model_validate(yaml.safe_load(text))
-    except (yaml.YAMLError, ValidationError) as exc:
-        raise ApprovedTextError(f"sidecar does not parse: {exc}") from exc
 
 
 def _git_show(ref: str, rel: str, root: Path) -> str | None:
@@ -112,20 +98,6 @@ def sidecar_state(slug: str, root: Path, base: str) -> str:
     if tree_text is None:
         return "deleted"
     return "unchanged" if base_text == tree_text else "changed"
-
-
-def _token_matches(approved: str, actual: str) -> bool:
-    if "{{" not in approved:
-        return approved == actual
-    pattern = re.escape(approved)
-    for escaped, regex in _PLACEHOLDERS.items():
-        pattern = pattern.replace(escaped, regex)
-    return re.fullmatch(pattern, actual) is not None
-
-
-def find_all(haystack: list[str], needle: list[str]) -> list[int]:
-    n = len(needle)
-    return [i for i in range(len(haystack) - n + 1) if haystack[i : i + n] == needle]
 
 
 def apply(base_words: list[str], blocks: list[Block]) -> list[str]:
@@ -195,11 +167,6 @@ def verify(sidecar: Sidecar, root: Path, base_ref: str) -> list[str]:
     return messages
 
 
-def digest(sidecar: Sidecar) -> str:
-    payload = [{"file": b.file, "before": words(b.before), "after": words(b.after)} for b in sidecar.blocks]
-    return hashlib.sha256(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
-
-
 def _cmd_record(args: argparse.Namespace) -> int:
     try:
         sidecar = load_sidecar(args.slug, args.root)
@@ -207,6 +174,9 @@ def _cmd_record(args: argparse.Namespace) -> int:
         print(f"APPROVED-TEXT ERROR {exc}")
         return 2
     print(f"digest={digest(sidecar)} blocks={len(sidecar.blocks)}")
+    approved = approved_digest(sidecar)
+    print(f"approved={approved}")
+    print(f"fingerprint={review_page.fingerprint(approved)}")
     return 0
 
 

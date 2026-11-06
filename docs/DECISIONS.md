@@ -2,6 +2,91 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 246: Always-ask wording is approved on GitHub -- the operator approves an Environment gate for the sidecar's approved words, CI checks that record at the plan and the build, and a build carrying those words never asks again (amends Decision 83) (Decided)
+
+```yaml
+number: 246
+status: Decided
+decided_date: "2026-11-05"
+kind:
+  value: direction
+  justification: >-
+    Clause 5 makes a human gate: a plan PR that adds or changes approved text stays red until the operator
+    approves it on GitHub, narrowing Decision 83's non-wedging property for those PRs; undone, the approval is
+    agent-recorded prose again.
+amends: [83]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant: it moves where every always-ask wording approval is recorded and rests on a
+    grant-based premise that can fail. Not a git-ops.yaml note: a contract records the check's shape, not the
+    operator's approval medium or the narrowing of Decision 83. Not amendment_forms: it binds every planning and
+    build session, not one prior entry.
+```
+
+**Status:** Decided
+**Date:** 2026-11-05
+**Warehouse ID:** dec-246 (per Decision 84 backfill)
+
+**Problem:** An approved-text sidecar (docs/plans/approved/<slug>.yaml) binds a build's always-ask edits word for
+word to the sidecar at the build's base, but nothing proves the sidecar is what the operator approved. The approval
+is a chat message, recorded only as agent-written prose, so a plan amendment can rewrite the sidecar and its digest
+together (rec-4769; the residual git-ops.yaml approved_text_binding declared under Decision 181 cl.2). Builds whose
+only always-ask content is approved text therefore still ask for a final merge word (operator, 2026-11-03).
+
+**Intent:** What the operator approves at planning ships word for word, provably, and the build never asks again.
+
+**Decision:**
+1. **Approval record.** The operator approves a sidecar by approving the `approved-text` Environment gate of an
+   approved-text-approval.yml run dispatched from main with the sidecar's slug, commit and approved-words digest.
+   The run's first job, main's code reading the sidecar at that commit as data (Decision 238 cl.3), checks the
+   digest and shows the wording on the run page. An agent may dispatch the run; only an Environment reviewer can
+   approve it (Decision 233 cl.4). A chat word alone no longer binds wording.
+2. **Approved words.** The approved-words digest covers, per block, its file, the words its `after` adds and the
+   words its `before` removes. It ignores the anchor words `before` and `after` share at either end, and a number
+   or date a placeholder replaces. A re-anchor that changes only those keeps the approval (the operator's
+   2026-11-03 ruling); any other change needs a new one, even a change to the removed words that main's own edit
+   caused (operator, 2026-11-05).
+3. **Checks.** validate_plan_documents fails a PR that adds or changes a sidecar, and validate_merge_step fails a
+   build, unless GitHub records, for that slug and digest, a run whose gated job an Environment reviewer approved
+   and that then succeeded, or the sidecar is grandfathered (on main at the rollout commit with its plan
+   undeclared and the same digest, derived from git as Decision 187 requires). In pull-request CI an unreadable
+   record fails; elsewhere the lookup is advisory and never reads as a pass (Decision 73 cl.2, Decision 170). The
+   post-merge full tier does not re-run the lookup.
+4. **No re-ask.** A build whose base sidecar passes needs no further operator word for its sidecar-bound text. The
+   final-diff word stays for what no sidecar binds: CODEOWNERS paths, hooks and other security code, IAM, spend
+   and deploys.
+5. **A human gate (amends Decision 83).** A sidecar PR stays red until the operator approves. The approval run
+   comments on the open PR at that commit, so its watcher re-runs pr-validate on that wake (Decision 76); an
+   operator merge in the GitHub UI stays the release valve.
+6. **Coverage (Decision 181 cl.2).** Clauses 1-3 and 5: the two checks, the approval workflow with its wake job,
+   and their tests. Clause 4 is procedural: the coordinator's standing authorisation carries it. Residuals: the
+   approval is operator-only by grant (rec-4695 HOLDS_BY_GRANT, re-decided with Decision 239's approval-bypass
+   condition); the digest binds words, not place, so a re-anchor may move a block to another match in its file
+   (rec-4907; the run page shows each block's location); an agent can still merge on red through the admin
+   bypass (rec-4080); a branch that edits these checks is judged by its own copy (rec-2827).
+   docs/contracts/git-ops.yaml records the mechanism.
+
+```yaml reversal-conditions
+decision: 246
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan; never let an agent-written record stand in for the approval"
+conditions:
+  - id: approval-bypass
+    kind: manual
+    description: "Any agent-held GitHub credential gains Deployments or environment write, or a deployment-approval-probe re-run reads APPROVED on any leg: re-decide with Decision 239."
+  - id: forge-change
+    kind: manual
+    description: "An adopter's forge is not GitHub (Decision 234): add a change-surface adapter for its approval record."
+  - id: wedge
+    kind: manual
+    description: "A sidecar PR the operator approved stays red because the lookup misreads GitHub's record: fix the adapter; if it recurs, revisit."
+```
+
+**Related:** Decisions 73, 76, 83, 101, 170, 181, 187, 233, 234, 238, 239; rec-2827, rec-4080, rec-4695, rec-4769, rec-4907.
+
+---
+
 ## Decision 245: An agent merge is refused when main has changed, since the PR's base, a file the PR also changes -- a fail-closed presubmit heuristic with no agent override, the post-merge full tier stays the authority (amends Decision 83) (Decided)
 
 ```yaml
@@ -10535,6 +10620,8 @@ conditions:
 **Related:** Decision 89 (premise reversed here; merge-gate design preserved), Decision 76 (foresaw reversal; deferred follow-up now unblocked), Decision 77 (guard rationale preserved -- guard is the plan-CONTENT control, not a branch-protection substitute), Decision 73 (public flip enabling the apply), Decision 75 (sanctioned premise correction).
 
 > **Update (2026-11-03):** Decision 245 clause 3 narrows the non-wedging property for agent merges: a fail-closed gate refuses a merge whose stale base shares a changed file with main. The ruleset configuration above is unchanged.
+
+> **Update (2026-11-05):** Decision 246 clause 5 narrows it again for pull requests that add or change approved text: such a PR stays red until the operator approves the wording on GitHub, and an operator merge in the GitHub UI stays the release valve.
 
 ---
 
