@@ -5,98 +5,179 @@ handoff_policy:
 slug: terraform-github-gated-apply
 intent: >-
   Give terraform/github (the repository's ruleset, Environments and Actions settings) a CI apply path behind one
-  operator approval, so the root is CI-applied like every other root (Decision 126) and the merged approved-text
-  Environment (Decision 246, rec-4769) can be created without anyone hand-applying Terraform.
+  operator approval, so the root is CI-applied like every other root (Decision 126). The operator had already judged
+  this best practice and deferred it; a harness change that stopped agent sessions applying the root brings it
+  forward, and its first run creates the merged approved-text Environment (Decision 246, rec-4769).
 plan_type: IMPLEMENTATION
 verification_tier: V3
 plan_path: docs/plans/PLAN-terraform-github-gated-apply.yaml
 phase: >-
   ad_hoc_rec (soft-warn exception category) -- rec-4964, filed at planning: the operator chose a gated CI apply on
-  2026-11-06 (thread "Roll out approved-wording GitHub approvals") after cloud sessions proved unable to apply
-  terraform/github; it unblocks rec-4769's VP 11-14.
+  2026-11-06 (thread "Roll out approved-wording GitHub approvals") after a harness change stopped agent sessions
+  applying terraform/github; it unblocks rec-4769's VP 11-14.
 scope:
-  - file: .github/workflows/terraform-github-apply.yml
-    action: Create
-    purpose: >-
-      The CI apply. on: push (branches [main]; paths terraform/github/**, this workflow, scripts/ci/terraform_github_apply*)
-      and workflow_dispatch with inputs gate_change (string, default empty) and approval_probe_run_id (string, default
-      empty); top-level permissions contents read; concurrency group terraform-github-apply, cancel-in-progress false.
-      Every job's if requires github.ref == 'refs/heads/main'. Job preview (environment tf-trusted-plan, the main-only
-      no-reviewer Environment, so the plan App key reaches it as a repository secret today and as an Environment
-      secret after rec-4638; id-token write; timeout 15): the read-only plan as terraform-github-plan.yml does it
-      (github-settings-preview by its tf-trusted-plan subject, role-session-name terraform-github-preview, the
-      read-only plan App token, -lock=false, every python call -I), the names-only reporter
-      and the gate's preview summary to the step summary, and the gate's preview outputs reviewed (the reviewed set)
-      and has_changes (false for NO_CHANGES and VISIBILITY_GATED_ONLY, true on a dispatch with either input set); plan
-      files deleted always. Job apply (needs preview; if has_changes; environment the GATE_ENV literal, tf-gated-apply
-      until rec-4965; id-token write; timeout 20): assumes github-settings-apply with role-session-name
-      terraform-github-apply and runs scripts/ci/terraform_github_apply.sh with REVIEWED, GATE_CHANGE and PROBE_RUN_ID
-      through env, never interpolated into run:. Every checkout takes no ref and sets persist-credentials false; every
-      non-local uses: in both jobs is pinned to a 40-hex commit SHA with a version comment (the preview job is a
-      governed job of validate_trusted_plan_environment's predicates (g)-(i)).
-  - file: scripts/ci/terraform_github_apply.sh
-    action: Create
-    purpose: >-
-      The apply job's single process, so the installation token never leaves a shell variable
-      (secret-material-handling.yaml provider_credential_ephemeral_input). set -euo pipefail. Reads the apply App entry
-      (Secrets Manager agent-platform-terraform-github-apply-app; JSON app_id, installation_id, private_key) into a
-      variable; signs a ten-minute RS256 JWT with openssl from a process substitution; POST
-      /app/installations/{id}/access_tokens with repositories [ontheloop] and permissions administration write, metadata
-      read, actions read; ::add-mask:: the token; unsets the key; trap EXIT revokes the token (DELETE /installation/token)
-      and deletes plan files. If PROBE_RUN_ID is set (must match ^[0-9]+$) it tries to approve that run's pending
-      deployment with the token and prints APPLY_APP_APPROVAL_REFUSED on a 4xx refusal, or APPLY_APP_APPROVAL_ACCEPTED and
-      exits 1 on success. Resolves reviewer ids into a variable; terraform init -lockfile=readonly; plan -out=plan.bin;
-      show -json; the gate's check against REVIEWED (a refusal exits before apply); the gate's applied summary to the
-      step summary; terraform apply plan.bin (the plan this job checked, Decision 158 cl.3); then plan
-      -detailed-exitcode and fails unless 0 (TF_GITHUB_APPLY_CONVERGED on 0). Prints only machine lines, counts and
-      allowlisted values; never another plan value, the key, the token, an id or an ARN.
-  - file: scripts/ci/terraform_github_apply_gate.py
-    action: Create
-    purpose: >-
-      Stdlib-only, run with python3 -I by path; loads terraform_github_plan_report.py the way that file loads
-      plan_names_core.py and reuses classify(). A row is {address, actions, changed, values}, where values holds the
-      after-values of ALLOWLIST (type, attribute) pairs only: environment, branch_pattern, can_admins_bypass,
-      prevent_self_review, protected_branches, custom_branch_policies, enforcement, and reviewer_count (the length of
-      reviewers[0].users, never the ids). preview, on the read-only plan: a Markdown table (address, action, changed
-      names, allowlisted values) with a GATE CHANGE banner for every GATE_TYPES row (github_repository_environment,
-      github_repository_environment_deployment_policy, github_actions_repository_permissions,
-      github_workflow_repository_permissions); reviewed (sorted compact JSON of rows) and has_changes to GITHUB_OUTPUT.
-      check, on the admin plan against the reviewed set, refuses with its own marker and exit 1: (a)
-      TF_GITHUB_APPLY_UNREVIEWED a row with no reviewed row of the same address and actions whose changed names are a
-      superset and whose allowlisted values are equal; (b) TF_GITHUB_APPLY_DESTRUCTIVE any destroy or replace; (c)
-      TF_GITHUB_APPLY_RULESET_REFUSED any github_repository_ruleset row that is not no-op (the provider resends only
-      modelled keys, rec-4624); (d) TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED any update of a GATE_TYPES row whose address is
-      not in GATE_CHANGE (comma-separated exact addresses); (e) TF_GITHUB_APPLY_GATE_CHANGE_STALE a GATE_CHANGE address
-      with no such update row; (f) TF_GITHUB_APPLY_PLAN_UNREADABLE a missing or unparseable plan or reviewed set.
-      Creates and imports of gate types pass (d). Otherwise TF_GITHUB_APPLY_CHECKED add=<n> change=<n> import=<n>, or
-      TF_GITHUB_APPLY_NOTHING with exit 0 when the admin plan has no rows (the script then skips apply).
   - file: terraform/bootstrap/github_settings_apply.tf
     action: Create
     purpose: >-  # pragma: allowlist secret -- names a Secrets Manager entry, not a value
+      PR 1. data.aws_secretsmanager_secret.github_apply_app (name agent-platform-terraform-github-apply-app; metadata
+      only, the platform_dev_policies.tf precedent; no value read, Decision 237 cl.3) and
+      local.github_settings_workflow_refs = ["otl-labs/ontheloop/.github/workflows/terraform-github-apply.yml@refs/heads/main"].
       aws_iam_role.github_settings_apply (name github-settings-apply, outside the agent-platform-* family so no CI
       identity's IAM grant reaches it; permissions_boundary aws_iam_policy.github_ci_apply_boundary.arn; trust ONE
       statement, StringEquals only: aud sts.amazonaws.com, sub
       flatten([for repo in local.github_repos : ["repo:${repo}:environment:${local.github_settings_gate_env}"]]) with
-      local.github_settings_gate_env = "tf-gated-apply" until rec-4965, and job_workflow_ref
-      ["otl-labs/ontheloop/.github/workflows/terraform-github-apply.yml@refs/heads/main"]).
-      aws_iam_role_policy.github_settings_apply: AppKeyRead (secretsmanager:GetSecretValue on
-      secret:agent-platform-terraform-github-apply-app-??????), TfstateGithubObject (s3:GetObject, s3:PutObject on
+      local.github_settings_gate_env = "tf-gated-apply" until rec-4965, job_workflow_ref
+      local.github_settings_workflow_refs). aws_iam_role_policy.github_settings_apply: AppKeyRead
+      (secretsmanager:GetSecretValue on the data source's arn), TfstateGithubObject (s3:GetObject, s3:PutObject on
       tfstate/github/terraform.tfstate), TfstateGithubLock (s3:GetObject, s3:PutObject, s3:DeleteObject on its .tflock);
-      no s3:ListBucket (the backend needs none, probe in context); no iam: action, nothing else; a
-      lifecycle precondition holds the minified policy under 10,240 B. aws_secretsmanager_secret_policy.github_settings_apply_key
-      on the operator-created secret: Deny secretsmanager:GetSecretValue, PutSecretValue, DeleteSecret,
-      PutResourcePolicy and DeleteResourcePolicy to every principal whose aws:PrincipalArn is not role/github-settings-apply,
-      role/PlatformAdmin, user/platform-breakglass or the account root; block_public_policy true. The secret ARN is built
-      from var.account_id, var.aws_region and a committed six-character suffix variable (no data source reads a secret,
-      Decision 237 cl.3). aws_iam_role.github_settings_preview (name github-settings-preview, same boundary; trust ONE
-      statement, StringEquals only: aud, sub environment:tf-trusted-plan, job_workflow_ref the same one main ref) and
+      no s3:ListBucket (the backend needs none: probe in context, re-proven pre-merge by VP 6), no iam: action, nothing
+      else. aws_iam_role.github_settings_preview (name github-settings-preview, same boundary; trust ONE statement,
+      StringEquals only: aud, sub environment:tf-trusted-plan, job_workflow_ref the same local) and
       aws_iam_role_policy.github_settings_preview (TfstateGithubRead: s3:GetObject on tfstate/github/terraform.tfstate
-      only; the preview plans -lock=false), mirroring the trusted-plan role's TfstateGithubRead. The header cites
-      Decision {{N}}.
+      only; the preview plans -lock=false). Each inline policy carries the lifecycle precondition holding its minified
+      form under 10,240 B (validate_iam_policy_size). aws_secretsmanager_secret_policy.github_settings_apply_key on the
+      data source's arn: one Deny statement, Principal "*", NotAction [secretsmanager:DescribeSecret,
+      secretsmanager:GetResourcePolicy, secretsmanager:ListSecretVersionIds], Resource "*", ArnNotLike aws:PrincipalArn
+      [role/github-settings-apply, role/PlatformAdmin, user/platform-breakglass, the account root] built from
+      var.account_id; block_public_policy true; no Allow statement. The header cites Decision {{N}}.
+  - file: scripts/checks/ci_guards/validate_github_settings_apply.py
+    action: Create
+    purpose: >-
+      Standing guard (fast tier); predicates over parsed workflows and Terraform text so red cases run on synthetic
+      input. PR 1 lands (a), (g) and (h); PR 2 adds the rest. (a) No workflow or composite action except
+      terraform-github-apply.yml names github-settings-apply, github-settings-preview, the apply App secret name or
+      scripts/ci/terraform_github_apply.sh. (b) Its on: keys are exactly push (branches [main]) and workflow_dispatch.
+      (c) The apply job declares a literal environment equal to GATE_ENV and is the only job assuming
+      github-settings-apply; the preview job declares exactly tf-trusted-plan, assumes only github-settings-preview and
+      is the only job that reads the plan App key. (d) Both jobs' if require refs/heads/main and apply needs preview.
+      (e) Every checkout takes no ref or repository and sets persist-credentials false. (f) Every non-local uses: in
+      both jobs is a 40-hex SHA. (g) Each role's trust has exactly one statement, StringEquals only, sub values only of
+      the environment:<GATE_ENV> form (the preview role: environment:tf-trusted-plan) and job_workflow_ref exactly
+      local.github_settings_workflow_refs, which is the one main ref. (h) The apply role's policy has no iam: action
+      and no resource outside the three named; the preview role's policy is exactly its one GetObject; both carry the
+      size precondition; the secret policy is one Deny with exactly the three metadata verbs as NotAction and exactly
+      the four principals excepted. (i) .github/CODEOWNERS covers the workflow, both scripts, the reporter, its
+      plan_names_core.py and this file. (j) No inputs.* or needs.* expression appears inside a run: body. (k) The
+      tf_github_apply Environment is main-only with can_admins_bypass false and prevent_destroy.
+      registry.examined(n, unit="invariants"). Reuses validate_trusted_plan_environment's parsing helpers by import;
+      estimate under 350 SLOC (its nine-predicate sibling is 432).
+    new_imports: [scripts.checks.ci_guards.validate_trusted_plan_environment]
+  - file: scripts/checks/ci_guards/_manifest.py
+    action: Modify
+    purpose: >-
+      PR 1. Entry validate_github_settings_apply, pre=True, pre_globs .github/workflows/**, .github/actions/**,
+      .github/CODEOWNERS, terraform/bootstrap/github_settings_apply.tf, terraform/github/environments.tf,
+      scripts/ci/terraform_github_apply*, the check file, scripts/checks/ci_guards/validate_trusted_plan_environment.py
+      (its import), scripts/verify_ci_workflow/**, scripts/checks/_common.py, scripts/checks/registry.py; full_segment
+      full_after_lint.
+  - file: tests/checks/ci_guards/test_validate_github_settings_apply.py
+    action: Create
+    purpose: >-
+      PR 1 (extended in PR 2). One red case per predicate on synthetic input, the manifest registration, and the real
+      tree green; plus pins that the ci_rca_taxonomy rows exist, deploy-paths.yaml
+      admin_out_of_band.github_settings_apply_provisioning names both roles (PR 1), secret-material-handling.yaml
+      domains names the apply App entry and its resource policy (PR 1), and environment-taxonomy.yaml
+      axis_a.github.apply_gating names terraform-github-apply.yml while keeping the NEVER auto-apply and
+      terraform-github-plan.yml words test_taxonomy_row reads (PR 2).
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      PR 1: one row for validate_github_settings_apply beside validate_trusted_plan_environment. PR 2: a workflows: row
+      terraform-github-apply {tier: not_a_gate, ci_rca: excluded, owner: platform}, rationale: operator-gated apply
+      dispatched or pushed from main; waiting, rejected and cancelled runs and a preview that stops on an unnamed gate
+      change are expected states read by the dispatching agent, like approved-text-approval. NEAR_CAP: measure against
+      main at each build and compact an existing row's wording (words unchanged) if a row does not fit.
+  - file: tests/checks/iam_tf/test_platform_role_metadata_admin_scope.py
+    action: Modify
+    purpose: PR 1. Scan terraform/bootstrap/github_settings_apply.tf too (Decision 225 cl.5 names a bootstrap CI identity other than the apply role as an unenforced residual), and add it to test_scanned_set_is_non_empty_and_every_expected_file_present. Its graduated shard platform-admin-absent-from-ci-write-patterns is kept unchanged.
+  - file: .github/CODEOWNERS
+    action: Modify
+    purpose: >-
+      PR 1: /scripts/checks/ci_guards/validate_github_settings_apply.py. PR 2: /scripts/ci/terraform_github_apply.sh,
+      /scripts/ci/terraform_github_apply_gate.py, /scripts/ci/terraform_github_plan_report.py and
+      /scripts/ci/plan_names_core.py (the workflow is covered by /.github/workflows/terraform-*.yml, the roles by
+      /terraform/bootstrap/).
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: PR 1. Insert the approved Decision (W1); number filled at implementation per decision-entry.yaml number_assignment; regenerate docs/decisions-index.json.
+  - file: docs/contracts/deploy-paths.yaml
+    action: Modify
+    purpose: >-
+      PR 1. admin_out_of_band.github_settings_apply_provisioning (W3) plus a new amendment_log entry. NEAR_CAP (492 of
+      500 at planning, three unbuilt plans also scope it): measure against main at the build; if W3 and its log entry do
+      not fit, compact existing multi-line amendment_log entries to the one-line flow form, words unchanged.
+  - file: docs/contracts/secret-material-handling.yaml
+    action: Modify
+    purpose: PR 1. domains gains the apply App key line (W5) plus a new amendment_log entry.
+  - file: .github/workflows/terraform-github-apply.yml
+    action: Create
+    purpose: >-
+      PR 2. on: push (branches [main]; paths terraform/github/**, this workflow, scripts/ci/terraform_github_apply*,
+      scripts/ci/terraform_github_plan_report.py, scripts/ci/plan_names_core.py) and workflow_dispatch with inputs
+      gate_change (string, default empty) and approval_probe_run_id (string, default empty); top-level permissions
+      contents read; concurrency group terraform-github-apply, cancel-in-progress false. Every job's if requires
+      github.ref == 'refs/heads/main'. Job preview (environment tf-trusted-plan, the main-only no-reviewer Environment,
+      so the plan App key reaches it as a repository secret today and as an Environment secret after rec-4638;
+      id-token write; timeout 15): the read-only plan as terraform-github-plan.yml does it (github-settings-preview by
+      its tf-trusted-plan subject, role-session-name terraform-github-preview, the read-only plan App token,
+      -lock=false, every python call -I), the names-only reporter and the gate's preview to the step summary, and the
+      gate's preview outputs reviewed and has_changes; the gate's preview exits 1 on an unnamed gate change, so the
+      apply job never asks; plan files deleted always. Job apply (needs preview; if has_changes; environment the
+      GATE_ENV literal, tf-gated-apply until rec-4965; id-token write; timeout 20): assumes github-settings-apply with
+      role-session-name terraform-github-apply and runs scripts/ci/terraform_github_apply.sh with REVIEWED,
+      GATE_CHANGE and PROBE_RUN_ID through env, never interpolated into run:. Every checkout takes no ref and sets
+      persist-credentials false; every non-local uses: in both jobs is pinned to a 40-hex commit SHA with a version
+      comment; run: bodies stay thin (logic in scripts/ci/).
+  - file: scripts/ci/terraform_github_apply.sh
+    action: Create
+    purpose: >-  # pragma: allowlist secret -- names a Secrets Manager entry, not a value
+      PR 2. The apply job's single process, so the installation token never leaves a shell variable
+      (secret-material-handling.yaml provider_credential_ephemeral_input). set -euo pipefail. Reads the apply App entry
+      (JSON app_id, installation_id, private_key) into a variable; signs an RS256 JWT with openssl from a process
+      substitution, iat backdated 60 s and exp at most iat + 600; POST /app/installations/{id}/access_tokens with
+      repositories [ontheloop] and permissions administration write, metadata read, actions read (no Deployments
+      permission); ::add-mask:: the token; unsets the key; curl always reads the Authorization header from stdin
+      (-H @-), never from argv; trap EXIT revokes the token (DELETE /installation/token) and deletes plan files.
+      Probe leg, if PROBE_RUN_ID is set (must match ^[0-9]+$, else exit 1 before any call): GET that run's
+      pending_deployments, which must succeed and name the deployment-approval-probe Environment (else
+      APPLY_APP_PROBE_INCONCLUSIVE, exit 1); POST an approval for that Environment; the gate's probe-verdict classifies
+      the response as deployment_approval_probe.py's table does (2xx APPLY_APP_APPROVAL_ACCEPTED, exit 1; an
+      integration 403 or a 403/422 with current_user_can_approve false APPLY_APP_APPROVAL_REFUSED; anything else, or
+      the pending entry gone on a re-read, APPLY_APP_PROBE_INCONCLUSIVE, exit 1). Then: reviewer ids into a variable;
+      every terraform call through scripts/ci/quiet_run.sh with logs under RUNNER_TEMP never printed; init
+      -lockfile=readonly; plan -out=plan.bin; show -json; the gate's check against REVIEWED (a refusal exits before
+      apply); the gate's applied summary to the step summary; terraform apply plan.bin (the plan this job checked,
+      Decision 158 cl.3); TF_GITHUB_APPLY_APPLIED add=<n> change=<n> import=<n> from the checked counts; then plan
+      -detailed-exitcode, failing unless 0 (TF_GITHUB_APPLY_CONVERGED on 0). Prints only machine lines, counts and
+      allowlisted values; never another plan value, the key, the token, an id or an ARN.
+  - file: scripts/ci/terraform_github_apply_gate.py
+    action: Create
+    purpose: >-
+      PR 2. Stdlib-only, run with python3 -I by path; loads terraform_github_plan_report.py the way that file loads
+      plan_names_core.py and reuses classify(). A row is {address, actions, changed, values}, where values holds the
+      after-values of ALLOWLIST (type, attribute) pairs only: environment, branch_pattern, can_admins_bypass,
+      prevent_self_review, protected_branches, custom_branch_policies, enforcement, and reviewer_count (the length of
+      reviewers[0].users, never the ids). GATE_TYPES: github_repository_environment,
+      github_repository_environment_deployment_policy, github_actions_repository_permissions,
+      github_workflow_repository_permissions. preview, on the read-only plan: a Markdown table (address, action,
+      changed names, allowlisted values) with a GATE CHANGE banner for every GATE_TYPES row; reviewed (sorted compact
+      JSON of rows) and has_changes (false for NO_CHANGES and VISIBILITY_GATED_ONLY, true on a dispatch with either
+      input set) to GITHUB_OUTPUT; when a non-no-op GATE_TYPES row (create, update or import) is not in GATE_CHANGE it
+      writes the table, prints TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED and exits 1 without writing GITHUB_OUTPUT. check, on the admin plan against the
+      reviewed set, refuses with its own marker and exit 1: (a) TF_GITHUB_APPLY_UNREVIEWED a row with no reviewed row
+      of the same address and actions whose changed names are a superset and whose allowlisted values are equal; (b)
+      TF_GITHUB_APPLY_DESTRUCTIVE any destroy or replace; (c) TF_GITHUB_APPLY_RULESET_REFUSED any github_repository_ruleset
+      row that is not no-op (the provider resends only modelled keys, rec-4624); (d) TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED
+      any non-no-op GATE_TYPES row, creates and imports included, whose address is not in GATE_CHANGE
+      (comma-separated exact addresses); (e) TF_GITHUB_APPLY_GATE_CHANGE_STALE a GATE_CHANGE address with no such row;
+      (f) TF_GITHUB_APPLY_PLAN_UNREADABLE a missing or unparseable plan or reviewed set. Otherwise
+      TF_GITHUB_APPLY_CHECKED add=<n> change=<n> import=<n>, or TF_GITHUB_APPLY_NOTHING with exit 0 when the admin plan
+      has no rows (the script then skips apply). probe-verdict maps (status, integration-403 flag, can_approve,
+      pending-after) to ACCEPTED, REFUSED or INCONCLUSIVE.
   - file: terraform/github/environments.tf
     action: Modify
     purpose: >-
-      Add github_repository_environment.tf_github_apply (environment tf-github-apply, reviewers
+      PR 2. Add github_repository_environment.tf_github_apply (environment tf-github-apply, reviewers
       var.gated_apply_reviewer_user_ids, prevent_self_review false, can_admins_bypass false, deployment_branch_policy
       protected_branches false and custom_branch_policies true, lifecycle prevent_destroy) and
       github_repository_environment_deployment_policy.tf_github_apply_main (branch_pattern main), mirroring approved_text.
@@ -104,127 +185,89 @@ scope:
       apply" line point to the CI apply.
   - file: tests/checks/iam_tf/test_terraform_github_import_blocks.py
     action: Modify
-    purpose: EXEMPT gains the two tf_github_apply addresses (created by the first run; rec-3136's exempt-until-exists rule); rec-4911, which adds approved_text's imports, adds these too. Its graduated shard terraform-github-import-blocks is kept unchanged.
+    purpose: PR 2. EXEMPT gains the two tf_github_apply addresses (created by the first run; rec-3136's exempt-until-exists rule), and _APPROVED_TEXT_REASON names the CI apply's first run instead of a hand apply; rec-4911, which adds approved_text's imports, adds these too. Its graduated shard terraform-github-import-blocks is kept unchanged.
   - file: terraform/github/main.tf
     action: Modify
-    purpose: Header comment only -- the "human-gated LOCAL apply only ... NEVER add terraform/github/** to any apply-workflow path" lines point to terraform-github-apply.yml and Decision {{N}}. No HCL change.
-  - file: scripts/checks/ci_guards/validate_github_settings_apply.py
-    action: Create
-    purpose: >-
-      Standing guard (fast tier); predicates over parsed workflows and Terraform text so red cases run on synthetic input.
-      (a) Only terraform-github-apply.yml names github-settings-apply, github-settings-preview, the apply App secret name
-      or scripts/ci/terraform_github_apply.sh (nothing under .github/actions either). (b) Its on: keys are exactly push
-      (branches [main]) and workflow_dispatch. (c) The apply job declares a literal environment equal to GATE_ENV and is
-      the only job assuming the settings role; the preview job declares exactly tf-trusted-plan, assumes only
-      github-settings-preview and is the only job that reads the plan App key. (d) Both jobs' if require refs/heads/main and apply needs preview. (e) Every
-      checkout takes no ref or repository and sets persist-credentials false. (f) Every non-local uses: in both jobs
-      is a 40-hex SHA. (g) Each role's trust has exactly one statement, StringEquals only, sub values only of the
-      environment:<GATE_ENV> form (the preview role: environment:tf-trusted-plan) and job_workflow_ref exactly the one
-      main ref. (h) The apply role's policy has no iam: action and no resource outside the three named, the preview
-      role's policy is exactly its one GetObject, and the secret policy denies every principal outside the four named. (i)
-      .github/CODEOWNERS covers the workflow, both scripts, the reporter and this file. (j) No inputs.* or needs.*
-      expression appears inside a run: body. (k) The tf_github_apply Environment is main-only with can_admins_bypass false
-      and prevent_destroy. registry.examined(11, unit="invariants").
-  - file: scripts/checks/ci_guards/_manifest.py
-    action: Modify
-    purpose: >-
-      Entry validate_github_settings_apply, pre=True, pre_globs .github/workflows/**, .github/CODEOWNERS,
-      terraform/bootstrap/github_settings_apply.tf, terraform/github/environments.tf, scripts/ci/terraform_github_apply*,
-      the check file, scripts/verify_ci_workflow/**, scripts/checks/_common.py, scripts/checks/registry.py; full_segment
-      full_after_lint.
+    purpose: PR 2. Header comment only -- the "human-gated LOCAL apply only ... NEVER add terraform/github/** to any apply-workflow path" lines point to terraform-github-apply.yml and Decision {{N}}. No HCL change.
   - file: scripts/checks/ci_guards/validate_trusted_plan_environment.py
     action: Modify
     purpose: >-
-      TRUSTED_WORKFLOWS gains terraform-github-apply.yml, so its preview job may declare tf-trusted-plan (predicate
-      (a)) and is governed by (g)-(i); no predicate changes. rec-4638 (S5), which moves the plan App key into that
-      Environment, then needs no change for this workflow; whichever lands second rebases.
+      PR 2 (Decision {{N}} cl.4, amending Decision 238 cl.2). New ENV_WORKFLOWS = TRUSTED_WORKFLOWS |
+      {"terraform-github-apply.yml"}: the workflows that may declare tf-trusted-plan. Predicate (a) and the governed
+      set that (g)-(i) walk use ENV_WORKFLOWS, and (c)'s no-workflow_call and existence rule covers it; (b), (d) and (e)
+      keep TRUSTED_WORKFLOWS. TRUSTED_WORKFLOWS stays the trusted-plan role's job_workflow_ref set, which
+      validate_github_org_transfer and test_trusted_plan_identity hold equal to that role's trust, so the role's trust
+      is unchanged. rec-4638 (S5, plan PR #1890) then needs no change for this workflow; whichever lands second rebases.
+      No new imports; 432 of 500 SLOC at planning, so the edit stays a few lines.
   - file: tests/checks/ci_guards/test_validate_trusted_plan_environment.py
     action: Modify
-    purpose: A case that terraform-github-apply.yml's preview job may declare tf-trusted-plan and an unlisted workflow still may not; the real tree stays green with the new workflow governed. Its graduated shard trusted-plan-environment-fence is kept unchanged.
-  - file: config/ci_rca_taxonomy.yaml
+    purpose: PR 2. Cases that terraform-github-apply.yml's preview job may declare tf-trusted-plan and is governed by (g)-(i), that an unlisted workflow still may not, and that TRUSTED_WORKFLOWS is unchanged; the real tree stays green. Its graduated shard trusted-plan-environment-fence is kept unchanged.
+  - file: config/composite_action_body_baseline.yaml
     action: Modify
-    purpose: One row for validate_github_settings_apply beside validate_trusted_plan_environment (NEAR_CAP, 9 lines of headroom at planning; measure at build and compact an existing row's wording if one row does not fit).
+    purpose: PR 2. r3_workflows gains one entry per inline run body of terraform-github-apply.yml at its measured effective-line count (validate_composite_action_shell_bodies R3 workflow leg), as approved-text-approval.yml's five entries did.
   - file: tests/test_terraform_github_apply_gate.py
     action: Create
     purpose: >-
-      Red/green on synthetic plan JSON for every preview and check path: each refusal marker; a changed name outside the
-      reviewed names; an allowlisted value that differs from the reviewed one (for example reviewer_count 1 reviewed, 0
-      applied); a named gate update passing only with its exact address; a stale GATE_CHANGE address refused; gate creates
-      and imports passing; the visibility-gated ruleset row in the reviewed set not licensing any applied ruleset change;
-      NO_CHANGES and VISIBILITY_GATED_ONLY giving has_changes false; an empty admin plan giving TF_GITHUB_APPLY_NOTHING;
-      allowlisted values shown, and a sentinel in reviewer ids, descriptions and any non-allowlisted attribute never
-      reaching stdout or GITHUB_OUTPUT.
+      PR 2. Red/green on synthetic plan JSON for every preview and check path: each refusal marker; a changed name
+      outside the reviewed names; an allowlisted value that differs from the reviewed one (for example reviewer_count 1
+      reviewed, 0 applied); a named gate update, create or import passing only with its exact address; an unnamed gate
+      create (a new address for an existing Environment name) and an unnamed singleton permissions create refused by
+      both preview and check; a stale GATE_CHANGE address refused; the visibility-gated ruleset row in the reviewed set
+      not licensing any applied ruleset change; NO_CHANGES and VISIBILITY_GATED_ONLY giving has_changes false; an empty
+      admin plan giving TF_GITHUB_APPLY_NOTHING; probe-verdict giving the same verdict as
+      deployment_approval_probe._classify_post on a shared table of responses; the reporter's visibility-gated line
+      naming the CI apply's admin plan; allowlisted values shown, and a sentinel
+      in reviewer ids, descriptions and any non-allowlisted attribute never reaching stdout or GITHUB_OUTPUT.
   - file: tests/test_terraform_github_apply_script.py
     action: Create
     purpose: >-
-      Static guards on the apply script: set -euo pipefail; the EXIT trap revokes the token; the token never reaches echo,
-      a file, GITHUB_ENV, GITHUB_OUTPUT or a command line other than an Authorization header; the key is read only into a
-      variable; the token request names repositories [ontheloop] and exactly the three permissions; PROBE_RUN_ID is
-      validated numeric before use; the gate check precedes terraform apply, which takes plan.bin; a plan
-      -detailed-exitcode follows apply. bash -n passes.
-  - file: tests/checks/ci_guards/test_validate_github_settings_apply.py
-    action: Create
-    purpose: >-
-      One red case per predicate (a)-(k) on synthetic input, the manifest registration, and the real tree green; plus
-      pins that the ci_rca_taxonomy row exists, environment-taxonomy.yaml axis_a.github.apply_gating names
-      terraform-github-apply.yml (keeping the NEVER auto-apply and terraform-github-plan.yml words test_taxonomy_row
-      reads), deploy-paths.yaml admin_out_of_band.github_settings_apply_provisioning names the workflow and the role,
-      and secret-material-handling.yaml domains names the apply App entry and its resource policy.
-  - file: tests/checks/iam_tf/test_platform_role_metadata_admin_scope.py
+      PR 2. Behavioural, on the tests/test_ci_neon_api_key.py pattern: the real script under stub aws, curl, openssl and
+      terraform on PATH (the real gate and quiet_run.sh), RUNNER_TEMP, GITHUB_ENV, GITHUB_OUTPUT and
+      GITHUB_STEP_SUMMARY in tmp_path. Asserts: call order (token mint, init, plan -out, show, check, apply plan.bin,
+      plan -detailed-exitcode); DELETE /installation/token on every exit path, including a gate refusal, a terraform
+      failure, an inconclusive probe and success; sentinel key and token values never in stdout, stderr, the env and
+      output files or any stub's argv log (the token reaches curl only on stdin and Terraform only as
+      TF_VAR_github_token); a non-numeric PROBE_RUN_ID rejected before any call; each probe verdict's exit and marker;
+      the JWT's iat 60 s before the stub clock and exp within 600 s of it; re-plan exit 2 fails; bash -n passes.
+  - file: scripts/ci/terraform_github_plan_report.py
     action: Modify
-    purpose: Scan terraform/bootstrap/github_settings_apply.tf too (Decision 225 cl.5 names a bootstrap CI identity other than the apply role as an unenforced residual). Its graduated shard platform-admin-absent-from-ci-write-patterns is kept unchanged.
-  - file: .github/CODEOWNERS
+    purpose: PR 2. The visibility-gated line names the CI apply's admin plan (terraform-github-apply.yml), which refuses any ruleset change, as authoritative, in place of "the operator's own plan"; no other output or interface change (#1890 relies on its interface). Its pin lives in tests/test_terraform_github_apply_gate.py, since tests/test_terraform_github_pr_plan.py is at 499 of 500 SLOC.
+  - file: tests/checks/iam_tf/test_terraform_github_provider_auth.py
     action: Modify
-    purpose: Add /scripts/ci/terraform_github_apply.sh, /scripts/ci/terraform_github_apply_gate.py, /scripts/ci/terraform_github_plan_report.py and /scripts/checks/ci_guards/validate_github_settings_apply.py (the workflow is covered by /.github/workflows/terraform-*.yml, the role by /terraform/bootstrap/).
+    purpose: PR 2. The no-GITHUB_APP_* token-lane check also covers terraform-github-apply.yml and the apply script, so the key never reaches Terraform. Its graduated shard terraform-github-provider-auth-lane is kept unchanged.
   - file: .github/workflows/terraform-github-plan.yml
     action: Modify
-    purpose: Header comment only -- drop the stale claim that plan.bin carries the App token (github_token is ephemeral since rec-4355); no step changes.
+    purpose: PR 2. Header comment only -- the root is CI-applied by terraform-github-apply.yml after one approval (not "applied by hand by the operator"), the CI apply's admin plan is authoritative for visibility-gated fields, and the stale claim that plan.bin carries the App token goes (github_token is ephemeral since rec-4355); no step changes.
+  - file: scripts/checks/_terraform.py
+    action: Modify
+    purpose: PR 2. Comment only -- terraform/github is CI-applied behind one operator approval (terraform-github-apply.yml), not "human-gated local apply only". No new imports.
   - file: terraform/github/CLAUDE.md
     action: Modify
-    purpose: Replace the NEVER auto-apply, Prerequisites and Apply runbook sections with the approved text (W4), and add the CI apply to the tf-gated-apply Environment section; the file shrinks (measured about 4.2 KB of 5214 B at planning), and the CloudShell lane stays as break-glass.
+    purpose: PR 2. Replace the NEVER auto-apply, Prerequisites and Apply runbook sections with the approved text (W4), and add the CI apply to the tf-gated-apply Environment section; the file shrinks (about 4.4 KB of 5214 B at planning) and keeps one config/aws-region reference, so project-configuration.yaml's reader row stays true.
   - file: config/prose_budgets.yaml
     action: Modify
-    purpose: Lower the terraform/github/CLAUDE.md entry to the file's new measured size (the ratchet-down edit implement-scope-boundary.yaml's prose_budgets_ratchet_down row sanctions); no other entry changes.
+    purpose: PR 2. Lower the terraform/github/CLAUDE.md entry to the file's new measured size (the ratchet-down edit implement-scope-boundary.yaml's prose_budgets_ratchet_down row sanctions); no other entry changes.
   - file: docs/contracts/environment-taxonomy.yaml
     action: Modify
-    purpose: axis_a.github.apply_gating replaced by the approved text (W2) plus a new amendment_log entry.
-  - file: docs/contracts/deploy-paths.yaml
-    action: Modify
-    purpose: admin_out_of_band.github_settings_apply_provisioning (W3) plus a new amendment_log entry (NEAR_CAP, 8 lines of headroom; W3 and its log entry are 3 lines).
-  - file: docs/contracts/secret-material-handling.yaml
-    action: Modify
-    purpose: domains gains the apply App key line (W5) plus a new amendment_log entry.
-  - file: docs/DECISIONS.md
-    action: Modify
-    purpose: Insert the approved Decision (W1); number filled at implementation per decision-entry.yaml number_assignment; regenerate docs/decisions-index.json.
+    purpose: PR 2. axis_a.github.apply_gating replaced by the approved text (W2) plus a new amendment_log entry.
 bundled_recommendations: [rec-4964]
-followon_recs: [rec-4965, rec-4966]
+followon_recs: [rec-4965, rec-4966, rec-4967, rec-4968]
 infrastructure_dependencies:
-  - "terraform/bootstrap: the apply and preview roles, their inline policies and the key's resource policy, created post-merge by a human-directed admin apply (Decision {{N}} cl.6); pre-merge read-only ADMIN plan required (deploy-paths.yaml admin_out_of_band.pre_merge_live_plan)."
+  - "terraform/bootstrap (PR 1): the apply and preview roles, their inline policies and the key's resource policy, created post-merge by a human-directed admin apply (Decision {{N}} cl.6); pre-merge read-only ADMIN plan and exact-policy backend probe required (deploy-paths.yaml admin_out_of_band.pre_merge_live_plan)."
   - "Secrets Manager: no value change; the existing operator-created entry gains a resource policy."
-  - "GitHub: no new App, secret or variable. The first run creates approved-text and tf-github-apply with their main-only policies, gated by tf-gated-apply; rec-4965 then moves the workflow and the role's trust to tf-github-apply."
-  - "Ordering: merge, then the bootstrap admin apply, then the operator's tap on the push run's waiting apply job, or a fresh dispatch if the tap came first and the assume-role failed."
+  - "GitHub (PR 2): no new App, secret or variable. The first approved dispatch creates approved-text and tf-github-apply with their main-only policies, gated by tf-gated-apply; rec-4965 then moves the workflow and the apply role's trust to tf-github-apply."
+  - "Ordering: PR 1 merges, then VP 7's bootstrap apply; PR 2 merges only after VP 7 passes. PR 2's push run is expected to stop at the preview on its four unnamed gate creates; the approved dispatch of VP 13 applies them."
 acceptance_criteria:
-  - The gate passes every synthetic red/green case, and no non-allowlisted plan value reaches stdout or GITHUB_OUTPUT (VP 1).
-  - validate_github_settings_apply passes on the real tree and fails each of its eleven predicates on a synthetic red case (VP 2); the apply script passes its static guards and bash -n (VP 3); touched suites stay green with no weakened assertion (VP 4).
-  - The pre-merge read-only ADMIN plan of terraform/bootstrap at the CI-green head adds exactly the two roles, their inline policies and the secret policy, and changes nothing main's own plan does not (VP 6-7).
-  - After the bootstrap apply, simulate allows the apply role its three grants and denies it another secret and tfstate/personal, allows the preview role only its state read, and PlatformAdmin can still read the entry (VP 8).
-  - The first run asks for one approval after a preview listing the four creates (approved_text, approved_text_main, tf_github_apply, tf_github_apply_main) with their allowlisted values; the apply App cannot approve a pending deployment; the apply job applies only those four and re-plans clean (VP 9-11).
-  - A dispatch with nothing to apply asks for no approval (VP 12).
+  - The gate passes every synthetic red/green case, including unnamed gate creates refused and probe-verdict parity, and no non-allowlisted plan value reaches stdout or GITHUB_OUTPUT (VP 8).
+  - validate_github_settings_apply passes on the real tree and fails each predicate on a synthetic red case (VP 1); the apply script behaves as specified under stubs on every exit path (VP 9); touched suites stay green with no weakened assertion (VP 2, VP 10).
+  - The pre-merge read-only ADMIN plan of terraform/bootstrap at PR 1's CI-green head adds exactly the two roles, their inline policies and the secret policy, and changes nothing main's own plan does not; each rendered role policy, as a session policy, can init and read terraform/github's state, and the apply policy grants the lock (VP 4-6).
+  - After the bootstrap apply, simulate allows each role exactly its grants, the resource policy denies the key to any principal outside its four while PlatformAdmin keeps every action, and the key policy has exactly the planned shape (VP 7).
+  - PR 2's push run previews the four creates under tf-trusted-plan and stops without asking; one approved dispatch naming them refuses the apply App's approval of a pending deployment, applies only those four and re-plans clean (VP 12-14).
+  - The PR-time plan then shows no add for the four, and a dispatch with nothing to apply asks for no approval (VP 15-16).
 verification_plan:
   - step: 1
     phase: pre-deploy
-    action: Gate unit tests.
-    command: bin/venv-python -m pytest tests/test_terraform_github_apply_gate.py -q
-    expected: exit 0; red before (module absent).
-    fix_if: a refusal path passes, a changed allowlisted value passes, an unnamed gate update passes, an empty plan applies, or a sentinel value is printed
-    hermetic: true
-    expected_literals: [" passed"]
-    graduation: graduate
-    graduation_check_id: terraform-github-apply-gate
-  - step: 2
-    phase: pre-deploy
-    action: Workflow, role, key-policy and Environment guard, red cases and real tree.
+    action: Guard unit tests, red cases and real tree (PR 1 for its predicates; PR 2 again for the rest).
     command: bin/venv-python -m pytest tests/checks/ci_guards/test_validate_github_settings_apply.py -q
     expected: exit 0; red before (check absent).
     fix_if: a predicate has no red case, or the real tree fails
@@ -232,257 +275,340 @@ verification_plan:
     expected_literals: [" passed"]
     graduation: graduate
     graduation_check_id: github-settings-apply-guard
-  - step: 3
+  - step: 2
     phase: pre-deploy
-    action: Apply script static guards and syntax (the test runs bash -n itself).
-    command: bin/venv-python -m pytest tests/test_terraform_github_apply_script.py -q
-    expected: exit 0; red before (script absent).
-    fix_if: the token can reach a file, env file or output, the trap does not revoke, or apply can run before the check
-    hermetic: true
-    expected_literals: [" passed"]
-    graduation: graduate
-    graduation_check_id: terraform-github-apply-script
-  - step: 4
-    phase: pre-deploy
-    action: Touched existing suites.
-    command: bin/venv-python -m pytest tests/checks/iam_tf/test_platform_role_metadata_admin_scope.py tests/test_terraform_github_pr_plan.py tests/checks/iam_tf/test_terraform_github_import_blocks.py tests/test_approved_text_approval_workflow.py tests/test_deployment_approval_probe_workflow.py tests/checks/ci_guards/test_validate_trusted_plan_environment.py -q
+    action: PR 1's touched and adjacent suites.
+    command: bin/venv-python -m pytest tests/checks/iam_tf/test_platform_role_metadata_admin_scope.py tests/checks/iam_tf/test_validate_iam_policy_size.py tests/checks/iam_tf/test_oidc_trust_slug_invariants.py tests/checks/iam_tf/test_trusted_plan_identity.py tests/checks/contracts/test_validate_github_org_transfer.py -q
     expected: exit 0
-    fix_if: a node fails; a pre-existing node changes only by the scan-set, EXEMPT or TRUSTED_WORKFLOWS addition its scope row names
+    fix_if: a node fails; a pre-existing node changes only by the scan-set addition its scope row names
     hermetic: true
     expected_literals: [" passed"]
     graduation: waive
     graduation_waiver_reason: These pre-existing suites already run in both tiers and their graduated shards (including platform-admin-absent-from-ci-write-patterns) are kept unchanged.
+  - step: 3
+    phase: pre-deploy
+    action: Provider-free format check of terraform/bootstrap (PR 1).
+    command: terraform fmt -check -recursive terraform/bootstrap
+    expected: exit 0 and no file listed
+    fix_if: fmt lists a file (run terraform fmt on it)
+    hermetic: true
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: ADMIN credential check (deploy-paths.yaml admin_out_of_band.pre_merge_live_plan ENVIRONMENT CHECK).
+    command: bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null | grep -q 'assumed-role/PlatformAdmin/' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT
+    expected: ADMIN_CHAIN_OK; on ADMIN_CHAIN_ABSENT PR 1 waits at CI-green for an ADMIN session to run steps 5-6.
+    fix_if: ADMIN_CHAIN_ABSENT in a session expected to hold admin credentials; report it, never widen
+    hermetic: false
+    graduation: not-applicable
   - step: 5
     phase: pre-deploy
-    action: Provider-free format check of the two touched roots, and the prose ratchet on the shrunk CLAUDE.md.
+    action: >-
+      Pre-merge read-only ADMIN plan of terraform/bootstrap at PR 1's CI-green head, compared with main's own plan;
+      counts and addresses only, posted on the PR. The head's two rendered inline policies are kept for step 6 in the
+      evidence directory, never printed.
     command: >-
-      terraform fmt -check -recursive terraform/bootstrap && terraform fmt -check -recursive terraform/github &&
+      set -o pipefail; test -n "$PR_HEAD_SHA" && E="${TMPDIR:-/tmp}/gsa-evidence" && mkdir -p "$E" && git fetch origin main "$PR_HEAD_SHA" -q &&
+      for ref in origin/main "$PR_HEAD_SHA"; do tag=$(echo "$ref" | tr '/' '-'); W="${TMPDIR:-/tmp}/gsa-wt-$tag";
+      git worktree add --detach "$W" "$ref" -q && cp terraform/bootstrap/terraform.bootstrap.tfvars "$W/terraform/bootstrap/" &&
+      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W/terraform/bootstrap" init -input=false > /dev/null &&
+      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W/terraform/bootstrap" plan -input=false -lock=false -var-file=terraform.bootstrap.tfvars -out="$E/p.bin" > /dev/null &&
+      terraform -chdir="$W/terraform/bootstrap" show -json "$E/p.bin" > "$E/p.json" && rm -f "$E/p.bin" &&
+      bin/venv-python -c "import json,sys; e,t=sys.argv[1],sys.argv[2]; p=json.load(open(e+'/p.json')); rc=p.get('resource_changes', []); json.dump(sorted([r['address'], '/'.join(r['change']['actions'])] for r in rc if r['change']['actions'] != ['no-op']), open(e+'/'+t+'.json','w')); [open(e+'/'+r['name']+'.policy.json','w').write(r['change']['after']['policy']) for r in rc if t != 'origin-main' and r['type'] == 'aws_iam_role_policy' and r['name'] in ('github_settings_apply', 'github_settings_preview')]" "$E" "$tag";
+      rm -f "$E/p.json"; git worktree remove --force "$W"; done &&
+      bin/venv-python -c "import json,sys; d,h=sys.argv[1],sys.argv[2].replace('/','-'); m={tuple(x) for x in json.load(open(d+'/origin-main.json'))}; n={tuple(x) for x in json.load(open(d+'/'+h+'.json'))}; print('NEW', sorted(n-m)); print('GONE', sorted(m-n))" "$E" "$PR_HEAD_SHA"
+    expected: >-
+      NEW lists exactly aws_iam_role.github_settings_apply, aws_iam_role_policy.github_settings_apply,
+      aws_iam_role.github_settings_preview, aws_iam_role_policy.github_settings_preview and
+      aws_secretsmanager_secret_policy.github_settings_apply_key, each create; GONE is empty; plan files are deleted in the
+      step and the two policy files exist for step 6. Post NEW and GONE with the head sha on the PR.
+    fix_if: any other NEW row, a GONE row, or an init or plan error; fix on the branch and re-run at the new head
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      Exact-policy backend probe (the round-1 ListBucket question, settled before any apply): each rendered inline
+      policy narrows a PlatformAdmin session, which inits terraform/github and lists its state; the apply policy's lock
+      grants are simulated. Markers only; the policy files are deleted in the step.
+    command: >-
+      set -o pipefail; E="${TMPDIR:-/tmp}/gsa-evidence"; R=$(tr -d '[:space:]' < config/aws-region);
+      SRC=$(aws configure get source_profile --profile agent_platform_admin); ARN=$(aws configure get role_arn --profile agent_platform_admin); EID=$(aws configure get external_id --profile agent_platform_admin);
+      for role in github_settings_preview github_settings_apply; do W=$(mktemp -d); cp -r terraform/github/. "$W/"; rm -rf "$W/.terraform";
+      J=$(aws sts assume-role --profile "$SRC" --region "$R" --role-arn "$ARN" --external-id "$EID" --role-session-name gsa-backend-probe --policy "file://$E/$role.policy.json" --duration-seconds 900 --output json) &&
+      ( export AWS_ACCESS_KEY_ID=$(echo "$J" | jq -r .Credentials.AccessKeyId) AWS_SECRET_ACCESS_KEY=$(echo "$J" | jq -r .Credentials.SecretAccessKey) AWS_SESSION_TOKEN=$(echo "$J" | jq -r .Credentials.SessionToken); unset AWS_PROFILE;
+      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W" init -input=false -backend-config="region=$R" > /dev/null 2>&1 && terraform -chdir="$W" state list > /dev/null 2>&1 ) && echo "BACKEND_OK $role" || echo "BACKEND_DENIED $role"; rm -rf "$W"; done;
+      L=$(aws iam simulate-custom-policy --profile agent_platform_admin --policy-input-list "file://$E/github_settings_apply.policy.json" --action-names s3:GetObject s3:PutObject s3:DeleteObject --resource-arns arn:aws:s3:::agent-platform-data-lake/tfstate/github/terraform.tfstate.tflock --query 'EvaluationResults[].EvalDecision' --output text);
+      [ "$(echo $L)" = "allowed allowed allowed" ] && echo LOCK_GRANTS_OK || echo LOCK_GRANTS_MISSING; rm -f "$E"/*.policy.json
+    expected: BACKEND_OK github_settings_preview, BACKEND_OK github_settings_apply and LOCK_GRANTS_OK.
+    fix_if: a BACKEND_DENIED (add the narrowest grant the error names, re-run steps 5-6 at the new head) or LOCK_GRANTS_MISSING; never apply first
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: >-
+      PR 1 post-merge: the human-directed targeted bootstrap apply of the merge sha (the operator's final-diff word on
+      PR 1 is the direction), then simulate each role and the key's resource policy without reading the key, and check
+      the policy's shape.
+    command: >-  # pragma: allowlist secret -- names a Secrets Manager entry, not a value
+      set -o pipefail; R=$(tr -d '[:space:]' < config/aws-region); P=agent_platform_admin; N=agent-platform-terraform-github-apply-app; K="${TMPDIR:-/tmp}/gsa-key-policy.json";
+      git checkout --detach "$MERGE_SHA" && TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir=terraform/bootstrap init -input=false > /dev/null &&
+      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir=terraform/bootstrap apply -input=false -var-file=terraform.bootstrap.tfvars
+      -target=aws_iam_role.github_settings_apply -target=aws_iam_role_policy.github_settings_apply -target=aws_iam_role.github_settings_preview -target=aws_iam_role_policy.github_settings_preview -target=aws_secretsmanager_secret_policy.github_settings_apply_key -auto-approve -no-color | tail -1;
+      git checkout -; A=$(aws sts get-caller-identity --profile $P --query Account --output text);
+      S=$(aws secretsmanager describe-secret --profile $P --region $R --secret-id $N --query ARN --output text);
+      aws secretsmanager get-resource-policy --profile $P --region $R --secret-id $N --query ResourcePolicy --output text > "$K";
+      sim() { got=$(aws iam simulate-principal-policy --profile $P --policy-source-arn "arn:aws:iam::$A:$1" --action-names "$2" --resource-arns "$3" --resource-policy "file://$K" --context-entries "ContextKeyName=aws:PrincipalArn,ContextKeyValues=arn:aws:iam::$A:$1,ContextKeyType=string" --query 'EvaluationResults[0].EvalDecision' --output text); [ "$got" = "$4" ] && echo "SIM_OK $1 $2 $4" || echo "SIM_MISMATCH $1 $2 want=$4 got=$got"; };
+      B=arn:aws:s3:::agent-platform-data-lake/tfstate;
+      sim role/github-settings-apply secretsmanager:GetSecretValue "$S" allowed; sim role/github-settings-apply s3:PutObject $B/github/terraform.tfstate allowed;
+      sim role/github-settings-apply s3:DeleteObject $B/github/terraform.tfstate.tflock allowed; sim role/github-settings-apply s3:GetObject $B/personal/sandbox/terraform.tfstate implicitDeny;
+      sim role/github-settings-apply ssm:GetParameter "arn:aws:ssm:$R:$A:parameter/secret/neon-api-key" implicitDeny; sim role/github-settings-apply secretsmanager:PutSecretValue "$S" implicitDeny;
+      sim role/github-settings-preview s3:GetObject $B/github/terraform.tfstate allowed; sim role/github-settings-preview s3:PutObject $B/github/terraform.tfstate implicitDeny;
+      sim role/github-settings-preview secretsmanager:GetSecretValue "$S" explicitDeny; sim role/agent-platform-github-ci-apply secretsmanager:GetSecretValue "$S" explicitDeny;
+      sim role/agent-platform-github-ci-apply secretsmanager:UpdateSecret "$S" explicitDeny; sim role/PlatformAdmin secretsmanager:GetSecretValue "$S" allowed; sim role/PlatformAdmin secretsmanager:PutResourcePolicy "$S" allowed;
+      bin/venv-python -I -c "import json,sys; p=json.load(open(sys.argv[1])); a=sys.argv[2]; s=p['Statement']; s=s if isinstance(s,list) else [s]; d=s[0] if len(s)==1 else {}; c=d.get('Condition',{}).get('ArnNotLike',{}).get('aws:PrincipalArn'); want={f'arn:aws:iam::{a}:{x}' for x in ('role/github-settings-apply','role/PlatformAdmin','user/platform-breakglass','root')}; ok=d.get('Effect')=='Deny' and d.get('Principal') in ('*',{'AWS':'*'}) and sorted(d.get('NotAction',[]))==['secretsmanager:DescribeSecret','secretsmanager:GetResourcePolicy','secretsmanager:ListSecretVersionIds'] and set(c if isinstance(c,list) else [c])==want; print('KEY_POLICY_OK' if ok else 'KEY_POLICY_MISMATCH')" "$K" "$A"; rm -f "$K"
+    expected: >-
+      the apply's last line reads 5 added, 0 changed, 0 destroyed; thirteen SIM_OK lines and no SIM_MISMATCH;
+      KEY_POLICY_OK. Post counts and markers (no account id or ARN) on PR 1.
+    fix_if: a SIM_MISMATCH or KEY_POLICY_MISMATCH (STOP and report; never widen in place), a PlatformAdmin row not allowed (delete the secret policy at once as PlatformAdmin, then STOP and report), or an apply error
+    hermetic: false
+  - step: 8
+    phase: pre-deploy
+    action: PR 2. Gate unit tests.
+    command: bin/venv-python -m pytest tests/test_terraform_github_apply_gate.py -q
+    expected: exit 0; red before (module absent).
+    fix_if: a refusal path passes, a changed allowlisted value passes, an unnamed gate create or update passes, an empty plan applies, probe-verdict disagrees with the session probe, or a sentinel value is printed
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: terraform-github-apply-gate
+  - step: 9
+    phase: pre-deploy
+    action: PR 2. Apply script behaviour under stubs (the test also runs bash -n).
+    command: bin/venv-python -m pytest tests/test_terraform_github_apply_script.py -q
+    expected: exit 0; red before (script absent).
+    fix_if: the token or key reaches an output, file or argv, an exit path skips the revoke, apply can run before the check, a bad probe id is used, or a non-zero re-plan passes
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: terraform-github-apply-script
+  - step: 10
+    phase: pre-deploy
+    action: PR 2's touched and adjacent suites.
+    command: bin/venv-python -m pytest tests/test_terraform_github_pr_plan.py tests/test_plan_names_core.py tests/checks/iam_tf/test_terraform_github_import_blocks.py tests/test_approved_text_approval_workflow.py tests/test_deployment_approval_probe_workflow.py tests/checks/ci_guards/test_validate_trusted_plan_environment.py tests/checks/iam_tf/test_trusted_plan_identity.py tests/checks/contracts/test_validate_github_org_transfer.py tests/checks/ci_guards/test__workflow_shell_bodies.py tests/checks/iam_tf/test_terraform_github_provider_auth.py -q
+    expected: exit 0
+    fix_if: a node fails; a pre-existing node changes only by the EXEMPT, ENV_WORKFLOWS, reporter-wording or lane-coverage edit its scope row names
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: waive
+    graduation_waiver_reason: These pre-existing suites already run in both tiers and their graduated shards (terraform-github-import-blocks, trusted-plan-environment-fence) are kept unchanged.
+  - step: 11
+    phase: pre-deploy
+    action: PR 2. Provider-free format check of terraform/github and the prose ratchet on the shrunk CLAUDE.md.
+    command: >-
+      terraform fmt -check -recursive terraform/github &&
       bin/venv-python -c "import sys; from scripts.checks.prose.prose_limits import validate_prose_limits as v; f = []; v(f); sys.exit(1 if f else 0)"
     expected: exit 0, no file listed by fmt, and the ratchet reports every gated surface within budget
     fix_if: fmt lists a file (run terraform fmt on it), or the ratchet names terraform/github/CLAUDE.md (set its entry to the measured size)
     hermetic: true
     expected_literals: ["All gated prose surfaces within budget."]
     graduation: not-applicable
-  - step: 6
-    phase: pre-deploy
-    action: ADMIN credential check (deploy-paths.yaml admin_out_of_band.pre_merge_live_plan ENVIRONMENT CHECK).
-    command: bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null | grep -q 'assumed-role/PlatformAdmin/' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT
-    expected: ADMIN_CHAIN_OK; on ADMIN_CHAIN_ABSENT the PR waits at CI-green for an ADMIN session to run step 7.
-    fix_if: ADMIN_CHAIN_ABSENT in a session expected to hold admin credentials; report it, never widen
-    hermetic: false
-    graduation: not-applicable
-  - step: 7
-    phase: pre-deploy
-    action: Pre-merge read-only ADMIN plan of terraform/bootstrap at the CI-green PR head, compared with main's own plan; counts and addresses only, posted on the PR.
-    command: >-
-      test -n "$PR_HEAD_SHA" && E="${TMPDIR:-/tmp}/gsa-evidence" && mkdir -p "$E" && git fetch origin main "$PR_HEAD_SHA" -q &&
-      for ref in origin/main "$PR_HEAD_SHA"; do tag=$(echo "$ref" | tr '/' '-'); W="${TMPDIR:-/tmp}/gsa-wt-$tag";
-      git worktree add --detach "$W" "$ref" -q && cp terraform/bootstrap/terraform.bootstrap.tfvars "$W/terraform/bootstrap/" &&
-      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W/terraform/bootstrap" init -input=false > /dev/null &&
-      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W/terraform/bootstrap" plan -input=false -lock=false -var-file=terraform.bootstrap.tfvars -out="$E/p.bin" > /dev/null &&
-      terraform -chdir="$W/terraform/bootstrap" show -json "$E/p.bin" | bin/venv-python -c "import json,sys; p=json.load(sys.stdin); print(json.dumps(sorted([r['address'], '/'.join(r['change']['actions'])] for r in p.get('resource_changes', []) if r['change']['actions'] != ['no-op'])))" > "$E/$tag.json";
-      rm -f "$E/p.bin"; git worktree remove --force "$W"; done &&
-      bin/venv-python -c "import json,sys; d,h=sys.argv[1],sys.argv[2].replace('/','-'); m={tuple(x) for x in json.load(open(d+'/origin-main.json'))}; n={tuple(x) for x in json.load(open(d+'/'+h+'.json'))}; print('NEW', sorted(n-m)); print('GONE', sorted(m-n))" "$E" "$PR_HEAD_SHA"
-    expected: >-
-      NEW lists exactly aws_iam_role.github_settings_apply, aws_iam_role_policy.github_settings_apply,
-      aws_iam_role.github_settings_preview, aws_iam_role_policy.github_settings_preview and
-      aws_secretsmanager_secret_policy.github_settings_apply_key, each create; GONE is empty; plan files are deleted in the
-      step. Post NEW and GONE with the head sha on the PR.
-    fix_if: any other NEW row, a GONE row, or an init or plan error; fix on the branch and re-run at the new head
-    hermetic: false
-    graduation: not-applicable
-  - step: 8
-    phase: post-deploy
-    action: Human-directed bootstrap apply of the merge sha (the operator's word on the build PR is the direction), then simulate.
-    command: >-  # pragma: allowlist secret -- names a Secrets Manager entry, not a value
-      git checkout --detach "$MERGE_SHA" && TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir=terraform/bootstrap init -input=false > /dev/null &&
-      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir=terraform/bootstrap apply -input=false -var-file=terraform.bootstrap.tfvars
-      -target=aws_iam_role.github_settings_apply -target=aws_iam_role_policy.github_settings_apply -target=aws_iam_role.github_settings_preview -target=aws_iam_role_policy.github_settings_preview -target=aws_secretsmanager_secret_policy.github_settings_apply_key -auto-approve | tail -1;
-      git checkout -; A=$(aws sts get-caller-identity --profile agent_platform_admin --query Account --output text);
-      S=$(aws secretsmanager describe-secret --profile agent_platform_admin --region eu-west-2 --secret-id agent-platform-terraform-github-apply-app --query ARN --output text);
-      sim() { got=$(aws iam simulate-principal-policy --profile agent_platform_admin --policy-source-arn "arn:aws:iam::$A:role/$1" --action-names "$2" --resource-arns "$3" --query 'EvaluationResults[0].EvalDecision' --output text); [ "$got" = "$4" ] && echo "SIM_OK $1 $2 $4" || echo "SIM_MISMATCH $1 $2 want=$4 got=$got"; };
-      sim github-settings-apply secretsmanager:GetSecretValue "$S" allowed;
-      sim github-settings-apply s3:PutObject arn:aws:s3:::agent-platform-data-lake/tfstate/github/terraform.tfstate allowed;
-      sim github-settings-apply s3:GetObject arn:aws:s3:::agent-platform-data-lake/tfstate/personal/sandbox/terraform.tfstate implicitDeny;
-      sim github-settings-apply ssm:GetParameter "arn:aws:ssm:eu-west-2:$A:parameter/secret/neon-api-key" implicitDeny;
-      sim github-settings-preview s3:GetObject arn:aws:s3:::agent-platform-data-lake/tfstate/github/terraform.tfstate allowed;
-      sim github-settings-preview s3:PutObject arn:aws:s3:::agent-platform-data-lake/tfstate/github/terraform.tfstate implicitDeny;
-      sim github-settings-preview secretsmanager:GetSecretValue "$S" implicitDeny;
-      aws secretsmanager get-resource-policy --profile agent_platform_admin --region eu-west-2 --secret-id agent-platform-terraform-github-apply-app --query ResourcePolicy --output text | grep -q '"Deny"' && echo KEY_POLICY_OK || echo KEY_POLICY_MISSING;
-      aws secretsmanager get-secret-value --profile agent_platform_admin --region eu-west-2 --secret-id agent-platform-terraform-github-apply-app --query Name --output text > /dev/null && echo ADMIN_STILL_READS
-    expected: >-
-      the apply's last line reads 5 added, 0 changed, 0 destroyed; seven SIM_OK lines and no SIM_MISMATCH; KEY_POLICY_OK;
-      ADMIN_STILL_READS. Post counts and markers (no account id or ARN) on the merged PR.
-    fix_if: a SIM_MISMATCH, KEY_POLICY_MISSING, a refused admin read (delete the secret policy at once as PlatformAdmin, then STOP and report) or an apply error; never widen in place
-    hermetic: false
-  - step: 9
-    phase: post-deploy
-    action: Read the merge's push run (or dispatch one on main) up to the approval wait.
-    command: mcp__github__actions_list(owner=otl-labs, repo=ontheloop, method=list_workflow_runs, resource_id=terraform-github-apply.yml), then mcp__github__get_job_logs for the preview job, grepping 'verdict=' and 'GATE CHANGE'
-    expected: >-
-      the preview job ran in tf-trusted-plan without an approval and reports CHANGES; its table lists the four creates with environment names, branch_pattern main,
-      can_admins_bypass false and reviewer_count 1, plus the visibility-gated ruleset bypass_actors row; the apply job is
-      waiting on tf-gated-apply.
-    fix_if: the preview errors, an unexpected row appears (tell the operator not to approve and report), or the apply job does not wait (environment wiring)
-    hermetic: false
-  - step: 10
-    phase: post-deploy
-    action: >-
-      Cancel the push run's waiting apply job; dispatch deployment-approval-probe, then this workflow with
-      approval_probe_run_id set to that pending probe run; ask the operator to approve this workflow's apply job only,
-      after reading its preview; read the apply job.
-    command: mcp__github__get_job_logs for the apply job; grep 'APPLY_APP_APPROVAL_', 'TF_GITHUB_APPLY_' and 'Apply complete'
-    expected: >-
-      APPLY_APP_APPROVAL_REFUSED; TF_GITHUB_APPLY_CHECKED add=4 change=0 import=0; Apply complete with 4 added, 0
-      changed, 0 destroyed; TF_GITHUB_APPLY_CONVERGED. Post counts on the merged PR, then cancel the pending probe run.
-    fix_if: APPLY_APP_APPROVAL_ACCEPTED (STOP; Decision 246's approval-bypass condition fired, re-decide with the operator before any further apply), a refusal marker (no apply ran; report it), or a non-converged re-plan (STOP and report)
-    hermetic: false
-  - step: 11
-    phase: post-deploy
-    action: Confirm the two new Environments from outside the session proxy (the PR-time plan reads them).
-    command: open a no-op PR touching terraform/github only by a comment, or re-run the latest terraform-github-plan run, and read its PR comment
-    expected: the PR-time plan reports no add for the four addresses (they are in state); only the visibility-gated ruleset row remains.
-    fix_if: an add for any of the four (the apply did not land; read the apply job again)
-    hermetic: false
   - step: 12
     phase: post-deploy
-    action: Dispatch the workflow on main with nothing to apply.
+    action: PR 2 post-merge. Read the merge's push run.
+    command: mcp__github__actions_list(owner=otl-labs, repo=ontheloop, method=list_workflow_runs, resource_id=terraform-github-apply.yml), then mcp__github__get_job_logs for its preview job, grepping 'TF_GITHUB_PLAN_REPORT verdict=', 'GATE CHANGE' and 'TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED'
+    expected: >-
+      the preview job ran in tf-trusted-plan without an approval, reports CHANGES, lists the four creates with
+      environment names, branch_pattern main, can_admins_bypass false and reviewer_count 1 (plus the visibility-gated
+      ruleset bypass_actors row), and stops with TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED; the apply job is skipped and no
+      approval was requested.
+    fix_if: the preview errors before its report (assume-role or plan; read the step, fix on a branch), an unexpected row appears (report it; dispatch nothing), or the apply job waits (has_changes wiring)
+    hermetic: false
+  - step: 13
+    phase: post-deploy
+    action: >-
+      PR 2. Dispatch deployment-approval-probe, then this workflow on main with gate_change naming the four creates and
+      approval_probe_run_id set to that pending probe run; ask the operator to approve this workflow's apply job only,
+      after reading its preview; read the apply job; cancel the pending probe run.
+    command: >-
+      mcp__github__actions_run_trigger(owner=otl-labs, repo=ontheloop, method=run_workflow, workflow_id=deployment-approval-probe.yml, ref=main);
+      mcp__github__actions_run_trigger(owner=otl-labs, repo=ontheloop, method=run_workflow, workflow_id=terraform-github-apply.yml, ref=main,
+      inputs={gate_change: "github_repository_environment.approved_text,github_repository_environment_deployment_policy.approved_text_main,github_repository_environment.tf_github_apply,github_repository_environment_deployment_policy.tf_github_apply_main", approval_probe_run_id: <probe run id>});
+      after the approval, mcp__github__get_job_logs for the apply job, grepping 'APPLY_APP_', 'TF_GITHUB_APPLY_'
+    expected: >-
+      APPLY_APP_APPROVAL_REFUSED; TF_GITHUB_APPLY_CHECKED add=4 change=0 import=0; TF_GITHUB_APPLY_APPLIED add=4 change=0
+      import=0; TF_GITHUB_APPLY_CONVERGED. Post counts on PR 2.
+    fix_if: >-
+      APPLY_APP_APPROVAL_ACCEPTED (STOP; Decision {{N}}'s approval-bypass condition fired: re-decide with the operator
+      before any further apply); APPLY_APP_PROBE_INCONCLUSIVE (no apply ran; re-dispatch once with a fresh probe run,
+      then report); a refusal marker on the admin plan, such as TF_GITHUB_APPLY_UNREVIEWED on a row only the admin
+      token sees (no apply ran: report the address and changed names, no values, to the operator; the remedy is a PR
+      that makes the HCL match live state, then a fresh dispatch; never widen the gate, and break-glass only on the
+      operator's word); or a non-converged re-plan (STOP and report)
+    hermetic: false
+  - step: 14
+    phase: post-deploy
+    action: PR 2. Confirm the two new Environments from outside the session proxy.
+    command: mcp__github__actions_run_trigger(owner=otl-labs, repo=ontheloop, method=rerun_workflow_run, run_id=<PR 2's newest terraform-github-plan run>), then mcp__github__get_job_logs for its plan job, grepping 'TF_GITHUB_PLAN_REPORT verdict='
+    expected: the re-run's report line shows add=0 (the four are in state); only the visibility-gated ruleset row remains, so the verdict is VISIBILITY_GATED_ONLY or NO_CHANGES.
+    fix_if: an add for any of the four (the apply did not land; read the apply job again)
+    hermetic: false
+  - step: 15
+    phase: post-deploy
+    action: PR 2. Dispatch the workflow on main with nothing to apply.
     command: mcp__github__actions_run_trigger(owner=otl-labs, repo=ontheloop, method=run_workflow, workflow_id=terraform-github-apply.yml, ref=main), then read the run's jobs
     expected: the preview reports NO_CHANGES or VISIBILITY_GATED_ONLY and the apply job is skipped; no approval is requested.
     fix_if: an approval is requested (has_changes wrong; fix the gate) or the preview shows a change (diagnose drift)
     hermetic: false
-  - step: 13
+  - step: 16
     phase: post-deploy
-    action: Hand back to rec-4769's rollout, close the bundled rec and unblock rec-4965.
+    action: Hand back to rec-4769's rollout and confirm the bundled rec closed.
     command: mcp__hearthbot__message_thread to "Roll out approved-wording GitHub approvals" naming the applied run; then the ducklake-reads recs_by_ids verb for rec-4964
-    expected: the message id is returned; rec-4964 reads closed after the merge's Resolves trailer and VP 10.
-    fix_if: the rec stays open (run its acceptance and update_rec with the merge sha)
+    expected: the message id is returned; rec-4964 reads closed after PR 2's Resolves trailer (its acceptance is decidable since 2026-11-06).
+    fix_if: the rec stays open (run its acceptance and update_rec with PR 2's merge sha and VP 13's run id)
     hermetic: false
-  - step: 14
+  - step: 17
     phase: pre-deploy
-    action: Full tier, then HEAD attestation, before each commit and push (handoff_policy); start it backgrounded with a 2 h limit and read only the attestation.
+    action: Full tier, then HEAD attestation, before each PR's commit and push (handoff_policy); start it from the top-level session, backgrounded with a 2 h limit, and read only the attestation.
     command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
     expected: the full tier exits 0 and the validation result attests the current HEAD's tree
     fix_if: any failure -- fix and rerun the full tier from the start
     hermetic: false
     graduation: waive
-    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and steps 1-3 carry the durable regressions.
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and steps 1, 8 and 9 carry the durable regressions.
 test_obligations:
-  - source: scripts/ci/terraform_github_apply_gate.py
-    behavior: preview, reviewed-set match, refusals, allowlisted values only
-    verification_step: 1
-    test_selector: tests/test_terraform_github_apply_gate.py
-    red_green_expectation: red before (module absent), green after
-  - source: scripts/ci/terraform_github_apply.sh
-    behavior: token confinement, revoke trap, check-before-apply, converged re-plan
-    verification_step: 3
-    test_selector: tests/test_terraform_github_apply_script.py
-    red_green_expectation: red before (script absent), green after
-  - source: scripts/checks/ci_guards/validate_github_settings_apply.py
-    behavior: eleven workflow, trust, grant and Environment predicates
-    verification_step: 2
-    test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
-    red_green_expectation: red before (check absent), green after
-  - source: .github/workflows/terraform-github-apply.yml
-    behavior: triggers, Environment, job split, pinned uses, checkout shape, inputs through env
-    verification_step: 2
-    test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
-    red_green_expectation: red before (workflow absent), green after
   - source: terraform/bootstrap/github_settings_apply.tf
-    behavior: one exact trust statement per role, three-statement apply policy without iam, state-only preview policy, secret deny policy
-    verification_step: 2
+    behavior: one exact trust statement per role, three-statement apply policy without iam, state-only preview policy, size preconditions, one-Deny secret policy
+    verification_step: 1
     test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
     red_green_expectation: red before (file absent), green after
-  - source: terraform/github/environments.tf
-    behavior: tf_github_apply is main-only, no admin bypass, prevent_destroy
-    verification_step: 2
+  - source: scripts/checks/ci_guards/validate_github_settings_apply.py
+    behavior: the workflow, trust, grant, key-policy and Environment predicates
+    verification_step: 1
     test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
-    red_green_expectation: its Environment-shape red case fails before the resource lands
+    red_green_expectation: red before (check absent), green after
   - source: scripts/checks/ci_guards/_manifest.py
     behavior: the new check runs on the fast tier
-    verification_step: 2
+    verification_step: 1
     test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
     red_green_expectation: its registration test is red before the Entry lands
-  - source: scripts/checks/ci_guards/validate_trusted_plan_environment.py
-    behavior: the apply workflow is a trusted workflow whose preview job may declare tf-trusted-plan
-    verification_step: 4
-    test_selector: tests/checks/ci_guards/test_validate_trusted_plan_environment.py
-    red_green_expectation: the new case is red before TRUSTED_WORKFLOWS gains the file
   - source: config/ci_rca_taxonomy.yaml
-    behavior: the new check has its taxonomy row
-    verification_step: 2
+    behavior: the new check and the new workflow have their taxonomy rows
+    verification_step: 1
     test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
-    red_green_expectation: its taxonomy-row pin is red before the row lands
+    red_green_expectation: its taxonomy-row pins are red before each row lands
   - source: .github/CODEOWNERS
-    behavior: the workflow, both scripts, the reporter and the check are code-owned
-    verification_step: 2
+    behavior: the workflow, both scripts, the reporter, plan_names_core.py and the check are code-owned
+    verification_step: 1
     test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
     red_green_expectation: predicate (i)'s real-tree case is red before the lines land
-  - source: docs/contracts/environment-taxonomy.yaml
-    behavior: axis_a.github.apply_gating names the CI apply
-    verification_step: 2
-    test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
-    red_green_expectation: its contract-row pin is red before W2 lands
   - source: docs/contracts/deploy-paths.yaml
-    behavior: admin_out_of_band.github_settings_apply_provisioning names the workflow and the role
-    verification_step: 2
+    behavior: admin_out_of_band.github_settings_apply_provisioning names the workflow and both roles
+    verification_step: 1
     test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
     red_green_expectation: its contract-row pin is red before W3 lands
   - source: docs/contracts/secret-material-handling.yaml
     behavior: domains names the apply App entry and its resource policy
-    verification_step: 2
+    verification_step: 1
     test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
     red_green_expectation: its contract-row pin is red before W5 lands
+  - source: docs/contracts/environment-taxonomy.yaml
+    behavior: axis_a.github.apply_gating names the CI apply
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
+    red_green_expectation: its contract-row pin is red before W2 lands
+  - source: .github/workflows/terraform-github-apply.yml
+    behavior: triggers, Environments, job split, pinned uses, checkout shape, inputs through env
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
+    red_green_expectation: red before (workflow absent), green after
+  - source: terraform/github/environments.tf
+    behavior: tf_github_apply is main-only, no admin bypass, prevent_destroy
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
+    red_green_expectation: its Environment-shape red case fails before the resource lands
+  - source: scripts/ci/terraform_github_apply_gate.py
+    behavior: preview, unnamed-gate stop, reviewed-set match, refusals, probe verdicts, allowlisted values only
+    verification_step: 8
+    test_selector: tests/test_terraform_github_apply_gate.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/ci/terraform_github_apply.sh
+    behavior: token and key confinement, revoke on every exit, check-before-apply, probe oracle, converged re-plan
+    verification_step: 9
+    test_selector: tests/test_terraform_github_apply_script.py
+    red_green_expectation: red before (script absent), green after
+  - source: scripts/checks/ci_guards/validate_trusted_plan_environment.py
+    behavior: the apply workflow may declare tf-trusted-plan and is governed, while TRUSTED_WORKFLOWS is unchanged
+    verification_step: 10
+    test_selector: tests/checks/ci_guards/test_validate_trusted_plan_environment.py
+    red_green_expectation: the new cases are red before ENV_WORKFLOWS lands
+  - source: config/composite_action_body_baseline.yaml
+    behavior: every inline run body of the new workflow is baselined at its measured count
+    verification_step: 10
+    test_selector: tests/checks/ci_guards/test__workflow_shell_bodies.py
+    red_green_expectation: validate_composite_action_shell_bodies' real-tree case is red while the workflow's bodies are unlisted
+  - source: scripts/ci/terraform_github_plan_report.py
+    behavior: the visibility-gated line names the CI apply's admin plan as authoritative
+    verification_step: 8
+    test_selector: tests/test_terraform_github_apply_gate.py
+    red_green_expectation: its wording case is red before the reporter changes
   - source: config/prose_budgets.yaml
     behavior: the terraform/github/CLAUDE.md entry equals its measured size
-    verification_step: 5
+    verification_step: 11
     command: bin/venv-python -c "import sys; from scripts.checks.prose.prose_limits import validate_prose_limits as v; f = []; v(f); sys.exit(1 if f else 0)"
     red_green_expectation: names the entry while W4 has shrunk the file and the entry is unchanged, then exits 0
   - source: terraform/github/main.tf
     behavior: header comment only
-    verification_step: 5
+    verification_step: 11
     command: terraform fmt -check -recursive terraform/github
     waiver_reason: Comment-only edit to the header; no HCL changes, so there is no behaviour for a test to pin beyond fmt.
   - source: .github/workflows/terraform-github-plan.yml
     behavior: header comment only
-    verification_step: 4
+    verification_step: 10
     test_selector: tests/test_terraform_github_pr_plan.py
-    waiver_reason: Comment-only edit dropping a stale claim; no step changes, and its existing suite (VP 4) pins the steps.
+    waiver_reason: Comment-only edit naming the CI apply and dropping a stale claim; no step changes, and its existing suite (VP 10) pins the steps.
+  - source: scripts/checks/_terraform.py
+    behavior: comment only
+    verification_step: 10
+    test_selector: tests/checks/iam_tf/test_terraform_github_provider_auth.py
+    waiver_reason: Comment-only edit to the roots comment; _TERRAFORM_ROOTS is unchanged, so no behaviour changes for a test to pin.
 constraints:
-  - Never print the apply App key, an installation token, a non-allowlisted plan value, an account id or an ARN (Decision 101); posted evidence is counts, names and allowlisted values only.
+  - Never print the apply App key, an installation token, a non-allowlisted plan value, an account id or an ARN (Decision 101); posted evidence is counts, names and allowlisted values only. No step reads the key's value into a session.
   - The apply App key is reachable only from the operator-approved apply job of main's workflow; no ungated job reads it.
-  - No sidecar -- the approved-text Environment that Decision 246 records approvals in is created by this plan's first run, so the always-ask wording (W1-W5) is approved inline in the planning thread, and the build needs the operator's final-diff word anyway (IAM, CODEOWNERS paths, security code).
+  - No sidecar -- the approved-text Environment Decision 246 records approvals in does not exist until PR 2's first approved dispatch, so the always-ask wording (W1-W5) is approved inline in the planning thread, and the operator's final-diff word on each build PR binds it (Decision 246 cl.4; that word is needed anyway for IAM, CODEOWNERS paths and security code).
   - The bootstrap apply runs only on the operator's explicit word (Decision {{N}} cl.6), never self-directed.
   - No rescue agents or workaround loops (Decision 55); a refused gate is fixed in code, never bypassed.
 context:
-  - "Operator choice 2026-11-06 14:28Z: the preview reads state through its own narrow role (github-settings-preview) under tf-trusted-plan, not the CI apply role and not the trusted-plan role."
-  - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: 126, 92, 94, 77, 158, 238, 144, 225, 246; CONTRADICT: 223 (a prefixed bootstrap role is writable by github_ci_apply's IAMRoleWriteBounded; resolved by the non-prefixed name), 237 (Secrets Manager read; a declared exception, W1 cl.5, after the Fable consult); SPIRIT: 92 (self-gating Environment; resolved by the dedicated Environment, the gate-update refusal and W1 cl.7). Decisions triaged: 198 of 198. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.9 4/5."
-  - "Fable consult (blind, facts-only, 2026-11-06): /mnt/project-files/github-gated-apply/fable-brief/BRIEF.md and ADVICE.md. It agreed with the bootstrap non-prefixed role and push-plus-dispatch; it recommended approving the exact applied plan (two taps), Secrets Manager plus a resource policy, a dedicated Environment and an approval-bypass probe leg. Operator choice 2026-11-06 14:03Z: all of it except two taps -- one tap stays, with allowlisted values now in the preview and the reviewed-set match."
-  - "Probes 2026-11-06 (PlatformAdmin, read-only): agent-platform-github-ci-apply is allowed s3:GetObject and PutObject on tfstate/github/terraform.tfstate (DataLakeObjectIO, bucket-wide), so the preview needs no grant (scout premise disputed); the apply App entry exists (last changed 2026-10-22) with no resource policy; CloudTrail shows its only value reader to date is the IAM user `platform-breakglass` (the operator's CloudShell lane, 2026-11-02), hence the allow list."
+  - "Operator rulings 2026-11-06: 13:24Z never hand-applies Terraform, threads apply with admin credentials; 13:50Z Fable consult; 14:03Z one tap, with the key lock, dedicated Environment and probe; 14:28Z the preview reads state through its own role (github-settings-preview) under tf-trusted-plan; 15:04-15:13Z agent sessions, never the operator's hand, applied this root, and the CI apply is best practice already judged worth doing later, brought forward by the harness change; 15:11Z keep the key in Secrets Manager now, KMS signing at rec-4538's rotation (rec-4967)."
+  - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: 126, 92, 94, 77, 158, 238, 144, 225, 246; CONTRADICT: 223 (a prefixed bootstrap role is writable by github_ci_apply's IAMRoleWriteBounded; resolved by the non-prefixed name), 237 (Secrets Manager read; a declared exception, W1 cl.5, after the Fable consult); SPIRIT: 92 (self-gating Environment; resolved by the dedicated Environment, the gate-change naming rule and W1 cl.7). Decisions triaged: 198 of 198. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.9 4/5. Critique round 1 added 238 cl.2 (amended, W1 cl.4) and 157 cl.1 (UpdateSecret is value-capable; the deny now covers every non-metadata action)."
+  - "Fable consult (blind, facts-only, 2026-11-06): /mnt/project-files/github-gated-apply/fable-brief/BRIEF.md and ADVICE.md. It agreed with the bootstrap non-prefixed role and push-plus-dispatch, and recommended approving the exact applied plan (two taps), Secrets Manager plus a resource policy, a dedicated Environment and an approval-bypass probe leg; the operator kept one tap, with allowlisted values in the preview and the reviewed-set match."
+  - "Probes 2026-11-06 (PlatformAdmin, read-only): agent-platform-github-ci-apply is allowed s3:GetObject and PutObject on tfstate/github/terraform.tfstate (DataLakeObjectIO, bucket-wide); the apply App entry exists (last changed 2026-10-22) with no resource policy; CloudTrail shows its only value reader to date is user/platform-breakglass (2026-11-02), hence that exception."
+  - "Probe 2026-11-06 (PlatformAdmin narrowed by a session policy allowing only s3:GetObject on tfstate/github/terraform.tfstate, Terraform 1.10.5): terraform init plus terraform state list of terraform/github succeed (8 addresses), so neither role needs s3:ListBucket for the backend; VP 6 repeats this with the exact rendered policies before any apply."
   - 'red_overlap (2026-11-06, 93ce8135): {"verdict": "clear", "slo_hours": 4, "reds": []}'
-  - "Probe 2026-11-06 (PlatformAdmin narrowed by a session policy, read-only): terraform init plus terraform state list of terraform/github succeed with only s3:GetObject on tfstate/github/terraform.tfstate (8 addresses), so neither role needs s3:ListBucket for the backend; the lock adds GetObject, PutObject and DeleteObject on the .tflock for the apply role only."
-  - "Why sessions cannot apply: memory terraform-github-apply-blocked (2026-11-06): the session proxy 403s repos/{o}/{r}/environments and /vulnerability-alerts with admin credentials."
-  - "Apply App: org-owned, Administration and Actions read/write, Metadata read, installed on all otl-labs repositories; rec-4538 owns narrowing the install and rotating its key (a rotation, since the App stays in use). Only an Administration-write token sees the ruleset's bypass_actors, so the read-only preview always shows a visibility-gated bypass_actors row; the check never lets that row license a ruleset change."
-  - "Residual accepted by the operator's one-tap choice: the reviewed plan is the read-only App's, not the applied plan; the reviewed-set match (address, actions, changed names, allowlisted values) bounds the difference, and values outside the allowlist are unseen."
-  - "UNPROVEN until VP 10: that GitHub refuses an App installation token's pending_deployments approval."
-  - "Overlap: rec-4905 stays open for the AWS gated applies; rec-4651 (tf-gated-apply admits any branch) and that Environment's admin bypass stay open, and rec-4965 moves this path off it; rec-4911 (approved_text imports) becomes actionable after VP 10 and should add the tf_github_apply imports too. rec-4638 (S5, plan PR #1890) moves the plan App key into the tf-trusted-plan Environment; the preview job declares that Environment from the start, with its own state-only role, so the move does not strand it (finding relayed by the operator 2026-11-06 14:25Z; the other route, an Environment job under agent-platform-github-ci-apply, loses the state read because the Environment replaces the main subject)."
-  - "V3 resolution: the posted pre-merge gate evidence for the current head (step 7) substitutes for the pre-merge post-deploy evidence the implement V3 Merge Gate and the code-review V3 check require; the behavioural acceptance (Decision 48) is the post-merge, human-directed walk of steps 8-11; its evidence is a counts-only comment on the merged PR naming the applied sha."
-  - "Operator rulings: 2026-11-06 13:24Z never hand-applies Terraform, threads apply with admin credentials; 13:50Z run a Fable consult; 14:03Z one tap, with the key lock, dedicated Environment and probe."
+  - "Why sessions cannot apply: thread 'Roll out approved-wording GitHub approvals', 2026-11-06 13:35Z, an admin-credential session: GET repos/{o}/{r}/environments and /vulnerability-alerts returned 403 'Access to this GitHub API path is not permitted through this proxy' while the token reported admin."
+  - "Apply App: org-owned, Administration and Actions read/write, Metadata read (no Deployments), installed on all otl-labs repositories; rec-4538 owns narrowing the install and rotating its key. Only an Administration-write token sees the ruleset's bypass_actors, so the read-only preview always shows a visibility-gated bypass_actors row; the check never lets that row license a ruleset change."
+  - "Two build PRs (critique B5): PR 1 = bootstrap roles, key policy, the guard's Terraform predicates and W1, W3, W5, then the admin apply; PR 2 = workflow, gate, script, Environment, fence and W2, W4. Precedent: deploy-paths.yaml production_catalog_provisioning (PR 1 then a switch PR). Gate changes need a dispatch naming them, so PR 2's push run stops at the preview by design."
+  - "Residual accepted by the operator's one-tap choice: the reviewed plan is the read-only App's, not the applied plan; the reviewed-set match bounds the difference, and values outside the allowlist are unseen. A tap also runs main's current code, which holds the key (rec-2827; rec-4967 removes the key from the runner)."
+  - "UNPROVEN until VP 13: that GitHub refuses an App installation token's pending_deployments approval (the token carries no Deployments permission)."
+  - "Overlap: rec-4905 stays open for the AWS gated applies; rec-4651 (tf-gated-apply admits any branch) and that Environment's admin bypass stay open, and rec-4965 moves this path off it; rec-4911 (approved_text imports) becomes actionable after VP 13 and should add the tf_github_apply imports too; rec-4638 (S5, plan PR #1890) moves the plan App key into tf-trusted-plan, which the preview declares from the start (no ordering; the second to merge rebases)."
+  - "Follow-ons: rec-4965 moves the apply job and the apply role's trust to tf-github-apply; rec-4966 adds a scheduled read-only drift preview of this root; rec-4967 moves JWT signing into a non-exportable KMS key at rec-4538's rotation; rec-4968 registers the new name-bound bindings and Environments in github-org-transfer.yaml."
+  - "V3 resolution: the posted pre-merge gate evidence for PR 1's current head (steps 5-6) substitutes for the pre-merge post-deploy evidence the implement V3 Merge Gate and the code-review V3 check require; the behavioural acceptance (Decision 48) is the post-merge, human-directed walk of steps 7 and 12-15; its evidence is a counts-only comment on each merged PR naming the applied sha."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 13, nits: 19}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
-  - Decisions 126, 158, 225, 237, 238, 239 and 246 sections read
+  - Decisions 126, 157, 158, 225, 237, 238, 239 and 246 sections read
   - All files in scope located and readable
-  - ADMIN_CHAIN_OK in the build session (step 6) or an ADMIN session lined up for steps 7-8
+  - ADMIN_CHAIN_OK in PR 1's build session (step 4) or an ADMIN session lined up for steps 5-7
 execution_steps:
-  - "W1-W5: the always-ask texts, approved inline by the operator; the plan PR body carries them and the approving message ids."
-  - "Build the gate, the apply script, the workflow, the bootstrap file, the tf_github_apply Environment, the check with its manifest and taxonomy rows, the tests, CODEOWNERS and the comment edits, in that order; run VP 1-5 after each. Apply W1-W5 exactly; fill {{N}} with MAX(decision number) + 1 after the final rebase; regenerate docs/decisions-index.json."
-  - "Run the full tier (VP 14, backgrounded) and VP 6-7; open the PR; merge only on code review PROCEED, green CI and the operator's final-diff word, which also directs the step 8 apply. Squash-merge body carries Resolves: rec-4964."
-  - "Post-merge: VP 8, VP 9; ask the operator for the tap; VP 10, VP 11, VP 12, VP 13."
+  - "W1-W5: the always-ask texts, approved inline by the operator; each build PR body carries its texts and the approving message ids."
+  - "PR 1: build the bootstrap file, the guard's predicates (a), (g) and (h) with its manifest Entry, taxonomy row and tests, the admin-scope scan, the CODEOWNERS line, W1 (fill {{N}} with MAX(decision number) + 1 after the final rebase; regenerate docs/decisions-index.json), W3 (with the deploy-paths relief step) and W5; run VP 1-3 after each. Run the full tier (VP 17) from the top-level session, read its verdict only with scripts.checks.validation_result --verify-head, then VP 4-6; open PR 1; merge on code review PROCEED, green CI and the operator's final-diff word, which also directs VP 7. No Resolves trailer on PR 1."
+  - "After VP 7 passes, PR 2 from the latest main: the gate, the apply script, the workflow and its baseline entries, the Environment, the guard's remaining predicates, the fence, the reporter wording, the tests, CODEOWNERS, the comment edits, W2 and W4 with the prose budget; run VP 1 and 8-11 after each, then VP 17; open PR 2; merge on code review PROCEED, green CI and the operator's final-diff word. Squash-merge body carries Resolves: rec-4964."
+  - "PR 2 post-merge: VP 12; ask the operator for the tap; VP 13, VP 14, VP 15, VP 16."
   - "Report: what was implemented, verification results"
 rollback: >-
-  Revert the build PR; remove the role, its policy and the secret policy with a human-directed targeted bootstrap
-  destroy (the secret policy first if PlatformAdmin's read is ever refused); the CloudShell lane in
+  Revert PR 2, then PR 1; remove the roles, their policies and the secret policy with a human-directed targeted
+  bootstrap destroy (the secret policy first if PlatformAdmin is ever refused); the CloudShell break-glass lane in
   terraform/github/CLAUDE.md stays usable throughout. Environments created by a run carry prevent_destroy and stay.
