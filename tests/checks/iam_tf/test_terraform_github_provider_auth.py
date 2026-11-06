@@ -61,7 +61,10 @@ def provider_owner_and_token_are_variables(files: dict[str, str]) -> bool:
 
 
 def token_variable_is_ephemeral_without_default(files: dict[str, str]) -> bool:
-    body = _block(files.get("variables.tf", ""), r'variable\s+"github_token"')
+    others = (text for name, text in files.items() if name != "main.tf")
+    if any(_block(text, r'variable\s+"github_token"') is not None for text in others):
+        return False
+    body = _block(files.get("main.tf", ""), r'variable\s+"github_token"')
     if body is None:
         return False
     if _attr(body, "sensitive") != "true" or _attr(body, "ephemeral") != "true" or _attr(body, "default") is not None:
@@ -87,11 +90,12 @@ _FILE_PREDICATES: dict[str, Callable[[dict[str, str]], bool]] = {
 }
 
 _GOOD = {
-    "main.tf": 'provider "github" {\n  owner = var.github_owner\n  token = var.github_token\n}\n',
-    "variables.tf": (
+    "main.tf": (
+        'provider "github" {\n  owner = var.github_owner\n  token = var.github_token\n}\n\n'
         'variable "github_token" {\n  type      = string\n  sensitive = true\n  ephemeral = true\n\n'
         '  validation {\n    condition     = var.github_token != ""\n    error_message = "b"\n  }\n}\n'
     ),
+    "variables.tf": 'variable "github_owner" {\n  type = string\n}\n',
 }
 
 
@@ -107,10 +111,11 @@ _RED_CASES: list[tuple[str, dict[str, str]]] = [
     ("no_app_auth", _mutated("main.tf", "}\n", '  dynamic "app_auth" {\n    for_each = []\n    content {}\n  }\n}\n')),
     ("owner_and_token_variables", _mutated("main.tf", "owner = var.github_owner", 'owner = "x"')),
     ("owner_and_token_variables", _mutated("main.tf", "token = var.github_token", "token = var.other")),
-    ("token_ephemeral_no_default", _mutated("variables.tf", "ephemeral = true", "ephemeral = false")),
-    ("token_ephemeral_no_default", _mutated("variables.tf", "sensitive = true", "sensitive = false")),
-    ("token_ephemeral_no_default", _mutated("variables.tf", "ephemeral = true", "ephemeral = true\n  default   = null")),
-    ("token_ephemeral_no_default", _mutated("variables.tf", 'var.github_token != ""', "true")),
+    ("token_ephemeral_no_default", _mutated("main.tf", "ephemeral = true", "ephemeral = false")),
+    ("token_ephemeral_no_default", _mutated("main.tf", "sensitive = true", "sensitive = false")),
+    ("token_ephemeral_no_default", _mutated("main.tf", "ephemeral = true", "ephemeral = true\n  default   = null")),
+    ("token_ephemeral_no_default", _mutated("main.tf", 'var.github_token != ""', "true")),
+    ("token_ephemeral_no_default", {**_GOOD, "variables.tf": 'variable "github_token" {\n  type = string\n}\n'}),
     ("no_key_variables", {**_GOOD, "extra.tf": 'variable "app_private_key" {\n  type = string\n}\n'}),
     ("no_key_variables", {**_GOOD, "extra.tf": 'variable "installation_id" {\n  type = string\n}\n'}),
 ]

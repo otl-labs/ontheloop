@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Overlay a PR's terraform/personal onto main's checkout for the trusted plan (Decision 238 cl.3).
+"""Overlay a PR's Terraform root onto main's checkout for the trusted plan (Decision 238 cl.3).
 
 Run by path with `python3 -I` from the repo root, before any credential exists. Inputs PR_NUMBER and HEAD_SHA come from
-env. Fetches +refs/pull/<n>/merge (a public read), then replaces terraform/personal in the working tree with the merge
-tree's copy and restores the main-only files from the checked-out main commit. It never runs anything from the PR: git
-is invoked with fixed argv, no shell. Prints one line, OVERLAY_OK or "OVERLAY_REFUSED <rule> [<path>]", where a path is
-printed only after it passed the file-name rule.
+env, and OVERLAY_ROOT (default terraform/personal) names the root, which must have a row in
+terraform_hcl_screen_policy.py. Fetches +refs/pull/<n>/merge (a public read), then replaces that root in the working
+tree with the merge tree's copy and restores the row's main-only files from the checked-out main commit. It never runs
+anything from the PR: git is invoked with fixed argv, no shell. Prints one line, OVERLAY_OK or
+"OVERLAY_REFUSED <rule> [<path>]", where a path is printed only after it passed the file-name rule.
 """
 
 from __future__ import annotations
@@ -21,13 +22,12 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(_ROOT))
 
 from scripts.ci import terraform_hcl_screen as screen  # noqa: E402
+from scripts.ci import terraform_hcl_screen_policy as policies  # noqa: E402
 
-PERSONAL = "terraform/personal"
 MERGE_REF = "refs/trusted/pr-merge"
 NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 HEX40 = re.compile(r"[0-9a-f]{40}")
 PR_RE = re.compile(r"[0-9]{1,9}")
-CONFIG_FILES = ("config/feature_flags.yaml", "config/lambda/ducklake/version.yaml")
 
 
 class Refusal(Exception):
@@ -50,8 +50,8 @@ def _out(repo: Path, *args: str) -> str:
     return _git(repo, *args).stdout.decode("utf-8", errors="replace").strip()
 
 
-def _entries(repo: Path, merge: str) -> list[tuple[str, str, str]]:
-    raw = _git(repo, "ls-tree", "-z", f"{merge}:{PERSONAL}").stdout
+def _entries(repo: Path, merge: str, root: str) -> list[tuple[str, str, str]]:
+    raw = _git(repo, "ls-tree", "-z", f"{merge}:{root}").stdout
     entries = []
     for rec in raw.split(b"\0"):
         if not rec:
@@ -62,7 +62,10 @@ def _entries(repo: Path, merge: str) -> list[tuple[str, str, str]]:
     return entries
 
 
-def overlay(repo: Path, pr_number: str, head_sha: str, remote: str = "origin") -> None:
+def overlay(repo: Path, pr_number: str, head_sha: str, remote: str = "origin", root: str = policies.DEFAULT_ROOT) -> None:
+    policy = policies.get(root)
+    if policy is None:
+        raise Refusal("unknown_root")
     if not PR_RE.fullmatch(pr_number) or not HEX40.fullmatch(head_sha):
         raise Refusal("bad_inputs")
     if not _ok(repo, "fetch", "--no-tags", "--quiet", remote, f"+refs/pull/{pr_number}/merge:{MERGE_REF}"):
@@ -74,7 +77,7 @@ def overlay(repo: Path, pr_number: str, head_sha: str, remote: str = "origin") -
     main_sha = _out(repo, "rev-parse", "HEAD")
     if not _ok(repo, "merge-base", "--is-ancestor", parents[0], main_sha):
         raise Refusal("base_not_ancestor_of_main")
-    entries = _entries(repo, merge)
+    entries = _entries(repo, merge, root)
     for mode, kind, name in entries:
         if not NAME_RE.fullmatch(name):
             raise Refusal("file_name")
@@ -85,17 +88,17 @@ def overlay(repo: Path, pr_number: str, head_sha: str, remote: str = "origin") -
             raise Refusal("git_metadata_file", name)
         if mode != "100644":
             raise Refusal("file_mode", name)
-    protected = {f"{PERSONAL}/{n}": n for n in screen.MAIN_ONLY_FILES} | {p: p for p in CONFIG_FILES}
+    protected = {f"{root}/{n}": n for n in policy.main_only_files} | {p: p for p in policy.config_files}
     changed = _git(repo, "diff", "--name-only", "--no-renames", "-z", parents[0], merge).stdout.split(b"\0")
     for path in sorted(c.decode("utf-8", errors="replace") for c in changed if c):
         if path in protected:
             raise Refusal("main_only_file_changed", protected[path])
-    shutil.rmtree(repo / PERSONAL)
-    _git(repo, "checkout", merge, "--", PERSONAL)
-    for name in sorted(screen.MAIN_ONLY_FILES):
-        target = repo / PERSONAL / name
-        if _ok(repo, "cat-file", "-e", f"HEAD:{PERSONAL}/{name}"):
-            _git(repo, "checkout", "HEAD", "--", f"{PERSONAL}/{name}")
+    shutil.rmtree(repo / root)
+    _git(repo, "checkout", merge, "--", root)
+    for name in sorted(policy.main_only_files):
+        target = repo / root / name
+        if _ok(repo, "cat-file", "-e", f"HEAD:{root}/{name}"):
+            _git(repo, "checkout", "HEAD", "--", f"{root}/{name}")
         elif target.exists():
             target.unlink()
 
@@ -105,7 +108,12 @@ def main() -> int:
         print("OVERLAY_REFUSED scripts_package_location")
         return 2
     try:
-        overlay(Path.cwd(), os.environ.get("PR_NUMBER", ""), os.environ.get("HEAD_SHA", ""))
+        overlay(
+            Path.cwd(),
+            os.environ.get("PR_NUMBER", ""),
+            os.environ.get("HEAD_SHA", ""),
+            root=os.environ.get("OVERLAY_ROOT") or policies.DEFAULT_ROOT,
+        )
     except Refusal as exc:
         print(f"OVERLAY_REFUSED {exc.rule}" + (f" {exc.path}" if exc.path else ""))
         return 1

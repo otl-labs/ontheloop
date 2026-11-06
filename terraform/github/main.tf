@@ -12,6 +12,8 @@
 # App's key outside Terraform (rec-4355), the PR-time plan App's token, or the classic admin PAT as
 # rollback until it is revoked. No app_auth block: provider 6.12.1 needs its three arguments in the
 # config unless GITHUB_APP_* are set at validate time, so the key would have to enter Terraform.
+# This file is main-only for the trusted PR-time plan (terraform-github-plan.yml): the PR's copy is replaced from main,
+# and no other file in this root may declare a terraform, provider or backend block (Decision 238 cl.3).
 
 terraform {
   required_version = ">= 1.10"
@@ -32,4 +34,16 @@ terraform {
 provider "github" {
   token = var.github_token
   owner = var.github_owner
+}
+
+variable "github_token" {
+  description = "GitHub token, supplied at run time and never committed: an installation token of the PR-time plan App or of the apply App (rec-4355), or the classic admin PAT (repo, admin:repo_hook, read:org) as rollback until it is revoked. Ephemeral, so no saved plan or state holds it; applying a saved plan needs it set again."
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+
+  validation {
+    condition     = var.github_token != ""
+    error_message = "github_token is empty; an empty token makes the provider fall back to the gh CLI, then anonymous access."
+  }
 }

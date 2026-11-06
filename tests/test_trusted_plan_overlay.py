@@ -250,3 +250,70 @@ def test_git_metadata_files_refused_so_no_filter_can_fire(scene: Scene, tmp_path
     assert out.stdout.strip() == f"OVERLAY_REFUSED git_metadata_file {name}"
     assert not marker.exists()
     assert scene.text(f"{P}/a.tf") == "# a-main\n"
+
+
+G = "terraform/github"
+
+
+class GithubScene(Scene):
+    def __init__(self, tmp: Path) -> None:
+        self.origin = tmp / "origin"
+        self.work = tmp / "work"
+        self.origin.mkdir()
+        git(self.origin, "init", "-q", "-b", "main")
+        for name, text in {
+            "repo.tf": "# repo-main\n",
+            "main.tf": "# main-base\n",
+            ".terraform.lock.hcl": "# lock-base\n",
+        }.items():
+            put(self.origin, f"{G}/{name}", text)
+        put(self.origin, f"{P}/a.tf", "# personal-main\n")
+        self.base = commit_all(self.origin, "base")
+        self.head_sha = ""
+
+    def run(self, head_sha: str | None = None, pr: str = "7", root: str | None = G) -> subprocess.CompletedProcess[str]:
+        env = {**GIT_ENV, "PR_NUMBER": pr, "HEAD_SHA": head_sha or self.head_sha}
+        if root is not None:
+            env["OVERLAY_ROOT"] = root
+        return subprocess.run([sys.executable, "-I", str(SCRIPT)], cwd=self.work, env=env, capture_output=True, text=True)
+
+
+class TestGithubRoot:
+    def test_overlays_only_the_selected_root_and_restores_main_only_files(self, tmp_path: Path) -> None:
+        scene = GithubScene(tmp_path)
+
+        def mutate(root: Path) -> None:
+            put(root, f"{G}/repo.tf", "# repo-pr\n")
+            put(root, f"{P}/a.tf", "# personal-pr\n")
+
+        scene.pr(mutate)
+        scene.clone()
+        out = scene.run()
+        assert (out.returncode, out.stdout.strip()) == (0, "OVERLAY_OK"), out.stderr
+        assert scene.text(f"{G}/repo.tf") == "# repo-pr\n"
+        assert scene.text(f"{G}/main.tf") == "# main-base\n"
+        assert scene.text(f"{P}/a.tf") == "# personal-main\n"
+
+    @pytest.mark.parametrize("name", ["main.tf", ".terraform.lock.hcl"])
+    def test_pr_change_to_a_main_only_file_is_refused(self, tmp_path: Path, name: str) -> None:
+        scene = GithubScene(tmp_path)
+        scene.pr(lambda root: put(root, f"{G}/{name}", "# changed by the PR\n"))
+        scene.clone()
+        out = scene.run()
+        assert out.returncode == 1
+        assert out.stdout.strip() == f"OVERLAY_REFUSED main_only_file_changed {name}"
+
+    def test_personal_run_does_not_protect_github_main_tf(self, tmp_path: Path) -> None:
+        scene = GithubScene(tmp_path)
+        scene.pr(lambda root: put(root, f"{P}/a.tf", "# personal-pr\n"))
+        scene.clone()
+        out = scene.run(root=None)
+        assert out.stdout.strip() == "OVERLAY_OK"
+
+    @pytest.mark.parametrize("root", ["terraform/bootstrap", "terraform/github/", "../x"])
+    def test_unknown_root_is_refused(self, tmp_path: Path, root: str) -> None:
+        scene = GithubScene(tmp_path)
+        scene.pr(lambda root_: put(root_, f"{G}/repo.tf", "# x\n"))
+        scene.clone()
+        out = scene.run(root=root)
+        assert (out.returncode, out.stdout.strip()) == (1, "OVERLAY_REFUSED unknown_root")

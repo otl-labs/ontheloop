@@ -223,7 +223,9 @@ ENTRIES: tuple[Entry, ...] = (
         pre=True,
         pre_globs=(
             "terraform/personal/**",
+            "terraform/github/**",
             "scripts/ci/terraform_hcl_screen.py",
+            "scripts/ci/terraform_hcl_screen_policy.py",
             "scripts/ci/terraform_hcl_lexer.py",
             "scripts/checks/ci_guards/validate_trusted_plan_screen.py",
             "scripts/checks/_common.py",

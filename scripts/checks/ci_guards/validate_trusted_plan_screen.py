@@ -1,4 +1,6 @@
-"""Keeps terraform/personal on main inside the trusted plan's own HCL screen (PLAN-trusted-plan-cutover, rec-4637).
+"""Keeps terraform/personal and terraform/github on main inside the trusted plan's own HCL screen.
+
+PLAN-trusted-plan-cutover (rec-4637) and PLAN-trusted-plan-github-root (rec-4638).
 
 The trusted plan job refuses any PR whose Terraform fails scripts/ci/terraform_hcl_screen.py. If main itself
 failed it, every later PR's plan would be refused. A PR that adds a resource type, data type, function or file()
@@ -10,26 +12,30 @@ it. Only the pure tree and lexer rules apply here; the overlay's diff-based rule
 from __future__ import annotations
 
 from scripts.checks import _common, registry
-from scripts.ci import terraform_hcl_screen
-
-ROOT_NAME = "terraform/personal"
+from scripts.ci import terraform_hcl_screen, terraform_hcl_screen_policy
 
 
 @registry.register("validate_trusted_plan_screen", owner="platform")
 def validate_trusted_plan_screen(failed: list[str]) -> None:
-    """Assert terraform/personal passes the trusted plan's static screen. See module docstring."""
-    print("\n=== trusted-plan screen over terraform/personal ===")
-    root = _common.ROOT / ROOT_NAME
-    if not root.is_dir():
-        print(f"  FAIL: {ROOT_NAME} is missing")
-        failed.append(f"trusted-plan-screen: {ROOT_NAME} is missing, so nothing was screened")
-        registry.examined(0, unit="terraform_files")
-        return
-    files, read_findings = terraform_hcl_screen.read_root(root)
-    findings = sorted(set(read_findings + terraform_hcl_screen.screen_tree(files)), key=lambda f: (f[1], f[2], f[0]))
-    for rule, name, line in findings:
-        print(f"  FAIL: {name}:{line} {rule}")
-        failed.append(f"trusted-plan-screen: {name}:{line} {rule} -- extend the screen's allowlist in the same PR")
-    registry.examined(len(files), unit="terraform_files")
-    if not findings:
-        print(f"  PASS: {len(files)} file(s) screened clean")
+    """Assert every policy-row root passes the trusted plan's static screen. See module docstring."""
+    examined = 0
+    for root_name, policy in sorted(terraform_hcl_screen_policy.POLICIES.items()):
+        print(f"\n=== trusted-plan screen over {root_name} ===")
+        root = _common.ROOT / root_name
+        if not root.is_dir():
+            print(f"  FAIL: {root_name} is missing")
+            failed.append(f"trusted-plan-screen: {root_name} is missing, so nothing was screened")
+            continue
+        files, read_findings = terraform_hcl_screen.read_root(root)
+        findings = sorted(
+            set(read_findings + terraform_hcl_screen.screen_tree(files, policy)), key=lambda f: (f[1], f[2], f[0])
+        )
+        for rule, name, line in findings:
+            print(f"  FAIL: {root_name}/{name}:{line} {rule}")
+            failed.append(
+                f"trusted-plan-screen: {root_name}/{name}:{line} {rule} -- extend the screen's allowlist in the same PR"
+            )
+        examined += len(files)
+        if not findings:
+            print(f"  PASS: {len(files)} file(s) screened clean")
+    registry.examined(examined, unit="terraform_files")
