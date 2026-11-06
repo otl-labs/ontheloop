@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from src.turn_capture.observations import hook_name
-from src.turn_capture.transcript import MemTree, project_ref_pin
+from src.turn_capture.provenance import pin_facts
+from src.turn_capture.transcript import PIN_SCRIPT_STEM, MemTree, hook_script, project_ref_pin
+from src.turn_capture.witness import is_witness_record
 
 ROOT = Path(__file__).resolve().parents[2]
 SETTINGS = ROOT / ".claude" / "settings.json"
@@ -101,3 +103,71 @@ def test_capture_commands_name_their_scripts() -> None:
         "UserPromptSubmit": "hook:stop_log_turn",
         "SessionEnd": "hook:session_end_log_turn",
     }
+
+
+PLUGIN_HOOKS = ROOT / ".claude" / "hooks" / "hooks.json"
+STATUS_MESSAGES = {
+    "SessionStart": "session_start_log_turn.sh --project-ref=ontheloop",
+    "Stop": "stop_log_turn.py",
+    "StopFailure": "stop_log_turn.py",
+    "UserPromptSubmit": "stop_log_turn.py",
+    "SessionEnd": "session_end_log_turn.py",
+}
+WITNESS_STDERR = "[stop_log_turn] turn witness\n"
+PIN_STDERR = "[session_start_log_turn] capture pin checkout=" + "a" * 40 + " base=" + "b" * 40 + " dirty=false\n"
+
+
+def _capture_status(hooks: dict[str, list[dict[str, Any]]]) -> list[tuple[str, str | None]]:
+    return sorted(
+        (event, h.get("statusMessage"))
+        for event, groups in hooks.items()
+        for group in groups
+        for h in group["hooks"]
+        if any(stem in h["command"] for stem in CAPTURE)
+    )
+
+
+def _with_status(hooks: dict[str, list[dict[str, Any]]]) -> list[tuple[str, str]]:
+    return sorted((e, h["statusMessage"]) for e, g in hooks.items() for grp in g for h in grp["hooks"] if "statusMessage" in h)
+
+
+def test_capture_hooks_carry_their_status_message() -> None:
+    expected = sorted(STATUS_MESSAGES.items())
+    plugin = json.loads(PLUGIN_HOOKS.read_text(encoding="utf-8"))["hooks"]
+    for hooks in (_hooks(), plugin):
+        assert _capture_status(hooks) == expected
+        assert _with_status(hooks) == expected
+    command_ref = [t for t in PIN_CMD.split() if t.startswith("--project-ref=")]
+    assert command_ref and STATUS_MESSAGES["SessionStart"].endswith(command_ref[0])
+
+
+def _attachment(event: str, command: str, stderr: str) -> dict[str, Any]:
+    return {"type": "hook_success", "hookName": f"{event}:startup", "hookEvent": event, "command": command, "stderr": stderr}
+
+
+def _pin_tree(command: str) -> MemTree:
+    records = [
+        {
+            "type": "attachment",
+            "uuid": "h1",
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "attachment": _attachment("SessionStart", command, PIN_STDERR),
+        },
+        {"type": "user", "uuid": "u1", "timestamp": "2026-01-01T00:00:01.000Z", "message": {"content": "hi"}},
+    ]
+    return MemTree({f"{SID}.jsonl": "".join(json.dumps(r) + "\n" for r in records)})
+
+
+def test_the_recorded_status_message_satisfies_the_parser_rules() -> None:
+    for event, message in STATUS_MESSAGES.items():
+        assert hook_name({"command": message}) == "hook:" + message.split()[0].rsplit(".", 1)[0]
+    pin = STATUS_MESSAGES["SessionStart"]
+    assert project_ref_pin(_pin_tree(pin)) == "ontheloop"
+    assert hook_script(pin)[0] == PIN_SCRIPT_STEM
+    assert pin_facts(_attachment("SessionStart", pin, PIN_STDERR)) == ("a" * 40, "b" * 40, False)
+    stop = STATUS_MESSAGES["Stop"]
+    record = {"type": "attachment", "attachment": _attachment("Stop", stop, WITNESS_STDERR)}
+    assert is_witness_record(record)
+    label = "command hook 9"
+    assert project_ref_pin(_pin_tree(label)) is None
+    assert not is_witness_record({"type": "attachment", "attachment": _attachment("Stop", label, WITNESS_STDERR)})
