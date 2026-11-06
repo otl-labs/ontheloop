@@ -1,0 +1,108 @@
+name: approved-text-approval
+
+# The operator's approval of an approved-text sidecar's words (rec-4769; Decision 246).
+# Dispatched from main with a sidecar's slug, commit, approved-words digest and fingerprint. The render job runs
+# main's code only and reads the sidecar at the given commit as data (Decision 238 cl.3); the approve job waits on
+# the `approved-text` Environment, whose reviewers only the operator holds; the wake job comments on open pull
+# requests at that commit. Never add id-token or secrets: no job here may assume a role or hold a credential.
+# Never a required check (Decision 83); waiting and rejected runs are expected states.
+
+run-name: approved-text ${{ inputs.slug }} ${{ inputs.fingerprint }} ${{ inputs.digest }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: Sidecar slug (docs/plans/approved/<slug>.yaml)
+        type: string
+        required: true
+      sha:
+        description: Commit that holds the sidecar
+        type: string
+        required: true
+      digest:
+        description: Approved-words digest (scripts.roadmap.approved_text record prints it)
+        type: string
+        required: true
+      fingerprint:
+        description: Four-word fingerprint of the digest (record prints it)
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  render:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install render dependencies
+        run: pip install pyyaml pydantic -c requirements.txt
+
+      - name: Render the approved wording
+        env:
+          SLUG: ${{ inputs.slug }}
+          SHA: ${{ inputs.sha }}
+          DIGEST: ${{ inputs.digest }}
+          FINGERPRINT: ${{ inputs.fingerprint }}
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "refused: sha is not 40 lowercase hex"; exit 1; }
+          [[ "$SLUG" =~ ^[a-z0-9-]+$ ]] || { echo "refused: slug is not [a-z0-9-]+"; exit 1; }
+          git fetch --depth=1 origin --end-of-options "$SHA"
+          git show --end-of-options "$SHA:docs/plans/approved/$SLUG.yaml" > "$RUNNER_TEMP/sidecar.yaml"
+          python -m scripts.roadmap.approved_words render \
+            --sidecar-file "$RUNNER_TEMP/sidecar.yaml" --slug "$SLUG" --base-file-dir "$GITHUB_WORKSPACE" \
+            --expect-approved "$DIGEST" --fingerprint "$FINGERPRINT" >> "$GITHUB_STEP_SUMMARY"
+
+  approve:
+    needs: render
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: approved-text
+    permissions: {}
+    steps:
+      - name: Approval recorded
+        run: echo "approved-text gate opened"
+
+  wake:
+    needs: approve
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install wake dependencies
+        run: pip install pyyaml pydantic -c requirements.txt
+
+      - name: Comment on open pull requests at the approved commit
+        env:
+          APPROVED_TEXT_GH_TOKEN: ${{ github.token }}
+          SLUG: ${{ inputs.slug }}
+          SHA: ${{ inputs.sha }}
+          DIGEST: ${{ inputs.digest }}
+          RUN_ID: ${{ github.run_id }}
+        run: python -m scripts.roadmap.approved_text_github wake --slug "$SLUG" --sha "$SHA" --digest "$DIGEST" --run-id "$RUN_ID"

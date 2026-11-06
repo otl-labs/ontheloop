@@ -16,6 +16,7 @@ import yaml
 duckdb = pytest.importorskip("duckdb")
 
 from src.common import ducklake_event_read_sql as sql  # noqa: E402
+from tests.fixtures import duckdb_connect  # noqa: E402
 
 _VECTORS = yaml.safe_load((Path(__file__).parents[1] / "telemetry" / "fixtures" / "dedupe_vectors.yaml").read_text("utf-8"))[
     "vectors"
@@ -47,7 +48,7 @@ def _render(text: str, *, mutate: tuple[str, str] | None = None) -> str:
 
 
 def _load(rows_by_table: dict[str, list[dict[str, Any]]]) -> Any:
-    con = duckdb.connect()
+    con = duckdb_connect.connect()
     con.execute("SET TimeZone='UTC'")
     for table in _TABLES.values():
         con.execute(f"CREATE TABLE {table} ({_COLUMNS})")

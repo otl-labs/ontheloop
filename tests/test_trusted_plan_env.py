@@ -227,6 +227,17 @@ class TestTfvarsGrammar:
         assert "::add-mask::owner-placeholder-nonemail" in result.stderr
 
 
+def test_exports_alerts_scrub_variable(tmp_path: Path) -> None:
+    env = {k: v for k, v in _setup(tmp_path).items() if not k.startswith("TF_VAR_")}
+    child = 'echo "ALERTS=${_ALERTS:-unset}"; env | grep -c "^TF_VAR_" || true'
+    full = _run([*BASH, str(ENV_SH), "--", "bash", "-c", child], env, tmp_path)
+    assert full.returncode == 0, full.stderr
+    assert full.stdout.splitlines() == ["ALERTS=alerts-placeholder-nonemail", "5"]
+    scrub = _run([*BASH, str(ENV_SH), "--scrub-only", "--", "bash", "-c", child], env, tmp_path)
+    assert scrub.returncode == 0, scrub.stderr
+    assert scrub.stdout.splitlines() == ["ALERTS=alerts-placeholder-nonemail", "0"]
+
+
 def test_materialise_masks_unquoted_values_without_leading_space(tmp_path: Path) -> None:
     env = _setup(tmp_path, tfvars="account_id = 12345\nplatform_dev_external_id =   spaced-id  \n")
     result = _run([*BASH, str(MATERIALISE), "--stdout"], env, tmp_path)

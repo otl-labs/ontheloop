@@ -15,6 +15,7 @@ duckdb = pytest.importorskip("duckdb")
 
 from src.common.ducklake_named_reads import NAMED_READS  # noqa: E402
 from src.common.ducklake_scd2_schema import resolve_table_spec  # noqa: E402
+from tests.fixtures import duckdb_connect  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -22,7 +23,7 @@ _COLS = ("ulid", "id", "title", "source", "effort", "priority", "status", "file"
 
 
 def _con() -> Any:
-    con = duckdb.connect()
+    con = duckdb_connect.connect()
     con.execute("SET TimeZone='UTC'")
     spec = resolve_table_spec("ops_recommendations")
     con.execute("CREATE TABLE t (" + ", ".join(f"{n} {ty}" for n, ty in spec.ordered_columns) + ")")

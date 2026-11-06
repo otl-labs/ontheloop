@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.aws_profile import resolve_aws_profile
-from scripts.telemetry_capture import cursor_tree, state, verify_due
+from scripts.telemetry_capture import capture_warning, cursor_tree, state, verify_due
 from scripts.telemetry_capture.state import CHECK, OPERATOR, CaptureState, state_dir
 from scripts.telemetry_capture.transport import Budget
 from scripts.telemetry_verify import compare, ledger, rows, shape, stored_ledger
@@ -44,12 +44,12 @@ LOCK_WAIT_S = 30.0
 FILE = "scripts/telemetry_capture/verify.py"
 OBSERVATIONS = "telemetry_observations"
 PER_TREE_SKIPS = frozenset(
-    {"no_cursor", "cursor_tail_mismatch", "halted", "parser_version_skip", "catalog_skip", "non_real_project"}
+    {"no_cursor", "cursor_tail_mismatch", "halted", "parser_version_skip", "catalog_skip", "non_real_project", "unpinned_tree"}
 )
 BENIGN = PER_TREE_SKIPS | {"busy", "tree_moved", "superseded_by_pass", "no_credentials"}
 ALARM_CLASSES = frozenset(
     {*compare.ALARM_CLASSES, "root_absent", *ledger.ALARMS, *shape.ALARMS, *stored_ledger.ALARMS, "verify_incomplete"}
-)
+) | {"unpinned_tree"}
 DECLARED_CLASSES = frozenset(
     {*ledger.DECLARED, *shape.DECLARED, *stored_ledger.DECLARED, "race_duplicate_rows", "ledger_fork_unmeasured"}
     | {"r7_boundary_divergence"}
@@ -272,6 +272,8 @@ class _Check:
             token = "halted"
         elif loaded.cursor is None:
             token = "no_cursor" if loaded.status == state.LOST else "cursor_tail_mismatch"
+            if token == "no_cursor" and capture_warning.unpinned(self.path, self.session_id):
+                token, self.counts["unpinned_tree"] = "unpinned_tree", 1
         elif (loaded.cursor.producer, loaded.cursor.parser_version) != (PRODUCER, PARSER_VERSION):
             token = "parser_version_skip"
         elif self.catalog is not None and self.catalog != loaded.catalog:

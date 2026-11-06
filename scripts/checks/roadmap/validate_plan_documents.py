@@ -8,6 +8,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from scripts.checks import _common, registry
+from scripts.checks.roadmap import _plan_sidecar_approval
+from scripts.roadmap import approved_text_provenance as prov
 
 _NON_BEHAVIOR_PREFIXES = ("tests/", "docs/plans/")
 _DOCUMENTATION_SUFFIXES = {".md", ".rst", ".txt"}
@@ -20,6 +22,7 @@ _DOCUMENTATION_SUFFIXES = {".md", ".rst", ".txt"}
 # for every plan authored between the two floors (137 v4 plans at the time of this split), silently
 # disabling a Decision 181 verifier for the whole population.
 _MIN_NEW_PLAN_SCHEMA_VERSION = 5
+_APPROVAL_ADVISORY_MARKS = ("MISSING (advisory)", "UNVERIFIED (advisory)")
 _TEST_OBLIGATION_MIN_SCHEMA_VERSION = 4
 
 
@@ -132,6 +135,13 @@ def _wording_check_gaps(path: Path, doc: Any, base: str) -> list[str]:
     ]
 
 
+def _approval_gaps(path: Path, doc: Any, base: str, in_push: bool, deadline: Any) -> tuple[list[str], list[str]]:
+    if doc.schema_version < _MIN_NEW_PLAN_SCHEMA_VERSION or not _has_sidecar(doc.slug):
+        return [], []
+    changed = lambda: _changed_sidecar_digest(doc.slug, base)  # noqa: E731
+    return _plan_sidecar_approval.approval_findings(path.name, doc.slug, _common.ROOT, changed, in_push, deadline)
+
+
 def _is_documentation(file: str) -> bool:
     """True for prose that carries no runtime or agent behavior.
 
@@ -209,6 +219,8 @@ def validate_plan_documents(
         advisories: list[str] = []
         on_plan_pr = os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
         wording_base = _common.status_diff_base()
+        in_push = _common.push_context_base(_common.ROOT) is not None
+        deadline = prov.Deadline(prov.DEADLINE_SECONDS)
         sidecar_unchecked = False
         for path in plan_paths:
             # One parse per plan feeds both the schema verdict and the semantic gates -- this
@@ -225,6 +237,9 @@ def validate_plan_documents(
             gaps = _gate_round_gaps(path, doc, added_names)
             if wording_base is not None:
                 gaps += _wording_check_gaps(path, doc, wording_base)
+                approval_failures, approval_advisories = _approval_gaps(path, doc, wording_base, in_push, deadline)
+                errors += approval_failures
+                advisories += approval_advisories
             (errors if on_plan_pr else advisories).extend(gaps)
             if path.name in added_names:
                 span = context_block_lines(path)
@@ -234,7 +249,9 @@ def validate_plan_documents(
                         f"(advisory cap {CONTEXT_BLOCK_LINE_ADVISORY}) -- link evidence, do not restate it"
                     )
         if sidecar_unchecked:
-            advisories.append("no merge base resolves, so no wording-check row is required (planning SKILL.md Step 8b)")
+            advisories.append(
+                "no merge base resolves, so no wording-check row or approval lookup is required (planning SKILL.md Step 8b)"
+            )
         registry.examined(len(plan_paths), unit="plan_documents")
         for advisory in advisories:
             print(f"  WARN: {advisory}")
@@ -242,7 +259,7 @@ def validate_plan_documents(
             print(f"  FAIL: {error}")
         if errors:
             failed.append("Plan document schema validation")
-        else:
+        elif not any(a.startswith(_APPROVAL_ADVISORY_MARKS) for a in advisories):
             print(f"  PASS: {len(plan_paths)} plan document(s) validate against PlanDocument schema.")
     except ImportError as exc:
         registry.skipped(f"plan_document import failed: {exc}")

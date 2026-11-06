@@ -35,9 +35,11 @@ class TestKillAndReapSignalTargeting:
         pg.kill_and_reap(popen)
 
         deadline = time.monotonic() + 5.0
-        while not pid_is_dead(grandchild_pid) and time.monotonic() < deadline:
+        dead = pid_is_dead(grandchild_pid)
+        while not dead and time.monotonic() < deadline:
             time.sleep(0.1)
-        assert pid_is_dead(grandchild_pid), f"grandchild pid {grandchild_pid} survived the process-group kill"
+            dead = pid_is_dead(grandchild_pid)
+        assert dead, f"grandchild pid {grandchild_pid} survived the process-group kill"
 
     def test_never_signals_the_callers_own_group(self) -> None:
         popen = subprocess.Popen(["sleep", "30"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -169,3 +171,34 @@ class TestKillAndReapBoundedWait:
             if popen.returncode is None:
                 popen.kill()
                 popen.wait(timeout=5.0)
+
+
+class TestPidIsDeadStates:
+    @staticmethod
+    def _proc(tmp_path: Path, state: str | None) -> Path:
+        if state is not None:
+            stat = tmp_path / "4242" / "stat"
+            stat.parent.mkdir()
+            stat.write_text(f"4242 (sleep) {state} 1 4242 4242 0 -1 0\n", encoding="utf-8")
+        return tmp_path
+
+    def test_exit_dead_counts_as_dead(self, tmp_path: Path) -> None:
+        assert pid_is_dead(4242, proc_root=self._proc(tmp_path, "X"))
+
+    def test_zombie_counts_as_dead(self, tmp_path: Path) -> None:
+        assert pid_is_dead(4242, proc_root=self._proc(tmp_path, "Z"))
+
+    def test_absent_stat_file_counts_as_dead(self, tmp_path: Path) -> None:
+        assert pid_is_dead(4242, proc_root=self._proc(tmp_path, None))
+
+    def test_running_sleeping_and_disk_wait_count_as_alive(self, tmp_path: Path) -> None:
+        for state in ("R", "S", "D"):
+            root = tmp_path / state
+            root.mkdir()
+            assert not pid_is_dead(4242, proc_root=self._proc(root, state)), state
+
+    def test_a_comm_with_spaces_and_parentheses_does_not_shift_the_state_field(self, tmp_path: Path) -> None:
+        stat = tmp_path / "4242" / "stat"
+        stat.parent.mkdir()
+        stat.write_text("4242 (a b) (c) X 1 4242 4242 0 -1 0\n", encoding="utf-8")
+        assert pid_is_dead(4242, proc_root=tmp_path)
