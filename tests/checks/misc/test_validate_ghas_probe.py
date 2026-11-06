@@ -224,7 +224,7 @@ class TestDefaultRepoSlug:
 
     def test_default_repo_is_the_renamed_slug_when_env_unset(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
-            assert _repo() == "benjamin-blake/theseus"
+            assert _repo() == "otl-labs/ontheloop"
 
     def test_ci_supplied_repository_still_wins_over_the_default(self) -> None:
         """CI sets GITHUB_REPOSITORY; the default is only the local fallback."""
@@ -325,4 +325,4 @@ class TestAuthErrorsAreDistinctFromTransportErrors:
 
 def test_malformed_repository_falls_back_to_the_default() -> None:
     with patch.dict("os.environ", {"GITHUB_REPOSITORY": "not-a-full-name"}):
-        assert _repo() == "benjamin-blake/theseus"
+        assert _repo() == "otl-labs/ontheloop"
