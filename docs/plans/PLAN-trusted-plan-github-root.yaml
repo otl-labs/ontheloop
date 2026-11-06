@@ -523,7 +523,10 @@ scope:
       both TF_GITHUB_PLAN_APP_PRIVATE_KEY and the substring "repository secret", and every header line naming the key
       also names tf-trusted-plan); a shell rule: the workflow-level defaults.run.shell is exactly bash and no step sets
       shell:; a total-map rule: every step before the post step has an id, and the post step's category map names every
-      one of those ids except checkout; a concurrency rule: the workflow's concurrency group differs from
+      one of those ids except checkout; a credentials rule (S3's CREDENTIAL_USES rule, test_terraform_plan_trusted.py:33
+      and :85-89, widened to aws-actions/configure-aws-credentials and actions/create-github-app-token): no step using
+      either comes before the screen step, and the assume step has no continue-on-error (red cases: a credential step
+      moved above the screen, and an assume step with continue-on-error: true); a concurrency rule: the workflow's concurrency group differs from
       terraform-plan-trusted.yml's (red case: a copy using S3's group); a loader rule: .github/CODEOWNERS names /scripts/ci/plan_names_core.py, which
       terraform_github_plan_report.py loads by importlib (:21), outside predicate (h)'s static import closure, so it is
       code-owned on purpose and not only because S3's reporter imports it statically (red case: a CODEOWNERS text
@@ -644,6 +647,7 @@ bundled_recommendations:
 followon_recs:
   - rec-4640
   - rec-4969
+  - rec-4970
 infrastructure_dependencies:
   - "S3 landed (#1764, 531c2394): the screen, lexer, overlay, quiet_run.sh, plan_names_core and the tf-trusted-plan environment (main-only policy, no reviewers) exist."
   - "Provider mirror: tf-provider-mirror/ holds aws and neon only today; PR 1's seed dispatch adds integrations/github 6.12.1 (terraform/github/.terraform.lock.hcl). The dispatch is CI on main under the apply role and writes only public provider files."
@@ -653,7 +657,7 @@ infrastructure_dependencies:
   - "terraform/github is never applied by this plan: PR 1's token move and PR 5's description edit change no state."
   - "approved-text Environment (Decision 246): declared on main by #1876 (terraform/github/environments.tf), live only after the operator's terraform/github hand apply; probe 2026-11-06 (approved_text_github approvals on the three green approval runs of that day): no approval recorded, so it has no required reviewer yet. Before PR 5 starts, a plan amendment adds the sidecar and Benjamin approves it on that gate; if the gate is still not live, PR 5 waits."
 acceptance_criteria:
-  - "A same-repo terraform/github PR gets its PR-time plan from main's terraform-github-plan.yml on pull_request_target in tf-trusted-plan, under agent-platform-github-ci-trusted-github-plan, and no pull_request-triggered job plans it (PR #1888's tf-trusted-plan preview job, if it lands, is that plan's own and outside this criterion)"
+  - "A same-repo terraform/github PR gets its PR-time plan from main's terraform-github-plan.yml on pull_request_target in tf-trusted-plan, under agent-platform-github-ci-trusted-github-plan, and no pull_request-triggered job plans it (PR #1888's tf-trusted-plan preview job, if it lands, is that plan's own and outside this criterion). This holds for branches based on post-PR-4 main: a branch that predates PR 4 still carries the old pull_request file, which runs its own definition (the planner's PR-sub role and, until VP 17, the repository secret) until it is rebased, within Decision 238 cl.6's accepted interim risk until rec-4640"
   - "The PR's terraform/github files are screened before any credential exists; main.tf and the lockfile always come from main; a refused PR gets a names-only refusal and no plan"
   - "The new role can read only tfstate/github/terraform.tfstate and the provider mirror (plus a list scoped to the mirror prefix); it reaches no secret value, no tfplan/ and no terraform/personal state"
   - "Init is hermetic from the mirror with main's lockfile; the plan's output and diagnostics stay in a private runner log; the PR comment carries names only, and every body (refusal or plan) is built, checked by terraform_github_plan_comment.py assert-clean, then posted"
@@ -832,7 +836,7 @@ verification_plan:
   - step: 11
     phase: post-deploy
     action: After PR 3's gated apply (Benjamin approves tf-gated-apply), the role is live with the planned trust and a candidate simulate holds
-    command: >-
+    command: >-  # pragma: allowlist secret
       A=$(aws sts get-caller-identity --profile agent_platform_admin --query Account --output text);
       R="arn:aws:iam::$A:role/agent-platform-github-ci-trusted-github-plan";
       aws iam get-role --profile agent_platform_admin --role-name agent-platform-github-ci-trusted-github-plan --query 'length(Role.AssumeRolePolicyDocument.Statement)' --output text;
@@ -843,12 +847,14 @@ verification_plan:
       sim s3:PutObject arn:aws:s3:::agent-platform-data-lake/tfplan/personal/x implicitDeny;
       REG=$(tr -d '[:space:]' < config/aws-region);
       sim ssm:GetParameter "arn:aws:ssm:$REG:$A:parameter/secret/neon-api-key" implicitDeny;
+      sim secretsmanager:GetSecretValue "arn:aws:secretsmanager:$REG:$A:secret:neon-api-key-x" implicitDeny;
       simlist() { got=$(aws iam simulate-principal-policy --profile agent_platform_admin --policy-source-arn "$R" --action-names s3:ListBucket --resource-arns arn:aws:s3:::agent-platform-data-lake --context-entries "ContextKeyName=s3:prefix,ContextKeyValues=$1,ContextKeyType=string" --query 'EvaluationResults[0].EvalDecision' --output text); [ "$got" = "$2" ] && echo "SIM_OK s3:ListBucket $1 $2" || echo "SIM_MISMATCH s3:ListBucket $1 want=$2 got=$got"; };
       simlist tf-provider-mirror/ allowed;
       simlist tfstate/ implicitDeny;
       simlist env:/ implicitDeny
     expected: >-
-      1, then eight SIM_OK lines and no SIM_MISMATCH (the env:/ row records the one listing the plan accepts as denied:
+      1, then nine SIM_OK lines and no SIM_MISMATCH (the Secrets Manager row covers the copies that stay until
+      PLAN-secrets-to-ssm-retire) (the env:/ row records the one listing the plan accepts as denied:
       init's workspace listing, inferred warn-only; VP 14 is its real-AWS proof); post markers only (no account id or ARN)
     fix_if: a SIM_MISMATCH -- stop and report; never widen in place
     hermetic: false
@@ -1318,6 +1324,7 @@ context:
   - "Settled without asking (critique round 10, PROCEED): N4, VP 13 stays an attestation with no command, because the session cannot list Environment secrets, and VP 14's Config check is its named executable proof; N1-N3 and N5-N8 are applied, and N1 and N2 are relayed through the coordinator."
   - "Settled without asking (critique round 11): B1, VP 13 is now an operator-run names-only listing whose pasted line is recorded on PR 4 (the PLAN-trusted-plan-identity VP 8 shape), replacing round 10's prose attestation; N6 gives VP 17 and AC 5 the same shape for the repository secret's absence; N3, the workflow header's 'Accepted residual until VP 17' sentence is stale once VP 17 is done, and its removal is handed to rec-4640, which edits the same trust surface next (context append, read back)."
   - "Settled without asking (critique round 12, PROCEED): N4, VP 7, 18 and 21 stay not-applicable, since each is an admin-credential probe or a validate tier itself and none is graduable; N6, ci.yml's and terraform-plan-trusted.yml's full mirror syncs also fetch integrations/github once it is seeded, a few MB of public provider bytes, accepted; N7, the screen keeps admitting a string-literal import id, because a literal carries no job value and validate_github_org_transfer's stricter rule on main still refuses an id without a variable; N1, N2, N3 and N5 are applied."
+  - "Settled without asking (critique round 13, the confirming round, PROCEED; its nits are applied, not re-read): N1, N2 and N3 applied; N4, decoupling the canary, the grant removal and VP 17 from the approved-text gate, would change the approved PR shape, so it is not applied and is put to Benjamin through the coordinator as an option (the repository-level key copy stays readable by a same-repo PR author's own workflow until VP 17, which waits on the gate going live); N5, the refusal grammar stays in two parsers held equal by the parity test, because sharing it would edit S3's code-owned reporter, and rec-4970 (extract one shared stdlib core) is filed, read back open; N6 is informational (the acceptance runner timed out; rec-4638's acceptance read back matches the PR 4 node)."
   - "Gotcha: python3 -I drops the script directory from sys.path; scripts append the repo root (never insert at 0) and check where scripts resolved (predicate h)."
   - "Gotcha: Actions logs on this public repo are public; read step conclusions only, never paste plan text, and never print an account id, ARN or secret value."
   - "Gotcha: a PR the screen refuses gets no PR-time plan; the operator's own plan stays authoritative for this hand-applied root."
@@ -1338,6 +1345,7 @@ gate_rounds:
   - {gate: plan-critique, round: 10, verdict: PROCEED, blocking: 0, nits: 8}
   - {gate: plan-critique, round: 11, verdict: REVISE, blocking: 1, nits: 6}
   - {gate: plan-critique, round: 12, verdict: PROCEED, blocking: 0, nits: 7}
+  - {gate: plan-critique, round: 13, verdict: PROCEED, blocking: 0, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
