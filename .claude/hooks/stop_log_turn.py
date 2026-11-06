@@ -5,7 +5,8 @@ Prints the witness line (rule WT-1) as its first action, on every path, then exi
 StopFailure (stop_hook_active included) it starts the capture runner fully detached (own session, /dev/null descriptors)
 when the switch and the guards say yes (rule SW-1); for UserPromptSubmit it starts it with the payload's prompt_id without
 reading the switch (the runner's own check decides, before any state is touched). Never runs a pass in the hook process;
-prints the witness line only. The switch is checked before any import beyond the stdlib and yaml. RUNNER_MODULE is a
+prints the witness line only, plus on UserPromptSubmit one capture-warning JSON line when capture keeps
+deferring (rule DW-2). The switch is checked before any import beyond the stdlib and yaml. RUNNER_MODULE is a
 constant: no environment variable redirects it.
 """
 
@@ -62,6 +63,15 @@ def main(
         if str(REPO_ROOT) not in sys.path:
             sys.path.insert(0, str(REPO_ROOT))
         if event == PROMPT_EVENT:
+            try:
+                from scripts.telemetry_capture import capture_warning  # noqa: PLC0415
+
+                line = capture_warning.prompt_warning(Path(transcript), session_id)
+                if line:
+                    sys.stdout.write(line + "\n")
+                    sys.stdout.flush()
+            except Exception:  # noqa: BLE001, S110 -- a warning failure never blocks the capture detach
+                pass
             prompt_id = payload.get("prompt_id")
             if not (isinstance(prompt_id, str) and _PROMPT_ID.fullmatch(prompt_id)):
                 return 0
