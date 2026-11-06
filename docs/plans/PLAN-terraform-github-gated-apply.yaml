@@ -47,8 +47,10 @@ scope:
       PR 1 (critique round 2 B1: PlatformAdmin's live identity is refused secretsmanager:PutResourcePolicy and
       DeleteResourcePolicy, so it could neither create nor remove the key policy). AdminOps gains one statement, Sid
       GithubApplyKeyResourcePolicy: Allow secretsmanager:PutResourcePolicy and secretsmanager:DeleteResourcePolicy on
-      data.aws_secretsmanager_secret.github_apply_app.arn only (the data-source ARN form the adoption test requires, no
-      -* suffix). SecretsManagerAdmin, IAMFull and both preconditions are unchanged (tests/test_secret_parameters_bootstrap.py
+      "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-terraform-github-apply-app-??????"
+      only: the exact-suffix literal (six characters, never -*), not the data source, so a plan or recovery of AdminOps
+      never depends on the entry existing; predicate (h) pins it (the adoption test's -* scan covers other files).
+      SecretsManagerAdmin, IAMFull and both preconditions are unchanged (tests/test_secret_parameters_bootstrap.py
       pins SecretsManagerAdmin); the existing 10,240 B precondition covers the statement (AdminOps measured 4,464 B
       minified live at planning). The header's zero-diff-import line gains that this statement was added after adoption
       (Decision {{N}}). Its graduated shards platform-iam-bootstrap-owns-roles-and-policies, platform-iam-admin-root-only
@@ -69,8 +71,9 @@ scope:
       local.github_settings_workflow_refs, which is the one main ref. (h) The apply role's policy has no iam: action
       and no resource outside the three named; the preview role's policy is exactly its one GetObject; both carry the
       size precondition; the secret policy is one Deny with exactly the three metadata verbs as NotAction and exactly
-      the four principals excepted, and depends_on AdminOps; AdminOps' GithubApplyKeyResourcePolicy grants exactly
-      the two resource-policy verbs on the data source's arn and nothing else. (i) .github/CODEOWNERS covers the
+      the four principals excepted, Resource "*", a Condition holding only ArnNotLike on aws:PrincipalArn, and
+      depends_on AdminOps; AdminOps' GithubApplyKeyResourcePolicy grants exactly the two resource-policy verbs on the
+      exact-suffix literal ARN of the apply App entry and nothing else. (i) .github/CODEOWNERS covers the
       workflow, both scripts, scripts/ci/quiet_run.sh (the apply job runs it with the token in its environment), the
       reporter, its plan_names_core.py and this file. (j) No inputs.* or needs.* expression appears inside a run:
       body. (k) The tf_github_apply Environment is main-only with can_admins_bypass false and prevent_destroy. (l)
@@ -282,8 +285,8 @@ infrastructure_dependencies:
 acceptance_criteria:
   - The gate passes every synthetic red/green case, including unnamed gate creates refused and probe-verdict parity, and no non-allowlisted plan value reaches stdout or GITHUB_OUTPUT (VP 8).
   - validate_github_settings_apply passes on the real tree and fails each predicate on a synthetic red case (VP 1); the apply script behaves as specified under stubs on every exit path (VP 9); touched suites stay green with no weakened assertion (VP 2, VP 10).
-  - The pre-merge read-only ADMIN plan of terraform/bootstrap at PR 1's CI-green head adds exactly the two roles, their inline policies and the secret policy, updates only AdminOps, and changes nothing main's own plan does not; each rendered role policy, as a session policy, can init and read terraform/github's state, the apply policy grants the lock, and the rendered AdminOps grants the two resource-policy verbs on the key and on no other secret (VP 4-6).
-  - The bootstrap apply lands from two saved plans whose rows each equal the planned set (AdminOps alone, then the five creates); simulate then allows each role exactly its grants, the resource policy denies the key to any principal outside its four, PlatformAdmin keeps its reads and can put and delete the key policy, and the key policy has exactly the planned shape (VP 7).
+  - The pre-merge read-only ADMIN plan of terraform/bootstrap at PR 1's CI-green head adds exactly the two roles, their inline policies and the secret policy, updates only AdminOps, and changes nothing main's own plan does not; each rendered role policy, as a session policy, can init and read terraform/github's state, the apply policy grants the lock, the rendered AdminOps grants the two resource-policy verbs on the key and on no other secret, and the rendered key policy still allows PlatformAdmin and user/platform-breakglass and denies other roles (VP 4-6).
+  - The bootstrap apply lands from saved plans whose rows each equal the planned rows not yet applied (AdminOps alone, then the five creates; a resumed re-run plans only what remains); simulate then allows each role exactly its grants, the resource policy denies the key to any principal outside its four, PlatformAdmin keeps its reads and can put and delete the key policy, and the key policy has exactly the planned shape (VP 7).
   - PR 2's push run previews the four creates under tf-trusted-plan and stops without asking; one approved dispatch naming them refuses the apply App's approval of a pending deployment, applies only those four and re-plans clean (VP 12-14).
   - The PR-time plan then shows no add for the four, and a dispatch with nothing to apply asks for no approval (VP 15-16).
 verification_plan:
@@ -328,79 +331,99 @@ verification_plan:
     phase: pre-deploy
     action: >-
       Pre-merge read-only ADMIN plan of terraform/bootstrap at PR 1's CI-green head, compared with main's own plan;
-      counts and addresses only, posted on the PR. The head's three rendered inline policies (the two roles' and
-      AdminOps) are kept for step 6 in the evidence directory, never printed.
-    command: >-
-      set -o pipefail; R=$(tr -d '[:space:]' < config/aws-region); test -n "$PR_HEAD_SHA" && E="${TMPDIR:-/tmp}/gsa-evidence" && mkdir -p "$E" && git fetch origin main "$PR_HEAD_SHA" -q &&
+      counts and addresses only, posted on the PR. The evidence directory is cleared first and the step stops at the
+      first failed init or plan, so it never reports from stale files. The head's rendered inline policies (the two
+      roles' and AdminOps) and the rendered key policy are kept for step 6, never printed; Terraform errors go to a
+      local log, never posted.
+    command: >-  # pragma: allowlist secret -- names a Secrets Manager entry, not a value
+      set -o pipefail; R=$(tr -d '[:space:]' < config/aws-region); E="${TMPDIR:-/tmp}/gsa-evidence"; ok=0; test -n "$PR_HEAD_SHA" && rm -rf "${E:?}" && mkdir -p "$E" && git fetch origin main "$PR_HEAD_SHA" -q && ok=1 &&
       for ref in origin/main "$PR_HEAD_SHA"; do tag=$(echo "$ref" | tr '/' '-'); W="${TMPDIR:-/tmp}/gsa-wt-$tag";
-      git worktree add --detach "$W" "$ref" -q && cp terraform/bootstrap/terraform.bootstrap.tfvars "$W/terraform/bootstrap/" &&
-      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W/terraform/bootstrap" init -input=false -backend-config="region=$R" > /dev/null &&
-      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W/terraform/bootstrap" plan -input=false -lock=false -var-file=terraform.bootstrap.tfvars -out="$E/p.bin" > /dev/null &&
+      { git worktree add --detach "$W" "$ref" -q && cp terraform/bootstrap/terraform.bootstrap.tfvars "$W/terraform/bootstrap/" &&
+      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W/terraform/bootstrap" init -input=false -backend-config="region=$R" > /dev/null 2>> "$E/tf.err" &&
+      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W/terraform/bootstrap" plan -input=false -lock=false -var-file=terraform.bootstrap.tfvars -out="$E/p.bin" > /dev/null 2>> "$E/tf.err" &&
       terraform -chdir="$W/terraform/bootstrap" show -json "$E/p.bin" > "$E/p.json" && rm -f "${E:?}/p.bin" &&
-      bin/venv-python -c "import json,sys; e,t=sys.argv[1],sys.argv[2]; p=json.load(open(e+'/p.json')); rc=p.get('resource_changes', []); json.dump(sorted([r['address'], '/'.join(r['change']['actions'])] for r in rc if r['change']['actions'] != ['no-op']), open(e+'/'+t+'.json','w')); [open(e+'/'+r['name']+'.policy.json','w').write(r['change']['after']['policy']) for r in rc if t != 'origin-main' and r['type'] == 'aws_iam_role_policy' and r['name'] in ('github_settings_apply', 'github_settings_preview', 'platform_admin_ops')]" "$E" "$tag";
-      rm -f "${E:?}/p.json"; git worktree remove --force "$W"; done &&
-      bin/venv-python -c "import json,sys; d,h=sys.argv[1],sys.argv[2].replace('/','-'); m={tuple(x) for x in json.load(open(d+'/origin-main.json'))}; n={tuple(x) for x in json.load(open(d+'/'+h+'.json'))}; print('NEW', sorted(n-m)); print('GONE', sorted(m-n))" "$E" "$PR_HEAD_SHA"
+      bin/venv-python -c "import json,sys; e,t=sys.argv[1],sys.argv[2]; p=json.load(open(e+'/p.json')); rc=p.get('resource_changes', []); json.dump(sorted([r['address'], '/'.join(r['change']['actions'])] for r in rc if r['change']['actions'] != ['no-op']), open(e+'/'+t+'.json','w')); keep={'aws_iam_role_policy.github_settings_apply': 'github_settings_apply', 'aws_iam_role_policy.github_settings_preview': 'github_settings_preview', 'aws_iam_role_policy.platform_admin_ops': 'platform_admin_ops', 'aws_secretsmanager_secret_policy.github_settings_apply_key': 'key'}; [open(e+'/'+keep[r['address']]+'.policy.json','w').write(r['change']['after']['policy']) for r in rc if t != 'origin-main' and r['address'] in keep]" "$E" "$tag"; } || ok=0;
+      rm -f "${E:?}/p.json"; git worktree remove --force "$W"; [ "$ok" = 1 ] || break; done;
+      [ "$ok" = 1 ] && bin/venv-python -c "import json,sys; d,h=sys.argv[1],sys.argv[2].replace('/','-'); m={tuple(x) for x in json.load(open(d+'/origin-main.json'))}; n={tuple(x) for x in json.load(open(d+'/'+h+'.json'))}; print('NEW', sorted(n-m)); print('GONE', sorted(m-n))" "$E" "$PR_HEAD_SHA" || echo PLAN_FAILED
     expected: >-
       NEW lists exactly aws_iam_role.github_settings_apply, aws_iam_role_policy.github_settings_apply,
       aws_iam_role.github_settings_preview, aws_iam_role_policy.github_settings_preview and
       aws_secretsmanager_secret_policy.github_settings_apply_key, each create, plus aws_iam_role_policy.platform_admin_ops
-      update; GONE is empty; plan files are deleted in the step and the three policy files exist for step 6. Post NEW
+      update; GONE is empty; plan files are deleted in the step and the four policy files exist for step 6. Post NEW
       and GONE with the head sha on the PR; step 7 applies only these rows.
-    fix_if: any other NEW row, a GONE row, or an init or plan error; fix on the branch and re-run at the new head
+    fix_if: PLAN_FAILED (read the local tf.err), any other NEW row, or a GONE row; fix on the branch and re-run at the new head
     hermetic: false
     graduation: not-applicable
   - step: 6
     phase: pre-deploy
     action: >-
-      Exact-policy backend probe (the round-1 ListBucket question, settled before any apply): each rendered inline
-      policy narrows a PlatformAdmin session, which inits terraform/github and lists its state; the apply policy's lock
-      grants and the rendered AdminOps' key-policy grant (on the key, and on no other secret) are simulated. Markers
-      only; the policy files are deleted in the step.
+      Exact-policy probes, settled before any apply. Backend: each rendered role policy narrows a PlatformAdmin
+      session, which must init terraform/github and list its state, while a ListObjectsV2 on tfstate/github/ under the
+      same session must be AccessDenied (the negative control proving the session is narrowed). Simulated: the apply
+      policy's lock grants; the rendered AdminOps' key-policy grant, on the key and on no other secret; and the
+      rendered key policy (a copy scoped to the key's ARN) against today's identities, so a lockout of PlatformAdmin
+      or user/platform-breakglass, or a leak to another role, shows before the policy exists. Markers only; errors go
+      to local logs, never posted; the policy files are deleted in the step.
     command: >-  # pragma: allowlist secret -- names a Secrets Manager entry, not a value
-      set -o pipefail; E="${TMPDIR:-/tmp}/gsa-evidence"; R=$(tr -d '[:space:]' < config/aws-region);
-      SRC=$(aws configure get source_profile --profile agent_platform_admin); ARN=$(aws configure get role_arn --profile agent_platform_admin); EID=$(aws configure get external_id --profile agent_platform_admin);
+      set -o pipefail; E="${TMPDIR:-/tmp}/gsa-evidence"; R=$(tr -d '[:space:]' < config/aws-region); P=agent_platform_admin;
+      A=$(aws sts get-caller-identity --profile $P --query Account --output text); S=$(aws secretsmanager describe-secret --profile $P --region "$R" --secret-id agent-platform-terraform-github-apply-app --query ARN --output text);
+      SRC=$(aws configure get source_profile --profile $P); ARN=$(aws configure get role_arn --profile $P); EID=$(aws configure get external_id --profile $P);
       for role in github_settings_preview github_settings_apply; do W=$(mktemp -d); cp -r terraform/github/. "$W/"; rm -rf "${W:?}/.terraform";
-      J=$(aws sts assume-role --profile "$SRC" --region "$R" --role-arn "$ARN" --external-id "$EID" --role-session-name gsa-backend-probe --policy "file://$E/$role.policy.json" --duration-seconds 900 --output json) &&
+      J=$(aws sts assume-role --profile "$SRC" --region "$R" --role-arn "$ARN" --external-id "$EID" --role-session-name gsa-backend-probe --policy "file://$E/$role.policy.json" --duration-seconds 900 --output json 2>> "$E/backend-$role.err");
+      if [ -z "$J" ]; then echo "ASSUME_FAILED $role"; else
       ( export AWS_ACCESS_KEY_ID=$(echo "$J" | jq -r .Credentials.AccessKeyId) AWS_SECRET_ACCESS_KEY=$(echo "$J" | jq -r .Credentials.SecretAccessKey) AWS_SESSION_TOKEN=$(echo "$J" | jq -r .Credentials.SessionToken); unset AWS_PROFILE;
-      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W" init -input=false -backend-config="region=$R" > /dev/null 2>&1 && terraform -chdir="$W" state list > /dev/null 2>&1 ) && echo "BACKEND_OK $role" || echo "BACKEND_DENIED $role"; rm -rf "${W:?}"; done;
-      L=$(aws iam simulate-custom-policy --profile agent_platform_admin --policy-input-list "$(cat "$E/github_settings_apply.policy.json")" --action-names s3:GetObject s3:PutObject s3:DeleteObject --resource-arns arn:aws:s3:::agent-platform-data-lake/tfstate/github/terraform.tfstate.tflock --query 'EvaluationResults[].EvalDecision' --output text);
+      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W" init -input=false -backend-config="region=$R" > /dev/null 2>> "$E/backend-$role.err" && terraform -chdir="$W" state list > /dev/null 2>> "$E/backend-$role.err" || exit 2;
+      o=$(aws s3api list-objects-v2 --region "$R" --bucket agent-platform-data-lake --prefix tfstate/github/ --max-keys 1 2>&1); case "$o" in *AccessDenied*) exit 0;; *) exit 3;; esac );
+      case $? in 0) echo "BACKEND_OK $role";; 2) echo "BACKEND_DENIED $role";; *) echo "SESSION_NOT_NARROWED $role";; esac; fi; rm -rf "${W:?}"; done;
+      L=$(aws iam simulate-custom-policy --profile $P --policy-input-list "$(cat "$E/github_settings_apply.policy.json")" --action-names s3:GetObject s3:PutObject s3:DeleteObject --resource-arns arn:aws:s3:::agent-platform-data-lake/tfstate/github/terraform.tfstate.tflock --query 'EvaluationResults[].EvalDecision' --output text);
       [ "$(echo $L)" = "allowed allowed allowed" ] && echo LOCK_GRANTS_OK || echo LOCK_GRANTS_MISSING;
-      S=$(aws secretsmanager describe-secret --profile agent_platform_admin --region "$R" --secret-id agent-platform-terraform-github-apply-app --query ARN --output text);
-      G=$(aws iam simulate-custom-policy --profile agent_platform_admin --policy-input-list "$(cat "$E/platform_admin_ops.policy.json")" --action-names secretsmanager:PutResourcePolicy secretsmanager:DeleteResourcePolicy --resource-arns "$S" --query 'EvaluationResults[].EvalDecision' --output text);
-      O=$(aws iam simulate-custom-policy --profile agent_platform_admin --policy-input-list "$(cat "$E/platform_admin_ops.policy.json")" --action-names secretsmanager:PutResourcePolicy --resource-arns "${S%%:secret:*}:secret:agent-platform-other-AbCdEf" --query 'EvaluationResults[].EvalDecision' --output text);
-      [ "$(echo $G)" = "allowed allowed" ] && [ "$O" = "implicitDeny" ] && echo ADMIN_KEY_POLICY_GRANT_OK || echo ADMIN_KEY_POLICY_GRANT_MISMATCH; rm -f "${E:?}"/*.policy.json
-    expected: BACKEND_OK github_settings_preview, BACKEND_OK github_settings_apply, LOCK_GRANTS_OK and ADMIN_KEY_POLICY_GRANT_OK.
-    fix_if: a BACKEND_DENIED (add the narrowest grant the error names, re-run steps 5-6 at the new head), LOCK_GRANTS_MISSING or ADMIN_KEY_POLICY_GRANT_MISMATCH (fix the statement on the branch, re-run steps 5-6); never apply first
+      G=$(aws iam simulate-custom-policy --profile $P --policy-input-list "$(cat "$E/platform_admin_ops.policy.json")" --action-names secretsmanager:PutResourcePolicy secretsmanager:DeleteResourcePolicy --resource-arns "$S" --query 'EvaluationResults[].EvalDecision' --output text);
+      O=$(aws iam simulate-custom-policy --profile $P --policy-input-list "$(cat "$E/platform_admin_ops.policy.json")" --action-names secretsmanager:PutResourcePolicy --resource-arns "${S%%:secret:*}:secret:agent-platform-other-AbCdEf" --query 'EvaluationResults[].EvalDecision' --output text);
+      [ "$(echo $G)" = "allowed allowed" ] && [ "$O" = "implicitDeny" ] && echo ADMIN_KEY_POLICY_GRANT_OK || echo ADMIN_KEY_POLICY_GRANT_MISMATCH;
+      jq --arg s "$S" '.Statement[].Resource=$s' "$E/key.policy.json" > "$E/key-scoped.policy.json";
+      kp() { got=$(aws iam simulate-principal-policy --profile $P --policy-source-arn "arn:aws:iam::$A:$1" --action-names secretsmanager:GetSecretValue --resource-arns "$S" --resource-policy "$(cat "$E/key-scoped.policy.json")" --context-entries "ContextKeyName=aws:PrincipalArn,ContextKeyValues=arn:aws:iam::$A:$1,ContextKeyType=string" --query 'EvaluationResults[0].EvalDecision' --output text 2> /dev/null); [ "$got" = "$2" ]; };
+      kp role/PlatformAdmin allowed && kp user/platform-breakglass allowed && kp role/agent-platform-github-ci-apply explicitDeny && kp role/PlatformDev explicitDeny && echo KEY_POLICY_PREVIEW_OK || echo KEY_POLICY_PREVIEW_MISMATCH; rm -f "${E:?}"/*.policy.json
+    expected: >-
+      BACKEND_OK github_settings_preview, BACKEND_OK github_settings_apply, LOCK_GRANTS_OK, ADMIN_KEY_POLICY_GRANT_OK
+      and KEY_POLICY_PREVIEW_OK.
+    fix_if: >-
+      BACKEND_DENIED (add the narrowest grant the local backend log names, re-run steps 5-6 at the new head);
+      ASSUME_FAILED or SESSION_NOT_NARROWED (the probe proved nothing: STOP and report); LOCK_GRANTS_MISSING,
+      ADMIN_KEY_POLICY_GRANT_MISMATCH or KEY_POLICY_PREVIEW_MISMATCH (fix the statement or the key policy on the
+      branch, re-run steps 5-6); never apply first
     hermetic: false
     graduation: not-applicable
   - step: 7
     phase: post-deploy
     action: >-
-      PR 1 post-merge: the human-directed bootstrap apply of the merge sha (the operator's final-diff word on PR 1 is
-      the direction), in two phases. Each phase applies a saved plan only after show -json proves its non-no-op rows
-      equal the planned set (Decision 158 cl.3; a -target plan also carries pending changes of the targets'
-      dependencies, which the equality refuses). Phase A applies AdminOps' new statement alone (the deploy-paths.yaml
-      self-access isolation shape), so its grant is live before phase B creates the roles, their policies and the key
-      policy; an AccessDenied in phase B (IAM propagation) re-plans the key policy alone, once. Then simulate each
-      role and the key's resource policy without reading the key, and check the policy's shape. Terraform output goes
-      to a local log, never posted.
+      PR 1 post-merge: the human-directed bootstrap apply of the merge sha in a fresh worktree (the operator's
+      final-diff word on PR 1 is the direction), in two phases. Each phase applies a saved plan only after show -json
+      proves its non-no-op rows equal the planned rows not yet applied (Decision 158 cl.3; a -target plan also carries
+      pending changes of the targets' dependencies, which the equality refuses), and skips itself once applied, so
+      the step is safely re-runnable and resumes after a partial apply. Phase A applies AdminOps alone, and only if
+      its one changed statement is GithubApplyKeyResourcePolicy (the SELF-ACCESS ISOLATION shape), so the grant is
+      live before phase B creates the roles, their policies and the key policy. The targets are that isolation and
+      that ordering: deploy-paths.yaml's SPLIT-APPLY "no split and no -target" is about not splitting PlatformAdmin
+      changes across terraform/personal and terraform/bootstrap. Then simulate each role and the key's resource policy
+      without reading the key, and check the policy's exact shape. Terraform errors go to a local log, never posted.
     command: >-  # pragma: allowlist secret -- names a Secrets Manager entry, not a value
       set -o pipefail; R=$(tr -d '[:space:]' < config/aws-region); P=agent_platform_admin; N=agent-platform-terraform-github-apply-app;
-      D="${TMPDIR:-/tmp}/gsa-apply"; mkdir -p "$D"; K="$D/key-policy.json"; KS="$D/key-policy-scoped.json"; export TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc; T="terraform -chdir=terraform/bootstrap";
-      phase() { w="$1"; shift; $T plan -input=false -var-file=terraform.bootstrap.tfvars "$@" -out="$D/bs.bin" > /dev/null 2>> "$D/tf.err" &&
-      $T show -json "$D/bs.bin" | bin/venv-python -I -c "import json,sys; rc=json.load(sys.stdin).get('resource_changes', []); got=sorted(r['address']+':'+'/'.join(r['change']['actions']) for r in rc if r['change']['actions'] != ['no-op']); sys.exit(0 if got == sorted(sys.argv[1].split(',')) else 1)" "$w" &&
-      $T apply -input=false -no-color "$D/bs.bin" 2>> "$D/tf.err" | grep '^Apply complete!'; s=$?; rm -f "${D:?}/bs.bin"; return $s; };
-      KP=aws_secretsmanager_secret_policy.github_settings_apply_key;
-      B5="aws_iam_role.github_settings_apply:create,aws_iam_role_policy.github_settings_apply:create,aws_iam_role.github_settings_preview:create,aws_iam_role_policy.github_settings_preview:create,$KP:create";
-      git checkout --detach "$MERGE_SHA" && $T init -input=false -backend-config="region=$R" > /dev/null &&
-      phase aws_iam_role_policy.platform_admin_ops:update -target=aws_iam_role_policy.platform_admin_ops && echo PHASE_A_OK &&
-      { phase "$B5" -target=aws_iam_role.github_settings_apply -target=aws_iam_role_policy.github_settings_apply -target=aws_iam_role.github_settings_preview -target=aws_iam_role_policy.github_settings_preview -target=$KP ||
-      { grep -q AccessDenied "$D/tf.err" && phase "$KP:create" -target=$KP; }; } && echo PHASE_B_OK || echo APPLY_STOPPED;
-      git checkout -; A=$(aws sts get-caller-identity --profile $P --query Account --output text);
+      D="${TMPDIR:-/tmp}/gsa-apply"; W="$D/wt"; mkdir -p "$D"; K="$D/key-policy.json"; KS="$D/key-policy-scoped.json"; export TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc; T="terraform -chdir=$W/terraform/bootstrap";
+      CHK="import json,sys; p=json.load(sys.stdin); w=sorted(x for x in sys.argv[1].split(',') if x); rc=[r for r in p.get('resource_changes', []) if r['change']['actions'] != ['no-op']]; got=sorted(r['address']+':'+'/'.join(r['change']['actions']) for r in rc); S=lambda s: {x.get('Sid'): x for x in (lambda t: t if isinstance(t, list) else [t])(json.loads(s or '{}').get('Statement', []))}; G='GithubApplyKeyResourcePolicy'; ok=all(set(S(r['change']['after']['policy'])) - set(S(r['change']['before']['policy'])) == {G} and {k: v for k, v in S(r['change']['after']['policy']).items() if k != G} == S(r['change']['before']['policy']) for r in rc if r['address'] == 'aws_iam_role_policy.platform_admin_ops'); sys.exit(3 if not got else 0 if got == w and ok else 1)";
+      phase() { n="$1"; w="$2"; shift 2; : > "$D/tf.err"; $T plan -input=false -var-file=terraform.bootstrap.tfvars "$@" -out="$D/bs.bin" > /dev/null 2>> "$D/tf.err" && $T show -json "$D/bs.bin" | bin/venv-python -I -c "$CHK" "$w"; c=$?;
+      if [ "$c" = 3 ]; then echo "${n}_ALREADY"; s=0; elif [ "$c" = 0 ]; then if $T apply -input=false -no-color "$D/bs.bin" 2>> "$D/tf.err" | grep '^Apply complete!'; then echo "${n}_OK"; s=0; else echo "${n}_APPLY_FAILED"; s=1; fi; else echo "${n}_STOPPED"; s=1; fi; rm -f "${D:?}/bs.bin"; return $s; };
+      RB="aws_iam_role.github_settings_apply aws_iam_role_policy.github_settings_apply aws_iam_role.github_settings_preview aws_iam_role_policy.github_settings_preview aws_secretsmanager_secret_policy.github_settings_apply_key";
+      git fetch -q origin main && { git worktree remove --force "$W" 2> /dev/null; rm -rf "${W:?}"; git worktree prune; git worktree add --detach "$W" "$MERGE_SHA" -q; } && cp terraform/bootstrap/terraform.bootstrap.tfvars "$W/terraform/bootstrap/" &&
+      $T init -input=false -backend-config="region=$R" > /dev/null 2>> "$D/tf.err" &&
+      phase PHASE_A aws_iam_role_policy.platform_admin_ops:update -target=aws_iam_role_policy.platform_admin_ops &&
+      SL=$($T state list 2>> "$D/tf.err") && WB=$(for a in $RB; do printf '%s\n' "$SL" | grep -qx "$a" || printf '%s:create,' "$a"; done | sed 's/,$//') &&
+      phase PHASE_B "$WB" $(for a in $RB; do printf -- '-target=%s ' "$a"; done) || echo APPLY_STOPPED;
+      git worktree remove --force "$W";
+      A=$(aws sts get-caller-identity --profile $P --query Account --output text);
       S=$(aws secretsmanager describe-secret --profile $P --region $R --secret-id $N --query ARN --output text);
       aws secretsmanager get-resource-policy --profile $P --region $R --secret-id $N --query ResourcePolicy --output text > "$K";
       jq --arg s "$S" '.Statement[].Resource=$s' "$K" > "$KS";
-      sim() { rp=(); [ -n "$5" ] && rp=(--resource-policy "$(cat "$5")"); got=$(aws iam simulate-principal-policy --profile $P --policy-source-arn "arn:aws:iam::$A:$1" --action-names "$2" --resource-arns "$3" "${rp[@]}" --context-entries "ContextKeyName=aws:PrincipalArn,ContextKeyValues=arn:aws:iam::$A:$1,ContextKeyType=string" --query 'EvaluationResults[0].EvalDecision' --output text 2>/dev/null); [ "$got" = "$4" ] && echo "SIM_OK $1 $2 $4" || echo "SIM_MISMATCH $1 $2 want=$4 got=$got"; };
+      sim() { rp=(); [ -n "$5" ] && rp=(--resource-policy "$(cat "$5")"); got=$(aws iam simulate-principal-policy --profile $P --policy-source-arn "arn:aws:iam::$A:$1" --action-names "$2" --resource-arns "$3" "${rp[@]}" --context-entries "ContextKeyName=aws:PrincipalArn,ContextKeyValues=arn:aws:iam::$A:$1,ContextKeyType=string" --query 'EvaluationResults[0].EvalDecision' --output text 2> /dev/null); [ "$got" = "$4" ] && echo "SIM_OK $1 $2 $4" || echo "SIM_MISMATCH $1 $2 want=$4 got=$got"; };
       B=arn:aws:s3:::agent-platform-data-lake/tfstate;
       sim role/github-settings-apply secretsmanager:GetSecretValue "$S" allowed "$KS"; sim role/github-settings-apply s3:PutObject $B/github/terraform.tfstate allowed;
       sim role/github-settings-apply s3:DeleteObject $B/github/terraform.tfstate.tflock allowed; sim role/github-settings-apply s3:GetObject $B/personal/sandbox/terraform.tfstate implicitDeny;
@@ -409,17 +432,22 @@ verification_plan:
       sim role/github-settings-preview secretsmanager:GetSecretValue "$S" explicitDeny "$KS"; sim role/agent-platform-github-ci-apply secretsmanager:GetSecretValue "$S" explicitDeny "$KS";
       sim role/agent-platform-github-ci-apply secretsmanager:UpdateSecret "$S" explicitDeny "$KS"; sim role/PlatformAdmin secretsmanager:GetSecretValue "$S" allowed "$KS";
       sim role/PlatformAdmin secretsmanager:PutResourcePolicy "$S" allowed "$KS"; sim role/PlatformAdmin secretsmanager:DeleteResourcePolicy "$S" allowed "$KS";
-      bin/venv-python -I -c "import json,sys; p=json.load(open(sys.argv[1])); a=sys.argv[2]; s=p['Statement']; s=s if isinstance(s,list) else [s]; d=s[0] if len(s)==1 else {}; c=d.get('Condition',{}).get('ArnNotLike',{}).get('aws:PrincipalArn'); want={f'arn:aws:iam::{a}:{x}' for x in ('role/github-settings-apply','role/PlatformAdmin','user/platform-breakglass','root')}; ok=d.get('Effect')=='Deny' and d.get('Principal') in ('*',{'AWS':'*'}) and sorted(d.get('NotAction',[]))==['secretsmanager:DescribeSecret','secretsmanager:GetResourcePolicy','secretsmanager:ListSecretVersionIds'] and set(c if isinstance(c,list) else [c])==want; print('KEY_POLICY_OK' if ok else 'KEY_POLICY_MISMATCH')" "$K" "$A"; rm -f "${K:?}" "${KS:?}"
+      bin/venv-python -I -c "import json,sys; p=json.load(open(sys.argv[1])); a=sys.argv[2]; s=p['Statement']; s=s if isinstance(s,list) else [s]; d=s[0] if len(s)==1 else {}; cn=d.get('Condition',{}); c=cn.get('ArnNotLike',{}).get('aws:PrincipalArn'); want={f'arn:aws:iam::{a}:{x}' for x in ('role/github-settings-apply','role/PlatformAdmin','user/platform-breakglass','root')}; ok=d.get('Effect')=='Deny' and d.get('Principal') in ('*',{'AWS':'*'}) and d.get('Resource')=='*' and 'Action' not in d and list(cn)==['ArnNotLike'] and list(cn['ArnNotLike'])==['aws:PrincipalArn'] and sorted(d.get('NotAction',[]))==['secretsmanager:DescribeSecret','secretsmanager:GetResourcePolicy','secretsmanager:ListSecretVersionIds'] and set(c if isinstance(c,list) else [c])==want; print('KEY_POLICY_OK' if ok else 'KEY_POLICY_MISMATCH')" "$K" "$A"; rm -f "${K:?}" "${KS:?}"
     expected: >-
-      PHASE_A_OK after "Apply complete! Resources: 0 added, 1 changed, 0 destroyed."; PHASE_B_OK after "Apply complete!
-      Resources: 5 added, 0 changed, 0 destroyed." (or 4 added, then 1 added on the one retry); fourteen SIM_OK lines
-      and no SIM_MISMATCH; KEY_POLICY_OK. Post counts and markers (no account id or ARN) on PR 1.
-    fix_if: >-
-      APPLY_STOPPED (read the local tf.err, never post it: a phase whose rows differ from the planned set applied
-      nothing, so report the addresses and STOP; any other error STOP and report); a SIM_MISMATCH or
-      KEY_POLICY_MISMATCH (STOP and report; never widen in place); a PlatformAdmin row not allowed (delete the key
-      policy at once as PlatformAdmin with aws secretsmanager delete-resource-policy, then STOP and report; if that is
-      refused too, the account root and user/platform-breakglass stay excepted for the operator's break-glass lane)
+      PHASE_A_OK after "Apply complete! Resources: 0 added, 1 changed, 0 destroyed." and PHASE_B_OK after "Apply
+      complete! Resources: 5 added, 0 changed, 0 destroyed."; a re-run after a partial apply prints PHASE_A_ALREADY
+      and applies only the rows not yet in state; fourteen SIM_OK lines and no SIM_MISMATCH; KEY_POLICY_OK. Post
+      counts and markers (no account id or ARN) on PR 1.
+    fix_if: >-  # pragma: allowlist secret -- names Secrets Manager actions, not a value
+      PHASE_B_APPLY_FAILED right after PHASE_A_OK with the local tf.err naming secretsmanager:PutResourcePolicy (IAM
+      propagation): re-run the whole step once; it resumes at the rows not yet in state. A _STOPPED marker (the rows
+      differ from the planned set, or the AdminOps change is not exactly the one statement; that phase applied
+      nothing), any other failure, or a second propagation failure: STOP and report from the local log. A
+      SIM_MISMATCH or KEY_POLICY_MISMATCH: STOP and report; never widen in place. If the PlatformAdmin GetSecretValue
+      row is not allowed, the key policy denies PlatformAdmin, including its delete: STOP and report at once; only the
+      account root or user/platform-breakglass can remove it then, on the operator's word. If only the PlatformAdmin
+      PutResourcePolicy or DeleteResourcePolicy rows fail (the grant not yet live), re-run the simulations once, then
+      STOP and report.
     hermetic: false
   - step: 8
     phase: pre-deploy
@@ -532,7 +560,7 @@ test_obligations:
     test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
     red_green_expectation: red before (file absent), green after
   - source: terraform/bootstrap/platform_admin_policies.tf
-    behavior: AdminOps' GithubApplyKeyResourcePolicy grants exactly PutResourcePolicy and DeleteResourcePolicy on the apply App entry's data-source arn
+    behavior: AdminOps' GithubApplyKeyResourcePolicy grants exactly PutResourcePolicy and DeleteResourcePolicy on the apply App entry's exact-suffix literal ARN
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
     red_green_expectation: predicate (h)'s AdminOps case is red before the statement lands, and red on a synthetic copy that widens its resource or verbs
@@ -636,7 +664,7 @@ context:
   - "Operator rulings 2026-11-06: 13:24Z never hand-applies Terraform, threads apply with admin credentials; 13:50Z Fable consult; 14:03Z one tap, with the key lock, dedicated Environment and probe; 14:28Z the preview reads state through its own role (github-settings-preview) under tf-trusted-plan; 15:04-15:13Z agent sessions, never the operator's hand, applied this root, and the CI apply is best practice already judged worth doing later, brought forward by the harness change; 15:11Z keep the key in Secrets Manager now, KMS signing at rec-4538's rotation (rec-4967)."
   - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: 126, 92, 94, 77, 158, 238, 144, 225, 246; CONTRADICT: 223 (a prefixed bootstrap role is writable by github_ci_apply's IAMRoleWriteBounded; resolved by the non-prefixed name), 237 (Secrets Manager read; a declared exception, W1 cl.5, after the Fable consult); SPIRIT: 92 (self-gating Environment; resolved by the dedicated Environment, the gate-change naming rule and W1 cl.7). Decisions triaged: 198 of 198. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.9 4/5. Critique round 1 added 238 cl.2 (amended, W1 cl.4) and 157 cl.1 (UpdateSecret is value-capable; the deny now covers every non-metadata action)."
   - "Fable consult (blind, facts-only, 2026-11-06): /mnt/project-files/github-gated-apply/fable-brief/BRIEF.md and ADVICE.md. It agreed with the bootstrap non-prefixed role and push-plus-dispatch, and recommended approving the exact applied plan (two taps), Secrets Manager plus a resource policy, a dedicated Environment and an approval-bypass probe leg; the operator kept one tap, with allowlisted values in the preview and the reviewed-set match."
-  - "Probes 2026-11-06 (PlatformAdmin, read-only): agent-platform-github-ci-apply is allowed s3:GetObject and PutObject on tfstate/github/terraform.tfstate (DataLakeObjectIO, bucket-wide); the apply App entry exists (last changed 2026-10-22) with no resource policy; CloudTrail shows its only value reader to date is user/platform-breakglass (2026-11-02), hence that exception; PlatformAdmin is refused secretsmanager:PutResourcePolicy and DeleteResourcePolicy (critique round 2, simulated), so PR 1's AdminOps statement grants them on this entry only."
+  - "Probes 2026-11-06 (PlatformAdmin, read-only): agent-platform-github-ci-apply is allowed s3:GetObject and PutObject on tfstate/github/terraform.tfstate (DataLakeObjectIO, bucket-wide); the apply App entry exists (last changed 2026-10-22) with no resource policy; CloudTrail shows its only value reader to date is user/platform-breakglass (2026-11-02), hence that exception; PlatformAdmin is refused secretsmanager:PutResourcePolicy and DeleteResourcePolicy (critique round 2, simulated), so PR 1's AdminOps statement grants them on this entry only; the planned key policy, simulated scoped to the key, allows PlatformAdmin and user/platform-breakglass and denies PlatformDev and the CI apply role (VP 6 repeats it on the rendered policy)."
   - "Probe 2026-11-06 (PlatformAdmin narrowed by a session policy allowing only s3:GetObject on tfstate/github/terraform.tfstate, Terraform 1.10.5): terraform init plus terraform state list of terraform/github succeed (8 addresses), so neither role needs s3:ListBucket for the backend; critique round 2 reproduced it against an S3 stub refusing every ListObjectsV2. VP 6 repeats it with the exact rendered policies before any apply, and a config/terraform-version bump re-runs VP 6's backend leg (a regression fails at init, never silently)."
   - 'red_overlap (2026-11-06, 93ce8135): {"verdict": "clear", "slo_hours": 4, "reds": []}'
   - "Why sessions cannot apply: thread 'Roll out approved-wording GitHub approvals', 2026-11-06 13:35Z, an admin-credential session: GET repos/{o}/{r}/environments and /vulnerability-alerts returned 403 'Access to this GitHub API path is not permitted through this proxy' while the token reported admin."
@@ -651,6 +679,7 @@ gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 13, nits: 19}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 5, nits: 8}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 9}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
