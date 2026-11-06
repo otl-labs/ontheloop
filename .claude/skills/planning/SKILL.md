@@ -36,7 +36,7 @@ When reading `logs/.preflight-report.json`, apply these conditionals:
 - **`main_freshness.commits_behind > 0`** -- Retain `main_freshness.main_files_changed_since_branch` for the Step 4 Main Divergence Assessment. Non-blocking at this step.
 - **`cron_review_fresh: false`** -- Note to human (non-blocking).
 - **`open_recommendations > 0`** -- Surface counts and ask whether to address. Wait.
-- **`non_automatable_recommendations > 0`** -- Informational. Surface counts; do not require per-rec discussion. Individual review stays suspended for good (Decision 73 cl.4 as amended by Decision 246).
+- **`non_automatable_recommendations > 0`** -- Informational. Surface counts; do not require per-rec discussion. Individual review stays suspended for good (Decision 73 cl.4 as amended by Decision 247).
   - If `non_automatable_softcap_breached` is true (count > 250), surface as a planning context note.
 - **`friction_patterns`, `metrics_anomalies` non-empty** -- Surface as planning context.
 - **`data_quality.last_run.verdict == "FAIL"`** -- Surface as planning context: N failures across
@@ -138,7 +138,7 @@ When a plan creates or modifies documentation artefacts, apply these rules:
 
 
 ## Complexity Assessment (Workflow Step 4)
-- **Scope files > 5** OR **estimated steps > 8** suggests the item may be too large for one plan (a heuristic). Plan types are IMPLEMENTATION and REPORT-ONLY only (Decision 246; the schema refuses STRATEGIC): author one larger IMPLEMENTATION plan, or decompose -- file child recs or split into atomic IMPLEMENTATION plans now, each planned on its own.
+- **Scope files > 5** OR **estimated steps > 8** suggests the item may be too large for one plan (a heuristic). Plan types are IMPLEMENTATION and REPORT-ONLY only (Decision 247; the schema refuses STRATEGIC): author one larger IMPLEMENTATION plan, or decompose -- file child recs or split into atomic IMPLEMENTATION plans now, each planned on its own.
 - If IMPLEMENTATION (and complex), execution steps must have explicit pre/post-conditions.
 - **Presentation Rule:** The classification MUST be presented to the human and confirmed, not assumed.
 - **Size headroom (Decisions 128, 166):** `plan_obligations --plan` reports each scope file's headroom (SLOC, structural lines, prose bytes) and the unbuilt plans editing the same file. Plan a crossing as a decomposition (facade package, Decision 80/104/124) or the class relief valve, never a default raise: a raise is a Decision-cited exception (`# raise-approved: dec-NNN`), never a bare `--update-sloc-budgets` re-seed. A NEAR_CAP row carries a relief step measured against main at build time, never a fixed line count.
@@ -357,7 +357,7 @@ execution_steps: # REQUIRED non-empty for IMPLEMENTATION plans
   - Specific file to create/modify -- what it must do
   - Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)
   - 'Report: what was implemented, verification results'
-work_areas: [] # always empty (STRATEGIC retired, Decision 246); omit on new plans
+work_areas: [] # always empty (STRATEGIC retired, Decision 247); omit on new plans
 rollback: optional rollback note # optional str; omit if not applicable
 # fallback_reevaluation: OPTIONAL, only if this plan names a CD.27-gated tier item
 # (validate_fallback_reevaluation); never on an ordinary plan. 4 fields, extra=forbid:
@@ -386,7 +386,7 @@ Apply this check when writing the PLAN file. It is CONDITIONAL -- additive plans
 **Enforcement:** a plan that trips a trigger but omits its closure obligation fails plan-critique 12k. Surface it during Step 6 presentation; the missing declaration or VP step must be added before writing.
 
 ## Plan Lint and Wording Check (Workflow Step 8b, before critique)
-Run `bin/venv-python -m scripts.roadmap.plan_obligations --plan <plan>` on the written plan: fold every gating finding (a derived companion) into scope, and act on each advisory one -- a NEAR_CAP row gets a relief step, an unbuilt plan editing the same file is named in `context:`, an undecidable bundled-rec acceptance is fixed or the rec dropped. Before asking approval of always-ask wording, write it as the approved-text sidecar, place it in an uncommitted scratch worktree of origin/main, and run `bin/venv-python -m scripts.roadmap.plan_wording_check --slug <slug> --tree <worktree>`: it checks the tree holds exactly the sidecar's edits (`approved_text.verify`), then runs `validate --pre` there, whose selector runs every test and registered check that reads a changed file. Revise until PASS; record each run as a `gate: wording-check` row with the digest, base and selection status it printed. Each live-infrastructure assumption (grants, cadence, concurrency, memory, provider values) carries a read-only probe result in `context:` or the word UNPROVEN. The handoff names this planning session as the plan's owner.
+Run `bin/venv-python -m scripts.roadmap.plan_obligations --plan <plan>` on the written plan: fold every gating finding (a derived companion) into scope, and act on each advisory one -- a NEAR_CAP row gets a relief step, an unbuilt plan editing the same file is named in `context:`, an undecidable bundled-rec acceptance is fixed or the rec dropped. Before asking approval of always-ask wording, write it as the approved-text sidecar, place it in an uncommitted scratch worktree of origin/main, and run `bin/venv-python -m scripts.roadmap.plan_wording_check --slug <slug> --tree <worktree>`: it checks the tree holds exactly the sidecar's edits, then runs `validate --pre` there. Revise until PASS; record each run as a `gate: wording-check` row with the digest, base and selection it printed. Then push it and get approval per Decision 246: dispatch the approval run and paste the wording with its link. Each live-infrastructure assumption (grants, cadence, concurrency, memory, provider values) carries a read-only probe result in `context:` or the word UNPROVEN. The handoff names this planning session as the plan's owner.
 
 **Amendment mode** (a plan-defect report, implement-scope-boundary.yaml `deviation_trigger.escalation`): fix the plan in a plan-text-only PR (`plan({slug}): scope amendment -- <reason>`), re-run this step and a fresh critique, merge as any plan PR merges, and report the merge SHA to the coordinator. An approved_text or contract defect, or any loosened assertion, goes to the human first; nothing is loosened to obtain green (Decisions 181, 235).
 

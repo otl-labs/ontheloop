@@ -7,7 +7,7 @@ description: "Use when: critique a plan, challenge assumptions, review docs/plan
 
 Challenge plans independently; accept deprecated `.md` inputs.
 
-This BLOCKING gate assesses strategic soundness, bounds, and North Star alignment; formatting-only review is insufficient.
+This BLOCKING gate assesses strategic soundness and bounds; formatting-only review is insufficient.
 
 ---
 
@@ -19,7 +19,7 @@ Reject a plan that invents a third validation tier, treats mapped coverage or re
 
 1. Read the ENTIRE plan file provided by the caller -- never default to `docs/plans/PLAN.md`. Absent a path, use the newest `PLAN-*.yaml` in `docs/plans/` (fall back to `PLAN-*.md` only if none exists, and note the deprecation).
 
-2. Read `docs/PROJECT_CONTEXT.md` in full (for North Star and rules).
+2. Read `docs/PROJECT_CONTEXT.md` in full (for rules); read `docs/contracts/north-star.yaml` when a Phase 2b answer turns on a north star.
 
 3. **Targeted roadmap extraction, not a full-file read:** extract only the `tier_items[]` (from `docs/ROADMAP-PLATFORM.yaml`) the plan's `phase` and `context` fields name, via a `bin/venv-python -c` yaml.safe_load projection -- do not `Read` the file in full.
 
@@ -33,9 +33,9 @@ Reject a plan that invents a third validation tier, treats mapped coverage or re
 
 6. **Check for decision conflicts:** Does the plan contradict or re-decide anything already resolved in `docs/DECISIONS.md`? Cite specific decision numbers and the conflicting plan section.
 
-7. **Score North Star alignment (1-5):** Does the `## Intent` section directly serve a North Star principle (NS.1-NS.5, `docs/ROADMAP-PLATFORM.yaml`)? A score of 1 means no discernible connection; 5 means it directly advances one. Name it and give a 1-2 sentence justification.
+7. **North Star alignment is the decision scout's (Decision 243 clause 8):** quote its Serves line from the plan's `context`; never re-score it. Absent: a nit.
 
-8. **Evaluate Scope breadth (IMPLEMENTATION plans; a split means child recs or atomic plans, Decision 246):**
+8. **Evaluate Scope breadth (IMPLEMENTATION plans; a split means child recs or atomic plans, Decision 247):**
    - For IMPLEMENTATION: Are all scope entries necessary? Too large (suggest split)? Does the Scope extend beyond the stated phase?
 
 9. **Check phase dependencies:** Does this plan depend on work from a prior phase that is not yet complete? Cite specific ROADMAP phase entries.
@@ -59,7 +59,7 @@ when a behavior-changing scope file lacks a linked obligation, its test is struc
 does not assert the named behavior, its red/green expectation is absent, or its waiver is thin.
 Presence/link validators are deterministic; adequacy is this fresh-context judgement.
 
-12d. **Retired (Decision 246):** the plan schema refuses `plan_type: STRATEGIC` and non-empty `work_areas`; an oversized plan is a step 8 split finding.
+12d. **Retired (Decision 247):** the plan schema refuses `plan_type: STRATEGIC` and non-empty `work_areas`; an oversized plan is a step 8 split finding.
 
 12k. **Closure obligation check (CONDITIONAL -- IMPLEMENTATION plans only):** VERIFY the plan's own declarations against its scope and VP; do not re-derive the obligation. Additive plans that trip neither condition are exempt.
 
@@ -114,7 +114,7 @@ Ask the following five questions against the plan's chosen approach. For each, w
 ```
 ## Plan Critique
 
-**Files Read:** [plan path; docs/PROJECT_CONTEXT.md; targeted roadmap items: <ids>; targeted decision sections: <ids>; scope files (IMPLEMENTATION only)] -- count must match the scope entry count
+**Files Read:** [plan path; docs/PROJECT_CONTEXT.md; docs/contracts/north-star.yaml (if read); targeted roadmap items: <ids>; targeted decision sections: <ids>; scope files (IMPLEMENTATION only)] -- count must match the scope entry count
 
 **Plan Type:** IMPLEMENTATION / REPORT-ONLY
 
@@ -129,7 +129,7 @@ Ask the following five questions against the plan's chosen approach. For each, w
 - Concrete contradiction surfaced: yes / no
   [if yes, cite the contradiction]
 
-**North Star Alignment:** X/5 -- [1-2 sentence justification]
+**North Star Alignment:** [the scout's Serves line, quoted] / absent (nit)
 
 **Scope Evaluation:**
 - [Area or file 1]: appropriately scoped / too large (suggest split into: X, Y; deferred half filed as a follow-on rec) / too small (merge with: Z)

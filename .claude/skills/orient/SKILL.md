@@ -177,7 +177,7 @@ Prioritized work list from the Status Digest:
    - **Mid-implementing** (a PLAN-*.yaml was authored and is in-flight but not yet acted on): suggest `/implement PLAN-{slug}.yaml` for that item.
    - **All authored plans actioned / no plan yet** (the common case -- the last plan was implemented and the item still has open criteria): emit a follow-on `/plan <item-id>: <item-name>` prompt. This is the default action for in_progress items. Read `needs_followon_plan` directly from the preflight cache (primary path); degrade to determining mid-implementing status from docs/plans/ and the progress_note only on a stale cache (see Inputs > In_progress entry fields).
 3. **Keystone-first within eligible**: items that unblock the largest downstream depends_on fan-out appear before items with fewer downstream dependents. Fan-out is a reverse query -- count, for each candidate id, how many entries in the Step-2 `depends_index` (Inputs > Roadmap detail) list that id in their `depends_on`; the candidate-scoped projection alone cannot answer this (it only carries the candidates' own forward `depends_on`). A keystone is an item whose completion enables the largest set of currently blocked items.
-4. **Strategic pending**: list separately at the bottom, noted "decompose into child items first (Decision 246)".
+4. **Strategic pending**: list separately at the bottom, noted "decompose into child items first (Decision 247)".
 
 Format: numbered list with a one-line rationale per item citing the keystone/momentum/block reasoning.
 

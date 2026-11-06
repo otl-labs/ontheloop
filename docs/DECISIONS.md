@@ -2,10 +2,10 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
-## Decision 246: The legacy Python executor is retired and the STRATEGIC plan type is shelved, both for good -- an item too large for one plan is decomposed by its planner into child work items, which ride the parent's approval only through a deterministic check (supersedes Decision 67; amends Decisions 73, 90, 182, 203 and 229) (Decided)
+## Decision 247: The legacy Python executor is retired and the STRATEGIC plan type is shelved, both for good -- an item too large for one plan is decomposed by its planner into child work items, which ride the parent's approval only through a deterministic check (supersedes Decision 67; amends Decisions 73, 90, 182, 203 and 229) (Decided)
 
 ```yaml
-number: 246
+number: 247
 status: Decided
 decided_date: "2026-11-02"
 supersedes: [67]
@@ -26,7 +26,7 @@ kind:
 
 **Status:** Decided
 **Date:** 2026-11-02
-**Warehouse ID:** dec-246 (per Decision 84 backfill)
+**Warehouse ID:** dec-247 (per Decision 84 backfill)
 
 **Problem:** Decision 67 froze the single-process Python executor and the STRATEGIC plan type it consumed, pending a
 reversal (CD.17) keyed to T4.2. That executor was a proof of concept; its successor is the Decision 185 loop with the
@@ -70,7 +70,7 @@ of plans, and a split carries the parent's approval only as far as a mechanical 
 T5.6; cl.3 and cl.5 -- T4.31, interim practice unenforced by design (every child is human-planned); cl.4 -- T4.4.
 
 ```yaml reversal-conditions
-decision: 246
+decision: 247
 review_by: 2027-06-30
 on_trigger: "re-decide via /plan"
 conditions:
@@ -87,6 +87,91 @@ conditions:
 
 **Related:** Decisions 55, 67, 73, 79, 90, 117, 182, 185, 197, 203, 205, 229, 233, 235, 241; CD.17; T4.4, T4.23, T4.31, T5.6;
 rec-4478, rec-4479.
+
+---
+
+## Decision 246: Always-ask wording is approved on GitHub -- the operator approves an Environment gate for the sidecar's approved words, CI checks that record at the plan and the build, and a build carrying those words never asks again (amends Decision 83) (Decided)
+
+```yaml
+number: 246
+status: Decided
+decided_date: "2026-11-05"
+kind:
+  value: direction
+  justification: >-
+    Clause 5 makes a human gate: a plan PR that adds or changes approved text stays red until the operator
+    approves it on GitHub, narrowing Decision 83's non-wedging property for those PRs; undone, the approval is
+    agent-recorded prose again.
+amends: [83]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant: it moves where every always-ask wording approval is recorded and rests on a
+    grant-based premise that can fail. Not a git-ops.yaml note: a contract records the check's shape, not the
+    operator's approval medium or the narrowing of Decision 83. Not amendment_forms: it binds every planning and
+    build session, not one prior entry.
+```
+
+**Status:** Decided
+**Date:** 2026-11-05
+**Warehouse ID:** dec-246 (per Decision 84 backfill)
+
+**Problem:** An approved-text sidecar (docs/plans/approved/<slug>.yaml) binds a build's always-ask edits word for
+word to the sidecar at the build's base, but nothing proves the sidecar is what the operator approved. The approval
+is a chat message, recorded only as agent-written prose, so a plan amendment can rewrite the sidecar and its digest
+together (rec-4769; the residual git-ops.yaml approved_text_binding declared under Decision 181 cl.2). Builds whose
+only always-ask content is approved text therefore still ask for a final merge word (operator, 2026-11-03).
+
+**Intent:** What the operator approves at planning ships word for word, provably, and the build never asks again.
+
+**Decision:**
+1. **Approval record.** The operator approves a sidecar by approving the `approved-text` Environment gate of an
+   approved-text-approval.yml run dispatched from main with the sidecar's slug, commit and approved-words digest.
+   The run's first job, main's code reading the sidecar at that commit as data (Decision 238 cl.3), checks the
+   digest and shows the wording on the run page. An agent may dispatch the run; only an Environment reviewer can
+   approve it (Decision 233 cl.4). A chat word alone no longer binds wording.
+2. **Approved words.** The approved-words digest covers, per block, its file, the words its `after` adds and the
+   words its `before` removes. It ignores the anchor words `before` and `after` share at either end, and a number
+   or date a placeholder replaces. A re-anchor that changes only those keeps the approval (the operator's
+   2026-11-03 ruling); any other change needs a new one, even a change to the removed words that main's own edit
+   caused (operator, 2026-11-05).
+3. **Checks.** validate_plan_documents fails a PR that adds or changes a sidecar, and validate_merge_step fails a
+   build, unless GitHub records, for that slug and digest, a run whose gated job an Environment reviewer approved
+   and that then succeeded, or the sidecar is grandfathered (on main at the rollout commit with its plan
+   undeclared and the same digest, derived from git as Decision 187 requires). In pull-request CI an unreadable
+   record fails; elsewhere the lookup is advisory and never reads as a pass (Decision 73 cl.2, Decision 170). The
+   post-merge full tier does not re-run the lookup.
+4. **No re-ask.** A build whose base sidecar passes needs no further operator word for its sidecar-bound text. The
+   final-diff word stays for what no sidecar binds: CODEOWNERS paths, hooks and other security code, IAM, spend
+   and deploys.
+5. **A human gate (amends Decision 83).** A sidecar PR stays red until the operator approves. The approval run
+   comments on the open PR at that commit, so its watcher re-runs pr-validate on that wake (Decision 76); an
+   operator merge in the GitHub UI stays the release valve.
+6. **Coverage (Decision 181 cl.2).** Clauses 1-3 and 5: the two checks, the approval workflow with its wake job,
+   and their tests. Clause 4 is procedural: the coordinator's standing authorisation carries it. Residuals: the
+   approval is operator-only by grant (rec-4695 HOLDS_BY_GRANT, re-decided with Decision 239's approval-bypass
+   condition); the digest binds words, not place, so a re-anchor may move a block to another match in its file
+   (rec-4907; the run page shows each block's location); an agent can still merge on red through the admin
+   bypass (rec-4080); a branch that edits these checks is judged by its own copy (rec-2827).
+   docs/contracts/git-ops.yaml records the mechanism.
+
+```yaml reversal-conditions
+decision: 246
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan; never let an agent-written record stand in for the approval"
+conditions:
+  - id: approval-bypass
+    kind: manual
+    description: "Any agent-held GitHub credential gains Deployments or environment write, or a deployment-approval-probe re-run reads APPROVED on any leg: re-decide with Decision 239."
+  - id: forge-change
+    kind: manual
+    description: "An adopter's forge is not GitHub (Decision 234): add a change-surface adapter for its approval record."
+  - id: wedge
+    kind: manual
+    description: "A sidecar PR the operator approved stays red because the lookup misreads GitHub's record: fix the adapter; if it recurs, revisit."
+```
+
+**Related:** Decisions 73, 76, 83, 101, 170, 181, 187, 233, 234, 238, 239; rec-2827, rec-4080, rec-4695, rec-4769, rec-4907.
 
 ---
 
@@ -1298,7 +1383,7 @@ child criteria; the self-review gap -- rec-4476.
 > advice consult as subagents, which gate until their persona flips (cl.4). After a flip, a session
 > runs that gate only as cl.4's outage fallback, so the end state is no nested personas.
 
-> **Amended by Decision 246 (2026-11-02):** Clause 1's interim reading is final: the legacy executor and STRATEGIC plans are retired for good, and the /overseer is no longer an interim coordinator: the coordinator alone starts a planning or implementation agent. Clause 4's CD.17 hold is discharged: CD.17 is superseded with no successor trigger.
+> **Amended by Decision 247 (2026-11-02):** Clause 1's interim reading is final: the legacy executor and STRATEGIC plans are retired for good, and the /overseer is no longer an interim coordinator: the coordinator alone starts a planning or implementation agent. Clause 4's CD.17 hold is discharged: CD.17 is superseded with no successor trigger.
 
 ---
 
@@ -2972,7 +3057,7 @@ live (Decision 67 reversal) -- re-derive the per-push cost basis.
 **Related:** 25, 67, 72, 73, 76, 83, 115, 132, 135, 138, 150, 162, 163, 167, 168, 177, 181, 184,
 187, 189. Roadmap refs: rec-4083, rec-4085, rec-4086, rec-4087, T2.54.
 
-> **Amended by Decision 246 (2026-11-02):** Reversal condition (e) reads as the Decision 185 loop going live (T4.2): the legacy executor never returns.
+> **Amended by Decision 247 (2026-11-02):** Reversal condition (e) reads as the Decision 185 loop going live (T4.2): the legacy executor never returns.
 
 ---
 
@@ -4729,7 +4814,7 @@ governed floor, installs a second measured cause.
 
 > **Update (2026-09-26):** Reversal condition (b) fires: PLAN-vp-replay-deadline-from-shared-budget re-derives validate_vp_replay's replay term to MAX_AGGREGATE_SECONDS (120) alone -- a replayed step's deadline is now the remaining share of that aggregate, never a flat per-step cap, so the 30s term this point's 150s figure used to add on top is retired. Re-derived, not reversed: NON_TEST_BUDGET_SECONDS stays 240 against the calibrated 71.766s static worst (120 + 71.766 = 191.766 < 240, headroom rises from 18.2s to 48.2s); CEILING_SECONDS - NON_TEST_BUDGET_SECONDS is unchanged at 1260. The check's own worst-case green maximum TIGHTENS from 150s to 120s. Reversal condition (a)'s measured-series re-check remains open, owned by rec-4093.
 
-> **Amended by Decision 246 (2026-11-02):** Decision 67 never lifts. The planning skill's file-count heuristic now flags decomposition need, not a STRATEGIC plan; replacing it with this measured breadth number is owed when plan_agent decides splits (T4.31).
+> **Amended by Decision 247 (2026-11-02):** Decision 67 never lifts. The planning skill's file-count heuristic now flags decomposition need, not a STRATEGIC plan; replacing it with this measured breadth number is owed when plan_agent decides splits (T4.31).
 
 ---
 
@@ -10365,7 +10450,7 @@ Tier responsibilities:
 
 > **Update (2026-10-19):** Decision 229 cl.1 reads the freeze above, as an interim reading pending rec-4478, as binding STRATEGIC plans and the autonomous queue consumer: before any loop host, an interactive session or the /overseer may dispatch one human-gated persona step on an operator-chosen work item (a rec today) -- plan_agent drafting its plan, every later step on that approved IMPLEMENTATION plan -- never from the rec queue.
 
-> **Amended by Decision 246 (2026-11-02):** The fourth tier is the Decision 185 loop with its personas. `/develop-executor` and the legacy Python executor are retired, STRATEGIC plans are shelved, and `/implement` executes IMPLEMENTATION plans only; the operational state above is no longer a freeze.
+> **Amended by Decision 247 (2026-11-02):** The fourth tier is the Decision 185 loop with its personas. `/develop-executor` and the legacy Python executor are retired, STRATEGIC plans are shelved, and `/implement` executes IMPLEMENTATION plans only; the operational state above is no longer a freeze.
 
 ---
 
@@ -10631,6 +10716,8 @@ conditions:
 **Related:** Decision 89 (premise reversed here; merge-gate design preserved), Decision 76 (foresaw reversal; deferred follow-up now unblocked), Decision 77 (guard rationale preserved -- guard is the plan-CONTENT control, not a branch-protection substitute), Decision 73 (public flip enabling the apply), Decision 75 (sanctioned premise correction).
 
 > **Update (2026-11-03):** Decision 245 clause 3 narrows the non-wedging property for agent merges: a fail-closed gate refuses a merge whose stale base shares a changed file with main. The ruleset configuration above is unchanged.
+
+> **Update (2026-11-05):** Decision 246 clause 5 narrows it again for pull requests that add or change approved text: such a PR stays red until the operator approves the wording on GitHub, and an operator merge in the GitHub UI stays the release valve.
 
 ---
 
@@ -11203,7 +11290,7 @@ Key elements:
 
 > **Amended by Decision 226 (2026-10-18):** Clause 3's fixed priority="critical" becomes track-derived (High for a tests-only repair on a CI-tier workflow), and a manual revert PR is a permitted Track B corrective outside terraform/** and governed deploy paths (automated revert stays excluded). Clause 3's L6 pause and clause 4's plan-time block become the red_overlap overlap block; clause 4 as written now applies only to a red past its repair SLO. Clause 5's rec -> plan -> implement recovery stands for Track B, with Track A on the fast lane (Decision 226 cl.1-4). This supersedes the Decision 217 line above for clause 4.
 
-> **Amended by Decision 246 (2026-11-02):** Clause 4's suspension of mandatory discussion when `non_automatable_recommendations > 0` is permanent: Decision 67 never reverses and the executor it waited on is retired. Counts stay informational.
+> **Amended by Decision 247 (2026-11-02):** Clause 4's suspension of mandatory discussion when `non_automatable_recommendations > 0` is permanent: Decision 67 never reverses and the executor it waited on is retired. Counts stay informational.
 
 ---
 
@@ -11478,9 +11565,9 @@ GitHub branch protection is permanently unavailable for this repository. The mer
 **Status:** Superseded
 **Date:** 2026-05-08
 
-**Decision:** Superseded by Decision 246, which retires the legacy Python executor and shelves the STRATEGIC plan type for good and supersedes CD.17; Decision 79 had already lifted the Lambda-deploy clause (per-Lambda gating, CD.16). Kept live rather than archived because roadmap annotations, code comments and contracts still cite "Decision 67" by name (Decision 146's still-cited-live carve-out; compacted under docs/contracts/decision-entry.yaml's `compaction:` section).
+**Decision:** Superseded by Decision 247, which retires the legacy Python executor and shelves the STRATEGIC plan type for good and supersedes CD.17; Decision 79 had already lifted the Lambda-deploy clause (per-Lambda gating, CD.16). Kept live rather than archived because roadmap annotations, code comments and contracts still cite "Decision 67" by name (Decision 146's still-cited-live carve-out; compacted under docs/contracts/decision-entry.yaml's `compaction:` section).
 
-**Superseded by: Decision 246**
+**Superseded by: Decision 247**
 
 ---
 
