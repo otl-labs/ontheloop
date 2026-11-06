@@ -3,14 +3,17 @@ case clears GITHUB_EVENT_NAME / GITHUB_EVENT_BEFORE so a push-event CI job sees 
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from scripts.checks import _common
+from scripts.checks import _common, registry
 from scripts.checks.verification import _implementation_merge as im
+from scripts.checks.verification import validate_merge_step as module
 from scripts.checks.verification.validate_merge_step import validate_merge_step
 from scripts.roadmap import approved_text as at
+from scripts.roadmap import approved_text_github, approved_text_provenance
 from tests.fixtures import late_closure_repos as lc
 from tests.fixtures import merge_step_repos as fx
 
@@ -19,6 +22,21 @@ PLAN = fx.plan_rel(SLUG)
 BUNDLED = ["rec-1", "rec-2"]
 BASE_DOC = "alpha beta gamma delta\n"
 BLOCK = {"id": "b1", "file": "doc.md", "before": "beta gamma", "after": "BETA GAMMA"}
+
+
+_REAL_SEAM = module._sidecar_provenance
+APPROVED = approved_text_provenance.Verdict(approved_text_provenance.APPROVED, "run 1 approver operator-fixture")
+
+
+@pytest.fixture(autouse=True)
+def _approved_provenance(monkeypatch):
+    """pr-validate exports the event path and the token to the whole step; every node but TestProvenanceLeg
+    reads an approved sidecar and never reaches the network."""
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+    monkeypatch.delenv("APPROVED_TEXT_GH_TOKEN", raising=False)
+    monkeypatch.setattr(
+        module, "_sidecar_provenance", lambda slug, sidecar, root, in_push, deadline: (APPROVED, "enforce", None)
+    )
 
 
 def _run(repo: Path, **kwargs) -> tuple[list[str], str]:
@@ -206,3 +224,118 @@ def test_merge_step_fails_on_competing_anchors(tmp_path, monkeypatch):
     lc.closure_branch(repo)
     failed = _late_merge(repo)
     assert len(failed) == 1 and "late closure" in failed[0] and second in failed[0]
+
+
+class TestProvenanceLeg:
+    """rec-4769: the base sidecar needs the operator's GitHub approval (or a grandfather) before the build passes."""
+
+    @staticmethod
+    def _stub(monkeypatch, verdict, mode, info=None):
+        monkeypatch.setattr(
+            module, "_sidecar_provenance", lambda slug, sidecar, root, in_push, deadline: (verdict, mode, info)
+        )
+
+    @pytest.mark.parametrize("kind", [approved_text_provenance.MISSING, approved_text_provenance.UNVERIFIED])
+    def test_enforce_fails_a_missing_or_unreadable_approval(self, tmp_path, monkeypatch, kind):
+        repo = _sidecar_repo(tmp_path, monkeypatch)
+        self._stub(monkeypatch, approved_text_provenance.Verdict(kind, "why"), "enforce")
+        failed, _ = _run(repo)
+        assert len(failed) == 1 and f"approval {kind} (why)" in failed[0] and "approved-text-approval.yml" in failed[0]
+
+    def test_remedy_names_the_pr_head_sha_from_the_event_payload(self, tmp_path, monkeypatch):
+        repo = _sidecar_repo(tmp_path, monkeypatch)
+        payload = tmp_path / "event.json"
+        payload.write_text(json.dumps({"pull_request": {"head": {"sha": "f" * 40}}}), encoding="utf-8")
+        monkeypatch.setenv("GITHUB_EVENT_PATH", str(payload))
+        self._stub(monkeypatch, approved_text_provenance.Verdict(approved_text_provenance.MISSING), "enforce")
+        failed, _ = _run(repo)
+        assert f"sha={'f' * 40}" in failed[0]
+
+    def test_remedy_falls_back_to_head_without_an_event_payload(self, tmp_path, monkeypatch):
+        repo = _sidecar_repo(tmp_path, monkeypatch)
+        self._stub(monkeypatch, approved_text_provenance.Verdict(approved_text_provenance.MISSING), "enforce")
+        failed, _ = _run(repo)
+        assert f"sha={fx.git(repo, 'rev-parse', 'HEAD')}" in failed[0]
+
+    @pytest.mark.parametrize("kind", [approved_text_provenance.MISSING, approved_text_provenance.UNVERIFIED])
+    def test_advisory_prints_and_never_reads_as_a_pass(self, tmp_path, monkeypatch, capsys, kind):
+        repo = _sidecar_repo(tmp_path, monkeypatch)
+        self._stub(monkeypatch, approved_text_provenance.Verdict(kind, "why"), "advisory")
+        failed, _ = _run(repo)
+        out = capsys.readouterr().out
+        assert failed == [] and f"{kind} (advisory)" in out and "PASS" not in out
+
+    def test_a_grandfathered_sidecar_prints_the_informational_lookup_line(self, tmp_path, monkeypatch, capsys):
+        repo = _sidecar_repo(tmp_path, monkeypatch)
+        info = "lookup (informational): MISSING auth=token"
+        self._stub(monkeypatch, approved_text_provenance.Verdict(approved_text_provenance.GRANDFATHERED), "enforce", info)
+        failed, _ = _run(repo)
+        out = capsys.readouterr().out
+        assert failed == [] and info in out and "PASS: 1 declared plan(s) examined" in out
+
+    def test_a_push_skips_the_lookup_and_still_declares_examined(self, tmp_path, monkeypatch, capsys):
+        repo = _sidecar_repo(tmp_path, monkeypatch)
+        monkeypatch.undo()
+        fx.clear_ci_env(monkeypatch)
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("the lookup must not run on a push")
+
+        monkeypatch.setattr(approved_text_github, "http_get", refuse)
+        declared: list[tuple] = []
+        monkeypatch.setattr(registry, "examined", lambda n, unit="": declared.append((n, unit)))
+        failed: list[str] = []
+        validate_merge_step(failed, root=repo, base="main", changed=[PLAN], push_base="abc123")
+        assert failed == [] and declared == [(1, "plans")]
+        assert "SKIP: approval lookup (on main)" in capsys.readouterr().out
+
+
+class TestRealSeam:
+    """The base-sidecar seam unstubbed: only the GitHub lookup and the grandfather pin are patched."""
+
+    @staticmethod
+    def _seam(tmp_path, monkeypatch, lookups, *, ref_is_base=True):
+        repo = _sidecar_repo(tmp_path, monkeypatch)
+        monkeypatch.setattr(module, "_sidecar_provenance", _REAL_SEAM)
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+        if ref_is_base:
+            monkeypatch.setattr(approved_text_provenance, "GRANDFATHER_REF", fx.git(repo, "rev-parse", "main"))
+        monkeypatch.setattr(approved_text_github, "lookup", lambda slug, approved, root, deadline, repo=None: lookups.pop(0))
+        return repo
+
+    def test_a_push_skips_without_a_lookup(self, tmp_path, monkeypatch):
+        repo = self._seam(tmp_path, monkeypatch, [])
+        sidecar = at.load_sidecar_at("main", SLUG, repo)
+        triple = module._sidecar_provenance(SLUG, sidecar, repo, True, approved_text_provenance.Deadline(30))
+        assert triple == (None, "skip", None)
+
+    def test_a_pull_request_reads_the_lookup_answer(self, tmp_path, monkeypatch):
+        repo = self._seam(tmp_path, monkeypatch, [APPROVED])
+        sidecar = at.parse_sidecar(fx.sidecar_text(SLUG, [{**BLOCK, "after": "BETA GAMMA!"}]))
+        verdict, mode, info = module._sidecar_provenance(SLUG, sidecar, repo, False, approved_text_provenance.Deadline(30))
+        assert (verdict, mode, info) == (APPROVED, "enforce", None)
+
+    def test_a_grandfathered_sidecar_adds_one_informational_line(self, tmp_path, monkeypatch, capsys):
+        missing = approved_text_provenance.Verdict(approved_text_provenance.MISSING, "none")
+        repo = self._seam(tmp_path, monkeypatch, [missing])
+        failed, _ = _run(repo)
+        out = capsys.readouterr().out
+        assert failed == [] and "lookup (informational): MISSING auth=anonymous" in out
+        assert "PASS: 1 declared plan(s) examined" in out
+
+    def test_the_head_sha_falls_back_to_the_literal_head_outside_a_repository(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+        assert module._head_sha(tmp_path) == "HEAD"
+
+    def test_an_unreadable_event_payload_falls_back_to_git(self, tmp_path, monkeypatch):
+        repo = _sidecar_repo(tmp_path, monkeypatch)
+        payload = tmp_path / "event.json"
+        payload.write_text("not json", encoding="utf-8")
+        monkeypatch.setenv("GITHUB_EVENT_PATH", str(payload))
+        assert module._head_sha(repo) == fx.git(repo, "rev-parse", "HEAD")
+
+    def test_a_sidecar_that_vanishes_between_the_state_read_and_the_load_is_skipped(self, tmp_path, monkeypatch):
+        repo = _sidecar_repo(tmp_path, monkeypatch)
+        monkeypatch.setattr(at, "load_sidecar_at", lambda ref, slug, root: None)
+        failed, _ = _run(repo)
+        assert failed == []
