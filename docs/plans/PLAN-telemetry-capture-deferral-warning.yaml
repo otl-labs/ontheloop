@@ -77,7 +77,8 @@ scope:
       On the UserPromptSubmit path only, inside the existing `if event == PROMPT_EVENT:` block, after the sys.path insert
       and before the prompt_id read (both the capture_warning import and the call there, since every failure is swallowed
       and an import above the sys.path insert would silently drop the warning), call
-      capture_warning.prompt_warning(transcript, session_id) inside its own try and print the returned line to stdout
+      capture_warning.prompt_warning(Path(transcript), session_id) inside its own try (every public capture_warning
+      function also coerces its path argument with Path(), as state_dir uses transcript_path.parent) and print the returned line to stdout
       (flushed); every failure is swallowed and the existing detach still runs. The Stop and StopFailure paths are
       unchanged: stdout stays empty and the stderr witness line stays the first and only stderr output (WT-1/WT-2). The
       module docstring's "prints the witness line only" sentence is updated to name the UserPromptSubmit warning line. No
@@ -264,12 +265,14 @@ verification_plan:
       title_prefix='telemetry verification alarm: unpinned_tree%'))"
     expected: >-
       Live: reason deferred_no_pin with streak at least 2, the alarm marker's action is file, update or unchanged, the grep
-      counts at least 1 warning record, and the reader returns one open rec with source telemetry_verify; record its id.
+      counts at least 1 warning record, and the reader returns at least one open rec with source telemetry_verify; record its id
+      (two trees' first filings can race run_episode's find-then-file across trees, the tree lock being per tree, so a
+      duplicate open rec is a known residual to record, not a step failure).
       Recovered: reason null with the latest Stop pass sent, recorded as UNPROVEN-LIVE with the reason.
     fix_if: >-
       The tree defers on 2+ Stop passes but no warning is recorded -- the SA-02 channel assumption is wrong; file a rec. The
       alarm marker reads alarm_error:* or no rec is returned -- that is a finding: file a rec naming the token (the detached
-      filing failed in the container, the failure class the postmortem section 5 names). A tree that warned or filed and
+      filing failed in the container: the "local-only signal" gap class in the postmortem's section 5 table). A tree that warned or filed and
       then pinned on its own (a late SessionStart in a project thread) is a finding too: record it and file a rec to raise
       F4's TRIGGER_PASSES, since the alarm fired on a healthy release. That leg is observable only in a project thread: when
       step 9 runs on a CC-web session, record the project-thread leg as UNPROVEN-LIVE.
@@ -306,9 +309,13 @@ test_obligations:
     test_selector: tests/telemetry_capture/test_deferred_no_pin_surface.py::test_stop_paths_print_nothing_new
     red_green_expectation: >-
       Red before: the node holds both halves -- the UserPromptSubmit twin (one warning line over a two-deferral tree, none
-      over a fresh tree, witness still first on stderr; run as a subprocess of the shim file from a foreign cwd, as
-      test_shim_detaches_silently does, so a misplaced import is caught) fails on origin/main; the Stop and StopFailure half (empty stdout,
-      stderr exactly the witness line, over the same two-deferral tree) is green before and after by design.
+      over a fresh tree, witness still first on stderr) fails on origin/main; the Stop and StopFailure half (empty stdout,
+      stderr exactly the witness line, over the same two-deferral tree) is green before and after by design. Both halves
+      run the shim as a subprocess through tests/hooks/test_stop_log_turn.py's WRAPPER/FAKE_RUNNER pattern (RUNNER_MODULE
+      swapped for the fake runner) with PYTHONPATH set to the fake runner's tmp directory only (never the repo root,
+      overriding any inherited value) and cwd tmp_path, so the repo is importable only through the shim's own sys.path
+      insert and a capture_warning import placed above it drops the line and fails the node; no half ever detaches the
+      real runner module, so no test can reach file_unpinned_alarm or the real portal.
   - source: scripts/telemetry_capture/runner.py
     behavior: A deferred pass records a validated cli_version; a hostile value is dropped.
     verification_step: 2
@@ -378,7 +385,8 @@ context:
     rec (one per tree; rec-4940 cannot see sessions that never push); F3 triggers deferred_no_pin and halted, halted never
     files; F4 two Stop passes (a project thread's first Stop defers before its SessionStart records land); F5 re-arm every
     25 passes, clear on recovery. Fable advice: /mnt/project-files/capture-pin-outage/deferral-warning/fable-advice.md.
-    Divergence from it: Fable had verify return completed with counts; the plan makes unpinned_tree a PER_TREE_SKIPS
+    F5's re-arm goes beyond rec-4941's "once per session" prose; the rec's acceptance names only the two VP 1 nodes (read
+    back 2026-11-05), so nothing asserts the literal wording. Divergence from Fable: it had verify return completed with counts; the plan makes unpinned_tree a PER_TREE_SKIPS
     status special-cased in _verify_exit, so verify never files and the runner is the single filer (critique r1 N7); and
     Fable had the filing outside the tree lock, the plan files under acquire(0.0) so overlapping runners cannot
     double-file (critique r3 N2).
@@ -391,10 +399,8 @@ context:
     PLAN-telemetry-late-hook-records (ports.yaml); PLAN-telemetry-capture-hooks is listed unbuilt but built long ago (its
     implementation_declared flag only).
   - >-
-    Critique convergence: the planning skill's finding-shaped rule governs (Project Review plan A,
-    PLAN-critique-severity-convergence, merged 2026-10-30, replaced the project's 3-round cap). Round 4 (the confirming
-    round after round 3's nits) found two new blocking findings at new anchors (PC-01, version regex), fixed, so the loop
-    re-dispatches; no recurrence, dispute or scope change, so no escalation.
+    Convergence: the skill's finding-shaped rule (PLAN-critique-severity-convergence, merged 2026-10-30, replaced the
+    3-round cap). Rounds 4-5 found new blocking findings at new anchors, all fixed; no recurrence, dispute or scope change.
   - "Owner of this plan's handoff: this planning session."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
@@ -402,6 +408,7 @@ gate_rounds:
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 10}
   - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 9}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 6}
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -458,8 +465,9 @@ execution_steps:
     semantic_break: false, change_class: field_add, summary: "PLAN-telemetry-capture-deferral-warning (rec-4941, Class D):
     structural_assumptions SA-02 extends to UserPromptSubmit additionalContext and systemMessage delivery and the
     transcript record version field, and coupling PC-01 records scripts/telemetry_capture/capture_warning.py as a further
-    function_url client of the ops reader and portal; no new port."} PC-01 sentence (append after its verify.py sentence,
-    before "No port row is added."): "scripts/telemetry_capture/capture_warning.py is a further function_url client of the
+    function_url client of the ops reader and portal; no new port.", migration_story: "Prose only; no code or contract
+    consumer reads it."} PC-01 sentence (insert after "...the verification plan's read_version equality is its build-time
+    check)." and before the standalone sentence "No port row is added." that follows it): "scripts/telemetry_capture/capture_warning.py is a further function_url client of the
     ops reader and portal through scripts.rec_episode (the unpinned_tree alarm from the detached capture runner)."
   - >-
     Commit (feat(telemetry-capture-deferral-warning): ..., whose body carries "Resolves: rec-4941" as its own paragraph),
