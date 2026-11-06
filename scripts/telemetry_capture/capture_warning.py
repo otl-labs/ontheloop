@@ -125,7 +125,7 @@ def alarm_marker(transcript_path: Path | str, session_id: str) -> dict[str, Any]
 
 def _latest_version(passes: list[dict[str, Any]]) -> str:
     value = passes[-1].get("cli_version") if passes else None
-    return value if is_version(value) else "unknown"
+    return str(value) if is_version(value) else "unknown"
 
 
 def prompt_warning(transcript_path: Path | str, session_id: str) -> str | None:
@@ -202,7 +202,8 @@ def file_unpinned_alarm(
         attempts = 0
         if held is not None:
             action = held.get("action")
-            attempts = held.get("attempts") if isinstance(held.get("attempts"), int) else 0
+            held_attempts = held.get("attempts")
+            attempts = held_attempts if isinstance(held_attempts, int) else 0
             if not (isinstance(action, str) and action.startswith("alarm_error:") and attempts < ALARM_ATTEMPTS):
                 return None
         from scripts.telemetry_capture.state import CaptureState  # noqa: PLC0415
