@@ -76,10 +76,13 @@ scope:
   - file: tests/hooks/test_session_start_log_turn.py
     action: Modify
     purpose: >-
-      LINE becomes the facts line followed by the optional ref line. New nodes test_one_valid_ref_flag_prints_the_ref_line,
-      test_no_two_or_malformed_ref_flags_print_no_ref_line (no argv, two flags, a ref with a space or a leading '-').
-      SANCTIONED ASSERTION CHANGE: the exact-stderr assertions of test_pin_line_carries_checkout_facts_from_git gain the
-      ref line where the run passes --project-ref (the facts line itself is unchanged). Every other node unchanged.
+      LINE is split into two exact patterns, FACTS_LINE (today's LINE) and REF_LINE
+      ('[session_start_log_turn] capture pin project_ref=ontheloop\n'); no optional group. SANCTIONED ASSERTION CHANGE (a
+      strengthening): test_every_source_prints_one_pin_line_and_writes_nothing, which passes --project-ref=ontheloop,
+      asserts stderr is exactly FACTS_LINE followed by REF_LINE for every source. test_closed_stdin_and_no_arguments_still_exit_zero
+      asserts FACTS_LINE alone (no ref line without a flag). test_pin_line_carries_checkout_facts_from_git is unchanged
+      (its runs pass no argv). New nodes test_one_valid_ref_flag_prints_the_ref_line and
+      test_no_two_or_malformed_ref_flags_print_no_ref_line (two flags, a ref with a space, a leading '-', an empty ref).
   - file: scripts/telemetry_capture/__main__.py
     action: Modify
     purpose: >-
@@ -129,6 +132,19 @@ scope:
       pins 'ontheloop', and a label with the witness stderr is a witness. New node
       test_status_message_ref_matches_the_hook_ref_line (the statusMessage's --project-ref, the registered command's flag
       and the line the hook prints for that flag are one value, Decision 200). Every other node unchanged.
+  - file: tests/turn_capture/test_transcript.py
+    action: Modify
+    purpose: >-
+      transcript.py's mirror file (validate_test_coverage per-file floor): new nodes
+      test_witness_ref_needs_exactly_one_well_formed_line, test_command_ref_is_the_legacy_form and
+      test_is_pin_attachment_reads_command_or_stderr, so every new line of transcript.py is covered by its mirror. Existing
+      nodes unchanged.
+  - file: tests/turn_capture/test_observations.py
+    action: Modify
+    purpose: >-
+      observations.py's mirror file (coverage floor): new node test_hook_name_names_capture_records_without_a_script
+      (pin attachment, witness line on Stop and on UserPromptSubmit, a label with other stderr, a '[WARN]' stderr tag that
+      is never a name). Existing nodes unchanged.
   - file: tests/turn_capture/test_provenance.py
     action: Modify
     purpose: New node test_pin_ref_disagreement_is_counted_on_the_root_only (provenance.py's mirror file, coverage floor).
@@ -394,8 +410,9 @@ acceptance_criteria:
     attachment supplies the open row's checkout facts; the observe CLI and the c8 smoke's synthetic tree use the same
     predicates (VP 1).
   - >-
-    The capture records keep the names hook:session_start_log_turn and hook:stop_log_turn under labels, and every other
-    labelled hook reads hook:<hookName> (VP 1, VP 3).
+    The capture records with a stderr capture line keep the names hook:session_start_log_turn and hook:stop_log_turn
+    (Stop, StopFailure, UserPromptSubmit) under labels; session_end_log_turn prints no capture line, so it and every
+    other labelled hook read hook:<hookName> (H-2) (VP 1, VP 3).
   - >-
     The pin hook prints the ref line only for exactly one well-formed --project-ref, keeps one stderr redirect, an empty
     stdout and exit 0 on every path (VP 1).
@@ -419,8 +436,13 @@ verification_plan:
     action: rec-4939's acceptance file plus the hook, observe, smoke, provenance and the two sanctioned-assertion nodes.
     command: >-
       bin/venv-python -m pytest tests/turn_capture/test_hook_label_shape.py tests/hooks/test_session_start_log_turn.py
-      tests/hooks/test_capture_hook_registration.py
+      tests/hooks/test_capture_hook_registration.py::test_the_recorded_status_message_satisfies_the_parser_rules
+      tests/hooks/test_capture_hook_registration.py::test_status_message_ref_matches_the_hook_ref_line
       tests/turn_capture/test_witness.py::test_witness_matches_only_the_capture_shim_line_at_stop
+      tests/turn_capture/test_transcript.py::test_witness_ref_needs_exactly_one_well_formed_line
+      tests/turn_capture/test_transcript.py::test_command_ref_is_the_legacy_form
+      tests/turn_capture/test_transcript.py::test_is_pin_attachment_reads_command_or_stderr
+      tests/turn_capture/test_observations.py::test_hook_name_names_capture_records_without_a_script
       tests/turn_capture/test_provenance.py::test_pin_ref_disagreement_is_counted_on_the_root_only
       tests/telemetry_capture/test_main.py::test_observe_counts_labelled_pin_records
       tests/telemetry_capture/test_smoke.py::test_synthetic_tree_records_the_label_shape -q
@@ -458,8 +480,7 @@ verification_plan:
       tests/turn_capture/test_record_turn.py::test_finalize_equals_virtual_prompt_at_eof
       tests/turn_capture/test_record_turn.py::test_new_cases_are_built_from_their_builders
       tests/turn_capture/test_record_turn.py::test_finalization_cuts_are_recorded_once_and_survive_a_reset
-      tests/telemetry/test_parser_version_registry.py tests/telemetry/test_derived_layer_reconciliation.py
-      tests/telemetry_verify/test_derive.py -q
+      tests/telemetry/test_parser_version_registry.py tests/telemetry_verify/test_derive.py -q
     expected: Exit 0, every node passes.
     fix_if: >-
       Regenerate expected_rows only after steps 1-2 pass. A line-cut failure is a prefix defect in a rule, never a test to
@@ -470,6 +491,18 @@ verification_plan:
       Most of its nodes already belong to graduated standing checks (turn-capture-golden-corpus,
       turn-capture-r7-incremental-equals-full, turn-capture-finalize-resume-emits-each-row-once and the parser version
       registry); the rest run in the full tier. The new cases join the corpus through the index, not a new check.
+  - step: 10
+    phase: pre-deploy
+    action: >-
+      The derived golden layer reconciles at 9 (its module needs duckdb, which PR CI's fast tier lacks, so it is not
+      hermetic; validate_hermetic_fast_tier_collectability).
+    command: bin/venv-python -m pytest tests/telemetry/test_derived_layer_reconciliation.py -q
+    expected: Exit 0 with at least one test collected and passing.
+    fix_if: A mismatch means a hand re-derivation in the derived golden files is missing; never copy a value from a verb.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Already a full-tier module; the derived files' consumers are the guard, and the step only re-runs it at 9.
   - step: 4
     phase: pre-deploy
     action: >-
@@ -478,12 +511,12 @@ verification_plan:
       local mock Messages API, and parses the transcript with this checkout's parser, in the settings, plugin and combined
       shapes. No credential is present, so nothing is sent.
     command: >-
-      for m in "" --plugin --combined; do bin/venv-python
-      /mnt/project-files/capture-pin-outage/durable-fix/label-probe/probe.py $m | tee -a "$PROBE_LOG" | grep -q
-      '"verdict": "PASS"' || exit 1; done; grep -c '"labels_seen": \["command hook' "$PROBE_LOG"
+      PROBE_LOG="$(mktemp)" && for m in "" --plugin --combined; do bin/venv-python
+      /mnt/project-files/capture-pin-outage/durable-fix/label-probe/probe.py $m >> "$PROBE_LOG" || true; done &&
+      test "$(grep -c '"verdict": "PASS"' "$PROBE_LOG")" -eq 3 && grep -c '"labels_seen": \["command hook' "$PROBE_LOG"
     expected: >-
-      Three JSON lines with verdict PASS, pin ontheloop, pin_records 1, stop_witnesses at least 1 and a non-empty
-      labels_seen, then the count 3. On main (2026-11-06, CLI 2.1.318) all three shapes printed FAIL with pin null.
+      Three JSON lines, each with verdict PASS, pin ontheloop, pin_records 1, stop_witnesses at least 1 and a non-empty
+      labels_seen; the command then prints 3. On main (2026-11-06, CLI 2.1.318) all three shapes printed FAIL with pin null.
     fix_if: >-
       HARNESS_ERROR: the CLI or the mock did not start; report it, never skip the step. FAIL with labels_seen empty: the
       CLI no longer labels (record its version and command shape in the PR body; the unit tests stay the guard). FAIL
@@ -661,7 +694,7 @@ weakening_dispositions:
   - candidate: '[assertion-changed] tests/hooks/test_capture_hook_registration.py::test_the_recorded_status_message_satisfies_the_parser_rules'
     cite: acceptance_criteria[0]
     disposition: planned-change
-  - candidate: '[assertion-changed] tests/hooks/test_session_start_log_turn.py::test_pin_line_carries_checkout_facts_from_git'
+  - candidate: '[assertion-changed] tests/hooks/test_session_start_log_turn.py::test_every_source_prints_one_pin_line_and_writes_nothing'
     cite: acceptance_criteria[3]
     disposition: planned-change
   - candidate: '[assertion-changed] tests/turn_capture/test_record_turn.py::test_finalization_cuts_are_recorded_once_and_survive_a_reset'
@@ -684,8 +717,9 @@ constraints:
   - >-
     Purity (envelope R7, Decision 207): every verdict reads only the attachment's own fields; no rule reads settings, the
     environment, git or a clock. The pin of a tree that already has a cursor is reused across the v9 reset as today
-    (Decision 199); a never-pinned outage-era tree pins fresh from its records on its first v9 pass (no operator-asserted
-    pin: postmortem D2 closed no backfill).
+    (Decision 199). An outage-era tree (2026-11-03..06) holds only the facts line under a label, so it stays unpinned
+    unless it is resumed on a post-merge checkout (whose resume pin record carries the ref line); that is accepted loss
+    (postmortem D2, no backfill), never a reason to parse labels or assert a pin.
   - >-
     Typed columns only (Benjamin, 2026-10-17): no new column and no new metadata key; pin_ref_disagreement is a pass
     diagnostic counter (DG-1), never a row value.
@@ -703,7 +737,7 @@ constraints:
     capture-runner-waits-for-its-witness, parser-v3-declared-prefixes-match-corpus, telemetry-parser-cap-agreement,
     telemetry-parser-version-registry, telemetry-read-clients-use-the-route, telemetry-verify-cli-counts-only,
     telemetry-verify-never-gates-capture, turn-capture-late-hook-groups, turn-capture-v2-conformance,
-    turn-capture-witness-frontier. turn-capture-stop-witness and capture-hooks-status-message-parser-parity keep their
+    turn-capture-witness-frontier, turn-capture-usage-final. turn-capture-stop-witness and capture-hooks-status-message-parser-parity keep their
     check_spec; only the sanctioned assertions inside their nodes change.
   - 'Public repository (Decision 101): fixtures synthetic; probe and integration steps print counts and fixed tokens only.'
   - >-
@@ -737,9 +771,10 @@ context:
     credential, which the coordinator passes to rec-4942's planner. rec-4426 (base=unknown) and rec-4305 (project-id.yaml
     P-rule wording) are not bundled.
   - >-
-    Unbuilt plans sharing scope files (plan_obligations): PLAN-telemetry-capture-hooks (built per the status-message
-    plan; listed only because it lacks a done marker), PLAN-hook-canary-evidence, PLAN-approved-text-operator-approval
-    (#1876) and PLAN-work-graph-edge-model; whichever builds second rebases.
+    Unbuilt plans sharing scope files (plan_obligations): PLAN-telemetry-capture-hooks and PLAN-telemetry-late-hook-records
+    (both built), PLAN-telemetry-claude-p-capture-adapter (#1856, SEQUENCING), PLAN-hook-canary-evidence,
+    PLAN-approved-text-operator-approval (#1876), PLAN-work-graph-edge-model; whichever builds second rebases. The
+    .claude/hooks/plugin_hooks.py docstring (H-1, P-1 read the stem) goes legacy-only; it moves with the stopgap removal.
   - "red_overlap verdict 2026-11-06: clear (slo_hours 4, reds [])."
   - >-
     Benjamin's word 2026-11-06 12:33Z ("perfect, please proceed", cmsg_012XgaFy8VaDQbxP5D8nC958JF2raFCLjW4TyQAXsxcZG3)
@@ -753,6 +788,7 @@ gate_rounds:
   - {gate: decision-scout, round: 1, verdict: NO_FLAGS}
   - {gate: wording-check, round: 1, verdict: PASS, digest: a2bee89dd55b2fd7d4534554bc33dbfb7f723e7fcbeaac855a76aabae5f9cb83, base: 6aa531d2037a4bfe3e38d3d0241726e0a734cc58, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: PASS, digest: 345d8fb802a844c09907893b50b13ac3d367650df5782f0ac6eb84268d0b751e, base: 6aa531d2037a4bfe3e38d3d0241726e0a734cc58, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -763,7 +799,8 @@ execution_steps:
   - >-
     1. Precondition: PR #1856 merged; rebase onto main. Confirm PARSER_VERSION 8, the corpus case count (57) and no other
     open plan bumping the parser; if any differs, STOP and tell the coordinator. Run VP 4 once at v8 and keep its output
-    (expect FAIL in all three shapes).
+    (expect FAIL in all three shapes) with the no-exit baseline: for m in "" --plugin --combined; do
+    bin/venv-python /mnt/project-files/capture-pin-outage/durable-fix/label-probe/probe.py $m; done
   - >-
     2. transcript.py (PIN_LINE_PREFIX, PIN_REF_PREFIX, witness_ref, command_ref, is_pin_attachment; project_ref_pin on
     them), provenance.py (_is_pin via is_pin_attachment; pin_ref_disagreement), witness.py (WT-2), observations.py (H-1),
@@ -785,7 +822,8 @@ execution_steps:
   - 6. Execute VP 4 (real CLI) and VP 5 (live smoke); on an unrecoverable failure stop and RCA (Decision 55).
   - >-
     7. VP 6. Closure per the implement skill's Commit Flows and docs/contracts/git-ops.yaml: VP 7 on the committed clean
-    tree, push, PR whose body holds the rules, the VP 4 lines before and after, the four sanctioned assertion changes and
+    tree, push, PR whose body holds the rules, the VP 4 fields before and after (verdict, pin, pin_records, stop_witnesses, labels_seen,
+    claude_version only; never hook_commands or a path), the four sanctioned assertion changes and
     the envelope text; paste the text and the assertion diffs inline in the thread. Merge (squash, body carries
     "Resolves: rec-4939") only after code review PROCEED, CI green and the build-merge gate in context.
   - >-
