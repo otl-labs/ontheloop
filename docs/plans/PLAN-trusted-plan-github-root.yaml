@@ -648,11 +648,11 @@ infrastructure_dependencies:
   - "terraform/github is never applied by this plan: PR 1's token move and PR 5's description edit change no state."
   - "approved-text Environment (Decision 246): declared on main by #1876 (terraform/github/environments.tf), live only after the operator's terraform/github hand apply; probe 2026-11-06 (approved_text_github approvals on the three green approval runs of that day): no approval recorded, so it has no required reviewer yet. Before PR 5 starts, a plan amendment adds the sidecar and Benjamin approves it on that gate; if the gate is still not live, PR 5 waits."
 acceptance_criteria:
-  - "A same-repo terraform/github PR gets its PR-time plan only from main's terraform-github-plan.yml on pull_request_target in tf-trusted-plan, under agent-platform-github-ci-trusted-github-plan"
+  - "A same-repo terraform/github PR gets its PR-time plan from main's terraform-github-plan.yml on pull_request_target in tf-trusted-plan, under agent-platform-github-ci-trusted-github-plan, and no pull_request-triggered job plans it (PR #1888's tf-trusted-plan preview job, if it lands, is that plan's own and outside this criterion)"
   - "The PR's terraform/github files are screened before any credential exists; main.tf and the lockfile always come from main; a refused PR gets a names-only refusal and no plan"
   - "The new role can read only tfstate/github/terraform.tfstate and the provider mirror (plus a list scoped to the mirror prefix); it reaches no secret value, no tfplan/ and no terraform/personal state"
   - "Init is hermetic from the mirror with main's lockfile; the plan's output and diagnostics stay in a private runner log; the PR comment carries names only, and every body (refusal or plan) is built, checked by terraform_github_plan_comment.py assert-clean, then posted"
-  - "The plan App key is readable only by jobs in the tf-trusted-plan environment; no repository secret of that name remains (on the operator's word, VP 17: a re-run cannot prove absence, because an environment secret shadows a repository secret of the same name); no forward-standing contract text places the key in a repository secret (VP 25)"
+  - "The plan App key is readable only by jobs in the tf-trusted-plan environment; no repository secret of that name remains (VP 17: the operator's names-only repository secret count, pasted with its message id, because a re-run cannot prove absence: an environment secret shadows a repository secret of the same name); no forward-standing contract text places the key in a repository secret (VP 25)"
   - "agent-platform-github-ci-trusted-plan holds no tfstate/github grant; its unused but still matchable terraform-github-plan.yml trust entry is pinned and handed to rec-4640 (hand-off read back from rec-4640's context, 2026-11-06)"
   - "The planner's TfstateGithubRead has no consumer after PR 4 and is handed to rec-4640 for removal with the PR-sub trust statement (read back from rec-4640's context, 2026-11-06); it stays pinned exactly by TestPlannerStateGrant until then"
   - "PR 5 carries the Decision 238 Update and the five contract edits (three contracts) exactly as the approved-text sidecar binds them, and rec-4638 is closed by PR 5's Resolves trailer (VP 22, VP 23)"
@@ -750,16 +750,16 @@ verification_plan:
     phase: post-deploy
     action: After PR 1 merges, dispatch the seed on main and confirm the github provider landed in the mirror
     command: >-
-      M=s3://agent-platform-data-lake/tf-provider-mirror/registry.terraform.io;
-      before=$(aws s3 ls --profile agent_platform "$M/" --recursive | grep -cE '(kislerdm/neon|hashicorp/aws)/.*linux_amd64');
-      then mcp__github__actions_run_trigger(owner=otl-labs, repo=ontheloop, method=run_workflow,
-      workflow_id=terraform-provider-mirror-seed.yml, ref=main) and read the run's conclusion; then
-      after=$(aws s3 ls --profile agent_platform "$M/" --recursive | grep -cE '(kislerdm/neon|hashicorp/aws)/.*linux_amd64');
-      V=$(grep -A1 'provider "registry.terraform.io/integrations/github"' terraform/github/.terraform.lock.hcl | grep -oE '[0-9]+\.[0-9]+\.[0-9]+');
-      echo "before=$before after=$after github_locked=$(aws s3 ls --profile agent_platform "$M/integrations/github/" --recursive | grep -c "terraform-provider-github_${V}_linux_amd64")"
+      mcp__github__actions_run_trigger(owner=otl-labs, repo=ontheloop, method=run_workflow,
+      workflow_id=terraform-provider-mirror-seed.yml, ref=main) and read the run's conclusion; then, on main's tree,
+      M=s3://agent-platform-data-lake/tf-provider-mirror/registry.terraform.io; for L in
+      terraform/personal/.terraform.lock.hcl terraform/github/.terraform.lock.hcl; do awk -F'"' '/^provider /{a=$2}
+      /^  version /{print a, $2}' "$L"; done | while read -r a v; do ns=${a#registry.terraform.io/}; n=${ns##*/}; echo
+      "$ns $v $(aws s3 ls --profile agent_platform "$M/$ns/" --recursive | grep -c "terraform-provider-${n}_${v}_linux_amd64")"; done
     expected: >-
-      run conclusion success; before equals after (the aws and neon packages survive the --delete sync); github_locked >= 1
-      (main's locked github version, 6.12.1 on 2026-11-06, is in the mirror)
+      run conclusion success; exactly three lines, hashicorp/aws, kislerdm/neon and integrations/github, each at main's
+      locked version (5.100.0, 0.13.0 and 6.12.1 on 2026-11-06) with a count of 1 or more, so the --delete sync kept
+      every locked package of both roots (a version the lockfiles no longer name may be pruned, which is correct)
     fix_if: a failed run (read step conclusions only) or a missing package -- fix the script, never hand-upload
     hermetic: false
   - step: 7
@@ -872,17 +872,19 @@ verification_plan:
     phase: pre-deploy
     action: Before PR 4 merges, the environment secret exists (names only; GitHub never returns values)
     command: >-
-      Before PR 4 merges: ask Benjamin to confirm in words that tf-trusted-plan holds TF_GITHUB_PLAN_APP_PRIVATE_KEY
-      (Environments > tf-trusted-plan > secrets lists it with an updated date after his new App key); the session proxy
-      cannot read environment secrets. This step is the attestation only; the executable proof is post-deploy, in VP 14,
-      whose step-conclusion read of PR 5's first trusted run includes the step named "Config check"
-    expected: his reply naming the secret, recorded with its message id on PR 4 before it merges
+      Before PR 4 merges, Benjamin runs on his own machine (the session proxy cannot read environment secrets, and gh
+      prints secret names and dates, never values): gh secret list --env tf-trusted-plan --repo otl-labs/ontheloop |
+      grep -E '^TF_GITHUB_PLAN_APP_PRIVATE_KEY[[:space:]]' and pastes the output. The post-deploy executable proof stays
+      VP 14, whose step-conclusion read of PR 5's first trusted run includes the step named "Config check"
+    expected: >-
+      exactly one pasted line, the secret name and an updated date after his new App key was made; the line is recorded
+      with its message id on PR 4 before it merges
     fix_if: absent -- PR 4 waits; never merge without it. (A Config check failure, CONFIG_MISSING, on PR 5 is VP 14's fix_if.)
     hermetic: false
     graduation: not-applicable
   - step: 14
     phase: post-deploy
-    action: Post-deploy of PR 4 (gates PR 5's merge) -- PR 5 (canary) gets its terraform/github plan from the trusted job and nothing else plans it
+    action: Post-deploy of PR 4 (gates PR 5's merge) -- PR 5 (canary) gets its terraform/github plan from the trusted job and no pull_request-triggered job plans it (PR #1888's preview job, if landed, is outside this step)
     command: >-
       mcp__github__actions_list(method=list_workflow_runs, resource_id=terraform-github-plan.yml) filtered to the PR head
       sha; read the run's event and step conclusions only; then mcp__github__pull_request_read(method=get_comments) for
@@ -939,16 +941,17 @@ verification_plan:
     phase: post-deploy
     action: Operator deletes the repository secret and the old App key; confirm by names
     command: >-
-      Ask Benjamin to confirm in words that the repository secrets list has no TF_GITHUB_PLAN_APP_PRIVATE_KEY and the plan App
-      shows one private key. Then re-run a terraform-github-plan run (mcp__github__actions_run_trigger,
+      Benjamin runs on his own machine gh secret list --repo otl-labs/ontheloop | grep -cE
+      '^TF_GITHUB_PLAN_APP_PRIVATE_KEY[[:space:]]' (names only, and only the count is pasted) and confirms in words that
+      the plan App shows one private key (no names-only read of App keys exists without the App's own JWT). Then re-run a terraform-github-plan run (mcp__github__actions_run_trigger,
       method=rerun_workflow_run): the latest run of an open terraform/github PR if one exists, else PR 5's last run. Read
       the re-run's step conclusions with mcp__github__actions_list(method=list_workflow_jobs) -- only the step named
       "Config check" counts. It runs before the overlay and fails CONFIG_MISSING when the key is absent. The environment
       secret shadowed the repository secret all along, so its success proves only that the environment secret survived
-      the operator's deletion (the right secret was deleted); the repository secret's absence itself rests on his word
-      (AC 5)
+      the operator's deletion (the right secret was deleted); the repository secret's absence itself is the pasted
+      count (AC 5)
     expected: >-
-      his reply (message id recorded on the merged PR 5); the re-run's Config check step conclusion success. On PR 5's
+      his pasted count 0 and his word on the App keys (message id recorded on the merged PR 5); the re-run's Config check step conclusion success. On PR 5's
       closed run, the later steps fail OVERLAY_REFUSED merge_ref_absent and a refusal comment lands on the merged PR:
       GitHub drops refs/pull/N/merge when a PR closes (checked 2026-11-06: `git ls-remote origin 'refs/pull/1876/merge'`
       is empty), so that is expected and is not a secret signal
@@ -1155,12 +1158,13 @@ test_obligations:
     waiver_reason: The baseline is enforced by the existing R3-workflow check in the fast tier; a stale entry fails it.
   - source: .github/CODEOWNERS
     behavior: the new and governed scripts are code-owned
-    verification_step: 12
-    test_selector: tests/checks/ci_guards/test_validate_trusted_plan_environment.py
+    verification_step: 21
+    command: bin/venv-python -m scripts.validate
     red_green_expectation: >-
-      predicate (h)'s real-tree case is red at PR 1 if the policy-module line is missing ((h) follows the import closure
-      of terraform-plan-trusted.yml's screen step into scripts/ci/terraform_hcl_screen_policy.py), and red at PR 4 if
-      the reporter or comment-gate line is missing
+      the full tier on each PR head (VP 21, so PR 1's own run, not PR 4's VP 12) runs validate_trusted_plan_environment
+      on the real tree and its test_real_tree_is_green: predicate (h) is red at PR 1 if the policy-module line is
+      missing ((h) follows the import closure of terraform-plan-trusted.yml's screen step into
+      scripts/ci/terraform_hcl_screen_policy.py), and red at PR 4 if the reporter or comment-gate line is missing
   - source: terraform/bootstrap/github_ci_apply_reads.tf
     behavior: IAMRolesRead names the new role
     verification_step: 9
@@ -1307,6 +1311,7 @@ context:
   - "Settled without asking (critique round 9): N2, the post step is a new body registered at its measured count (S3's post-the-plan-comment: 15 precedent), and the category map stays in the workflow so the total-map rule pins it in one file; N10, no check requires a github-actions-evidence row for this workflow, and adding one would be bound contract text outside the five approved edits, so none is added; N3's semantic coupling with PLAN-telemetry-content-reader-lock is recorded in the unbuilt-plans line and sent to the coordinator."
   - "Registry entry shape: each new entry is config/agent/verification_registry/entries/<check_id>.yaml and carries check_id, primitive_slot test_selector, guard_target, guard_symbol, plan_slug trusted-plan-github-root, graduated_at (the PR's build date, quoted) and graduated_by implement-agent, with node_id under check_spec, as trusted-plan-environment-fence.yaml does (validate_verification_registry.py:137 requires check_id, primitive_slot, guard_target, plan_slug and graduated_at; its placement leg requires the filename to equal check_id)."
   - "Settled without asking (critique round 10, PROCEED): N4, VP 13 stays an attestation with no command, because the session cannot list Environment secrets, and VP 14's Config check is its named executable proof; N1-N3 and N5-N8 are applied, and N1 and N2 are relayed through the coordinator."
+  - "Settled without asking (critique round 11): B1, VP 13 is now an operator-run names-only listing whose pasted line is recorded on PR 4 (the PLAN-trusted-plan-identity VP 8 shape), replacing round 10's prose attestation; N6 gives VP 17 and AC 5 the same shape for the repository secret's absence; N3, the workflow header's 'Accepted residual until VP 17' sentence is stale once VP 17 is done, and its removal is handed to rec-4640, which edits the same trust surface next (context append, read back)."
   - "Gotcha: python3 -I drops the script directory from sys.path; scripts append the repo root (never insert at 0) and check where scripts resolved (predicate h)."
   - "Gotcha: Actions logs on this public repo are public; read step conclusions only, never paste plan text, and never print an account id, ARN or secret value."
   - "Gotcha: a PR the screen refuses gets no PR-time plan; the operator's own plan stays authoritative for this hand-applied root."
@@ -1325,6 +1330,7 @@ gate_rounds:
   - {gate: plan-critique, round: 8, verdict: REVISE, blocking: 1, nits: 8}
   - {gate: plan-critique, round: 9, verdict: REVISE, blocking: 1, nits: 12}
   - {gate: plan-critique, round: 10, verdict: PROCEED, blocking: 0, nits: 8}
+  - {gate: plan-critique, round: 11, verdict: REVISE, blocking: 1, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -1349,7 +1355,10 @@ execution_steps:
 work_areas: []
 rollback: >-
   Before PR 4 merges: nothing user-visible has changed (the old job still runs; the role and screen rows are unused) --
-  revert any PR. After PR 5: revert PR 5 first (its pins and bound text sit on files PR 4 created, so reverting PR 4
+  revert any PR, but two reverts are not code-only: after VP 11, reverting PR 3 is a role DESTROY that routes to
+  tf-gated-apply, and after VP 8, reverting PR 2 needs a human-directed admin apply of terraform/bootstrap on Benjamin's
+  word on the exact command; revert PR 3 before PR 2, because the gated apply that destroys the role reads it through
+  PR 2's IAMRolesRead line. After PR 5: revert PR 5 first (its pins and bound text sit on files PR 4 created, so reverting PR 4
   alone would conflict and leave PR 5's pins red), then PR 4 as below. After PR 4: revert PR 4, which restores the pull_request job; it needs the repository secret, so before
   VP 17 nothing else is needed, and after VP 17 the operator re-stores the repository secret first. PR 5's removal of
   the shared role's TfstateGithubRead never needs reverting: no job reads tfstate/github through the shared role after
