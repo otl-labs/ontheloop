@@ -22,6 +22,9 @@
 # this secret by design (per-parameter GetParameter grant, Decision 237) -- that is the intended
 # DEP-13 fail-closed outcome, not a bug; re-run from an ADMIN container.
 #
+# Both modes mask account_id, the two ExternalIds and every *_email key (rec-3975), so the drift job, the
+# dispatch fresh plan and reconcile never print an e-mail value.
+#
 # No INSTALL_TERRAFORM gate here -- that belongs to the caller (bin/setup-cloud-env.sh's bootstrap
 # branch). INSTALL_TERRAFORM appears zero times under .github/workflows/, so gating inside this
 # shared unit would no-op every CI apply call site.
@@ -52,7 +55,7 @@ mask_values() {
     key=$(printf '%s' "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     value=$(printf '%s' "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"//;s/"$//')
     case "$key" in
-      account_id | platform_dev_external_id | platform_admin_external_id)
+      account_id | platform_dev_external_id | platform_admin_external_id | *_email)
         if [ -n "$value" ]; then
           echo "::add-mask::${value}" >&2
         fi
@@ -104,8 +107,9 @@ if ! chmod 600 "$TMP"; then
   exit 1
 fi
 
-# rec-2214/rec-2285: emit ::add-mask:: for account_id and both ExternalId trust secrets BEFORE any
-# downstream step writes plan.json / review.txt, so they are redacted in subsequent log output.
+# rec-2214/rec-2285/rec-3975: emit ::add-mask:: for account_id, both ExternalId trust secrets and every
+# *_email value BEFORE any downstream step writes plan.json / review.txt, so they are redacted in
+# subsequent log output.
 # Split on the FIRST '=' only (line%%=* / line#*=) so a value containing '=' is not truncated.
 # Gated on $GITHUB_ACTIONS: ::add-mask:: is a GitHub-runner sentinel, not redaction -- emitting it
 # unconditionally would print account_id and both ExternalIds into a local ADMIN shell transcript,
@@ -117,7 +121,7 @@ if [ -n "${GITHUB_ACTIONS:-}" ]; then
     key=$(printf '%s' "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     value=$(printf '%s' "$value" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
     case "$key" in
-      account_id | platform_dev_external_id | platform_admin_external_id)
+      account_id | platform_dev_external_id | platform_admin_external_id | *_email)
         if [ -n "$value" ]; then
           echo "::add-mask::${value}"
         fi

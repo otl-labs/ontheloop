@@ -8,7 +8,10 @@ tests/telemetry/fixtures/derivation_cases.yaml.
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import re
+import types
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,7 +25,9 @@ from src.common import ducklake_event_read_verbs as verbs  # noqa: E402
 from src.common import ducklake_event_reads as ev  # noqa: E402
 from src.common.ducklake_reader_client import VERB_FIELDS  # noqa: E402
 from src.telemetry.identity import derive_entity_key  # noqa: E402
+from tests.fixtures import duckdb_connect  # noqa: E402
 from tests.fixtures import telemetry_read_db as db  # noqa: E402
+from tests.fixtures.ducklake_fakes import FakeCon  # noqa: E402
 
 _FIXTURES = Path(__file__).parents[1] / "telemetry" / "fixtures"
 _CASES = yaml.safe_load((_FIXTURES / "derivation_cases.yaml").read_text("utf-8"))
@@ -310,7 +315,7 @@ def test_friction_vectors(vector: dict[str, Any]) -> None:
 
 def test_health_count_reads_metadata_only() -> None:
     """Only the DuckLake metadata tables exist on this connection: a data-file read would fail with a catalog error."""
-    con = duckdb.connect()
+    con = duckdb_connect.connect()
     con.execute("ATTACH ':memory:' AS __ducklake_metadata_telemetry_catalog")
     meta = "__ducklake_metadata_telemetry_catalog"
     con.execute(f"CREATE TABLE {meta}.ducklake_table(table_id BIGINT, table_name VARCHAR, end_snapshot BIGINT)")
@@ -458,3 +463,103 @@ def test_transcript_content_sql_resolves_on_a_real_catalog() -> None:
         "content_omitted_reason",
         "compared_versions",
     }
+
+
+_RUNTIME_DSN = {
+    "host": "ep-test-123.eu-west-2.aws.neon.tech",
+    "dbname": "ducklake_ops",
+    "username": "ducklake_ops",
+    "password": "secret-pw",  # pragma: allowlist secret -- fake fixture value
+    "sslmode": "require",
+    "meta_schema": "ducklake_ops",
+}
+
+
+def _runtime_thread_count(monkeypatch: pytest.MonkeyPatch) -> int:
+    from src.common import ducklake_runtime as rt  # noqa: PLC0415
+    from src.common.ducklake_version import pinned_duckdb_version  # noqa: PLC0415
+
+    con = FakeCon()
+    fake_duckdb = types.SimpleNamespace(connect=lambda: con, __version__=pinned_duckdb_version())
+    monkeypatch.setattr(rt.ducklake_spike, "_require_duckdb", lambda: fake_duckdb)
+    monkeypatch.setattr(rt.ducklake_spike, "_set_s3_credentials", lambda c, profile=None: None)
+    rt.open_connection(dsn=_RUNTIME_DSN, data_path="s3://x/y/")
+    counts = [int(m.group(1)) for sql, _ in con.executed if (m := re.fullmatch(r"SET threads=(\d+)", sql))]
+    assert len(counts) == 1, con.executed
+    return counts[0]
+
+
+def test_fixture_connections_run_with_the_runtime_thread_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rec-4890: tests open DuckDB at the thread count production's runtime sets, derived from the runtime itself."""
+    expected = _runtime_thread_count(monkeypatch)
+    con = duckdb_connect.connect()
+    assert con.execute("SELECT current_setting('threads')").fetchone()[0] == expected
+    assert db.open_memory_catalog().execute("SELECT current_setting('threads')").fetchone()[0] == expected
+
+    class _Routed(Exception):
+        pass
+
+    def _spy() -> Any:
+        raise _Routed
+
+    monkeypatch.setattr(db.duckdb_connect, "connect", _spy)
+    with pytest.raises(_Routed):
+        db.open_local_lake(Path("unused-lake-dir"))
+
+
+_TESTS_ROOT = Path(__file__).parents[1]
+_VERB_NAMES = {"NAMED_READS", "EVENT_READS", "render_sql"}
+_VERB_MODULES = {
+    f"src.common.{m}"
+    for m in "ducklake_event_read_verbs ducklake_event_reads ducklake_event_read_sql ducklake_named_reads "
+    "ducklake_content_read_verbs".split()
+}
+_AD_HOC_SQL_EXCLUSION = "tests/test_ducklake_reader_handler.py"  # its real-DuckDB node runs ad hoc SQL only, not verb SQL
+_REWIRED = (
+    "tests/common/test_ducklake_event_read_verbs.py",
+    "tests/common/test_ducklake_event_read_dedupe.py",
+    "tests/common/ducklake_reader_client/test_verb_fields_parity.py",
+    "tests/test_session_preflight_cache_serving.py",
+    "tests/recs_related/test_verb_sql.py",
+)
+
+
+def _verb_sql_and_direct_openers(tree: ast.AST) -> tuple[bool, list[int]]:
+    names: set[str] = set()
+    openers: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            for alias in node.names:
+                names.update({alias.name, mod, f"{mod}.{alias.name}"})
+                if mod == "duckdb" and alias.name == "connect":
+                    openers.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.name)
+                if alias.name == "duckdb":
+                    openers.add(f"{alias.asname or alias.name}.connect")
+        elif isinstance(node, ast.Assign) and ast.unparse(node.value) == "pytest.importorskip('duckdb')":
+            openers.update(f"{ast.unparse(t)}.connect" for t in node.targets)
+    calls = [n for n in ast.walk(tree) if openers and isinstance(n, ast.Call) and ast.unparse(n.func) in openers]
+    return bool(names & (_VERB_NAMES | _VERB_MODULES)), [n.lineno for n in calls]
+
+
+def test_verb_sql_modules_open_duckdb_only_through_the_seam() -> None:
+    """rec-4890: a test module running production read-verb SQL never calls duckdb.connect itself."""
+    repo = _TESTS_ROOT.parent
+    verb_modules: set[str] = set()
+    offenders: list[str] = []
+    for path in sorted(_TESTS_ROOT.rglob("*.py")):
+        rel = path.relative_to(repo).as_posix()
+        uses_verbs, lines = _verb_sql_and_direct_openers(ast.parse(path.read_text("utf-8")))
+        if uses_verbs:
+            verb_modules.add(rel)
+            if lines and rel != _AD_HOC_SQL_EXCLUSION:
+                offenders.append(f"{rel}:{lines}")
+    assert not offenders, f"verb-SQL test modules opening DuckDB outside tests/fixtures/duckdb_connect.py: {offenders}"
+    assert set(_REWIRED) <= verb_modules, "the sweep stopped classifying a rewired file as verb-SQL (a rename?)"

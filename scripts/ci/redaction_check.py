@@ -5,7 +5,7 @@ Two modes, both fail closed:
 
 redact
     stdin is the raw ``terraform show`` text. Replaces the tfvars-sourced secrets (env
-    ``_ACCT``/``_DEV``/``_ADM``/``_OWNER``) with placeholders, then fails if a 12-digit
+    ``_ACCT``/``_DEV``/``_ADM``/``_OWNER``/``_ALERTS``) with placeholders, then fails if a 12-digit
     account-id-shaped TOKEN survives. The shape check belongs HERE, on untrusted terraform
     output, and nowhere else.
 
@@ -21,7 +21,9 @@ and replace-based redaction would silently no-op exactly when redaction matters 
 
 ``owner_email`` is scrubbed alongside the account id and the two ExternalIds because
 ``terraform/personal/main.tf`` sets ``default_tags { Owner = var.owner_email }``, so a destroy plan
-prints it on every tagged resource.
+prints it on every tagged resource. ``alerts_email`` is scrubbed too (rec-3975): it is the
+``endpoint`` of the alerts topic's e-mail subscription, so a plan that touches that subscription
+prints it.
 
 ``mask_account_ids`` is the shared shape mask for text that reaches session output (rec-4656).
 """
@@ -58,6 +60,7 @@ _SCRUB_SPECS = (
     ("_DEV", "[ExternalId]"),
     ("_ADM", "[ExternalId]"),
     ("_OWNER", "[OWNER_EMAIL]"),
+    ("_ALERTS", "[ALERTS_EMAIL]"),
 )
 
 
@@ -80,6 +83,8 @@ def _placeholder_label(index: int) -> str:
         return "[ACCOUNT_ID]"
     if index == 1 or index == 2:
         return "[ExternalId]"
+    if index == 4:
+        return "[ALERTS_EMAIL]"
     return "[OWNER_EMAIL]"
 
 

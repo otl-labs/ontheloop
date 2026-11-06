@@ -37,6 +37,21 @@ resource "aws_sns_topic_subscription" "alerts_email" {
   endpoint  = var.alerts_email
 }
 
+# Transitional (PLAN-terraform-company-emails): the company successor beside the predecessor. CI may
+# subscribe but never unsubscribe (github_ci_apply_policy.tf), so PLAN-terraform-company-emails-forget
+# forgets the predecessor for the operator to delete, and PLAN-terraform-company-emails-closing moves
+# this subscription back to aws_sns_topic_subscription.alerts_email.
+variable "company_alerts_email" {
+  description = "Company alerts role alias for the successor alerts subscription, from the tfvars parameter (never committed)."
+  type        = string
+}
+
+resource "aws_sns_topic_subscription" "company_alerts_email" {
+  topic_arn = aws_sns_topic.alerts.arn
+  protocol  = "email"
+  endpoint  = var.company_alerts_email
+}
+
 output "alerts_topic_arn" {
   description = "Shared personal-account SNS alerts topic ARN (wired to DuckLake alarms)."
   value       = aws_sns_topic.alerts.arn

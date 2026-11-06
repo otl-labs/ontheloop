@@ -93,7 +93,7 @@ def _make_stub_bin(tmp_path: Path) -> Path:
 
 
 def _run_delegate(
-    repo_root: Path, stub_bin: Path, *, env_overrides: dict[str, str] | None = None
+    repo_root: Path, stub_bin: Path, *, env_overrides: dict[str, str] | None = None, args: tuple[str, ...] = ()
 ) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["PATH"] = f"{stub_bin}:{env.get('PATH', '')}"
@@ -105,7 +105,7 @@ def _run_delegate(
             else:
                 env[key] = value
     return subprocess.run(
-        [*GITHUB_COMPOSITE_BASH, str(DELEGATE_SH)],
+        [*GITHUB_COMPOSITE_BASH, str(DELEGATE_SH), *args],
         cwd=repo_root,
         capture_output=True,
         text=True,
@@ -184,13 +184,37 @@ class TestDelegateBehaviour:
         env["GITHUB_ACTIONS"] = "true"
         result = _run_delegate(repo_root, stub_bin, env_overrides=env)
         assert result.returncode == 0, result.stderr
-        assert result.stdout.count("::add-mask::") == 3
+        assert result.stdout.count("::add-mask::") == 5
         assert "::add-mask::acct-placeholder-nonnumeric" in result.stdout
         assert "::add-mask::dev-ext-id-placeholder" in result.stdout
         assert "::add-mask::admin-ext-id-placeholder" in result.stdout
-        # owner_email / alerts_email are NOT in the protected-key set -- never masked.
-        assert "owner-placeholder-nonemail-value" not in result.stdout
-        assert "alerts-placeholder-nonemail-value" not in result.stdout
+        # owner_email / alerts_email match the *_email arm (rec-3975) -- masked too.
+        assert "::add-mask::owner-placeholder-nonemail-value" in result.stdout
+        assert "::add-mask::alerts-placeholder-nonemail-value" in result.stdout
+
+    def test_masks_every_email_value(self, tmp_path: Path) -> None:
+        repo_root = _make_repo_root(tmp_path)
+        stub_bin = _make_stub_bin(tmp_path)
+        stdout_file = tmp_path / "aws-stdout.txt"
+        company = 'company_alerts_email = "company-alerts-placeholder-nonemail-value"\n'
+        stdout_file.write_text(FIXTURE_TFVARS + company, encoding="utf-8")
+        emails = (
+            "owner-placeholder-nonemail-value",
+            "alerts-placeholder-nonemail-value",
+            "company-alerts-placeholder-nonemail-value",
+        )
+        base = {"AWS_STUB_STDOUT_FILE": str(stdout_file), "AWS_STUB_EXIT_CODE": "0"}
+        # File mode prints its mask lines on stdout; --stdout mode on stderr, keeping stdout the bare tfvars.
+        for args, stream in (((), "stdout"), (("--stdout",), "stderr")):
+            masked = _run_delegate(repo_root, stub_bin, env_overrides={**base, "GITHUB_ACTIONS": "true"}, args=args)
+            assert masked.returncode == 0, masked.stderr
+            for value in emails:
+                assert f"::add-mask::{value}" in getattr(masked, stream), (args, value)
+            if args:
+                assert "::add-mask::" not in masked.stdout
+            quiet = _run_delegate(repo_root, stub_bin, env_overrides=base, args=args)
+            assert quiet.returncode == 0, quiet.stderr
+            assert "::add-mask::" not in quiet.stdout + quiet.stderr, args
 
     def test_preexisting_file_preserved(self, tmp_path: Path) -> None:
         repo_root = _make_repo_root(tmp_path)

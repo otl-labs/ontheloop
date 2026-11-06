@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from scripts.telemetry_capture import responses, switch, verify_due
+from scripts.telemetry_capture import capture_warning, responses, switch, verify_due
 from scripts.telemetry_capture.state import (  # noqa: F401 -- DEFAULT_CATALOG and KNOWN_CATALOGS are re-exported
     DEFAULT_CATALOG,
     KNOWN_CATALOGS,
@@ -303,6 +303,7 @@ def _locked_pass(
         project_ref, pin_token = resolve_pin(tree)
     if project_ref is None:
         diag["pin_conflict" if pin_token == "pin_conflict" else "deferred_no_pin"] += 1
+        record.update(capture_warning.version_field(root))
         return _finish(state, record, "deferred", diag)
     if smoke_ref is not None and project_ref != smoke_ref:
         diag["smoke_pin_mismatch"] += 1

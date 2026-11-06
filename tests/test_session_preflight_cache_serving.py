@@ -29,6 +29,7 @@ import pytest
 from scripts.preflight import _common, aws_infra, ci_rca_signals, env_git
 from scripts.roadmap import platform_roadmap
 from src.common.ducklake_scd2_schema import NAMED_READS
+from tests.fixtures import duckdb_connect
 from tests.fixtures.platform_roadmap_state import live_state_dict
 
 # Load the module under test as a PRIVATE handle. Deliberately NOT registered as
@@ -65,7 +66,7 @@ def _utc(s: str) -> datetime:
 
 
 def _con() -> duckdb.DuckDBPyConnection:
-    con = duckdb.connect()
+    con = duckdb_connect.connect()
     con.execute("SET TimeZone='UTC'")  # naive TIMESTAMPTZ casts resolve as UTC (matches _parse_ts_utc)
     return con
 

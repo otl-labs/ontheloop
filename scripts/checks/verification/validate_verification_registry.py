@@ -13,6 +13,7 @@ from pathlib import Path
 from scripts import verification_graduation
 from scripts.checks import _common, registry
 from scripts.checks.verification import _implementation_merge as _im
+from scripts.checks.verification import _registry_command_portability as _portability
 
 
 def _added_entries(current_entries: list[dict], root: Path | None = None) -> list[dict]:
@@ -251,6 +252,9 @@ def validate_verification_registry(failed: list[str], root: Path | None = None) 
     added = _added_entries(entries, root)
     modified = _modified_entries(entries, root)
     candidates = added + modified
+    portability_failures, portability_line = _portability.admission_report(candidates)
+    print(f"  {portability_line}")
+    failed.extend(portability_failures)
     if candidates:
         bases, pending = _late_closure_state(added, root, failed)
         _run_added_entry_differentials(candidates, failed, root, bases, pending)

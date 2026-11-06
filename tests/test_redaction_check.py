@@ -28,6 +28,7 @@ FAKE_ACCT = "123456789012"
 FAKE_DEV = "dev/ext&id=1"
 FAKE_ADM = "adm/ext&id=2"
 FAKE_OWNER = "owner@example.invalid"
+FAKE_ALERTS = "alerts@example.invalid"
 
 # The literal digest from the PR #975 incident. Its substring f740037807611c carries twelve digits
 # bounded by hex letters, which is what the old whole-body shape check matched. Neither value is a
@@ -139,11 +140,24 @@ def test_unknown_mode_is_rejected(env, monkeypatch: pytest.MonkeyPatch) -> None:
     assert main(["redaction_check.py", "sanitize"]) == 1
 
 
+def test_alerts_email_is_scrubbed(env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """rec-3975: the alerts subscription endpoint is scrubbed like owner_email, and named without being echoed."""
+    env()
+    monkeypatch.setenv("_ALERTS", FAKE_ALERTS)
+    assert _run(monkeypatch, "redact", f"endpoint = {FAKE_ALERTS}") == 0
+    out = capsys.readouterr().out
+    assert FAKE_ALERTS not in out and "endpoint = [ALERTS_EMAIL]" in out
+    assert _run(monkeypatch, "assert-clean", f"comment naming {FAKE_ALERTS} inline") != 0
+    out = capsys.readouterr().out
+    assert "REDACTION_FAIL" in out and "[ALERTS_EMAIL]" in out
+    assert FAKE_ALERTS not in out
+
+
 def test_helpers_ignore_unset_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("_ACCT", "_DEV", "_ADM", "_OWNER"):
+    for name in ("_ACCT", "_DEV", "_ADM", "_OWNER", "_ALERTS"):
         monkeypatch.delenv(name, raising=False)
     pairs = scrub_pairs()
-    assert [value for value, _ in pairs] == ["", "", "", ""]
+    assert [value for value, _ in pairs] == ["", "", "", "", ""]
     assert redact("untouched", pairs) == "untouched"
     assert unscrubbed_labels("untouched", pairs) == []
 
