@@ -46,7 +46,7 @@ Suggest 3-5 open recommendations aligned with the task (`bin/venv-python -m scri
 2. Read those files and check `tests/` for existing test coverage.
 3. Conduct an Infrastructure Assessment if `.tf` files are in scope.
 4. Conduct a Lambda Deployment Assessment if Lambda-packaged files are in scope.
-5. Conduct a Complexity Assessment to determine if this is STRATEGIC or IMPLEMENTATION.
+5. Conduct a Complexity Assessment to decide whether the item fits one plan or decomposes into child recs or atomic plans (Decision 247).
 6. Conduct a Data-Model Assessment (`docs/contracts/data-modeling-standard.yaml`) if a table, field_semantics entry, or warehouse write path is in scope.
 7. Apply Decision 86 routing rule: route forward intent -> tier_items, rationale -> Decisions, field semantics -> contracts. No new standing prose-architecture docs under docs/. Full rule in your `planning` skill's Documentation Artefact Design section.
 *(Apply the exact assessment rules from your `planning` skill).*
@@ -102,7 +102,7 @@ Invoke per the planning skill's Critique Gate (dispatch shape, example prompt, c
 Note: this gate reviews the PLAN artefact, not the report deliverable. For REPORT-ONLY plans, the deliverable gets its own critique in Step 10.
 
 ## Step 10: Multi-Perspective Report Critique Gate (REPORT-ONLY only, MANDATORY)
-**If Plan Type is IMPLEMENTATION or STRATEGIC, SKIP this step entirely and proceed to Step 11.**
+**If Plan Type is IMPLEMENTATION, SKIP this step entirely and proceed to Step 11.**
 
 For REPORT-ONLY plans, the Step 9 plan-critique gate reviewed the planning artefact (PLAN-{slug}.yaml) but NOT the report deliverable itself, which needs its own independent zero-context critique.
 
