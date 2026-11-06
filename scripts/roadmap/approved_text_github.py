@@ -4,8 +4,8 @@ The operator approves a sidecar on the `approved-text` Environment gate of an ap
 dispatched from main; this adapter reads GitHub's record of that approval. Imports only the standard library,
 approved_words, approved_text_provenance and scripts.repo_identity.
 
-CLI (each subcommand takes --repo OWNER/NAME; session commands always pass it, since repo_identity's fallback is the
-pre-transfer name the session proxy refuses):
+CLI (each subcommand takes --repo OWNER/NAME; omitted, it defaults to repo_identity.full_name(): GITHUB_REPOSITORY in
+CI, the repository fallback elsewhere):
   check --slug S [--digest H]                    print the grandfather and lookup verdicts
   approvals --run-id N                           print each approval of a run (the read-only shape probe)
   wake --slug S --sha X --digest H --run-id R    comment on each open PR whose head is X (the workflow's wake job)
