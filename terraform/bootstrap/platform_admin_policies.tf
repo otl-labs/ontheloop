@@ -1,7 +1,8 @@
 # PlatformAdmin AdminOps inline policy, adopted from its terraform/personal source file (PLAN-
 # platform-iam-bootstrap-adopt, rec-3838 plan 1 of 2). Zero-diff import -- no statement
 # added, removed or reordered relative to the personal-root source; this file references no
-# terraform/personal object (every action in AdminOps is account/region-scoped or "*").
+# terraform/personal object (every action in AdminOps is account/region-scoped or "*"). Added
+# after adoption: GithubApplyKeyResourcePolicy (Decision 248), last.
 locals {
   platform_admin_ops_policy_json = jsonencode({
     Version = "2012-10-17"
@@ -208,6 +209,18 @@ locals {
         Effect   = "Allow"
         Action   = ["s3:ListBucket", "s3:ListBucketVersions"]
         Resource = "arn:aws:s3:::agent-platform-*"
+      },
+      {
+        # Decision 248 cl.5: lets PlatformAdmin put and delete the apply App entry's resource policy
+        # (terraform/bootstrap/github_settings_apply.tf). Exact six-character suffix literal, never -*,
+        # so planning AdminOps never depends on the entry existing.
+        Sid    = "GithubApplyKeyResourcePolicy"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:PutResourcePolicy",
+          "secretsmanager:DeleteResourcePolicy",
+        ]
+        Resource = "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-terraform-github-apply-app-??????"
       },
     ]
   })
