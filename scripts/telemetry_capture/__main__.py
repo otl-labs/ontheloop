@@ -42,6 +42,7 @@ DENOMINATOR_OF = {
     "nonfinal_root_call": "root_calls",
     "spawn_usage_mismatch": "sync_spawns",
     "sidecar_pinned_absent_present": "pinned_absent",
+    "unpinned_tree": "root_checked",
 }
 
 
@@ -113,6 +114,10 @@ def _cmd_run(
         )
         if result.diag.get("verify_due") is True:
             _run_check(args, result, reader_factory)
+        if args.event in ("Stop", "StopFailure") and result.outcome == "deferred":
+            from scripts.telemetry_capture import capture_warning  # noqa: PLC0415
+
+            capture_warning.file_unpinned_alarm(Path(args.transcript), args.session_id)
     except Exception:  # noqa: BLE001 -- the detached runner is silent on every path
         pass
     return 0
@@ -293,6 +298,8 @@ def _denominator_met(cls: str, counts: Mapping[str, int]) -> bool:
 
 
 def _verify_exit(result: Any, assert_zero: str | None) -> int:
+    if result.status == "unpinned_tree":
+        return 1 if assert_zero in (None, "unpinned_tree") else 2
     if not result.completed:
         return 2
     if assert_zero is None:

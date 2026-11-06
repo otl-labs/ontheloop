@@ -165,6 +165,10 @@ _CLOSURE_INPUTS: dict[str, tuple[str, ...]] = {
     "validate_plan_scope_closure": (
         "docs/contracts/plan-obligations.yaml",
         "scripts/roadmap/plan_obligations.py",
+        "scripts/roadmap/plan_decision_drafts.py",
+        "scripts/roadmap/approved_text.py",
+        "scripts/checks/decisions/envelope_rules.py",
+        "scripts/north_star_models.py",
         "scripts/checks/_common.py",
         "scripts/checks/registry.py",
     ),

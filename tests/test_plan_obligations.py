@@ -467,6 +467,11 @@ class TestMainCli:
         path = _write(tmp_path, data)
         assert plan_obligations.main(["--plan", str(path)]) == 0
 
+    def test_cli_decision_draft_prints_the_clean_line_and_exits_zero(self, capsys: pytest.CaptureFixture[str]) -> None:
+        draft = plan_obligations.ROOT / "tests" / "fixtures" / "decision_drafts" / "placeholder_conforming.txt"
+        assert plan_obligations.main(["--decision-draft", str(draft)]) == 0
+        assert capsys.readouterr().out.strip() == "decision_drafts: 1 drafted, 0 findings"
+
     def test_cli_always_exits_zero_on_absent_plan(self, tmp_path: Path) -> None:
         assert plan_obligations.main(["--plan", str(tmp_path / "PLAN-absent.yaml")]) == 0
 

@@ -30,18 +30,22 @@ def read_published_pid(pidfile: Path, timeout: float = 5.0) -> int:
         time.sleep(0.05)
 
 
-def pid_is_dead(pid: int) -> bool:
-    """True iff /proc/<pid>/stat is absent, or reports zombie state 'Z' -- never
-    ProcessLookupError alone, which measures reaping rather than death (plan-critique measured
-    1.46-1.72s of zombie reap latency in this container)."""
-    stat_path = Path(f"/proc/{pid}/stat")
+DEAD_STATES = frozenset({"Z", "X"})
+
+
+def pid_is_dead(pid: int, proc_root: Path = Path("/proc")) -> bool:
+    """True iff <proc_root>/<pid>/stat is absent, or reports zombie state 'Z' or exit-dead 'X' --
+    never ProcessLookupError alone, which measures reaping rather than death (plan-critique
+    measured 1.46-1.72s of zombie reap latency in this container). 'X' is shown while the reaper
+    collects the child, between 'Z' and the stat file vanishing (rec-4872)."""
+    stat_path = proc_root / str(pid) / "stat"
     try:
         text = stat_path.read_text(encoding="utf-8")
     except (FileNotFoundError, ProcessLookupError):
         return True
     close_paren = text.rfind(")")
     state = text[close_paren + 2] if close_paren != -1 else ""
-    return state == "Z"
+    return state in DEAD_STATES
 
 
 def pid_state(pid: int) -> str:

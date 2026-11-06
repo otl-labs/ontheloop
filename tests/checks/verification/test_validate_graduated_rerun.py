@@ -1,5 +1,7 @@
 """Mirror of scripts/checks/verification/validate_graduated_rerun.py (standing re-run of graduated records)."""
 
+import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -155,6 +157,7 @@ class TestRerun:
 
     def test_hung_record_times_out_red(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(rerun, "RECORD_TIMEOUT_S", 6)
+        created = _spy_mkdtemp(monkeypatch)
         pidfile = tmp_path / "sleeper.pid"
         _record(tmp_path, "rec-hung", ["bash", "-c", f"sleep 120 & echo $! > {pidfile}; wait"])
         _listed(tmp_path, [])
@@ -162,6 +165,8 @@ class TestRerun:
         assert failed
         assert "rec-hung" in failed[0]
         assert "timed out after 6 s" in failed[0]
+        assert created
+        assert not any(Path(d).exists() for d in created)
         pid = int(pidfile.read_text(encoding="utf-8").strip())
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and _alive(pid):
@@ -179,7 +184,52 @@ class TestRerun:
         assert rerun.red_records(tmp_path) == set()
 
 
+def _spy_mkdtemp(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    created: list[str] = []
+    real = tempfile.mkdtemp
+
+    def spy(*args: object, **kwargs: object) -> str:
+        path = real(*args, **kwargs)  # type: ignore[call-overload]
+        created.append(path)
+        return path
+
+    monkeypatch.setattr(tempfile, "mkdtemp", spy)
+    return created
+
+
+def _fake_rg_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "rg").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (fake / "rg").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
 class TestHelpers:
+    def test_child_runs_see_rg_absent(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _fake_rg_on_path(tmp_path, monkeypatch)
+        row = {"check_id": "rec-rg", "primitive_slot": "command_exit_zero", "guard_target": "x.py"}
+        _record(tmp_path, "rec-rg", ["bash", "-c", "rg --version"])
+        row["check_spec"] = {"command": ["bash", "-c", "rg --version"]}
+        passed, _ = rerun._run_child(row, tmp_path)
+        assert passed is False
+
+    def test_rg_stub_dir_removed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _fake_rg_on_path(tmp_path, monkeypatch)
+        _record(tmp_path, "rec-rg", ["bash", "-c", "rg --version"])
+        _record(tmp_path, "rec-ok")
+        created = _spy_mkdtemp(monkeypatch)
+        row = {"check_id": "rec-ok", "primitive_slot": "command_exit_zero", "guard_target": "x.py"}
+        assert rerun._run_child(row, tmp_path)[0] is True
+        assert len(created) == 1
+        assert not Path(created[0]).exists()
+        created.clear()
+        outcomes = {o.check_id: o for o in rerun.evaluate(tmp_path)}
+        assert outcomes["rec-rg"].red is True
+        assert outcomes["rec-ok"].red is False
+        assert len(created) == 1
+        assert not Path(created[0]).exists()
+
     def test_first_line_skips_blank_and_empty(self) -> None:
         assert rerun._first_line("\n  \n  hello \nworld") == "hello"
         assert rerun._first_line("") == ""
@@ -197,9 +247,12 @@ class TestHelpers:
 
     def test_child_without_verdict_is_red(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(rerun, "_MODULE", "json.tool")
+        created = _spy_mkdtemp(monkeypatch)
         passed, detail = rerun._run_child({"check_id": "x"}, tmp_path)
         assert passed is False
         assert detail
+        assert len(created) == 1
+        assert not Path(created[0]).exists()
 
     def test_child_main_reports_verdict_and_missing_id(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         _record(tmp_path, "rec-ok")

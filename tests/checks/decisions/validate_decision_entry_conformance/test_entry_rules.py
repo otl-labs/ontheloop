@@ -509,13 +509,13 @@ class TestRealContractIntegration:
     """Sanity check against the REAL decision-entry.yaml, not a test-local assumption."""
 
     def test_real_contract_required_markers_are_status_date_decision(self) -> None:
-        repo_root = Path(__file__).resolve().parents[3]
+        repo_root = Path(__file__).resolve().parents[4]
         contract_path = repo_root / "docs" / "contracts" / "decision-entry.yaml"
         data = yaml.safe_load(contract_path.read_text(encoding="utf-8"))
         assert data["required_markers"] == ["Status", "Date", "Decision"]
 
     def test_real_contract_metadata_envelope_declares_significance_as_required(self) -> None:
-        repo_root = Path(__file__).resolve().parents[3]
+        repo_root = Path(__file__).resolve().parents[4]
         contract_path = repo_root / "docs" / "contracts" / "decision-entry.yaml"
         data = yaml.safe_load(contract_path.read_text(encoding="utf-8"))
         assert "significance" in data["metadata_envelope"]["required_fields"]

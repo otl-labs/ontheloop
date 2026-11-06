@@ -559,3 +559,14 @@ class TestPreGlobClosureConcernSplitRegistration:
         ok, why = check_test_file_exists(source)
         assert ok is True
         assert why == "test package found"
+
+
+class TestDecisionEntryConformanceConcernSplitRegistration:
+    """The decision-entry conformance check is registered in _CONCERN_SPLIT_TEST_PACKAGES: its flat mirror test was at
+    the 500-SLOC limit, so its tests live in tests/checks/decisions/validate_decision_entry_conformance/ (Decision 128)."""
+
+    def test_maps_decision_entry_conformance_to_concern_split_package(self) -> None:
+        source = ROOT / "scripts" / "checks" / "decisions" / "validate_decision_entry_conformance.py"
+        result = map_source_to_test(source)
+        assert result == ROOT / "tests" / "checks" / "decisions" / "validate_decision_entry_conformance"
+        assert not (ROOT / "tests" / "checks" / "decisions" / "test_validate_decision_entry_conformance.py").exists()

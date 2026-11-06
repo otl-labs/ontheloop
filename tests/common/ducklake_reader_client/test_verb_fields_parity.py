@@ -7,7 +7,8 @@ The four SELECT * verbs resolve through resolve_table_spec(table).ordered_column
 contract, only that this test is internally consistent.
 
 COPIES (never imports) the DuckDB verb-execution harness pattern from
-tests/test_session_preflight_cache_serving.py (_con/_run_verb, ~lines 65-85):
+tests/test_session_preflight_cache_serving.py (_con/_run_verb, ~lines 65-85), opening through
+tests/fixtures/duckdb_connect.py instead of duckdb.connect:
 validate_no_cross_test_imports forbids importing any module whose final dotted component starts
 with test_, and tests/fixtures/ducklake_fakes.py's FakeCon is a connection double that cannot
 execute SQL.
@@ -22,6 +23,7 @@ duckdb = pytest.importorskip("duckdb")
 from src.common.ducklake_event_read_verbs import EVENT_READS  # noqa: E402
 from src.common.ducklake_reader_client import _NAMED_READS_VERSION_PIN, ALL_TABLE_COLUMNS, VERB_FIELDS  # noqa: E402
 from src.common.ducklake_scd2_schema import NAMED_READS, NAMED_READS_VERSION, ScdTableSpec, resolve_table_spec  # noqa: E402
+from tests.fixtures import duckdb_connect  # noqa: E402
 
 # The four SELECT * verbs: their VERB_FIELDS entry is the ALL_TABLE_COLUMNS sentinel, resolved
 # through the table spec below rather than hand-copied (see module docstring).
@@ -34,7 +36,7 @@ _PARAM_VALUES = {"since_ts": "2024-01-01T00:00:00+00:00", "near": "a.py|1", "ter
 
 
 def _con() -> "duckdb.DuckDBPyConnection":
-    con = duckdb.connect()
+    con = duckdb_connect.connect()
     con.execute("SET TimeZone='UTC'")
     return con
 
