@@ -4,7 +4,7 @@ handoff_policy:
   timeout_disposition: blocked
 slug: telemetry-capture-deferral-warning
 intent: >-
-  Make a Claude Code session whose turn capture keeps deferring (deferred_no_pin) or stays halted say so within two turns:
+  Make a Claude Code session whose turn capture keeps deferring (deferred_no_pin) or stays halted say so by its third prompt:
   the agent and the human see one in-session warning, a telemetry_verify alarm rec (one open rec for the class, its context naming the Claude Code version) leaves
   the container, and
   the operator verify command reports an unpinned tree as a finding, so the next capture break is a minutes-long noisy
@@ -21,8 +21,8 @@ scope:
   - file: scripts/telemetry_capture/capture_warning.py
     action: Create
     purpose: >-
-      Stdlib-only at import (json, os, re, tempfile, time, pathlib, typing; every other import is lazy inside the one
-      function that files the alarm), so the UserPromptSubmit shim can import it before any switch or credential work.
+      Stdlib-only at import (json, os, re, tempfile, time, datetime, pathlib, typing; every other import is lazy inside the
+      functions that need them: file_unpinned_alarm and unpinned), so the UserPromptSubmit shim can import it before any switch or credential work.
       Holds: STATE_DIRNAME = "telemetry-capture" (a test pins it equal to state.STATE_DIRNAME), DIAGNOSTICS
       "diagnostics.jsonl", WARNING_MARKER "capture_warning.json", ALARM_MARKER "unpinned_alarm.json", STOP_EVENTS
       ("Stop", "StopFailure"), TRIGGER_PASSES = 2, REARM_EVERY = 25, ALARM_ATTEMPTS = 3, VERSION = ^\d+\.\d+\.\d+$.
@@ -35,23 +35,33 @@ scope:
       verify and VP step 9). Rule DW-2 (warning, once per episode): prompt_warning(transcript_path, session_id) returns
       the JSON line to print, or None. It returns a line when the reason is set and the marker is absent, names another
       reason, or holds a streak at least REARM_EVERY below the current one; it then writes the marker {reason, streak, at}
-      by temp file plus os.replace (a failed write still returns the line: loud beats silent). When the latest Stop pass
-      ended sent or no_rows it deletes the marker and returns None, so a recovered tree that breaks again warns afresh.
+      by temp file plus os.replace (a failed write still returns the line: loud beats silent). Whenever the persistent reason
+      is None (the latest Stop pass ended sent, no_rows, stopped or anything else outside a deferred or halted run) it
+      deletes the marker and returns None, so a tree that recovers, or whose run is broken by another outcome, warns afresh
+      once a new run reaches TRIGGER_PASSES.
       The line is one JSON object {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": TEXT},
       "systemMessage": TEXT} where TEXT is the fixed ASCII template for the reason (pinned in execution_steps[1]) filled
-      with the streak and the latest Stop pass's cli_version (or "unknown" when absent or not matching VERSION). Reads only
+      with the streak and, for deferred_no_pin only, the latest Stop pass's cli_version (or "unknown" when absent or not
+      matching VERSION; a halted pass returns before the runner reads the root, so the halted text names no version). Reads only
       the diagnostics file (DIAGNOSTICS_KEEP bounds it at 500 lines) and the marker; takes no lock, starts no subprocess,
       tolerates a missing state directory, never raises. cli_version(root: bytes) returns the version field of the last
-      root record that has one, if it matches VERSION, scanning from the end of the bytes and parsing only complete lines.
+      root record that has one, if it matches VERSION, scanning from the end of the bytes and parsing only complete lines;
+      version_field(root: bytes) returns {"cli_version": v} or {} so the runner's call site adds no branch.
       Rule DW-3 (alarm): file_unpinned_alarm(transcript_path, session_id, *, portal=None, reader=None, now=None) acts only
       when the persistent reason is deferred_no_pin (a halt warns, never files) and the alarm marker is absent or records a
-      failure with attempts below ALARM_ATTEMPTS. It calls scripts.telemetry_verify.alarms.raise_alarms with findings
-      {"unpinned_tree": streak}, scope "claude_code=<version or unknown>", alarm_at None, file this module's path,
+      failure with attempts below ALARM_ATTEMPTS. It runs under the tree lock (CaptureState(state_dir).acquire(0.0), lazily
+      imported; a busy lock skips this attempt without counting it), so two overlapping detached Stop runners cannot both
+      see the marker absent and double-file; the reader's and portal's own 180 s request timeouts bound the call, which
+      runs only in the already-detached runner, never in the hook. It calls scripts.telemetry_verify.alarms.raise_alarms with findings
+      {"unpinned_tree": streak}, scope "claude_code=<version or unknown>", alarm_at None, now (the now argument, defaulting
+      to datetime.now(timezone.utc); raise_alarms takes it keyword-only with no default), file this module's path,
       acceptance_for scripts.telemetry_capture.verify.acceptance_for, declared (), parser_version PARSER_VERSION, then
       writes the alarm marker {action, version, at} (the episode action, or "alarm_error:<ExceptionClass>" with attempts
       incremented). Returns the action token; never raises. raise_alarms matches the one open rec on finding_class only, so
       every tree and version updates the same rec and scope= in its context is last-writer-wins: the version names the
-      latest affected release, not a per-version rec. unpinned(tree_path, session_id) is True when the persistent
+      latest affected release, not a per-version rec. The alarm marker is never cleared on recovery (once per tree, by
+      design): a tree that recovers and breaks again re-warns in-session but files no second alarm, since the class's one
+      open rec already carries the break or a fix closed it and rec-4940 watches arrival from outside. unpinned(tree_path, session_id) is True when the persistent
       reason is deferred_no_pin and project_ref_pin(FsTree(tree)) is None (both imported lazily).
   - file: .claude/hooks/stop_log_turn.py
     action: Modify
@@ -65,9 +75,9 @@ scope:
   - file: scripts/telemetry_capture/runner.py
     action: Modify
     purpose: >-
-      The deferred_no_pin branch of _locked_pass records cli_version (capture_warning.cli_version over the pass's root
-      bytes) on the diagnostics record when it matches VERSION, else records nothing. No other behaviour changes; the
-      module docstring's "Nothing is ever printed" stays true.
+      The deferred_no_pin branch of _locked_pass calls record.update(capture_warning.version_field(root)) before _finish:
+      no new branch, because _locked_pass is at 19 of the 20-branch limit (validate_cc_limits _BRANCH_TYPES, measured at
+      planning). No other behaviour changes; the module docstring's "Nothing is ever printed" stays true.
   - file: scripts/telemetry_capture/__main__.py
     action: Modify
     purpose: >-
@@ -341,6 +351,7 @@ context:
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 8}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 10}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -356,7 +367,7 @@ execution_steps:
     ended deferred_no_pin (no capture pin found; Claude Code {version}), so nothing from this session reaches the telemetry
     warehouse. Tell the operator in your next status. Detail: bin/venv-python -m scripts.telemetry_capture status --tree
     <this session's transcript>." halted: "[telemetry_capture] WARNING: turn capture is halted for this session. The last
-    {n} Stop passes ended halted (Claude Code {version}), so nothing new from this session reaches the telemetry warehouse.
+    {n} Stop passes ended halted, so nothing new from this session reaches the telemetry warehouse.
     Tell the operator in your next status. Detail: bin/venv-python -m scripts.telemetry_capture status --tree <this
     session's transcript>; an operator clears it with clear-halt after fixing the cause."
   - >-
@@ -364,8 +375,9 @@ execution_steps:
     scripts/telemetry_capture/verify.py per their scope rows.
   - >-
     Create tests/telemetry_capture/test_deferred_no_pin_surface.py with: test_second_deferred_stop_emits_one_warning,
-    test_verify_reports_unpinned_tree (driven through cli.main with a fake reader_factory and verify.credentials_available
-    monkeypatched to True, so no boto3 lookup runs; no cursor, two deferred Stop passes, no pin: VERIFY
+    test_verify_reports_unpinned_tree (driven through cli.main with a fake reader_factory and boto3.Session monkeypatched
+    to a stub like test_main.py's _Boto3Session, because run_verify binds credentials_available as a default argument and
+    _cmd_verify passes none, so patching the module attribute would be inert; no network or STS call runs; no cursor, two deferred Stop passes, no pin: VERIFY
     status=unpinned_tree, alarms=unpinned_tree, exit 1, no portal call; --assert-zero unpinned_tree on that tree exits 1;
     on a pinned completed tree, with run_verify returning a completed result whose counts hold root_checked 1, exits 0;
     a tree with no passes: status=no_cursor, exit 2),
@@ -374,11 +386,14 @@ execution_steps:
     test_obligations row),
     test_deferred_pass_records_only_a_valid_version, test_capture_warning_imports_only_the_stdlib (AST over module-level
     imports, plus STATE_DIRNAME parity), test_warning_json_matches_hook_canary_shape (the hookSpecificOutput keys and
-    hookEventName equal the canary's printed JSON), test_detached_run_files_one_version_scoped_alarm (raise_alarms
-    monkeypatched: called once with {"unpinned_tree": 2} and scope claude_code=2.1.318 after the second pass, not again
-    after the third; a raising fake is retried until ALARM_ATTEMPTS then stops), test_prompt_warning_record_is_not_a_witness
+    hookEventName equal the canary's printed JSON), test_detached_run_files_one_version_scoped_alarm (the root records it
+    builds override the corpus fixture's "version": "2.1.0" with "2.1.318"; raise_alarms monkeypatched: called once with
+    {"unpinned_tree": 2} and scope claude_code=2.1.318 after the second pass, not again after the third; a raising fake
+    is retried until ALARM_ATTEMPTS then stops; a held tree lock skips the attempt uncounted), test_prompt_warning_record_is_not_a_witness
     (a UserPromptSubmit hook_success record carrying the warning, in both its heldContent and plain copies, is not
-    is_witness_record and leaves record_turn's turn rows equal to the same tree without it),
+    is_witness_record, the tree's witness count is unchanged, and record_turn's rows other than hook process_event
+    observations equal those of the control tree, which carries the same UserPromptSubmit hook_success record once with
+    empty stdout and no heldContent twin),
     test_sa02_states_the_deferral_warning_assumptions (SA-02's assumption text in docs/contracts/ports.yaml contains
     "hookSpecificOutput.additionalContext" and "version field"; rec-4942 edits SA-02 too, so whichever lands second keeps
     both sentences).
@@ -390,10 +405,27 @@ execution_steps:
     semantic_break: false, change_class: field_add, summary: "PLAN-telemetry-capture-deferral-warning (rec-4941, Class D):
     structural_assumptions SA-02 extends to UserPromptSubmit additionalContext and systemMessage delivery and the
     transcript record version field; no new port."}
-  - Execute Verification Plan -- run each step; loop until pass; on an unrecoverable failure stop and RCA (Decision 55).
   - >-
-    Merge with a squash commit whose body carries "Resolves: rec-4941"; then run post-deploy steps 8 and 9.
-  - 'Report: what was implemented, verification results, step 9 outcome (observed or UNPROVEN-LIVE with reason).'
+    Commit (feat(telemetry-capture-deferral-warning): ..., whose body carries "Resolves: rec-4941" as its own paragraph),
+    then run VP 1-6; loop until pass; on an unrecoverable failure stop and RCA (Decision 55).
+  - >-
+    CLOSURE, in this order, each outcome reported separately (implement skill Commit Flows; docs/contracts/git-ops.yaml
+    handoff_sequence and rebase_phase_distinction.commit_flow_time): (1) GitHub readiness (bin/venv-python -m
+    scripts.session.github_readiness; unknown is never PASS). (2) The graduation walk writes the registry row for VP 1's
+    graduation_check_id capture-deferral-warning-surface; flip implementation_declared to true in this plan; run --pre;
+    commit. (3) git fetch origin main && bin/venv-python -m scripts.session.rebase_resolve (STOP on a non-mechanical
+    conflict; claude-p-capture-adapter's build PR 1856 shares runner.py and __main__.py). (4) Parent validator evidence:
+    VP 7 full tier on that committed clean tree, backgrounded with a 2 h limit, then bin/venv-python -m
+    scripts.checks.validation_result --verify-head for that HEAD; any tracked write after VP 7 voids it and needs a re-run.
+    (5) Structured postflight evidence: write the scripts.session.postflight_evidence.CATEGORIES JSON in the scratchpad
+    (outside the tree), then bin/venv-python -m scripts.session.postflight --evidence <file>. (6) The real outcome: push
+    (git push -u origin HEAD as its own call, --force-with-lease when the branch was already pushed), the build PR citing
+    rec-4941, CI green by event-driven wake, fresh-context code review PROCEED (a fix for a review finding repeats
+    (3)-(5)), squash merge with the PR body (carrying Resolves: rec-4941) as the commit message, the merge SHA, then VP 8
+    and VP 9.
+  - >-
+    Report: what was implemented, verification results, the pushed SHA, the PR number, the merge SHA, the rec-4941 closure
+    read-back, and the VP 9 outcome (observed with the alarm rec id, or UNPROVEN-LIVE with the reason).
 work_areas: []
 rollback: >-
   Revert the squash commit; no state migrates. Marker files left in live sessions' state directories are inert without the
