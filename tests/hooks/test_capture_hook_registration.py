@@ -159,8 +159,14 @@ def _pin_tree(command: str) -> MemTree:
 
 
 def test_the_recorded_status_message_satisfies_the_parser_rules() -> None:
-    for event, message in STATUS_MESSAGES.items():
-        assert hook_name({"command": message}) == "hook:" + message.split()[0].rsplit(".", 1)[0]
+    names = {event: hook_name({"command": message}) for event, message in STATUS_MESSAGES.items()}
+    assert names == {
+        "SessionStart": "hook:session_start_log_turn",
+        "Stop": "hook:stop_log_turn",
+        "StopFailure": "hook:stop_log_turn",
+        "UserPromptSubmit": "hook:stop_log_turn",
+        "SessionEnd": "hook:session_end_log_turn",
+    }
     pin = STATUS_MESSAGES["SessionStart"]
     assert project_ref_pin(_pin_tree(pin)) == "ontheloop"
     assert hook_script(pin)[0] == PIN_SCRIPT_STEM
