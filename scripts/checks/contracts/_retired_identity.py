@@ -54,15 +54,11 @@ SWEEP_PINS: dict[str, str] = {
     "packages/ontheloop-rs/Cargo.toml": "descriptive_literals",
     "packages/ontheloop-rs/src/lib.rs": "descriptive_literals",
     "scripts/checks/hygiene/validate_licence_consistency.py": "descriptive_literals",
-    "scripts/convergence_health/escalate.py": "owner_literal_defaults",
-    "scripts/repo_identity.py": "owner_literal_defaults",
     "terraform/github/CLAUDE.md": "descriptive_literals",
     "tests/checks/ci_guards/test_validate_dependabot_automation.py": "dependabot_repository_guard",
     "scripts/telemetry_verify/completeness.py": "owner_literal_defaults",
-    "tests/checks/misc/test_validate_ghas_probe.py": "owner_literal_defaults",
     "tests/telemetry_verify/test_completeness.py": "owner_literal_defaults",
     "tests/test_ontheloop_placeholder_packages.py": "descriptive_literals",
-    "tests/test_repo_identity.py": "owner_literal_defaults",
 }
 
 SURVIVOR_PINS: dict[str, str] = {

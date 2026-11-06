@@ -75,6 +75,41 @@ def test_consumer_row_names_the_contract() -> None:
 
 
 def test_structure_bars_nested_doing_agents_but_allows_gates() -> None:
-    structure = " ".join(_DOC["roles"]["structure"].split())
+    structure = _flat(_DOC["roles"]["structure"])
     assert "starts no planning or implementation agent of its own (Decision 229 cl.2)" in structure
     assert "may run the repo's verdict gates and advisor consults as subagents" in structure
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_build_merge_skips_second_word_only_for_bound_text() -> None:
+    items = [_flat(item) for item in _DOC["standing_authorisation"]]
+    bound = [item for item in items if "approved_text verify" in item]
+    assert len(bound) == 1
+    for needle in (
+        "code review PROCEED + green CI",
+        "no second operator word",
+        "validate_merge_step",
+        "has no commit after that plan merge",
+        (
+            "the operator's word on the final diff stays required for CODEOWNERS paths (rec-2827), hook and other "
+            "security code, IAM, spend and deploys not run by the reviewed CI channel"
+        ),
+        "rec-4769",
+        "overrides always_ask handling",
+        "a loosened test or assertion",
+    ):
+        assert needle in bound[0], needle
+    build = next(step for step in _DOC["lifecycle"]["steps"] if step["step"] == "build")
+    assert _flat(build["rule"]).endswith("that standing_authorisation does not already cover.")
+    acting = [_flat(item) for item in _DOC["approvals"] if "is given in that worker" in item]
+    assert len(acting) == 1
+    assert "except approved text a build places under standing_authorisation" in acting[0]
+    handoff = _flat(_DOC["templates"]["handoff_note"])
+    assert "Approved text: <sidecar path, approved digest, plan merge commit;" in handoff
+    assert _DOC["contract"]["contract_version"] == 2
+    entry = next(e for e in _DOC["amendment_log"] if "PLAN-coordinator-approve-once" in _flat(e["summary"]))
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(entry["date"]))
+    assert entry["semantic_break"] is True

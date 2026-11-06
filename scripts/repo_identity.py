@@ -1,15 +1,15 @@
 """The repository's GitHub identity, resolved once per call (rec-3903; breakage_map.owner_literal_defaults).
 
 Every script that queries GitHub reads the repository from GITHUB_REPOSITORY (set by GitHub Actions) when it is a
-well-formed owner/name, else FALLBACK_FULL_NAME, so CI callers follow the GitHub transfer at once and local callers
-keep the fallback until the post-transfer sweep moves it (docs/contracts/github-org-transfer.yaml). Never raises.
+well-formed owner/name, else FALLBACK_FULL_NAME, so CI callers follow the repository at once and local callers
+resolve the post-transfer repository (docs/contracts/github-org-transfer.yaml). Never raises.
 """
 
 from __future__ import annotations
 
 import os
 
-FALLBACK_FULL_NAME = "benjamin-blake/theseus"
+FALLBACK_FULL_NAME = "otl-labs/ontheloop"
 
 
 def full_name() -> str:
