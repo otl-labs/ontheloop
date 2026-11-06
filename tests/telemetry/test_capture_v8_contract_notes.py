@@ -88,7 +88,7 @@ def test_ports_name_ci_pass_and_record_the_adapter_assumption() -> None:
     doc = load("ports.yaml")
     pc01 = next(c for c in doc["coupling_findings"] if c["id"] == "PC-01")
     assert "scripts/telemetry_capture/ci_pass.py" in pc01["description"]
-    sa05 = next(a for a in doc["structural_assumptions"] if a["id"] == "SA-05")
-    assert sa05["location"].startswith("scripts/telemetry_capture/ci_pass.py") and sa05["owning_item"] == "T4.24:c9"
-    assert "--session-id" in sa05["assumption"] and "host-run.json" in sa05["assumption"]
+    sa06 = next(a for a in doc["structural_assumptions"] if a["id"] == "SA-06")
+    assert sa06["location"].startswith("scripts/telemetry_capture/ci_pass.py") and sa06["owning_item"] == "T4.24:c9"
+    assert "--session-id" in sa06["assumption"] and "host-run.json" in sa06["assumption"]
     assert len(logged(doc["amendment_log"])) == 1

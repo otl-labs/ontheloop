@@ -103,3 +103,37 @@ resource "github_repository_environment" "deployment_approval_probe" {
     custom_branch_policies = false
   }
 }
+
+# GitHub Environment: approved-text (rec-4769; Decision 246).
+#
+# The operator-only approval gate for approved text: a run of approved-text-approval.yml waits here, and CI reads
+# GitHub's record of the operator's approval. Required reviewers come from var.gated_apply_reviewer_user_ids; with
+# can_admins_bypass false GitHub records an approval only from a required reviewer, which the adapter relies on
+# instead of reading the Environment (the session proxy refuses that path). Never in any OIDC trust, never a job
+# holding id-token or secrets. Created by the operator's hand apply after the build merges, with no UI step; the
+# explicit main-only policy mirrors tf_trusted_plan (rec-4651). rec-4911 adds the import blocks.
+resource "github_repository_environment" "approved_text" {
+  repository          = github_repository.this.name
+  environment         = "approved-text"
+  prevent_self_review = false
+  can_admins_bypass   = false
+
+  reviewers {
+    users = var.gated_apply_reviewer_user_ids
+  }
+
+  deployment_branch_policy {
+    protected_branches     = false
+    custom_branch_policies = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "github_repository_environment_deployment_policy" "approved_text_main" {
+  repository     = github_repository.this.name
+  environment    = github_repository_environment.approved_text.environment
+  branch_pattern = "main"
+}
