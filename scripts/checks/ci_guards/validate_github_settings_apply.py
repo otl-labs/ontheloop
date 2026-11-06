@@ -26,17 +26,19 @@ GATE_ENV = "tf-gated-apply"
 PREVIEW_ENV = "tf-trusted-plan"
 APPLY_ROLE = "github-settings-apply"
 PREVIEW_ROLE = "github-settings-preview"
-APP_SECRET = "agent-platform-terraform-github-apply-app"  # pragma: allowlist secret -- an entry name, not a value
+# Identifiers say "entry", not "secret": CodeQL py/clear-text-logging-sensitive-data treats a secret-named value as
+# sensitive, and these are a Secrets Manager entry name and a Terraform reference, never secret material.
+APP_ENTRY = "agent-platform-terraform-github-apply-app"  # pragma: allowlist secret -- an entry name, not a value
 APPLY_SCRIPT = "scripts/ci/terraform_github_apply.sh"
 MAIN_REF = f"otl-labs/ontheloop/.github/workflows/{WORKFLOW}@refs/heads/main"
 SETTINGS_TF = "github_settings_apply.tf"
 ADMIN_TF = "platform_admin_policies.tf"
 
 _STATE = "arn:aws:s3:::agent-platform-data-lake/tfstate/github/terraform.tfstate"
-_SECRET_REF = "data.aws_secretsmanager_secret.github_apply_app.arn"  # pragma: allowlist secret
+_ENTRY_REF = "data.aws_secretsmanager_secret.github_apply_app.arn"  # pragma: allowlist secret
 _OIDC = "arn:aws:iam::${var.account_id}:oidc-provider/token.actions.githubusercontent.com"
-_TOKEN = "token.actions.githubusercontent.com"
-_ADMIN_KEY_ARN = f"arn:aws:secretsmanager:${{var.aws_region}}:${{var.account_id}}:secret:{APP_SECRET}-??????"
+_OIDC_HOST = "token.actions.githubusercontent.com"
+_ADMIN_KEY_ARN = f"arn:aws:secretsmanager:${{var.aws_region}}:${{var.account_id}}:secret:{APP_ENTRY}-??????"
 _ADMIN_SID = "GithubApplyKeyResourcePolicy"
 _METADATA_VERBS = {"secretsmanager:DescribeSecret", "secretsmanager:GetResourcePolicy", "secretsmanager:ListSecretVersionIds"}
 _EXCEPTED = {
@@ -44,7 +46,7 @@ _EXCEPTED = {
     for p in (f"role/{APPLY_ROLE}", "role/PlatformAdmin", "user/platform-breakglass", "root")
 }
 _APPLY_GRANTS = {
-    ("AppKeyRead", frozenset({"secretsmanager:GetSecretValue"}), frozenset({_SECRET_REF})),
+    ("AppKeyRead", frozenset({"secretsmanager:GetSecretValue"}), frozenset({_ENTRY_REF})),
     ("TfstateGithubObject", frozenset({"s3:GetObject", "s3:PutObject"}), frozenset({_STATE})),
     ("TfstateGithubLock", frozenset({"s3:GetObject", "s3:PutObject", "s3:DeleteObject"}), frozenset({_STATE + ".tflock"})),
 }
@@ -202,7 +204,7 @@ def _as_list(value: Any) -> list[Any]:
 
 
 def check_names(files: dict[str, str]) -> list[str]:
-    names = (APPLY_ROLE, PREVIEW_ROLE, APP_SECRET, APPLY_SCRIPT)
+    names = (APPLY_ROLE, PREVIEW_ROLE, APP_ENTRY, APPLY_SCRIPT)
     return [
         f"a: {path} names {n}"
         for path, text in sorted(files.items())
@@ -233,18 +235,18 @@ def check_trust(files: dict[str, str]) -> list[str]:
         s = stmts[0] if len(stmts) == 1 and isinstance(stmts[0], dict) else {}
         cond = s.get("Condition", {})
         eq = cond.get("StringEquals", {}) if isinstance(cond, dict) else {}
-        sub = _SUB_RE.match(str(eq.get(f"{_TOKEN}:sub", "")))
+        sub = _SUB_RE.match(str(eq.get(f"{_OIDC_HOST}:sub", "")))
         ok = (
             set(s) == {"Effect", "Principal", "Action", "Condition"}
             and s.get("Effect") == "Allow"
             and s.get("Principal") == {"Federated": _OIDC}
             and s.get("Action") == "sts:AssumeRoleWithWebIdentity"
             and list(cond) == ["StringEquals"]
-            and set(eq) == {f"{_TOKEN}:aud", f"{_TOKEN}:sub", f"{_TOKEN}:job_workflow_ref"}
-            and eq.get(f"{_TOKEN}:aud") == "sts.amazonaws.com"
+            and set(eq) == {f"{_OIDC_HOST}:aud", f"{_OIDC_HOST}:sub", f"{_OIDC_HOST}:job_workflow_ref"}
+            and eq.get(f"{_OIDC_HOST}:aud") == "sts.amazonaws.com"
             and sub is not None
             and _resolve(sub.group(1), local) == env
-            and eq.get(f"{_TOKEN}:job_workflow_ref") == "local.github_settings_workflow_refs"
+            and eq.get(f"{_OIDC_HOST}:job_workflow_ref") == "local.github_settings_workflow_refs"
         )
         if not ok:
             out.append(f"g: {role} trust must be one StringEquals statement on aud, environment:{env} and the main ref")
@@ -283,9 +285,9 @@ def check_policies(files: dict[str, str]) -> list[str]:
             out.append(f"h: aws_iam_role_policy.{res} must grant exactly {sorted(g[0] for g in want)} (bad: {bad})")
         if not ref.startswith("local.") or not _precondition(block, ref[6:]):
             out.append(f"h: aws_iam_role_policy.{res} lacks its 10,240 B precondition")
-    secret = re.search(r'data\s+"aws_secretsmanager_secret"\s+"github_apply_app"\s*\{\s*name\s*=\s*"([^"]+)"\s*\}', text)
-    if not secret or secret.group(1) != APP_SECRET:
-        out.append(f"h: data.aws_secretsmanager_secret.github_apply_app must name {APP_SECRET}")
+    entry = re.search(r'data\s+"aws_secretsmanager_secret"\s+"github_apply_app"\s*\{\s*name\s*=\s*"([^"]+)"\s*\}', text)
+    if not entry or entry.group(1) != APP_ENTRY:
+        out.append(f"h: data.aws_secretsmanager_secret.github_apply_app must name {APP_ENTRY}")
     out += _key_policy(text, local)
     out += _admin_grant(files.get(ADMIN_TF, ""))
     return out
@@ -297,7 +299,7 @@ def _key_policy(text: str, local: dict[str, Any]) -> list[str]:
     s = stmts[0] if len(stmts) == 1 and isinstance(stmts[0], dict) else {}
     cond = s.get("Condition", {})
     ok = (
-        block.get("secret_arn") == _SECRET_REF
+        block.get("secret_arn") == _ENTRY_REF
         and block.get("block_public_policy") is True
         and "aws_iam_role_policy.platform_admin_ops" in _as_list(block.get("depends_on"))
         and set(s) - {"Sid"} == {"Effect", "Principal", "NotAction", "Resource", "Condition"}

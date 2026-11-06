@@ -50,7 +50,7 @@ def test_registered_check_passes_on_the_real_tree(capsys) -> None:
 # (a) -------------------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", [v.APPLY_ROLE, v.PREVIEW_ROLE, v.APP_SECRET, v.APPLY_SCRIPT])
+@pytest.mark.parametrize("name", [v.APPLY_ROLE, v.PREVIEW_ROLE, v.APP_ENTRY, v.APPLY_SCRIPT])
 def test_a_another_workflow_naming_a_fenced_name(tree, name) -> None:
     names = dict(tree[0])
     names[".github/workflows/other.yml"] = f"jobs:\n  j:\n    steps:\n      - run: echo {name}\n"
@@ -59,8 +59,8 @@ def test_a_another_workflow_naming_a_fenced_name(tree, name) -> None:
 
 def test_a_a_composite_action_naming_the_key(tree) -> None:
     names = dict(tree[0])
-    names[".github/actions/x/action.yml"] = f"runs:\n  steps:\n    - run: aws secretsmanager x {v.APP_SECRET}\n"
-    assert v.check_names(names) == [f"a: .github/actions/x/action.yml names {v.APP_SECRET}"]
+    names[".github/actions/x/action.yml"] = f"runs:\n  steps:\n    - run: aws secretsmanager x {v.APP_ENTRY}\n"
+    assert v.check_names(names) == [f"a: .github/actions/x/action.yml names {v.APP_ENTRY}"]
 
 
 def test_a_the_apply_workflow_itself_may_name_them(tree) -> None:
@@ -190,7 +190,7 @@ def test_h_size_precondition_dropped(boot) -> None:
 
 
 def test_h_data_source_names_another_entry(boot) -> None:
-    _swap(boot, _SETTINGS, f'  name = "{v.APP_SECRET}"', '  name = "agent-platform-other"')
+    _swap(boot, _SETTINGS, f'  name = "{v.APP_ENTRY}"', '  name = "agent-platform-other"')
     assert any(x.startswith("h: data.aws_secretsmanager_secret") for x in v.check_policies(boot))
 
 
@@ -289,7 +289,7 @@ def test_deploy_paths_provisioning_row_names_both_roles() -> None:
 
 def test_secret_material_domains_name_the_entry_and_its_policy() -> None:
     data = yaml.safe_load((_ROOT / "docs" / "contracts" / "secret-material-handling.yaml").read_text(encoding="utf-8"))
-    domains = [d for d in data["patterns"]["domains"] if v.APP_SECRET in d]
+    domains = [d for d in data["patterns"]["domains"] if v.APP_ENTRY in d]
     assert len(domains) == 1 and "resource policy" in domains[0] and SETTINGS_PATH in domains[0]
 
 
