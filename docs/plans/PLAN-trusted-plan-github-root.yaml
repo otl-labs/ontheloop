@@ -108,8 +108,10 @@ scope:
       dir, S3 prefix. The prefix must equal tf-provider-mirror exactly (the seed role holds bucket-wide DeleteObject, so a
       --delete sync to any other prefix could erase tfstate/ or tfplan/); any other value, or a missing or extra argument,
       exits 2 with SEED_BAD_ARGS before any terraform or aws call. Runs terraform providers mirror (linux_amd64 only, as
-      today) for terraform/personal and the same for
-      terraform/github into the SAME dir (no init needed for providers mirror), asserts that a linux_amd64 package of the
+      today) for terraform/personal (initialized by the workflow's existing init step) and, after `terraform
+      -chdir=terraform/github init -backend=false -input=false -lockfile=readonly` (providers mirror reads the lock file
+      only in an initialized directory, and readonly fails rather than rewrite it), the same for terraform/github into
+      the SAME dir, asserts that a linux_amd64 package of the
       exact locked version exists for every provider either root's .terraform.lock.hcl names (today hashicorp/aws and
       kislerdm/neon from terraform/personal, integrations/github from terraform/github; read from the lockfiles, never a
       hardcoded list), else `MIRROR_MISSING <address> <version>`, exit 1, nothing published (this also closes the
@@ -181,7 +183,8 @@ scope:
       red cases with the aws, the neon and the github package absent, and with a mirrored github version other than the
       locked one; each asserts the aws stub is not called and the exit is 1 with the MIRROR_MISSING line); a prefix other than tf-provider-mirror (red
       cases tfstate, tfplan, an empty value and tf-provider-mirror/../tfstate) and a missing or extra argument exit 2 with
-      SEED_BAD_ARGS and neither stub is called; the workflow's step calls the script with the two env values.
+      SEED_BAD_ARGS and neither stub is called; the github root's init (-backend=false, -lockfile=readonly) runs before
+      its mirror call (stub call order); the workflow's step calls the script with the two env values.
   - file: tests/checks/contracts/test_validate_github_org_transfer.py
     action: Modify
     purpose: >-
@@ -197,7 +200,10 @@ scope:
       (test_real_tree[token_ephemeral_no_default] reads variables.tf). The synthetic fixture follows: _GOOD's
       github_token block moves from its "variables.tf" key into "main.tf" beside the provider block, and the four
       token_ephemeral_no_default red cases mutate "main.tf" (else _mutated's assert fails at collection); no red case is
-      dropped. PR 4: see the PR 4 row.
+      dropped. PR 4 leaves this file unchanged: plan_workflow_keeps_the_token_lane (:78-79) already holds on the
+      rewritten workflow, which keeps the minted installation token in TF_VAR_github_token as process env and names none
+      of GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID or GITHUB_APP_PEM_FILE (the App key's location is predicate (k)'s and
+      the acceptance test's header rule's job); VP 12 still runs it.
   - file: config/agent/verification_registry/entries/trusted-plan-screen-main.yaml
     action: Create
     purpose: >-
@@ -316,7 +322,9 @@ scope:
     purpose: >-
       PR 4. Rewritten on the terraform-plan-trusted.yml pattern. on: pull_request_target, types [opened, synchronize,
       reopened], paths ['terraform/github/**'] only (the workflow and reporter self-paths go: under pull_request_target they
-      run main's text). permissions: {} at top; concurrency per PR, cancel-in-progress; workflow-level `defaults: run:
+      run main's text). permissions: {} at top; concurrency group `terraform-github-plan-pr-${{ github.event.pull_request.number }}` (today's
+      group, kept) with cancel-in-progress, never S3's `terraform-plan-trusted-` group, because concurrency groups are
+      repository-wide and PR 5 touches both roots, so a shared group would cancel one root's run; workflow-level `defaults: run:
       shell: bash` (as terraform-plan-trusted.yml:24-26), so every run step is `bash --noprofile --norc -eo pipefail {0}`
       and a refusal exit in the overlay or screen step is not masked by its `| tee` (GitHub's default for a step with no
       shell is `bash -e {0}`, no pipefail); no step sets its own shell. Job plan: if same-repo head AND base
@@ -349,7 +357,9 @@ scope:
       the check); one post step "Post the comment" (if: `${{ !cancelled() && steps.checkout.outcome == 'success' }}`, the
       expression form terraform-plan-trusted.yml:148 uses, since a bare leading `!` is a YAML tag; so a
       CONFIG_MISSING refusal is posted too; the step reads no PR file) that chooses the category from step outcomes
-      only, mapping every step before it except checkout (its success is the post step's own condition): aws-region and
+      only, read from env keys O_<STEP> as S3 does (the reviewer-ids step's key is O_REVIEWERS_STEP, because
+      test_reviewer_ids_never_in_step_env refuses any env key containing REVIEWER_IDS or USER_IDS), mapping every step
+      before it except checkout (its success is the post step's own condition): aws-region and
       config check CONFIG_MISSING; overlay OVERLAY_REFUSED; screen SCREEN_REFUSED;
       assume ASSUME_FAILED; mint MINT_FAILED; reviewer ids REVIEWER_LOOKUP_FAILED; terraform version, setup-terraform and
       init INIT_FAILED; mirror sync MIRROR_FAILED; plan and show PLAN_FAILED; backstop BACKSTOP_REFUSED; visibility probe
@@ -513,7 +523,8 @@ scope:
       both TF_GITHUB_PLAN_APP_PRIVATE_KEY and the substring "repository secret", and every header line naming the key
       also names tf-trusted-plan); a shell rule: the workflow-level defaults.run.shell is exactly bash and no step sets
       shell:; a total-map rule: every step before the post step has an id, and the post step's category map names every
-      one of those ids except checkout; a loader rule: .github/CODEOWNERS names /scripts/ci/plan_names_core.py, which
+      one of those ids except checkout; a concurrency rule: the workflow's concurrency group differs from
+      terraform-plan-trusted.yml's (red case: a copy using S3's group); a loader rule: .github/CODEOWNERS names /scripts/ci/plan_names_core.py, which
       terraform_github_plan_report.py loads by importlib (:21), outside predicate (h)'s static import closure, so it is
       code-owned on purpose and not only because S3's reporter imports it statically (red case: a CODEOWNERS text
       without that line). Plus red cases on synthetic workflow text
@@ -541,12 +552,6 @@ scope:
       integrations/github include filters; no `aws s3 cp`, no upload, no other aws s3 call). test_reviewer_ids_never_in_step_env, test_not_a_required_check, test_taxonomy_row,
       test_admin_root_gate_does_not_derive_github and test_claude_md_pointer keep their assertions. PR 5: see the PR 5
       row.
-  - file: tests/checks/iam_tf/test_terraform_github_provider_auth.py
-    action: Modify
-    purpose: >-
-      PR 4. test_plan_workflow_keeps_the_token_lane and test_workflow_red_cases follow the rewritten workflow (token from
-      the tf-trusted-plan environment secret into TF_VAR_github_token as process env); no assertion loosened. Graduated
-      shard terraform-github-provider-auth-lane is kept unchanged (the class keeps its name).
   # ---------------------------------------------------------------- PR 5: canary, grant removal, approved wording (declares the plan)
   - file: terraform/github/variables.tf
     action: Modify
@@ -1312,6 +1317,7 @@ context:
   - "Registry entry shape: each new entry is config/agent/verification_registry/entries/<check_id>.yaml and carries check_id, primitive_slot test_selector, guard_target, guard_symbol, plan_slug trusted-plan-github-root, graduated_at (the PR's build date, quoted) and graduated_by implement-agent, with node_id under check_spec, as trusted-plan-environment-fence.yaml does (validate_verification_registry.py:137 requires check_id, primitive_slot, guard_target, plan_slug and graduated_at; its placement leg requires the filename to equal check_id)."
   - "Settled without asking (critique round 10, PROCEED): N4, VP 13 stays an attestation with no command, because the session cannot list Environment secrets, and VP 14's Config check is its named executable proof; N1-N3 and N5-N8 are applied, and N1 and N2 are relayed through the coordinator."
   - "Settled without asking (critique round 11): B1, VP 13 is now an operator-run names-only listing whose pasted line is recorded on PR 4 (the PLAN-trusted-plan-identity VP 8 shape), replacing round 10's prose attestation; N6 gives VP 17 and AC 5 the same shape for the repository secret's absence; N3, the workflow header's 'Accepted residual until VP 17' sentence is stale once VP 17 is done, and its removal is handed to rec-4640, which edits the same trust surface next (context append, read back)."
+  - "Settled without asking (critique round 12, PROCEED): N4, VP 7, 18 and 21 stay not-applicable, since each is an admin-credential probe or a validate tier itself and none is graduable; N6, ci.yml's and terraform-plan-trusted.yml's full mirror syncs also fetch integrations/github once it is seeded, a few MB of public provider bytes, accepted; N7, the screen keeps admitting a string-literal import id, because a literal carries no job value and validate_github_org_transfer's stricter rule on main still refuses an id without a variable; N1, N2, N3 and N5 are applied."
   - "Gotcha: python3 -I drops the script directory from sys.path; scripts append the repo root (never insert at 0) and check where scripts resolved (predicate h)."
   - "Gotcha: Actions logs on this public repo are public; read step conclusions only, never paste plan text, and never print an account id, ARN or secret value."
   - "Gotcha: a PR the screen refuses gets no PR-time plan; the operator's own plan stays authoritative for this hand-applied root."
@@ -1331,6 +1337,7 @@ gate_rounds:
   - {gate: plan-critique, round: 9, verdict: REVISE, blocking: 1, nits: 12}
   - {gate: plan-critique, round: 10, verdict: PROCEED, blocking: 0, nits: 8}
   - {gate: plan-critique, round: 11, verdict: REVISE, blocking: 1, nits: 6}
+  - {gate: plan-critique, round: 12, verdict: PROCEED, blocking: 0, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
