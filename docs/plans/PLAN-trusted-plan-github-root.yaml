@@ -39,7 +39,9 @@ scope:
     purpose: >-
       PR 1. Every rule reads its constants from a policy row. `screen --root DIR` gains `--policy ROW` (default
       terraform/personal, so terraform-plan-trusted.yml and the existing CLI test need no edit; screen_root(path,
-      policy=...) the same); an unknown ROW prints REFUSED unknown_root and exits 1. The module keeps module-level aliases
+      policy=...) the same); an unknown ROW prints REFUSED unknown_root and exits 1, and a DIR that is not ROW's own root
+      path (`--root terraform/github` with the default row, or the reverse) prints REFUSED root_policy_mismatch and exits
+      1, so the two arguments cannot be paired wrongly. The module keeps module-level aliases
       of the personal row's constants (MAIN_ONLY_FILES, ALLOWED_FILE_PATHS and the rest; DOC_FILES stays here, shared),
       so trusted_plan_overlay.py and the existing tests keep resolving them. New import rule, applied only where
       imports_allowed: an `import` block has exactly `to` and `id`; `to` is a bare TYPE.NAME address (no instance key,
@@ -139,7 +141,9 @@ scope:
       block, a provider or terraform block outside main.tf, file(), each import_shape violation (function call in id, a
       template id without var.repository_name, a template interpolating var.github_token, one interpolating
       var.gated_apply_reviewer_user_ids, one interpolating a variable outside import_id_vars, `to` of a
-      non-allowlisted type, a keyed or indexed `to`, an extra argument), and an unknown policy row; backstop red cases (`--policy terraform/github`) for a github plan whose
+      non-allowlisted type, a keyed or indexed `to`, an extra argument), an unknown policy row, and root_policy_mismatch
+      for `--root terraform/github` with the default row and for `--root terraform/personal --policy terraform/github`;
+      backstop red cases (`--policy terraform/github`) for a github plan whose
       provider_config is not {github}, and for an importing change of a non-allowlisted type; personal backstop still
       refuses any importing change.
   - file: tests/test_trusted_plan_overlay.py
@@ -279,7 +283,11 @@ scope:
     purpose: >-
       PR 3. Pins agent-platform-github-ci-trusted-plan's job_workflow_ref list as exactly the two current values (F2-A: the
       terraform-github-plan.yml entry stays until rec-4640's admin split-apply, which must edit this pin). No assertion is
-      loosened. Graduated shard trusted-plan-identity is kept unchanged. PR 5: see the PR 5 row.
+      loosened. The existing `files != set(TRUSTED_WORKFLOWS)` coupling (:115-116) is kept unchanged: the fence's
+      TRUSTED_WORKFLOWS already holds both terraform-plan-trusted.yml and terraform-github-plan.yml, and PR 4 does not
+      change it (the new role's own trust pin lives in test_trusted_github_plan_identity.py), so the coupling holds
+      through PR 5; rec-4640's removal of the shared entry must restate it as a named Decision 235 rewrite. Graduated
+      shard trusted-plan-identity is kept unchanged. PR 5: see the PR 5 row.
   # ---------------------------------------------------------------- PR 4: cutover (workflow and fence)
   - file: .github/workflows/terraform-github-plan.yml
     action: Modify
@@ -296,7 +304,9 @@ scope:
       checkout (id checkout, no ref, persist-credentials false); aws-region (id aws_region); config check (step name "Config check": APP_CLIENT_ID, key set, reviewer logins;
       CONFIG_MISSING names only); overlay (OVERLAY_ROOT=terraform/github, python3 -I by path, tee to RUNNER_TEMP);
       screen (screen --root terraform/github --policy terraform/github); assume
-      agent-platform-github-ci-trusted-github-plan, role-session-name tf-trusted-github-plan, fails loudly; mint the plan
+      agent-platform-github-ci-trusted-github-plan, role-session-name tf-trusted-github-plan, with env
+      MASK_AWS_ROLE_ID_ACCOUNT_PART from the AWS_ROLE_ID_ACCOUNT_PART secret as S3's assume step has
+      (validate_actions_account_id_masking), fails loudly; mint the plan
       App token (create-github-app-token, owner and repositories: the running repository's name, the three read
       permissions; the key is the tf-trusted-plan environment secret TF_GITHUB_PLAN_APP_PRIVATE_KEY); reviewer ids to a
       RUNNER_TEMP file (as today); terraform version; setup-terraform; mirror sync of this root's one provider (`aws s3
@@ -326,7 +336,8 @@ scope:
       "$category" --head-sha "$HEAD_SHA" --run-url "$RUN_URL" --overlay-file "$RUNNER_TEMP/overlay.txt" --screen-file
       "$RUNNER_TEMP/screen.txt")` on a refusal, else `BODY=$(<"$RUNNER_TEMP/report.md")`), CHECKS it (`printf '%s'
       "$BODY" | python3 -I "$GITHUB_WORKSPACE/scripts/ci/terraform_github_plan_comment.py" assert-clean --values-file
-      "$RUNNER_TEMP/reviewer_ids"`, APP_CLIENT_ID and the AWS account-id secret the assume step uses in env), then POSTS (`gh pr comment`, and only then appends the
+      "$RUNNER_TEMP/reviewer_ids"`, APP_CLIENT_ID, the AWS account-id secret the assume step uses and the
+      AWS_ROLE_ID_ACCOUNT_PART secret in env), then POSTS (`gh pr comment`, and only then appends the
       checked body to the step summary), in that order; a failed check posts nothing and fails the step. Log rule: no
       step other than the quiet_run.sh-wrapped init, plan and show names tf-init.log, tf-plan.log or tf-show.log;
       `terraform show` runs only with -json; cat, head and tail appear only as `cat config/terraform-version`, the plan
@@ -356,11 +367,11 @@ scope:
       other line is dropped; the finished body is validated against a closed line grammar before printing (fail
       closed). `assert-clean --values-file F`: reads the body on stdin; exit 1 with a fixed message naming only the
       rule if the body holds a GitHub token shape (gh[pousr]_ or github_pat_ prefixes), a PEM marker, the App client id
-      (env APP_CLIENT_ID), the AWS account id (env AWS_ACCOUNT_ID, exact value) or any reviewer id from F's JSON list,
-      each as a whole token; else exit 0, printing nothing. F absent means no ids were resolved yet (every refusal
+      (env APP_CLIENT_ID), the AWS account id (env AWS_ACCOUNT_ID, exact value), the role-id account part (env
+      AWS_ROLE_ID_ACCOUNT_PART, exact value) or any reviewer id from F's JSON list, each as a whole token; else exit 0, printing nothing. F absent means no ids were resolved yet (every refusal
       before the reviewer-ids step), so the id list is empty; this is safe because the ids exist only in that file. F
       present but unreadable or not a JSON list of integers exits 1 (fail closed). An empty APP_CLIENT_ID or
-      AWS_ACCOUNT_ID is skipped for that rule only. This
+      AWS_ACCOUNT_ID or AWS_ROLE_ID_ACCOUNT_PART value is skipped for that rule only. This
       replaces redaction_check.py assert-clean, whose scrub pairs come from terraform/personal's tfvars, which this role
       cannot read (its empty-account guard would always fail). Under 150 SLOC.
   - file: tests/test_terraform_github_plan_comment.py
@@ -370,7 +381,7 @@ scope:
       refused; overlay and screen lines outside the grammar (a line carrying `=`, a quote, a value-shaped token or
       trailing text) are dropped, grammar lines are re-rendered; the output validates against the closed grammar.
       assert-clean: a clean reporter-shaped body passes; red cases for each token prefix, a PEM marker, the client id,
-      a reviewer id, the account id, and a reviewer id inside a longer number or a 40-hex sha is NOT a hit (whole-token
+      a reviewer id, the account id, the role-id account part, and a reviewer id inside a longer number or a 40-hex sha is NOT a hit (whole-token
       match); an absent values file passes a clean refusal body (VP 15's SCREEN_REFUSED path); a present but malformed
       or unreadable values file exits 1. refusal with absent inputs: CONFIG_MISSING with neither overlay nor screen file,
       and OVERLAY_REFUSED with no screen file, each render the category only and exit 0.
@@ -457,7 +468,8 @@ scope:
     purpose: >-
       PR 4. TestWorkflowAndTaxonomy (moved here verbatim in PR 3) is rewritten for the pull_request_target shape (Decision
       235 named rewrites, listed in context): test_triggers_exact (pull_request -> pull_request_target, self-paths
-      dropped), test_guard_and_permissions (adds environment and the Dependabot gate), test_aws_credentials_step (planner
+      dropped), test_guard_and_permissions (keeps the same-repo and Dependabot gates, adds the base-main gate and the environment,
+      and the top-level permissions go from {contents: read} to {}; the job permissions are unchanged), test_aws_credentials_step (planner
       PR-sub -> the new role), test_app_token_step (its exact `set(step["with"])` gains owner and repositories, both the
       running repository's owner and name), test_plan_and_probe_flags (quiet_run.sh wrapper,
       -lock=false and -detailed-exitcode kept), test_nothing_mutating_or_persisted (every forbidden token stays forbidden
@@ -520,12 +532,15 @@ scope:
   - file: docs/contracts/github-org-transfer.yaml
     action: Modify
     purpose: >-
-      PR 5. Exactly the sidecar's blocks org-transfer-plan-app-locations, org-transfer-plan-app-held and
-      org-transfer-log: breakage_map.terraform_github_plan_app.locations' "repository secrets (App private key)" becomes
+      PR 5. Exactly the sidecar's blocks org-transfer-plan-app-locations, org-transfer-plan-app-held,
+      org-transfer-pr-plan-scope and org-transfer-log: breakage_map.terraform_github_plan_app.locations' "repository secrets (App private key)" becomes
       "tf-trusted-plan environment secret (App private key)"; transfer_credentials' "terraform/github plan App
       installation" row's `held: existing repository secret` becomes `held: tf-trusted-plan environment secret` (in
-      place, net 0 lines; nothing else in that row changes); and one single-line amendment_log row naming both edits
-      (497 -> 498 of 500 effective lines).
+      place, net 0 lines; nothing else in that row changes); prerequisites.terraform-github-pr-time-plan's satisfied_by
+      clause "on every PR touching it," gains "(since rec-4638 a PR that changes main.tf or the lockfile is refused,
+      not planned)" (+1 line at most; after PR 4 the trusted job refuses those main-only files, so the clause as written
+      would be stale); and one single-line amendment_log row naming the three edits (497 -> 499 of 500 effective
+      lines).
   - file: docs/contracts/account-credential-inventory.yaml
     action: Modify
     purpose: >-
@@ -538,9 +553,10 @@ scope:
       PR 5. Contract pins: test_plan_app_key_location_is_the_environment_secret asserts, over the parsed YAML, that the
       github-org-transfer breakage_map terraform_github_plan_app locations, its transfer_credentials "terraform/github
       plan App installation" row's held value and the GH-09 location each name the tf-trusted-plan environment secret
-      and no repository secret; and, as a sweep, that no line of either contract outside its amendment_log and
+      and no repository secret; that the terraform-github-pr-time-plan prerequisite's satisfied_by names rec-4638 and
+      the main.tf and lockfile refusal; and, as a sweep, that no line of either contract outside its amendment_log and
       evidence_ledger (history, which may name the old location) names the plan App or TF_GITHUB_PLAN_APP_PRIVATE_KEY
-      together with "repository secret" (red before the contract blocks: the three pins fail, and the sweep hits
+      together with "repository secret" (red before the contract blocks: the four pins fail, and the sweep hits
       github-org-transfer.yaml:425 and account-credential-inventory.yaml:185 today).
   - file: tests/test_terraform_github_plan_workflow.py
     action: Modify
@@ -554,7 +570,9 @@ scope:
       declaring PR and admitted against pre-PR-5 main, where the renamed node is absent.
 bundled_recommendations:
   - rec-4638
-followon_recs: []
+followon_recs:
+  - rec-4640
+  - rec-4969
 infrastructure_dependencies:
   - "S3 landed (#1764, 531c2394): the screen, lexer, overlay, quiet_run.sh, plan_names_core and the tf-trusted-plan environment (main-only policy, no reviewers) exist."
   - "Provider mirror: tf-provider-mirror/ holds aws and neon only today; PR 1's seed dispatch adds integrations/github 6.12.1 (terraform/github/.terraform.lock.hcl). The dispatch is CI on main under the apply role and writes only public provider files."
@@ -571,7 +589,7 @@ acceptance_criteria:
   - "The plan App key is readable only by jobs in the tf-trusted-plan environment; no repository secret of that name remains (on the operator's word, VP 17: a re-run cannot prove absence, because an environment secret shadows a repository secret of the same name); no forward-standing contract text places the key in a repository secret (VP 25)"
   - "agent-platform-github-ci-trusted-plan holds no tfstate/github grant; its unused but still matchable terraform-github-plan.yml trust entry is pinned and handed to rec-4640 (hand-off read back from rec-4640's context, 2026-11-06)"
   - "The planner's TfstateGithubRead has no consumer after PR 4 and is handed to rec-4640 for removal with the PR-sub trust statement (read back from rec-4640's context, 2026-11-06); it stays pinned exactly by TestPlannerStateGrant until then"
-  - "PR 5 carries the Decision 238 Update and the four contract edits (three contracts) exactly as the approved-text sidecar binds them, and rec-4638 is closed by PR 5's Resolves trailer (VP 22, VP 23)"
+  - "PR 5 carries the Decision 238 Update and the five contract edits (three contracts) exactly as the approved-text sidecar binds them, and rec-4638 is closed by PR 5's Resolves trailer (VP 22, VP 23)"
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -579,7 +597,8 @@ verification_plan:
     command: bin/venv-python -m pytest tests/test_terraform_hcl_screen.py::TestGithubRoot -q
     expected: all pass (red before, the TestGithubRoot class is absent); the whole file stays green; real tree green for both roots
     fix_if: a real-tree failure -- fix the policy row or lexer, never loosen a refusal rule without the planner
-    hermetic: false
+    hermetic: true
+    expected_literals: [" passed"]
     graduation: waive
     graduation_waiver_reason: >-
       Duplicate: the standing graduated check trusted-plan-screen already runs the whole file
@@ -606,7 +625,8 @@ verification_plan:
       tests/checks/ci_guards/test_validate_trusted_plan_screen.py::test_manifest_pre_globs_cover_both_roots -q
     expected: all pass (red before, the two new node ids are absent)
     fix_if: extend the github row to what main declares (re-derive from main), or fix the check's root loop
-    hermetic: false
+    hermetic: true
+    expected_literals: [" passed"]
     graduation: waive
     graduation_waiver_reason: >-
       Its node lands in PR 1, which adds the registry row trusted-plan-screen-main (test_selector node
@@ -840,10 +860,19 @@ verification_plan:
     action: Operator deletes the repository secret and the old App key; confirm by names
     command: >-
       Ask Benjamin to confirm in words that the repository secrets list has no TF_GITHUB_PLAN_APP_PRIVATE_KEY and the plan App
-      shows one private key; then re-run the latest terraform-github-plan run (mcp__github__actions_run_trigger,
-      method=rerun_workflow_run) and read its conclusion
-    expected: his reply (message id recorded on the merged PR 5); the re-run succeeds (the environment secret serves the job)
-    fix_if: the re-run fails CONFIG_MISSING -- the environment secret is missing; the operator re-stores it
+      shows one private key. Then re-run a terraform-github-plan run (mcp__github__actions_run_trigger,
+      method=rerun_workflow_run): the latest run of an open terraform/github PR if one exists, else PR 5's last run. Read
+      the re-run's step conclusions with mcp__github__actions_list(method=list_workflow_jobs) -- only the step named
+      "Config check" counts. It runs before the overlay and fails CONFIG_MISSING when the key is absent; with the
+      repository secret gone, its success means the environment secret served the job
+    expected: >-
+      his reply (message id recorded on the merged PR 5); the re-run's Config check step conclusion success. On PR 5's
+      closed run, the later steps fail OVERLAY_REFUSED merge_ref_absent and a refusal comment lands on the merged PR:
+      GitHub drops refs/pull/N/merge when a PR closes (checked 2026-11-06: `git ls-remote origin 'refs/pull/1876/merge'`
+      is empty), so that is expected and is not a secret signal
+    fix_if: >-
+      the Config check step fails (CONFIG_MISSING) -- the environment secret is missing; the operator re-stores it. Any
+      later step's result on a closed PR's run is not evidence for this step
     hermetic: false
   - step: 18
     phase: pre-deploy
@@ -971,7 +1000,8 @@ verification_plan:
       one test passes; red before PR 5 (the node is PR 5's rename of test_policy_sids_are_exactly_the_four, so it is
       absent at PR 5's base and the registry row is admitted there)
     fix_if: the TfstateGithubRead SID is back or another SID changed -- fix the HCL, never the expected set
-    hermetic: false
+    hermetic: true
+    expected_literals: [" passed"]
     graduation: graduate
     graduation_check_id: trusted-plan-sids-no-github-state
 test_obligations:
@@ -1001,10 +1031,13 @@ test_obligations:
     test_selector: tests/checks/ci_guards/test_validate_trusted_plan_screen.py::test_manifest_pre_globs_cover_both_roots
     red_green_expectation: red before the globs land (the node is new in PR 1 and asserts both globs)
   - source: scripts/checks/ci_guards/_manifest.py
-    behavior: PR 4 half, the fence's pre_globs cover the three scripts the github job runs or imports
+    behavior: >-
+      PR 4 half, the fence's pre_globs cover the four modules the github job runs or imports, or the fence imports:
+      terraform_github_plan_report.py, terraform_github_plan_comment.py, terraform_hcl_screen_policy.py and
+      _trusted_plan_role_partition.py
     verification_step: 12
     test_selector: tests/checks/ci_guards/test_validate_trusted_plan_environment.py::test_manifest_pre_globs_cover_the_github_job_scripts
-    red_green_expectation: red before PR 4's manifest edit (the node is new in PR 4 and asserts all three globs)
+    red_green_expectation: red before PR 4's manifest edit (the node is new in PR 4 and asserts all four globs)
   - source: terraform/github/main.tf
     behavior: holds the github_token declaration with sensitive, ephemeral, no default and its validation
     verification_step: 5
@@ -1149,25 +1182,25 @@ test_obligations:
     command: bin/venv-python -m scripts.validate --pre
     waiver_reason: A registry entry is its own check; validate_verification_registry's differential admission runs it.
 constraints:
-  - IMPLEMENTATION only (Decision 67); five PRs in order (1, 2, 3, 4, 5); PR 2 never merged-but-unapplied beside another terraform/bootstrap change
+  - IMPLEMENTATION only; five PRs in order (1, 2, 3, 4, 5); PR 2 never merged-but-unapplied beside another terraform/bootstrap change
   - "PR 4 touches nothing under terraform/github (no plan job would produce a plan for it); PR 1 and PR 5 are the only terraform/github PRs, PR 3 and PR 5 the only terraform/personal PRs"
   - "ADMIN container never bypasses CI deploys; admin credentials only for VP 7 and VP 20 (identity check and read-only plan), VP 8 (the bootstrap apply, on Benjamin's word on the exact command), VP 11 and VP 16 (read-only)"
   - No LLM in the trusted workflow (Decision 205 cl.2, Decision 238 cl.3)
   - "The trusted job never executes PR content, never prints a value, id, plan text or diagnostic text, and never stores plan.bin or plan.json (Decision 238 cl.4, Decision 101)"
   - "No trust edit on an existing role (Decision 223 cl.4); the shared role's unused but still matchable terraform-github-plan.yml entry leaves in rec-4640's admin split-apply"
-  - "Wording (the Decision 238 Update, the four contract edits and their amendment_log rows) ships only in PR 5 and exactly as docs/plans/approved/trusted-plan-github-root.yaml binds it, a sidecar added by plan amendment and approved on the approved-text gate before PR 5 starts; allowed variance: whitespace, line wrapping and the filled {{DATE}} (Decision 246 cl.2). The build never adds or edits the sidecar"
+  - "Wording (the Decision 238 Update, the five contract edits and their amendment_log rows) ships only in PR 5 and exactly as docs/plans/approved/trusted-plan-github-root.yaml binds it, a sidecar added by plan amendment and approved on the approved-text gate before PR 5 starts; allowed variance: whitespace, line wrapping and the filled {{DATE}} (Decision 246 cl.2). The build never adds or edits the sidecar"
   - "implementation_declared flips only in PR 5 (the declaring PR carries the sidecar-bound text and the Resolves trailer; validate_merge_step reads the sidecar at PR 5's base); PRs 1-4 never set it"
   - No rescue agents or workaround loops (Decision 55); out-of-scope bugs become recs via scripts.ops_data_portal
 context:
   - "Approvals (Benjamin, 2026-11-06 14:24Z, cmsg_01Cqz6E4mzSv6kkGCSCub3WMTVQXYYPZEed8s4jCqkUFs2, 'write the plan as is'): every recommendation in /mnt/project-files/trusted-plan-executor/s5-github-root-plan/step6b-presentation.md (F1-A per-root role, F2-A grant in S5 and trust entry in rec-4640, F3-A App key to a tf-trusted-plan environment secret, F4-A import blocks under an id grammar), the settled points and the Decision 238 Update text. 'start s5' 2026-11-03 21:58Z (cmsg_01Cqz6E4mzSv6kkGCSCub3WMPwGQx3BgM8YEyDeNHNC7Rm); 'continue planning' during the rec-4869 halt 2026-11-03 22:28Z (cmsg_01Cqz6E4mzSv6kkGCSCub3WMVZ8pP4rsLP7t2tRGokoChJ)."
-  - "Wording binding (Decision 246, settled in critique round 1): the always-ask text is the Decision 238 Update below, the four contract edits in the PR 5 scope rows (round 2 added the transfer_credentials held value), and one amendment_log row per contract. It binds only through docs/plans/approved/trusted-plan-github-root.yaml, which a plan amendment adds before PR 5 starts, run through plan_wording_check and approved by Benjamin on the approved-text gate (cl.1: a chat or final-diff word no longer binds; cl.4: PR 5 then needs no re-ask for it). This plan PR adds no sidecar because the gate has no reviewer yet, so its approval check could never pass."
+  - "Wording binding (Decision 246, settled in critique round 1): the always-ask text is the Decision 238 Update below, the five contract edits in the PR 5 scope rows (round 2 added the transfer_credentials held value, round 6 the pr-time-plan scope clause), and one amendment_log row per contract. It binds only through docs/plans/approved/trusted-plan-github-root.yaml, which a plan amendment adds before PR 5 starts, run through plan_wording_check and approved by Benjamin on the approved-text gate (cl.1: a chat or final-diff word no longer binds; cl.4: PR 5 then needs no re-ask for it). This plan PR adds no sidecar because the gate has no reviewer yet, so its approval check could never pass."
   - "Decision 238 Update (exact; {{DATE}} = PR 5's build date): '> **Update ({{DATE}}, PLAN-trusted-plan-github-root, rec-4638):** the terraform/github speculative plan runs under its own role, agent-platform-github-ci-trusted-github-plan. It has cl.2''s subject form (the tf-trusted-plan Environment and a job_workflow_ref naming terraform-github-plan.yml at refs/heads/main), carries the mandatory boundary, and holds only tfstate/github read and provider-mirror read and list (Decision 143 cl.1). agent-platform-github-ci-trusted-plan''s terraform-github-plan.yml entry and its tfstate/github read leave it: the grant in rec-4638, the trust entry in rec-4640''s admin split-apply. Coverage: test_terraform_github_plan_trusted, test_trusted_github_plan_identity and test_trusted_plan_identity.' Two changes from the text approved in chat on 2026-11-06: 'and list' (the mirror-scoped ListBucket) and the test_trusted_github_plan_identity Coverage name (critique N2); the contract sentences were never in the step 6b. Both reach Benjamin on the approval run page."
   - "Why all bound text rides PR 5: validate_merge_step applies the base sidecar's blocks only on the PR that flips implementation_declared, so every bound edit must be in that PR's diff. PR 5 closes the slice (the shared role's grant leaves there; the repository secret is deleted after it), so the key-location sentences are true when they land. Accepted lag: Decision 238's text names the new role only from PR 5, while PR 3 creates it and PR 4 runs it (scout round 2 NOTE). The step 6b placed the Update in PR 3 and the sentences in PR 4; the edits are unchanged, only their PR moved."
   - "Decision-scout verdict: FLAGS_FOUND (Decisions triaged: 195 of 195; Roadmap items intersected: 4; CONFLICT: 0; RELATED: 4). CITE: 238, 144, 223, 98, 205, 120, 162, 126, 235. NOTE 238 cl.2 (one named role) resolved by the approved Update; NOTE 238 cl.4 (import blocks widen the evaluated surface) resolved by F4-A's id grammar and the per-root backstop; NOTE 143 cl.1 resolved by F1-A. Report: /mnt/project-files/trusted-plan-executor/s5-github-root-plan/decision-scout-report.md."
   - "Fable consult: /mnt/project-files/trusted-plan-executor/s5-github-root-plan/ADVICE.md (all seven answers adopted; corrections folded: the variables.tf refusal is the list() constructor; the org-transfer evaluator also reads main.tf and imports.tf; the reporter was not code-owned)."
   - "Decision-scout round 2 (2026-11-06, Decisions triaged 198 of 198, FLAGS_FOUND; Serves: NS.9 3/5; CITE adds 246, 245, 172, 126, 98, 143): WARN 246 (gate not live) resolved by the sidecar amendment before PR 5; NOTE 238 (Update lag; data sources; #1888's preview) resolved above, by the github row's 'data types none', and by predicate (k) admitting tf-trusted-plan jobs; SPIRIT 223: PR 3 adds one more role whose trust CI cannot edit (cl.4), accepted with the shared role's precedent and owned by rec-3583. 245 applies to every build merge: when main changed a file the PR changes, update the branch, wait for the CI-green wake, and re-run VP 20 on PR 2's new head (its saved plans are then stale)."
   - "red-overlap (2026-11-06, main f95a722d): clear (verdict clear, no reds)."
-  - "Contract headroom: github-org-transfer.yaml is at 497 of 500 effective lines; PR 5's two edits (the locations list and the transfer_credentials held value) are in place, plus one single-line flow-style amendment_log row (net +1). If main has grown it past 499 by then, the sidecar amendment adds a block compacting an existing amendment_log row (approved with the rest), never a raise."
+  - "Contract headroom: github-org-transfer.yaml is at 497 of 500 effective lines; PR 5's three edits are the locations list and the transfer_credentials held value (both in place) and the pr-time-plan scope clause (+1 line at most), plus one single-line flow-style amendment_log row (net +2 at most, 499 of 500). If main has grown it past 498 by then, the sidecar amendment adds a block compacting an existing amendment_log row (approved with the rest), never a raise."
   - "Decision 235 named rewrites, each with its successor assertion in its scope row: PR 1 test_terraform_github_provider_auth token_variable_is_ephemeral_without_default (reads main.tf; plus a no-other-declaration assertion; its synthetic _GOOD and four red cases move with the block to main.tf, none dropped). PR 3 TestPlannerStateGrant admits the new document's exact grant only (_other_document_violations and the expected (file, sid) list). PR 4 TestWorkflowAndTaxonomy (moved verbatim in PR 3): test_triggers_exact, test_guard_and_permissions, test_aws_credentials_step, test_app_token_step, test_plan_and_probe_flags follow the pull_request_target shape, and test_nothing_mutating_or_persisted allows exactly the one mirror-sync download; none is dropped without a replacement. PR 5 tightenings: the trusted-plan grant and SID leave both guards. Not rewrites: PR 4's test_validate_trusted_plan_environment count ([[]] * 9 to * 11) and PASS-line (a)-(i) to (a)-(k) edits strengthen."
   - "Probe (2026-11-06, relayed by Benjamin from the PR #1888 thread: a read-only admin probe narrowed by a session policy): terraform/github's state reads with s3:GetObject on the one state object and no bucket listing, so the role's list grant covers only tf-provider-mirror/* (aws s3 sync lists). For this role itself the init listing is inferred low risk: critique round 2 ran the pinned terraform 1.10.5 init against a local S3 stub that answered the workspace listing (ListObjectsV2, prefix env:/) with 403; the backend only warned (Unable to list non-default workspaces) and init succeeded, its only object call a HEAD on the state key. VP 14 stays the real-AWS proof; a miss shows as INIT_FAILED on the canary and is fixed forward in a planner-approved amendment."
   - "Overlap with PR #1888 (terraform-github-gated-apply, draft, another project): per its planner's reply relayed by Benjamin 2026-11-06 14:42Z (cmsg_01Cqz6E4mzSv6kkGCSCub3WMDwCREeSgKvYGKnmyd2NCQX), its preview job declares tf-trusted-plan and reads the key from the environment secret (predicate (k) admits it), it adds terraform-github-apply.yml to the fence's TRUSTED_WORKFLOWS under its own role (predicate (j) is compatible), and whichever lands second rebases. Rebase-only overlaps: CODEOWNERS reporter line, the terraform-github-plan.yml and main.tf headers, the environment-taxonomy github row (the sidecar block re-anchors); keep the reporter's classify() stable. Coupling to tell #1888's planner at rebase: tests/checks/iam_tf/test_trusted_plan_identity.py:115-116 requires the shared role's job_workflow_ref files to equal the fence's TRUSTED_WORKFLOWS, so a #1888 that adds terraform-github-apply.yml to TRUSTED_WORKFLOWS must re-state that test as a named Decision 235 rewrite in its own PR (rec-4640 edits the same pin later)."
@@ -1178,6 +1211,7 @@ context:
   - "Settled without asking (critique round 3): N9, registry entry terraform-github-provider-auth-lane keeps guard_target terraform/github/variables.tf, because that field is an identity label (validate_graduated_rerun) and the class still guards variables.tf (the no-other-declaration assertion), so re-pointing a graduated entry buys nothing; N12, PR 1's /scripts/ci/provider_mirror_seed.sh CODEOWNERS line is deliberate hygiene (no governed job runs the script, so no predicate fails without it); B3's closed import_id_vars set tightens F4-A's approved id grammar and narrows nothing Benjamin approved."
   - "Settled without asking (critique round 4): N6, config/ci_rca_taxonomy.yaml's terraform-github-plan row keeps its excluded value and rationale, because under pull_request_target the workflow still runs only on PR events, never on main pushes, so 'never runs there' stays true; B1's graduation follows PLAN-telemetry-production-maintenance: a row lands with its test in PRs 1, 2 and 4 and those steps are waived, while PR 5's own new node (VP 27) graduates."
   - "Settled without asking (critique round 5): B1, the workflow-level defaults block and its shape rule pin pipefail on both trusted workflows in an in-scope test (S3's file is read, not edited, so no rec is owed); N6, the fence sibling module is planned now, not by a mid-build amendment; N11, scripts/ci/terraform_github_plan_report.py's docstring ('invoked by path with python3') stays true under python3 -I and the file is #1888's import surface, so it is not touched; N15 residual: predicate (k) sees only a literal secrets.TF_GITHUB_PLAN_APP_PRIVATE_KEY reference, so a job using toJSON(secrets), a computed secrets[...] key or secrets: inherit reads the key unseen while the repository secret exists; after VP 17 the key exists only in tf-trusted-plan, whose main-only deployment branch policy is then the real control. Strategic risk accepted under F2-A: from PR 4 until rec-4640's split-apply, the new job's OIDC subject also matches the shared role's terraform-github-plan.yml trust entry, so that entry is live, not dormant; the barriers until then are main's code-owned workflow text and predicate (j)."
+  - "Settled without asking (critique round 6): B1, VP 17 reads only the re-run's Config check step, because a re-run of a closed PR's run fails at the overlay (GitHub drops refs/pull/N/merge on close, checked against #1876); N1, the constraint no longer cites Decision 67, which main's Decision 247 supersedes; N8, rec-4640's context now records that the shared role's github entry is live from PR 4 (portal Updated, read back); N11 adds a fifth bound contract edit, the pr-time-plan scope clause, which reaches Benjamin with the rest on the approval run page; N12, the screen refuses a --root and --policy pair that disagree."
   - "Gotcha: python3 -I drops the script directory from sys.path; scripts append the repo root (never insert at 0) and check where scripts resolved (predicate h)."
   - "Gotcha: Actions logs on this public repo are public; read step conclusions only, never paste plan text, and never print an account id, ARN or secret value."
   - "Gotcha: a PR the screen refuses gets no PR-time plan; the operator's own plan stays authoritative for this hand-applied root."
@@ -1191,10 +1225,11 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 4, nits: 12}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 4, nits: 6}
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 15}
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 1, nits: 12}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
-  - only the plan-cited decision sections (238, 143, 144, 223, 205, 235, 237, 246)
+  - only the plan-cited decision sections (238, 143, 144, 223, 205, 235, 237, 246, and the scout CITEs 98, 120, 126, 162, 172, 245)
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
   - "red_overlap --plan clear; no other terraform/bootstrap change merged-but-unapplied before PR 2"
@@ -1207,7 +1242,7 @@ execution_steps:
   - "Operator: the new App key stored as the tf-trusted-plan environment secret (VP 13)."
   - "PR 4: the workflow rewrite, the comment gate script and its test (with its CODEOWNERS line), the fence predicates and manifest globs, the acceptance test, the rewritten tests, the baseline and the registry rows terraform-github-plan-trusted and terraform-github-plan-comment-gate (admitted in this PR); VP 12, 13 (attestation), 18; merge on the PR 4 rule."
   - "Before PR 5: ask the coordinator for the sidecar amendment (planning thread); it merges with Benjamin's approval run before PR 5 opens."
-  - "PR 5: the canary description edit, the shared role's grant removal, the PR 5 test tightenings and contract pins, and exactly the sidecar's blocks (Decision 238 Update, the four contract edits, their log rows) with the regenerated index, and the registry row trusted-plan-sids-no-github-state (VP 27, the declaring PR's graduation); set implementation_declared; VP 19, 23, 24, 25, 27, then VP 13's proof, 14, 15 (the top-level session, two full-tier runs) and 26 on the PR; merge on the PR 5 rule; VP 16; then the operator's deletions, VP 17 and VP 22."
+  - "PR 5: the canary description edit, the shared role's grant removal, the PR 5 test tightenings and contract pins, and exactly the sidecar's blocks (Decision 238 Update, the five contract edits, their log rows) with the regenerated index, and the registry row trusted-plan-sids-no-github-state (VP 27, the declaring PR's graduation); set implementation_declared, and in the same commit record the plan's weakening_dispositions for every candidate validate_weakening_candidates lists over PR 5's diff (for example the test_policy_sids_are_exactly_the_four rename and the PR 5 tightenings), each keyed '[category] path::node' with a cite that resolves (validate_weakening_dispositions blocks the declaring PR otherwise); VP 19, 23, 24, 25, 27, then VP 13's proof, 14, 15 (the top-level session, two full-tier runs) and 26 on the PR; merge on the PR 5 rule; VP 16; then the operator's deletions, VP 17 and VP 22."
   - Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)
   - "Branches: one harness branch per PR, or one session branch restarted from main after each squash-merge (git-ops.yaml merged-PR rule)."
   - "Closure evidence per PR as four separate facts (implement skill Commit Flows): GitHub readiness, full-tier evidence for the pushed HEAD (VP 21), structured postflight evidence, the real outcome (CI green by event wake, squash-merge sha, post-deploy steps)."
