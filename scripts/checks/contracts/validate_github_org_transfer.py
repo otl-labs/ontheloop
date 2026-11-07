@@ -212,6 +212,12 @@ def _read_tfg(repo_root: Path, name: str, failed: list[str]) -> str | None:
         return None
 
 
+def _check_sensitive_defaults(text: str, name: str, row: str, failed: list[str]) -> None:
+    for _, label, attrs in _blocks(text, "variable"):
+        if attrs.get("sensitive") == "true" and attrs.get("default", "null") != "null":
+            failed.append(f"{_LABEL}: {row}: {_TFG_DIR}/{name} sensitive variable {label} has a non-null default")
+
+
 def _evaluate_terraform_github_root(contract: dict, repo_root: Path, failed: list[str]) -> None:
     """terraform/github: owner and name defaults follow the phase, provider owner and import ids are variables."""
     row = "terraform_github_root"
@@ -237,9 +243,8 @@ def _evaluate_terraform_github_root(contract: dict, repo_root: Path, failed: lis
                     f"{_LABEL}: {row}: {_TFG_DIR}/variables.tf variable {var_name} default must be the quoted string"
                     f" {want!r} for phase {governing!r}, found {default!r}"
                 )
-        for label, attrs in variables.items():
-            if attrs.get("sensitive") == "true" and attrs.get("default", "null") != "null":
-                failed.append(f"{_LABEL}: {row}: {_TFG_DIR}/variables.tf sensitive variable {label} has a non-null default")
+    for name in ("variables.tf", "main.tf"):
+        _check_sensitive_defaults(texts[name] or "", name, row, failed)
     if texts["main.tf"] is not None:
         providers = _blocks(texts["main.tf"], "provider")
         provider = next((attrs for _, label, attrs in providers if label == "github"), None)

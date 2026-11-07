@@ -394,6 +394,19 @@ class TestTerraformGithubRootRow:
         failed = _run_tfg(tmp_path, monkeypatch, "proven", None, _tfg_variables(extra=bad))
         assert len(failed) == 1 and "secret" in failed[0]
 
+    def test_sensitive_variable_in_main_tf_with_string_default_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bad = 'variable "github_token" {\n  type      = string\n  sensitive = true\n  default   = "ghp_x"\n}\n'
+        failed = _run_tfg(tmp_path, monkeypatch, "proven", None, _tfg_variables(), main=_TFG_MAIN + bad)
+        assert len(failed) == 1 and "main.tf sensitive variable github_token" in failed[0]
+
+    def test_sensitive_variable_in_main_tf_without_default_is_green(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        good = 'variable "github_token" {\n  type      = string\n  sensitive = true\n}\n'
+        assert _run_tfg(tmp_path, monkeypatch, "proven", None, _tfg_variables(), main=_TFG_MAIN + good) == []
+
     @pytest.mark.parametrize("body", ["  sensitive = true\n  default   = null\n", "  sensitive = true\n"])
     def test_sensitive_variable_without_default_is_green(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str

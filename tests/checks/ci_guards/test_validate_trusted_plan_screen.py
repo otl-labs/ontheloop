@@ -1,4 +1,4 @@
-"""validate_trusted_plan_screen keeps main's terraform/personal inside the trusted plan's own screen."""
+"""validate_trusted_plan_screen keeps main's terraform roots inside the trusted plan's own screen."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from scripts.checks.ci_guards.validate_trusted_plan_screen import validate_trust
 REAL_ROOT = Path(__file__).resolve().parents[3]
 
 _GOOD = 'resource "aws_s3_bucket" "b" {\n  bucket = "x"\n}\n'
+_GOOD_GITHUB = 'resource "github_repository" "this" {\n  name = "x"\n}\n'
 
 
 def _run(root: Path) -> list[str]:
@@ -19,11 +20,12 @@ def _run(root: Path) -> list[str]:
     return failed
 
 
-def _tree(tmp_path: Path, files: dict[str, str]) -> Path:
-    personal = tmp_path / "terraform" / "personal"
-    personal.mkdir(parents=True)
-    for name, text in files.items():
-        (personal / name).write_text(text, encoding="utf-8")
+def _tree(tmp_path: Path, files: dict[str, str], github: dict[str, str] | None = None) -> Path:
+    for root_name, root_files in (("personal", files), ("github", github or {"repo.tf": _GOOD_GITHUB})):
+        root = tmp_path / "terraform" / root_name
+        root.mkdir(parents=True)
+        for name, text in root_files.items():
+            (root / name).write_text(text, encoding="utf-8")
     return tmp_path
 
 
@@ -53,3 +55,19 @@ def test_heredoc_is_red(tmp_path: Path) -> None:
 def test_missing_root_is_red_and_examines_nothing(tmp_path: Path) -> None:
     failed = _run(tmp_path)
     assert failed and "missing" in failed[0]
+
+
+def test_github_root_red_case_names_the_root(tmp_path: Path) -> None:
+    bad = {"repo.tf": 'data "github_user" "u" {\n  username = "x"\n}\n'}
+    failed = _run(_tree(tmp_path, {"main.tf": _GOOD}, github=bad))
+    assert len(failed) == 1
+    assert "terraform/github/repo.tf" in failed[0] and "data_type" in failed[0]
+
+
+def test_manifest_pre_globs_cover_both_roots() -> None:
+    from scripts.checks.ci_guards import _manifest
+
+    entry = next(e for e in _manifest.ENTRIES if e.name == "validate_trusted_plan_screen")
+    assert {"terraform/personal/**", "terraform/github/**", "scripts/ci/terraform_hcl_screen_policy.py"} <= set(
+        entry.pre_globs
+    )

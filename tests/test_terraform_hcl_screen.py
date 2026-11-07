@@ -341,3 +341,135 @@ def test_unquoted_label_forms_are_refused(rule: str, text: str) -> None:
 
 def test_dotted_connection_reference_is_not_a_block() -> None:
     assert "provisioner_block" not in one("locals {\n  a = local.connection\n}\n")
+
+
+GH = "terraform/github"
+
+
+def _gh_rules(files: dict[str, str]) -> set[str]:
+    from scripts.ci import terraform_hcl_screen_policy as policies
+
+    return {r for r, _f, _l in screen.screen_tree(files, policies.POLICIES[GH])}
+
+
+def _imp(to: str, id_: str) -> str:
+    return f"import {{\n  to = {to}\n  id = {id_}\n}}\n"
+
+
+def _cli(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([sys.executable, "-I", str(SCRIPT), *args], capture_output=True, text=True, cwd=ROOT)
+
+
+class TestGithubRoot:
+    def test_real_tree_is_green(self) -> None:
+        out = _cli("screen", "--root", GH, "--policy", GH)
+        assert (out.returncode, out.stdout.strip()) == (0, "PASS")
+
+    @pytest.mark.parametrize(
+        "block",
+        [
+            _imp("github_repository.this", "var.repository_name"),
+            _imp("github_repository_ruleset.m", '"${var.repository_name}:${var.main_protection_ruleset_id}"'),
+            _imp("github_repository_environment.e", '"${var.repository_name}:tf-trusted-plan"'),
+            _imp("github_repository.this", '"literal-id"'),
+        ],
+    )
+    def test_import_ids_main_uses_are_accepted(self, block: str) -> None:
+        assert _gh_rules({"i.tf": block}) == set()
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            'resource "github_actions_secret" "s" {\n}\n',
+            'resource "github_actions_environment_secret" "s" {\n}\n',
+            'resource "github_actions_variable" "s" {\n}\n',
+            'resource "github_repository_webhook" "s" {\n}\n',
+            'resource "github_repository_deploy_key" "s" {\n}\n',
+            'resource "aws_s3_bucket" "s" {\n}\n',
+            'data "github_user" "u" {\n}\n',
+            'provider "github" {\n}\n',
+            "terraform {\n}\n",
+            'locals {\n  a = file("x")\n}\n',
+            "locals {\n  a = jsonencode({})\n}\n",
+        ],
+    )
+    def test_github_red_cases(self, text: str) -> None:
+        assert _gh_rules({"x.tf": text})
+
+    def test_provider_block_is_allowed_only_in_main_tf(self) -> None:
+        assert _gh_rules({"main.tf": 'provider "github" {\n}\n'}) == set()
+        assert _gh_rules({"other.tf": 'provider "github" {\n}\n'}) == {"toplevel_block"}
+
+    @pytest.mark.parametrize(
+        "block",
+        [
+            _imp("github_repository.this", "lower(var.repository_name)"),
+            _imp("github_repository.this", '"x:${var.github_token}"'),
+            _imp("github_repository.this", '"${var.repository_name}:${var.github_token}"'),
+            _imp("github_repository.this", '"${var.repository_name}:${var.gated_apply_reviewer_user_ids}"'),
+            _imp("github_repository.this", '"${var.repository_name}:${var.not_in_the_set}"'),
+            _imp("github_repository.this", '"${var.main_protection_ruleset_id}"'),
+            _imp("github_repository.this", "var.main_protection_ruleset_id"),
+            _imp("github_repository.this", '"${var.repository_name}:${lower(var.repository_name)}"'),
+            _imp("github_actions_secret.s", "var.repository_name"),
+            'import "x" {\n  to = github_repository.this\n  id = var.github_token\n}\n',
+            _imp("github_repository.this[0]", "var.repository_name"),
+            _imp('github_repository.this["a"]', "var.repository_name"),
+            _imp("module.m.github_repository.this", "var.repository_name"),
+            "import {\n  to = github_repository.this\n  id = var.repository_name\n  provider = github\n}\n",
+            "import {\n  to = github_repository.this\n}\n",
+        ],
+    )
+    def test_import_shape_violations(self, block: str) -> None:
+        assert "import_shape" in _gh_rules({"i.tf": block})
+
+    def test_import_is_refused_for_the_personal_row(self) -> None:
+        assert "toplevel_block" in one(_imp("aws_sns_topic.t", '"x"'))
+
+    def test_unknown_policy_row_is_refused(self) -> None:
+        out = _cli("screen", "--root", GH, "--policy", "terraform/nothing")
+        assert (out.returncode, out.stdout.strip()) == (1, "REFUSED unknown_root")
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ("--root", GH),
+            ("--root", "./terraform/github/"),
+            ("--root", str(ROOT / "terraform" / "github")),
+            ("--root", "terraform/personal", "--policy", GH),
+        ],
+    )
+    def test_root_policy_mismatch(self, args: tuple[str, ...]) -> None:
+        out = _cli("screen", *args)
+        assert (out.returncode, out.stdout.strip()) == (1, "REFUSED root_policy_mismatch")
+
+    def test_tmp_path_root_with_github_policy_is_screened_not_refused(self, tmp_path: Path) -> None:
+        (tmp_path / "a.tf").write_text('resource "github_repository" "r" {\n  name = "x"\n}\n', encoding="utf-8")
+        out = _cli("screen", "--root", str(tmp_path), "--policy", GH)
+        assert (out.returncode, out.stdout.strip()) == (0, "PASS")
+
+    def test_github_backstop_provider_and_importing_rules(self, tmp_path: Path) -> None:
+        from scripts.ci import terraform_hcl_screen_policy as policies
+
+        gh = policies.POLICIES[GH]
+        plan = {"configuration": {"provider_config": {"github": {}}, "root_module": {}}, "resource_changes": []}
+        assert screen.backstop(plan, gh) is None
+        assert screen.backstop(plan) == "provider_config"
+        bad = {"configuration": {"provider_config": {"aws": {}, "neon": {}}, "root_module": {}}}
+        assert screen.backstop(bad, gh) == "provider_config"
+        imp = {"type": "github_repository", "change": {"importing": {"id": "x"}}}
+        plan["resource_changes"] = [imp]
+        assert screen.backstop(plan, gh) is None
+        plan["resource_changes"] = [{"type": "github_actions_secret", "change": {"importing": {"id": "x"}}}]
+        assert screen.backstop(plan, gh) == "importing"
+        personal = {"configuration": {"provider_config": {"aws": {}, "neon": {}}, "root_module": {}}}
+        personal["resource_changes"] = [{"type": "aws_sns_topic", "change": {"importing": {"id": "x"}}}]
+        assert screen.backstop(personal) == "importing"
+
+    def test_backstop_cli_policy_flag(self, tmp_path: Path) -> None:
+        f = tmp_path / "p.json"
+        f.write_text(json.dumps({"configuration": {"provider_config": {"github": {}}, "root_module": {}}}), encoding="utf-8")
+        ok = _cli("backstop", "--plan-json", str(f), "--policy", GH)
+        assert (ok.returncode, ok.stdout.strip()) == (0, "BACKSTOP_OK")
+        assert _cli("backstop", "--plan-json", str(f)).stdout.strip() == "BACKSTOP_REFUSED provider_config"
+        assert _cli("backstop", "--plan-json", str(f), "--policy", "x/y").stdout.strip() == "BACKSTOP_REFUSED unknown_root"
