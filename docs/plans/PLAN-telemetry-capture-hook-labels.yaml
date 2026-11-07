@@ -1,0 +1,899 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-capture-hook-labels
+intent: >-
+  Make Claude Code turn capture independent of the hook attachment's recorded command. Since Claude Code 2.1.317 a cloud
+  session records that field as a label ('command hook', 'command hook N') unless the hook sets statusMessage, and every
+  capture rule that read it (the pin P-2, checkout provenance PV-1, the Stop witness WT-2, hook names H-1) broke: no
+  cloud session was captured from 2026-11-03 to 2026-11-06 (rec-4939, Critical). The statusMessage stopgap (#1881)
+  restored capture by leaning on undocumented CLI behaviour; this plan makes the capture hooks' own stderr witness lines
+  the identity, so the next upstream change to the command field cannot silently stop the learning signal the
+  self-improvement loop depends on (PROJECT_CONTEXT, telemetry as evidence).
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-telemetry-capture-hook-labels.yaml
+phase: >-
+  ad_hoc_rec (rec-4939, Critical, tagged telemetry-project and capture-outage; postmortem
+  /mnt/project-files/capture-pin-outage/POSTMORTEM.md section 7.2, recommendations approved by Benjamin 2026-11-05 in
+  thread cmsg_012XgaFy8VaDQbxP5D8nC958U5KXCpeStYsV1nBk9MWZWf). T3.20 (owner only; no criterion advanced) owns turn capture; its one open criterion is c9 (CI
+  agent capture, rec-4415), which this plan neither closes nor forecloses, so closes_criteria is empty by design. V3: the
+  pre-merge proof runs the installed Claude Code CLI against a local mock Messages API (no model spend), and the
+  post-merge proof reads a fresh session's rows back through the production reader. src/turn_capture and .claude/hooks are
+  excluded from every Lambda bundle, so nothing deploys; sessions pick the change up from their checkout of main.
+scope:
+  - file: src/turn_capture/transcript.py
+    action: Modify
+    purpose: >-
+      Rules P-2 and PV-1's shared predicate. New constants PIN_LINE_PREFIX ('[session_start_log_turn] capture pin') and
+      PIN_REF_PREFIX (PIN_LINE_PREFIX + ' project_ref='); new pure functions stderr_ref(att) (the ref when exactly one
+      stripped stderr line starts with PIN_REF_PREFIX and has a remainder that fullmatches the ref grammar, counting only
+      such well-formed lines as the approved envelope words say, else None),
+      command_ref(att) (today's command-form test, unchanged: stem session_start_log_turn and exactly one well-formed
+      --project-ref token) and is_pin_attachment(att) (hookEvent SessionStart and either the command names the pin
+      script or a stripped stderr line equals PIN_LINE_PREFIX or starts with PIN_LINE_PREFIX plus a space).
+      project_ref_pin keeps its signature, its P-1 earliest-first loop and the K-1 inherited-line skip, and takes
+      stderr_ref(att) or, as the legacy form, command_ref(att). Docstrings name the rules.
+  - file: src/turn_capture/provenance.py
+    action: Modify
+    purpose: >-
+      _is_pin delegates to transcript.is_pin_attachment (PV-1), so a labelled pin attachment supplies its checkout facts;
+      pin_facts and _PIN_LINE unchanged (the facts line is untouched). open_provenance (root only) counts
+      pin_ref_disagreement once per pin attachment in the stream whose stderr_ref and command_ref are both present and
+      differ (rule DG-1: a pass diagnostic, never a row value).
+  - file: src/turn_capture/witness.py
+    action: Modify
+    purpose: >-
+      Rule WT-2: is_witness_record drops the command test (Fable consult F3); a Stop hook_success attachment whose stderr
+      first line equals WITNESS_LINE is a witness whatever its command (label, statusMessage free text, absent or the
+      registered line). WITNESS_STEM is kept only if another module still imports it (grep at build time; delete it
+      otherwise).
+  - file: src/turn_capture/observations.py
+    action: Modify
+    purpose: >-
+      Rule H-1: hook_name keeps the command's script stem first; when the command names no script, a pin attachment
+      (transcript.is_pin_attachment) is named hook:session_start_log_turn and a hook record whose stderr first line equals
+      witness.WITNESS_LINE (any event) is named hook:stop_log_turn; otherwise the H-2 hookName fallback as today. No other
+      stderr tag is ever read as a name (Fable consult F4). Net growth at most 10 SLOC.
+  - file: src/turn_capture/record_turn.py
+    action: Modify
+    purpose: PARSER_VERSION 9, PRODUCER_VERSION "turn-capture-9" (one above main's value at build time, see context).
+  - file: config/telemetry/parser_versions.yaml
+    action: Modify
+    purpose: >-
+      claude_code current 9; history entry v9 (build date, regenerated golden_digest, full_output_cap_bytes 8388608,
+      signature_prefixes [hook, gate, precommit, status], a reason naming this plan, rec-4939 and rules P-2, PV-1, WT-2,
+      H-1).
+  - file: .claude/hooks/session_start_log_turn.sh
+    action: Modify
+    purpose: >-
+      Rule PW-1: after the facts line, and only when its argv holds exactly one --project-ref=<ref> whose ref fullmatches
+      ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$, print a second stderr line
+      '[session_start_log_turn] capture pin project_ref=<ref>'; zero, two or malformed flags print nothing extra (never
+      'unknown'). Both lines go out in one redirected block (the hook keeps exactly one '>&2'). Still reads no stdin,
+      writes no file, prints nothing on stdout and exits 0 on every path. Header comment names the parser rules that read
+      each line.
+  - file: tests/hooks/test_session_start_log_turn.py
+    action: Modify
+    purpose: >-
+      LINE keeps its name and pattern (the facts line alone); a new exact REF_LINE constant is
+      '[session_start_log_turn] capture pin project_ref=ontheloop\n'; no optional group. SANCTIONED ASSERTION CHANGE (a
+      strengthening): test_every_source_prints_one_pin_line_and_writes_nothing, which passes --project-ref=ontheloop,
+      asserts stderr is exactly a LINE match followed by REF_LINE for every source.
+      test_closed_stdin_and_no_arguments_still_exit_zero and test_pin_line_carries_checkout_facts_from_git are unchanged
+      (they pass no argv, so their LINE.fullmatch and exact-stderr asserts already prove no ref line is printed). New nodes test_one_valid_ref_flag_prints_the_ref_line and
+      test_no_two_or_malformed_ref_flags_print_no_ref_line (two flags, a ref with a space, a leading '-', an empty ref).
+  - file: scripts/telemetry_capture/__main__.py
+    action: Modify
+    purpose: >-
+      _cmd_observe counts SessionStart pin records with transcript.is_pin_attachment instead of the script stem (the fifth
+      command reader), so observe reports the pins the parser now captures. Import list adjusted; nothing else changes.
+  - file: tests/telemetry_capture/test_main.py
+    action: Modify
+    purpose: New node test_observe_counts_labelled_pin_records (a 'command hook 9' pin with both stderr lines counts once by source).
+  - file: scripts/telemetry_capture/smoke.py
+    action: Modify
+    purpose: >-
+      The c8 smoke's synthetic tree moves to the label shape (Fable consult F5): the pin attachment's command is
+      'command hook 9' and its stderr carries the facts line and the ref line; the Stop witness's command is
+      'command hook'. STOP_COMMAND is removed if nothing else reads it. The real Stop entry point and runner therefore pin
+      through stderr_ref end to end. Docstring says so.
+  - file: tests/telemetry_capture/test_smoke.py
+    action: Modify
+    purpose: >-
+      New node test_synthetic_tree_records_the_label_shape (every hook attachment's command is a label, and the tree still
+      pins the ref through project_ref_pin and closes at its witness). Existing nodes unchanged.
+  - file: tests/turn_capture/test_hook_label_shape.py
+    action: Create
+    purpose: >-
+      rec-4939's acceptance file. Nodes: test_labelled_pin_attachment_pins_from_witness,
+      test_labelled_stop_attachment_is_a_witness (both named by the rec's acceptance),
+      test_label_grammar_is_never_parsed ('command hook', 'command hook 1', 'command hook 11', 'http hook 2' all pin only
+      through their stderr), test_witness_line_ref_wins_over_the_command_form_and_is_counted (pin_ref_disagreement 1),
+      test_malformed_or_repeated_ref_lines_fall_back_to_the_command_form (a malformed line beside one well-formed line does not block it), test_labelled_pin_without_a_ref_line_does_not_pin,
+      test_inherited_labelled_pin_is_skipped (K-1), test_gated_plugin_copy_never_pins_or_supplies_facts (CC-web: a label
+      with empty stderr before and after the real record), test_labelled_pin_supplies_checkout_facts (PV-1/PV-2),
+      test_capture_records_keep_their_names_under_labels (H-1), test_other_labelled_hooks_fall_back_to_hook_name (H-2),
+      test_statusmessage_free_text_does_not_hide_the_witness, test_command_shape_parses_as_before,
+      test_status_message_shape_matches_the_command_shape (the hook_status_message_shape case's rows equal the same tree's
+      rows with the registered command lines, apart from metadata.command), test_labelled_twins_still_collapse (HG-1).
+  - file: tests/turn_capture/test_witness.py
+    action: Modify
+    purpose: >-
+      SANCTIONED ASSERTION CHANGE (graduated record turn-capture-stop-witness, Decision 244; disclosed to Benjamin):
+      test_witness_matches_only_the_capture_shim_line_at_stop removes the two command variants ('bash ./other_stop.sh' and
+      None) from its `variants` list and adds a new `accepted` list (those two plus command 'command hook 3') with
+      `assert all(witness.is_witness_record(v) for v in accepted)`, because rule WT-2 no longer reads the command. The
+      `variants` name and its `assert not any(...)` line stay byte-identical, so the AST weakening detector emits no
+      candidate for this node; the change is disclosed in the PR body instead (constraints). Every other variant (type,
+      attachment shape, hook_blocking_error, SubagentStop, stderr shapes) stays rejected and the SubagentStop assertion
+      is unchanged.
+  - file: tests/hooks/test_capture_hook_registration.py
+    action: Modify
+    purpose: >-
+      SANCTIONED ASSERTION CHANGE (graduated record capture-hooks-status-message-parser-parity): the last two assertions
+      of test_the_recorded_status_message_satisfies_the_parser_rules pinned the outage (a label neither pins nor
+      witnesses). They become: a label with only the facts line still does not pin, a label whose stderr adds the ref line
+      pins 'ontheloop', and a label with the witness stderr is a witness. New node
+      test_status_message_ref_matches_the_hook_ref_line (for every capture entry that carries a statusMessage, its
+      --project-ref, the registered command's flag and the line the hook prints for that flag are one value, Decision
+      200; with the stopgap removed it holds over no entries, so F6 needs no sanctioned change). Every other node unchanged.
+  - file: tests/turn_capture/test_transcript.py
+    action: Modify
+    purpose: >-
+      transcript.py's mirror file (validate_test_coverage per-file floor): new nodes
+      test_stderr_ref_needs_exactly_one_well_formed_line, test_command_ref_is_the_legacy_form and
+      test_is_pin_attachment_reads_command_or_stderr, so every new line of transcript.py is covered by its mirror. Existing
+      nodes unchanged.
+  - file: tests/turn_capture/test_observations.py
+    action: Modify
+    purpose: >-
+      observations.py's mirror file (coverage floor): new node test_hook_name_names_capture_records_without_a_script
+      (pin attachment, witness line on Stop and on UserPromptSubmit, a label with other stderr, a '[WARN]' stderr tag that
+      is never a name). Existing nodes unchanged.
+  - file: tests/turn_capture/test_provenance.py
+    action: Modify
+    purpose: New node test_pin_ref_disagreement_is_counted_on_the_root_only (provenance.py's mirror file, coverage floor).
+  - file: tests/turn_capture/test_record_turn.py
+    action: Modify
+    purpose: >-
+      test_new_cases_are_built_from_their_builders registers V9_BUILDERS. SANCTIONED ASSERTION CHANGE:
+      test_finalization_cuts_are_recorded_once_and_survive_a_reset pins PRODUCER_VERSION "turn-capture-9" and
+      PARSER_VERSION 9. Nothing else changes.
+  - file: tests/telemetry/test_parser_version_registry.py
+    action: Modify
+    purpose: CASES gains the two new cases after the existing ones (no other change).
+  - file: tests/fixtures/turn_capture_v9_cases.py
+    action: Create
+    purpose: >-
+      Builders for the two new golden cases and V9_BUILDERS; synthetic values only (Decision 101), timestamps in the corpus
+      epoch, label and stderr shapes copied from the 2026-11-06 probe of Claude Code 2.1.318
+      (/mnt/project-files/capture-pin-outage/durable-fix/label-probe/).
+  - file: tests/fixtures/turn_capture/golden/hook_label_shape.json
+    action: Create
+    purpose: >-
+      The CC-web label shape: a gated plugin pin copy ('command hook 1', empty stderr) and the real pin ('command hook 2',
+      facts line plus ref line), another labelled SessionStart hook with no stderr, a prompt, a labelled PreToolUse hook,
+      a tool call, a reply, a labelled Stop witness ('command hook'), a second prompt and reply closed by a second witness,
+      and one labelled stdout-printing hook run written twice (a heldContent copy and a plain copy sharing toolUseID,
+      hookEvent, hookName, label and durationMs) so HG-1's twin collapse is pinned under labels.
+      Expected: the open row carries the checkout facts; turns close at their witnesses; the capture records are named
+      hook:session_start_log_turn and hook:stop_log_turn; every other hook reads hook:<hookName>.
+  - file: tests/fixtures/turn_capture/golden/hook_status_message_shape.json
+    action: Create
+    purpose: >-
+      Today's live shape after the build: statusMessage commands ('session_start_log_turn.sh --project-ref=ontheloop',
+      'stop_log_turn.py') with the new ref line. Expected: identical rows to the command shape apart from metadata.command.
+  - file: tests/fixtures/turn_capture/golden/index.json
+    action: Modify
+    purpose: Lists the two new cases after the existing ones.
+  - file: tests/telemetry/fixtures/derived_golden_state.yaml
+    action: Modify
+    purpose: >-
+      Re-authored by hand at parser_version 9 under its own AUTHORING RULE (never copied from a verb): header moves to 9;
+      new entries for corpus:hook_label_shape and corpus:hook_status_message_shape cite this plan. Expected movement in
+      existing entries: none (the prototype regenerated every existing case unchanged apart from version stamps).
+  - file: tests/telemetry/fixtures/derived_golden_rollups.yaml
+    action: Modify
+    purpose: >-
+      Same rule. Mandatory new entry: corpus:hook_label_shape final-pass process_event rollup, which pins the
+      process_event count (HG-1 twin collapse included); the names are pinned by the golden expected_rows and
+      test_capture_records_keep_their_names_under_labels, since the rollup carries counts only.
+  - file: tests/telemetry/test_capture_hook_labels_contract_notes.py
+    action: Create
+    purpose: >-
+      Nodes: test_envelope_declares_parser_version_9_after_8_and_before_r8, test_ports_sa02_names_the_label_and_stderr_assumption,
+      test_project_ref_row_names_the_stderr_echo. Each asserts the named rule tokens, not whole sentences.
+  - file: docs/contracts/telemetry-event-envelope.yaml
+    action: Modify
+    purpose: >-
+      Contract class C (Decision 199); treated as always-ask in this project, so Benjamin's word before the build merges,
+      exact text pasted inline and recorded in the approved-text sidecar. One governance line "PARSER_VERSION 9
+      (PLAN-telemetry-capture-hook-labels, rec-4939)" after the PARSER_VERSION 8 line and before "R8: non-replayable"
+      (tests/telemetry/test_stop_turn_close_contract_notes.py pins that order), plus one amendment_log entry, both
+      verbatim from the approved wording. Under 2000 characters per line and 500 effective lines (Decision 166).
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      Class D (Decision 212). structural_assumptions SA-02 gains one sentence: Claude Code records an exit-0 hook's stderr
+      verbatim in its hook attachment, and the attachment's command may be the registered line, the hook's statusMessage
+      text or, from 2.1.317 in cloud sessions, a label ('command hook', 'command hook N', N not stable across surfaces),
+      so capture identifies its own hook records by their stderr lines and reads the command only as a legacy form. One
+      amendment_log entry. This discharges the SA-02 half of rec-4942 (its canary half stays open).
+  - file: docs/contracts/project-configuration.yaml
+    action: Modify
+    purpose: >-
+      Class D (Decision 224 cl.6). The project.ref row's this_repository note becomes "the --project-ref flag of the
+      SessionStart capture hook, which the hook echoes on its 'capture pin project_ref=' stderr line for the parser"; its
+      readers gain .claude/hooks/session_start_log_turn.sh (it now reads the flag from argv, Decision 224 cl.6); one
+      amendment_log entry.
+  - file: config/agent/verification_registry/entries/turn-capture-hook-labels.yaml
+    action: Create
+    purpose: Registry row for VP 1 (graduate), written verbatim from the step's command; guard_target src/turn_capture/transcript.py.
+  - file: config/agent/verification_registry/entries/telemetry-capture-hook-labels-declared.yaml
+    action: Create
+    purpose: Registry row for VP 2 (graduate); guard_target docs/contracts/telemetry-event-envelope.yaml.
+  - file: tests/fixtures/turn_capture/golden/pin_first_record_without_uuid.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/multiblock_response_interleaved_tool_results.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/meta_and_companion_records.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/tool_result_error.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/tool_result_interrupted.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/hook_blocked_tool_call.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/sidecar_present.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/sidecar_absent.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/subagent_sync.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/subagent_background_with_completion.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/subagent_background_without_completion.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/nested_subagent_depth2.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/hooks_resume_and_compact.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/empty_thinking_and_image_blocks.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/orphan_tool_result.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/unknown_record_and_attachment_types.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/trailing_partial_line.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/malformed_line.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/large_tool_result_over_64k.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/observed_real_shapes.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/secrets.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/hooks_before_first_record.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/mcp_overflow_saved_output.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/full_output_omitted_over_cap.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/reasoning_visibility_forms.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/gate_and_precommit_markers.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/close_cancelled_mid_stream.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/close_cancelled_running_tool.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/close_failed_api_error.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/resume_after_interrupt.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/fork_branch_copied_head.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/fork_session_copied_head.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/fork_session_nested.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/hook_command_names.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/no_reply_session.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/subagent_usage_final_and_spawn_correction.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/background_notice_statuses.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/resume_segment_closes.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/session_provenance_facts.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/model_call_request_fields.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/stop_witness_closes.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/stop_blocked_witness_first.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/stop_blocked_feedback_first.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/stop_blocked_then_interrupted.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/api_error_self_close.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/stop_witness_not_at_rest.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/prompt_open_row.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/workflow_from_skill.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/subagent_workflow_skills.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/status_markers.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/late_startup_group.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/late_resume_group.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/resume_hook_twins.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/ci_rca_hook_pin_and_host_run.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/host_run_malformed.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/host_run_only_withheld.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+  - file: tests/fixtures/turn_capture/golden/host_run_retry_attempts.json
+    action: Modify
+    purpose: expected_rows regenerated at v9 (parser_version stamps only).
+bundled_recommendations:
+  - rec-4939
+followon_recs:
+  - rec-4942
+  - rec-4959
+  - rec-4962
+  - rec-4963
+closes_criteria: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - >-
+    A labelled SessionStart pin attachment pins the tree from its 'capture pin project_ref=' stderr line, whatever the
+    label's form ('command hook', 'command hook N'), the label is never parsed, the command form still pins a transcript
+    without the line, the line wins where both are present and a disagreement is counted pin_ref_disagreement, K-1 still
+    skips copied fork records, and under labels a gated plugin copy with empty stderr never pins (VP 1).
+  - >-
+    A Stop hook_success whose stderr opens with the witness line is a witness whatever its command; a labelled pin
+    attachment supplies the open row's checkout facts; the observe CLI and the c8 smoke's synthetic tree use the same
+    predicates (VP 1).
+  - >-
+    The capture records with a stderr capture line keep the names hook:session_start_log_turn and hook:stop_log_turn
+    (Stop, StopFailure, UserPromptSubmit) under labels; session_end_log_turn prints no capture line, so it and every
+    other labelled hook read hook:<hookName> (H-2) (VP 1, VP 3).
+  - >-
+    The pin hook prints the ref line only for exactly one well-formed --project-ref, keeps one stderr redirect, an empty
+    stdout and exit 0 on every path (VP 1).
+  - >-
+    The golden corpus is regenerated at parser_version 9 with the registry bumped and two new cases, and no existing case
+    changes beyond the version stamps; the derived golden state and rollups are re-authored by hand at 9 (VP 3, VP 10, VP 11).
+  - >-
+    The installed Claude Code CLI, run against a local mock Messages API in cloud mode with every statusMessage stripped,
+    writes labels, and the parser still pins, sees a witness and reads checkout facts in the settings, plugin and
+    combined shapes (VP 4; FAIL on main recorded 2026-11-06).
+  - >-
+    The envelope's PARSER_VERSION 9 line and amendment_log entry match the approved-text sidecar word for word and
+    Benjamin's word on that text is recorded before the build merges; ports.yaml SA-02 and the project.ref row say the
+    same as the code (VP 2, VP 6).
+  - >-
+    A session started on merged main is captured at parser_version 9 with its pin read from the stderr line, and rec-4939
+    closes through the Resolves trailer against its existing acceptance (VP 8, VP 9).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-4939's acceptance file plus the hook, observe, smoke, provenance and the two sanctioned-assertion nodes.
+    command: >-
+      bin/venv-python -m pytest tests/turn_capture/test_hook_label_shape.py tests/hooks/test_session_start_log_turn.py
+      tests/hooks/test_capture_hook_registration.py::test_the_recorded_status_message_satisfies_the_parser_rules
+      tests/hooks/test_capture_hook_registration.py::test_status_message_ref_matches_the_hook_ref_line
+      tests/turn_capture/test_witness.py::test_witness_matches_only_the_capture_shim_line_at_stop
+      tests/turn_capture/test_transcript.py::test_stderr_ref_needs_exactly_one_well_formed_line
+      tests/turn_capture/test_transcript.py::test_command_ref_is_the_legacy_form
+      tests/turn_capture/test_transcript.py::test_is_pin_attachment_reads_command_or_stderr
+      tests/turn_capture/test_observations.py::test_hook_name_names_capture_records_without_a_script
+      tests/turn_capture/test_provenance.py::test_pin_ref_disagreement_is_counted_on_the_root_only
+      tests/telemetry_capture/test_main.py::test_observe_counts_labelled_pin_records
+      tests/telemetry_capture/test_smoke.py::test_synthetic_tree_records_the_label_shape -q
+    expected: >-
+      Exit 0, every node passes. Red before: the new file and nodes are absent, and on main a labelled pin returns None
+      and a labelled Stop attachment is no witness.
+    fix_if: >-
+      A label pins without a stderr line, a gated copy pins or supplies facts, or the witness depends on the command. Fix
+      the rule, never the fixture.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: turn-capture-hook-labels
+  - step: 2
+    phase: pre-deploy
+    action: Contract notes, their order relative to R8, and the ports validator.
+    command: >-
+      bin/venv-python -m pytest tests/telemetry/test_capture_hook_labels_contract_notes.py
+      tests/telemetry/test_capture_v8_contract_notes.py tests/telemetry/test_stop_turn_close_contract_notes.py -q && bin/venv-python -c "from
+      scripts.checks.contracts.validate_ports_contract import validate_ports_contract as v;f=[];v(f);assert not f,
+      f;print('PORTS_OK')"
+    expected: Exit 0, every node passes, then PORTS_OK. Red before because the test file and texts are absent.
+    fix_if: A note is missing, or the PARSER_VERSION 9 line is not between the PARSER_VERSION 8 line and R8.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: telemetry-capture-hook-labels-declared
+  - step: 3
+    phase: pre-deploy
+    action: >-
+      The golden corpus at v9 and the registry: every case matches, the bump is recorded, incremental equals full at every
+      line cut, finalize and resume schedules emit each row once, and the derived golden layer reconciles at 9.
+    command: >-
+      bin/venv-python -m pytest tests/turn_capture/test_record_turn.py::test_golden_cases_match_expected_rows
+      tests/turn_capture/test_record_turn.py::test_incremental_equals_full_at_every_line_cut
+      tests/turn_capture/test_record_turn.py::test_finalize_resume_schedules_emit_each_row_once
+      tests/turn_capture/test_record_turn.py::test_finalize_equals_virtual_prompt_at_eof
+      tests/turn_capture/test_record_turn.py::test_new_cases_are_built_from_their_builders
+      tests/turn_capture/test_record_turn.py::test_finalization_cuts_are_recorded_once_and_survive_a_reset
+      tests/telemetry/test_parser_version_registry.py tests/telemetry_verify/test_derive.py -q
+    expected: Exit 0, every node passes.
+    fix_if: >-
+      Regenerate expected_rows only after steps 1-2 pass. A line-cut failure is a prefix defect in a rule, never a test to
+      relax. A derived-layer failure means a hand re-derivation is missing, never a value copied from a verb.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Most of its nodes already belong to graduated standing checks (turn-capture-golden-corpus,
+      turn-capture-r7-incremental-equals-full, turn-capture-finalize-resume-emits-each-row-once and the parser version
+      registry); the rest run in the full tier. The new cases join the corpus through the index, not a new check.
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      Real-CLI proof without model spend: the label probe copies the capture registrations with every statusMessage
+      stripped into a scratch project, runs the installed claude -p in cloud mode (CLAUDE_CODE_REMOTE=true) against a
+      local mock Messages API, and parses the transcript with this checkout's parser, in the settings, plugin and combined
+      shapes. No credential is present, so nothing is sent.
+    command: >-
+      PROBE_LOG="$(mktemp)" && for m in "" --plugin --combined; do bin/venv-python
+      /mnt/project-files/capture-pin-outage/durable-fix/label-probe/probe.py $m >> "$PROBE_LOG" || true; done &&
+      test "$(grep -c '"verdict": "PASS"' "$PROBE_LOG")" -eq 3 && test "$(grep -c '"labels_seen": \["command hook' "$PROBE_LOG")" -eq 3 && echo 3
+    expected: >-
+      Three JSON lines, each with verdict PASS, pin ontheloop, pin_records 1, stop_witnesses at least 1 and a non-empty
+      labels_seen; the command then prints 3. On main (2026-11-06, CLI 2.1.318) all three shapes printed FAIL with pin null.
+    fix_if: >-
+      Probe file absent (no /mnt/project-files mount): stop and tell the coordinator, never skip the step. HARNESS_ERROR:
+      the CLI or the mock did not start; report it, never skip the step. FAIL with labels_seen empty: the
+      CLI no longer labels (record its version and command shape in the PR body; the unit tests stay the guard). FAIL
+      with labels present: a parser defect; stop and RCA (Decision 55).
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      Live proof against the production writer under a synthetic ref: the c8 smoke, now in the label shape, through the
+      real hook entry points and runner.
+    command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_capture.smoke
+    expected: Ends with the PC_SMOKE PASS line; counts only.
+    fix_if: Any failure -> STOP and RCA (Decision 55); never clear a halt and retry.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      The always-ask text matches the approved sidecar at the build's base, and rec-4939's acceptance is unchanged and
+      passes (Decision 201).
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug telemetry-capture-hook-labels --base origin/main &&
+      bin/venv-python -c "from scripts.ops_data_portal import _fetch_rec_from_reader as f;a=f('rec-4939',
+      profile='agent_platform');want='bin/venv-python -m pytest
+      tests/turn_capture/test_hook_label_shape.py::test_labelled_pin_attachment_pins_from_witness
+      tests/turn_capture/test_hook_label_shape.py::test_labelled_stop_attachment_is_a_witness -q';assert
+      a['status']=='open' and a['acceptance'].strip()==want, a['acceptance'];print('REC_OK')" && bin/venv-python -m pytest
+      tests/turn_capture/test_hook_label_shape.py::test_labelled_pin_attachment_pins_from_witness
+      tests/turn_capture/test_hook_label_shape.py::test_labelled_stop_attachment_is_a_witness -q
+    expected: The verify line passes, REC_OK, then exit 0.
+    fix_if: >-
+      A verify mismatch means the edit differs from the approved words: restore the words, never edit the sidecar. A
+      changed acceptance means someone re-authored it: read it and make it pass, or update it through the portal with
+      get_rec_write_guidance first.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      Fast tier, then the full tier on the committed, rebased, clean tree before handoff. The full tier runs past the
+      10-minute foreground cap: start it backgrounded with a 2 h limit from the top-level build session (never a
+      subagent); its verdict is --verify-head, never a pipe's exit status.
+    command: >-
+      bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m
+      scripts.checks.validation_result --verify-head
+    expected: Exit 0 on a completed full run with the head verified; a timeout is not a pass (handoff_policy).
+    fix_if: >-
+      Fix the named check at root cause and rerun from the start; never raise a budget, skip a check or weaken an
+      assertion beyond the sanctioned changes.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Invokes scripts.validate (recursion refusal); it is the handoff gate itself.
+  - step: 8
+    phase: post-deploy
+    action: >-
+      A session started on merged main is captured at v9 and pinned from the stderr line, and its rows read back through
+      the production reader. The new session runs this command in its own container after its first Stop pass (the
+      coordinator starts it with this step in its brief) and posts the counts line; the build thread records that
+      message id as the read-back.
+    command: >-
+      T="$(ls -t ~/.claude/projects/*/*.jsonl | head -1)" && AWS_PROFILE=agent_platform bin/venv-python -m
+      scripts.telemetry_capture probe --tree "$T" --require telemetry_sessions && bin/venv-python -c "import sys;from
+      pathlib import Path;from src.turn_capture.transcript import FsTree,ROOT,read_lines,stderr_ref,is_pin_attachment,project_ref_pin;from
+      src.turn_capture.record_turn import PARSER_VERSION;t=FsTree(Path(sys.argv[1]));a=[l.data['attachment'] for l in
+      read_lines(t.read(ROOT) or b'') if l.data and isinstance(l.data.get('attachment'),dict)];w=[stderr_ref(x) for x in a
+      if is_pin_attachment(x)];print('v',PARSER_VERSION,'pin_records',len(w),'with_ref_line',sum(x is not None for x in
+      w));assert PARSER_VERSION==9 and 'ontheloop' in w and project_ref_pin(t)=='ontheloop'" "$T"
+    expected: >-
+      The probe's sessions rows above zero with no halt, then one line with v 9 and with_ref_line at least 1. Counts only.
+    fix_if: >-
+      No ref line: the session's checkout predates the merge (check git log); a halt or no rows: read the pass
+      diagnostics, file a rec through the portal and fix forward.
+    hermetic: false
+  - step: 9
+    phase: post-deploy
+    action: 'After the squash merge carries "Resolves: rec-4939", the closure job closed rec-4939.'
+    command: >-
+      bin/venv-python -c "from scripts.ops_data_portal import _fetch_rec_from_reader as f;s=(f('rec-4939',
+      profile='agent_platform') or {}).get('status');print('rec-4939',s);assert s=='closed'"
+    expected: rec-4939 closed.
+    fix_if: >-
+      Open: check ci.yml's closure job on the squash commit; close through update_rec with the PR as evidence only if its
+      acceptance passes on main.
+    hermetic: false
+  - step: 10
+    phase: pre-deploy
+    action: >-
+      The derived golden layer reconciles at 9 (its module needs duckdb, which PR CI's fast tier lacks, so it is not
+      hermetic; validate_hermetic_fast_tier_collectability).
+    command: bin/venv-python -m pytest tests/telemetry/test_derived_layer_reconciliation.py -q
+    expected: Exit 0 with at least one test collected and passing.
+    fix_if: A mismatch means a hand re-derivation in the derived golden files is missing; never copy a value from a verb.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Already a full-tier module; the derived files' consumers are the guard, and the step only re-runs it at 9.
+  - step: 11
+    phase: pre-deploy
+    action: >-
+      Mechanical proof of "no existing case changes beyond the version stamps" (the approved envelope sentence): every
+      case in the base tree's golden index (origin/main after #1856 merges, before this build) has the same expected_rows
+      in the regenerated tree with parser_version masked. Run after execution step 5's regeneration.
+    command: >-
+      bin/venv-python -c "import json,subprocess as s;g='tests/fixtures/turn_capture/golden/';b=json.loads(s.check_output(['git','show','origin/main:'+g+'index.json']))['cases'];m=lambda
+      r:[{k:v for k,v in x.items() if k!='parser_version'} for x in r];bad=[c for c in b if
+      m(json.loads(s.check_output(['git','show','origin/main:'+g+c]))['expected_rows'])!=m(json.load(open(g+c))['expected_rows'])];assert
+      not bad,bad;print('UNCHANGED',len(b))"
+    expected: >-
+      UNCHANGED 57 (the count is #1856's index; measured as UNCHANGED 53 on main v7 against #1856's v8 corpus, so masking
+      parser_version alone is enough).
+    fix_if: >-
+      A listed case changed beyond its version stamp: a rule is not a no-op on the old shape; fix the rule, never the
+      golden. A count other than 57: the base is not #1856's merged corpus; stop and tell the coordinator (step 1).
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      A one-time comparison against the pre-build base; after merge the standing golden-corpus check pins the
+      regenerated rows.
+test_obligations:
+  - source: src/turn_capture/transcript.py
+    behavior: P-2 pins from the stderr ref line under any label, keeps the command form, K-1 and P-1.
+    verification_step: 1
+    test_selector: tests/turn_capture/test_hook_label_shape.py::test_labelled_pin_attachment_pins_from_witness
+    red_green_expectation: red before (a labelled pin returns None on main), green after
+  - source: src/turn_capture/provenance.py
+    behavior: A labelled pin supplies the open row's checkout facts (PV-1 via is_pin_attachment).
+    verification_step: 1
+    test_selector: tests/turn_capture/test_hook_label_shape.py::test_labelled_pin_supplies_checkout_facts
+    red_green_expectation: red before (NULL facts for a labelled pin on main), green after
+  - source: src/turn_capture/provenance.py
+    behavior: A two-form disagreement is counted pin_ref_disagreement on the root only.
+    verification_step: 1
+    test_selector: tests/turn_capture/test_provenance.py::test_pin_ref_disagreement_is_counted_on_the_root_only
+    red_green_expectation: red before (counter absent), green after
+  - source: src/turn_capture/witness.py
+    behavior: WT-2 reads the stderr witness line whatever the command.
+    verification_step: 1
+    test_selector: tests/turn_capture/test_hook_label_shape.py::test_labelled_stop_attachment_is_a_witness
+    red_green_expectation: red before (a labelled Stop attachment is no witness on main), green after
+  - source: src/turn_capture/observations.py
+    behavior: Capture records keep their names under labels; other hooks fall back to hookName.
+    verification_step: 1
+    test_selector: tests/turn_capture/test_hook_label_shape.py::test_capture_records_keep_their_names_under_labels
+    red_green_expectation: red before (hook:SessionStart.startup on main), green after
+  - source: src/turn_capture/record_turn.py
+    behavior: The version pin moves to 9 with the corpus and registry.
+    verification_step: 3
+    test_selector: tests/turn_capture/test_record_turn.py::test_finalization_cuts_are_recorded_once_and_survive_a_reset
+    red_green_expectation: red before (pins 8), green after
+  - source: config/telemetry/parser_versions.yaml
+    behavior: The registry records v9 with the regenerated digest.
+    verification_step: 3
+    test_selector: tests/telemetry/test_parser_version_registry.py::test_registry_matches_producer
+    red_green_expectation: red before (current 8 against PARSER_VERSION 9), green after
+  - source: .claude/hooks/session_start_log_turn.sh
+    behavior: The ref line is printed only for exactly one well-formed flag; one redirect; exit 0.
+    verification_step: 1
+    test_selector: tests/hooks/test_session_start_log_turn.py::test_one_valid_ref_flag_prints_the_ref_line
+    red_green_expectation: red before (no ref line), green after
+  - source: scripts/telemetry_capture/__main__.py
+    behavior: observe counts labelled pin records.
+    verification_step: 1
+    test_selector: tests/telemetry_capture/test_main.py::test_observe_counts_labelled_pin_records
+    red_green_expectation: red before (zero pins counted for a labelled tree), green after
+  - source: scripts/telemetry_capture/smoke.py
+    behavior: The c8 smoke's synthetic tree is in the label shape and still pins and closes.
+    verification_step: 1
+    test_selector: tests/telemetry_capture/test_smoke.py::test_synthetic_tree_records_the_label_shape
+    red_green_expectation: red before (registered command lines), green after
+  - source: docs/contracts/telemetry-event-envelope.yaml
+    behavior: The PARSER_VERSION 9 line exists between the PARSER_VERSION 8 line and R8.
+    verification_step: 2
+    test_selector: tests/telemetry/test_capture_hook_labels_contract_notes.py::test_envelope_declares_parser_version_9_after_8_and_before_r8
+    red_green_expectation: red before (module absent), green after
+  - source: docs/contracts/ports.yaml
+    behavior: SA-02 names the label and stderr assumption.
+    verification_step: 2
+    test_selector: tests/telemetry/test_capture_hook_labels_contract_notes.py::test_ports_sa02_names_the_label_and_stderr_assumption
+    red_green_expectation: red before (module absent), green after
+  - source: docs/contracts/project-configuration.yaml
+    behavior: The project.ref row names the stderr echo.
+    verification_step: 2
+    test_selector: tests/telemetry/test_capture_hook_labels_contract_notes.py::test_project_ref_row_names_the_stderr_echo
+    red_green_expectation: red before (module absent), green after
+  - source: tests/fixtures/turn_capture_v9_cases.py
+    behavior: The committed new cases equal their builders.
+    verification_step: 3
+    test_selector: tests/turn_capture/test_record_turn.py::test_new_cases_are_built_from_their_builders
+    red_green_expectation: red before (builders absent), green after
+  - source: tests/telemetry/fixtures/derived_golden_state.yaml
+    behavior: Hand-derived state expectations at parser_version 9.
+    verification_step: 3
+    test_selector: tests/telemetry_verify/test_derive.py
+    waiver_reason: Hand-authored expectation data; its consumer tests are the guard and fail until the header moves to 9.
+  - source: tests/telemetry/fixtures/derived_golden_rollups.yaml
+    behavior: Hand-derived rollups at parser_version 9, including the label-shape process_event names.
+    verification_step: 3
+    test_selector: tests/telemetry_verify/test_derive.py
+    waiver_reason: Hand-authored expectation data; its consumer tests are the guard and fail until the header moves to 9.
+  - source: config/agent/verification_registry/entries/turn-capture-hook-labels.yaml
+    behavior: Records VP step 1 as a graduated registry check_id, so it keeps running as a standing regression guard.
+    verification_step: 7
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: >-
+      Registry data, not behaviour-capable source; validate_verification_registry executes the row's check_spec and
+      validate_graduation_completeness fails the PR if the graduate step has no row.
+  - source: config/agent/verification_registry/entries/telemetry-capture-hook-labels-declared.yaml
+    behavior: Records VP step 2 as a graduated registry check_id, so it keeps running as a standing regression guard.
+    verification_step: 7
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: >-
+      Registry data, not behaviour-capable source; validate_verification_registry executes the row's check_spec and
+      validate_graduation_completeness fails the PR if the graduate step has no row.
+weakening_dispositions:
+  - candidate: '[assertion-changed] tests/hooks/test_capture_hook_registration.py::test_the_recorded_status_message_satisfies_the_parser_rules'
+    cite: acceptance_criteria[0]
+    disposition: planned-change
+  - candidate: '[assertion-changed] tests/hooks/test_session_start_log_turn.py::test_every_source_prints_one_pin_line_and_writes_nothing'
+    cite: acceptance_criteria[3]
+    disposition: planned-change
+  - candidate: '[assertion-changed] tests/turn_capture/test_record_turn.py::test_finalization_cuts_are_recorded_once_and_survive_a_reset'
+    cite: acceptance_criteria[4]
+    disposition: planned-change
+  - candidate: '[constant-changed] src/turn_capture/record_turn.py::PARSER_VERSION'
+    cite: acceptance_criteria[4]
+    disposition: planned-change
+constraints:
+  - >-
+    Rules, pinned (rule ids go into code docstrings and the envelope line). PW-1: the pin hook prints
+    '[session_start_log_turn] capture pin project_ref=<ref>' after the facts line iff its argv holds exactly one
+    --project-ref=<ref> with ref matching ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$. P-2: per non-inherited root SessionStart
+    hook attachment in file order (P-1, K-1), ref = stderr_ref (exactly one stripped stderr line starting with the ref
+    prefix whose remainder is well-formed; malformed prefixed lines are not counted) else command_ref (today's test); the first non-None ref pins. PV-1: is_pin_attachment
+    = SessionStart and (command stem is the pin script or a stripped stderr line is the capture pin prefix, alone or
+    followed by a space). WT-2: Stop, hook_success, stderr first line equals WITNESS_LINE; the command is never read.
+    H-1: script stem from the command first; else pin attachment -> hook:session_start_log_turn, stderr first line equals
+    WITNESS_LINE -> hook:stop_log_turn; else H-2. No rule parses a label; label grammar is observed, never relied on.
+  - >-
+    Purity (envelope R7, Decision 207): every verdict reads only the attachment's own fields; no rule reads settings, the
+    environment, git or a clock. The pin of a tree that already has a cursor is reused across the v9 reset as today
+    (Decision 199). An outage-era tree (2026-11-03..06) holds only the facts line under a label, so it stays unpinned
+    unless it is resumed on a post-merge checkout (whose resume pin record carries the ref line); that is accepted loss
+    (postmortem D2, no backfill), never a reason to parse labels or assert a pin.
+  - >-
+    Typed columns only (Benjamin, 2026-10-17): no new column and no new metadata key; pin_ref_disagreement is a pass
+    diagnostic counter (DG-1), never a row value.
+  - >-
+    The statusMessage stopgap (#1881) stays exactly as it is (Fable consult F6): no edit to .claude/settings.json or
+    .claude/hooks/hooks.json, so no plugin render; its removal is a later, separate choice once rec-4942's canary is live.
+  - >-
+    No file crosses 500 SLOC, tests included (Decision 128); observations.py grows at most 10 SLOC and
+    tests/turn_capture/test_observations.py (462 today) at most 25 (one parametrized node; nearer 500 the node moves into
+    test_hook_label_shape.py, never a raise); contracts stay under
+    500 effective lines (ports.yaml measured 466 on main, about 479 projected after #1856, about 483 after this plan;
+    re-measure after the rebase) and governance lines under 2000 characters (Decision 166), by relief, never a raise.
+  - >-
+    Graduated checks keep resolving and are never weakened beyond the four sanctioned changes Benjamin approved (per file:
+    test_witness.py, test_capture_hook_registration.py, test_session_start_log_turn.py, test_record_turn.py) and the
+    version constant. weakening_dispositions must equal validate_weakening_candidates' find_candidates output on the
+    build diff: a candidate in one of those four files that this ledger did not foresee (e.g. an AST-only rename) is
+    added as planned-change with the same cite and named in the PR body; a stale entry is removed; a candidate in any
+    other file stops the build for the coordinator. The test_witness.py change is invisible to the AST detector by
+    design and is disclosed in the PR body with its diff.
+  - >-
+    Graduated shards kept unchanged (their check_spec and nodes stay; the nodes keep passing): capture-catalog-reset-resends-tree,
+    capture-runner-waits-for-its-witness, parser-v3-declared-prefixes-match-corpus, telemetry-parser-cap-agreement,
+    telemetry-parser-version-registry, telemetry-read-clients-use-the-route, telemetry-verify-cli-counts-only,
+    telemetry-verify-never-gates-capture, turn-capture-late-hook-groups, turn-capture-v2-conformance,
+    turn-capture-witness-frontier, turn-capture-usage-final. turn-capture-stop-witness and capture-hooks-status-message-parser-parity keep their
+    check_spec; only the sanctioned assertions inside their nodes change.
+  - 'Public repository (Decision 101): fixtures synthetic; probe and integration steps print counts and fixed tokens only.'
+  - >-
+    Do not touch terraform/ (env-cleanup hold) or the arrival-checks plan's files (rec-4949/rec-4940: Decisions,
+    data-modeling-standard.yaml, .github/workflows/). No admin credentials; every AWS call uses AWS_PROFILE=agent_platform.
+  - No rescue agents or workaround loops (Decision 55); a failed live step stops for RCA.
+context:
+  - >-
+    Decision-scout: NO_FLAGS. CITE 207, 228, 212, 118, 244, 224; RELATED 199, 200, 236, 166, 128, 48, 55, 201; 197 of 197
+    triaged; 6 roadmap items, 0 CONFLICT. Decision 228's turn-evidence-lost did NOT fire (the witness stayed on stderr).
+  - >-
+    SEQUENCING: build only after PR #1856 (claude -p capture adapter, parser v8, awaiting Benjamin) merges; it edits
+    transcript.py, record_turn.py, __main__.py, parser_versions.yaml, the envelope, ports.yaml, project-configuration.yaml
+    and the corpus. If #1856 closes unmerged, the amendment is more than a digit: number 8, the four host_run golden
+    rows and #1856 builders dropped, VP 11 expecting 53, and the sidecar's 'parser_version 8' sentence re-worded, which
+    needs Benjamin's word again. The sidecar anchors on R8 and the top-level amendment_log, which #1856 leaves in place.
+  - >-
+    Evidence (/mnt/project-files/capture-pin-outage/durable-fix/): label probe on CLI 2.1.318 (labels 'command hook' and
+    'command hook 1', stderr verbatim; FAIL on main in all three shapes); prototype.diff, under which the probe PASSed
+    in all three shapes, re-applied to #1856's branch 34003f2f (prototype-on-1856.txt): all 57 golden cases unchanged at
+    v8 and only the sanctioned tests failed; fable-independent-advice.md (F1-F6 adopted; liveness is rec-4940/rec-4949).
+  - >-
+    Not the 6-hourly causal-chain probe: it builds a hook-free tree with a shape digest its prior leg re-reads, so it is
+    unchanged; the c8 smoke (scripts/telemetry_capture/smoke.py) is the on-demand probe that drives the hooks and runner.
+  - >-
+    Gated plugin copy (CC-web): settings and plugin registrations both run; the gated copy exits 0 with empty stderr and
+    its own label, so the stderr rules skip it. Under statusMessage both copies record its text and PV-1 takes the last
+    (record-order dependent, as today; owner rec-4963). HG-1 twins collapse if labels are stable within a file (inferred;
+    pinned by the golden twin pair and test_labelled_twins_still_collapse).
+  - >-
+    rec-4942 keeps the canary half (its SA-02 half lands here). rec-4959 (filed 2026-11-06, critique r3 B2) owns the
+    friction rules r01-r03 that key on hook:never_on_main and siblings, which read hook:<hookName> under labels since
+    2.1.317 whatever this plan does. rec-4426 (base=unknown) and rec-4305 (project-id.yaml P-rule) are not bundled.
+  - >-
+    Unbuilt plans sharing scope files (plan_obligations): PLAN-telemetry-capture-hooks and PLAN-telemetry-late-hook-records
+    (both built), PLAN-telemetry-claude-p-capture-adapter (#1856, SEQUENCING), PLAN-hook-canary-evidence,
+    PLAN-approved-text-operator-approval (#1876, merged), PLAN-work-graph-edge-model; whichever builds second rebases. The
+    .claude/hooks/plugin_hooks.py docstring (H-1, P-1 read the stem) goes legacy-only; it moves with the stopgap removal.
+  - >-
+    Benjamin's word 2026-11-06 12:33Z (cmsg_012XgaFy8VaDQbxP5D8nC958JF2raFCLjW4TyQAXsxcZG3) approved the plan, the
+    sidecar wording (r2, digest 345d8fb8, inline in cmsg_012XgaFy8VaDQbxP5D8nC958V7jYRLgE8kXmK8kYZ9xGdx), the 4 changes.
+  - >-
+    Build-merge gate: the sidecar text and sanctioned assertion changes are approved (above) and carry to the build
+    landed verbatim; the session_start_log_turn.sh diff also needs Benjamin's final-diff word (Decision 246 cl.4); else
+    normal gates. Decision 246: CI reads Benjamin's tap on an approved-text run (46adecd8, garnet-storm-gravel-bay); run
+    42227418796 had no reviewer gate (approvals []), so is not his. Plan merge gate; red_overlap 2026-11-06 clear.
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS}
+  - {gate: wording-check, round: 1, verdict: PASS, digest: a2bee89dd55b2fd7d4534554bc33dbfb7f723e7fcbeaac855a76aabae5f9cb83, base: 6aa531d2037a4bfe3e38d3d0241726e0a734cc58, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 345d8fb802a844c09907893b50b13ac3d367650df5782f0ac6eb84268d0b751e, base: 6aa531d2037a4bfe3e38d3d0241726e0a734cc58, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 7}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 9}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 8}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 10}
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 9}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    1. Precondition: PR #1856 merged; rebase onto main. Confirm PARSER_VERSION 8, the corpus case count (57) and no other
+    open plan bumping the parser; if any differs, STOP and tell the coordinator. Run VP 4 once at v8 and keep its output
+    (expect FAIL in all three shapes) with the no-exit baseline: for m in "" --plugin --combined; do
+    bin/venv-python /mnt/project-files/capture-pin-outage/durable-fix/label-probe/probe.py $m; done
+  - >-
+    2. transcript.py (PIN_LINE_PREFIX, PIN_REF_PREFIX, stderr_ref, command_ref, is_pin_attachment; project_ref_pin on
+    them), provenance.py (_is_pin via is_pin_attachment; pin_ref_disagreement), witness.py (WT-2), observations.py (H-1),
+    with test_hook_label_shape.py, the provenance node and the sanctioned test_witness.py change.
+  - >-
+    3. session_start_log_turn.sh (PW-1, one redirected block) with test_session_start_log_turn.py; __main__.py observe
+    with its node; smoke.py label shape with its node; test_capture_hook_registration.py's sanctioned change and new node.
+    Run VP 1 until green.
+  - >-
+    4. Contracts: the envelope's two blocks copied verbatim from docs/plans/approved/telemetry-capture-hook-labels.yaml
+    ({{DATE}} filled with the build day), ports.yaml SA-02, project-configuration.yaml project.ref note, each Class D edit
+    with its amendment_log entry; the contract-notes test module. Run VP 2 and VP 6's approved_text verify.
+  - >-
+    5. Version and corpus: PARSER_VERSION 9, PRODUCER_VERSION "turn-capture-9", the sanctioned pin change, the two
+    builders and cases, the index and registry CASES. Only after VP 1-2 pass, regenerate every case's expected_rows from
+    record_turn and review the diff by kind: parser_version on every row and new rows only in the new cases; any other
+    change in an existing case is a defect to explain or fix. Set the registry v9 entry with the regenerated digest.
+    Re-author derived_golden_state.yaml and derived_golden_rollups.yaml by hand at 9. Run VP 3, VP 10 and VP 11.
+  - 6. Execute VP 4 (real CLI) and VP 5 (live smoke); on an unrecoverable failure stop and RCA (Decision 55).
+  - >-
+    7. VP 6. Closure per the implement skill's Commit Flows and docs/contracts/git-ops.yaml: VP 7 on the committed clean
+    tree, push, PR whose body holds the rules, the VP 4 fields before and after (verdict, pin, pin_records, stop_witnesses, labels_seen,
+    claude_version only; never hook_commands or a path), the four sanctioned assertion changes and
+    the envelope text; paste the text and the assertion diffs inline in the thread. Merge (squash, body carries
+    "Resolves: rec-4939") only after code review PROCEED, CI green and the build-merge gate in context.
+  - >-
+    8. After merge: update_rec on rec-4942 (portal, get_rec_write_guidance first) adding a context note that SA-02 now
+    states the command-field assumption (this PR; the shipped guard is
+    test_ports_sa02_names_the_label_and_stderr_assumption, so the acceptance's test_sa02_states_the_command_field_assumption
+    is a canary-side suggestion, not a second SA-02 test), that the mock Messages API probe
+    (/mnt/project-files/capture-pin-outage/durable-fix/label-probe/) needs no model credential and should become the
+    committed canary that replaces VP 4's mount path, and that HG-1 twin label stability (no stdout-printing hook in the
+    probe) is the canary's to measure; read it back. update_rec on rec-4959 adding
+    that H-1 shipped with the hookName fallback (this PR); read it back. Ask the coordinator for a session on merged
+    main for VP 8; then VP 9.
+  - "9. Report: what was implemented, VP results, merge SHA, rec-4939 status and the rec-4942 and rec-4959 read-backs."
+rollback: >-
+  Revert the squash commit as a forward change (parser_version 10 with the v8 rules; a version is never reused). The
+  statusMessage stopgap keeps capture working either way.
