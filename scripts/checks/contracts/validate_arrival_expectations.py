@@ -63,7 +63,7 @@ def _workflow_doc(root: Path, stem: str) -> tuple[dict[str, Any] | None, str | N
     return (doc, None) if isinstance(doc, dict) else (None, f"workflow {stem}.yml is not a mapping")
 
 
-def _cron_errors(doc: dict[str, Any], stem: str) -> list[str]:
+def _cron_errors(doc: dict[Any, Any], stem: str) -> list[str]:
     on_block = doc.get("on", doc.get(True, {}))
     schedule = on_block.get("schedule") if isinstance(on_block, dict) else None
     crons = [e["cron"] for e in schedule if isinstance(e, dict) and e.get("cron")] if isinstance(schedule, list) else []
