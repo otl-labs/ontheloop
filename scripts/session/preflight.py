@@ -32,6 +32,7 @@ from scripts.preflight import (
     correlation,
     decision_conditions,
     dependabot,
+    emergent_north_star,
     env_git,
     priority_queue,
     prose_context,
@@ -401,6 +402,7 @@ def main(roadmap_detail: str = "slim") -> int:
 
     report["provisional_contracts_due"] = provisional_contracts_due
     report["decision_conditions"] = decision_conditions_bucket
+    report["emergent_north_star"] = emergent_north_star.preflight_bucket()
     report["non_automatable_softcap_breached"] = (
         recs_cache._check_non_automatable_softcap(non_automatable_count) if non_automatable_count is not None else None
     )

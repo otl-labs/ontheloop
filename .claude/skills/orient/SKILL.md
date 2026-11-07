@@ -70,7 +70,7 @@ Do not re-author the four checks here -- that would be drift by design. `/orient
 
 ## Deliverable Shape
 
-The orient deliverable is a structured chat reply with six sections, in order:
+The orient deliverable is a structured chat reply with seven sections, in order:
 
 ### 1. Status Digest
 
@@ -99,11 +99,11 @@ Realized-but-pending (needs corroboration): CD.2 (hint: <realized_hint>) | CD.21
 ```
 `/orient` ranks these as candidates for a human-confirmed `/plan` ratification session -- it never ratifies them itself (read-only, same discipline as Ratifiable CDs). Preserve the "do NOT surface a pending CD with no `realization_evidence` in the RATIFIABLE list" rule above unchanged: a CD promoted out of this list into Ratifiable CDs only once `realization_evidence` is actually set (typically at ratification time, when the prose marker is folded into the structured field).
 
-**Realization candidates** (derived, lowest-confidence; audit PCD-01, building on Decision 105): read `platform_roadmap.realization_candidates` from the preflight cache -- pending CDs with no `realization_evidence` and no `[Realized` prose marker, whose every gated tier_item (or tier, via the same tier-shortcut gate-resolution used elsewhere) is `complete` or non-blocking (`reserved`/`deferred_post_mvp`), and whose detail does NOT match "fully superseded by CD.NN" (that prose belongs to the supersession lane, not here). This is a third tier, strictly disjoint from and BELOW Realized-but-pending CDs above: candidates for evidence-writing in a human-confirmed `/plan` session, never a status /orient computes or writes itself. List each as:
+**Realization candidates** (derived, lowest-confidence; audit PCD-01, building on Decision 105): read `platform_roadmap.realization_candidates` from the preflight cache -- pending CDs with no `realization_evidence` and no `[Realized` prose marker, whose every gated tier_item (or tier, via the same tier-shortcut gate-resolution used elsewhere) is `complete` or non-blocking (`reserved`/`deferred_post_mvp`), and whose detail does NOT match "fully superseded by CD.NN" (the supersession lane's). This is a third tier, strictly disjoint from and BELOW Realized-but-pending CDs above: candidates for evidence-writing in a human-confirmed `/plan` session, never a status /orient computes or writes itself. List each as:
 ```
 Realization candidates (derived): CD.4 (gates: ...) | CD.5 (gates: ...)
 ```
-`/orient` stays read-only here exactly as elsewhere in this section -- it never writes `realization_evidence`; a human-confirmed `/plan` session is what would draft the evidence text (and, separately, the ratifying Decision, per `docs/contracts/candidate-decision-ratification.yaml#lane_steps.plan.draft`).
+That `/plan` session would also draft the ratifying Decision, separately (`docs/contracts/candidate-decision-ratification.yaml#lane_steps.plan.draft`).
 
 **Blocked-on-CD annotation**: for each item in `platform_roadmap.blocked_on_cd`, add a "gated by CD.NN" note in the Notes column including the relationship type (`gates`, `related`, or `decision_required_before`) and whether the item carries `bootstrap_completion_exempt: true` (in which case it may start/complete despite the pending CD). An item can be eligible-to-start while still annotated as gated-by-CD; the annotation informs planning, it is not a hard block on eligibility.
 
@@ -177,7 +177,7 @@ Prioritized work list from the Status Digest:
    - **Mid-implementing** (a PLAN-*.yaml was authored and is in-flight but not yet acted on): suggest `/implement PLAN-{slug}.yaml` for that item.
    - **All authored plans actioned / no plan yet** (the common case -- the last plan was implemented and the item still has open criteria): emit a follow-on `/plan <item-id>: <item-name>` prompt. This is the default action for in_progress items. Read `needs_followon_plan` directly from the preflight cache (primary path); degrade to determining mid-implementing status from docs/plans/ and the progress_note only on a stale cache (see Inputs > In_progress entry fields).
 3. **Keystone-first within eligible**: items that unblock the largest downstream depends_on fan-out appear before items with fewer downstream dependents. Fan-out is a reverse query -- count, for each candidate id, how many entries in the Step-2 `depends_index` (Inputs > Roadmap detail) list that id in their `depends_on`; the candidate-scoped projection alone cannot answer this (it only carries the candidates' own forward `depends_on`). A keystone is an item whose completion enables the largest set of currently blocked items.
-4. **Strategic pending**: list separately at the bottom, noted "blocked by executor freeze (CD.17 reversal required)".
+4. **Strategic pending**: list separately at the bottom, noted "decompose into child items first (Decision 247)".
 
 Format: numbered list with a one-line rationale per item citing the keystone/momentum/block reasoning.
 
@@ -218,6 +218,10 @@ Then one prompt per eligible (not_started) item, ordered keystone-first:
 ```
 
 Ad-hoc lane (non-blocking, cap 3): open Critical recs, ready follow-on recs, priority queue -- rendering rule in the orient command Section 6 trailing subsection.
+
+### 7. Emergent North Stars
+
+Advisory (Decision 243 clause 8): render `emergent_north_star` by the orient command's Section 7 rule, its one home.
 
 ## Scope
 

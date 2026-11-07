@@ -60,24 +60,18 @@ class TestPlanDocumentSchema:
 
     def test_work_areas_on_implementation_fail(self):
         wa = [{"area": "A", "scope": "files", "rationale": "why", "complexity": "S"}]
-        with pytest.raises(ValidationError, match="only valid on STRATEGIC"):
+        with pytest.raises(ValidationError, match="STRATEGIC plan type is retired"):
             PlanDocument.model_validate(_mutate(work_areas=wa))
 
-    def test_strategic_requires_work_areas(self):
-        with pytest.raises(ValidationError, match="require a non-empty work_areas"):
+    def test_strategic_plan_type_refused(self):
+        with pytest.raises(ValidationError, match="plan_type"):
             PlanDocument.model_validate(_mutate(plan_type="STRATEGIC"))
 
-    def test_strategic_with_work_areas_validates(self):
+    @pytest.mark.parametrize("plan_type", ["IMPLEMENTATION", "REPORT-ONLY"])
+    def test_work_areas_refused_on_every_plan_type(self, plan_type: str):
         wa = [{"area": "A", "scope": "files", "rationale": "why", "complexity": "S"}]
-        doc = PlanDocument.model_validate(
-            _mutate(
-                plan_type="STRATEGIC",
-                slug="zz-strategic-demo",
-                plan_path="docs/plans/PLAN-zz-strategic-demo.yaml",
-                work_areas=wa,
-            )
-        )
-        assert doc.work_areas[0].complexity == "S"
+        with pytest.raises(ValidationError, match="STRATEGIC plan type is retired"):
+            PlanDocument.model_validate(_mutate(plan_type=plan_type, execution_steps=[], work_areas=wa))
 
     def test_implementation_requires_execution_steps(self):
         with pytest.raises(ValidationError, match="non-empty execution_steps"):
@@ -161,15 +155,12 @@ class TestSchemaVersion3:
         with pytest.raises(ValidationError):
             PlanDocument.model_validate(data)
 
-    @pytest.mark.parametrize("plan_type", ["STRATEGIC", "REPORT-ONLY"])
-    def test_non_implementation_forbids_policy(self, plan_type: str) -> None:
+    def test_non_implementation_forbids_policy(self) -> None:
         data = _mutate_v2(
             schema_version=3,
-            plan_type=plan_type,
+            plan_type="REPORT-ONLY",
             execution_steps=[],
             handoff_policy={"full_validation_required_before_commit": True, "timeout_disposition": "blocked"},
         )
-        if plan_type == "STRATEGIC":
-            data["work_areas"] = [{"area": "A", "scope": "files", "rationale": "why", "complexity": "S"}]
         with pytest.raises(ValidationError, match="only valid"):
             PlanDocument.model_validate(data)

@@ -15,14 +15,14 @@ def test_ci_repository_wins(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_unset_environment_falls_back_to_the_constant(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
-    assert repo_identity.full_name() == "benjamin-blake/theseus"
-    assert repo_identity.FALLBACK_FULL_NAME == "benjamin-blake/theseus"
+    assert repo_identity.full_name() == "otl-labs/ontheloop"
+    assert repo_identity.FALLBACK_FULL_NAME == "otl-labs/ontheloop"
 
 
 @pytest.mark.parametrize("value", ["", "   ", "example-org", "/example-repo", "example-org/", "a/b/c", "example-org//x"])
 def test_malformed_environment_falls_back_to_the_constant(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("GITHUB_REPOSITORY", value)
-    assert repo_identity.full_name() == "benjamin-blake/theseus"
+    assert repo_identity.full_name() == "otl-labs/ontheloop"
 
 
 def test_resolve_fills_only_missing_parts(monkeypatch: pytest.MonkeyPatch) -> None:

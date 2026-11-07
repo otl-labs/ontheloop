@@ -290,7 +290,7 @@ def derive_currency(row: dict, inbound_supersedes: set[int], inbound_amends: set
          target of an inbound supersedes edge (title_supersedes/envelope-supersedes from
          another entry).
       3. 'amended' -- row's number is the target of an inbound amends edge, OR its bold status
-         marker begins with 'Amended' (the residual status-prose band, e.g. Decision 67).
+         marker begins with 'Amended' (the residual status-prose band, empty since Decision 247 compacted Decision 67).
       4. 'current' -- none of the above.
 
     Both the status_is_superseded/is_compacted_stub checks above and the 'amended' bold-marker
