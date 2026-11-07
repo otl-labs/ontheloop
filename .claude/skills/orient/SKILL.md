@@ -70,7 +70,7 @@ Do not re-author the four checks here -- that would be drift by design. `/orient
 
 ## Deliverable Shape
 
-The orient deliverable is a structured chat reply with six sections, in order:
+The orient deliverable is a structured chat reply with seven sections, in order:
 
 ### 1. Status Digest
 
@@ -99,11 +99,11 @@ Realized-but-pending (needs corroboration): CD.2 (hint: <realized_hint>) | CD.21
 ```
 `/orient` ranks these as candidates for a human-confirmed `/plan` ratification session -- it never ratifies them itself (read-only, same discipline as Ratifiable CDs). Preserve the "do NOT surface a pending CD with no `realization_evidence` in the RATIFIABLE list" rule above unchanged: a CD promoted out of this list into Ratifiable CDs only once `realization_evidence` is actually set (typically at ratification time, when the prose marker is folded into the structured field).
 
-**Realization candidates** (derived, lowest-confidence; audit PCD-01, building on Decision 105): read `platform_roadmap.realization_candidates` from the preflight cache -- pending CDs with no `realization_evidence` and no `[Realized` prose marker, whose every gated tier_item (or tier, via the same tier-shortcut gate-resolution used elsewhere) is `complete` or non-blocking (`reserved`/`deferred_post_mvp`), and whose detail does NOT match "fully superseded by CD.NN" (that prose belongs to the supersession lane, not here). This is a third tier, strictly disjoint from and BELOW Realized-but-pending CDs above: candidates for evidence-writing in a human-confirmed `/plan` session, never a status /orient computes or writes itself. List each as:
+**Realization candidates** (derived, lowest-confidence; audit PCD-01, building on Decision 105): read `platform_roadmap.realization_candidates` from the preflight cache -- pending CDs with no `realization_evidence` and no `[Realized` prose marker, whose every gated tier_item (or tier, via the same tier-shortcut gate-resolution used elsewhere) is `complete` or non-blocking (`reserved`/`deferred_post_mvp`), and whose detail does NOT match "fully superseded by CD.NN" (the supersession lane's). This is a third tier, strictly disjoint from and BELOW Realized-but-pending CDs above: candidates for evidence-writing in a human-confirmed `/plan` session, never a status /orient computes or writes itself. List each as:
 ```
 Realization candidates (derived): CD.4 (gates: ...) | CD.5 (gates: ...)
 ```
-`/orient` stays read-only here exactly as elsewhere in this section -- it never writes `realization_evidence`; a human-confirmed `/plan` session is what would draft the evidence text (and, separately, the ratifying Decision, per `docs/contracts/candidate-decision-ratification.yaml#lane_steps.plan.draft`).
+That `/plan` session would also draft the ratifying Decision, separately (`docs/contracts/candidate-decision-ratification.yaml#lane_steps.plan.draft`).
 
 **Blocked-on-CD annotation**: for each item in `platform_roadmap.blocked_on_cd`, add a "gated by CD.NN" note in the Notes column including the relationship type (`gates`, `related`, or `decision_required_before`) and whether the item carries `bootstrap_completion_exempt: true` (in which case it may start/complete despite the pending CD). An item can be eligible-to-start while still annotated as gated-by-CD; the annotation informs planning, it is not a hard block on eligibility.
 
@@ -218,6 +218,10 @@ Then one prompt per eligible (not_started) item, ordered keystone-first:
 ```
 
 Ad-hoc lane (non-blocking, cap 3): open Critical recs, ready follow-on recs, priority queue -- rendering rule in the orient command Section 6 trailing subsection.
+
+### 7. Emergent North Stars
+
+Advisory (Decision 243 clause 8): render `emergent_north_star` by the orient command's Section 7 rule, its one home.
 
 ## Scope
 

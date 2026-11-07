@@ -92,4 +92,13 @@ def _disable_reader_and_git_fetch(request: pytest.FixtureRequest):
         # see it unpatched (same escape-hatch shape as TestCheckMainFreshness above).
         if not module_name.endswith("test_dependabot"):
             stack.enter_context(patch("scripts.preflight.dependabot.check_stranded_prs", return_value=None))
+        # The detector costs about 0.34 s per call; stub it for every main()-integration module (rec-4273 shape).
+        # test_emergent_north_star owns the real function and test_yaml_parse_budget measures the real YAML loaders.
+        if not module_name.endswith(("test_emergent_north_star", "test_yaml_parse_budget")):
+            stack.enter_context(
+                patch(
+                    "scripts.preflight.emergent_north_star.preflight_bucket",
+                    return_value={"detector_version": 1, "stubbed": True},
+                )
+            )
         yield
