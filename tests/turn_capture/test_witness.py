@@ -50,13 +50,13 @@ def test_witness_matches_only_the_capture_shim_line_at_stop() -> None:
         {**good, "attachment": "text"},
         {**good, "attachment": {**att, "type": "hook_blocking_error"}},
         {**good, "attachment": {**att, "hookEvent": "SubagentStop"}},
-        {**good, "attachment": {**att, "command": "bash ./other_stop.sh"}},
-        {**good, "attachment": {**att, "command": None}},
         {**good, "attachment": {**att, "stderr": "ok\n" + WITNESS_STDERR}},
         {**good, "attachment": {**att, "stderr": ""}},
         {**good, "attachment": {**att, "stderr": None}},
     ]
     assert not any(witness.is_witness_record(v) for v in variants)
+    accepted = [{**good, "attachment": {**att, "command": c}} for c in ("bash ./other_stop.sh", None, "command hook 3")]
+    assert all(witness.is_witness_record(v) for v in accepted)
     assert witness.is_witness_record({**good, "attachment": {**att, "stderr": WITNESS_STDERR + "more\n"}})
     root = [prompt("u1", 1, "p1", "go"), assistant("a1", 2, "m1", [text_block("k")]), witness_rec("w1", 3)]
     kid = [

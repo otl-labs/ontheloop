@@ -44,7 +44,6 @@ SIDECAR = "big1.txt"
 SIDECAR_LINE = "pc smoke sidecar output line\n"
 SIDECAR_LINES = 2600
 POLL_S = 60.0
-STOP_COMMAND = '"$CLAUDE_PROJECT_DIR/bin/venv-python" "$CLAUDE_PROJECT_DIR/.claude/hooks/stop_log_turn.py"'
 TRAILING_PROMPT_ID = "p3"
 WAIT_TIMEOUTS = ("witness_wait_timeout", "settle_timeout", "prompt_wait_timeout")
 Entry = Callable[[str, Mapping[str, str]], object]
@@ -86,9 +85,8 @@ def _records(sid: str, ref: str, start: datetime) -> tuple[list[list[dict[str, A
         message = {"role": "user", "content": [block]}
         return base(rec_uuid, t, type="user", message=message, promptId="p1", toolUseResult=use_result)
 
-    command = f'bash "$CLAUDE_PROJECT_DIR/.claude/hooks/session_start_log_turn.sh" --project-ref={ref}'
     facts = f"checkout={'1' * 40} base={'2' * 40} dirty=false"
-    stderr = f"[session_start_log_turn] capture pin {facts}\n"
+    stderr = f"[session_start_log_turn] capture pin {facts}\n[session_start_log_turn] capture pin project_ref={ref}\n"
     pin = {"type": "hook_success", "hookName": "SessionStart:startup", "hookEvent": "SessionStart", "exitCode": 0}
     pin["stderr"] = stderr
     remote = {"type": "remote_session_change", "url": "https://example.invalid/code/session_smoke0000"}
@@ -102,7 +100,7 @@ def _records(sid: str, ref: str, start: datetime) -> tuple[list[list[dict[str, A
     persisted = {"interrupted": False, "persistedOutputPath": f"/elsewhere/tool-results/{SIDECAR}", "stdout": "preview"}
     persisted["persistedOutputSize"] = len(SIDECAR_LINE) * SIDECAR_LINES
     root = [
-        base("h1", 0, type="attachment", attachment={**pin, "command": command}),
+        base("h1", 0, type="attachment", attachment={**pin, "command": "command hook 9"}),
         base("rs1", 0.5, type="attachment", attachment=remote),
         base("u1", 1, type="user", promptId="p1", message={"role": "user", "content": "run the smoke"}),
         reply("a1", 2, "m1", [tool_use("tu1", "Bash", {"command": "cat big"})]),
@@ -117,7 +115,7 @@ def _records(sid: str, ref: str, start: datetime) -> tuple[list[list[dict[str, A
         ),
         reply("a3", 7, "m3", [{"type": "text", "text": "smoke done"}]),
     ]
-    stop_hook = {"type": "hook_success", "hookName": "Stop", "hookEvent": "Stop", "exitCode": 0, "command": STOP_COMMAND}
+    stop_hook = {"type": "hook_success", "hookName": "Stop", "hookEvent": "Stop", "exitCode": 0, "command": "command hook"}
     stop_hook.update(stderr=WITNESS_LINE + "\n", stdout="", toolUseID="stop-w1")
     zero = dict.fromkeys(("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"), 0)
     error = reply("e1", 11, "me1", [{"type": "text", "text": "API Error: smoke"}], "stop_sequence", isApiErrorMessage=True)

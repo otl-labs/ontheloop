@@ -154,6 +154,17 @@ def test_the_synthetic_tree_pins_the_ref_and_spans_all_four_tables(tmp_path: Pat
     assert any(len(r.get("content", "").encode()) > 65536 for r in built.transcripts)
 
 
+def test_synthetic_tree_records_the_label_shape(tmp_path: Path) -> None:
+    root = smoke.write_tree(tmp_path, REF)
+    commands = set()
+    for line in root.read_text(encoding="utf-8").splitlines():
+        att = json.loads(line).get("attachment") or {}
+        if str(att.get("type", "")).startswith("hook_"):
+            commands.add(att["command"])
+    assert commands == {"command hook 9", "command hook"}
+    assert project_ref_pin(SnapshotTree(root)) == REF
+
+
 def test_synthetic_tree_builds_every_new_column(tmp_path: Path) -> None:
     root = smoke.write_tree(tmp_path, REF)
     built = record_turn(SnapshotTree(root), None, project_ref=REF, session_final=True)

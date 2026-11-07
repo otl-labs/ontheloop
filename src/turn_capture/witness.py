@@ -8,13 +8,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from src.turn_capture.transcript import ROOT, hook_script
+from src.turn_capture.transcript import ROOT
 
 if TYPE_CHECKING:
     from src.turn_capture.streams import Rec, Turn
 
 WITNESS_LINE = "[stop_log_turn] turn witness"
-WITNESS_STEM = "stop_log_turn"
 API_ERROR_FLAG_KEYS = ("isApiErrorMessage",)
 
 
@@ -23,13 +22,11 @@ def is_api_error(data: dict[str, Any]) -> bool:
 
 
 def is_witness_record(data: dict[str, Any]) -> bool:
-    """The raw-record form of rule WT-2: a Stop hook_success of the capture shim whose stderr opens with the line."""
+    """The raw-record form of rule WT-2: a Stop hook_success whose stderr opens with the line; the command is never read."""
     att = data.get("attachment")
     if data.get("type") != "attachment" or not isinstance(att, dict):
         return False
     if att.get("type") != "hook_success" or att.get("hookEvent") != "Stop":
-        return False
-    if hook_script(att.get("command"))[0] != WITNESS_STEM:
         return False
     stderr = att.get("stderr")
     lines = stderr.splitlines() if isinstance(stderr, str) else []

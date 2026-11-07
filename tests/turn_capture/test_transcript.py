@@ -12,11 +12,14 @@ from src.turn_capture.transcript import (
     SIDECAR_CHUNK_BYTES,
     FsTree,
     MemTree,
+    command_ref,
     inherited_lines,
+    is_pin_attachment,
     project_ref_pin,
     read_lines,
     record_time,
     session_pin,
+    stderr_ref,
 )
 from tests.fixtures.turn_capture_corpus import (
     PROJECT_REF,
@@ -244,3 +247,28 @@ def test_host_run_bytes_on_both_trees_and_none_when_absent(tmp_path: Path) -> No
     (tmp_path / SID).mkdir()
     (tmp_path / SID / "host-run.json").write_text("{}", encoding="utf-8")
     assert MemTree(with_sidecar).host_run() == b"{}" and FsTree(target).host_run() == b"{}"
+
+
+_REF_LINE = "[session_start_log_turn] capture pin project_ref="
+
+
+def test_stderr_ref_needs_exactly_one_well_formed_line() -> None:
+    assert stderr_ref({"stderr": f"x\n  {_REF_LINE}a/b  \n"}) == "a/b"
+    assert stderr_ref({"stderr": f"{_REF_LINE}a\n{_REF_LINE}b\n"}) is None
+    assert stderr_ref({"stderr": f"{_REF_LINE}has space\n{_REF_LINE}ok\n"}) == "ok"
+    assert stderr_ref({"stderr": f"{_REF_LINE}\n"}) is None and stderr_ref({"stderr": None}) is None
+
+
+def test_command_ref_is_the_legacy_form() -> None:
+    assert command_ref({"command": 'bash "/w/session_start_log_turn.sh" --project-ref=acme'}) == "acme"
+    assert command_ref({"command": "bash /w/other.sh --project-ref=acme"}) is None
+    assert command_ref({"command": "command hook 3"}) is None
+
+
+def test_is_pin_attachment_reads_command_or_stderr() -> None:
+    facts = "[session_start_log_turn] capture pin checkout=unknown base=unknown dirty=unknown\n"
+    assert is_pin_attachment({"hookEvent": "SessionStart", "command": "command hook", "stderr": facts})
+    assert is_pin_attachment({"hookEvent": "SessionStart", "command": "bash /w/session_start_log_turn.sh"})
+    assert is_pin_attachment({"hookEvent": "SessionStart", "stderr": "[session_start_log_turn] capture pin\n"})
+    assert not is_pin_attachment({"hookEvent": "SessionStart", "command": "command hook", "stderr": ""})
+    assert not is_pin_attachment({"hookEvent": "Stop", "stderr": facts})

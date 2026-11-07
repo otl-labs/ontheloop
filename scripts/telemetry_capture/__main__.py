@@ -27,7 +27,7 @@ from scripts.telemetry_capture.state import CaptureState, state_dir
 from scripts.telemetry_capture.transport import MAX_TIMEOUT_S, Budget, CaptureUnavailable
 from src.turn_capture.host_run import resolve_pin
 from src.turn_capture.render import render_datetime
-from src.turn_capture.transcript import PIN_SCRIPT_STEM, ROOT, FsTree, hook_script, read_lines, record_time
+from src.turn_capture.transcript import ROOT, FsTree, is_pin_attachment, read_lines, record_time
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
@@ -264,7 +264,7 @@ def _cmd_observe(args: argparse.Namespace, out: Callable, boot_id: Path) -> int:
         att = item.data.get("attachment") if item.data is not None else None
         if not isinstance(att, dict) or att.get("hookEvent") != "SessionStart":
             continue
-        if hook_script(att.get("command"))[0] == PIN_SCRIPT_STEM:
+        if is_pin_attachment(att):
             sources[str(att.get("hookName") or "SessionStart").partition(":")[2] or "unknown"] += 1
     state = _state(args.tree)
     late, seen = _late_sidecars(args.tree)

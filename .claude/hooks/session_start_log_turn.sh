@@ -3,7 +3,9 @@
 #
 # Registered as `bash "$CLAUDE_PROJECT_DIR/.claude/hooks/session_start_log_turn.sh" --project-ref=<ref>` on every
 # SessionStart source (startup, resume, clear, compact, fork). Its exit-0 stderr line makes Claude Code record a
-# SessionStart hook attachment whose command carries --project-ref=<ref> and whose stderr carries the checkout facts:
+# SessionStart hook attachment whose stderr carries the checkout facts line (rule PV-1) and, for exactly one well-formed
+# --project-ref flag, a second 'capture pin project_ref=<ref>' line (rule PW-1, read by rule P-2): Claude Code 2.1.317
+# records a label instead of the command in cloud sessions, so the parser reads the stderr, never the command field.
 # src/turn_capture/transcript.py's project_ref_pin and src/turn_capture/provenance.py read them from that attachment.
 # It reads no stdin, writes no file, never refreshes or locks the git index and never starts a capture pass, so a fork is
 # first captured only after its own fork attachment exists. Nothing on stdout (that becomes context). Exits 0 on every path.
@@ -28,5 +30,17 @@ if [[ -n "$repo" ]] && command -v git >/dev/null 2>&1; then
         if [[ -n "$changes" ]]; then dirty=true; else dirty=false; fi
     fi
 fi
-printf '%s\n' "[session_start_log_turn] capture pin checkout=${checkout} base=${base} dirty=${dirty}" >&2
+ref_re='^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'
+ref_line=""
+refs=()
+for arg in "$@"; do
+    if [[ "$arg" == --project-ref=* ]]; then refs+=("${arg#--project-ref=}"); fi
+done
+if [[ "${#refs[@]}" -eq 1 && "${refs[0]}" =~ $ref_re ]]; then
+    ref_line="[session_start_log_turn] capture pin project_ref=${refs[0]}"
+fi
+{
+    printf '%s\n' "[session_start_log_turn] capture pin checkout=${checkout} base=${base} dirty=${dirty}"
+    if [[ -n "$ref_line" ]]; then printf '%s\n' "$ref_line"; fi
+} >&2
 exit 0

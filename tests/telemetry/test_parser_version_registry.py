@@ -88,6 +88,8 @@ CASES = (
     "host_run_only_withheld.json",
     "host_run_malformed.json",
     "host_run_retry_attempts.json",
+    "hook_label_shape.json",
+    "hook_status_message_shape.json",
 )
 
 

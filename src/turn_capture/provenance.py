@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from src.turn_capture.streams import Rec, Stream
-from src.turn_capture.transcript import PIN_SCRIPT_STEM, hook_script
+from src.turn_capture.transcript import PIN_SCRIPT_STEM, command_ref, is_pin_attachment, stderr_ref
 
 SHA_PATTERN = r"^([0-9a-f]{40}|[0-9a-f]{64})$"
 SESSION_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
@@ -27,9 +27,7 @@ NO_FACTS: Facts = (None, None, None)
 
 
 def _is_pin(rec: Rec) -> bool:
-    att = rec.data["attachment"]
-    stem, _ = hook_script(att.get("command"))
-    return att.get("hookEvent") == "SessionStart" and stem == PIN_SCRIPT_STEM
+    return is_pin_attachment(rec.data["attachment"])
 
 
 def pin_facts(att: dict[str, Any]) -> Facts:
@@ -59,8 +57,17 @@ def _last_pin(recs: list[Rec], root: bool, diag: Counter[str]) -> Facts:
 
 
 def open_provenance(stream: Stream, root: bool, diag: Counter[str]) -> Facts:
-    """Rule PV-2: the LAST pin attachment before the stream's first prompt record (sub-agents carry none, uncounted)."""
+    """Rule PV-2: the LAST pin attachment before the first prompt record (sub-agents carry none); DG-1 counts disagreements."""
     first = next((r.line for r in stream.recs if r.kind == "prompt"), None)
+    if root:
+        for rec in stream.hooks:
+            att = rec.data["attachment"]
+            if (
+                is_pin_attachment(att)
+                and None not in (stderr_ref(att), command_ref(att))
+                and stderr_ref(att) != command_ref(att)
+            ):
+                diag["pin_ref_disagreement"] += 1
     before = [r for r in stream.hooks if first is None or r.line < first]
     if root and first is not None and not any(_is_pin(r) for r in before):
         late = (r for r in stream.hooks if r.line > first and _is_pin(r))
