@@ -14,9 +14,13 @@ name: deploy-prod-lambdas
 # Terraform is NOT involved in this channel (Decision 126 point 1): code ships via this
 # build/deploy pipeline scoped to UpdateFunctionCode-equivalent permissions only.
 #
-# Triggers on push to main touching prod source (kept in sync with
-# scripts.convergence_health.PROD_SOURCE_PATHSPECS -- single conceptual source, rec-2686), and on
-# workflow_dispatch (operator-triggered redeploy / recovery, e.g. after a stale-code drift alarm).
+# Woken by each completed CI push run on main (workflow_run) and by workflow_dispatch (force). The gate job
+# (deploy-gate.yml, scripts/ci/deploy_gate.py, Decision 249) deploys the newest main commit whose main-validate full tier
+# passed, skipping when it is already deployed, superseded, or no watched path changed since the oldest record; the watched
+# paths live only in scripts.convergence_health.PROD_SOURCE_PATHSPECS. Every job checks out the gate sha, not main HEAD, and
+# the deploy records name it (LAMBDA_ARTIFACT_SHA). A workflow_dispatch redeploys the newest green commit (force bypasses the
+# skips, never the full-tier requirement); a pending forced dispatch replaced by a later pending run loses its force, and the
+# operator re-dispatches.
 #
 # deploy job:
 #   - T2.49 / DEP-12 (Decision 144): assumes the merged agent-platform-github-ci-deploy role
@@ -43,7 +47,7 @@ name: deploy-prod-lambdas
 # smoke job (needs: deploy; Decision 55 false-green avoidance):
 #   - Runs ONLY when deploy actually shipped code (needs.deploy.outputs.deployed == 'true') --
 #     never on a bootstrap-window no-op.
-#   - Asserts deploy-record freshness (source_git_sha == github.sha) for both functions
+#   - Asserts deploy-record freshness (source_git_sha == the gate sha) for both functions
 #     BEFORE running the smoke gates -- a stale or partially-written record fails closed instead
 #     of letting a skipped/no-op deploy report smoke-green.
 #   - Assumes agent-platform-github-ci-branch (ProdLambdaInvokeCI grant -- the scoped deploy role
@@ -55,22 +59,20 @@ name: deploy-prod-lambdas
 #     A failed gate is a loud-fail (Decision 55): stop and RCA, never auto-retry into green.
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
-    paths:
-      - 'src/data/handlers/**'
-      - 'scripts/aws_profile.py'
-      - 'scripts/llm/github_models_client.py'
-      - 'scripts/llm/client.py'
-      - 'scripts/llm/utils.py'
-      - 'scripts/run_scheduled_agent.py'
-      - 'scripts/s3_log_store.py'
-      - 'scripts/tool_runtime.py'
-      - 'config/lambda/data-pipeline/**'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Redeploy the newest green commit even when already deployed or unchanged'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   # Serialise governed deploys -- two concurrent update-function-code runs against the same
@@ -79,8 +81,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  gate:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+      || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository)
+    uses: ./.github/workflows/deploy-gate.yml
+    with:
+      channel: prod
+      force: ${{ inputs.force || false }}
+    secrets: inherit  # pragma: allowlist secret
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+
   deploy:
+    needs: gate
+    if: needs.gate.outputs.deploy == 'true'
     runs-on: ubuntu-latest
+    env:
+      LAMBDA_ARTIFACT_SHA: ${{ needs.gate.outputs.sha }}
     timeout-minutes: 20
     outputs:
       deployed: ${{ steps.deploy_code.outputs.deployed }}
@@ -92,6 +113,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/aws-region
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
 
       - name: Configure AWS credentials (OIDC -- merged deploy role, main only)
         # T2.49 / DEP-12 (Decision 144): repointed from the retired prod-only deploy role to the
@@ -157,7 +182,7 @@ jobs:
           echo "deployed=true" >> "$GITHUB_OUTPUT"
 
   smoke:
-    needs: deploy
+    needs: [gate, deploy]
     if: needs.deploy.outputs.deployed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -170,6 +195,10 @@ jobs:
 
       - uses: ./.github/actions/aws-region
 
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
       - name: Configure AWS credentials (OIDC -- github_ci_branch role, prod-class invoke)
         uses: aws-actions/configure-aws-credentials@v6
         env:
@@ -178,24 +207,10 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Assert deploy-record freshness (source_git_sha == github.sha)
-        # False-green guard (Decision 55): a skipped/partial/stale deploy must not let the smoke
-        # gates report green against previously-deployed code. Reads each of the two deploy
-        # records this run's deploy job wrote and asserts source_git_sha matches the commit that
-        # triggered this workflow run.
-        env:
-          EXPECTED_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          for fn in agent-platform-scheduled-agent-dispatcher agent-platform-findings-processor; do
-            RECORD=$(aws s3 cp "s3://agent-platform-data-lake/deploy-records/prod/${fn}.json" - --region "$AWS_REGION")
-            ACTUAL_SHA=$(printf '%s' "$RECORD" | python3 -c "import json,sys; print(json.load(sys.stdin).get('source_git_sha') or '')")
-            if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-              echo "::error::DEPLOY_RECORD_STALE ${fn}: source_git_sha=${ACTUAL_SHA} != github.sha=${EXPECTED_SHA} -- a stale or skipped deploy cannot report smoke-green (Decision 55 false-green guard)." >&2
-              exit 1
-            fi
-            echo "OK ${fn} deploy record fresh: ${ACTUAL_SHA}"
-          done
+      - name: Assert deploy-record freshness (source_git_sha == gate sha)
+        # False-green guard (Decision 55): a skipped/partial/stale deploy must not let the smoke gates report green against
+        # previously-deployed code; both records must name the commit the gate chose.
+        run: python3 -m scripts.ci.deploy_gate freshness --channel prod --expected-sha "${{ needs.gate.outputs.sha }}" agent-platform-scheduled-agent-dispatcher agent-platform-findings-processor
 
       - name: Smoke invoke -- scheduled-agent-dispatcher (expect status=disabled; schedule stays off)
         run: |

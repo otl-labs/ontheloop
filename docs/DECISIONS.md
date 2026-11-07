@@ -2,6 +2,67 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 249: Lambda code deploys ship only the newest main commit whose full tier passed, because the sandbox tier now serves production (amends Decisions 24, 73 and 77) (Decided)
+
+```yaml
+number: 249
+status: Decided
+decided_date: "2026-11-07"
+kind:
+  value: direction
+  justification: >-
+    Clause 1 decides what may reach production: never a commit whose full tier has not passed, so a red main pauses
+    code deploys; clause 4 leaves the only ungated deploy with the operator. Undone, production code again deploys in
+    parallel with the full tier.
+amends: [24, 73, 77]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable and reversal-relevant: it reverses Decision 73 cl.5 for code deploys and binds every governed code-deploy
+    channel. Not a build-lambda.yaml or environment-taxonomy.yaml note: those record the channel's mechanism and the
+    tier's description, not whether a red main may reach production. Not amendment_forms lines: an annotation cannot
+    change a ratified clause's meaning (Decision 226's precedent).
+```
+
+**Status:** Decided
+**Date:** 2026-11-07
+**Warehouse ID:** dec-249 (per Decision 84 backfill)
+
+**Problem:** Decision 73 cl.5 lets the sandbox tier tolerate a red main because SIT and PROD would carry production. Neither exists (environment-taxonomy.yaml single_account_rule), and since slice 5 (2026-10-28) the sandbox tier hosts the production telemetry catalog. Both governed code-deploy channels trigger on push and run in parallel with the full tier: #1680 deployed the DuckLake Lambdas at 17:19Z on 2026-10-27 and its full tier went red at 17:44Z. 14 of 300 main runs were red between 17 Oct and 3 Nov.
+
+**Intent:** Production code never runs a commit whose full tier has not passed, and merging stays as fast as today.
+
+**Decision:**
+1. **The sandbox tier serves production (amends Decision 73 cl.5).** The single-account sandbox tier hosts the operator deployment's production workload with real externals, so its code deploys no longer tolerate a red main. Merging stays optimistic (Decision 73 cl.2-3). SIT and PROD stay reserved future tiers, and cl.5's green-streak train stays future state.
+2. **Deploy the newest green commit.** Each governed code-deploy channel (build-lambda.yaml deploy_channels) deploys the newest main commit whose push run of CI passed the full tier in main-validate. A run that executed only the fast tier (Decision 205 cl.5) is never deploy evidence. A completed CI run only wakes the channel. The channel skips when that commit is already deployed or superseded, or when no watched source path changed since the oldest deployed commit, so every queued change ships with the next green.
+3. **A red main pauses code deploys.** Any red, Track A included, pauses them until a later commit is green: a red's track is a diagnosis confirmed only when its fix lands (Decision 226 cl.1), so the gate cannot tell a tests-only red. Decision 226's recovery and 4 h SLO are unchanged. The accepted cost is about 30 minutes more per deploy (full tier p90 37 min) and no deploy during a red.
+4. **Recovery and break-glass.** workflow_dispatch redeploys the newest green commit and is the agent recovery path (a drift alarm, a re-run whose completion did not wake the channel). No agent-reachable path deploys an ungated commit: during a red, an urgent deploy uses the operator-only break_glass_only command (Decision 125 cl.3) on the operator's own words.
+5. **Scope.** Code deploys only. Terraform apply stays on push behind the deterministic guard (Decision 77); its licence there rests on that guard and its human-gated fail-closed set, not on mocked externals (amends Decision 77 cl.3's premise); revisit once this gate beds in. Decision 24's "sandbox auto-deploys on every push" no longer describes code deploys. No IAM change: a workflow_run or workflow_dispatch job on main keeps the OIDC sub ref:refs/heads/main that the deploy role trusts. rec-4874's batched-canary model is the end state and replaces clause 2's green signal when decided; this entry does not decide how a red is reconciled with Decision 226 there (Decision 245 cl.5).
+6. **Coverage (Decision 181 cl.2).** Clause 2: scripts/ci/deploy_gate.py and its tests, and wiring tests for both channels and the golden replay. Clause 4's operator-only break-glass is instruction-enforced, as today. Residuals: a workflow_run job runs main HEAD's workflow file, so an edit to a channel's workflow takes effect before its own full tier passes; ci-rca attributes a failed deploy run to its head_sha, which is main HEAD (rec-4918).
+
+```yaml reversal-conditions
+decision: 249
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: red-pause-too-costly
+    kind: manual
+    description: "In 30 days a red pauses deploys past Decision 226's SLO twice, or an urgent fix waits on a red: re-decide cl.3."
+  - id: canary-model-decided
+    kind: manual
+    description: "rec-4874's model is decided: retire or re-scope cl.2."
+  - id: tier-stood-up
+    kind: manual
+    description: "A SIT or PROD tier is stood up: re-decide cl.1."
+  - id: gate-defect
+    kind: manual
+    description: "The gate skips a deploy whose watched source changed, or deploys a commit whose full tier did not pass: fix the gate; if it recurs, revisit cl.2."
+```
+
+**Related:** Decisions 24, 55, 73, 77, 125, 126, 166, 181, 205, 226, 236, 239, 245; rec-4874, rec-4912.
+
+---
+
 ## Decision 248: terraform/github is CI-applied behind one operator approval, applying only what a read-only preview listed, with a resource-locked App key (amends Decisions 126, 237 and 238) (Decided)
 
 ```yaml
@@ -11204,6 +11265,8 @@ OIDC CI), `docs/contracts/environment-taxonomy.md`, `docs/INTENT-ci-cd-architect
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
+> **Amended by Decision 249 (2026-11-07):** Clause 3's "except the mocked sandbox": the sandbox tier now serves production with real externals; sandbox auto-apply stays licensed by the deterministic guard and its human-gated fail-closed set, not by mocked externals (Decision 249 cl.5). The apply model is unchanged.
+
 ---
 
 ## Decision 76: Claude-Code-on-the-Web Workflow Migration; .claude as Canonical Interactive Layer (Decided)
@@ -11387,6 +11450,8 @@ Key elements:
 > **Amended by Decision 217 (2026-10-14):** Above executor concurrency 1, clause 4's plan-time block on an open ci-rca rec becomes an affected-set overlap block, and a red whose file set cannot be determined still blocks (Decision 217 clause 1); until then clause 4 stands unchanged. Textual conflicts route per Decision 217 clause 2.
 
 > **Amended by Decision 226 (2026-10-18):** Clause 3's fixed priority="critical" becomes track-derived (High for a tests-only repair on a CI-tier workflow), and a manual revert PR is a permitted Track B corrective outside terraform/** and governed deploy paths (automated revert stays excluded). Clause 3's L6 pause and clause 4's plan-time block become the red_overlap overlap block; clause 4 as written now applies only to a red past its repair SLO. Clause 5's rec -> plan -> implement recovery stands for Track B, with Track A on the fast lane (Decision 226 cl.1-4). This supersedes the Decision 217 line above for clause 4.
+
+> **Amended by Decision 249 (2026-11-07):** Clause 5's "Sandbox tolerates red `main`" no longer holds for code deploys: the sandbox tier serves production, and each governed code-deploy channel deploys only the newest main commit whose full tier passed, so a red pauses code deploys (Decision 249 cl.1-3). Merging stays optimistic, Terraform apply stays on push, and the SIT/PROD green-streak train stays future state.
 
 > **Amended by Decision 247 (2026-11-02):** Clause 4's suspension of mandatory discussion when `non_automatable_recommendations > 0` is permanent: Decision 67 never reverses and the executor it waited on is retired. Counts stay informational.
 
@@ -12162,6 +12227,8 @@ terraform/
 **Status:** Decided — March 2026
 
 > **2026-05 migration update:** The `company-aws-profile` credential referenced in the Agent SSO Profile Restrictions section was retired; the current model is the `agent_platform` static-key assume-role chain (Decision 73 / CD.21). The multi-environment promotion strategy (separate sandbox/staging/production AWS accounts) is architecturally superseded by the single personal-account model.
+
+> **Amended by Decision 249 (2026-11-07):** The `sandbox` line's "Auto-deploys on every push to main" no longer holds for Lambda code: code deploys ship only the newest main commit whose full tier passed (Decision 249 cl.2); Terraform apply stays on push.
 
 ---
 

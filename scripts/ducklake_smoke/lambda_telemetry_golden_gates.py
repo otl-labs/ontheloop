@@ -45,7 +45,6 @@ ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = ROOT / "tests" / "fixtures" / "turn_capture" / "golden"
 EXPECTATIONS = ("derived_golden_state.yaml", "derived_golden_rollups.yaml")
 EXPECTATION_DIR = ROOT / "tests" / "telemetry" / "fixtures"
-DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy-ducklake-lambdas.yml"
 WRITER_FUNCTION = "agent-platform-ducklake-telemetry-writer"
 HEALTH_TABLES = frozenset({"telemetry_sessions", "telemetry_observations", "telemetry_transcripts", "telemetry_agents"})
 RECORD_BUCKET = "agent-platform-data-lake"
@@ -110,11 +109,11 @@ class Env:
     clock: Callable[[], float] = time.monotonic
 
 
-def deploy_paths(workflow: Path = DEPLOY_WORKFLOW) -> list[str]:
-    """The push paths of deploy-ducklake-lambdas (the code a deploy of this commit would ship)."""
-    doc = yaml.safe_load(workflow.read_text(encoding="utf-8"))
-    triggers = doc.get("on", doc.get(True))
-    return [str(p) for p in triggers["push"]["paths"]]
+def deploy_paths() -> list[str]:
+    """The watched source paths of the DuckLake deploy channel (the code a deploy of this commit would ship)."""
+    from scripts.convergence_health import code_drift  # noqa: PLC0415
+
+    return list(code_drift.DUCKLAKE_SOURCE_PATHSPECS)
 
 
 def deploy_functions(env: Env) -> tuple[str, str]:

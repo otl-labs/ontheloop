@@ -349,3 +349,44 @@ class TestReachabilityOracle:
             raise AssertionError("expected RuntimeError for a shallow clone")
         except RuntimeError as exc:
             assert "shallow" in str(exc)
+
+
+class TestSettledGreenTarget:
+    """Decision 249: the prod detector shares the settled-green reference and the independent HEAD ceiling."""
+
+    @staticmethod
+    def _run(stub: GitRunnerStub, resolver: Any, sha: str = "SHA_OLD") -> dict[str, Any]:
+        return detect_prod_code_drift(
+            git_runner=stub,
+            s3_client=_FakeDeployRecordsS3(default_sha=sha),
+            portal_caller=lambda a, f: "rec-x",
+            open_recs=[],
+            target_resolver=resolver,
+        )
+
+    def test_a_commit_after_the_settled_green_target_is_not_drift(self) -> None:
+        stub = GitRunnerStub(head_latest="SHA_NEW", reachable={"SHA_OLD": "SHA_OLD", "SHA_T": "SHA_OLD"}, head_age_hours=1)
+        assert self._run(stub, lambda: "SHA_T")["action"] == "none"
+
+    def test_the_head_ceiling_still_flags_after_six_hours(self) -> None:
+        stub = GitRunnerStub(head_latest="SHA_NEW", reachable={"SHA_OLD": "SHA_OLD", "SHA_T": "SHA_OLD"}, head_age_hours=7)
+        assert self._run(stub, lambda: "SHA_T")["action"] == "file"
+
+    def test_resolver_failure_and_no_green_fall_back_to_head(self) -> None:
+        stub = GitRunnerStub(head_latest="SHA_NEW", reachable={"SHA_OLD": "SHA_OLD"})
+        assert self._run(stub, lambda: None)["action"] == "file"
+        assert self._run(stub, None)["action"] == "file"
+
+    def test_a_record_ahead_of_the_settled_target_is_fresh(self) -> None:
+        stub = GitRunnerStub(
+            head_latest="SHA_T_LATEST",
+            reachable={"SHA_REC": "SHA_REC_LATEST", "SHA_T": "SHA_T_LATEST"},
+            merge_bases={("SHA_T_LATEST", "SHA_REC_LATEST"): "SHA_T_LATEST"},
+        )
+        assert self._run(stub, lambda: "SHA_T", sha="SHA_REC")["action"] == "none"
+
+    def test_function_list_comes_from_the_build_contract(self) -> None:
+        from scripts.build_lambda_config import _build_prod_function_names
+        from scripts.convergence_health import _PROD_FUNCTION_NAMES
+
+        assert list(_PROD_FUNCTION_NAMES) == _build_prod_function_names()

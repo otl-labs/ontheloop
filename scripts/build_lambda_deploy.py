@@ -189,8 +189,9 @@ def _write_ducklake_deploy_record(
     source_git_sha, deployed_at}``. ``channel`` defaults to ``"ducklake"`` (the T2.38 original
     caller); the prod class (T2.43) passes ``channel="prod"`` -- same schema, different S3
     prefix, generalising this function rather than duplicating it. ``source_git_sha`` reads
-    ``os.environ.get("GITHUB_SHA")`` -- None-safe: a local break-glass path (``bin/venv-python -m
-    scripts.build_lambda [--ducklake-only] --deploy``) has no ``GITHUB_SHA``, so the record
+    ``LAMBDA_ARTIFACT_SHA`` (the commit the deploy gate chose; under workflow_run ``GITHUB_SHA`` is
+    main HEAD and cannot be overridden), then ``GITHUB_SHA`` -- None-safe: a local break-glass path
+    (``bin/venv-python -m scripts.build_lambda [--ducklake-only] --deploy``) has neither, so the record
     carries ``source_git_sha: null`` rather than raising. Read back via ``read_deploy_record``
     (consumed by ``scripts.convergence_health.detect_ducklake_code_drift`` /
     ``detect_prod_code_drift``).
@@ -204,7 +205,7 @@ def _write_ducklake_deploy_record(
     record = {
         "function": function,
         "code_sha256": code_sha256,
-        "source_git_sha": os.environ.get("GITHUB_SHA"),
+        "source_git_sha": os.environ.get("LAMBDA_ARTIFACT_SHA") or os.environ.get("GITHUB_SHA") or None,
         "deployed_at": datetime.now(timezone.utc).isoformat(),
     }
     key = f"deploy-records/{channel}/{function}.json"

@@ -19,6 +19,13 @@ contract:
     check: validate_deploy_channel_conformance
 
 amendment_log:
+  - date: "2026-11-07"
+    semantic_break: false
+    change_class: governance_note_add
+    summary: >-
+      PLAN-lambda-deploy-full-tier-gate (Decision 249): deploy_channels.ducklake_functions and prod_functions governed_channel
+      comments name the deploy gate as the trigger; deploy_record.source_git_sha, freshness_semantics and null_source_git_sha
+      are rewritten (LAMBDA_ARTIFACT_SHA precedence, settled-green target, 6 h HEAD ceiling). No field name or schema changed.
   - date: "2026-10-25"
     semantic_break: false
     change_class: field_add
@@ -153,23 +160,21 @@ deploy_record:
   shape:
     function: "str -- the deployed Lambda function name"
     code_sha256: "str -- CodeSha256 from the update-function-code response"
-    source_git_sha: "str | null -- os.environ.get(GITHUB_SHA) at deploy time; null for a break-glass local deploy (no GITHUB_SHA set)"
+    source_git_sha: "str | null -- LAMBDA_ARTIFACT_SHA (the commit the deploy gate chose), else GITHUB_SHA, at deploy time; null for a break-glass local deploy (neither set)"
     deployed_at: "str -- ISO8601 UTC timestamp of the deploy"
   freshness_semantics: >-
-    Freshness is REACHABILITY, not equality: a deploy record is fresh iff the latest
-    watched-source commit reachable FROM its recorded source_git_sha equals the latest
-    watched-source commit on HEAD (git log -1 --format=%H <recorded_sha> -- <pathspecs>). A
-    push-triggered deploy sets source_git_sha to the exact commit that touched source; a
-    workflow_dispatch recovery deploy can set it to a LATER commit that never itself touches
-    source -- both are correctly fresh under this oracle. Bare equality (the pre-fix defect)
-    reported the latter as stale, which is what let a correct workflow_dispatch recovery deploy
-    look drifted.
+    Freshness is REACHABILITY against the newest green commit (Decision 249): the sensor's target is the newest main
+    commit whose full tier passed and whose CI run settled 45 minutes ago (scripts.ci.deploy_gate.newest_green_sha). A
+    record is fresh iff the latest watched-source commit reachable FROM its source_git_sha (git log -1 --format=%H
+    <recorded_sha> -- <pathspecs>) equals the latest watched-source commit at the target, or the record is ahead of the
+    target (git merge-base prints the target's). An independent 6 h ceiling applies the same rule against HEAD, so a
+    resolver defect cannot silence the alarm; a resolver failure falls back to HEAD. A workflow_dispatch recovery deploy
+    can set the record to a LATER commit that never touches source; that is fresh, where bare equality reported it stale.
   null_source_git_sha: >-
     A null source_git_sha (break-glass local deploy, scripts.build_lambda [--ducklake-only]
-    --deploy run outside CI with no GITHUB_SHA set) is deliberately treated as STALE, never
-    fresh -- fail closed on uncertainty. write_deploy_record's GITHUB_SHA semantics are never
-    changed to work around this; the record stays an honest statement of which commit was
-    deployed, and the sensor's comparison is what changed.
+    --deploy run outside CI with neither LAMBDA_ARTIFACT_SHA nor GITHUB_SHA set) is deliberately treated as STALE, never
+    fresh -- fail closed on uncertainty. write_deploy_record never fabricates a sha: it records LAMBDA_ARTIFACT_SHA, then
+    GITHUB_SHA (Decision 249; under workflow_run GITHUB_SHA is main HEAD and cannot be overridden), else null.
 
 # Flag DEFAULTS (--profile: $AWS_PROFILE else agent_platform via scripts.aws_profile.resolve_aws_profile; --region=eu-west-2) are OUT of registry scope.
 # The equivalence test compares flag-name sets only.
@@ -197,11 +202,11 @@ deploy_channels:
     root: terraform/personal
     channel_class: terraform_personal_ignore_changes_decoupled  # #544 landed the decoupling (Decision 125/126)
     see: docs/contracts/environment-taxonomy.yaml (conformance)
-    governed_channel: .github/workflows/deploy-ducklake-lambdas.yml  # Decision 236 nine-job topology (supersedes the T2.38 five-job split): the DEFAULT channel -- push-to-main (ducklake source paths) or workflow_dispatch; assumes the merged agent-platform-github-ci-deploy role (T2.49 / DEP-12, UpdateFunctionCode-only on function:agent-platform-*). deploy-maintenance builds+uploads ALL artifacts once and deploys maintenance + maintenance-smoke (ungated) -> maintenance-smoke + reconcile-gate (the latter invoking validate_reconcile_pending_gate --deploy-gate, refusing the serving and telemetry legs while any reconcile_scope=ducklake table has a non-empty pending_reconcile) -> deploy-serving (--ducklake-deploy-only for writer, reader and catalog-dr) -> smoke (--lambda-attach/--lambda-reader); deploy-telemetry-twin (the smoke-pinned telemetry writer twin, ungated) -> telemetry-twin-smoke (--lambda-telemetry-smoke, after maintenance-smoke and deploy-serving) -> deploy-telemetry (telemetry-writer and telemetry-reader, success-only behind reconcile-gate and telemetry-twin-smoke, and skipped while a reconcile_scope=telemetry_catalog table has a pending column (validate_reconcile_pending_gate --telemetry-hold)) -> telemetry-smoke (--lambda-telemetry-production, the production writer's light gate, then --lambda-telemetry-reader)
+    governed_channel: .github/workflows/deploy-ducklake-lambdas.yml  # Decision 236 nine-job topology (supersedes the T2.38 five-job split): the DEFAULT channel -- wakes on each completed CI push run on main and deploys the newest main commit whose full tier passed (Decision 249; .github/workflows/deploy-gate.yml, scripts/ci/deploy_gate.py; watched paths = scripts.convergence_health *_SOURCE_PATHSPECS), or workflow_dispatch (same target, force redeploys it); the workflow files and `deploy_gate resolve` run at main HEAD, `deploy_gate freshness` and the build at the gate sha; assumes the merged agent-platform-github-ci-deploy role (T2.49 / DEP-12, UpdateFunctionCode-only on function:agent-platform-*). deploy-maintenance builds+uploads ALL artifacts once and deploys maintenance + maintenance-smoke (ungated) -> maintenance-smoke + reconcile-gate (the latter invoking validate_reconcile_pending_gate --deploy-gate, refusing the serving and telemetry legs while any reconcile_scope=ducklake table has a non-empty pending_reconcile) -> deploy-serving (--ducklake-deploy-only for writer, reader and catalog-dr) -> smoke (--lambda-attach/--lambda-reader); deploy-telemetry-twin (the smoke-pinned telemetry writer twin, ungated) -> telemetry-twin-smoke (--lambda-telemetry-smoke, after maintenance-smoke and deploy-serving) -> deploy-telemetry (telemetry-writer and telemetry-reader, success-only behind reconcile-gate and telemetry-twin-smoke, and skipped while a reconcile_scope=telemetry_catalog table has a pending column (validate_reconcile_pending_gate --telemetry-hold)) -> telemetry-smoke (--lambda-telemetry-production, the production writer's light gate, then --lambda-telemetry-reader)
     break_glass_only: "bin/venv-python -m scripts.build_lambda --ducklake-only --deploy"  # genuinely NON-DEFAULT now that governed_channel exists (T2.38) -- retained as a fallback for when the governed channel cannot run (mirrors the agent_platform_admin human-gated IAM-apply precedent), not the routine agent path
   prod_functions:  # data-pipeline.zip targets above
     root: terraform/personal  # T2.43: provisioned in terraform/personal/prod_lambdas.tf
     channel_class: decoupled_build_pipeline
     see: src/data/handlers/CLAUDE.md
-    governed_channel: .github/workflows/deploy-prod-lambdas.yml  # T2.43: the DEFAULT channel -- push-to-main (prod source paths) or workflow_dispatch; assumes the merged agent-platform-github-ci-deploy role (T2.49 / DEP-12, UpdateFunctionCode-only on function:agent-platform-*, shared with deploy-ducklake-lambdas.yml), runs build_lambda --deploy, gates on a per-function smoke invocation
+    governed_channel: .github/workflows/deploy-prod-lambdas.yml  # T2.43: the DEFAULT channel -- wakes on each completed CI push run on main and deploys the newest main commit whose full tier passed (Decision 249; .github/workflows/deploy-gate.yml, scripts/ci/deploy_gate.py; watched paths = scripts.convergence_health *_SOURCE_PATHSPECS), or workflow_dispatch (same target, force redeploys it); the workflow files and `deploy_gate resolve` run at main HEAD, `deploy_gate freshness` and the build at the gate sha; assumes the merged agent-platform-github-ci-deploy role (T2.49 / DEP-12, UpdateFunctionCode-only on function:agent-platform-*, shared with deploy-ducklake-lambdas.yml), runs build_lambda --deploy, gates on a per-function smoke invocation
     break_glass_only: "bin/venv-python -m scripts.build_lambda --deploy"  # genuinely NON-DEFAULT now that governed_channel exists (T2.43) -- retained as a fallback for when the governed channel cannot run (mirrors the agent_platform_admin human-gated IAM-apply precedent), not the routine agent path
