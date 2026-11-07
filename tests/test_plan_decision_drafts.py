@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from scripts.north_star_models import load_north_star
 from scripts.roadmap import plan_decision_drafts as pdd
 from scripts.roadmap.plan_obligations import main
 
@@ -160,3 +161,73 @@ class TestMissingContracts:
         monkeypatch.setattr(pdd, "ROOT", tmp_path)
         found = pdd.findings_for_plan(_plan(tmp_path, _draft()), root=tmp_path)
         assert all(isinstance(f, pdd.Finding) for f in found)
+
+
+def _serves_draft(serves: list[str] | None = None, title: str = "Drafted", related: str = "") -> str:
+    extra = f"serves: [{', '.join(serves)}]\n" if serves else ""
+    rel = f"\n**Related:** {related}\n" if related else ""
+    return _draft(extra=extra, title=title) + rel
+
+
+def _ns_entry(ns_id: str):
+    return next(p for p in load_north_star().principles if p.id == ns_id)
+
+
+def _infos(lines: list[str]) -> list[str]:
+    return [x for x in lines if x.lstrip().startswith("INFO")]
+
+
+class TestDraftsReportInfo:
+    def test_one_id_prints_one_info_line(self, tmp_path: Path) -> None:
+        entry = _ns_entry("NS.6")
+        lines = pdd.report_for_plan(_plan(tmp_path, _serves_draft(["NS.6"])))
+        assert lines[0] == "decision_drafts: 1 drafted, 0 findings"
+        (info,) = _infos(lines)
+        assert f'principle "{entry.principle}"' in info
+        assert f'failure_signal "{" ".join(entry.failure_signal.split())}"' in info
+        assert f"carried_by [{', '.join(str(n) for n in entry.carried_by)}]" in info
+        assert "links none" in info
+
+    def test_related_line_naming_a_carrier_is_a_link(self, tmp_path: Path) -> None:
+        carrier = _ns_entry("NS.6").carried_by[0]
+        plan = _plan(tmp_path, _serves_draft(["NS.6"], related=f"Decision {carrier}"))
+        (info,) = _infos(pdd.report_for_plan(plan))
+        assert f"links {carrier} " in info
+
+    def test_amends_edge_into_carried_by_is_a_link(self, tmp_path: Path) -> None:
+        carrier = _ns_entry("NS.6").carried_by[0]
+        plan = _plan(tmp_path, _serves_draft(["NS.6"], title=f"Drafted (amends Decision {carrier})"))
+        (info,) = _infos(pdd.report_for_plan(plan))
+        assert f"links {carrier} " in info
+
+    def test_envelope_supersedes_into_carried_by_is_a_link(self, tmp_path: Path) -> None:
+        carrier = _ns_entry("NS.6").carried_by[0]
+        draft = _draft(extra=f"serves: [NS.6]\nsupersedes: [{carrier}]\n")
+        (info,) = _infos(pdd.report_for_plan(_plan(tmp_path, draft)))
+        assert f"links {carrier} " in info
+
+    def test_two_ids_print_two_lines_in_envelope_order(self, tmp_path: Path) -> None:
+        ids = sorted(load_north_star().ids())[:2]
+        lines = _infos(pdd.report_for_plan(_plan(tmp_path, _serves_draft(list(reversed(ids))))))
+        assert [x.split()[3].rstrip(":") for x in lines] == list(reversed(ids))
+
+    def test_unknown_id_prints_fail_and_no_info(self, tmp_path: Path) -> None:
+        lines = pdd.report_for_plan(_plan(tmp_path, _serves_draft(["NS.9999"])))
+        assert any(x.startswith("  FAIL") and "serves" in x for x in lines)
+        assert _infos(lines) == []
+
+    def test_draft_without_serves_prints_none(self, tmp_path: Path) -> None:
+        assert _infos(pdd.report_for_plan(_plan(tmp_path, _draft()))) == []
+
+    def test_findings_never_include_info(self, tmp_path: Path) -> None:
+        assert all(f.severity != "INFO" for f in pdd.findings_for_plan(_plan(tmp_path, _serves_draft(["NS.6"]))))
+
+    def test_missing_north_star_prints_none_without_raising(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(pdd, "ROOT", tmp_path)
+        assert _infos(pdd.report_for_plan(_plan(tmp_path, _serves_draft(["NS.6"])), tmp_path)) == []
+
+    def test_sidecar_drafted_decision_prints_info(self, tmp_path: Path) -> None:
+        after = _draft(extra="serves: [NS.6]\n")
+        _sidecar(tmp_path, [{"id": "b", "file": "docs/DECISIONS.md", "before": "", "after": after}])
+        lines = pdd.report_for_plan(_plan(tmp_path, "x"), tmp_path)
+        assert len(_infos(lines)) == 1
