@@ -1,0 +1,101 @@
+name: telemetry-arrival
+
+# Arrival check for telemetry_sessions (Decision 250 cl.5, rec-4940): each distinct Claude-Session trailer of a squash commit
+# merged to main more than the declared SLA ago must resolve to a captured root session. A merged session that never reached the
+# warehouse, or a source the check cannot read, fails the run; ci-rca (watched) files the rec. It is an alarm, never a gate or a
+# required check (Decisions 83, 210 cl.2) and files no rec itself. Counts and commit shas only in the log (Decision 101).
+#
+# Triggers: main CI completion (judges every earlier merge past its SLA), a 12-hourly cron backstop in a shape the liveness sweep
+# accepts (GitHub delivers hourly crons about every 6 hours here), and dispatch on main. CI -> telemetry-arrival -> ci-rca is
+# three workflow_run levels, GitHub's limit.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: '17 */12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telemetry-arrival
+  cancel-in-progress: false
+
+jobs:
+  arrival:
+    # A fork PR's branch named main must never start this id-token job (ci-rca.yml's fork-PR privilege gate precedent).
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write  # OIDC token minting for assume-role
+      contents: read
+      pull-requests: read
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # the denominator is main's history
+
+      - uses: ./.github/actions/aws-region
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies (venv)
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Configure AWS credentials (OIDC -- github_ci_branch role, DuckLake telemetry reader invoke)
+        uses: aws-actions/configure-aws-credentials@v6
+        env:
+          MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve the telemetry reader Function URL
+        # The URL and its bare host are masked (Decision 101).
+        run: |
+          set -euo pipefail
+          URL=$(aws lambda get-function-url-config --function-name agent-platform-ducklake-telemetry-reader --region "$AWS_REGION" --query FunctionUrl --output text)
+          if [ -z "$URL" ] || [ "$URL" = "None" ]; then
+            echo "::error::Could not resolve the telemetry_reader Function URL via get-function-url-config." >&2
+            exit 1
+          fi
+          HOST="${URL#https://}"
+          HOST="${HOST%%/*}"
+          echo "::add-mask::${URL}"
+          echo "::add-mask::${HOST}"
+          echo "DUCKLAKE_TELEMETRY_READER_URL=${URL}" >> "$GITHUB_ENV"
+          echo "Resolved DUCKLAKE_TELEMETRY_READER_URL (masked)."
+
+      - name: Check merged sessions arrived
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          .venv/bin/python -m scripts.telemetry_verify arrival --junit-xml reports/pytest-junit.xml
+
+      - name: Upload pytest junit report (v2 fingerprint substrate)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pytest-junit
+          path: reports/pytest-junit.xml
+          if-no-files-found: ignore
+          retention-days: 14

@@ -2,6 +2,66 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 250: Every warehouse table declares what should arrive, from an independent source and by when; a check that cannot read its source is red, and every check is itself watched (amends Decision 62) (Decided)
+
+```yaml
+number: 250
+status: Decided
+decided_date: "2026-11-07"
+kind:
+  value: mechanism
+  justification: >-
+    Undoing clauses 1-5 changes how missing data is detected and alarmed, not a goal, a human gate or a data
+    commitment; clause 4 routes reds into Decision 226's existing planning halt without changing it.
+amends: [62]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable rule binding every registered table, a fast-tier validator and the alarm route of every arrival check,
+    and reversing Decision 62's 2026-06-16 rule that live-reader checks file their own recs. Not a contract note:
+    data-modeling-standard.yaml holds the grammar and the declarations, not the commitment that absence is a failure or the
+    amended route. Not amendment_forms: it binds every table, not one call site of Decision 62.
+```
+
+**Status:** Decided
+**Date:** 2026-11-07
+**Warehouse ID:** dec-250 (per Decision 84 backfill)
+
+**Problem:** Our checks test rows that arrived and are blind to rows that did not. From 2026-11-03 a Claude Code release stopped telemetry capture (rec-4939) and nothing reached the warehouse for about 2.8 days while every telemetry check stayed green: the probes fed synthetic input, the monitor judged only captured trees, and the one listed-versus-captured run had stopped on 2026-10-26 without an alarm (rec-4439). Cost reconciliation (rec-4734) has never run and still exits green.
+
+**Intent:** Data that should have arrived and did not is a failure detected within its SLA, not a gap found by accident.
+
+**Decision:**
+1. **Every table declares.** Each table in the generated table registry declares an arrival expectation in data-modeling-standard.yaml's arrival_expectations.tables, keyed by table. A declaration names an independent denominator (a source outside the pipeline that writes the table), the join key, a latency SLA, set inclusion or count, and the enforcing check and its alarm route. Its kind is enforced, residual (the check is not built; an open rec owns it until a review_by date), derived (bounded by a parent table's expectation and a named cardinality check) or waived (no external stream; the Decision or rec that allows it). The grammar sits beside the declarations; validate_arrival_expectations fails a registry table without a declaration and a declaration that names no registry table. An expectation names rows no write can decide, so it is not a Decision 210 cl.3 data rule; each table's Class A contract stays its single rule source. At adoption the block raises the size budget of docs/contracts/data-modeling-standard.yaml (config/structural_size_budgets.yaml).
+2. **Unreadable is red.** A check that cannot read its denominator or the warehouse fails; it never passes with nothing judged. An empty denominator reports skipped, never pass.
+3. **Every check is watched.** An enforcing check is watched by a separate monitor that alarms when it stops running or never succeeds: the derived sensor-liveness sweep for a scheduled GitHub workflow (its cron must be one the sweep accepts), or a native dead-man alarm that treats missing data as breaching for a check that runs anywhere else. A check that nothing watches, such as the claude.ai completeness routine, is never the enforcing check of an expectation. The sweep's thresholds do not yet fit GitHub's real schedule delivery (hourly crons fire about every 6 hours here); rec-4233 owns that.
+4. **Route (amends Decision 62).** Decision 62's 2026-06-16 amendment has live-reader checks file their own recs. An arrival check may instead be ci-rca watched: a red files a source=ci_rca rec under Decision 226, whose planning halt applies, and the check attributes its failure to its own module so that halt is overlap-scoped inside the SLO. An arrival check is never a merge gate, a required check, or part of the fast or full tier (Decisions 83, 210 cl.2).
+5. **First instance.** telemetry_sessions is enforced by the telemetry-arrival workflow: each distinct session named by a Claude-Session trailer of a squash commit merged to main more than its SLA ago resolves to a captured root, set inclusion on harness_session_key. Sessions that never merge are outside this denominator, and its declaration says so.
+
+**Coverage (Decision 181 cl.2):** cl.1 and cl.3 validate_arrival_expectations (cl.3's cadence and success legs sensor_liveness); cl.2 and cl.5 tests/telemetry_verify/test_session_presence.py; cl.4 validate_ci_rca_adjudication over config/ci_rca_taxonomy.yaml; each residual expectation its owning rec.
+
+**Options considered:** A daily row-count floor -- rejected: sessions merge zero to several PRs, so a count misleads where set inclusion does not. A presence check in the fast or full tier -- rejected: a PR's session is still running when its PR runs, and merges must not depend on the reader. A block in each Class A contract -- rejected: it splits one subject over nine contracts and a waiver map for the three with none; one block checked against the registry both ways cannot drift unseen. Own-lane recs per Decision 62 -- rejected by the operator on 2026-11-05: a rec alone was parked for days during this outage.
+
+```yaml reversal-conditions
+decision: 250
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: false-reds
+    kind: manual
+    description: "More than four arrival reds in a month close with no data actually missing."
+  - id: halt-cost
+    kind: manual
+    description: "An arrival red with a cause outside this repository (a reader outage, an upstream release) halts planning for more than 24 hours twice in a quarter: re-decide clause 4."
+  - id: residual-stall
+    kind: manual
+    description: "A residual expectation passes its review_by twice."
+```
+
+**Related:** Decisions 55, 62, 83, 88, 167, 170, 181, 210, 215, 226, 236; rec-4233, rec-4439, rec-4734, rec-4939, rec-4940, rec-4949.
+
+---
+
 ## Decision 249: Lambda code deploys ship only the newest main commit whose full tier passed, because the sandbox tier now serves production (amends Decisions 24, 73 and 77) (Decided)
 
 ```yaml
@@ -11861,6 +11921,8 @@ The presubmit tier on the self-hosted EC2 runner already has SSO credentials and
 > **2026-06-16 amendment (premise revisit -- live-reader DQ):** The 2026-05 footnote held the "core decision ... unchanged" after CD.21. That stays true for the Session E MECHANISM itself (cron agent -> EC2 -> commit `dq-latest.json` -> auto-merge), which remains retired. But the load-bearing PREMISE of the no-separate-routine conclusion -- "the presubmit tier already has SSO credentials and runs before every merge," i.e. live DQ is cheap on the credentialed gate -- is now invalidated: CD.21 retired the SSO/EC2 substrate, Decision 73 measured ~10-min presubmit round-trips, and a DuckLake-reader 502 storm added ~17-20 min of DQ-verifier hangs plus merge-gate flapping (2026-06-15; PLAN-dq-gate-infra-resilience). For LIVE-READER-dependent DQ checks specifically (e.g. ulid_history_unique, current_merge_key_unique), the "no separate scheduled routine" conclusion is therefore DELIBERATELY REVISITED -- not reinterpreted: those checks move to a scheduled, non-gating MONITOR/canary that files recs (alarm-not-gate, CD.12), with uniqueness enforced STRUCTURALLY at write time (Decision 81 cl.3 MERGE-on-ULID + cl.8 current-MERGE-key) and only hermetic structural contract checks remaining on the merge gate. The silent-cron failure mode 62 worried about is mitigated by a persistent-unavailability alarm (Decision 74). This revisit is owned by roadmap tier_item T1.6 and is distinct from the GitHub-Actions-scheduled meta-validation (T3.7), which never re-introduced Session E. See docs/ROADMAP-PLATFORM.yaml (T1.6) and docs/plans/PLAN-dq-gate-to-monitor-roadmap.yaml.
 
 > **2026-09-25 correction (PLAN-monitor-liveness-sweep -- the 2026-06-16 clause's named alarm does not operate on the primary dev surface):** The 2026-06-16 amendment above states "the silent-cron failure mode 62 worried about is mitigated by a persistent-unavailability alarm (Decision 74)." That alarm does not run on Claude Code on the web (CC-web), the primary dev surface (AGENTS.md "Role and environment") -- it never armed here, so the named mitigation was not actually in force. The operative mitigation is the derived-peer scheduled-loop liveness backstop (`scripts/convergence_health/sensor_liveness.py`, audit finding LSA-02, PLAN-sensor-liveness, landed 2026-09-07) plus its success-age leg (PLAN-monitor-liveness-sweep, 2026-09-25): a schedule that stops firing, and a schedule that fires on cadence but never succeeds, both alarm via the `loop_liveness_stale` source rather than via Decision 74's alarm. Separately, this leg's staleness threshold is CRON-DERIVED (`clamp(2 x nominal cron period, 6h, 45d)`, `config/agent/data_quality/source_registry.yaml`), not a declared constant, so Decision 83's condition (b) prose ("more than 14 days") agrees with the live weekly-cadence loops only by coincidence (`0 7 * * 1` x 2 = 1209600s = 14d) and would silently redefine itself if that cron ever changed. Decision 83 itself is NOT edited by this annotation -- arming its predicate is a separate, deferred follow-up (rec-3979).
+
+> **Update (2026-11-07):** Decision 250 clause 4 amends the 2026-06-16 amendment above for arrival checks: an arrival check may be ci-rca watched instead of filing its own recs, so its red files a source=ci_rca rec under Decision 226. Every other live-reader check keeps the 2026-06-16 route.
 
 ---
 

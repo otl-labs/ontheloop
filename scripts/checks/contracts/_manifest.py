@@ -88,6 +88,19 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_arrival_expectations",
+        module="scripts.checks.contracts.validate_arrival_expectations",
+        attr="validate_arrival_expectations",
+        pre=True,
+        full_segment="full_after_lint",
+    ),
+    Entry(
+        name="validate_arrival_residual_review",
+        module="scripts.checks.contracts.validate_arrival_expectations",
+        attr="validate_arrival_residual_review",
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_portal_drift",
         module="scripts.checks.contracts.validate_portal_drift",
         attr="validate_portal_drift",

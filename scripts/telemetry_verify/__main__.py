@@ -1,4 +1,4 @@
-"""python -m scripts.telemetry_verify monitor|completeness (PLAN-telemetry-verification-monitor).
+"""python -m scripts.telemetry_verify monitor|completeness|arrival (PLAN-telemetry-verification-monitor).
 
 Each command prints one line of counts, class names, verb names and join ids (Decision 101: the output lands in public Actions
 logs, so never a row value, session id, ref, branch, error body or URL host). Exit 0 when the run completed (whatever the
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -18,7 +19,7 @@ from typing import Any, Callable, Mapping
 
 from scripts.rec_episode import find_recs
 from scripts.telemetry_capture import read_route
-from scripts.telemetry_verify import completeness, monitor
+from scripts.telemetry_verify import completeness, monitor, session_presence
 from scripts.telemetry_verify.alarms import ALARM_SOURCE, raise_alarms
 from scripts.telemetry_verify.silent_checks import REPORT_ONLY_CHECKS
 
@@ -42,6 +43,14 @@ def _day(text: str) -> str:
         raise argparse.ArgumentTypeError("expected YYYY-MM-DD") from None
 
 
+def _instant(text: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+    except ValueError:
+        raise argparse.ArgumentTypeError("expected an ISO instant") from None
+
+
 def _skip(text: str) -> int:
     if not text.isdigit():
         raise argparse.ArgumentTypeError("expected a non-negative integer")
@@ -57,6 +66,11 @@ def parser() -> argparse.ArgumentParser:
     comp = sub.add_parser("completeness")
     comp.add_argument("--lists-dir", default=DEFAULT_LISTS_DIR)
     comp.add_argument("--judged-day", type=_day, default=None)
+    arr = sub.add_parser("arrival")
+    arr.add_argument("--junit-xml", default=None, metavar="PATH")
+    arr.add_argument("--as-of", type=_instant, default=None)
+    arr.add_argument("--no-lost-windows", action="store_true")
+    arr.add_argument("--repo", default=None)
     for each in (mon, comp):
         each.add_argument("--no-alarms", action="store_true")
         each.add_argument("--assert-zero", default=None, metavar="CLASS")
@@ -247,6 +261,19 @@ def run_completeness_command(
     return 0 if _file(findings, scope=judged, now=now, portal=portal, file=COMPLETENESS_FILE, reader=reader) else 1
 
 
+def run_arrival_command(args: argparse.Namespace, *, reader: Any, now: datetime) -> int:
+    repo = args.repo or os.environ.get("GITHUB_REPOSITORY") or session_presence.DEFAULT_REPO
+    result = session_presence.run(
+        Path(__file__).resolve().parents[2], reader, args.as_of or now, repo=repo, no_lost_windows=args.no_lost_windows
+    )
+    for line in session_presence.lines(result):
+        print(line)
+    if args.junit_xml:
+        Path(args.junit_xml).parent.mkdir(parents=True, exist_ok=True)
+        session_presence.write_junit(args.junit_xml, result)
+    return result.exit_code()
+
+
 def main(
     argv: list[str] | None = None,
     *,
@@ -260,6 +287,8 @@ def main(
     when = now or datetime.now(timezone.utc)
     if reader is None:
         reader = read_route.make_routed_reader()
+    if args.command == "arrival":
+        return run_arrival_command(args, reader=reader, now=when)
     if args.command == "monitor":
         return run_monitor_command(args, reader=reader, now=when, budget=budget, portal=portal)
     return run_completeness_command(args, reader=reader, now=when, portal=portal)
