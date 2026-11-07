@@ -2,7 +2,10 @@
 
 The coordinator fetches the harness's two session lists (agent tools, unreachable from hooks or CI) into raw JSON files; this
 module joins them with the captured root sessions on the harness session key (session_ and cse_ prefixes normalised),
-classifies only the unjoined rows, and counts. Counts only (Decision 101): no id, ref or branch leaves this module.
+classifies only the unjoined rows, and counts. A captured root with a host_run_ref is a top-level CI run:
+no harness list holds it, so it is counted apart (captured_host_runs)
+and never as a keyless or unlisted root, which would mask a real gap.
+Counts only (Decision 101): no id, ref or branch leaves this module.
 """
 
 from __future__ import annotations
@@ -58,6 +61,7 @@ class CompletenessResult:
     listed_unjoinable: int = 0
     listed_scope_unknown: int = 0
     captured_without_key: int = 0
+    captured_host_runs: int = 0
 
     def findings(self) -> dict[str, int]:
         return {"completeness_listed_not_captured": self.unexplained_not_captured} if self.unexplained_not_captured else {}
@@ -171,6 +175,9 @@ def compare_sessions(
     for root in roots:
         started = parse_timestamp(root["session_started_at"])
         if not first <= started < last:
+            continue
+        if root.get("host_run_ref"):
+            result.captured_host_runs += 1
             continue
         key = normalise_key(root.get("harness_session_key"))
         if key is None:

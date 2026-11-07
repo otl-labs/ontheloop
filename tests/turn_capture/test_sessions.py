@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections import Counter
 from pathlib import Path
 
@@ -513,3 +514,16 @@ def test_segment_closes_read_the_effective_boundary() -> None:
     rows = sessions(root, final=False)
     assert [r["external_ref"] for r in by(rows, event_kind="close")] == ["a1#0/close"]
     assert [r["execution_attempt"] for r in by(rows, event_kind="resume")] == [2]
+
+
+def test_a_sidecar_root_falls_back_to_the_host_checkout_sha_only_without_a_hook_pin() -> None:
+    from src.turn_capture import host_run  # noqa: PLC0415
+    from tests.fixtures import turn_capture_v8_cases as v8  # noqa: PLC0415
+
+    host = host_run.parse_host_run(v8.sidecar(checkout=v8.CHECKOUT_SHA).encode())
+    ctx = make_ctx()
+    ctx = dataclasses.replace(ctx, host=host)
+    root = [prompt("u1", 1, "p1", "hi"), assistant("a1", 2, "m1", [text_block("ok")])]
+    diag: Counter[str] = Counter()
+    open_row = by(rows_of(build_sessions(parse_records(root), ctx, diag)), event_kind="open")[0]
+    assert open_row["checkout_sha"] == v8.CHECKOUT_SHA and diag["checkout_from_host_run"] == 1

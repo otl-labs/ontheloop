@@ -51,6 +51,7 @@ from src.telemetry_client.blob_delivery import (
     protocol_from_describe,
 )
 from src.turn_capture.cursor import CursorError
+from src.turn_capture.host_run import resolve_pin
 from src.turn_capture.record_turn import CaptureResult, record_turn
 from src.turn_capture.transcript import ROOT, FsTree, project_ref_pin
 
@@ -295,9 +296,13 @@ def _locked_pass(
     loaded = state.load_cursor(root)
     if not loaded.valid:
         diag[loaded.status] += 1
-    project_ref = loaded.cursor.project_ref if loaded.cursor is not None else project_ref_pin(tree)
+    project_ref: str | None
+    if loaded.cursor is not None:
+        project_ref, pin_token = loaded.cursor.project_ref, "pinned"
+    else:
+        project_ref, pin_token = resolve_pin(tree)
     if project_ref is None:
-        diag["deferred_no_pin"] += 1
+        diag["pin_conflict" if pin_token == "pin_conflict" else "deferred_no_pin"] += 1
         record.update(capture_warning.version_field(root))
         return _finish(state, record, "deferred", diag)
     if smoke_ref is not None and project_ref != smoke_ref:
@@ -419,13 +424,17 @@ def run_pass(
     sleep: Callable[[float], None] = time.sleep,
     rng: Callable[[], float] = random.random,
     wait: Callable[[], str] | None = None,
+    ci_gate: switch.CiGate | None = None,
 ) -> PassResult:
     """RN-1..RN-8. "off" before any state is touched; "busy" when another pass holds the tree's lock.
+
+    *ci_gate* (ci-pass only) admits an allow-listed Actions run: mode ci runs like on, and the project pin may come from the
+    host-run sidecar (rule P-5); a hook/sidecar conflict finishes deferred with pin_conflict.
 
     *wait* (rule RW-1, opt-in) runs after the switch and smoke checks and before the lock; its token is counted in the pass's
     diagnostics and a timeout still runs the pass.
     """
-    mode, switch_source = switch.switch_mode(env, repo_root)
+    mode, switch_source = switch.switch_mode(env, repo_root, ci_gate)
     if mode == switch.OFF:
         return PassResult("off")
     root_file = Path(transcript_path)

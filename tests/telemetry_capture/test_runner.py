@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from scripts.telemetry_capture import runner
+from scripts.telemetry_capture import runner, switch
 from scripts.telemetry_capture.transport import Budget, CaptureUnavailable
 from tests.fixtures.telemetry_capture_writer import ON, PIN, REF, Writer, factory, records, repo, run, state, write
 from tests.fixtures.turn_capture_corpus import (
@@ -29,6 +29,7 @@ from tests.fixtures.turn_capture_corpus import (
     tool_result,
     tool_use_block,
 )
+from tests.fixtures.turn_capture_v8_cases import sidecar
 
 
 def test_off_touches_nothing(tmp_path: Path) -> None:
@@ -468,3 +469,29 @@ def test_a_not_due_pass_that_changes_nothing_does_not_rewrite_the_state(tmp_path
     run(tmp_path, writer)
     before = state(tmp_path).verify_file.stat().st_mtime_ns
     assert run(tmp_path, writer).outcome == "no_rows" and state(tmp_path).verify_file.stat().st_mtime_ns == before
+
+
+CI_GATE = switch.CiGate(switch.CI, {"workflow": "w", "agent": "ci_rca", "content_policy": "full"}, "origin_main", None)
+ACTIONS = {"GITHUB_ACTIONS": "true"}
+
+
+def test_run_pass_ci_gate_runs_under_github_actions(tmp_path: Path) -> None:
+    files = {**make_files(records()[1:]), f"{SID}/host-run.json": sidecar()}
+    write(tmp_path, files)
+    writer = Writer()
+    assert run(tmp_path, writer, env=ACTIONS).outcome == "off" and writer.posts == []
+    result = run(tmp_path, writer, env=ACTIONS, ci_gate=CI_GATE)
+    assert result.outcome == "sent" and result.diag["diag"]["switch_source:origin_main"] == 1
+    agents = [row for batch in writer.appends()[0]["batches"] if batch["table"] == "telemetry_agents" for row in batch["rows"]]
+    assert [row["host_run_ref"] for row in agents] == ["gha:123456789/1/rca/1"]
+    refused = switch.CiGate(switch.OFF, None, "origin_main", "ref_not_main")
+    assert run(tmp_path, Writer(), env=ACTIONS, ci_gate=refused).outcome == "off"
+
+
+def test_run_pass_defers_a_pin_conflict(tmp_path: Path) -> None:
+    files = {**make_files(records(ref="other/project")), f"{SID}/host-run.json": sidecar()}
+    write(tmp_path, files)
+    writer = Writer()
+    result = run(tmp_path, writer, env=ACTIONS, ci_gate=CI_GATE)
+    assert result.outcome == "deferred" and result.diag["diag"]["pin_conflict"] == 1
+    assert writer.posts == [] and not state(tmp_path).state_file.exists()

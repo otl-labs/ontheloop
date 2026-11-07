@@ -1130,6 +1130,7 @@ try:
     from awswrangler.exceptions import ServiceApiError as _WranglerServiceApiError
 except ImportError:
     wr = None
+
     class _WranglerServiceApiError(Exception):
         pass
 ```

@@ -38,6 +38,9 @@ class CursorTree:
             return None
         return b"".join(line + b"\n" for line in data.split(b"\n")[:-1][:wanted])
 
+    def host_run(self) -> bytes | None:
+        return self._tree.host_run()
+
     def _pinned(self, basename: str) -> tuple[bool, str | None]:
         pins = self._cursor.sidecars
         return basename in pins, pins.get(basename)

@@ -377,3 +377,18 @@ def test_denial_kind_exempts_a_string_tool_use_result_from_the_unmatched_counter
     ]
     build(root, diag=diag)
     assert diag["unmatched_string_tool_use_result"] == 1
+
+
+def test_the_withheld_policy_turns_every_row_into_an_empty_digest_omission() -> None:
+    from src.turn_capture.transcripts import EMPTY_SHA256  # noqa: PLC0415
+
+    files = make_files([prompt("u1", 1, "p1", "secret words"), assistant("a1", 2, "m1", [text_block("more")])])
+    tree = MemTree(files)
+    from src.turn_capture.streams import parse_tree  # noqa: PLC0415
+
+    ctx = dataclasses.replace(make_ctx(), content_policy="withheld")
+    rows = rows_of(build_transcripts(parse_tree(tree, None, True), ctx, Sidecars(tree, None), Counter()))
+    assert rows and all(
+        r["content_omitted_reason"] == "withheld_by_policy" and r["content_sha256"] == EMPTY_SHA256 and r["content_bytes"] == 0
+        for r in rows
+    )

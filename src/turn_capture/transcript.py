@@ -21,6 +21,7 @@ from src.telemetry.timestamps import TimestampError, parse_iso8601_utc
 
 ROOT = "root"
 SIDECAR_CHUNK_BYTES = 65536
+HOST_RUN_FILE = "host-run.json"
 
 
 class TranscriptTree(Protocol):
@@ -29,6 +30,8 @@ class TranscriptTree(Protocol):
     def agent_ids(self) -> list[str]: ...
 
     def read(self, key: str) -> bytes | None: ...
+
+    def host_run(self) -> bytes | None: ...
 
     def sidecar(self, basename: str) -> bytes | None: ...
 
@@ -49,6 +52,10 @@ class FsTree:
 
     def read(self, key: str) -> bytes | None:
         path = self.root_file if key == ROOT else self._dir / "subagents" / f"agent-{key}.jsonl"
+        return path.read_bytes() if path.is_file() else None
+
+    def host_run(self) -> bytes | None:
+        path = self._dir / HOST_RUN_FILE
         return path.read_bytes() if path.is_file() else None
 
     def sidecar(self, basename: str) -> bytes | None:
@@ -85,6 +92,10 @@ class MemTree:
     def read(self, key: str) -> bytes | None:
         rel = f"{self.session_id}.jsonl" if key == ROOT else f"{self.session_id}/subagents/agent-{key}.jsonl"
         body = self.files.get(rel)
+        return None if body is None else body.encode("utf-8")
+
+    def host_run(self) -> bytes | None:
+        body = self.files.get(f"{self.session_id}/{HOST_RUN_FILE}")
         return None if body is None else body.encode("utf-8")
 
     def _sidecar_bytes(self, basename: str) -> bytes | None:
@@ -138,7 +149,7 @@ FORK_HOOK = "SessionStart:fork"
 PIN_SCRIPT_STEM = "session_start_log_turn"
 PIN_FLAG = "--project-ref="
 _SCRIPT_TOKEN = re.compile(r"[^\s]+\.(py|sh)$")
-_PIN_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}")
+PIN_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}")
 
 
 def _hook_attachment(data: dict) -> dict | None:
@@ -197,7 +208,7 @@ def hook_script(command: object) -> tuple[str | None, list[str]]:
     return None, tokens
 
 
-def _unquoted(value: str) -> str:
+def unquoted(value: str) -> str:
     """hook_script strips token edges, so a quoted flag value arrives with its opening quote still attached (rec-4308)."""
     return value[1:] if value[:1] in ("'", '"') else value
 
@@ -211,7 +222,7 @@ def project_ref_pin(tree: TranscriptTree) -> str | None:
         if att is None or att.get("hookEvent") != "SessionStart":
             continue
         stem, tokens = hook_script(att.get("command"))
-        refs = [_unquoted(t[len(PIN_FLAG) :]) for t in tokens if t.startswith(PIN_FLAG)]
-        if stem == PIN_SCRIPT_STEM and len(refs) == 1 and _PIN_REF.fullmatch(refs[0]):
+        refs = [unquoted(t[len(PIN_FLAG) :]) for t in tokens if t.startswith(PIN_FLAG)]
+        if stem == PIN_SCRIPT_STEM and len(refs) == 1 and PIN_REF.fullmatch(refs[0]):
             return refs[0]
     return None

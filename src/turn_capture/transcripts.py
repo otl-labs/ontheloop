@@ -18,7 +18,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.turn_capture.cursor import CaptureCursor
 from src.turn_capture.refs import full_output_ref, transcript_ref, turn_entity_ref
@@ -34,6 +34,11 @@ from src.turn_capture.streams import (
     is_api_error,
 )
 from src.turn_capture.transcript import TranscriptTree
+
+if TYPE_CHECKING:
+    from src.turn_capture.host_run import HostRun
+
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 TRANSCRIPT_COLUMNS = (
     "event_kind",
@@ -69,6 +74,8 @@ class Ctx:
     started: datetime
     billing_shape: str
     full_output_cap_bytes: int
+    host: HostRun | None = None
+    content_policy: str = "full"
 
 
 @dataclass(frozen=True)
@@ -257,7 +264,9 @@ def _row(
         content_truncated=False,
         model=model if isinstance(model, str) else None,
     )
-    if omitted is not None:
+    if ctx.content_policy == "withheld":
+        row.update(content_omitted_reason="withheld_by_policy", content_sha256=EMPTY_SHA256, content_bytes=0)
+    elif omitted is not None:
         row.update(content_omitted_reason="oversize", content_sha256=omitted.sha256, content_bytes=omitted.size)
     else:
         assert text is not None

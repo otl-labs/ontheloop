@@ -32,6 +32,9 @@ _PORTS = "docs/contracts/ports.yaml"
 
 def _touch(root: Path, rel: str) -> None:
     target = root / rel
+    if rel.endswith("/"):
+        target.mkdir(parents=True, exist_ok=True)
+        return
     target.parent.mkdir(parents=True, exist_ok=True)
     target.touch()
 

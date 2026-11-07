@@ -62,6 +62,7 @@ from tests.fixtures.turn_capture_v4_cases import V4_BUILDERS
 from tests.fixtures.turn_capture_v5_cases import V5_BUILDERS
 from tests.fixtures.turn_capture_v6_cases import V6_BUILDERS
 from tests.fixtures.turn_capture_v7_cases import V7_BUILDERS
+from tests.fixtures.turn_capture_v8_cases import V8_BUILDERS
 
 SECRET_KINDS = ("aws_access", "aws_secret", "aws_session", "anthropic", "github", "github_pat", "bearer")
 
@@ -165,6 +166,7 @@ def test_finalize_equals_virtual_prompt_at_eof() -> None:
             if k[0] == "telemetry_sessions" and r["event_kind"] == "open" and r["entity_ref"] == SID
         ]
         assert len(closes) == len(opens), name
+        final_closes = [*closes, *(("telemetry_agents", ref.removesuffix("/close") + "/run_close") for _, ref in closes)]
         virtual = dict(files)
         for rel in files:
             if rel.endswith(".jsonl"):
@@ -177,7 +179,7 @@ def test_finalize_equals_virtual_prompt_at_eof() -> None:
             live_rows = {k: v for k, v in keyed(capture(virtual, final=False)).items() if not k[1].startswith("zz-")}
         ended_by_virtual = {k for k, v in live_rows.items() if v.get("event_kind") == "resume" and k not in final_rows}
         assert {k: v for k, v in live_rows.items() if k not in ended_by_virtual} == {
-            k: v for k, v in final_rows.items() if k not in closes
+            k: v for k, v in final_rows.items() if k not in final_closes
         }, name
 
 
@@ -322,6 +324,7 @@ def test_new_cases_are_built_from_their_builders() -> None:
         **V5_BUILDERS,
         **V6_BUILDERS,
         **V7_BUILDERS,
+        **V8_BUILDERS,
     }
     for name, builder in builders.items():
         assert load_case(name)[0] == builder(), name
@@ -493,7 +496,7 @@ def test_finalization_cuts_are_recorded_once_and_survive_a_reset() -> None:
     stale = dataclasses.replace(first.next_cursor, parser_version=PARSER_VERSION - 1)
     re_emitted = capture(files, stale, final=True)
     assert [r["event_kind"] for r in re_emitted.sessions].count("close") == 1 and re_emitted.next_cursor.finalize_cuts == cuts
-    assert PRODUCER_VERSION == "turn-capture-7" and PARSER_VERSION == 7
+    assert PRODUCER_VERSION == "turn-capture-8" and PARSER_VERSION == 8
 
 
 def test_resend_tree_re_emits_every_row_keeping_pins_and_cuts() -> None:

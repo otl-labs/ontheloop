@@ -31,7 +31,7 @@ MONITOR_LINE = re.compile(
 COMPLETENESS_LINE = re.compile(
     r"COMPLETENESS judged_day=\d{4}-\d\d-\d\d status=(completed|before_v4|before_catalog|lists_short) listed=\d+ "
     r"listed_and_captured=\d+ listed_not_captured=\d+ unexplained_not_captured=\d+ captured_not_listed=\d+ "
-    r"listed_unjoinable=\d+ listed_scope_unknown=\d+ captured_without_key=\d+ alarms=\S+"
+    r"listed_unjoinable=\d+ listed_scope_unknown=\d+ captured_without_key=\d+ captured_host_runs=\d+ alarms=\S+"
 )
 
 
@@ -133,6 +133,18 @@ def test_completeness_command_prints_the_pinned_grammar_only(tmp_path: Path, cap
     assert cli.main(argv, reader=FakeReader([]), now=NOW, portal=portal) == 0
     assert "unexplained_not_captured=1" in capsys.readouterr().out and [c[0] for c in portal.calls] == ["file"]
     assert cli.main([*argv, "--assert-zero", "completeness_listed_not_captured"], reader=FakeReader([]), now=NOW) == 2
+
+
+def test_completeness_line_prints_captured_host_runs(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (tmp_path / completeness.THREAD_FILE).write_text(json.dumps([{"sessions": [], "next_cursor": None}]), encoding="utf-8")
+    (tmp_path / completeness.SESSIONS_FILE).write_text(
+        json.dumps([{"ccr": {"data": [], "has_more": False}}]), encoding="utf-8"
+    )
+    roots = [{"harness_session_key": None, "host_run_ref": "gha:1/1/rca/1", "session_started_at": "2026-01-18T09:59:00+00:00"}]
+    argv = ["completeness", "--lists-dir", str(tmp_path), "--judged-day", "2026-01-18", "--no-alarms"]
+    assert cli.main(argv, reader=FakeReader(roots), now=NOW) == 0
+    (line,) = capsys.readouterr().out.strip().splitlines()
+    assert COMPLETENESS_LINE.fullmatch(line) and "captured_without_key=0 captured_host_runs=1 alarms=none" in line
 
 
 def test_a_reader_error_prints_class_and_status_only(

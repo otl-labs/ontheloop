@@ -84,6 +84,10 @@ CASES = (
     "late_startup_group.json",
     "late_resume_group.json",
     "resume_hook_twins.json",
+    "ci_rca_hook_pin_and_host_run.json",
+    "host_run_only_withheld.json",
+    "host_run_malformed.json",
+    "host_run_retry_attempts.json",
 )
 
 

@@ -1,6 +1,7 @@
 """`python -m scripts.telemetry_capture <cmd>`: the runner entry the hooks detach (`run`) and the operator CLI (rule OP-1).
 
-run (silent, exit 0 always); pass --tree [--final]; status --tree; probe --tree [--require t1,t2]; observe --tree;
+run (silent, exit 0 always); ci-pass --manifest ... (the Actions final pass, PLAN-telemetry-claude-p-capture-adapter);
+pass --tree [--final]; status --tree; probe --tree [--require t1,t2]; observe --tree;
 mark --tree; clear-halt --tree; verify --tree [--no-alarms] [--assert-zero CLASS]; register --project-ref --name --remote.
 No sweep exists: a pass starts on a tree only through its own hook or an explicit --tree. Operator output is counts and fixed
 tokens, never content or credentials.
@@ -20,12 +21,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from scripts.telemetry_capture import waits
+from scripts.telemetry_capture import ci_pass, waits
 from scripts.telemetry_capture.runner import STOP_BUDGET_S, ClientFactory, default_client_factory, run_pass
 from scripts.telemetry_capture.state import CaptureState, state_dir
 from scripts.telemetry_capture.transport import MAX_TIMEOUT_S, Budget, CaptureUnavailable
+from src.turn_capture.host_run import resolve_pin
 from src.turn_capture.render import render_datetime
-from src.turn_capture.transcript import PIN_SCRIPT_STEM, ROOT, FsTree, hook_script, project_ref_pin, read_lines, record_time
+from src.turn_capture.transcript import PIN_SCRIPT_STEM, ROOT, FsTree, hook_script, read_lines, record_time
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
@@ -67,6 +69,7 @@ def _parser() -> argparse.ArgumentParser:
             cmd.add_argument("--session-id", default=None)
             cmd.add_argument("--no-alarms", action="store_true")
             cmd.add_argument("--assert-zero", default=None)
+    ci_pass.add_arguments(sub.add_parser("ci-pass"))
     register = sub.add_parser("register")
     register.add_argument("--project-ref", required=True)
     register.add_argument("--name", required=True)
@@ -143,8 +146,9 @@ def _run_check(args: argparse.Namespace, result: Any, reader_factory: Callable[[
 
 
 def _cmd_pass(args: argparse.Namespace, env: Mapping[str, str], repo_root: Path, factory: ClientFactory, out: Callable) -> int:
-    if project_ref_pin(FsTree(args.tree)) is None:
-        out("refused: the tree has no pinning SessionStart attachment")
+    pinned, token = resolve_pin(FsTree(args.tree))
+    if pinned is None:
+        out("refused: pin_conflict" if token == "pin_conflict" else "refused: the tree has no pinning SessionStart attachment")
         return 1
     result = run_pass(
         args.tree,
@@ -376,6 +380,8 @@ def main(
         return _cmd_run(args, environ, repo_root, client_factory, reader_factory, clock, sleep)
     if args.cmd == "pass":
         return _cmd_pass(args, environ, repo_root, client_factory, out)
+    if args.cmd == "ci-pass":
+        return ci_pass.main_ci_pass(args, environ, repo_root, client_factory, out)
     if args.cmd == "status":
         return _cmd_status(args, out)
     if args.cmd == "probe":
