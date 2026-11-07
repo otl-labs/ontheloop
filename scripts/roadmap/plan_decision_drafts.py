@@ -124,9 +124,9 @@ def _int_list(value: Any) -> list[int]:
 def _info_lines(number: str, title: str, block: str) -> list[str]:
     """Advisory context for each resolving serves id (Decision 66): never a finding, total."""
     env = extract_entry_envelope(block, placeholder=True)
-    serves = env.get("serves") if isinstance(env, dict) else None
-    if not isinstance(serves, list) or not serves:
+    if env is None or not isinstance(env.get("serves"), list):
         return []
+    serves = env["serves"]
     try:
         entries = {p.id: p for p in load_north_star(ROOT / "docs/contracts/north-star.yaml").principles}
     except ValueError:
