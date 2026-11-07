@@ -19,13 +19,13 @@ import yaml
 
 from scripts.checks import _common, registry
 from scripts.convergence_health import sensor_liveness
+from scripts.telemetry_verify import session_presence
 
 _STANDARD = "docs/contracts/data-modeling-standard.yaml"
 _TAXONOMY = "config/ci_rca_taxonomy.yaml"
 _CI_RCA = ".github/workflows/ci-rca.yml"
 _WORKFLOWS = ".github/workflows"
 _ORACLE = "scripts/telemetry_verify/session_presence.py"
-_SLA = re.compile(r"^[1-9][0-9]*[mhd]$")
 _OWNER = re.compile(r"^rec-[0-9]{4,}$")
 _AUTHORIZED = re.compile(r"^(Decision [0-9]+|rec-[0-9]{4,})$")
 _SEMANTICS = {"set_inclusion", "count"}
@@ -105,7 +105,9 @@ def _enforced_errors(root: Path, entry: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     if entry.get("semantics") not in _SEMANTICS:
         errors.append(f"semantics must be one of {sorted(_SEMANTICS)}")
-    if not _SLA.match(str(entry.get("sla"))):
+    try:
+        session_presence.parse_sla(entry.get("sla"))
+    except session_presence.Unreadable:
         errors.append("sla must match ^[1-9][0-9]*[mhd]$")
     route = entry.get("alarm_route")
     if route not in _ROUTES:
@@ -128,8 +130,8 @@ def _entry_errors(root: Path, table: str, entry: Any, kinds: dict[str, Any], tab
     if not isinstance(entry, dict):
         return ["entry is not a mapping"]
     kind = entry.get("kind")
-    spec = kinds.get(kind)
-    if spec is None:
+    spec = kinds.get(kind) if isinstance(kind, str) else None
+    if spec is None or kind not in {"enforced", "residual", "derived", "waived"}:
         return [f"unknown kind {kind!r}"]
     required = list(spec["required"])
     allowed = set(required) | set(spec.get("optional") or []) | {"kind", "denominator"}
@@ -149,7 +151,7 @@ def _entry_errors(root: Path, table: str, entry: Any, kinds: dict[str, Any], tab
     elif kind == "waived":
         if not _AUTHORIZED.match(str(entry["authorized_by"])):
             errors.append("authorized_by must be 'Decision N' or rec-NNNN")
-    else:
+    elif kind == "derived":
         parent = tables.get(entry["parent"])
         if not isinstance(parent, dict) or parent.get("kind") not in {"enforced", "residual"}:
             errors.append("parent must be a registered table whose kind is enforced or residual")

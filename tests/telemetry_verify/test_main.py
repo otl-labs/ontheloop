@@ -353,3 +353,14 @@ def test_arrival_rejects_a_malformed_instant_and_keeps_logging_disabled(
     logging.disable(logging.NOTSET)
     cli.main(["arrival"], reader=FakeReader(), now=NOW)
     assert logging.root.manager.disable == logging.CRITICAL
+
+
+def test_arrival_naive_as_of_is_utc_and_the_junit_directory_is_created(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _arrival(monkeypatch, "green")
+    junit = tmp_path / "new" / "dir" / "out.xml"
+    assert (
+        cli.main(["arrival", "--junit-xml", str(junit), "--as-of", "2026-01-10T12:00:00"], reader=FakeReader(), now=NOW) == 0
+    )
+    assert junit.is_file() and calls[0]["now"] == datetime(2026, 1, 10, 12, tzinfo=timezone.utc)

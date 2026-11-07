@@ -45,7 +45,8 @@ def _day(text: str) -> str:
 
 def _instant(text: str) -> datetime:
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
     except ValueError:
         raise argparse.ArgumentTypeError("expected an ISO instant") from None
 
@@ -268,6 +269,7 @@ def run_arrival_command(args: argparse.Namespace, *, reader: Any, now: datetime)
     for line in session_presence.lines(result):
         print(line)
     if args.junit_xml:
+        Path(args.junit_xml).parent.mkdir(parents=True, exist_ok=True)
         session_presence.write_junit(args.junit_xml, result)
     return result.exit_code()
 

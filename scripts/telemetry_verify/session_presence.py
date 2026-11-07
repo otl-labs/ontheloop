@@ -189,7 +189,7 @@ def _judge(
     remaining = set(first)
     _walk(roots_for, remaining, max(c.committed_at for c in first.values()).date(), config, r)
     r.captured = r.judged - len(remaining)
-    excused = {row["key"] for row in config.get("excused_sessions") or []}
+    excused = {completeness.normalise_key(str(row["key"])) for row in config.get("excused_sessions") or []}
     for key in sorted(remaining, key=lambda k: first[k].committed_at):
         commit = first[key]
         if key in excused:
@@ -234,7 +234,8 @@ def lines(r: ArrivalResult) -> list[str]:
         f"excused={r.excused} pending={r.pending} untrailered={r.untrailered} windows_read={r.windows_read} "
         f"pr_lookups={r.pr_lookups} pr_lookup_failed={r.pr_lookup_failed} elapsed_s={r.elapsed_s}"
     )
-    return [head, *(f"ARRIVAL_MISSING sha={sha[:12]}" for sha in r.missing_shas)]
+    cause = [f"ARRIVAL_UNREADABLE cause={r.cause}"] if r.status == "unreadable" else []
+    return [head, *cause, *(f"ARRIVAL_MISSING sha={sha[:12]}" for sha in r.missing_shas)]
 
 
 def write_junit(path: Path | str, r: ArrivalResult) -> None:
@@ -252,9 +253,10 @@ def write_junit(path: Path | str, r: ArrivalResult) -> None:
     ET.ElementTree(suite).write(path, encoding="utf-8", xml_declaration=True)
 
 
-def git_commits(root: Path, ref: str = "origin/main") -> list[Commit]:
+def git_commits(root: Path, ref: str = "origin/main", since: datetime | None = None) -> list[Commit]:
+    window = [f"--since={since.isoformat()}"] if since is not None else []
     proc = subprocess.run(
-        ["git", "log", "--first-parent", f"--format=%H{_SEP}%cI{_SEP}%s{_SEP}%B{_END}", ref],
+        ["git", "log", "--first-parent", *window, f"--format=%H{_SEP}%cI{_SEP}%s{_SEP}%B{_END}", ref],
         cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
     )  # fmt: skip
     out = []
@@ -292,6 +294,11 @@ def load_config(root: Path, no_lost_windows: bool = False) -> Any:
     return config
 
 
+def _recent_commits(root: Path, now: datetime, config: Any) -> list[Commit]:
+    horizon = now - timedelta(days=int(config["judge_days"]) + 1) if isinstance(config, Mapping) else None
+    return [c for c in git_commits(root, since=horizon) if c.committed_at <= now]
+
+
 def run(
     root: Path,
     reader: Any,
@@ -309,7 +316,7 @@ def run(
     except Unreadable as exc:
         return ArrivalResult(status="unreadable", cause=str(exc), elapsed_s=round(time.monotonic() - began, 1))
     return judge(
-        commits if commits is not None else (lambda: [c for c in git_commits(root) if c.committed_at <= now]),
+        commits if commits is not None else (lambda: _recent_commits(root, now, config)),
         lambda day_from, day_to: reader.named("telemetry_root_sessions", day_from=day_from, day_to=day_to),
         now,
         expectation,

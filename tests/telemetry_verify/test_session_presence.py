@@ -336,9 +336,40 @@ def test_run_default_commit_source_is_git_up_to_now(monkeypatch: pytest.MonkeyPa
             return []
 
     monkeypatch.setattr(
-        sp, "git_commits", lambda root: [commit(1, "AAA"), sp.Commit("f" * 40, NOW + timedelta(days=1), "x", "")]
+        sp, "git_commits", lambda root, since=None: [commit(1, "AAA"), sp.Commit("f" * 40, NOW + timedelta(days=1), "x", "")]
     )
     seen: list[str] = []
     monkeypatch.setattr(sp, "github_pr_created_at", lambda repo, n: seen.append(repo) or NOW)
     result = sp.run(ROOT, Reader(), NOW, repo="o/r")
     assert result.status in ("red", "green") and result.judged == 1 and seen == ["o/r"]
+
+
+def test_unreadable_prints_its_cause_class_line() -> None:
+    result = run([commit(1, "AAA")], Roots(["AAA"], fail=2))
+    assert sp.lines(result)[1] == "ARRIVAL_UNREADABLE cause=RuntimeError"
+    assert all("ARRIVAL_UNREADABLE" not in line for line in sp.lines(run([commit(1, "AAA")], Roots(["AAA"]))))
+
+
+def test_an_excused_key_written_with_its_prefix_still_matches() -> None:
+    config = {**CONFIG, "lost_windows": [], "excused_sessions": [{"key": "session_AAA", "owner": "rec-4939"}]}
+    assert run([commit(1, "AAA")], Roots([]), config).excused == 1
+
+
+def test_git_commits_since_bounds_the_history(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "config", "user.email", "a@b.c")
+    _git(tmp_path, "config", "user.name", "t")
+    _git(tmp_path, "config", "commit.gpgsign", "false")
+    (tmp_path / "f").write_text("1")
+    _git(tmp_path, "add", "f")
+    _git(tmp_path, "commit", "-q", "-m", "old (#1)", "--date", "2020-01-01T00:00:00Z")
+    assert len(sp.git_commits(tmp_path, "main")) == 1
+    assert sp.git_commits(tmp_path, "main", since=datetime.now(timezone.utc) + timedelta(days=1)) == []
+
+
+def test_recent_commits_bounds_by_judge_days(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[Any] = []
+    monkeypatch.setattr(sp, "git_commits", lambda root, since=None: seen.append(since) or [])
+    sp._recent_commits(ROOT, NOW, CONFIG)
+    sp._recent_commits(ROOT, NOW, "bad")
+    assert seen == [NOW - timedelta(days=4), None]

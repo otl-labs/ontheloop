@@ -92,6 +92,7 @@ def test_entry_naming_no_registry_table_fails(tmp_path: Path) -> None:
     ("table", "fields", "expected"),
     [
         ("t_wav", {"kind": "bogus"}, "unknown kind"),
+        ("t_wav", {"kind": ["derived"]}, "unknown kind"),
         ("t_wav", {"extra": 1}, "field extra is not allowed"),
         ("t_res", {"owner": "x"}, "owner must match"),
         ("t_res", {"review_by": "soon"}, "review_by must be an ISO date"),
@@ -241,3 +242,11 @@ def test_population_resolves_from_a_foreign_root_without_leaking_sys_path(tmp_pa
     population = check._population(tmp_path)
     assert population == set(ops_table_names()) | set(control_table_names())
     assert str(tmp_path) not in sys.path
+
+
+def test_a_kind_in_the_grammar_without_a_handler_fails_instead_of_crashing(tmp_path: Path) -> None:
+    standard = {
+        "arrival_expectations": {"kinds": {**_KINDS, "novel": {"required": ["x"]}}, "tables": {"t": {"kind": "novel", "x": 1}}}
+    }
+    failures, _ = check.judge(_tree(tmp_path, standard=standard), known_tables={"t"})
+    assert failures == ["t: unknown kind 'novel'"]
