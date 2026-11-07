@@ -19,6 +19,11 @@ from tests.fixtures.terraform_hcl_blocks import tf_dir_file_texts
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _TF_GITHUB_DIR = _REPO_ROOT / "terraform" / "github"
 _PLAN_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "terraform-github-plan.yml"
+_TOKEN_LANE_FILES = (
+    _PLAN_WORKFLOW,
+    _REPO_ROOT / ".github" / "workflows" / "terraform-github-apply.yml",
+    _REPO_ROOT / "scripts" / "ci" / "terraform_github_apply.sh",
+)
 
 _APP_ENV_NAMES = ("GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PEM_FILE")
 _KEY_VARIABLE_FRAGMENTS = ("pem", "private_key", "app_id", "installation")
@@ -132,8 +137,9 @@ class TestTerraformGithubProviderAuth:
     def test_every_predicate_has_a_red_case(self) -> None:
         assert {name for name, _ in _RED_CASES} == set(_FILE_PREDICATES)
 
-    def test_plan_workflow_keeps_the_token_lane(self) -> None:
-        assert plan_workflow_keeps_the_token_lane(_PLAN_WORKFLOW.read_text(encoding="utf-8"))
+    @pytest.mark.parametrize("path", _TOKEN_LANE_FILES, ids=lambda p: p.name)
+    def test_every_terraform_github_runner_keeps_the_token_lane(self, path: Path) -> None:
+        assert plan_workflow_keeps_the_token_lane(path.read_text(encoding="utf-8"))
 
     @pytest.mark.parametrize(
         "workflow",

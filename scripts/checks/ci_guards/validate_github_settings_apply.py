@@ -11,15 +11,39 @@ on synthetic data; the registered check loads the real tree.
       preview policy is one state GetObject; both carry the 10,240 B precondition; the key's resource policy is one Deny
       of every non-metadata action to all but four principals, ordered after AdminOps, whose
       GithubApplyKeyResourcePolicy grants exactly the two resource-policy verbs on the entry's exact-suffix ARN
+  (b) WORKFLOW's on: keys are exactly push (branches [main]) and workflow_dispatch
+  (c) its jobs are exactly preview and apply; apply declares the literal GATE_ENV and is the only job assuming the
+      apply role; preview declares exactly tf-trusted-plan, assumes only the preview role and is the only job reading
+      the plan App key, and no job reads secrets whole
+  (d) both jobs' if require refs/heads/main in every disjunct, and apply needs preview
+  (e) every checkout takes no ref or repository and sets persist-credentials false
+  (f) every non-local uses: is pinned to a 40-hex commit SHA
+  (i) .github/CODEOWNERS covers OWNED
+  (j) no ${{ }} expression appears inside a run: body (inputs reach run bodies only through env:)
+  (k) terraform/github's tf_github_apply Environment is main-only, has no admin bypass and is prevent_destroy
+  (l) every resource type under terraform/github is in the gate's GATE_TYPES or NON_GATE_TYPES
 """
 
 from __future__ import annotations
 
+import ast
 import re
 from typing import Any
 
+import yaml
+
 from scripts.checks import _common, registry
-from scripts.checks.ci_guards.validate_trusted_plan_environment import _blocks
+from scripts.checks.ci_guards.validate_trusted_plan_environment import (
+    _arg,
+    _blocks,
+    _disjuncts,
+    _env_name,
+    _jobs,
+    _owned,
+    _steps,
+    _triggers,
+)
+from scripts.verify_ci_workflow import _load
 
 WORKFLOW = "terraform-github-apply.yml"
 GATE_ENV = "tf-gated-apply"
@@ -31,6 +55,17 @@ PREVIEW_ROLE = "github-settings-preview"
 APP_ENTRY = "agent-platform-terraform-github-apply-app"  # pragma: allowlist secret -- an entry name, not a value
 APPLY_SCRIPT = "scripts/ci/terraform_github_apply.sh"
 MAIN_REF = f"otl-labs/ontheloop/.github/workflows/{WORKFLOW}@refs/heads/main"
+GATE_SCRIPT = "scripts/ci/terraform_github_apply_gate.py"
+PLAN_APP_SIGNER_REF = "secrets.TF_GITHUB_PLAN_APP_PRIVATE_KEY"  # pragma: allowlist secret -- a secret's name, not a value
+OWNED = (
+    f".github/workflows/{WORKFLOW}",
+    APPLY_SCRIPT,
+    GATE_SCRIPT,
+    "scripts/ci/quiet_run.sh",
+    "scripts/ci/terraform_github_plan_report.py",
+    "scripts/ci/plan_names_core.py",
+    "scripts/checks/ci_guards/validate_github_settings_apply.py",
+)
 SETTINGS_TF = "github_settings_apply.tf"
 ADMIN_TF = "platform_admin_policies.tf"
 
@@ -53,6 +88,9 @@ _APPLY_GRANTS = {
 _PREVIEW_GRANTS = {("TfstateGithubRead", frozenset({"s3:GetObject"}), frozenset({_STATE}))}
 _SUB_RE = re.compile(r'^flatten\(\[for repo in local\.github_repos : \["repo:\$\{repo\}:environment:([^"]+)"\]\]\)$')
 _INTERP_RE = re.compile(r"\$\{local\.(\w+)\}")
+_MAIN_REF = "github.ref == 'refs/heads/main'"
+_SHA_PIN_RE = re.compile(r"@[0-9a-f]{40}$")
+_SECRETS_WHOLE_RE = re.compile(r"secrets\s*\[|tojson\(\s*secrets\s*\)", re.IGNORECASE)
 
 
 class Expr(str):  # noqa: SLOT000 -- str subtypes cannot take a non-empty __slots__, and .src is set per instance
@@ -335,11 +373,123 @@ def _admin_grant(text: str) -> list[str]:
     return []
 
 
-def run_all(names: dict[str, str], bootstrap: dict[str, str]) -> list[list[str]]:
-    return [check_names(names), check_trust(bootstrap), check_policies(bootstrap)]
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
-def _load_tree() -> tuple[dict[str, str], dict[str, str]]:
+def _roles(job: dict[str, Any]) -> set[str]:
+    out: set[str] = set()
+    for s in _steps(job):
+        with_ = _dict(s.get("with"))
+        if "role-to-assume" in with_:
+            out.add(str(with_["role-to-assume"]).rsplit("/", 1)[-1])
+    return out
+
+
+def check_workflow(wf: dict[str, Any] | None) -> list[str]:
+    if wf is None:
+        return [f"b: {WORKFLOW} is missing"]
+    out = []
+    on = _dict(wf.get("on"))
+    push = _dict(on.get("push"))
+    if _triggers(wf) != {"push", "workflow_dispatch"} or push.get("branches") != ["main"] or set(push) - {"branches", "paths"}:
+        out.append("b: on: must be exactly push (branches [main]) and workflow_dispatch")
+    jobs = _jobs(wf)
+    if set(jobs) != {"preview", "apply"}:
+        out.append("c: the workflow's jobs must be exactly preview and apply")
+    apply, preview = jobs.get("apply", {}), jobs.get("preview", {})
+    if _env_name(apply) != GATE_ENV or not isinstance(apply.get("environment"), str):
+        out.append(f"c: the apply job must declare environment {GATE_ENV} as a literal")
+    if [j for j, job in jobs.items() if APPLY_ROLE in _roles(job)] != ["apply"] or _roles(apply) != {APPLY_ROLE}:
+        out.append(f"c: only the apply job may assume {APPLY_ROLE}, and it assumes nothing else")
+    if _env_name(preview) != PREVIEW_ENV or _roles(preview) != {PREVIEW_ROLE}:
+        out.append(f"c: the preview job must declare {PREVIEW_ENV} and assume only {PREVIEW_ROLE}")
+    if [j for j, job in jobs.items() if PLAN_APP_SIGNER_REF in yaml.safe_dump(job)] != ["preview"] or any(
+        _SECRETS_WHOLE_RE.search(yaml.safe_dump(job)) for job in jobs.values()
+    ):
+        out.append("c: only the preview job may read the plan App key")
+    for jid in ("preview", "apply"):
+        if any(_MAIN_REF not in d for d in _disjuncts(jobs.get(jid, {}).get("if"))):
+            out.append(f"d: the {jid} job's if must require refs/heads/main in every disjunct")
+    if apply.get("needs") not in ("preview", ["preview"]):
+        out.append("d: the apply job must need preview")
+    return out + _step_violations(jobs)
+
+
+def _step_violations(jobs: dict[str, Any]) -> list[str]:
+    out = []
+    for jid, job in jobs.items():
+        for s in _steps(job):
+            uses = str(s.get("uses", ""))
+            with_ = _dict(s.get("with"))
+            if uses.startswith("actions/checkout@") and (
+                "ref" in with_ or "repository" in with_ or str(with_.get("persist-credentials")).lower() != "false"
+            ):
+                out.append(f"e: {jid} checkout must take no ref or repository and set persist-credentials false")
+            if uses and not uses.startswith("./") and not _SHA_PIN_RE.search(uses.split("#")[0].strip()):
+                out.append(f"f: {jid} uses {uses} without a 40-hex commit SHA pin")
+            if isinstance(s.get("run"), str) and "${{" in s["run"]:
+                out.append(f"j: {jid} interpolates an expression in a run body")
+    return out
+
+
+def check_codeowners(codeowners: str) -> list[str]:
+    return [f"i: {p} is not code-owned" for p in OWNED if not _owned(p, codeowners)]
+
+
+def check_github_root(github_tf: dict[str, str], gate_text: str) -> list[str]:
+    text = "\n".join(github_tf.values())
+    out = []
+    env = _blocks(text, "github_repository_environment").get("tf_github_apply", "")
+    for arg, want in (
+        ("environment", '"tf-github-apply"'),
+        ("can_admins_bypass", "false"),
+        ("protected_branches", "false"),
+        ("custom_branch_policies", "true"),
+        ("prevent_destroy", "true"),
+    ):
+        if _arg(env, arg) != want:
+            out.append(f"k: github_repository_environment.tf_github_apply must set {arg} = {want}")
+    policy = _blocks(text, "github_repository_environment_deployment_policy").get("tf_github_apply_main", "")
+    if (
+        _arg(policy, "environment") != "github_repository_environment.tf_github_apply.environment"
+        or _arg(policy, "branch_pattern") != '"main"'
+    ):
+        out.append('k: tf_github_apply_main must bind tf_github_apply to branch_pattern "main"')
+    classified: set[str] = set()
+    for node in ast.walk(ast.parse(gate_text)):
+        if isinstance(node, ast.Assign) and any(
+            getattr(t, "id", "") in ("GATE_TYPES", "NON_GATE_TYPES") for t in node.targets
+        ):
+            classified |= {c.value for c in ast.walk(node.value) if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+    stripped = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(("#", "//")))
+    declared = set(re.findall(r'^\s*resource\s+"(\w+)"', stripped, re.M))
+    out += [
+        f"l: resource type {t} is in neither GATE_TYPES nor NON_GATE_TYPES of {GATE_SCRIPT}"
+        for t in sorted(declared - classified)
+    ]
+    return out
+
+
+def run_all(
+    names: dict[str, str],
+    bootstrap: dict[str, str],
+    workflow: dict[str, Any] | None,
+    codeowners: str,
+    github_tf: dict[str, str],
+    gate_text: str,
+) -> list[list[str]]:
+    return [
+        check_names(names),
+        check_trust(bootstrap),
+        check_policies(bootstrap),
+        check_workflow(workflow),
+        check_codeowners(codeowners),
+        check_github_root(github_tf, gate_text),
+    ]
+
+
+def _load_tree() -> tuple[dict[str, str], dict[str, str], dict[str, Any] | None, str, dict[str, str], str]:
     root = _common.ROOT
     names = {
         str(p.relative_to(root)): p.read_text(encoding="utf-8")
@@ -347,7 +497,11 @@ def _load_tree() -> tuple[dict[str, str], dict[str, str]]:
         for p in sorted(root.glob(pattern))
     }
     bootstrap = {n: (root / "terraform" / "bootstrap" / n).read_text(encoding="utf-8") for n in (SETTINGS_TF, ADMIN_TF)}
-    return names, bootstrap
+    wf_path = root / ".github" / "workflows" / WORKFLOW
+    workflow = _load(str(wf_path)) if wf_path.exists() else None
+    github_tf = {p.name: p.read_text(encoding="utf-8") for p in sorted((root / "terraform" / "github").glob("*.tf"))}
+    codeowners = (root / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
+    return names, bootstrap, workflow, codeowners, github_tf, (root / GATE_SCRIPT).read_text(encoding="utf-8")
 
 
 @registry.register("validate_github_settings_apply", owner="platform")
@@ -355,9 +509,17 @@ def validate_github_settings_apply(failed: list[str]) -> None:
     """Assert the terraform/github CI apply fence. See module docstring."""
     print("\n=== terraform/github CI apply fence ===")
     try:
-        names, bootstrap = _load_tree()
-        groups = run_all(names, bootstrap)
-    except (OSError, UnicodeDecodeError, ValueError, AttributeError, IndexError, TypeError) as exc:
+        groups = run_all(*_load_tree())
+    except (
+        OSError,
+        UnicodeDecodeError,
+        ValueError,
+        AttributeError,
+        IndexError,
+        TypeError,
+        yaml.YAMLError,
+        SyntaxError,
+    ) as exc:
         print(f"  FAIL: could not load or parse the inputs: {exc}")
         failed.append("github-settings-apply: inputs unreadable, so no predicate ran")
         registry.examined(0, unit="invariants")
@@ -368,4 +530,4 @@ def validate_github_settings_apply(failed: list[str]) -> None:
         failed.append(f"github-settings-apply: {violation}")
     registry.examined(len(groups), unit="invariants")
     if not violations:
-        print("  PASS: predicates (a), (g), (h)")
+        print("  PASS: predicates (a)-(l)")
