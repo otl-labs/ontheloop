@@ -84,10 +84,10 @@ Trigger condition 2 -- **Surface-retiring plan**: `scope` carries an `action: De
    - **Thin waiver:** a `waive` disposition whose `graduation_waiver_reason` is generic or non-substantive (e.g. "not needed", "skip", "later") rather than naming a concrete reason the check can't be graduated now.
    If any step trips one of these, recommend REVISE citing the step number and which sub-check failed. Otherwise report "graduation dispositions complete and honest."
 
-12p. **Category-consistency verdict (Decision 167 clause 2 -- fresh Decisions and CD ratifications alike):** No other check here asks whether a drafted numbered Decision's claimed significance row and kind match its body.
-   - **Trigger detection.** Fires when EITHER the plan carries a ratification block (Workflow Step 5b above) OR the plan's `scope` includes a `docs/DECISIONS.md` row AND the plan's drafted text contains a numbered `"## Decision NNN:"` heading. A `docs/DECISIONS.md` scope row that adds ONLY a dated amendment trailer -- no drafted numbered heading -- does NOT fire this check: an amendment carries no significance envelope to adjudicate.
-   - **Verdict.** When the trigger fires, locate the drafted entry's claimed `significance.value` (envelope field or narrative Significance marker) and quote VERBATIM the body sentence that satisfies or fails `docs/contracts/decision-entry.yaml` `significance.routing_rule`'s three questions for the claimed row, and the own clause deciding `decision-kind.yaml`'s `test` for `kind.value`. Either mismatch is REVISE-worthy on its own -- a mandatory gate, never surface-and-defer.
-   - **N/A branch.** When the trigger does not fire, the Phase-3 row emits "Category consistency: N/A -- plan drafts no numbered Decision text", so a silent omission is distinguishable from a pass.
+12p. **Category-consistency verdict (Decision 167 clause 2 -- fresh Decisions and CD ratifications alike):** No other check here asks whether a drafted numbered Decision's claimed significance row, kind and serves match its body.
+   - **Trigger detection.** Fires when EITHER the plan carries a ratification block (Workflow Step 5b above) OR the plan's `scope` includes a `docs/DECISIONS.md` row AND the plan's drafted text contains a numbered `"## Decision NNN:"` heading. A row adding only a dated amendment trailer does not fire it: an amendment carries no envelope.
+   - **Verdict.** When the trigger fires, locate the drafted entry's claimed `significance.value` (envelope field or narrative Significance marker) and quote VERBATIM the body sentence that satisfies or fails `docs/contracts/decision-entry.yaml` `significance.routing_rule`'s three questions for the claimed row, the own clause deciding `decision-kind.yaml`'s `test` for `kind.value`, and for each `serves` id the sentence `decision-entry.yaml`'s `serves.verification` requires (`plan_obligations` prints the north star). Any mismatch is REVISE-worthy on its own -- a mandatory gate, never surface-and-defer.
+   - **N/A branch.** Untriggered, emit the Phase-3 row's N/A form, so a silent omission is distinguishable from a pass.
 
 ### Phase 2b: Frame Challenge (MANDATORY)
 
@@ -151,7 +151,7 @@ Ask the following five questions against the plan's chosen approach. For each, w
 
 **Graduation Dispositions (12o):** Complete and honest / REVISE -- [step number(s) and sub-check failed]
 
-**Category Consistency (12p, Decision 167 clause 2):** N/A -- plan drafts no numbered Decision text / PASS -- "[verbatim body quote]" supports claimed [routing row] / REVISE -- claimed [routing row] but body reads: "[verbatim quote]"
+**Category Consistency (12p, Decision 167 clause 2):** N/A -- plan drafts no numbered Decision text / PASS -- "[verbatim body quote]" supports claimed [row, kind, NS.n] / REVISE -- claimed [row, kind, NS.n] but body reads: "[verbatim quote]" or no sentence supports it
 
 **Finding-Origin Attribution and severity:** blocking (correctness, safety, scope, a Decision conflict or failed check above; when unsure) or nit (wording, citation form, ordering; never a Frame Challenge contradiction); mechanical (a deterministic check could catch it -- name it) / critic judgement -- tag each finding, with a stable anchor (plan field path or VP step id)
 

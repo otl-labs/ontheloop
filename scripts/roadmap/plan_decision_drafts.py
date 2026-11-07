@@ -18,6 +18,9 @@ import yaml
 from scripts.checks.decisions import envelope_rules
 from scripts.decisions_md import (
     PLACEHOLDER_NUMBER,
+    _extract_related_decisions,
+    _extract_title_borne_supersedes,
+    extract_amends_edges,
     extract_entry_envelope,
     iter_decision_headings,
     iter_placeholder_headings,
@@ -114,17 +117,51 @@ def _rule_findings(number: str, title: str, block: str) -> list[Finding]:
     return out
 
 
-def _draft_findings(content: str, root: Path, skip_quoted: bool) -> tuple[int, list[Finding]]:
+def _int_list(value: Any) -> list[int]:
+    return [v for v in value if isinstance(v, int) and not isinstance(v, bool)] if isinstance(value, list) else []
+
+
+def _info_lines(number: str, title: str, block: str) -> list[str]:
+    """Advisory context for each resolving serves id (Decision 66): never a finding, total."""
+    env = extract_entry_envelope(block, placeholder=True)
+    serves = env.get("serves") if isinstance(env, dict) else None
+    if not isinstance(serves, list) or not serves:
+        return []
+    try:
+        entries = {p.id: p for p in load_north_star(ROOT / "docs/contracts/north-star.yaml").principles}
+    except ValueError:
+        return []
+    edges = (
+        set(extract_amends_edges(title)) | set(_extract_title_borne_supersedes(title)) | set(_extract_related_decisions(block))
+    )
+    edges |= set(_int_list(env.get("supersedes")))
+    out: list[str] = []
+    for ns_id in serves:
+        entry = entries.get(ns_id) if isinstance(ns_id, str) else None
+        if entry is None:
+            continue
+        links = ", ".join(str(n) for n in sorted(edges & set(entry.carried_by))) or "none"
+        out.append(
+            f'  INFO {number} serves {ns_id}: principle "{entry.principle}"; '
+            f'failure_signal "{" ".join(entry.failure_signal.split())}"; '
+            f"carried_by [{', '.join(str(n) for n in entry.carried_by)}]; links {links} (corroborate, never substitute)"
+        )
+    return out
+
+
+def _draft_findings(content: str, root: Path, skip_quoted: bool) -> tuple[int, list[Finding], list[str]]:
     concrete = any(n != PLACEHOLDER_NUMBER for n, _, _ in _blocks(content))
     existing = _existing_headings(root) if skip_quoted and concrete else set()
     drafted = 0
     findings: list[Finding] = []
+    infos: list[str] = []
     for number, title, block in _blocks(content):
         if number != PLACEHOLDER_NUMBER and (int(number), title) in existing:
             continue
         drafted += 1
         findings += _rule_findings(number, title, block)
-    return drafted, findings
+        infos += _info_lines(number, title, block)
+    return drafted, findings, infos
 
 
 def _sidecar_contents(plan: dict, root: Path) -> tuple[list[str], list[Finding]]:
@@ -145,32 +182,35 @@ def _sidecar_contents(plan: dict, root: Path) -> tuple[list[str], list[Finding]]
     return texts, []
 
 
-def _scan_draft(path: str | Path, root: Path) -> tuple[int, list[Finding]]:
+def _scan_draft(path: str | Path, root: Path) -> tuple[int, list[Finding], list[str]]:
     try:
         content = Path(path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        return 0, [Finding("-", "", "FAIL", "path", f"cannot read {path}: {exc}")]
+        return 0, [Finding("-", "", "FAIL", "path", f"cannot read {path}: {exc}")], []
     return _draft_findings(content, root, skip_quoted=False)
 
 
-def _scan_plan(path: str | Path, root: Path) -> tuple[int, list[Finding]]:
+def _scan_plan(path: str | Path, root: Path) -> tuple[int, list[Finding], list[str]]:
     try:
         plan = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
-        return 0, [Finding("-", "", "FAIL", "path", f"cannot read {path}: {exc}")]
+        return 0, [Finding("-", "", "FAIL", "path", f"cannot read {path}: {exc}")], []
     if not isinstance(plan, dict):
-        return 0, []
+        return 0, [], []
     drafted = 0
     findings: list[Finding] = []
+    infos: list[str] = []
     for text in _strings(plan):
-        d, f = _draft_findings(text, root, skip_quoted=True)
-        drafted, findings = drafted + d, findings + f
+        d, f, i = _draft_findings(text, root, skip_quoted=True)
+        drafted, findings, infos = drafted + d, findings + f, infos + i
     sidecar_texts, findings_extra = _sidecar_contents(plan, root)
     findings += findings_extra
     for text in sidecar_texts:
         drafted += 1
-        findings += _rule_findings(*next(iter(_blocks(text))))
-    return drafted, findings
+        head = next(iter(_blocks(text)))
+        findings += _rule_findings(*head)
+        infos += _info_lines(head[0], head[1], text)
+    return drafted, findings, infos
 
 
 def findings_for_draft(path: str | Path, root: Path | None = None) -> list[Finding]:
@@ -182,11 +222,11 @@ def findings_for_plan(path: str | Path, root: Path | None = None) -> list[Findin
     return _scan_plan(path, root or ROOT)[1]
 
 
-def _report(drafted: int, findings: list[Finding]) -> list[str]:
+def _report(drafted: int, findings: list[Finding], infos: list[str]) -> list[str]:
     if not drafted and not findings:
         return ["decision_drafts: none"]
     lines = [f"decision_drafts: {drafted} drafted, {len(findings)} findings"]
-    return lines + [f"  {f.severity} {f.number} {f.field}: {f.detail}" for f in findings]
+    return lines + [f"  {f.severity} {f.number} {f.field}: {f.detail}" for f in findings] + infos
 
 
 def report_for_plan(path: str | Path, root: Path | None = None) -> list[str]:
