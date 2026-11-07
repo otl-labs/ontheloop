@@ -6,8 +6,10 @@ name: telemetry-golden-replay
 # telemetry_verify recs (golden_replay_mismatch per verb, golden_replay_error for a run that could not complete) and is never a
 # required check (Decision 83).
 #
-# Triggers: after every successful deploy-ducklake-lambdas run on main (checking out that run's head_sha), once a day on main so
-# a producer or expectations change is replayed within a day, and on dispatch (main only). The daily cron is the every-N-hours
+# Triggers: after every successful deploy-ducklake-lambdas run on main, once a day on main so a producer or expectations change
+# is replayed within a day, and on dispatch (main only). The decision job reads the triggering run's deploy-manifest artifact
+# (Decision 249): the replay runs only when that run deployed, and checks out the deployed (gate) sha, not main HEAD; a
+# successful triggering run without the artifact fails the decision job red, never a skip. The daily cron is the every-N-hours
 # shape scripts/convergence_health/sensor_liveness.py classifies as 86,400 s (the plain 'M H * * *' daily shape raises there and
 # would blind loop_liveness_stale for every peer). No push trigger: a push-time run would race the deploy the same commit starts.
 #
@@ -27,16 +29,47 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: telemetry-golden-replay
-  cancel-in-progress: false
-
 jobs:
-  replay:
+  decision:
     if: >-
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
       || github.event_name == 'schedule'
       || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      replay: ${{ steps.pick.outputs.replay }}
+      sha: ${{ steps.pick.outputs.sha }}
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Download the triggering run's deploy manifest
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v8
+        with:
+          name: deploy-manifest
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Decide whether to replay and at which commit
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = workflow_run ]; then jq -r '"replay=\(.deploy)\nsha=\(.sha)"' deploy-manifest.json >> "$GITHUB_OUTPUT"; else printf 'replay=true\nsha=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"; fi
+
+  replay:
+    needs: decision
+    if: >-
+      needs.decision.outputs.replay == 'true' && (
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+      || github.event_name == 'schedule'
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    concurrency:
+      group: telemetry-golden-replay
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -50,7 +83,7 @@ jobs:
 
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.decision.outputs.sha }}
           fetch-depth: 0
 
       - name: Configure AWS credentials (OIDC -- github_ci_branch role, DuckLake reader and telemetry-writer invoke)

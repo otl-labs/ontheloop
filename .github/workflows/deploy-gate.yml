@@ -1,0 +1,82 @@
+name: deploy-gate
+
+# Reusable deploy gate shared by the two governed Lambda code-deploy channels (Decision 249, rec-4912).
+# workflow_call only: it never runs alone, and its failures are failures of the calling channel run.
+#
+# Resolves the newest main commit whose main-validate full-tier step passed (scripts/ci/deploy_gate.py) and decides
+# deploy or skip against the channel's deploy records. Outputs sha, deploy and reason; the callers check out `sha` and
+# deploy only when `deploy` is true. A forced dispatch (force) bypasses only the already-deployed and no-source-change
+# skips, never the full-tier requirement. The decision is also uploaded as the deploy-manifest artifact, which
+# telemetry-golden-replay.yml reads across runs.
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        required: true
+      force:
+        type: boolean
+        default: false
+    outputs:
+      sha:
+        value: ${{ jobs.gate.outputs.sha }}
+      deploy:
+        value: ${{ jobs.gate.outputs.deploy }}
+      reason:
+        value: ${{ jobs.gate.outputs.reason }}
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      deploy: ${{ steps.resolve.outputs.deploy }}
+      reason: ${{ steps.resolve.outputs.reason }}
+    permissions:
+      id-token: write  # OIDC token minting for assume-role
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/aws-region
+
+      - name: Configure AWS credentials (OIDC -- github_ci_branch role, deploy-records read)
+        id: assume
+        uses: aws-actions/configure-aws-credentials@v6
+        env:
+          MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - run: pip install pyyaml pydantic
+
+      - name: Resolve the newest green commit and decide
+        id: resolve
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          python -m scripts.ci.deploy_gate resolve --channel "$CHANNEL" ${{ inputs.force && '--force' || '' }} --manifest deploy-manifest.json
+
+      - name: Upload deploy manifest
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: deploy-manifest
+          path: deploy-manifest.json
+          retention-days: 7
+          if-no-files-found: ignore

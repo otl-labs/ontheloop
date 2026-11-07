@@ -6,9 +6,12 @@ waits on the twin's gate, and the heavy telemetry vectors run only against the t
 from __future__ import annotations
 
 import re
+from fnmatch import fnmatch
 from pathlib import Path
 
 import yaml
+
+from scripts.convergence_health.code_drift import DUCKLAKE_SOURCE_PATHSPECS
 
 _ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOWS = _ROOT / ".github" / "workflows"
@@ -24,7 +27,12 @@ def _jobs() -> dict:
 
 
 def _runs(job: str) -> list[str]:
-    return [step.get("run", "") for step in _jobs()[job]["steps"]]
+    return [step.get("run", "") for step in _jobs()[job].get("steps", [])]
+
+
+def _watched(path: str) -> bool:
+    """True when `path` falls under a DUCKLAKE_SOURCE_PATHSPECS entry (the gate's single path source, Decision 249)."""
+    return any(path == p or path.startswith(p.rstrip("/") + "/") or fnmatch(path, p) for p in DUCKLAKE_SOURCE_PATHSPECS)
 
 
 def _deploy_list(job: str) -> set[str]:
@@ -34,8 +42,9 @@ def _deploy_list(job: str) -> set[str]:
 
 
 def _freshness_set(job: str) -> set[str]:
-    found = [m.group(1) for run in _runs(job) if (m := re.search(r"for fn in ([^;]+); do", run))]
-    assert len(found) == 1, f"{job}: expected exactly one freshness loop, found {len(found)}"
+    pattern = r"deploy_gate freshness --channel ducklake --expected-sha \"[^\"]+\" ([^\n]+)"
+    found = [m.group(1) for run in _runs(job) if (m := re.search(pattern, run))]
+    assert len(found) == 1, f"{job}: expected exactly one deploy_gate freshness call, found {len(found)}"
     return set(found[0].split())
 
 
@@ -125,11 +134,9 @@ def test_url_loop_roles_map_to_deploy_map_functions() -> None:
     assert "telemetry_writer" in next(r for r in _runs("telemetry-smoke") if "for role in" in r)
 
 
-def test_deploy_push_paths_include_src_telemetry() -> None:
-    """The telemetry kernel is bundled into a DuckLake function, so a kernel edit must trigger the governed deploy."""
-    doc = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
-    triggers = doc.get("on", doc.get(True))
-    assert "src/telemetry/**" in triggers["push"]["paths"]
+def test_deploy_watched_paths_include_src_telemetry() -> None:
+    """The telemetry kernel is bundled into a DuckLake function, so a kernel edit must reach the governed deploy."""
+    assert _watched("src/telemetry/identity.py")
 
 
 def test_create_telemetry_step_is_last_in_maintenance_smoke_and_not_cancelled() -> None:
@@ -147,7 +154,7 @@ def test_smoke_job_waits_for_maintenance_smoke() -> None:
     """The shared smoke gates run after the owner step and the twin's gate; deploy-serving never waits on a smoke step."""
     jobs = _jobs()
     smoke = jobs["smoke"]
-    assert set(smoke["needs"]) == {"deploy-serving", "maintenance-smoke", "telemetry-twin-smoke"}
+    assert set(smoke["needs"]) == {"gate", "deploy-serving", "maintenance-smoke", "telemetry-twin-smoke"}
     condition = str(smoke["if"]).replace(" ", "")
     assert "!cancelled()" in condition and "needs.deploy-serving.outputs.deployed=='true'" in condition
     assert not {"maintenance-smoke", "telemetry-twin-smoke"} & set(jobs["deploy-serving"].get("needs", []))
@@ -240,7 +247,7 @@ def test_production_telemetry_deploy_holds_while_a_column_add_is_pending() -> No
     assert "steps.oidc_deploy.outcome == 'success'" in hold["if"]
     assert "steps.hold.outputs.held == 'false'" in deploy["if"]
     assert "steps.oidc_deploy.outcome == 'success'" in deploy["if"]
-    assert "config/lambda/ducklake/**" in _WORKFLOW.read_text(encoding="utf-8")
+    assert _watched("config/lambda/ducklake/columns.yaml")
 
     paths = yaml.safe_load((_ROOT / "docs" / "contracts" / "deploy-paths.yaml").read_text(encoding="utf-8"))
     recovery = " ".join(paths["deploy_code"]["recovery"].split())

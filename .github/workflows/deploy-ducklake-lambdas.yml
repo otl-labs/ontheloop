@@ -12,8 +12,13 @@ name: deploy-ducklake-lambdas
 # Terraform is NOT involved in this channel (Decision 126 point 1): code ships via this
 # build/deploy pipeline scoped to UpdateFunctionCode-equivalent permissions only.
 #
-# Triggers on push to main touching ducklake source, and on workflow_dispatch (operator-triggered
-# redeploy / recovery, e.g. after a stale-code drift alarm).
+# Woken by each completed CI push run on main (workflow_run) and by workflow_dispatch (force). The gate job
+# (deploy-gate.yml, scripts/ci/deploy_gate.py, Decision 249) deploys the newest main commit whose main-validate full tier
+# passed, skipping when it is already deployed, superseded, or no watched path changed since the oldest record; the watched
+# paths live only in scripts.convergence_health.DUCKLAKE_SOURCE_PATHSPECS. Every job checks out the gate sha, not main
+# HEAD, and the deploy records name it (LAMBDA_ARTIFACT_SHA); a held function catches up when its hold-clearing sidecar
+# change ships. A workflow_dispatch redeploys the newest green commit (force bypasses the skips, never the full-tier
+# requirement); a pending forced dispatch replaced by a later pending run loses its force, and the operator re-dispatches.
 #
 # NINE-JOB TOPOLOGY (Decision 236, on the T2.38 five-job split after the 2026-07-24 ops_decisions incident):
 # reconcile_columns (src/common/ducklake_tables.py) derives its physical ALTER list from the field_semantics.yaml
@@ -93,7 +98,7 @@ name: deploy-ducklake-lambdas
 # maintenance-smoke / telemetry-twin-smoke / smoke / telemetry-smoke (Decision 55 false-green avoidance):
 #   - Each runs ONLY when its own deploy leg actually shipped code -- never on a bootstrap-window
 #     no-op.
-#   - Asserts deploy-record freshness (source_git_sha == github.sha) for its OWN function set
+#   - Asserts deploy-record freshness (source_git_sha == the gate sha) for its OWN function set
 #     BEFORE running the smoke gates -- a stale or partially-written record fails closed instead
 #     of letting a skipped/no-op deploy report smoke-green.
 #   - Assumes agent-platform-github-ci-branch (reuses its existing DuckLakeInvokeCI writer+reader
@@ -106,18 +111,20 @@ name: deploy-ducklake-lambdas
 # publishing stays with T2.42 -- no publish-version step is added here.
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
-    paths:
-      - 'src/lambdas/ducklake_*/**'
-      - 'src/common/ducklake_*.py'
-      - 'config/lambda/ducklake/**'
-      - 'src/row_rules/**'
-      - 'src/telemetry/**'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Redeploy the newest green commit even when already deployed or unchanged'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   # Serialise governed deploys -- two concurrent update-function-code runs against the same
@@ -126,9 +133,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  gate:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+      || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository)
+    uses: ./.github/workflows/deploy-gate.yml
+    with:
+      channel: ducklake
+      force: ${{ inputs.force || false }}
+    secrets: inherit  # pragma: allowlist secret
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+
   deploy-maintenance:
+    needs: gate
+    if: needs.gate.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      LAMBDA_ARTIFACT_SHA: ${{ needs.gate.outputs.sha }}
     outputs:
       deployed: ${{ steps.deploy_code.outputs.deployed }}
     permissions:
@@ -139,6 +165,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/aws-region
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
 
       - name: Configure AWS credentials (OIDC -- merged deploy role, main only)
         # T2.49 / DEP-12 (Decision 144): repointed from the retired ducklake-only deploy role to
@@ -205,7 +235,7 @@ jobs:
           echo "deployed=true" >> "$GITHUB_OUTPUT"
 
   maintenance-smoke:
-    needs: deploy-maintenance
+    needs: [gate, deploy-maintenance]
     if: needs.deploy-maintenance.outputs.deployed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -218,6 +248,10 @@ jobs:
 
       - uses: ./.github/actions/aws-region
 
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
       - name: Configure AWS credentials (OIDC -- github_ci_branch role, DuckLake maintenance-smoke invoke)
         uses: aws-actions/configure-aws-credentials@v6
         env:
@@ -226,24 +260,9 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Assert deploy-record freshness (source_git_sha == github.sha, maintenance functions only)
-        # False-green guard (Decision 55): a skipped/partial/stale deploy must not let the smoke
-        # gates report green against previously-deployed code. Narrowed to THIS leg's own function
-        # set (maintenance, maintenance-smoke) -- the serving functions' records are
-        # deploy-serving's concern, not this leg's.
-        env:
-          EXPECTED_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          for fn in agent-platform-ducklake-maintenance agent-platform-ducklake-maintenance-smoke; do
-            RECORD=$(aws s3 cp "s3://agent-platform-data-lake/deploy-records/ducklake/${fn}.json" - --region "$AWS_REGION")
-            ACTUAL_SHA=$(printf '%s' "$RECORD" | python3 -c "import json,sys; print(json.load(sys.stdin).get('source_git_sha') or '')")
-            if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-              echo "::error::DEPLOY_RECORD_STALE ${fn}: source_git_sha=${ACTUAL_SHA} != github.sha=${EXPECTED_SHA} -- a stale or skipped deploy cannot report smoke-green (Decision 55 false-green guard)." >&2
-              exit 1
-            fi
-            echo "OK ${fn} deploy record fresh: ${ACTUAL_SHA}"
-          done
+      - name: Assert deploy-record freshness (source_git_sha == gate sha, maintenance functions only)
+        # False-green guard (Decision 55): a stale or skipped deploy must not report smoke-green; this leg's records name the gate sha.
+        run: python3 -m scripts.ci.deploy_gate freshness --channel ducklake --expected-sha "${{ needs.gate.outputs.sha }}" agent-platform-ducklake-maintenance agent-platform-ducklake-maintenance-smoke
 
       - name: Resolve DuckLake maintenance-smoke Function URL
         run: |
@@ -286,7 +305,8 @@ jobs:
         run: .venv/bin/python -m scripts.ducklake_neon_smoke_test --lambda-maintenance-create-telemetry
 
   reconcile-gate:
-    needs: deploy-maintenance
+    needs: [gate, deploy-maintenance]
+    if: needs.gate.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -294,6 +314,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
 
       - name: Setup Python 3.12
         uses: actions/setup-python@v7
@@ -311,10 +333,12 @@ jobs:
         run: python -m scripts.checks.ops_governance.validate_reconcile_pending_gate --deploy-gate
 
   deploy-serving:
-    needs: [reconcile-gate, deploy-maintenance]
+    needs: [gate, reconcile-gate, deploy-maintenance]
     if: needs.deploy-maintenance.outputs.deployed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      LAMBDA_ARTIFACT_SHA: ${{ needs.gate.outputs.sha }}
     outputs:
       deployed: ${{ steps.deploy_code.outputs.deployed }}
     permissions:
@@ -325,6 +349,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/aws-region
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
 
       - name: Configure AWS credentials (OIDC -- merged deploy role, main only)
         # Same bootstrap-window tolerance as deploy-maintenance, scoped by the SAME
@@ -374,10 +402,12 @@ jobs:
           echo "deployed=true" >> "$GITHUB_OUTPUT"
 
   deploy-telemetry-twin:
-    needs: deploy-maintenance
+    needs: [gate, deploy-maintenance]
     if: needs.deploy-maintenance.outputs.deployed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      LAMBDA_ARTIFACT_SHA: ${{ needs.gate.outputs.sha }}
     outputs:
       deployed: ${{ steps.deploy_code.outputs.deployed }}
     permissions:
@@ -388,6 +418,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/aws-region
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
 
       - name: Configure AWS credentials (OIDC -- merged deploy role, main only)
         # Same bootstrap-window tolerance as deploy-maintenance, scoped by the SAME
@@ -437,7 +471,7 @@ jobs:
           echo "deployed=true" >> "$GITHUB_OUTPUT"
 
   telemetry-twin-smoke:
-    needs: [deploy-telemetry-twin, maintenance-smoke, deploy-serving]
+    needs: [gate, deploy-telemetry-twin, maintenance-smoke, deploy-serving]
     if: ${{ !cancelled() && needs.deploy-telemetry-twin.outputs.deployed == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -450,6 +484,10 @@ jobs:
 
       - uses: ./.github/actions/aws-region
 
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
       - name: Configure AWS credentials (OIDC -- github_ci_branch role, DuckLake telemetry twin invoke)
         uses: aws-actions/configure-aws-credentials@v6
         env:
@@ -458,22 +496,9 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Assert deploy-record freshness (source_git_sha == github.sha, telemetry twin only)
-        # False-green guard (Decision 55), narrowed to THIS leg's own function set (see the
-        # loop below) -- the maintenance records are maintenance-smoke's concern.
-        env:
-          EXPECTED_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          for fn in agent-platform-ducklake-telemetry-writer-smoke; do
-            RECORD=$(aws s3 cp "s3://agent-platform-data-lake/deploy-records/ducklake/${fn}.json" - --region "$AWS_REGION")
-            ACTUAL_SHA=$(printf '%s' "$RECORD" | python3 -c "import json,sys; print(json.load(sys.stdin).get('source_git_sha') or '')")
-            if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-              echo "::error::DEPLOY_RECORD_STALE ${fn}: source_git_sha=${ACTUAL_SHA} != github.sha=${EXPECTED_SHA} -- a stale or skipped deploy cannot report smoke-green (Decision 55 false-green guard)." >&2
-              exit 1
-            fi
-            echo "OK ${fn} deploy record fresh: ${ACTUAL_SHA}"
-          done
+      - name: Assert deploy-record freshness (source_git_sha == gate sha, telemetry twin only)
+        # False-green guard (Decision 55): a stale or skipped deploy must not report smoke-green; this leg's records name the gate sha.
+        run: python3 -m scripts.ci.deploy_gate freshness --channel ducklake --expected-sha "${{ needs.gate.outputs.sha }}" agent-platform-ducklake-telemetry-writer-smoke
 
       - name: Resolve DuckLake telemetry twin Function URLs
         # ducklake_neon_smoke_test._function_url resolves the Function URL from DUCKLAKE_{role}_URL
@@ -511,7 +536,7 @@ jobs:
         run: .venv/bin/python -m scripts.ducklake_neon_smoke_test --lambda-telemetry-smoke
 
   smoke:
-    needs: [deploy-serving, maintenance-smoke, telemetry-twin-smoke]
+    needs: [gate, deploy-serving, maintenance-smoke, telemetry-twin-smoke]
     if: ${{ !cancelled() && needs.deploy-serving.outputs.deployed == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -524,6 +549,10 @@ jobs:
 
       - uses: ./.github/actions/aws-region
 
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
       - name: Configure AWS credentials (OIDC -- github_ci_branch role, DuckLake writer+reader invoke)
         uses: aws-actions/configure-aws-credentials@v6
         env:
@@ -532,22 +561,9 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Assert deploy-record freshness (source_git_sha == github.sha, serving functions only)
-        # False-green guard (Decision 55), narrowed to THIS leg's own function set (writer,
-        # reader, catalog-dr) -- the maintenance records are maintenance-smoke's concern.
-        env:
-          EXPECTED_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          for fn in agent-platform-ducklake-writer agent-platform-ducklake-reader agent-platform-ducklake-catalog-dr; do
-            RECORD=$(aws s3 cp "s3://agent-platform-data-lake/deploy-records/ducklake/${fn}.json" - --region "$AWS_REGION")
-            ACTUAL_SHA=$(printf '%s' "$RECORD" | python3 -c "import json,sys; print(json.load(sys.stdin).get('source_git_sha') or '')")
-            if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-              echo "::error::DEPLOY_RECORD_STALE ${fn}: source_git_sha=${ACTUAL_SHA} != github.sha=${EXPECTED_SHA} -- a stale or skipped deploy cannot report smoke-green (Decision 55 false-green guard)." >&2
-              exit 1
-            fi
-            echo "OK ${fn} deploy record fresh: ${ACTUAL_SHA}"
-          done
+      - name: Assert deploy-record freshness (source_git_sha == gate sha, serving functions only)
+        # False-green guard (Decision 55): a stale or skipped deploy must not report smoke-green; this leg's records name the gate sha.
+        run: python3 -m scripts.ci.deploy_gate freshness --channel ducklake --expected-sha "${{ needs.gate.outputs.sha }}" agent-platform-ducklake-writer agent-platform-ducklake-reader agent-platform-ducklake-catalog-dr
 
       - name: Resolve DuckLake serving Function URLs
         # ducklake_neon_smoke_test._function_url resolves the Function URL from DUCKLAKE_{role}_URL
@@ -588,10 +604,12 @@ jobs:
         run: .venv/bin/python -m scripts.ducklake_neon_smoke_test --lambda-reader && .venv/bin/python -m scripts.ducklake_neon_smoke_test --lambda-row-rules
 
   deploy-telemetry:
-    needs: [reconcile-gate, telemetry-twin-smoke, deploy-maintenance, maintenance-smoke, deploy-serving]
+    needs: [gate, reconcile-gate, telemetry-twin-smoke, deploy-maintenance, maintenance-smoke, deploy-serving]
     if: needs.deploy-maintenance.outputs.deployed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      LAMBDA_ARTIFACT_SHA: ${{ needs.gate.outputs.sha }}
     outputs:
       deployed: ${{ steps.deploy_code.outputs.deployed }}
     permissions:
@@ -602,6 +620,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/aws-region
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
 
       - name: Configure AWS credentials (OIDC -- merged deploy role, main only)
         # Same bootstrap-window tolerance as deploy-maintenance, scoped by the SAME
@@ -665,7 +687,7 @@ jobs:
           echo "deployed=true" >> "$GITHUB_OUTPUT"
 
   telemetry-smoke:
-    needs: [deploy-telemetry, smoke]
+    needs: [gate, deploy-telemetry, smoke]
     if: ${{ !cancelled() && needs.deploy-telemetry.outputs.deployed == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -678,6 +700,10 @@ jobs:
 
       - uses: ./.github/actions/aws-region
 
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
       - name: Configure AWS credentials (OIDC -- github_ci_branch role, DuckLake telemetry writer and reader invoke)
         uses: aws-actions/configure-aws-credentials@v6
         env:
@@ -686,22 +712,9 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Assert deploy-record freshness (source_git_sha == github.sha, production telemetry only)
-        # False-green guard (Decision 55), narrowed to THIS leg's own function set (see the
-        # loop below) -- the maintenance records are maintenance-smoke's concern.
-        env:
-          EXPECTED_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          for fn in agent-platform-ducklake-telemetry-writer agent-platform-ducklake-telemetry-reader; do
-            RECORD=$(aws s3 cp "s3://agent-platform-data-lake/deploy-records/ducklake/${fn}.json" - --region "$AWS_REGION")
-            ACTUAL_SHA=$(printf '%s' "$RECORD" | python3 -c "import json,sys; print(json.load(sys.stdin).get('source_git_sha') or '')")
-            if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-              echo "::error::DEPLOY_RECORD_STALE ${fn}: source_git_sha=${ACTUAL_SHA} != github.sha=${EXPECTED_SHA} -- a stale or skipped deploy cannot report smoke-green (Decision 55 false-green guard)." >&2
-              exit 1
-            fi
-            echo "OK ${fn} deploy record fresh: ${ACTUAL_SHA}"
-          done
+      - name: Assert deploy-record freshness (source_git_sha == gate sha, production telemetry only)
+        # False-green guard (Decision 55): a stale or skipped deploy must not report smoke-green; this leg's records name the gate sha.
+        run: python3 -m scripts.ci.deploy_gate freshness --channel ducklake --expected-sha "${{ needs.gate.outputs.sha }}" agent-platform-ducklake-telemetry-writer agent-platform-ducklake-telemetry-reader
 
       - name: Resolve DuckLake production telemetry Function URLs
         # ducklake_neon_smoke_test._function_url resolves the Function URL from DUCKLAKE_{role}_URL

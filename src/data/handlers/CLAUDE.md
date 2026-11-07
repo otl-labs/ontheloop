@@ -14,13 +14,13 @@ are `terraform/personal`-managed (`terraform/personal/prod_lambdas.tf`, the
 after an initial coupled period. Do not conflate the two classes — see `src/lambdas/CLAUDE.md` and
 `environment-taxonomy.yaml` (conformance).
 
-**Routine deploy channel: `.github/workflows/deploy-prod-lambdas.yml` (T2.43)** — push-to-main
-touching this directory's source paths, or `workflow_dispatch`. It assumes the merged
+**Routine deploy channel: `.github/workflows/deploy-prod-lambdas.yml` (T2.43)** — CI-woken, ships
+the latest green commit (Decision 249) or `workflow_dispatch`. It assumes the merged
 `agent-platform-github-ci-deploy` OIDC role (T2.49: UpdateFunctionCode-only on
 `function:agent-platform-*`, shared with the DuckLake channel; no invoke, no terraform, no iam)
 and runs `build_lambda --deploy`, then smoke-invokes both functions. The local
 `bin/venv-python -m scripts.build_lambda --deploy` invocation below is now **admin break-glass
-only** (mirrors the DuckLake class's break-glass posture) — it remains available as a genuinely
+only** (mirrors the DuckLake class's break-glass posture) — it remains available as a
 non-default fallback (see `docs/contracts/build-lambda.yaml` deploy_channels), not the routine
 agent path. **Profile correction:** `agent_platform` (PlatformDev, routine dev/runtime) does NOT
 hold `lambda:UpdateFunctionCode` on these functions — that lives on `agent_platform_admin`

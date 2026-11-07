@@ -34,6 +34,7 @@ class TestWriteDucklakeDeployRecord:
         return json.dumps({"CodeSha256": code_sha256, "FunctionName": "whatever"})
 
     def test_writes_record_with_expected_schema(self, monkeypatch):
+        monkeypatch.delenv("LAMBDA_ARTIFACT_SHA", raising=False)
         monkeypatch.setenv("GITHUB_SHA", "deadbeefcafe")
         captured = {}
 
@@ -56,6 +57,19 @@ class TestWriteDucklakeDeployRecord:
         assert record["source_git_sha"] == "deadbeefcafe"
         assert "deployed_at" in record and record["deployed_at"]
 
+    def test_record_names_lambda_artifact_sha_over_github_sha(self, monkeypatch):
+        monkeypatch.setenv("LAMBDA_ARTIFACT_SHA", "gated-sha")
+        monkeypatch.setenv("GITHUB_SHA", "main-head-sha")
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["input"] = kw.get("input")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch("scripts.build_lambda.subprocess.run", side_effect=fake_run):
+            bd._write_ducklake_deploy_record(_DUCKLAKE_WRITER_FUNCTION, self._stdout(), "b", "p", "eu-west-2")
+        assert json.loads(captured["input"])["source_git_sha"] == "gated-sha"
+
     def test_key_is_per_function(self):
         captured = {}
 
@@ -71,6 +85,7 @@ class TestWriteDucklakeDeployRecord:
         """Local break-glass path (bin/venv-python -m scripts.build_lambda --ducklake-only
         --deploy) has no GITHUB_SHA -- the record must carry source_git_sha=null, not KeyError."""
         monkeypatch.delenv("GITHUB_SHA", raising=False)
+        monkeypatch.delenv("LAMBDA_ARTIFACT_SHA", raising=False)
         captured = {}
 
         def fake_run(cmd, **kw):
@@ -251,6 +266,7 @@ class TestReadDeployRecord:
     def test_round_trip_write_then_read(self, monkeypatch):
         """The record _write_ducklake_deploy_record writes is exactly what read_deploy_record
         parses back -- proves schema symmetry end-to-end (minus the live S3 transport)."""
+        monkeypatch.delenv("LAMBDA_ARTIFACT_SHA", raising=False)
         monkeypatch.setenv("GITHUB_SHA", "roundtrip-sha")
         written = {}
 

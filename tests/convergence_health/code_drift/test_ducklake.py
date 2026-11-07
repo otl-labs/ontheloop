@@ -8,6 +8,7 @@ Free of live AWS/git dependencies: the S3 client, git runner, and portal caller 
 
 from __future__ import annotations
 
+from fnmatch import fnmatch
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -34,6 +35,7 @@ from scripts.convergence_health import (
     detect_ducklake_code_drift,
     detect_prod_code_drift,
 )
+from scripts.convergence_health.code_drift import DUCKLAKE_SOURCE_PATHSPECS
 
 from .conftest import GitRunnerStub, _FakeDeployRecordsS3, _RecordingS3
 
@@ -175,14 +177,10 @@ class TestDetectDucklakeCodeDrift:
         assert seen_functions == _ALL_DUCKLAKE_FUNCTIONS
 
     def test_telemetry_writer_source_directory_is_watched(self) -> None:
-        from scripts.convergence_health.code_drift import DUCKLAKE_SOURCE_PATHSPECS
-
-        assert "src/lambdas/ducklake_telemetry_writer" in DUCKLAKE_SOURCE_PATHSPECS
+        assert any(fnmatch("src/lambdas/ducklake_telemetry_writer/handler.py", p + "*") for p in DUCKLAKE_SOURCE_PATHSPECS)
 
     def test_telemetry_reader_source_directory_is_watched(self) -> None:
-        from scripts.convergence_health.code_drift import DUCKLAKE_SOURCE_PATHSPECS
-
-        assert "src/lambdas/ducklake_telemetry_reader" in DUCKLAKE_SOURCE_PATHSPECS
+        assert any(fnmatch("src/lambdas/ducklake_telemetry_reader/handler.py", p + "*") for p in DUCKLAKE_SOURCE_PATHSPECS)
 
     def test_git_runner_receives_ducklake_source_pathspecs(self) -> None:
         stub = GitRunnerStub(head_latest="SHA_OLD", reachable={"SHA_OLD": "SHA_OLD"})
@@ -395,6 +393,113 @@ def test_pathspecs_include_row_rules() -> None:
 
 def test_ducklake_pathspecs_include_src_telemetry() -> None:
     """The telemetry kernel is bundled into a DuckLake function, so a kernel change advances the drift reference."""
-    from scripts.convergence_health.code_drift import DUCKLAKE_SOURCE_PATHSPECS
-
     assert "src/telemetry" in DUCKLAKE_SOURCE_PATHSPECS
+
+
+class TestSettledGreenTarget:
+    """Decision 249: the reference is the newest settled green commit, with an independent HEAD ceiling."""
+
+    @staticmethod
+    def _run(stub: GitRunnerStub, resolver: Any, sha: str = "SHA_OLD", open_recs: Any = None) -> dict[str, Any]:
+        acts: list[str] = []
+
+        def _caller(action: str, fields: dict[str, Any]) -> str:
+            acts.append(action)
+            return "rec-x"
+
+        result = detect_ducklake_code_drift(
+            git_runner=stub,
+            s3_client=_FakeDeployRecordsS3(default_sha=sha),
+            portal_caller=_caller,
+            open_recs=open_recs or [],
+            target_resolver=resolver,
+        )
+        return {**result, "acts": acts}
+
+    def test_a_commit_after_the_settled_green_target_is_not_drift(self) -> None:
+        stub = GitRunnerStub(head_latest="SHA_NEW", reachable={"SHA_OLD": "SHA_OLD", "SHA_T": "SHA_OLD"}, head_age_hours=1)
+        assert self._run(stub, lambda: "SHA_T")["action"] == "none"
+        assert ["git", "log", "-1", "--format=%H", "SHA_T", "--", *DUCKLAKE_SOURCE_PATHSPECS] in stub.calls
+
+    def test_the_head_ceiling_still_flags_after_six_hours(self) -> None:
+        stub = GitRunnerStub(head_latest="SHA_NEW", reachable={"SHA_OLD": "SHA_OLD", "SHA_T": "SHA_OLD"}, head_age_hours=7)
+        result = self._run(stub, lambda: "SHA_T")
+        assert result["action"] == "file" and result["acts"] == ["file"]
+
+    def test_resolver_failure_falls_back_to_head_and_says_so(self) -> None:
+        from scripts.ci.deploy_gate import GateError
+
+        def _boom() -> str:
+            raise GateError("api down")
+
+        stub = GitRunnerStub(head_latest="SHA_NEW", reachable={"SHA_OLD": "SHA_OLD"})
+        fields: dict[str, Any] = {}
+        result = detect_ducklake_code_drift(
+            git_runner=stub,
+            s3_client=_FakeDeployRecordsS3(default_sha="SHA_OLD"),
+            portal_caller=lambda a, f: fields.update(f) or "rec-x",
+            open_recs=[],
+            target_resolver=_boom,
+        )
+        assert result["action"] == "file" and "compared against HEAD instead" in fields["context"]
+
+    def test_no_green_commit_falls_back_to_head(self) -> None:
+        stub = GitRunnerStub(head_latest="SHA_NEW", reachable={"SHA_OLD": "SHA_OLD"})
+        assert self._run(stub, lambda: None)["action"] == "file"
+
+    def test_a_record_ahead_of_the_settled_target_is_fresh(self) -> None:
+        stub = GitRunnerStub(
+            head_latest="SHA_T_LATEST",
+            reachable={"SHA_REC": "SHA_REC_LATEST", "SHA_T": "SHA_T_LATEST"},
+            merge_bases={("SHA_T_LATEST", "SHA_REC_LATEST"): "SHA_T_LATEST"},
+        )
+        assert self._run(stub, lambda: "SHA_T", sha="SHA_REC")["action"] == "none"
+
+    def test_a_record_ahead_of_head_is_fresh_for_the_ceiling(self) -> None:
+        stub = GitRunnerStub(
+            head_latest="SHA_HEAD_L",
+            reachable={"SHA_REC": "SHA_REC_L", "SHA_T": "SHA_T_L"},
+            merge_bases={("SHA_T_L", "SHA_REC_L"): "SHA_T_L", ("SHA_HEAD_L", "SHA_REC_L"): "SHA_HEAD_L"},
+            head_age_hours=9,
+        )
+        assert self._run(stub, lambda: "SHA_T", sha="SHA_REC")["action"] == "none"
+
+    def test_a_record_behind_the_target_is_stale(self) -> None:
+        stub = GitRunnerStub(head_latest="SHA_NEW", reachable={"SHA_OLD": "SHA_OLD", "SHA_T": "SHA_T_L"})
+        assert self._run(stub, lambda: "SHA_T")["action"] == "file"
+
+    def test_ducklake_maintenance_smoke_paths_are_watched(self) -> None:
+        assert any(fnmatch("src/lambdas/ducklake_maintenance_smoke/handler.py", p + "*") for p in DUCKLAKE_SOURCE_PATHSPECS)
+
+    def test_rec_context_names_the_gate_not_push(self) -> None:
+        fields: dict[str, Any] = {}
+        stub = GitRunnerStub(head_latest="SHA_NEW", reachable={"SHA_OLD": "SHA_OLD"})
+        detect_ducklake_code_drift(
+            git_runner=stub,
+            s3_client=_FakeDeployRecordsS3(default_sha="SHA_OLD"),
+            portal_caller=lambda a, f: fields.update(f) or "rec-x",
+            open_recs=[],
+        )
+        assert "Decision 249" in fields["context"] and "push to main" not in fields["context"]
+
+
+def test_default_target_resolver_settles_the_green_lookup(monkeypatch: Any) -> None:
+    from scripts.ci import deploy_gate
+    from scripts.convergence_health import code_drift
+
+    seen: dict[str, Any] = {}
+
+    def fake_newest(api: Any, git: Any, **kwargs: Any) -> str:
+        seen.update(kwargs)
+        return "SHA_G"
+
+    monkeypatch.undo()
+    monkeypatch.setattr(deploy_gate, "newest_green_sha", fake_newest)
+    assert code_drift._default_target_resolver() == "SHA_G"
+    assert seen["settled_before"].tzinfo is not None
+
+
+def test_an_unreadable_head_date_counts_as_old() -> None:
+    from scripts.convergence_health import code_drift
+
+    assert code_drift._head_is_old(lambda argv: "not-a-timestamp", "SHA_H") is True

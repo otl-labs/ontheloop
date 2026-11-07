@@ -366,7 +366,9 @@ def test_git_diff_guard_and_commit_label(monkeypatch: pytest.MonkeyPatch) -> Non
     assert head and head != "unknown"
     head_sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=gates.ROOT).stdout.strip()
     assert gates._git_unchanged(head_sha, ["src"])
-    assert gates.deploy_paths() and all(isinstance(p, str) for p in gates.deploy_paths())
+    from scripts.convergence_health import code_drift
+
+    assert gates.deploy_paths() == list(code_drift.DUCKLAKE_SOURCE_PATHSPECS)
 
 
 def _with_passes(monkeypatch: pytest.MonkeyPatch, extra: dict[tuple[str, bool], list[dict[str, Any]]]) -> None:
