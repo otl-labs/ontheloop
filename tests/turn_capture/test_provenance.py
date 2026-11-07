@@ -167,3 +167,17 @@ def test_late_resume_pin_is_not_counted_for_the_open_row() -> None:
     diag = Counter()
     open_provenance(_stream(early), True, diag)
     assert diag["pin_after_first_prompt"] == 0
+
+
+def test_pin_ref_disagreement_is_counted_on_the_root_only() -> None:
+    other = pin_attachment("h0", 0.1, "other", pin_facts_text())
+    other["attachment"]["stderr"] += f"[session_start_log_turn] capture pin project_ref={REF}\n"
+    agree = pin_attachment("h1", 0.2, REF, pin_facts_text())
+    agree["attachment"]["stderr"] += f"[session_start_log_turn] capture pin project_ref={REF}\n"
+    stream = _stream(_turns(other, agree))
+    diag: Counter[str] = Counter()
+    open_provenance(stream, True, diag)
+    assert diag["pin_ref_disagreement"] == 1
+    sub: Counter[str] = Counter()
+    open_provenance(stream, False, sub)
+    assert "pin_ref_disagreement" not in sub

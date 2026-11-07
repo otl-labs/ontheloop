@@ -516,3 +516,14 @@ def test_ci_pass_is_registered_and_delegates(monkeypatch: pytest.MonkeyPatch, tm
     argv += ["--run-id", "1", "--run-attempt", "1", "--job", "rca", "--event-name", "push", "--sha", "x" * 40]
     assert cli.main(argv, env={"K": "v"}) == 0
     assert seen == {"manifest": ["a*", "b"], "job": "rca", "event": "push", "budget": 180.0, "env": {"K": "v"}}
+
+
+def test_observe_counts_labelled_pin_records(tmp_path: Path) -> None:
+    stderr = "[session_start_log_turn] capture pin checkout=unknown base=unknown dirty=unknown\n"
+    stderr += "[session_start_log_turn] capture pin project_ref=ontheloop\n"
+    records = [hook("h0", 0.5, "SessionStart:startup", command="command hook 9", stderr=stderr), prompt("u1", 1, "p1", "go")]
+    root = tmp_path / f"{SID}.jsonl"
+    root.write_text(jsonl(records), encoding="utf-8")
+    out: list[str] = []
+    assert cli.main(["observe", "--tree", str(root)], out=out.append, boot_id=tmp_path / "absent") == 0
+    assert json.loads(out[0])["session_start_by_source"] == {"startup": 1}

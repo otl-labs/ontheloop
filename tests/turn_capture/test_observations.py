@@ -228,6 +228,19 @@ def test_hook_name_rules_h1_to_h3() -> None:
     assert hook_name({"command": 7, "hookName": 7}) == "hook:unknown"
 
 
+def test_hook_name_names_capture_records_without_a_script() -> None:
+    facts = "[session_start_log_turn] capture pin checkout=unknown base=unknown dirty=unknown\n"
+    witness_err = observations.witness.WITNESS_LINE + "\n"
+    base = {"command": "command hook 2", "hookName": "SessionStart:startup", "hookEvent": "SessionStart"}
+    assert hook_name({**base, "stderr": facts}) == "hook:session_start_log_turn"
+    assert hook_name({"command": "command hook", "hookName": "Stop", "stderr": witness_err}) == "hook:stop_log_turn"
+    assert (
+        hook_name({"command": "command hook", "hookName": "UserPromptSubmit", "stderr": witness_err}) == "hook:stop_log_turn"
+    )
+    assert hook_name({"command": "command hook", "hookName": "Stop", "stderr": "other\n"}) == "hook:Stop"
+    assert hook_name({"command": "command hook", "hookName": "Stop", "stderr": "[WARN] x\n"}) == "hook:Stop"
+
+
 def test_hook_stderr_scrubbed_before_truncation() -> None:
     secret = build_secret("aws_access")
     stderr = "e" * 500 + " " + secret + " tail"

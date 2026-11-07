@@ -15,6 +15,7 @@ SHA = "[0-9a-f]{40}(?:[0-9a-f]{24})?"
 LINE = re.compile(
     rf"\[session_start_log_turn\] capture pin checkout=({SHA}|unknown) base=({SHA}|unknown) dirty=(true|false|unknown)\n"
 )
+REF_LINE = "[session_start_log_turn] capture pin project_ref=ontheloop\n"
 GIT_ENV = ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]
 
 
@@ -53,7 +54,8 @@ def test_every_source_prints_one_pin_line_and_writes_nothing(tmp_path: Path, sou
         check=False,
     )
     assert (result.returncode, result.stdout) == (0, "")
-    assert LINE.fullmatch(result.stderr)
+    first, _, rest = result.stderr.partition("\n")
+    assert LINE.fullmatch(first + "\n") and rest == REF_LINE
     assert list(tmp_path.iterdir()) == []
 
 
@@ -62,6 +64,40 @@ def test_closed_stdin_and_no_arguments_still_exit_zero(tmp_path: Path) -> None:
     assert (result.returncode, result.stdout) == (0, "")
     assert LINE.fullmatch(result.stderr)
     assert list(tmp_path.iterdir()) == []
+
+
+def _ref_run(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(HOOK), *args],
+        stdin=subprocess.DEVNULL,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
+def test_one_valid_ref_flag_prints_the_ref_line(tmp_path: Path) -> None:
+    result = _ref_run(tmp_path, "--project-ref=ontheloop")
+    assert (result.returncode, result.stdout) == (0, "")
+    assert result.stderr.endswith(REF_LINE) and result.stderr.count("\n") == 2
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--project-ref=a", "--project-ref=b"),
+        ("--project-ref=has space",),
+        ("--project-ref=-lead",),
+        ("--project-ref=",),
+        (),
+    ],
+)
+def test_no_two_or_malformed_ref_flags_print_no_ref_line(tmp_path: Path, args: tuple[str, ...]) -> None:
+    result = _ref_run(tmp_path, *args)
+    assert (result.returncode, result.stdout) == (0, "")
+    assert LINE.fullmatch(result.stderr)
 
 
 def test_the_hook_reads_no_stdin_and_runs_no_pass() -> None:
