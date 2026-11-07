@@ -2,6 +2,186 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 248: terraform/github is CI-applied behind one operator approval, applying only what a read-only preview listed, with a resource-locked App key (amends Decisions 126, 237 and 238) (Decided)
+
+```yaml
+number: 248
+status: Decided
+decided_date: "2026-11-06"
+kind:
+  value: direction
+  justification: >-
+    Clauses 1 and 3 move terraform/github's human gate from directing a session's apply to approving a CI job.
+amends: [126, 237, 238]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable and reversal-relevant: it changes how the root holding the gates is applied and fires Decision 246's
+    approval-bypass condition; a contract note cannot.
+```
+
+**Status:** Decided
+**Date:** 2026-11-06
+**Warehouse ID:** dec-248 (per Decision 84 backfill)
+
+**Problem:** Agent sessions applied terraform/github (the ruleset, Environments, Actions settings) on the
+operator's direction, outside CI, unlike every other root (Decision 126); a CI apply was planned as best practice.
+A harness change outside the project's control (2026-11-06) makes the session proxy refuse GitHub's settings
+endpoints, so sessions cannot apply it, and Decision 246's approved-text Environment could not be created. That
+brings the CI apply forward.
+
+**Intent:** The root is CI-applied, never without the operator's approval, and the credential
+that can change GitHub's gates is reachable only from that approved job.
+
+**Decision:**
+1. **Trigger.** .github/workflows/terraform-github-apply.yml applies the root from main only: on a push to main
+   that touches the root or the workflow, and on a dispatch from main. It never auto-applies (Decision 77): every
+   apply waits for one operator approval. A local apply is break-glass only.
+2. **Preview.** An ungated job plans read-only with the plan App and lists each change: address, action, changed
+   attribute names and allowlisted values (Environment names, branch patterns, gate flags, ruleset enforcement,
+   reviewer counts; never ids). The list is the reviewed set. No approval is asked when nothing would change or a
+   gate change is unnamed (clause 3).
+3. **Apply.** One job in a reviewer-gated Environment mints a narrowed apply-App token, plans, and applies that
+   plan (Decision 158 cl.3) only if each change matches a reviewed one (same address and actions, changed names
+   within the reviewed names, allowlisted values equal). It refuses a destroy or replace, any ruleset change
+   (rec-4624), any change (creates included) to an Environment, deployment policy or Actions permission that the
+   dispatch's gate_change input does not name, and an unreadable plan; then it re-plans and fails unless clean.
+4. **Roles.** Two roles live in terraform/bootstrap, named outside agent-platform-* so no CI role's IAM grant can
+   write them (Decision 223 cl.1), with the CI apply boundary. Each has one trust statement binding one Environment
+   subject and this workflow's job_workflow_ref at main. github-settings-apply (the apply job) reads the apply App
+   entry and reads and writes this root's state and lock; github-settings-preview (the preview job) reads only
+   this root's state. Amends Decision 238 cl.2: tf-trusted-plan also admits the preview job; the trusted-plan
+   role's trust is unchanged.
+5. **Key (amends Decision 237 cl.1 and cl.4; fires its second-gate-wanted condition).** The apply App key stays in
+   its Secrets Manager entry. A resource policy denies every action but reading its metadata to every principal
+   except the role, PlatformAdmin, user/platform-breakglass and the account root; an SSM parameter cannot carry one.
+6. **Provisioning (amends Decision 126).** The roles, their policies and the resource policy change only by a
+   terraform/bootstrap apply an ADMIN-session agent runs on the operator's explicit direction, after the pre-merge
+   admin plan (deploy-paths.yaml admin_out_of_band).
+7. **Gate Environment.** The first run creates tf-github-apply (main-only, no admin bypass, prevent_destroy) beside
+   approved-text; rec-4965 moves the apply job and the role's trust from tf-gated-apply to it.
+8. **Approval bypass (Decisions 246 and 239).** An agent-authored job now holds the apply App, which can write
+   Environment settings: Decision 246's approval-bypass condition fires and is re-decided here. The credential
+   exists only inside a job the operator approved, its token carries no Deployments permission, a gate change must
+   be named, and the first run proves the token cannot approve a pending deployment.
+9. **Coverage (Decision 181 cl.2).** Clauses 1-4 and 7: validate_github_settings_apply and the gate and script
+   tests; clause 5: the guard and the post-apply read-back; clause 6: procedural; clause 8: the first run's probe.
+   Residuals: the operator approves the read-only plan, not the applied one, so values outside the allowlist go
+   unseen (operator's choice); an approved run can change a gate it names, its own included; until
+   rec-4965, tf-gated-apply admits any branch and admins bypass it (rec-4651); the apply App is installed org-wide
+   until rec-4538; CODEOWNERS does not bind agent pull requests (rec-2827).
+
+**Rationale:** A reviewer-gated Environment and an exact workflow-bound role are controls an agent cannot satisfy
+for itself (Decision 239). Rejected: a second approval of the applied plan; the key
+as an Environment secret (no AWS audit or resource policy); the role in terraform/personal (routine applies could
+rewrite it).
+
+```yaml reversal-conditions
+decision: 248
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan; stop CI applies of terraform/github until then"
+conditions:
+  - id: approval-bypass
+    kind: manual
+    description: "An apply-App installation token approves a pending deployment on any probe: re-decide clause 8."
+  - id: unreviewed-apply
+    kind: manual
+    description: "An apply changes something its preview did not list: re-decide clause 3 (approve the applied plan)."
+  - id: key-read
+    kind: manual
+    description: "CloudTrail shows the apply App entry read by a principal outside clause 5's list: re-decide clause 5."
+```
+
+---
+
+## Decision 247: The legacy Python executor is retired and the STRATEGIC plan type is shelved, both for good -- an item too large for one plan is decomposed by its planner into child work items, which ride the parent's approval only through a deterministic check (supersedes Decision 67; amends Decisions 73, 90, 182, 203 and 229) (Decided)
+
+```yaml
+number: 247
+status: Decided
+decided_date: "2026-11-02"
+supersedes: [67]
+amends: [73, 90, 182, 203, 229]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant: it ends a freeze that instruction surfaces, CD.17 and the plan schema still read as
+    temporary, and fixes how oversized work splits for every later planner. Not a contract note: the plan schema can
+    enforce a type list but cannot retire a Decision or dispose of a candidate decision. Not amendment_forms: a
+    note cannot retire a Decision, and Decision 67 already carries two clause-level amendments.
+kind:
+  value: direction
+  justification: >-
+    Clause 4 changes what satisfies a human gate (a child work item rides its parent's human approval when a
+    deterministic check passes), so undoing the entry would move that gate.
+```
+
+**Status:** Decided
+**Date:** 2026-11-02
+**Warehouse ID:** dec-247 (per Decision 84 backfill)
+
+**Problem:** Decision 67 froze the single-process Python executor and the STRATEGIC plan type it consumed, pending a
+reversal (CD.17) keyed to T4.2. That executor was a proof of concept; its successor is the Decision 185 loop with the
+Decision 205 and 229 personas, so the freeze can never reverse. Yet AGENTS.md, three skills and the plan schema still
+treat it as temporary, and no rule says how an item too large for one plan splits once STRATEGIC plans are gone.
+
+**Intent:** Work too large for one plan splits into smaller work items that each get their own plan, never into a plan
+of plans, and a split carries the parent's approval only as far as a mechanical check can prove it.
+
+**Decision:**
+1. **Executor retired.** The legacy Python executor and the `/develop-executor` tier are retired, never to be
+   unfrozen; "executor" in Decisions 185, 205 and 229 names their successor. T5.6 deletes or re-homes the code and no
+   longer waits on T4.2. The self-modification boundary (Decision 117's capabilities.yaml) is not retired: it binds the
+   successor and is re-homed, never deleted. The /overseer stops being an interim coordinator (Decision 229 cl.1; its
+   files go separately): the coordinator alone starts a planning or implementation agent (Decision 229 cl.2).
+2. **STRATEGIC shelved.** Plan types are IMPLEMENTATION and REPORT-ONLY; the plan schema refuses STRATEGIC and any
+   non-empty `work_areas`. A tier item's `strategic: true` marks decomposition need only.
+3. **Decomposition by child items.** A planner that finds its item too large for one plan ends its run `decomposed`
+   and starts nothing: the item becomes kind epic and the planner files child work items `part_of` it, ordered by
+   `depends_on` -- the work-item edge model's decomposition form, whose lifecycle the children's edges follow. The
+   engine (today the coordinator) schedules the children. Until the work-item store (T4.23) and plan_agent (T4.31)
+   exist, a planning session files child recs or atomic IMPLEMENTATION plans instead, each planned and signed off by
+   the human as today.
+4. **Inherited approval.** A child rides its parent's approval only when a deterministic check passes all five tests
+   against the approved parent plan: (a) its paths lie inside the parent's declared scope; (b) its budget fits the
+   parent's remainder and adds no cloud resource or spend class; (c) it cites no Decision the parent did not and edits
+   no contract, Decision or public-surface text; (d) every criterion refines a parent criterion; (e) it adds no named
+   verb, table, port or contract term. Taste and cost never inherit. The check returns a verdict and never approves
+   (Decision 233 cl.4); a pass is consumed by a standing direction the human sets on the parent. It runs as a Decision
+   235 cl.2 ladder lane (T4.4): every child goes to triage first, each rung promotion is operator-approved on measured
+   evidence, and a reverted child that rode the check demotes the lane automatically.
+5. **Promotion, not a depth cap.** One planner lineage decomposes at most once under inherited approval. A child that
+   would decompose again, or a split wider than the fan-out ceiling the human sets (Decision 185 cl.3), goes to triage
+   (today the human), which may make the epic a stream (Decision 241 cl.5): work-in-progress, budget, path ownership and a `serves`
+   edge to a north star. Deep decomposition is allowed; silent deep decomposition is not.
+6. **Disposals.** Decision 67 is superseded whole (Decision 79 already carries its Lambda-deploy clause). CD.17 is
+   superseded with no successor trigger. Decisions 73, 90, 182, 203 and 229 carry dated notes saying what each
+   re-keys to; anything else keyed to either's reversal re-keys to T4.2's completion.
+
+**Coverage (Decision 181 cl.2):** cl.2 -- the plan schema and tests/decisions/test_decision_67_supersession.py; cl.1 --
+T5.6; cl.3 and cl.5 -- T4.31, interim practice unenforced by design (every child is human-planned); cl.4 -- T4.4.
+
+```yaml reversal-conditions
+decision: 247
+review_by: 2027-06-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: children-miss-parent
+    kind: manual
+    description: "Twice, every child of a decomposed item completes while the parent's criteria stay unmet: re-decide clause 3."
+  - id: inherited-child-reverted
+    kind: manual
+    description: "A child that rode the check is reverted for taste or cost after its lane's first promotion: re-decide clause 4's tests."
+  - id: plan-of-plans-needed
+    kind: manual
+    description: "A real item needs one reviewed artefact spanning several plans that child items and edges cannot carry: re-decide clause 2."
+```
+
+**Related:** Decisions 55, 67, 73, 79, 90, 117, 182, 185, 197, 203, 205, 229, 233, 235, 241; CD.17; T4.4, T4.23, T4.31, T5.6;
+rec-4478, rec-4479.
+
+---
+
 ## Decision 246: Always-ask wording is approved on GitHub -- the operator approves an Environment gate for the sidecar's approved words, CI checks that record at the plan and the build, and a build carrying those words never asks again (amends Decision 83) (Decided)
 
 ```yaml
@@ -639,6 +819,8 @@ conditions:
     description: "GitHub changes pull_request_target, environment-claim or job_workflow_ref semantics; AWS stops evaluating job_workflow_ref; names-only output proves insufficient for review in practice; a fork-safe trigger that needs no environment appears."
 ```
 
+> **Update (2026-11-06):** Decision 248 clause 4 amends clause 2: tf-trusted-plan also admits terraform-github-apply.yml's preview job; the trusted-plan role's trust is unchanged.
+
 ---
 
 ## Decision 237: Secrets live as SSM SecureString parameters under a separate /secret/ root -- value verbs enumerated per parameter, out-of-band values outside Terraform, no secret read by a data source (amends Decision 101 point (b), Decision 213 clause 5 and Decision 230 clause 4) (Decided)
@@ -723,6 +905,8 @@ conditions:
 > declared consumer of the Neon key and catalog DSN parameters. Its reads carry no session condition: its one trusted
 > subject is the tf-trusted-plan Environment bound to main's workflow, so clause 2's drift-session condition, written
 > for the planner's PR session, does not apply to it.
+
+> **Update (2026-11-06):** Decision 248 clause 5 amends clauses 1 and 4 for the terraform/github apply App key, which stays in its Secrets Manager entry under a resource policy denying every action but reading its metadata to all but four principals; it fires this Decision's second-gate-wanted condition.
 
 ---
 
@@ -1294,6 +1478,8 @@ child criteria; the self-review gap -- rec-4476.
 > the repo's in-session verdict gates (decision-scout, plan-critique, code-review) or a read-only
 > advice consult as subagents, which gate until their persona flips (cl.4). After a flip, a session
 > runs that gate only as cl.4's outage fallback, so the end state is no nested personas.
+
+> **Amended by Decision 247 (2026-11-02):** Clause 1's interim reading is final: the legacy executor and STRATEGIC plans are retired for good, and the /overseer is no longer an interim coordinator: the coordinator alone starts a planning or implementation agent. Clause 4's CD.17 hold is discharged: CD.17 is superseded with no successor trigger.
 
 ---
 
@@ -2966,6 +3152,8 @@ live (Decision 67 reversal) -- re-derive the per-push cost basis.
 
 **Related:** 25, 67, 72, 73, 76, 83, 115, 132, 135, 138, 150, 162, 163, 167, 168, 177, 181, 184,
 187, 189. Roadmap refs: rec-4083, rec-4085, rec-4086, rec-4087, T2.54.
+
+> **Amended by Decision 247 (2026-11-02):** Reversal condition (e) reads as the Decision 185 loop going live (T4.2): the legacy executor never returns.
 
 ---
 
@@ -4721,6 +4909,8 @@ governed floor, installs a second measured cause.
 **Related:** 153 (amended), 73 (cited, narrowed, not amended), 135, 128, 165, 167, 177, 181, 84.
 
 > **Update (2026-09-26):** Reversal condition (b) fires: PLAN-vp-replay-deadline-from-shared-budget re-derives validate_vp_replay's replay term to MAX_AGGREGATE_SECONDS (120) alone -- a replayed step's deadline is now the remaining share of that aggregate, never a flat per-step cap, so the 30s term this point's 150s figure used to add on top is retired. Re-derived, not reversed: NON_TEST_BUDGET_SECONDS stays 240 against the calibrated 71.766s static worst (120 + 71.766 = 191.766 < 240, headroom rises from 18.2s to 48.2s); CEILING_SECONDS - NON_TEST_BUDGET_SECONDS is unchanged at 1260. The check's own worst-case green maximum TIGHTENS from 150s to 120s. Reversal condition (a)'s measured-series re-check remains open, owned by rec-4093.
+
+> **Amended by Decision 247 (2026-11-02):** Decision 67 never lifts. The planning skill's file-count heuristic now flags decomposition need, not a STRATEGIC plan; replacing it with this measured breadth number is owed when plan_agent decides splits (T4.31).
 
 ---
 
@@ -8345,6 +8535,8 @@ mutation. `deploy-paths.yaml`'s admin_out_of_band.scoped_login_provisioning inde
 > **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.9 in docs/contracts/north-star.yaml; clauses unchanged.
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+> **Update (2026-11-06):** Decision 248 clauses 1 and 6 bring terraform/github under CI: terraform-github-apply.yml applies it behind one operator approval, and its two terraform/bootstrap roles and the apply App key's resource policy change only by a bootstrap apply an ADMIN-session agent runs on the operator's explicit direction.
 ---
 
 ## Decision 125: Ratify decoupling DuckLake Lambda code deploys from terraform/personal infra apply (environment-taxonomy.md section 5 conformance) (Decided)
@@ -10356,6 +10548,8 @@ Tier responsibilities:
 
 > **Update (2026-10-19):** Decision 229 cl.1 reads the freeze above, as an interim reading pending rec-4478, as binding STRATEGIC plans and the autonomous queue consumer: before any loop host, an interactive session or the /overseer may dispatch one human-gated persona step on an operator-chosen work item (a rec today) -- plan_agent drafting its plan, every later step on that approved IMPLEMENTATION plan -- never from the rec queue.
 
+> **Amended by Decision 247 (2026-11-02):** The fourth tier is the Decision 185 loop with its personas. `/develop-executor` and the legacy Python executor are retired, STRATEGIC plans are shelved, and `/implement` executes IMPLEMENTATION plans only; the operational state above is no longer a freeze.
+
 ---
 
 ## Decision 88: Neon catalog egress is a first-class budget -- four standing access-pattern invariants + a measurement obligation; amends CD.34's "negligible add-on" (Decided)
@@ -11194,6 +11388,8 @@ Key elements:
 
 > **Amended by Decision 226 (2026-10-18):** Clause 3's fixed priority="critical" becomes track-derived (High for a tests-only repair on a CI-tier workflow), and a manual revert PR is a permitted Track B corrective outside terraform/** and governed deploy paths (automated revert stays excluded). Clause 3's L6 pause and clause 4's plan-time block become the red_overlap overlap block; clause 4 as written now applies only to a red past its repair SLO. Clause 5's rec -> plan -> implement recovery stands for Track B, with Track A on the fast lane (Decision 226 cl.1-4). This supersedes the Decision 217 line above for clause 4.
 
+> **Amended by Decision 247 (2026-11-02):** Clause 4's suspension of mandatory discussion when `non_automatable_recommendations > 0` is permanent: Decision 67 never reverses and the executor it waited on is retired. Counts stay informational.
+
 ---
 
 ## Decision 72: RCA-as-Plan-Source for CI Merge Gate Failures (Decided)
@@ -11464,36 +11660,12 @@ GitHub branch protection is permanently unavailable for this repository. The mer
 
 ## Decision 67: Lambda Deployment and STRATEGIC Plan Execution Deferred Pending Telemetry Readiness (Amended - Partially Active)
 
-**Status:** Amended by Decision 79 (2026-06-03). Two clauses; each has its own status.
+**Status:** Superseded
+**Date:** 2026-05-08
 
-**[LAMBDA-DEPLOY CLAUSE -- LIFTED by Decision 79 / CD.16 + CD.24]**
-The blanket `DEFERRED: build_lambda.py --deploy` pattern is withdrawn. Plans are now gated per
-Lambda artifact (see Decision 79 + CD.16). Step 12b of plan-critique updated accordingly.
-The blanket DEFERRED marker is no longer acceptable in lieu of active per-Lambda deploy steps.
+**Decision:** Superseded by Decision 247, which retires the legacy Python executor and shelves the STRATEGIC plan type for good and supersedes CD.17; Decision 79 had already lifted the Lambda-deploy clause (per-Lambda gating, CD.16). Kept live rather than archived because roadmap annotations, code comments and contracts still cite "Decision 67" by name (Decision 146's still-cited-live carve-out; compacted under docs/contracts/decision-entry.yaml's `compaction:` section).
 
-**[STRATEGIC-PLAN CLAUSE -- RETAINED, pending CD.17 / T4.2]**
-**Status:** Active -- remove when reversal condition is met
-**Reversal condition:** Legacy telemetry tables (`telemetry_sessions`, `telemetry_process_events`,
-`telemetry_model_calls`, `telemetry_phases`, `telemetry_steps`) confirmed operational end-to-end
-with passing data quality checks AND executor re-enabled per CD.17 / T4.2.
-
-[RESTATED by Decision 95 (2026-06-23): the draft tables telemetry_process_events / telemetry_model_calls /
-telemetry_phases / telemetry_steps collapse into the unified telemetry_observations table; the reversal
-condition now tracks the canonical four-table model -- telemetry_sessions, telemetry_observations,
-telemetry_transcripts (and telemetry_agents) operational with passing DQ checks AND executor re-enabled per
-CD.17 / T4.2. The executor-re-enabled clause and the CD.17 / T4.2 gate are unchanged. See Decision 95.]
-
-**Effect on planning (STRATEGIC clause only):**
-- STRATEGIC plans are blocked. All plans must be IMPLEMENTATION type.
-
-**Effect on plan-critique (STRATEGIC clause only):** Step 12d blocks STRATEGIC plans while
-this clause is active.
-
-**Rationale (original, preserved):** The executor telemetry pipeline (telemetry_sessions etc.)
-is not yet confirmed operational. Running executor-mediated recs risks silent telemetry loss.
-Lambda dispatcher is separately disabled pending telemetry confirmation and scheduled-agent
-migration completion. The Lambda-deploy half reverses per Decision 79; the STRATEGIC half
-reverses when telemetry is confirmed and executor re-enabled (CD.17 / T4.2).
+**Superseded by: Decision 247**
 
 ---
 

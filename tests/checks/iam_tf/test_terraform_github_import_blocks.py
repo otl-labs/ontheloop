@@ -27,10 +27,14 @@ _TRANSFER_CONTRACT = _REPO_ROOT / "docs" / "contracts" / "github-org-transfer.ya
 _HISTORICAL_REPOSITORY_NAME = "agent-platform"
 
 # address -> reason; only for a resource whose remote object does not exist yet.
-_APPROVED_TEXT_REASON = "created by the operator's hand apply after rec-4769's build; rec-4911 adds their import blocks"
+_APPROVED_TEXT_REASON = (
+    "created by terraform-github-apply.yml's first approved run (Decision 248); rec-4911 adds their import blocks"
+)
 EXEMPT: dict[str, str] = {
     "github_repository_environment.approved_text": _APPROVED_TEXT_REASON,
     "github_repository_environment_deployment_policy.approved_text_main": _APPROVED_TEXT_REASON,
+    "github_repository_environment.tf_github_apply": _APPROVED_TEXT_REASON,
+    "github_repository_environment_deployment_policy.tf_github_apply_main": _APPROVED_TEXT_REASON,
 }
 
 _REQUIRED_IGNORED = (

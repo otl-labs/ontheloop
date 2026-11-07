@@ -56,7 +56,7 @@ _RESOLUTION_PENDING_CODIFICATION = (
 # because no repo-local command can express "the convergence record returned to green"). Each
 # is a static shell command -- credentials-bearing but syntactically real, never prose.
 _ACCEPTANCE_STUCK_APPROVAL = (
-    "gh api 'repos/benjamin-blake/theseus/actions/workflows/terraform-apply-sandbox.yml/runs"
+    "gh api 'repos/otl-labs/ontheloop/actions/workflows/terraform-apply-sandbox.yml/runs"
     "?status=waiting' --jq '.total_count' | grep -qx 0"
 )
 _ACCEPTANCE_STALE_GREEN_BACKLOG = (

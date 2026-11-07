@@ -145,8 +145,9 @@ def render(report: Report, head_sha: str, run_url: str, plan_exit_code: int | st
         )
     if report.gated:
         lines.append(
-            "Visibility-gated rows change only a field the App cannot read; the operator's own plan is authoritative "
-            "for it (github-org-transfer.yaml breakage_map.terraform_github_root)."
+            "Visibility-gated rows change only a field the App cannot read; the CI apply's admin plan "
+            "(terraform-github-apply.yml), which refuses any ruleset change, is authoritative for it "
+            "(github-org-transfer.yaml breakage_map.terraform_github_root)."
         )
     if report.conflict:
         lines.append(

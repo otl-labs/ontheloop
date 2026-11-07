@@ -5,9 +5,9 @@ trusted workflow file. This guard keeps that premise true on the repo side. Pred
 data (workflows as {filename: parsed yaml}, terraform as {filename: text}, CODEOWNERS text) so the red cases run
 on synthetic input; the registered check loads the real tree.
 
-  (a) only TRUSTED_WORKFLOWS reference ENV, and no environment name is an expression
+  (a) only ENV_WORKFLOWS reference ENV, and no environment name is an expression
   (b) only TRUSTED_WORKFLOWS combine pull_request_target with a token-minting job
-  (c) no TRUSTED_WORKFLOWS file declares workflow_call; every one exists
+  (c) no ENV_WORKFLOWS file declares workflow_call; every one exists
   (d) token-minting jobs that can run on pull_request_target declare ENV and a same-repo or dispatch guard
   (e) no run body in TRUSTED_WORKFLOWS interpolates PR-controlled expressions
   (f) terraform/github declares ENV with a main-only deployment policy, and import blocks for both
@@ -36,6 +36,9 @@ from scripts.verify_ci_workflow import _load
 
 ENV = "tf-trusted-plan"
 TRUSTED_WORKFLOWS = frozenset({"terraform-plan-trusted.yml", "terraform-github-plan.yml"})
+# Decision 248 cl.4 (amends Decision 238 cl.2): the workflows that may declare ENV. TRUSTED_WORKFLOWS stays the
+# trusted-plan role's job_workflow_ref set; terraform-github-apply.yml's preview job uses its own role.
+ENV_WORKFLOWS = TRUSTED_WORKFLOWS | {"terraform-github-apply.yml"}
 TEMP_NO_ENV_JOBS: frozenset[tuple[str, str]] = frozenset()
 
 _PRT = "pull_request_target"
@@ -189,7 +192,7 @@ def _governed(name: str, wf: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]
     return [
         (jid, job)
         for jid, job in _jobs(wf).items()
-        if name in TRUSTED_WORKFLOWS and ((_mints(wf, job) and _can_run_on_prt(wf, job)) or _env_name(job) == ENV)
+        if name in ENV_WORKFLOWS and ((_mints(wf, job) and _can_run_on_prt(wf, job)) or _env_name(job) == ENV)
     ]
 
 
@@ -200,7 +203,7 @@ def check_environment_references(workflows: dict[str, dict[str, Any]]) -> list[s
             env = _env_name(job)
             if env is not None and "${{" in env:
                 out.append(f"a: {name}:{jid} names an environment by expression")
-            if env == ENV and name not in TRUSTED_WORKFLOWS:
+            if env == ENV and name not in ENV_WORKFLOWS:
                 out.append(f"a: {name}:{jid} references {ENV}")
     return out
 
@@ -216,10 +219,10 @@ def check_prt_minting(workflows: dict[str, dict[str, Any]]) -> list[str]:
 
 
 def check_trusted_files(workflows: dict[str, dict[str, Any]]) -> list[str]:
-    out = [f"c: trusted workflow {n} is missing" for n in sorted(TRUSTED_WORKFLOWS - workflows.keys())]
+    out = [f"c: trusted workflow {n} is missing" for n in sorted(ENV_WORKFLOWS - workflows.keys())]
     out += [
         f"c: {n} declares workflow_call"
-        for n in sorted(TRUSTED_WORKFLOWS & workflows.keys())
+        for n in sorted(ENV_WORKFLOWS & workflows.keys())
         if "workflow_call" in _triggers(workflows[n])
     ]
     return out
@@ -310,7 +313,7 @@ def check_terraform(files: dict[str, str]) -> list[str]:
 
 def check_checkouts(workflows: dict[str, dict[str, Any]], read: Reader = _no_read) -> list[str]:
     out = []
-    for name in sorted(TRUSTED_WORKFLOWS & workflows.keys()):
+    for name in sorted(ENV_WORKFLOWS & workflows.keys()):
         for jid, job in _governed(name, workflows[name]):
             if any(kind == "run" and _GIT_REF_RE.search(text) for kind, text, _ in _expanded(job, read)):
                 out.append(f"g: {name}:{jid} runs git fetch or git checkout in a run body")
@@ -425,7 +428,7 @@ def _executed_paths(expanded: list[tuple[str, str, str | None]]) -> list[str]:
 
 def check_owned_and_isolated(workflows: dict[str, dict[str, Any]], codeowners: str, read: Reader = _no_read) -> list[str]:
     out = []
-    for name in sorted(TRUSTED_WORKFLOWS & workflows.keys()):
+    for name in sorted(ENV_WORKFLOWS & workflows.keys()):
         wf = workflows[name]
         for jid, job in _governed(name, wf):
             expanded = _expanded(job, read)
@@ -458,7 +461,7 @@ def check_owned_and_isolated(workflows: dict[str, dict[str, Any]], codeowners: s
 
 def check_pinned_actions(workflows: dict[str, dict[str, Any]], read: Reader = _no_read) -> list[str]:
     out = []
-    for name in sorted(TRUSTED_WORKFLOWS & workflows.keys()):
+    for name in sorted(ENV_WORKFLOWS & workflows.keys()):
         for jid, job in _governed(name, workflows[name]):
             for kind, text, _ in _expanded(job, read):
                 if kind == "uses" and not text.startswith("./") and not _SHA_PIN_RE.search(text + " "):

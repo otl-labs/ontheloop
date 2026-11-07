@@ -621,3 +621,10 @@ def test_pending_codification_context_names_pending_gated_change() -> None:
     assert "pendsha" in context and "https://x/runs/42" in context
     assert "land the codifying" not in context
     assert calls[0][1]["title"] == _TITLE_PENDING_CODIFICATION
+
+
+def test_stuck_approval_probe_targets_the_resolved_repository() -> None:
+    from scripts import repo_identity
+    from scripts.convergence_health.escalate import _ACCEPTANCE_STUCK_APPROVAL
+
+    assert f"repos/{repo_identity.FALLBACK_FULL_NAME}/actions/" in _ACCEPTANCE_STUCK_APPROVAL

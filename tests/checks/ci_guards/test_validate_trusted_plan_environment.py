@@ -435,3 +435,51 @@ def test_unparseable_inputs_degrade_to_empty_results() -> None:
     assert v._safe_yaml("a: [unclosed") is None
     assert v._imported_paths("def (:", lambda rel: None) == set()
     assert v._inserts_repo_root_first("def (:") is False
+
+
+# Decision 248 cl.4: terraform-github-apply.yml's preview job may declare ENV and is governed by (g)-(i).
+_APPLY_WF = "terraform-github-apply.yml"
+
+
+def _preview(workflows: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return workflows[_APPLY_WF]["jobs"]["preview"]
+
+
+def test_trusted_workflows_are_unchanged_and_the_apply_workflow_may_declare_env() -> None:
+    assert frozenset({"terraform-plan-trusted.yml", "terraform-github-plan.yml"}) == v.TRUSTED_WORKFLOWS
+    assert v.ENV_WORKFLOWS == v.TRUSTED_WORKFLOWS | {_APPLY_WF}
+
+
+def test_the_apply_workflows_preview_job_is_governed(real_workflows) -> None:
+    assert {jid for jid, _ in v._governed(_APPLY_WF, real_workflows[_APPLY_WF])} == {"preview"}
+    assert not any(_APPLY_WF in x for x in v.check_environment_references(real_workflows))
+
+
+def test_an_unlisted_copy_of_the_apply_workflow_may_not_declare_env(wfs) -> None:
+    wfs["terraform-github-apply-copy.yml"] = copy.deepcopy(wfs[_APPLY_WF])
+    assert "a: terraform-github-apply-copy.yml:preview references tf-trusted-plan" in v.check_environment_references(wfs)
+
+
+def test_the_apply_workflow_is_required_and_may_not_be_called(wfs) -> None:
+    wf = wfs.pop(_APPLY_WF)
+    assert f"c: trusted workflow {_APPLY_WF} is missing" in v.check_trusted_files(wfs)
+    wf["on"]["workflow_call"] = {}
+    wfs[_APPLY_WF] = wf
+    assert f"c: {_APPLY_WF} declares workflow_call" in v.check_trusted_files(wfs)
+
+
+def test_g_governs_the_preview_checkout(wfs) -> None:
+    next(s for s in _preview(wfs)["steps"] if "checkout" in str(s.get("uses")))["with"]["persist-credentials"] = True
+    assert f"g: {_APPLY_WF}:preview checkout does not set persist-credentials false" in v.check_checkouts(wfs)
+
+
+def test_h_governs_the_preview_scripts(wfs, real_codeowners) -> None:
+    _preview(wfs)["steps"].append({"run": "python3 scripts/ci/unowned.py"})
+    out = v.check_owned_and_isolated(wfs, real_codeowners)
+    assert f"h: {_APPLY_WF}:preview executes scripts/ci/unowned.py, which no CODEOWNERS pattern covers" in out
+    assert f"h: {_APPLY_WF}:preview runs python without -I" in out
+
+
+def test_i_governs_the_preview_pins(wfs) -> None:
+    _preview(wfs)["steps"].append({"uses": "actions/setup-node@v4"})
+    assert f"i: {_APPLY_WF}:preview uses actions/setup-node@v4 without a 40-hex commit SHA pin" in v.check_pinned_actions(wfs)

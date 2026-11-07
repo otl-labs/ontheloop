@@ -24,8 +24,9 @@
 #
 # Broader IAM changes beyond github_ci_apply's current scope remain admin-gated until T2.23.
 #
-# NEVER add this resource to any auto-apply workflow path (README.md / Decision 77):
-# terraform/github/ is human-gated LOCAL apply only; the guard cannot inspect github_* diffs.
+# NEVER add this resource to any auto-apply workflow path (README.md / Decision 77): the guard cannot
+# inspect github_* diffs. terraform/github is CI-applied only by terraform-github-apply.yml behind one
+# operator approval (Decision 248), whose apply job waits here until rec-4965 moves it to tf-github-apply.
 
 resource "github_repository_environment" "tf_gated_apply" {
   repository          = github_repository.this.name
@@ -110,7 +111,7 @@ resource "github_repository_environment" "deployment_approval_probe" {
 # GitHub's record of the operator's approval. Required reviewers come from var.gated_apply_reviewer_user_ids; with
 # can_admins_bypass false GitHub records an approval only from a required reviewer, which the adapter relies on
 # instead of reading the Environment (the session proxy refuses that path). Never in any OIDC trust, never a job
-# holding id-token or secrets. Created by the operator's hand apply after the build merges, with no UI step; the
+# holding id-token or secrets. Created by the first approved run of terraform-github-apply.yml, with no UI step; the
 # explicit main-only policy mirrors tf_trusted_plan (rec-4651). rec-4911 adds the import blocks.
 resource "github_repository_environment" "approved_text" {
   repository          = github_repository.this.name
@@ -135,5 +136,38 @@ resource "github_repository_environment" "approved_text" {
 resource "github_repository_environment_deployment_policy" "approved_text_main" {
   repository     = github_repository.this.name
   environment    = github_repository_environment.approved_text.environment
+  branch_pattern = "main"
+}
+
+# GitHub Environment: tf-github-apply (Decision 248 cl.7).
+#
+# The dedicated gate for terraform-github-apply.yml's apply job; rec-4965 moves the job and the
+# github-settings-apply role's trust here from tf-gated-apply. Required reviewers from
+# var.gated_apply_reviewer_user_ids, no admin bypass, and the explicit main-only policy (rec-4651).
+# Created by the first approved run of terraform-github-apply.yml. Destroying it fails open for the
+# same reason as tf_gated_apply.
+resource "github_repository_environment" "tf_github_apply" {
+  repository          = github_repository.this.name
+  environment         = "tf-github-apply"
+  prevent_self_review = false
+  can_admins_bypass   = false
+
+  reviewers {
+    users = var.gated_apply_reviewer_user_ids
+  }
+
+  deployment_branch_policy {
+    protected_branches     = false
+    custom_branch_policies = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "github_repository_environment_deployment_policy" "tf_github_apply_main" {
+  repository     = github_repository.this.name
+  environment    = github_repository_environment.tf_github_apply.environment
   branch_pattern = "main"
 }
