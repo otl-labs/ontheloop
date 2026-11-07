@@ -2,6 +2,98 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 248: terraform/github is CI-applied behind one operator approval, applying only what a read-only preview listed, with a resource-locked App key (amends Decisions 126, 237 and 238) (Decided)
+
+```yaml
+number: 248
+status: Decided
+decided_date: "2026-11-06"
+kind:
+  value: direction
+  justification: >-
+    Clauses 1 and 3 move terraform/github's human gate from directing a session's apply to approving a CI job.
+amends: [126, 237, 238]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable and reversal-relevant: it changes how the root holding the gates is applied and fires Decision 246's
+    approval-bypass condition; a contract note cannot.
+```
+
+**Status:** Decided
+**Date:** 2026-11-06
+**Warehouse ID:** dec-248 (per Decision 84 backfill)
+
+**Problem:** Agent sessions applied terraform/github (the ruleset, Environments, Actions settings) on the
+operator's direction, outside CI, unlike every other root (Decision 126); a CI apply was planned as best practice.
+A harness change outside the project's control (2026-11-06) makes the session proxy refuse GitHub's settings
+endpoints, so sessions cannot apply it, and Decision 246's approved-text Environment could not be created. That
+brings the CI apply forward.
+
+**Intent:** The root is CI-applied, never without the operator's approval, and the credential
+that can change GitHub's gates is reachable only from that approved job.
+
+**Decision:**
+1. **Trigger.** .github/workflows/terraform-github-apply.yml applies the root from main only: on a push to main
+   that touches the root or the workflow, and on a dispatch from main. It never auto-applies (Decision 77): every
+   apply waits for one operator approval. A local apply is break-glass only.
+2. **Preview.** An ungated job plans read-only with the plan App and lists each change: address, action, changed
+   attribute names and allowlisted values (Environment names, branch patterns, gate flags, ruleset enforcement,
+   reviewer counts; never ids). The list is the reviewed set. No approval is asked when nothing would change or a
+   gate change is unnamed (clause 3).
+3. **Apply.** One job in a reviewer-gated Environment mints a narrowed apply-App token, plans, and applies that
+   plan (Decision 158 cl.3) only if each change matches a reviewed one (same address and actions, changed names
+   within the reviewed names, allowlisted values equal). It refuses a destroy or replace, any ruleset change
+   (rec-4624), any change (creates included) to an Environment, deployment policy or Actions permission that the
+   dispatch's gate_change input does not name, and an unreadable plan; then it re-plans and fails unless clean.
+4. **Roles.** Two roles live in terraform/bootstrap, named outside agent-platform-* so no CI role's IAM grant can
+   write them (Decision 223 cl.1), with the CI apply boundary. Each has one trust statement binding one Environment
+   subject and this workflow's job_workflow_ref at main. github-settings-apply (the apply job) reads the apply App
+   entry and reads and writes this root's state and lock; github-settings-preview (the preview job) reads only
+   this root's state. Amends Decision 238 cl.2: tf-trusted-plan also admits the preview job; the trusted-plan
+   role's trust is unchanged.
+5. **Key (amends Decision 237 cl.1 and cl.4; fires its second-gate-wanted condition).** The apply App key stays in
+   its Secrets Manager entry. A resource policy denies every action but reading its metadata to every principal
+   except the role, PlatformAdmin, user/platform-breakglass and the account root; an SSM parameter cannot carry one.
+6. **Provisioning (amends Decision 126).** The roles, their policies and the resource policy change only by a
+   terraform/bootstrap apply an ADMIN-session agent runs on the operator's explicit direction, after the pre-merge
+   admin plan (deploy-paths.yaml admin_out_of_band).
+7. **Gate Environment.** The first run creates tf-github-apply (main-only, no admin bypass, prevent_destroy) beside
+   approved-text; rec-4965 moves the apply job and the role's trust from tf-gated-apply to it.
+8. **Approval bypass (Decisions 246 and 239).** An agent-authored job now holds the apply App, which can write
+   Environment settings: Decision 246's approval-bypass condition fires and is re-decided here. The credential
+   exists only inside a job the operator approved, its token carries no Deployments permission, a gate change must
+   be named, and the first run proves the token cannot approve a pending deployment.
+9. **Coverage (Decision 181 cl.2).** Clauses 1-4 and 7: validate_github_settings_apply and the gate and script
+   tests; clause 5: the guard and the post-apply read-back; clause 6: procedural; clause 8: the first run's probe.
+   Residuals: the operator approves the read-only plan, not the applied one, so values outside the allowlist go
+   unseen (operator's choice); an approved run can change a gate it names, its own included; until
+   rec-4965, tf-gated-apply admits any branch and admins bypass it (rec-4651); the apply App is installed org-wide
+   until rec-4538; CODEOWNERS does not bind agent pull requests (rec-2827).
+
+**Rationale:** A reviewer-gated Environment and an exact workflow-bound role are controls an agent cannot satisfy
+for itself (Decision 239). Rejected: a second approval of the applied plan; the key
+as an Environment secret (no AWS audit or resource policy); the role in terraform/personal (routine applies could
+rewrite it).
+
+```yaml reversal-conditions
+decision: 248
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan; stop CI applies of terraform/github until then"
+conditions:
+  - id: approval-bypass
+    kind: manual
+    description: "An apply-App installation token approves a pending deployment on any probe: re-decide clause 8."
+  - id: unreviewed-apply
+    kind: manual
+    description: "An apply changes something its preview did not list: re-decide clause 3 (approve the applied plan)."
+  - id: key-read
+    kind: manual
+    description: "CloudTrail shows the apply App entry read by a principal outside clause 5's list: re-decide clause 5."
+```
+
+---
+
 ## Decision 247: The legacy Python executor is retired and the STRATEGIC plan type is shelved, both for good -- an item too large for one plan is decomposed by its planner into child work items, which ride the parent's approval only through a deterministic check (supersedes Decision 67; amends Decisions 73, 90, 182, 203 and 229) (Decided)
 
 ```yaml
@@ -727,6 +819,8 @@ conditions:
     description: "GitHub changes pull_request_target, environment-claim or job_workflow_ref semantics; AWS stops evaluating job_workflow_ref; names-only output proves insufficient for review in practice; a fork-safe trigger that needs no environment appears."
 ```
 
+> **Update (2026-11-06):** Decision 248 clause 4 amends clause 2: tf-trusted-plan also admits terraform-github-apply.yml's preview job; the trusted-plan role's trust is unchanged.
+
 ---
 
 ## Decision 237: Secrets live as SSM SecureString parameters under a separate /secret/ root -- value verbs enumerated per parameter, out-of-band values outside Terraform, no secret read by a data source (amends Decision 101 point (b), Decision 213 clause 5 and Decision 230 clause 4) (Decided)
@@ -811,6 +905,8 @@ conditions:
 > declared consumer of the Neon key and catalog DSN parameters. Its reads carry no session condition: its one trusted
 > subject is the tf-trusted-plan Environment bound to main's workflow, so clause 2's drift-session condition, written
 > for the planner's PR session, does not apply to it.
+
+> **Update (2026-11-06):** Decision 248 clause 5 amends clauses 1 and 4 for the terraform/github apply App key, which stays in its Secrets Manager entry under a resource policy denying every action but reading its metadata to all but four principals; it fires this Decision's second-gate-wanted condition.
 
 ---
 
@@ -8439,6 +8535,8 @@ mutation. `deploy-paths.yaml`'s admin_out_of_band.scoped_login_provisioning inde
 > **Update (2026-11-02):** Promoted: this entry's intent is carried as NS.9 in docs/contracts/north-star.yaml; clauses unchanged.
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+> **Update (2026-11-06):** Decision 248 clauses 1 and 6 bring terraform/github under CI: terraform-github-apply.yml applies it behind one operator approval, and its two terraform/bootstrap roles and the apply App key's resource policy change only by a bootstrap apply an ADMIN-session agent runs on the operator's explicit direction.
 ---
 
 ## Decision 125: Ratify decoupling DuckLake Lambda code deploys from terraform/personal infra apply (environment-taxonomy.md section 5 conformance) (Decided)

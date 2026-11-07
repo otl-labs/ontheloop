@@ -1,0 +1,234 @@
+name: terraform-github-apply
+
+# CI apply of terraform/github behind one operator approval (Decision 248, PLAN-terraform-github-gated-apply).
+# Never auto-applies (Decision 77): every apply waits for the apply job's reviewer-gated Environment.
+#
+# preview (ungated, tf-trusted-plan, role github-settings-preview: state read only): the read-only plan with the
+# read-only plan App, as terraform-github-plan.yml does it; the names-only report and the gate's preview table
+# (address, action, changed attribute names, allowlisted values) go to the step summary. That table is the reviewed
+# set. It asks for no approval when nothing would change, and fails before asking when a change to an Environment,
+# deployment policy or Actions permission (creates included) is not named in the dispatch's gate_change input.
+# apply (tf-gated-apply until rec-4965, role github-settings-apply): scripts/ci/terraform_github_apply.sh mints a
+# narrowed apply App token, plans, applies that plan only if each change matches a reviewed one, and re-plans clean.
+# Read the preview's summary before approving.
+#
+# validate_github_settings_apply fences this file; validate_trusted_plan_environment governs the preview job.
+# Configuration: repository secret TF_GITHUB_PLAN_APP_PRIVATE_KEY, repository variables TF_GITHUB_PLAN_APP_CLIENT_ID
+# and TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS; the apply App key lives in Secrets Manager, readable only by the apply
+# role (terraform/bootstrap/github_settings_apply.tf).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'terraform/github/**'
+      - '.github/workflows/terraform-github-apply.yml'
+      - 'scripts/ci/terraform_github_apply*'
+      - 'scripts/ci/terraform_github_plan_report.py'
+      - 'scripts/ci/plan_names_core.py'
+  workflow_dispatch:
+    inputs:
+      gate_change:
+        description: Comma-separated exact addresses of the gate changes this run may apply (creates included)
+        type: string
+        default: ''
+      approval_probe_run_id:
+        description: A pending deployment-approval-probe run the apply App's token must fail to approve
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-github-apply
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: tf-trusted-plan
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      reviewed: ${{ steps.gate.outputs.reviewed }}
+      has_changes: ${{ steps.gate.outputs.has_changes }}
+    env:
+      TF_IN_AUTOMATION: "1"
+      TF_INPUT: "0"
+      MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/aws-region
+
+      - name: Check preview configuration
+        env:
+          APP_CLIENT_ID: ${{ vars.TF_GITHUB_PLAN_APP_CLIENT_ID }}
+          APP_PRIVATE_KEY_SET: ${{ secrets.TF_GITHUB_PLAN_APP_PRIVATE_KEY != '' }}
+          REVIEWER_LOGINS: ${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}
+        run: |
+          missing=""
+          [ -n "$APP_CLIENT_ID" ] || missing="$missing variable:TF_GITHUB_PLAN_APP_CLIENT_ID"
+          [ "$APP_PRIVATE_KEY_SET" = "true" ] || missing="$missing secret:TF_GITHUB_PLAN_APP_PRIVATE_KEY"
+          [ -n "$REVIEWER_LOGINS" ] || missing="$missing variable:TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS"
+          [ -z "$missing" ] || { echo "::error::CONFIG_MISSING${missing}"; exit 1; }
+          echo "CONFIG_OK"
+
+      - name: Configure AWS credentials (OIDC -- github-settings-preview, state read only)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-settings-preview
+          role-session-name: terraform-github-preview
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Mint the read-only plan App token (this repository only)
+        id: app_token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.TF_GITHUB_PLAN_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TF_GITHUB_PLAN_APP_PRIVATE_KEY }}
+          permission-metadata: read
+          permission-administration: read
+          permission-actions: read
+
+      - name: Resolve reviewer ids (kept out of the log)
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          REVIEWER_LOGINS: ${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}
+        run: |
+          ids=""
+          for login in ${REVIEWER_LOGINS//,/ }; do
+            [[ "$login" =~ ^[A-Za-z0-9-]+$ ]] || { echo "::error::REVIEWER_LOOKUP_FAILED"; exit 1; }
+            id=$(gh api "users/${login}" --jq .id) || { echo "::error::REVIEWER_LOOKUP_FAILED ${login}"; exit 1; }
+            ids="${ids:+${ids},}${id}"
+          done
+          [ -n "$ids" ] || { echo "::error::REVIEWER_LOOKUP_FAILED no login resolved"; exit 1; }
+          printf '[%s]' "$ids" > "$RUNNER_TEMP/reviewer_ids"
+
+      - name: Read pinned Terraform version
+        id: tfver
+        run: echo "version=$(cat config/terraform-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: ${{ steps.tfver.outputs.version }}
+          terraform_wrapper: false
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Read-only plan (-lock=false, text never logged)
+        id: plan
+        env:
+          TF_VAR_github_token: ${{ steps.app_token.outputs.token }}
+        run: |
+          TF_VAR_gated_apply_reviewer_user_ids="$(cat "$RUNNER_TEMP/reviewer_ids")"
+          export TF_VAR_gated_apply_reviewer_user_ids
+          q="$GITHUB_WORKSPACE/scripts/ci/quiet_run.sh"
+          bash "$q" "$RUNNER_TEMP/tf.log" -- terraform -chdir=terraform/github init -input=false -lockfile=readonly || { echo "::error::TF_GITHUB_PREVIEW_FAILED init"; exit 1; }
+          rc=0
+          bash "$q" "$RUNNER_TEMP/tf.log" -- terraform -chdir=terraform/github plan -lock=false -input=false -no-color -detailed-exitcode -out=plan.bin || rc=$?
+          [ "$rc" = 0 ] || [ "$rc" = 2 ] || { echo "::error::TF_GITHUB_PREVIEW_FAILED plan exit ${rc}"; exit 1; }
+          echo "exit_code=${rc}" >> "$GITHUB_OUTPUT"
+          bash "$q" "$RUNNER_TEMP/tf.log" --stdout "$RUNNER_TEMP/plan.json" -- terraform -chdir=terraform/github show -json plan.bin
+          rm -f terraform/github/plan.bin
+
+      - name: Probe what the plan App can see
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set +e
+          san=$(gh api "repos/${REPO}" --jq '.security_and_analysis != null' 2>/dev/null)
+          [ -n "$san" ] || san=unknown
+          bypass=unknown
+          rid=$(gh api "repos/${REPO}/rulesets" --jq '.[] | select(.name == "main-protection") | .id' 2>/dev/null)
+          if [ -n "$rid" ]; then
+            bypass=$(gh api "repos/${REPO}/rulesets/${rid}" --jq 'has("bypass_actors")' 2>/dev/null)
+            [ -n "$bypass" ] || bypass=unknown
+          fi
+          printf '{"security_and_analysis": "%s", "ruleset_bypass_actors": "%s"}\n' "$san" "$bypass" > "$RUNNER_TEMP/visibility.json"
+
+      - name: Report and preview (names and allowlisted values only)
+        id: gate
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PLAN_EXIT: ${{ steps.plan.outputs.exit_code }}
+          GATE_CHANGE: ${{ inputs.gate_change }}
+          PROBE_RUN_ID: ${{ inputs.approval_probe_run_id }}
+        run: |
+          python3 -I scripts/ci/terraform_github_plan_report.py --plan-json "$RUNNER_TEMP/plan.json" \
+            --visibility "$RUNNER_TEMP/visibility.json" --plan-exit-code "$PLAN_EXIT" --head-sha "$GITHUB_SHA" \
+            --run-url "$RUN_URL" > "$RUNNER_TEMP/report.md"
+          dispatched=false
+          [ -z "${GATE_CHANGE}${PROBE_RUN_ID}" ] || dispatched=true
+          rc=0
+          python3 -I scripts/ci/terraform_github_apply_gate.py preview --plan-json "$RUNNER_TEMP/plan.json" \
+            --visibility "$RUNNER_TEMP/visibility.json" --gate-change "$GATE_CHANGE" --dispatched-input "$dispatched" \
+            --github-output "$GITHUB_OUTPUT" > "$RUNNER_TEMP/preview.md" || rc=$?
+          cat "$RUNNER_TEMP/report.md" "$RUNNER_TEMP/preview.md" >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/report.md" "$RUNNER_TEMP/preview.md"
+          exit "$rc"
+
+      - name: Delete plan files (never persisted or uploaded)
+        if: always()
+        run: rm -f terraform/github/plan.bin "$RUNNER_TEMP/plan.json"
+
+  apply:
+    needs: preview
+    if: ${{ github.ref == 'refs/heads/main' && needs.preview.outputs.has_changes == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: tf-gated-apply
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/aws-region
+
+      - name: Configure AWS credentials (OIDC -- github-settings-apply)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-settings-apply
+          role-session-name: terraform-github-apply
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Read pinned Terraform version
+        id: tfver
+        run: echo "version=$(cat config/terraform-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: ${{ steps.tfver.outputs.version }}
+          terraform_wrapper: false
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Apply only what the preview listed (one process; the token never leaves it)
+        env:
+          REVIEWED: ${{ needs.preview.outputs.reviewed }}
+          GATE_CHANGE: ${{ inputs.gate_change }}
+          PROBE_RUN_ID: ${{ inputs.approval_probe_run_id }}
+          REVIEWER_LOGINS: ${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}
+        run: bash scripts/ci/terraform_github_apply.sh

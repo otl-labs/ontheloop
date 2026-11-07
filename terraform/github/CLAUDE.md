@@ -8,55 +8,25 @@ This module manages GitHub repository settings for `benjamin-blake/theseus` via 
 protection), the `main` branch-protection ruleset, Actions permissions, and the
 `tf-gated-apply` GitHub Environment (CD.35 Wave 3 / T2.22 / Decision 92).
 
-## NEVER auto-apply this module
+## CI apply (Decision 248)
 
-The `terraform-apply-sandbox.yml` workflow path filter is `terraform/personal/**`. This module
-(`terraform/github/**`) matches nothing in that filter and is intentionally excluded. Adding it
-to any auto-apply workflow is FORBIDDEN (Decision 77 / `environment-taxonomy.yaml`):
-`terraform_apply_guard.py` is AWS-IAM-only and cannot inspect `github_*` resource diffs; a
-branch-protection change applied ungated could lock out the push-to-main flow the workflow depends
-on. Apply this module by hand from AWS CloudShell, every time.
+`.github/workflows/terraform-github-apply.yml` applies this root on each push to `main` that touches it, and on a
+dispatch from `main`. Its preview job plans read-only and lists each change with its allowlisted values. Its apply
+job waits for one approval in `tf-gated-apply` (`tf-github-apply` after rec-4965), then plans with the apply App,
+applies only changes the preview listed, and re-plans clean. It refuses any destroy or replace, any ruleset change,
+and any change (creates included) to an Environment, branch policy or Actions permission that the dispatch's
+`gate_change` input does not name; the preview fails on such a change before asking. Read the preview before
+approving. Never add this root to another apply workflow: `terraform_apply_guard.py` cannot read `github_*` diffs.
 
-## Prerequisites
+## CloudShell break-glass
 
-- Terraform 1.10+ (`cat config/terraform-version`)
-- AWS CloudShell, as an identity that can read the PAT secret and write `tfstate/github/` (a Claude
-  Code cloud session cannot: its proxy swaps the PAT for a token that gets 403).
-- A GitHub admin PAT stored in Secrets Manager. Required scopes: `repo`, `admin:repo_hook`, `read:org`.
-
-## Apply runbook
-
-```bash
-# 1. Export the GitHub PAT from Secrets Manager.
-export TF_VAR_github_token=$(aws secretsmanager get-secret-value \
-  --region eu-west-2 \
-  --secret-id <GITHUB_PAT_SECRET_ARN> \
-  --query SecretString \
-  --output text)
-
-# 2. Resolve the numeric GitHub user ID for the tf-gated-apply reviewer.
-#    benjamin-blake's numeric ID (NOT the login string):
-REVIEWER_ID=$(curl -s -H "Authorization: Bearer $TF_VAR_github_token" https://api.github.com/user | jq .id)
-#    Or use the GitHub MCP get_me tool in Claude Code on the web.
-
-# 3. Initialise (S3 backend in agent-platform-data-lake; region and re-init rule: see
-#    docs/contracts/terraform-cc-web-operations.yaml backend_region).
-terraform -chdir=terraform/github init \
-  -backend-config="region=$(tr -d '[:space:]' < config/aws-region)"
-
-# 4. Plan -- review carefully before applying.
-#    STOP if plan shows any destroy/replace of github_repository, any unintended
-#    in-place reset of description/homepage/topics/visibility/features, or any
-#    change to the main-protection ruleset required_status_checks.
-terraform -chdir=terraform/github plan \
-  -var="admin_bypass_actor_id=5" \
-  -var="gated_apply_reviewer_user_ids=[${REVIEWER_ID}]"
-
-# 5. Apply -- only after plan is confirmed safe.
-terraform -chdir=terraform/github apply \
-  -var="admin_bypass_actor_id=5" \
-  -var="gated_apply_reviewer_user_ids=[${REVIEWER_ID}]"
-```
+Only when that workflow cannot run, and only on the operator's word: apply from AWS CloudShell (outside the session
+proxy) as `platform-breakglass`, with an apply-App token (the paste in
+`docs/plans/PLAN-terraform-github-org-rekey.yaml`), init
+`-backend-config="region=$(tr -d '[:space:]' < config/aws-region)"` and plan/apply
+`-var="admin_bypass_actor_id=5" -var="gated_apply_reviewer_user_ids=[<id>]"`. STOP on a destroy or replace of
+`github_repository`, a reset of description, homepage, topics, visibility or features, or a change to the
+ruleset's required status checks.
 
 ## PR-time plan (rec-4335)
 
@@ -68,7 +38,7 @@ The `tf-gated-apply` GitHub Environment (defined in `environments.tf`) gates the
 Terraform apply job for the guard fail-closed set (IAM/trust/destroy diffs). After a change
 in that set is merged to main, the `gated-apply` job in `terraform-apply-sandbox.yml` blocks
 on Environment reviewer approval -- the job does not start until benjamin-blake approves via
-the GitHub Actions UI.
+the GitHub Actions UI. Until rec-4965 it also gates this root's CI apply job.
 
 Key constraints:
 - `protected_branches = true` may not restrict to main under the ruleset-only main.

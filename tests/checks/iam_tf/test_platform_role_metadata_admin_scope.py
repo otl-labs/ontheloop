@@ -32,6 +32,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _BOOTSTRAP_DIR = _REPO_ROOT / "terraform" / "bootstrap"
 _POLICY_FILE = _BOOTSTRAP_DIR / "github_ci_apply_policy.tf"
 _READS_FILE = _BOOTSTRAP_DIR / "github_ci_apply_reads.tf"
+# Decision 225 cl.5's unenforced residual: a bootstrap CI identity other than the apply role (Decision 248).
+_SETTINGS_FILE = _BOOTSTRAP_DIR / "github_settings_apply.tf"
 _PERSONAL_DIR = _REPO_ROOT / "terraform" / "personal"
 _ACCOUNT_ID = "123456789012"
 _AWS_REGION = "eu-west-2"
@@ -39,7 +41,7 @@ _AWS_REGION = "eu-west-2"
 # The guard's fail-closed scanned-file list (literal paths -- this is what makes --pre select
 # this module for an edit to any of these files; see test_platform_iam_admin_root_only.py for the
 # oidc.tf -> Decision 223 guard edge, kept by a docstring mention there, not here).
-_SCANNED_BOOTSTRAP_FILES = (_POLICY_FILE, _READS_FILE)
+_SCANNED_BOOTSTRAP_FILES = (_POLICY_FILE, _READS_FILE, _SETTINGS_FILE)
 _SCANNED_PERSONAL_GLOB = "*.tf"
 
 _EXPECTED_METADATA_WRITE_RESOURCES = frozenset(
@@ -151,6 +153,7 @@ class TestNoCIIamGrantOnPlatformRoles:
         for required in (
             "terraform/bootstrap/github_ci_apply_policy.tf",
             "terraform/bootstrap/github_ci_apply_reads.tf",
+            "terraform/bootstrap/github_settings_apply.tf",
             "terraform/personal/oidc.tf",
             "terraform/personal/oidc_ci_roles.tf",
             "terraform/personal/oidc_pipeline_roles.tf",
@@ -188,6 +191,19 @@ class TestNoCIIamGrantOnPlatformRoles:
             '"arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-deploy",\n',
             '"arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-deploy",\n'
             '          "arn:aws:iam::${var.account_id}:role/PlatformAdmin",\n',
+            1,
+        )
+        leaks = ci_platform_role_iam_leaks(texts)
+        assert any(role == "PlatformAdmin" for _, _, role in leaks)
+
+    def test_iam_grant_on_platformadmin_in_settings_apply_file_is_detected(self) -> None:
+        texts = dict(_scanned_texts())
+        settings_file = "terraform/bootstrap/github_settings_apply.tf"
+        old = 'Action   = ["secretsmanager:GetSecretValue"]'
+        assert old in texts[settings_file]
+        texts[settings_file] = texts[settings_file].replace(
+            old + "\n        Resource = [data.aws_secretsmanager_secret.github_apply_app.arn]",
+            'Action   = ["iam:PassRole"]\n        Resource = ["arn:aws:iam::${var.account_id}:role/PlatformAdmin"]',
             1,
         )
         leaks = ci_platform_role_iam_leaks(texts)
