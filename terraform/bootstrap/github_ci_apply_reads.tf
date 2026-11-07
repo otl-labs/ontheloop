@@ -89,6 +89,10 @@ locals {
           # Pre-staged ahead of the role's own creation (same precedent as the telemetry-writer entries
           # below): without it the gated apply's iam:GetRole after the create, and every refresh, fail closed.
           "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-trusted-plan",
+          # Pre-staged ahead of the role's own creation (PLAN-trusted-plan-github-root, rec-4638; the same
+          # precedent as the trusted-plan entry above): the terraform/github PR-plan role is created by a
+          # gated apply that reads it back, so this applies before that create merges.
+          "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-trusted-github-plan",
           "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-catalog-dr",
           "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-writer",
           "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-reader",
