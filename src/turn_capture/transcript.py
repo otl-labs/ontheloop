@@ -148,6 +148,8 @@ def record_time(data: dict) -> datetime | None:
 FORK_HOOK = "SessionStart:fork"
 PIN_SCRIPT_STEM = "session_start_log_turn"
 PIN_FLAG = "--project-ref="
+PIN_LINE_PREFIX = f"[{PIN_SCRIPT_STEM}] capture pin"
+PIN_REF_PREFIX = PIN_LINE_PREFIX + " project_ref="
 _SCRIPT_TOKEN = re.compile(r"[^\s]+\.(py|sh)$")
 PIN_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}")
 
@@ -213,6 +215,40 @@ def unquoted(value: str) -> str:
     return value[1:] if value[:1] in ("'", '"') else value
 
 
+def _stderr_lines(att: dict) -> list[str]:
+    stderr = att.get("stderr")
+    return [line.strip() for line in stderr.splitlines()] if isinstance(stderr, str) else []
+
+
+def stderr_ref(att: dict) -> str | None:
+    """Rule P-2 (witness form): the ref of exactly one well-formed 'capture pin project_ref=' stderr line, else None.
+
+    Malformed prefixed lines are not counted. The attachment's command is never read, so a label cannot matter.
+    """
+    refs = [
+        line[len(PIN_REF_PREFIX) :]
+        for line in _stderr_lines(att)
+        if line.startswith(PIN_REF_PREFIX) and PIN_REF.fullmatch(line[len(PIN_REF_PREFIX) :])
+    ]
+    return refs[0] if len(refs) == 1 else None
+
+
+def command_ref(att: dict) -> str | None:
+    """Rule P-2 (legacy command form): the pin script's single well-formed --project-ref token, else None."""
+    stem, tokens = hook_script(att.get("command"))
+    refs = [unquoted(t[len(PIN_FLAG) :]) for t in tokens if t.startswith(PIN_FLAG)]
+    return refs[0] if stem == PIN_SCRIPT_STEM and len(refs) == 1 and PIN_REF.fullmatch(refs[0]) else None
+
+
+def is_pin_attachment(att: dict) -> bool:
+    """Rule PV-1: a SessionStart attachment of the pin hook, by its script stem or by its capture pin stderr line."""
+    if att.get("hookEvent") != "SessionStart":
+        return False
+    if hook_script(att.get("command"))[0] == PIN_SCRIPT_STEM:
+        return True
+    return any(line == PIN_LINE_PREFIX or line.startswith(PIN_LINE_PREFIX + " ") for line in _stderr_lines(att))
+
+
 def project_ref_pin(tree: TranscriptTree) -> str | None:
     """The project_ref the earliest SessionStart capture-hook attachment recorded, else None (rules P-1..P-4)."""
     lines = read_lines(tree.read(ROOT) or b"")
@@ -221,8 +257,7 @@ def project_ref_pin(tree: TranscriptTree) -> str | None:
         att = _hook_attachment(item.data) if item.data is not None and item.line not in skip else None
         if att is None or att.get("hookEvent") != "SessionStart":
             continue
-        stem, tokens = hook_script(att.get("command"))
-        refs = [unquoted(t[len(PIN_FLAG) :]) for t in tokens if t.startswith(PIN_FLAG)]
-        if stem == PIN_SCRIPT_STEM and len(refs) == 1 and PIN_REF.fullmatch(refs[0]):
-            return refs[0]
+        ref = stderr_ref(att) or command_ref(att)
+        if ref is not None:
+            return ref
     return None

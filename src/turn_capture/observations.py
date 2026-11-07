@@ -32,7 +32,7 @@ from src.turn_capture.streams import (
     Turn,
     emitting_streams,
 )
-from src.turn_capture.transcript import ROOT, hook_script
+from src.turn_capture.transcript import ROOT, hook_script, is_pin_attachment
 from src.turn_capture.transcripts import Ctx, Sidecars, canonical_json, line_count, persisted_output, text_of
 from src.turn_capture.usage import usage_columns
 
@@ -367,10 +367,16 @@ def _turn_rows(
 
 
 def hook_name(att: dict[str, Any]) -> str:
-    """Rules H-1..H-3: the script stem, else hookName with ':' as '.', else hook:unknown; each must fit the class."""
+    """Rules H-1..H-3: the script stem, else a capture record by its stderr line, else hookName, else hook:unknown."""
     stem, _ = hook_script(att.get("command"))
     if stem is not None and _SIGNATURE.fullmatch(stem):
         return "hook:" + stem
+    if stem is None:
+        first = str(att.get("stderr") or "").splitlines()[:1]
+        if is_pin_attachment(att):
+            return "hook:session_start_log_turn"
+        if first and first[0] == witness.WITNESS_LINE:
+            return "hook:stop_log_turn"
     hook = att.get("hookName")
     name = hook.replace(":", ".") if isinstance(hook, str) else ""
     return "hook:" + (name if _SIGNATURE.fullmatch(name) else "unknown")

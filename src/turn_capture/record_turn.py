@@ -31,8 +31,8 @@ from src.turn_capture.transcript import ROOT, TranscriptTree, read_lines, sessio
 from src.turn_capture.transcripts import Ctx, Sidecars, build_transcripts
 
 PRODUCER = "claude_code"
-PARSER_VERSION = 8
-PRODUCER_VERSION = "turn-capture-8"
+PARSER_VERSION = 9
+PRODUCER_VERSION = "turn-capture-9"
 FULL_OUTPUT_CAP_BYTES = 8388608
 BILLING_SHAPES = ("fixed_non_rollover_allowance",)
 TABLES = ("telemetry_observations", "telemetry_transcripts", "telemetry_agents", "telemetry_sessions")

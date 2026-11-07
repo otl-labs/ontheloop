@@ -63,6 +63,7 @@ from tests.fixtures.turn_capture_v5_cases import V5_BUILDERS
 from tests.fixtures.turn_capture_v6_cases import V6_BUILDERS
 from tests.fixtures.turn_capture_v7_cases import V7_BUILDERS
 from tests.fixtures.turn_capture_v8_cases import V8_BUILDERS
+from tests.fixtures.turn_capture_v9_cases import V9_BUILDERS
 
 SECRET_KINDS = ("aws_access", "aws_secret", "aws_session", "anthropic", "github", "github_pat", "bearer")
 
@@ -325,6 +326,7 @@ def test_new_cases_are_built_from_their_builders() -> None:
         **V6_BUILDERS,
         **V7_BUILDERS,
         **V8_BUILDERS,
+        **V9_BUILDERS,
     }
     for name, builder in builders.items():
         assert load_case(name)[0] == builder(), name
@@ -496,7 +498,7 @@ def test_finalization_cuts_are_recorded_once_and_survive_a_reset() -> None:
     stale = dataclasses.replace(first.next_cursor, parser_version=PARSER_VERSION - 1)
     re_emitted = capture(files, stale, final=True)
     assert [r["event_kind"] for r in re_emitted.sessions].count("close") == 1 and re_emitted.next_cursor.finalize_cuts == cuts
-    assert PRODUCER_VERSION == "turn-capture-8" and PARSER_VERSION == 8
+    assert PRODUCER_VERSION == "turn-capture-9" and PARSER_VERSION == 9
 
 
 def test_resend_tree_re_emits_every_row_keeping_pins_and_cuts() -> None:

@@ -114,6 +114,7 @@ STATUS_MESSAGES = {
     "SessionEnd": "session_end_log_turn.py",
 }
 WITNESS_STDERR = "[stop_log_turn] turn witness\n"
+REF_STDERR = "[session_start_log_turn] capture pin project_ref=ontheloop\n"
 PIN_STDERR = "[session_start_log_turn] capture pin checkout=" + "a" * 40 + " base=" + "b" * 40 + " dirty=false\n"
 
 
@@ -145,13 +146,13 @@ def _attachment(event: str, command: str, stderr: str) -> dict[str, Any]:
     return {"type": "hook_success", "hookName": f"{event}:startup", "hookEvent": event, "command": command, "stderr": stderr}
 
 
-def _pin_tree(command: str) -> MemTree:
+def _pin_tree(command: str, stderr: str = PIN_STDERR) -> MemTree:
     records = [
         {
             "type": "attachment",
             "uuid": "h1",
             "timestamp": "2026-01-01T00:00:00.000Z",
-            "attachment": _attachment("SessionStart", command, PIN_STDERR),
+            "attachment": _attachment("SessionStart", command, stderr),
         },
         {"type": "user", "uuid": "u1", "timestamp": "2026-01-01T00:00:01.000Z", "message": {"content": "hi"}},
     ]
@@ -176,4 +177,28 @@ def test_the_recorded_status_message_satisfies_the_parser_rules() -> None:
     assert is_witness_record(record)
     label = "command hook 9"
     assert project_ref_pin(_pin_tree(label)) is None
-    assert not is_witness_record({"type": "attachment", "attachment": _attachment("Stop", label, WITNESS_STDERR)})
+    assert project_ref_pin(_pin_tree(label, PIN_STDERR + REF_STDERR)) == "ontheloop"
+    assert is_witness_record({"type": "attachment", "attachment": _attachment("Stop", label, WITNESS_STDERR)})
+
+
+def test_status_message_ref_matches_the_hook_ref_line(tmp_path: Path) -> None:
+    import re  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+
+    hook_path = ROOT / ".claude" / "hooks" / "session_start_log_turn.sh"
+    for _, entry in _capture_entries():
+        message = entry.get("statusMessage")
+        if message is None or "--project-ref=" not in message:
+            continue
+        flag = re.search(r"--project-ref=(\S+)", entry["command"])
+        assert flag and flag.group(1) == message.split("--project-ref=")[1]
+        done = subprocess.run(
+            ["bash", str(hook_path), f"--project-ref={flag.group(1)}"],
+            stdin=subprocess.DEVNULL,
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert done.stderr.splitlines()[-1] == f"[session_start_log_turn] capture pin project_ref={flag.group(1)}"
