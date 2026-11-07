@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -15,14 +17,28 @@ _SETTINGS = v.SETTINGS_TF
 _ADMIN = v.ADMIN_TF
 
 
+Tree = tuple[dict[str, str], dict[str, str], dict[str, Any] | None, str, dict[str, str], str]
+
+
 @pytest.fixture(scope="module")
-def tree() -> tuple[dict[str, str], dict[str, str]]:
+def tree() -> Tree:
     return v._load_tree()
 
 
 @pytest.fixture
-def boot(tree: tuple[dict[str, str], dict[str, str]]) -> dict[str, str]:
+def boot(tree: Tree) -> dict[str, str]:
     return dict(tree[1])
+
+
+@pytest.fixture
+def wf(tree: Tree) -> dict[str, Any]:
+    assert tree[2] is not None
+    return copy.deepcopy(tree[2])
+
+
+@pytest.fixture
+def gh(tree: Tree) -> dict[str, str]:
+    return dict(tree[4])
 
 
 def _swap(files: dict[str, str], name: str, old: str, new: str) -> dict[str, str]:
@@ -32,13 +48,31 @@ def _swap(files: dict[str, str], name: str, old: str, new: str) -> dict[str, str
 
 
 def test_real_tree_is_green(tree) -> None:
-    assert v.run_all(*tree) == [[], [], []]
+    names, bootstrap = tree[0], tree[1]
+    assert v.check_names(names) == []
+    assert v.check_trust(bootstrap) == []
+    assert v.check_policies(bootstrap) == []
+
+
+def test_run_all_runs_every_group(monkeypatch) -> None:
+    groups = ["check_names", "check_trust", "check_policies", "check_workflow", "check_codeowners", "check_github_root"]
+    for name in groups:
+        monkeypatch.setattr(v, name, lambda *args, _n=name: [_n])
+    assert v.run_all({}, {}, None, "", {}, "") == [[name] for name in groups]
+
+
+def test_real_tree_meets_the_ci_apply_predicates(tree) -> None:
+    _, _, workflow, codeowners, github_tf, gate_text = tree
+    assert v.check_workflow(workflow) == []
+    assert v.check_codeowners(codeowners) == []
+    assert v.check_github_root(github_tf, gate_text) == []
+    assert len(v.run_all(*tree)) == 6
 
 
 def test_registered_on_the_fast_tier() -> None:
     entries = [e for e in _manifest.ENTRIES if e.name == "validate_github_settings_apply"]
     assert len(entries) == 1 and entries[0].pre
-    assert "terraform/bootstrap/github_settings_apply.tf" in entries[0].pre_globs
+    assert "terraform/bootstrap/github_settings_apply.tf" in (entries[0].pre_globs or ())
 
 
 def test_registered_check_passes_on_the_real_tree(capsys) -> None:
@@ -267,7 +301,7 @@ def test_parser_keeps_expressions_and_literals_apart() -> None:
 
 
 def test_unparseable_input_fails_closed(monkeypatch) -> None:
-    monkeypatch.setattr(v, "_load_tree", lambda: ({}, {_SETTINGS: 'locals {\n  a = "', _ADMIN: ""}))
+    monkeypatch.setattr(v, "_load_tree", lambda: ({}, {_SETTINGS: 'locals {\n  a = "', _ADMIN: ""}, None, "", {}, ""))
     failed: list[str] = []
     v.validate_github_settings_apply(failed)
     assert failed == ["github-settings-apply: inputs unreadable, so no predicate ran"]
@@ -279,6 +313,18 @@ def test_unparseable_input_fails_closed(monkeypatch) -> None:
 def test_ci_rca_taxonomy_row() -> None:
     data = yaml.safe_load((_ROOT / "config" / "ci_rca_taxonomy.yaml").read_text(encoding="utf-8"))
     assert "validate_github_settings_apply" in str(data)
+
+
+def test_environment_taxonomy_apply_gating_names_the_ci_apply() -> None:
+    data = yaml.safe_load((_ROOT / "docs" / "contracts" / "environment-taxonomy.yaml").read_text(encoding="utf-8"))
+    gating = str(data["axis_a"]["github"]["apply_gating"])
+    assert v.WORKFLOW in gating and "terraform-github-plan.yml" in gating and "NEVER auto-apply" in gating
+
+
+def test_ci_rca_taxonomy_workflow_row() -> None:
+    data = yaml.safe_load((_ROOT / "config" / "ci_rca_taxonomy.yaml").read_text(encoding="utf-8"))
+    assert data["workflows"]["terraform-github-apply"]["tier"] == "not_a_gate"
+    assert data["workflows"]["terraform-github-apply"]["ci_rca"] == "excluded"
 
 
 def test_deploy_paths_provisioning_row_names_both_roles() -> None:
@@ -314,9 +360,225 @@ def test_h_a_deny_statement_in_the_apply_policy(boot) -> None:
 
 
 def test_registered_check_reports_violations(monkeypatch) -> None:
-    names, boot = v._load_tree()
+    names, *rest = v._load_tree()
     names = {**names, ".github/workflows/other.yml": v.APPLY_ROLE}
-    monkeypatch.setattr(v, "_load_tree", lambda: (names, boot))
+    monkeypatch.setattr(v, "_load_tree", lambda: (names, *rest))
     failed: list[str] = []
     v.validate_github_settings_apply(failed)
     assert failed == [f"github-settings-apply: a: .github/workflows/other.yml names {v.APPLY_ROLE}"]
+
+
+def test_a_bad_gate_file_fails_closed(monkeypatch) -> None:
+    rest = v._load_tree()
+    monkeypatch.setattr(v, "_load_tree", lambda: (*rest[:5], "GATE_TYPES = (\n"))
+    failed: list[str] = []
+    v.validate_github_settings_apply(failed)
+    assert failed == ["github-settings-apply: inputs unreadable, so no predicate ran"]
+
+
+# (b)-(f), (j) ------------------------------------------------------------------------------------------------------
+
+
+def _step(wf: dict[str, Any], job: str, key: str, contains: str) -> dict[str, Any]:
+    return next(s for s in wf["jobs"][job]["steps"] if contains in str(s.get(key, "")))
+
+
+def test_b_missing_workflow() -> None:
+    assert v.check_workflow(None) == [f"b: {v.WORKFLOW} is missing"]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda on: on.update(pull_request={}),
+        lambda on: on.pop("workflow_dispatch"),
+        lambda on: on["push"].update(branches=["main", "dev"]),
+        lambda on: on["push"].update(tags=["v*"]),
+    ],
+    ids=["pull-request", "no-dispatch", "second-branch", "push-tags"],
+)
+def test_b_triggers(wf, mutate) -> None:
+    mutate(wf["on"])
+    assert "b: on: must be exactly push (branches [main]) and workflow_dispatch" in v.check_workflow(wf)
+
+
+def test_c_apply_environment_not_the_gate(wf) -> None:
+    wf["jobs"]["apply"]["environment"] = "tf-trusted-plan"
+    assert f"c: the apply job must declare environment {v.GATE_ENV} as a literal" in v.check_workflow(wf)
+
+
+def test_c_apply_environment_as_a_mapping(wf) -> None:
+    wf["jobs"]["apply"]["environment"] = {"name": v.GATE_ENV}
+    assert f"c: the apply job must declare environment {v.GATE_ENV} as a literal" in v.check_workflow(wf)
+
+
+def test_c_preview_assuming_the_apply_role(wf) -> None:
+    step = _step(wf, "preview", "with", "role-to-assume")
+    step["with"]["role-to-assume"] = step["with"]["role-to-assume"].replace(v.PREVIEW_ROLE, v.APPLY_ROLE)
+    got = v.check_workflow(wf)
+    assert f"c: only the apply job may assume {v.APPLY_ROLE}, and it assumes nothing else" in got
+    assert f"c: the preview job must declare {v.PREVIEW_ENV} and assume only {v.PREVIEW_ROLE}" in got
+
+
+def test_c_a_third_job_assuming_the_apply_role(wf) -> None:
+    wf["jobs"]["extra"] = copy.deepcopy(wf["jobs"]["apply"])
+    assert f"c: only the apply job may assume {v.APPLY_ROLE}, and it assumes nothing else" in v.check_workflow(wf)
+
+
+def test_c_preview_on_another_environment(wf) -> None:
+    wf["jobs"]["preview"]["environment"] = v.GATE_ENV
+    assert f"c: the preview job must declare {v.PREVIEW_ENV} and assume only {v.PREVIEW_ROLE}" in v.check_workflow(wf)
+
+
+def test_c_apply_reading_the_plan_app_key(wf) -> None:
+    wf["jobs"]["apply"]["steps"].append({"run": "true", "env": {"K": "${{ " + v.PLAN_APP_SIGNER_REF + " }}"}})
+    assert "c: only the preview job may read the plan App key" in v.check_workflow(wf)
+
+
+@pytest.mark.parametrize("job", ["preview", "apply"])
+def test_d_if_without_main(wf, job) -> None:
+    wf["jobs"][job]["if"] = "${{ github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' }}"
+    assert f"d: the {job} job's if must require refs/heads/main in every disjunct" in v.check_workflow(wf)
+
+
+def test_d_apply_not_needing_preview(wf) -> None:
+    del wf["jobs"]["apply"]["needs"]
+    assert "d: the apply job must need preview" in v.check_workflow(wf)
+
+
+@pytest.mark.parametrize(
+    "with_",
+    [
+        {"persist-credentials": True},
+        {"persist-credentials": False, "ref": "x"},
+        {"persist-credentials": False, "repository": "a/b"},
+    ],
+    ids=["persisted", "ref", "repository"],
+)
+def test_e_checkout(wf, with_) -> None:
+    _step(wf, "apply", "uses", "actions/checkout@")["with"] = with_
+    assert "e: apply checkout must take no ref or repository and set persist-credentials false" in v.check_workflow(wf)
+
+
+def test_f_unpinned_action(wf) -> None:
+    _step(wf, "preview", "uses", "setup-python")["uses"] = "actions/setup-python@v7"
+    assert "f: preview uses actions/setup-python@v7 without a 40-hex commit SHA pin" in v.check_workflow(wf)
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "${{ inputs.gate_change }}",
+        "${{ needs.preview.outputs.reviewed }}",
+        "${{ inputs['gate_change'] }}",
+        "${{ toJSON(inputs) }}",
+        "${{ github.event.head_commit.message }}",
+    ],
+)
+def test_j_expression_in_a_run_body(wf, expr) -> None:
+    wf["jobs"]["apply"]["steps"].append({"run": f"echo {expr}"})
+    assert "j: apply interpolates an expression in a run body" in v.check_workflow(wf)
+
+
+def test_c_a_third_job(wf) -> None:
+    wf["jobs"]["extra"] = {"runs-on": "ubuntu-latest", "steps": [{"run": "true"}]}
+    assert "c: the workflow's jobs must be exactly preview and apply" in v.check_workflow(wf)
+
+
+@pytest.mark.parametrize(
+    "expr", ["${{ secrets['TF_GITHUB_PLAN_APP_PRIVATE_KEY'] }}", "${{ toJSON(secrets) }}", "${{ tojson( secrets ) }}"]
+)
+def test_c_reading_secrets_whole(wf, expr) -> None:
+    wf["jobs"]["apply"]["steps"].append({"run": "true", "env": {"K": expr}})
+    assert "c: only the preview job may read the plan App key" in v.check_workflow(wf)
+
+
+# (i) --------------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", v.OWNED)
+def test_i_codeowners_line_missing(tree, path) -> None:
+    assert v.check_codeowners(tree[3]) == []
+    codeowners = "\n".join(f"/{p} @owner" for p in v.OWNED if p != path)
+    assert v.check_codeowners(codeowners) == [f"i: {path} is not code-owned"]
+
+
+# (k), (l) ---------------------------------------------------------------------------------------------------------
+
+_ENV_FILE = "environments.tf"
+
+
+def _in_block(gh: dict[str, str], header: str, old: str, new: str) -> dict[str, str]:
+    text = gh[_ENV_FILE]
+    start = text.index(header)
+    end = text.index("\n}\n", start)
+    assert old in text[start:end], old
+    gh[_ENV_FILE] = text[:start] + text[start:end].replace(old, new) + text[end:]
+    return gh
+
+
+_ENV_HEADER = 'resource "github_repository_environment" "tf_github_apply"'
+_POLICY_HEADER = 'resource "github_repository_environment_deployment_policy" "tf_github_apply_main"'
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "arg"),
+    [
+        ('"tf-github-apply"', '"tf-github-apply-2"', "environment"),
+        ("can_admins_bypass   = false", "can_admins_bypass   = true", "can_admins_bypass"),
+        ("protected_branches     = false", "protected_branches     = true", "protected_branches"),
+        ("custom_branch_policies = true", "custom_branch_policies = false", "custom_branch_policies"),
+        ("prevent_destroy = true", "prevent_destroy = false", "prevent_destroy"),
+    ],
+    ids=["renamed", "admin-bypass", "protected-branches", "custom-policies", "destroyable"],
+)
+def test_k_environment_shape(gh, old, new, arg) -> None:
+    got = v.check_github_root(_in_block(gh, _ENV_HEADER, old, new), "")
+    want = old.rsplit(" ", 1)[-1]
+    assert [x for x in got if x.startswith("k:")] == [
+        f"k: github_repository_environment.tf_github_apply must set {arg} = {want}"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ('branch_pattern = "main"', 'branch_pattern = "*"'),
+        (
+            "github_repository_environment.tf_github_apply.environment",
+            "github_repository_environment.tf_gated_apply.environment",
+        ),
+    ],
+    ids=["any-branch", "other-environment"],
+)
+def test_k_deployment_policy(gh, old, new) -> None:
+    got = v.check_github_root(_in_block(gh, _POLICY_HEADER, old, new), "")
+    assert 'k: tf_github_apply_main must bind tf_github_apply to branch_pattern "main"' in got
+
+
+def test_k_environment_missing(gh) -> None:
+    _swap(gh, _ENV_FILE, '"github_repository_environment" "tf_github_apply" {', '"github_repository_environment" "tf_other" {')
+    assert len([x for x in v.check_github_root(gh, "") if x.startswith("k: github_repository_environment")]) == 5
+
+
+def test_l_unclassified_resource_type(tree, gh) -> None:
+    gh["extra.tf"] = '# resource "github_ignored" "x" {}\nresource "github_branch_protection" "main" {\n}\n'
+    got = [x for x in v.check_github_root(gh, tree[5]) if x.startswith("l:")]
+    assert got == [f"l: resource type github_branch_protection is in neither GATE_TYPES nor NON_GATE_TYPES of {v.GATE_SCRIPT}"]
+
+
+def test_l_reads_the_gate_by_its_assignments(tree, gh) -> None:
+    trimmed = tree[5].replace('"github_repository_ruleset"})', "})").replace('RULESET = "github_repository_ruleset"', "")
+    assert "l: resource type github_repository_ruleset is in neither GATE_TYPES nor NON_GATE_TYPES of " + v.GATE_SCRIPT in (
+        v.check_github_root(gh, trimmed)
+    )
+
+
+def test_apply_job_pins_python_and_preview_checks_login_shape(wf) -> None:
+    apply_steps = wf["jobs"]["apply"]["steps"]
+    setup = [s for s in apply_steps if str(s.get("uses", "")).startswith("actions/setup-python@")]
+    assert len(setup) == 1 and setup[0]["with"]["python-version"] == "3.12"
+    names = [s.get("name", "") for s in apply_steps]
+    assert names.index(setup[0]["name"]) < next(i for i, n in enumerate(names) if n.startswith("Apply only"))
+    lookup = next(s for s in wf["jobs"]["preview"]["steps"] if str(s.get("name", "")).startswith("Resolve reviewer ids"))
+    assert '[[ "$login" =~ ^[A-Za-z0-9-]+$ ]]' in lookup["run"]

@@ -3,8 +3,9 @@
 # WHY isolated: terraform/personal/ auto-applies from GitHub Actions via OIDC; the
 # terraform_apply_guard.py is AWS-IAM-only and cannot inspect github_* resource diffs.
 # A branch-protection change on that auto-apply path would apply ungated and could lock
-# out the push-to-main flow the workflow depends on. This module is human-gated LOCAL
-# apply only (see CLAUDE.md). NEVER add terraform/github/** to any apply-workflow path.
+# out the push-to-main flow the workflow depends on. This module is CI-applied only by
+# .github/workflows/terraform-github-apply.yml behind one operator approval (Decision 248; see
+# CLAUDE.md). NEVER add terraform/github/** to any other apply-workflow path.
 #
 # Apply: see terraform/github/CLAUDE.md; init with the region from config/aws-region (rec-4067):
 # terraform -chdir=terraform/github init -backend-config="region=$(tr -d '[:space:]' < config/aws-region)".
