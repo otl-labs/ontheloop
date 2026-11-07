@@ -47,6 +47,16 @@ PROTECTED = (
     "src/common/ducklake_content_read_verbs.py",
     "docs/contracts/ducklake_telemetry_content_reader.yaml",
     "tests/lambdas/ducklake_telemetry_content_reader/",
+    ".claude/hooks/protected_action_gate.sh",
+    ".claude/hooks/protected_action_gate.py",
+    "scripts/session/protected_action_match.py",
+    "scripts/session/protected_action_shell.py",
+    "scripts/session/protected_action_approvals.py",
+    "scripts/session/handoff_push_parse.py",
+    "scripts/session/__init__.py",
+    "scripts/__init__.py",
+    "bin/venv-python",
+    "docs/contracts/protected-actions.yaml",
 )
 
 

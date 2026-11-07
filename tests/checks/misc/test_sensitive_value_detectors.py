@@ -27,8 +27,24 @@ BOUNDARY = [
     "src/common/ducklake_content_read_verbs.py",
     "docs/contracts/ducklake_telemetry_content_reader.yaml",
     "tests/lambdas/ducklake_telemetry_content_reader/",
+    "docs/contracts/protected-actions.yaml",
+    ".claude/hooks/protected_action_gate.sh",
+    ".claude/hooks/protected_action_gate.py",
+    "scripts/session/protected_action_match.py",
+    "scripts/session/protected_action_shell.py",
+    "scripts/session/protected_action_approvals.py",
+    "scripts/session/handoff_push_parse.py",
+    "scripts/session/__init__.py",
+    "scripts/__init__.py",
+    "bin/venv-python",
 ]
-CONTENT_READER_PATHS = BOUNDARY[-4:]
+CONTENT_READER_PATHS = [
+    "src/lambdas/ducklake_telemetry_content_reader/",
+    "src/common/ducklake_content_read_verbs.py",
+    "docs/contracts/ducklake_telemetry_content_reader.yaml",
+    "tests/lambdas/ducklake_telemetry_content_reader/",
+]
+PROTECTED_ACTION_GATE_PATHS = BOUNDARY[-10:]
 
 
 def _registered() -> dict[str, int]:
@@ -115,6 +131,17 @@ def test_content_reader_paths_are_protected() -> None:
     assert det.ownership_violations(det.PROTECTED, head, caps) == []
     owned = "\n".join(line for line in head.splitlines() if "ducklake_telemetry_content_reader" not in line)
     assert any("ducklake_telemetry_content_reader" in v for v in det.ownership_violations(det.PROTECTED, owned, caps))
+
+
+def test_protected_action_gate_paths_are_protected() -> None:
+    assert len(PROTECTED_ACTION_GATE_PATHS) == 10
+    assert all(path in det.PROTECTED for path in PROTECTED_ACTION_GATE_PATHS)
+    head = (ROOT / det.CODEOWNERS_REL).read_text(encoding="utf-8")
+    caps = yaml.safe_load((ROOT / det.CAPABILITIES_REL).read_text(encoding="utf-8"))["boundary_patterns"]
+    assert det.ownership_violations(det.PROTECTED, head, caps) == []
+    contract = "docs/contracts/protected-actions.yaml"
+    owned = "\n".join(line for line in head.splitlines() if contract not in line)
+    assert any(contract in v for v in det.ownership_violations(det.PROTECTED, owned, caps))
 
 
 def test_narrowing_against_base() -> None:
