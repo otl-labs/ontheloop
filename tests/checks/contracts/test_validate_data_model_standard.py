@@ -22,6 +22,7 @@ _COMPLETE_STANDARD = {
     "rules": [{"id": "grain-first", "statement": "name the grain first"}],
     "write_modes": {"scd2": {}, "append_only": {}},
     "indexes": [{"target": "docs/contracts/storage-substrate.yaml"}],
+    "arrival_expectations": {"kinds": {}, "tables": {}},
 }
 
 
@@ -253,14 +254,20 @@ class TestExaminedDeclaration:
         failed, decl = _declared(tmp_path, [_STANDARD])
         assert failed == []
         assert decl is not None
-        assert (decl.kind, decl.count, decl.unit) == ("examined", 3, "entries")
+        assert (decl.kind, decl.count, decl.unit) == ("examined", 4, "entries")
+
+    def test_standard_without_arrival_expectations_fails_as_a_missing_section(self, tmp_path: Path) -> None:
+        standard = {k: v for k, v in _COMPLETE_STANDARD.items() if k != "arrival_expectations"}
+        _write_yaml(tmp_path / "data-modeling-standard.yaml", standard)
+        failed, _ = _declared(tmp_path, [_STANDARD])
+        assert len(failed) == 1 and "arrival_expectations" in failed[0]
 
     def test_missing_section_still_counts_the_judged_sections(self, tmp_path: Path) -> None:
         _write_yaml(tmp_path / "data-modeling-standard.yaml", {"rules": []})
         failed, decl = _declared(tmp_path, [_STANDARD])
         assert len(failed) == 1
         assert decl is not None
-        assert (decl.kind, decl.count) == ("examined", 3)
+        assert (decl.kind, decl.count) == ("examined", 4)
 
     def test_both_files_changed_sum_their_judged_entries(self, tmp_path: Path) -> None:
         _write_yaml(tmp_path / "storage-substrate.yaml", {"tables": {"a": {}, "b": {}}})
@@ -268,7 +275,7 @@ class TestExaminedDeclaration:
         failed, decl = _declared(tmp_path, [_SUBSTRATE, _STANDARD])
         assert failed == []
         assert decl is not None
-        assert (decl.kind, decl.count) == ("examined", 5)
+        assert (decl.kind, decl.count) == ("examined", 6)
 
     def test_files_that_never_reach_the_judgment_count_zero(self, tmp_path: Path) -> None:
         _write_yaml(tmp_path / "storage-substrate.yaml", {"version": 1})
@@ -290,4 +297,4 @@ class TestExaminedDeclaration:
         assert failed == []
         assert decl is not None
         assert decl.kind == "examined"
-        assert decl.count == len(live["tables"]) + 3 > 3
+        assert decl.count == len(live["tables"]) + 4 > 4

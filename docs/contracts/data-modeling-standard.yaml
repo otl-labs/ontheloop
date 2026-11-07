@@ -28,6 +28,7 @@ contract:
     check: validate_data_model_standard
 
 amendment_log:
+  - {date: "2026-11-07", semantic_break: true, change_class: governance_note_add, summary: "PLAN-arrival-expectations (Decision 250): rule arrival-expectation, design_time_walk step 9, and the arrival_expectations grammar with every registry table's declaration. Additive: no existing rule or write mode changes."}
   - date: "2026-10-30"
     semantic_break: false
     change_class: governance_note_add
@@ -165,10 +166,10 @@ amendment_log:
       validate_table_registration.py is the new admission control this plan adds separately.
       semantic_break=false.
 
-version: 6
-updated_at: "2026-10-05"
-updated_by: "PLAN-telemetry-table-registration"
-decisions_cited: [78, 81, 84, 95, 96, 97, 141, 66, 137, 199, 191, 207, 210]
+version: 7
+updated_at: "2026-11-07"
+updated_by: "PLAN-arrival-expectations"
+decisions_cited: [78, 81, 84, 95, 96, 97, 141, 66, 137, 199, 191, 207, 210, 250]
 
 # Vocabulary reservation (environment-taxonomy.yaml's reserved_meaning / do_not_use_for row
 # shape): disambiguates a cluster of "smoke"-adjacent terms that Decision 191's amendment
@@ -389,6 +390,14 @@ rules:
       column. Materialization of a derived field (caching it back to a physical column for query
       performance) is a distinct, separately-gated decision owned by tier_item T2.52 clause 1 -- never
       a default a table falls into silently.
+  - id: arrival-expectation
+    statement: >-
+      Decision 250: every table in the generated table registry declares what should arrive, from an independent
+      denominator and by when, in arrival_expectations.tables below, keyed by table. A check that enforces an expectation fails when it cannot read its denominator or the
+      warehouse, reports skipped (never pass) when the denominator is empty, and is watched by a separate monitor
+      (Decision 250 cl.3); this grammar admits one watched form today, a scheduled GitHub workflow under the
+      derived sensor-liveness sweep. Grammar: arrival_expectations below. Evaluators: validate_arrival_expectations
+      and validate_arrival_residual_review.
 
 design_time_walk: >-
   Walk order (relocated from the planning skill's Data-Model Assessment,
@@ -428,6 +437,10 @@ design_time_walk: >-
   against the PINNED engine, not by name: a transform name is not portable between engines (the
   engine false-friend rule) -- confirm the actual semantics on the connection's pinned engine
   version before trusting a spec that merely looks familiar.
+
+  9 (Decision 250). Arrival: name the table's independent denominator (what outside the writing pipeline says a row
+  should exist), its join key and SLA, and declare it in arrival_expectations.tables in the same change that
+  registers the table; a table with no such source is waived with its reason.
 
 write_modes:
   scd2:
@@ -505,3 +518,51 @@ indexes:
       mandatory-read stub pointing here)
   - target: docs/contracts/telemetry-lexicon.yaml
     covers: canonical telemetry vocabulary, identity scheme, and temporal/partition rules (Decisions 95/96/97) -- precedent for this file's non-ritual shape
+
+arrival_expectations:
+  home: >-
+    arrival_expectations.tables below, one entry per table in the generated table registry (ops_table_names() and
+    control_table_names()), never a table outside it.
+  kinds:
+    enforced: {required: [denominator, join_key, semantics, sla, check, alarm_route], meaning: "A live check judges the denominator against the warehouse."}
+    residual: {required: [denominator, owner, review_by], meaning: "The denominator is known and the check is not built. owner is the open rec that builds it; the full tier fails once review_by is past, as for a temporary write-time exemption."}
+    derived: {required: [parent, cardinality_check], meaning: "The table's rows follow from a parent table's rows: the parent's expectation bounds it, and a named scheduled check reads the parent-to-child cardinality."}
+    waived: {required: [reason, authorized_by], optional: [binds_when], meaning: "No stream outside the writer exists to expect."}
+  fields:
+    denominator: The independent source, in prose, including what it cannot see.
+    join_key: The key the check joins the denominator to stored rows on, and any normalisation.
+    semantics: "set_inclusion (every denominator member is present) or count (the counts agree within a stated bound)."
+    sla: "How late a row may be, as an integer and a unit (m, h or d), measured from the denominator event."
+    check: "{workflow, module}: the .github/workflows file stem and the repository path of the module that judges."
+    alarm_route: "ci_rca (the workflow is ci-rca watched, Decision 250 cl.4) or self_filed (it files its own recs)."
+    owner: A rec id, rec-NNNN.
+    review_by: A date, YYYY-MM-DD.
+    parent: A registered table whose kind is enforced or residual.
+    cardinality_check: The scheduled workflow file stem whose check reads the parent-to-child cardinality.
+    reason: Why no external stream exists.
+    authorized_by: "Decision NNN or rec-NNNN."
+    binds_when: "The event that ends a waiver, after which the table needs another kind."
+  mechanical: >-
+    A kind's fields are its required list plus its optional list. validate_arrival_expectations enumerates the generated
+    table registry, never the contract files, and fails a registry table with no entry, an entry naming no registry
+    table, an unknown kind, a missing required field, or a field its kind does not allow; an absent or malformed
+    grammar fails, never passes. For enforced it checks that the workflow
+    file exists, carries an on.schedule cron sensor_liveness accepts, and, for ci_rca, is ci_rca: watched in
+    config/ci_rca_taxonomy.yaml and listed in .github/workflows/ci-rca.yml, or, for self_filed, is ci_rca: excluded
+    there; that the module exists; and that sla and semantics have their stated shapes. For derived it checks the
+    parent's kind and that the cardinality workflow exists with a schedule. It checks owner and authorized_by by shape
+    only and reads no warehouse. validate_arrival_residual_review, in the full tier only, fails a residual whose
+    review_by is past.
+  tables:
+    telemetry_sessions: {kind: enforced, denominator: "The Claude-Session trailers of squash commits on main: each distinct session a trailer names is expected as a captured root. A commit with no trailer is counted, never judged. Sessions that never merge (orient, plan-only, abandoned) are outside this denominator, and a root whose capture stopped after its open row still passes.", join_key: "harness_session_key against the trailer URL's last path segment, both without a session_ or cse_ prefix (scripts/telemetry_verify/completeness.py normalise_key).", semantics: set_inclusion, sla: 60m, check: {workflow: telemetry-arrival, module: scripts/telemetry_verify/session_presence.py}, alarm_route: ci_rca}
+    telemetry_observations: {kind: residual, denominator: "Bounded by telemetry_sessions: each captured root that closed an assistant-bearing turn has its turn observations, a parent-to-child cardinality no scheduled check reads yet. Anthropic usage reporting is the independent denominator for model_call rows once a credential for it exists.", owner: rec-4950, review_by: "2027-02-28"}
+    telemetry_transcripts: {kind: residual, denominator: "Bounded by telemetry_observations: each turn observation that carries content has its transcript row. The orphan count reads only the other direction (a transcript with no observation).", owner: rec-4950, review_by: "2027-02-28"}
+    telemetry_agents: {kind: residual, denominator: "The agent runs recorded in captured transcripts (subagent invocations), and the GitHub Actions runs of the CI agents once their capture lands (rec-4415).", owner: rec-4951, review_by: "2027-02-28"}
+    ops_recommendations: {kind: residual, denominator: "The rec ids the portal prints in its FILED and STATUS lines, ci-rca's FILED markers in Actions logs, and every rec a Resolves trailer on main names.", owner: rec-4952, review_by: "2027-02-28"}
+    ops_decisions: {kind: residual, denominator: "The Decision headers of docs/DECISIONS.md and docs/DECISIONS_ARCHIVE.md on main, each expected in ops_decisions after the rec-autoclose backfill of the push that adds it.", owner: rec-4953, review_by: "2027-02-28"}
+    ops_projects: {kind: waived, reason: "A real project is registered in the same writer transaction as its first telemetry append (src/common/ducklake_telemetry_append.py), so it is never absent while its telemetry arrived; telemetry_sessions' expectation covers that stream.", authorized_by: "Decision 250"}
+    ops_tenants: {kind: waived, reason: "The operator registers each tenant once through register_tenant; no stream exists to expect.", authorized_by: "Decision 250"}
+    ops_entity_counters: {kind: waived, reason: "Writer-internal control state with no external stream (write_modes.control); its maintenance_binding health verb asserts its invariants.", authorized_by: "Decision 250"}
+    ops_priority_queue: {kind: waived, reason: "Dormant: the writer refuses it until its Class A contract lands, so nothing can arrive.", authorized_by: "Decision 250", binds_when: its Class A contract lands}
+    ops_execution_plans: {kind: waived, reason: "Dormant writes: the writer refuses it until its Class A contract lands, so nothing can arrive.", authorized_by: "Decision 250", binds_when: its Class A contract lands}
+    ops_smoke_events: {kind: waived, reason: "Deploy-smoke kernel proof: deploy-ducklake-lambdas' smoke job asserts its rows on every deploy.", authorized_by: "Decision 250", binds_when: it leaves smoke status}

@@ -16,7 +16,7 @@ import yaml
 
 from scripts.checks import _common, registry
 
-_REQUIRED_STANDARD_SECTIONS = ("rules", "write_modes", "indexes")
+_REQUIRED_STANDARD_SECTIONS = ("rules", "write_modes", "indexes", "arrival_expectations")
 
 
 def _load_yaml(path: Path) -> tuple[object | None, str | None]:

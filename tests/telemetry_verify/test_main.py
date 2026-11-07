@@ -301,3 +301,55 @@ def test_an_unresolved_catalog_prints_a_class_only_stop_line(
         assert cli.main([*argv, "--assert-zero", "x"], now=NOW) == 2
         out = capsys.readouterr().out
         assert out == f"{line}\n{line}\n" and "ducklake_ops" not in out and "Traceback" not in out
+
+
+def _arrival(monkeypatch: pytest.MonkeyPatch, status: str) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+
+    def fake(root: Path, reader: Any, now: datetime, **kw: Any) -> Any:
+        calls.append({"now": now, **kw})
+        return cli.session_presence.ArrivalResult(status=status, judged=2, missing=1 if status == "red" else 0)
+
+    monkeypatch.setattr(cli.session_presence, "run", fake)
+    return calls
+
+
+@pytest.mark.parametrize(("status", "code"), [("green", 0), ("skipped", 0), ("red", 1), ("unreadable", 1)])
+def test_arrival_command_exits_per_status_and_prints_the_arrival_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], status: str, code: int
+) -> None:
+    _arrival(monkeypatch, status)
+    assert cli.main(["arrival"], reader=FakeReader(), now=NOW) == code
+    assert capsys.readouterr().out.startswith(f"ARRIVAL status={status} judged=2")
+
+
+def test_arrival_command_writes_the_junit_and_parses_its_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = _arrival(monkeypatch, "red")
+    junit = tmp_path / "out.xml"
+    argv = ["arrival", "--junit-xml", str(junit), "--as-of", "2026-01-10T12:00:00Z", "--no-lost-windows", "--repo", "o/r"]
+    assert cli.main(argv, reader=FakeReader(), now=NOW) == 1
+    assert junit.is_file() and "ArrivalMissing_" in junit.read_text(encoding="utf-8")
+    assert calls[0]["now"] == datetime(2026, 1, 10, 12, tzinfo=timezone.utc)
+    assert calls[0]["no_lost_windows"] is True and calls[0]["repo"] == "o/r"
+
+
+def test_arrival_repo_defaults_to_the_environment_then_the_literal_slug(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _arrival(monkeypatch, "green")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "env/repo")
+    cli.main(["arrival"], reader=FakeReader(), now=NOW)
+    monkeypatch.delenv("GITHUB_REPOSITORY")
+    cli.main(["arrival"], reader=FakeReader(), now=NOW)
+    assert [c["repo"] for c in calls] == ["env/repo", "otl-labs/ontheloop"]
+    assert calls[0]["no_lost_windows"] is False and calls[0]["now"] == NOW
+
+
+def test_arrival_rejects_a_malformed_instant_and_keeps_logging_disabled(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["arrival", "--as-of", "yesterday"], reader=FakeReader(), now=NOW)
+    assert "expected an ISO instant" in capsys.readouterr().err
+    _arrival(monkeypatch, "green")
+    logging.disable(logging.NOTSET)
+    cli.main(["arrival"], reader=FakeReader(), now=NOW)
+    assert logging.root.manager.disable == logging.CRITICAL
