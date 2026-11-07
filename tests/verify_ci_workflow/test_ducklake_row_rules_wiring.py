@@ -8,6 +8,7 @@ from pathlib import Path
 
 import yaml
 
+from scripts.convergence_health.code_drift import DUCKLAKE_SOURCE_PATHSPECS
 from scripts.lambda_manifest import compute_affected_artifacts
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -49,8 +50,7 @@ def test_data_pipeline_excludes_the_engine_and_is_never_marked_affected_by_it() 
 
 def test_workflow_redeploys_on_engine_edits_and_smokes_the_row_rules_gate() -> None:
     doc = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
-    triggers = doc.get("on") or doc.get(True)
-    assert "src/row_rules/**" in triggers["push"]["paths"]
+    assert "src/row_rules" in DUCKLAKE_SOURCE_PATHSPECS
     steps = [step.get("run", "") for step in doc["jobs"]["smoke"]["steps"]]
     chained = [run for run in steps if "--lambda-row-rules" in run]
     assert len(chained) == 1 and "\n" not in chained[0].strip()  # one line: the R3 body baseline stays untouched

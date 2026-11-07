@@ -8,7 +8,9 @@ so a deploy from a later, non-source-touching commit (e.g. a workflow_dispatch
 recovery run) is correctly reported fresh. A null/empty/unresolvable recorded
 sha is always stale (fail closed). Mirrors escalate()'s idempotent
 file/update/close pattern via scripts.rec_episode.run_episode, but ANY stale
-function triggers exactly ONE deduped rec (never one per function). Never
+function triggers exactly ONE deduped rec (never one per function). The reference is the newest
+settled green main commit (scripts.ci.deploy_gate.newest_green_sha, Decision 249), with an independent
+6 h ceiling against HEAD. Never
 writes a deploy record; never redeploys; never runs build_lambda. Alarm-not-gate (priority High,
 never source=ci_rca). Part of the scripts.convergence_health package -- see
 scripts/convergence_health/__init__.py for the full public surface.
@@ -17,17 +19,19 @@ scripts/convergence_health/__init__.py for the full public surface.
 from __future__ import annotations
 
 import subprocess
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from scripts.rec_episode import run_episode
 
+SETTLE_MINUTES = 45
+HEAD_CEILING_HOURS = 6
+
+# Single path source for the deploy gate and this sensor (Decision 249). "src/lambdas/ducklake_*" also matches
+# ducklake_telemetry_content_reader (operator-only deploy, Decision 239), exactly as the retired push glob did.
 DUCKLAKE_SOURCE_PATHSPECS: tuple[str, ...] = (
-    "src/lambdas/ducklake_writer",
-    "src/lambdas/ducklake_reader",
-    "src/lambdas/ducklake_maintenance",
-    "src/lambdas/ducklake_catalog_dr",
-    "src/lambdas/ducklake_telemetry_writer",
-    "src/lambdas/ducklake_telemetry_reader",
+    "src/lambdas/ducklake_*",
     "src/common/ducklake_*.py",
     "src/row_rules",
     "src/telemetry",
@@ -62,11 +66,10 @@ def _is_fresh(
     pathspecs: tuple[str, ...],
 ) -> bool:
     """Reachability oracle (Decision 103): a deploy record is fresh iff the latest watched-source
-    commit reachable FROM its recorded source_git_sha equals the latest watched-source commit on
-    HEAD (`latest_sha`). A push-triggered deploy sets source_git_sha to the exact commit that
-    touched source; a workflow_dispatch recovery deploy can set it to a LATER commit that never
-    itself touches source -- both are correctly FRESH here, unlike a bare equality comparison
-    (the defect that let a dead sensor report false drift after a workflow_dispatch recovery).
+    commit reachable FROM its recorded source_git_sha (L_R) equals the latest watched-source commit
+    at the reference (`latest_sha`, L_T), or the record is AHEAD of the reference (L_T is an
+    ancestor of L_R: `git merge-base L_T L_R` prints L_T). A deploy from a later, non-source-touching
+    commit (a workflow_dispatch recovery run) is correctly fresh, unlike a bare equality comparison.
 
     Fails closed (returns False) when: there is no record at all, `latest_sha` itself could not
     be resolved (empty -- never treat "nothing to compare against" as fresh), the recorded
@@ -81,10 +84,58 @@ def _is_fresh(
     if not recorded_sha:
         return False
     reachable = runner(["git", "log", "-1", "--format=%H", recorded_sha, "--", *pathspecs]).strip()
-    return bool(reachable) and reachable == latest_sha
+    if not reachable:
+        return False
+    return reachable == latest_sha or runner(["git", "merge-base", latest_sha, reachable]).strip() == latest_sha
 
 
-def _build_ducklake_drift_context(stale_functions: list[str], latest_sha: str) -> str:
+def _default_target_resolver() -> Optional[str]:
+    from scripts.ci import deploy_gate  # noqa: PLC0415
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=SETTLE_MINUTES)
+    return deploy_gate.newest_green_sha(deploy_gate.GithubApi(), deploy_gate.Git(), settled_before=cutoff)
+
+
+def _head_is_old(runner: Callable[[list[str]], str], head_latest: str) -> bool:
+    """True when HEAD's latest watched commit is older than the ceiling (an unreadable date counts as old)."""
+    try:
+        return time.time() - int(runner(["git", "log", "-1", "--format=%ct", head_latest]).strip()) > HEAD_CEILING_HOURS * 3600
+    except ValueError:
+        return True
+
+
+def _stale_functions(
+    functions: list[str],
+    read: Callable[[str], Optional[dict[str, Any]]],
+    runner: Callable[[list[str]], str],
+    pathspecs: tuple[str, ...],
+    target_resolver: Optional[Callable[[], Optional[str]]],
+) -> tuple[list[str], str, str]:
+    """(stale functions, reference sha, note): fresh against the settled green target AND, once HEAD's latest watched
+    commit is past the ceiling, against HEAD. A resolver failure or no green commit falls back to HEAD (alarming)."""
+    from scripts.ci.deploy_gate import GateError  # noqa: PLC0415
+
+    head_latest = runner(["git", "log", "-1", "--format=%H", "--", *pathspecs]).strip()
+    note = ""
+    try:
+        target = (target_resolver or _default_target_resolver)()
+    except GateError as exc:
+        target, note = None, f" The settled green target could not be resolved ({exc}); compared against HEAD instead."
+    if target is None and not note:
+        note = " No settled green main commit was found; compared against HEAD instead."
+    reference = runner(["git", "log", "-1", "--format=%H", target, "--", *pathspecs]).strip() if target else head_latest
+    records = {fn: read(fn) for fn in functions}
+    stale = [fn for fn, rec in records.items() if not _is_fresh(rec, reference, runner, pathspecs)]
+    if reference != head_latest and head_latest:
+        behind = [fn for fn, rec in records.items() if not _is_fresh(rec, head_latest, runner, pathspecs)]
+        if behind and _head_is_old(runner, head_latest):
+            stale = sorted(set(stale) | set(behind))
+            reference = head_latest
+            note += f" The latest watched commit is more than {HEAD_CEILING_HOURS} h old (independent ceiling)."
+    return stale, reference, note
+
+
+def _build_ducklake_drift_context(stale_functions: list[str], latest_sha: str, note: str = "") -> str:
     fn_list = ", ".join(sorted(stale_functions))
     return (
         f"The following DuckLake Lambda function(s) have a deployed CodeSha256 whose recorded "
@@ -92,10 +143,10 @@ def _build_ducklake_drift_context(stale_functions: list[str], latest_sha: str) -
         f"touching ducklake source ({latest_sha[:12] if latest_sha else 'unknown'}): {fn_list}. The "
         "latest ducklake-source commit reachable from the recorded deploy sha is stale, absent, or "
         "unresolvable (Decision 103 reachability oracle). Redeploy via the governed channel "
-        "(.github/workflows/deploy-ducklake-lambdas.yml -- push to main touching ducklake source, "
-        "or workflow_dispatch) to bring the deployed code current. This rec closes automatically on "
-        "the next sensor tick once every function's deploy record reaches the latest ducklake-source "
-        "commit."
+        "(.github/workflows/deploy-ducklake-lambdas.yml -- the deploy gate of Decision 249 wakes on each "
+        "completed CI run and deploys the newest green main commit; workflow_dispatch redeploys it) to bring "
+        "the deployed code current. This rec closes automatically on the next sensor tick once every "
+        f"function's deploy record reaches the latest ducklake-source commit.{note}"
     )
 
 
@@ -119,7 +170,7 @@ def _build_drift_acceptance(stale_functions: list[str], latest_sha: str, channel
     )
 
 
-def _build_ducklake_drift_rec_fields(stale_functions: list[str], latest_sha: str) -> dict[str, Any]:
+def _build_ducklake_drift_rec_fields(stale_functions: list[str], latest_sha: str, note: str = "") -> dict[str, Any]:
     return {
         "title": "DuckLake Lambda code drift -- deployed code stale vs latest main",
         "file": ".github/workflows/deploy-ducklake-lambdas.yml",
@@ -129,7 +180,7 @@ def _build_ducklake_drift_rec_fields(stale_functions: list[str], latest_sha: str
         "effort": "S",
         "risk": "medium",
         "verification_tier": "V2",
-        "context": _build_ducklake_drift_context(stale_functions, latest_sha),
+        "context": _build_ducklake_drift_context(stale_functions, latest_sha, note),
         "acceptance": _build_drift_acceptance(stale_functions, latest_sha, "ducklake"),
     }
 
@@ -140,6 +191,7 @@ def detect_ducklake_code_drift(
     portal_caller: Optional[Any] = None,
     open_recs: Optional[list[dict[str, Any]]] = None,
     profile: Optional[str] = None,
+    target_resolver: Optional[Callable[[], Optional[str]]] = None,
 ) -> dict[str, Any]:
     """Idempotent ducklake code-drift alarm: file/update/close exactly one rec per episode.
 
@@ -156,6 +208,8 @@ def detect_ducklake_code_drift(
                        current_state("ops_recommendations", row_filter="source = "
                        "'ducklake_code_drift'") (never a bulk fetch of every open rec).
         profile:       AWS profile for the reader / portal / S3 client.
+        target_resolver: Injected callable() -> settled green main sha (or None). Default:
+                       deploy_gate.newest_green_sha settled 45 minutes; a GateError falls back to HEAD.
 
     Returns:
         {"action": "file"|"update"|"unchanged"|"close"|"none"|"skipped", "rec_id": str|None}
@@ -180,19 +234,19 @@ def detect_ducklake_code_drift(
 
     runner = git_runner or _default_runner
     _assert_full_history(runner)
-    latest_sha = runner(["git", "log", "-1", "--format=%H", "--", *DUCKLAKE_SOURCE_PATHSPECS]).strip()
-
-    stale_functions: list[str] = []
-    for function in _build_ducklake_function_zip_keys():
-        record = read_deploy_record(function, s3_client=s3_client)
-        if not _is_fresh(record, latest_sha, runner, DUCKLAKE_SOURCE_PATHSPECS):
-            stale_functions.append(function)
+    stale_functions, latest_sha, note = _stale_functions(
+        list(_build_ducklake_function_zip_keys()),
+        lambda fn: read_deploy_record(fn, s3_client=s3_client),
+        runner,
+        DUCKLAKE_SOURCE_PATHSPECS,
+        target_resolver,
+    )
 
     def _build_fields() -> dict[str, Any]:
-        return _build_ducklake_drift_rec_fields(stale_functions, latest_sha)
+        return _build_ducklake_drift_rec_fields(stale_functions, latest_sha, note)
 
     def _build_update(existing: dict[str, Any]) -> dict[str, Any]:
-        return {"context": _build_ducklake_drift_context(stale_functions, latest_sha)}
+        return {"context": _build_ducklake_drift_context(stale_functions, latest_sha, note)}
 
     def _build_close(existing: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -225,9 +279,8 @@ def detect_ducklake_code_drift(
 # High, never source=ci_rca).
 # ---------------------------------------------------------------------------
 
-# Kept in sync with .github/workflows/deploy-prod-lambdas.yml's `on.push.paths` filter (single
-# conceptual source per rec-2686 -- a path added to one must be added to the other) so the drift
-# sensor's notion of "source changed" never diverges from what actually triggers a deploy.
+# Single path source for the deploy gate and this sensor (Decision 249): the deploy-prod-lambdas.yml push
+# paths filter is gone, so the sensor's notion of "source changed" is exactly the gate's.
 PROD_SOURCE_PATHSPECS: tuple[str, ...] = (
     "src/data/handlers",
     "scripts/aws_profile.py",
@@ -246,7 +299,7 @@ _PROD_FUNCTION_NAMES: tuple[str, ...] = (
 )
 
 
-def _build_prod_drift_context(stale_functions: list[str], latest_sha: str) -> str:
+def _build_prod_drift_context(stale_functions: list[str], latest_sha: str, note: str = "") -> str:
     fn_list = ", ".join(sorted(stale_functions))
     return (
         f"The following prod-class Lambda function(s) have a deployed CodeSha256 whose recorded "
@@ -254,14 +307,14 @@ def _build_prod_drift_context(stale_functions: list[str], latest_sha: str) -> st
         f"touching prod source ({latest_sha[:12] if latest_sha else 'unknown'}): {fn_list}. The "
         "latest prod-source commit reachable from the recorded deploy sha is stale, absent, or "
         "unresolvable (Decision 103 reachability oracle). Redeploy via the governed channel "
-        "(.github/workflows/deploy-prod-lambdas.yml -- push to main touching prod source, or "
-        "workflow_dispatch) to bring the deployed code current. This rec closes automatically on "
-        "the next sensor tick once every function's deploy record reaches the latest prod-source "
-        "commit."
+        "(.github/workflows/deploy-prod-lambdas.yml -- the deploy gate of Decision 249 wakes on each "
+        "completed CI run and deploys the newest green main commit; workflow_dispatch redeploys it) to bring "
+        "the deployed code current. This rec closes automatically on the next sensor tick once every "
+        f"function's deploy record reaches the latest prod-source commit.{note}"
     )
 
 
-def _build_prod_drift_rec_fields(stale_functions: list[str], latest_sha: str) -> dict[str, Any]:
+def _build_prod_drift_rec_fields(stale_functions: list[str], latest_sha: str, note: str = "") -> dict[str, Any]:
     return {
         "title": "Prod-class Lambda code drift -- deployed code stale vs latest main",
         "file": ".github/workflows/deploy-prod-lambdas.yml",
@@ -271,7 +324,7 @@ def _build_prod_drift_rec_fields(stale_functions: list[str], latest_sha: str) ->
         "effort": "S",
         "risk": "medium",
         "verification_tier": "V2",
-        "context": _build_prod_drift_context(stale_functions, latest_sha),
+        "context": _build_prod_drift_context(stale_functions, latest_sha, note),
         "acceptance": _build_drift_acceptance(stale_functions, latest_sha, "prod"),
     }
 
@@ -282,6 +335,7 @@ def detect_prod_code_drift(
     portal_caller: Optional[Any] = None,
     open_recs: Optional[list[dict[str, Any]]] = None,
     profile: Optional[str] = None,
+    target_resolver: Optional[Callable[[], Optional[str]]] = None,
 ) -> dict[str, Any]:
     """Idempotent prod-class code-drift alarm: file/update/close exactly one rec per episode.
 
@@ -293,6 +347,7 @@ def detect_prod_code_drift(
     Returns:
         {"action": "file"|"update"|"unchanged"|"close"|"none"|"skipped", "rec_id": str|None}
     """
+    from scripts.build_lambda_config import _build_prod_function_names  # noqa: PLC0415
     from scripts.build_lambda_deploy import read_deploy_record  # noqa: PLC0415
 
     if s3_client is None:
@@ -312,19 +367,19 @@ def detect_prod_code_drift(
 
     runner = git_runner or _default_runner
     _assert_full_history(runner)
-    latest_sha = runner(["git", "log", "-1", "--format=%H", "--", *PROD_SOURCE_PATHSPECS]).strip()
-
-    stale_functions: list[str] = []
-    for function in _PROD_FUNCTION_NAMES:
-        record = read_deploy_record(function, s3_client=s3_client, channel="prod")
-        if not _is_fresh(record, latest_sha, runner, PROD_SOURCE_PATHSPECS):
-            stale_functions.append(function)
+    stale_functions, latest_sha, note = _stale_functions(
+        _build_prod_function_names(),
+        lambda fn: read_deploy_record(fn, s3_client=s3_client, channel="prod"),
+        runner,
+        PROD_SOURCE_PATHSPECS,
+        target_resolver,
+    )
 
     def _build_fields() -> dict[str, Any]:
-        return _build_prod_drift_rec_fields(stale_functions, latest_sha)
+        return _build_prod_drift_rec_fields(stale_functions, latest_sha, note)
 
     def _build_update(existing: dict[str, Any]) -> dict[str, Any]:
-        return {"context": _build_prod_drift_context(stale_functions, latest_sha)}
+        return {"context": _build_prod_drift_context(stale_functions, latest_sha, note)}
 
     def _build_close(existing: dict[str, Any]) -> dict[str, Any]:
         return {

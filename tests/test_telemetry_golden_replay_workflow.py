@@ -33,8 +33,11 @@ def test_exactly_three_triggers_and_no_push() -> None:
     assert set(trigger) == {"workflow_run", "schedule", "workflow_dispatch"}
     assert trigger["workflow_run"] == {"workflows": ["deploy-ducklake-lambdas"], "types": ["completed"], "branches": ["main"]}
     condition = " ".join(str(_doc()["jobs"]["replay"]["if"]).split())
-    assert "github.event.workflow_run.conclusion == 'success'" in condition
-    assert "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'" in condition
+    assert condition.startswith("needs.decision.outputs.replay == 'true' && (")
+    decision = " ".join(str(_doc()["jobs"]["decision"]["if"]).split())
+    for text in (condition, decision):
+        assert "github.event.workflow_run.conclusion == 'success'" in text
+        assert "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'" in text
 
 
 def test_daily_cron_is_classified_as_86400_seconds() -> None:
@@ -46,16 +49,17 @@ def test_daily_cron_is_classified_as_86400_seconds() -> None:
 def test_permissions_role_masking_and_checkout() -> None:
     job = _doc()["jobs"]["replay"]
     assert job["permissions"] == {"id-token": "write", "contents": "read"} and _doc()["permissions"] == {"contents": "read"}
-    assert job["timeout-minutes"] == 30 and len(_doc()["jobs"]) == 1
-    assert _doc()["concurrency"] == {"group": "telemetry-golden-replay", "cancel-in-progress": False}
+    assert job["timeout-minutes"] == 30 and list(_doc()["jobs"]) == ["decision", "replay"]
+    assert "concurrency" not in _doc()
+    assert job["concurrency"] == {"group": "telemetry-golden-replay", "cancel-in-progress": False}
     steps = _steps()
     checkout = next(
         s
         for s in steps
         if str(s.get("uses", "")).startswith("actions/checkout")
-        and "workflow_run.head_sha" in str(s.get("with", {}).get("ref", ""))
+        and "needs.decision.outputs.sha" in str(s.get("with", {}).get("ref", ""))
     )
-    assert checkout["with"]["fetch-depth"] == 0 and "workflow_run.head_sha" in checkout["with"]["ref"]
+    assert checkout["with"]["fetch-depth"] == 0 and "workflow_run.head_sha" not in checkout["with"]["ref"]
     (assume,) = [s for s in steps if str(s.get("uses", "")).startswith("aws-actions/configure-aws-credentials")]
     assert assume["with"]["role-to-assume"].endswith("role/agent-platform-github-ci-branch")
     assert assume["env"] == {"MASK_AWS_ROLE_ID_ACCOUNT_PART": "${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}"}
@@ -68,7 +72,9 @@ def test_permissions_role_masking_and_checkout() -> None:
     assert str(step0.get("uses", "")).startswith("actions/checkout")
     assert "ref" not in step0_with and "path" not in step0_with
     assert step1.get("uses") == "./.github/actions/aws-region"
-    assert str(step2.get("uses", "")).startswith("actions/checkout") and "workflow_run.head_sha" in str(step2["with"]["ref"])
+    assert str(step2.get("uses", "")).startswith("actions/checkout") and "needs.decision.outputs.sha" in str(
+        step2["with"]["ref"]
+    )
     assert step2["with"]["fetch-depth"] == 0
     assert assume["with"]["aws-region"] == "${{ env.AWS_REGION }}"
 
@@ -101,3 +107,24 @@ def test_the_telemetry_reader_url_is_resolved_and_masked() -> None:
     assert '--function-name "agent-platform-ducklake-${role//_/-}"' in run
     assert run.index('echo "::add-mask::${URL}"') < run.index('>> "$GITHUB_ENV"')
     assert f"DUCKLAKE_{'telemetry_reader'.upper()}_URL" == read_route.READER_URL_ENV
+
+
+def test_the_decision_job_reads_the_deploy_manifest_and_gates_the_replay() -> None:
+    decision = _doc()["jobs"]["decision"]
+    assert decision["permissions"] == {"contents": "read", "actions": "read"}
+    assert _doc()["jobs"]["replay"]["needs"] == "decision"
+    download = next(s for s in decision["steps"] if str(s.get("uses", "")).startswith("actions/download-artifact"))
+    assert download["if"] == "github.event_name == 'workflow_run'"
+    assert download["with"]["name"] == "deploy-manifest"
+    assert download["with"]["run-id"] == "${{ github.event.workflow_run.id }}"
+    assert download["with"]["github-token"] == "${{ github.token }}"
+    pick = next(s for s in decision["steps"] if s.get("id") == "pick")
+    assert "deploy-manifest.json" in pick["run"] and "replay=true" in pick["run"]
+    assert decision["outputs"] == {"replay": "${{ steps.pick.outputs.replay }}", "sha": "${{ steps.pick.outputs.sha }}"}
+
+
+def test_a_missing_manifest_fails_red_and_no_replay_skips_the_job() -> None:
+    decision = _doc()["jobs"]["decision"]
+    download = next(s for s in decision["steps"] if str(s.get("uses", "")).startswith("actions/download-artifact"))
+    assert "continue-on-error" not in download
+    assert "needs.decision.outputs.replay == 'true'" in str(_doc()["jobs"]["replay"]["if"])

@@ -8,7 +8,23 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from typing import Any, Optional
+
+import pytest
+
+from scripts.ci.deploy_gate import GateError
+from scripts.convergence_health import code_drift
+
+
+@pytest.fixture(autouse=True)
+def _no_github_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every detector test falls back to HEAD (the pre-gate behaviour) unless it supplies a target_resolver."""
+
+    def _unreachable() -> Optional[str]:
+        raise GateError("no GitHub API in unit tests")
+
+    monkeypatch.setattr(code_drift, "_default_target_resolver", _unreachable)
 
 
 class _FakeDeployRecordsS3:
@@ -69,16 +85,24 @@ class GitRunnerStub:
         head_latest: str = "",
         reachable: Optional[dict[str, str]] = None,
         is_shallow: bool = False,
+        merge_bases: Optional[dict[tuple[str, str], str]] = None,
+        head_age_hours: float = 0.0,
     ) -> None:
         self.head_latest = head_latest
         self.reachable = reachable or {}
         self.is_shallow = is_shallow
+        self.merge_bases = merge_bases or {}
+        self.head_age_hours = head_age_hours
         self.calls: list[list[str]] = []
 
     def __call__(self, argv: list[str]) -> str:
         self.calls.append(argv)
         if argv[:3] == ["git", "rev-parse", "--is-shallow-repository"]:
             return "true" if self.is_shallow else "false"
+        if argv[:2] == ["git", "merge-base"]:
+            return self.merge_bases.get((argv[2], argv[3]), "")
+        if argv[:4] == ["git", "log", "-1", "--format=%ct"]:
+            return str(int(time.time() - self.head_age_hours * 3600))
         # Remaining shape: ["git", "log", "-1", "--format=%H", (optional sha), "--", *pathspecs]
         dashdash = argv.index("--")
         ref_tokens = argv[4:dashdash]
