@@ -337,3 +337,9 @@ def test_module_imports_only_stdlib() -> None:
     source = Path(dg.__file__).read_text(encoding="utf-8")
     top = source.split("\nclass GateError")[0]
     assert "yaml" not in top and "pydantic" not in top and "from scripts" not in top
+
+
+@pytest.mark.parametrize("channel", ["ducklake", "prod"])
+def test_channel_inputs_resolve_real_functions_and_pathspecs(channel: str) -> None:
+    functions, pathspecs = dg._channel_inputs(channel)
+    assert functions and pathspecs and all(isinstance(f, str) for f in functions)

@@ -121,3 +121,10 @@ def test_the_decision_job_reads_the_deploy_manifest_and_gates_the_replay() -> No
     pick = next(s for s in decision["steps"] if s.get("id") == "pick")
     assert "deploy-manifest.json" in pick["run"] and "replay=true" in pick["run"]
     assert decision["outputs"] == {"replay": "${{ steps.pick.outputs.replay }}", "sha": "${{ steps.pick.outputs.sha }}"}
+
+
+def test_a_missing_manifest_fails_red_and_no_replay_skips_the_job() -> None:
+    decision = _doc()["jobs"]["decision"]
+    download = next(s for s in decision["steps"] if str(s.get("uses", "")).startswith("actions/download-artifact"))
+    assert "continue-on-error" not in download
+    assert "needs.decision.outputs.replay == 'true'" in str(_doc()["jobs"]["replay"]["if"])
