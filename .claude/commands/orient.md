@@ -5,7 +5,7 @@ model: opus[1m]
 
 # Orient Workflow
 
-**Intent**: Consume the preflight cache and the roadmap to produce a structured orientation deliverable: status digest, CI-RCA triage, ranked work list, and up to 5 disjoint `/plan` prompts with an overlap matrix and keystone-first sequencing. Writes nothing.
+**Intent**: Consume the preflight cache and the roadmap to produce a structured orientation deliverable: status digest, CI-RCA triage, momentum and direction, best-practices health check, ranked work list, up to 5 disjoint `/plan` prompts with an overlap matrix and keystone-first sequencing, and advisory emergent north stars. Writes nothing.
 
 *Note: For the full orientation methodology (read-only contract, deliverable shape, overlap matrix spec, keystone sequencing, status-trusted-never-inferred rule), invoke your `orient` skill via the Skill tool.*
 
@@ -34,6 +34,9 @@ For the ad-hoc lane (Section 6's trailing subsection, below): `followon_recs`,
 DEGRADED recommendation pull from a genuinely empty lane rather than reading an unknown Critical
 population as a silent zero.
 
+For Section 7: `emergent_north_star`, the advisory bucket preflight computes from committed files
+only (Decision 243 clause 8).
+
 For `files_in_scope` (overlap matrix) and `depends_on` (keystone computation), use the typed-loader
 projection -- pure-local `scripts.roadmap.platform_roadmap.load()` import, no warehouse I/O, distinct from
 the banned `-m scripts.roadmap.platform_roadmap` module entrypoint. Keystone fan-out is a reverse query, so
@@ -46,15 +49,16 @@ bin/venv-python -c "import json; from scripts.roadmap.platform_roadmap import lo
 
 ## Step 3: Invoke the Orient Skill and Emit the Deliverable
 
-Apply the `orient` skill methodology to produce the six-section chat deliverable:
+Apply the `orient` skill methodology to produce the seven-section chat deliverable:
 1. Status Digest
 2. CI-RCA Triage
 3. Momentum & Direction
 4. Best-Practices Health Check
 5. Ranked What-to-Work-On
 6. /plan Prompts with Overlap Matrix
+7. Emergent North Stars (advisory)
 
-See the skill's Deliverable Shape section for the full spec of each, except Section 2's CI-RCA triage rendering and Section 6's ad-hoc lane trailing subsection, both specified below.
+See the skill's Deliverable Shape section for the full spec of each, except Section 2's CI-RCA triage rendering, Section 6's ad-hoc lane trailing subsection and Section 7, all specified below.
 
 ### CI-RCA Triage rendering (deliverable Section 2)
 
@@ -135,6 +139,30 @@ Render (within the total cap of 3):
 /plan rec-NNNN: follow-on of PLAN-<parent_plan> -- <title>
 /plan <rec_id>: <rationale>   # priority-queue head
 ```
+
+### Emergent North Stars rendering (deliverable Section 7)
+
+Advisory only (Decision 243 clause 8): the section shows where live Decisions may be converging on
+an intent no north star records yet. It promotes, files and edits nothing; an entry changes only by
+the operator's confirmation (Decision 243 clause 6). Render from the cache's `emergent_north_star`
+bucket only -- never recompute it, never read the decision files for it, and never copy one of its
+numbers into a rec, a Decision or a file (CD.47-r3: never a stored metric). An absent key means the
+cache predates the section: say so and recommend re-running preflight. A bucket carrying `error`
+renders as one DEGRADED line naming it, never as "no candidates".
+
+Render in bucket order (already sorted; do not re-sort):
+```
+Emergent north stars (advisory, detector v<detector_version>): <live> live entries, <kept_edges> of <amends_edges> amends/supersedes edges at similarity >= <edge_cut>, serves declared on <serves_declared> of <serves_eligible> eligible rows
+  [<members, first 8, then +N>] terms: <terms>; carried: <id xN, ...> | UNCOVERED; kinds: <kind xN, ...>
+  Rising: Decision NNN, cited by <citers> of <later> later entries (<share>), <per_month>/month over <months> months
+  Hubs (over <hub_cut> citers, listed, not ranked): NNN, NNN, ... (+N)
+```
+A cluster is UNCOVERED when no member is in any north star's `carried_by` and no member declares
+`serves`; while serves is declared on under a fifth of eligible rows, add "coverage read from
+carried_by". A cluster covered by serves alone is marked "cleared by serves", so a self-declared
+claim never hides a cluster silently. Follow the cluster lines with "+N more clusters" when
+`cluster_count` exceeds those listed. An undated entry shows "undated" for its months. Omit an
+empty line; omit the section only when the bucket has no cluster, no rising entry and no error.
 
 Output the deliverable to the chat. This is the sole output of `/orient`.
 

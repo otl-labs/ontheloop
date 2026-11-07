@@ -46,6 +46,7 @@ from scripts.preflight import (
     context_docs,
     correlation,
     dependabot,
+    emergent_north_star,
     env_git,
     priority_queue,
     recs_cache,
@@ -76,7 +77,8 @@ _spec.loader.exec_module(_preflight)  # type: ignore[union-attr]
 # dedup_effectiveness_escalation, PLAN-ci-rca-dedup-fire-and-selftest WS5; decision_conditions,
 # PR #603 feat(reversal-condition-monitor) SEQ-02; prose_context, PLAN-prose-context-metric
 # ACG-05/ACG-06 slice 3; budget_breach_summary, PLAN-full-tier-engine-hardening VTS-20;
-# dependabot_stranded_prs, dependabot-automation-cleanup Component 3) -- this
+# dependabot_stranded_prs, dependabot-automation-cleanup Component 3; emergent_north_star,
+# PLAN-emergent-north-star-orient) -- this
 # constant is a drift guard against SILENT schema changes, not a permanent ban on adding fields;
 # bump it (and the count assertion below) in the same commit as a deliberate report-key addition.
 FROZEN_REPORT_KEYS = frozenset(
@@ -125,6 +127,7 @@ FROZEN_REPORT_KEYS = frozenset(
         # 10 post-assignments
         "provisional_contracts_due",
         "decision_conditions",
+        "emergent_north_star",
         "non_automatable_softcap_breached",
         # Ad-hoc /orient lane (audit PDB-01, B1-R4 + B4-O1): pure derivations over
         # recs_rows_cache, written unconditionally right after the softcap gauge above.
@@ -141,7 +144,7 @@ FROZEN_REPORT_KEYS = frozenset(
         "prose_context",
     }
 )
-assert len(FROZEN_REPORT_KEYS) == 55, "frozen report key list itself drifted -- fix the constant, not the assertion"
+assert len(FROZEN_REPORT_KEYS) == 56, "frozen report key list itself drifted -- fix the constant, not the assertion"
 
 # Frozen export list: every public function + every test-referenced private symbol from the
 # pre-refactor module (facade-resident + all 9 domain modules + _common + the back-compat
@@ -302,6 +305,7 @@ def _base_stub_specs(report_path: Path) -> list[tuple[object, str, object]]:
         (alerts, "_check_forward_fix_recursion", None),
         (alerts, "_check_budget_bypass_alert", None),
         (dependabot, "check_stranded_prs", None),
+        (emergent_north_star, "preflight_bucket", {}),
         (telemetry_health, "check_telemetry_health", {"status": "pass", "catalog": "ducklake_smoke", "tables": {}}),
         (priority_queue, "read_priority_queue", []),
         (correlation, "correlate_ci_rca_with_main", {"unresolved": [], "likely_resolved": []}),
@@ -381,12 +385,12 @@ def _run_stubbed_main(
 
 
 class TestReportSchemaFreeze:
-    """A stubbed main() run's report top-level key set equals the frozen 55-key list."""
+    """A stubbed main() run's report top-level key set equals the frozen 56-key list."""
 
     def test_report_key_set_matches_frozen_keys(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         _, report, _ = _run_stubbed_main(tmp_path, capsys)
         assert set(report.keys()) == FROZEN_REPORT_KEYS
-        assert len(report.keys()) == 55
+        assert len(report.keys()) == 56
 
 
 class TestFacadeCompleteness:
