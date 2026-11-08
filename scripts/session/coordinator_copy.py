@@ -41,8 +41,6 @@ def expected(ref: str) -> dict[str, tuple[str, bytes]]:
 
 def _orphans(directory: Path, names: set[str]) -> list[Path]:
     pattern = Path(PROFILE_GLOB).name
-    if not directory.is_dir():
-        return []
     return sorted(p for p in directory.glob(pattern) if p.name not in names)
 
 
