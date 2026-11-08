@@ -515,3 +515,8 @@ def test_manifest_pre_globs_cover_the_github_job_scripts() -> None:
         "scripts/checks/ci_guards/_trusted_plan_role_partition.py",
     ):
         assert f'"{path}"' in entry, path
+
+
+def test_a_non_minting_job_in_a_trusted_workflow_needs_no_environment(wfs) -> None:
+    wfs[_TRUSTED]["jobs"]["lint"] = {"permissions": {"contents": "read"}, "steps": []}
+    assert v.check_minting_jobs(wfs) == []
