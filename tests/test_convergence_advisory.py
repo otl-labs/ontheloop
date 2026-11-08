@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import json
 import os
-from unittest.mock import patch
+import subprocess
+from unittest.mock import MagicMock, patch
 
 from scripts.ci.convergence_advisory import ERROR, FAILURE, SUCCESS, classify, main
 
@@ -194,3 +195,76 @@ class TestMainNeverRaises:
         out = capsys.readouterr().out.splitlines()
         assert out[0] == ERROR
         assert "UNVERIFIED" in out[1]
+
+
+_POST_ENV = {
+    "REPO": "o/r",
+    "HEAD_SHA": "abc",
+    "SERVER_URL": "https://github.com",
+    "RUN_ID": "7",
+    "CONVERGENCE_BUCKET": "bkt",
+    "CONVERGENCE_KEY": "key.json",
+    "OIDC_FAILED": "false",
+}
+
+
+def _cp(rc: int = 0, stderr: str = "") -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=rc, stdout="", stderr=stderr)
+
+
+def _post_fields(run: MagicMock) -> dict[str, str]:
+    argv = run.call_args_list[-1].args[0]
+    assert argv[:5] == ["gh", "api", "repos/o/r/statuses/abc", "--method", "POST"]
+    return {kv.split("=", 1)[0]: kv.split("=", 1)[1] for kv in argv[5:] if "=" in kv}
+
+
+def test_post_with_oidc_failure_skips_the_s3_read() -> None:
+    with patch.dict(os.environ, {**_POST_ENV, "OIDC_FAILED": "true"}), patch("subprocess.run", return_value=_cp()) as run:
+        assert main(["--post"]) == 0
+    assert run.call_count == 1
+    fields = _post_fields(run)
+    assert fields["state"] == ERROR
+    assert fields["context"] == "terraform-converged"
+    assert fields["description"].startswith("UNVERIFIED -- could not read the convergence record")
+    assert fields["target_url"] == "https://github.com/o/r/actions/runs/7"
+
+
+def test_post_read_success_classifies_the_record() -> None:
+    def fake(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "aws":
+            assert argv[:6] == ["aws", "s3api", "get-object", "--bucket", "bkt", "--key"]
+            with open(argv[-1], "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"status": "green"}))
+            return _cp()
+        return _cp()
+
+    with patch.dict(os.environ, _POST_ENV), patch("subprocess.run", side_effect=fake) as run:
+        assert main(["--post"]) == 0
+    fields = _post_fields(run)
+    assert fields["state"] == SUCCESS
+    assert fields["description"] == "main is converged (last sandbox apply GREEN). Advisory only."
+
+
+def test_post_nosuchkey_and_credential_failure() -> None:
+    for stderr, state in (("An error occurred (NoSuchKey)", SUCCESS), ("AccessDenied", ERROR)):
+        with patch.dict(os.environ, _POST_ENV), patch("subprocess.run", side_effect=[_cp(254, stderr), _cp()]) as run:
+            assert main(["--post"]) == 0
+        assert _post_fields(run)["state"] == state
+
+
+def test_post_aws_missing_degrades_and_failing_post_exits_nonzero() -> None:
+    with patch.dict(os.environ, _POST_ENV), patch("subprocess.run", side_effect=[OSError("no aws"), _cp(1, "boom")]) as run:
+        assert main(["--post"]) == 1
+    assert _post_fields(run)["state"] == ERROR
+    with patch.dict(os.environ, _POST_ENV), patch("subprocess.run", side_effect=[_cp(254, "NoSuchKey"), OSError("no gh")]):
+        assert main(["--post"]) == 1
+
+
+def test_post_classifier_exception_degrades() -> None:
+    with (
+        patch.dict(os.environ, _POST_ENV),
+        patch("scripts.ci.convergence_advisory.classify", side_effect=RuntimeError("x")),
+        patch("subprocess.run", side_effect=[_cp(0), _cp()]) as run,
+    ):
+        assert main(["--post"]) == 0
+    assert _post_fields(run)["state"] == ERROR
