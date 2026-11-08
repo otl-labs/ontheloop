@@ -25,9 +25,9 @@ scope:
       REVIEWER_LOGINS from the environment; refuses an environment name outside ^[A-Za-z0-9._-]+$. `approvals` (the
       load-bearing check): GET /repos/{repo}/actions/runs/{run_id}/approvals; prints ENVIRONMENT_APPROVAL_OK
       environment=<name> approver=<login> and exits 0 only when an entry has state approved, lists <name> among its
-      environments[].name, and its user.login is in the comma-separated REVIEWER_LOGINS (case-insensitive); with no such
+      environments[].name, and its user.login is in REVIEWER_LOGINS (split on commas and whitespace, each segment trimmed, empty segments ignored, compared case-insensitively, as the preview's `${REVIEWER_LOGINS//,/ }` tolerates spaces); with no such
       entry it reads once more after 5 s (in case GitHub records the approval after the job starts), then prints
-      ENVIRONMENT_APPROVAL_MISSING environment=<name> entries=<n> (exit 1); an empty REVIEWER_LOGINS prints
+      ENVIRONMENT_APPROVAL_MISSING environment=<name> entries=<n> (exit 1); a REVIEWER_LOGINS with no non-empty segment prints
       REVIEWER_LOGINS_EMPTY (exit 1). `environment [--require-no-admin-bypass]` (the early warning): GET
       /repos/{repo}/environments/{name}; 404 prints ENVIRONMENT_MISSING; no protection_rules entry of type
       required_reviewers with a non-empty reviewers list prints ENVIRONMENT_UNGATED; with the flag, can_admins_bypass
@@ -164,6 +164,18 @@ scope:
       publish gains actions read and the approvals check for pypi right after checkout, before the build and the OIDC
       publish; its checkout gains persist-credentials: false, so the widened token is not left in .git/config for the
       pip-installed build tool.
+  - file: config/agent/verification_registry/entries/ontheloop-publish-workflow-body-registered.yaml
+    action: Modify
+    purpose: >-
+      This graduated record pins publish-ontheloop.yml to exactly one inline run body (`len(k)==1`); the new approvals
+      step is a second. Its command changes from a count to an exact key set: the sorted list of publish-ontheloop keys
+      from scan_workflow_bodies() equals the two keys `.github/workflows/publish-ontheloop.yml::publish::build-distribution`
+      and the approvals step's name-slug key, and none is missing from r3_workflows; it still prints WF_BODIES= and
+      WF_BODIES_UNREGISTERED=. That pins both bodies by name rather than raising a count. A planned change to a graduated record's
+      assertion (Decision 235 cl.1), named here and in acceptance_criteria[2]: validate_weakening_candidates reads only
+      tests/*.py and source constants, so it emits no weakening_dispositions candidate for this file. Every other field is kept; it is not added to known_red.yaml. Build-time sweep: grep
+      config/agent/verification_registry/entries/ for each touched workflow and script name and confirm no other live
+      record pins a body or step count this plan changes (planning found none); one that does is a plan defect.
   - file: tests/test_approved_text_approval_workflow.py
     action: Modify
     purpose: >-
@@ -189,7 +201,7 @@ scope:
   - file: tests/checks/ci_guards/test_validate_github_settings_apply.py
     action: Modify
     purpose: >-
-      No edit expected: test_i_codeowners_line_missing is parametrized over v.OWNED (:499-503), so the new path's red
+      Listed to pin its graduated shards and the OWNED parametrization, not for an edit. No edit expected: test_i_codeowners_line_missing is parametrized over v.OWNED (:499-503), so the new path's red
       case appears without a change; the real-tree node stays green. Its graduated shards
       github-settings-apply-guard and github-settings-apply-guard-ci are kept unchanged.
   - file: .github/CODEOWNERS
@@ -283,11 +295,11 @@ followon_recs: [rec-5001]
 infrastructure_dependencies:
   - "GitHub: no new Environment, secret or variable. The jobs reuse the existing repository variable TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS (set; terraform-github-apply.yml's preview already refuses when it is empty)."
   - "GITHUB_TOKEN gains actions: read in the seven touched jobs; no id-token or secret is added anywhere."
-  - "No Terraform apply: environments.tf changes comments only."
+  - "No Terraform apply: environments.tf changes comments only. The merge matches terraform-github-apply.yml's push paths, so a push run starts: with nothing pending it ends with no changes; if the root has pending changes, that run asks the operator for approval and its preview environment check and apply approvals check run live (extra evidence for VP 8, read its log)."
 acceptance_criteria:
   - The preflight script refuses every unapproved, unreadable, wrong-Environment, wrong-approver, missing, ungated and admin-bypass case with its marker and exit 1, and accepts only the specified good cases, never printing the token (VP 1).
   - validate_environment_reviewer_preflight passes on the real tree and fails each predicate on a synthetic red case; every reviewer-gated job except the exempt probe runs the approvals check before any credential step (VP 2).
-  - The touched suites stay green; the changed assertions are exactly the approve job's permissions and steps, the render job's permissions pin and the two reconcile wake-silence nodes, each recorded in weakening_dispositions (VP 3, VP 4).
+  - The touched suites stay green; the changed assertions are exactly the approve job's permissions and steps, the render job's permissions pin, the two reconcile wake-silence nodes and the publish body record's count-to-key-set change (named in its scope row; the weakening detector does not read registry YAML), the test-file changes each recorded in weakening_dispositions (VP 3, VP 4).
   - After merge, a dispatched, operator-approved tf-gated-apply-prototype run logs ENVIRONMENT_APPROVAL_OK for tf-gated-apply before its OIDC step, and an operator-approved approved-text run logs ENVIRONMENT_GATED_OK in render and ENVIRONMENT_APPROVAL_OK in approve (VP 8, VP 9).
   - rec-4979 and rec-4961 read back closed (VP 10).
 verification_plan:
@@ -343,16 +355,19 @@ verification_plan:
     phase: pre-deploy
     action: >-
       Size relief holds: every governed file, reconcile.yml and terraform-apply-sandbox.yml included, is within its
-      structural budget, and no roster entry rose.
+      structural budget, and no roster entry rose; the edited publish body record re-runs green on the new tree.
     command: >-
       bin/venv-python -c "import sys; from scripts.checks.structural.size_limits import validate_structural_size_limits as v;
       from scripts.checks.structural.budget_raises import validate_structural_size_budget_raises as r; f = []; v(f); r(f);
-      print('STRUCTURAL_VIOLATIONS', len(f)); sys.exit(1 if f else 0)"
-    expected: STRUCTURAL_VIOLATIONS 0 and exit 0 (both the size limits and the raise-marker check pass).
+      print('STRUCTURAL_VIOLATIONS', len(f)); sys.exit(1 if f else 0)" && bin/venv-python -m
+      scripts.checks.verification.validate_graduated_rerun --check-id ontheloop-publish-workflow-body-registered --root .
+    expected: >-
+      STRUCTURAL_VIOLATIONS 0 (both the size limits and the raise-marker check pass), then the record's child result
+      {"passed": true, ...}; exit 0.
     fix_if: a violation (extract more of the named bodies, never raise or join lines)
     hermetic: false
     graduation: waive
-    graduation_waiver_reason: Duplicates the registered fast-tier checks validate_structural_size_limits and validate_structural_size_budget_raises, which already guard every later change.
+    graduation_waiver_reason: Duplicates the registered fast-tier checks validate_structural_size_limits and validate_structural_size_budget_raises, which already guard every later change; the record re-run is the full tier's validate_graduated_rerun, run here early.
   - step: 7
     phase: pre-deploy
     action: >-
@@ -392,11 +407,12 @@ verification_plan:
     action: >-
       Live proof on approved-text (also proves the GET environment response carries can_admins_bypass). Dispatch
       approved-text-approval.yml from main for an existing approved sidecar on main (slug protected-action-gate at main's
-      head, which holds the sidecar, with the digest and fingerprint the record command prints); the operator approves; read the render and
+      head, which holds the sidecar, with the approved= digest and fingerprint= value the record command prints and the
+      SHA git rev-parse prints); the operator approves; read the render and
       approve job logs.
     command: >-
-      bin/venv-python -m scripts.roadmap.approved_text record --slug protected-action-gate (prints approved= and
-      fingerprint=) and git rev-parse origin/main (a commit holding the sidecar); then
+      bin/venv-python -m scripts.roadmap.approved_text record --slug protected-action-gate;
+      git fetch origin main -q; git rev-parse origin/main;
       mcp__github__actions_run_trigger(method="run_workflow", owner="otl-labs", repo="ontheloop",
       workflow_id="approved-text-approval.yml", ref="main", inputs={"slug": "protected-action-gate", "sha": <that
       commit>, "digest": <approved=>, "fingerprint": <fingerprint=>}); after approval, mcp__github__get_job_logs for
@@ -406,7 +422,9 @@ verification_plan:
       ENVIRONMENT_APPROVAL_OK environment=approved-text approver=<the operator's login>; the run succeeds.
     fix_if: >-
       ENVIRONMENT_ADMIN_BYPASS because the field is absent (the endpoint omits the field: plan defect, the approval path is
-      blocked until the amendment merges; report at once); any other refusal: plan defect
+      blocked until the amendment merges; report at once; interim release valve: a one-line amendment dropping
+      --require-no-admin-bypass from render, merged on code review, or an operator UI merge under Decision 246 cl.5);
+      any other refusal: plan defect
     hermetic: false
   - step: 10
     phase: post-deploy
@@ -470,7 +488,7 @@ test_obligations:
     behavior: the preflight script is in the apply job's code-owned set
     verification_step: 3
     test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
-    red_green_expectation: red before for the new OWNED red case, green after
+    red_green_expectation: the new parametrized red case test_i_codeowners_line_missing[scripts/ci/environment_reviewer_preflight.py] appears through v.OWNED (it does not exist before); the real-tree node stays green
   - source: config/ci_rca_taxonomy.yaml
     behavior: the new check is mapped to a failure category (one line)
     verification_step: 5
@@ -554,6 +572,7 @@ gate_rounds:
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 13}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 7}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 5}
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
