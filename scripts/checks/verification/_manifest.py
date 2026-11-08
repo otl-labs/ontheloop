@@ -230,6 +230,7 @@ ENTRIES: tuple[Entry, ...] = (
         pre_globs=(
             "docs/plans/**",
             "docs/contracts/environment-taxonomy.yaml",
+            "docs/contracts/protected-actions.yaml",
             "scripts/checks/verification/**",
             "scripts/roadmap/plan_obligations.py",
             "scripts/roadmap/plan_decision_drafts.py",

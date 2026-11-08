@@ -1,0 +1,255 @@
+# Protected-action gate (rec-4518). Class D mechanism contract: the actions an agent session runs only after the
+# operator acknowledges them in that session, the acknowledgement grammar, and the recovery procedure for refusals.
+# Read at run time from origin/main by .claude/hooks/protected_action_gate.py (PreToolUse; project threads load it
+# through the ontheloop plugin's hooks.json). PUBLIC repository (Decision 101): logical names only.
+contract:
+  id: protected-actions
+  class: D
+  contract_version: 1
+  status: provisional_v0
+  description: >-
+    The protected-action classes, the in-session approval grammar the gate reads from the session transcript, the
+    build-start ask, the fail-closed and tamper rules, the known limits, and the refusal procedure.
+    validate_admin_root_premerge_gate checks this file against environment-taxonomy.yaml axis_a and enforces
+    approval.build_start on net-new admin-root plans.
+  subject: protected-actions
+  evaluator:
+    check: validate_admin_root_premerge_gate
+  provisional_v0:
+    authored_at: "2026-11-07"
+    authored_via: "PLAN-protected-action-gate"
+    rationale: >-
+      First shape. The approval grammar is tested only against this repository's project-thread and direct-session
+      transcript formats, which the harness may change; provisional_v0 lets it settle before it is treated as stable.
+amendment_log:
+  - date: "2026-11-07"
+    semantic_break: false
+    change_class: field_add
+    summary: >-
+      PLAN-protected-action-gate (rec-4518): created. Classes tf-state-change, secret-read and admin-credential; the
+      in-session approval grammar and the build-start ask; fail-closed and tamper rules; the refusal procedure.
+    migration_story: New contract; nothing migrates.
+
+authority: >-
+  None. The gate is an early warning (Decision 239 cl.5; Decision 143 cl.1 puts enforcement outside the agent's
+  loop): it only refuses, never returns an allow decision, and so never bypasses the auto-mode classifier. An approve
+  line acknowledges the warning for this gate alone. It grants no authority and is not an engine verb (Decision 233);
+  each class's binding_control is what binds.
+
+gate:
+  hook: .claude/hooks/protected_action_gate.sh
+  modules:
+    - .claude/hooks/protected_action_gate.sh
+    - .claude/hooks/protected_action_gate.py
+    - scripts/session/protected_action_match.py
+    - scripts/session/protected_action_shell.py
+    - scripts/session/protected_action_approvals.py
+    - scripts/session/handoff_push_parse.py
+    - scripts/session/__init__.py
+    - scripts/__init__.py
+    - bin/venv-python
+  tools: [Bash, Monitor, Edit, Write, MultiEdit, NotebookEdit]
+  contract_source: >-
+    git show origin/main:docs/contracts/protected-actions.yaml in CLAUDE_PROJECT_DIR (else the hook input cwd),
+    never the working tree (Decision 203 cl.4 precedent).
+  shell_parsing: >-
+    The handoff gate's lexer (scripts/session/handoff_push_parse.py) splits a command into simple commands and
+    recovers $(...) and backtick bodies, bash -c and eval strings, and heredocs fed to a shell; a here-string (<<<) or
+    an arithmetic << never starts a heredoc. A heredoc or here-string fed to an interpreter (python or python3 with
+    any version suffix, venv-python, perl, node), and an interpreter's -c, -e, -E, -p or --eval string, also inside a
+    combined flag word such as -Ic, is inline code; other heredoc bodies are data. A command word matches by basename
+    after leading NAME=value assignments. After a wrapper (env, command, exec, nohup, nice, time, timeout, sudo,
+    stdbuf, ionice, xargs, watch) the command word is the first later word whose basename is terraform or aws, so no
+    wrapper option hides it, and NAME=value words before it join the command's environment. The words after a
+    standalone --, -exec or -execdir are a command of their own; cd, pushd and env -C set the directory for what
+    follows.
+  live_roots:
+    terraform/bootstrap: bootstrap
+    terraform/github: github
+    terraform/personal: sandbox
+  live_roots_note: >-
+    Each live root maps to its environment-taxonomy.yaml axis_a row, the sole source for its apply gating
+    (Decision 92 pt 5). Every admin-only row's root must be listed here. A root directory is matched by its literal
+    last two path parts, so -chdir="$W/terraform/bootstrap" is bootstrap.
+  admin_profiles: [agent_platform_admin]
+  self_serve_profile: agent_platform
+  on_deny: >-
+    Exit 2. The message names the class, the target, the binding control, and the exact approve line the operator
+    writes in this thread, beside the exact command. When the only hit is admin-credential from the hook's own
+    AWS_PROFILE, it also names the self-serve fix: re-run with AWS_PROFILE=<self_serve_profile>.
+
+classes:
+  - id: tf-state-change
+    matches: >-
+      A terraform invocation, run against a live root, whose subcommand is in subcommands; or state followed by one of
+      state_subcommands; or workspace followed by one of workspace_subcommands; or init with one of init_flags. The
+      root directory is the -chdir= value, else the directory a preceding cd, pushd or env -C in the same command
+      sets, else the hook input cwd. A directory whose last two parts are not literal has target unknown.
+    subcommands: [apply, destroy, import, refresh, test, force-unlock, taint, untaint]
+    state_subcommands: [rm, mv, push, replace-provider]
+    workspace_subcommands: [new, delete]
+    init_flags: [-migrate-state, -force-copy]
+    target: the live root's last path part (bootstrap, github or personal), or unknown, which is never approvable
+    approval: one_shot_at_commit
+    binding_control: >-
+      The apply_gating of the root's axis_a row (gate.live_roots). An agent applies only after the operator has seen
+      the plan and directed the apply (Decision 126 cl.1; deploy-paths.yaml admin_out_of_band.procedure).
+  - id: secret-read
+    matches: >-
+      aws secretsmanager get-secret-value or batch-get-secret-value; aws ssm get-parameter, get-parameters,
+      get-parameters-by-path or get-parameter-history with --with-decryption; inline code (gate.shell_parsing)
+      naming get_secret_value, batch_get_secret_value or WithDecryption=True; or a command that runs one of
+      entry_points.
+    entry_points:
+      - .github/actions/materialise-tfvars/materialise_tfvars.sh
+      - bin/sync-terraform-assets.sh --tfvars
+      - scripts/ci/neon_api_key.sh
+      - scripts/ci/terraform_github_apply.sh
+    target: the --secret-id, --name, --names or --path value, else any
+    approval: session
+    binding_control: >-
+      IAM: the reading role's value grant on that secret or parameter (Decisions 157 and 237;
+      secret-material-handling.yaml).
+  - id: admin-credential
+    matches: >-
+      (1) A command that selects an admin profile: --profile <p>, --profile=<p>, AWS_PROFILE=<p>,
+      AWS_DEFAULT_PROFILE=<p>, TF_VAR_aws_profile=<p>, -var aws_profile=<p>, -backend-config=profile=<p>, or, in any
+      word or inline code, profile_name='<p>' or profile='<p>' (either quote). (2) A terraform call that contacts
+      AWS (any subcommand not in offline_subcommands, and not init -backend=false) on a root in admin_default_roots,
+      whose provider defaults aws_profile to an admin profile, unless the call sets aws_profile (-var or TF_VAR_) to
+      a non-admin profile. (3) An aws call, or a terraform call that contacts AWS, while the hook's own AWS_PROFILE is
+      an admin profile, unless the command sets AWS_PROFILE (or, for aws, --profile) to a non-admin profile; -var and
+      TF_VAR_ do not clear this, because the terraform backends read the ambient profile.
+    admin_default_roots: [terraform/bootstrap, terraform/personal]
+    offline_subcommands: [fmt, validate, version, providers, graph, help, -help, -version]
+    target: the profile name
+    approval: session
+    binding_control: >-
+      IAM trust on the admin role and the CloudTrail IAM-change detector (Decisions 144, 202 and 225), and the
+      operator's rule that the admin profile serves only named bootstrap and admin deploys (rec-4707).
+
+not_protected:
+  - >-
+    terraform plan, show, output, state list and state pull on a live root: state reads are bound by IAM
+    (Decision 238 cl.1). Run with an admin profile, including a root's default one, they are admin-credential.
+  - aws ssm get-parameter(s) without --with-decryption, and any secretsmanager or ssm metadata call.
+
+approval:
+  grammar:
+    session: "approve <class> <target>"
+    one_shot_at_commit: "approve <class> <target> <commit>"
+  grammar_notes: >-
+    Case-insensitive; a whole line, or a whole comma-separated item, is one approval, so a line that only mentions
+    one ("do not approve ...") is none; one message may carry several. Target any covers every target of a session
+    class. <commit> is at least 7 hex characters of a commit id.
+  lifetimes:
+    session: The rest of that session. A new thread needs its own approval.
+    one_shot_at_commit: >-
+      One matching tool call made after the approval line, and only while the repository's HEAD starts with <commit>
+      and no file in the repository, tracked or untracked and not ignored, differs from HEAD (a root also reads files
+      outside its directory, such as config/). It covers only a root the command names (-chdir=, cd, pushd or env
+      -C), never one taken from the hook input cwd. Any later matching call uses it up, whether or not it ran. A call
+      from a subagent (the hook input carries agent_id) is never covered, because its calls are not in the
+      transcript that counts the credit: one-shot actions run in the main session.
+  sources: >-
+    A user turn the person typed: a user record with string content, a promptId, no sourceToolUseID or
+    turnCompanion, and none of isMeta, isCompactSummary or isSidechain (src/turn_capture/streams.py's prompt rule).
+    In a project thread that record must be a wake whose origin kind is human, and only its <message> elements with
+    from="human" and trust="principal", outside any relay or citation, count; for a decision-card tap only the
+    chosen option's label counts. In a direct session a record whose origin kind is present and not human does not
+    count.
+  never_counted: >-
+    Coordinator or thread relays, including the operator's messages they cite; tool results; companion records;
+    compaction summaries; file contents; hook output; the agent's own messages.
+  build_start:
+    context_prefix: "Approvals at build start:"
+    rule: >-
+      A net-new IMPLEMENTATION plan whose scope changes a non-Markdown file under an admin-only root
+      (deploy-paths.yaml admin_out_of_band.pre_merge_live_plan) carries a context line starting with context_prefix.
+      It lists the approve line for every session class its steps need and the exact commands each covers. The build
+      posts that list as its first ask, before any work. One reply in that thread clears this gate, and because it
+      names the exact commands it is also the in-thread approval the auto-mode classifier looks for (harness
+      behaviour this repository does not own). Only session classes may be listed; a one_shot_at_commit class is
+      asked when its plan is shown.
+
+fail_closed:
+  - An unreadable or unparseable transcript, or an empty transcript_path, denies a protected command.
+  - >-
+    An unreadable or invalid contract at origin/main denies every command that names a coarse keyword (terraform,
+    secretsmanager, ssm, get_secret_value, WithDecryption, an admin profile, an entry point), and every aws or
+    terraform call while the hook's own AWS_PROFILE is an admin profile, naming the failure and git fetch origin main.
+  - A lexer error on a command that names a coarse keyword denies it.
+  - A git error while checking a one_shot_at_commit approval, or a root path that is not literal, denies it.
+  - >-
+    The registered shim (gate.hook) maps a timeout or any interpreter exit other than 0 and 2 to a deny when the
+    payload names a coarse keyword, and to an allow otherwise, so a broken interpreter never wedges every command.
+  - Malformed hook input allows (the never_on_main precedent, Decision 138), because nothing can be classified.
+
+tamper:
+  - The gate denies Edit, Write, MultiEdit and NotebookEdit on any file in the transcript's directory.
+  - >-
+    It denies a Bash or Monitor command that names the transcript's directory and writes (a > or >> redirect into it,
+    tee, sed -i, cp, mv, rm, truncate, dd, ln, or an inline interpreter). Reading it stays allowed.
+  - >-
+    gate.modules and this contract are code-owned by the operator (.github/CODEOWNERS) and listed in the PROTECTED
+    ratchet (scripts/checks/misc/sensitive_value_detectors.py) and in boundary_patterns, so the ratchet refuses a
+    change that drops one of them, or its CODEOWNERS line or boundary entry, at the base ref. Like the gate, these
+    are early warnings until rec-2827 (Decision 239 cl.5). No session hook refuses an in-session Edit or Write of
+    them: that residual is owned by rec-4696, whose protected-path edit hook reads PROTECTED.
+
+known_limits:
+  - >-
+    Indirection the lexer does not recover is not parsed: variables other than a literal root path, aliases,
+    functions, wrappers not in gate.shell_parsing (such as flock or parallel), shells nested beyond one -c or eval,
+    and scripts or programs that call terraform, aws or an AWS SDK internally, including a script written elsewhere
+    that then writes the transcript.
+  - >-
+    The ambient rule (admin-credential rule 3) gates only aws and terraform words: inline code or a script that uses
+    an AWS SDK under an admin AWS_PROFILE without naming a profile passes.
+  - >-
+    A one-shot approval does not see ignored files a root reads, such as a gitignored tfvars file or a build output;
+    the plan output the operator saw is what the approval stands on.
+  - >-
+    A hook failure on a payload that names no coarse keyword is allowed, so a crash skips the tamper rules; an empty
+    transcript_path skips them too.
+  - >-
+    The hook runs from the working tree, so an edit to gate.modules or the venv's packages disables it for that
+    session, as does an edit to its registration (.claude/settings.json, .claude/hooks/hooks.json or
+    .claude/.claude-plugin/plugin.json, which are not code-owned); CODEOWNERS flags an edit to gate.modules or this
+    contract for the operator's word on the final diff (Decision 246 cl.4).
+  - >-
+    In a checkout whose branch predates the gate, the plugin's registered command finds no shim and exits 127, which
+    Claude Code does not treat as a block, so the gate is off there (the merge gate's residual, git-ops.yaml).
+  - Approvals are read, and one-shot credits used up, only in the transcript the hook input names.
+  - >-
+    The tamper rule also refuses a copy out of the transcript's directory (a saved tool result, say): read such a file
+    with cat or the Read tool instead.
+  - >-
+    A claude -p session in GitHub Actions loads .claude/settings.json but has no operator to write an approve line,
+    so a protected command there is always refused. A checkout with no origin/main ref (a shallow CI checkout)
+    cannot read this contract, so there every command naming a coarse keyword is refused (fail_closed).
+  - The gate never loosens auto mode. A command it lets through can still be refused by the classifier.
+  - The binding controls hold whatever the gate misses.
+
+procedure:
+  description: >-
+    Agent-led steps when a protected action or its approval is refused. Each step starts with the refusal it answers.
+  steps:
+    - >-
+      GATE DENY (the message names a protected-actions class): post the exact command and the deny's approve line to
+      the operator in this thread, as a message rather than a decision card (card labels hold at most 40 bytes), and
+      run the command only after the operator writes that line here. For tf-state-change, first commit every change,
+      then present the plan output at the named commit (deploy-paths.yaml admin_out_of_band.procedure), from the main
+      session with a literal -chdir=terraform/<root>; a target of unknown is rewritten, never approved. terraform/github
+      applies through terraform-github-apply.yml (Decision 248 cl.1), so a session apply there is asked for only as a
+      break-glass apply the operator directs. An admin-credential hit from the hook's own AWS_PROFILE alone is re-run
+      with the self-serve profile when the step does not need admin rights; ask only when it does.
+    - >-
+      CLASSIFIER VERDICT ("Denied by auto mode classifier"): only the operator's own message in this thread naming the
+      exact command clears it, so every ask lists the exact commands beside the approve lines.
+    - >-
+      CONTENT CHECK ("a safety check separate from auto mode blocked this request because of earlier conversation
+      content"): no approval clears it. Stop, record the state, and continue in a fresh thread with a handoff.
+    - >-
+      RELAYED APPROVAL: neither the classifier nor this gate counts an approval relayed by the coordinator or another
+      thread; ask the operator to answer in this thread.
