@@ -51,20 +51,25 @@ scope:
       keys of `message` not in `branch`, and the keys of `branch` the message lacks; set EQUALITY passes when both are
       empty (an empty branch set means the squash must carry no trailer). Equality, not subset: dropping a key would
       hide a session the oracle should judge (Fable advice, rec. 2).
-      (8a) stamp(path, environ, git_dir_probe) for `prepare-commit-msg <file>`: when own_key is None, or a sequencer
+      (8a) stamp(path, environ, root) for `prepare-commit-msg <file>`: when own_key is None, or a sequencer
       operation is in progress (any of `git rev-parse --git-path` rebase-merge, rebase-apply (dirs), CHERRY_PICK_HEAD,
       REVERT_HEAD exists: probed 2026-11-08 on git 2.43.0, a rebase pick and a cherry-pick both run prepare-commit-msg
       with source "message", so a naive stamp would re-attribute another session's rebased commits), the file is left
-      byte-identical; otherwise `git interpret-trailers --in-place --if-exists replace --if-missing add --trailer
-      "<trailer_line(own_key)>" <file>` (git's own trailer-block and comment handling), after which the commit-msg
-      check (11) is the backstop for any Claude-Session line outside the trailer block. prepare-commit-msg is not
-      skipped by --no-verify, so a bypassed commit is still stamped.
-      (9) premerge_attribution(root, base, message) -> bool, the whole premerge leg, printing its own lines: branch =
+      byte-identical; otherwise every line of the file matching TRAILER (anywhere in the message, not only the trailer
+      block) is removed, then `git interpret-trailers --in-place --trailer "<trailer_line(own_key)>" <file>` adds the
+      own line (git's own trailer-block and comment handling). Never `--if-exists replace`: probed by the round-1
+      critic on git 2.43.0, it deletes only the closest same-key trailer, so a second typed session_A survives beside
+      the own line. The only Claude-Session key in the result is own_key. The commit-msg check (11) stays as the
+      backstop for any path where the stamp did not run. prepare-commit-msg is not skipped by --no-verify, so a
+      bypassed commit is still stamped. `git commit --amend` (source "commit") is restamped with the amending
+      session's key (it made the new commit); a single `git revert` writes no REVERT_HEAD before the hook (critic
+      probe), so it is stamped too, which is harmless because a revert message carries no original trailer.
+      (9) premerge_attribution(*, root, base, message) -> bool (keyword-only), the whole premerge leg, printing its own lines: branch =
       branch_keys(root, base, "HEAD"); both sets empty -> True, silent; a mismatch prints `PREMERGE ATTRIBUTION
       MISMATCH extra=[...] missing=[...]`, `  remedy: the squash message must carry exactly these lines:` and one
       `  <trailer_line(key)>` per branch key (or `  (none)`), -> False; a TrailerReadError prints `PREMERGE ATTRIBUTION
       UNAVAILABLE <reason>` -> False; else `PREMERGE ATTRIBUTION OK` -> True.
-      (10) gate_denial(root, base_ref, head_ref, message) -> str | None, the merge-gate core (Decision 203: the
+      (10) gate_denial(*, root, base_ref, head_ref, message) -> str | None (keyword-only), the merge-gate core (Decision 203: the
       adapter is plumbing): None when the trailer keys of `message` equal the branch keys of
       merge-base(base_ref, head_ref)..head_ref (both empty included); else the denial text "attribution:
       commit_message Claude-Session trailers must equal the PR branch commits' (extra <keys>, missing <keys>); use
@@ -94,13 +99,15 @@ scope:
       `bin/venv-python -m scripts.session.session_trailer prepare-commit-msg`, stages [prepare-commit-msg]; and id
       claude-session-trailer, name "Claude-Session trailer names this session", language system, entry
       `bin/venv-python -m scripts.session.session_trailer commit-msg`, stages [commit-msg]. No hook is removed or
-      restaged away from pre-commit (Decision 235 cl.5 floor).
+      restaged away from pre-commit (Decision 235 cl.5 floor), and default_stages narrows nothing any hook runs at
+      today: rg finds no `--hook-stage` or pre-push install outside docs/plans, and session_start_precommit.sh runs a
+      bare `pre-commit install`, which today installs only the pre-commit type.
     new_imports: []
   - file: scripts/session/merge_step.py
     action: Modify
     purpose: >-
       cmd_premerge gains exactly one line and no branch, after the Resolves trailer check and before _preview: `ok =
-      session_trailer.premerge_attribution(root, message_text, base) and ok`, where base is the merge-base cmd_premerge
+      session_trailer.premerge_attribution(root=root, base=base, message=message_text) and ok`, where base is the merge-base cmd_premerge
       already computes and message_text is the message file's text, read once into a local and reused by
       _parsed_trailer (today it is read inline). The import is local to cmd_premerge like its siblings. Every premerge
       test already runs this line, so the mirror suite tests/test_session_merge_step.py (490 of 500 SLOC, NEAR_CAP)
@@ -114,7 +121,8 @@ scope:
       A second predicate on the Decision 245 seam, keyed on refs plus the payload's commit_message, after the overlap
       verdict is CLEAR (so the existing shallow-clone deepen has run and both refs are fetched): when tool_input carries
       a str commit_message (merge_pull_request; enable_pr_auto_merge has no message field and is unchanged),
-      session_trailer.gate_denial(root, "refs/remotes/origin/main", <the private PR ref>, commit_message); a non-None
+      session_trailer.gate_denial(root=root, base_ref="refs/remotes/origin/main", head_ref=<the private PR ref>,
+      message=commit_message), with _judge gaining the commit_message argument from run(); a non-None
       result denies through _deny (exit 2, fail closed, no override, Decision 245 cl.3, Decision 203). A non-str commit_message (present but not a string) denies as malformed. No
       commit_message, or one with no trailer, behaves exactly as today. The private ref cleanup in run()'s finally is
       unchanged. Docstring names this predicate beside the overlap one.
@@ -132,6 +140,23 @@ scope:
       open, owning_item "T4.24:c9". One amendment_log row at the top (date, semantic_break false, change_class
       field_add, summary naming PLAN-arrival-trailer-attribution and rec-5004, migration_story "Prose only; no code or
       contract consumer reads it.").
+    new_imports: []
+  - file: docs/contracts/git-ops.yaml
+    action: Modify
+    purpose: >-
+      Decision 245 cl.6 (the contract records the gate mechanism). push_pr_ci_merge_flow's merge sentence names the
+      attribution predicate beside the overlap one: the merge gate also refuses a merge_pull_request whose
+      commit_message's Claude-Session key set differs from the PR branch commits' (remedy: use the printed lines),
+      and premerge carries the same check as its ATTRIBUTION leg. commit_message_conventions (the line that mandates
+      the Co-Authored-By / Claude-Session footer) adds that in a CC-web session the prepare-commit-msg hook stamps the
+      Claude-Session line from CLAUDE_CODE_REMOTE_SESSION_ID and a commit-msg hook verifies it, so a typed line is
+      replaced. merge_step_coverage appends: attribution (rec-5004): the commit stamp and check are client hooks
+      (bypass residuals: GitHub API commits, sessions outside CC-web, commit_title; owners rec-5009, rec-5011); the
+      merge-time equality is mechanical at the merge gate for merges that pass a commit_message and procedural at
+      premerge; merges without a commit_message rely on the repository squash default (rec-5010).
+      referenced_repo_paths gains scripts/session/session_trailer.py and .pre-commit-config.yaml (if absent).
+      contract_version 13 -> 14 and one amendment_log row at the top (semantic_break true, change_class field_add,
+      summary naming PLAN-arrival-trailer-attribution and rec-5004). validate_git_ops_contract stays green.
     new_imports: []
   - file: tests/test_session_session_trailer.py
     action: Create
@@ -155,14 +180,18 @@ scope:
       test_mismatch_is_set_equality (extra and missing both reported; equal sets, duplicates and prefixes pass; empty
       branch set with an untrailered message passes, with a trailered one fails);
       TestStamp (variable set: a typed foreign trailer is replaced by the own line; no trailer -> the own line is added
-      as a trailer; two typed keys -> exactly one own line; the file is byte-identical when the variable is unset and
+      as a trailer; two typed keys (session_A, session_B, then a Co-Authored-By line) and a mid-body line -> the only
+      Claude-Session key in the result, by trailer_keys, is OWN, and Co-Authored-By survives; the file is byte-identical when the variable is unset and
       when each of rebase-merge, rebase-apply, CHERRY_PICK_HEAD and REVERT_HEAD exists in a tmp repo's git dir);
       test_stamp_then_check_on_a_real_commit and test_rebase_keeps_another_sessions_trailer (tmp repo whose
       .git/hooks prepare-commit-msg and commit-msg run `<sys.executable> -m scripts.session.session_trailer <verb>
       "$@"` with the repo root on PYTHONPATH and the variable cse_OWN: `git commit -m x -m "Claude-Session:
       .../session_OTHER"` lands carrying only session_OWN; a mid-body foreign line outside the trailer block is
-      refused by commit-msg with HEAD unchanged; a branch commit made with the variable cse_A, rebased onto a new main
-      commit under cse_B, still carries session_A; a --no-verify commit is still stamped);
+      stamped away (only OWN remains); a commit-msg run on a message the stamp did not touch (a foreign line, variable
+      set) refuses with HEAD unchanged; a branch commit made with the variable cse_A, rebased onto a new main
+      commit under cse_B, still carries session_A; a --no-verify commit with two typed foreign keys lands carrying only
+      session_OWN). The file stays at or under 450 SLOC, measured at build; a crossing is a decomposition, never a
+      raise.
       TestPremergeAttribution through ms.main premerge on tests/fixtures/merge_step_repos.make_pr_branch with a branch
       commit message carrying `Claude-Session: https://claude.ai/code/session_BUILD` beside the Resolves trailer: a
       squash message naming session_COORD exits 1 with PREMERGE ATTRIBUTION MISMATCH extra=[COORD] missing=[BUILD]
@@ -200,11 +229,11 @@ followon_recs: [rec-5009, rec-5010, rec-5011]
 infrastructure_dependencies: []
 acceptance_criteria:
   - "config/telemetry/arrival.yaml excuses 01XZubGwhX1EcdnXkxC6BKfL owned by rec-5004, and the shipped config turns a lone uncaptured commit with that key into excused=1 missing=0."
-  - "In a session with CLAUDE_CODE_REMOTE_SESSION_ID set, every git commit lands carrying exactly this session's Claude-Session trailer whatever the agent typed (stamped by prepare-commit-msg, even under --no-verify), except a rebase, cherry-pick or revert pick, which keeps its original trailer; a foreign Claude-Session line the stamp cannot reach is refused by commit-msg, which prints the correct line; with the variable unset both hooks leave the commit untouched."
+  - "In a session with CLAUDE_CODE_REMOTE_SESSION_ID set, every git commit lands carrying exactly one Claude-Session key, this session's, whatever the agent typed (stamped by prepare-commit-msg, even under --no-verify), except a pick inside a rebase or cherry-pick sequence, which keeps its original trailer; the commit-msg backstop refuses a foreign key on any path the stamp did not run and prints the correct line; with the variable unset both hooks leave the commit untouched."
   - "scripts.session.merge_step premerge refuses a squash message whose Claude-Session key set differs from the branch commits' set (an extra or a dropped key), prints the exact expected lines, and passes equal sets, whatever the merging session's own id."
   - "The merge gate denies mcp__github__merge_pull_request when commit_message's Claude-Session key set differs from the PR branch commits' set, fail closed, and is unchanged for merges without a commit_message."
   - "The new parser equals the arrival oracle's on a fixed corpus and on main's first-parent history; the oracle's code and missing semantics (Decision 250 cl.5) are unchanged."
-  - "After merge, telemetry-arrival on main reports status=green with missing=0 (or skipped, never red), and rec-5004 closes from the build's Resolves trailer."
+  - "After merge, telemetry-arrival on main reports status=green with missing=0 (or skipped, never red), and rec-5004 closes from the build's Resolves trailer through the Decision 186 closure obligation, resolving the closure_artifact shard:session-trailer-commit-check recorded at plan write against the merge sha."
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -276,7 +305,8 @@ verification_plan:
     command: >-
       bin/venv-python -m pytest tests/test_session_session_trailer.py tests/telemetry_verify/test_session_presence.py
       tests/test_session_merge_step.py tests/hooks/test_merge_gate.py tests/hooks/test_merge_gate_shim.py -q &&
-      bin/venv-python -c "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as f; failed=[]; f(failed); raise SystemExit(1 if failed else 0)"
+      bin/venv-python -c "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as f; failed=[]; f(failed); raise SystemExit(1 if failed else 0)" &&
+      bin/venv-python -c "from scripts.checks.contracts.validate_git_ops_contract import validate_git_ops_contract as f; failed=[]; f(failed); raise SystemExit(1 if failed else 0)"
     expected: exit 0
     fix_if: a pre-existing node fails (fix the code, never the node; Decision 235)
     hermetic: true
@@ -286,24 +316,26 @@ verification_plan:
   - step: 7
     phase: pre-deploy
     action: >-
-      The installed hooks stamp this session's trailer over a typed foreign one in a throwaway worktree of this checkout,
+      The installed hooks stamp this session's trailer over two typed foreign ones in a detached throwaway worktree of
+      this checkout (its .venv symlinked in, the scripts/verification_graduation.py worktree pattern; a worktree with no
+      .venv now stops every commit loudly, because bin/venv-python refuses a non-venv interpreter, which is accepted),
       and no existing hook runs at the commit-msg or prepare-commit-msg stage. Run in the implementing CC-web session
       (CLAUDE_CODE_REMOTE_SESSION_ID set, which also proves hook processes inherit it) after `.venv/bin/pre-commit
-      install`; the worktree and its branch are removed afterwards.
+      install`; the worktree is removed afterwards and no branch is created.
     command: >-
       .venv/bin/pre-commit install && test -x .git/hooks/commit-msg && test -x .git/hooks/prepare-commit-msg &&
-      own=${CLAUDE_CODE_REMOTE_SESSION_ID#cse_} && test -n "$own" && W=$(mktemp -d)/w &&
-      git worktree add -q -b otl-stamp-probe "$W" HEAD && (cd "$W" && git commit --allow-empty -q -m probe -m
-      "Claude-Session: https://claude.ai/code/session_PROBEFOREIGN" && git log -1 --format=%B | grep -qx
-      "Claude-Session: https://claude.ai/code/session_$own" && ! git log -1 --format=%B | grep -q PROBEFOREIGN);
-      rc=$?; git worktree remove --force "$W"; git branch -D -q otl-stamp-probe; test $rc -eq 0 &&
-      printf 'p\n\nClaude-Session: https://claude.ai/code/session_X\n' > "$(dirname "$W")/m" && for st in commit-msg
-      prepare-commit-msg; do .venv/bin/pre-commit run --hook-stage $st --commit-msg-filename "$(dirname "$W")/m"
-      2>&1; done | grep -v '^Claude-Session trailer\|^Stamp this session' | grep -cE 'Passed|Failed|Skipped' |
-      grep -qx 0
+      own=${CLAUDE_CODE_REMOTE_SESSION_ID#cse_} && test -n "$own" && T=$(mktemp -d) &&
+      git worktree add -q --detach "$T/w" HEAD && ln -s "$PWD/.venv" "$T/w/.venv" && (cd "$T/w" &&
+      git commit --allow-empty -q -m probe -m "Claude-Session: https://claude.ai/code/session_PROBEA" -m
+      "Claude-Session: https://claude.ai/code/session_PROBEB" && test "$(git log -1 --format=%B | grep -c
+      '^Claude-Session:')" = 1 && git log -1 --format=%B | grep -qx "Claude-Session: https://claude.ai/code/session_$own");
+      rc=$?; git worktree remove --force "$T/w"; test $rc -eq 0 && printf 'p\n\nClaude-Session:
+      https://claude.ai/code/session_X\n' > "$T/m" && for st in commit-msg prepare-commit-msg; do .venv/bin/pre-commit
+      run --hook-stage $st --commit-msg-filename "$T/m" 2>&1; done | grep -E '[.]{3,}.*(Passed|Failed|Skipped)$' |
+      grep -v '^Claude-Session trailer names this session\|^Stamp this session' | wc -l | grep -qx 0
     expected: >-
-      exit 0: both hooks are installed, the probe commit carries only this session's trailer, the probe worktree and
-      branch are gone, and no hook other than the two new ones reports at either stage.
+      exit 0: both hooks are installed, the probe commit carries exactly one Claude-Session line, this session's, the
+      probe worktree is gone, and no pre-commit status line other than the two new hooks' appears at either stage.
     fix_if: the probe commit keeps PROBEFOREIGN (hook not wired, or the variable not inherited by hooks), or another hook runs at those stages (default_stages missing)
     hermetic: false
     graduation: waive
@@ -328,12 +360,19 @@ verification_plan:
     hermetic: false
   - step: 10
     phase: post-deploy
-    action: rec-5004 is closed by the merge's Resolves trailer.
+    action: >-
+      rec-5004 is closed by the merge's Resolves trailer through the Decision 186 closure obligation: rec-5004 is
+      escape-classified (escape_class no-edge), and its closure_artifact shard:session-trailer-commit-check was recorded
+      at plan write, so the trailer closure's closure_fix_sha resolves it once the shard (VP 2's graduation) is on main.
     command: >-
       AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
       make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5004']); print(rows[0]['id'], rows[0]['status'])"
-    expected: prints rec-5004 closed after ci.yml's closure job runs on the merge commit; record that run id.
-    fix_if: "still open: check the squash body carries the Resolves trailer for rec-5004 and the closure job's log; never close by hand without the acceptance passing"
+    expected: prints rec-5004 closed after the closure job runs on the merge commit; record that run id.
+    fix_if: >-
+      still open: read the closure job's log for a ClosureArtifactRequired or acceptance refusal marker (it exits 0 and
+      leaves the rec open). Leading causes: the squash body lacks Resolves for rec-5004, or the
+      session-trailer-commit-check shard is not on main. Never close it with a direct status write after a Decision 186
+      refusal (implement.md); fix the cause and re-run the closure route.
     hermetic: false
 test_obligations:
   - source: config/telemetry/arrival.yaml
@@ -371,6 +410,11 @@ test_obligations:
     verification_step: 5
     test_selector: tests/hooks/test_merge_gate.py::test_branch_trailer_in_commit_message_allows
     red_green_expectation: red before (module not copied, so the adapter import fails closed), green after
+  - source: docs/contracts/git-ops.yaml
+    behavior: the contract records the attribution predicate, the stamp and the residual owners and still validates
+    verification_step: 6
+    command: bin/venv-python -c "from scripts.checks.contracts.validate_git_ops_contract import validate_git_ops_contract as f; failed=[]; f(failed); raise SystemExit(1 if failed else 0)"
+    waiver_reason: Contract prose read by the already-registered validate_git_ops_contract; no consumer parses the new sentences, so no new test can fail without the change.
   - source: docs/contracts/ports.yaml
     behavior: the new assumption row and the SA-04 field validate
     verification_step: 6
@@ -387,16 +431,19 @@ context:
   - "Root cause and evidence: /mnt/project-files/red-main-rec-5004/REPORT.md and rec-5004's corrected context (read back 2026-11-08T11:16Z). Run 42471873998: ARRIVAL status=red judged=40 missing=1 pr_lookup_failed=0, ARRIVAL_MISSING sha=6d1d1f146c7f; in-memory rerun with this excuse: status=green judged=42 captured=31 missing=0 excused=2."
   - "Operator 2026-11-08 11:22Z card 'Plan excuse + trailer check' (thread cmsg_012XgaFy8VaDQbxP5D8nC958GZuWZkeCHXHMuio97yS7Kf). After a Fable best-practice consult he asked for (13:35Z; /mnt/project-files/red-main-rec-5004/fable-independent-advice.md), operator 13:39Z chose 'Stamp + set equality (Fable)' (card cmsg_012XgaFy8VaDQbxP5D8nC958PDUL71MjALEPNtWjRXPgK9) over typed + branch subset and own id everywhere."
   - "Probe 2026-11-08 (this container): CLAUDE_CODE_REMOTE_SESSION_ID=cse_<key>, and the session's own attribution trailer ends session_<the same key>; Bash and therefore git inherit it. Hook processes inheriting it is UNPROVEN until VP 7 runs. pre-commit 4.7.0; at --hook-stage commit-msg today's config runs five existing hooks on the message file (hence default_stages)."
-  - "Plan PR merges never run premerge (.claude/commands/plan.md Step 11.5 calls merge_pull_request directly), so the merge gate is the only seam that sees them."
-  - "Residual (Decision 181 cl.2): a commit made through the GitHub API (mcp__github__push_files) or outside CC-web carries an unstamped trailer, and set equality then carries it to main; a --no-verify commit is stamped but not checked. Owned by the follow-on recs."
+  - "Plan PR merges never run premerge, and .claude/commands/plan.md Step 11.5 calls merge_pull_request with no commit_message, so neither seam checks them: their squash body is GitHub's repository default, owned by rec-5010 (COMMIT_MESSAGES composes it from the stamped branch commits). The merge gate checks any merge that does pass a commit_message, whoever merges."
+  - "rec-5004 closure (Decision 186): escape_class no-edge; closure_artifact shard:session-trailer-commit-check recorded at plan write without a status change (update_rec read back 2026-11-08: status open, closure_artifact set), so the build's trailer closure resolves it against the merge sha."
+  - "Residual (Decision 181 cl.2): commit_title is not checked (a trailer-shaped title would reach the squash body); a commit made through the GitHub API (mcp__github__push_files) or outside CC-web carries an unstamped trailer, and set equality then carries it to main; a --no-verify commit is stamped but not checked. Owned by the follow-on recs."
   - "rec-5004 acceptance replaced at plan write (read back 2026-11-08): the filed `scripts.telemetry_verify arrival` probe needs warehouse credentials and plan_obligations rated it UNDECIDABLE for the closure job; it is now a two-grep chain on the excuse row and the stamp hook. The oracle end state stays proven by VP 9."
   - "Deferred, filed at plan write: rec-5009 (a), rec-5010 (b), rec-5011 (c). (a) a post-merge detector comparing each squash's trailers with its PR's commits via git and the GitHub API, never the warehouse, with the hint when a missing key's PR branch has a captured root; (b) the repository squash default COMMIT_MESSAGES (terraform/github); (c) a git-only required PR check that every non-merge branch commit carries one well-formed trailer, and whether to require presence (Fable measured 4 of 61 recent first-parent commits untrailered)."
   - "Upstream cause outside the repo: the spawn wake shows the parent's id in trailer-shaped form (relay session=, author-id cse_); operator-side harness feedback, not a repo change."
+  - "Project Review check (project rule): no open PR touches git-ops.yaml, .pre-commit-config.yaml, merge_gate.py or merge_step.py (open PRs listed 2026-11-08: #1918, #1917, #1913, #1912, #1900, #1854); the build re-checks before editing git-ops.yaml."
   - "Overlap: #1917 (environment-gates-fail-closed) adds SA-09 to ports.yaml; this build takes the next free SA id and rebases that hunk. #1918 (terraform-validate mirror) waits on this repair (its red_overlap names rec-5004)."
   - "Graduated shards kept unchanged (their files gain nodes or one line, the claims hold): late-closure-merge-step-session, merge-step-verb-tests (tests/test_session_merge_step.py is not edited), merge-overlap-gate-fails-closed (tests/hooks/test_merge_gate.py gains nodes only), telemetry-arrival-oracle (tests/telemetry_verify/test_session_presence.py gains one node)."
   - "red_overlap --plan 2026-11-08 at write: verdict clear (rec-5004 repairs_this_red; rec-5007 disjoint, age 3.25 h)."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -407,7 +454,7 @@ execution_steps:
   - "Config: add the excused row; the session_presence node; run VP 1."
   - "Module: scripts/session/session_trailer.py and tests/test_session_session_trailer.py; .pre-commit-config.yaml keys and hook; run VP 2 and 3."
   - "Merge seams: merge_step premerge leg and TestPremergeAttribution; merge_gate predicate, fixture, nodes; run VP 4 and 5."
-  - "Contract: ports.yaml SA-04 field, the new SA row, amendment_log row; add the five graduate shards (VP 1-5); run VP 6 and 7."
-  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit; git fetch origin main && git rebase origin/main; VP 8 (full tier backgrounded from the top-level session, then --verify-head; a timeout is BLOCKED, no push); push; open the PR; subscribe; code review in a fresh context; premerge (its own new leg must print ATTRIBUTION OK on the squash message naming this session); merge on code review PROCEED and green CI with Resolves: rec-5004 in the squash body; then VP 9 and 10, reporting PR number, run ids and merge SHA."
+  - "Contract: ports.yaml SA-04 field, the new SA row, amendment_log row; git-ops.yaml merge flow, conventions, coverage, paths, version and log; add the five graduate shards (VP 1-5); run VP 6 and 7."
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit; git fetch origin main && git rebase origin/main; VP 8 (full tier backgrounded from the top-level session, then --verify-head; a timeout is BLOCKED, no push); push; open the PR (its body says the new merge-gate predicate inherits Decision 245 cl.3's fail-closed, no-override posture and its false-refusal-or-wedge reversal condition); subscribe; code review in a fresh context; premerge (its own new leg must print ATTRIBUTION OK on the squash message naming this session); merge on code review PROCEED and green CI with Resolves: rec-5004 in the squash body; then VP 9 and 10, reporting PR number, run ids and merge SHA."
   - "Report: what was implemented, verification results"
 rollback: Revert the build PR; the excuse row and the three checks go together, and arrival turns red again on 6d1d1f14 until it leaves the judge window (2026-11-11T01:09Z).
