@@ -22,6 +22,7 @@ on synthetic data; the registered check loads the real tree.
   (j) no ${{ }} expression appears inside a run: body (inputs reach run bodies only through env:)
   (k) terraform/github's tf_github_apply Environment is main-only, has no admin bypass and is prevent_destroy
   (l) every resource type under terraform/github is in the gate's GATE_TYPES or NON_GATE_TYPES
+  (m) the preview job's gate step passes github.event_name through env EVENT_NAME to the gate's --event-name
 """
 
 from __future__ import annotations
@@ -413,7 +414,7 @@ def check_workflow(wf: dict[str, Any] | None) -> list[str]:
             out.append(f"d: the {jid} job's if must require refs/heads/main in every disjunct")
     if apply.get("needs") not in ("preview", ["preview"]):
         out.append("d: the apply job must need preview")
-    return out + _step_violations(jobs)
+    return out + _step_violations(jobs) + _event_wiring(preview)
 
 
 def _step_violations(jobs: dict[str, Any]) -> list[str]:
@@ -431,6 +432,15 @@ def _step_violations(jobs: dict[str, Any]) -> list[str]:
             if isinstance(s.get("run"), str) and "${{" in s["run"]:
                 out.append(f"j: {jid} interpolates an expression in a run body")
     return out
+
+
+def _event_wiring(preview: dict[str, Any]) -> list[str]:
+    gate = next((s for s in _steps(preview) if s.get("id") == "gate"), {})
+    body = re.sub(r"\\\n\s*", " ", str(gate.get("run", "")))
+    ok = _dict(gate.get("env")).get("EVENT_NAME") == "${{ github.event_name }}" and any(
+        "terraform_github_apply_gate.py preview" in ln and '--event-name "$EVENT_NAME"' in ln for ln in body.splitlines()
+    )
+    return [] if ok else ["m: the preview gate step must pass env EVENT_NAME=${{ github.event_name }} as --event-name"]
 
 
 def check_codeowners(codeowners: str) -> list[str]:
@@ -530,4 +540,4 @@ def validate_github_settings_apply(failed: list[str]) -> None:
         failed.append(f"github-settings-apply: {violation}")
     registry.examined(len(groups), unit="invariants")
     if not violations:
-        print("  PASS: predicates (a)-(l)")
+        print("  PASS: predicates (a)-(m)")

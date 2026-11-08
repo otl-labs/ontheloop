@@ -164,6 +164,41 @@ class TestPreview:
         assert rc == 1 and gh == ""
         assert out.splitlines()[-1] == f"TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED {change['address']}"
 
+    @pytest.mark.parametrize(
+        "change",
+        [
+            _env_update(),
+            _env_create(f"{ENV}.tf_github_apply_copy", "tf-gated-apply"),
+            _rc("github_actions_repository_permissions.this", ["create"], None, {"enabled": True}),
+            _rc("github_workflow_repository_permissions.this", ["create"], None, {"can_approve": True}),
+            _rc("github_branch_protection.main", ["create"], None, {"pattern": "main"}),
+        ],
+        ids=["env-update", "env-create-new-address", "actions-permissions", "workflow-permissions", "unclassified"],
+    )
+    def test_a_push_run_with_an_unnamed_gate_change_ends_neutral(self, change: dict[str, Any]) -> None:
+        addr = change["address"]
+        rc, out, gh = gate.preview(_plan(change), HIDDEN, [], False, "push")
+        assert rc == 0 and gh == "has_changes=false\n"
+        lines = out.splitlines()
+        assert lines[-2].startswith("TF_GITHUB_APPLY_PREVIEW verdict=") and lines[-2].endswith("has_changes=false")
+        assert lines[-1].startswith("::warning::TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED ")
+        assert lines[-1].count(addr) == 2 and f"gate_change={addr}" in lines[-1]
+
+    def test_a_push_run_with_mixed_rows_skips_the_apply(self) -> None:
+        rc, out, gh = gate.preview(_plan(_env_update(), _repo_update()), HIDDEN, [], False, "push")
+        assert rc == 0 and gh == "has_changes=false\n"
+
+    @pytest.mark.parametrize("event", ["workflow_dispatch", "", "pull_request", "PUSH"])
+    def test_a_non_push_run_with_an_unnamed_gate_change_fails_closed(self, event: str) -> None:
+        change = _env_update()
+        rc, out, gh = gate.preview(_plan(change), HIDDEN, [], False, event)
+        assert rc == 1 and gh == ""
+        assert out.splitlines()[-1] == f"TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED {change['address']}"
+
+    def test_a_push_run_with_a_dispatch_input_fails_closed(self) -> None:
+        rc, _, gh = gate.preview(_plan(_env_update()), HIDDEN, [], True, "push")
+        assert rc == 1 and gh == ""
+
 
 class TestCheck:
     def _check(self, plan: dict[str, Any], reviewed_plan: dict[str, Any] | None = None, names: list[str] | None = None):
@@ -418,6 +453,15 @@ class TestCli:
             ]
         )
         return rc, out
+
+    def test_a_push_preview_writes_only_has_changes_false(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        rc, gh = self._preview(tmp_path, _plan(_env_update()), "--event-name", "push")
+        assert rc == 0 and gh.read_text(encoding="utf-8") == "has_changes=false\n"
+        assert "::warning::TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED" in capsys.readouterr().out
+
+    def test_an_unreadable_plan_on_push_still_fails(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        rc, _ = self._preview(tmp_path, {"resource_changes": "x"}, "--event-name", "push")
+        assert rc == 1 and capsys.readouterr().out.startswith("TF_GITHUB_APPLY_PLAN_UNREADABLE")
 
     def test_sentinels_never_reach_stdout_github_output_or_summary(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
