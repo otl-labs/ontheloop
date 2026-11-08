@@ -8,7 +8,8 @@ reviewed set and every printed line carry names, actions and allowlisted values 
 (plan_names_core.normalise_address), so a for_each or count resource makes a plan unreadable: it fails closed.
 
   preview        the read-only plan: a Markdown table with a GATE CHANGE banner per gate row, and the reviewed set
-                 and has_changes to GITHUB_OUTPUT; exits 1 before writing them when a gate row is not named
+                 and has_changes to GITHUB_OUTPUT. An unnamed gate row stops it before writing them: a push run ends
+                 neutral (exit 0, ::warning::, has_changes=false); any other run exits 1
   check          the admin plan against the reviewed set; prints a refusal marker and exits 1, or CHECKED / NOTHING
   probe-verdict  classifies the apply App's pending-deployment approval attempt as the session probe does
 """
@@ -149,14 +150,24 @@ def table(plan_rows: list[dict[str, Any]], title: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def preview(plan: Any, visibility: dict[str, str], gate_change: list[str], dispatched_input: bool) -> tuple[int, str, str]:
+def preview(
+    plan: Any, visibility: dict[str, str], gate_change: list[str], dispatched_input: bool, event_name: str = ""
+) -> tuple[int, str, str]:
     """Returns (exit code, stdout, GITHUB_OUTPUT text)."""
     plan_rows = rows(plan)
     verdict = _report.classify(plan, visibility).verdict
     out = table(plan_rows, "terraform/github CI apply preview (read-only plan; the reviewed set)")
     unnamed = [r["address"] for r in plan_rows if is_gate(r) and r["address"] not in gate_change]
     if unnamed:
-        return 1, out + f"TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED {','.join(unnamed)}\n", ""
+        names = ",".join(unnamed)
+        if event_name == "push" and not dispatched_input:
+            out += f"TF_GITHUB_APPLY_PREVIEW verdict={verdict} rows={len(plan_rows)} has_changes=false\n"
+            out += (
+                f"::warning::TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED {names} push run ends without applying; "
+                f"a dispatch of terraform-github-apply with gate_change={names} is owed\n"
+            )
+            return 0, out, "has_changes=false\n"
+        return 1, out + f"TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED {names}\n", ""
     has_changes = verdict not in ("NO_CHANGES", "VISIBILITY_GATED_ONLY") or dispatched_input
     reviewed = json.dumps(plan_rows, sort_keys=True, separators=(",", ":"))
     out += f"TF_GITHUB_APPLY_PREVIEW verdict={verdict} rows={len(plan_rows)} has_changes={str(has_changes).lower()}\n"
@@ -258,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--gate-change", default="")
     p.add_argument("--dispatched-input", choices=["true", "false"], default="false")
     p.add_argument("--github-output", required=True)
+    p.add_argument("--event-name", default="")
     c = sub.add_parser("check")
     c.add_argument("--plan-json", required=True)
     c.add_argument("--reviewed", required=True, help="the reviewed set as JSON text")
@@ -291,7 +303,9 @@ def main(argv: list[str] | None = None) -> int:
         gate_change = parse_gate_change(args.gate_change)
         if args.cmd == "preview":
             visibility = _report.load_visibility(args.visibility)
-            rc, out, gh_out = preview(_read_json(args.plan_json), visibility, gate_change, args.dispatched_input == "true")
+            rc, out, gh_out = preview(
+                _read_json(args.plan_json), visibility, gate_change, args.dispatched_input == "true", args.event_name
+            )
             sys.stdout.write(out)
             if rc == 0:
                 with open(args.github_output, "a", encoding="utf-8") as fh:

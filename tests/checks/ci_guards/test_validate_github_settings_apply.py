@@ -582,3 +582,18 @@ def test_apply_job_pins_python_and_preview_checks_login_shape(wf) -> None:
     assert names.index(setup[0]["name"]) < next(i for i, n in enumerate(names) if n.startswith("Apply only"))
     lookup = next(s for s in wf["jobs"]["preview"]["steps"] if str(s.get("name", "")).startswith("Resolve reviewer ids"))
     assert '[[ "$login" =~ ^[A-Za-z0-9-]+$ ]]' in lookup["run"]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda st: st["env"].pop("EVENT_NAME"),
+        lambda st: st["env"].update(EVENT_NAME="${{ inputs.gate_change }}"),
+        lambda st: st.update(run=st["run"].replace(' --event-name "$EVENT_NAME"', "")),
+        lambda st: st.update(id="gate2"),
+    ],
+    ids=["env-dropped", "env-wrong-expression", "argument-dropped", "step-id-renamed"],
+)
+def test_m_gate_step_event_wiring(wf, mutate) -> None:
+    mutate(_step(wf, "preview", "id", "gate"))
+    assert [m for m in v.check_workflow(wf) if m.startswith("m:")] != [] and len(v.check_workflow(wf)) == 1
