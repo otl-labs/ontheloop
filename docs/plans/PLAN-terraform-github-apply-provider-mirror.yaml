@@ -1,0 +1,432 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: terraform-github-apply-provider-mirror
+intent: >-
+  Stop a github.com provider-asset outage from failing terraform-github-apply's preview and apply jobs (2026-11-08:
+  github.com answered 504 for the integrations/github SHA256SUMS and the preview failed init on both attempts, run
+  42468562354) by copying the exact locked integrations/github package from the S3 provider mirror and installing it
+  from there, falling back to today's direct fetch whenever the package is missing or unreadable, and by naming the
+  class of an init failure (provider install, backend or other) without printing terraform's output.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-terraform-github-apply-provider-mirror.yaml
+phase: >-
+  hotfix follow-on (PR 2 of the operator's two-PR choice for the 2026-11-08 red main; PR 1 is
+  PLAN-terraform-validate-github-provider-mirror); no tier_item is targeted and no exit criterion is closed, so
+  closes_criteria is empty.
+closes_criteria: []
+scope:
+  - file: terraform/bootstrap/github_settings_apply.tf
+    action: Modify
+    purpose: >-
+      Approved text (docs/plans/approved/terraform-github-apply-provider-mirror.yaml blocks tf-mirror-arn,
+      tf-apply-mirror-read, tf-preview-mirror-read), applied word for word. A new local github_settings_mirror_arn =
+      "arn:aws:s3:::agent-platform-data-lake/tf-provider-mirror/registry.terraform.io/integrations/github/*" beside
+      github_settings_state_arn, and one new statement in each role's inline policy, after its last existing one:
+      Sid ProviderMirrorGithubRead, Effect Allow, Action ["s3:GetObject"], Resource [local.github_settings_mirror_arn].
+      No s3:ListBucket (the script copies one known key), no write, no other prefix; every other statement, the
+      trusts, the boundary, the key policy and both 10,240 B preconditions are unchanged. terraform fmt may realign
+      the locals' equals signs (whitespace only; the sidecar binds words).
+    new_imports: []
+  - file: scripts/ci/terraform_github_apply_mirror.sh
+    action: Create
+    purpose: >-
+      Mode 100755, `set -uo pipefail` (never -e), every path ends in an explicit `exit 0`; env read guard-then-use
+      (`${VAR:-}` tested, the plain name written, `if ...; then ...; fi` never a trailing `[ ] && ...`). Two modes.
+      `fetch`: degrade unless MIRROR_PREFIX, RUNNER_TEMP and GITHUB_ENV are all set and `uname -sm` is `Linux x86_64`;
+      parse GITHUB_VERSION from terraform/github/.terraform.lock.hcl's registry.terraform.io/integrations/github block
+      (the awk PR 1's gate uses); KEY=registry.terraform.io/integrations/github/terraform-provider-github_${GITHUB_VERSION}_linux_amd64.zip;
+      `timeout 120 aws s3 cp "${MIRROR_PREFIX}${KEY}" "$RUNNER_TEMP/tf-github-mirror/$KEY" --only-show-errors` with
+      stdout and stderr sent to /dev/null (an AWS error names an ARN with the account id: never printed, Decision
+      101); then the file must be a non-empty regular file. On success it writes "$RUNNER_TEMP/tf-github-mirror.tfrc"
+      (filesystem_mirror path "$RUNNER_TEMP/tf-github-mirror", include ["registry.terraform.io/integrations/github"];
+      direct exclude the same one address), appends TF_CLI_CONFIG_FILE=<that path> to $GITHUB_ENV and prints
+      `provider-mirror: ACTIVE (integrations/github ${GITHUB_VERSION})`. Every degradation (an unset variable, another
+      platform, an unparsed version, a copy error or timeout (exit 124), an empty file) prints `provider-mirror:
+      DEGRADED -- <reason> -- falling back to a direct fetch` and the same reason as one `::warning::` annotation (so a
+      persistent degradation shows on every run page, Decision 55), writes no GITHUB_ENV line and exits 0. It never fails
+      the job. `classify LOG`: prints exactly one line `init failure class: provider_install`, `backend` or `other`,
+      chosen by fixed greps over LOG (provider_install: Failed to install provider, Failed to query available
+      provider packages, could not query provider registry, Gateway Timeout, 502 Bad Gateway, checksum; backend: Error
+      loading state, Failed to get existing workspaces, error configuring S3 Backend, Error acquiring the state lock;
+      provider_install wins when both match), never any LOG text; an unreadable LOG is `other`; exit 0.
+    new_imports: []
+  - file: .github/workflows/terraform-github-apply.yml
+    action: Modify
+    purpose: >-
+      Each job gains one step right after its Configure AWS credentials step (preview: before the plan App token is
+      minted): name "Fetch the GitHub provider from the S3 provider mirror (fail-open)", id mirror, env MIRROR_PREFIX:
+      s3://agent-platform-data-lake/tf-provider-mirror/, run `bash scripts/ci/terraform_github_apply_mirror.sh fetch`.
+      The preview plan step's init line keeps its shape and line count, its failure branch becoming `|| { bash
+      "$GITHUB_WORKSPACE/scripts/ci/terraform_github_apply_mirror.sh" classify "$RUNNER_TEMP/tf.log"; echo
+      "::error::TF_GITHUB_PREVIEW_FAILED init"; exit 1; }`. The header comment gains one sentence: both jobs install
+      integrations/github from the S3 provider mirror when its locked package is there, else fetch it directly. No
+      trigger, permission, Environment, role, if or other step changes (#1917 and PLAN-terraform-github-apply-push-neutral
+      also edit this file: expect a rebase).
+    new_imports: []
+  - file: scripts/ci/terraform_github_apply.sh
+    action: Modify
+    purpose: >-
+      terraform_step, on a failed step named init, runs `bash "$HERE/terraform_github_apply_mirror.sh" classify "$LOG"`
+      before its existing TF_GITHUB_APPLY_TERRAFORM_FAILED line. Nothing else changes; the init command inherits
+      TF_CLI_CONFIG_FILE from the job env when the mirror step exported it.
+    new_imports: []
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      Two new r3_workflows entries at 1, ".github/workflows/terraform-github-apply.yml::preview::mirror" and
+      "...::apply::mirror" (one-line bodies; no marker needed). The preview::plan entry stays 10.
+    new_imports: []
+  - file: scripts/checks/ci_guards/validate_github_settings_apply.py
+    action: Modify
+    purpose: >-
+      _APPLY_GRANTS and _PREVIEW_GRANTS each gain ("ProviderMirrorGithubRead", {s3:GetObject}, {the mirror arn}) with a
+      module constant _MIRROR naming the literal arn, so any widening (tf-provider-mirror/*, another namespace), an added
+      action or a missing statement fails h. OWNED gains scripts/ci/terraform_github_apply_mirror.sh. New predicate n in
+      check_workflow: in each job, the step with id mirror runs exactly `bash scripts/ci/terraform_github_apply_mirror.sh
+      fetch` with env MIRROR_PREFIX equal to the literal prefix, comes after that job's configure-aws-credentials step
+      and before any step whose run names terraform, and in the preview job before the app_token step; and the apply
+      script's terraform_step body names `terraform_github_apply_mirror.sh" classify`. Registered check unchanged.
+      NEAR_CAP (476 of 500 SLOC at planning, and PLAN-environment-gates-fail-closed also grows it): the relief step is
+      measured against main at build time; if the change would pass 500, decompose into a facade package (Decision
+      128), never a budget raise.
+    new_imports: []
+  - file: tests/checks/ci_guards/test_validate_github_settings_apply.py
+    action: Modify
+    purpose: >-
+      New nodes: test_h_the_mirror_grant_is_exact (parametrized over both roles: statement removed, resource widened to
+      tf-provider-mirror/*, resource moved to kislerdm/*, s3:PutObject added, s3:ListBucket added; each fails h) and
+      test_n_each_job_fetches_the_mirror_before_init (parametrized: mirror step missing, after the plan step, before the
+      credentials step, preview's after app_token, another run line, MIRROR_PREFIX changed, classify call dropped from
+      the apply script; each fails n). test_i_codeowners_line_missing covers the new OWNED entry by its existing
+      parametrization. Every existing node stays byte-identical (test_h_a_fourth_apply_statement still fails: an
+      Extra statement still breaks the exact set).
+  - file: tests/test_terraform_github_apply_mirror.py
+    action: Create
+    purpose: >-
+      Runs the real script as the workflow does, `bash -e -c 'bash scripts/ci/terraform_github_apply_mirror.sh fetch'`,
+      from a temp repo copy holding the real terraform/github/.terraform.lock.hcl, with a fake aws (records argv; per
+      STUB_MODE writes the destination zip, exits 1, sleeps past a stubbed timeout, writes an empty file, or prints an
+      AccessDenied line naming a synthetic 12-digit account ARN to stderr) and a fake uname on PATH. Nodes:
+      test_fetch_active_writes_a_mirror_only_tfrc (exit 0; argv is `s3 cp <prefix><KEY> <dest> --only-show-errors`
+      with the version read from the real lockfile; GITHUB_ENV holds TF_CLI_CONFIG_FILE; the tfrc's filesystem_mirror
+      include and direct exclude are each exactly ["registry.terraform.io/integrations/github"]; the ACTIVE line names
+      the locked version); test_fetch_degrades_and_exits_zero (parametrized: copy error, timeout, empty file,
+      unparseable lockfile, MIRROR_PREFIX unset, RUNNER_TEMP unset, GITHUB_ENV unset, uname aarch64; each exits 0,
+      writes no TF_CLI_CONFIG_FILE line, prints one DEGRADED line and one ::warning:: line); test_fetch_never_prints_aws_error_text (the
+      account digits and the ARN appear nowhere in stdout or stderr); test_classify_names_a_class_and_never_the_log
+      (parametrized logs: a 504 provider install, a backend lock error, both (provider_install wins), neither, a
+      missing file; exactly one line, the expected class, no log line echoed).
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: >-
+      Approved text (sidecar block decision-248-update), word for word: one "> **Update (DATE):**" line appended to
+      Decision 248 after its reversal-conditions block, recording clause 4's read-only mirror widening. No other
+      Decision changes; no new number.
+    new_imports: []
+  - file: .github/CODEOWNERS
+    action: Modify
+    purpose: >-
+      Approved text (sidecar block codeowners-mirror-script): `/scripts/ci/terraform_github_apply_mirror.sh
+      @benjamin-blake` after the terraform_github_apply_gate.py line, so the trusted-plan guard's (h) and the settings
+      guard's OWNED accept the script the preview job executes.
+    new_imports: []
+bundled_recommendations: [rec-5005]
+followon_recs: []
+infrastructure_dependencies:
+  - >-
+    aws_iam_role_policy.github_settings_apply and aws_iam_role_policy.github_settings_preview (terraform/bootstrap):
+    one added read-only statement each (ProviderMirrorGithubRead), applied post-merge by the human-directed bootstrap
+    apply of VP 13 (Decision 248 cl.6; deploy-paths.yaml admin_out_of_band.github_settings_apply_provisioning). Before
+    it, the mirror step degrades (AccessDenied) and both jobs fetch directly as today, so merge order against the apply
+    never breaks a run.
+acceptance_criteria:
+  - "With the grant live and the locked package in the mirror, the preview and apply jobs export TF_CLI_CONFIG_FILE to a tfrc serving only integrations/github from the mirror, and terraform/github init installs it with no github.com fetch."
+  - "A missing grant, a missing or unreadable package, an unparsed lockfile, an unset variable, another platform or a copy timeout each degrade to today's direct fetch with a printed reason and exit 0; the mirror step never fails a job."
+  - "A failed init prints one named class (provider_install, backend or other) and never terraform's output; the mirror step never prints AWS error text."
+  - "Each role gains exactly s3:GetObject on tf-provider-mirror/registry.terraform.io/integrations/github/* and nothing else; the bootstrap apply changes only those two inline policies."
+  - "The Decision 248 update, the policy statements and the CODEOWNERS line ship word for word as the operator approved them (Decision 246)."
+  - "rec-5005's acceptance passes and rec-5005 closes from the build's Resolves trailer."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The fetch activates a mirror-only tfrc from the exact locked package.
+    command: bin/venv-python -m pytest "tests/test_terraform_github_apply_mirror.py::test_fetch_active_writes_a_mirror_only_tfrc" -q
+    expected: exit 0; red before (file absent).
+    fix_if: TF_CLI_CONFIG_FILE is not exported, the key names another version or platform, or the tfrc routes another address
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: tf-github-apply-mirror-active
+  - step: 2
+    phase: pre-deploy
+    action: Every degradation falls back to a direct fetch and exits 0 under the workflow's bash -e shell.
+    command: bin/venv-python -m pytest "tests/test_terraform_github_apply_mirror.py::test_fetch_degrades_and_exits_zero" -q
+    expected: exit 0; red before (file absent).
+    fix_if: a case exports TF_CLI_CONFIG_FILE, exits non-zero or prints no reason
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: tf-github-apply-mirror-fail-open
+  - step: 3
+    phase: pre-deploy
+    action: The fetch never prints AWS error text (public log; Decision 101).
+    command: bin/venv-python -m pytest "tests/test_terraform_github_apply_mirror.py::test_fetch_never_prints_aws_error_text" -q
+    expected: exit 0; red before (file absent).
+    fix_if: the synthetic account digits or ARN reach stdout or stderr
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: tf-github-apply-mirror-no-aws-text
+  - step: 4
+    phase: pre-deploy
+    action: A failed init is classified by name, never echoed.
+    command: bin/venv-python -m pytest "tests/test_terraform_github_apply_mirror.py::test_classify_names_a_class_and_never_the_log" -q
+    expected: exit 0; red before (file absent).
+    fix_if: a wrong class, more than one line, or any log text in the output
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: tf-github-apply-init-failure-class
+  - step: 5
+    phase: pre-deploy
+    action: The guard pins each role's mirror grant to the exact one-namespace read.
+    command: bin/venv-python -m pytest "tests/checks/ci_guards/test_validate_github_settings_apply.py::test_h_the_mirror_grant_is_exact" -q
+    expected: exit 0; red before (node absent; the pre-change guard has no mirror grant).
+    fix_if: a widened, added-to or missing statement passes h
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: github-settings-mirror-grant-exact
+  - step: 6
+    phase: pre-deploy
+    action: The guard pins each job's mirror step before init and the apply script's classify call.
+    command: bin/venv-python -m pytest "tests/checks/ci_guards/test_validate_github_settings_apply.py::test_n_each_job_fetches_the_mirror_before_init" -q
+    expected: exit 0; red before (node absent).
+    fix_if: a misplaced or missing mirror step, or a dropped classify call, passes n
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: github-settings-mirror-step-wiring
+  - step: 7
+    phase: pre-deploy
+    action: The touched and neighbouring suites in full.
+    command: bin/venv-python -m pytest tests/test_terraform_github_apply_mirror.py tests/checks/ci_guards/test_validate_github_settings_apply.py tests/checks/ci_guards/test_validate_trusted_plan_environment.py tests/test_terraform_github_apply_gate.py tests/checks/ci_guards/test__workflow_shell_bodies.py -q
+    expected: exit 0
+    fix_if: a pre-existing node fails (fix the code, never the node; Decision 235)
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: waive
+    graduation_waiver_reason: Whole-file re-runs of suites already in the --pre pytest_diff set and graduated elsewhere; steps 1-6 carry the new durable regressions.
+  - step: 8
+    phase: pre-deploy
+    action: The registered guards that read these files pass, the bootstrap root is formatted, and the build's always-ask edits match the approved sidecar.
+    command: >-
+      bin/venv-python -c "from scripts.checks.ci_guards.validate_github_settings_apply import validate_github_settings_apply as f; failed=[]; f(failed); raise SystemExit(1 if failed else 0)" && bin/venv-python -c "from scripts.checks.ci_guards.validate_trusted_plan_environment import validate_trusted_plan_environment as f; failed=[]; f(failed); raise SystemExit(1 if failed else 0)" && bin/venv-python -c "from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as f; failed=[]; f(failed); raise SystemExit(1 if failed else 0)" && terraform fmt -check -recursive terraform/bootstrap && bin/venv-python -m scripts.roadmap.approved_text verify --slug terraform-github-apply-provider-mirror --base origin/main
+    expected: >-
+      exit 0; the trusted-plan guard's (h) accepts the new script because it is code-owned; approved_text verify
+      reports every block applied word for word.
+    fix_if: a guard fails (fix the code to the plan), fmt differs (run terraform fmt), or verify names a differing block (match the sidecar, never edit it)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Registered fast-tier guards plus the merge-step approved-text verify; nothing here is a new regression to graduate.
+  - step: 9
+    phase: pre-deploy
+    action: ADMIN credential check (deploy-paths.yaml admin_out_of_band.pre_merge_live_plan ENVIRONMENT CHECK).
+    command: bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null | grep -q 'assumed-role/PlatformAdmin/' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT
+    expected: ADMIN_CHAIN_OK; on ADMIN_CHAIN_ABSENT the PR waits at CI-green for an ADMIN session to run steps 10-11.
+    fix_if: ADMIN_CHAIN_ABSENT in a session expected to hold admin credentials; report it, never widen
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: pre-deploy
+    action: >-
+      Pre-merge read-only ADMIN plan of terraform/bootstrap at the PR's CI-green head, compared with main's own plan:
+      the head's state-changing rows must be exactly the two inline-policy updates, each adding only
+      ProviderMirrorGithubRead in the planned shape with every other statement equal by Sid; main's plan must be
+      empty. Plan files are deleted in the step; the two rendered policies are kept for step 11. Errors go to a local
+      log, never posted.
+    command: >-
+      set -o pipefail; R=$(tr -d '[:space:]' < config/aws-region); E="${TMPDIR:-/tmp}/gsm-evidence"; ok=0;
+      CHK="import json,sys; d,h=sys.argv[1],sys.argv[2]; L=lambda v: v if isinstance(v, list) else [v]; S=lambda s: {x.get('Sid'): {k: (sorted(L(v)) if k in ('Action', 'Resource') else v) for k, v in x.items()} for x in L(json.loads(s or '{}').get('Statement', []))}; rows=lambda p: sorted(r['address']+':'+'/'.join(r['change']['actions'])+(':import' if r['change'].get('importing') is not None else '')+(':moved' if r.get('previous_address') else '') for r in p.get('resource_changes', []) if r['change']['actions'] != ['no-op'] or r['change'].get('importing') is not None or r.get('previous_address')); m=json.load(open(d+'/origin-main.json')); p=json.load(open(d+'/'+h+'.json')); want=['aws_iam_role_policy.github_settings_apply:update', 'aws_iam_role_policy.github_settings_preview:update']; G='ProviderMirrorGithubRead'; NEW={'Sid': G, 'Effect': 'Allow', 'Action': ['s3:GetObject'], 'Resource': ['arn:aws:s3:::agent-platform-data-lake/tf-provider-mirror/registry.terraform.io/integrations/github/*']}; ch={r['address']: r for r in p.get('resource_changes', []) if r['address'] in ('aws_iam_role_policy.github_settings_apply', 'aws_iam_role_policy.github_settings_preview')}; ok=all(S(r['change']['after']['policy']).get(G) == NEW and {k: v for k, v in S(r['change']['after']['policy']).items() if k != G} == S(r['change']['before']['policy']) for r in ch.values()) and len(ch) == 2; [open(d+'/'+a.split('.')[1]+'.policy.json', 'w').write(r['change']['after']['policy']) for a, r in ch.items()]; print('HEAD_ROWS', rows(p)); print('MAIN_ROWS', len(rows(m)), rows(m)); print('SID_CHECK_OK' if ok and rows(p) == want and not rows(m) else 'SID_CHECK_MISMATCH')";
+      test -n "$PR_HEAD_SHA" && rm -rf "${E:?}" && mkdir -p "$E" && git fetch origin main "$PR_HEAD_SHA" -q && ok=1 &&
+      for ref in origin/main "$PR_HEAD_SHA"; do tag=$(echo "$ref" | tr '/' '-'); W="${TMPDIR:-/tmp}/gsm-wt-$tag";
+      { git worktree add --detach "$W" "$ref" -q && cp terraform/bootstrap/terraform.bootstrap.tfvars "$W/terraform/bootstrap/" &&
+      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W/terraform/bootstrap" init -input=false -backend-config="region=$R" > /dev/null 2>> "$E/tf.err" &&
+      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W/terraform/bootstrap" plan -input=false -lock=false -var-file=terraform.bootstrap.tfvars -out="$E/p.bin" > /dev/null 2>> "$E/tf.err" &&
+      terraform -chdir="$W/terraform/bootstrap" show -json "$E/p.bin" > "$E/$tag.json" && rm -f "${E:?}/p.bin"; } || ok=0;
+      git worktree remove --force "$W"; [ "$ok" = 1 ] || break; done;
+      [ "$ok" = 1 ] && bin/venv-python -I -c "$CHK" "$E" "$PR_HEAD_SHA" || echo PLAN_FAILED; rm -f "${E:?}"/origin-main.json "${E:?}/$PR_HEAD_SHA.json"
+    expected: >-
+      HEAD_ROWS ['aws_iam_role_policy.github_settings_apply:update', 'aws_iam_role_policy.github_settings_preview:update'];
+      MAIN_ROWS 0 []; SID_CHECK_OK; the files github_settings_apply.policy.json and github_settings_preview.policy.json
+      exist in the evidence dir. Post HEAD_ROWS, MAIN_ROWS and the marker with the head sha on the PR (counts and
+      addresses only).
+    fix_if: >-
+      PLAN_FAILED (read the local tf.err) or SID_CHECK_MISMATCH with HEAD_ROWS wrong: fix on the branch and re-run at the
+      new head. MAIN_ROWS above 0: main carries someone else's unapplied bootstrap change or drift; STOP and report before
+      merge, never fold it into this apply
+    hermetic: false
+    graduation: not-applicable
+  - step: 11
+    phase: pre-deploy
+    action: >-
+      Simulate the two rendered policies before any apply: the locked github package is readable; another namespace,
+      the mirror root, a write and a bucket listing are not. Markers only; the policy files are deleted in the step.
+    command: >-
+      E="${TMPDIR:-/tmp}/gsm-evidence"; P=agent_platform_admin; B=arn:aws:s3:::agent-platform-data-lake; M=$B/tf-provider-mirror/registry.terraform.io;
+      V=$(awk '/^provider "registry.terraform.io\/integrations\/github"/ { f=1 } f && /version[ \t]*=/ { gsub(/[",]/, "", $3); print $3; exit }' terraform/github/.terraform.lock.hcl); res=OK;
+      for role in github_settings_apply github_settings_preview; do q() { aws iam simulate-custom-policy --profile $P --policy-input-list "$(cat "$E/$role.policy.json")" --action-names "$1" --resource-arns "$2" --query 'EvaluationResults[0].EvalDecision' --output text 2> /dev/null; };
+      [ "$(q s3:GetObject "$M/integrations/github/terraform-provider-github_${V}_linux_amd64.zip")" = allowed ] && [ "$(q s3:GetObject "$M/kislerdm/neon/x.zip")" = implicitDeny ] && [ "$(q s3:GetObject "$B/tf-provider-mirror/x.zip")" = implicitDeny ] && [ "$(q s3:PutObject "$M/integrations/github/x.zip")" = implicitDeny ] && [ "$(q s3:ListBucket "$B")" = implicitDeny ] && echo "MIRROR_GRANT_OK $role" || { echo "MIRROR_GRANT_MISMATCH $role"; res=BAD; }; done; rm -f "${E:?}"/*.policy.json; echo "SIM_$res"
+    expected: MIRROR_GRANT_OK for both roles, then SIM_OK.
+    fix_if: MIRROR_GRANT_MISMATCH (fix the statement on the branch, re-run steps 10-11); never apply first
+    hermetic: false
+    graduation: not-applicable
+  - step: 12
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it from the top-level session, backgrounded with a 2 h limit, and read only the attestation.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure -- fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and steps 1-6 carry the durable regressions.
+  - step: 13
+    phase: post-deploy
+    action: >-
+      The human-directed bootstrap apply of the merge sha in a fresh worktree (Decision 248 cl.6), run by an ADMIN
+      session only after the operator directs it in that session; never self-directed. A saved plan is applied only
+      after show -json proves its state-changing rows are exactly the two inline-policy updates not yet live, each
+      adding only ProviderMirrorGithubRead (the step 10 check, re-run on this plan); an empty plan prints
+      APPLY_ALREADY. Then simulate both live roles. Terraform errors go to a local log, never posted.
+    command: >-
+      set -o pipefail; R=$(tr -d '[:space:]' < config/aws-region); P=agent_platform_admin; D="${TMPDIR:-/tmp}/gsm-apply"; W="$D/wt"; mkdir -p "$D"; export TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc; T="terraform -chdir=$W/terraform/bootstrap";
+      CHK="import json,sys; L=lambda v: v if isinstance(v, list) else [v]; S=lambda s: {x.get('Sid'): {k: (sorted(L(v)) if k in ('Action', 'Resource') else v) for k, v in x.items()} for x in L(json.loads(s or '{}').get('Statement', []))}; p=json.load(sys.stdin); rc=[r for r in p.get('resource_changes', []) if r['change']['actions'] != ['no-op'] or r['change'].get('importing') is not None or r.get('previous_address')]; G='ProviderMirrorGithubRead'; NEW={'Sid': G, 'Effect': 'Allow', 'Action': ['s3:GetObject'], 'Resource': ['arn:aws:s3:::agent-platform-data-lake/tf-provider-mirror/registry.terraform.io/integrations/github/*']}; ok=all(r['address'] in ('aws_iam_role_policy.github_settings_apply', 'aws_iam_role_policy.github_settings_preview') and r['change']['actions'] == ['update'] and S(r['change']['after']['policy']).get(G) == NEW and {k: v for k, v in S(r['change']['after']['policy']).items() if k != G} == S(r['change']['before']['policy']) for r in rc); sys.exit(3 if not rc else 0 if ok else 1)";
+      git fetch -q origin main && { git worktree remove --force "$W" 2> /dev/null; rm -rf "${W:?}"; git worktree prune; git worktree add --detach "$W" "$MERGE_SHA" -q; } &&
+      { git merge-base --is-ancestor "$MERGE_SHA" origin/main && grep -q ProviderMirrorGithubRead "$W/terraform/bootstrap/github_settings_apply.tf" || { echo MERGE_SHA_WRONG; false; }; } &&
+      cp terraform/bootstrap/terraform.bootstrap.tfvars "$W/terraform/bootstrap/" && $T init -input=false -backend-config="region=$R" > /dev/null 2>> "$D/tf.err" &&
+      $T plan -input=false -var-file=terraform.bootstrap.tfvars -out="$D/bs.bin" > /dev/null 2>> "$D/tf.err" &&
+      { $T show -json "$D/bs.bin" | bin/venv-python -I -c "$CHK"; c=$?; if [ "$c" = 3 ]; then echo APPLY_ALREADY; elif [ "$c" = 0 ]; then $T apply -input=false -no-color "$D/bs.bin" 2>> "$D/tf.err" | grep -q '^Apply complete!' && echo APPLY_OK || echo APPLY_FAILED; else echo APPLY_STOPPED; fi; } || echo APPLY_PLAN_FAILED;
+      rm -f "${D:?}/bs.bin"; git worktree remove --force "$W";
+      A=$(aws sts get-caller-identity --profile $P --query Account --output text); M=arn:aws:s3:::agent-platform-data-lake/tf-provider-mirror/registry.terraform.io;
+      V=$(awk '/^provider "registry.terraform.io\/integrations\/github"/ { f=1 } f && /version[ \t]*=/ { gsub(/[",]/, "", $3); print $3; exit }' terraform/github/.terraform.lock.hcl);
+      for role in github-settings-apply github-settings-preview; do s() { aws iam simulate-principal-policy --profile $P --policy-source-arn "arn:aws:iam::$A:role/$role" --action-names "$1" --resource-arns "$2" --query 'EvaluationResults[0].EvalDecision' --output text 2> /dev/null; };
+      [ "$(s s3:GetObject "$M/integrations/github/terraform-provider-github_${V}_linux_amd64.zip")" = allowed ] && [ "$(s s3:GetObject "$M/kislerdm/neon/x.zip")" = implicitDeny ] && [ "$(s s3:PutObject "$M/integrations/github/x.zip")" = implicitDeny ] && echo "LIVE_GRANT_OK $role" || echo "LIVE_GRANT_MISMATCH $role"; done
+    expected: >-
+      APPLY_OK (or APPLY_ALREADY on a re-run), then LIVE_GRANT_OK for github-settings-apply and github-settings-preview.
+      Post the markers and the merge sha as a counts-only comment on the merged build PR.
+    fix_if: >-
+      APPLY_STOPPED (the plan carries another row or another statement change: STOP and report, never target or fold it
+      in); APPLY_PLAN_FAILED or APPLY_FAILED (read the local tf.err; re-run is safe); LIVE_GRANT_MISMATCH after APPLY_OK
+      (IAM propagation: re-run the simulation after a minute, then STOP and report)
+    hermetic: false
+  - step: 14
+    phase: post-deploy
+    action: >-
+      The real jobs against the real mirror. First, the merge's own push run of terraform-github-apply.yml (it touches the
+      workflow): if it ran before step 13, its preview shows `provider-mirror: DEGRADED` and still succeeds (fail-open
+      proven live). Then, after step 13, dispatch terraform-github-apply.yml from main with no inputs and read its
+      preview job.
+    command: >-
+      mcp__github__actions_run_trigger(owner=otl-labs, repo=ontheloop, method=run_workflow, workflow_id=terraform-github-apply.yml, ref=main); then mcp__github__actions_list(method=list_workflow_runs, resource_id=terraform-github-apply.yml) for the dispatch run, mcp__github__actions_list(method=list_workflow_jobs, resource_id=<run id>) and mcp__github__get_job_logs on its preview job, grepping 'provider-mirror: ' and 'TF_GITHUB_PREVIEW_FAILED'
+    expected: >-
+      the dispatch run's preview job succeeds and its log carries 'provider-mirror: ACTIVE (integrations/github 6.12.1)'
+      (the version the lockfile pins at merge) and no TF_GITHUB_PREVIEW_FAILED line; with nothing to change, the apply
+      job is skipped and no approval is asked. Record both run ids.
+    fix_if: >-
+      DEGRADED after step 13 (read the reason: a missing package means re-dispatch terraform-provider-mirror-seed.yml; an access reason means step 13 did not take; a code defect means a fix on a new branch)
+    hermetic: false
+  - step: 15
+    phase: post-deploy
+    action: The bundled rec-5005 is closed by the merge's Resolves trailer.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
+      make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5005']); print(rows[0]['id'], rows[0]['status'])"
+    expected: prints rec-5005 with a closed status after ci.yml's closure job runs on the merge commit; record that run id.
+    fix_if: >-
+      still open (check the squash body carries Resolves: rec-5005 and the closure job's log; never close it by hand
+      without the acceptance passing)
+    hermetic: false
+test_obligations:
+  - source: scripts/ci/terraform_github_apply_mirror.sh
+    behavior: fetch activates a mirror-only tfrc only from the exact locked package
+    verification_step: 1
+    test_selector: tests/test_terraform_github_apply_mirror.py::test_fetch_active_writes_a_mirror_only_tfrc
+    red_green_expectation: red before (file absent), green after
+  - source: scripts/ci/terraform_github_apply_mirror.sh
+    behavior: every degradation, an unset variable included, exits 0 with no export under bash -e
+    verification_step: 2
+    test_selector: tests/test_terraform_github_apply_mirror.py::test_fetch_degrades_and_exits_zero
+    red_green_expectation: red before (file absent), green after; red if any branch aborts under -e or -u
+  - source: scripts/ci/terraform_github_apply_mirror.sh
+    behavior: AWS error text never reaches the public log
+    verification_step: 3
+    test_selector: tests/test_terraform_github_apply_mirror.py::test_fetch_never_prints_aws_error_text
+    red_green_expectation: red before (file absent), green after; red if stderr is passed through
+  - source: scripts/ci/terraform_github_apply_mirror.sh
+    behavior: classify prints one named class and no log text
+    verification_step: 4
+    test_selector: tests/test_terraform_github_apply_mirror.py::test_classify_names_a_class_and_never_the_log
+    red_green_expectation: red before (file absent), green after
+  - source: terraform/bootstrap/github_settings_apply.tf
+    behavior: each role reads only the integrations/github mirror packages
+    verification_step: 5
+    test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py::test_h_the_mirror_grant_is_exact
+    red_green_expectation: red before (node absent), green after; the real-tree node test_real_tree_is_green is red if the .tf lacks the statement once the guard expects it
+  - source: scripts/checks/ci_guards/validate_github_settings_apply.py
+    behavior: h pins the mirror grant and n pins the mirror step wiring and the classify call
+    verification_step: 6
+    test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py::test_n_each_job_fetches_the_mirror_before_init
+    red_green_expectation: red before (node absent), green after
+  - source: .github/workflows/terraform-github-apply.yml
+    behavior: each job runs the mirror fetch after its credentials and before init; preview's init failure is classified
+    verification_step: 6
+    test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py::test_n_each_job_fetches_the_mirror_before_init
+    red_green_expectation: red before (no mirror step), green after
+  - source: scripts/ci/terraform_github_apply.sh
+    behavior: a failed init step prints its class before the existing failure line
+    verification_step: 6
+    test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py::test_n_each_job_fetches_the_mirror_before_init
+    red_green_expectation: red before (no classify call), green after
+  - source: config/composite_action_body_baseline.yaml
+    behavior: the two one-line mirror steps are registered
+    verification_step: 8
+    command: bin/venv-python -c "from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as f; failed=[]; f(failed); raise SystemExit(1 if failed else 0)"
+    waiver_reason: Config data read by an already-registered guard, which fails an unregistered inline body; no new test can add to that.
+constraints:
+  - "Fail-open (Decision 55): no mirror state can fail either job; the mirror step only ever adds a TF_CLI_CONFIG_FILE line or nothing."
+  - "Integrity unchanged: both inits keep -lockfile=readonly, so the mirror package is checked against the committed lockfile hashes."
+  - "No terraform output and no AWS error text reaches a log (the workflow already hides terraform's; Decision 101)."
+  - "The bootstrap apply is human-directed in an ADMIN session (Decision 248 cl.6); the operator never hand-applies; no -target."
+  - "Never loosen an existing assertion (Decision 235); no existing guard test changes."
+context:
+  - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: 248 (cl.4 widened by a dated Update line; cl.6 human-directed bootstrap apply; cl.9 names the guard as coverage), 246 (approved text; {{DATE}} keeps the approval; final-diff word kept for IAM and CODEOWNERS paths), 177 (an Update line legally widens a ratified clause), 120 (the mirror; fail-open to the pre-mirror path), 126 (agents never self-direct an apply), 101 (no AWS error text or account specifics in logs or comments), 128 (guard NEAR_CAP: facade, never a raise), 162 (one-line steps calling a testable script), 235 (the guard's exact grant set widens only by this human-approved IAM change; no existing node changes). CONTRADICT: 238 NOTE (cl.3 'init is hermetic' binds the PR-as-data speculative plan job, not this main-only preview; see the next line). SPIRIT: 55 NOTE (a silent green DEGRADED hides a persistent gap) -- adopted: each degradation is also a ::warning:: annotation on the run page. RELATED: 55, 119, 77, 144, 223, 150, 167, 226, 245, 132, 48. Decisions triaged: 202 of 202. Roadmap items intersected: 6; CONFLICT: 0; RELATED: 6. Serves: NS.9 2/5."
+  - "Decision 238 cl.3 ('init is hermetic from the S3 provider mirror') governs the PR-data speculative plan job. This preview runs only main's code on push or dispatch, and provider integrity rests on -lockfile=readonly's check of the package against main's committed, code-owned lockfile hashes (zh for integrations/github 6.12.1), not on the mirror's write controls (tf-provider-mirror/ is writable by bucket-wide writers, Decision 120). So a direct-fetch fallback keeps the same integrity."
+  - "Root cause and PR 1: see PLAN-terraform-validate-github-provider-mirror context (run 42468562354 preview init failed on both attempts; the S3 mirror holds integrations/github 6.12.1, seeded by #1894). This plan does not depend on PR 1's build: it has its own script, so either can build first."
+  - "Operator 2026-11-08 (thread 'Fix terraform init failure on main'): scope card 'Both, as two PRs' (PR 2 = rec-5005, IAM approved at planning); 12:35Z 'write the plan'; 10:55Z no override of the rec-5004 red_overlap block, so plan merges and builds wait for it to clear."
+  - "Fork decided-with-notice (not on the always-ask roster; precedent PR 1 and Decision 55): fail-open copy-then-tfrc over rec-5005's sketched hermetic -plugin-dir init. -plugin-dir would turn a missing mirror package or a missing grant into a failed preview, and would make merge order against the bootstrap apply load-bearing; fail-open keeps today's direct fetch as the fallback with the same lockfile integrity. Persisted here and in the build PR body."
+  - "Least privilege: s3:GetObject on one namespace prefix and no ListBucket, unlike terraform-validate's whole-mirror sync roles; the script copies the one key the lockfile names (packed filesystem_mirror layout needs only the zip)."
+  - "Overlap: #1917 (fail-closed gates build) and PLAN-terraform-github-apply-push-neutral (rec-4980, unbuilt) edit terraform-github-apply.yml; #1900 and rec-4965 (trust move to tf-github-apply), rec-4981 (key policy) touch github_settings_apply.tf. Whichever builds second rebases; none edits the two policies' statement lists except this plan. config/composite_action_body_baseline.yaml is shared with many unbuilt plans (two added lines here)."
+  - "CODEOWNERS paths in scope (.github/workflows/terraform-*.yml, terraform/bootstrap/, scripts/ci/terraform_github_apply.sh, .github/CODEOWNERS): the build merges on code review PROCEED, green CI and the operator's final-diff word (project ruling 2026-11-03: IAM and CODEOWNERS paths keep it)."
+  - "red_overlap 2026-11-08 12:50Z: blocked (rec-5004 slo_breached, the telemetry red; rec-5007 overlap on 16 transitive tests/** paths). rec-5007 closes with PR 1's build (PLAN-terraform-validate-github-provider-mirror bundles it), so this build starts after PR 1's merges and rec-5004 clears; the operator declined an override."
+  - "Kept unchanged: graduated shards github-settings-apply-guard, github-settings-apply-guard-ci and github-settings-apply-event-wiring (they name tests/checks/ci_guards/test_validate_github_settings_apply.py, whose existing nodes stay byte-identical)."
+  - "V3 resolution: the posted pre-merge gate evidence for the build PR's current head (steps 10-11) substitutes for pre-merge post-deploy evidence; the behavioural acceptance (Decision 48) is the post-merge, human-directed walk of steps 13-14, evidenced by a counts-only comment on the merged PR naming the applied sha."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 55, 101, 126, 246 and 248 sections read
+  - All files in scope located and readable
+  - Approved-text sidecar docs/plans/approved/terraform-github-apply-provider-mirror.yaml read; its approval run recorded
+execution_steps:
+  - "Script and tests: scripts/ci/terraform_github_apply_mirror.sh and tests/test_terraform_github_apply_mirror.py; run VP 1-4."
+  - "Guard: validate_github_settings_apply grants, OWNED and predicate n, with the two new nodes; run VP 5-6 (red until the next step lands)."
+  - "Tree: the sidecar's blocks applied word for word to terraform/bootstrap/github_settings_apply.tf, docs/DECISIONS.md and .github/CODEOWNERS; the workflow's two mirror steps and the classify branch; terraform_github_apply.sh's classify call; the two baseline entries; add the six graduate shards (VP 1-6); run VP 5-8."
+  - "CLOSURE, each outcome reported separately (implement skill Commit Flows; docs/contracts/git-ops.yaml handoff_sequence): go/no-go first: re-run bin/venv-python -m scripts.ci_rca.red_overlap --plan on this plan; proceed only if it is clear, else stop BLOCKED; bin/venv-python -m scripts.session.github_readiness; set implementation_declared: true; run VP 1-8; commit (feat(terraform-github-apply-provider-mirror): ...); git fetch origin main && git rebase origin/main; VP 12 (full tier from the top-level session, backgrounded, then --verify-head; a timeout is BLOCKED, no push); postflight evidence; push; open the PR (body names the fork notice and carries 'Approved text: <sidecar path + approval run link>'; the squash body carries Resolves: rec-5005); subscribe; at CI green run VP 9-11 in an ADMIN session and post their markers; code review in a fresh context; re-run red_overlap and merge only if it is clear, on code review PROCEED, green CI and the operator's final-diff word; then VP 13 only on the operator's explicit direction in the ADMIN session, then VP 14 and 15, reporting the PR number, run ids and merge sha."
+  - "Report: what was implemented, verification results"
+rollback: >-
+  Revert the build PR; the jobs fetch directly again. The two inline-policy statements are removed only by a
+  human-directed bootstrap apply of the revert (harmless if left: read-only on public provider packages).
