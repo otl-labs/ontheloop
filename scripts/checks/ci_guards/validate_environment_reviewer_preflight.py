@@ -146,6 +146,7 @@ def check_upstream(workflows: dict[str, dict[str, Any]], declared: dict[str, dic
     for fname, (upstream, gated) in UPSTREAM.items():
         wf = workflows.get(fname)
         jobs = _jobs(wf) if wf else {}
+        wf = wf or {}
         if upstream not in jobs or gated not in jobs:
             out.append(f"d: {fname} must define jobs {upstream} and {gated}")
             continue
