@@ -50,7 +50,8 @@ scope:
       On success it writes "$RUNNER_TEMP/tf-github-mirror.tfrc"
       (filesystem_mirror path "$RUNNER_TEMP/tf-github-mirror", include ["registry.terraform.io/integrations/github"];
       direct exclude the same one address), and only once that write succeeds appends TF_CLI_CONFIG_FILE=<that path>
-      to $GITHUB_ENV (a failed tfrc write degrades, reason "tfrc write failed") and prints
+      to $GITHUB_ENV (a failed tfrc write degrades, reason "tfrc write failed"; a failed append degrades too, reason
+      "GITHUB_ENV write failed", so ACTIVE prints only after both writes succeed) and prints
       `provider-mirror: ACTIVE (integrations/github ${GITHUB_VERSION})`. Every degradation (an unset variable, another
       OS or CPU, an unparsed version, a copy error or timeout (exit 124), an empty file, a hash mismatch) prints `provider-mirror:
       DEGRADED -- <reason> -- falling back to a direct fetch` and the same reason as one `::warning::` annotation (so a
@@ -143,9 +144,10 @@ scope:
       The helper's mirror test file (validate_test_coverage maps the helper here and requires 100% coverage from this file
       alone). Calls check_mirror_wiring(jobs, apply_script) directly on the real workflow's jobs and the real apply script
       text (both green), then test_n_each_job_fetches_the_mirror_before_init (parametrized; mirror step missing, before
-      the credentials step, after the first terraform-naming step, another run line and MIRROR_PREFIX changed, each for
-      the preview and the apply job; preview only: after app_token; classify dropped from the preview plan step's init
-      failure branch; classify call dropped from the apply script; each returns exactly one "n: " line).
+      the credentials step, a terraform-naming step inserted ahead of it, another run line and MIRROR_PREFIX changed, each
+      for the preview and the apply job; preview only: moved after app_token; classify dropped from the preview plan step's init
+      failure branch; classify call dropped from the apply script; each returns exactly one "n: " line, because the helper
+      reports all placement faults of one job's mirror step as a single line).
     new_imports: []
   - file: tests/test_terraform_github_apply_script.py
     action: Modify
@@ -170,7 +172,8 @@ scope:
       with the version read from the real lockfile; GITHUB_ENV holds TF_CLI_CONFIG_FILE; the tfrc's filesystem_mirror
       include and direct exclude are each exactly ["registry.terraform.io/integrations/github"]; the ACTIVE line names
       the locked version); test_fetch_degrades_and_exits_zero (parametrized: copy error, timeout, empty file,
-      hash mismatch (the zip is also deleted), unparseable lockfile, MIRROR_PREFIX unset, RUNNER_TEMP unset, GITHUB_ENV unset, uname aarch64; each exits 0,
+      hash mismatch (the zip is also deleted), tfrc write failed (RUNNER_TEMP's tfrc path made a directory),
+      GITHUB_ENV write failed (GITHUB_ENV pointing at a directory), unparseable lockfile, MIRROR_PREFIX unset, RUNNER_TEMP unset, GITHUB_ENV unset, uname aarch64; each exits 0,
       writes no TF_CLI_CONFIG_FILE line, prints one DEGRADED line and one ::warning:: line); test_fetch_never_prints_aws_error_text (the
       account digits and the ARN appear nowhere in stdout or stderr); test_classify_names_a_class_and_never_the_log
       (parametrized logs: a 504 provider install, a backend lock error, both (backend wins), neither, a
@@ -202,7 +205,7 @@ infrastructure_dependencies:
     never breaks a run.
 acceptance_criteria:
   - "With the grant live and the locked package in the mirror, both jobs export TF_CLI_CONFIG_FILE to a tfrc serving only integrations/github from the mirror and init installs it with no github.com fetch; the preview job is observed live (VP 14), the apply job by the same step and guard n (it runs only when there is something to apply)."
-  - "A missing grant, a missing or unreadable package, an unparsed lockfile, an unset variable, another OS or CPU, a copy timeout or a package whose hash the lockfile lacks each degrade to today's direct fetch with a printed reason and exit 0; the mirror step never fails a job."
+  - "A missing grant, a missing or unreadable package, an unparsed lockfile, an unset variable, another OS or CPU, a copy timeout, a package whose hash the lockfile lacks or a failed tfrc or GITHUB_ENV write each degrade to today's direct fetch with a printed reason and exit 0; the mirror step never fails a job."
   - "A failed init prints one named class (provider_install, backend or other) and never terraform's output; the mirror step never prints AWS error text."
   - "Each role gains exactly s3:GetObject on tf-provider-mirror/registry.terraform.io/integrations/github/* and nothing else; the bootstrap apply changes only those two inline policies."
   - "The Decision 248 update and the CODEOWNERS line ship word for word as the operator approved them (Decision 246); the two policy statements match the IAM wording the operator approved at planning, confirmed by his final-diff word."
@@ -446,10 +449,15 @@ test_obligations:
     test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py::test_h_the_mirror_grant_is_exact
     red_green_expectation: red before (node absent), green after; the real-tree node test_real_tree_is_green is red if the .tf lacks the statement once the guard expects it
   - source: scripts/checks/ci_guards/validate_github_settings_apply.py
-    behavior: h pins the mirror grant and n pins the mirror step wiring and the classify call
+    behavior: h pins the mirror grant exactly
     verification_step: 5
     test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py::test_h_the_mirror_grant_is_exact
-    red_green_expectation: red before (node absent), green after; n's plumbing by test_n_check_workflow_appends_the_mirror_wiring in the same file (VP 7)
+    red_green_expectation: red before (node absent), green after
+  - source: scripts/checks/ci_guards/validate_github_settings_apply.py
+    behavior: check_workflow appends predicate n's lines from the helper
+    verification_step: 7
+    test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py::test_n_check_workflow_appends_the_mirror_wiring
+    red_green_expectation: red before (node absent), green after
   - source: scripts/checks/ci_guards/_github_settings_mirror.py
     behavior: predicate n fails each misplaced, missing or altered mirror step and each dropped classify call
     verification_step: 6
@@ -508,6 +516,7 @@ gate_rounds:
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 8}
   - {gate: wording-check, round: 2, verdict: PASS, digest: ccb3b115cafd3f8f1c6e15ea6f9473d887604404f4cc56b469667c3be4d76ab4, base: 7cc88fd8688be82e9d4b4b54ecb9bba04ec20a07, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 3}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
