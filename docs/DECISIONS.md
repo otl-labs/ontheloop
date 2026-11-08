@@ -213,6 +213,14 @@ conditions:
     description: "CloudTrail shows the apply App entry read by a principal outside clause 5's list: re-decide clause 5."
 ```
 
+> **Update (2026-11-08):** Clause 4 widens for provider installation (rec-5005; on 2026-11-08 github.com answered 504
+> for the integrations/github provider checksum and the preview could not init). Both roles may also read, and only
+> read, the integrations/github packages in the S3 provider mirror (s3:GetObject on
+> tf-provider-mirror/registry.terraform.io/integrations/github/*; no listing, no write). Each job copies the exact
+> package the committed lockfile names and installs it from there, checked against the lockfile's hashes, and falls
+> back to a direct fetch from github.com when the package is missing or unreadable. Clause 6 still governs how the
+> grant is provisioned.
+
 ---
 
 ## Decision 247: The legacy Python executor is retired and the STRATEGIC plan type is shelved, both for good -- an item too large for one plan is decomposed by its planner into child work items, which ride the parent's approval only through a deterministic check (supersedes Decision 67; amends Decisions 73, 90, 182, 203 and 229) (Decided)

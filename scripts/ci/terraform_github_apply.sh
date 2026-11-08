@@ -61,6 +61,9 @@ terraform_step() {
     local step="$1"
     shift
     if ! "$QUIET" "$LOG" -- "$@"; then
+        if [ "$step" = init ]; then
+            bash "$HERE/terraform_github_apply_mirror.sh" classify "$LOG"
+        fi
         echo "TF_GITHUB_APPLY_TERRAFORM_FAILED step=$step"
         exit 1
     fi

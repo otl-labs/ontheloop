@@ -7,10 +7,11 @@ on synthetic data; the registered check loads the real tree.
   (a) no workflow or composite action except WORKFLOW names either role, the apply App entry or the apply script
   (g) each role's trust is one Allow statement, StringEquals only, on aud, one Environment subject per repo segment
       (GATE_ENV for the apply role, tf-trusted-plan for the preview role) and job_workflow_ref exactly the one main ref
-  (h) the apply policy grants exactly the key read and terraform/github's state and lock, with no iam: action; the
-      preview policy is one state GetObject; both carry the 10,240 B precondition; the key's resource policy is one Deny
-      of every non-metadata action to all but four principals, ordered after AdminOps, whose
-      GithubApplyKeyResourcePolicy grants exactly the two resource-policy verbs on the entry's exact-suffix ARN
+  (h) the apply policy grants exactly the key read, terraform/github's state and lock and the integrations/github mirror
+      read, with no iam: action; the preview policy is one state GetObject plus that mirror read; both carry the
+      10,240 B precondition; the key's resource policy is one Deny of every non-metadata action to all but four
+      principals, ordered after AdminOps, whose GithubApplyKeyResourcePolicy grants exactly the two
+      resource-policy verbs on the entry's exact-suffix ARN
   (b) WORKFLOW's on: keys are exactly push (branches [main]) and workflow_dispatch
   (c) its jobs are exactly preview and apply; apply declares the literal GATE_ENV and is the only job assuming the
       apply role; preview declares exactly tf-trusted-plan, assumes only the preview role and is the only job reading
@@ -23,6 +24,7 @@ on synthetic data; the registered check loads the real tree.
   (k) terraform/github's tf_github_apply Environment is main-only, has no admin bypass and is prevent_destroy
   (l) every resource type under terraform/github is in the gate's GATE_TYPES or NON_GATE_TYPES
   (m) the preview job's gate step passes github.event_name through env EVENT_NAME to the gate's --event-name
+  (n) each job fetches the provider mirror before init and both init failures are classified (_github_settings_mirror)
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from typing import Any
 import yaml
 
 from scripts.checks import _common, registry
+from scripts.checks.ci_guards._github_settings_mirror import MIRROR_ARN, check_mirror_wiring
 from scripts.checks.ci_guards.validate_trusted_plan_environment import (
     _arg,
     _blocks,
@@ -67,6 +70,8 @@ OWNED = (
     "scripts/ci/plan_names_core.py",
     "scripts/ci/environment_reviewer_preflight.py",
     "scripts/checks/ci_guards/validate_github_settings_apply.py",
+    "scripts/checks/ci_guards/_github_settings_mirror.py",
+    "scripts/ci/terraform_github_apply_mirror.sh",
 )
 SETTINGS_TF = "github_settings_apply.tf"
 ADMIN_TF = "platform_admin_policies.tf"
@@ -86,8 +91,12 @@ _APPLY_GRANTS = {
     ("AppKeyRead", frozenset({"secretsmanager:GetSecretValue"}), frozenset({_ENTRY_REF})),
     ("TfstateGithubObject", frozenset({"s3:GetObject", "s3:PutObject"}), frozenset({_STATE})),
     ("TfstateGithubLock", frozenset({"s3:GetObject", "s3:PutObject", "s3:DeleteObject"}), frozenset({_STATE + ".tflock"})),
+    ("ProviderMirrorGithubRead", frozenset({"s3:GetObject"}), frozenset({MIRROR_ARN})),
 }
-_PREVIEW_GRANTS = {("TfstateGithubRead", frozenset({"s3:GetObject"}), frozenset({_STATE}))}
+_PREVIEW_GRANTS = {
+    ("TfstateGithubRead", frozenset({"s3:GetObject"}), frozenset({_STATE})),
+    ("ProviderMirrorGithubRead", frozenset({"s3:GetObject"}), frozenset({MIRROR_ARN})),
+}
 _SUB_RE = re.compile(r'^flatten\(\[for repo in local\.github_repos : \["repo:\$\{repo\}:environment:([^"]+)"\]\]\)$')
 _INTERP_RE = re.compile(r"\$\{local\.(\w+)\}")
 _MAIN_REF = "github.ref == 'refs/heads/main'"
@@ -388,7 +397,7 @@ def _roles(job: dict[str, Any]) -> set[str]:
     return out
 
 
-def check_workflow(wf: dict[str, Any] | None) -> list[str]:
+def check_workflow(wf: dict[str, Any] | None, apply_script: str | None = None) -> list[str]:
     if wf is None:
         return [f"b: {WORKFLOW} is missing"]
     out = []
@@ -415,7 +424,7 @@ def check_workflow(wf: dict[str, Any] | None) -> list[str]:
             out.append(f"d: the {jid} job's if must require refs/heads/main in every disjunct")
     if apply.get("needs") not in ("preview", ["preview"]):
         out.append("d: the apply job must need preview")
-    return out + _step_violations(jobs) + _event_wiring(preview)
+    return out + _step_violations(jobs) + _event_wiring(preview) + check_mirror_wiring(jobs, apply_script)
 
 
 def _step_violations(jobs: dict[str, Any]) -> list[str]:
@@ -541,4 +550,4 @@ def validate_github_settings_apply(failed: list[str]) -> None:
         failed.append(f"github-settings-apply: {violation}")
     registry.examined(len(groups), unit="invariants")
     if not violations:
-        print("  PASS: predicates (a)-(m)")
+        print("  PASS: predicates (a)-(n)")

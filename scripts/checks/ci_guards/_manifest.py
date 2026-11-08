@@ -231,6 +231,7 @@ ENTRIES: tuple[Entry, ...] = (
             "scripts/ci/terraform_github_apply*",
             "scripts/ci/quiet_run.sh",
             "scripts/checks/ci_guards/validate_github_settings_apply.py",
+            "scripts/checks/ci_guards/_github_settings_mirror.py",
             "scripts/checks/ci_guards/validate_trusted_plan_environment.py",
             "scripts/verify_ci_workflow/**",
             "scripts/checks/_common.py",
