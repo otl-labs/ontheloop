@@ -410,6 +410,60 @@ class TestMalformedBodies:
         assert "wake: ERROR pulls list is not a list" in capsys.readouterr().out
 
 
+class TestWakeApprovals:
+    ARGV = ["wake", "--slug", SLUG, "--sha", "b" * 40, "--digest", DIGEST, "--run-id", "55"]
+    NONE = "wake: no approver recorded for run 55; nothing posted"
+
+    def _run(self, monkeypatch, api, argv=None):
+        posts: list[tuple] = []
+        monkeypatch.setattr(gh, "http_get", api)
+        monkeypatch.setattr(gh, "http_post", lambda *a: posts.append(a))
+        return gh.main(argv or self.ARGV), posts
+
+    def _urls(self, api):
+        return [u for u, _, _ in api.calls]
+
+    @pytest.mark.parametrize(
+        "record",
+        [
+            [],
+            approvals_for(state="rejected"),
+            approvals_for(environment="other-env"),
+        ],
+        ids=["empty", "rejected", "other-environment"],
+    )
+    def test_wake_without_an_approver_posts_nothing(self, monkeypatch, capsys, record):
+        api = Api([], approvals={55: record})
+        code, posts = self._run(monkeypatch, api)
+        assert code == 1 and posts == []
+        assert capsys.readouterr().out.strip() == self.NONE
+        assert not any(u.split("?")[0].endswith("/pulls") for u in self._urls(api))
+
+    def test_wake_reads_the_run_approvals_before_the_pulls(self, monkeypatch):
+        api = Api([])
+        code, _ = self._run(monkeypatch, api)
+        urls = self._urls(api)
+        assert code == 0 and urls[0].endswith("/actions/runs/55/approvals") and urls[1].split("?")[0].endswith("/pulls")
+
+    @pytest.mark.parametrize("record", [{"x": 1}, "text"], ids=["dict", "str"])
+    def test_wake_with_a_non_list_approvals_read_fails(self, monkeypatch, capsys, record):
+        code, posts = self._run(monkeypatch, Api([], approvals={55: record}))
+        assert code == 1 and posts == []
+        assert "wake: ERROR run 55 approvals is not a list" in capsys.readouterr().out
+
+    def test_wake_with_a_failed_approvals_read_fails(self, monkeypatch, capsys):
+        code, posts = self._run(monkeypatch, Api([], fail=gh.GitHubError("HTTP 403 from x")))
+        assert code == 1 and posts == []
+        assert capsys.readouterr().out.strip() == "wake: ERROR HTTP 403 from x"
+
+    def test_wake_with_a_non_numeric_run_id_fails_before_any_request(self, monkeypatch, capsys):
+        api = Api([])
+        argv = self.ARGV[:-1] + ["abc"]
+        code, posts = self._run(monkeypatch, api, argv)
+        assert code == 1 and posts == [] and api.calls == []
+        assert capsys.readouterr().out.startswith("wake: ERROR")
+
+
 class TestResolve:
     def _repo(self, tmp_path, monkeypatch):
         fx.clear_ci_env(monkeypatch)

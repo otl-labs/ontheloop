@@ -69,10 +69,10 @@ class TestWorkflow:
         assert job["permissions"] == {} and len(job["steps"]) == 1 and "run" in job["steps"][0]
         assert "uses" not in job["steps"][0]
 
-    def test_wake_job_cannot_fail_the_run_and_has_only_the_comment_grant(self) -> None:
+    def test_wake_job_cannot_fail_the_run_and_holds_only_the_approvals_read_and_comment_grants(self) -> None:
         job = _wf()["jobs"]["wake"]
         assert job["needs"] == "approve" and job["continue-on-error"] is True
-        assert job["permissions"] == {"contents": "read", "pull-requests": "write"}
+        assert job["permissions"] == {"contents": "read", "actions": "read", "pull-requests": "write"}
         assert _wf()["jobs"]["wake"]["steps"][-1]["env"]["APPROVED_TEXT_GH_TOKEN"] == "${{ github.token }}"
         assert "approved_text_github wake" in _runs("wake")
 

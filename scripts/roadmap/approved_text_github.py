@@ -8,7 +8,7 @@ CLI (each subcommand takes --repo OWNER/NAME; omitted, it defaults to repo_ident
 CI, the repository fallback elsewhere):
   check --slug S [--digest H]                    print the grandfather and lookup verdicts
   approvals --run-id N                           print each approval of a run (the read-only shape probe)
-  wake --slug S --sha X --digest H --run-id R    comment on each open PR whose head is X (the workflow's wake job)
+  wake --slug S --sha X --digest H --run-id R    comment on open PRs whose head is X, once run R records an approver
 """
 
 from __future__ import annotations
@@ -237,6 +237,9 @@ def _cmd_wake(args: argparse.Namespace) -> int:
     repo = args.repo or repo_identity.full_name()
     deadline = prov.Deadline(prov.DEADLINE_SECONDS)
     try:
+        if _approver(approvals(repo, int(args.run_id), deadline)) is None:
+            print(f"wake: no approver recorded for run {args.run_id}; nothing posted")
+            return 1
         targets: list[int] = []
         for page in range(1, PULL_PAGES + 1):
             batch = _get(f"{API}/repos/{repo}/pulls?state=open&per_page=100&page={page}", deadline)
