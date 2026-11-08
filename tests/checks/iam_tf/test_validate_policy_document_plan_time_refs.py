@@ -97,6 +97,10 @@ def test_reference_in_inline_json_fails() -> None:
     assert len(reference_problems(text)) == 1
 
 
+def test_required_documents_include_the_trusted_github_plan_role() -> None:
+    assert "github_ci_trusted_github_plan" in REQUIRED_DOCUMENTS
+
+
 def test_missing_required_document_reported() -> None:
     assert len(missing_required_documents(_doc(_NAME_BUILT, name="github_ci_branch"))) == len(REQUIRED_DOCUMENTS) - 1
 

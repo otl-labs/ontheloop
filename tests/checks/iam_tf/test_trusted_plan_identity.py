@@ -257,6 +257,15 @@ def test_planner_grants_nothing_on_tfplan() -> None:
     assert _planner_tfplan_grants(_read(_PERSONAL / "oidc_pipeline_roles.tf")) == []
 
 
+def test_trusted_plan_role_trust_pins_exactly_the_two_current_workflow_refs() -> None:
+    match = re.search(r"trusted_plan_workflow_refs\s*=\s*\[(.*?)\]", _strip_comments(_read(_ROLE_FILE)), re.S)
+    assert match
+    assert re.findall(r'"([^"]+)"', match.group(1)) == [
+        "otl-labs/ontheloop/.github/workflows/terraform-plan-trusted.yml@refs/heads/main",
+        "otl-labs/ontheloop/.github/workflows/terraform-github-plan.yml@refs/heads/main",
+    ]
+
+
 def test_red_pr_sub_in_trust() -> None:
     text = _read(_ROLE_FILE).replace(
         '"repo:${repo}:environment:${local.trusted_plan_environment}"',

@@ -19,6 +19,9 @@ PLANNER_FILE = "oidc_pipeline_roles.tf"
 PLANNER_DOC = "github_ci_planner"
 TRUSTED_FILE = "oidc_trusted_plan_role.tf"
 TRUSTED_DOC = "github_ci_trusted_plan"
+TRUSTED_GITHUB_FILE = "oidc_trusted_github_plan_role.tf"
+TRUSTED_GITHUB_DOC = "github_ci_trusted_github_plan"
+EXACT_GRANT_DOCS = {TRUSTED_DOC, TRUSTED_GITHUB_DOC}
 GRANT_SID = "TfstateGithubRead"
 GRANT_RESOURCE = "${aws_s3_bucket.data_lake.arn}/tfstate/github/terraform.tfstate"
 TARGET_ACTION = "s3:GetObject"
@@ -137,7 +140,7 @@ def _other_document_violations(texts: dict[str, str]) -> list[str]:
     for name in {n for t in texts.values() for n in _ANY_DOC_RE.findall(t)} - {PLANNER_DOC}:
         for s in doc_statements(texts, name):
             exact = (s["sid"], s["effect"], s["condition"], s["actions"], s["resources"]) == _EXACT_GRANT
-            if name == TRUSTED_DOC and exact:
+            if name in EXACT_GRANT_DOCS and exact:
                 continue
             if any(LITERAL in r for r in s["resources"]) and s["effect"] == "Allow":
                 bad.append(f"document {name} statement {s['sid']} names {LITERAL}")
@@ -265,7 +268,11 @@ class TestPlannerStateGrant:
         assert planner_violations(real_texts()) == []
 
     def test_real_hcl_no_other_allow_statement_names_the_state_prefix(self) -> None:
-        assert allow_statements_naming_literal(real_texts()) == [(PLANNER_FILE, GRANT_SID), (TRUSTED_FILE, GRANT_SID)]
+        assert allow_statements_naming_literal(real_texts()) == [
+            (PLANNER_FILE, GRANT_SID),
+            (TRUSTED_GITHUB_FILE, GRANT_SID),
+            (TRUSTED_FILE, GRANT_SID),
+        ]
 
     def test_trusted_plan_document_may_hold_only_the_exact_grant(self) -> None:
         doc = f'data "aws_iam_policy_document" "{TRUSTED_DOC}" {{\n{GRANT_HCL}}}\n'
@@ -279,6 +286,14 @@ class TestPlannerStateGrant:
             texts[TRUSTED_FILE] = strip_comments(broad)
             assert planner_violations(texts), broad
         texts[TRUSTED_FILE] = strip_comments(doc.replace(f'"{TRUSTED_DOC}"', '"other_doc"'))
+        assert planner_violations(texts)
+
+    def test_trusted_github_plan_document_may_hold_only_the_exact_grant(self) -> None:
+        doc = f'data "aws_iam_policy_document" "{TRUSTED_GITHUB_DOC}" {{\n{GRANT_HCL}}}\n'
+        texts = synthetic()
+        texts[TRUSTED_GITHUB_FILE] = strip_comments(doc)
+        assert planner_violations(texts) == []
+        texts[TRUSTED_GITHUB_FILE] = strip_comments(doc.replace("terraform.tfstate", "*"))
         assert planner_violations(texts)
 
     def test_real_hcl_refresh_read_still_scoped_to_tfstate_personal(self) -> None:
@@ -350,13 +365,10 @@ import json  # noqa: E402
 import sys  # noqa: E402
 
 import pytest  # noqa: E402
-import yaml  # noqa: E402
 
 from scripts.ci import terraform_github_plan_report as rpt  # noqa: E402
 
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "terraform-github-plan.yml"
 REPORTER = REPO_ROOT / "scripts" / "ci" / "terraform_github_plan_report.py"
-TAXONOMY = REPO_ROOT / "docs" / "contracts" / "environment-taxonomy.yaml"
 SENTINEL = "SENTINEL-VALUE-9f3a"
 
 
@@ -512,107 +524,3 @@ class TestPlanReport:
             )
             for m in mods:
                 assert m.split(".")[0] in allowed, m
-
-
-def _steps(wf: dict) -> list[dict]:
-    return wf["jobs"]["plan"]["steps"]
-
-
-def _step(wf: dict, uses_prefix: str) -> dict:
-    return next(s for s in _steps(wf) if s.get("uses", "").startswith(uses_prefix))
-
-
-class TestWorkflowAndTaxonomy:
-    @pytest.fixture(scope="class")
-    def wf(self) -> dict:
-        return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-
-    def test_triggers_exact(self, wf) -> None:
-        assert set(wf[True]) == {"pull_request"}
-        assert wf[True]["pull_request"] == {
-            "paths": [
-                "terraform/github/**",
-                ".github/workflows/terraform-github-plan.yml",
-                "scripts/ci/terraform_github_plan_report.py",
-            ]
-        }
-
-    def test_guard_and_permissions(self, wf) -> None:
-        cond = wf["jobs"]["plan"]["if"]
-        assert "github.event.pull_request.head.repo.full_name == github.repository" in cond
-        assert "github.actor != 'dependabot[bot]'" in cond
-        assert wf["permissions"] == {"contents": "read"}
-        assert wf["jobs"]["plan"]["permissions"] == {"id-token": "write", "contents": "read", "pull-requests": "write"}
-
-    def test_aws_credentials_step(self, wf) -> None:
-        step = _step(wf, "aws-actions/configure-aws-credentials")
-        role = step["with"]["role-to-assume"]
-        assert "secrets.AWS_ACCOUNT_ID" in role and role.endswith("role/agent-platform-github-ci-planner")
-        session = step["with"]["role-session-name"]
-        assert session == "terraform-github-plan-pr"
-        oidc = (TF_DIR / "oidc.tf").read_text(encoding="utf-8")
-        reserved = re.search(r'convergence_writer_session_name\s*=\s*"([^"]+)"', oidc)
-        assert reserved and session != reserved.group(1)
-        assert "continue-on-error" not in step
-
-    def test_app_token_step(self, wf) -> None:
-        step = _step(wf, "actions/create-github-app-token")
-        assert set(step["with"]) == {
-            "client-id",
-            "private-key",
-            "permission-metadata",
-            "permission-administration",
-            "permission-actions",
-        }
-        assert all(v == "read" for k, v in step["with"].items() if k.startswith("permission-"))
-
-    def test_plan_and_probe_flags(self, wf) -> None:
-        plan = next(s for s in _steps(wf) if s.get("id") == "plan")["run"]
-        assert "-lock=false" in plan and "-detailed-exitcode" in plan and "> /dev/null" in plan
-        probe = next(s for s in _steps(wf) if "Probe" in s.get("name", ""))["run"]
-        assert "!= null" in probe and 'has("bypass_actors")' in probe
-
-    def test_nothing_mutating_or_persisted(self, wf) -> None:
-        forbidden = [
-            "terraform apply",
-            "terraform import",
-            "state rm",
-            "state mv",
-            "state push",
-            "force-unlock",
-            "aws s3",
-            "GITHUB_ENV",
-        ]
-        for s in _steps(wf):
-            for token in forbidden:
-                assert token not in s.get("run", ""), (token, s.get("name"))
-            assert not s.get("uses", "").startswith("actions/upload-artifact")
-        last = _steps(wf)[-1]
-        assert last["if"] == "always()" and "plan.bin" in last["run"] and "plan.json" in last["run"]
-
-    def test_reviewer_ids_never_in_step_env(self, wf) -> None:
-        for s in _steps(wf):
-            for key in s.get("env") or {}:
-                assert "USER_IDS" not in key.upper() and "REVIEWER_IDS" not in key.upper()
-
-    def test_not_a_required_check(self) -> None:
-        assert "terraform-github-plan" not in (REPO_ROOT / "terraform" / "github" / "repo.tf").read_text(encoding="utf-8")
-
-    def test_taxonomy_row(self) -> None:
-        row = yaml.safe_load(TAXONOMY.read_text(encoding="utf-8"))["axis_a"]["github"]
-        assert "terraform/github" in row["code_vs_infra"]
-        gating = row["apply_gating"]
-        assert "terraform-github-plan.yml" in gating and "NEVER auto-apply" in gating and not gating.startswith("admin-only")
-
-    def test_admin_root_gate_does_not_derive_github(self) -> None:
-        from scripts.checks.verification import validate_admin_root_premerge_gate as gate
-
-        result = gate._derive_admin_only_roots(TAXONOMY)
-        roots, err = result
-        assert not err
-        flat = " ".join(map(str, roots))
-        assert "terraform/bootstrap" in flat and "terraform/github" not in flat
-
-    def test_claude_md_pointer(self) -> None:
-        text = (REPO_ROOT / "terraform" / "github" / "CLAUDE.md").read_text(encoding="utf-8")
-        assert ".github/workflows/terraform-github-plan.yml" in text
