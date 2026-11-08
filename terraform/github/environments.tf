@@ -24,6 +24,10 @@
 #
 # Broader IAM changes beyond github_ci_apply's current scope remain admin-gated until T2.23.
 #
+# Every job that names a reviewer-gated Environment here runs scripts/ci/environment_reviewer_preflight.py first
+# (rec-4979, rec-4961; guard validate_environment_reviewer_preflight), so an auto-created or emptied Environment makes
+# the job refuse instead of run unattended.
+#
 # NEVER add this resource to any auto-apply workflow path (README.md / Decision 77): the guard cannot
 # inspect github_* diffs. terraform/github is CI-applied only by terraform-github-apply.yml behind one
 # operator approval (Decision 248), whose apply job waits here until rec-4965 moves it to tf-github-apply.
@@ -46,7 +50,9 @@ resource "github_repository_environment" "tf_gated_apply" {
   # silently re-creates a protection-rule-free environment the first time a job references
   # `environment: tf-gated-apply`, while github_ci_apply's OIDC trust still matches the
   # environment: sub form -- so every gated apply would keep authenticating and start running
-  # with NO required reviewer. The gate would appear intact and enforce nothing.
+  # with NO required reviewer. The gate would appear intact and enforce nothing. Since rec-4979 the in-job
+  # approvals check (validate_environment_reviewer_preflight) also refuses a run of an auto-created or emptied
+  # Environment, so that failure is no longer silent.
   # prevent_destroy is a lifecycle meta-argument, so it produces no plan diff of its own.
   lifecycle {
     prevent_destroy = true

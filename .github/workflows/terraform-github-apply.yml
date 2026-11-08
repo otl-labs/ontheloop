@@ -6,12 +6,18 @@ name: terraform-github-apply
 # preview (ungated, tf-trusted-plan, role github-settings-preview: state read only): the read-only plan with the
 # read-only plan App, as terraform-github-plan.yml does it; the names-only report and the gate's preview table
 # (address, action, changed attribute names, allowlisted values) go to the step summary. That table is the reviewed
-# set. It asks for no approval when nothing would change, and fails before asking when a change to an Environment,
-# deployment policy or Actions permission (creates included) is not named in the dispatch's gate_change input.
+# set. It asks for no approval when nothing would change. A change to an Environment, deployment policy or Actions
+# permission (creates included) that the dispatch's gate_change input does not name stops it before asking: a push
+# run ends neutral with a ::warning:: naming the dispatch now owed; a dispatch run fails.
 # apply (tf-gated-apply until rec-4965, role github-settings-apply): scripts/ci/terraform_github_apply.sh mints a
 # narrowed apply App token, plans, applies that plan only if each change matches a reviewed one, and re-plans clean.
 # Read the preview's summary before approving.
 #
+# Fail closed (rec-4979): both jobs read GitHub's Environment state with `actions: read`. preview, when it would ask
+# for approval, checks that the apply job's Environment exists with required reviewers; apply, right after its
+# checkout and before any credential step, checks that the run holds a recorded approval for its Environment by a
+# listed reviewer (scripts/ci/environment_reviewer_preflight.py), so an auto-created, unprotected Environment cannot
+# open the gate.
 # validate_github_settings_apply fences this file; validate_trusted_plan_environment governs the preview job.
 # Configuration: repository secret TF_GITHUB_PLAN_APP_PRIVATE_KEY, repository variables TF_GITHUB_PLAN_APP_CLIENT_ID
 # and TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS; the apply App key lives in Secrets Manager, readable only by the apply
@@ -53,6 +59,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      actions: read
     outputs:
       reviewed: ${{ steps.gate.outputs.reviewed }}
       has_changes: ${{ steps.gate.outputs.has_changes }}
@@ -166,6 +173,7 @@ jobs:
           PLAN_EXIT: ${{ steps.plan.outputs.exit_code }}
           GATE_CHANGE: ${{ inputs.gate_change }}
           PROBE_RUN_ID: ${{ inputs.approval_probe_run_id }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           python3 -I scripts/ci/terraform_github_plan_report.py --plan-json "$RUNNER_TEMP/plan.json" \
             --visibility "$RUNNER_TEMP/visibility.json" --plan-exit-code "$PLAN_EXIT" --head-sha "$GITHUB_SHA" \
@@ -175,10 +183,17 @@ jobs:
           rc=0
           python3 -I scripts/ci/terraform_github_apply_gate.py preview --plan-json "$RUNNER_TEMP/plan.json" \
             --visibility "$RUNNER_TEMP/visibility.json" --gate-change "$GATE_CHANGE" --dispatched-input "$dispatched" \
-            --github-output "$GITHUB_OUTPUT" > "$RUNNER_TEMP/preview.md" || rc=$?
+            --github-output "$GITHUB_OUTPUT" --event-name "$EVENT_NAME" > "$RUNNER_TEMP/preview.md" || rc=$?
           cat "$RUNNER_TEMP/report.md" "$RUNNER_TEMP/preview.md" >> "$GITHUB_STEP_SUMMARY"
           cat "$RUNNER_TEMP/report.md" "$RUNNER_TEMP/preview.md"
           exit "$rc"
+
+      - name: Check the apply Environment has reviewers
+        if: ${{ steps.gate.outputs.has_changes == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEWER_LOGINS: ${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}
+        run: python3 -I scripts/ci/environment_reviewer_preflight.py environment --environment tf-gated-apply
 
       - name: Delete plan files (never persisted or uploaded)
         if: always()
@@ -193,6 +208,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      actions: read
     env:
       MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
 
@@ -200,6 +216,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+
+      - name: Check the reviewer approval for tf-gated-apply
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEWER_LOGINS: ${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}
+        run: python3 -I scripts/ci/environment_reviewer_preflight.py approvals --environment tf-gated-apply
 
       - uses: ./.github/actions/aws-region
 

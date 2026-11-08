@@ -69,10 +69,10 @@ class Fixture:
         git(repo, "config", "remote.origin.url", url)
         git(repo, "config", f"url.{self.origin_url}.insteadOf", url)
 
-    def branch_pr(self, number: int, rel: str, text: str, name: str = "pr") -> str:
+    def branch_pr(self, number: int, rel: str, text: str, name: str = "pr", *, message: str | None = None) -> str:
         """Branch off main (the current main), commit one file, push it as refs/pull/<number>/head, back to main."""
         git(self.work, "checkout", "-q", "-b", name, "main")
-        sha = commit(self.work, rel, text, f"pr {number}")
+        sha = commit(self.work, rel, text, message if message is not None else f"pr {number}")
         git(self.work, "push", "origin", f"HEAD:refs/pull/{number}/head")
         git(self.work, "checkout", "-q", "main")
         return sha
@@ -111,6 +111,7 @@ def install_project(project: Path) -> None:
         ".claude/hooks/merge_gate.sh",
         ".claude/hooks/merge_gate.py",
         "scripts/session/merge_overlap.py",
+        "scripts/session/session_trailer.py",
         "bin/venv-python",
     ):
         dest = project / rel

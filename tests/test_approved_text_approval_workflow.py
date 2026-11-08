@@ -60,19 +60,39 @@ class TestWorkflow:
     def test_render_job_is_main_only_and_read_only(self) -> None:
         job = _wf()["jobs"]["render"]
         assert job["if"] == "github.ref == 'refs/heads/main'"
-        assert job["permissions"] == {"contents": "read"}
+        assert job["permissions"] == {"contents": "read", "actions": "read"}
         assert "environment" not in job
 
-    def test_approve_job_waits_on_the_gate_with_no_permissions(self) -> None:
+    def test_approve_job_checks_its_reviewers_approval_before_anything_else(self) -> None:
         job = _wf()["jobs"]["approve"]
         assert job["needs"] == "render" and job["environment"] == adapter.ENVIRONMENT == "approved-text"
-        assert job["permissions"] == {} and len(job["steps"]) == 1 and "run" in job["steps"][0]
-        assert "uses" not in job["steps"][0]
+        assert job["permissions"] == {"contents": "read", "actions": "read"}
+        steps = job["steps"]
+        assert len(steps) == 3
+        assert re.fullmatch(r"actions/checkout@[0-9a-f]{40}", steps[0]["uses"])
+        assert steps[0]["with"] == {"persist-credentials": False}
+        assert steps[1]["run"] == (
+            "python3 -I scripts/ci/environment_reviewer_preflight.py approvals --environment approved-text"
+        )
+        assert steps[1]["env"] == {
+            "GH_TOKEN": "${{ github.token }}",
+            "REVIEWER_LOGINS": "${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}",
+        }
+        assert "uses" not in steps[2] and "run" in steps[2]
 
-    def test_wake_job_cannot_fail_the_run_and_has_only_the_comment_grant(self) -> None:
+    def test_render_checks_the_environment_has_reviewers_first(self) -> None:
+        steps = _wf()["jobs"]["render"]["steps"]
+        assert steps[0]["uses"].startswith("actions/checkout@")
+        assert steps[1]["run"] == (
+            "python3 -I scripts/ci/environment_reviewer_preflight.py environment --environment approved-text "
+            "--require-no-admin-bypass"
+        )
+        assert steps[1]["env"]["GH_TOKEN"] == "${{ github.token }}"
+
+    def test_wake_job_cannot_fail_the_run_and_holds_only_the_approvals_read_and_comment_grants(self) -> None:
         job = _wf()["jobs"]["wake"]
         assert job["needs"] == "approve" and job["continue-on-error"] is True
-        assert job["permissions"] == {"contents": "read", "pull-requests": "write"}
+        assert job["permissions"] == {"contents": "read", "actions": "read", "pull-requests": "write"}
         assert _wf()["jobs"]["wake"]["steps"][-1]["env"]["APPROVED_TEXT_GH_TOKEN"] == "${{ github.token }}"
         assert "approved_text_github wake" in _runs("wake")
 
@@ -205,6 +225,7 @@ class TestCodeowners:
     def test_the_workflow_and_every_path_of_the_render_and_wake_closure_are_code_owned(self) -> None:
         owned = self._owned()
         assert "/.github/workflows/approved-text-approval.yml" in owned
+        assert "/scripts/ci/environment_reviewer_preflight.py" in owned
         missing = sorted(p for p in self._closure_paths() if p not in owned)
         assert not missing, f"import closure paths without a CODEOWNERS entry: {missing}"
 

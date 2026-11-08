@@ -2,7 +2,8 @@
 (PLAN-pr-conflict-signal-exit-status).
 
 Every real-tree fixture below is extracted programmatically from the live workflow files (never
-hand-retyped) so it stays byte-for-byte identical to what the guard actually scans -- a
+hand-retyped), except the two reconcile wake bodies frozen from the base tree (the live steps became delegates),
+so it stays byte-for-byte identical to what the guard actually scans -- a
 paraphrased fixture can pass while the real tree still fails (or vice versa), which is exactly the
 round-1 gap this plan's own critique measured against a per-line detector.
 """
@@ -28,6 +29,53 @@ _ROOT = Path(__file__).resolve().parents[3]
 _CI_RCA_WORKFLOW = _ROOT / ".github" / "workflows" / "ci-rca.yml"
 _RECONCILE_WORKFLOW = _ROOT / ".github" / "workflows" / "reconcile.yml"
 _TF_APPLY_SANDBOX_WORKFLOW = _ROOT / ".github" / "workflows" / "terraform-apply-sandbox.yml"
+
+# Frozen byte for byte from reconcile.yml at the base of PLAN-environment-gates-fail-closed: the live wake steps are now
+# one-line apply_wake delegates (size relief), so the guard's discrimination on these real-tree shapes is pinned here.
+_FROZEN_APPLY_RECONCILE_WAKE_BODY = r"""PR_NUM=$(gh api "repos/${REPO}/commits/${RED_SHA}/pulls" --jq '.[0].number' 2>/dev/null || echo "")
+if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
+  echo "No originating PR resolved for ${RED_SHA}; skipping wake comment."
+  exit 0
+fi
+# A routed outcome now ALWAYS carries a fresh_reason: post-rec-2847 routed=true is only
+# emitted on the needs_fresh_plan branch of the `resolved` aggregator. The pre-rec-2847
+# "routed with no fresh re-plan" message is therefore unreachable and is not restated here.
+if [ "$FRESH_REASON" = "guard_routed" ]; then
+  WHY="the saved plan.bin for ${RED_SHA} was guard-BLOCKed (so it was never applied and could not report staleness), and Reconcile re-planned fresh in this same run"
+else
+  WHY="the saved plan.bin for ${RED_SHA} was stale (STALE_PLAN_FRESH_REPLAN), and Reconcile re-planned fresh in this same run"
+fi
+if [ "$ROUTED" = "true" ]; then
+  # The tf-gated-apply approval is requested BEFORE gated-apply-reconcile starts, so at
+  # approval time the reviewer can see nothing of the fresh plan from inside that job --
+  # the only evidence lives in THIS run's apply-reconcile step logs. Name them, or the
+  # approval is uninformed by construction.
+  MSG="Reconcile: ${WHY}, then routed the FRESH plan to the tf-gated-apply job in reconcile.yml (out-of-budget IAM / trust / destroy). Pending reviewer approval in GitHub Actions -- the convergence record keeps its pending_gated marker until the gated apply completes. BEFORE APPROVING, review the fresh plan in this run's apply-reconcile job -- steps \`Fresh re-plan (STALE_PLAN_FRESH_REPLAN fallthrough)\` and \`Deterministic apply guard (fail-closed) -- fresh re-plan\` at ${RUN_URL} -- because the gated job itself shows nothing of it at approval time."
+elif [ "$REVIEW_OUTCOME" = "starved" ]; then
+  MSG="Reconcile's subagent reviewer was STARVED for ${RED_SHA} (max-turns/no-verdict after retry); apply was blocked and the convergence record was NOT touched. Re-dispatch Reconcile once the reviewer is healthy."
+elif [ "$APPLY_OUTCOME" = "success" ]; then
+  if [ -n "$FRESH_REASON" ]; then
+    MSG="Reconcile: ${WHY}, re-guarded it, and converged GREEN; convergence record updated. The fresh plan guard-PASSed, so it was applied here behind the digest-fed subagent review rather than the tf-gated-apply Environment (Decision 158 route (i))."
+  else
+    MSG="Reconcile converged GREEN for ${RED_SHA}; convergence record updated."
+  fi
+else
+  MSG="Reconcile did NOT converge (RED) for ${RED_SHA}. Inspect this run's logs directly (ci-rca does not watch reconcile.yml)."
+fi
+gh pr comment "$PR_NUM" --repo "$REPO" --body "$MSG" || true
+"""  # noqa: E501
+
+_FROZEN_GATED_APPLY_RECONCILE_WAKE_BODY = r"""PR_NUM=$(gh api "repos/${REPO}/commits/${RED_SHA}/pulls" --jq '.[0].number' 2>/dev/null || echo "")
+if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
+  exit 0
+fi
+if [ "$APPLY_OUTCOME" = "success" ]; then
+  MSG="Reconcile's gated apply converged GREEN for ${RED_SHA} (IAM/trust/destroy change applied after reviewer approval); convergence record updated."
+else
+  MSG="Reconcile's gated apply did NOT converge (RED) for ${RED_SHA}. Inspect this run's logs directly."
+fi
+gh pr comment "$PR_NUM" --repo "$REPO" --body "$MSG" || true
+"""  # noqa: E501
 _CI_WORKFLOW = _ROOT / ".github" / "workflows" / "ci.yml"
 
 
@@ -104,7 +152,8 @@ class TestSimpleSingleLineViolator:
 
 
 class TestRealNearMissesStaySilent:
-    """Negatives drawn byte-for-byte from the real tree -- the discrimination this plan's zero
+    """Negatives drawn byte-for-byte from the real tree (the two reconcile wake bodies are frozen fixtures, because the
+    live steps became one-line apply_wake delegates) -- the discrimination this plan's zero
     population is earned by: every one of these passes for a SUBSTANTIVE reason (|| true,
     || echo "", && break || sleep 3, a single-line trailing || echo ""), not by narrowing."""
 
@@ -119,23 +168,26 @@ class TestRealNearMissesStaySilent:
         assert _unguarded_assignments(joined) == []
 
     def test_reconcile_apply_reconcile_wake_comment_is_silent(self) -> None:
-        body = _step_run(
+        body = _FROZEN_APPLY_RECONCILE_WAKE_BODY
+        assert "|| true" in body
+        joined = _join_backslash_continuations(body)
+        assert _unguarded_assignments(joined) == []
+        live = _step_run(
             _RECONCILE_WORKFLOW,
             "apply-reconcile",
             step_name="Best-effort wake comment on the red commit's originating PR",
         )
-        assert "|| true" in body
-        joined = _join_backslash_continuations(body)
-        assert _unguarded_assignments(joined) == []
+        assert live.strip() == "python3 -m scripts.ci.apply_wake --job apply-reconcile"
 
     def test_reconcile_gated_apply_reconcile_wake_comment_is_silent(self) -> None:
-        body = _step_run(
+        joined = _join_backslash_continuations(_FROZEN_GATED_APPLY_RECONCILE_WAKE_BODY)
+        assert _unguarded_assignments(joined) == []
+        live = _step_run(
             _RECONCILE_WORKFLOW,
             "gated-apply-reconcile",
             step_name="Best-effort wake comment on the red commit's originating PR",
         )
-        joined = _join_backslash_continuations(body)
-        assert _unguarded_assignments(joined) == []
+        assert live.strip() == "python3 -m scripts.ci.apply_wake --job gated-apply-reconcile"
 
     def test_terraform_apply_sandbox_artifact_sha_is_silent(self) -> None:
         body = _step_run(_TF_APPLY_SANDBOX_WORKFLOW, "apply-sandbox", step_id="artifact_sha")

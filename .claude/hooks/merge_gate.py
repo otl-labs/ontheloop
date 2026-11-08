@@ -2,8 +2,11 @@
 """PreToolUse adapter for the merge_pull_request seam (Decision 203 hook-adapter pattern; Decision on merge overlap).
 
 GitHub-specific plumbing only: repository identity, PR resolution, fetch. The first predicate is
-scripts.session.merge_overlap (refs only); later predicates (rec-4080, rec-4755, rec-4451) extend this seam.
-Fails closed: exit 2 on overlap, an unavailable verdict, a failed fetch, malformed input. No override exists.
+scripts.session.merge_overlap (refs only). The second, scripts.session.session_trailer.gate_denial, requires a
+merge_pull_request commit_message's Claude-Session trailer keys to equal the PR branch commits' (rec-5004). Later
+predicates (rec-4080, rec-4755, rec-4451) extend this seam.
+Fails closed: exit 2 on overlap, an attribution mismatch, an unavailable verdict, a failed fetch, malformed input.
+No override exists.
 """
 
 from __future__ import annotations
@@ -90,7 +93,7 @@ def _fetch(root: Path, number: int, *extra: str) -> subprocess.CompletedProcess[
     )
 
 
-def _judge(root: Path, number: int, expected: str | None) -> int:
+def _judge(root: Path, number: int, expected: str | None, commit_message: str | None = None) -> int:
     from scripts.session import merge_overlap  # noqa: PLC0415
 
     ref = f"refs/merge-overlap/pr/{number}"
@@ -111,7 +114,14 @@ def _judge(root: Path, number: int, expected: str | None) -> int:
         if _fetch(root, number, "--deepen=500").returncode == 0:
             verdict = merge_overlap.overlap(root, ref, "refs/remotes/origin/main")
     if verdict.kind == merge_overlap.CLEAR:
-        return 0
+        if commit_message is None:
+            return 0
+        from scripts.session import session_trailer  # noqa: PLC0415
+
+        denial = session_trailer.gate_denial(
+            root=root, base_ref="refs/remotes/origin/main", head_ref=ref, message=commit_message
+        )
+        return 0 if denial is None else _deny(denial)
     if verdict.kind == merge_overlap.OVERLAP:
         sys.stderr.write(
             _OVERLAP_MSG.format(files=", ".join(verdict.files), base=verdict.merge_base[:12], behind=verdict.behind) + "\n"
@@ -150,8 +160,11 @@ def run(raw: str) -> int:
         expected = tool_input.get("expectedHeadSha")
         if expected is not None and not (isinstance(expected, str) and _SHA.match(expected)):
             return _deny(f"expectedHeadSha {expected!r} is malformed (need 4-40 hex digits)")
+        message = tool_input.get("commit_message")
+        if message is not None and not isinstance(message, str):
+            return _deny(f"commit_message {type(message).__name__} is not a string (malformed)")
         try:
-            return _judge(root, number, expected)
+            return _judge(root, number, expected, message)
         finally:
             _git(root, "update-ref", "-d", f"refs/merge-overlap/pr/{number}")
     except (OSError, subprocess.SubprocessError) as exc:
