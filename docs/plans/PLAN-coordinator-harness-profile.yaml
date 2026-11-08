@@ -45,8 +45,9 @@ scope:
       (sha = git log -1 --format=%H <ref> -- <path>) followed by the raw bytes of `git show <ref>:<path>`, read as
       bytes and written with write_bytes, never text-decoded (rec-4814: a CRLF file stays byte-identical). check
       compares bytes: exit 0 when every expected copy equals what write would produce; 1 when any differs (print the
-      file, copy sha and current sha); 2 when the contract is missing at the ref or any expected copy is missing. write
-      creates DIR if absent and leaves other files in it alone. The CLI and its defaults are unchanged.
+      file, copy sha and current sha); 2 when the contract is missing at the ref or any expected copy is missing. check also exits 1 when DIR holds a
+      coordinator-harness-*.yaml copy the ref no longer has (a deleted or renamed profile). write creates DIR if absent
+      and leaves other files in it alone. The CLI and its defaults are unchanged.
   - file: tests/test_session_coordinator_copy.py
     action: Modify
     purpose: >-
@@ -54,9 +55,10 @@ scope:
       (a committed docs/contracts/coordinator-harness-x.yaml is written beside the contract with its own header, body
       byte-identical, check exits 0, and an unmatched docs/contracts/other.yaml is not copied);
       test_stale_profile_copy_is_stale (an edited profile copy exits 1); test_missing_profile_copy_exits_2 (a deleted
-      profile copy exits 2); test_crlf_contract_round_trips_byte_identical (a contract committed with CRLF line ends
-      writes a copy whose bytes after the header equal the committed bytes, check exits 0, and the same copy rewritten
-      with LF line ends exits 1).
+      profile copy exits 2); test_orphan_profile_copy_is_stale (a profile copy whose source the ref no longer has
+      exits 1); test_crlf_contract_round_trips_byte_identical (a contract committed as raw CRLF bytes, with
+      core.autocrlf=false, writes a copy whose bytes after the header equal the committed bytes, check exits 0, and the
+      same copy rewritten with LF line ends exits 1).
   - file: tests/checks/contracts/test_coordinator_harness_profile.py
     action: Create
     purpose: >-
@@ -69,7 +71,7 @@ scope:
       test_contract_points_at_the_profile: coordinator.yaml's text names coordinator-harness-claude-projects.yaml;
       surfaces.delivery names docs/contracts/coordinator-harness-*.yaml; the memory batch item and the watcher beat
       name "[contract], [harness] or [repo:<path>]"; templates.standing_instructions carries "Harness facts:
-      <shared_store>/coordinator/"; the newest coordinator.yaml amendment_log entry names
+      <shared_store>/coordinator/"; the last coordinator.yaml amendment_log entry names
       PLAN-coordinator-harness-profile with semantic_break false; coordinator_copy.PROFILE_GLOB matches the profile's
       repo path (fnmatch).
 bundled_recommendations: [rec-4814]
@@ -80,17 +82,17 @@ acceptance_criteria:
     The profile, coordinator.yaml and the kit test equal the approved sidecar with {{DATE}} filled
     (scripts.roadmap.approved_text verify --slug coordinator-harness-profile exits 0) and pass the fast tier.
   - >-
-    The four new coordinator_copy tests and both tests in test_coordinator_harness_profile.py pass and fail before
+    The five new coordinator_copy tests and both tests in test_coordinator_harness_profile.py pass and fail before
     the change; every existing test in test_session_coordinator_copy.py, test_coordinator_contract.py and
     test_coordinator_playbook_kit.py passes.
   - "rec-4814's acceptance command exits 0: bin/venv-python -m pytest tests/test_session_coordinator_copy.py::test_crlf_contract_round_trips_byte_identical -q."
-  - After merge, VP 5's coordinator_copy check exits 0 with both copies in the shared store.
+  - After merge, VP 5's coordinator_copy check exits 0 with both copies in the shared store, VP 6 reads rec-4814 as closed, and VP 7 finds both pointer stubs.
 verification_plan:
   - step: 1
     phase: pre-deploy
     action: Prove coordinator_copy copies every harness profile and keeps bytes (rec-4814).
     command: bin/venv-python -m pytest tests/test_session_coordinator_copy.py -q
-    expected: Exit 0, all passed. Red before (the four new tests fail on the current tool).
+    expected: Exit 0, all passed. Red before (the five new tests fail on the current tool).
     fix_if: A new test fails after the change -- fix the tool at root; never loosen an existing test.
     hermetic: true
     graduation: waive
@@ -148,12 +150,36 @@ verification_plan:
     command: >-
       git fetch -q origin main && bin/venv-python -m scripts.session.coordinator_copy write /mnt/project-files/coordinator/
       && bin/venv-python -m scripts.session.coordinator_copy check /mnt/project-files/coordinator/
-      && head -1 /mnt/project-files/coordinator/coordinator-harness-claude-projects.yaml
+      && head -1 /mnt/project-files/coordinator/coordinator.yaml
+      /mnt/project-files/coordinator/coordinator-harness-claude-projects.yaml
     expected: >-
       Both exit 0; head -1 of each copy names its file and the merge's commit for it.
     fix_if: >-
       check exits 1 right after write: this shared store is a network mount; re-read after about ten seconds and rerun
       check once before reporting.
+    hermetic: false
+  - step: 6
+    phase: post-deploy
+    action: Confirm the bundled rec closed after the squash merge.
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader; r=make_reader(profile='agent_platform');
+      s=r.named('recs_by_ids', ids='rec-4814')[0]['status']; print(s); assert s == 'closed'"
+    expected: Prints closed, exit 0.
+    fix_if: >-
+      Still open: check ci.yml's closure job run on the merge commit and that the squash body carried
+      "Resolves: rec-4814"; close it with update_rec citing the merge SHA.
+    hermetic: false
+  - step: 7
+    phase: post-deploy
+    action: Confirm the shared store's prose playbook and harness-facts file are pointer stubs (execution step 4).
+    command: >-
+      grep -l 'coordinator/coordinator-harness-claude-projects.yaml' /mnt/project-files/plan-h/HARNESS-FACTS.md
+      /mnt/project-files/joint-review/inputs/playbook/WAYS-OF-WORKING.md | wc -l && wc -l
+      /mnt/project-files/plan-h/HARNESS-FACTS.md /mnt/project-files/joint-review/inputs/playbook/WAYS-OF-WORKING.md
+    expected: Prints 2, then each file at 3 lines.
+    fix_if: >-
+      A file is missing the pointer or is longer: rewrite the stub, re-read after about ten seconds (network mount),
+      and rerun.
     hermetic: false
 test_obligations:
   - source: scripts/session/coordinator_copy.py
@@ -249,7 +275,7 @@ context:
     is not amended.
   - >-
     rec-4814 (Low, XS) is bundled: coordinator_copy is rewritten here anyway and its acceptance test is one of this
-    plan's tests; the squash body carries "Resolves: rec-4814".
+    plan's tests; a branch commit and the squash body carry "Resolves: rec-4814".
   - "red_overlap: clear (no reds) at 069f4f2d. plan_obligations: no unmet obligations; rec-4814 acceptance decidable; PLAN-decision-229-subagent-scope (listed unbuilt) landed in #1796."
 pre_implementation_checklist:
   - Branch confirmed not on main
@@ -258,19 +284,20 @@ pre_implementation_checklist:
   - Acceptance criteria understood and verifiable
 execution_steps:
   - >-
-    Write the four new tests in tests/test_session_coordinator_copy.py and see them fail on the current tool (VP 1
+    Write the five new tests in tests/test_session_coordinator_copy.py and see them fail on the current tool (VP 1
     red); change scripts/session/coordinator_copy.py until VP 1 is green.
   - >-
     Write tests/checks/contracts/test_coordinator_harness_profile.py and see it fail (VP 2 red). Apply the sidecar's
     nine blocks, filling {{DATE}} (UTC). Run VP 2 (green) and VP 3.
   - >-
     Closure per the implement skill (code review, implementation_declared true, rebase, full tier + --verify-head,
-    push, PR, squash-merge on PROCEED + green CI with "Resolves: rec-4814" in the squash body), then VP 5.
+    push, PR, squash-merge on PROCEED + green CI; a branch commit message and merge_pull_request's commit_message both
+    carry "Resolves: rec-4814", per git-ops.yaml resolves_trailer), then VP 5.
   - >-
     After VP 5, replace the shared store's 2026-10-29 prose playbook (joint-review/inputs/playbook/WAYS-OF-WORKING.md)
     and plan-h/HARNESS-FACTS.md each with a three-line pointer stub naming coordinator/coordinator.yaml and
     coordinator/coordinator-harness-claude-projects.yaml as the generated copies of their repository sources, and
-    re-read each after about ten seconds. Report to the coordinator the merge SHA, the --verify-head verdict, the VP 5
+    re-read each after about ten seconds; then VP 6 and VP 7. Report to the coordinator the merge SHA, the --verify-head verdict, the VP 5
     headers, and that the moved facts now leave the other surfaces: the standing instructions' harness block shrinks
     to the template's "Harness facts:" line, and memory's harness-fact lines are marked landed.
 work_areas: []
@@ -281,7 +308,5 @@ gate_rounds:
   - {gate: wording-check, round: 1, verdict: PASS, digest: 94a588ebfeb4b9680537a2da0131bc525e0e6a54a0e3ecb5f3aa9b5d1a6bbc81, base: 069f4f2d74395cda2010a405cac795006c55a9a8, selection: complete}  # pragma: allowlist secret
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: wording-check, round: 2, verdict: PASS, digest: 231d12a8a8b572b465d7494ccb1b1b948a2e562ca64da24aec450c9d6699e157, base: 069f4f2d74395cda2010a405cac795006c55a9a8, selection: complete}  # pragma: allowlist secret
-weakening_dispositions:
-  - candidate: "[assertion-changed] tests/checks/contracts/test_coordinator_playbook_kit.py::test_playbook_kit_rules_and_templates"
-    disposition: planned-change
-    cite: "test_obligations[4]"
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 5}
+weakening_dispositions: []
