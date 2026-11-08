@@ -1,0 +1,241 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: approved-text-wake-requires-approver
+intent: >-
+  Make the approved-text approval run's wake comment tell the truth: it says a sidecar "was approved" only when GitHub's
+  approvals record for that run names an approver for the approved-text Environment, the same record the plan-PR and
+  merge-time lookup trust, so a run that went green with no reviewer never wakes a PR watcher with a false approval
+  (rec-4960).
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-approved-text-wake-requires-approver.yaml
+phase: >-
+  ad_hoc_rec (soft-warn category; rec-4960, High, S; no tier_item claimed, so the Tier Item Freshness Gate is skipped).
+  Follows rec-4769 (Decision 246, merged #1876). No tier_item criterion is closed.
+scope:
+  - file: scripts/roadmap/approved_text_github.py
+    action: Modify
+    purpose: >-
+      _cmd_wake first reads this run's approvals with the existing approvals(repo, args.run_id, deadline) and applies
+      the existing _approver() predicate (the one lookup() uses: an entry with state approved whose environments name
+      approved-text). When it returns None the command prints `wake: no approver recorded for run <R>; nothing posted`,
+      lists no pull requests, posts nothing and returns 1. Otherwise it behaves exactly as today: the comment body and
+      the success line `wake: N open PRs at <sha> auth=<label>` stay byte-identical. The wake parser's --run-id gains
+      type=int, as the approvals subcommand's already has. The module docstring's wake line says it comments only once
+      run R records an approver. No new import.
+    new_imports: []
+  - file: tests/test_approved_text_github.py
+    action: Modify
+    purpose: >-
+      New class TestWakeApprovals (every test name carries "wake", so rec-4960's `-k wake` acceptance selects them): an
+      empty approvals record ([] for run 55, the observed 2026-11-06 shape) returns 1, prints the no-approver line,
+      posts nothing and reads no pulls URL; a record holding only a rejected entry, or only an approved entry for
+      another Environment, does the same; the approvals URL read is /actions/runs/55/approvals and precedes the pulls
+      read; an approvals read that fails (GitHubError) or is not a list returns 1 with `wake: ERROR`, posting nothing.
+      Existing wake tests stay unchanged (the Api double already answers an approved entry by default).
+  - file: .github/workflows/approved-text-approval.yml
+    action: Modify
+    purpose: >-
+      wake job permissions gain `actions: read` (GET /actions/runs/{id}/approvals; pr-validate holds the same grant):
+      {contents: read, actions: read, pull-requests: write}. continue-on-error: true stays. The header comment's wake
+      sentence says it comments once the run records an approver. No run body changes, so the shell-body baseline
+      (config/composite_action_body_baseline.yaml) is untouched.
+  - file: tests/test_approved_text_approval_workflow.py
+    action: Modify
+    purpose: >-
+      test_wake_job_cannot_fail_the_run_and_has_only_the_comment_grant is renamed
+      test_wake_job_cannot_fail_the_run_and_holds_only_the_approvals_read_and_comment_grants and its exact permission
+      pin becomes {"contents": "read", "actions": "read", "pull-requests": "write"} (still an exact-equality set);
+      every other assertion in it unchanged.
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      SA-05's assumption gains one clause carrying the phrase "wake job reads the run's own approvals record" (VP step 3
+      greps it), saying it comments only when that record names an approver for approved-text. Plus a new amendment_log entry (date the build date, semantic_break false,
+      change_class field_add, summary naming PLAN-approved-text-wake-requires-approver (rec-4960) and SA-05, migration_story
+      "Prose only; no code or contract consumer reads it."), the shape of the 2026-11-07 rows. Class D register prose,
+      edited by builds without a sidecar (#1856, #1903, #1907, #1909); 435 of 500 effective lines, about +2.
+bundled_recommendations:
+  - rec-4960
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - >-
+    wake with an empty approvals record for its run returns 1, prints `wake: no approver recorded for run 55; nothing posted`, posts no comment and reads no pulls page.
+  - >-
+    wake with only a rejected entry, or only an approved entry for an Environment other than approved-text, behaves as criterion 0.
+  - >-
+    wake with an approved approved-text entry posts the same comment body and prints the same success line as before the change (the existing TestCli wake tests pass unchanged).
+  - >-
+    A failed or non-list approvals read returns 1 with a `wake: ERROR` line and posts nothing.
+  - >-
+    The wake job holds exactly {contents: read, actions: read, pull-requests: write} and keeps continue-on-error true; no other job's permissions change.
+  - >-
+    ports.yaml SA-05 names the wake job's approvals read and the contract's amendment_log carries the new row.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Wake refuses to comment without an approver (rec-4960's acceptance plus the new class).
+    command: bin/venv-python -m pytest tests/test_approved_text_github.py -q -k wake
+    expected: exit 0, every wake test passes. Before the change the empty-record test fails (wake returns 0 and posts).
+    expected_literals:
+      - passed
+    fix_if: An empty or rejected record still posts -- the approvals read is missing or runs after the post loop; fix
+      _cmd_wake, never the test.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: The registry row approved-text-github-adapter already runs tests/test_approved_text_github.py
+      whole, so the new class is a standing guard without a new row.
+  - step: 2
+    phase: pre-deploy
+    action: Workflow shape, including the wake job's new grant, and the CODEOWNERS closure.
+    command: bin/venv-python -m pytest tests/test_approved_text_approval_workflow.py -q
+    expected: exit 0. Before the workflow edit the renamed permission test fails on the missing actions read.
+    expected_literals:
+      - passed
+    fix_if: The closure test fails -- _cmd_wake gained an import; remove it (no new import is planned).
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: The registry row approved-text-approval-workflow-shape already runs this file whole.
+  - step: 3
+    phase: pre-deploy
+    action: ports.yaml SA-05 carries the wake clause and the contract still loads.
+    command: grep -c "wake job reads the run's own approvals record" docs/contracts/ports.yaml && bin/venv-python -c "import yaml;
+      yaml.safe_load(open('docs/contracts/ports.yaml')); print('PORTS_OK')"
+    expected: Prints 1 and then PORTS_OK.
+    expected_literals: []
+    fix_if: The count is 0 -- the clause wording differs from the scope row's quoted phrase; use it verbatim.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: Register prose; the standing contract checks validate the file's shape on every tier.
+  - step: 4
+    phase: pre-deploy
+    action: The adapter's predicate on GitHub's real records - the observed empty run and a genuinely approved run (read-only).
+    command: bin/venv-python -c "from scripts.roadmap import approved_text_github as g, approved_text_provenance as p;
+      d=p.Deadline(60); r='otl-labs/ontheloop'; e=g._approver(g.approvals(r, 42227418796, d)); a=g._approver(g.approvals(r,
+      42371161230, d)); assert e is None and a, (e, a); print('LIVE_OK', e, a)"
+    expected: Prints LIVE_OK None followed by the approving login. If GitHub has expired either run, record that in the build
+      report; the hermetic steps stand.
+    expected_literals: []
+    fix_if: The empty run names an approver or the approved run names none -- stop and report; the predicate does not match
+      GitHub's record shape, a plan amendment.
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: Full validation before handoff, attested for the pushed HEAD (backgrounded, 2 h limit, top-level session).
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: Exit 0; --verify-head attests HEAD.
+    expected_literals: []
+    fix_if: A failure in scope -- fix on the branch and rerun from the start; never skip a test or relax an assertion. A
+      failure outside scope becomes a rec via scripts.ops_data_portal (Decisions 55, 59).
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Invokes scripts.validate (recursion refusal); it is the handoff gate itself.
+  - step: 6
+    phase: post-deploy
+    action: On the first approval run dispatched after the merge, its wake job succeeded with the new token grant (an
+      approved run whose approvals read did not 403).
+    command: RUN_ID=<first approval run after merge>; curl -sS "https://api.github.com/repos/otl-labs/ontheloop/actions/runs/$RUN_ID/jobs"
+      | bin/venv-python -c "import json,sys; j={x['name']:x['conclusion'] for x in json.load(sys.stdin)['jobs']}; assert
+      j.get('approve')=='success' and j.get('wake')=='success', j; print('WAKE_OK', j)"
+    expected: Prints WAKE_OK with approve and wake both success. The planning or build thread that dispatches that run records
+      the result.
+    fix_if: wake failed -- read its log; HTTP 403 on approvals means the grant did not apply (fix the workflow), a no-approver
+      line on an approved run means the record shape changed (stop and report).
+    hermetic: false
+  - step: 7
+    phase: post-deploy
+    action: rec-4960 closed by the merge's Resolves trailer.
+    command: AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
+      make_reader; rows, missing = fetch_recs_by_ids(make_reader(), ['rec-4960']); print([(r['id'], r['status']) for r in
+      rows], missing)"
+    expected: rec-4960 shows a closed status and none are missing.
+    fix_if: Still open -- run `bin/venv-python -m scripts.session.merge_step recover --slug approved-text-wake-requires-approver
+      --sha <merge sha>`; never close by hand without the operator.
+    hermetic: false
+test_obligations:
+  - source: scripts/roadmap/approved_text_github.py
+    behavior: wake comments only when the run's approvals record names an approver for approved-text; otherwise it posts
+      nothing and exits 1.
+    verification_step: 1
+    test_selector: tests/test_approved_text_github.py::TestWakeApprovals
+    red_green_expectation: red before (class absent; with it added first, the empty-record case posts and returns 0), green
+      after.
+  - source: .github/workflows/approved-text-approval.yml
+    behavior: The wake job holds the approvals read and nothing more.
+    verification_step: 2
+    test_selector: tests/test_approved_text_approval_workflow.py::TestWorkflow::test_wake_job_cannot_fail_the_run_and_holds_only_the_approvals_read_and_comment_grants
+    red_green_expectation: red before (the workflow lacks actions read), green after.
+  - source: docs/contracts/ports.yaml
+    behavior: SA-05 names the wake job's approvals read.
+    verification_step: 3
+    command: grep -c "wake job reads the run's own approvals record" docs/contracts/ports.yaml
+    waiver_reason: Register prose with no executable rule; code review reads the clause against the shipped behaviour.
+constraints:
+  - >-
+    The success comment body and success line stay byte-identical (no new public wording, so no approved-text sidecar).
+  - >-
+    continue-on-error stays true on wake; lookup(), _approver() and _cannot_hold_approval are unchanged.
+  - >-
+    No change to the approve or render jobs, nor to Decision 246 or docs/contracts/git-ops.yaml text.
+  - >-
+    No new import in approved_text_github.py (its docstring limits imports; the CODEOWNERS closure test tracks them).
+  - >-
+    Every scope file except ports.yaml is CODEOWNERS; the build merges on code review PROCEED, green CI and the operator's final-diff word (token permission change).
+  - >-
+    No rescue agents or workaround loops (Decision 55); out-of-scope defects become recs via scripts/ops_data_portal.
+context:
+  - "Incident: runs 42227418796 and 42227344406 (2026-11-06) passed approve with approvals == [] and run conclusion success;
+    wake comment on #1886 said 'was approved' while lookup read MISSING. Run 42371161230 holds a real approved entry."
+  - "Blind Fable consult adopted in full (operator ruling 2026-11-08 01:10Z): /mnt/project-files/wake-empty-approvals/advisor-brief/ADVICE.md."
+  - "Why the job, not the run, goes red: _cannot_hold_approval (approved_text_github.py:128) reads a non-success run as
+    holding no approval, so dropping continue-on-error would let a transient wake error void a genuine approval. A run
+    with no approval going red is rec-4961/rec-4979's approve-job check (separate plan, thread 'Make approval gates fail closed')."
+  - "Overlap: the rec-4961/4979 plan edits the approve job of the same workflow and tests/test_approved_text_approval_workflow.py
+    (approve-job pins); hunks differ. Whichever builds second rebases."
+  - "Not bundled: rec-4934 (approver 'unknown' semantics, shared with lookup) and rec-4935 (wake comment de-dup)."
+  - "Token: actions read for GET /actions/runs/{id}/approvals per GitHub REST docs (fine-grained 'Actions' read). INFERENCE:
+    a GITHUB_TOKEN lacking actions gets 403 rather than anonymous public access; VP step 6 proves the grant on a real run."
+  - "Disposition: the permission pin change is a planned-change (acceptance_criteria[4]); the set stays exact."
+  - "Decision-scout verdict FLAGS_FOUND -- Decision 246 SPIRIT NOTE (the empty record means the gate opened with no recorded
+    reviewer; see the next line). CITE: 246, 212, 235; RELATED 83, 76, 92, 233, 239, 184, 234, 248, 126; roadmap T4.33, T4.15,
+    T4.23, T2.54 RELATED. Decisions triaged: 202 of 202. Roadmap items intersected: 4; CONFLICT: 0; RELATED: 4. Serves:
+    NS.9 4/5."
+  - "SPIRIT NOTE disposition (accepted with note): the 2026-11-06 runs predate the approved-text Environment (Terraform
+    created it 2026-11-07 ~10:25Z), so GitHub auto-created it with no reviewers; that cause, and failing the approve job
+    itself, are owned by rec-4961/rec-4979. Decision 246's approval-bypass reversal condition is not engaged by this
+    evidence (inferred from the timeline). Sessions get proxy 403 on the Environment endpoint, so a protection-rule read
+    is rec-4979's in-CI step, not a VP step here."
+  - "rec-4960 acceptance re-pointed 2026-11-08 to the TestWakeApprovals node id (decidable probe; ops portal update_rec)."
+  - "Unbuilt plans also scoping docs/contracts/ports.yaml: PLAN-telemetry-capture-hook-labels, -capture-hooks,
+    -claude-p-capture-adapter, -late-hook-records, PLAN-work-graph-edge-model; whichever builds second rebases (one SA-05
+    clause plus one amendment_log row)."
+  - "red_overlap 2026-11-08: {\"verdict\": \"clear\", \"slo_hours\": 4, \"reds\": []}"
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    scripts/roadmap/approved_text_github.py -- in _cmd_wake, inside the existing try, call `approver = _approver(approvals(repo, args.run_id, deadline))` before the pulls loop; on None print the no-approver line and return 1. Add type=int to the wake parser's --run-id. Update the docstring's wake line.
+  - >-
+    tests/test_approved_text_github.py -- add TestWakeApprovals (acceptance_criteria[0], [1], [3]; use Api(approvals={55: ...}) and assert no POST and no pulls call); leave existing tests unchanged.
+  - >-
+    .github/workflows/approved-text-approval.yml -- add `actions: read` to wake permissions; reword the header's wake sentence. tests/test_approved_text_approval_workflow.py -- rename the wake permission test and update its pin.
+  - >-
+    docs/contracts/ports.yaml -- add the SA-05 clause.
+  - >-
+    Execute Verification Plan -- steps 1-4, then step 5 (full tier) last; loop until pass; on unrecoverable failure stop and RCA (Decision 55).
+  - >-
+    Code review via a fresh code-review subagent; fix blocking findings and rerun the pre-deploy steps.
+  - >-
+    Commit Flow per the implement skill (Resolves: rec-4960 paragraph; premerge, merge with the operator's final-diff word, readback); record weakening disposition planned-change for the renamed permission test citing acceptance_criteria[4]. After merge run VP step 7; VP step 6 on the first approval run dispatched after the merge.
+  - 'Report: what was implemented, verification results'
+rollback: Revert the squash commit; wake comments on every run again, as today.
