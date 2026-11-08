@@ -417,8 +417,9 @@ jobs:
     #
     # PLAN-ci-provider-mirror-terraform-init-hardening (rec-2836): this job DOES make AWS calls
     # now -- a best-effort, read-only OIDC assume + S3 sync that consumes the Decision 120
-    # provider filesystem_mirror, so a github.com provider-asset outage cannot red this required,
-    # branch-protection-gating check (Decision 83). Event-conditional role (the PR-sub
+    # provider filesystem_mirror (kislerdm/neon and terraform/github's integrations/github), so a
+    # github.com provider-asset outage cannot red this required, branch-protection-gating check
+    # (Decision 83). Event-conditional role (the PR-sub
     # `agent-platform-github-ci-pr` role for pull_request; the already-trusted
     # `agent-platform-github-ci-branch` role for push -- see terraform/personal/oidc.tf, whose
     # trust conditions accept exactly these two sub claims). id-token:write below is REQUIRED for
@@ -455,57 +456,19 @@ jobs:
 
     - name: Provider-mirror gate chain (fail-open; Decision 55/83)
       # Three gates, evaluated in order -- ANY failure degrades to today's direct-fetch behaviour
-      # with a printed reason (stdout + $GITHUB_STEP_SUMMARY); the required check never wedges:
-      #   1/3 OIDC credentials (steps.mirror_oidc.outcome == 'success')
-      #   2/3 non-empty S3 mirror sync
-      #   3/3 EXACT-LOCKED-VERSION presence -- parsed from terraform/personal/.terraform.lock.hcl,
-      #       never mere directory non-emptiness. cc-web.tfrc excludes kislerdm/* from `direct` and
-      #       terraform's provider_installation has NO method-chaining, so an exported tfrc over a
-      #       mirror missing the exact locked version would RED this required check in a state
-      #       that passes today (see terraform/CLAUDE.md).
-      # Only when all three succeed is the tfrc rendered and TF_CLI_CONFIG_FILE exported.
+      # with a printed reason (stdout + $GITHUB_STEP_SUMMARY); the required check never wedges.
+      # The chain lives in scripts/ci/provider_mirror_gate.sh and covers every provider the mirror
+      # serves (kislerdm/neon and integrations/github): OIDC credentials, a non-empty sync limited
+      # to the tfrc's namespaces, then EXACT-LOCKED-VERSION presence for each provider (never mere
+      # directory non-emptiness; provider_installation has no method-chaining, see
+      # terraform/CLAUDE.md). Activation is all-or-nothing: a missing package for either provider
+      # sends both to direct fetch. The OIDC outcome comparison stays here in the job YAML
+      # (validate_oidc_failopen_guards requires a negative-branch classifier on
+      # steps.mirror_oidc.outcome); the script reads it as OIDC_FAILED.
       id: mirror_gate
-      run: |
-        set -uo pipefail
-        reason=""
-        active=false
-
-        if [ "${{ steps.mirror_oidc.outcome }}" != "success" ]; then
-          reason="gate 1/3 (OIDC credentials) failed: could not assume the mirror-read role -- degrading to direct-fetch"
-        else
-          MIRROR_DIR="${RUNNER_TEMP}/tf-provider-mirror"
-          mkdir -p "$MIRROR_DIR"
-          if ! aws s3 sync "s3://agent-platform-data-lake/tf-provider-mirror/" "$MIRROR_DIR" --only-show-errors; then
-            reason="gate 2/3 (mirror sync) failed: aws s3 sync errored -- degrading to direct-fetch"
-          elif [ -z "$(ls -A "$MIRROR_DIR" 2>/dev/null)" ]; then
-            reason="gate 2/3 (mirror sync) failed: synced tree is empty -- degrading to direct-fetch"
-          else
-            NEON_VERSION=$(awk '
-              /^provider "registry.terraform.io\/kislerdm\/neon"/ { found=1 }
-              found && /version[ \t]*=/ { gsub(/[",]/, "", $3); print $3; exit }
-            ' terraform/personal/.terraform.lock.hcl)
-            if [ -z "$NEON_VERSION" ]; then
-              reason="gate 3/3 (exact-locked-version) failed: could not parse kislerdm/neon version from terraform/personal/.terraform.lock.hcl -- degrading to direct-fetch"
-            elif ! ls "$MIRROR_DIR/registry.terraform.io/kislerdm/neon/terraform-provider-neon_${NEON_VERSION}_"*.zip >/dev/null 2>&1; then
-              reason="gate 3/3 (exact-locked-version) failed: synced mirror lacks terraform-provider-neon_${NEON_VERSION}_*.zip (locked version) -- degrading to direct-fetch (re-seed via terraform-provider-mirror-seed.yml)"
-            else
-              RESOLVED_TFRC="${RUNNER_TEMP}/cc-web.tfrc"
-              sed "s|__TF_MIRROR_DIR__|${MIRROR_DIR}|g" config/terraform/cc-web.tfrc > "$RESOLVED_TFRC"
-              echo "TF_CLI_CONFIG_FILE=${RESOLVED_TFRC}" >> "$GITHUB_ENV"
-              active=true
-            fi
-          fi
-        fi
-
-        echo "active=${active}" >> "$GITHUB_OUTPUT"
-
-        if [ "$active" = "true" ]; then
-          echo "provider-mirror: ACTIVE (neon ${NEON_VERSION} served from s3://agent-platform-data-lake/tf-provider-mirror/)"
-          echo "provider-mirror: ACTIVE (neon ${NEON_VERSION})" >> "$GITHUB_STEP_SUMMARY"
-        else
-          echo "provider-mirror: DEGRADED -- ${reason}"
-          echo "provider-mirror: DEGRADED -- ${reason}" >> "$GITHUB_STEP_SUMMARY"
-        fi
+      env:
+        OIDC_FAILED: ${{ steps.mirror_oidc.outcome != 'success' }}
+      run: bash scripts/ci/provider_mirror_gate.sh
 
     - name: Provider-mirror fail-closed consistency invariant (Decision 55/83)
       # Fires only when all three gates above already succeeded. If TF_CLI_CONFIG_FILE is somehow
