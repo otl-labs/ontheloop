@@ -16,6 +16,8 @@ on synthetic input; the registered check loads the real tree.
       they use, and the static import closure of every executed .py file), every python call is isolated (-I), and no
       executed .py file inserts the repo root at sys.path position 0 (each appends it, so the stdlib always wins)
   (i) every non-local uses: in a governed job (and in the composites it uses) is pinned to a 40-hex commit SHA
+  (j) role partition: each trusted workflow assumes only its own role (see _trusted_plan_role_partition)
+  (k) a job reading TF_GITHUB_PLAN_APP_PRIVATE_KEY declares the tf-trusted-plan environment (same module)
 
 Predicates (g) also refuse git fetch and git checkout in a governed run body: only scripts/ci/trusted_plan_overlay.py
 touches the PR's ref.
@@ -32,6 +34,7 @@ from typing import Any
 import yaml
 
 from scripts.checks import _common, registry
+from scripts.checks.ci_guards import _trusted_plan_role_partition as _partition
 from scripts.verify_ci_workflow import _load
 
 ENV = "tf-trusted-plan"
@@ -482,6 +485,8 @@ def run_all(
         check_checkouts(workflows, read),
         check_owned_and_isolated(workflows, codeowners, read),
         check_pinned_actions(workflows, read),
+        _partition.check_role_partition(workflows),
+        _partition.check_key_location(workflows),
     ]
 
 
@@ -518,6 +523,6 @@ def validate_trusted_plan_environment(failed: list[str]) -> None:
     for violation in violations:
         print(f"  FAIL: {violation}")
         failed.append(f"trusted-plan-environment: {violation}")
-    registry.examined(9, unit="fence_predicates")
+    registry.examined(11, unit="fence_predicates")
     if not violations:
-        print("  PASS: predicates (a)-(i)")
+        print("  PASS: predicates (a)-(k)")

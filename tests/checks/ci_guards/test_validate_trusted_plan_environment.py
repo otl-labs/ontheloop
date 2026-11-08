@@ -41,7 +41,7 @@ def _job(workflows: dict[str, dict[str, Any]], job: str) -> dict[str, Any]:
 
 
 def test_real_tree_is_green(real_workflows, real_terraform, real_codeowners) -> None:
-    assert v.run_all(real_workflows, real_terraform, real_codeowners, v._repo_reader()) == [[]] * 9
+    assert v.run_all(real_workflows, real_terraform, real_codeowners, v._repo_reader()) == [[]] * 11
 
 
 def test_real_tree_governs_the_single_plan_job(real_workflows) -> None:
@@ -273,7 +273,7 @@ def test_pass_line_ignores_unrelated_earlier_failures(capsys) -> None:
     failed = ["other-check: unrelated"]
     v.validate_trusted_plan_environment(failed)
     assert failed == ["other-check: unrelated"]
-    assert "PASS: predicates (a)-(i)" in capsys.readouterr().out
+    assert "PASS: predicates (a)-(k)" in capsys.readouterr().out
 
 
 def test_no_pass_line_when_this_check_fails(monkeypatch, capsys) -> None:
@@ -483,3 +483,35 @@ def test_h_governs_the_preview_scripts(wfs, real_codeowners) -> None:
 def test_i_governs_the_preview_pins(wfs) -> None:
     _preview(wfs)["steps"].append({"uses": "actions/setup-node@v4"})
     assert f"i: {_APPLY_WF}:preview uses actions/setup-node@v4 without a 40-hex commit SHA pin" in v.check_pinned_actions(wfs)
+
+
+_GITHUB_WF = "terraform-github-plan.yml"
+
+
+def test_j_wiring_a_wrong_role_pairing_fails_the_fence(wfs, real_terraform, real_codeowners) -> None:
+    step = next(s for s in wfs[_GITHUB_WF]["jobs"]["plan"]["steps"] if "configure-aws-credentials" in str(s.get("uses")))
+    step["with"]["role-to-assume"] = step["with"]["role-to-assume"].replace("trusted-github-plan", "trusted-plan")
+    groups = v.run_all(wfs, real_terraform, real_codeowners, v._repo_reader())
+    assert any(x.startswith(f"j: {_GITHUB_WF}:plan") for g in groups for x in g)
+
+
+def test_k_wiring_a_key_read_without_the_environment_fails_the_fence(wfs, real_terraform, real_codeowners) -> None:
+    wfs["other.yml"] = {
+        "on": "push",
+        "jobs": {"j": {"steps": [{"run": "x", "env": {"K": "${{ secrets.TF_GITHUB_PLAN_APP_PRIVATE_KEY }}"}}]}},
+    }
+    groups = v.run_all(wfs, real_terraform, real_codeowners, v._repo_reader())
+    assert any(x.startswith("k: other.yml:j") for g in groups for x in g)
+
+
+def test_manifest_pre_globs_cover_the_github_job_scripts() -> None:
+    text = (_ROOT / "scripts" / "checks" / "ci_guards" / "_manifest.py").read_text(encoding="utf-8")
+    start = text.index('name="validate_trusted_plan_environment"')
+    entry = text[start : text.index("full_segment", start)]
+    for path in (
+        "scripts/ci/terraform_github_plan_report.py",
+        "scripts/ci/terraform_github_plan_comment.py",
+        "scripts/ci/terraform_hcl_screen_policy.py",
+        "scripts/checks/ci_guards/_trusted_plan_role_partition.py",
+    ):
+        assert f'"{path}"' in entry, path

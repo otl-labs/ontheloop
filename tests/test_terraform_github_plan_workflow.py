@@ -32,28 +32,27 @@ class TestWorkflowAndTaxonomy:
         return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
 
     def test_triggers_exact(self, wf) -> None:
-        assert set(wf[True]) == {"pull_request"}
-        assert wf[True]["pull_request"] == {
-            "paths": [
-                "terraform/github/**",
-                ".github/workflows/terraform-github-plan.yml",
-                "scripts/ci/terraform_github_plan_report.py",
-            ]
+        assert set(wf[True]) == {"pull_request_target"}
+        assert wf[True]["pull_request_target"] == {
+            "types": ["opened", "synchronize", "reopened"],
+            "paths": ["terraform/github/**"],
         }
 
     def test_guard_and_permissions(self, wf) -> None:
         cond = wf["jobs"]["plan"]["if"]
         assert "github.event.pull_request.head.repo.full_name == github.repository" in cond
+        assert "github.event.pull_request.base.ref == 'main'" in cond
         assert "github.actor != 'dependabot[bot]'" in cond
-        assert wf["permissions"] == {"contents": "read"}
+        assert wf["jobs"]["plan"]["environment"] == "tf-trusted-plan"
+        assert wf["permissions"] == {}
         assert wf["jobs"]["plan"]["permissions"] == {"id-token": "write", "contents": "read", "pull-requests": "write"}
 
     def test_aws_credentials_step(self, wf) -> None:
         step = _step(wf, "aws-actions/configure-aws-credentials")
         role = step["with"]["role-to-assume"]
-        assert "secrets.AWS_ACCOUNT_ID" in role and role.endswith("role/agent-platform-github-ci-planner")
+        assert "secrets.AWS_ACCOUNT_ID" in role and role.endswith("role/agent-platform-github-ci-trusted-github-plan")
         session = step["with"]["role-session-name"]
-        assert session == "terraform-github-plan-pr"
+        assert session == "tf-trusted-github-plan"
         oidc = (TF_DIR / "oidc.tf").read_text(encoding="utf-8")
         reserved = re.search(r'convergence_writer_session_name\s*=\s*"([^"]+)"', oidc)
         assert reserved and session != reserved.group(1)
@@ -64,15 +63,18 @@ class TestWorkflowAndTaxonomy:
         assert set(step["with"]) == {
             "client-id",
             "private-key",
+            "owner",
+            "repositories",
             "permission-metadata",
             "permission-administration",
             "permission-actions",
         }
         assert all(v == "read" for k, v in step["with"].items() if k.startswith("permission-"))
+        assert step["with"]["private-key"] == "${{ secrets.TF_GITHUB_PLAN_APP_PRIVATE_KEY }}"
 
     def test_plan_and_probe_flags(self, wf) -> None:
         plan = next(s for s in _steps(wf) if s.get("id") == "plan")["run"]
-        assert "-lock=false" in plan and "-detailed-exitcode" in plan and "> /dev/null" in plan
+        assert "quiet_run.sh" in plan and "-lock=false" in plan and "-detailed-exitcode" in plan
         probe = next(s for s in _steps(wf) if "Probe" in s.get("name", ""))["run"]
         assert "!= null" in probe and 'has("bypass_actors")' in probe
 
@@ -84,9 +86,15 @@ class TestWorkflowAndTaxonomy:
             "state mv",
             "state push",
             "force-unlock",
-            "aws s3",
+            "aws s3 cp",
             "GITHUB_ENV",
         ]
+        s3_steps = [s for s in _steps(wf) if "aws s3" in s.get("run", "")]
+        assert len(s3_steps) == 1
+        assert s3_steps[0]["run"] == (
+            'aws s3 sync "s3://agent-platform-data-lake/tf-provider-mirror/" "$RUNNER_TEMP/tf-mirror" '
+            '--exclude "*" --include "registry.terraform.io/integrations/github/*" --only-show-errors'
+        )
         for s in _steps(wf):
             for token in forbidden:
                 assert token not in s.get("run", ""), (token, s.get("name"))
