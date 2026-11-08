@@ -45,9 +45,10 @@ scope:
       (sha = git log -1 --format=%H <ref> -- <path>) followed by the raw bytes of `git show <ref>:<path>`, read as
       bytes and written with write_bytes, never text-decoded (rec-4814: a CRLF file stays byte-identical). check
       compares bytes: exit 0 when every expected copy equals what write would produce; 1 when any differs (print the
-      file, copy sha and current sha); 2 when the contract is missing at the ref or any expected copy is missing. check also exits 1 when DIR holds a
-      coordinator-harness-*.yaml copy the ref no longer has (a deleted or renamed profile). write creates DIR if absent
-      and leaves other files in it alone. The CLI and its defaults are unchanged.
+      file, copy sha and current sha); 2 when the contract is missing at the ref or any expected copy is missing (2 takes precedence over 1). check also
+      exits 1 when DIR holds a coordinator-harness-*.yaml copy the ref no longer has (a deleted or renamed profile).
+      write creates DIR if absent, deletes any coordinator-harness-*.yaml in DIR that the ref lacks (it owns that name
+      pattern), and leaves every other file in DIR alone, so rewriting a stale copy always clears check. The CLI and its defaults are unchanged.
   - file: tests/test_session_coordinator_copy.py
     action: Modify
     purpose: >-
@@ -56,7 +57,7 @@ scope:
       byte-identical, check exits 0, and an unmatched docs/contracts/other.yaml is not copied);
       test_stale_profile_copy_is_stale (an edited profile copy exits 1); test_missing_profile_copy_exits_2 (a deleted
       profile copy exits 2); test_orphan_profile_copy_is_stale (a profile copy whose source the ref no longer has
-      exits 1); test_crlf_contract_round_trips_byte_identical (a contract committed as raw CRLF bytes, with
+      exits 1, and write then removes it so check exits 0, while an unrelated file in DIR survives); test_crlf_contract_round_trips_byte_identical (a contract committed as raw CRLF bytes, with
       core.autocrlf=false, writes a copy whose bytes after the header equal the committed bytes, check exits 0, and the
       same copy rewritten with LF line ends exits 1).
   - file: tests/checks/contracts/test_coordinator_harness_profile.py
@@ -166,17 +167,20 @@ verification_plan:
       s=r.named('recs_by_ids', ids='rec-4814')[0]['status']; print(s); assert s == 'closed'"
     expected: Prints closed, exit 0.
     fix_if: >-
-      Still open: check ci.yml's closure job run on the merge commit and that the squash body carried
-      "Resolves: rec-4814"; close it with update_rec citing the merge SHA.
+      Still open: read the merge commit's ci.yml trailer-closure job log and follow git-ops.yaml resolves_trailer's
+      conditional fallback: a lost trailer runs `bin/venv-python -m scripts.session.merge_step recover --slug
+      coordinator-harness-profile --sha <merge sha>` (a junit-routed rec it leaves open goes to the operator); an
+      acceptance-verdict refusal is fixed forward, never closed by hand; ops_data_portal --update-rec rec-4814 --status
+      closed only after a transport failure or a merge-leg refusal.
     hermetic: false
   - step: 7
     phase: post-deploy
     action: Confirm the shared store's prose playbook and harness-facts file are pointer stubs (execution step 4).
     command: >-
-      grep -l 'coordinator/coordinator-harness-claude-projects.yaml' /mnt/project-files/plan-h/HARNESS-FACTS.md
-      /mnt/project-files/joint-review/inputs/playbook/WAYS-OF-WORKING.md | wc -l && wc -l
-      /mnt/project-files/plan-h/HARNESS-FACTS.md /mnt/project-files/joint-review/inputs/playbook/WAYS-OF-WORKING.md
-    expected: Prints 2, then each file at 3 lines.
+      A=/mnt/project-files/plan-h/HARNESS-FACTS.md; B=/mnt/project-files/joint-review/inputs/playbook/WAYS-OF-WORKING.md;
+      test "$(grep -l 'coordinator/coordinator-harness-claude-projects.yaml' "$A" "$B" | wc -l)" -eq 2
+      && test "$(wc -l < "$A")" -le 3 && test "$(wc -l < "$B")" -le 3 && echo stubs-ok
+    expected: Prints stubs-ok, exit 0.
     fix_if: >-
       A file is missing the pointer or is longer: rewrite the stub, re-read after about ten seconds (network mount),
       and rerun.
@@ -192,6 +196,16 @@ test_obligations:
     verification_step: 1
     test_selector: tests/test_session_coordinator_copy.py::test_crlf_contract_round_trips_byte_identical
     red_green_expectation: red before (text mode normalises CRLF), green after
+  - source: scripts/session/coordinator_copy.py
+    behavior: A profile copy the ref no longer has is stale, and write removes it.
+    verification_step: 1
+    test_selector: tests/test_session_coordinator_copy.py::test_orphan_profile_copy_is_stale
+    red_green_expectation: red before (the current tool ignores profile copies), green after
+  - source: scripts/session/coordinator_copy.py
+    behavior: A missing profile copy exits 2.
+    verification_step: 1
+    test_selector: tests/test_session_coordinator_copy.py::test_missing_profile_copy_exits_2
+    red_green_expectation: red before (the current tool expects no profile copy), green after
   - source: docs/contracts/coordinator-harness-claude-projects.yaml
     behavior: >-
       The profile maps every contract term, its facts are dated and uniquely named, day_one cites only real facts, it
@@ -291,22 +305,27 @@ execution_steps:
     nine blocks, filling {{DATE}} (UTC). Run VP 2 (green) and VP 3.
   - >-
     Closure per the implement skill (code review, implementation_declared true, rebase, full tier + --verify-head,
-    push, PR, squash-merge on PROCEED + green CI; a branch commit message and merge_pull_request's commit_message both
-    carry "Resolves: rec-4814", per git-ops.yaml resolves_trailer), then VP 5.
+    push, PR, `merge_step premerge --slug coordinator-harness-profile --message-file <f> --expect
+    231d12a8a8b572b465d7494ccb1b1b948a2e562ca64da24aec450c9d6699e157`, squash-merge on PROCEED + green CI; a branch
+    commit message and merge_pull_request's commit_message both carry "Resolves: rec-4814", per git-ops.yaml
+    resolves_trailer), then VP 5.
   - >-
-    After VP 5, replace the shared store's 2026-10-29 prose playbook (joint-review/inputs/playbook/WAYS-OF-WORKING.md)
-    and plan-h/HARNESS-FACTS.md each with a three-line pointer stub naming coordinator/coordinator.yaml and
+    After VP 5, copy the shared store's 2026-10-29 prose playbook (joint-review/inputs/playbook/WAYS-OF-WORKING.md)
+    and plan-h/HARNESS-FACTS.md into a superseded-<date>/ folder beside each, then replace each with a three-line
+    pointer stub naming coordinator/coordinator.yaml and
     coordinator/coordinator-harness-claude-projects.yaml as the generated copies of their repository sources, and
     re-read each after about ten seconds; then VP 6 and VP 7. Report to the coordinator the merge SHA, the --verify-head verdict, the VP 5
     headers, and that the moved facts now leave the other surfaces: the standing instructions' harness block shrinks
     to the template's "Harness facts:" line, and memory's harness-fact lines are marked landed.
 work_areas: []
 rollback: >-
-  Revert the squash commit, rerun coordinator_copy write, and delete the profile copy from the shared store. No
+  Revert the squash commit and rerun coordinator_copy write (which removes the profile copy); restore the two
+  shared-store files from their superseded-<date>/ folders and the standing instructions' harness block. No
   production, infrastructure or warehouse state.
 gate_rounds:
   - {gate: wording-check, round: 1, verdict: PASS, digest: 94a588ebfeb4b9680537a2da0131bc525e0e6a54a0e3ecb5f3aa9b5d1a6bbc81, base: 069f4f2d74395cda2010a405cac795006c55a9a8, selection: complete}  # pragma: allowlist secret
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: wording-check, round: 2, verdict: PASS, digest: 231d12a8a8b572b465d7494ccb1b1b948a2e562ca64da24aec450c9d6699e157, base: 069f4f2d74395cda2010a405cac795006c55a9a8, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 5}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 5}
 weakening_dispositions: []
