@@ -56,7 +56,7 @@ scope:
       (a committed docs/contracts/coordinator-harness-x.yaml is written beside the contract with its own header, body
       byte-identical, check exits 0, and an unmatched docs/contracts/other.yaml is not copied);
       test_stale_profile_copy_is_stale (an edited profile copy exits 1); test_missing_profile_copy_exits_2 (a deleted
-      profile copy exits 2); test_orphan_profile_copy_is_stale (a profile copy whose source the ref no longer has
+      profile copy exits 2 even when the contract copy is also edited, so 2 takes precedence over 1); test_orphan_profile_copy_is_stale (a profile copy whose source the ref no longer has
       exits 1, and write then removes it so check exits 0, while an unrelated file in DIR survives); test_crlf_contract_round_trips_byte_identical (a contract committed as raw CRLF bytes, with
       core.autocrlf=false, writes a copy whose bytes after the header equal the committed bytes, check exits 0, and the
       same copy rewritten with LF line ends exits 1).
@@ -167,19 +167,23 @@ verification_plan:
       s=r.named('recs_by_ids', ids='rec-4814')[0]['status']; print(s); assert s == 'closed'"
     expected: Prints closed, exit 0.
     fix_if: >-
-      Still open: read the merge commit's ci.yml trailer-closure job log and follow git-ops.yaml resolves_trailer's
-      conditional fallback: a lost trailer runs `bin/venv-python -m scripts.session.merge_step recover --slug
+      Still open: wait until the merge commit's ci.yml trailer-closure job has concluded, read its log and follow
+      git-ops.yaml resolves_trailer's conditional fallback: a lost trailer runs `bin/venv-python -m scripts.session.merge_step recover --slug
       coordinator-harness-profile --sha <merge sha>` (a junit-routed rec it leaves open goes to the operator); an
-      acceptance-verdict refusal is fixed forward, never closed by hand; ops_data_portal --update-rec rec-4814 --status
-      closed only after a transport failure or a merge-leg refusal.
+      acceptance-verdict refusal is fixed forward, never closed by hand; a Decision 186 refusal stays open and is
+      reported; `bin/venv-python -m scripts.ops_data_portal --update-rec rec-4814 --status closed --resolution
+      "<merge sha>"` only after a transport failure or a merge-leg refusal.
     hermetic: false
   - step: 7
     phase: post-deploy
-    action: Confirm the shared store's prose playbook and harness-facts file are pointer stubs (execution step 4).
+    action: Confirm the shared store's prose playbook and harness-facts file are pointer stubs with saved originals (execution step 4).
     command: >-
       A=/mnt/project-files/plan-h/HARNESS-FACTS.md; B=/mnt/project-files/joint-review/inputs/playbook/WAYS-OF-WORKING.md;
       test "$(grep -l 'coordinator/coordinator-harness-claude-projects.yaml' "$A" "$B" | wc -l)" -eq 2
-      && test "$(wc -l < "$A")" -le 3 && test "$(wc -l < "$B")" -le 3 && echo stubs-ok
+      && test "$(grep -lF 'coordinator/coordinator.yaml' "$A" "$B" | wc -l)" -eq 2
+      && test "$(wc -l < "$A")" -le 3 && test "$(wc -l < "$B")" -le 3
+      && ls "$(dirname "$A")"/superseded-*/HARNESS-FACTS.md "$(dirname "$B")"/superseded-*/WAYS-OF-WORKING.md >/dev/null
+      && echo stubs-ok
     expected: Prints stubs-ok, exit 0.
     fix_if: >-
       A file is missing the pointer or is longer: rewrite the stub, re-read after about ten seconds (network mount),
@@ -202,7 +206,7 @@ test_obligations:
     test_selector: tests/test_session_coordinator_copy.py::test_orphan_profile_copy_is_stale
     red_green_expectation: red before (the current tool ignores profile copies), green after
   - source: scripts/session/coordinator_copy.py
-    behavior: A missing profile copy exits 2.
+    behavior: A missing profile copy exits 2, even when another copy is stale.
     verification_step: 1
     test_selector: tests/test_session_coordinator_copy.py::test_missing_profile_copy_exits_2
     red_green_expectation: red before (the current tool expects no profile copy), green after
@@ -306,9 +310,10 @@ execution_steps:
   - >-
     Closure per the implement skill (code review, implementation_declared true, rebase, full tier + --verify-head,
     push, PR, `merge_step premerge --slug coordinator-harness-profile --message-file <f> --expect
-    231d12a8a8b572b465d7494ccb1b1b948a2e562ca64da24aec450c9d6699e157`, squash-merge on PROCEED + green CI; a branch
-    commit message and merge_pull_request's commit_message both carry "Resolves: rec-4814", per git-ops.yaml
-    resolves_trailer), then VP 5.
+    231d12a8a8b572b465d7494ccb1b1b948a2e562ca64da24aec450c9d6699e157`, squash-merge on PROCEED + green CI with
+    merge_pull_request's expectedHeadSha set to the HEAD premerge printed; a branch commit message and
+    merge_pull_request's commit_message both carry "Resolves: rec-4814", per git-ops.yaml resolves_trailer; then
+    `merge_step readback --slug coordinator-harness-profile --sha <merge sha>`), then VP 5.
   - >-
     After VP 5, copy the shared store's 2026-10-29 prose playbook (joint-review/inputs/playbook/WAYS-OF-WORKING.md)
     and plan-h/HARNESS-FACTS.md into a superseded-<date>/ folder beside each, then replace each with a three-line
@@ -319,7 +324,9 @@ execution_steps:
     to the template's "Harness facts:" line, and memory's harness-fact lines are marked landed.
 work_areas: []
 rollback: >-
-  Revert the squash commit and rerun coordinator_copy write (which removes the profile copy); restore the two
+  Revert the squash commit, rerun coordinator_copy write, and delete
+  <shared_store>/coordinator/coordinator-harness-claude-projects.yaml by hand (the reverted tool does not manage it);
+  restore the two
   shared-store files from their superseded-<date>/ folders and the standing instructions' harness block. No
   production, infrastructure or warehouse state.
 gate_rounds:
@@ -328,4 +335,5 @@ gate_rounds:
   - {gate: wording-check, round: 2, verdict: PASS, digest: 231d12a8a8b572b465d7494ccb1b1b948a2e562ca64da24aec450c9d6699e157, base: 069f4f2d74395cda2010a405cac795006c55a9a8, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 5}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 5}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 5}
 weakening_dispositions: []
