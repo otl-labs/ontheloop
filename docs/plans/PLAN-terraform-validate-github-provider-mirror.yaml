@@ -1,0 +1,272 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: terraform-validate-github-provider-mirror
+intent: >-
+  Stop a github.com provider-asset outage from redding the required terraform-validate check (2026-11-08: github.com
+  answered 504 for the integrations/github provider's SHA256SUMS, so every runner's terraform/github init failed) by
+  serving integrations/github from the S3 provider mirror the way kislerdm/neon already is, with the same fail-open
+  version gate, so main's required check depends on github.com only when the mirror itself is unavailable.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-terraform-validate-github-provider-mirror.yaml
+phase: >-
+  hotfix (red main 2026-11-08, an upstream github.com outage on the integrations/github provider checksum); no
+  tier_item is targeted and no exit criterion is closed, so closes_criteria is empty.
+closes_criteria: []
+scope:
+  - file: config/terraform/cc-web.tfrc
+    action: Modify
+    purpose: >-
+      filesystem_mirror include and direct exclude both become ["registry.terraform.io/kislerdm/*",
+      "registry.terraform.io/integrations/*"] (kept symmetric). Header comment: the mirror now serves kislerdm/* and
+      integrations/* (terraform/github's provider); hashicorp/* still resolves direct. Both consumers pick it up with no
+      code change of their own: terraform-validate renders it, and bin/sync-terraform-assets.sh derives its S3 include
+      filters and per-namespace non-empty check from this include list.
+    new_imports: []
+  - file: scripts/ci/provider_mirror_gate.sh
+    action: Create
+    purpose: >-
+      The terraform-validate gate chain moved out of ci.yml's inline mirror_gate body (touch-it-fix-it, Decision 162
+      R3), unchanged in shape and generalised in gate 3. `set -uo pipefail` (never -e: every degradation exits 0).
+      Reads env OIDC_OUTCOME, RUNNER_TEMP, GITHUB_ENV, GITHUB_OUTPUT, GITHUB_STEP_SUMMARY; run from the repo root.
+      Gate 1/3: OIDC_OUTCOME must equal success. Gate 2/3: `aws s3 sync s3://agent-platform-data-lake/tf-provider-mirror/
+      "$RUNNER_TEMP/tf-provider-mirror" --exclude "*" --include <ns>... --only-show-errors`, the includes parsed from
+      config/terraform/cc-web.tfrc's include line exactly as bin/sync-terraform-assets.sh parses it (so the 150 MB
+      hashicorp/aws zip is no longer downloaded), then every included namespace directory must be non-empty. Gate 3/3:
+      a fixed MIRRORED table of two rows, "terraform/personal/.terraform.lock.hcl registry.terraform.io/kislerdm/neon"
+      and "terraform/github/.terraform.lock.hcl registry.terraform.io/integrations/github"; for each row the locked
+      version is parsed from that lockfile's provider block (the existing awk) and
+      "$MIRROR_DIR/<address>/terraform-provider-<type>_<version>_"*.zip must exist; the first miss degrades with a reason
+      naming the address and version (or "unparsed"). Every degradation prints `provider-mirror: DEGRADED -- gate N/3
+      (...) ... -- degrading to direct-fetch` to stdout and $GITHUB_STEP_SUMMARY, writes active=false, and exits 0.
+      Success renders the tfrc (sed of __TF_MIRROR_DIR__) to "$RUNNER_TEMP/cc-web.tfrc", appends
+      TF_CLI_CONFIG_FILE=<that path> to $GITHUB_ENV, writes active=true, and prints `provider-mirror: ACTIVE
+      (kislerdm/neon <v>, integrations/github <v>)` to stdout and the summary. No other output (public log).
+    new_imports: []
+  - file: .github/workflows/ci.yml
+    action: Modify
+    purpose: >-
+      terraform-validate's mirror_gate step keeps its name, id, position and no-if, gains `env: OIDC_OUTCOME: ${{
+      steps.mirror_oidc.outcome }}`, and its run body becomes the one line `bash scripts/ci/provider_mirror_gate.sh`; the
+      step's comment block is rewritten to say the gates now cover every provider the mirror serves (kislerdm/neon and
+      integrations/github), naming the script. The job's header comment (lines 411-430) gains "and terraform/github's
+      integrations/github" where it names the neon mirror. The mirror_oidc step, the fail-closed invariant step and every
+      other job are unchanged.
+    new_imports: []
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      The r3 entry ".github/workflows/ci.yml::terraform-validate::mirror_gate" lowers from 37 to 1 (a decrease, always
+      allowed; no marker).
+    new_imports: []
+  - file: tests/test_provider_mirror_gate.py
+    action: Create
+    purpose: >-
+      Stubbed runs of the real script driven exactly as the step runs it, `bash -e -c 'bash
+      scripts/ci/provider_mirror_gate.sh'` (the workflow's default `bash -e {0}`), from a temp repo copy (the real tfrc and both real lockfiles copied
+      in; a fake aws on PATH that records argv and populates the destination per STUB_MODE). Nodes:
+      test_active_when_every_locked_provider_is_mirrored (both locked zips present: exit 0, GITHUB_ENV holds
+      TF_CLI_CONFIG_FILE pointing at a rendered tfrc whose path line names the mirror dir and whose include names both
+      namespaces, GITHUB_OUTPUT active=true, the ACTIVE line names both versions read from the real lockfiles);
+      test_a_missing_or_wrong_version_provider_degrades (parametrized: github zip absent, github zip of another version,
+      neon zip absent; each exits 0, no GITHUB_ENV line, active=false, a gate 3/3 reason naming that address);
+      test_oidc_failure_degrades_without_calling_aws (OIDC_OUTCOME failure and unset; aws never invoked);
+      test_sync_failure_and_empty_namespace_degrade (aws exit 1; a sync that fills only kislerdm: gate 2/3);
+      test_sync_downloads_only_included_namespaces (argv carries --exclude * and one --include per tfrc include, so not
+      hashicorp); test_mirrored_table_matches_tfrc_includes (every MIRRORED address falls under an include pattern and
+      every include pattern has a MIRRORED row and a provider block in that row's real lockfile);
+      test_every_branch_writes_active_and_exits_zero (parametrized over every degradation above plus an unparseable
+      lockfile and a missing RUNNER_TEMP mirror dir: GITHUB_OUTPUT holds exactly one active= line and the exit is 0).
+  - file: tests/test_ci_provider_mirror_acceptance.py
+    action: Modify
+    purpose: >-
+      TestGateChainFailOpen reads its gate assertions from scripts/ci/provider_mirror_gate.sh instead of the inline body
+      (each assertion kept, re-pointed: refactor disposition, citing the script and tests/test_provider_mirror_gate.py);
+      test_gate_chain_checks_oidc_outcome_first becomes the step's env OIDC_OUTCOME equals `${{
+      steps.mirror_oidc.outcome }}` plus the script testing OIDC_OUTCOME; the neon exact-version assertion is joined by
+      the same for integrations/github; new test_gate_step_delegates_to_the_script (run body is exactly the one bash
+      line). New TestTfrcSymmetry node test_mirror_serves_terraform_github_provider (include holds
+      registry.terraform.io/integrations/*). test_filesystem_mirror_include_matches_direct_exclude and the invariant tests
+      stay byte-identical.
+  - file: tests/test_sync_terraform_assets.py
+    action: Modify
+    purpose: >-
+      AWS_STUB's populate fills every namespace named by an `--include` argument of its own argv (today it fills
+      kislerdm/neon only, which would turn every ok-mode node red once the real tfrc includes integrations/*); dirs_only
+      likewise. Existing assertions unchanged (planned-change disposition on the fixture, citing acceptance criterion 3).
+      New node test_mirror_sync_needs_every_included_namespace (real tfrc; a stub mode that fills only kislerdm: exit 1,
+      WARNING EMPTY_MIRROR, no resolved tfrc written).
+  - file: config/agent/verification_registry/entries/ci-terraform-validate-provider-mirror-contract.yaml
+    action: Modify
+    purpose: >-
+      check_spec's last grep (the neon filename pattern inside ci.yml, which moves to the script) is replaced by
+      `grep -q 'bash scripts/ci/provider_mirror_gate.sh' .github/workflows/ci.yml && grep -q
+      'registry.terraform.io/integrations/github' scripts/ci/provider_mirror_gate.sh && grep -q
+      'registry.terraform.io/kislerdm/neon' scripts/ci/provider_mirror_gate.sh`; the other three greps stay. A refactor
+      of the same contract plus the new provider (same or stronger).
+bundled_recommendations: []
+followon_recs: [rec-5005, rec-5006]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "With both locked provider packages in the mirror, the gate exports TF_CLI_CONFIG_FILE to a rendered tfrc that serves kislerdm/* and integrations/* from the mirror, and terraform-validate's terraform/github init makes no github.com fetch."
+  - "A missing or wrong-version package for either provider, an OIDC failure, a failed sync or an empty included namespace each degrades to direct fetch with a printed gate reason and exit 0; the required check never fails because of the mirror."
+  - "ADMIN-session sync (bin/sync-terraform-assets.sh) needs every included namespace non-empty before it writes the resolved tfrc, so a session never excludes integrations/* from direct with nothing to serve it."
+  - "The mirror_gate run body is one line and its baseline ceiling is lowered to match; no ceiling or budget is raised."
+  - "On the merge's main CI run, terraform-validate prints provider-mirror: ACTIVE naming both providers and its terraform/github init passes without a registry retry."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The gate activates the mirror for both providers.
+    command: bin/venv-python -m pytest "tests/test_provider_mirror_gate.py::test_active_when_every_locked_provider_is_mirrored" -q
+    expected: exit 0; red before (file absent).
+    fix_if: TF_CLI_CONFIG_FILE is not exported, the rendered tfrc omits integrations/*, or the ACTIVE line omits a provider
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: provider-mirror-gate-active-both-providers
+  - step: 2
+    phase: pre-deploy
+    action: A missing or wrong-version package for either provider degrades, exit 0.
+    command: bin/venv-python -m pytest "tests/test_provider_mirror_gate.py::test_a_missing_or_wrong_version_provider_degrades" -q
+    expected: exit 0; red before (file absent). Each case exports nothing, writes active=false and names the address in a gate 3/3 reason.
+    fix_if: any case exports TF_CLI_CONFIG_FILE (that would wedge init with no direct fallback) or exits non-zero
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: provider-mirror-gate-version-miss-degrades
+  - step: 3
+    phase: pre-deploy
+    action: The tfrc serves terraform/github's provider from the mirror.
+    command: bin/venv-python -m pytest "tests/test_ci_provider_mirror_acceptance.py::TestTfrcSymmetry::test_mirror_serves_terraform_github_provider" -q
+    expected: exit 0; red before (node absent; the pre-change tfrc includes kislerdm/* only).
+    fix_if: the include list lacks registry.terraform.io/integrations/*
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: cc-web-tfrc-serves-integrations-github
+  - step: 4
+    phase: pre-deploy
+    action: ADMIN-session sync refuses a mirror missing an included namespace.
+    command: bin/venv-python -m pytest "tests/test_sync_terraform_assets.py::test_mirror_sync_needs_every_included_namespace" -q
+    expected: exit 0; red before (node absent).
+    fix_if: a resolved tfrc is written while integrations/* is empty
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: sync-terraform-assets-every-namespace
+  - step: 5
+    phase: pre-deploy
+    action: All three touched suites in full (the re-pointed structural nodes, the session sync, the gate script).
+    command: bin/venv-python -m pytest tests/test_provider_mirror_gate.py tests/test_ci_provider_mirror_acceptance.py tests/test_sync_terraform_assets.py -q
+    expected: exit 0
+    fix_if: a pre-existing node fails (fix the code, never the node; Decision 235)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-file re-runs of suites already in the --pre pytest_diff set; sync-terraform-assets-behaviour keeps covering the session file and steps 1-4 carry the new durable regressions.
+  - step: 6
+    phase: pre-deploy
+    action: The re-pointed registry contract holds on the new tree.
+    command: >-
+      bash -c "grep -q 'id: mirror_gate' .github/workflows/ci.yml && grep -q 'Provider-mirror fail-closed consistency invariant' .github/workflows/ci.yml && grep -q 'bash scripts/ci/provider_mirror_gate.sh' .github/workflows/ci.yml && grep -q 'registry.terraform.io/integrations/github' scripts/ci/provider_mirror_gate.sh && grep -q 'registry.terraform.io/kislerdm/neon' scripts/ci/provider_mirror_gate.sh"
+    expected: exit 0; red before (the script is absent).
+    fix_if: a grep misses (fix the code to the plan, never the grep)
+    hermetic: true
+    expected_literals: []
+    graduation: waive
+    graduation_waiver_reason: This is the ci-terraform-validate-provider-mirror-contract shard's own re-pointed command (in scope); a second shard would duplicate it.
+  - step: 7
+    phase: pre-deploy
+    action: The run-body ratchet passes with the lowered ceiling.
+    command: bin/venv-python -c "from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as f; failed=[]; f(failed); raise SystemExit(1 if failed else 0)" && git diff origin/main -- config/composite_action_body_baseline.yaml | grep -c '^[-+] ' | grep -qx 2
+    expected: exit 0; the baseline diff is the one mirror_gate line, 37 down to 1.
+    fix_if: the guard fails, or any other baseline line changed
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: The ratchet is already a registered fast-tier check; this step only confirms the decrease.
+  - step: 8
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it from the top-level session, backgrounded with a 2 h limit, and read only the attestation.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure -- fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and steps 1-4 carry the durable regressions.
+  - step: 9
+    phase: post-deploy
+    action: The build PR's own CI and then the merge's main CI run the real job against the real mirror.
+    command: >-
+      mcp__github__actions_list(owner=otl-labs, repo=ontheloop, method=list_workflow_runs, resource_id=ci.yml), pick the push run on the merge SHA, then mcp__github__actions_list(method=list_workflow_jobs, resource_id=<run id>) and mcp__github__get_job_logs on its terraform-validate job, grepping 'provider-mirror: ' and '=== Terraform init [terraform/github] ===' through the next '==='
+    expected: >-
+      the job succeeds; its log carries 'provider-mirror: ACTIVE (kislerdm/neon 0.13.0, integrations/github 6.12.1)' (the
+      versions the lockfiles pin at merge) and the terraform/github init section has no 'transient registry error' line.
+      Record the PR run id and the main run id.
+    fix_if: the log shows DEGRADED (read the reason; a mirror miss means re-dispatch terraform-provider-mirror-seed.yml, a code defect means a fix on a new branch), or init still retries against the registry
+    hermetic: false
+  - step: 10
+    phase: post-deploy
+    action: An ADMIN session syncs the wider mirror and inits terraform/github from it.
+    command: bash bin/sync-terraform-assets.sh && ls "$HOME/.terraform-mirror/registry.terraform.io/integrations/github" && TF_CLI_CONFIG_FILE="$HOME/.terraform-mirror.tfrc" terraform -chdir=terraform/github init -backend=false -input=false -lockfile=readonly && git status --short terraform/github
+    expected: mirror-sync OK, the integrations/github package listed, init succeeds with no github.com fetch, and no tracked file changes (.terraform/ is gitignored).
+    fix_if: >-
+      EMPTY_MIRROR (the S3 mirror lost integrations/github: re-dispatch the seed workflow) or init tries a direct fetch (the tfrc did not resolve)
+    hermetic: false
+test_obligations:
+  - source: scripts/ci/provider_mirror_gate.sh
+    behavior: activates the mirror only when every mirrored provider's exact locked package is present
+    verification_step: 1
+    test_selector: tests/test_provider_mirror_gate.py::test_active_when_every_locked_provider_is_mirrored
+    red_green_expectation: red before (file absent), green after
+  - source: scripts/ci/provider_mirror_gate.sh
+    behavior: a missing or wrong-version package for either provider degrades fail-open with a named reason
+    verification_step: 2
+    test_selector: tests/test_provider_mirror_gate.py::test_a_missing_or_wrong_version_provider_degrades
+    red_green_expectation: red before (file absent), green after; red if gate 3 checks neon alone
+  - source: config/terraform/cc-web.tfrc
+    behavior: the mirror serves registry.terraform.io/integrations/* with direct excluding it symmetrically
+    verification_step: 3
+    test_selector: tests/test_ci_provider_mirror_acceptance.py::TestTfrcSymmetry::test_mirror_serves_terraform_github_provider
+    red_green_expectation: red before (kislerdm-only include), green after
+  - source: .github/workflows/ci.yml
+    behavior: mirror_gate passes the OIDC outcome by env and delegates to the script in one line
+    verification_step: 5
+    test_selector: tests/test_ci_provider_mirror_acceptance.py::TestGateChainFailOpen::test_gate_step_delegates_to_the_script
+    red_green_expectation: red before (inline body), green after
+  - source: config/composite_action_body_baseline.yaml
+    behavior: the mirror_gate ceiling matches the one-line body
+    verification_step: 7
+    command: bin/venv-python -c "from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as f; failed=[]; f(failed); raise SystemExit(1 if failed else 0)"
+    waiver_reason: Config data read by an already-registered guard; a lowered ceiling can only tighten it, so no new test can fail without the change.
+constraints:
+  - "Fail-open is kept (Decisions 55, 83): no mirror state can fail the required check; only the existing fail-closed TF_CLI_CONFIG_FILE invariant can."
+  - "Integrity unchanged: validate.py inits with -lockfile=readonly, so mirror packages are checked against the committed lockfile hashes."
+  - "No IAM change; no apply or deploy. The apply workflow and the PR-time plan are out of scope (follow-on rec; rec-4638)."
+  - "Never loosen an existing assertion (Decision 235); re-pointed nodes carry refactor dispositions."
+  - "No rescue agents or workaround loops (Decision 55)."
+context:
+  - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: 119 (routine validate/plan stays CI-delegated), 120 (mirror mechanism; never export a config excluding a namespace from direct with nothing to serve it; cc-web.tfrc keeps its name), 83 (terraform-validate is a required check), 55 (fail-open gates print reasons; the fail-closed invariant step is unchanged), 162 (R3 extraction; ceiling decrease needs no marker), 226 (Track B forward-fix; bundles a source=ci_rca rec for this red if one is filed), 235 and 181 (re-pointed assertions are refactor dispositions, never weakening), 244 (the re-pointed graduated shard keeps its claim), 132 (graduation dispositions). CONTRADICT: none. SPIRIT: 162 NOTE (the script feeds a consumed step output, so drive it under the workflow's own shell) -- adopted: tests run it as the step does, bash -e -c 'bash scripts/ci/provider_mirror_gate.sh', and assert active= is written and exit 0 on every branch, an unparseable lockfile included. RELATED: 248, 238, 223, 126, 112, 100, 246, 245, 128/166, 131. Decisions triaged: 202 of 202. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.1 2/5."
+  - "Root cause (2026-11-08): main CI run 42468653543 terraform-validate log, five attempts each '504 Gateway Timeout returned from github.com' fetching the integrations/github 6.12.1 SHA256SUMS; terraform-github-apply run 42468562354 preview failed init on both attempts (same root, hidden by quiet_run). Last good: run 42373246272 (d57247d3). Nothing in terraform/github, its lockfile, config/terraform-version or the workflows changed between."
+  - "Probe (2026-11-08, read-only): s3://agent-platform-data-lake/tf-provider-mirror/ holds integrations/github 6.12.1 (seeded by #1894, run 42373251789) and kislerdm/neon 0.13.0; terraform 1.10.5 init -backend=false -lockfile=readonly of a terraform/github copy against a mirror-only tfrc serving kislerdm/* and integrations/github succeeded with no network fetch."
+  - "Gap: cc-web.tfrc includes kislerdm/* only; ci.yml gate 3 checks neon only. Live grants: the terraform-validate roles already sync the whole mirror (S3ReadProviderMirror, shard github-ci-pr-mirror-grant-read-only-and-scoped), so a namespace-filtered sync needs nothing new."
+  - "Operator 2026-11-08 10:18Z (thread 'Fix terraform init failure on main'): scope card 'Both, as two PRs' and 'write the plan'. PR 2 is rec-5005 (apply workflow on the mirror, IAM, planned next in the same thread). rec-5006 defers the always-ask contract wording (terraform-cc-web-operations.yaml provider_init_and_mirror)."
+  - "Not bundled: rec-3152 (its seed-leg purpose shipped in #1894; relevance verdict unknown, acceptance already passes on main; left for the operator); rec-2520 (seed publishes all providers; untouched surface); rec-4638 (S5 owns terraform-github-plan.yml's hermetic init)."
+  - "Kept unchanged: graduated shards sync-terraform-assets-behaviour (tests/test_sync_terraform_assets.py, whole file, still the guard), setup-cloud-env-mirror-hygiene, github-ci-pr-mirror-grant-read-only-and-scoped, provider-mirror-seed-both-roots. Re-pointed in scope: ci-terraform-validate-provider-mirror-contract."
+  - "Overlap: eight unbuilt plans also scope config/composite_action_body_baseline.yaml (environment-gates-fail-closed, neon-key-out-of-pr-plans, pr-plan-opaque-iam-policy-check, telemetry-content-reader-lock, telemetry-owner-provisioning, trusted-plan-cutover, trusted-plan-github-root, trusted-plan-identity); this plan changes one r3 line, so whichever builds second rebases that line only. ci.yml is edited often (Decision 245: expect a rebase)."
+  - "Short-term recovery is independent of this plan: re-running the failed jobs clears main once github.com recovers."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 55, 83, 119, 120, 162 and 235 sections read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Script: create scripts/ci/provider_mirror_gate.sh from the ci.yml mirror_gate body, with gate 3 over the MIRRORED table and the namespace-filtered sync; tests/test_provider_mirror_gate.py; run VP 1 and 2."
+  - "Config: cc-web.tfrc include/exclude and header; tests/test_ci_provider_mirror_acceptance.py re-points and new nodes; tests/test_sync_terraform_assets.py stub generalised plus the new node; run VP 3 and 4."
+  - "Workflow: ci.yml mirror_gate env and one-line body, comments; lower the baseline ceiling; re-point the registry shard; add the four graduate shards (VP 1-4); run VP 5-7."
+  - "CLOSURE, each outcome reported separately (implement skill Commit Flows; docs/contracts/git-ops.yaml handoff_sequence): bin/venv-python -m scripts.session.github_readiness; set implementation_declared: true; run VP 1-7; commit (feat(terraform-validate-github-provider-mirror): ...); git fetch origin main && git rebase origin/main; VP 8 (full tier from the top-level session, backgrounded, then --verify-head; a timeout is BLOCKED, no push); postflight evidence; push; open the PR (body names rec-5005 and rec-5006, and a Resolves: trailer for any source=ci_rca rec filed for this red); subscribe; code review in a fresh context; merge on code review PROCEED and green CI (no CODEOWNERS path in scope); then VP 9 and VP 10, reporting the PR number, CI run ids and merge SHA."
+  - "Report: what was implemented, verification results"
+rollback: Revert the build PR; terraform/github init returns to fetching from github.com.
