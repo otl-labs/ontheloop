@@ -108,8 +108,11 @@ verification_plan:
     command: grep -c "wake job reads the run's own approvals record" docs/contracts/ports.yaml && bin/venv-python -c "import yaml;
       yaml.safe_load(open('docs/contracts/ports.yaml')); print('PORTS_OK')"
     expected: Prints 1 and then PORTS_OK.
-    expected_literals: []
-    fix_if: The count is 0 -- the clause wording differs from the scope row's quoted phrase; use it verbatim.
+    expected_literals:
+      - PORTS_OK
+    fix_if: The count is 0 -- the clause wording differs from the scope row's quoted phrase, or the phrase wraps across
+      two lines of SA-05's folded scalar; keep it verbatim on one line. The count is 2 -- the amendment_log summary repeats
+      the phrase; word the summary differently.
     hermetic: true
     graduation: waive
     graduation_waiver_reason: Register prose; the standing contract checks validate the file's shape on every tier.
@@ -140,14 +143,14 @@ verification_plan:
     graduation_waiver_reason: Invokes scripts.validate (recursion refusal); it is the handoff gate itself.
   - step: 6
     phase: post-deploy
-    action: On the first completed approval run dispatched from a main commit that holds the build, its wake job succeeded
+    action: On the first successful approval run dispatched from a main commit that holds the build, its wake job succeeded
       with the new token grant (an approved run whose approvals read did not 403).
     command: >-
       git fetch origin main --quiet && B=$(git log origin/main --format=%H -1 --grep='^feat(approved-text-wake-requires-approver)')
       && curl -sS "https://api.github.com/repos/otl-labs/ontheloop/actions/workflows/approved-text-approval.yml/runs?branch=main&status=completed&per_page=30"
       | bin/venv-python -c "import json,subprocess,sys,urllib.request as u; b=sys.argv[1]; runs=[r for r in
-      json.load(sys.stdin)['workflow_runs'] if subprocess.run(['git','merge-base','--is-ancestor',b,r['head_sha']]).returncode==0];
-      assert b and runs, 'no completed approval run after the build yet'; r=min(runs, key=lambda x: x['created_at']);
+      json.load(sys.stdin)['workflow_runs'] if r['conclusion']=='success' and subprocess.run(['git','merge-base','--is-ancestor',b,r['head_sha']]).returncode==0];
+      assert b and runs, 'no successful approval run after the build yet'; r=min(runs, key=lambda x: x['created_at']);
       j={x['name']:x['conclusion'] for x in json.load(u.urlopen(r['jobs_url']))['jobs']}; assert j.get('approve')=='success'
       and j.get('wake')=='success', (r['id'], j); print('WAKE_OK', r['id'], j)" "$B"
     expected: Prints WAKE_OK with the run id and approve and wake both success. A wake job that fails reports conclusion
@@ -208,6 +211,8 @@ context:
   - "VP step 4 probed at planning 2026-11-08: LIVE_OK None benjamin-blake (approvals endpoint readable from a session)."
   - "Why _approver(approvals(this run)) and not lookup(): wake already knows its run; lookup scans the run list and needs
     origin/main ancestry, which wake's depth-1 checkout lacks. Same predicate, this run only; do not 'fix' it to lookup()."
+  - "Contested (ADVICE point 6): once rec-4979 makes the approve job fail closed, an empty record never reaches wake, so this
+    check becomes defence in depth (one GET per run); the operator may judge it dead weight at the build's final-diff word."
   - "Overlap: the rec-4961/4979 plan edits the approve job of the same workflow and tests/test_approved_text_approval_workflow.py
     (approve-job pins); hunks differ. Whichever builds second rebases."
   - "Not bundled: rec-4934 (approver 'unknown' semantics, shared with lookup) and rec-4935 (wake comment de-dup)."
@@ -231,6 +236,7 @@ context:
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: plan-critique, round: 1, verdict: PROCEED, blocking: 0, nits: 6}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -239,7 +245,7 @@ pre_implementation_checklist:
   - Acceptance criteria understood and verifiable
 execution_steps:
   - >-
-    scripts/roadmap/approved_text_github.py -- in _cmd_wake, inside the existing try, call `approver = _approver(approvals(repo, args.run_id, deadline))` before the pulls loop; on None print the no-approver line and return 1. Convert the run id with int(args.run_id) inside the try (no parser change). Update the docstring's wake line.
+    scripts/roadmap/approved_text_github.py -- in _cmd_wake, inside the existing try, call `approver = _approver(approvals(repo, int(args.run_id), deadline))` before the pulls loop (the int() conversion precedes any request); on None print the no-approver line and return 1. No parser change. Update the docstring's wake line.
   - >-
     tests/test_approved_text_github.py -- add TestWakeApprovals (acceptance_criteria[0], [1], [3]; use Api(approvals={55: ...}) and assert no POST and no pulls call); leave existing tests unchanged.
   - >-
@@ -247,10 +253,28 @@ execution_steps:
   - >-
     docs/contracts/ports.yaml -- add the SA-05 clause.
   - >-
-    Execute Verification Plan -- steps 1-4, then step 5 (full tier) last; loop until pass; on unrecoverable failure stop and RCA (Decision 55).
+    Run VP steps 1-4 until green; on unrecoverable failure stop and RCA (Decision 55).
   - >-
-    Code review via a fresh code-review subagent; fix blocking findings and rerun the pre-deploy steps.
+    Code review via a fresh code-review subagent; fix blocking findings and rerun VP steps 1-4.
   - >-
-    Commit Flow per the implement skill (Resolves: rec-4960 paragraph; premerge, merge with the operator's final-diff word, readback); record weakening disposition planned-change for the renamed permission test citing acceptance_criteria[4]. After merge run VP step 7; VP step 6 on the first approval run dispatched after the merge.
+    Commit (flip this plan's implementation_declared to true; record weakening disposition planned-change for the renamed permission test citing acceptance_criteria[4];
+    carry "Resolves: rec-4960" as its own paragraph in a branch commit's message), rebase on origin/main, then run VP
+    step 5 (full tier, backgrounded with a 2 h limit from the top-level session) on the committed clean HEAD, since
+    --verify-head fails on a dirty tree; then push as its own call and open the build PR.
+  - >-
+    Closure evidence, recorded as four SEPARATE facts (implement skill Commit Flows; PLAN-arrival-expectations
+    precedent): GitHub readiness state (bin/venv-python -m scripts.session.github_readiness; unknown is never PASS);
+    parent validator evidence (VP step 5 full-tier exit 0 plus bin/venv-python -m scripts.checks.validation_result
+    --verify-head for the pushed HEAD); structured postflight evidence (write the
+    scripts.session.postflight_evidence.CATEGORIES JSON in the scratchpad, then bin/venv-python -m
+    scripts.session.postflight --evidence <file>); the real outcome - push, build PR, CI green by event-driven wake
+    (never polled), merge SHA.
+  - >-
+    Merge on code review PROCEED, green CI and the operator's final-diff word (CODEOWNERS paths, token permission):
+    write the squash message (with the Resolves paragraph) to a file, run bin/venv-python -m scripts.session.merge_step
+    premerge --slug approved-text-wake-requires-approver --message-file <file>, merge_pull_request (squash) with that
+    commit_message and the expectedHeadSha premerge printed, then bin/venv-python -m scripts.session.merge_step readback
+    --slug approved-text-wake-requires-approver --sha <merge sha>. After merge run VP step 7; VP step 6 runs on the
+    first approval run dispatched after the merge.
   - 'Report: what was implemented, verification results'
 rollback: Revert the squash commit; wake comments on every run again, as today.
