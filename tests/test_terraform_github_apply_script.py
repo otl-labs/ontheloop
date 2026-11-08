@@ -27,6 +27,7 @@ COPIED = (
     "terraform_github_plan_report.py",
     "plan_names_core.py",
     "quiet_run.sh",
+    "terraform_github_apply_mirror.sh",
 )
 KEY = "stub-apply-app-private-key-sentinel"  # pragma: allowlist secret
 TOKEN = "ghs_stubInstallationTokenSentinel0123"  # pragma: allowlist secret
@@ -285,6 +286,16 @@ def test_a_terraform_failure_stops_and_revokes(env: dict[str, str], step: str) -
     assert "terraform error" not in r.stdout + r.stderr
     assert _revoked(env)
     _assert_confined(env, r)
+
+
+def test_a_failed_init_prints_its_class_only(env: dict[str, str]) -> None:
+    env["TF_STUB_FAIL"] = "init"
+    r = _run(env)
+    lines = r.stdout.splitlines()
+    classes = [i for i, ln in enumerate(lines) if ln.startswith("init failure class: ")]
+    failed = [i for i, ln in enumerate(lines) if ln.startswith("TF_GITHUB_APPLY_TERRAFORM_FAILED")]
+    assert r.returncode == 1 and len(classes) == 1 and failed and classes[0] < failed[0]
+    assert "terraform error" not in r.stdout + r.stderr
 
 
 def test_a_re_plan_with_changes_fails(env: dict[str, str]) -> None:

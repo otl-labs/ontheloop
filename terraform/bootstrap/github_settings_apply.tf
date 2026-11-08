@@ -4,8 +4,10 @@
 # grant (IAMRoleWriteBounded and kin, keyed on that prefix) can write them (Decision 223 cl.1). Each trusts ONE
 # statement, StringEquals only: one Environment subject and this workflow's job_workflow_ref at main.
 #   - github-settings-apply (the apply job, environment local.github_settings_gate_env): reads the apply App entry and
-#     reads and writes terraform/github's state and lock. No iam: action, no s3:ListBucket (the S3 backend needs none).
-#   - github-settings-preview (the preview job, environment tf-trusted-plan): reads terraform/github's state only.
+#     reads and writes terraform/github's state and lock, and reads the integrations/github provider packages in the S3
+#     provider mirror. No iam: action, no s3:ListBucket (the S3 backend needs none).
+#   - github-settings-preview (the preview job, environment tf-trusted-plan): reads terraform/github's state and the
+#     integrations/github provider packages in the S3 provider mirror only.
 # The apply App entry is created and rotated out of band (Decision 237 cl.3); this file reads its metadata only and
 # attaches a resource policy denying every non-metadata action to all but four principals (Decision 248 cl.5).
 # Changes here apply only by a human-directed admin apply (deploy-paths.yaml github_settings_apply_provisioning).
@@ -15,7 +17,8 @@ locals {
   github_settings_workflow_refs = [
     "otl-labs/ontheloop/.github/workflows/terraform-github-apply.yml@refs/heads/main",
   ]
-  github_settings_state_arn = "arn:aws:s3:::agent-platform-data-lake/tfstate/github/terraform.tfstate"
+  github_settings_state_arn  = "arn:aws:s3:::agent-platform-data-lake/tfstate/github/terraform.tfstate"
+  github_settings_mirror_arn = "arn:aws:s3:::agent-platform-data-lake/tf-provider-mirror/registry.terraform.io/integrations/github/*"
 
   github_settings_apply_policy_json = jsonencode({
     Version = "2012-10-17"
@@ -38,6 +41,12 @@ locals {
         Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
         Resource = ["${local.github_settings_state_arn}.tflock"]
       },
+      {
+        Sid      = "ProviderMirrorGithubRead"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = [local.github_settings_mirror_arn]
+      },
     ]
   })
 
@@ -49,6 +58,12 @@ locals {
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
         Resource = [local.github_settings_state_arn]
+      },
+      {
+        Sid      = "ProviderMirrorGithubRead"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = [local.github_settings_mirror_arn]
       },
     ]
   })

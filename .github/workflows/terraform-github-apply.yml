@@ -3,7 +3,7 @@ name: terraform-github-apply
 # CI apply of terraform/github behind one operator approval (Decision 248, PLAN-terraform-github-gated-apply).
 # Never auto-applies (Decision 77): every apply waits for the apply job's reviewer-gated Environment.
 #
-# preview (ungated, tf-trusted-plan, role github-settings-preview: state read only): the read-only plan with the
+# preview (ungated, tf-trusted-plan, role github-settings-preview: state and mirror read only): the read-only plan with the
 # read-only plan App, as terraform-github-plan.yml does it; the names-only report and the gate's preview table
 # (address, action, changed attribute names, allowlisted values) go to the step summary. That table is the reviewed
 # set. It asks for no approval when nothing would change. A change to an Environment, deployment policy or Actions
@@ -18,6 +18,7 @@ name: terraform-github-apply
 # checkout and before any credential step, checks that the run holds a recorded approval for its Environment by a
 # listed reviewer (scripts/ci/environment_reviewer_preflight.py), so an auto-created, unprotected Environment cannot
 # open the gate.
+# Both jobs install integrations/github from the S3 provider mirror when its locked package is there, else fetch it directly.
 # validate_github_settings_apply fences this file; validate_trusted_plan_environment governs the preview job.
 # Configuration: repository secret TF_GITHUB_PLAN_APP_PRIVATE_KEY, repository variables TF_GITHUB_PLAN_APP_CLIENT_ID
 # and TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS; the apply App key lives in Secrets Manager, readable only by the apply
@@ -88,12 +89,18 @@ jobs:
           [ -z "$missing" ] || { echo "::error::CONFIG_MISSING${missing}"; exit 1; }
           echo "CONFIG_OK"
 
-      - name: Configure AWS credentials (OIDC -- github-settings-preview, state read only)
+      - name: Configure AWS credentials (OIDC -- github-settings-preview, state and mirror read only)
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-settings-preview
           role-session-name: terraform-github-preview
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Fetch the GitHub provider from the S3 provider mirror (fail-open)
+        id: mirror
+        env:
+          MIRROR_PREFIX: s3://agent-platform-data-lake/tf-provider-mirror/
+        run: bash scripts/ci/terraform_github_apply_mirror.sh fetch
 
       - name: Mint the read-only plan App token (this repository only)
         id: app_token
@@ -142,7 +149,7 @@ jobs:
           TF_VAR_gated_apply_reviewer_user_ids="$(cat "$RUNNER_TEMP/reviewer_ids")"
           export TF_VAR_gated_apply_reviewer_user_ids
           q="$GITHUB_WORKSPACE/scripts/ci/quiet_run.sh"
-          bash "$q" "$RUNNER_TEMP/tf.log" -- terraform -chdir=terraform/github init -input=false -lockfile=readonly || { echo "::error::TF_GITHUB_PREVIEW_FAILED init"; exit 1; }
+          bash "$q" "$RUNNER_TEMP/tf.log" -- terraform -chdir=terraform/github init -input=false -lockfile=readonly || { bash "$GITHUB_WORKSPACE/scripts/ci/terraform_github_apply_mirror.sh" classify "$RUNNER_TEMP/tf.log"; echo "::error::TF_GITHUB_PREVIEW_FAILED init"; exit 1; }
           rc=0
           bash "$q" "$RUNNER_TEMP/tf.log" -- terraform -chdir=terraform/github plan -lock=false -input=false -no-color -detailed-exitcode -out=plan.bin || rc=$?
           [ "$rc" = 0 ] || [ "$rc" = 2 ] || { echo "::error::TF_GITHUB_PREVIEW_FAILED plan exit ${rc}"; exit 1; }
@@ -231,6 +238,12 @@ jobs:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-settings-apply
           role-session-name: terraform-github-apply
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Fetch the GitHub provider from the S3 provider mirror (fail-open)
+        id: mirror
+        env:
+          MIRROR_PREFIX: s3://agent-platform-data-lake/tf-provider-mirror/
+        run: bash scripts/ci/terraform_github_apply_mirror.sh fetch
 
       - name: Read pinned Terraform version
         id: tfver

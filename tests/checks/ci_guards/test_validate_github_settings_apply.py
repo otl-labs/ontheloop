@@ -597,3 +597,58 @@ def test_apply_job_pins_python_and_preview_checks_login_shape(wf) -> None:
 def test_m_gate_step_event_wiring(wf, mutate) -> None:
     mutate(_step(wf, "preview", "id", "gate"))
     assert [m for m in v.check_workflow(wf) if m.startswith("m:")] != [] and len(v.check_workflow(wf)) == 1
+
+
+_MIRROR_STMT = (
+    '      {\n        Sid      = "ProviderMirrorGithubRead"\n        Effect   = "Allow"\n        Action   = ["s3:GetObject"]\n'
+    "        Resource = [local.github_settings_mirror_arn]\n      },\n"
+)
+_MIRROR_ARN_LINE = '"arn:aws:s3:::agent-platform-data-lake/tf-provider-mirror/registry.terraform.io/integrations/github/*"'
+
+
+def _in_role(files: dict[str, str], role: str, old: str, new: str) -> None:
+    text = files[_SETTINGS]
+    start = text.index(f"github_settings_{role}_policy_json = jsonencode")
+    at = text.index(old, start)
+    files[_SETTINGS] = text[:at] + new + text[at + len(old) :]
+
+
+@pytest.mark.parametrize("role", ["apply", "preview"])
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (_MIRROR_STMT, ""),
+        (
+            "Resource = [local.github_settings_mirror_arn]",
+            'Resource = ["arn:aws:s3:::agent-platform-data-lake/tf-provider-mirror/*"]',
+        ),
+        (
+            "Resource = [local.github_settings_mirror_arn]",
+            'Resource = ["arn:aws:s3:::agent-platform-data-lake/tf-provider-mirror/registry.terraform.io/kislerdm/*"]',
+        ),
+        (
+            '"ProviderMirrorGithubRead"\n        Effect   = "Allow"\n        Action   = ["s3:GetObject"]',
+            '"ProviderMirrorGithubRead"\n        Effect   = "Allow"\n        Action   = ["s3:GetObject", "s3:PutObject"]',
+        ),
+        (
+            '"ProviderMirrorGithubRead"\n        Effect   = "Allow"\n        Action   = ["s3:GetObject"]',
+            '"ProviderMirrorGithubRead"\n        Effect   = "Allow"\n        Action   = ["s3:GetObject", "s3:ListBucket"]',
+        ),
+    ],
+    ids=["removed", "widened", "other-namespace", "put-added", "list-added"],
+)
+def test_h_the_mirror_grant_is_exact(boot, role, old, new) -> None:
+    _in_role(boot, role, old, new)
+    assert any(f"github_settings_{role} must grant" in x for x in v.check_policies(boot))
+
+
+def test_h_the_mirror_local_widened(boot) -> None:
+    _swap(boot, _SETTINGS, _MIRROR_ARN_LINE, '"arn:aws:s3:::agent-platform-data-lake/tf-provider-mirror/*"')
+    assert sum("must grant" in x for x in v.check_policies(boot)) == 2
+
+
+def test_n_check_workflow_appends_the_mirror_wiring(wf) -> None:
+    assert v.check_workflow(wf) == []
+    assert [x for x in v.check_workflow(wf, apply_script="terraform_step() {\n}\n") if x.startswith("n: ")] == [
+        "n: terraform_step in the apply script must call the classifier on a failed step"
+    ]
