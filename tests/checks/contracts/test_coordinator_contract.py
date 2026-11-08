@@ -115,7 +115,7 @@ def test_build_merge_reads_the_github_approval() -> None:
     assert len(record) == 1 and "approval run link" in record[0]
     handoff = _flat(_DOC["templates"]["handoff_note"])
     assert "Approved text: <sidecar path and approval run link;" in handoff
-    assert _DOC["contract"]["contract_version"] == 3
+    assert _DOC["contract"]["contract_version"] == 4
     entry = next(e for e in _DOC["amendment_log"] if "PLAN-coordinator-approval-run" in _flat(e["summary"]))
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(entry["date"]))
     assert entry["semantic_break"] is True
