@@ -43,7 +43,8 @@ scope:
       (kept from today's body) and `aws s3 sync s3://agent-platform-data-lake/tf-provider-mirror/
       "$MIRROR_DIR" --exclude "*" --include <ns>... --only-show-errors` (MIRROR_DIR="$RUNNER_TEMP/tf-provider-mirror"),
       the includes parsed from config/terraform/cc-web.tfrc's include line exactly as bin/sync-terraform-assets.sh
-      parses it (so the 150 MB hashicorp/aws zip is no longer downloaded); a sync error degrades, then the whole tree
+      parses it (so the 150 MB hashicorp/aws zip is no longer downloaded), wrapped in `timeout 300` so a hung S3 call
+      cannot burn the job's 15-minute limit; a sync error or timeout (exit 124) degrades with its own reason, then the whole tree
       must be non-empty (the existing `[ -z "$(ls -A "$MIRROR_DIR" 2>/dev/null)" ]` check, kept literally) and then every
       included namespace directory must be non-empty. Gate 3/3 spells each provider out literally, no table or loop:
       NEON_VERSION is parsed by the existing awk from terraform/personal/.terraform.lock.hcl's
@@ -54,7 +55,9 @@ scope:
       "$MIRROR_DIR/registry.terraform.io/integrations/github/terraform-provider-github_${GITHUB_VERSION}_"*.zip` must
       match. An unparsed version or a missing package degrades with a reason naming that address and version. Every
       degradation runs `echo "provider-mirror: DEGRADED -- ${reason}"` to stdout and the same line to
-      $GITHUB_STEP_SUMMARY (when set), writes active=false to $GITHUB_OUTPUT (when set), and exits 0. Success renders
+      $GITHUB_STEP_SUMMARY (when set), writes active=false to $GITHUB_OUTPUT (when set), and exits 0. Every guarded
+      write uses `if [ -n ... ]; then ...; fi` (never a trailing `[ ] && ...`, whose status 1 would fail the bash -e
+      step), and the script ends with an explicit `exit 0` on every path, ACTIVE included. Success renders
       the tfrc (sed of __TF_MIRROR_DIR__) to "$RUNNER_TEMP/cc-web.tfrc", appends TF_CLI_CONFIG_FILE=<that path> to
       $GITHUB_ENV, writes active=true, and prints `provider-mirror: ACTIVE (kislerdm/neon ${NEON_VERSION},
       integrations/github ${GITHUB_VERSION})` to stdout and the summary. No other output (public log). Every literal
@@ -95,13 +98,15 @@ scope:
       test_oidc_failure_degrades_without_calling_aws (OIDC_FAILED true, empty and unset; aws never invoked);
       test_sync_failure_and_empty_namespace_degrade (aws exit 1; a sync that fills only kislerdm: gate 2/3);
       test_sync_downloads_only_included_namespaces (argv carries --exclude * and exactly one --include per entry of the
-      HCL-aware include list TestTfrcSymmetry parses, so not hashicorp, and a multi-line rewrite of the list turns it red); test_gate_providers_match_tfrc_includes_and_lockfiles (the providers the script checks literally,
+      HCL-aware include list, parsed by a regex local to this test file (never imported from
+      tests/test_ci_provider_mirror_acceptance.py; Decision 131 forbids cross-test imports), so not hashicorp, and a multi-line rewrite of the list turns it red); test_gate_providers_match_tfrc_includes_and_lockfiles (the providers the script checks literally,
       kislerdm/neon and integrations/github, each fall under a tfrc include pattern; every include pattern covers at
       least one checked provider; and no tracked terraform/*/.terraform.lock.hcl locks a provider under an included
       namespace that the script does not check);
       test_every_branch_writes_active_and_exits_zero (parametrized over every degradation above plus an unparseable
       lockfile, RUNNER_TEMP unset (the script reads ${RUNNER_TEMP:-} and degrades at gate 2/3), GITHUB_ENV unset with
-      every package present (degrades), and RUNNER_TEMP set to a path that does not exist (not a degradation: mkdir -p
+      every package present (degrades), GITHUB_STEP_SUMMARY unset and GITHUB_OUTPUT unset with every package present
+      (each still exits 0), and RUNNER_TEMP set to a path that does not exist (not a degradation: mkdir -p
       creates it and, with packages present, the run goes ACTIVE): GITHUB_OUTPUT holds exactly one active= line and the exit is 0).
   - file: tests/test_ci_provider_mirror_acceptance.py
     action: Modify
@@ -292,7 +297,7 @@ test_obligations:
     test_selector: tests/test_ci_provider_mirror_acceptance.py::TestTfrcSymmetry::test_mirror_serves_terraform_github_provider
     red_green_expectation: red before (kislerdm-only include), green after
   - source: .github/workflows/ci.yml
-    behavior: mirror_gate passes OIDC_FAILED (steps.mirror_oidc.outcome != 'success') by env and delegates to the script in one line
+    behavior: mirror_gate passes OIDC_FAILED (steps.mirror_oidc.outcome != 'success') by env and delegates to the script in one line (the standing guard is the re-pointed shard's delegation grep, VP 7)
     verification_step: 6
     test_selector: tests/test_ci_provider_mirror_acceptance.py::TestGateChainFailOpen::test_gate_step_delegates_to_the_script
     red_green_expectation: red before (inline body), green after
@@ -323,13 +328,14 @@ context:
   - "Kept unchanged: graduated shards sync-terraform-assets-behaviour (tests/test_sync_terraform_assets.py, whole file, still the guard), setup-cloud-env-mirror-hygiene, github-ci-pr-mirror-grant-read-only-and-scoped, provider-mirror-seed-both-roots. Re-pointed in scope: ci-terraform-validate-provider-mirror-contract."
   - "Overlap: eight unbuilt plans also scope config/composite_action_body_baseline.yaml (environment-gates-fail-closed, neon-key-out-of-pr-plans, pr-plan-opaque-iam-policy-check, telemetry-content-reader-lock, telemetry-owner-provisioning, trusted-plan-cutover, trusted-plan-github-root, trusted-plan-identity); this plan changes one r3 line, so whichever builds second rebases that line only. ci.yml is edited often (Decision 245: expect a rebase)."
   - "Short-term recovery is independent of this plan: re-running the failed jobs clears main once github.com recovers."
-  - "Bundled rec-5007 (Critical, source=ci_rca, this red; relevance verdict unknown, so bundled). Its acceptance greps the literal integrations/github in cc-web.tfrc, hence the header naming the address. red_overlap 2026-11-08 before bundling: blocked (rec-5007 overlap; rec-5004 slo_breached, unrelated telemetry); bundling an open red skips the SLO rule (red-main-recovery.yaml rule 1). After bundling: rec-5007 repairs_this_red; rec-5004 overlap on 17 shared paths, all tests/** reached transitively through ci.yml (rec-5004 is a telemetry_sessions arrival red on src/common/ducklake_telemetry_append.py, which this plan does not touch); operator override requested 2026-11-08."
+  - "Bundled rec-5007 (Critical, source=ci_rca, this red; relevance verdict unknown, so bundled). Its acceptance greps the literal integrations/github in cc-web.tfrc, hence the header naming the address. red_overlap 2026-11-08 before bundling: blocked (rec-5007 overlap; rec-5004 slo_breached, unrelated telemetry); bundling an open red skips the SLO rule (red-main-recovery.yaml rule 1). After bundling: rec-5007 repairs_this_red; rec-5004 overlap on 17 shared paths, all tests/** reached transitively through ci.yml (rec-5004 is a telemetry_sessions arrival red on src/common/ducklake_telemetry_append.py, which this plan does not touch); operator ruling 2026-11-08 10:55Z: no override, wait for rec-5004's repair. So this plan's PR merges, and the build starts, only once red_overlap returns clear."
   - "Premise this build makes false: PLAN-trusted-plan-github-root L1314 settles that cc-web.tfrc includes only kislerdm/*; whichever of the two builds second re-checks that premise."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 7}
   - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 6}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -340,6 +346,6 @@ execution_steps:
   - "Script: create scripts/ci/provider_mirror_gate.sh from the ci.yml mirror_gate body, with the literal github check beside neon's in gate 3 and the namespace-filtered sync; tests/test_provider_mirror_gate.py; run VP 1, 2 and 5."
   - "Config: cc-web.tfrc include/exclude and header; tests/test_ci_provider_mirror_acceptance.py re-points and new nodes; tests/test_sync_terraform_assets.py stub generalised plus the new node; run VP 3 and 4."
   - "Workflow: ci.yml mirror_gate env and one-line body, comments; lower the baseline ceiling; re-point the registry shard; add the five graduate shards (VP 1-5); run VP 6-8."
-  - "CLOSURE, each outcome reported separately (implement skill Commit Flows; docs/contracts/git-ops.yaml handoff_sequence): go/no-go first: re-run bin/venv-python -m scripts.ci_rca.red_overlap --plan on this plan; proceed only if it is clear or the operator's rec-5004 override is recorded in context, else stop BLOCKED; bin/venv-python -m scripts.session.github_readiness; set implementation_declared: true; run VP 1-8; commit (feat(terraform-validate-github-provider-mirror): ...); git fetch origin main && git rebase origin/main; VP 9 (full tier from the top-level session, backgrounded, then --verify-head; a timeout is BLOCKED, no push); postflight evidence; push; open the PR (body names rec-5005 and rec-5006; the squash body carries Resolves: rec-5007); subscribe; code review in a fresh context; before merging, read the PR run's terraform-validate log for VP 10's ACTIVE and (unauthenticated) lines (a DEGRADED run is green, so green alone proves nothing); merge on code review PROCEED, green CI and that log read (no CODEOWNERS path in scope); then VP 10, 11 and 12, reporting the PR number, CI run ids and merge SHA."
+  - "CLOSURE, each outcome reported separately (implement skill Commit Flows; docs/contracts/git-ops.yaml handoff_sequence): go/no-go first: re-run bin/venv-python -m scripts.ci_rca.red_overlap --plan on this plan; proceed only if it is clear (the operator declined an override for rec-5004 on 2026-11-08), else stop BLOCKED; bin/venv-python -m scripts.session.github_readiness; set implementation_declared: true; run VP 1-8; commit (feat(terraform-validate-github-provider-mirror): ...); git fetch origin main && git rebase origin/main; VP 9 (full tier from the top-level session, backgrounded, then --verify-head; a timeout is BLOCKED, no push); postflight evidence; push; open the PR (body names rec-5005 and rec-5006; the squash body carries Resolves: rec-5007); subscribe; code review in a fresh context; before merging, read the PR run's terraform-validate log for VP 10's ACTIVE and (unauthenticated) lines (a DEGRADED run is green, so green alone proves nothing); merge on code review PROCEED, green CI and that log read (no CODEOWNERS path in scope); then VP 10, 11 and 12, reporting the PR number, CI run ids and merge SHA."
   - "Report: what was implemented, verification results"
 rollback: Revert the build PR; terraform/github init returns to fetching from github.com.
