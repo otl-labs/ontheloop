@@ -22,8 +22,9 @@ scope:
       the existing _approver() predicate (the one lookup() uses: an entry with state approved whose environments name
       approved-text). When it returns None the command prints `wake: no approver recorded for run <R>; nothing posted`,
       lists no pull requests, posts nothing and returns 1. Otherwise it behaves exactly as today: the comment body and
-      the success line `wake: N open PRs at <sha> auth=<label>` stay byte-identical. The wake parser's --run-id gains
-      type=int, as the approvals subcommand's already has. The module docstring's wake line says it comments only once
+      the success line `wake: N open PRs at <sha> auth=<label>` stay byte-identical. --run-id stays a string argument;
+      _cmd_wake converts it with int(args.run_id) inside the existing try, so a non-numeric id prints `wake: ERROR ...`
+      and returns 1 (ValueError is already caught) before any request. The module docstring's wake line says it comments only once
       run R records an approver. No new import.
     new_imports: []
   - file: tests/test_approved_text_github.py
@@ -33,14 +34,16 @@ scope:
       empty approvals record ([] for run 55, the observed 2026-11-06 shape) returns 1, prints the no-approver line,
       posts nothing and reads no pulls URL; a record holding only a rejected entry, or only an approved entry for
       another Environment, does the same; the approvals URL read is /actions/runs/55/approvals and precedes the pulls
-      read; an approvals read that fails (GitHubError) or is not a list returns 1 with `wake: ERROR`, posting nothing.
+      read; an approvals read that fails (GitHubError) or is not a list returns 1 with `wake: ERROR`, posting nothing;
+      a non-numeric --run-id (abc) returns 1 with `wake: ERROR`, makes no request and posts nothing.
       Existing wake tests stay unchanged (the Api double already answers an approved entry by default).
   - file: .github/workflows/approved-text-approval.yml
     action: Modify
     purpose: >-
       wake job permissions gain `actions: read` (GET /actions/runs/{id}/approvals; pr-validate holds the same grant):
       {contents: read, actions: read, pull-requests: write}. continue-on-error: true stays. The header comment's wake
-      sentence says it comments once the run records an approver. No run body changes, so the shell-body baseline
+      sentence says it comments once the run records an approver; the literal sentence "Never add id-token or secrets"
+      stays verbatim (test_no_secrets_or_id_token_anywhere strips exactly it). No run body changes, so the shell-body baseline
       (config/composite_action_body_baseline.yaml) is untouched.
   - file: tests/test_approved_text_approval_workflow.py
     action: Modify
@@ -53,7 +56,7 @@ scope:
     action: Modify
     purpose: >-
       SA-05's assumption gains one clause carrying the phrase "wake job reads the run's own approvals record" (VP step 3
-      greps it), saying it comments only when that record names an approver for approved-text. Plus a new amendment_log entry (date the build date, semantic_break false,
+      greps it), saying it comments only when that record names an approver for approved-text. Plus a new amendment_log entry at the head of the list (the log is newest-first; date the build date, semantic_break false,
       change_class field_add, summary naming PLAN-approved-text-wake-requires-approver (rec-4960) and SA-05, migration_story
       "Prose only; no code or contract consumer reads it."), the shape of the 2026-11-07 rows. Class D register prose,
       edited by builds without a sidecar (#1856, #1903, #1907, #1909); 435 of 500 effective lines, about +2.
@@ -69,7 +72,7 @@ acceptance_criteria:
   - >-
     wake with an approved approved-text entry posts the same comment body and prints the same success line as before the change (the existing TestCli wake tests pass unchanged).
   - >-
-    A failed or non-list approvals read returns 1 with a `wake: ERROR` line and posts nothing.
+    A failed or non-list approvals read, or a non-numeric --run-id, returns 1 with a `wake: ERROR` line and posts nothing.
   - >-
     The wake job holds exactly {contents: read, actions: read, pull-requests: write} and keeps continue-on-error true; no other job's permissions change.
   - >-
@@ -120,7 +123,8 @@ verification_plan:
       report; the hermetic steps stand.
     expected_literals: []
     fix_if: The empty run names an approver or the approved run names none -- stop and report; the predicate does not match
-      GitHub's record shape, a plan amendment.
+      GitHub's record shape, a plan amendment. A transport error (GitHubError traceback, proxy 403, rate limit) -- record
+      it in the build report; the hermetic steps stand.
     hermetic: false
     graduation: not-applicable
   - step: 5
@@ -136,13 +140,20 @@ verification_plan:
     graduation_waiver_reason: Invokes scripts.validate (recursion refusal); it is the handoff gate itself.
   - step: 6
     phase: post-deploy
-    action: On the first approval run dispatched after the merge, its wake job succeeded with the new token grant (an
-      approved run whose approvals read did not 403).
-    command: RUN_ID=<first approval run after merge>; curl -sS "https://api.github.com/repos/otl-labs/ontheloop/actions/runs/$RUN_ID/jobs"
-      | bin/venv-python -c "import json,sys; j={x['name']:x['conclusion'] for x in json.load(sys.stdin)['jobs']}; assert
-      j.get('approve')=='success' and j.get('wake')=='success', j; print('WAKE_OK', j)"
-    expected: Prints WAKE_OK with approve and wake both success. The planning or build thread that dispatches that run records
-      the result.
+    action: On the first completed approval run dispatched from a main commit that holds the build, its wake job succeeded
+      with the new token grant (an approved run whose approvals read did not 403).
+    command: >-
+      git fetch origin main --quiet && B=$(git log origin/main --format=%H -1 --grep='^feat(approved-text-wake-requires-approver)')
+      && curl -sS "https://api.github.com/repos/otl-labs/ontheloop/actions/workflows/approved-text-approval.yml/runs?branch=main&status=completed&per_page=30"
+      | bin/venv-python -c "import json,subprocess,sys,urllib.request as u; b=sys.argv[1]; runs=[r for r in
+      json.load(sys.stdin)['workflow_runs'] if subprocess.run(['git','merge-base','--is-ancestor',b,r['head_sha']]).returncode==0];
+      assert b and runs, 'no completed approval run after the build yet'; r=min(runs, key=lambda x: x['created_at']);
+      j={x['name']:x['conclusion'] for x in json.load(u.urlopen(r['jobs_url']))['jobs']}; assert j.get('approve')=='success'
+      and j.get('wake')=='success', (r['id'], j); print('WAKE_OK', r['id'], j)" "$B"
+    expected: Prints WAKE_OK with the run id and approve and wake both success. A wake job that fails reports conclusion
+      failure in the jobs API even under continue-on-error, which is what makes the assertion discriminate. The thread that
+      dispatches the first approval run after the merge runs it and records the result. curl and urllib read the public
+      API anonymously because a VP command must be a shell command; an agent may cross-check with mcp__github__actions_get.
     fix_if: wake failed -- read its log; HTTP 403 on approvals means the grant did not apply (fix the workflow), a no-approver
       line on an approved run means the record shape changed (stop and report).
     hermetic: false
@@ -194,6 +205,9 @@ context:
   - "Why the job, not the run, goes red: _cannot_hold_approval (approved_text_github.py:128) reads a non-success run as
     holding no approval, so dropping continue-on-error would let a transient wake error void a genuine approval. A run
     with no approval going red is rec-4961/rec-4979's approve-job check (separate plan, thread 'Make approval gates fail closed')."
+  - "VP step 4 probed at planning 2026-11-08: LIVE_OK None benjamin-blake (approvals endpoint readable from a session)."
+  - "Why _approver(approvals(this run)) and not lookup(): wake already knows its run; lookup scans the run list and needs
+    origin/main ancestry, which wake's depth-1 checkout lacks. Same predicate, this run only; do not 'fix' it to lookup()."
   - "Overlap: the rec-4961/4979 plan edits the approve job of the same workflow and tests/test_approved_text_approval_workflow.py
     (approve-job pins); hunks differ. Whichever builds second rebases."
   - "Not bundled: rec-4934 (approver 'unknown' semantics, shared with lookup) and rec-4935 (wake comment de-dup)."
@@ -216,6 +230,7 @@ context:
   - "red_overlap 2026-11-08: {\"verdict\": \"clear\", \"slo_hours\": 4, \"reds\": []}"
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: plan-critique, round: 1, verdict: PROCEED, blocking: 0, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -224,7 +239,7 @@ pre_implementation_checklist:
   - Acceptance criteria understood and verifiable
 execution_steps:
   - >-
-    scripts/roadmap/approved_text_github.py -- in _cmd_wake, inside the existing try, call `approver = _approver(approvals(repo, args.run_id, deadline))` before the pulls loop; on None print the no-approver line and return 1. Add type=int to the wake parser's --run-id. Update the docstring's wake line.
+    scripts/roadmap/approved_text_github.py -- in _cmd_wake, inside the existing try, call `approver = _approver(approvals(repo, args.run_id, deadline))` before the pulls loop; on None print the no-approver line and return 1. Convert the run id with int(args.run_id) inside the try (no parser change). Update the docstring's wake line.
   - >-
     tests/test_approved_text_github.py -- add TestWakeApprovals (acceptance_criteria[0], [1], [3]; use Api(approvals={55: ...}) and assert no POST and no pulls call); leave existing tests unchanged.
   - >-
