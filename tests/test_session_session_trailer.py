@@ -415,3 +415,41 @@ def test_gate_denial(tmp_path):
     assert (st.gate_denial(**{**kw, "head_ref": "nope"}, message="x") or "").startswith("attribution UNAVAILABLE")
     fx.git(repo, "checkout", "-q", "main")
     assert st.gate_denial(root=repo, base_ref="main", head_ref="main", message="plain\n") is None
+
+
+def test_gate_denial_reports_an_unreadable_range(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+
+    def boom(*_a, **_k):
+        raise st.TrailerReadError("planted")
+
+    monkeypatch.setattr(st, "branch_keys", boom)
+    assert st.gate_denial(root=repo, base_ref="main", head_ref="main", message="x") == "attribution UNAVAILABLE: planted"
+
+
+def test_a_failed_interpret_trailers_stops_the_commit(tmp_path, monkeypatch, capsys):
+    repo = _repo(tmp_path)
+    path = tmp_path / "msg"
+    path.write_text("subject\n", encoding="utf-8")
+    real = st._git
+
+    def fake(root, *args):
+        if args[0] == "interpret-trailers":
+            return subprocess.CompletedProcess(args, 1, "", "planted failure")
+        return real(root, *args)
+
+    monkeypatch.setattr(st, "_git", fake)
+    monkeypatch.setenv(VAR, "cse_OWN")
+    monkeypatch.chdir(repo)
+    assert st.main(["prepare-commit-msg", str(path)]) == 1
+    assert "planted failure" in capsys.readouterr().err
+
+
+def test_commit_msg_skips_during_a_sequencer_operation(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    (repo / ".git" / "CHERRY_PICK_HEAD").write_text("x\n")
+    path = tmp_path / "msg"
+    path.write_text(_msg("OTHER"), encoding="utf-8")
+    monkeypatch.setenv(VAR, "cse_OWN")
+    monkeypatch.chdir(repo)
+    assert st.main(["commit-msg", str(path)]) == 0
