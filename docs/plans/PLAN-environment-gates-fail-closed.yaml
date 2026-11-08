@@ -1,0 +1,600 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: environment-gates-fail-closed
+intent: >-
+  Make every reviewer-gated GitHub Actions job fail closed when its Environment is missing or unprotected, or the run
+  holds no recorded reviewer approval. GitHub creates a missing Environment with no protection the first time a job
+  names it, so today such a job runs unattended (approved-text-approval.yml passed its gate with an empty approvals
+  list on 2026-11-06); the operator's approval gates are the governed loop's human authority boundary (Decisions 92,
+  246, 248), and a gate that silently opens defeats them.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-environment-gates-fail-closed.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category) -- rec-4979 and rec-4961 (both High), filed 2026-11-06/07 after the
+  approved-text gate ran ungated before terraform/github created its Environment.
+scope:
+  - file: scripts/ci/environment_reviewer_preflight.py
+    action: Create
+    purpose: >-
+      Standard-library-only CLI (argparse, json, os, sys, time, urllib; no first-party import, so it is its own whole
+      import closure), run as `python3 -I scripts/ci/environment_reviewer_preflight.py <subcommand> --environment
+      <name>`. Reads GITHUB_API_URL (default https://api.github.com), GITHUB_REPOSITORY, GITHUB_RUN_ID, GH_TOKEN and
+      REVIEWER_LOGINS from the environment; refuses an environment name outside ^[A-Za-z0-9._-]+$. `approvals` (the
+      load-bearing check): GET /repos/{repo}/actions/runs/{run_id}/approvals; prints ENVIRONMENT_APPROVAL_OK
+      environment=<name> approver=<login> and exits 0 only when an entry has state approved, lists <name> among its
+      environments[].name, and its user.login is in REVIEWER_LOGINS (split on commas and whitespace, each segment trimmed, empty segments ignored, compared case-insensitively, as the preview's `${REVIEWER_LOGINS//,/ }` tolerates spaces); with no such
+      entry it reads once more after 5 s (in case GitHub records the approval after the job starts), then prints
+      ENVIRONMENT_APPROVAL_MISSING environment=<name> entries=<n> (exit 1); a REVIEWER_LOGINS with no non-empty segment prints
+      REVIEWER_LOGINS_EMPTY (exit 1). `environment [--require-no-admin-bypass]` (the early warning): GET
+      /repos/{repo}/environments/{name}; 404 prints ENVIRONMENT_MISSING; no protection_rules entry of type
+      required_reviewers with a non-empty reviewers list prints ENVIRONMENT_UNGATED; with the flag, can_admins_bypass
+      not exactly false (absent included) prints ENVIRONMENT_ADMIN_BYPASS; else ENVIRONMENT_GATED_OK environment=<name>
+      reviewers=<n> admin_bypass=<true|false|absent> (lower-case JSON words; exit 0). Any transport error, non-JSON or wrong-shaped body after three
+      attempts (2 s, 4 s backoff, only on URLError or HTTP 5xx) prints ENVIRONMENT_CHECK_UNREADABLE <subcommand>
+      status=<code> (exit 1), where <code> is the HTTP status, or the literal none for a URLError or a 2xx body that is
+      not JSON or has the wrong shape. Never prints the token or a response body; never writes GITHUB_ENV, GITHUB_PATH or
+      GITHUB_OUTPUT (later steps in the same job hold credentials). Module docstring names the residuals in context, including that Decision 94's premise (the environment sub is approval-gated) holds only for main-defined jobs until rec-4651/rec-4965.
+  - file: tests/test_environment_reviewer_preflight.py
+    action: Create
+    purpose: >-
+      Hermetic mirror (urllib stubbed; no network): every marker and exit code above, including the observed
+      empty-list body ([] from runs 42227418796, 42227344406, 42310159795; reuse tests/fixtures/approved_text_github/
+      shapes where they exist), the single re-read on an empty list (sleep stubbed), an approval for another Environment, a
+      rejected entry, an approver outside REVIEWER_LOGINS, mixed-case logins, an Environment body with no
+      required_reviewers rule, one with an empty reviewers list, can_admins_bypass true and absent under the flag and
+      ignored without it, 404, 403, a 5xx retried then refused, a malformed name refused before any request; the token
+      never appears in output; the source has no GITHUB_ENV, GITHUB_PATH or GITHUB_OUTPUT reference and no
+      non-stdlib import (ast walk). Holds the module at 100% line coverage. Node test_an_empty_approvals_list_is_refused
+      is rec-4979's acceptance (with the guard's real-tree node).
+  - file: scripts/checks/ci_guards/validate_environment_reviewer_preflight.py
+    action: Create
+    purpose: >-
+      Registered check validate_environment_reviewer_preflight (Decision 92 enforcement note in its docstring; no new
+      Decision). Predicates over parsed workflows, terraform/github text and CODEOWNERS (each takes parsed input so red
+      cases run on synthetic data; the registered check loads the real tree): (a) every job's environment: is a literal
+      (string, or mapping name) and is a name declared by a github_repository_environment resource in terraform/github
+      or in UI_MANAGED = {pypi}; (b) REVIEWER_ENVS = the declared resources with a reviewers block, plus pypi, minus
+      EXEMPT = {deployment-approval-probe: inert probe with no permissions; a check would change what it probes};
+      UI_MANAGED carries its owning rec (pypi: rec-4549) and a name both UI_MANAGED and declared in HCL fails, so
+      rec-4549's build drops it; (c)
+      every job naming a REVIEWER_ENVS name has, before any step other than actions/checkout, a run step whose body is
+      exactly `python3 -I scripts/ci/environment_reviewer_preflight.py approvals --environment <that job's name>`, whose
+      env maps GH_TOKEN to `${{ github.token }}` and REVIEWER_LOGINS to `${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}`,
+      and the job's permissions grant actions read or write; in a job whose first actions/checkout takes a ref: input
+      AND which also checks out path: .dispatch-tooling (whether or not it names an Environment; today exactly
+      reconcile.yml's apply-reconcile and gated-apply-reconcile, which check out the red commit; the other two
+      ref-pinned jobs, dependabot-auto-merge.yml auto-merge and deploy-ducklake-lambdas.yml reconcile-gate, have no
+      side checkout and deliberately run the checked-out tree, so the clause does not reach them), the approvals step and every step whose whole run body is one line starting `python3 -m
+      scripts.ci.` (a one-line delegate, such as the two new apply_wake calls) carry working-directory:
+      .dispatch-tooling, the dispatch-ref side checkout, so main's code is what runs. Out of scope, deliberately: a
+      multi-line body (apply-reconcile's recheck step, reconcile.yml:259-277, runs the red commit's reconcile_target
+      inside `OUT=$(...)`, which the :214-217 note relies on) and path-form calls ($GITHUB_WORKSPACE/scripts/ci/... or
+      $GITHUB_WORKSPACE/.dispatch-tooling/scripts/ci/...), which name their tree explicitly (reconcile.yml:807's apply
+      step runs the red commit's stale_plan_signature.py from terraform/personal; Decision 154 cl.2). This plan moves
+      nothing else to .dispatch-tooling; (d) UPSTREAM = {approved-text-approval.yml: render,
+      terraform-github-apply.yml: preview}: that job runs `python3 -I scripts/ci/environment_reviewer_preflight.py
+      environment --environment <the gated job's name>`, with `--require-no-admin-bypass` exactly when the Environment's
+      resource declares can_admins_bypass = false, and grants actions read; (e) the script imports only the standard
+      library and never names GITHUB_ENV, GITHUB_PATH or GITHUB_OUTPUT; (f) .github/CODEOWNERS covers the script and
+      this check. Declares registry.examined(n, unit="gated_jobs"). Reuses validate_trusted_plan_environment's
+      _jobs/_env_name/_steps and scripts.verify_ci_workflow._load, as validate_github_settings_apply does.
+    new_imports: [scripts.checks.ci_guards.validate_trusted_plan_environment, scripts.verify_ci_workflow]
+  - file: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+    action: Create
+    purpose: >-
+      Mirror: real tree green, and a red case per predicate (unknown or expression Environment name; gated job without
+      the step; the step after a credential step; wrong --environment literal; missing actions permission; missing
+      upstream check; a ref-pinned job with a .dispatch-tooling side checkout (gated or not) running the approvals step or a
+      one-line `python3 -m scripts.ci.` delegate without working-directory .dispatch-tooling, paired with green cases
+      where a recheck-shaped multi-line body and a path-form $GITHUB_WORKSPACE/scripts/ci call in the same job pass, and
+      a green mirror where a ref-pinned job with no side checkout runs a one-line delegate with no working-directory; flag present where HCL leaves can_admins_bypass unset and absent where HCL declares false; a
+      non-stdlib import or a GITHUB_ENV write in a synthetic script; uncovered CODEOWNERS path); the exempt probe and
+      branch-policy-only tf-trusted-plan pass without the step; a newly declared reviewer Environment is enforced
+      without a code change; a UI_MANAGED name also declared in HCL fails. Node test_real_tree_gates_every_reviewer_job
+      (the real tree: every non-exempt reviewer-gated job carries the step) is rec-4979's acceptance. 100% line coverage
+      of the check.
+  - file: scripts/checks/ci_guards/_manifest.py
+    action: Modify
+    purpose: >-
+      One Entry for validate_environment_reviewer_preflight, pre=True, pre_globs .github/workflows/**,
+      .github/CODEOWNERS, terraform/github/*.tf, scripts/ci/environment_reviewer_preflight.py,
+      scripts/checks/ci_guards/validate_environment_reviewer_preflight.py,
+      scripts/checks/ci_guards/validate_trusted_plan_environment.py, scripts/verify_ci_workflow/**,
+      scripts/checks/_common.py, scripts/checks/registry.py; full_segment full_after_lint.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      Exactly one line: function_to_category gains validate_environment_reviewer_preflight: environment (the category
+      validate_github_settings_apply uses; validate_ci_rca_taxonomy check 1b needs every registered check mapped). No
+      marker rows: a preflight refusal is a real failure, never an expected state. NEAR_CAP (499 of 500 effective lines
+      at 6d1d1f14; other unbuilt plans append too): measure on main at build time; if the line would pass 500, apply the
+      config class relief valve in this file only (compact one resolved row, never a raise) as its own commit.
+  - file: .github/workflows/approved-text-approval.yml
+    action: Modify
+    purpose: >-
+      render gains actions: read and, after checkout, the environment check for approved-text with
+      --require-no-admin-bypass. approve moves from permissions {} to {contents: read, actions: read} (contents for the
+      checkout, as render and wake hold): a SHA-pinned checkout with
+      persist-credentials false, then the approvals check for approved-text, then the existing echo. Still no id-token
+      and no secrets. Header names the check and the one added read permission.
+  - file: .github/workflows/terraform-github-apply.yml
+    action: Modify
+    purpose: >-
+      preview gains actions: read and, after the gate step and only when steps.gate.outputs.has_changes is true, the
+      environment check for the apply job's Environment (tf-gated-apply, no flag until rec-4965). apply gains actions:
+      read and the approvals check right after its checkout, before the aws-region action and any credential step. No
+      new job; inputs reach run bodies only through env (fence j).
+  - file: .github/workflows/terraform-apply-sandbox.yml
+    action: Modify
+    purpose: >-
+      gated-apply: the approvals check for tf-gated-apply right after checkout (it already holds actions: write). No
+      upstream environment check: a failure in apply-sandbox would change convergence-record semantics (Decisions 154,
+      183). A refusal fails before credentials, so the red record write cannot reach S3, as for any pre-credential
+      failure (the job's VP10 note); the attempt-1 workflow_run and the run_attempt != 1 self-dispatch still raise ci-rca.
+      SIZE RELIEF (the file sits at its structural roster entry, 420 of 420 effective lines at 6d1d1f14; the
+      ci_workflows relief valve, config/structural_size_budgets.yaml:108): advisory-status's "Read convergence record
+      and post advisory terraform-converged status" body becomes one line, `python3 -m scripts.ci.convergence_advisory
+      --post`, with the step's name kept (its baseline key) and OIDC_FAILED: ${{ steps.oidc_advisory.outcome != 'success' }}
+      added to its env: the negative comparison validate_oidc_failopen_guards requires for the continue-on-error
+      oidc_advisory step (validate_oidc_failopen_guards.py:53) moves from the run body into env, unchanged in meaning. Measured on main at build time, the file ends at or
+      below its roster entry; never a raise.
+  - file: .github/workflows/reconcile.yml
+    action: Modify
+    purpose: >-
+      gated-apply-reconcile gains actions read and the approvals check for tf-gated-apply right after its two checkouts
+      (the red commit, then the .dispatch-tooling side checkout) and before the OIDC step, with working-directory:
+      .dispatch-tooling: the root checkout is the red commit, which may predate this merge and lack the script
+      (reconcile.yml:11-23; the rec-2862 failure). Same record reasoning as the sandbox job. The header's ref-resolution
+      note (:11-23), which names the artifact fetch as the one exception, is updated to list everything that resolves
+      from .dispatch-tooling: the artifact fetch, neon_api_key.sh, the approvals check and the two wake delegates. SIZE RELIEF (536 of 536 effective lines at 6d1d1f14): both "Best-effort wake comment
+      on the red commit's originating PR" bodies (apply-reconcile, 24 effective lines; gated-apply-reconcile, 10) become
+      `python3 -m scripts.ci.apply_wake --job apply-reconcile` and `--job gated-apply-reconcile`, the extraction
+      scripts/ci/apply_wake.py:4-5 already records for the sandbox twins; step names, if: and continue-on-error are kept
+      and the env passes SHA from the job's RED_SHA plus the outcomes each body reads. Both delegates run with
+      working-directory: .dispatch-tooling, for the same reason (an older red commit's apply_wake.py refuses the new
+      --job values). The file ends at or below its roster entry, measured at build time; never a raise.
+  - file: .github/workflows/tf-gated-apply-prototype.yml
+    action: Modify
+    purpose: gate-smoke-test gains actions read and the approvals check for tf-gated-apply right after checkout, before OIDC; its checkout gains persist-credentials false (no later step uses git credentials), so the widened token is not left in .git/config; it becomes the post-merge live proof (VP 8).
+  - file: .github/workflows/publish-ontheloop.yml
+    action: Modify
+    purpose: >-
+      publish gains actions read and the approvals check for pypi right after checkout, before the build and the OIDC
+      publish; its checkout gains persist-credentials: false, so the widened token is not left in .git/config for the
+      pip-installed build tool.
+  - file: config/agent/verification_registry/entries/ontheloop-publish-workflow-body-registered.yaml
+    action: Modify
+    purpose: >-
+      This graduated record pins publish-ontheloop.yml to exactly one inline run body (`len(k)==1`); the new approvals
+      step is a second. Its command changes from a count to a lasting containment claim (Decision 244 cl.4): the publish-ontheloop keys
+      from scan_workflow_bodies() include `.github/workflows/publish-ontheloop.yml::publish::build-distribution` and the
+      approvals step's name-slug key, and every publish-ontheloop key is in r3_workflows. Editing the record fires
+      validate_verification_registry's differential admission gate, which needs the new check_spec to fail on origin/main
+      (it does: main has no approvals key); it still prints WF_BODIES= and
+      WF_BODIES_UNREGISTERED=. That pins both bodies by name rather than raising a count. A planned change to a graduated record's
+      assertion (Decision 235 cl.1), named here and in acceptance_criteria[2]: validate_weakening_candidates reads only
+      tests/*.py and source constants, so it emits no weakening_dispositions candidate for this file. Every other field is kept; it is not added to known_red.yaml. Build-time sweep: grep
+      config/agent/verification_registry/entries/ for each touched workflow and script name and confirm no other live
+      record pins a body or step count this plan changes (planning found none); one that does is a plan defect.
+  - file: tests/test_approved_text_approval_workflow.py
+    action: Modify
+    purpose: >-
+      test_approve_job_waits_on_the_gate_with_no_permissions becomes
+      test_approve_job_checks_its_reviewers_approval_before_anything_else: permissions exactly {contents: read, actions:
+      read}, steps
+      exactly [SHA-pinned checkout with persist-credentials false, the approvals check for approved-text, the echo]
+      (planned change, weakening_dispositions). test_render_job_is_main_only_and_read_only's exact pin becomes
+      {contents: read, actions: read} (planned change, weakening_dispositions). New
+      test_render_checks_the_environment_has_reviewers_first. The two
+      TestWorkflow nodes are rec-4961's acceptance (updated at planning to these node ids). The render-closure
+      CODEOWNERS test also covers scripts/ci/environment_reviewer_preflight.py. Every other assertion (no id-token or
+      secrets anywhere) is unchanged. Its graduated shard approved-text-approval-workflow-shape (whole file) is kept
+      unchanged.
+  - file: scripts/checks/ci_guards/validate_github_settings_apply.py
+    action: Modify
+    purpose: >-
+      OWNED gains scripts/ci/environment_reviewer_preflight.py (it runs inside the apply job before the App key);
+      docstring (i) names it. No predicate is loosened. NEAR_CAP after rec-4980: its build (plan #1911) leaves this file
+      near 475 of 500 SLOC; this plan adds one line. Measure on main at build time; if the edit would pass 500, decompose
+      it into a facade package (Decision 128; Decision 80/104/124 pattern) as its own commit, never a raise.
+    new_imports: []
+  - file: tests/checks/ci_guards/test_validate_github_settings_apply.py
+    action: Modify
+    purpose: >-
+      Listed to pin its graduated shards and the OWNED parametrization, not for an edit. No edit expected: test_i_codeowners_line_missing is parametrized over v.OWNED (:499-503), so the new path's red
+      case appears without a change; the real-tree node stays green. Its graduated shards
+      github-settings-apply-guard and github-settings-apply-guard-ci are kept unchanged.
+  - file: .github/CODEOWNERS
+    action: Modify
+    purpose: >-
+      Code-own scripts/ci/environment_reviewer_preflight.py, its test, the new check and its test, and the two size-relief
+      delegates scripts/ci/apply_wake.py and scripts/ci/convergence_advisory.py with their tests, and
+      scripts/ci/convergence_classify.py, which convergence_advisory imports (reconcile's wake code
+      moves out of a code-owned workflow into apply_wake.py and runs beside the apply role's credentials;
+      convergence_advisory.py gains the S3 read and status POST), plus .github/workflows/tf-gated-apply-prototype.yml
+      (it assumes the apply role). Procedural until rec-2827.
+  - file: scripts/ci/apply_wake.py
+    action: Modify
+    purpose: >-
+      Size relief for reconcile.yml: --job accepts apply-reconcile and gated-apply-reconcile; render_message returns,
+      byte for byte, the messages the two inline bodies build today (the guard_routed / stale WHY clause, routed,
+      starved, converged with and without a fresh reason, and RED for apply-reconcile; GREEN and RED for
+      gated-apply-reconcile), reading ROUTED, REVIEW_OUTCOME, APPLY_OUTCOME, FRESH_REASON and RUN_URL from the
+      environment. Parity is byte-exact for every posted comment body only; stdout is not required to match (with no resolved PR, apply_wake's existing "No originating PR resolved ...; next-planning-session baseline applies." line replaces apply-reconcile's "skipping wake comment" line and gated-apply-reconcile's silence), and no comment is posted in that case, as today. Stays
+      stdlib-only and best-effort (every gh error exits 0). Docstring names the new callers.
+    new_imports: []
+  - file: tests/test_apply_wake.py
+    action: Modify
+    purpose: >-
+      Every new message branch pinned to the exact text of the inline body it replaces (copied from reconcile.yml at
+      the build's base), the new --job values accepted, an unknown job still refused, and a gh failure still exits 0. Its graduated shard gated-apply-wake-names-refusal is
+      kept unchanged.
+  - file: scripts/ci/convergence_advisory.py
+    action: Modify
+    purpose: >-
+      Size relief for terraform-apply-sandbox.yml: a --post mode that does what the inline body does today (when
+      OIDC_FAILED is true, RC=1 with the "assume-role failed -- OIDC credentials unavailable" stderr; else
+      `aws s3api get-object` of CONVERGENCE_BUCKET/CONVERGENCE_KEY to a temp file, its exit code and stderr), feeds
+      classify() unchanged, and POSTs the terraform-converged status through `gh api repos/{REPO}/statuses/{HEAD_SHA}`
+      with the same state, context, description and target_url. Keeps the never-raise contract: any subprocess error
+      degrades to the printed state and exit 0, except the status POST: a failing POST exits non-zero, as the inline
+      body's last command does today (parity; no behaviour change). Without --post the module behaves exactly as today. The docstring's "the S3 read itself stays in the workflow's run:
+      body" line is updated.
+    new_imports: []
+  - file: tests/test_convergence_advisory.py
+    action: Modify
+    purpose: >-
+      --post with subprocess stubbed: OIDC_FAILED true (no S3 read attempted), read success, NoSuchKey and credential
+      failure each yield the same state and description the inline body produced, with exit 0; the gh api argv carries
+      the four fields; a failing POST exits non-zero, as the inline body does today; the existing seven classify() outcomes are
+      unchanged. Its graduated shards
+      convergence-advisory-descriptions-fit-status-limit and convergence-advisory-names-measured-cause are kept unchanged.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      Ratchet down the three extracted bodies' r3_workflows entries (sandbox advisory-status, reconcile's two wakes) to
+      their new one-line size (touch-it-fix-it), and add the eight one-line r3_workflows entries the new steps need
+      (_workflow_shell_bodies.check_workflow_bodies fails an inline run body with no entry): the environment checks in
+      approved-text render and terraform-github-apply preview, and the approvals checks in approve, apply, gated-apply,
+      gated-apply-reconcile, gate-smoke-test and publish. Each new step carries a stable name: its key is the name's
+      slug. Never raise an existing entry.
+  - file: config/structural_size_budgets.yaml
+    action: Modify
+    purpose: >-
+      Lower the reconcile.yml and terraform-apply-sandbox.yml roster entries to the files' measured effective lines
+      after the change, if below today's entries (ratchet down only, Decision 166; reconcile.yml keeps its dec-166
+      marker). Never raise.
+  - file: tests/checks/ci_guards/test_validate_masked_errexit_steps.py
+    action: Modify
+    purpose: >-
+      The two TestRealNearMissesStaySilent reconcile wake nodes keep their guard assertion: each step's pre-change run
+      body (reconcile.yml:589 and :833 at the build's base) is frozen byte for byte into a module-level string fixture,
+      and the node still asserts "|| true" in it (apply-reconcile) and `_unguarded_assignments(joined) == []` on it, so
+      the guard's discrimination on those real-tree shapes stays pinned. Beside it, each node asserts the live step now
+      runs exactly the one-line apply_wake delegate. The module docstring's "every real-tree fixture is extracted programmatically" line and the class docstring both name the two frozen fixtures as the exception (frozen from the base tree because the live steps become delegates). Refactor,
+      weakening_dispositions. Its graduated shard masked-errexit-guard-fires-on-synthetic-violator is kept unchanged.
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      structural_assumptions gains SA-09 (location scripts/ci/environment_reviewer_preflight.py, status open,
+      owning_item "T4.24:c9"): the preflight assumes GitHub's run-approvals API body (a list of entries with state,
+      environments[].name and user.login, recorded per run rather than per attempt), the environments API body
+      (protection_rules entries of type required_reviewers with a reviewers list, and a top-level can_admins_bypass),
+      GITHUB_TOKEN reading both under actions read, the repository variable TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS as the
+      reviewer set, and the GITHUB_API_URL, GITHUB_REPOSITORY and GITHUB_RUN_ID runner variables. One amendment_log
+      entry (field_add, semantic_break false, "Prose only; no code or contract consumer reads it"), the SA-07/SA-08
+      precedent; no new port. SA-05 is unchanged: the approved-text adapter still reads the record the same way.
+  - file: terraform/github/environments.tf
+    action: Modify
+    purpose: >-
+      Comment only: the header and the tf_gated_apply prevent_destroy note point at
+      validate_environment_reviewer_preflight, whose in-job approvals check now refuses a run of an auto-created or
+      emptied Environment. No resource change (no apply needed).
+bundled_recommendations: [rec-4979, rec-4961]
+followon_recs: [rec-5001]
+infrastructure_dependencies:
+  - "GitHub: no new Environment, secret or variable. The jobs reuse the existing repository variable TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS (set; terraform-github-apply.yml's preview already refuses when it is empty)."
+  - "GITHUB_TOKEN gains actions: read in the seven touched jobs; no id-token or secret is added anywhere."
+  - "No Terraform apply: environments.tf changes comments only. The merge matches terraform-github-apply.yml's push paths, so a push run starts: with nothing pending it ends with no changes; if the root has pending changes, that run asks the operator for approval and its preview environment check and apply approvals check run live (extra evidence for VP 8, read its log)."
+acceptance_criteria:
+  - The preflight script refuses every unapproved, unreadable, wrong-Environment, wrong-approver, missing, ungated and admin-bypass case with its marker and exit 1, and accepts only the specified good cases, never printing the token (VP 1).
+  - validate_environment_reviewer_preflight passes on the real tree and fails each predicate on a synthetic red case; every reviewer-gated job except the exempt probe runs the approvals check before any credential step (VP 2).
+  - The touched suites stay green; the changed assertions are exactly the approve job's permissions and steps, the render job's permissions pin, the two reconcile wake-silence nodes and the publish body record's count-to-key-set change (named in its scope row; the weakening detector does not read registry YAML), the test-file changes each recorded in weakening_dispositions (VP 3, VP 4).
+  - After merge, a dispatched, operator-approved tf-gated-apply-prototype run logs ENVIRONMENT_APPROVAL_OK for tf-gated-apply before its OIDC step, and an operator-approved approved-text run logs ENVIRONMENT_GATED_OK in render and ENVIRONMENT_APPROVAL_OK in approve (VP 8, VP 9).
+  - rec-4979 and rec-4961 read back closed (VP 10).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Preflight script unit tests (stubbed HTTP).
+    command: bin/venv-python -m pytest tests/test_environment_reviewer_preflight.py -q
+    expected: exit 0; red before (the test file and script are absent on main).
+    fix_if: a refusal case exits 0, a good case exits 1, or the token appears in output
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: environment-reviewer-preflight-script
+  - step: 2
+    phase: pre-deploy
+    action: Guard red cases and real tree.
+    command: bin/venv-python -m pytest tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py -q
+    expected: exit 0; red before (absent on main).
+    fix_if: a predicate has no red case, or the real tree fails (fix the workflow, never the predicate)
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: environment-reviewer-preflight-guard
+  - step: 3
+    phase: pre-deploy
+    action: Touched and adjacent suites.
+    command: bin/venv-python -m pytest tests/test_approved_text_approval_workflow.py tests/test_approved_text_github.py tests/checks/ci_guards/test_validate_github_settings_apply.py tests/checks/ci_guards/test_terraform_plan_trusted.py tests/checks/ci_guards/test_validate_dispatch_gated_apply_topology.py tests/checks/ci_guards/test__workflow_shell_bodies.py tests/checks/ci_guards/test_validate_oidc_failopen_guards.py tests/checks/ci_guards/test_validate_masked_errexit_steps.py tests/checks/ci_guards/test_validate_workflow_dependency_install.py tests/test_apply_wake.py tests/test_convergence_advisory.py tests/checks/ci_guards/test_validate_trusted_plan_environment.py tests/test_ontheloop_placeholder_packages.py tests/test_gated_apply_drift_guard.py tests/verify_ci_workflow/test_apply_and_terraform.py tests/test_convergence_infra_error_acceptance.py -q
+    expected: exit 0
+    fix_if: a node fails; a pre-existing node changes only as its scope row names
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: waive
+    graduation_waiver_reason: Pre-existing suites that already run in both tiers; their graduated shards are kept unchanged. The new apply_wake parity branches and convergence_advisory --post nodes are not separately graduated; they run in these whole-file suites in both tiers, and the guard's real-tree node (VP 2, graduated) pins that the workflows call them.
+  - step: 4
+    phase: pre-deploy
+    action: The two bundled recs' acceptance commands (node ids set at planning).
+    command: bin/venv-python -m pytest tests/test_approved_text_approval_workflow.py::TestWorkflow::test_approve_job_checks_its_reviewers_approval_before_anything_else tests/test_approved_text_approval_workflow.py::TestWorkflow::test_render_checks_the_environment_has_reviewers_first tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py::test_real_tree_gates_every_reviewer_job tests/test_environment_reviewer_preflight.py::test_an_empty_approvals_list_is_refused -q
+    expected: exit 0, four passed
+    fix_if: a node is missing (exit 4) or fails
+    hermetic: true
+    expected_literals: ["4 passed"]
+    graduation: waive
+    graduation_waiver_reason: Nodes of the files steps 1-3 already run (two of them graduated by steps 1-2); a second record would duplicate them.
+  - step: 5
+    phase: pre-deploy
+    action: Fast tier on the branch (advisory outside CI; PR CI is authoritative).
+    command: bin/venv-python -m scripts.validate --pre
+    expected: exit 0
+    fix_if: any check fails
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      Size relief holds: every governed file, reconcile.yml and terraform-apply-sandbox.yml included, is within its
+      structural budget, and no roster entry rose; the edited publish body record re-runs green on the new tree.
+    command: >-
+      bin/venv-python -c "import sys; from scripts.checks.structural.size_limits import validate_structural_size_limits as v;
+      from scripts.checks.structural.budget_raises import validate_structural_size_budget_raises as r; f = []; v(f); r(f);
+      print('STRUCTURAL_VIOLATIONS', len(f)); sys.exit(1 if f else 0)" && bin/venv-python -m
+      scripts.checks.verification.validate_graduated_rerun --check-id ontheloop-publish-workflow-body-registered --root . | grep '"passed": true'
+    expected: >-
+      STRUCTURAL_VIOLATIONS 0 (both the size limits and the raise-marker check pass), then the record's child result
+      line with passed true; exit 0 (the child always exits 0, so the grep carries the verdict).
+    fix_if: a violation (extract more of the named bodies, never raise or join lines)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Duplicates the registered fast-tier checks validate_structural_size_limits and validate_structural_size_budget_raises, which already guard every later change; the record re-run is the full tier's validate_graduated_rerun, run here early.
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      Full tier after the final commit and before the push that opens the PR (handoff_policy), on a clean tree: started
+      backgrounded with a 2 h limit from the top-level session; its verdict is the result file, never a pipe's exit
+      status.
+    command: bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the verify-head verdict reports a completed full run at HEAD with exit 0
+    fix_if: >-
+      any failure (fix and rerun from the start); a verify-head non-pass (stale or tree_mismatch, dirty_start or
+      dirty_end, incomplete) means rerun on the clean final commit; a timeout leaves the handoff blocked
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: >-
+      Live proof of the approvals check on tf-gated-apply. Dispatch tf-gated-apply-prototype.yml from main
+      (mcp__github__actions_run_trigger); the operator approves the pending deployment; read the gate-smoke-test job
+      log (mcp__github__get_job_logs), and read the run's approvals from the session as a second, independent read
+      (sessions are refused only the environments endpoint).
+    command: >-
+      mcp__github__actions_run_trigger(method="run_workflow", owner="otl-labs", repo="ontheloop",
+      workflow_id="tf-gated-apply-prototype.yml", ref="main"); after the operator's approval,
+      mcp__github__get_job_logs(owner="otl-labs", repo="ontheloop", run_id=<run>, failed_only=false); then
+      bin/venv-python -m scripts.roadmap.approved_text_github approvals --run-id <run> --repo otl-labs/ontheloop
+    expected: >-
+      The job log shows ENVIRONMENT_APPROVAL_OK environment=tf-gated-apply approver=<the operator's login> before the
+      OIDC step, and the job succeeds; the session read lists one approved entry for tf-gated-apply by the same login.
+      Post the run link on the PR.
+    fix_if: >-
+      ENVIRONMENT_APPROVAL_MISSING after a real approval (the approvals body differs from the fixtures: read its shape
+      from a session with bin/venv-python -m scripts.roadmap.approved_text_github approvals --run-id <run> and report a
+      plan defect); ENVIRONMENT_CHECK_UNREADABLE status=403 (the token permission is wrong: plan defect)
+    hermetic: false
+  - step: 9
+    phase: post-deploy
+    action: >-
+      Live proof on approved-text (also proves the GET environment response carries can_admins_bypass). Dispatch
+      approved-text-approval.yml from main for an existing approved sidecar on main (slug protected-action-gate at main's
+      head, which holds the sidecar, with the approved= digest and fingerprint= value the record command prints and the
+      SHA git rev-parse prints, both read from origin/main's tree); the operator approves; read the render and
+      approve job logs.
+    command: >-
+      git fetch origin main -q; git worktree add --detach /tmp/vp9-main origin/main; (cd /tmp/vp9-main &&
+      /home/user/ontheloop/bin/venv-python -m scripts.roadmap.approved_text record --slug protected-action-gate &&
+      git rev-parse HEAD); git worktree remove /tmp/vp9-main;
+      mcp__github__actions_run_trigger(method="run_workflow", owner="otl-labs", repo="ontheloop",
+      workflow_id="approved-text-approval.yml", ref="main", inputs={"slug": "protected-action-gate", "sha": <that
+      commit>, "digest": <approved=>, "fingerprint": <fingerprint=>}); after approval, mcp__github__get_job_logs for
+      render and approve
+    expected: >-
+      render logs ENVIRONMENT_GATED_OK environment=approved-text reviewers=1 admin_bypass=false; approve logs
+      ENVIRONMENT_APPROVAL_OK environment=approved-text approver=<the operator's login>; the run succeeds.
+    fix_if: >-
+      ENVIRONMENT_ADMIN_BYPASS because the field is absent (the endpoint omits the field: plan defect, the approval path is
+      blocked until the amendment merges; report at once; interim release valve: a one-line amendment dropping
+      --require-no-admin-bypass from render, merged on code review, or an operator UI merge under Decision 246 cl.5);
+      any other refusal: plan defect
+    hermetic: false
+  - step: 10
+    phase: post-deploy
+    action: Rec closure read-back after the squash merge carries Resolves rec-4979, rec-4961.
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids; rows, missing =
+      fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-4979', 'rec-4961']); print(sorted((r['id'],
+      r['status']) for r in rows), missing)"
+    expected: >-
+      both closed; the build's final status names the read-backs: the build PR number, its green pr-validate run id and
+      the squash-merge SHA whose body carries Resolves rec-4979, rec-4961.
+    fix_if: either open (the trailer job did not run; close through update_rec with the merge sha)
+    hermetic: false
+test_obligations:
+  - source: scripts/ci/environment_reviewer_preflight.py
+    behavior: every refusal path fails closed; only a reviewer's approval for this Environment passes
+    verification_step: 1
+    test_selector: tests/test_environment_reviewer_preflight.py
+    red_green_expectation: red before (absent), green after
+  - source: scripts/checks/ci_guards/validate_environment_reviewer_preflight.py
+    behavior: each predicate refuses its red case; the real tree passes
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+    red_green_expectation: red before (absent), green after
+  - source: scripts/checks/ci_guards/_manifest.py
+    behavior: the new check is registered in the fast tier
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+    red_green_expectation: red before (absent), green after
+  - source: .github/workflows/approved-text-approval.yml
+    behavior: render checks the Environment; approve checks its own approval first
+    verification_step: 3
+    test_selector: tests/test_approved_text_approval_workflow.py
+    red_green_expectation: red before (the reviewers tests fail on main's workflow), green after
+  - source: .github/workflows/terraform-github-apply.yml
+    behavior: apply checks its approval before credentials; preview checks the Environment when it would ask
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+    red_green_expectation: red before (absent), green after
+  - source: .github/workflows/terraform-apply-sandbox.yml
+    behavior: gated-apply checks its approval before credentials
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+    red_green_expectation: red before (absent), green after
+  - source: .github/workflows/reconcile.yml
+    behavior: gated-apply-reconcile checks its approval before credentials
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+    red_green_expectation: red before (absent), green after
+  - source: .github/workflows/tf-gated-apply-prototype.yml
+    behavior: the prototype checks its approval before OIDC
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+    red_green_expectation: red before (absent), green after
+  - source: .github/workflows/publish-ontheloop.yml
+    behavior: publish checks its approval before the OIDC publish
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+    red_green_expectation: red before (absent), green after
+  - source: scripts/checks/ci_guards/validate_github_settings_apply.py
+    behavior: the preflight script is in the apply job's code-owned set
+    verification_step: 3
+    test_selector: tests/checks/ci_guards/test_validate_github_settings_apply.py
+    red_green_expectation: the new parametrized red case test_i_codeowners_line_missing[scripts/ci/environment_reviewer_preflight.py] appears through v.OWNED (it does not exist before); the real-tree node stays green
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: the new check is mapped to a failure category (one line)
+    verification_step: 5
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Registry data checked by validate_ci_rca_taxonomy in the fast tier; no behavior of its own.
+  - source: .github/CODEOWNERS
+    behavior: the preflight script and the new check are code-owned (predicate f); the lines for apply_wake.py, convergence_advisory.py, convergence_classify.py, their tests and tf-gated-apply-prototype.yml are procedural until rec-2827 and asserted by no test (accepted, since CODEOWNERS is advisory without required code-owner review)
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+    red_green_expectation: red before (absent), green after
+  - source: scripts/ci/apply_wake.py
+    behavior: reconcile's two wake messages are byte-identical to the inline bodies they replace
+    verification_step: 3
+    test_selector: tests/test_apply_wake.py
+    red_green_expectation: red before (the new --job values are refused on main), green after
+  - source: scripts/ci/convergence_advisory.py
+    behavior: --post reproduces the inline body's read, classification and status POST and never raises
+    verification_step: 3
+    test_selector: tests/test_convergence_advisory.py
+    red_green_expectation: red before (no --post mode on main), green after
+  - source: config/composite_action_body_baseline.yaml
+    behavior: extracted bodies' entries ratcheted down
+    verification_step: 5
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Baseline data checked by validate_composite_action_shell_bodies in the fast tier; no behavior of its own.
+  - source: config/agent/verification_registry/entries/ontheloop-publish-workflow-body-registered.yaml
+    behavior: the record pins publish-ontheloop.yml's two inline bodies by key, each registered in r3_workflows
+    verification_step: 6
+    command: bin/venv-python -m scripts.checks.verification.validate_graduated_rerun --check-id ontheloop-publish-workflow-body-registered --root .
+    waiver_reason: Graduated-record data; VP 6 re-runs this record and the full tier's validate_graduated_rerun re-runs it after every change.
+  - source: config/structural_size_budgets.yaml
+    behavior: roster entries only lowered
+    verification_step: 5
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Budget data checked by validate_structural_size_limits and validate_structural_size_budget_raises in the fast tier.
+  - source: docs/contracts/ports.yaml
+    behavior: SA-09 row
+    verification_step: 5
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Prose assumption row; validate_ports_contract checks its shape in the fast tier.
+  - source: terraform/github/environments.tf
+    behavior: comments only
+    verification_step: 5
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Comment-only edit with no behavior; terraform-validate fmt covers its form.
+weakening_dispositions:
+  - candidate: "[assertion-changed] tests/test_approved_text_approval_workflow.py::TestWorkflow::test_render_job_is_main_only_and_read_only"
+    disposition: planned-change
+    cite: "acceptance_criteria[2]"
+  - candidate: "[assertion-changed] tests/checks/ci_guards/test_validate_masked_errexit_steps.py::TestRealNearMissesStaySilent::test_reconcile_apply_reconcile_wake_comment_is_silent"
+    disposition: refactor
+    cite: "scope tests/checks/ci_guards/test_validate_masked_errexit_steps.py (the pre-change body is frozen as a fixture and the same guard assertion runs on it; the build matches each label to what the weakening detector emits and drops a row it does not emit)"
+  - candidate: "[assertion-changed] tests/checks/ci_guards/test_validate_masked_errexit_steps.py::TestRealNearMissesStaySilent::test_reconcile_gated_apply_reconcile_wake_comment_is_silent"
+    disposition: refactor
+    cite: "scope tests/checks/ci_guards/test_validate_masked_errexit_steps.py (the pre-change body is frozen as a fixture and the same guard assertion runs on it; the build matches each label to what the weakening detector emits and drops a row it does not emit)"
+  - candidate: "[test-removed] tests/test_approved_text_approval_workflow.py::TestWorkflow::test_approve_job_waits_on_the_gate_with_no_permissions"
+    disposition: planned-change
+    cite: "acceptance_criteria[2]"
+constraints:
+  - Never add id-token or secrets to approved-text-approval.yml; the approve job gains only contents read and actions read (Decision 246; its header).
+  - No new job in terraform-github-apply.yml (fence c), no workflow_call (validate_trusted_plan_environment c), no expression inside a run body (fence j).
+  - Every python call in a governed (tf-trusted-plan) job, and every preflight call, is isolated (-I); the `python3 -m scripts.ci.*` delegates in reconcile.yml and the sandbox take no -I (it drops cwd from sys.path, so the module would not resolve) and executes only code-owned paths (validate_trusted_plan_environment h).
+  - The approvals check runs before any credential, OIDC or secret-reading step and writes nothing later steps read.
+  - Never loosen an existing predicate or assertion beyond the one planned change (Decision 235); never skip a test to get green.
+  - No terraform apply and no Environment change from this plan; deployment-approval-probe.yml is not edited.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout r1 FLAGS_FOUND. CITE: Decisions 92, 94, 246, 248, 238, 183, 233, 162. Decisions triaged: 202 of 202. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 3. Serves: NS.9 5/5 -- This directly stops GitHub-held human approval from failing open: a reviewer-gated job can no longer run unattended when its Environment loses its required reviewers."
+  - "Scout flag Decision 212 (WARN) resolved: ports.yaml SA-09 in scope. The script does not reuse approved_text_github.approvals because it runs inside credentialed jobs before any credential under python3 -I with no installed packages, and must be its own whole code-owned import closure (Decision 238 cl.3; validate_trusted_plan_environment h); approved_text_github imports approved_words (pyyaml, pydantic)."
+  - "Scout flag Decision 154 (NOTE) resolved: no allow-list change. The approvals step precedes the OIDC step (guard predicate c pins it), so on a refusal in gated-apply or gated-apply-reconcile the always-run record write has no credentials and cannot reach S3: the record keeps its prior value, as for every pre-credential failure today (terraform-apply-sandbox.yml's VP10 note), and nothing latches red. In the sandbox job ci-rca still fires (attempt-1 workflow_run; run_attempt != 1 self-dispatch); ci-rca does not watch reconcile.yml (ci-rca.yml:18-27), so a reconcile refusal is visible to whoever dispatched it, as every reconcile failure is today. Decision 154's closed allow-list is untouched; the step id is not added. Decision 154 cl.2's enumerated RED_SHA set (guard.py, review_verdict.py, fetch-saved-plan, materialise-tfvars, terraform-init-retry, write-convergence-record) is unchanged: the three steps newly run from .dispatch-tooling (the approvals check and the two wake delegates) sit outside the plan and apply data path and follow cl.2's own reason (reconcile's own tooling loads the new code), so this is not a re-decision."
+  - "pypi is UI-managed until rec-4549 brings it into terraform/github (Decision 126 drift); rec-4651 (tf-gated-apply main-only policy) and rec-4913 are related, not bundled. Follow-on rec-5001 (filed at planning, read back open): the branch-policy-only tf-trusted-plan Environment's live check."
+  - "Fable consult (blind, facts-only): /mnt/project-files/fail-closed-gates/advisor-brief/ (BRIEF.md, ADVICE.md); adopted except the upstream environment check is not added to apply-sandbox or apply-reconcile (convergence-record semantics, Decisions 154/183)."
+  - "Split: rec-4960 (wake comment on empty approvals) and rec-4980 (push-run neutral exit) are planned separately; rec-4980 also edits terraform-github-apply.yml and validate_github_settings_apply.py, so the second build to merge rebases."
+  - "rec-4965 (move the apply job to tf-github-apply) needs no change here: the guard derives the literal and the admin-bypass flag from the job and terraform/github."
+  - "Residuals stated, not fixed: approvals are recorded per run, not per attempt, so a re-run attempt is satisfied by an earlier attempt's approval; whether an admin bypass writes an approvals entry is unproven (with the reviewer-login check a bypass by a non-listed admin fails closed); the time between the upstream read and the gated job's start is covered by the in-job check."
+  - "Recovery once a gate Environment is missing or ungated: every gated job, terraform-github-apply's included, now refuses, so the repair is the operator's break-glass local apply of terraform/github (sessions get proxy 403); this is the intended fail-closed state. Before rec-4965 moves the apply job, tf-github-apply must exist (it does since run 42362739770) or the cutover's first run refuses."
+  - "More residuals, stated not fixed: on a preflight refusal the sandbox and reconcile best-effort wakes still post their generic did-NOT-converge text (the sandbox one says ci-rca will file a rec) though the record is untouched; telling a refused-before-credentials outcome apart is wake truthfulness, adjacent to rec-4960, not this plan. terraform-github-apply.yml's preview and apply jobs set MASK_AWS_ROLE_ID_ACCOUNT_PART from a secret in job-level env, and the preview's environment check runs after its configure-aws-credentials step, so the github-settings-preview session credentials (state read only) are also in that step's process environment; the script never prints or forwards its environment, and the module docstring says so. The check lives in each job's own definition, so a workflow dispatched from a non-main branch could drop it, and the Environment's reviewers stay the only gate on that path (tf-gated-apply admits any branch until rec-4651/rec-4965; publish-ontheloop has no main-only if:); the module docstring names this. An operator admin bypass of tf-gated-apply (can_admins_bypass unset) is not known to write an approvals entry, so it will probably now fail closed in the job: an intended loss of that release valve, the operator approving as reviewer instead."
+  - "Build-time re-checks: the next free structural_assumptions id (SA-09 assumes no unbuilt ports.yaml plan lands first) and each NEAR_CAP file's measured size on main."
+  - "UNPROVEN until VP 8-9: actions read lets GITHUB_TOKEN read both endpoints (docs list both under Actions read); the GET environment body carries can_admins_bypass (the Terraform provider reads it from this endpoint). pypi's reviewers are UI-managed and assumed to be the logins in TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS. Read at planning (2026-11-08): the last two publish-ontheloop runs (40115871822 on 2026-10-24, 39824756406 on 2026-10-22) have an EMPTY approvals list and their publish job started 3 s after the run was created, so pypi was ungated then (rec-4549's 2026-10-22 finding; no later read shows a reviewer). After this build the next publish refuses (ENVIRONMENT_APPROVAL_MISSING) unless pypi has a listed reviewer by then: the intended fail-closed state, repaired by rec-4549 (or the operator's console reviewer). No live publish is run by this plan."
+  - "Size relief (second blind Fable consult, /mnt/project-files/fail-closed-gates/advisor-brief/ADVICE.md part 2, adopted): reconcile.yml and terraform-apply-sandbox.yml sit at their structural roster entries; the plan extracts best-effort bodies (never the convergence precondition, Decision 77's sole hard block) rather than raising, joining lines or deferring the two jobs."
+  - "plan_obligations at 6d1d1f14: no unmet obligation; advisories handled (NEAR_CAP relief rows above; validate_github_settings_apply and both scripts/ci modules gain no import, new_imports []); overlapping unbuilt plans on the shared files rebase whichever builds second."
+  - "Sessions get proxy 403 on the environments endpoint (environments.tf:111-113; memory terraform-github-apply-blocked), so its proof is a CI job log; the run-approvals endpoint is readable from a session (approved_text_github.py approvals --run-id), which VP 8 uses as a second read. Read-only probe 2026-11-08 from this session: approved_text_github approvals --run-id 42410066873 printed state=approved environment=approved-text login=benjamin-blake (the entry shape the preflight reads)."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 10}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 13}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 7}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 5}
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 6}
+  - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 8}
+  - {gate: plan-critique, round: 7, verdict: PROCEED, blocking: 0, nits: 5}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 92, 246 and 248 read (only the cited sections)
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - Write scripts/ci/environment_reviewer_preflight.py and its test to 100% coverage (VP 1).
+  - Write the guard, its mirror and the manifest entry; run VP 2 against main's workflows first and confirm it reports every gated job.
+  - Size relief first (VP 6 red before any workflow growth is impossible to see, so measure main first) -- extract reconcile's two wake bodies into apply_wake and sandbox's advisory body into convergence_advisory --post, with their tests, and confirm the messages and statuses are byte-identical.
+  - Edit the six workflows, CODEOWNERS, ports.yaml SA-09, validate_github_settings_apply OWNED, the approved-text workflow test and the environments.tf comments; append the one taxonomy line (VP 2-4).
+  - Run VP 5 and VP 6, then the full tier (VP 7) backgrounded per AGENTS.md; open the PR with Resolves rec-4979, rec-4961; code review; the operator's final-diff word (CODEOWNERS paths, security code); merge on green.
+  - After merge run VP 8-10 and post the evidence on the PR; report to the coordinator.
+rollback: Revert the merge commit; no infrastructure changed.
