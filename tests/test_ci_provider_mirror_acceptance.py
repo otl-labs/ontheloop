@@ -23,6 +23,7 @@ import yaml
 
 CI_WORKFLOW = Path(".github/workflows/ci.yml")
 CC_WEB_TFRC = Path("config/terraform/cc-web.tfrc")
+GATE_SCRIPT = Path("scripts/ci/provider_mirror_gate.sh")
 
 
 def _load_terraform_validate_job() -> dict:
@@ -78,9 +79,12 @@ class TestEventConditionalRoleSelection:
 
 class TestGateChainFailOpen:
     def _gate_script(self) -> str:
+        return GATE_SCRIPT.read_text(encoding="utf-8")
+
+    def test_gate_step_delegates_to_the_script(self) -> None:
         job = _load_terraform_validate_job()
         step = _find_step(job, "mirror_gate")
-        return step["run"]
+        assert step["run"].strip() == "bash scripts/ci/provider_mirror_gate.sh"
 
     def test_gate_chain_never_declares_its_own_if(self) -> None:
         """The gate-chain step must run unconditionally (no top-level `if:`) so it always has the
@@ -91,7 +95,9 @@ class TestGateChainFailOpen:
 
     def test_gate_chain_checks_oidc_outcome_first(self) -> None:
         script = self._gate_script()
-        assert "steps.mirror_oidc.outcome" in script, "gate 1/3 must check the OIDC step's outcome"
+        step = _find_step(_load_terraform_validate_job(), "mirror_gate")
+        assert step["env"]["OIDC_FAILED"] == "${{ steps.mirror_oidc.outcome != 'success' }}"
+        assert '"${OIDC_FAILED:-}" != "false"' in script, "gate 1/3 must check the OIDC outcome first"
 
     def test_gate_chain_checks_non_empty_sync(self) -> None:
         script = self._gate_script()
@@ -109,6 +115,8 @@ class TestGateChainFailOpen:
         assert re.search(r"terraform-provider-neon_\$\{?NEON_VERSION\}?_", script), (
             "gate 3/3 must check for the exact-version package filename, not directory non-emptiness"
         )
+        assert re.search(r"terraform-provider-github_\$\{?GITHUB_VERSION\}?_", script)
+        assert "integrations/github" in script
 
     def test_every_degradation_branch_prints_a_reason(self) -> None:
         script = self._gate_script()
@@ -177,3 +185,9 @@ class TestTfrcSymmetry:
             "(an asymmetry excludes a provider from direct with nothing serving it)"
         )
         assert include_set, "include/exclude sets must be non-empty"
+
+    def test_mirror_serves_terraform_github_provider(self) -> None:
+        content = CC_WEB_TFRC.read_text(encoding="utf-8")
+        include_match = re.search(r"filesystem_mirror\s*\{[^}]*include\s*=\s*\[([^\]]+)\]", content, re.DOTALL)
+        assert include_match and "registry.terraform.io/integrations/*" in include_match.group(1)
+        assert "integrations/github" in content

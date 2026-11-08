@@ -27,9 +27,10 @@ classify() discriminates SEVEN mutually-exclusive outcomes:
      plain green, the same way outcome 6 already does for pending_gated.
 
 classify() is a pure function of (return code, stderr text, response body) -- no I/O, no AWS
-call -- so all seven outcomes are unit-provable (tests/test_convergence_advisory.py). The S3 read
-itself stays in the workflow's `run:` body, reusing the NoSuchKey-vs-other-error pattern already
-at terraform-drift.yml:198-225 rather than inventing a second one.
+call -- so all seven outcomes are unit-provable (tests/test_convergence_advisory.py). The `--post`
+mode (the workflow's one-line body, extracted for terraform-apply-sandbox.yml's structural size
+budget) performs the S3 read and the status POST around classify(), reusing the
+NoSuchKey-vs-other-error pattern already at terraform-drift.yml:198-225.
 
 main() never raises (Decision 55/83: the advisory-status job must never red a PR) -- any
 unexpected exception classifies as `error`/UNVERIFIED rather than propagating, per this plan's
@@ -42,7 +43,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 from typing import Optional
 
 from scripts.ci.convergence_classify import render_convergence_advisory_red_description
@@ -117,6 +120,82 @@ def classify(rc: int, stderr: str, body: str) -> tuple[str, str]:
     return SUCCESS, "main is converged (last sandbox apply GREEN). Advisory only."
 
 
+def _read_record() -> tuple[int, str, str]:
+    """Read the convergence record with `aws s3api get-object`; returns (rc, stderr, body)."""
+    if os.environ.get("OIDC_FAILED", "") == "true":
+        return 1, "assume-role failed -- OIDC credentials unavailable", ""
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "rec.json")
+            result = subprocess.run(
+                [
+                    "aws",
+                    "s3api",
+                    "get-object",
+                    "--bucket",
+                    os.environ.get("CONVERGENCE_BUCKET", ""),
+                    "--key",
+                    os.environ.get("CONVERGENCE_KEY", ""),
+                    out,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            body = ""
+            if result.returncode == 0:
+                with open(out, encoding="utf-8", errors="replace") as fh:
+                    body = fh.read()
+            return result.returncode, result.stderr.strip(), body
+    except OSError as exc:
+        return 1, str(exc), ""
+
+
+def post() -> int:
+    """Read the record, classify it and POST the terraform-converged status; a failing POST exits non-zero."""
+    try:
+        state, description = classify(*_read_record())
+    except Exception as exc:  # noqa: BLE001 -- never raise past the POST; the advisory job must stay green (Decision 83)
+        state, description = (
+            ERROR,
+            f"UNVERIFIED -- convergence_advisory classifier raised {type(exc).__name__}; treating as unverified.",
+        )
+    env = os.environ.get
+    repo, head_sha = env("REPO", ""), env("HEAD_SHA", "")
+    target = f"{env('SERVER_URL', '')}/{repo}/actions/runs/{env('RUN_ID', '')}"
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/statuses/{head_sha}",
+                "--method",
+                "POST",
+                "--field",
+                f"state={state}",
+                "--field",
+                "context=terraform-converged",
+                "--field",
+                f"description={description}",
+                "--field",
+                f"target_url={target}",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError as exc:
+        print(f"status POST failed: {exc}", file=sys.stderr)
+        return 1
+    if result.returncode != 0:
+        print(result.stderr, file=sys.stderr)
+    return result.returncode
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """CLI entrypoint: read RC / S3_STDERR / REC_JSON from the environment, print
     "<state>\\n<description>" for the calling `run:` body to parse.
@@ -124,7 +203,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     Always exits 0 and never raises -- classification itself must never fail the advisory-status
     job (Decision 83: it must never red a PR).
     """
-    del argv  # no positional args; env-var contract only (mirrors the calling run: body's shape)
+    if argv and argv[0] == "--post":
+        return post()
     try:
         rc_raw = os.environ.get("RC", "0")
         try:

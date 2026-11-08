@@ -15,6 +15,7 @@ def env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     f = fx.Fixture(tmp)
     f.branch_pr(1, "a.txt", "pr\n", name="pr1")  # overlaps once main edits a.txt
     f.branch_pr(2, "b.txt", "pr\n", name="pr2")  # disjoint
+    f.branch_pr(3, "c.txt", "pr\n", name="pr3", message="pr 3\n\nClaude-Session: https://claude.ai/code/session_BUILD\n")
     f.advance_main("a.txt", "main\n")
     project = tmp / "project"
     project.mkdir()
@@ -169,3 +170,34 @@ def test_shallow_clone_resolves_only_after_deepen(tmp_path: Path) -> None:
     fx.install_project(project)
     r = fx.run_shim(project, fx.merge_payload(1), cwd=tmp_path)
     assert r.returncode == 2 and "OVERLAP" in r.stderr and "a.txt" in r.stderr
+
+
+_BUILD = "pr 3\n\nClaude-Session: https://claude.ai/code/session_BUILD\n"
+
+
+def test_foreign_trailer_in_commit_message_denies(env: dict[str, Path]) -> None:
+    msg = "pr 3\n\nClaude-Session: https://claude.ai/code/session_COORD\n"
+    r = _run(env, fx.merge_payload(3, commit_message=msg))
+    assert r.returncode == 2 and "attribution" in r.stderr
+    assert "Claude-Session: https://claude.ai/code/session_BUILD" in r.stderr
+    _no_private_ref(env)
+
+
+def test_branch_trailer_in_commit_message_allows(env: dict[str, Path]) -> None:
+    r = _run(env, fx.merge_payload(3, commit_message=_BUILD))
+    assert (r.returncode, r.stdout, r.stderr) == (0, "", "")
+
+
+def test_dropped_branch_trailer_denies(env: dict[str, Path]) -> None:
+    r = _run(env, fx.merge_payload(3, commit_message="pr 3\n"))
+    assert r.returncode == 2 and "missing ['BUILD']" in r.stderr
+
+
+def test_no_commit_message_or_no_trailer_unchanged(env: dict[str, Path]) -> None:
+    assert _run(env, fx.merge_payload(3)).returncode == 0
+    assert _run(env, fx.merge_payload(2, commit_message="pr 2\n")).returncode == 0
+
+
+def test_non_string_commit_message_denies(env: dict[str, Path]) -> None:
+    r = _run(env, fx.merge_payload(3, commit_message=["x"]))
+    assert r.returncode == 2 and "commit_message" in r.stderr and "malformed" in r.stderr

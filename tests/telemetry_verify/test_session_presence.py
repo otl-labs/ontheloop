@@ -92,6 +92,14 @@ def test_a_key_merged_inside_the_sla_is_pending() -> None:
     assert (result.status, result.judged, result.pending) == ("green", 1, 1)
 
 
+def test_the_shipped_config_excuses_the_rec_5004_key() -> None:
+    config = sp.load_config(ROOT)
+    sp.check_config(config)
+    result = run([commit(1, "01XZubGwhX1EcdnXkxC6BKfL")], Roots([]), config)
+    assert (result.excused, result.missing) == (1, 0)
+    assert result.status != "red"
+
+
 def test_an_untrailered_commit_is_counted_not_red() -> None:
     result = run([commit(1, None), commit(2, "AAA")], Roots(["AAA"]))
     assert (result.status, result.untrailered) == ("green", 1)

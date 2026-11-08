@@ -211,7 +211,8 @@ def cmd_premerge(args: argparse.Namespace) -> int:
         print(f"PREMERGE ERROR no readable {_plan_rel(args.slug)} at HEAD")
         return 2
     expected = expected_set(plan)
-    parsed = _parsed_trailer(Path(args.message_file).read_text(encoding="utf-8"))
+    message_text = Path(args.message_file).read_text(encoding="utf-8")
+    parsed = _parsed_trailer(message_text)
     ok = True
     base = _git(root, "merge-base", "origin/main", "HEAD").stdout.strip() or "origin/main"
     try:
@@ -234,6 +235,9 @@ def cmd_premerge(args: argparse.Namespace) -> int:
 
             for remedy in trailer_remedy(expected, parsed):
                 print(f"  remedy: {remedy}")
+    from scripts.session import session_trailer  # noqa: PLC0415
+
+    ok = session_trailer.premerge_attribution(root=root, base=base, message=message_text) and ok
     ok = _preview(expected, root, head) and ok
     ok = _approved_text(args.slug, root, args.expect) and ok
     ok = _decision_collisions(root) and ok

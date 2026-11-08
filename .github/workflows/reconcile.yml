@@ -16,11 +16,12 @@ name: reconcile
 # their FIRST step, and every `uses: ./.github/actions/...` local composite-action reference in
 # those jobs resolves against THAT checkout, not the dispatch ref -- so guard.py,
 # review_verdict.py, fetch-saved-plan, materialise-tfvars, terraform-init-retry and
-# write-convergence-record all still resolve from the RED_SHA checkout. The ONE exception is the
-# artifact-fetch step ("Fetch reviewed DuckLake lambda packages"), which this plan repoints at a
-# second, dispatch-ref-pinned checkout (path: .dispatch-tooling) specifically so it can load the
-# NEW scripts.ci.ducklake_artifacts --mode fetch path added at the dispatch ref -- the RED_SHA
-# checkout's copy predates this fix and is exactly what was stuck.
+# write-convergence-record all still resolve from the RED_SHA checkout. The exceptions resolve from a
+# second, dispatch-ref-pinned checkout (path: .dispatch-tooling) because the RED_SHA checkout's copy
+# predates them: the artifact-fetch step ("Fetch reviewed DuckLake lambda packages", which loads the NEW
+# scripts.ci.ducklake_artifacts --mode fetch path and is exactly what was stuck), neon_api_key.sh, the gated
+# job's reviewer-approval check (scripts/ci/environment_reviewer_preflight.py) and the two wake delegates
+# (scripts.ci.apply_wake).
 #
 # Guard-PASS -> the apply-reconcile job below re-applies directly, behind the SAME
 #               digest-fed subagent review gate as terraform-apply-sandbox.yml (T2.39): nothing
@@ -589,46 +590,17 @@ jobs:
       - name: Best-effort wake comment on the red commit's originating PR
         if: always() && steps.recheck.outputs.still_actionable == 'true'
         continue-on-error: true
+        working-directory: .dispatch-tooling
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          SHA: ${{ env.RED_SHA }}
           ROUTED: ${{ steps.resolved.outputs.routed }}
           REVIEW_OUTCOME: ${{ steps.resolved.outputs.review_outcome }}
           APPLY_OUTCOME: ${{ steps.resolved.outputs.apply_outcome }}
           FRESH_REASON: ${{ steps.route.outputs.fresh_reason }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          PR_NUM=$(gh api "repos/${REPO}/commits/${RED_SHA}/pulls" --jq '.[0].number' 2>/dev/null || echo "")
-          if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
-            echo "No originating PR resolved for ${RED_SHA}; skipping wake comment."
-            exit 0
-          fi
-          # A routed outcome now ALWAYS carries a fresh_reason: post-rec-2847 routed=true is only
-          # emitted on the needs_fresh_plan branch of the `resolved` aggregator. The pre-rec-2847
-          # "routed with no fresh re-plan" message is therefore unreachable and is not restated here.
-          if [ "$FRESH_REASON" = "guard_routed" ]; then
-            WHY="the saved plan.bin for ${RED_SHA} was guard-BLOCKed (so it was never applied and could not report staleness), and Reconcile re-planned fresh in this same run"
-          else
-            WHY="the saved plan.bin for ${RED_SHA} was stale (STALE_PLAN_FRESH_REPLAN), and Reconcile re-planned fresh in this same run"
-          fi
-          if [ "$ROUTED" = "true" ]; then
-            # The tf-gated-apply approval is requested BEFORE gated-apply-reconcile starts, so at
-            # approval time the reviewer can see nothing of the fresh plan from inside that job --
-            # the only evidence lives in THIS run's apply-reconcile step logs. Name them, or the
-            # approval is uninformed by construction.
-            MSG="Reconcile: ${WHY}, then routed the FRESH plan to the tf-gated-apply job in reconcile.yml (out-of-budget IAM / trust / destroy). Pending reviewer approval in GitHub Actions -- the convergence record keeps its pending_gated marker until the gated apply completes. BEFORE APPROVING, review the fresh plan in this run's apply-reconcile job -- steps \`Fresh re-plan (STALE_PLAN_FRESH_REPLAN fallthrough)\` and \`Deterministic apply guard (fail-closed) -- fresh re-plan\` at ${RUN_URL} -- because the gated job itself shows nothing of it at approval time."
-          elif [ "$REVIEW_OUTCOME" = "starved" ]; then
-            MSG="Reconcile's subagent reviewer was STARVED for ${RED_SHA} (max-turns/no-verdict after retry); apply was blocked and the convergence record was NOT touched. Re-dispatch Reconcile once the reviewer is healthy."
-          elif [ "$APPLY_OUTCOME" = "success" ]; then
-            if [ -n "$FRESH_REASON" ]; then
-              MSG="Reconcile: ${WHY}, re-guarded it, and converged GREEN; convergence record updated. The fresh plan guard-PASSed, so it was applied here behind the digest-fed subagent review rather than the tf-gated-apply Environment (Decision 158 route (i))."
-            else
-              MSG="Reconcile converged GREEN for ${RED_SHA}; convergence record updated."
-            fi
-          else
-            MSG="Reconcile did NOT converge (RED) for ${RED_SHA}. Inspect this run's logs directly (ci-rca does not watch reconcile.yml)."
-          fi
-          gh pr comment "$PR_NUM" --repo "$REPO" --body "$MSG" || true
+        run: python3 -m scripts.ci.apply_wake --job apply-reconcile
 
   # ---------------------------------------------------------------------------
   # Gated-apply-reconcile job: only when apply-reconcile's guard routed (out-of-budget IAM / trust
@@ -651,6 +623,7 @@ jobs:
       id-token: write
       contents: read
       pull-requests: write
+      actions: read
     env:
       TF_VAR_aws_profile: ""
       RED_SHA: ${{ needs.resolve-target.outputs.commit_sha }}
@@ -675,6 +648,15 @@ jobs:
         uses: actions/checkout@v7
         with:
           path: .dispatch-tooling
+
+      - name: Check the reviewer approval for tf-gated-apply
+        # Fail closed (rec-4979): before the OIDC step, and from the dispatch-ref tooling because the root checkout is
+        # the red commit, which may predate the script.
+        working-directory: .dispatch-tooling
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEWER_LOGINS: ${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}
+        run: python3 -I scripts/ci/environment_reviewer_preflight.py approvals --environment tf-gated-apply
 
       - name: Configure AWS credentials (OIDC -- apply role, main only)
         uses: aws-actions/configure-aws-credentials@v6
@@ -833,21 +815,13 @@ jobs:
       - name: Best-effort wake comment on the red commit's originating PR
         if: always()
         continue-on-error: true
+        working-directory: .dispatch-tooling
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          SHA: ${{ env.RED_SHA }}
           APPLY_OUTCOME: ${{ steps.apply.outcome }}
-        run: |
-          PR_NUM=$(gh api "repos/${REPO}/commits/${RED_SHA}/pulls" --jq '.[0].number' 2>/dev/null || echo "")
-          if [ -z "$PR_NUM" ] || [ "$PR_NUM" = "null" ]; then
-            exit 0
-          fi
-          if [ "$APPLY_OUTCOME" = "success" ]; then
-            MSG="Reconcile's gated apply converged GREEN for ${RED_SHA} (IAM/trust/destroy change applied after reviewer approval); convergence record updated."
-          else
-            MSG="Reconcile's gated apply did NOT converge (RED) for ${RED_SHA}. Inspect this run's logs directly."
-          fi
-          gh pr comment "$PR_NUM" --repo "$REPO" --body "$MSG" || true
+        run: python3 -m scripts.ci.apply_wake --job gated-apply-reconcile
 
   # ---------------------------------------------------------------------------
   # File-reconcile-starved-rec job: Decision 162 / rec-2664. A starved Reconcile subagent reviewer

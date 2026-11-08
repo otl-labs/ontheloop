@@ -26,12 +26,17 @@ echo "$@" >> "$STUB_DIR/aws.argv"
 echo "${AWS_PROFILE-unset}" >> "$STUB_DIR/aws.profile"
 dest="$4"
 ns="$dest/registry.terraform.io/kislerdm/neon"
-populate() { mkdir -p "$ns"; echo bin > "$ns/p.zip"; }
+gh="$dest/registry.terraform.io/integrations/github"
+populate() {
+  mkdir -p "$ns"; echo bin > "$ns/p.zip"
+  case "$*" in *"--include registry.terraform.io/integrations/*"*) mkdir -p "$gh"; echo bin > "$gh/p.zip" ;; esac
+}
 case "$STUB_MODE" in
-  ok) populate; exit 0 ;;
+  ok) populate "$@"; exit 0 ;;
+  kislerdm_only) mkdir -p "$ns"; echo bin > "$ns/p.zip"; exit 0 ;;
   empty) exit 0 ;;
-  dirs_only) mkdir -p "$ns"; exit 0 ;;
-  fail_then_ok) if [ "$n" -eq 1 ]; then echo "Could not connect to the endpoint URL" >&2; exit 1; fi; populate; exit 0 ;;
+  dirs_only) mkdir -p "$ns" "$gh"; exit 0 ;;
+  fail_then_ok) if [ "$n" -eq 1 ]; then echo "Could not connect to the endpoint URL" >&2; exit 1; fi; populate "$@"; exit 0 ;;
   creds) echo "Unable to locate credentials. You can configure credentials by running aws configure." >&2; exit 253 ;;
   region) echo "You must specify a region. You can also configure your region by running aws configure." >&2; exit 253 ;;
   hang) sleep 30 ;;
@@ -195,6 +200,13 @@ def test_sync_fetches_only_the_namespaces_the_tfrc_routes_through_the_mirror(tmp
     assert "--include registry.terraform.io/kislerdm/*" in line
     assert "--include registry.terraform.io/acme/*" in line
     assert argv.returncode == 1  # the acme namespace holds no file in the stub, so the sync is not non-empty
+
+
+def test_mirror_sync_needs_every_included_namespace(h: Harness) -> None:
+    result = h.run("kislerdm_only")
+    assert result.returncode == 1
+    assert "EMPTY_MIRROR" in result.stdout + result.stderr + (h.log.read_text(encoding="utf-8") if h.log.exists() else "")
+    assert not h.tfrc.exists()
 
 
 def test_default_mode_never_runs_the_delegate(h: Harness) -> None:

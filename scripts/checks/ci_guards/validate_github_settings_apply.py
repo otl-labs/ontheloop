@@ -18,7 +18,7 @@ on synthetic data; the registered check loads the real tree.
   (d) both jobs' if require refs/heads/main in every disjunct, and apply needs preview
   (e) every checkout takes no ref or repository and sets persist-credentials false
   (f) every non-local uses: is pinned to a 40-hex commit SHA
-  (i) .github/CODEOWNERS covers OWNED
+  (i) .github/CODEOWNERS covers OWNED (including the reviewer-gate preflight the apply job runs before the App key)
   (j) no ${{ }} expression appears inside a run: body (inputs reach run bodies only through env:)
   (k) terraform/github's tf_github_apply Environment is main-only, has no admin bypass and is prevent_destroy
   (l) every resource type under terraform/github is in the gate's GATE_TYPES or NON_GATE_TYPES
@@ -65,6 +65,7 @@ OWNED = (
     "scripts/ci/quiet_run.sh",
     "scripts/ci/terraform_github_plan_report.py",
     "scripts/ci/plan_names_core.py",
+    "scripts/ci/environment_reviewer_preflight.py",
     "scripts/checks/ci_guards/validate_github_settings_apply.py",
 )
 SETTINGS_TF = "github_settings_apply.tf"
