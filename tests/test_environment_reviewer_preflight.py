@@ -131,6 +131,7 @@ def test_malformed_name_is_refused_before_any_request(monkeypatch, capsys) -> No
     requests = _serve(monkeypatch, [_entry()])
     assert _run(capsys, "approvals", "--environment", "a b;rm") == (1, "ENVIRONMENT_NAME_INVALID")
     assert _run(capsys, "environment", "--environment", "../x") == (1, "ENVIRONMENT_NAME_INVALID")
+    assert _run(capsys, "environment", "--environment", "..") == (1, "ENVIRONMENT_NAME_INVALID")
     assert requests == []
 
 

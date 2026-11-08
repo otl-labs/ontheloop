@@ -175,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
         if command == "environment":
             p.add_argument("--require-no-admin-bypass", action="store_true")
     args = parser.parse_args(argv)
-    if not _NAME_RE.fullmatch(args.environment):
+    if not _NAME_RE.fullmatch(args.environment) or not args.environment.strip("."):
         print("ENVIRONMENT_NAME_INVALID")
         return 1
     if args.command == "approvals":

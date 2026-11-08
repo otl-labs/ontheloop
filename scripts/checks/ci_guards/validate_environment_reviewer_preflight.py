@@ -108,6 +108,15 @@ def _ref_pinned_with_side_checkout(steps: list[dict[str, Any]]) -> bool:
     return any((s.get("with") or {}).get("path") == SIDE_CHECKOUT for s in checkouts)
 
 
+def _unconditional(step: dict[str, Any]) -> bool:
+    return "if" not in step and not step.get("continue-on-error")
+
+
+def _first_checkout_takes_ref(steps: list[dict[str, Any]]) -> bool:
+    checkouts = [s for s in steps if _is_checkout(s)]
+    return bool(checkouts) and isinstance((checkouts[0].get("with") or {}).get("ref"), str)
+
+
 def _step_env_ok(step: dict[str, Any]) -> bool:
     return step.get("env") == {"GH_TOKEN": TOKEN_EXPR, "REVIEWER_LOGINS": LOGINS_EXPR}
 
@@ -125,12 +134,16 @@ def check_gated_jobs(workflows: dict[str, dict[str, Any]], declared: dict[str, d
             first = next((s for s in steps if not _is_checkout(s)), None)
             if first is None or str(first.get("run", "")).strip() != _approvals_cmd(name):
                 out.append(f"c: {where} must run `{_approvals_cmd(name)}` before any step other than actions/checkout")
+            elif not _unconditional(first):
+                out.append(f"c: {where} approvals step must carry no if: and no continue-on-error")
             elif not _step_env_ok(first):
                 out.append(
                     f"c: {where} approvals step must map GH_TOKEN to github.token and REVIEWER_LOGINS to the repo variable"
                 )
             if not _grants_actions(wf, job):
                 out.append(f"c: {where} must grant actions read or write for the approvals check")
+            if _first_checkout_takes_ref(steps) and not _ref_pinned_with_side_checkout(steps):
+                out.append(f"c: {where} takes a ref: checkout, so it needs a {SIDE_CHECKOUT} side checkout for the script")
         if _ref_pinned_with_side_checkout(steps):
             for step in steps:
                 body = str(step.get("run", "")).strip()
@@ -155,8 +168,11 @@ def check_upstream(workflows: dict[str, dict[str, Any]], declared: dict[str, dic
             continue
         want = _environment_cmd(name, declared.get(name, {}).get("no_bypass", False))
         job = jobs[upstream]
-        if not any(str(s.get("run", "")).strip() == want for s in _steps(job)):
+        found = [s for s in _steps(job) if str(s.get("run", "")).strip() == want]
+        if not found:
             out.append(f"d: {fname}:{upstream} must run `{want}`")
+        elif found[0].get("continue-on-error"):
+            out.append(f"d: {fname}:{upstream} environment check must not set continue-on-error")
         if not _grants_actions(wf, job):
             out.append(f"d: {fname}:{upstream} must grant actions read for the environment check")
     return out

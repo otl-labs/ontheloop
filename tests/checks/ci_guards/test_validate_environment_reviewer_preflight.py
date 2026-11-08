@@ -239,3 +239,24 @@ def test_check_is_registered_in_the_fast_tier_manifest() -> None:
 
 def test_a_resource_without_an_environment_argument_is_ignored() -> None:
     assert v.declared_environments({"x.tf": 'resource "github_repository_environment" "x" {\n  repository = "r"\n}\n'}) == {}
+
+
+@pytest.mark.parametrize("key,value", [("if", "github.event_name != 'workflow_dispatch'"), ("continue-on-error", True)])
+def test_c_conditional_or_maskable_approvals_step_is_refused(wfs, declared, key, value) -> None:
+    job = _gated(wfs, "publish-ontheloop.yml", "publish")
+    next(s for s in job["steps"] if "preflight" in s.get("run", ""))[key] = value
+    assert any("no if: and no continue-on-error" in x for x in v.check_gated_jobs(wfs, declared)[0])
+
+
+def test_c_continue_on_error_on_the_upstream_check_is_refused_but_if_is_allowed(wfs, declared) -> None:
+    job = _gated(wfs, "terraform-github-apply.yml", "preview")
+    step = next(s for s in job["steps"] if "preflight" in s.get("run", ""))
+    assert "if" in step and v.check_upstream(wfs, declared) == []
+    step["continue-on-error"] = True
+    assert any("must not set continue-on-error" in x for x in v.check_upstream(wfs, declared))
+
+
+def test_c_gated_job_with_a_ref_checkout_needs_the_side_checkout(wfs, declared) -> None:
+    job = _gated(wfs, "reconcile.yml", "gated-apply-reconcile")
+    job["steps"] = [s for s in job["steps"] if (s.get("with") or {}).get("path") != v.SIDE_CHECKOUT]
+    assert any("needs a .dispatch-tooling side checkout" in x for x in v.check_gated_jobs(wfs, declared)[0])
