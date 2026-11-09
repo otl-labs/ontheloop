@@ -57,15 +57,16 @@ blocks:
     3. **Data.** Production data leaves its prefixes only as an in-account server-side copy of the ops prefix into that
        scratch prefix, deleted at teardown, and as one on-demand catalog dump the restore function reads once through a
        short-lived presigned URL and restores for ducklake_ops only. Decision 81 cl.7's closed read boundary admits, for a
-       sitting only, those reads, the restore function's reads of the restored copy and the ephemeral checksum reader. No
-       maintenance verb ever runs on a restored catalog. Evidence is counts only (Decision 101).
+       sitting only, those reads, the restore function's reads of the restored copy and the ephemeral checksum reader. pg_restore's
+       re-creation of the stats index in the scratch database is outside Decision 214 cl.2, which binds live catalog
+       schemas. No maintenance verb ever runs on a restored catalog. Evidence is counts only (Decision 101).
     4. **Native primitives (Decision 100).** pg_restore of the DR dump is the claim under test, because SIT's catalog will
        live in SIT's catalog database, which no Neon branch reaches (rec-5024 decides its backend and account); restoring
        into that backend itself is rec-5030's proof. The branch, S3 server-side copy and S3 versioning are used natively for
        everything else.
     5. **Closure.** rec-5023 closes through a committed counts-only evidence fixture and its test, as rec-4070 did
        (Decision 204 cl.5), whichever way its criteria fall: Decision 201's evaluator cannot run a live sitting. A step
-       that errors is fixed and the sitting re-run; only a completed run's evidence is a result. The candidate-engine leg
+       that errors is fixed and the sitting re-run; a completed run, or one stopped by a failed criterion, is a result. The candidate-engine leg
        is rec-5036.
     6. **Scope.** Rehearsal sittings only, until SIT's reset path (rec-5030) exists. The SIT Decision (rec-5024) decides
        whether the verb stays.
@@ -95,7 +96,7 @@ blocks:
   file: docs/contracts/restore-rehearsal.yaml
   before: ''
   after: |
-    # SIT restore rehearsal (rec-5023, Decision 251). Class D mechanism contract: the ephemeral-only rehearsal verb, its
+    # SIT restore rehearsal (rec-5023, Decision {{N}}). Class D mechanism contract: the ephemeral-only rehearsal verb, its
     # boundary, the human-directed ADMIN sitting, the consistency rule, the counts-only evidence and the verifier's exit
     # criteria. PUBLIC repository (Decision 101): logical names only; no host, DSN, password, bucket name or ARN anywhere.
     contract:
@@ -115,7 +116,7 @@ blocks:
         agent_surface: docs/DECISIONS.md
 
     amendment_log:
-      - {date: "2026-11-09", semantic_break: false, change_class: field_add, summary: "PLAN-sit-restore-spike (rec-5023, Decision 251): created."}
+      - {date: "{{DATE}}", semantic_break: false, change_class: field_add, summary: "PLAN-sit-restore-spike (rec-5023, Decision {{N}}): created."}
 
     boundary:
       binding: >-
@@ -128,10 +129,11 @@ blocks:
         holding a new role and a new database, both named restore_rehearsal_<run_id>, deleted whole with the branch.
       defence_in_depth: >-
         The verb's own refusals: the function name must end in -restore-rehearsal-ephemeral; env DUCKLAKE_RESTORE_REHEARSAL
-        must equal the event's confirm; the target DSN comes only from env DUCKLAKE_RESTORE_TARGET_DSN and its username and
-        dbname must start with restore_rehearsal_; every scratch path must sit under the rehearsal prefix; the dump URL must be an https S3 presigned GET. A refusal is
-        RestoreRehearsalRefused (400) before any connection opens. A function whose name ends in
-        -restore-rehearsal-ephemeral refuses every other maintenance action the same way.
+        must equal the event's confirm; prod_checksum refuses when env DUCKLAKE_RESTORE_TARGET_DSN is set, and every other
+        step refuses when it is absent or its username or dbname does not start with restore_rehearsal_, which binds each
+        step to the function this contract names; every scratch path must sit under the rehearsal prefix; the dump URL
+        must be an https S3 presigned GET. A refusal is RestoreRehearsalRefused (400) before any connection opens. A
+        function whose name ends in -restore-rehearsal-ephemeral refuses every other maintenance action the same way.
       never:
         - A write or delete under ducklake/, ducklake-telemetry/ or telemetry-blobs/.
         - A maintenance verb (merge, gc, expire, cleanup, catalog_reinit) on a restored catalog.
@@ -152,9 +154,11 @@ blocks:
         DSN is given to a function. That target role is minted by the Neon API, so it can likely read the branch's copy of
         the whole PROD database, telemetry catalog included (inferred); only PlatformAdmin can read its password, and
         PlatformAdmin already reads the PROD catalog DSN. The dump, telemetry catalog included, exists outside the DR
-        bucket only in the restore function's /tmp. Decision 81 cl.7's closed read boundary admits the checksum reader and copy_data for a
-        sitting only (Decision 251 cl.3).
-        The restored scratch copy's stats index is outside Decision 214 cl.2, which binds live catalog schemas.
+        bucket only in the restore function's /tmp. Decision 81 cl.7's closed read boundary admits, for a sitting only, the
+        checksum reader, copy_data, the restore function's one presigned read of the dump and its reads of the restored
+        copy (Decision {{N}} cl.3). The ephemeral functions write no CloudWatch logs, because each role's log grant names
+        only its production log group: a step error surfaces only as its step, error class and code, which the
+        orchestrator prints.
 
     verb:
       action: restore_rehearsal
@@ -172,12 +176,14 @@ blocks:
           path_is_relative false), foreign_owned (relations not owned by the target role) and foreign_acl (ACL entries
           naming any other role).
         rewrite: >-
-          Sets ducklake_ops's ducklake_metadata.data_path to its scratch location and nothing else; refuses if
-          absolute_paths is not 0 or the value falls outside the scratch prefix. Returns rewrite_ms.
+          Sets the global data_path row (scope IS NULL) of ducklake_ops's ducklake_metadata to its scratch location and
+          nothing else, refusing a value outside the scratch prefix. When absolute_paths is not 0 it changes nothing.
+          Returns rewritten and rewrite_ms.
         verify: >-
-          missing_files (referenced data and delete files absent from the scratch copy), then ATTACH READ_ONLY at the new
-          data_path without OVERRIDE_DATA_PATH and, per table, row count and checksum (the sum over rows of each whole row's
-          hash, one expression for every step) at the restored snapshot.
+          Returns missing_files (referenced data and delete files absent from the scratch copy), attach_ok (ATTACH
+          READ_ONLY at the new data_path without OVERRIDE_DATA_PATH) and, per table at the restored snapshot, read_ok, row
+          count and checksum (count(*) and sum(hash(t)) over whole rows, one expression for every step). A failed ATTACH
+          or table read is recorded, not raised.
         prod_checksum: >-
           Checksum function only: ATTACH the PROD ops catalog READ_ONLY with the function's own catalog DSN and return the
           same per-table count and checksum AT (VERSION => the restored snapshot_id).
@@ -201,18 +207,19 @@ blocks:
     sitting:
       where: An ADMIN cloud session (agent_platform_admin present); no cloud container has TCP/5432 egress, so all SQL runs in the functions.
       actor: >-
-        An ADMIN-container agent, only under the operator's explicit direction in that session (Decision 251), each
+        An ADMIN-container agent, only under the operator's explicit direction in that session (Decision {{N}}), each
         admin-profile command acknowledged per protected-actions.yaml. Never self-directed or scheduled. Calls that need no
-        admin grant run as agent_platform (--dev-profile). The orchestrator redacts before it prints or writes evidence.
+        admin grant run as agent_platform (--dev-profile). The orchestrator redacts before it prints or writes evidence;
+        on a step error it prints only the step, error class and code.
       orchestrator: "bin/venv-python -m scripts.ducklake_neon_smoke_test --restore-rehearsal --profile agent_platform_admin --dev-profile agent_platform --evidence-out <file>"
       order:
         - {id: present, principal: none, rule: "--dry-run prints every admin mutation the run will make, in order; the operator's approve line names that list before the run."}
-        - {id: teardown_handles, principal: none, rule: "Resolve every teardown handle before anything is created; fail loud if one cannot be resolved."}
+        - {id: teardown_handles, principal: none, rule: "Resolve every teardown handle before anything is created; stop if one cannot be resolved or if a rehearsal function, branch or scratch prefix is left from an earlier run. Teardown never deletes what this run did not create."}
         - {id: dump, principal: agent_platform_admin, rule: "One on-demand dump through the catalog-dr Function URL; record its size and wall time (Decision 88 egress); presign a GET on that one object, valid 15 minutes, passed only in the restore step's event and never printed or written."}
         - {id: neon_target, principal: agent_platform_admin, rule: "Child branch, role and empty database, all restore_rehearsal_<run_id>, each call made only once the branch's operations have finished."}
         - {id: functions, principal: agent_platform_admin, rule: "Create maintenance-restore-rehearsal-ephemeral (maintenance-smoke role) and reader-restore-rehearsal-ephemeral (reader role), both on the production maintenance function's layers, from lambda-packages/<sha>/ducklake-maintenance.zip where <sha> is the commit last deployed to the production maintenance function (Decision 249); before any step, each function's CodeSha256 must equal the production function's, else stop."}
         - {id: copy_data, principal: agent_platform, rule: "Server-side copy ducklake/ into <scratch>/ducklake/ after the dump, once the target and functions exist; record objects, bytes, wall time."}
-        - {id: steps, principal: agent_platform_admin, rule: "Invoke restore, rewrite, verify, prod_checksum, duckdb_copy, write_probe in that order; any failure stops the run and goes to teardown."}
+        - {id: steps, principal: agent_platform_admin, rule: "Invoke restore, rewrite, verify, prod_checksum, duckdb_copy, write_probe in that order. A step error stops the run and goes to teardown. rewritten false, missing_files above 0, or attach_ok or any read_ok false also stops the run, which writes its evidence and goes to teardown."}
         - {id: probe_absent, principal: agent_platform, rule: "The probe's relative key is absent under ducklake/ (head-object 404)."}
         - {id: teardown, principal: "maintenance-smoke role via the restore function (scratch prefix); agent_platform_admin (functions, branch)", rule: "In finally, whatever failed; the scratch prefix is deleted before the functions, by the restore function's teardown_scratch or, if that cannot run, by agent_platform through the scratch key builder; record each in torn_down; a false is cleaned by hand at once."}
       version_recovery: >-
@@ -228,17 +235,17 @@ blocks:
     evidence:
       schema_version: 1
       keys: [run_id, measured_at, maintenance_zip_sha256, dump_bytes, dump_ms, copy_objects, copy_bytes, copy_ms, restore_ms,
-        rewrite_ms, meta_schemas, snapshot_ids, absolute_paths, foreign_owned, foreign_acl, missing_files, ops_tables,
+        rewrite_ms, rewritten, attach_ok, meta_schemas, snapshot_ids, absolute_paths, foreign_owned, foreign_acl, missing_files, ops_tables,
         write_probe_key, write_probe_in_scratch, write_probe_in_production,
         catalog_format_version, prefix_sizes, duckdb_copy_ms, duckdb_catalog_rows, duckdb_file_bytes, duckdb_copy_tables,
         torn_down]
-      ops_tables: one row per table with restored_count, restored_checksum, prod_count, prod_checksum.
+      ops_tables: one row per table with read_ok, restored_count, restored_checksum, prod_count, prod_checksum.
       forbidden: any host, DSN, password, bucket name, account id or ARN; the verifier refuses a file that carries one.
 
     exit_criteria:
       restored: "restore returned ok; foreign_owned 0 and foreign_acl 0."
-      rewritten: "absolute_paths 0; ATTACH at the new data_path succeeded without OVERRIDE_DATA_PATH."
-      complete: "missing_files 0."
+      rewritten: "rewritten true, absolute_paths 0 and attach_ok true."
+      complete: "missing_files 0 and every ops table read_ok true."
       faithful: "every ops table's restored_count and restored_checksum equal prod_count and prod_checksum."
       one_way_writes: "write_probe_in_scratch true and write_probe_in_production false."
       measured: "dump, copy, restore and rewrite timings, dump_bytes and prefix_sizes present."
@@ -247,9 +254,10 @@ blocks:
       torn_down: "every torn_down flag true."
       verifier: "bin/venv-python -m scripts.ducklake_smoke.restore_rehearsal verify-evidence <file> prints RESTORE_REHEARSAL_OK or names each failed criterion and exits 1."
       result_rule: >-
-        A step that raises, or a run that stops before write_probe, is a mechanical failure: fix it and run the sitting
-        again. Only a completed run's evidence is a result; a failed criterion in it is the spike's answer, committed as it
-        stands, and sends SIT to its fallback (rec-5024 decides).
+        A step error, or a run that stops before write_probe for any other cause, is a mechanical failure: fix it and run
+        the sitting again. A run that completes, or stops on rewritten false, missing files or a failed ATTACH or table
+        read, is a result: its evidence is committed as it stands, a failed criterion in it is the spike's answer, and that
+        sends SIT to its fallback (rec-5024 decides).
 - id: maintenance-pointer
   file: docs/contracts/ducklake_maintenance.yaml
   before: |
@@ -268,18 +276,18 @@ blocks:
         change_class: prose_improvement
   after: |
     amendment_log:
-      - {date: "2026-11-09", semantic_break: false, change_class: governance_note_add, summary: "PLAN-sit-restore-spike (Decision {{N}}): the description names the ephemeral-only restore_rehearsal verb and its contract; no verb of this function changes."}
+      - {date: "{{DATE}}", semantic_break: false, change_class: governance_note_add, summary: "PLAN-sit-restore-spike (Decision {{N}}): the description names the ephemeral-only restore_rehearsal verb and its contract; no verb of this function changes."}
       - date: "2026-10-25"
         semantic_break: false
         change_class: prose_improvement
 - id: d126-pointer
   file: docs/DECISIONS.md
   before: |
-    [Amendment 2026-10-29, Decision 239: the telemetry content reader's operator-approved deploy job changes its code and configuration, outside cl.1's UpdateFunctionCode-only scope.]
+    > **Update (2026-11-06):** Decision 248 clauses 1 and 6 bring terraform/github under CI: terraform-github-apply.yml applies it behind one operator approval, and its two terraform/bootstrap roles and the apply App key's resource policy change only by a bootstrap apply an ADMIN-session agent runs on the operator's explicit direction.
   after: |
-    [Amendment 2026-10-29, Decision 239: the telemetry content reader's operator-approved deploy job changes its code and configuration, outside cl.1's UpdateFunctionCode-only scope.]
+    > **Update (2026-11-06):** Decision 248 clauses 1 and 6 bring terraform/github under CI: terraform-github-apply.yml applies it behind one operator approval, and its two terraform/bootstrap roles and the apply App key's resource policy change only by a bootstrap apply an ADMIN-session agent runs on the operator's explicit direction.
 
-    [Amendment {{DATE}}, Decision {{N}}: the admin tier admits the restore rehearsal sitting (docs/contracts/restore-rehearsal.yaml) for an ADMIN-container agent under explicit human direction, on ephemeral functions and a throwaway Neon branch only.]
+    > **Update ({{DATE}}):** Decision {{N}} cl.1 admits the restore rehearsal sitting (docs/contracts/restore-rehearsal.yaml) to the admin tier for an ADMIN-container agent under explicit human direction, on ephemeral functions and a throwaway Neon branch only.
 - id: d81-pointer
   file: docs/DECISIONS.md
   before: |
