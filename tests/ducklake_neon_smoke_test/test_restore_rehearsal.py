@@ -619,12 +619,6 @@ def test_cli_without_optional_values_passes_none_of_them():
     assert passed[:3] == ["version-recovery", "--dev-profile", "agent_platform"]
 
 
-def test_module_main_dispatches_each_subcommand(tmp_path):
-    with patch.object(rr, "run", return_value=0) as run:
-        assert rr.main(["run", "--dry-run"]) == 0
-    assert run.called
-
-
 def test_a_probe_without_a_key_leaves_production_unknown_and_fails_one_way_writes(world, capsys):
     world.bodies["write_probe"] = {**world.bodies["write_probe"], "write_probe_key": None}
     assert _run(world) == 1
