@@ -95,7 +95,7 @@ blocks:
   file: docs/contracts/restore-rehearsal.yaml
   before: ''
   after: |
-    # SIT restore rehearsal (rec-5023, Decision {{N}}). Class D mechanism contract: the ephemeral-only rehearsal verb, its
+    # SIT restore rehearsal (rec-5023, Decision 251). Class D mechanism contract: the ephemeral-only rehearsal verb, its
     # boundary, the human-directed ADMIN sitting, the consistency rule, the counts-only evidence and the verifier's exit
     # criteria. PUBLIC repository (Decision 101): logical names only; no host, DSN, password, bucket name or ARN anywhere.
     contract:
@@ -115,7 +115,7 @@ blocks:
         agent_surface: docs/DECISIONS.md
 
     amendment_log:
-      - {date: "2026-11-09", semantic_break: false, change_class: field_add, summary: "PLAN-sit-restore-spike (rec-5023, Decision {{N}}): created."}
+      - {date: "2026-11-09", semantic_break: false, change_class: field_add, summary: "PLAN-sit-restore-spike (rec-5023, Decision 251): created."}
 
     boundary:
       binding: >-
@@ -146,13 +146,15 @@ blocks:
         noncurrent versions expire under the bucket's existing lifecycle. Fenced by code, not IAM: the checksum function's
         catalog login is the shared owner login (Decision 230 cl.2), held to a READ_ONLY ATTACH and the refusal of every
         other action; PlatformDev holds write on the whole bucket, used here only through key builders that refuse a path
-        outside the rehearsal prefix (copy_data's destination, probe_absent, version_recovery); the child branch is a
+        outside the rehearsal prefix (copy_data's destination, probe_absent, version_recovery, and the teardown fallback
+        below); the child branch is a
         copy-on-write copy of PROD whose PROD roles stay valid on its endpoint for the sitting, and only the target role's
         DSN is given to a function. That target role is minted by the Neon API, so it can likely read the branch's copy of
         the whole PROD database, telemetry catalog included (inferred); only PlatformAdmin can read its password, and
         PlatformAdmin already reads the PROD catalog DSN. The dump, telemetry catalog included, exists outside the DR
         bucket only in the restore function's /tmp. Decision 81 cl.7's closed read boundary admits the checksum reader and copy_data for a
-        sitting only (Decision {{N}} cl.3).
+        sitting only (Decision 251 cl.3).
+        The restored scratch copy's stats index is outside Decision 214 cl.2, which binds live catalog schemas.
 
     verb:
       action: restore_rehearsal
@@ -163,7 +165,8 @@ blocks:
       event: "{action: restore_rehearsal, step, confirm, run_id, plus the step's fields below}"
       steps:
         restore: >-
-          Downloads the dump to /tmp from the presigned URL in its event (never logged or returned), runs pg_restore
+          Downloads the dump to /tmp from the presigned URL in its event (never logged or returned), creates schema
+          ducklake_ops as the target role (a schema-filtered restore does not create it), runs pg_restore
           --schema=ducklake_ops --no-owner --no-acl --exit-on-error (no --clean) into the target, and returns restore_ms,
           ducklake_ops's max snapshot_id, absolute_paths (schema, table, data file and delete file rows with
           path_is_relative false), foreign_owned (relations not owned by the target role) and foreign_acl (ACL entries
@@ -192,12 +195,13 @@ blocks:
           bucket's lifecycle expires the noncurrent versions.
       responses: >-
         Counts, booleans, durations, table names and relative keys only. Every error, the verb's own or any raised beneath
-        it, returns only the step and the exception class, never its message.
+        it, returns only the step, the exception class and a value-free code (a SQLSTATE or pg_restore's exit status),
+        never its message.
 
     sitting:
       where: An ADMIN cloud session (agent_platform_admin present); no cloud container has TCP/5432 egress, so all SQL runs in the functions.
       actor: >-
-        An ADMIN-container agent, only under the operator's explicit direction in that session (Decision {{N}}), each
+        An ADMIN-container agent, only under the operator's explicit direction in that session (Decision 251), each
         admin-profile command acknowledged per protected-actions.yaml. Never self-directed or scheduled. Calls that need no
         admin grant run as agent_platform (--dev-profile). The orchestrator redacts before it prints or writes evidence.
       orchestrator: "bin/venv-python -m scripts.ducklake_neon_smoke_test --restore-rehearsal --profile agent_platform_admin --dev-profile agent_platform --evidence-out <file>"
@@ -205,12 +209,12 @@ blocks:
         - {id: present, principal: none, rule: "--dry-run prints every admin mutation the run will make, in order; the operator's approve line names that list before the run."}
         - {id: teardown_handles, principal: none, rule: "Resolve every teardown handle before anything is created; fail loud if one cannot be resolved."}
         - {id: dump, principal: agent_platform_admin, rule: "One on-demand dump through the catalog-dr Function URL; record its size and wall time (Decision 88 egress); presign a GET on that one object, valid 15 minutes, passed only in the restore step's event and never printed or written."}
-        - {id: copy_data, principal: agent_platform, rule: "Server-side copy ducklake/ into <scratch>/ducklake/ after the dump; record objects, bytes, wall time."}
         - {id: neon_target, principal: agent_platform_admin, rule: "Child branch, role and empty database, all restore_rehearsal_<run_id>, each call made only once the branch's operations have finished."}
         - {id: functions, principal: agent_platform_admin, rule: "Create maintenance-restore-rehearsal-ephemeral (maintenance-smoke role) and reader-restore-rehearsal-ephemeral (reader role), both on the production maintenance function's layers, from lambda-packages/<sha>/ducklake-maintenance.zip where <sha> is the commit last deployed to the production maintenance function (Decision 249); before any step, each function's CodeSha256 must equal the production function's, else stop."}
+        - {id: copy_data, principal: agent_platform, rule: "Server-side copy ducklake/ into <scratch>/ducklake/ after the dump, once the target and functions exist; record objects, bytes, wall time."}
         - {id: steps, principal: agent_platform_admin, rule: "Invoke restore, rewrite, verify, prod_checksum, duckdb_copy, write_probe in that order; any failure stops the run and goes to teardown."}
         - {id: probe_absent, principal: agent_platform, rule: "The probe's relative key is absent under ducklake/ (head-object 404)."}
-        - {id: teardown, principal: "maintenance-smoke role via the restore function (scratch prefix); agent_platform_admin (functions, branch)", rule: "In finally, whatever failed; the scratch prefix is deleted before the functions; record each in torn_down; a false is cleaned by hand at once."}
+        - {id: teardown, principal: "maintenance-smoke role via the restore function (scratch prefix); agent_platform_admin (functions, branch)", rule: "In finally, whatever failed; the scratch prefix is deleted before the functions, by the restore function's teardown_scratch or, if that cannot run, by agent_platform through the scratch key builder; record each in torn_down; a false is cleaned by hand at once."}
       version_recovery: >-
         Separate subcommand, run as agent_platform with S3 calls only: put a scratch object under <scratch>/versioning/,
         delete it, list its versions, copy the noncurrent version back, read it and compare sha256, then delete it.
