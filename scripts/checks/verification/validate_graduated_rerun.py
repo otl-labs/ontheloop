@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -141,9 +142,11 @@ def _run_record(row: dict, root: Path, rg_stub_dir: str | None = None) -> tuple[
     return _run_in_process(row, root)
 
 
-def evaluate(root: Path) -> list[Outcome]:
-    """Every live record's outcome at `root`, in check_id order."""
+def evaluate(root: Path, *, select: Callable[[dict], bool] | None = None) -> list[Outcome]:
+    """Every live record's outcome at `root`, in check_id order; with `select`, only the rows it accepts."""
     rows = sorted(load_entries(root), key=lambda r: str(r.get("check_id", "")))
+    if select is not None:
+        rows = [r for r in rows if select(r)]
     outcomes: dict[str, Outcome] = {}
     to_run: list[dict] = []
     for row in rows:
