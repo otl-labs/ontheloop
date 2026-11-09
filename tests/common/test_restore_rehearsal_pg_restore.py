@@ -140,7 +140,8 @@ def test_local_rewrite_reads_every_table(
             reopened.execute(f"INSERT INTO {alias}.a SELECT 1000 + i, 'w' FROM range(5) t(i)")
             snapshot = int(reopened.execute(f"SELECT max(snapshot_id) FROM {alias}.snapshots()").fetchone()[0])
             files = reopened.execute(
-                f"SELECT data_file, delete_file FROM ducklake_list_files('{alias}', ?, schema => ?, snapshot_version => {snapshot})",
+                f"SELECT data_file, delete_file FROM ducklake_list_files('{alias}', ?, schema => ?, "
+                f"snapshot_version => {snapshot})",
                 ["b", "main"],
             ).fetchall()
             assert files and all(f[0].startswith(new_path) for f in files)

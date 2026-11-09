@@ -16,7 +16,7 @@ pytestmark = pytest.mark.unit
 
 RUN = "20261109t193000_a1b2c3"
 FN = "agent-platform-maint-restore-rehearsal-ephemeral"
-TARGET_URI = "postgresql://restore_rehearsal_x:p%2Fw%40@ep-fake.example.invalid/restore_rehearsal_x?sslmode=require"  # pragma: allowlist secret -- fake fixture value
+TARGET_URI = "postgresql://restore_rehearsal_x:p%2Fw%40@ep-fake.example.invalid/restore_rehearsal_x?sslmode=require"  # pragma: allowlist secret
 SCRATCH = f"s3://agent-platform-data-lake/ducklake-neon-smoke/restore-rehearsal/{RUN}/"
 FAKE_HOST = "ep-secret-host.example.invalid"
 FAKE_PW = "hunter2-fake"  # pragma: allowlist secret -- fake fixture value

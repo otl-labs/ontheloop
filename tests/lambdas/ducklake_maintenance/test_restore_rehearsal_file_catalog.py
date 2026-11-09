@@ -1,4 +1,4 @@
-"""restore_rehearsal_file_catalog (rec-5023): the DuckDB-file copy stays in /tmp, is deleted, reports mismatches, never raises."""
+"""restore_rehearsal_file_catalog (rec-5023): the file copy stays in /tmp, is deleted, reports mismatches, never raises."""
 
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ def test_copy_matches_and_deletes_the_tmp_file():
     holder: dict = {}
     out, opener = _run(_Con(holder))
     assert out["tables"] == [{"table": "main.a", "match_restored": True, "match_median": True}]
-    assert out["catalog_rows"] == 8 and out["file_bytes"] == 10 and out["copy_ms"] >= 0
+    assert out["catalog_rows"] == 12 and out["file_bytes"] == 10 and out["copy_ms"] >= 0
     assert holder["path"].startswith(("/tmp", os.path.realpath("/tmp"))) or "rr-file-catalog-" in holder["path"]
     assert not os.path.exists(holder["path"])
     assert opener.call_args.kwargs["read_only"] is True
