@@ -1,0 +1,263 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: graduated-rerun-plan-readers
+intent: >-
+  Keep every graduated record that reads plan content checked when a plan changes, so that a plans-only merge, which
+  will run the fast tier on main (Decision 205 clause 5, PLAN-plans-only-main-fast-tier), is never left to Main
+  Canary alone. A new fast-tier check reruns the live graduated records whose command reads docs/plans/ on any
+  diff under docs/plans/, which also gates plan PRs before merge. First of two atomic plans for rec-4114.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-graduated-rerun-plan-readers.yaml
+phase: >-
+  T4.9a (c10's prerequisite; closes no criterion itself -- PLAN-plans-only-main-fast-tier closes T4.9a:c10). Itinerary
+  item D4 (verdict-ci ITINERARY.md, Actions-capacity lever CMTS-06).
+scope:
+  - file: scripts/checks/verification/validate_graduated_rerun.py
+    action: Modify
+    purpose: >-
+      evaluate(root, select=None) gains a keyword-only `select: Callable[[dict], bool] | None`; when given, only rows
+      for which select(row) is true are evaluated (static verdicts and child runs alike), in the same check_id order.
+      select=None is byte-for-byte today's behaviour. Expose the known-red loader the new check reuses (keep
+      _load_known_red's name and return shape; import it, never copy it). No other behaviour changes.
+  - file: scripts/checks/verification/validate_graduated_rerun_plan_readers.py
+    action: Create
+    purpose: >-
+      PLAN_READ_RE = re.compile(r"(?<!:!)docs/plans") and reads_plans(row) -> bool: true when the record's
+      check_spec command (a list joined with spaces, or a string) matches PLAN_READ_RE, so a `:!docs/plans/`
+      pathspec exclusion never selects a record. Registered check validate_graduated_rerun_plan_readers(failed,
+      root=None): prints "=== Graduated plan-reader re-run ===", runs validate_graduated_rerun.evaluate(tree,
+      select=reads_plans), loads known_red.yaml through the existing loader (a load problem fails, as in the full
+      check), and appends one failure per red selected record NOT on known_red.yaml, worded like the full check's
+      ("graduated record <id> (guard_target <t>) is red: <detail>"). A listed record that passes, a listed id that is
+      not live and duplicates are NOT checked here (validate_graduated_rerun and validate_known_red_shrinks own those),
+      so this check never reports a known_red.yaml bookkeeping fault the full check also reports. Prints
+      "<n> plan-reading graduated_records examined, <r> red (<l> listed)" and calls registry.examined(n,
+      unit="graduated_records"); n == 0 calls registry.skipped("no graduated record reads docs/plans/") rather than
+      passing silently (Decision 170). Module docstring states the selection rule and names rec-5040 as the
+      indirection residual.
+  - file: scripts/checks/verification/_manifest.py
+    action: Modify
+    purpose: >-
+      New Entry after validate_graduated_rerun: name/attr validate_graduated_rerun_plan_readers, module
+      scripts.checks.verification.validate_graduated_rerun_plan_readers, pre=True, pre_globs=("docs/plans/**",
+      "scripts/checks/verification/validate_graduated_rerun.py",
+      "scripts/checks/verification/validate_graduated_rerun_plan_readers.py"), full_segment=None (pre-only: the full
+      tier already reruns every record through validate_graduated_rerun).
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      Exactly one line: function_to_category gains `validate_graduated_rerun_plan_readers: code_regression` beside
+      validate_graduated_rerun's row (validate_ci_rca_taxonomy needs every registered check mapped). NEAR_CAP (500 of
+      500 effective lines at e6eda786; other unbuilt plans append too): measure on main at build time; if the line
+      would pass 500, apply the config class relief valve in this file only (compact one resolved row, never a
+      raise) as its own commit.
+  - file: tests/checks/verification/test_validate_graduated_rerun_plan_readers.py
+    action: Create
+    purpose: >-
+      Reuse test_validate_graduated_rerun.py's tmp_path fixture shape (copy its small _record/_listed helpers; do not
+      import from another test module). Tests: test_selects_commands_that_read_plans (a command naming
+      docs/plans/PLAN-x.yaml is selected; one naming only `':!docs/plans/'` is not; one naming no plans path is not);
+      test_unlisted_red_plan_reader_fails; test_listed_red_plan_reader_passes; test_red_non_plan_record_is_ignored
+      (a red record whose command does not read docs/plans adds no failure); test_listed_green_record_is_not_reported
+      (bookkeeping stays the full check's); test_no_plan_readers_is_a_skip (registry.skipped, not a pass);
+      test_manifest_entry_is_pre_only_on_plan_diffs (the manifest Entry has pre=True, full_segment None, and
+      scripts.validate._should_run_in_pre(entry.pre_globs, ["docs/plans/PLAN-x.yaml"], True) is True while
+      ["src/x.py"] is False); test_evaluate_without_select_is_unchanged (evaluate(tmp_path) and
+      evaluate(tmp_path, select=None) return the same outcomes over a mixed fixture).
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: >-
+      Exactly the sidecar block decision-244-update (docs/plans/approved/graduated-rerun-plan-readers.yaml): a dated
+      Update under Decision 244's Coverage line, with {{DATE}} filled with the build date (UTC). Nothing else.
+bundled_recommendations: []
+followon_recs: [rec-5040]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - >-
+    validate_graduated_rerun_plan_readers runs in --pre whenever a diff touches docs/plans/** or its two modules,
+    reruns exactly the live records whose command names docs/plans/ outside a `:!` exclusion (16 at e6eda786), and
+    fails on an unlisted red one; the eight new tests pass and fail before the change.
+  - Every existing test in tests/checks/verification/test_validate_graduated_rerun.py and test__manifest.py passes unchanged.
+  - >-
+    On the real repository the check passes (the one selected red record, roadmap-projection-delta-bounded-to-t15,
+    is on known_red.yaml) and takes under 90 s of wall clock locally.
+  - docs/DECISIONS.md equals the approved sidecar with {{DATE}} filled (scripts.roadmap.approved_text verify exits 0).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Prove the new check's selection, failure, skip and manifest behaviour.
+    command: bin/venv-python -m pytest tests/checks/verification/test_validate_graduated_rerun_plan_readers.py -q
+    expected: Exit 0, all passed. Red before (the module and the select parameter do not exist).
+    fix_if: A test fails -- fix the check or evaluate() at root; never loosen a test.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Unit tests of one check module; the --pre pytest_diff runs them whenever the module or its test changes.
+  - step: 2
+    phase: pre-deploy
+    action: Prove the full rerun check and the manifest are unchanged in behaviour.
+    command: >-
+      bin/venv-python -m pytest tests/checks/verification/test_validate_graduated_rerun.py
+      tests/checks/verification/test__manifest.py tests/checks/verification/test__graduated_rerun_nodes.py -q
+    expected: Exit 0, all passed.
+    fix_if: An existing test fails -- the select parameter changed default behaviour; restore it.
+    hermetic: true
+    graduation: not-applicable
+  - step: 3
+    phase: pre-deploy
+    action: Run the new check against the real repository and time it.
+    command: >-
+      /usr/bin/time -f "wall=%e" bin/venv-python -c "from scripts.checks.verification.validate_graduated_rerun_plan_readers
+      import validate_graduated_rerun_plan_readers as v; f=[]; v(f); assert not f, f; print('PLAN_READERS_OK')"
+    expected: >-
+      Prints a count line naming 16 or more plan-reading records, then PLAN_READERS_OK; wall under 90 s. A count far
+      from 16 means the selector drifted.
+    fix_if: >-
+      A red record that is not on known_red.yaml is a real red on main: stop and report it to the coordinator (it is
+      not this build's to fix or list); a wall time over 90 s goes to the plan owner before merge.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Live-repo run of the check itself; the --pre tier runs it on every plan diff after merge.
+  - step: 4
+    phase: pre-deploy
+    action: Prove the committed Decision text is the approved text.
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug graduated-rerun-plan-readers --expect
+      7ac38d464616233859ba5d605407351f2b13618788d6457352ff8abcbccfc75f  # pragma: allowlist secret
+    expected: Exit 0.
+    fix_if: A difference is reported -- restore the approved words; any other change is an approved_text plan defect.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Duplicates validate_merge_step's approved-text binding, which runs in the PR fast tier (git-ops.yaml
+      merge_step_coverage).
+  - step: 5
+    phase: pre-deploy
+    action: Fast tier on the branch (advisory outside CI; PR CI is authoritative), including validate_ci_rca_taxonomy.
+    command: bin/venv-python -m scripts.validate --pre
+    expected: Exit 0; the output includes the "=== Graduated plan-reader re-run ===" section (the plan file is in the diff).
+    fix_if: A failure in this plan's files -- fix at root; never loosen a test.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      Lint the changed Python files and run the full tier, as the handoff policy requires before commit; start
+      scripts.validate as its own backgrounded run (2 h limit) and read its verdict with --verify-head.
+    command: >-
+      bin/venv-python -m ruff check scripts/checks/verification/validate_graduated_rerun.py
+      scripts/checks/verification/validate_graduated_rerun_plan_readers.py scripts/checks/verification/_manifest.py
+      tests/checks/verification/test_validate_graduated_rerun_plan_readers.py
+      && bin/venv-python -m ruff format --check scripts/checks/verification/validate_graduated_rerun.py
+      scripts/checks/verification/validate_graduated_rerun_plan_readers.py scripts/checks/verification/_manifest.py
+      tests/checks/verification/test_validate_graduated_rerun_plan_readers.py
+      && bin/venv-python -m scripts.validate;
+      bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: >-
+      ruff exit 0, and validation_result --verify-head exit 0 for HEAD; the verdict is --verify-head, never the
+      backgrounded run's own exit status.
+    fix_if: >-
+      A failure in this plan's files: fix at root and rerun the full tier from the start (handoff_policy). A failure
+      only in another open red's tests is not this build's to fix: wait for that repair per the implement skill.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: Confirm the next plan PR's pr-validate ran the new check.
+    command: >-
+      echo "Open the pr-validate log of the first PR touching docs/plans/ after this merge and find the line
+      '=== Graduated plan-reader re-run ==='"
+    expected: The section is present with an examined count of 16 or more.
+    fix_if: Absent -- the manifest Entry is not selected in --pre; reopen this plan through a plan-defect report.
+    hermetic: false
+test_obligations:
+  - source: scripts/checks/verification/validate_graduated_rerun_plan_readers.py
+    behavior: Records whose command names docs/plans/ outside a `:!` exclusion are selected, and only those.
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_graduated_rerun_plan_readers.py::test_selects_commands_that_read_plans
+    red_green_expectation: red before (the module does not exist), green after
+  - source: scripts/checks/verification/validate_graduated_rerun_plan_readers.py
+    behavior: An unlisted red plan-reading record fails the fast tier; a listed one does not.
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_graduated_rerun_plan_readers.py::test_unlisted_red_plan_reader_fails
+    red_green_expectation: red before (the module does not exist), green after
+  - source: scripts/checks/verification/validate_graduated_rerun_plan_readers.py
+    behavior: No selected record is a declared skip, never a silent pass (Decision 170).
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_graduated_rerun_plan_readers.py::test_no_plan_readers_is_a_skip
+    red_green_expectation: red before (the module does not exist), green after
+  - source: scripts/checks/verification/validate_graduated_rerun.py
+    behavior: evaluate(select=...) narrows the rerun; evaluate() without select is unchanged.
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_graduated_rerun_plan_readers.py::test_evaluate_without_select_is_unchanged
+    red_green_expectation: red before (evaluate takes no select keyword), green after
+  - source: scripts/checks/verification/_manifest.py
+    behavior: The new check is pre-only and selected exactly on diffs under docs/plans/ or its modules.
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_graduated_rerun_plan_readers.py::test_manifest_entry_is_pre_only_on_plan_diffs
+    red_green_expectation: red before (no such Entry), green after
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: ci-rca classifies a failure of the new check as code_regression.
+    verification_step: 5
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Registry data checked by validate_ci_rca_taxonomy in the fast tier; no behavior of its own.
+constraints:
+  - >-
+    The sidecar block decision-244-update is operator-approved Decision text (Decision 246): the build places it
+    exactly, fills only {{DATE}}, and never edits it; a needed change is an approved_text plan defect
+    (implement-scope-boundary.yaml deviation_trigger.escalation). The sidecar is not grandfathered: the planning
+    worker dispatches its approval run at the plan PR's final head and the operator approves it on GitHub before the
+    plan PR merges.
+  - >-
+    This build merges under the approve-once standing_authorisation item: its only always_ask content is the
+    sidecar-bound Decision text, so it merges on code review PROCEED + green CI once validate_merge_step is green.
+  - >-
+    Select by the record's command text, never by guard_target (Decision 244's options rejected guard_target-keyed
+    re-runs because guard_target misses inputs). One selector (reads_plans) and one evaluator (evaluate); never a
+    second list of record ids (Decision 104).
+  - No change to which records the full tier reruns, to known_red.yaml, or to validate_known_red_shrinks; no test is loosened or skipped.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - >-
+    Decision-scout verdict: FLAGS_FOUND (one scout run over both rec-4114 plans; this plan is its Decision 73 WARN's
+    resolution). CITE: 205, 73, 249, 246, 170, 104, 159, 181, 244. Decisions triaged: 202 of 202. Flag taken: Decision
+    73 WARN (the amendment's premise that every full-only plan reader repeats a fast-tier check was false for
+    graduated records) -> this check, chosen by the operator over a declared residual; Decision 244 cl.1's "The fast
+    tier does not run it" gets the dated Update in the sidecar.
+  - >-
+    Operator rulings (2026-11-09, this planning thread): decision card "Close it in this plan" (close the gap rather
+    than accept Canary latency); "write the plan". Split into this plan and PLAN-plans-only-main-fast-tier, this one
+    first, settled on a blind consult (shared folder rec-4114-plan/advisor-brief-split/ADVICE.md) per the
+    2026-11-09 ruling that splitting and ordering are mechanical forks.
+  - >-
+    Measured at e6eda786: 16 records selected by PLAN_READ_RE; one (roadmap-projection-delta-bounded-to-t15) is red
+    and on known_red.yaml; the subset took 34 s wall locally (8 workers). Three of the 16 read plans generically
+    (plan-document-fallback-reevaluation-schema, vp-replay-pr-relative-predicate-population,
+    roadmap-projection-delta-bounded-to-t15); the rest name specific files or assert plan-related text.
+  - >-
+    PLAN-plans-only-main-fast-tier depends on this plan's build merging first: until then a plans-only merge would
+    leave these records to Main Canary. The coordinator starts that build only after this one merges.
+  - >-
+    Residual (Decision 181 cl.2): a record that reads plans only through an indirection, and any pre=False registry
+    check that reads docs/plans/, are rec-5040's.
+  - 'red_overlap (2026-11-09, main e6eda786): {"verdict": "clear", "slo_hours": 4, "reds": []}'
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Decision 244 and Decision 205 clause 5 read (only the plan-cited sections)
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    validate_graduated_rerun.py: add the keyword-only select parameter to evaluate(); run step 2 to confirm
+    unchanged behaviour.
+  - Create validate_graduated_rerun_plan_readers.py and its test file; register the manifest Entry and the taxonomy row.
+  - Place the sidecar block decision-244-update in docs/DECISIONS.md with {{DATE}} filled; run step 4.
+  - Execute Verification Plan steps 1-6 -- loop until pass; on an unrecoverable failure stop and RCA (Decision 55).
+  - 'Report: what was implemented, verification results, the step 3 count and wall time.'
+rollback: Revert the build PR; the full tier's validate_graduated_rerun is untouched throughout.
