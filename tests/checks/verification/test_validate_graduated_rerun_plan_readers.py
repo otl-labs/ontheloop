@@ -53,6 +53,8 @@ def test_selects_commands_that_read_plans() -> None:
     assert readers.reads_plans(_row(["python", "-c", "ROOT/'docs'/'plans'"]))
     assert not readers.reads_plans(_row(["git", "diff", "--", ":!docs/plans/"]))
     assert not readers.reads_plans(_row(["echo", "nothing"]))
+    assert readers.reads_plans({"check_spec": {"command": "cat docs/plans/PLAN-x.yaml"}})
+    assert not readers.reads_plans({})
 
 
 def test_unlisted_red_plan_reader_fails(tmp_path: Path) -> None:
