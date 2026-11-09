@@ -88,3 +88,68 @@ def test_ref_without_the_contract_exits_2(repo: Path, tmp_path: Path) -> None:
     _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "x")
     assert cc.main(["check", str(tmp_path / "o"), "--ref", "other"]) == 2
     assert cc.main(["write", str(tmp_path / "o"), "--ref", "other"]) == 2
+
+
+def _commit_file(repo: Path, rel: str, data: bytes) -> None:
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "c")
+
+
+def test_harness_profiles_are_copied_beside_the_contract(repo: Path, tmp_path: Path) -> None:
+    _commit_file(repo, "docs/contracts/coordinator-harness-x.yaml", b"profile: x\n")
+    _commit_file(repo, "docs/contracts/other.yaml", b"other: 1\n")
+    out = tmp_path / "out"
+    assert cc.main(["write", str(out), "--ref", "main"]) == 0
+    copy = (out / "coordinator-harness-x.yaml").read_bytes()
+    header, body = copy.split(b"\n", 1)
+    assert header.startswith(b"# GENERATED from docs/contracts/coordinator-harness-x.yaml at ")
+    assert body == b"profile: x\n"
+    assert not (out / "other.yaml").exists()
+    assert cc.main(["check", str(out), "--ref", "main"]) == 0
+
+
+def test_stale_profile_copy_is_stale(repo: Path, tmp_path: Path) -> None:
+    _commit_file(repo, "docs/contracts/coordinator-harness-x.yaml", b"profile: x\n")
+    out = tmp_path / "out"
+    cc.main(["write", str(out), "--ref", "main"])
+    copy = out / "coordinator-harness-x.yaml"
+    copy.write_bytes(copy.read_bytes() + b"edit\n")
+    assert cc.main(["check", str(out), "--ref", "main"]) == 1
+
+
+def test_missing_profile_copy_exits_2(repo: Path, tmp_path: Path) -> None:
+    _commit_file(repo, "docs/contracts/coordinator-harness-x.yaml", b"profile: x\n")
+    out = tmp_path / "out"
+    cc.main(["write", str(out), "--ref", "main"])
+    (out / "coordinator-harness-x.yaml").unlink()
+    contract_copy = out / "coordinator.yaml"
+    contract_copy.write_bytes(contract_copy.read_bytes() + b"edit\n")
+    assert cc.main(["check", str(out), "--ref", "main"]) == 2
+
+
+def test_orphan_profile_copy_is_stale(repo: Path, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    cc.main(["write", str(out), "--ref", "main"])
+    (out / "coordinator-harness-gone.yaml").write_bytes(b"# old\n")
+    (out / "unrelated.txt").write_bytes(b"keep\n")
+    assert cc.main(["check", str(out), "--ref", "main"]) == 1
+    assert cc.main(["write", str(out), "--ref", "main"]) == 0
+    assert not (out / "coordinator-harness-gone.yaml").exists()
+    assert (out / "unrelated.txt").read_bytes() == b"keep\n"
+    assert cc.main(["check", str(out), "--ref", "main"]) == 0
+
+
+def test_crlf_contract_round_trips_byte_identical(repo: Path, tmp_path: Path) -> None:
+    _git(repo, "config", "core.autocrlf", "false")
+    raw = b"contract: one\r\nline: two\r\n"
+    _commit_file(repo, cc.CONTRACT, raw)
+    out = tmp_path / "out"
+    assert cc.main(["write", str(out), "--ref", "main"]) == 0
+    copy = out / "coordinator.yaml"
+    assert copy.read_bytes().split(b"\n", 1)[1] == raw
+    assert cc.main(["check", str(out), "--ref", "main"]) == 0
+    copy.write_bytes(copy.read_bytes().replace(b"\r\n", b"\n"))
+    assert cc.main(["check", str(out), "--ref", "main"]) == 1

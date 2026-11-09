@@ -64,7 +64,7 @@ def test_playbook_kit_rules_and_templates() -> None:
         "on no",
     ):
         assert needle in batch[0], needle
-    beat = [_flat(b) for b in _DOC["liveness"]["watcher"]["beat"] if "[contract] or [repo:<path>]" in b]
+    beat = [_flat(b) for b in _DOC["liveness"]["watcher"]["beat"] if "[contract], [harness] or [repo:<path>]" in b]
     assert len(beat) == 1 and "naming no open rec" in beat[0]
     entry = next(e for e in _DOC["amendment_log"] if "PLAN-coordinator-playbook-kit" in _flat(e["summary"]))
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(entry["date"]))
