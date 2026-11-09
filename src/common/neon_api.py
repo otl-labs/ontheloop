@@ -129,7 +129,16 @@ def create_branch(api_key: str, project_id: str, name: str | None = None) -> dic
 def delete_branch(api_key: str, project_id: str, branch_id: str) -> None:
     """DELETE /projects/{project_id}/branches/{branch_id}. Raises NeonApiError on non-2xx."""
     url = f"{_NEON_API_BASE}/projects/{project_id}/branches/{branch_id}"
-    _api_delete(api_key, url)
+    for attempt in range(_LOCKED_RETRIES + 1):
+        wait_operations(api_key, project_id, branch_id)
+        try:
+            _api_delete(api_key, url)
+            return
+        except NeonApiError as exc:
+            if exc.status != 423 or attempt == _LOCKED_RETRIES:
+                raise
+            time.sleep(_LOCKED_BACKOFF_S)
+    raise NeonApiError("unreachable")  # pragma: no cover
 
 
 def list_branches(api_key: str, project_id: str) -> list[dict[str, str]]:

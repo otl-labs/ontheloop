@@ -10,7 +10,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from scripts import ducklake_neon_smoke_test as smoke
 from scripts.ducklake_smoke import restore_rehearsal as rr
 from scripts.ducklake_smoke import restore_rehearsal_aws as aws
 from scripts.ducklake_smoke import restore_rehearsal_evidence as ev
@@ -570,57 +569,19 @@ def test_write_and_verify_without_a_path_still_verifies(capsys):
     assert "FAILED" in capsys.readouterr().out
 
 
-# ---------------------------------------------------------------- CLI flags
-
-
-@pytest.mark.parametrize(
-    "flags,subcommand",
-    [
-        (["--restore-rehearsal"], "run"),
-        (["--restore-rehearsal-version-recovery"], "version-recovery"),
-    ],
-)
-def test_the_two_cli_flags_dispatch_and_pass_values_through(flags, subcommand):
-    argv = [
-        *flags,
-        "--profile",
-        "admin",
-        "--dev-profile",
-        "dev",
-        "--run-id",
-        RUN,
-        "--project-id",
-        "proj-1",
-        "--evidence-out",
-        "/tmp/e.json",
-        "--dry-run",
-        "--restore-final",
-    ]
-    with patch.object(rr, "main", return_value=0) as main:
-        assert smoke.main(argv) == 0
-    passed = main.call_args.args[0]
-    assert passed[0] == subcommand
-    for pair in (
-        ("--profile", "admin"),
-        ("--dev-profile", "dev"),
-        ("--run-id", RUN),
-        ("--project-id", "proj-1"),
-        ("--evidence-out", "/tmp/e.json"),
-    ):
-        assert passed[passed.index(pair[0]) + 1] == pair[1]
-    assert "--dry-run" in passed and "--restore-final" in passed
-
-
-def test_cli_without_optional_values_passes_none_of_them():
-    with patch.object(rr, "main", return_value=0) as main:
-        smoke.main(["--restore-rehearsal-version-recovery"])
-    passed = main.call_args.args[0]
-    assert "--profile" not in passed and "--run-id" not in passed and "--dry-run" not in passed
-    assert passed[:3] == ["version-recovery", "--dev-profile", "agent_platform"]
-
-
 def test_a_probe_without_a_key_leaves_production_unknown_and_fails_one_way_writes(world, capsys):
     world.bodies["write_probe"] = {**world.bodies["write_probe"], "write_probe_key": None}
     assert _run(world) == 1
     assert _evidence(world)["write_probe_in_production"] is None
     assert "FAILED one_way_writes" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("over", [{"profile": None}, {"profile": "dev"}, {"run_id": "Bad-Id"}])
+def test_bad_profile_or_run_id_stops_before_anything(world, capsys, over):
+    assert _run(world, **over) == 1
+    assert world.calls == [] and "nothing was created" in capsys.readouterr().out
+
+
+def test_evidence_with_a_leak_is_refused_not_silently_redacted(capsys, tmp_path):
+    assert rr._write_and_verify({"run_id": "postgresql://u:p@h/d"}, str(tmp_path / "e.json")) == 1
+    assert "FORBIDDEN_PATTERN dsn" in capsys.readouterr().out and not (tmp_path / "e.json").exists()

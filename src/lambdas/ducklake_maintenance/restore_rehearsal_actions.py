@@ -83,6 +83,8 @@ def _guard(event: dict[str, Any]) -> tuple[str, str, dict[str, str] | None]:
         if not dsn["username"].startswith("restore_rehearsal_") or not dsn["dbname"].startswith("restore_rehearsal_"):
             raise RestoreRehearsalRefused("target is not a rehearsal login")
     prefix = scratch_prefix(run_id)
+    if step in ("rewrite", "verify", "duckdb_copy", "write_probe") and not event.get("data_path"):
+        raise RestoreRehearsalRefused("data_path is required")
     for key in ("data_path", "scratch_prefix"):
         value = event.get(key)
         if value is not None and (not isinstance(value, str) or not value.startswith(prefix) or ".." in value):

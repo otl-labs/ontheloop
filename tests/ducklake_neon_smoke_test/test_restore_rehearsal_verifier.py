@@ -122,6 +122,7 @@ def test_duckdb_copy_mismatch_is_named_without_changing_the_exit_code():
     [
         "postgresql://u:p@host/db",
         "ep-cool-123.eu-west-2.aws.neon.tech",
+        "abcd1234.lambda-url.eu-west-2.on.aws",
         "https://bkt.s3.eu-west-2.amazonaws.com/k?X-Amz-Signature=abc",
         "X-Amz-Security-Token",
         "AKIA" + "ABCDEFGHIJKLMNOP",

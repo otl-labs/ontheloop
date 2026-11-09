@@ -549,3 +549,10 @@ def test_response_fields_match_no_forbidden_pattern(monkeypatch):
     text = json.dumps(out)
     for needle in ("amazonaws", "X-Amz", "postgresql://", "agent-platform-data-lake", "s3://"):
         assert needle not in text
+
+
+@pytest.mark.parametrize("step", ["rewrite", "verify", "duckdb_copy", "write_probe"])
+def test_steps_that_open_a_catalog_require_a_data_path(monkeypatch, step):
+    _env(monkeypatch)
+    with _no_connection(), pytest.raises(rra.RestoreRehearsalRefused):
+        rra.action_restore_rehearsal(_ev(step, snapshot_id=1), None)

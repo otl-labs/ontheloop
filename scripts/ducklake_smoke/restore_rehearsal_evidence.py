@@ -27,7 +27,7 @@ _secrets: set[str] = set()
 
 FORBIDDEN_PATTERNS: dict[str, re.Pattern[str]] = {
     "dsn": re.compile(r"postgres(?:ql)?://\S+", re.I),
-    "host": re.compile(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:neon\.tech|amazonaws\.com|rds\.amazonaws\.com)\b", re.I),
+    "host": re.compile(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:neon\.tech|amazonaws\.com|on\.aws)\b", re.I),
     "url": re.compile(r"https?://\S+", re.I),
     "presign_credential": re.compile(r"X-Amz-[A-Za-z-]+|\b(?:AKIA|ASIA)[A-Z0-9]{12,}\b", re.I),
     "arn": re.compile(r"arn:aws[a-z-]*:\S+"),

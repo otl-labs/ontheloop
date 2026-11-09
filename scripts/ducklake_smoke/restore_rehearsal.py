@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import sys
 import time
@@ -23,6 +24,7 @@ from scripts.ducklake_smoke import restore_rehearsal_evidence as ev
 from src.common import neon_api
 
 META_SCHEMA = "ducklake_ops"
+_RUN_ID_RE = re.compile(r"[a-z0-9_]{1,64}")
 PROBE_EXPECTED_KEYS = ("write_probe_key", "write_probe_in_scratch", "catalog_format_version")
 
 
@@ -134,6 +136,7 @@ class _Sitting:
 
     def dump_and_target(self) -> None:
         started = time.monotonic()
+        ev.register_secret(self.handles["dr_url"])
         self.dump = aws.dump_catalog(self.admin, self.handles["dr_url"], self.args.region)
         self.evidence.update(dump_bytes=self.dump.get("dump_bytes"), dump_ms=int((time.monotonic() - started) * 1000))
         target = aws.create_target(
@@ -284,6 +287,12 @@ def run(args: argparse.Namespace) -> int:
     if not args.project_id:
         say("NEON_PROJECT_ID is required (--project-id or env); nothing was created")
         return 1
+    if not args.profile or args.profile == args.dev_profile:
+        say("--profile must name the admin profile and differ from --dev-profile; nothing was created")
+        return 1
+    if not _RUN_ID_RE.fullmatch(run_id):
+        say("--run-id must match [a-z0-9_]{1,64}; nothing was created")
+        return 1
     sitting = _Sitting(args, run_id)
     result, failure = True, None
     try:
@@ -310,7 +319,13 @@ def run(args: argparse.Namespace) -> int:
 
 
 def _write_and_verify(evidence: dict[str, Any], path: str | None) -> int:
-    text = json.dumps(ev.redact_value(evidence), indent=1, sort_keys=True)
+    raw = json.dumps(evidence, indent=1, sort_keys=True)
+    hits = ev.forbidden_hits(raw)
+    if hits:
+        for hit in sorted(set(hits)):
+            say(f"FORBIDDEN_PATTERN {hit}")
+        return 1
+    text = raw
     if path:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
@@ -331,16 +346,17 @@ def version_recovery(args: argparse.Namespace) -> int:
     key = aws.scratch_key(run_id, "versioning/object.bin")
     data = os.urandom(64)
     digest = hashlib.sha256(data).hexdigest()
-    s3.put_object(Bucket=aws.BUCKET, Key=key, Body=data)
-    s3.delete_object(Bucket=aws.BUCKET, Key=key)
-    versions = s3.list_object_versions(Bucket=aws.BUCKET, Prefix=key).get("Versions", [])
-    noncurrent = [v for v in versions if not v.get("IsLatest")]
-    if noncurrent:
-        s3.copy_object(
-            Bucket=aws.BUCKET, Key=key, CopySource={"Bucket": aws.BUCKET, "Key": key, "VersionId": noncurrent[0]["VersionId"]}
-        )
-    restored = hashlib.sha256(s3.get_object(Bucket=aws.BUCKET, Key=key)["Body"].read()).hexdigest() if noncurrent else ""
-    s3.delete_object(Bucket=aws.BUCKET, Key=key)
+    try:
+        s3.put_object(Bucket=aws.BUCKET, Key=key, Body=data)
+        s3.delete_object(Bucket=aws.BUCKET, Key=key)
+        versions = s3.list_object_versions(Bucket=aws.BUCKET, Prefix=key).get("Versions", [])
+        noncurrent = [v for v in versions if not v.get("IsLatest")]
+        if noncurrent:
+            source = {"Bucket": aws.BUCKET, "Key": key, "VersionId": noncurrent[0]["VersionId"]}
+            s3.copy_object(Bucket=aws.BUCKET, Key=key, CopySource=source)
+        restored = hashlib.sha256(s3.get_object(Bucket=aws.BUCKET, Key=key)["Body"].read()).hexdigest() if noncurrent else ""
+    finally:
+        s3.delete_object(Bucket=aws.BUCKET, Key=key)
     evidence = {
         "run_id": run_id,
         "measured_at": datetime.now(timezone.utc).isoformat(),

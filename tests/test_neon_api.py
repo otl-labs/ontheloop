@@ -344,14 +344,13 @@ def test_delete_branch_issues_delete_request():
         resp = MagicMock()
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
-        resp.read.return_value = b""
+        resp.read.return_value = b"" if req.get_method() == "DELETE" else b'{"operations": []}'
         return resp
 
     with patch("urllib.request.urlopen", side_effect=_urlopen):
         neon_api.delete_branch(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID)
 
-    assert len(captured_reqs) == 1
-    req = captured_reqs[0]
+    req = [r for r in captured_reqs if r.get_method() == "DELETE"][0]
     assert req.get_method() == "DELETE"
     assert _FAKE_BRANCH_ID in req.full_url
 
@@ -559,3 +558,31 @@ def test_non_423_error_is_not_retried():
         with pytest.raises(neon_api.NeonApiError):
             neon_api.create_database(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID, "db1", "owner1")
     assert len(sent) == 1
+
+
+def _delete_urlopen(results: list):
+    queue = list(results)
+
+    def _urlopen(req):
+        if req.get_method() == "GET":
+            return _mock_urlopen(_ops_body("finished"))
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return _mock_urlopen(item)
+
+    return _urlopen
+
+
+def test_delete_branch_waits_then_retries_423_and_gives_up_on_other_errors():
+    with patch("urllib.request.urlopen", side_effect=_delete_urlopen([_http_error(423), _http_error(423), {}])):
+        with patch("src.common.neon_api.time.sleep") as sleep:
+            neon_api.delete_branch(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID)
+    assert sleep.call_count == 2
+    errs = [_http_error(423) for _ in range(neon_api._LOCKED_RETRIES + 1)]
+    with patch("urllib.request.urlopen", side_effect=_delete_urlopen(errs)), patch("src.common.neon_api.time.sleep"):
+        with pytest.raises(neon_api.NeonApiError):
+            neon_api.delete_branch(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID)
+    with patch("urllib.request.urlopen", side_effect=_delete_urlopen([_http_error(500)])):
+        with pytest.raises(neon_api.NeonApiError):
+            neon_api.delete_branch(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID)
