@@ -100,6 +100,8 @@ blocks:
         Proves, in the single account and before any SIT resource exists, that a PROD catalog dump restores into an empty
         Neon target under its own role, that ducklake_metadata.data_path rewritten outside the production data path reads
         every table and takes writes there only, and records the timings, sizes and catalog format SIT's reset depends on.
+        It also reports whether the restored catalog copies into a DuckDB-file catalog that reads identically, as
+        evidence for the catalog-backend choice; that leg gates nothing here.
         A failed criterion is a result: SIT falls back to a fresh-init catalog with synthetic data (rec-5024 decides).
       subject: restore-rehearsal
       evaluator:
@@ -157,6 +159,12 @@ blocks:
         prod_checksum: >-
           Checksum function only: ATTACH the PROD ops catalog READ_ONLY with the function's own catalog DSN and return the
           same per-table count and checksum AT (VERSION => the restored snapshot_id).
+        duckdb_copy: >-
+          Restore function only, after prod_checksum: ATTACH the target READ_ONLY, initialise a DuckDB-file DuckLake
+          catalog in the function's /tmp, copy every ducklake_ops catalog table into it, then ATTACH both READ_ONLY at
+          the scratch data_path and compare each table's count and checksum at the restored snapshot and at the median
+          snapshot_id. Returns copy_ms, catalog_rows, file_bytes and per-table match booleans. The file is never
+          uploaded or returned: column statistics can hold text fragments, so it dies with the function.
         write_probe: >-
           ATTACH the target at the new data_path, create rehearsal_probe.t and insert 100 rows (data inlining disabled), and
           return the new file's relative key, whether it exists under the scratch prefix, and ducklake_metadata.version.
@@ -176,7 +184,7 @@ blocks:
         - {id: copy_data, principal: agent_platform, rule: "Server-side copy ducklake/ into <scratch>/ducklake/ after the dump; record objects, bytes, wall time."}
         - {id: neon_target, principal: agent_platform_admin, rule: "Child branch, role and empty database, all restore_rehearsal_<run_id>."}
         - {id: functions, principal: agent_platform_admin, rule: "Create maintenance-restore-rehearsal-ephemeral (maintenance-smoke role, the production maintenance function's layers) and reader-restore-rehearsal-ephemeral (reader role) from lambda-packages/ducklake-maintenance.zip; record its CodeSha256."}
-        - {id: steps, principal: agent_platform_admin, rule: "Invoke restore, rewrite, verify, prod_checksum, write_probe in that order; any failure stops the run and goes to teardown."}
+        - {id: steps, principal: agent_platform_admin, rule: "Invoke restore, rewrite, verify, prod_checksum, duckdb_copy, write_probe in that order; any failure stops the run and goes to teardown."}
         - {id: probe_absent, principal: agent_platform, rule: "The probe's relative key is absent under ducklake/ (head-object 404)."}
         - {id: teardown, principal: "agent_platform_admin (functions, branch); agent_platform (scratch prefix)", rule: "In finally, whatever failed; record each in torn_down; a false is cleaned by hand at once."}
       version_recovery: >-
@@ -194,7 +202,8 @@ blocks:
       keys: [run_id, measured_at, maintenance_zip_sha256, dump_bytes, dump_ms, copy_objects, copy_bytes, copy_ms, restore_ms,
         rewrite_ms, meta_schemas, snapshot_ids, absolute_paths, foreign_owned, foreign_acl, missing_files, ops_tables,
         telemetry_tables, telemetry_data_files, write_probe_key, write_probe_in_scratch, write_probe_in_production,
-        catalog_format_version, prefix_sizes, torn_down]
+        catalog_format_version, prefix_sizes, duckdb_copy_ms, duckdb_catalog_rows, duckdb_file_bytes, duckdb_copy_tables,
+        torn_down]
       ops_tables: one row per table with restored_count, restored_checksum, prod_count, prod_checksum.
       forbidden: any host, DSN, password, bucket name, account id or ARN; the verifier refuses a file that carries one.
 
@@ -206,6 +215,7 @@ blocks:
       one_way_writes: "write_probe_in_scratch true and write_probe_in_production false."
       measured: "dump, copy, restore and rewrite timings, dump_bytes and prefix_sizes present."
       format: "catalog_format_version recorded; the candidate-engine leg is rec-5036."
+      file_catalog: "Reported, not gating: every duckdb_copy_tables row matches at both snapshots; the verifier prints DUCKDB_COPY_OK or names each mismatch."
       torn_down: "every torn_down flag true."
       verifier: "bin/venv-python -m scripts.ducklake_smoke.restore_rehearsal verify-evidence <file> prints RESTORE_REHEARSAL_OK or names each failed criterion and exits 1."
 - id: maintenance-pointer
