@@ -395,3 +395,162 @@ def test_api_request_sends_bearer_token():
 
     assert len(captured_reqs) == 1
     assert captured_reqs[0].get_header("Authorization") == f"Bearer {_FAKE_API_KEY}"
+
+
+# ---------------------------------------------------------------------------
+# restore-rehearsal additions: names, roles, databases, operations, 423, no-body errors
+# ---------------------------------------------------------------------------
+
+_FAKE_PASSWORD = "pw-fake-SECRETVALUE9"  # pragma: allowlist secret -- fake fixture value
+
+
+def _http_error(code: int, body: bytes = b"") -> urllib.error.HTTPError:
+    err = urllib.error.HTTPError(url="https://example.com", code=code, msg="x", hdrs=None, fp=None)  # type: ignore[arg-type]
+    err.read = lambda: body
+    return err
+
+
+def _ops_body(*statuses: str, branch: str = _FAKE_BRANCH_ID) -> dict:
+    return {"operations": [{"branch_id": branch, "status": s} for s in statuses]}
+
+
+def test_create_branch_name_is_sent():
+    sent = []
+
+    def _urlopen(req):
+        sent.append(json.loads(req.data))
+        return _mock_urlopen({"branch": {"id": _FAKE_BRANCH_ID}, "endpoints": [{"type": "read_write", "host": "h"}]})
+
+    with patch("urllib.request.urlopen", side_effect=_urlopen):
+        neon_api.create_branch(_FAKE_API_KEY, _FAKE_PROJECT_ID, name="restore_rehearsal_x")
+    assert sent[0]["branch"] == {"name": "restore_rehearsal_x"}
+
+
+def test_create_branch_error_has_no_body_and_carries_status():
+    err = _http_error(500, b"postgres://user:pw@host/db")
+    with patch("urllib.request.urlopen", side_effect=err):
+        with pytest.raises(neon_api.NeonApiError) as info:
+            neon_api.create_branch(_FAKE_API_KEY, _FAKE_PROJECT_ID)
+    assert info.value.status == 500
+    assert "postgres://" not in str(info.value)
+
+
+def test_create_branch_missing_id_error_does_not_echo_body():
+    body = {"branch": {}, "endpoints": [{"connection_uri": "postgres://u:p@h/d"}]}
+    with patch("urllib.request.urlopen", return_value=_mock_urlopen(body)):
+        with pytest.raises(neon_api.NeonApiError) as info:
+            neon_api.create_branch(_FAKE_API_KEY, _FAKE_PROJECT_ID)
+    assert "postgres://" not in str(info.value)
+
+
+def test_list_branches_returns_names_and_ids_only():
+    body = {"branches": [{"id": "br-1", "name": "main", "connection_uri": "x"}, {"id": "br-2"}]}
+    with patch("urllib.request.urlopen", return_value=_mock_urlopen(body)):
+        out = neon_api.list_branches(_FAKE_API_KEY, _FAKE_PROJECT_ID)
+    assert out == [{"id": "br-1", "name": "main"}, {"id": "br-2", "name": ""}]
+
+
+def test_wait_operations_returns_when_branch_finished():
+    body = _ops_body("finished", "failed")
+    body["operations"].append({"branch_id": "other", "status": "running"})
+    with patch("urllib.request.urlopen", return_value=_mock_urlopen(body)):
+        neon_api.wait_operations(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID)
+
+
+def test_wait_operations_polls_until_done():
+    bodies = iter([_ops_body("running"), _ops_body("finished")])
+    with (
+        patch("urllib.request.urlopen", side_effect=lambda req: _mock_urlopen(next(bodies))),
+        patch("src.common.neon_api.time.sleep") as sleep,
+    ):
+        neon_api.wait_operations(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID, poll_s=0.5)
+    sleep.assert_called_once_with(0.5)
+
+
+def test_wait_operations_times_out():
+    with (
+        patch("urllib.request.urlopen", side_effect=lambda req: _mock_urlopen(_ops_body("running"))),
+        patch("src.common.neon_api.time.sleep"),
+    ):
+        with pytest.raises(neon_api.NeonApiError, match="unfinished"):
+            neon_api.wait_operations(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID, timeout_s=0)
+
+
+def _branch_urlopen(post_responses: list, sent: list):
+    queue = list(post_responses)
+
+    def _urlopen(req):
+        if req.get_method() == "GET":
+            return _mock_urlopen(_ops_body("finished"))
+        sent.append((req.full_url, json.loads(req.data)))
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return _mock_urlopen(item)
+
+    return _urlopen
+
+
+def test_create_role_request_shape_and_password():
+    sent: list = []
+    body = {"role": {"name": "r", "password": _FAKE_PASSWORD}}
+    with patch("urllib.request.urlopen", side_effect=_branch_urlopen([body], sent)):
+        pw = neon_api.create_role(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID, "r")
+    assert pw == _FAKE_PASSWORD
+    assert sent == [(f"https://console.neon.tech/api/v2/projects/{_FAKE_PROJECT_ID}/branches/{_FAKE_BRANCH_ID}/roles", {"role": {"name": "r"}})]
+
+
+def test_create_role_without_password_fails_without_body():
+    sent: list = []
+    with patch("urllib.request.urlopen", side_effect=_branch_urlopen([{"role": {}}], sent)):
+        with pytest.raises(neon_api.NeonApiError, match="no password"):
+            neon_api.create_role(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID, "r")
+
+
+def test_create_role_error_never_holds_password():
+    sent: list = []
+    err = _http_error(400, _FAKE_PASSWORD.encode())
+    with patch("urllib.request.urlopen", side_effect=_branch_urlopen([err], sent)):
+        with pytest.raises(neon_api.NeonApiError) as info:
+            neon_api.create_role(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID, "r")
+    assert _FAKE_PASSWORD not in str(info.value)
+    assert info.value.status == 400
+
+
+def test_create_database_request_shape():
+    sent: list = []
+    with patch("urllib.request.urlopen", side_effect=_branch_urlopen([{}], sent)):
+        neon_api.create_database(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID, "db1", "owner1")
+    assert sent[0][0].endswith(f"/branches/{_FAKE_BRANCH_ID}/databases")
+    assert sent[0][1] == {"database": {"name": "db1", "owner_name": "owner1"}}
+
+
+def test_create_database_locked_423_retries_then_succeeds():
+    sent: list = []
+    with (
+        patch("urllib.request.urlopen", side_effect=_branch_urlopen([_http_error(423), _http_error(423), {}], sent)),
+        patch("src.common.neon_api.time.sleep"),
+    ):
+        neon_api.create_database(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID, "db1", "owner1")
+    assert len(sent) == 3
+
+
+def test_locked_423_gives_up_after_bounded_retries():
+    sent: list = []
+    errs = [_http_error(423) for _ in range(neon_api._LOCKED_RETRIES + 1)]
+    with (
+        patch("urllib.request.urlopen", side_effect=_branch_urlopen(errs, sent)),
+        patch("src.common.neon_api.time.sleep"),
+    ):
+        with pytest.raises(neon_api.NeonApiError) as info:
+            neon_api.create_database(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID, "db1", "owner1")
+    assert info.value.status == 423
+    assert len(sent) == neon_api._LOCKED_RETRIES + 1
+
+
+def test_non_423_error_is_not_retried():
+    sent: list = []
+    with patch("urllib.request.urlopen", side_effect=_branch_urlopen([_http_error(500)], sent)):
+        with pytest.raises(neon_api.NeonApiError):
+            neon_api.create_database(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID, "db1", "owner1")
+    assert len(sent) == 1
