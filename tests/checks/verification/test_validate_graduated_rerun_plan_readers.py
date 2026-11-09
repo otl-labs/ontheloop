@@ -137,3 +137,19 @@ def test_evaluate_without_select_is_unchanged(tmp_path: Path) -> None:
     _record(tmp_path, "rec-b")
     assert rerun.evaluate(tmp_path) == rerun.evaluate(tmp_path, select=None)
     assert [o.check_id for o in rerun.evaluate(tmp_path)] == ["rec-a", "rec-b"]
+
+
+def test_missing_known_red_list_fails(tmp_path: Path) -> None:
+    _record(tmp_path, "rec-ok", PLAN_GREEN)
+    failed = _run(tmp_path)
+    assert len(failed) == 1
+    assert "known_red.yaml" in failed[0]
+
+
+def test_load_sensitive_record_is_reported_not_red(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    flag = tmp_path / "flag"
+    script = f"echo docs/plans/x; if [ -e {flag} ]; then exit 0; else touch {flag}; exit 1; fi"
+    _record(tmp_path, "rec-flaky", ["bash", "-c", script])
+    _listed(tmp_path, [])
+    assert _run(tmp_path) == []
+    assert "load-sensitive" in capsys.readouterr().out
