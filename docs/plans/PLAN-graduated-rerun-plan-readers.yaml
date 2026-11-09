@@ -20,8 +20,9 @@ scope:
     purpose: >-
       evaluate(root, select=None) gains a keyword-only `select: Callable[[dict], bool] | None`; when given, only rows
       for which select(row) is true are evaluated (static verdicts and child runs alike), in the same check_id order.
-      select=None is byte-for-byte today's behaviour. Expose the known-red loader the new check reuses (keep
-      _load_known_red's name and return shape; import it, never copy it). No other behaviour changes.
+      select=None is byte-for-byte today's behaviour; unselected rows are never statically checked or run (filter
+      before the pool, never after). The new check imports _load_known_red as is (a deliberate same-package import
+      of a private helper; never copy it). No other behaviour changes.
   - file: scripts/checks/verification/validate_graduated_rerun_plan_readers.py
     action: Create
     purpose: >-
@@ -42,10 +43,11 @@ scope:
     action: Modify
     purpose: >-
       New Entry after validate_graduated_rerun: name/attr validate_graduated_rerun_plan_readers, module
-      scripts.checks.verification.validate_graduated_rerun_plan_readers, pre=True, pre_globs=("docs/plans/**",
-      "scripts/checks/verification/validate_graduated_rerun.py",
-      "scripts/checks/verification/validate_graduated_rerun_plan_readers.py"), full_segment=None (pre-only: the full
-      tier already reruns every record through validate_graduated_rerun).
+      scripts.checks.verification.validate_graduated_rerun_plan_readers, pre=True, full_segment=None (pre-only: the
+      full tier already reruns every record through validate_graduated_rerun). pre_globs: validate_verification_registry's
+      pre_globs tuple as it stands on main at build time (it already covers validate_graduated_rerun's import closure:
+      0 of 80 closure paths uncovered at e6eda786) plus "docs/plans/**"; then validate_pre_glob_closure must report 0
+      uncovered paths for the new Entry. The check therefore also runs on code PRs touching that closure (cost below).
   - file: config/ci_rca_taxonomy.yaml
     action: Modify
     purpose: >-
@@ -62,7 +64,9 @@ scope:
       docs/plans/PLAN-x.yaml is selected; one naming only `':!docs/plans/'` is not; one naming no plans path is not);
       test_unlisted_red_plan_reader_fails; test_listed_red_plan_reader_passes; test_red_non_plan_record_is_ignored
       (a red record whose command does not read docs/plans adds no failure); test_listed_green_record_is_not_reported
-      (bookkeeping stays the full check's); test_no_plan_readers_is_a_skip (registry.skipped, not a pass);
+      (bookkeeping stays the full check's); test_select_never_runs_unselected_records (an unselected record whose
+      command would write a sentinel file under tmp_path leaves no sentinel after evaluate(tmp_path,
+      select=reads_plans), while a selected record's sentinel is written); test_no_plan_readers_is_a_skip (registry.skipped, not a pass);
       test_manifest_entry_is_pre_only_on_plan_diffs (the manifest Entry has pre=True, full_segment None, and
       scripts.validate._should_run_in_pre(entry.pre_globs, ["docs/plans/PLAN-x.yaml"], True) is True while
       ["src/x.py"] is False); test_evaluate_without_select_is_unchanged (evaluate(tmp_path) and
@@ -77,9 +81,9 @@ followon_recs: [rec-5040]
 infrastructure_dependencies: []
 acceptance_criteria:
   - >-
-    validate_graduated_rerun_plan_readers runs in --pre whenever a diff touches docs/plans/** or its two modules,
+    validate_graduated_rerun_plan_readers runs in --pre whenever a diff touches docs/plans/** or its import closure,
     reruns exactly the live records whose command names docs/plans/ outside a `:!` exclusion (16 at e6eda786), and
-    fails on an unlisted red one; the eight new tests pass and fail before the change.
+    fails on an unlisted red one; the nine new tests pass and fail before the change.
   - Every existing test in tests/checks/verification/test_validate_graduated_rerun.py and test__manifest.py passes unchanged.
   - >-
     On the real repository the check passes (the one selected red record, roadmap-projection-delta-bounded-to-t15,
@@ -105,7 +109,10 @@ verification_plan:
     expected: Exit 0, all passed.
     fix_if: An existing test fails -- the select parameter changed default behaviour; restore it.
     hermetic: true
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: >-
+      Suite-covered: these existing test files run in the full tier's unit suite and in --pre whenever the modules
+      change; a graduated record would repeat them, and the step is green before the change.
   - step: 3
     phase: pre-deploy
     action: Run the new check against the real repository and time it.
@@ -138,7 +145,9 @@ verification_plan:
     phase: pre-deploy
     action: Fast tier on the branch (advisory outside CI; PR CI is authoritative), including validate_ci_rca_taxonomy.
     command: bin/venv-python -m scripts.validate --pre
-    expected: Exit 0; the output includes the "=== Graduated plan-reader re-run ===" section (the plan file is in the diff).
+    expected: >-
+      Exit 0; the output includes the "=== Graduated plan-reader re-run ===" section (the check's own modules are in
+      the build diff).
     fix_if: A failure in this plan's files -- fix at root; never loosen a test.
     hermetic: false
     graduation: not-applicable
@@ -164,15 +173,6 @@ verification_plan:
       only in another open red's tests is not this build's to fix: wait for that repair per the implement skill.
     hermetic: false
     graduation: not-applicable
-  - step: 7
-    phase: post-deploy
-    action: Confirm the next plan PR's pr-validate ran the new check.
-    command: >-
-      echo "Open the pr-validate log of the first PR touching docs/plans/ after this merge and find the line
-      '=== Graduated plan-reader re-run ==='"
-    expected: The section is present with an examined count of 16 or more.
-    fix_if: Absent -- the manifest Entry is not selected in --pre; reopen this plan through a plan-defect report.
-    hermetic: false
 test_obligations:
   - source: scripts/checks/verification/validate_graduated_rerun_plan_readers.py
     behavior: Records whose command names docs/plans/ outside a `:!` exclusion are selected, and only those.
@@ -190,7 +190,12 @@ test_obligations:
     test_selector: tests/checks/verification/test_validate_graduated_rerun_plan_readers.py::test_no_plan_readers_is_a_skip
     red_green_expectation: red before (the module does not exist), green after
   - source: scripts/checks/verification/validate_graduated_rerun.py
-    behavior: evaluate(select=...) narrows the rerun; evaluate() without select is unchanged.
+    behavior: evaluate(select=...) never runs an unselected record, so the fast tier pays only for the subset.
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_graduated_rerun_plan_readers.py::test_select_never_runs_unselected_records
+    red_green_expectation: red before (evaluate takes no select keyword), green after
+  - source: scripts/checks/verification/validate_graduated_rerun.py
+    behavior: evaluate() without select is unchanged.
     verification_step: 1
     test_selector: tests/checks/verification/test_validate_graduated_rerun_plan_readers.py::test_evaluate_without_select_is_unchanged
     red_green_expectation: red before (evaluate takes no select keyword), green after
@@ -242,10 +247,21 @@ context:
     leave these records to Main Canary. The coordinator starts that build only after this one merges.
   - >-
     Residual (Decision 181 cl.2): a record that reads plans only through an indirection, and any pre=False registry
-    check that reads docs/plans/, are rec-5040's.
+    check that reads docs/plans/, are rec-5040's (filed 2026-11-09, read back as rec-5040 from file_rec). rec-4114
+    itself closes through the sibling plan's bundled_recommendations, not this one.
+  - >-
+    Fast-tier budget (Decisions 182, 208; non-test budget 270 s, warning 216 s): CI non-test time is 85-89 s on recent
+    plan PRs and 63-146 s on code PRs (critique r1, runs 42530284431, 42519106720, 42540015290, 42537454671,
+    42521012669); this check adds about 27-34 s locally (4-8 cores), on plan PRs and on code PRs touching its import
+    closure. Measured headroom remains; the step 3 wall time is reported. The 16 records import only yaml and
+    pydantic today, which pr-validate installs; a future plan-reading record needing AWS or heavy dependencies would
+    go red in pr-validate first.
+  - "Decision-scout North Star: Serves NS.3 2/5 (engaged NS.3, NS.6, NS.8, NS.9)."
   - 'red_overlap (2026-11-09, main e6eda786): {"verdict": "clear", "slo_hours": 4, "reds": []}'
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: wording-check, round: 1, verdict: PASS, digest: 7ac38d464616233859ba5d605407351f2b13618788d6457352ff8abcbccfc75f, base: e6eda786a224d348d5e3620728e2c52b2ebcb0eb, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 8}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -259,5 +275,8 @@ execution_steps:
   - Create validate_graduated_rerun_plan_readers.py and its test file; register the manifest Entry and the taxonomy row.
   - Place the sidecar block decision-244-update in docs/DECISIONS.md with {{DATE}} filled; run step 4.
   - Execute Verification Plan steps 1-6 -- loop until pass; on an unrecoverable failure stop and RCA (Decision 55).
-  - 'Report: what was implemented, verification results, the step 3 count and wall time.'
+  - >-
+    Report: what was implemented; each VP step's result; the step 3 count and wall time; whether the full tier's
+    --verify-head passed; and the PR, CI and merge outcome as read back from GitHub (started, green, merged), never
+    assumed.
 rollback: Revert the build PR; the full tier's validate_graduated_rerun is untouched throughout.
