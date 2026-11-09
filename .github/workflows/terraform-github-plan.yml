@@ -1,67 +1,81 @@
 name: terraform-github-plan
 
-# PR-time read-only plan of terraform/github (rec-4335; docs/contracts/github-org-transfer.yaml
-# prerequisites.terraform-github-pr-time-plan). The root is CI-applied by terraform-github-apply.yml after
-# one operator approval and never auto-applies (Decision 77, Decision 248); this job gives every PR that
-# touches it a live provider contact BEFORE merge (the #1316 failure class). Advisory: NOT a required check
-# (Decision 83). It never applies. The plan's own text never reaches the public log (stdout discarded);
-# plan.bin and plan.json never leave the runner (rec-4230; github_token is ephemeral since rec-4355, so
-# neither carries the App token).
+# Trusted PR-time plan of terraform/github (rec-4638, Decision 238; originally rec-4335). Runs main's definition on
+# pull_request_target: the PR is data, never steps, so no job checks out the PR head or merge ref. The PR's Terraform is
+# overlaid from the merge tree, screened as text before any credential exists, planned under
+# agent-platform-github-ci-trusted-github-plan (one state object and the provider mirror, nothing else) from the S3
+# provider mirror, and reported by counts and attribute names only. No LLM runs here (Decision 205 cl.2). The root is
+# CI-applied by terraform-github-apply.yml after one operator approval and never auto-applies (Decision 77, Decision 248);
+# this job gives every PR that touches it a live provider contact BEFORE merge. Advisory: NOT a required check
+# (Decision 83). It never applies and never persists plan.bin or plan.json. Never workflow_call.
+# validate_trusted_plan_environment polices this file; every local path it executes is code-owned.
 #
-# Credentials: AWS through OIDC as agent-platform-github-ci-planner under its PR-sub trust with a
-# NON-reserved role-session-name (Decision 92 pt2), whose only grant on this root's state is
-# s3:GetObject on tfstate/github/terraform.tfstate; GitHub through a short-lived installation token
-# from the read-only otl-labs plan App (Metadata, Administration and Actions read), scoped to this
-# repository, narrowed at mint time and revoked at job end. Same-repo, non-Dependabot PRs only: forks
-# and Dependabot runs receive no repository secrets. Accepted residual (Decision 205's
-# secrets-in-a-pull_request-job note): a same-repo PR author can edit this file and read the App key;
-# the App is read-only and installed on this one repository.
+# Credentials: AWS through OIDC as agent-platform-github-ci-trusted-github-plan; GitHub through a short-lived installation
+# token from the read-only otl-labs plan App (Metadata, Administration and Actions read), minted for this repository only
+# and revoked at job end. Same-repo, non-Dependabot PRs aimed at main only.
+# Accepted residual until VP 17 of
+# PLAN-trusted-plan-github-root: an older copy of the plan App key stays a repository-level secret, readable by a
+# same-repo PR author's own workflow, until the operator deletes it. The App is read-only, but until rec-4538
+# narrows its installations to this repository, a token minted from the key can read every repository the App is
+# installed on.
 #
-# Reading the report (terraform/github/CLAUDE.md points here): this job is the root's pre-merge live
-# provider contact; agent sessions cannot plan this root themselves. Read its PR comment before
-# merging. It posts counts, per-resource actions and changed attribute names on the PR, never values.
-# Its VISIBILITY line says whether the App can see security_and_analysis and the ruleset's
-# bypass_actors; while either is hidden, the CI apply's admin plan is authoritative for that field. The
-# job fails on a plan error and on any destroy or replace. terraform-github-apply.yml applies the merged change.
-# Configuration: repository secret TF_GITHUB_PLAN_APP_PRIVATE_KEY; repository variables
-# TF_GITHUB_PLAN_APP_CLIENT_ID and TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS (the reviewers' logins,
-# resolved to ids at run time).
+# Reading the report (terraform/github/CLAUDE.md points here): this job is the root's pre-merge live provider contact;
+# agent sessions cannot plan this root themselves. Read its PR comment before merging. It posts counts, per-resource
+# actions and changed attribute names on the PR, never values. Its VISIBILITY line says whether the App can see
+# security_and_analysis and the ruleset's bypass_actors; while either is hidden, the CI apply's admin plan is
+# authoritative for that field. The job fails on a plan error and on any destroy or replace.
+# Operator rules: a PR that changes main.tf or the lockfile is refused (OVERLAY_REFUSED) and gets the operator's own plan
+# of the PR branch before merge; a resource type the screen refuses needs an allowlist-first PR that adds it to the policy
+# row (scripts/ci/terraform_hcl_screen_policy.py); after a lockfile bump merges, re-dispatch
+# terraform-provider-mirror-seed.yml before the next PR, else that PR's plan fails INIT_FAILED.
+# Configuration: tf-trusted-plan environment secret TF_GITHUB_PLAN_APP_PRIVATE_KEY; repository variables
+# TF_GITHUB_PLAN_APP_CLIENT_ID and TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS (the reviewers' logins, resolved to ids at
+# run time).
 
 on:
-  pull_request:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
     paths:
       - 'terraform/github/**'
-      - '.github/workflows/terraform-github-plan.yml'
-      - 'scripts/ci/terraform_github_plan_report.py'
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: terraform-github-plan-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   plan:
-    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]' }}
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main' && github.actor != 'dependabot[bot]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    environment: tf-trusted-plan
     permissions:
-      id-token: write       # OIDC for the planner role (PR-sub, non-reserved session)
       contents: read
-      pull-requests: write  # post the plan report comment
+      id-token: write
+      pull-requests: write
     env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       TF_IN_AUTOMATION: "1"
       TF_INPUT: "0"
-      WORKDIR: terraform/github
-      MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
 
     steps:
-      - uses: actions/checkout@v7
+      - id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: ./.github/actions/aws-region
+      - id: aws_region
+        uses: ./.github/actions/aws-region
 
-      - name: Check plan configuration
+      - name: Config check
+        id: config
         env:
           APP_CLIENT_ID: ${{ vars.TF_GITHUB_PLAN_APP_CLIENT_ID }}
           APP_PRIVATE_KEY_SET: ${{ secrets.TF_GITHUB_PLAN_APP_PRIVATE_KEY != '' }}
@@ -77,28 +91,44 @@ jobs:
           fi
           echo "CONFIG_OK"
 
-      - name: Configure AWS credentials (OIDC -- planner role, PR-sub, non-reserved session)
-        uses: aws-actions/configure-aws-credentials@v6
+      - name: Overlay the PR's Terraform
+        id: overlay
+        env:
+          OVERLAY_ROOT: terraform/github
+        run: python3 -I scripts/ci/trusted_plan_overlay.py | tee "$RUNNER_TEMP/overlay.txt"
+
+      - name: Screen the PR's Terraform
+        id: screen
+        run: python3 -I scripts/ci/terraform_hcl_screen.py screen --root terraform/github --policy terraform/github | tee "$RUNNER_TEMP/screen.txt"
+
+      - name: Assume the trusted github plan role
+        id: assume
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        env:
+          MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-planner
-          role-session-name: terraform-github-plan-pr
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-trusted-github-plan
+          role-session-name: tf-trusted-github-plan
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Mint the read-only plan App token (this repository only)
-        id: app_token
-        uses: actions/create-github-app-token@v3
+        id: mint
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ vars.TF_GITHUB_PLAN_APP_CLIENT_ID }}
           private-key: ${{ secrets.TF_GITHUB_PLAN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
           permission-metadata: read
           permission-administration: read
           permission-actions: read
 
       - name: Resolve reviewer ids (kept out of the log)
+        id: reviewers_step
         # The ids go to a runner-temp file, never to an env block or GITHUB_ENV, both of which the
         # public log echoes. Logins are public (CODEOWNERS); the variable holds logins, never ids.
         env:
-          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
           REVIEWER_LOGINS: ${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}
         run: |
           ids=""
@@ -115,47 +145,57 @@ jobs:
         run: echo "version=$(cat config/terraform-version)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v4
+        id: setup_tf
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
           terraform_version: ${{ steps.tfver.outputs.version }}
           terraform_wrapper: false
 
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
+      - name: Sync the provider mirror
+        id: mirror
+        run: aws s3 sync "s3://agent-platform-data-lake/tf-provider-mirror/" "$RUNNER_TEMP/tf-mirror" --exclude "*" --include "registry.terraform.io/integrations/github/*" --only-show-errors
 
-      - name: Terraform init (S3 backend, lock file read-only)
-        working-directory: ${{ env.WORKDIR }}
-        run: terraform init -input=false -lockfile=readonly
+      - name: Terraform init (hermetic, from the mirror)
+        id: init
+        run: >-
+          bash "$GITHUB_WORKSPACE/scripts/ci/quiet_run.sh" "$RUNNER_TEMP/tf-init.log" --
+          terraform -chdir=terraform/github init -input=false -plugin-dir="$RUNNER_TEMP/tf-mirror" -get=false
+          -lockfile=readonly -backend-config="region=$AWS_REGION"
 
       - name: Terraform plan (read-only, -lock=false, text never logged)
         id: plan
-        working-directory: ${{ env.WORKDIR }}
         env:
-          TF_VAR_github_token: ${{ steps.app_token.outputs.token }}
+          TF_VAR_github_token: ${{ steps.mint.outputs.token }}
         run: |
           TF_VAR_gated_apply_reviewer_user_ids="$(cat "$RUNNER_TEMP/reviewer_ids")"
           export TF_VAR_gated_apply_reviewer_user_ids
-          set +e
-          terraform plan -lock=false -input=false -no-color -detailed-exitcode -out=plan.bin > /dev/null
-          rc=$?
-          set -e
+          rc=0
+          bash "$GITHUB_WORKSPACE/scripts/ci/quiet_run.sh" "$RUNNER_TEMP/tf-plan.log" -- \
+            terraform -chdir=terraform/github plan -lock=false -input=false -detailed-exitcode -out=plan.bin || rc=$?
           echo "exit_code=${rc}" >> "$GITHUB_OUTPUT"
           if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
-            echo "::error::TF_GITHUB_PLAN_FAILED terraform plan exited ${rc} (diagnostics above)"
+            echo "::error::TF_GITHUB_PLAN_FAILED terraform plan exited ${rc} (the plan text is never logged)"
             exit 1
           fi
-          terraform show -json plan.bin > plan.json
-          rm -f plan.bin
+
+      - name: Render the plan as JSON (private file)
+        id: show
+        run: >-
+          bash "$GITHUB_WORKSPACE/scripts/ci/quiet_run.sh" "$RUNNER_TEMP/tf-show.log" --stdout "$RUNNER_TEMP/plan.json" --
+          terraform -chdir=terraform/github show -json plan.bin
+
+      - name: Backstop (Terraform's own parsed configuration)
+        id: backstop
+        run: python3 -I scripts/ci/terraform_hcl_screen.py backstop --plan-json "$RUNNER_TEMP/plan.json" --policy terraform/github
 
       - name: Probe what the plan App can see
+        id: probe
         # The two fields GitHub returns only to admin or ruleset-write callers
         # (github-org-transfer.yaml breakage_map.terraform_github_root): true / false / unknown each.
         # A null security_and_analysis reads as hidden; a "visible" bypass_actors that the refreshed
         # state contradicts is flagged by the report as a VISIBILITY CONFLICT, never trusted.
         env:
-          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
           REPO: ${{ github.repository }}
         run: |
           set +e
@@ -172,35 +212,56 @@ jobs:
 
       - name: Report (counts and attribute names only, never values)
         id: report
-        working-directory: ${{ env.WORKDIR }}
         env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           PLAN_EXIT: ${{ steps.plan.outputs.exit_code }}
-        run: |
-          python3 "$GITHUB_WORKSPACE/scripts/ci/terraform_github_plan_report.py" \
-            --plan-json plan.json --visibility "$RUNNER_TEMP/visibility.json" --plan-exit-code "$PLAN_EXIT" \
-            --head-sha "$HEAD_SHA" --run-url "$RUN_URL" --github-output "$GITHUB_OUTPUT" > "$RUNNER_TEMP/report.md"
-          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
-          cat "$RUNNER_TEMP/report.md"
+        run: >-
+          python3 -I "$GITHUB_WORKSPACE/scripts/ci/terraform_github_plan_report.py"
+          --plan-json "$RUNNER_TEMP/plan.json" --visibility "$RUNNER_TEMP/visibility.json" --plan-exit-code "$PLAN_EXIT"
+          --head-sha "$HEAD_SHA" --run-url "$RUN_URL" --github-output "$GITHUB_OUTPUT" > "$RUNNER_TEMP/report.md"
 
-      - name: Post the report on the PR
-        if: always() && steps.plan.outcome != 'skipped'
+      - name: Post the comment
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR_NUM: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          PLAN_OUTCOME: ${{ steps.plan.outcome }}
-          REPORT_OUTCOME: ${{ steps.report.outcome }}
+          APP_CLIENT_ID: ${{ vars.TF_GITHUB_PLAN_APP_CLIENT_ID }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+          O_AWS_REGION: ${{ steps.aws_region.outcome }}
+          O_CONFIG: ${{ steps.config.outcome }}
+          O_OVERLAY: ${{ steps.overlay.outcome }}
+          O_SCREEN: ${{ steps.screen.outcome }}
+          O_ASSUME: ${{ steps.assume.outcome }}
+          O_MINT: ${{ steps.mint.outcome }}
+          O_REVIEWERS_STEP: ${{ steps.reviewers_step.outcome }}
+          O_TFVER: ${{ steps.tfver.outcome }}
+          O_SETUP: ${{ steps.setup_tf.outcome }}
+          O_MIRROR: ${{ steps.mirror.outcome }}
+          O_INIT: ${{ steps.init.outcome }}
+          O_PLAN: ${{ steps.plan.outcome }}
+          O_SHOW: ${{ steps.show.outcome }}
+          O_BACKSTOP: ${{ steps.backstop.outcome }}
+          O_PROBE: ${{ steps.probe.outcome }}
+          O_REPORT: ${{ steps.report.outcome }}
         run: |
-          if [ "$REPORT_OUTCOME" = "success" ]; then
-            body=$(cat "$RUNNER_TEMP/report.md")
+          category=OK
+          for pair in O_AWS_REGION:CONFIG_MISSING O_CONFIG:CONFIG_MISSING O_OVERLAY:OVERLAY_REFUSED O_SCREEN:SCREEN_REFUSED \
+            O_ASSUME:ASSUME_FAILED O_MINT:MINT_FAILED O_REVIEWERS_STEP:REVIEWER_LOOKUP_FAILED O_TFVER:INIT_FAILED \
+            O_SETUP:INIT_FAILED O_MIRROR:MIRROR_FAILED O_INIT:INIT_FAILED O_PLAN:PLAN_FAILED O_SHOW:PLAN_FAILED \
+            O_BACKSTOP:BACKSTOP_REFUSED O_PROBE:REPORT_FAILED O_REPORT:REPORT_FAILED; do
+            name=${pair%%:*}
+            if [ "${!name}" != success ] && [ "$category" = OK ]; then category=${pair#*:}; fi
+          done
+          if [ "$category" = OK ]; then
+            BODY=$(<"$RUNNER_TEMP/report.md")
           else
-            body="### terraform/github PR-time plan (rec-4335)"$'\n\n'"**FAILED** at head \`${HEAD_SHA}\` (plan step: ${PLAN_OUTCOME}, report step: ${REPORT_OUTCOME}). Read the run log: ${RUN_URL}"
+            BODY=$(python3 -I "$GITHUB_WORKSPACE/scripts/ci/terraform_github_plan_comment.py" refusal --category "$category" \
+              --head-sha "$HEAD_SHA" --run-url "$RUN_URL" --overlay-file "$RUNNER_TEMP/overlay.txt" --screen-file "$RUNNER_TEMP/screen.txt")
           fi
-          gh pr comment "$PR_NUM" --repo "$REPO" --body "$body" || true
+          printf '%s' "$BODY" | python3 -I "$GITHUB_WORKSPACE/scripts/ci/terraform_github_plan_comment.py" assert-clean \
+            --values-file "$RUNNER_TEMP/reviewer_ids"
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$BODY"
+          printf '%s\n' "$BODY" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail on destroy or replace
         if: steps.report.outputs.destructive == 'true'
@@ -210,5 +271,4 @@ jobs:
 
       - name: Delete plan files (never persisted or uploaded)
         if: always()
-        working-directory: ${{ env.WORKDIR }}
-        run: rm -f plan.bin plan.json
+        run: rm -f terraform/github/plan.bin "$RUNNER_TEMP/plan.json"
