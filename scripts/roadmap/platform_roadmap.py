@@ -20,6 +20,7 @@ from scripts.platform_roadmap_models import (
     NorthStar,
     OpenQuestion,
     RoadmapDocument,
+    StartEdge,
     TierItem,
 )
 from scripts.platform_roadmap_state import PlatformRoadmapState, compute_followon_state, compute_state_dict, load
@@ -39,6 +40,7 @@ __all__ = [
     "OpenQuestion",
     "PlatformRoadmapState",
     "RoadmapDocument",
+    "StartEdge",
     "TierItem",
     "_GATE_HELPERS",
     "compute_followon_state",
