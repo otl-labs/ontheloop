@@ -403,3 +403,10 @@ def test_restore_clean_dsn_uri_percent_encodes_reserved_characters():
     assert parsed.hostname == "h"
     assert urllib.parse.unquote(parsed.password) == "p/w:@#?"
     assert urllib.parse.unquote(parsed.username) == "u@x"
+
+
+def test_build_pg_dump_cmd_schema_flag():
+    import src.common.catalog_dr as cdr
+
+    cmd = cdr.build_pg_dump_cmd("uri", "/tmp/o.dump", schema="scratch_meta")
+    assert "--schema=scratch_meta" in cmd and cmd[-1] == "uri"
