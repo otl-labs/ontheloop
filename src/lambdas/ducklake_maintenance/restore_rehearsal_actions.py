@@ -242,7 +242,7 @@ def _table_checks(
             if present is not None:
                 files = con.execute(
                     f"SELECT data_file, delete_file FROM ducklake_list_files('{rt.CATALOG_ALIAS}', ?, schema => ?, "
-                    f"version => {int(snapshot_id)})",
+                    f"snapshot_version => {int(snapshot_id)})",
                     [table, schema],
                 ).fetchall()
                 missing += sum(1 for pair in files for f in pair if f and f.split("/", 3)[3] not in present)

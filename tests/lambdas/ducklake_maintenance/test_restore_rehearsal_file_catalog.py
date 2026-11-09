@@ -86,12 +86,13 @@ def test_copy_matches_and_deletes_the_tmp_file():
     assert opener.call_args.kwargs["read_only"] is True
 
 
-def test_copy_only_copies_tables_present_in_the_file_catalog():
+def test_copy_creates_inlined_data_tables_the_file_catalog_lacks():
     holder: dict = {}
     con = _Con(holder)
     _run(con)
     inserts = [s for s in con.sql if s.startswith("INSERT INTO dst")]
-    assert len(inserts) == 2 and not any("not_in_dst" in s for s in inserts)
+    created = [s for s in con.sql if s.startswith("CREATE TABLE dst.main.")]
+    assert len(inserts) == 2 and len(created) == 1 and '"not_in_dst"' in created[0]
     assert "DETACH dst" in con.sql and con.closed
 
 

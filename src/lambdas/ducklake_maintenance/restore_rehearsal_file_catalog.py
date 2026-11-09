@@ -60,11 +60,13 @@ def _copy_catalog(con: Any, file_path: str, conninfo: str, meta_schema: str, dat
     rows = 0
     con.execute("BEGIN TRANSACTION")
     for name in src_tables:
-        if name not in dst_tables:
-            continue
         t = quote_ident(name)
-        con.execute(f"DELETE FROM dst.main.{t}")
-        con.execute(f"INSERT INTO dst.main.{t} SELECT * FROM pg.{quote_ident(meta_schema)}.{t}")
+        if name in dst_tables:
+            con.execute(f"DELETE FROM dst.main.{t}")
+            con.execute(f"INSERT INTO dst.main.{t} SELECT * FROM pg.{quote_ident(meta_schema)}.{t}")
+        else:
+            # DuckLake creates ducklake_inlined_data_* tables per user table on demand; a fresh file catalog has none
+            con.execute(f"CREATE TABLE dst.main.{t} AS SELECT * FROM pg.{quote_ident(meta_schema)}.{t}")
         rows += con.execute(f"SELECT count(*) FROM dst.main.{t}").fetchone()[0]
     con.execute("COMMIT")
     con.execute("DETACH dst")
