@@ -497,7 +497,12 @@ def test_create_role_request_shape_and_password():
     with patch("urllib.request.urlopen", side_effect=_branch_urlopen([body], sent)):
         pw = neon_api.create_role(_FAKE_API_KEY, _FAKE_PROJECT_ID, _FAKE_BRANCH_ID, "r")
     assert pw == _FAKE_PASSWORD
-    assert sent == [(f"https://console.neon.tech/api/v2/projects/{_FAKE_PROJECT_ID}/branches/{_FAKE_BRANCH_ID}/roles", {"role": {"name": "r"}})]
+    assert sent == [
+        (
+            f"https://console.neon.tech/api/v2/projects/{_FAKE_PROJECT_ID}/branches/{_FAKE_BRANCH_ID}/roles",
+            {"role": {"name": "r"}},
+        )
+    ]
 
 
 def test_create_role_without_password_fails_without_body():

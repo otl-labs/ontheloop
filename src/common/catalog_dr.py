@@ -155,7 +155,9 @@ def run_pg_restore(
     )
     result = run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
     if result.returncode != 0:
-        raise CatalogDrError(f"pg_restore exited {result.returncode}: {result.stderr.strip()[:500]}", returncode=result.returncode)
+        raise CatalogDrError(
+            f"pg_restore exited {result.returncode}: {result.stderr.strip()[:500]}", returncode=result.returncode
+        )
 
 
 def build_dr_key(

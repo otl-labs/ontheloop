@@ -21,7 +21,8 @@ Decision 81 cl.7.)
 
 The scheduled path is agent-free; an ADMIN-container agent may invoke the partition-layout verbs (Decision 204)
 and provision_telemetry_login (Decision 213), provision_catalog_owner and provision_telemetry_catalog (Decision 230) only under
-explicit human direction (CD.33 clause 5 / Decision 81 cl.6).
+explicit human direction (CD.33 clause 5 / Decision 81 cl.6). The restore_rehearsal verb (Decision 251,
+docs/contracts/restore-rehearsal.yaml) runs only on ephemeral -restore-rehearsal-ephemeral functions and refuses here.
 Singleton enforced by reserved_concurrent_executions=1 (Decision 81 clause 6; see Terraform).
 
 See src/common/ducklake_maintenance.py::MAINTENANCE_SCOPE_NOTE.
@@ -30,6 +31,7 @@ See src/common/ducklake_maintenance.py::MAINTENANCE_SCOPE_NOTE.
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any
 
@@ -38,7 +40,14 @@ from src.common import ducklake_gc_ops as gc_ops_body
 from src.common import ducklake_maintenance as maint
 from src.common import ducklake_maintenance_scope as scope
 from src.common import ducklake_runtime as rt
-from src.lambdas.ducklake_maintenance import catalog_actions, health_actions, index_actions, login_actions, partition_actions
+from src.lambdas.ducklake_maintenance import (
+    catalog_actions,
+    health_actions,
+    index_actions,
+    login_actions,
+    partition_actions,
+    restore_rehearsal_actions,
+)
 from src.lambdas.ducklake_maintenance._shared import (  # noqa: F401 -- DATA_PATH re-bound for existing callers
     CATALOG_METRICS,
     DATA_PATH,
@@ -532,6 +541,7 @@ _ACTIONS: dict[str, Any] = {
     "provision_catalog_owner": catalog_actions.action_provision_catalog_owner,
     "provision_telemetry_catalog": catalog_actions.action_provision_telemetry_catalog,
     "ensure_catalog_indexes": index_actions.action_ensure_catalog_indexes,
+    "restore_rehearsal": restore_rehearsal_actions.action_restore_rehearsal,
 }
 
 
@@ -565,11 +575,17 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
     payload = _parse_event(event)
     action: str | None = payload.get("action")
     fn = _ACTIONS.get(action or "")
+    if os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "").endswith(restore_rehearsal_actions.EPHEMERAL_SUFFIX) and (
+        action != "restore_rehearsal"
+    ):
+        return _response(400, {"ok": False, "error_type": "refused", "error": "ephemeral rehearsal function"})
     if fn is None:
         return _response(400, {"ok": False, "error": f"unknown action {action!r}", "actions": sorted(_ACTIONS)})
 
     try:
         return _response(200, fn(payload, None))
+    except restore_rehearsal_actions.RestoreRehearsalRefused:
+        return _response(400, {"ok": False, "error_type": "refused", "error": "restore_rehearsal refused"})
     except maint.DuckLakeMaintenanceError as exc:
         _catalog_sink(payload.get("meta_schema"))("MaintenanceBreakerTrip", 1.0)
         return _response(500, {"ok": False, "error_type": "breaker", "breaker_tripped": True, "error": str(exc)})
