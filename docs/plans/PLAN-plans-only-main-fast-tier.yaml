@@ -1,0 +1,498 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: plans-only-main-fast-tier
+intent: >-
+  Cut about half of the post-merge full-tier runs on main, the largest single demand on the 20-slot Actions
+  concurrency cap (audit CMTS-06), by building Decision 205 clause 5: a push to main whose diff is confined to
+  docs/plans/ runs the fast tier inside main-validate instead of the full tier, with Main Canary's 3-hourly full tier
+  as the backstop. Second of two atomic plans for rec-4114; closes roadmap T4.9a c10.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-plans-only-main-fast-tier.yaml
+phase: T4.9a (exit criterion c10). Itinerary item D4 (verdict-ci ITINERARY.md, Actions-capacity lever CMTS-06).
+closes_criteria: ["T4.9a:c10"]
+scope:
+  - file: scripts/ci/push_scope.py
+    action: Create
+    purpose: >-
+      Stdlib-only at import (like scripts/ci/deploy_gate.py), runnable as `python3 -I scripts/ci/push_scope.py
+      classify` before setup-python. PLAN_PREFIX = "docs/plans/". confined_to_plans(changed: set[str] | None) ->
+      bool: False on None or empty, else every path starts with PLAN_PREFIX. changed_paths(before, after, cwd) ->
+      set[str] | None: None when before is empty or all zeros, when `git cat-file -e <sha>^{commit}` fails for either
+      sha, or when `git diff --name-only --no-renames <before> <after>` fails; else that output's non-empty lines
+      (deletions included; a rename shows both paths). classify(before, after, forced, cwd) -> (bool, reason): False
+      with a reason when forced is "true", when changed_paths is None, or when confined_to_plans is False; True only
+      for a non-empty all-plans diff. CLI `classify` reads BEFORE, AFTER and FORCED from the environment, prints
+      "push_scope: plans_only=<true|false> (<reason>)", appends "plans_only=<true|false>" to $GITHUB_OUTPUT when set,
+      and exits 0 on every input, including any unexpected exception, which prints the error and writes
+      plans_only=false (fail closed to the full tier; Decision 170). Module docstring: a scope classifier, not a diff
+      base; --pre's own diff base stays scripts/checks/_common.py push_context_base (Decision 159 cl.1); it shares
+      its prefix with scripts/ops_portal/trailer_closure_gate.py's merge_leg_refuses (opposite polarity on an empty
+      diff), pinned equal by test_prefix_matches_trailer_gate rather than imported, because the gate module is
+      reached by gated --pre Entries whose pre_globs would otherwise need push_scope.py added in four manifests.
+  - file: tests/ci/test_push_scope.py
+    action: Create
+    purpose: >-
+      Against a temporary git repo (core.autocrlf=false): test_plans_only_diff_is_plans_only (PLAN and approved/
+      sidecar files); test_mixed_diff_is_full; test_deletion_under_plans_is_plans_only; test_deletion_outside_is_full;
+      test_rename_out_of_plans_is_full; test_zero_before_is_full; test_unresolvable_before_is_full;
+      test_forced_push_is_full; test_empty_diff_is_full; test_git_error_is_full (a cwd that is not a repo);
+      test_prefix_matches_trailer_gate (push_scope.PLAN_PREFIX equals
+      scripts.ops_portal.trailer_closure_gate._PLAN_PREFIX, so the two plans-only predicates cannot drift);
+      test_cli_writes_github_output (writes plans_only=true and plans_only=false lines to a tmp GITHUB_OUTPUT, exit
+      0 both ways); test_cli_exception_fails_closed (an exception inside classify still exits 0 and writes
+      plans_only=false); test_confined_to_plans_polarity (None and empty are False);
+      test_range_base_matches_push_context_base (a two-commit push: with GITHUB_EVENT_NAME=push and
+      GITHUB_EVENT_BEFORE=<HEAD~2 sha>, scripts.checks._common.push_context_base(root) returns the same before sha
+      classify used, and not its HEAD~1 fallback, so the classifier and --pre diff the same multi-commit range). No test
+      asserts the live share of plans-only commits on main: that is a
+      moment claim (Decision 244 cl.4) and stays one-time evidence in context.
+  - file: scripts/checks/_scaffolding.py
+    action: Modify
+    new_imports: []
+    purpose: >-
+      run_precommit_checks' --pre escalation call becomes precommit_escalates(target, _common.push_context_base() or
+      "origin/main"), and the comment that says the --pre call site never runs in push context is replaced by one
+      line saying it runs there for plans-only pushes to main (Decision 205 cl.5). No other change.
+  - file: tests/validate/test_precommit_escalation_predicate.py
+    action: Modify
+    purpose: >-
+      Add test_push_context_uses_push_base: with push_context_base patched to return a sha, run_precommit_checks
+      (files given, all_files False) passes that sha to precommit_escalates; with it returning None, "origin/main".
+      Existing tests unchanged.
+  - file: .github/workflows/ci.yml
+    action: Modify
+    purpose: >-
+      main-validate only. After checkout, a step "Classify push scope" (id scope, no if) with env BEFORE: ${{
+      github.event.before }}, AFTER: ${{ github.sha }}, FORCED: ${{ github.event.forced }} and run `python3 -I
+      scripts/ci/push_scope.py classify`. Let FULL = `steps.scope.outputs.plans_only != 'true'` and FAST =
+      `steps.scope.outputs.plans_only == 'true'`. The OIDC step, the existing dependency-cache step and "Install
+      dependencies" take `if: FULL`; the existing step "Validate full tier (ruff, mypy, pytest, DQ runner, verifier
+      harness)" keeps its exact name and run line and takes `if: FULL` (scripts/ci/deploy_gate.py binds that name;
+      a skipped step is never deploy evidence, Decision 249 cl.2). New steps with `if: FAST`: "Cache fast-tier
+      dependencies" with pr-validate's key expression (named, so main-validate never shows two "Cache dependencies");
+      "Install fast-tier dependencies only" with pr-validate's three-line body; and
+      "Validate fast tier (ruff lint, ruff format, mypy, prompt checks)" running `python -m scripts.validate --pre`
+      with env GITHUB_EVENT_BEFORE: ${{ github.event.before }} (no APPROVED_TEXT_GH_TOKEN: in push context the
+      sidecar lookup prints SKIP). The aws-region action, setup-python, the pre-commit cache and both always()
+      upload steps stay unconditioned. The header comment gains one line naming the plans-only exception
+      (Decision 205 cl.5, git-ops.yaml two_tier_presubmit_model.full.plans_only_exception). No other job changes.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      Register main-validate's three new inline run bodies in r3_workflows under the key scheme
+      _workflow_shell_bodies._step_identity derives (id before name slug): ".github/workflows/ci.yml::main-validate::scope":
+      1, "...::main-validate::install-fast-tier-dependencies-only": 3 and
+      "...::main-validate::validate-fast-tier-ruff-lint-ruff-format-mypy-prompt-checks": 1, at their measured counts and
+      without markers (validate_composite_action_shell_bodies); no other row changes.
+  - file: scripts/verify_ci_workflow/_shared.py
+    action: Modify
+    new_imports: []
+    purpose: >-
+      _full_tier_jobs classifies per step: a job is full-tier when any one step's run invokes scripts.validate with
+      neither --pre nor --terraform-only (so main-validate stays in the set beside main-canary's job). Docstring
+      updated; still the sole derivation (Decision 104). New constants FULL_STEP_IF = "steps.scope.outputs.plans_only
+      != 'true'" and FAST_STEP_IF = "steps.scope.outputs.plans_only == 'true'" are the single home of the two literals;
+      _ci_yaml.py and test_deploy_gate_wiring.py import them from here. _assert_runtime_lock reads only the full-tier
+      path's steps:
+      both its install half and its cache-key half select positively -- only steps with no `if` or with exactly the
+      FULL literal -- so the fast install (which carries requirements-dev.txt), however its `if` is spelled, cannot
+      hide a full install or full cache key that dropped it. Its messages
+      are unchanged; a job with no FAST step (main-canary) reads exactly as today.
+  - file: scripts/verify_ci_workflow/_ci_yaml.py
+    action: Modify
+    new_imports: []
+    purpose: >-
+      _check_jobs_and_flags replaces `"--pre" not in main_steps` with step-level asserts on main-validate: exactly
+      one step whose run invokes scripts.validate without --pre or --terraform-only, whose `if` is the FULL literal;
+      exactly one step running scripts.validate --pre, whose `if` is the FAST literal; a step with id scope, no `if`,
+      whose run invokes scripts/ci/push_scope.py classify and which precedes both. Each assert message names the
+      failing rule. pr-validate's asserts are unchanged. No new import: the full step's exact name is already pinned
+      against scripts/ci/deploy_gate.py by tests/verify_ci_workflow/test_deploy_gate_wiring.py, and importing
+      deploy_gate here would put it in the import closure of five gated --pre Entries (validate_ci_rca_trigger,
+      validate_dispatch_gated_apply_topology, validate_environment_reviewer_preflight, validate_github_settings_apply,
+      validate_trusted_plan_environment) whose pre_globs do not cover it (validate_pre_glob_closure).
+  - file: tests/verify_ci_workflow/test_ci_data_guards.py
+    action: Modify
+    purpose: >-
+      The file that imports _check_jobs_and_flags and owns _VALID_CI_DATA (272 lines). Its main-validate fixture gains
+      the new shape: a classify step (id scope) after checkout, the full cache/install/validate steps under the FULL
+      literal, and the fast cache/install/--pre steps under the FAST literal. Existing tests keep their assertions;
+      where a test mutates a main-validate step by list index, it is re-pointed to the same step by its run or uses
+      text, because the fixture's order shifts; TestFullTierRuntimeLock and
+      test_fails_when_main_validate_compiled_install_is_missing keep passing with their existing messages. Add, as
+      module-level functions (so the test_obligations selectors resolve), each asserting with pytest.raises(...,
+      match=<that rule's own message>) so none passes on today's "--pre" assert:
+      test_fails_when_full_step_is_unconditionally_off (`if: false`); test_fails_when_fast_step_is_unconditioned;
+      test_fails_when_classify_step_is_missing; test_fails_when_classify_runs_after_validate;
+      test_fails_when_second_full_step_is_added; test_runtime_lock_ignores_fast_path_install (a full install without
+      requirements-dev.txt, or a full cache key without it, fails even though the fast path carries it);
+      test_full_tier_jobs_classifies_by_step (a job with one full step and one --pre step is full-tier; a job with only
+      --pre is not). Stays under the 500-line budget.
+  - file: tests/verify_ci_workflow/test_deploy_gate_wiring.py
+    action: Modify
+    purpose: >-
+      test_ci_still_has_the_full_tier_step_the_gate_matches keeps its name lookup (exactly one main-validate step named
+      deploy_gate.FULL_TIER_STEP) and its run assertion; its `"if" not in step` assertion becomes `step["if"] ==` the
+      FULL literal (FULL_STEP_IF, imported from scripts.verify_ci_workflow._shared), so the step deploy_gate binds can be
+      skipped only by the classifier's plans_only output. No other
+      test changes.
+  - file: docs/contracts/git-ops.yaml
+    action: Modify
+    purpose: >-
+      Exactly the four sidecar blocks (docs/plans/approved/plans-only-main-fast-tier.yaml): version (contract_version
+      14 -> 15), amendment-log (a new first amendment_log entry, semantic_break true), description-compact (the model's
+      description shortened to one line, same meaning) and plans-only-exception (two_tier_presubmit_model.full gains a
+      one-line
+      plans_only_exception, indented under full:), with {{DATE}} filled with the build date (UTC). Nothing else. Size:
+      499 effective lines at e6eda786 (contracts class cap 500, NEAR_CAP); the new field and log entry add two lines and
+      the shortened description saves two, so the file stays at 499 -- measure on main at build time, and if another
+      plan has grown it
+      past the cap first, stop with a plan-defect report (never a raise).
+  - file: docs/ROADMAP-PLATFORM.yaml
+    action: Modify
+    purpose: >-
+      T4.9a c10 flips open -> met with met_by naming this plan and the build PR (docs/contracts/exit-criteria-ledger.yaml),
+      plus one progress_note line; the item's status follows docs/contracts/tier-item-lifecycle.yaml (not_started ->
+      in_progress when a first criterion is met). Nothing else.
+bundled_recommendations: [rec-4114]
+followon_recs: [rec-5040]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - >-
+    rec-4114's acceptance command exits 0: test "$(grep -c "scripts.validate --pre" .github/workflows/ci.yml)" -ge 2.
+  - >-
+    A push to main confined to docs/plans/ runs only the fast tier in main-validate; any other push, a zero or
+    unresolvable before, a forced push, an empty diff or a git error runs the full tier (the push_scope tests pass and
+    fail before
+    the change).
+  - >-
+    scripts.verify_ci_workflow passes on the real ci.yml and fails on each new mutation in test_ci_data_guards.py;
+    main-validate stays in _full_tier_jobs; the full-tier step keeps deploy_gate.FULL_TIER_STEP's exact name and
+    carries only the FULL condition (test_deploy_gate_wiring.py).
+  - >-
+    push_scope's prefix equals trailer_closure_gate's (test_prefix_matches_trailer_gate), and every existing
+    trailer-closure test passes unchanged.
+  - docs/contracts/git-ops.yaml equals the approved sidecar with {{DATE}} filled (scripts.roadmap.approved_text verify exits 0).
+  - >-
+    After merge, the first plans-only push to main shows "push_scope: plans_only=true" and the fast step ran with the
+    full step skipped; the next code push shows plans_only=false and the full step ran; rec-4114 reads closed.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Prove the classifier's every branch, its CLI and its agreement with push_context_base.
+    command: bin/venv-python -m pytest tests/ci/test_push_scope.py -q
+    expected: Exit 0, all passed, none skipped. Red before (no module).
+    fix_if: A test fails -- fix push_scope at root; a fail-open branch is a blocking defect.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: Unit tests of one CI script; the --pre pytest_diff runs them whenever it or its test changes.
+  - step: 2
+    phase: pre-deploy
+    action: Prove the CI shape guards accept the new main-validate and reject each mutation.
+    command: >-
+      bin/venv-python -m pytest tests/verify_ci_workflow/ tests/checks/ci_guards/test_validate_ci_workflow_guards.py -q
+      && bin/venv-python -m scripts.verify_ci_workflow
+    expected: Exit 0 for both; the verifier prints every guard passing on the real ci.yml.
+    fix_if: >-
+      The real ci.yml fails a guard -- fix ci.yml, not the guard; a mutation test passes -- the guard does not fail
+      closed, fix it.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      validate_ci_workflow_guards already runs these guards on ci.yml in both tiers; a graduated record would repeat it.
+  - step: 3
+    phase: pre-deploy
+    action: Prove the trailer refusal is unchanged and the pre-commit escalation is push-aware.
+    command: >-
+      bin/venv-python -m pytest tests/ops_data_portal/test_trailer_closure_gate.py tests/test_rec_trailer.py
+      tests/checks/ci_guards/test_validate_rec_autoclose_trailer_gate.py
+      tests/validate/test_precommit_escalation_predicate.py -q
+    expected: Exit 0, all passed; test_push_context_uses_push_base red before, green after.
+    fix_if: An existing trailer test fails -- this plan must not touch the trailer gate; find what changed it.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Unit tests already in the suite; the --pre pytest_diff runs them whenever the trailer gate, _scaffolding.py or
+      these tests change, and the full tier runs them on every code push, so a graduated record would repeat both.
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      Replay the plans-only path: in a scratch clone at a recent plans-only main commit with origin/main set to that
+      commit, run the classifier and the fast tier as main-validate would.
+    command: >-
+      C=$(for c in $(git log --first-parent --format=%H -n 60 origin/main); do f=$(git diff-tree --no-commit-id
+      --name-only -r $c); [ -n "$f" ] && ! echo "$f" | grep -qv '^docs/plans/' && echo $c && break; done);
+      D=$(mktemp -d) && trap 'rm -rf "$D"' EXIT && cp scripts/ci/push_scope.py "$D/push_scope.py" && git clone -q
+      --no-checkout . "$D/c"
+      && cd "$D/c" && git update-ref refs/remotes/origin/main $C && git checkout -q -B main $C
+      && ln -s "$OLDPWD/.venv" .venv
+      && BEFORE=$(git rev-parse HEAD~1) AFTER=$C FORCED=false python3 -I "$D/push_scope.py" classify
+      && CI=true GITHUB_EVENT_NAME=push GITHUB_EVENT_BEFORE=$(git rev-parse HEAD~1) AWS_CONFIG_FILE=/dev/null
+      AWS_SHARED_CREDENTIALS_FILE=/dev/null env -u AWS_PROFILE bin/venv-python -m scripts.validate --pre
+    expected: >-
+      push_scope prints plans_only=true, then the fast tier ends "All checks passed." with the plan schema section
+      present (the branch's push_scope.py is copied in because the clone checks out an older main commit). Limits:
+      it does not exercise this branch's _scaffolding change, the sibling's new check if the commit predates it, or
+      a main that moved past the commit, and it keeps the full dev venv; AWS config is stripped because the fast path
+      skips the OIDC step. VP 9 covers the live path.
+    fix_if: >-
+      plans_only=false on a plans-only commit -- classifier defect; a fast-tier failure -- a --pre check misbehaves in
+      push context: fix it inside this plan's scope or stop with a plan-defect report.
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: Prove the committed contract text is the approved text.
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug plans-only-main-fast-tier --expect
+      3ab4edd98c881bb82d11e22b5973d5dea39c9063bbdaedb18407b3fddb349b3d  # pragma: allowlist secret
+    expected: Exit 0.
+    fix_if: A difference is reported -- restore the approved words; any other change is an approved_text plan defect.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Duplicates validate_merge_step's approved-text binding, which runs in the PR fast tier (git-ops.yaml
+      merge_step_coverage).
+  - step: 6
+    phase: pre-deploy
+    action: Fast tier on the branch (advisory outside CI; PR CI is authoritative), and rec-4114's acceptance.
+    command: >-
+      bin/venv-python -m scripts.validate --pre
+      && test "$(grep -c "scripts.validate --pre" .github/workflows/ci.yml)" -ge 2 && echo REC_4114_ACCEPTANCE_OK
+    expected: Exit 0 and REC_4114_ACCEPTANCE_OK.
+    fix_if: A failure in this plan's files -- fix at root; never loosen a test.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: Lint and format-check the changed Python files.
+    command: >-
+      bin/venv-python -m ruff check scripts/ci/push_scope.py tests/ci/test_push_scope.py scripts/checks/_scaffolding.py
+      tests/validate/test_precommit_escalation_predicate.py scripts/verify_ci_workflow/_shared.py
+      scripts/verify_ci_workflow/_ci_yaml.py tests/verify_ci_workflow/test_ci_data_guards.py
+      tests/verify_ci_workflow/test_deploy_gate_wiring.py
+      && bin/venv-python -m ruff format --check scripts/ci/push_scope.py tests/ci/test_push_scope.py
+      scripts/checks/_scaffolding.py
+      tests/validate/test_precommit_escalation_predicate.py scripts/verify_ci_workflow/_shared.py
+      scripts/verify_ci_workflow/_ci_yaml.py tests/verify_ci_workflow/test_ci_data_guards.py
+      tests/verify_ci_workflow/test_deploy_gate_wiring.py
+    expected: Exit 0 for both.
+    fix_if: A lint or format failure -- fix the file; never add an ignore.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: pre-deploy
+    action: >-
+      Run the full tier, as the handoff policy requires before commit. The command's first part (scripts.validate) is
+      started as its own backgrounded run (2 h limit, from the top-level session); when it completes, run the second
+      part (--verify-head), which is the verdict; the backgrounded run's own exit status never is.
+    command: >-
+      bin/venv-python -m scripts.validate;
+      bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: Exit 0 for HEAD.
+    fix_if: >-
+      A failure in this plan's files: fix at root and rerun the full tier from the start (handoff_policy). A failure
+      only in another open red's tests is not this build's to fix: wait for that repair per the implement skill.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: >-
+      After the build merges, read the next CI push run on main for a plans-only commit and for a code commit (any
+      later merges; the build's own merge is a code commit).
+    command: >-
+      echo "mcp__github__actions_list (workflow ci.yml, event push, branch main), then mcp__github__get_job_logs for
+      main-validate on the build's merge run and on the next plans-only merge run"
+    expected: >-
+      Build merge run: "push_scope: plans_only=false", the full-tier step succeeded, the fast step skipped. First
+      plans-only merge run: "push_scope: plans_only=true", the fast step succeeded, the full-tier step and the OIDC
+      step skipped, and deploy-gate (if woken) resolved an earlier commit.
+    fix_if: >-
+      A plans-only run that ran the full tier costs only minutes: file a rec. A plans-only run whose fast step failed
+      is a red main: ci-rca files its rec; diagnose it (a fast-tier check misbehaving in push context or without
+      credentials is this build's defect: forward-fix, red-main-recovery.yaml). A code run that skipped the full tier is
+      a fail-open defect: report to the coordinator at once and open a revert PR of this build (red-main-recovery.yaml).
+    hermetic: false
+  - step: 10
+    phase: post-deploy
+    action: Confirm rec-4114 closed after the squash merge.
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader;
+      r,_=fetch_recs_by_ids(make_reader(profile='agent_platform'),['rec-4114']); print(r[0]['status'])"
+    expected: Prints closed.
+    fix_if: >-
+      Still open: wait until the merge commit's ci.yml trailer-closure job has concluded, read its log and follow
+      git-ops.yaml resolves_trailer; close it through update_rec only after a transport failure.
+    hermetic: false
+test_obligations:
+  - source: scripts/ci/push_scope.py
+    behavior: Only a non-empty diff confined to docs/plans/ is plans-only; every doubtful input is full tier.
+    verification_step: 1
+    test_selector: tests/ci/test_push_scope.py::test_mixed_diff_is_full
+    red_green_expectation: red before (the module does not exist), green after
+  - source: scripts/ci/push_scope.py
+    behavior: A zero before, forced push or git error falls back to the full tier.
+    verification_step: 1
+    test_selector: tests/ci/test_push_scope.py::test_zero_before_is_full
+    red_green_expectation: red before (the module does not exist), green after
+  - source: scripts/ci/push_scope.py
+    behavior: The CLI always exits 0 and writes plans_only=false on any exception.
+    verification_step: 1
+    test_selector: tests/ci/test_push_scope.py::test_cli_exception_fails_closed
+    red_green_expectation: red before (the module does not exist), green after
+  - source: scripts/ci/push_scope.py
+    behavior: The classifier and --pre's push_context_base diff the same range (Decision 159 cl.1).
+    verification_step: 1
+    test_selector: tests/ci/test_push_scope.py::test_range_base_matches_push_context_base
+    red_green_expectation: red before (the module does not exist), green after
+  - source: .github/workflows/ci.yml
+    behavior: main-validate classifies first and runs exactly one of the full or fast validate steps.
+    verification_step: 2
+    command: bin/venv-python -m scripts.verify_ci_workflow
+    red_green_expectation: red before (the new step-level guard finds no classify step in today's ci.yml), green after
+  - source: scripts/verify_ci_workflow/_ci_yaml.py
+    behavior: A full-tier step switched off for every push fails the guard.
+    verification_step: 2
+    test_selector: tests/verify_ci_workflow/test_ci_data_guards.py::test_fails_when_full_step_is_unconditionally_off
+    red_green_expectation: red before (today's guard only checks the job text), green after
+  - source: scripts/verify_ci_workflow/_ci_yaml.py
+    behavior: A main-validate without the classify step before both validate steps fails the guard.
+    verification_step: 2
+    test_selector: tests/verify_ci_workflow/test_ci_data_guards.py::test_fails_when_classify_step_is_missing
+    red_green_expectation: red before (today's guard has no classify rule), green after
+  - source: .github/workflows/ci.yml
+    behavior: The step deploy_gate binds keeps its exact name and is skipped only on the classifier's plans_only output.
+    verification_step: 2
+    test_selector: tests/verify_ci_workflow/test_deploy_gate_wiring.py::test_ci_still_has_the_full_tier_step_the_gate_matches
+    red_green_expectation: red before (today's step carries no if), green after
+  - source: scripts/verify_ci_workflow/_shared.py
+    behavior: The runtime lock reads only the full-tier path, so the fast install cannot hide a missing full dev install.
+    verification_step: 2
+    test_selector: tests/verify_ci_workflow/test_ci_data_guards.py::test_runtime_lock_ignores_fast_path_install
+    red_green_expectation: red before (the job-wide text join finds the fast path's requirements-dev.txt), green after
+  - source: scripts/verify_ci_workflow/_shared.py
+    behavior: A job with one full step and one --pre step is a full-tier job.
+    verification_step: 2
+    test_selector: tests/verify_ci_workflow/test_ci_data_guards.py::test_full_tier_jobs_classifies_by_step
+    red_green_expectation: red before (job-text classification drops it), green after
+  - source: scripts/checks/_scaffolding.py
+    behavior: The --pre pre-commit escalation uses the push-context base on a push.
+    verification_step: 3
+    test_selector: tests/validate/test_precommit_escalation_predicate.py::test_push_context_uses_push_base
+    red_green_expectation: red before (origin/main is hard-coded), green after
+  - source: config/composite_action_body_baseline.yaml
+    behavior: The three new inline run bodies are registered.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Registry data checked by validate_composite_action_shell_bodies in the fast tier; no behavior of its own.
+  - source: docs/contracts/git-ops.yaml
+    behavior: Carries exactly the four approved sidecar blocks with {{DATE}} filled.
+    verification_step: 5
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug plans-only-main-fast-tier
+    waiver_reason: Approved governing text checked byte-for-byte by approved_text verify and validate_merge_step; no code.
+  - source: docs/ROADMAP-PLATFORM.yaml
+    behavior: T4.9a c10 reads met with its met_by.
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Roadmap data checked by validate_platform_roadmap in the fast tier; no behavior of its own.
+constraints:
+  - >-
+    Depends on PLAN-graduated-rerun-plan-readers's build being merged first (its fast-tier check keeps the
+    plan-reading graduated records running on plans-only pushes); the build checks
+    scripts/checks/verification/validate_graduated_rerun_plan_readers.py exists on main before starting, and stops
+    if it does not.
+  - >-
+    The four git-ops.yaml sidecar blocks are operator-approved governing text (Decision 246): placed exactly, only
+    {{DATE}} filled, never edited; a needed change, including a contract_version that moved because another plan
+    edited git-ops.yaml first, is an approved_text plan defect routed to the owning planning worker for a new
+    approval run. The sidecar is not grandfathered: the planning worker dispatches its approval run at the plan PR's
+    final head and the operator approves it on GitHub before the plan PR merges.
+  - >-
+    Merge: the git-ops.yaml text is under the approve-once standing_authorisation item, but ci.yml and
+    scripts/verify_ci_workflow/ are CI security-relevant code; the build holds its PR for the operator's word on the
+    final diff if CODEOWNERS covers any scope path (check .github/CODEOWNERS at build time), else it merges on code
+    review PROCEED + green CI once validate_merge_step is green.
+  - >-
+    Never weaken the full tier for any push that is not plans-only; the classifier fails closed on every doubtful
+    input; the full-tier step's name stays exactly deploy_gate.FULL_TIER_STEP (Decision 249 cl.2).
+  - >-
+    weakening_dispositions (the build copies code review's stubs into the plan's top-level weakening_dispositions
+    list, one entry per candidate, each citing acceptance_criteria[2]; this prose alone is not enough): the replaced
+    `"--pre" not in main_steps` assert, the job-text _full_tier_jobs rule and
+    test_deploy_gate_wiring's `"if" not in step` assertion (replaced by an exact FULL-literal match) are planned-change
+    dispositions citing acceptance_criteria[2]; scoping _assert_runtime_lock to the full-tier path is a tightening (a
+    job-wide join would otherwise pass on the fast install); no test is skipped or loosened (Decision 235).
+  - "The fast tier stays light: no new dependency in requirements-fast.txt and no budget raise."
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - >-
+    Decision-scout verdict: FLAGS_FOUND. CITE: 205, 73, 249, 246, 170, 104, 159, 181, 244. Decisions triaged: 202 of
+    202. Flags taken: Decision 73 WARN (full-only plan readers) -> PLAN-graduated-rerun-plan-readers, built first,
+    plus rec-5040 for the indirection residual; Decision 159 NOTE -> push_scope is a classifier, never a diff base,
+    and test_range_base_matches_push_context_base proves both see the same range; Decision 170 -> fail closed, and the
+    fast tier writes no validation-result.json; Decision 249 cl.2 -> deploy_gate's job+step binding is the guard,
+    pinned by test_deploy_gate_wiring. North Star: Serves NS.3 2/5 (engaged NS.3, NS.6, NS.8, NS.9).
+  - >-
+    Operator rulings (2026-11-09, this planning thread): "write the plan"; decision cards "Close it in this plan" and
+    "git-ops.yaml only" (AGENTS.md untouched; its pinned Full row stays verbatim). Spend: none -- the repository is
+    public, Actions minutes are free, and the change lowers usage ($0 a month).
+  - >-
+    Design forks settled on a blind consult (shared folder rec-4114-plan/advisor-brief/ADVICE.md): conditional steps
+    in main-validate, not a separate job (0 extra job starts; deploy_gate unchanged); before..sha diff with
+    deletions; the whole docs/plans/ tree; fast path mirrors pr-validate. Adapted: advice Q3 (import the prefix into
+    merge_leg_refuses) became a pinned-equal test (the import trips the pre-glob closure in four manifests). Split
+    from PLAN-graduated-rerun-plan-readers on a third consult (advisor-brief-split/ADVICE.md).
+  - >-
+    Probes (2026-11-09, read-only): 141 of the 300 first-parent main commits ending at e6eda786 are plans-only by the
+    classifier's rule. --pre in a simulated push context on plans-only commit 2c9d835 (origin/main at it) passed in
+    85 s, plan schema checks ran, approval lookup printed SKIP. With origin/main ahead of the pushed commit,
+    validate_tier_demotion_markers failed: the full tier, which runs every --pre check, has the same exposure on push
+    today, and each push still runs exactly one tier, so this plan does not change it.
+  - >-
+    Gotchas: trailer-junit-verdict already tolerates the absent junit (unmeasurable) and trailer-closure already
+    refuses plan-only merges, so neither job changes. The Lambda deploy channels still wake on every CI success and
+    re-derive through deploy_gate. Main Canary has no same-SHA skip today; a future skip (rec-4233) must not skip a
+    HEAD whose CI run lacked the full-tier step. docs/contracts/git-ops.yaml is also edited by itinerary items C1,
+    C2 and A6: builds merge in order, and a contract_version moved by one of them needs a new approval run here.
+  - "Live-infrastructure assumptions: github.event.before and github.event.forced on push events are UNPROVEN until VP 9."
+  - >-
+    LAMBDA-DEPLOY DEFERRED (Decision 79): compute_affected_artifacts(scope) = {'data-pipeline':
+    ['docs/ROADMAP-PLATFORM.yaml']}, a packaged asset of the active artifact. No build, deploy or smoke test is owed: the
+    change is data only (c10's status), and the asset refreshes with the next governed deploy (rec-2910
+    over-inclusion). No other scope file is Lambda-packaged; no .tf in scope. Precedent: PLAN-work-graph-edge-model.
+  - >-
+    Graduated shards kept (node ids still resolve, kept green): fast-tier-escalation-predicate-shared,
+    full-ci-runtime-lock-parity, full-tier-checkout-depth-rule, deploy-gate-wiring.
+  - 'red_overlap (2026-11-09, main e6eda786): {"verdict": "clear", "slo_hours": 4, "reds": []}'
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: wording-check, round: 1, verdict: PASS, digest: 3ab4edd98c881bb82d11e22b5973d5dea39c9063bbdaedb18407b3fddb349b3d, base: e6eda786a224d348d5e3620728e2c52b2ebcb0eb, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 6, nits: 6}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 6}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 7}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 4}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 205 (clause 5), 73 (2026-09-28 amendment), 249 (clause 2) and 159 (clause 1) read
+  - PLAN-graduated-rerun-plan-readers's build merged on main
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - Create scripts/ci/push_scope.py and tests/ci/test_push_scope.py; run VP 1.
+  - Make the _scaffolding escalation base push-aware with its test; run VP 3.
+  - >-
+    Edit ci.yml main-validate and register the new run bodies; update _shared.py, _ci_yaml.py,
+    test_ci_data_guards.py and test_deploy_gate_wiring.py; run VP 2.
+  - Place the four git-ops.yaml sidecar blocks with {{DATE}} filled; run VP 5. Flip T4.9a c10 in the roadmap.
+  - Execute Verification Plan steps 1-8 -- loop until pass; on an unrecoverable failure stop and RCA (Decision 55).
+  - >-
+    Report: what was implemented; readiness (implemented and verified, or the stop reason); the --verify-head result
+    for the pushed HEAD and the structured postflight evidence (scripts.session.postflight --evidence <json file>); the
+    build PR number, its CI run id and the merge SHA once merged; and the VP 9 run ids once
+    available. A claim without its read-back says started or expected.
+rollback: >-
+  Revert the build PR: main-validate returns to the full tier for every push.
