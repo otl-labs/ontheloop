@@ -1,7 +1,8 @@
 """The approved-text approval surface's small closure (rec-4769).
 
-Holds the sidecar models and matcher, the wording-check digest, the approved-words digest the operator approves on
-GitHub, and the `render` CLI the approval workflow runs. Imports only the standard library, yaml, pydantic and
+Holds the sidecar models (an optional `tldr` line, outside both digests, that `render` requires and shows as context)
+and matcher, the wording-check digest, the approved-words digest the operator approves on GitHub, and the `render`
+CLI the approval workflow runs. Imports only the standard library, yaml, pydantic and
 review_page, so the workflow's render and wake jobs execute a small, code-owned set of local files.
 
 CLI:
@@ -32,6 +33,7 @@ _PLACEHOLDERS = {r"\{\{N\}\}": r"\d+", r"\{\{DATE\}\}": r"\d{4}-\d{2}-\d{2}"}
 _SLUG_RE = re.compile(r"[a-z0-9-]+")
 _HEX64_RE = re.compile(r"[0-9a-f]{64}")
 _SUMMARY_CAP_BYTES = 1 << 20
+_TLDR_MAX_CHARS = 600
 _HEADING_RE = re.compile(r"#{1,6}\s+\S")
 _YAML_KEY_RE = re.compile(r"[A-Za-z_][\w.-]*:")
 
@@ -54,6 +56,7 @@ class Sidecar(BaseModel):
 
     schema_version: Literal[1]
     slug: str
+    tldr: str | None = None
     blocks: list[Block]
 
     @model_validator(mode="after")
@@ -157,6 +160,16 @@ def _check_block_file(rel: str) -> None:
         raise RenderRefused(f"block file {rel!r} is absolute or holds `..` or `.git/`")
 
 
+def _check_tldr(tldr: str | None) -> None:
+    if tldr is None or not tldr.strip():
+        raise RenderRefused("sidecar carries no tldr")
+    if len(tldr) > _TLDR_MAX_CHARS:
+        raise RenderRefused(f"tldr is over {_TLDR_MAX_CHARS} characters")
+    bad = _unsafe_code_point(tldr)
+    if bad:
+        raise RenderRefused(f"tldr carries a control, bidi or zero-width code point {bad}")
+
+
 def _validate_render_inputs(sidecar: Sidecar, slug: str, expected: str, finger: str) -> None:
     if not _SLUG_RE.fullmatch(slug):
         raise RenderRefused(f"slug {slug!r} is not [a-z0-9-]+")
@@ -167,6 +180,7 @@ def _validate_render_inputs(sidecar: Sidecar, slug: str, expected: str, finger: 
         raise RenderRefused(f"approved-words digest {found} differs from the approved {expected}")
     if finger != fingerprint(expected):
         raise RenderRefused("fingerprint does not match the digest")
+    _check_tldr(sidecar.tldr)
     for block in sidecar.blocks:
         _check_block_file(block.file)
         for text in (block.id, block.file, block.before, block.after):
@@ -227,7 +241,9 @@ def render_page(sidecar: Sidecar, slug: str, expected: str, finger: str, base_di
     _validate_render_inputs(sidecar, slug, expected, finger)
     sha = _main_sha(base_dir)
     locations = {block.id: _locate(block, base_dir, sha) for block in sidecar.blocks}
-    page = review_page.render(sidecar.blocks, locations, slug=slug, approved=expected, wording=digest(sidecar))
+    page = review_page.render(
+        sidecar.blocks, locations, slug=slug, approved=expected, wording=digest(sidecar), tldr=sidecar.tldr
+    )
     if len(page.encode("utf-8")) > _SUMMARY_CAP_BYTES:
         raise RenderRefused("page is over 1 MiB, the step summary cap")
     return page

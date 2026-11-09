@@ -275,8 +275,6 @@ subagent-dispatch division of labor; schema: `docs/contracts/overseer-dispatch.y
 - **BLOCK** -> STOP. Do NOT present the original approach for confirmation. Surface the BLOCK contradiction and propose pivots, then re-dispatch the gate against the revised approach. Confirming a known-blocking approach would invite the human to ratify a plan that contradicts an active decision.
 - **Gate-error:** if the gate subagent errors or returns output missing the required `Verdict:` line, the gate has NOT completed -- re-dispatch; never proceed past an incomplete gate. Likewise, if the report's "Decisions triaged: N of M" line is missing, or N != M, treat the gate as incomplete and re-dispatch -- a mismatch means the scout truncated its read of DECISIONS.md.
 
-**Why a subagent and not inline grep, and the Lambda migration contract:** see the `decision-scout` skill -- it owns the isolation rationale and the stable-interface contract for when DECISIONS.md is replaced by a Lambda-backed tool query.
-
 **Convergence rule -- findings, not rounds:** re-dispatch after each pivot; escalate at once when a pivot is re-BLOCKed on the same decision id, naming whether the intent contradicts it (re-scope) or it needs revisiting (file a rec; record accept-with-deferral). Carrier (AskUserQuestion, chat or GATE_REQUEST) and stop as in Step 9.
 
 ## Alignment Sign-off (Workflow Step 6, project alignment)
@@ -297,7 +295,7 @@ git branch --show-current
 ```
 If the result is `main`, STOP.
 
-Derive the plan slug from the task, not the branch. Author only `docs/plans/PLAN-{slug}.yaml`; legacy `.md` plans are deprecated. Merge the approved plan before implementation.
+Derive the plan slug from the task, not the branch. Author only `docs/plans/PLAN-{slug}.yaml`. Merge the approved plan before implementation.
 
 ## PLAN-{slug}.yaml Template (Workflow Step 8)
 The plan is a YAML document validated against the `PlanDocument` Pydantic schema (`scripts/roadmap/plan_document.py`, enforced by `validate.py` in both tiers). Unknown keys FAIL validation (`extra="forbid"`). Use exactly this structure -- comments document field semantics:
@@ -386,7 +384,7 @@ Apply this check when writing the PLAN file. It is CONDITIONAL -- additive plans
 **Enforcement:** a plan that trips a trigger but omits its closure obligation fails plan-critique 12k. Surface it during Step 6 presentation; the missing declaration or VP step must be added before writing.
 
 ## Plan Lint and Wording Check (Workflow Step 8b, before critique)
-Run `bin/venv-python -m scripts.roadmap.plan_obligations --plan <plan>` on the written plan: fold every gating finding (a derived companion) into scope, and act on each advisory one -- a NEAR_CAP row gets a relief step, an unbuilt plan editing the same file is named in `context:`, an undecidable bundled-rec acceptance is fixed or the rec dropped. Before asking approval of always-ask wording, write it as the approved-text sidecar, place it in an uncommitted scratch worktree of origin/main, and run `bin/venv-python -m scripts.roadmap.plan_wording_check --slug <slug> --tree <worktree>`: it checks the tree holds exactly the sidecar's edits, then runs `validate --pre` there. Revise until PASS; record each run as a `gate: wording-check` row with the digest, base and selection it printed. Then push it and get approval per Decision 246: dispatch the approval run and paste the wording with its link. Each live-infrastructure assumption (grants, cadence, concurrency, memory, provider values) carries a read-only probe result in `context:` or the word UNPROVEN. The handoff names this planning session as the plan's owner.
+Run `bin/venv-python -m scripts.roadmap.plan_obligations --plan <plan>` on the written plan: fold every gating finding (a derived companion) into scope, and act on each advisory one -- a NEAR_CAP row gets a relief step, an unbuilt plan editing the same file is named in `context:`, an undecidable bundled-rec acceptance is fixed or the rec dropped. Before asking approval of always-ask wording, write it as the approved-text sidecar (its `tldr` is the presentation's Summary), place it in an uncommitted scratch worktree of origin/main, and run `bin/venv-python -m scripts.roadmap.plan_wording_check --slug <slug> --tree <worktree>`: it checks the tree holds exactly the sidecar's edits, then runs `validate --pre` there. Revise until PASS; record each run as a `gate: wording-check` row with the digest, base and selection it printed. Push it, dispatch the approval run (Decision 246) and paste the TLDR, the wording and the run link; "write the plan" never waits on it. Ask the operator to approve it after plan-critique returns PROCEED, then re-run the plan PR's pr-validate (the run's wake matches only its own commit). If critique changes approved words, cancel the run and dispatch one on the final sidecar. Each live-infrastructure assumption (grants, cadence, concurrency, memory, provider values) carries a read-only probe result in `context:` or the word UNPROVEN. The handoff names this planning session as the plan's owner.
 
 **Amendment mode** (a plan-defect report, implement-scope-boundary.yaml `deviation_trigger.escalation`): fix the plan in a plan-text-only PR (`plan({slug}): scope amendment -- <reason>`), re-run this step and a fresh critique, merge as any plan PR merges, and report the merge SHA to the coordinator. An approved_text or contract defect, or any loosened assertion, goes to the human first; nothing is loosened to obtain green (Decisions 181, 235).
 
@@ -404,8 +402,7 @@ Launch a zero-context Claude subagent via the `Agent` tool to run the `plan-crit
 **Invocation shape:**
 - `subagent_type: "general-purpose"` (needs `Skill`, `Read`, and `Grep` access)
 - `description: "Plan critique gate"`
-- `prompt:` self-contained per the Example body below; also state a `.md` plan path is
-  deprecated -- warn and proceed.
+- `prompt:` self-contained per the Example body below.
 
 **Example prompt body:**
 > "You are running the plan-critique gate in a fresh context window. **First, run `git fetch origin main --quiet`** so the local `origin/main` ref is current. Then invoke the `plan-critique` skill via the Skill tool to critique `/abs/path/to/docs/plans/PLAN-{slug}.yaml`. Read `docs/PROJECT_CONTEXT.md` in full; extract only the roadmap items and decision sections the plan names per the skill's Phase 1 (do not load full ROADMAP-PLATFORM.yaml/DECISIONS.md). For IMPLEMENTATION plans, also read every file in the plan's Scope table. If `git diff origin/main -- docs/DECISIONS.md docs/ROADMAP-PLATFORM.yaml` shows divergence, note that the critique evaluates against the branch's (possibly stale) view of these docs. Return the skill's structured critique output verbatim, including the final `Recommendation:` verdict line. Do not edit any files."
