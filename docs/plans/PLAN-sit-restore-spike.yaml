@@ -82,7 +82,7 @@ scope:
       database's public schema or objects Neon creates. teardown_scratch
       deletes only under the run's scratch prefix. prod_checksum alone reads the function's own catalog DSN (rt.fetch_dsn) and only
       ATTACHes READ_ONLY, with DATA_PATH set to the production ops data path built from the bucket constant as restore_drill
-      does (handler.py:121-122), never open_connection's smoke default. duckdb_copy writes its DuckDB-file catalog only under /tmp, never uploads or returns it, and
+      does (handler.py:144-145), never open_connection's smoke default. duckdb_copy writes its DuckDB-file catalog only under /tmp, never uploads or returns it, and
       returns only the contract's duckdb_copy fields. The rewrite SQL builder (rewrite_data_path_sql(meta_schema, new_path) -> (sql, params)) is a
       pure function the local test reuses; it updates only the global row (key 'data_path' and scope IS NULL). rewrite
       returns rewritten false and runs no UPDATE when absolute_paths is above 0. verify records attach_ok and each
@@ -97,7 +97,8 @@ scope:
       the DuckDB-file catalog in /tmp from the restored target, compare at the two snapshots with the shared checksum
       expression, delete the file, return the contract's fields. The median snapshot is taken from the restored
       ducklake_snapshot rows; a per-table read error at either snapshot is recorded as match false, never raised, so
-      this non-gating leg cannot turn a result run into a step error; likewise every init, copy or type error after its
+      this non-gating leg cannot turn a result run into a step error. This module holds the one checksum expression
+      (checksum_sql), which restore_rehearsal_actions imports for verify and prod_checksum, avoiding an import cycle; likewise every init, copy or type error after its
       refusals is caught and returned as all-false matches within the contract's fields.
     new_imports: [src.lambdas.ducklake_maintenance._shared]
   - file: src/lambdas/ducklake_maintenance/handler.py
@@ -122,10 +123,14 @@ scope:
       calls over 443): sequencing, run_id (lowercase [a-z0-9_] only, a UTC timestamp plus 6 hex characters such as 20261109t193000_a1b2c3, so
       restore_rehearsal_<run_id> is a plain Postgres identifier), the one scratch key builder that
       refuses a path outside ducklake-neon-smoke/restore-rehearsal/<run_id>/, teardown in finally, the evidence write
-      and the CLI. copy_data also records prefix_sizes (an S3 list of ducklake/, ducklake-telemetry/ and
+      and the CLI. The Neon project id comes from --project-id (default env NEON_PROJECT_ID), because
+      /secret/neon-api-key is project-scoped and cannot list org projects (canary precedent); teardown_handles resolves
+      it before anything is created and stops when it is absent, and the org listing (resolve_project_id) is never
+      called. copy_data also records prefix_sizes (an S3 list of ducklake/, ducklake-telemetry/ and
       telemetry-blobs/ as agent_platform, counts and bytes only). Subcommands: run, version-recovery (contract sitting.version_recovery; it honours --dev-profile only,
       default agent_platform, and refuses --profile), and verify-evidence FILE (delegated to restore_rehearsal_evidence).
-      --dry-run prints the ordered admin mutation list and calls nothing (sitting.order present). Both functions are
+      --dry-run prints the ordered admin mutation list and calls nothing (sitting.order present); it mints the run_id
+      and prints it, and the run takes it back through --run-id, so the operator approves the exact names that run. Both functions are
       created from lambda-packages/<sha>/ducklake-maintenance.zip, <sha> being source_git_sha in
       deploy-records/ducklake/agent-platform-ducklake-maintenance.json (Decision 249; a workflow_run head_sha is main's
       HEAD, not the deployed commit), and before any step each function's CodeSha256 must equal that record's
@@ -162,7 +167,7 @@ scope:
       330 s; catalog-dr's own is 300 s; core.py stays unchanged); the URL is resolved with get_function_url_config
       during teardown_handles. The 15-minute presigned GET is minted immediately before the restore invoke. Neon target
       calls go through src.common.neon_api. It reuses canary.py's _wait_function_active and _canary_delete_function.
-    new_imports: [scripts.ducklake_smoke.canary, src.common.neon_api]
+    new_imports: [scripts.ducklake_smoke.canary, scripts.ducklake_smoke.restore_rehearsal_evidence, src.common.neon_api]
   - file: scripts/ducklake_smoke/restore_rehearsal_evidence.py
     action: Create
     purpose: >-
@@ -174,7 +179,8 @@ scope:
     action: Modify
     purpose: >-
       PR 1. --restore-rehearsal and --restore-rehearsal-version-recovery join the mutually exclusive gate group, with
-      --evidence-out PATH, --dev-profile (default agent_platform), --dry-run and --restore-final (passed through), dispatching to scripts.ducklake_smoke.restore_rehearsal. Unbuilt plans PLAN-neon-key-out-of-pr-plans
+      --evidence-out PATH, --dev-profile (default agent_platform), --dry-run, --run-id, --restore-final and --project-id (all passed through; --project-id defaults to env NEON_PROJECT_ID),
+      dispatching to scripts.ducklake_smoke.restore_rehearsal. Unbuilt plans PLAN-neon-key-out-of-pr-plans
       and PLAN-telemetry-owner-provisioning also scope this file; whichever builds second rebases.
     new_imports: [scripts.ducklake_smoke.restore_rehearsal]
   - file: tests/test_neon_api.py
@@ -187,9 +193,12 @@ scope:
   - file: tests/checks/contracts/test_write_time_enforcement_conformance.py
     action: Modify
     purpose: >-
-      PR 1. Classify restore_rehearsal under the maintenance handler's _NON_ROW_WRITING map with a reason
-      (rehearsal: ephemeral functions only; writes a scratch catalog, no caller row), so
-      test_every_action_and_handler_is_classified stays green once handler.py registers it. The registry shards that name this
+      PR 1. Classify restore_rehearsal under the maintenance handler's _NON_ROW_WRITING map by appending it to an
+      existing line of that entry's dict.fromkeys key string, under its shared reason ("writes no caller row"), so
+      test_every_action_and_handler_is_classified stays green once handler.py registers it. The file is at 500 of 500
+      SLOC and unregistered in config/sloc_budgets.yaml: the edit adds no line (zero net SLOC, measured at build
+      with plan_obligations; ruff line length 127), and if no existing line has room it re-wraps that key string
+      within its current line count. The registry shards that name this
       file (write-time-conformance-every-rule-has-a-validator, writer-adapters-reject-every-declared-kind) are kept
       unchanged.
   - file: tests/test_catalog_dr.py
@@ -205,7 +214,8 @@ scope:
       refuse when it is absent; rewrite with absolute_paths above 0 returns rewritten false and executes no UPDATE;
       verify with a missing data file returns missing_files above 0 and that table's read_ok false without raising, and a
       failed ATTACH returns attach_ok false; the rewrite SQL updates only the scope IS NULL row; the rewrite SQL
-      names only data_path in the named meta-schema; prod_checksum attaches READ_ONLY; duckdb_copy writes nothing outside /tmp and returns no file; no response field matches the
+      names only data_path in the named meta-schema; the target DSN URI from the environment is parsed to the dict
+      form run_pg_restore and open_connection take, with percent-decoding (one test with an encoded password); prod_checksum attaches READ_ONLY; duckdb_copy writes nothing outside /tmp and returns no file; no response field matches the
       forbidden patterns; a forced
       pg_restore error and a forced ATTACH error whose messages hold a fake host and password return only step and
       error_class; restore passes clean=False, no_acl=True and schema ducklake_ops, and refuses a non-S3 dump URL; the
@@ -247,7 +257,9 @@ scope:
       each create_function carries EphemeralStorage 10240, Timeout 900, the fixed Runtime, Handler and Architectures,
       and reserved concurrency 1 is set; teardown_handles also stops on a leftover restore-rehearsal/ scratch prefix; the invoke client has read_timeout 960 and total_max_attempts 1; a timeout FunctionError and a client ReadTimeoutError on a step invoke each write evidence naming the step and the 900 s limit;
       a failure before copy_data leaves no scratch object, and a failure after it deletes scratch through
-      teardown_scratch or the agent_platform fallback; the two CLI flags dispatch to the orchestrator and --restore-final is passed through.
+      teardown_scratch or the agent_platform fallback; the two CLI flags dispatch to the orchestrator and --run-id, --restore-final and --project-id are passed through; a run
+      given --run-id uses the dry-run's names exactly; teardown_handles uses the supplied project id, never calls resolve_project_id, and stops before creating anything
+      when it is absent; --dry-run shows the project id handle.
   - file: tests/ducklake_neon_smoke_test/test_restore_rehearsal_verifier.py
     action: Create
     purpose: >-
@@ -294,7 +306,7 @@ bundled_recommendations: [rec-5023]
 followon_recs: [rec-5036, rec-5045]
 infrastructure_dependencies: []
 acceptance_criteria:
-  - The restore_rehearsal verb refuses, before any connection, everywhere but a function named *-restore-rehearsal-ephemeral holding the matching token, a restore_rehearsal_ target and scratch under ducklake-neon-smoke/restore-rehearsal/.
+  - The restore_rehearsal verb refuses, before any connection, everywhere but a function named *-restore-rehearsal-ephemeral holding the matching token; prod_checksum refuses when a target DSN is set, and every other step refuses without a restore_rehearsal_ target or with scratch outside ducklake-neon-smoke/restore-rehearsal/.
   - catalog_dr's default restore argv is unchanged; no_acl=True adds --no-acl and schema adds --schema.
   - The orchestrator resolves teardown first, tears down everything it created on any failure, and its evidence and stdout carry no host, DSN, password, bucket name, account id or ARN.
   - test_local_rewrite_reads_every_table passes (not skipped) on the PG16 stage, executing rewrite_data_path_sql's exact (sql, params) through psycopg2.
@@ -385,8 +397,8 @@ verification_plan:
   - step: 10
     phase: post-deploy
     action: ADMIN sitting -- the rehearsal, each admin-profile command on the operator's in-session approval line
-    command: bin/venv-python -m scripts.ducklake_neon_smoke_test --restore-rehearsal --profile agent_platform_admin --dev-profile agent_platform --evidence-out "${TMPDIR:-/tmp}/restore-rehearsal.json"; echo "EXIT=$?"
-    expected: EXIT=0 and every torn_down flag true; a failed criterion gives EXIT=1 naming it, with teardown complete
+    command: bin/venv-python -m scripts.ducklake_neon_smoke_test --restore-rehearsal --run-id "$RUN_ID" --project-id "$NEON_PROJECT_ID" --profile agent_platform_admin --dev-profile agent_platform --evidence-out "${TMPDIR:-/tmp}/restore-rehearsal.json"; echo "EXIT=$?"
+    expected: EXIT=0 and every torn_down flag true (RUN_ID is the run_id VP 9's dry-run printed; NEON_PROJECT_ID is the catalog project id the operator supplies); a failed criterion gives EXIT=1 naming it, with teardown complete
     fix_if: run only after the operator's approve line names VP 9's dry-run list; a torn_down false is cleaned by hand at once (the named resource) and rec-filed; a step error is mechanical (contract result_rule), fixed in a PR and the sitting re-run, with --restore-final added when the error was pg_restore's; a failed criterion in a result run (completed, or stopped by rewritten false, missing files or a failed read) is the spike's result, recorded, not patched
   - step: 11
     phase: post-deploy
@@ -428,6 +440,11 @@ test_obligations:
     verification_step: 6
     command: bin/venv-python -m scripts.roadmap.approved_text verify --slug sit-restore-spike --base origin/main
     red_green_expectation: red before (file absent), green after
+  - source: docs/DECISIONS.md
+    behavior: the new Decision and the three forward pointers hold exactly the approved words
+    verification_step: 6
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug sit-restore-spike --base origin/main
+    red_green_expectation: red before (entry absent), green after
   - source: docs/contracts/ducklake_maintenance.yaml
     behavior: the pointer line and amendment_log row hold exactly the approved words
     verification_step: 6
@@ -469,7 +486,7 @@ test_obligations:
     test_selector: tests/ducklake_neon_smoke_test/test_restore_rehearsal.py
     red_green_expectation: red before (module absent), green after
   - source: scripts/ducklake_neon_smoke_test.py
-    behavior: the two flags dispatch to the orchestrator and --restore-final is passed through
+    behavior: the two flags dispatch to the orchestrator; --restore-final and --project-id are passed through
     verification_step: 4
     test_selector: tests/ducklake_neon_smoke_test/test_restore_rehearsal.py
     red_green_expectation: red before (flags absent), green after
@@ -517,6 +534,7 @@ gate_rounds:
   - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 2, nits: 9}
   - {gate: wording-check, round: 9, verdict: PASS, digest: a22a747cd1b6252753df404dd84016b27bc3a38b6ae4eceb12dc36cac8af89f5, base: 75b7458e810f939c7096af11b3a25e325fe3bbb4, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 2, nits: 8}
+  - {gate: plan-critique, round: 8, verdict: REVISE, blocking: 2, nits: 10}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
