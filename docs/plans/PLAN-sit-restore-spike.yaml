@@ -43,7 +43,8 @@ scope:
   - file: src/common/neon_api.py
     action: Modify
     purpose: >-
-      PR 1. create_branch gains an optional name; add create_role(api_key, project_id, branch_id, role_name) -> password
+      PR 1. create_branch gains an optional name; add list_branches(api_key, project_id) (GET
+      /projects/{id}/branches, names and ids only) for teardown_handles' leftover check; add create_role(api_key, project_id, branch_id, role_name) -> password
       and create_database(api_key, project_id, branch_id, db_name, owner_name) over the existing _api_post (443, stdlib
       urllib). Neon serialises operations per branch: each call first waits, bounded, until the branch's operations have
       finished (GET /projects/{project_id}/operations, filtered to the branch_id; the exact filter is confirmed against
@@ -145,8 +146,8 @@ scope:
       rewritten false, missing files, a failed ATTACH or table read, or a Lambda limit (contract result_rule), never for
       a step error, which prints only the redacted step, error_class and code. --restore-final (passed only on the
       sitting re-run after one restore fix) makes a pg_restore non-zero exit a result: evidence with restore_ok false
-      and its exit status (contract result_rule); without it, the same exit is a step error. A Lambda-limit stop
-      writes host_limit with the step and limit.
+      and restore_exit_status (contract result_rule); without it, the same exit is a step error. A Lambda-limit stop
+      writes host_limit with the step, the limit and the elapsed seconds.
     new_imports: [scripts.ducklake_smoke.canary, scripts.ducklake_smoke.restore_rehearsal_aws, scripts.ducklake_smoke.restore_rehearsal_evidence]
   - file: scripts/ducklake_smoke/restore_rehearsal_aws.py
     action: Create
@@ -191,8 +192,8 @@ scope:
     purpose: >-
       PR 1. create_branch's name; create_role and create_database request shapes; each waits for the branch's
       operations and retries 423 a bounded number of times; non-2xx loud-fail; the password never in exception text. Errors from create_branch and _api_request no longer contain the response body;
-      NeonApiError carries the HTTP status. Test names carry VP 1's -k terms (create_branch_name, create_role, create_database,
-      wait_operations, locked_423), which no existing test matches.
+      NeonApiError carries the HTTP status. list_branches returns names and ids only. Test names carry VP 1's -k terms (create_branch_name,
+      create_role, create_database, list_branches, wait_operations, locked_423), which no existing test matches.
   - file: tests/checks/contracts/test_write_time_enforcement_conformance.py
     action: Modify
     purpose: >-
@@ -223,7 +224,8 @@ scope:
       forbidden patterns; a forced
       pg_restore error and a forced ATTACH error whose messages hold a fake host and password return only step and
       error_class; restore passes clean=False, no_acl=True and schema ducklake_ops, and refuses a non-S3 dump URL; the
-      maintenance manifest's includes list restore_rehearsal_actions.py and restore_rehearsal_file_catalog.py; absolute_paths counts all four path-bearing tables. For the 100% per-file coverage floor (which runs without
+      maintenance manifest's includes list restore_rehearsal_actions.py and restore_rehearsal_file_catalog.py; absolute_paths counts all four path-bearing tables; foreign_acl_grantees carries role names only, measured
+      over the ducklake_ops namespace. For the 100% per-file coverage floor (which runs without
       the integration marker), each step's success path, teardown_scratch and restore_ops_schema also have mocked
       unit tests.
   - file: tests/lambdas/ducklake_maintenance/test_restore_rehearsal_file_catalog.py
@@ -247,7 +249,7 @@ scope:
       keys never leave the prefix; the DSN reaches only create_function's Environment; a rewrite returning rewritten
       false, or a verify returning missing_files above 0 or a false attach_ok or read_ok, stops the run, writes evidence
       and tears down; a Lambda timeout or ENOSPC stop writes evidence with host_limit naming the step and limit; a pg_restore
-      non-zero exit is a step error without --restore-final and writes restore_ok false evidence with it; a step error writes no
+      non-zero exit is a step error without --restore-final and writes restore_ok false and restore_exit_status evidence with it; a step error writes no
       evidence and prints only step, error_class and code; the dump POST uses timeout 330; the presign happens after
       copy_data and immediately before the restore invoke; teardown_handles stops before creating anything when a
       rehearsal function or branch already exists, and teardown deletes only what this run created; a failing invoke
@@ -328,7 +330,7 @@ verification_plan:
   - step: 1
     phase: pre-deploy
     action: Neon API gains role and database creation without leaking the password
-    command: bin/venv-python -m pytest tests/test_neon_api.py -k "create_branch_name or create_role or create_database or wait_operations or locked_423" -q
+    command: bin/venv-python -m pytest tests/test_neon_api.py -k "create_branch_name or create_role or create_database or list_branches or wait_operations or locked_423" -q
     expected: all selected pass; red before (functions absent)
     fix_if: fix neon_api; never print the password
     hermetic: true
@@ -402,7 +404,7 @@ verification_plan:
     phase: post-deploy
     action: ADMIN sitting -- credential check, then the dry-run list for the operator's approve line
     command: if bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null | grep -q 'assumed-role/PlatformAdmin/'; then echo ADMIN_CHAIN_OK; bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform | grep -q 'assumed-role/PlatformDev/' && echo DEV_CHAIN_OK; bin/venv-python -m scripts.ducklake_neon_smoke_test --restore-rehearsal --dry-run --project-id "$NEON_PROJECT_ID" --profile agent_platform_admin --dev-profile agent_platform; else echo ADMIN_CHAIN_ABSENT; fi
-    expected: ADMIN_CHAIN_OK and DEV_CHAIN_OK (copy_data, probe_absent, the teardown fallback and VP 12 run as agent_platform); ADMIN_CHAIN_ABSENT or a missing DEV_CHAIN_OK stops here and asks the coordinator for an ADMIN cloud session
+    expected: ADMIN_CHAIN_OK and DEV_CHAIN_OK, then the dry-run list, which the operator names in a second line before VP 10 (copy_data, probe_absent, the teardown fallback and VP 12 run as agent_platform); ADMIN_CHAIN_ABSENT or a missing DEV_CHAIN_OK stops here and asks the coordinator for an ADMIN cloud session
     fix_if: wrong environment
   - step: 10
     phase: post-deploy
@@ -466,12 +468,12 @@ test_obligations:
     test_selector: tests/lambdas/ducklake_maintenance/test_restore_rehearsal_actions.py
     red_green_expectation: red before (module not in includes), green after
   - source: src/common/neon_api.py
-    behavior: role and database creation after the branch's operations finish, bounded 423 retry; password never in logs or errors
+    behavior: role and database creation after the branch's operations finish, bounded 423 retry, list_branches; password never in logs or errors; no response body in any error; NeonApiError.status
     verification_step: 1
     test_selector: tests/test_neon_api.py
     red_green_expectation: red before (functions absent), green after
   - source: src/common/catalog_dr.py
-    behavior: opt-in --no-acl and --schema; default argv unchanged
+    behavior: opt-in --no-acl and --schema; default argv unchanged; CatalogDrError.returncode; dsn_uri percent-encodes user and password
     verification_step: 2
     test_selector: tests/test_catalog_dr.py
     red_green_expectation: red before (no_acl keyword absent), green after
@@ -519,8 +521,8 @@ context:
   - "Code home (ADVICE Q4 adapted): dormant verb in the maintenance package, run on ephemeral functions from the CI-published zip, because a function-less separate artifact has no build precedent and stub manifests are skipped by the build; the role is the boundary either way."
   - "Profiles (operator rule 2026-11-09): agent_platform by default; agent_platform_admin only for the steps sitting.order names (dump invoke, DR read and copy, function create and delete, Neon target, step invokes); code ships only through CI. The sitting runs in an admin-container thread the coordinator starts."
   - "deploy-paths.yaml has no admin_out_of_band row for this sitting until rec-5045 lands (the file is at its 500-line cap); the new Decision's cl.1 and its Decision 126 pointer authorise the sitting meanwhile, and the handoff note says so. The sitting is also outside protected-actions.yaml admin-credential's rec-4707 rule (the admin profile serves only named bootstrap and admin deploys); the new Decision's cl.1 authorises it."
-  - "Decision number race: nine unbuilt plans scope DECISIONS.md. If one lands a Decision first, the before anchor (the Decision 250 heading) still matches but the new entry must go above the newer one and take the next number, which approved_text verify does not accept; the build then rebases, re-runs the wording check on the new base and the operator approves through a fresh approval run before PR 1 merges."
-  - "Approvals at build start: the operator's in-session approve lines for each admin-profile command (protected-actions.yaml admin-credential and secret-read for /secret/neon-api-key); the admin-route choice is recorded in the handoff note."
+  - "Decision number race: eight unbuilt plans scope DECISIONS.md (plan_obligations, 2026-11-09). If one lands a Decision first, the before anchor (the Decision 250 heading) still matches but the new entry must go above the newer one and take the next number, which approved_text verify does not accept; the build then rebases, re-runs the wording check on the new base and the operator approves through a fresh approval run before PR 1 merges."
+  - "Approvals in the sitting's ADMIN thread (a new thread needs its own): the operator's in-session line approve admin-credential agent_platform_admin (protected-actions.yaml) covers VP 9 and VP 10; then a second operator line naming VP 9's dry-run list is the human checkpoint before VP 10 (the gate does not enforce it). The orchestrator's in-script read of /secret/neon-api-key is not a secret-read trigger (protected-actions known_limits). The admin-route choice is recorded in the handoff note."
   - "rec-5024's plan (Plan the SIT Decision thread) sets T2.57 c2 met_by this slug and re-anchors its Decision after this one; told 2026-11-09."
   - "File-catalog leg (duckdb_copy): added 2026-11-09 at the request of the Decide between RDS and Neon thread, whose catalog-backend choice needs a real PROD catalog copied into a DuckDB file; synthetic proof at /mnt/project-files/rds-vs-neon/ROUND-2.md section 1. Reported, not gating; the file stays in the restore function's /tmp."
   - "Related, not bundled: rec-4300 (restore into a Postgres without pg_read_all_data), rec-4883 (canary teardown on CC-web; its lesson is the teardown-first rule), rec-4694 (telemetry redaction for SIT reads)."
@@ -547,6 +549,8 @@ gate_rounds:
   - {gate: plan-critique, round: 8, verdict: REVISE, blocking: 2, nits: 10}
   - {gate: plan-critique, round: 9, verdict: REVISE, blocking: 1, nits: 7}
   - {gate: wording-check, round: 10, verdict: PASS, digest: bc5c06712117d386c101af7611e0467f41852442a85f04a16cb5deca5cf24146, base: 75b7458e810f939c7096af11b3a25e325fe3bbb4, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 10, verdict: REVISE, blocking: 2, nits: 8}
+  - {gate: wording-check, round: 11, verdict: PASS, digest: e0b1dcf76b46cd5868b0ea1b8dc3ef38da7d63654819937e60049553271c98f1, base: 654b77978917acc0494698bed38ff28c15f8c97b, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
