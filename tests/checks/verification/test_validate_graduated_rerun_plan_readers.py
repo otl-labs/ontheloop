@@ -1,5 +1,8 @@
 """Mirror of scripts/checks/verification/validate_graduated_rerun_plan_readers.py (fast-tier plan-reader re-run)."""
 
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -8,9 +11,7 @@ import yaml
 from scripts.checks import registry
 from scripts.checks.verification import validate_graduated_rerun as rerun
 from scripts.checks.verification import validate_graduated_rerun_plan_readers as readers
-from scripts.checks.verification._manifest import ENTRIES
 from scripts.checks.verification.validate_known_red_shrinks import KNOWN_RED_REL
-from scripts.validate import _should_run_in_pre
 from scripts.verification_graduation import shard_path_for
 
 GREEN = ["bash", "-c", "exit 0"]
@@ -103,12 +104,30 @@ def test_no_plan_readers_is_vacuous(tmp_path: Path) -> None:
     assert declaration.count == 0
 
 
+def _would_run(pre_globs: tuple[str, ...], paths: list[str]) -> bool:
+    # A subprocess keeps scripts.validate out of this worker's sys.modules (test_manifest_contracts asserts it is absent).
+    code = (
+        "import json, sys; from scripts.validate import _should_run_in_pre as f; "
+        "a = json.loads(sys.argv[1]); print(f(tuple(a[0]), a[1], True))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code, json.dumps([list(pre_globs), paths])],
+        cwd=str(rerun.HEAD_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+    )
+    return proc.stdout.strip() == "True"
+
+
 def test_manifest_entry_is_pre_only_on_plan_diffs() -> None:
-    entry = next(e for e in ENTRIES if e.name == "validate_graduated_rerun_plan_readers")
+    entry = registry._ALL_ENTRIES["validate_graduated_rerun_plan_readers"]
     assert entry.pre is True
     assert entry.full_segment is None
-    assert _should_run_in_pre(entry.pre_globs, ["docs/plans/PLAN-x.yaml"], True) is True
-    assert _should_run_in_pre(entry.pre_globs, ["src/x.py"], True) is False
+    assert _would_run(entry.pre_globs, ["docs/plans/PLAN-x.yaml"]) is True
+    assert _would_run(entry.pre_globs, ["src/x.py"]) is False
 
 
 def test_evaluate_without_select_is_unchanged(tmp_path: Path) -> None:
