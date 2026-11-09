@@ -25,8 +25,9 @@ scope:
       PR 1. The new Decision exactly as docs/plans/approved/sit-restore-spike.yaml binds (block decision-new): the
       human-directed ADMIN-agent rehearsal sitting carve-out, amending Decisions 81, 126 and 237, plus the one-line
       forward pointers on Decisions 126, 81 and 237 (blocks d126-pointer, d81-pointer, d237-pointer) the supersession
-      guard requires. {{N}} and {{DATE}} are filled
-      at build time; a clean tool-made renumber keeps the approval.
+      guard requires. {{N}} and {{DATE}} are filled at build time. If another Decision lands first, the entry no
+      longer sits directly above Decision 250 as approved_text verify expects, so the operator re-approves (context:
+      Decision number race).
   - file: docs/contracts/restore-rehearsal.yaml
     action: Create
     purpose: >-
@@ -47,8 +48,9 @@ scope:
       urllib). Neon serialises operations per branch: each call first waits, bounded, until the branch's operations have
       finished (GET .../operations) and retries a 423 Locked a bounded number of times before failing. Loud-fail
       (NeonApiError) on any other non-2xx; the password is never in an exception, log line or return other than
-      create_role's (response bodies of role, database, branch and operations calls are never quoted in errors; the
-      existing create_branch loud-fails stop embedding the body, since a branch response can carry connection URIs). Orchestrator-only: no Lambda imports it,
+      create_role's (no response body is quoted in any error: _api_request stops quoting its 500 characters and the existing
+      create_branch loud-fails stop embedding the body, since a branch response can carry connection URIs).
+      NeonApiError gains a status attribute, which the 423 retry reads. Orchestrator-only: no Lambda imports it,
       though data-pipeline packages src/ whole (VP 8 and its forced deploy).
   - file: src/common/catalog_dr.py
     action: Modify
@@ -91,7 +93,8 @@ scope:
       the DuckDB-file catalog in /tmp from the restored target, compare at the two snapshots with the shared checksum
       expression, delete the file, return the contract's fields. The median snapshot is taken from the restored
       ducklake_snapshot rows; a per-table read error at either snapshot is recorded as match false, never raised, so
-      this non-gating leg cannot turn a result run into a step error.
+      this non-gating leg cannot turn a result run into a step error; likewise every init, copy or type error after its
+      refusals is caught and returned as all-false matches within the contract's fields.
     new_imports: [src.lambdas.ducklake_maintenance._shared]
   - file: src/lambdas/ducklake_maintenance/handler.py
     action: Modify
@@ -122,13 +125,16 @@ scope:
       deploy-records/ducklake/agent-platform-ducklake-maintenance.json (Decision 249; a workflow_run head_sha is main's
       HEAD, not the deployed commit), and before any step each function's CodeSha256 must equal that record's
       code_sha256 and the production function's, or the run stops. Function names never start with agent-platform- (CI
-      roles hold lambda:Get* on that prefix). teardown_handles stops before creating anything when a rehearsal function
-      or branch already exists, and teardown deletes only what this run created. Each step runs under the principal
+      roles hold lambda:Get* on that prefix). teardown_handles stops before creating anything when a rehearsal function,
+      branch or restore-rehearsal/ scratch prefix (listed as agent_platform) already exists, and teardown deletes only what this run created. Each step runs under the principal
       sitting.order names (--profile for admin, --dev-profile for agent_platform). Every invoke response, exception and
       stderr is redacted (restore_rehearsal_evidence) before any print, exception text or evidence write; a
       SmokeTestFailure never embeds a response body. Evidence is written for a completed run and for one stopped by
       rewritten false, missing files, a failed ATTACH or table read, or a Lambda limit (contract result_rule), never for
-      a step error, which prints only the redacted step, error_class and code.
+      a step error, which prints only the redacted step, error_class and code. --restore-final (passed only on the
+      sitting re-run after one restore fix) makes a pg_restore non-zero exit a result: evidence with restore_ok false
+      and its exit status (contract result_rule); without it, the same exit is a step error. A Lambda-limit stop
+      writes host_limit with the step and limit.
     new_imports: [scripts.ducklake_smoke.canary, scripts.ducklake_smoke.restore_rehearsal_aws, scripts.ducklake_smoke.restore_rehearsal_evidence]
   - file: scripts/ducklake_smoke/restore_rehearsal_aws.py
     action: Create
@@ -140,9 +146,13 @@ scope:
       each step is invoked with boto3 lambda.invoke(Payload=...) on a client configured read_timeout 960 (above the
       900 s function timeout, so Lambda's own timeout response arrives first) and retries total_max_attempts 1; a
       FunctionError reporting a timeout, or a client ReadTimeoutError on a step invoke, is the 900 s Lambda-limit result
-      (contract result_rule), never a step error. Reserved concurrency 1 on each function (listed in --dry-run). From
-      the ephemeral functions' responses only CodeSha256 and State are read; from the production maintenance and reader
-      functions only Role, Layers, MemorySize and CodeSha256; never Environment. The dump is one SigV4-signed POST to
+      (contract result_rule), never a step error. Reserved concurrency 1 on each function (listed in --dry-run). Roles: the
+      restore function takes the Role of agent-platform-ducklake-maintenance-smoke and the checksum function the Role of
+      the production reader function, each read for Role only; the production maintenance function's Role is never
+      passed (it writes production prefixes). Layers, MemorySize and CodeSha256 are read from the production
+      maintenance function; Runtime python3.12, Handler src.lambdas.ducklake_maintenance.handler.handler and
+      Architectures x86_64 are fixed as in ducklake_maintenance.tf. From the ephemeral functions' responses only
+      CodeSha256 and State are read; Environment is never read from any function. The dump is one SigV4-signed POST to
       the catalog-dr Function URL (the same signing as core._sigv4_invoke, whose 180 s timeout is fixed, with timeout
       330 s; catalog-dr's own is 300 s; core.py stays unchanged); the URL is resolved with get_function_url_config
       during teardown_handles. The 15-minute presigned GET is minted immediately before the restore invoke. Neon target
@@ -166,7 +176,8 @@ scope:
     action: Modify
     purpose: >-
       PR 1. create_branch's name; create_role and create_database request shapes; each waits for the branch's
-      operations and retries 423 a bounded number of times; non-2xx loud-fail; the password never in exception text. Test names carry VP 1's -k terms (create_branch_name, create_role, create_database,
+      operations and retries 423 a bounded number of times; non-2xx loud-fail; the password never in exception text. Errors from create_branch and _api_request no longer contain the response body;
+      NeonApiError carries the HTTP status. Test names carry VP 1's -k terms (create_branch_name, create_role, create_database,
       wait_operations, locked_423), which no existing test matches.
   - file: tests/test_catalog_dr.py
     action: Modify
@@ -192,7 +203,7 @@ scope:
     purpose: >-
       PR 1. The mirror test of restore_rehearsal_file_catalog.py (validate_test_coverage): with the target ATTACH
       mocked over a local DuckDB-file source, duckdb_copy builds its catalog only under /tmp, deletes it, returns only
-      the contract's duckdb_copy fields, and reports a per-table mismatch or read error as a false match, never a raise.
+      the contract's duckdb_copy fields, and reports a per-table mismatch or read error, and an init or copy error, as false matches, never a raise.
   - file: tests/lambdas/ducklake_maintenance/handler/test_restore_rehearsal_dispatch.py
     action: Create
     purpose: >-
@@ -207,7 +218,8 @@ scope:
       every later step still tears down each created resource and records it; the dump precedes the data copy; scratch
       keys never leave the prefix; the DSN reaches only create_function's Environment; a rewrite returning rewritten
       false, or a verify returning missing_files above 0 or a false attach_ok or read_ok, stops the run, writes evidence
-      and tears down; a Lambda timeout or ENOSPC stop writes evidence naming the step and limit; a step error writes no
+      and tears down; a Lambda timeout or ENOSPC stop writes evidence with host_limit naming the step and limit; a pg_restore
+      non-zero exit is a step error without --restore-final and writes restore_ok false evidence with it; a step error writes no
       evidence and prints only step, error_class and code; the dump POST uses timeout 330; the presign happens after
       copy_data and immediately before the restore invoke; teardown_handles stops before creating anything when a
       rehearsal function or branch already exists, and teardown deletes only what this run created; a failing invoke
@@ -216,7 +228,10 @@ scope:
       URL; --dry-run calls nothing; each step uses the principal sitting.order names; version-recovery refuses
       --profile; a CodeSha256 mismatch stops the run before any step and still tears down; the zip key and expected
       CodeSha256 come from the deploy record; nothing read from a create or configuration response but CodeSha256 and
-      State; names never start with agent-platform-; the invoke client has read_timeout 960 and total_max_attempts 1; a timeout FunctionError and a client ReadTimeoutError on a step invoke each write evidence naming the step and the 900 s limit;
+      State; names never start with agent-platform-; each create_function receives exactly the maintenance-smoke role (restore) and
+      the reader role (checksum), and the production maintenance role never appears, both roles listed in --dry-run;
+      each create_function carries EphemeralStorage 10240, Timeout 900, the fixed Runtime, Handler and Architectures,
+      and reserved concurrency 1 is set; teardown_handles also stops on a leftover restore-rehearsal/ scratch prefix; the invoke client has read_timeout 960 and total_max_attempts 1; a timeout FunctionError and a client ReadTimeoutError on a step invoke each write evidence naming the step and the 900 s limit;
       a failure before copy_data leaves no scratch object, and a failure after it deletes scratch through
       teardown_scratch or the agent_platform fallback; the two CLI flags dispatch to the orchestrator.
   - file: tests/ducklake_neon_smoke_test/test_restore_rehearsal_verifier.py
@@ -224,7 +239,8 @@ scope:
     purpose: >-
       PR 1. Pre-declared split for restore_rehearsal_evidence.py: verify-evidence accepts a complete evidence file and
       names each failed criterion otherwise (rewritten and complete for the stopped-run shapes); refuses a file holding
-      a host, DSN, password, bucket name, 12-digit account id or ARN; prints VERSION_RECOVERY_OK only when the contract's
+      a host, DSN, password, bucket name, 12-digit account id, ARN, presigned URL or its credential parts (access key id,
+      X-Amz-Security-Token, X-Amz-Signature); prints VERSION_RECOVERY_OK only when the contract's
       version_recovery criterion holds; prints DUCKDB_COPY_OK or names each mismatch without changing the exit code;
       the redaction function strips every forbidden pattern.
   - file: tests/common/test_restore_rehearsal_pg_restore.py
@@ -254,7 +270,7 @@ scope:
       PR 2, written for the branch the sitting produced. Pass branch: test_rewritten_data_path_reads_every_table
       (rec-5023's acceptance, moved here by update_rec in PR 2): the committed evidence passes verify-evidence, every ops
       table's restored count and checksum equal PROD's, missing_files 0, write probe in scratch only, every torn_down
-      true. Failure branch (a result run with a failed criterion, completed or stopped by one): test_restore_rehearsal_failed_criteria asserts
+      true. Failure branch (a result run with a failed criterion, completed or stopped by one, including restore_ok false or a host_limit): test_restore_rehearsal_failed_criteria asserts
       verify-evidence names exactly the failed criteria recorded, every torn_down true and no forbidden pattern; rec-5023's
       acceptance is updated to that test, and the fallback goes to rec-5024's owner through the coordinator. test_version_recovery_evidence:
       sha256 match. test_duckdb_copy_evidence: the file-catalog leg's rows are present and reported (not asserted equal:
@@ -317,7 +333,7 @@ verification_plan:
     action: A real local DuckLake rewrite reads every table and writes only to the new path
     command: bin/venv-python -m pytest tests/common/test_restore_rehearsal_pg_restore.py -q -rs
     expected: all passed and no SKIPPED line (fetches the ducklake extension over the network and needs the local PG16 stage, hence not hermetic)
-    fix_if: a skip means the extension could not be fetched; rerun with network; never accept a skip as a pass
+    fix_if: the stage fixture FAILS (never skips) when DUCKLAKE_TEST_PG_ADMIN_DSN is unset or an extension cannot load; a FAIL naming the extension means it could not be fetched, so rerun with network; never accept a skip as a pass
     hermetic: false
     graduation: waive
     graduation_waiver_reason: needs a network fetch of the ducklake extension and the local PG16 stage (DUCKLAKE_TEST_PG_ADMIN_DSN; the PG16 test fails when it is unset), so it cannot join the hermetic fast tier; the hermetic rewrite-builder and restore-helper tests graduate through VP 3
@@ -342,7 +358,7 @@ verification_plan:
   - step: 8
     phase: post-deploy
     action: The governed deploys shipped PR 1 to every affected artifact (ducklake_maintenance, ducklake_catalog_dr, data-pipeline)
-    command: for r in ducklake/agent-platform-ducklake-maintenance ducklake/agent-platform-ducklake-catalog-dr prod/agent-platform-scheduled-agent-dispatcher prod/agent-platform-findings-processor; do s=$(aws s3 cp "s3://agent-platform-data-lake/deploy-records/$r.json" - --profile agent_platform | bin/venv-python -c "import json,sys;print(json.load(sys.stdin)['source_git_sha'])") && git merge-base --is-ancestor "$PR1_MERGE_SHA" "$s" && echo "DEPLOYED_OK $r" || echo "NOT_DEPLOYED $r"; done
+    command: git fetch origin main --quiet && PR1_MERGE_SHA=$(git log origin/main --format=%H -1 --grep='^feat(sit-restore-spike)') && test -n "$PR1_MERGE_SHA" && for r in ducklake/agent-platform-ducklake-maintenance ducklake/agent-platform-ducklake-catalog-dr prod/agent-platform-scheduled-agent-dispatcher prod/agent-platform-findings-processor; do s=$(aws s3 cp "s3://agent-platform-data-lake/deploy-records/$r.json" - --profile agent_platform | bin/venv-python -c "import json,sys;print(json.load(sys.stdin)['source_git_sha'])") && git merge-base --is-ancestor "$PR1_MERGE_SHA" "$s" && echo "DEPLOYED_OK $r" || echo "NOT_DEPLOYED $r"; done
     expected: DEPLOYED_OK for all four records (data-pipeline.zip deploys to two functions, one record each; the two prod records move only after the forced deploy-prod-lambdas.yml dispatch) (PR1_MERGE_SHA is PR 1's squash-merge sha) (each deployed commit is PR 1's merge sha or a descendant); the governed channel's own smoke job gates each deploy
     fix_if: follow deploy-paths.yaml deploy_code recovery
   - step: 9
@@ -356,13 +372,13 @@ verification_plan:
     action: ADMIN sitting -- the rehearsal, each admin-profile command on the operator's in-session approval line
     command: bin/venv-python -m scripts.ducklake_neon_smoke_test --restore-rehearsal --profile agent_platform_admin --dev-profile agent_platform --evidence-out "${TMPDIR:-/tmp}/restore-rehearsal.json"; echo "EXIT=$?"
     expected: EXIT=0 and every torn_down flag true; a failed criterion gives EXIT=1 naming it, with teardown complete
-    fix_if: run only after the operator's approve line names VP 9's dry-run list; a torn_down false is cleaned by hand at once (the named resource) and rec-filed; a step error is mechanical (contract result_rule), fixed in a PR and the sitting re-run; a failed criterion in a result run (completed, or stopped by rewritten false, missing files or a failed read) is the spike's result, recorded, not patched
+    fix_if: run only after the operator's approve line names VP 9's dry-run list; a torn_down false is cleaned by hand at once (the named resource) and rec-filed; a step error is mechanical (contract result_rule), fixed in a PR and the sitting re-run, with --restore-final added when the error was pg_restore's; a failed criterion in a result run (completed, or stopped by rewritten false, missing files or a failed read) is the spike's result, recorded, not patched
   - step: 11
     phase: post-deploy
     action: Evidence meets every exit criterion
     command: bin/venv-python -m scripts.ducklake_smoke.restore_rehearsal verify-evidence "${TMPDIR:-/tmp}/restore-rehearsal.json"
     expected: RESTORE_REHEARSAL_OK
-    fix_if: a failed criterion is the result; record it and route the fallback to rec-5024's owner through the coordinator
+    fix_if: a failed criterion is the result; record it and route the fallback to rec-5024's owner through the coordinator; a host_limit result goes to rec-5024 as a harness limit, not a fallback trigger
   - step: 12
     phase: post-deploy
     action: Versioning recovery as PlatformDev
@@ -461,7 +477,7 @@ context:
   - "Code home (ADVICE Q4 adapted): dormant verb in the maintenance package, run on ephemeral functions from the CI-published zip, because a function-less separate artifact has no build precedent and stub manifests are skipped by the build; the role is the boundary either way."
   - "Profiles (operator rule 2026-11-09): agent_platform by default; agent_platform_admin only for the steps sitting.order names (dump invoke, DR read and copy, function create and delete, Neon target, step invokes); code ships only through CI. The sitting runs in an admin-container thread the coordinator starts."
   - "deploy-paths.yaml has no admin_out_of_band row for this sitting until rec-5045 lands (the file is at its 500-line cap); the new Decision's cl.1 and its Decision 126 pointer authorise the sitting meanwhile, and the handoff note says so."
-  - "Decision number race: nine unbuilt plans scope DECISIONS.md. If one lands a Decision first, the build fills {{N}} with the next free number; if decision-new's before anchor (the top Decision heading) no longer matches, the build re-runs the wording check on the new base and the operator re-approves through a fresh approval run before PR 1 merges."
+  - "Decision number race: nine unbuilt plans scope DECISIONS.md. If one lands a Decision first, the before anchor (the Decision 250 heading) still matches but the new entry must go above the newer one and take the next number, which approved_text verify does not accept; the build then rebases, re-runs the wording check on the new base and the operator approves through a fresh approval run before PR 1 merges."
   - "Approvals at build start: the operator's in-session approve lines for each admin-profile command (protected-actions.yaml admin-credential and secret-read for /secret/neon-api-key); the admin-route choice is recorded in the handoff note."
   - "rec-5024's plan (Plan the SIT Decision thread) sets T2.57 c2 met_by this slug and re-anchors its Decision after this one; told 2026-11-09."
   - "File-catalog leg (duckdb_copy): added 2026-11-09 at the request of the Decide between RDS and Neon thread, whose catalog-backend choice needs a real PROD catalog copied into a DuckDB file; synthetic proof at /mnt/project-files/rds-vs-neon/ROUND-2.md section 1. Reported, not gating; the file stays in the restore function's /tmp."
@@ -483,6 +499,8 @@ gate_rounds:
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 4, nits: 13}
   - {gate: wording-check, round: 8, verdict: PASS, digest: 3c749deaead9ec06d112a0cc3587a77427b12fd81be7678c7fc729c4ea9e19b2, base: 75b7458e810f939c7096af11b3a25e325fe3bbb4, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 2, nits: 10}
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 2, nits: 9}
+  - {gate: wording-check, round: 9, verdict: PASS, digest: a22a747cd1b6252753df404dd84016b27bc3a38b6ae4eceb12dc36cac8af89f5, base: 75b7458e810f939c7096af11b3a25e325fe3bbb4, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -494,7 +512,7 @@ execution_steps:
   - "PR 1: create restore_rehearsal_actions.py, and restore_rehearsal_file_catalog.py, register the verb in handler.py and both modules in manifest.yaml's includes, with their tests (VP 3) and the PG16 test (VP 5). Post: every refusal holds."
   - "PR 1: apply the sidecar's blocks to DECISIONS.md, restore-rehearsal.yaml and ducklake_maintenance.yaml word for word (VP 6)."
   - "PR 1: create restore_rehearsal.py, restore_rehearsal_evidence.py and the CLI flags with their tests (VP 4-5); then VP 7 and the full tier (handoff_policy)."
-  - "PR 1: open, drive CI green, merge under standing authorisation once validate_merge_step reads the operator's approval run. The ducklake channel deploys maintenance and catalog-dr on its own (catalog-dr only while deploy-ducklake's reconcile gate is green). The prod channel's gate skips data-pipeline (no_source_change: PROD_SOURCE_PATHSPECS watch no src/common path), so dispatch deploy-prod-lambdas.yml with force true (the governed channel, deploy-paths.yaml deploy_code); then VP 8."
+  - "PR 1: open with a title starting feat(sit-restore-spike): (VP 8 finds its squash commit by it), drive CI green, merge under standing authorisation once validate_merge_step reads the operator's approval run. The ducklake channel deploys maintenance and catalog-dr on its own (catalog-dr only while deploy-ducklake's reconcile gate is green). The prod channel's gate skips data-pipeline (no_source_change: PROD_SOURCE_PATHSPECS watch no src/common path), so dispatch deploy-prod-lambdas.yml with force true (the governed channel, deploy-paths.yaml deploy_code); then VP 8."
   - "Sitting, in an ADMIN cloud session with the operator present: VP 9-11, then VP 12 as PlatformDev. Save both evidence files to /mnt/project-files/restore-spike/ and post counts-only results on PR 1."
   - "PR 2: commit both evidence files unedited and the evidence test, regenerating .secrets.baseline for their sha256 values (implement-scope-boundary.yaml secrets_baseline_regeneration); update_rec rec-5023's acceptance to test_restore_rehearsal_evidence.py::test_rewritten_data_path_reads_every_table (pass branch) or ::test_restore_rehearsal_failed_criteria (failure branch); Resolves: rec-5023 in the squash body; VP 13-14."
   - "Report the data-model result (pass, or the failed criterion and the fallback) and the measured timings to the coordinator for rec-5024."
