@@ -46,7 +46,8 @@ scope:
       PR 1. create_branch gains an optional name; add create_role(api_key, project_id, branch_id, role_name) -> password
       and create_database(api_key, project_id, branch_id, db_name, owner_name) over the existing _api_post (443, stdlib
       urllib). Neon serialises operations per branch: each call first waits, bounded, until the branch's operations have
-      finished (GET .../operations) and retries a 423 Locked a bounded number of times before failing. Loud-fail
+      finished (GET /projects/{project_id}/operations, filtered to the branch_id; the exact filter is confirmed against
+      Neon's API reference at build) and retries a 423 Locked a bounded number of times before failing. Loud-fail
       (NeonApiError) on any other non-2xx; the password is never in an exception, log line or return other than
       create_role's (no response body is quoted in any error: _api_request stops quoting its 500 characters and the existing
       create_branch loud-fails stop embedding the body, since a branch response can carry connection URIs).
@@ -60,7 +61,8 @@ scope:
       never depends on roles that exist only in PROD) and schema: str | None = None (adds --schema=<s>, so the rehearsal
       restores ducklake_ops only and never the telemetry catalog, Decision 239). Default argv byte-identical to today (restore_drill and any real DR
       restore keep their grants). CatalogDrError gains a returncode attribute (pg_restore's exit status), so the restore
-      step's value-free code needs no message.
+      step's value-free code needs no message. dsn_uri percent-encodes the user and password (urllib.parse.quote, safe
+      ''), so a decoded password with reserved characters re-joins correctly; Neon's are alphanumeric today.
   - file: src/lambdas/ducklake_maintenance/restore_rehearsal_actions.py
     action: Create
     purpose: >-
@@ -179,7 +181,8 @@ scope:
     action: Modify
     purpose: >-
       PR 1. --restore-rehearsal and --restore-rehearsal-version-recovery join the mutually exclusive gate group, with
-      --evidence-out PATH, --dev-profile (default agent_platform), --dry-run, --run-id, --restore-final and --project-id (all passed through; --project-id defaults to env NEON_PROJECT_ID),
+      --evidence-out PATH, --dev-profile (default agent_platform), --dry-run, --run-id and --restore-final, all passed through; the existing --project-id (default env
+      NEON_PROJECT_ID, :290-296) is reused, not re-added, and its help text widened to --restore-rehearsal,
       dispatching to scripts.ducklake_smoke.restore_rehearsal. Unbuilt plans PLAN-neon-key-out-of-pr-plans
       and PLAN-telemetry-owner-provisioning also scope this file; whichever builds second rebases.
     new_imports: [scripts.ducklake_smoke.restore_rehearsal]
@@ -203,7 +206,8 @@ scope:
       unchanged.
   - file: tests/test_catalog_dr.py
     action: Modify
-    purpose: PR 1. no_acl=True adds --no-acl, schema adds --schema, run_pg_restore(clean=False) drops --clean --if-exists; the default argv list is unchanged. CatalogDrError carries returncode (a restore_clean test asserts it). Test names carry VP 2's -k terms (no_acl,
+    purpose: PR 1. no_acl=True adds --no-acl, schema adds --schema, run_pg_restore(clean=False) drops --clean --if-exists; the default argv list is unchanged. CatalogDrError carries returncode (a restore_clean test asserts it); dsn_uri percent-encodes a password
+      holding reserved characters (a restore_clean test). Test names carry VP 2's -k terms (no_acl,
       restore_schema, restore_clean).
   - file: tests/lambdas/ducklake_maintenance/test_restore_rehearsal_actions.py
     action: Create
@@ -215,7 +219,7 @@ scope:
       verify with a missing data file returns missing_files above 0 and that table's read_ok false without raising, and a
       failed ATTACH returns attach_ok false; the rewrite SQL updates only the scope IS NULL row; the rewrite SQL
       names only data_path in the named meta-schema; the target DSN URI from the environment is parsed to the dict
-      form run_pg_restore and open_connection take, with percent-decoding (one test with an encoded password); prod_checksum attaches READ_ONLY; duckdb_copy writes nothing outside /tmp and returns no file; no response field matches the
+      form run_pg_restore and open_connection take, with percent-decoding (one test with an encoded password asserts the round trip into the pg_restore argv); prod_checksum attaches READ_ONLY; duckdb_copy writes nothing outside /tmp and returns no file; no response field matches the
       forbidden patterns; a forced
       pg_restore error and a forced ATTACH error whose messages hold a fake host and password return only step and
       error_class; restore passes clean=False, no_acl=True and schema ducklake_ops, and refuses a non-S3 dump URL; the
@@ -260,6 +264,12 @@ scope:
       teardown_scratch or the agent_platform fallback; the two CLI flags dispatch to the orchestrator and --run-id, --restore-final and --project-id are passed through; a run
       given --run-id uses the dry-run's names exactly; teardown_handles uses the supplied project id, never calls resolve_project_id, and stops before creating anything
       when it is absent; --dry-run shows the project id handle.
+  - file: tests/ducklake_neon_smoke_test/test_restore_rehearsal_aws.py
+    action: Create
+    purpose: >-
+      PR 1. Pre-declared split of test_restore_rehearsal.py: the restore_rehearsal_aws.py behaviours listed there
+      (create_function roles, settings and Environment, the invoke client's timeout and attempts, timeout shapes, the
+      330 s dump POST, response fields read, Neon project-id handling) live here, so neither file passes 500 SLOC.
   - file: tests/ducklake_neon_smoke_test/test_restore_rehearsal_verifier.py
     action: Create
     purpose: >-
@@ -348,7 +358,7 @@ verification_plan:
   - step: 4
     phase: pre-deploy
     action: Orchestrator sequencing, teardown, secret transport and evidence verifier
-    command: bin/venv-python -m pytest tests/ducklake_neon_smoke_test/test_restore_rehearsal.py tests/ducklake_neon_smoke_test/test_restore_rehearsal_verifier.py -q
+    command: bin/venv-python -m pytest tests/ducklake_neon_smoke_test/test_restore_rehearsal.py tests/ducklake_neon_smoke_test/test_restore_rehearsal_aws.py tests/ducklake_neon_smoke_test/test_restore_rehearsal_verifier.py -q
     expected: all pass; red before (file absent)
     fix_if: fix the orchestrator
     hermetic: true
@@ -391,7 +401,7 @@ verification_plan:
   - step: 9
     phase: post-deploy
     action: ADMIN sitting -- credential check, then the dry-run list for the operator's approve line
-    command: if bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null | grep -q 'assumed-role/PlatformAdmin/'; then echo ADMIN_CHAIN_OK; bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform | grep -q 'assumed-role/PlatformDev/' && echo DEV_CHAIN_OK; bin/venv-python -m scripts.ducklake_neon_smoke_test --restore-rehearsal --dry-run --profile agent_platform_admin --dev-profile agent_platform; else echo ADMIN_CHAIN_ABSENT; fi
+    command: if bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null | grep -q 'assumed-role/PlatformAdmin/'; then echo ADMIN_CHAIN_OK; bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform | grep -q 'assumed-role/PlatformDev/' && echo DEV_CHAIN_OK; bin/venv-python -m scripts.ducklake_neon_smoke_test --restore-rehearsal --dry-run --project-id "$NEON_PROJECT_ID" --profile agent_platform_admin --dev-profile agent_platform; else echo ADMIN_CHAIN_ABSENT; fi
     expected: ADMIN_CHAIN_OK and DEV_CHAIN_OK (copy_data, probe_absent, the teardown fallback and VP 12 run as agent_platform); ADMIN_CHAIN_ABSENT or a missing DEV_CHAIN_OK stops here and asks the coordinator for an ADMIN cloud session
     fix_if: wrong environment
   - step: 10
@@ -481,9 +491,9 @@ test_obligations:
     test_selector: tests/ducklake_neon_smoke_test/test_restore_rehearsal.py
     red_green_expectation: red before (module absent), green after
   - source: scripts/ducklake_smoke/restore_rehearsal_aws.py
-    behavior: DSN and presigned URL only in memory (create_function Environment, invoke Payload); one-attempt 900 s invoke client; 330 s dump POST; only CodeSha256 and State read from responses
+    behavior: DSN and presigned URL only in memory (create_function Environment, invoke Payload); one-attempt 960 s invoke client; 330 s dump POST; only the named response fields read
     verification_step: 4
-    test_selector: tests/ducklake_neon_smoke_test/test_restore_rehearsal.py
+    test_selector: tests/ducklake_neon_smoke_test/test_restore_rehearsal_aws.py
     red_green_expectation: red before (module absent), green after
   - source: scripts/ducklake_neon_smoke_test.py
     behavior: the two flags dispatch to the orchestrator; --restore-final and --project-id are passed through
@@ -535,6 +545,8 @@ gate_rounds:
   - {gate: wording-check, round: 9, verdict: PASS, digest: a22a747cd1b6252753df404dd84016b27bc3a38b6ae4eceb12dc36cac8af89f5, base: 75b7458e810f939c7096af11b3a25e325fe3bbb4, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 2, nits: 8}
   - {gate: plan-critique, round: 8, verdict: REVISE, blocking: 2, nits: 10}
+  - {gate: plan-critique, round: 9, verdict: REVISE, blocking: 1, nits: 7}
+  - {gate: wording-check, round: 10, verdict: PASS, digest: bc5c06712117d386c101af7611e0467f41852442a85f04a16cb5deca5cf24146, base: 75b7458e810f939c7096af11b3a25e325fe3bbb4, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -542,7 +554,7 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - "PR 1, pre: on the harness branch with main fetched. Modify neon_api.py and catalog_dr.py with their tests (VP 1-2). Post: both green."
+  - "PR 1, pre: on the harness branch with main fetched; re-run plan_obligations with a longer limit to confirm no acceptance criterion is undecidable. Modify neon_api.py and catalog_dr.py with their tests (VP 1-2). Post: both green."
   - "PR 1: create restore_rehearsal_actions.py, and restore_rehearsal_file_catalog.py, register the verb in handler.py and both modules in manifest.yaml's includes, with their tests (VP 3) and the PG16 test (VP 5). Post: every refusal holds."
   - "PR 1: apply the sidecar's blocks to DECISIONS.md, restore-rehearsal.yaml and ducklake_maintenance.yaml word for word (VP 6)."
   - "PR 1: create restore_rehearsal.py, restore_rehearsal_evidence.py and the CLI flags with their tests (VP 4-5); then VP 7 and the full tier (handoff_policy)."
