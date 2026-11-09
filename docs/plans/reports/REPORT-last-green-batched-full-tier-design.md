@@ -42,9 +42,9 @@ Three terms, one meaning each:
   contains the commit. A commit counts as green when any attempt of its run passed, so coverage, once earned, is never
   withdrawn (a failed re-run withdraws nothing).
 - In range: inside a completed main-validate run's prev..head (3.1), whatever its conclusion.
-- Head-checked: main HEAD's main-validate full-tier step is pending or running, or completed within one canary period
-  (3 h). A plans-only run of the fast tier alone does not count, so a plans-only tail still gets the canary's full
-  tier (Decision 205 cl.5).
+- Head-checked: main HEAD's main-validate job is pending, or its full-tier step running or completed within one
+  canary period (3 h). A plans-only run of the fast tier alone does not count, so a plans-only tail still gets the
+  canary's full tier (Decision 205 cl.5).
 
 Boundary: the last-green ref selects what may deploy to the first deploy tier (the sandbox account today, SIT once
 rec-5028 lands). What is promotable to PROD (the identical artifact that ran on SIT, by CodeSha256 and saved plan) is
@@ -152,7 +152,11 @@ last-green ref.)
 - Dispatch, not re-run: ci.yml gains a workflow_dispatch trigger on main (plan 3), and every "run on HEAD" in this
   design is a fresh attempt-1 run, because GitHub does not reliably fire workflow_run when a re-run completes
   (terraform-apply-sandbox.yml:824-830, run 28379330706). A re-run that does happen (attempt 2 and above) follows that
-  file's precedent: its own completion step dispatches ci-rca and the deploy channels.
+  file's precedent: its own completion step dispatches ci-rca and the deploy channels. Every filter that admits only
+  push runs widens to a workflow_dispatch run on main, or a dispatched green would neither advance the last-green ref
+  nor wake a deploy: main-validate's `if: github.event_name == 'push'` (ci.yml:101; plan 3), the resolver's
+  `event: push` query (scripts/ci/deploy_gate.py:103) and both deploy channels' `workflow_run.event == 'push'`
+  (deploy-ducklake-lambdas.yml:139-140, deploy-prod-lambdas.yml:87-88; plan 4).
 - Staleness alarm: when main HEAD has moved past the last-green ref and the ref is older than a threshold (plan 3 sets
   it from the measured red window), the operator is alerted. It is the catch-all for a hung or silently cancelled
   run, an environment red nobody re-dispatched, and a missed wake.
@@ -177,22 +181,31 @@ last-green ref.)
   B is known only from the filed rec's derived priority (red-main-recovery.yaml priority row), and only when the
   culprit job named a culprit by the pair (3.3). It pushes a `git revert` of the culprit SHA to a branch named
   `agent/revert-<culprit sha>`, so a repairing session may push to it and signal-green wakes on it
-  (docs/contracts/git-ops.yaml:108, 518-521), with a commit trailer marking it as opener-made, and opens the PR,
+  (docs/contracts/git-ops.yaml:108, 518-521; plan 3 adds the exception to git-ops.yaml's branch rule that a session
+  works only on its harness-assigned branch), with a commit trailer marking it as opener-made, and opens the PR,
   whose body names the rec id (the agent job's output). So Decision 205 cl.1 (an LLM persona on
   Actions is verdict-shaped, never a commit) does not bind, and the ci-rca agent's "Do not propose or execute any
   autonomous fix" (.claude/agents/scheduled/ ci-rca.md:205) stays true of the agent. The pipeline does now propose a
   fix, though, so the Decision amends Decision 72's "does NOT propose or execute any autonomous fix"
   (docs/DECISIONS.md:11537), as Decision 226 narrowed it to a manual revert PR, and Decision 226 cl.4's "manual" and
-  "when the fix is not obvious" conditions (not 73 cl.3).
+  "when the fix is not obvious" conditions (not 73 cl.3). A deterministic opener is the recovery Decision 55 already
+  allows ("Deterministic recovery remains valid"), so 55 is cited, not amended.
+- Weakening (Decision 235): reverting a culprit that added the failing check, assertion or budget removes a check
+  that is red on main, which is weakening to obtain green. The opener files the rec only, with no PR, when the revert
+  diff carries a weakening candidate (Decision 187's base-ref derivation) or touches Decision 235 cl.5's floor.
 - Credential: a GitHub App installation token minted in the opener's job the way the terraform-github workflows mint
   theirs (actions/create-github-app-token, this repository only, per-permission inputs), limited to contents and
   pull-requests write, with checkout credentials not persisted and no LLM step in the job. The App is a dedicated
   one the operator creates out of band; its private key is a secret of a main-only GitHub Environment, as
   tf-trusted-plan holds the plan App's (terraform/github/environments.tf:62-89), because a repository secret is
-  readable by any same-repo branch's pull_request workflow (Decision 237). Plan 3 names the operator step and its
-  check. A PR opened with GITHUB_TOKEN starts no workflow runs, so the App token is what makes the PR's own
-  required checks (pr-validate, terraform-validate) run. Unlike 3.2's rejected mutable ref, the opener writes only a
-  new branch, never main, so no ruleset change is needed.
+  readable by any same-repo branch's pull_request workflow. The Environment has no admin bypass and the App is not
+  in the ruleset's bypass list, so only main's opener job can mint the token and it cannot skip required checks (the
+  Decision 248 intent: a control an agent cannot satisfy for itself); the job never calls a merge. The key's home is
+  an Actions secret (Decision 224 cl.2); plan 3 adds its project-configuration.yaml and account-credential-inventory
+  rows (224 cl.6), names the operator step and its check, and records that this App is not the executor lane's
+  single non-bypass App (Decision 217 cl.3). A PR opened with GITHUB_TOKEN starts no workflow runs, so the App token
+  is what makes the PR's own required checks (pr-validate, terraform-validate) run. Unlike 3.2's rejected mutable
+  ref, the opener writes only a new branch, never main, so no ruleset change is needed.
 - Guards (consult 2 and both report critiques): a culprit is named only on a passes-at-parent, fails-at-culprit pair
   of re-runs; the opener dispatches the full tier on the revert head (rec-5019's ready-head job while it lives, a
   dispatched full-tier run otherwise), since a revert that applies cleanly can still break later commits built on the
@@ -242,9 +255,11 @@ last-green ref.)
   canonical-form refusals and drops the full-tier evidence requirement.
 - Order: rec-5019 lands first as the interim (validation on GitHub soonest) and itself retires the local pre-push
   full tier (operator ruling 2026-11-09 20:50 UTC: rec-5019 removes the local full tier only, never the optional
-  local fast tier). Its plan therefore owns the local-tier surfaces: the handoff gate accepts the ready-head check
-  as its evidence in place of local full-tier evidence (Decision 203; scripts/session/handoff_evidence.py), and
-  handoff_sequence, the implement skill, the AGENTS.md tier table and docs/PROJECT_CONTEXT.md:144 change with it.
+  local fast tier). Its plan therefore owns the local-tier surfaces. Decision 203's gate refuses the push itself, so
+  it can never hold a ready-head check, which exists only after the push: the gate drops the local full-tier
+  evidence requirement (scripts/session/handoff_evidence.py) and keeps its destination and form refusals, and the
+  ready-head check gates readiness or merge, at the point rec-5019's plan decides. handoff_sequence, the implement
+  skill, the AGENTS.md tier table and docs/PROJECT_CONTEXT.md:144 change with it.
   Draft cl.7 records that replacement; if rec-5019's plan merges before build plan 1 lands this Decision, that plan
   carries the Decision 163 pt.3 and 203 amendment itself and build plan 1 cites it. From then the ready-head GitHub
   run is the only pre-merge full tier, and its check runs are the server-side record the measurement below needs.
@@ -298,7 +313,9 @@ rec-autoclose.yml (per push, DECISIONS.md diff), the merge gate, signal-green an
 
 ### 3.9 Deploys and Terraform
 
-- Code deploys: Decision 249 cl.2's green signal becomes the last-green ref; cl.3's pause is unchanged.
+- Code deploys: Decision 249 cl.2's green signal becomes the last-green ref; cl.3's pause is unchanged. Decision 73
+  cl.5's future-state green-streak train (24 h on sandbox before SIT, kept by 249 cl.1) is the SIT Decision's (PR
+  #1936) to change, since the merge-time SIT deploy consumes the last-green ref.
 - Terraform apply stays on push behind the Decision 77 deterministic guard (Decision 249 cl.5). Its licence is the
   guard and its human-gated fail-closed set, not test colour, and a red main must not block a drift repair. SIT's
   plans (rec-5028, rec-5033) move auto-apply to SIT; this design does not.
@@ -352,54 +369,55 @@ rec-autoclose.yml (per push, DECISIONS.md diff), the merge gate, signal-green an
 
 Envelope and amendment annotations are added by the landing plan (decision-entry.yaml). The size check counts the
 whole entry against 6,144 bytes, so the text below stays at or under 4,700 bytes to leave room for the envelope and
-the reversal-condition YAML; the landing plan measures the full entry. Bracketed text marks the operator's fork
-answers of 2026-11-09 (A-D).
+the reversal-condition YAML; the landing plan measures the full entry and maps cl.9 to the child-rec ids it files
+(Decision 181 cl.2). Bracketed text marks the operator's fork answers of 2026-11-09 (A-D).
 
 ```text
 ## Decision N: The full tier runs post-merge on batches of main, a red batch is bisected to its culprit, and code
 deploys consume the newest commit a passing run covers; a red pauses deploys, never merging (amends Decisions 72,
 73, 159, 163, 201, 203, 205, 226, 244, 245 and 249)
 
-significance: numbered_decision -- durable and reversal-relevant: it moves every full-tier check to post-merge
-placement and redefines what a red blocks. Not a contract note: those record mechanisms and values, not where a check
-runs or what a red may halt. Not amendment_forms lines: an annotation cannot change a ratified clause's meaning.
+significance: numbered_decision -- it moves every full-tier check to post-merge placement and redefines what a red
+blocks; a contract note records mechanisms, and an annotation cannot change a ratified clause's meaning.
 kind: direction -- clause 5 decides what production may run and clause 6 what merging waits on.
 
-Problem: three full-tier placements cover one change (session container, every push to main, a 3-hourly canary) and
-rec-5019 adds a fourth. The per-push run is 59% of Actions job-minutes per merge; red occupancy is 0.34 (audit
+Problem: three full-tier placements cover one change (session container, every push to main, a 3-hourly canary).
+The per-push run is 59% of Actions job-minutes per merge; red occupancy is 0.34 (audit
 ci-merge-throughput-scaling-269e630a).
 
 Intent: every merged tree still meets every check; production runs only covered trees; merging never waits on
 main's colour.
 
 1. Batched full tier (amends 73 cl.2, 205 cl.5). main-validate runs in one non-cancelling concurrency group, re-runs
-   apart; a run covers prev..head on first-parent history, prev being the nearest ancestor whose job started and did
-   not time out or get cancelled. An unresolvable prev widens to the last-green ref, never HEAD~1; a timed-out or
-   cancelled running job alarms. Plans-only detection reads the range. Main Canary skips a head whose run is pending,
-   running or under 3 h old.
+   apart; a run covers prev..head on first-parent history, prev being the nearest ancestor whose full tier started and
+   did not time out or get cancelled. An unresolvable prev widens to the last-green ref, never HEAD~1; a timed-out or
+   cancelled running job alarms outside ci-rca. Plans-only detection reads the range. Main Canary skips a head whose
+   full tier is pending, running or under 3 h old.
 2. Last-green ref. The newest first-parent main commit whose own run passed the full tier, derived from run evidence,
    never stored as authority. It and its ancestors are covered; coverage is never withdrawn. It is not a promotion.
 3. Culprit step (amends 244 cl.1). A deterministic job screens every red: a node passing two head re-runs is flaky; a
    check also failing at prev names no culprit; otherwise hermetic failing checks re-run per commit, oldest first; a
    whole-tree check that does not localise is attributed to the range. [A: After the rec is filed, a deterministic
    job outside the ci-rca agent opens, never merges, a revert PR of a Track B culprit outside terraform/** and
-   governed deploy paths, runs the full tier on its head and never reverts its own revert; the repairing session adds
-   the Decision 186 artifact (amends 72's no-autonomous-fix rule and 226 cl.4's "manual" and "not obvious").
+   governed deploy paths, never one that weakens a check (235), runs the full tier on its head and never reverts its
+   own revert; the repairing session adds the Decision 186 artifact (amends 72's no-autonomous-fix rule and 226
+   cl.4's "manual" and "not obvious").
    Automated revert stays excluded (73 cl.3).]
 4. Range-aware evidence (amends 159 cl.1, 201). ci-rca anchors, diffs and resolves PRs over the range and dedups on
-   the open fingerprint; the covering run censuses every merge in its range, and a junit verdict binds to the first
-   completed run whose range holds the merge commit; push_context_base anchors on prev.
+   the open fingerprint; the covering run censuses its range's open junit-routed recs, and a junit verdict binds to
+   the first completed run whose range holds the merge commit; push_context_base anchors on prev.
 5. Deploys (amends 249 cl.2). Code-deploy channels to the first tier consume the last-green ref; a red pauses them
    (249 cl.3) and never withdraws coverage. Terraform apply stays on push behind the Decision 77 guard. Every tier is
    fixed forward; what is promotable to PROD, and promoting an earlier record, are rec-5033's.
-6. What a red blocks (amends 226 cl.3-4, 73 cl.4). Never a merge. Plan and dispatch keep 226 cl.3's overlap test,
+6. What a red blocks (amends 226 cl.3-4, 73 cl.3-4). Never a merge. Plan and dispatch keep 226 cl.3's overlap test,
    fail-closed reads and Track A clear; a named culprit's diff supplies the red's file. [B: Past the SLO an
    alarm replaces the block on all new plans and dispatch.]
-7. Presubmit end state (amends 163 pt.3, 203). rec-5019's per-PR GitHub run, once live, replaces the local pre-push
-   full tier as 203's evidence. It retires in turn, leaving the fast tier the only presubmit, only through a later
-   Decision the operator approves citing 30 days of pre-registered measures taken after that (pre-merge catches per
-   100 merges, red occupancy, projected occupancy without the pre-merge tier under 0.5). The measure informs; it never
-   decides (Decision 235). 203's gate then keeps its destination and form refusals only.
+7. Presubmit end state (amends 163 pt.2-3, 203). Once rec-5019's per-PR GitHub run is live, 203's push gate drops
+   the local full-tier evidence, keeping its destination and form refusals, and that run's check gates readiness or
+   merge. It retires in turn, leaving the fast tier the only presubmit, only through a later Decision the operator
+   approves, which also amends 226 cl.2, 244 cl.1's handoff leg and 217 cl.2, citing 30 days of pre-registered
+   measures taken after that (pre-merge catches per 100 merges, red occupancy, projected occupancy without the
+   pre-merge tier under 0.5). The measure informs; it never decides (Decision 235).
 8. Merge-overlap refusal (amends 245). [D: Narrowed to overlapping files under terraform/** and governed deploy
    paths once the culprit step has named three real culprits correctly; the update-branch remedy gains an attempt
    cap.]
@@ -417,7 +435,7 @@ Child recs are filed by the Decision-landing plan, not now, so a change to the D
 | # | Plan | Depends on | Scope sketch | Proof |
 |---|---|---|---|---|
 | 1 | Land the Decision, taxonomy term, Decision 245/249 reversal annotations, SIT cl.6 alignment (section 2); file child recs for plans 2-6 | this plan merged; the SIT Decision (PR #1936) merged | docs/DECISIONS.md, environment-taxonomy.yaml, decisions-index.json | wording-check PASS; approval run (Decision 246) |
-| 2 | Range-aware consumers (3.8) and the shared last-green resolver (3.2) | 1 | ci-rca.yml, scripts/ci_rca/**, trailer census and junit jobs, scripts/rec_trailer_acceptance*.py, git-ops.yaml PROVENANCE, trailer_acceptance_gate and the merge_step readback window, scripts/session/merge_step.py, ci-rca-lifecycle.yaml, scripts/checks/_common.py, the resolver module | fixture batch of three merges, one failing test: one rec naming the range's PRs, two junit-routed recs closed, halt set equal to the range's union; with prev = HEAD^ every consumer's output is unchanged |
+| 2 | Range-aware consumers (3.8) and the shared last-green resolver (3.2) | 1 | ci-rca.yml, scripts/ci_rca/**, trailer census and junit jobs, scripts/rec_trailer_acceptance*.py, git-ops.yaml PROVENANCE, trailer_acceptance_gate and the merge_step readback window, scripts/session/merge_step.py, ci-rca-lifecycle.yaml, scripts/checks/_common.py, the resolver module | fixture batch of three merges, one failing test: one rec naming the range's PRs, two junit-routed recs closed, the red_overlap halt set unchanged (the rec's file plus the failing nodes' files through the selector); with prev = HEAD^ every consumer's output is unchanged |
 | 3 | Vehicle, prev step, timed-out alarm, culprit job, canary head-check skip, revert-PR opener [A] (3.1, 3.3, 3.4) | 2; rec-4114's PLAN-plans-only-main-fast-tier built (constraint: scripts/ci/push_scope.py exists on main, else stop) | ci.yml main-validate concurrency (`queue: single`, re-run key), workflow_dispatch trigger, prev step, attempt-2 self-dispatch, the job-level timed-out alarm and the staleness alarm, main-canary.yml, ci-rca.yml culprit and opener jobs, .claude/agents/scheduled/ci-rca.md (the rec names the culprit; the PR body names the rec), the App-token mint and its main-only Environment | a dispatched batch on a fixture branch: one rec naming the culprit PR, halt set equal to the culprit's affected set, a revert PR whose head runs CI; a canary run on a head-checked HEAD concludes skipped |
 | 4 | Deploy gate on the paginated last-green resolver; rec-4874 acceptance test; halt and alarm rules [B]; update-branch attempt cap; expand/contract rule (3.9) | 3 | scripts/ci/deploy_gate.py, tests/ci/test_last_green_ref.py, red_overlap and red-main-recovery.yaml, merge_gate, deploy-paths.yaml | test_green_batch_advances_last_green_and_red_does_not |
 | 5 | Retire the per-PR GitHub full tier (3.6) | 4 live 30 days; rec-5019 live, which retired the local full tier and owns its surfaces; the measure read | the retiring Decision, the handoff gate's ready-head evidence requirement, rec-5019's job, the AGENTS.md tier table row and docs/PROJECT_CONTEXT.md:144 again (post-merge only) | m1-m3 report and the operator-approved Decision; closes rec-4874 |
