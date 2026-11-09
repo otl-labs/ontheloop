@@ -1,0 +1,333 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "sit-restore-spike"
+intent: >-
+  Prove, in today's single account and before any SIT infrastructure exists, the two mechanics the whole SIT design
+  rests on and has never run: a PROD DuckLake catalog dump restores into an empty Neon target under its own role, and
+  ducklake_metadata.data_path rewritten to a location outside the production data path reads every table and takes
+  writes there only. Record the timings, sizes and catalog format SIT's reset depends on, and rehearse recovery of a
+  deleted data-lake object from S3 versioning. The result feeds the SIT Decision's data-model clause (rec-5024); a
+  failure sends SIT to its fallback (fresh-init catalog plus synthetic data).
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-sit-restore-spike.yaml
+phase: >-
+  ad_hoc_rec (soft-warn category; no tier_item claimed, so the Tier Item Freshness Gate is skipped). Executes rec-5023,
+  the first SIT item. The SIT tier item T2.57 lands with rec-5024's build, whose criterion c2 cites this plan's slug;
+  this plan flips no criterion itself.
+scope:
+  # ------------------------------------------------------------ PR 1: code, contract and Decision (merge, deploy)
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: >-
+      PR 1. The new Decision exactly as docs/plans/approved/sit-restore-spike.yaml binds (block decision-new): the
+      human-directed ADMIN-agent rehearsal sitting carve-out, amending Decisions 81 and 126, plus the one-line forward
+      pointers on Decisions 126 and 81 (blocks d126-pointer, d81-pointer) the supersession guard requires. {{N}} and {{DATE}} are filled
+      at build time; a clean tool-made renumber keeps the approval.
+  - file: docs/contracts/restore-rehearsal.yaml
+    action: Create
+    purpose: >-
+      PR 1. The Class D contract exactly as the sidecar binds (block contract-new): boundary, the restore_rehearsal verb
+      and its five steps, the sitting order with the principal of each call, the consistency rule, the evidence keys and
+      the exit criteria the verifier checks.
+  - file: docs/contracts/ducklake_maintenance.yaml
+    action: Modify
+    purpose: >-
+      PR 1. Two lines exactly as the sidecar binds (blocks maintenance-pointer, maintenance-log): the description names
+      the ephemeral-only restore_rehearsal verb and its contract, plus one amendment_log row. The file is NEAR_CAP (495 of
+      500 effective lines on main 2026-11-09; 497 after): add nothing else.
+  - file: src/common/neon_api.py
+    action: Modify
+    purpose: >-
+      PR 1. create_branch gains an optional name; add create_role(api_key, project_id, branch_id, role_name) -> password
+      and create_database(api_key, project_id, branch_id, db_name, owner_name) over the existing _api_post (443, stdlib
+      urllib). Loud-fail (NeonApiError) on any non-2xx; the password is never in an exception, log line or return other
+      than create_role's. Orchestrator-only: no Lambda imports it.
+  - file: src/common/catalog_dr.py
+    action: Modify
+    purpose: >-
+      PR 1. build_pg_restore_cmd and run_pg_restore gain keyword no_acl: bool = False; True adds --no-acl, so a restore
+      never depends on roles that exist only in PROD. Default argv byte-identical to today (restore_drill and any real DR
+      restore keep their grants).
+  - file: src/lambdas/ducklake_maintenance/restore_rehearsal_actions.py
+    action: Create
+    purpose: >-
+      PR 1. action_restore_rehearsal(event, _con), dispatching on event.step to restore, rewrite, verify, prod_checksum
+      and write_probe exactly as docs/contracts/restore-rehearsal.yaml verb.steps defines. First statement, before any
+      connection: the contract's defence_in_depth refusals (function-name suffix -restore-rehearsal-ephemeral; env
+      DUCKLAKE_RESTORE_REHEARSAL equals event.confirm; target DSN only from env DUCKLAKE_RESTORE_TARGET_DSN, username and
+      dbname starting restore_rehearsal_; every scratch path under the smoke data path's restore-rehearsal/<run_id>/),
+      raising RestoreRehearsalRefused. prod_checksum alone reads the function's own catalog DSN (rt.fetch_dsn) and only
+      ATTACHes READ_ONLY. The rewrite SQL builder (rewrite_data_path_sql(meta_schema, new_path) -> (sql, params)) is a
+      pure function the local test reuses. Checksum: SELECT count(*), sum(hash(COLUMNS(*)))::VARCHAR per table (the
+      same expression in verify and prod_checksum). Responses carry only what the contract's responses line allows.
+    new_imports: [src.common.catalog_dr, src.common.ducklake_runtime]
+  - file: src/lambdas/ducklake_maintenance/handler.py
+    action: Modify
+    purpose: >-
+      PR 1. One _ACTIONS entry, "restore_rehearsal": restore_rehearsal_actions.action_restore_rehearsal, and
+      RestoreRehearsalRefused mapped to a 400 response beside the existing typed errors. Nothing else (headroom 32 SLOC).
+    new_imports: [src.lambdas.ducklake_maintenance.restore_rehearsal_actions]
+  - file: src/lambdas/ducklake_maintenance/manifest.yaml
+    action: Modify
+    purpose: >-
+      PR 1. Add src/lambdas/ducklake_maintenance/restore_rehearsal_actions.py to includes only if the manifest lists
+      package files individually (it does not if the package directory is included whole; then no edit). Decision 79.
+  - file: scripts/ducklake_smoke/restore_rehearsal.py
+    action: Create
+    purpose: >-
+      PR 1. Orchestrator implementing docs/contracts/restore-rehearsal.yaml sitting.order exactly (canary pattern, all
+      calls over 443), reusing canary.py's _aws_cmd, _canary_create_function (ephemeral storage 10240 MB, timeout 900 s,
+      memory as the production maintenance function), _wait_function_active, _canary_delete_function and
+      _lambda_invoke_cli, core._sigv4_invoke and core._function_url for the dump. run_id is a UTC timestamp plus 6 hex
+      characters. Every scratch key is built by one function that refuses a path outside
+      ducklake-neon-smoke/restore-rehearsal/<run_id>/. The target DSN reaches only the restore function's environment
+      (create-function --environment), never an invoke payload, stdout or the evidence. Subcommands: run, version-recovery
+      (contract sitting.version_recovery, agent_platform only), and verify-evidence FILE (every exit_criteria entry;
+      refuses evidence holding a host, DSN, password, bucket name, 12-digit account id or ARN; prints RESTORE_REHEARSAL_OK
+      or VERSION_RECOVERY_OK, else names each failed criterion and exits 1).
+    new_imports: [scripts.ducklake_smoke.core, scripts.ducklake_smoke.canary, src.common.neon_api]
+  - file: scripts/ducklake_neon_smoke_test.py
+    action: Modify
+    purpose: >-
+      PR 1. --restore-rehearsal and --restore-rehearsal-version-recovery join the mutually exclusive gate group, with
+      --evidence-out PATH, dispatching to scripts.ducklake_smoke.restore_rehearsal. Unbuilt plans PLAN-neon-key-out-of-pr-plans
+      and PLAN-telemetry-owner-provisioning also scope this file; whichever builds second rebases.
+    new_imports: [scripts.ducklake_smoke.restore_rehearsal]
+  - file: tests/test_neon_api.py
+    action: Modify
+    purpose: PR 1. create_role and create_database request shapes; non-2xx loud-fail; the password never in exception text.
+  - file: tests/test_catalog_dr.py
+    action: Modify
+    purpose: PR 1. no_acl=True adds --no-acl; the default argv list is unchanged.
+  - file: tests/lambdas/ducklake_maintenance/test_restore_rehearsal_actions.py
+    action: Create
+    purpose: >-
+      PR 1. Each refusal (production function name, missing or wrong token, a non-rehearsal target, a scratch path
+      outside the prefix, rewrite with absolute_paths above 0) raises before any connection or subprocess; the rewrite SQL
+      names only data_path in the named meta-schema; prod_checksum attaches READ_ONLY; no response field matches the
+      forbidden patterns; _ACTIONS["restore_rehearsal"] is registered and a refusal maps to 400 on the production name.
+  - file: tests/ducklake_neon_smoke_test/test_restore_rehearsal.py
+    action: Create
+    purpose: >-
+      PR 1. With the aws, Neon and invoke seams mocked: teardown handles resolve before anything is created; a raise at
+      every later step still tears down each created resource and records it; the dump precedes the data copy; scratch
+      keys never leave the prefix; the DSN reaches only the function environment; verify-evidence accepts a complete
+      evidence file and names each failed criterion otherwise, and refuses forbidden patterns. Plus
+      test_local_rewrite_reads_every_table (@pytest.mark.integration, network fixture, skips only if the ducklake
+      extension cannot be fetched): a real local DuckLake (DuckDB-file catalog, data inlining disabled) with two tables
+      is copied to a second directory, rewritten with rewrite_data_path_sql, the original deleted, every table re-read
+      without OVERRIDE_DATA_PATH with equal counts and checksums, and a write lands only in the new directory.
+  # ------------------------------------------------------------ PR 2: the sitting's evidence (after the sitting)
+  - file: tests/fixtures/restore_rehearsal/evidence.json
+    action: Create
+    purpose: >-
+      PR 2. The sitting's counts-only evidence file as the orchestrator wrote it, unedited (verify-evidence passes on it
+      before commit; no host, DSN, password, bucket name, account id or ARN).
+  - file: tests/fixtures/restore_rehearsal/version_recovery.json
+    action: Create
+    purpose: PR 2. The versioning rehearsal's evidence file, unedited.
+  - file: tests/ducklake_neon_smoke_test/test_restore_rehearsal_evidence.py
+    action: Create
+    purpose: >-
+      PR 2. test_rewritten_data_path_reads_every_table (rec-5023's acceptance, moved here from the PR 1 file name by
+      update_rec in PR 2): the committed evidence passes verify-evidence, every ops table's restored count and checksum
+      equal PROD's, missing_files 0, write probe in scratch only, every torn_down true. test_version_recovery_evidence:
+      sha256 match. Pure JSON reads: hermetic, fast tier.
+bundled_recommendations: [rec-5023]
+followon_recs: [rec-5036]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - The restore_rehearsal verb refuses, before any connection, everywhere but a function named *-restore-rehearsal-ephemeral holding the matching token, a restore_rehearsal_ target and scratch under ducklake-neon-smoke/restore-rehearsal/.
+  - catalog_dr's default restore argv is unchanged; no_acl=True adds --no-acl.
+  - The orchestrator resolves teardown first, tears down everything it created on any failure, and its evidence and stdout carry no host, DSN, password, bucket name, account id or ARN.
+  - test_local_rewrite_reads_every_table passes (not skipped) in the build session.
+  - DECISIONS.md, restore-rehearsal.yaml and ducklake_maintenance.yaml hold exactly the sidecar's words (validate_merge_step green on the operator's approval run).
+  - After the deploy, one human-directed ADMIN sitting produces evidence that verify-evidence accepts, or a recorded failure naming the criterion that sends SIT to its fallback.
+  - The versioning rehearsal recovers a deleted scratch object with a matching sha256, as PlatformDev.
+  - PR 2 commits both evidence files and test_rewritten_data_path_reads_every_table passes on them; rec-5023 reads back closed with its result.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Neon API gains role and database creation without leaking the password
+    command: bin/venv-python -m pytest tests/test_neon_api.py -k "create_role or create_database" -q
+    expected: all selected pass; red before (functions absent)
+    fix_if: fix neon_api; never print the password
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: neon-api-create-role-database
+  - step: 2
+    phase: pre-deploy
+    action: pg_restore gains opt-in --no-acl; default argv unchanged
+    command: bin/venv-python -m pytest tests/test_catalog_dr.py -k "no_acl" -q
+    expected: selected pass; red before (no_acl keyword absent)
+    fix_if: keep the default argv byte-identical
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: catalog-dr-restore-no-acl
+  - step: 3
+    phase: pre-deploy
+    action: The rehearsal verb refuses everywhere but an ephemeral rehearsal function and returns allowed fields only
+    command: bin/venv-python -m pytest tests/lambdas/ducklake_maintenance/test_restore_rehearsal_actions.py -q
+    expected: all pass; red before (file absent)
+    fix_if: tighten the guard; never relax a refusal
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: restore-rehearsal-refusal-guard
+  - step: 4
+    phase: pre-deploy
+    action: Orchestrator sequencing, teardown, secret transport and evidence verifier
+    command: bin/venv-python -m pytest tests/ducklake_neon_smoke_test/test_restore_rehearsal.py -m "not integration" -q
+    expected: all pass; red before (file absent)
+    fix_if: fix the orchestrator
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: restore-rehearsal-orchestrator
+  - step: 5
+    phase: pre-deploy
+    action: A real local DuckLake rewrite reads every table and writes only to the new path
+    command: bin/venv-python -m pytest tests/ducklake_neon_smoke_test/test_restore_rehearsal.py::test_local_rewrite_reads_every_table -q -rs
+    expected: 1 passed and no SKIPPED line (fetches the ducklake extension over the network, hence not hermetic)
+    fix_if: a skip means the extension could not be fetched; rerun with network; never accept a skip as a pass
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: The bound files hold exactly the approved words
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug sit-restore-spike --base origin/main
+    expected: verify passes (head words equal base words with each block applied; only {{N}} and {{DATE}} filled)
+    fix_if: restore the sidecar's words exactly; a wording change needs a new approval run
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: Fast tier
+    command: bin/venv-python -m scripts.validate --pre
+    expected: exit 0
+    fix_if: fix the failing check
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: The governed deploy shipped PR 1 to the maintenance function and its smoke gates passed
+    command: "mcp__github__actions_list(owner=otl-labs, repo=ontheloop, method=list_workflow_runs, resource_id=deploy-ducklake-lambdas.yml) -- the run for the newest green commit at or after PR 1's merge sha: conclusion and the maintenance smoke job"
+    expected: success; maintenance smoke gates green
+    fix_if: follow deploy-paths.yaml deploy_code recovery
+  - step: 9
+    phase: post-deploy
+    action: ADMIN sitting -- credential check
+    command: bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null | grep -q 'assumed-role/PlatformAdmin/' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT
+    expected: ADMIN_CHAIN_OK; ADMIN_CHAIN_ABSENT stops here and asks the coordinator for an ADMIN cloud session
+    fix_if: wrong environment
+  - step: 10
+    phase: post-deploy
+    action: ADMIN sitting -- the rehearsal, each admin-profile command on the operator's in-session approval line
+    command: bin/venv-python -m scripts.ducklake_neon_smoke_test --restore-rehearsal --profile agent_platform_admin --evidence-out "${TMPDIR:-/tmp}/restore-rehearsal.json"; echo "EXIT=$?"
+    expected: EXIT=0 and every torn_down flag true; a failed criterion gives EXIT=1 naming it, with teardown complete
+    fix_if: a torn_down false is cleaned by hand at once (the named resource) and rec-filed; a failed criterion is the spike's result, recorded, not patched
+  - step: 11
+    phase: post-deploy
+    action: Evidence meets every exit criterion
+    command: bin/venv-python -m scripts.ducklake_smoke.restore_rehearsal verify-evidence "${TMPDIR:-/tmp}/restore-rehearsal.json"
+    expected: RESTORE_REHEARSAL_OK
+    fix_if: a failed criterion is the result; record it and route the fallback to rec-5024's owner through the coordinator
+  - step: 12
+    phase: post-deploy
+    action: Versioning recovery as PlatformDev
+    command: bin/venv-python -m scripts.ducklake_neon_smoke_test --restore-rehearsal-version-recovery --profile agent_platform --evidence-out "${TMPDIR:-/tmp}/version-recovery.json" && bin/venv-python -m scripts.ducklake_smoke.restore_rehearsal verify-evidence "${TMPDIR:-/tmp}/version-recovery.json"
+    expected: VERSION_RECOVERY_OK
+    fix_if: an AccessDenied names the missing grant; rec-file it; never widen IAM in this plan
+  - step: 13
+    phase: post-deploy
+    action: PR 2 -- committed evidence passes rec-5023's acceptance
+    command: bin/venv-python -m pytest tests/ducklake_neon_smoke_test/test_restore_rehearsal_evidence.py -q
+    expected: all pass on the committed fixtures
+    fix_if: a fixture is never edited by hand; rerun the sitting instead
+  - step: 14
+    phase: post-deploy
+    action: rec-5023 closed with its result
+    command: bin/venv-python -c "from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids; rows,_=fetch_recs_by_ids(make_reader(profile='agent_platform'),['rec-5023']); print(rows[0]['status'], rows[0]['acceptance'])"
+    expected: closed, acceptance naming tests/ducklake_neon_smoke_test/test_restore_rehearsal_evidence.py::test_rewritten_data_path_reads_every_table
+    fix_if: update_rec the acceptance in PR 2, then the Resolves trailer closes it
+test_obligations:
+  - source: src/common/neon_api.py
+    behavior: role and database creation; password never in logs or errors
+    verification_step: 1
+    test_selector: tests/test_neon_api.py
+    red_green_expectation: red before (functions absent), green after
+  - source: src/common/catalog_dr.py
+    behavior: opt-in --no-acl; default argv unchanged
+    verification_step: 2
+    test_selector: tests/test_catalog_dr.py
+    red_green_expectation: red before (no_acl keyword absent), green after
+  - source: src/lambdas/ducklake_maintenance/restore_rehearsal_actions.py
+    behavior: ephemeral-only refusal before any connection; READ_ONLY prod checksum; rewrite touches only data_path; allowed response fields
+    verification_step: 3
+    test_selector: tests/lambdas/ducklake_maintenance/test_restore_rehearsal_actions.py
+    red_green_expectation: red before (module absent), green after
+  - source: src/lambdas/ducklake_maintenance/handler.py
+    behavior: restore_rehearsal registered; a refusal maps to 400 on the production function name
+    verification_step: 3
+    test_selector: tests/lambdas/ducklake_maintenance/test_restore_rehearsal_actions.py
+    red_green_expectation: red before (action unregistered), green after
+  - source: scripts/ducklake_smoke/restore_rehearsal.py
+    behavior: teardown first, dump before copy, scratch-only keys, DSN only in the function environment, counts-only evidence, verifier
+    verification_step: 4
+    test_selector: tests/ducklake_neon_smoke_test/test_restore_rehearsal.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/ducklake_neon_smoke_test.py
+    behavior: the two flags dispatch to the orchestrator
+    verification_step: 4
+    test_selector: tests/ducklake_neon_smoke_test/test_restore_rehearsal.py
+    red_green_expectation: red before (flags absent), green after
+constraints:
+  - "Never write or delete under ducklake/, ducklake-telemetry/ or telemetry-blobs/; all scratch lives under ducklake-neon-smoke/restore-rehearsal/<run_id>/."
+  - Never run a maintenance verb (merge, gc, expire, cleanup, catalog_reinit) on the restored catalog.
+  - Each admin-profile command runs only on the operator's in-session approval line (protected-actions.yaml); calls that need no admin grant name agent_platform.
+  - No Terraform, no IAM change, no standing resource, no /secret/ parameter.
+  - "Public repository (Decision 101): evidence, fixtures and PR comments are counts-only."
+  - Governing text lands exactly as the sidecar binds; nothing else in DECISIONS.md, restore-rehearsal.yaml or ducklake_maintenance.yaml changes.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout verdict: FLAGS_FOUND (Decisions triaged: 202 of 202; Roadmap items intersected: 4; CONFLICT: 0; RELATED: 4). Serves: NS.1 3/5. CITE: 214, 81, 99, 249, 247, 216, 213, 101, 79. NOTE 126 (no Decision names an ADMIN-agent sitting that mints a Neon role and copies production data) resolved by the new Decision's cl.1; NOTE 143 cl.1 resolved by contract boundary.binding (roles are the boundary, refusals defence in depth) and its residual; NOTE 100 resolved by Decision cl.4; NOTE 237 resolved by the DSN-in-function-environment transport and no /secret/ parameter; NOTE 201 resolved by Decision cl.5 (PR 2 evidence fixture) and rec-5036 for the deferred leg; SPIRIT 230 resolved by the contract's residual (smoke gc grace outlives a sitting). Report: /mnt/project-files/restore-spike/decision-scout-report.md."
+  - "Network: no cloud container has TCP/5432 egress (deploy-paths.yaml scoped_login_provisioning), so all Neon SQL runs inside the ephemeral functions; S3 and Neon REST run over 443."
+  - "The DR dump is weekly (ducklake_catalog_dr.tf cron Sunday 03:00 UTC), not daily as the handover says; the sitting takes one on-demand dump through the catalog-dr Function URL (lambda_maintenance_gates.py catalog_dr gate precedent)."
+  - "Grants (read from terraform/bootstrap 2026-11-09): PlatformAdmin holds lambda Create/Delete/Invoke/InvokeFunctionUrl and DR-bucket List/Get (platform_admin_policies.tf, platform_admin_data_policies.tf); PlatformDev holds data-lake Get/Put/Delete, ListBucketVersions and GetObjectVersion on the smoke prefix. iam:PassRole on the two execution roles is assumed from the canary precedent: UNPROVEN until the sitting; an AccessDenied stops it and is rec-filed."
+  - "Sizes (PlatformDev listing 2026-11-09): ducklake/ 4,900 objects 60 MB; ducklake-telemetry/ 8,341 objects 2.1 GB (not copied); telemetry-blobs/ 87 MB. Dump size and the fit in 10240 MB /tmp and 900 s: UNPROVEN until the sitting."
+  - "Criterion 3: PyPI has 1.5.5, 1.5.6 and 2.0.0; a local probe (DuckDB-file catalog) shows 2.0.0 keeps ducklake_metadata.version 1.0 and 1.5.4 re-attaches, so no migration exists through 2.0.0. The sitting records the restored catalog's format; the candidate-engine leg is rec-5036 (planning-time split)."
+  - "Restore target is a Neon child branch with a new role and new database (ADVICE Q2): compute isolated from PROD, teardown one branch delete; --no-acl plus foreign_owned 0 and foreign_acl 0 prove the restored catalog depends on no PROD role."
+  - "Code home (ADVICE Q4 adapted): dormant verb in the maintenance package, run on ephemeral functions from the CI-published zip, because a function-less separate artifact has no build precedent and stub manifests are skipped by the build; the role is the boundary either way."
+  - "Approvals at build start: the operator's in-session approve lines for each admin-profile command (protected-actions.yaml admin-credential and secret-read for /secret/neon-api-key); the admin-route choice is recorded in the handoff note."
+  - "rec-5024's plan (Plan the SIT Decision thread) sets T2.57 c2 met_by this slug and re-anchors its Decision after this one; told 2026-11-09."
+  - "Related, not bundled: rec-4300 (restore into a Postgres without pg_read_all_data), rec-4883 (canary teardown on CC-web; its lesson is the teardown-first rule), rec-4694 (telemetry redaction for SIT reads)."
+  - "Evidence: /mnt/project-files/restore-spike/ (advisor-brief/BRIEF.md, ADVICE.md, decision-scout-report.md, PRESENTATION.md)."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: wording-check, round: 1, verdict: PASS, digest: 87b560371fdb2cb43eae0ed4550174f3049633b8d7428789da2c7772bb77603d, base: a888647a75c638c905f6fa0283918918a3b979ce, selection: complete}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "PR 1, pre: on the harness branch with main fetched. Modify neon_api.py and catalog_dr.py with their tests (VP 1-2). Post: both green."
+  - "PR 1: create restore_rehearsal_actions.py, register it in handler.py (and manifest.yaml only if needed) with its tests (VP 3). Post: every refusal holds."
+  - "PR 1: apply the sidecar's blocks to DECISIONS.md, restore-rehearsal.yaml and ducklake_maintenance.yaml word for word (VP 6)."
+  - "PR 1: create restore_rehearsal.py and the two CLI flags with their tests (VP 4-5); then VP 7 and the full tier (handoff_policy)."
+  - "PR 1: open, drive CI green, merge under standing authorisation once validate_merge_step reads the operator's approval run; VP 8."
+  - "Sitting, in an ADMIN cloud session with the operator present: VP 9-11, then VP 12 as PlatformDev. Save both evidence files to /mnt/project-files/restore-spike/ and post counts-only results on PR 1."
+  - "PR 2: commit both evidence files unedited and the evidence test; update_rec rec-5023's acceptance to test_restore_rehearsal_evidence.py::test_rewritten_data_path_reads_every_table; Resolves: rec-5023 in the squash body; VP 13-14."
+  - "Report the data-model result (pass, or the failed criterion and the fallback) and the measured timings to the coordinator for rec-5024."
+  - "Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)"
+  - "Report: what was implemented, verification results"
+rollback: >-
+  PR 1: revert (the verb is dormant; the Decision and contract revert with it). Sitting: teardown runs in the
+  orchestrator's finally block; anything left is named in torn_down and deleted by hand at once (ephemeral functions,
+  the Neon branch, the scratch prefix). PR 2: revert (fixtures only).
