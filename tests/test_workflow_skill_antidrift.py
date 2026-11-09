@@ -408,3 +408,12 @@ def test_implement_alarm_is_stop_plus_one_plan_defect_report() -> None:
     assert "STOP and raise the alarm" in implement
     assert "stop-and-surface-to-human" not in implement
     assert "STOP (Deviation trigger (c))" in implement
+
+
+def test_planning_skill_orders_the_wording_approval_after_critique() -> None:
+    planning = _PLANNING_SKILL.read_text(encoding="utf-8")
+    assert "after plan-critique returns PROCEED" in planning
+    assert "(its `tldr` is the presentation's Summary)" in planning
+    assert "then re-run the plan PR's pr-validate" in planning
+    assert "cancel the run and dispatch one on the final sidecar" in planning
+    assert "Then push it and get approval per Decision 246" not in planning

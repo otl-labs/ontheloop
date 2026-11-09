@@ -96,3 +96,27 @@ class TestFingerprint:
 
     def test_the_word_list_has_256_distinct_words(self) -> None:
         assert len(review_page._FINGERPRINT_WORDS) == len(set(review_page._FINGERPRINT_WORDS)) == 256
+
+
+class TestTldr:
+    def _with(self, tldr: str | None) -> list[str]:
+        block = _block("a", "a b")
+        return review_page.render([block], {}, slug="demo", approved=APPROVED, wording=WORDING, tldr=tldr).splitlines()
+
+    def test_the_tldr_follows_the_h1_and_precedes_the_fingerprint(self) -> None:
+        lines = self._with("Why this change.")
+        assert lines[:3] == ["# Approve wording: demo", "", "**TLDR:** Why this change."]
+        assert lines.index("**TLDR:** Why this change.") < lines.index(f"Fingerprint: **{review_page.fingerprint(APPROVED)}**")
+
+    def test_the_context_only_line_is_present(self) -> None:
+        assert "_Context only: the TLDR is not part of the approved words._" in self._with("x")
+
+    def test_the_tldr_is_whitespace_collapsed_and_escaped(self) -> None:
+        lines = self._with("one  two\n*bold* <b> & [l](u)")
+        assert lines[2] == "**TLDR:** one two \\*bold\\* &lt;b\\> &amp; \\[l\\]\\(u\\)"
+
+    def test_without_a_tldr_the_page_is_todays_shape(self) -> None:
+        for absent in (None, ""):
+            lines = self._with(absent)
+            assert lines[:3] == ["# Approve wording: demo", "", f"Fingerprint: **{review_page.fingerprint(APPROVED)}**"]
+            assert "TLDR" not in "\n".join(lines)
