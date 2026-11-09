@@ -44,9 +44,9 @@ scope:
       test_cli_writes_github_output (writes plans_only=true and plans_only=false lines to a tmp GITHUB_OUTPUT, exit
       0 both ways); test_cli_exception_fails_closed (an exception inside classify still exits 0 and writes
       plans_only=false); test_confined_to_plans_polarity (None and empty are False);
-      test_range_base_matches_push_context_base (with GITHUB_EVENT_NAME=push and GITHUB_EVENT_BEFORE=<parent sha>,
-      scripts.checks._common.push_context_base(root) returns the same before sha classify used, so the classifier
-      and --pre diff the same range). No test asserts the live share of plans-only commits on main: that is a
+      test_range_base_matches_push_context_base (a two-commit push: with GITHUB_EVENT_NAME=push and
+      GITHUB_EVENT_BEFORE=<HEAD~2 sha>, scripts.checks._common.push_context_base(root) returns the same before sha
+      classify used, and not its HEAD~1 fallback, so the classifier and --pre diff the same multi-commit range). No test asserts the live share of plans-only commits on main: that is a
       moment claim (Decision 244 cl.4) and stays one-time evidence in context.
   - file: scripts/checks/_scaffolding.py
     action: Modify
@@ -91,7 +91,9 @@ scope:
     purpose: >-
       _full_tier_jobs classifies per step: a job is full-tier when any one step's run invokes scripts.validate with
       neither --pre nor --terraform-only (so main-validate stays in the set beside main-canary's job). Docstring
-      updated; still the sole derivation (Decision 104). _assert_runtime_lock reads only the full-tier path's steps:
+      updated; still the sole derivation (Decision 104). New constants FULL_STEP_IF = "steps.scope.outputs.plans_only
+      != 'true'" and FAST_STEP_IF = "steps.scope.outputs.plans_only == 'true'" are the single home of the two literals;
+      _ci_yaml.py and test_deploy_gate_wiring.py import them from here. _assert_runtime_lock reads only the full-tier path's steps:
       both its install half and its cache-key half skip steps whose `if` is the FAST literal, so the fast install
       (which carries requirements-dev.txt) cannot hide a full install or full cache key that dropped it. Its messages
       are unchanged; a job with no FAST step (main-canary) reads exactly as today.
@@ -130,7 +132,8 @@ scope:
     purpose: >-
       test_ci_still_has_the_full_tier_step_the_gate_matches keeps its name lookup (exactly one main-validate step named
       deploy_gate.FULL_TIER_STEP) and its run assertion; its `"if" not in step` assertion becomes `step["if"] ==` the
-      FULL literal, so the step deploy_gate binds can be skipped only by the classifier's plans_only output. No other
+      FULL literal (FULL_STEP_IF, imported from scripts.verify_ci_workflow._shared), so the step deploy_gate binds can be
+      skipped only by the classifier's plans_only output. No other
       test changes.
   - file: docs/contracts/git-ops.yaml
     action: Modify
@@ -218,12 +221,14 @@ verification_plan:
       && cd "$D/c" && git update-ref refs/remotes/origin/main $C && git checkout -q -B main $C
       && ln -s "$OLDPWD/.venv" .venv
       && BEFORE=$(git rev-parse HEAD~1) AFTER=$C FORCED=false python3 -I "$D/push_scope.py" classify
-      && CI=true GITHUB_EVENT_NAME=push GITHUB_EVENT_BEFORE=$(git rev-parse HEAD~1) bin/venv-python -m scripts.validate --pre
+      && CI=true GITHUB_EVENT_NAME=push GITHUB_EVENT_BEFORE=$(git rev-parse HEAD~1) AWS_CONFIG_FILE=/dev/null
+      AWS_SHARED_CREDENTIALS_FILE=/dev/null env -u AWS_PROFILE bin/venv-python -m scripts.validate --pre
     expected: >-
       push_scope prints plans_only=true, then the fast tier ends "All checks passed." with the plan schema section
       present (the branch's push_scope.py is copied in because the clone checks out an older main commit). Limits:
       it does not exercise this branch's _scaffolding change, the sibling's new check if the commit predates it, or
-      a main that moved past the commit; VP 9 covers the live path.
+      a main that moved past the commit, and it keeps the full dev venv; AWS config is stripped because the fast path
+      skips the OIDC step. VP 9 covers the live path.
     fix_if: >-
       plans_only=false on a plans-only commit -- classifier defect; a fast-tier failure -- a --pre check misbehaves in
       push context: fix it inside this plan's scope or stop with a plan-defect report.
@@ -254,9 +259,7 @@ verification_plan:
     graduation: not-applicable
   - step: 7
     phase: pre-deploy
-    action: >-
-      Lint the changed Python files and run the full tier, as the handoff policy requires before commit; start
-      scripts.validate as its own backgrounded run (2 h limit) and read its verdict with --verify-head.
+    action: Lint and format-check the changed Python files.
     command: >-
       bin/venv-python -m ruff check scripts/ci/push_scope.py tests/ci/test_push_scope.py scripts/checks/_scaffolding.py
       tests/validate/test_precommit_escalation_predicate.py scripts/verify_ci_workflow/_shared.py
@@ -266,20 +269,23 @@ verification_plan:
       tests/validate/test_precommit_escalation_predicate.py scripts/verify_ci_workflow/_shared.py
       scripts/verify_ci_workflow/_ci_yaml.py tests/verify_ci_workflow/test_ci_data_guards.py
       tests/verify_ci_workflow/test_deploy_gate_wiring.py
-      && bin/venv-python -m scripts.validate
-    expected: >-
-      ruff exit 0, and the full-tier run started backgrounded (its own exit status is not the verdict; step 8 reads it).
-    fix_if: >-
-      A failure in this plan's files: fix at root and rerun the full tier from the start (handoff_policy). A failure
-      only in another open red's tests is not this build's to fix: wait for that repair per the implement skill.
+    expected: Exit 0 for both.
+    fix_if: A lint or format failure -- fix the file; never add an ignore.
     hermetic: false
     graduation: not-applicable
   - step: 8
     phase: pre-deploy
-    action: Read the full tier's verdict for HEAD after step 7's backgrounded run completes.
-    command: bin/venv-python -m scripts.checks.validation_result --verify-head
+    action: >-
+      Run the full tier, as the handoff policy requires before commit. The command's first part (scripts.validate) is
+      started as its own backgrounded run (2 h limit, from the top-level session); when it completes, run the second
+      part (--verify-head), which is the verdict; the backgrounded run's own exit status never is.
+    command: >-
+      bin/venv-python -m scripts.validate;
+      bin/venv-python -m scripts.checks.validation_result --verify-head
     expected: Exit 0 for HEAD.
-    fix_if: A failure in this plan's files -- fix at root and rerun step 7 from the start (handoff_policy).
+    fix_if: >-
+      A failure in this plan's files: fix at root and rerun the full tier from the start (handoff_policy). A failure
+      only in another open red's tests is not this build's to fix: wait for that repair per the implement skill.
     hermetic: false
     graduation: not-applicable
   - step: 9
@@ -295,7 +301,9 @@ verification_plan:
       plans-only merge run: "push_scope: plans_only=true", the fast step succeeded, the full-tier step and the OIDC
       step skipped, and deploy-gate (if woken) resolved an earlier commit.
     fix_if: >-
-      A plans-only run that ran the full tier costs only minutes: file a rec. A code run that skipped the full tier is
+      A plans-only run that ran the full tier costs only minutes: file a rec. A plans-only run whose fast step failed
+      is a red main: ci-rca files its rec; diagnose it (a fast-tier check misbehaving in push context or without
+      credentials is this build's defect: forward-fix, red-main-recovery.yaml). A code run that skipped the full tier is
       a fail-open defect: report to the coordinator at once and open a revert PR of this build (red-main-recovery.yaml).
     hermetic: false
   - step: 10
@@ -401,7 +409,8 @@ constraints:
     Never weaken the full tier for any push that is not plans-only; the classifier fails closed on every doubtful
     input; the full-tier step's name stays exactly deploy_gate.FULL_TIER_STEP (Decision 249 cl.2).
   - >-
-    weakening_dispositions: the replaced `"--pre" not in main_steps` assert, the job-text _full_tier_jobs rule and
+    weakening_dispositions (the build copies code review's stubs into the plan's top-level weakening_dispositions
+    list, one entry per candidate, each citing acceptance_criteria[2]; this prose alone is not enough): the replaced `"--pre" not in main_steps` assert, the job-text _full_tier_jobs rule and
     test_deploy_gate_wiring's `"if" not in step` assertion (replaced by an exact FULL-literal match) are planned-change
     dispositions citing acceptance_criteria[2]; scoping _assert_runtime_lock to the full-tier path is a tightening (a
     job-wide join would otherwise pass on the fast install); no test is skipped or loosened (Decision 235).
@@ -452,6 +461,7 @@ gate_rounds:
   - {gate: wording-check, round: 1, verdict: PASS, digest: 3ab4edd98c881bb82d11e22b5973d5dea39c9063bbdaedb18407b3fddb349b3d, base: e6eda786a224d348d5e3620728e2c52b2ebcb0eb, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 6, nits: 6}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 6}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -469,7 +479,7 @@ execution_steps:
   - Execute Verification Plan steps 1-8 -- loop until pass; on an unrecoverable failure stop and RCA (Decision 55).
   - >-
     Report: what was implemented; readiness (implemented and verified, or the stop reason); the --verify-head result
-    for the pushed HEAD; the build PR number, its CI run id and the merge SHA once merged; and the VP 9 run ids once
+    for the pushed HEAD and the structured postflight evidence (scripts.session.postflight --evidence); the build PR number, its CI run id and the merge SHA once merged; and the VP 9 run ids once
     available. A claim without its read-back says started or expected.
 rollback: >-
   Revert the build PR: main-validate returns to the full tier for every push.
