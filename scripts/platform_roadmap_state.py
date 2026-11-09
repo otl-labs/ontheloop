@@ -31,6 +31,7 @@ def _item_dict(item: TierItem) -> dict[str, Any]:
         "effort": item.effort,
         "strategic": item.strategic,
         "user_action_required": item.user_action_required,
+        "start_edges": [edge.ref for edge in item.start_edges],
     }
 
 
@@ -176,18 +177,24 @@ class PlatformRoadmapState:
         item = self._by_id.get(dep)
         return item is not None and item.status == "complete"
 
+    def _start_satisfied(self, item: TierItem, dep: str) -> bool:
+        if self._dep_satisfied(dep):
+            return True
+        dep_item = self._by_id.get(dep)
+        return dep_item is not None and dep_item.status == "in_progress" and any(e.ref == dep for e in item.start_edges)
+
     def eligible_items(self) -> list[TierItem]:
         return [
             item
             for item in self._doc.tier_items
-            if item.status == "not_started" and all(self._dep_satisfied(dep) for dep in item.depends_on)
+            if item.status == "not_started" and all(self._start_satisfied(item, dep) for dep in item.depends_on)
         ]
 
     def compute_blocked(self) -> list[TierItem]:
         return [
             item
             for item in self._doc.tier_items
-            if item.status == "not_started" and not all(self._dep_satisfied(dep) for dep in item.depends_on)
+            if item.status == "not_started" and not all(self._start_satisfied(item, dep) for dep in item.depends_on)
         ]
 
     def in_progress_items(self) -> list[TierItem]:
@@ -207,7 +214,7 @@ class PlatformRoadmapState:
         return None
 
     def _blocked_on(self, item: TierItem) -> list[str]:
-        return [dep for dep in item.depends_on if not self._dep_satisfied(dep)]
+        return [dep for dep in item.depends_on if not self._start_satisfied(item, dep)]
 
     def evaluate_gates(self) -> list[dict[str, Any]]:
         """Evaluate all cross_tier_gates and return {id, name, verdict, reason} for each."""
