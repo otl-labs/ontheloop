@@ -108,11 +108,18 @@ def render(
     slug: str,
     approved: str,
     wording: str,
+    tldr: str | None = None,
 ) -> str:
     """Markdown for the run page. Each block shows its file, the place its caller found, and one form."""
-    lines = [
-        f"# Approve wording: {_escape(slug)}",
-        "",
+    lines = [f"# Approve wording: {_escape(slug)}", ""]
+    if tldr:
+        lines += [
+            f"**TLDR:** {_escape(' '.join(tldr.split()))}",
+            "",
+            "_Context only: the TLDR is not part of the approved words._",
+            "",
+        ]
+    lines += [
         f"Fingerprint: **{fingerprint(approved)}**",
         "",
         f"- Approved-words digest: `{approved}`",
