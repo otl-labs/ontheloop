@@ -199,7 +199,7 @@ def test_provider_variable_tier_item_and_transport_criterion() -> None:
     """The forward intent lands on a tier_item; T4.2 and CD.28 gain additive annotations only."""
     items = _tier_items()
     item = items["T4.17"]
-    assert item["depends_on"] == ["T4.2"], item["depends_on"]
+    assert item["depends_on"] == ["T4.32"], item["depends_on"]
     criteria = item["exit_criteria"]
     assert len(criteria) >= 5, len(criteria)
     assert all(isinstance(c, dict) and "id" in c and "text" in c for c in criteria), criteria
