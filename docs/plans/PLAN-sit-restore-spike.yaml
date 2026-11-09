@@ -59,7 +59,8 @@ scope:
       run_pg_restore gain keywords no_acl: bool = False (True adds --no-acl, so a restore
       never depends on roles that exist only in PROD) and schema: str | None = None (adds --schema=<s>, so the rehearsal
       restores ducklake_ops only and never the telemetry catalog, Decision 239). Default argv byte-identical to today (restore_drill and any real DR
-      restore keep their grants).
+      restore keep their grants). CatalogDrError gains a returncode attribute (pg_restore's exit status), so the restore
+      step's value-free code needs no message.
   - file: src/lambdas/ducklake_maintenance/restore_rehearsal_actions.py
     action: Create
     purpose: >-
@@ -76,9 +77,12 @@ scope:
       that the PG16 test calls; it deletes the local dump in a finally. Every exception
       raised beneath a step is caught and returned as {ok: false, step, error_class, code} with no message (code is a SQLSTATE or pg_restore's exit status) (pg_restore stderr,
       DuckDB connection errors and CatalogDrError text can name a host). absolute_paths counts ducklake_schema,
-      ducklake_table, ducklake_data_file and ducklake_delete_file rows with path_is_relative false. teardown_scratch
+      ducklake_table, ducklake_data_file and ducklake_delete_file rows with path_is_relative false. foreign_owned and
+      foreign_acl are measured only over the ducklake_ops namespace (the schema and its relations), never the target
+      database's public schema or objects Neon creates. teardown_scratch
       deletes only under the run's scratch prefix. prod_checksum alone reads the function's own catalog DSN (rt.fetch_dsn) and only
-      ATTACHes READ_ONLY. duckdb_copy writes its DuckDB-file catalog only under /tmp, never uploads or returns it, and
+      ATTACHes READ_ONLY, with DATA_PATH set to the production ops data path built from the bucket constant as restore_drill
+      does (handler.py:121-122), never open_connection's smoke default. duckdb_copy writes its DuckDB-file catalog only under /tmp, never uploads or returns it, and
       returns only the contract's duckdb_copy fields. The rewrite SQL builder (rewrite_data_path_sql(meta_schema, new_path) -> (sql, params)) is a
       pure function the local test reuses; it updates only the global row (key 'data_path' and scope IS NULL). rewrite
       returns rewritten false and runs no UPDATE when absolute_paths is above 0. verify records attach_ok and each
@@ -115,7 +119,8 @@ scope:
     action: Create
     purpose: >-
       PR 1. Orchestrator implementing docs/contracts/restore-rehearsal.yaml sitting.order exactly (canary pattern, all
-      calls over 443): sequencing, run_id (a UTC timestamp plus 6 hex characters), the one scratch key builder that
+      calls over 443): sequencing, run_id (lowercase [a-z0-9_] only, a UTC timestamp plus 6 hex characters such as 20261109t193000_a1b2c3, so
+      restore_rehearsal_<run_id> is a plain Postgres identifier), the one scratch key builder that
       refuses a path outside ducklake-neon-smoke/restore-rehearsal/<run_id>/, teardown in finally, the evidence write
       and the CLI. copy_data also records prefix_sizes (an S3 list of ducklake/, ducklake-telemetry/ and
       telemetry-blobs/ as agent_platform, counts and bytes only). Subcommands: run, version-recovery (contract sitting.version_recovery; it honours --dev-profile only,
@@ -169,7 +174,7 @@ scope:
     action: Modify
     purpose: >-
       PR 1. --restore-rehearsal and --restore-rehearsal-version-recovery join the mutually exclusive gate group, with
-      --evidence-out PATH, --dev-profile (default agent_platform) and --dry-run, dispatching to scripts.ducklake_smoke.restore_rehearsal. Unbuilt plans PLAN-neon-key-out-of-pr-plans
+      --evidence-out PATH, --dev-profile (default agent_platform), --dry-run and --restore-final (passed through), dispatching to scripts.ducklake_smoke.restore_rehearsal. Unbuilt plans PLAN-neon-key-out-of-pr-plans
       and PLAN-telemetry-owner-provisioning also scope this file; whichever builds second rebases.
     new_imports: [scripts.ducklake_smoke.restore_rehearsal]
   - file: tests/test_neon_api.py
@@ -179,9 +184,18 @@ scope:
       operations and retries 423 a bounded number of times; non-2xx loud-fail; the password never in exception text. Errors from create_branch and _api_request no longer contain the response body;
       NeonApiError carries the HTTP status. Test names carry VP 1's -k terms (create_branch_name, create_role, create_database,
       wait_operations, locked_423), which no existing test matches.
+  - file: tests/checks/contracts/test_write_time_enforcement_conformance.py
+    action: Modify
+    purpose: >-
+      PR 1. Classify restore_rehearsal under the maintenance handler's _NON_ROW_WRITING map with a reason
+      (rehearsal: ephemeral functions only; writes a scratch catalog, no caller row), so
+      test_every_action_and_handler_is_classified stays green once handler.py registers it. The registry shards that name this
+      file (write-time-conformance-every-rule-has-a-validator, writer-adapters-reject-every-declared-kind) are kept
+      unchanged.
   - file: tests/test_catalog_dr.py
     action: Modify
-    purpose: PR 1. no_acl=True adds --no-acl, schema adds --schema, run_pg_restore(clean=False) drops --clean --if-exists; the default argv list is unchanged. Test names carry VP 2's -k terms (no_acl, restore_schema, restore_clean).
+    purpose: PR 1. no_acl=True adds --no-acl, schema adds --schema, run_pg_restore(clean=False) drops --clean --if-exists; the default argv list is unchanged. CatalogDrError carries returncode (a restore_clean test asserts it). Test names carry VP 2's -k terms (no_acl,
+      restore_schema, restore_clean).
   - file: tests/lambdas/ducklake_maintenance/test_restore_rehearsal_actions.py
     action: Create
     purpose: >-
@@ -233,7 +247,7 @@ scope:
       each create_function carries EphemeralStorage 10240, Timeout 900, the fixed Runtime, Handler and Architectures,
       and reserved concurrency 1 is set; teardown_handles also stops on a leftover restore-rehearsal/ scratch prefix; the invoke client has read_timeout 960 and total_max_attempts 1; a timeout FunctionError and a client ReadTimeoutError on a step invoke each write evidence naming the step and the 900 s limit;
       a failure before copy_data leaves no scratch object, and a failure after it deletes scratch through
-      teardown_scratch or the agent_platform fallback; the two CLI flags dispatch to the orchestrator.
+      teardown_scratch or the agent_platform fallback; the two CLI flags dispatch to the orchestrator and --restore-final is passed through.
   - file: tests/ducklake_neon_smoke_test/test_restore_rehearsal_verifier.py
     action: Create
     purpose: >-
@@ -242,7 +256,8 @@ scope:
       a host, DSN, password, bucket name, 12-digit account id, ARN, presigned URL or its credential parts (access key id,
       X-Amz-Security-Token, X-Amz-Signature); prints VERSION_RECOVERY_OK only when the contract's
       version_recovery criterion holds; prints DUCKDB_COPY_OK or names each mismatch without changing the exit code;
-      the redaction function strips every forbidden pattern.
+      the redaction function strips every forbidden pattern; the account-id pattern matches only a 12-digit run on
+      digit boundaries or inside an ARN, so a 20-digit checksum string such as 42633225326946801578 passes.
   - file: tests/common/test_restore_rehearsal_pg_restore.py
     action: Create
     purpose: >-
@@ -311,7 +326,7 @@ verification_plan:
   - step: 3
     phase: pre-deploy
     action: The rehearsal verb refuses everywhere but an ephemeral rehearsal function and returns allowed fields only
-    command: bin/venv-python -m pytest tests/lambdas/ducklake_maintenance/test_restore_rehearsal_actions.py tests/lambdas/ducklake_maintenance/test_restore_rehearsal_file_catalog.py tests/lambdas/ducklake_maintenance/handler/test_restore_rehearsal_dispatch.py -q
+    command: bin/venv-python -m pytest tests/lambdas/ducklake_maintenance/test_restore_rehearsal_actions.py tests/lambdas/ducklake_maintenance/test_restore_rehearsal_file_catalog.py tests/lambdas/ducklake_maintenance/handler/test_restore_rehearsal_dispatch.py tests/checks/contracts/test_write_time_enforcement_conformance.py -q
     expected: all pass; red before (file absent)
     fix_if: tighten the guard; never relax a refusal
     hermetic: true
@@ -364,8 +379,8 @@ verification_plan:
   - step: 9
     phase: post-deploy
     action: ADMIN sitting -- credential check, then the dry-run list for the operator's approve line
-    command: if bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null | grep -q 'assumed-role/PlatformAdmin/'; then echo ADMIN_CHAIN_OK; bin/venv-python -m scripts.ducklake_neon_smoke_test --restore-rehearsal --dry-run --profile agent_platform_admin --dev-profile agent_platform; else echo ADMIN_CHAIN_ABSENT; fi
-    expected: ADMIN_CHAIN_OK; ADMIN_CHAIN_ABSENT stops here and asks the coordinator for an ADMIN cloud session
+    command: if bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null | grep -q 'assumed-role/PlatformAdmin/'; then echo ADMIN_CHAIN_OK; bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform | grep -q 'assumed-role/PlatformDev/' && echo DEV_CHAIN_OK; bin/venv-python -m scripts.ducklake_neon_smoke_test --restore-rehearsal --dry-run --profile agent_platform_admin --dev-profile agent_platform; else echo ADMIN_CHAIN_ABSENT; fi
+    expected: ADMIN_CHAIN_OK and DEV_CHAIN_OK (copy_data, probe_absent, the teardown fallback and VP 12 run as agent_platform); ADMIN_CHAIN_ABSENT or a missing DEV_CHAIN_OK stops here and asks the coordinator for an ADMIN cloud session
     fix_if: wrong environment
   - step: 10
     phase: post-deploy
@@ -454,7 +469,7 @@ test_obligations:
     test_selector: tests/ducklake_neon_smoke_test/test_restore_rehearsal.py
     red_green_expectation: red before (module absent), green after
   - source: scripts/ducklake_neon_smoke_test.py
-    behavior: the two flags dispatch to the orchestrator
+    behavior: the two flags dispatch to the orchestrator and --restore-final is passed through
     verification_step: 4
     test_selector: tests/ducklake_neon_smoke_test/test_restore_rehearsal.py
     red_green_expectation: red before (flags absent), green after
@@ -476,7 +491,7 @@ context:
   - "Restore target is a Neon child branch with a new role and new database (ADVICE Q2): compute isolated from PROD, teardown one branch delete; --no-acl plus foreign_owned 0 and foreign_acl 0 prove the restored catalog depends on no PROD role. The operator's stated direction is RDS for SIT and PROD, pending the SIT Decision (rec-5024); restoring into that backend, and any Neon-to-RDS version or extension gap, is rec-5030's proof and unproven here. pg_restore recreates the stats index in the scratch database; the contract's residual records that Decision 214 cl.2 binds live catalog schemas, not a restored scratch copy."
   - "Code home (ADVICE Q4 adapted): dormant verb in the maintenance package, run on ephemeral functions from the CI-published zip, because a function-less separate artifact has no build precedent and stub manifests are skipped by the build; the role is the boundary either way."
   - "Profiles (operator rule 2026-11-09): agent_platform by default; agent_platform_admin only for the steps sitting.order names (dump invoke, DR read and copy, function create and delete, Neon target, step invokes); code ships only through CI. The sitting runs in an admin-container thread the coordinator starts."
-  - "deploy-paths.yaml has no admin_out_of_band row for this sitting until rec-5045 lands (the file is at its 500-line cap); the new Decision's cl.1 and its Decision 126 pointer authorise the sitting meanwhile, and the handoff note says so."
+  - "deploy-paths.yaml has no admin_out_of_band row for this sitting until rec-5045 lands (the file is at its 500-line cap); the new Decision's cl.1 and its Decision 126 pointer authorise the sitting meanwhile, and the handoff note says so. The sitting is also outside protected-actions.yaml admin-credential's rec-4707 rule (the admin profile serves only named bootstrap and admin deploys); the new Decision's cl.1 authorises it."
   - "Decision number race: nine unbuilt plans scope DECISIONS.md. If one lands a Decision first, the before anchor (the Decision 250 heading) still matches but the new entry must go above the newer one and take the next number, which approved_text verify does not accept; the build then rebases, re-runs the wording check on the new base and the operator approves through a fresh approval run before PR 1 merges."
   - "Approvals at build start: the operator's in-session approve lines for each admin-profile command (protected-actions.yaml admin-credential and secret-read for /secret/neon-api-key); the admin-route choice is recorded in the handoff note."
   - "rec-5024's plan (Plan the SIT Decision thread) sets T2.57 c2 met_by this slug and re-anchors its Decision after this one; told 2026-11-09."
@@ -501,6 +516,7 @@ gate_rounds:
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 2, nits: 10}
   - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 2, nits: 9}
   - {gate: wording-check, round: 9, verdict: PASS, digest: a22a747cd1b6252753df404dd84016b27bc3a38b6ae4eceb12dc36cac8af89f5, base: 75b7458e810f939c7096af11b3a25e325fe3bbb4, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 2, nits: 8}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
