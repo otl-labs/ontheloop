@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -50,8 +51,13 @@ LAMBDA_PG_RESTORE_PATH = "/opt/bin/pg_restore"
 class CatalogDrError(RuntimeError):
     """Loud-fail for any catalog DR failure (pg_dump non-zero exit, upload error).
 
-    Raised before emitting the success metric -- never swallowed (Decision 55).
+    Raised before emitting the success metric -- never swallowed (Decision 55). ``returncode`` carries
+    pg_restore's exit status (None for other failures) so a caller can report a value-free code.
     """
+
+    def __init__(self, message: str, returncode: int | None = None) -> None:
+        super().__init__(message)
+        self.returncode = returncode
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +68,9 @@ class CatalogDrError(RuntimeError):
 def dsn_uri(dsn: dict[str, str]) -> str:
     """Assemble a libpq URI from a DSN dict (sslmode defaults to require)."""
     sslmode = dsn.get("sslmode") or "require"
-    return f"postgresql://{dsn['username']}:{dsn['password']}@{dsn['host']}/{dsn['dbname']}?sslmode={sslmode}"
+    user = urllib.parse.quote(dsn["username"], safe="")
+    password = urllib.parse.quote(dsn["password"], safe="")
+    return f"postgresql://{user}:{password}@{dsn['host']}/{dsn['dbname']}?sslmode={sslmode}"
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +107,8 @@ def build_pg_restore_cmd(
     *,
     pg_restore_path: str = LAMBDA_PG_RESTORE_PATH,
     clean: bool = True,
+    no_acl: bool = False,
+    schema: str | None = None,
 ) -> list[str]:
     """Return the pg_restore argv for restoring a --format=custom dump into *target_dsn_uri*.
 
@@ -109,10 +119,16 @@ def build_pg_restore_cmd(
       --no-owner       do not restore ownership (the scratch role differs from the dump's owner)
       --clean --if-exists  drop existing objects first so the drill is idempotent on a reused scratch db
       --exit-on-error  loud-fail on the first restore error (Decision 55 -- no partial restore)
+      --no-acl         (opt-in) skip GRANTs, so a restore never depends on roles that exist only in PROD
+      --schema=<s>     (opt-in) restore only this schema (the rehearsal restores ducklake_ops, never telemetry)
     """
     cmd = [pg_restore_path, "--no-owner", "--exit-on-error", "--dbname", target_dsn_uri]
     if clean:
         cmd[1:1] = ["--clean", "--if-exists"]
+    if no_acl:
+        cmd.append("--no-acl")
+    if schema is not None:
+        cmd.append(f"--schema={schema}")
     cmd.append(dump_path)
     return cmd
 
@@ -123,6 +139,9 @@ def run_pg_restore(
     *,
     pg_restore_path: str = LAMBDA_PG_RESTORE_PATH,
     runner: Any = None,
+    clean: bool = True,
+    no_acl: bool = False,
+    schema: str | None = None,
 ) -> None:
     """Restore *dump_path* (custom format) into *target_dsn* via pg_restore. Loud-fail on non-zero.
 
@@ -131,10 +150,14 @@ def run_pg_restore(
     cutover rather than recording a half-restored catalog as healthy.
     """
     run = runner if runner is not None else subprocess.run
-    cmd = build_pg_restore_cmd(dump_path, dsn_uri(target_dsn), pg_restore_path=pg_restore_path)
+    cmd = build_pg_restore_cmd(
+        dump_path, dsn_uri(target_dsn), pg_restore_path=pg_restore_path, clean=clean, no_acl=no_acl, schema=schema
+    )
     result = run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
     if result.returncode != 0:
-        raise CatalogDrError(f"pg_restore exited {result.returncode}: {result.stderr.strip()[:500]}")
+        raise CatalogDrError(
+            f"pg_restore exited {result.returncode}: {result.stderr.strip()[:500]}", returncode=result.returncode
+        )
 
 
 def build_dr_key(

@@ -2,6 +2,92 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 251: The SIT restore rehearsal runs as one human-directed ADMIN-agent sitting on ephemeral functions and a throwaway Neon branch, never on a production function, catalog or prefix (amends Decisions 81, 126 and 237) (Decided)
+
+```yaml
+number: 251
+status: Decided
+decided_date: "2026-11-09"
+kind:
+  value: direction
+  justification: >-
+    Clause 1 changes who may act: an ADMIN-container agent may run the rehearsal sitting on the operator's direction.
+    Undone, that path closes again and only the operator could run it.
+amends: [81, 126, 237]
+significance:
+  value: numbered_decision
+  justification: >-
+    Opens a narrow ADMIN-agent execution path that Decision 81 cl.6 and Decision 126 closed, as Decisions 204, 213 cl.5
+    and 230 cl.4 each did for their own verbs: durable and reversal-relevant. Not a restore-rehearsal.yaml note: a
+    contract note cannot widen a ratified rule or carve-out (Decision 230). Not amendment_forms lines: it amends three
+    entries and grants a new path, which an annotation cannot.
+```
+
+**Status:** Decided
+**Date:** 2026-11-09
+**Warehouse ID:** dec-251 (per Decision 84 backfill)
+
+**Problem:** The SIT design builds SIT from a PROD catalog dump restored into SIT's own catalog database with
+ducklake_metadata.data_path rewritten to SIT's bucket. That restore and rewrite have never run (rec-5023). No cloud
+container has TCP/5432 egress, so the only route is ephemeral Lambdas created and invoked with the admin profile, plus a
+Neon branch, role and database created through the Neon API. No Decision names an ADMIN-agent path that does this.
+
+**Intent:** Prove the restore and rewrite once, on real production data, without changing anything production.
+
+**Decision:**
+1. **Sanctioned sitting.** An ADMIN-container agent may run the restore rehearsal sitting in
+   docs/contracts/restore-rehearsal.yaml, and only under the operator's explicit direction in that session: the run
+   lists its admin mutations first, and each admin-profile command is acknowledged per protected-actions.yaml. Never
+   self-directed or scheduled. This overrides Decision 81 cl.6 for the restore_rehearsal verb on ephemeral functions
+   only, and is a narrow carve-out beside Decision 126's admin tier.
+2. **Boundary (Decision 143 cl.1).** IAM bounds what the ephemeral functions write: the maintenance-smoke role (every
+   step but the checksum, and scratch teardown) reaches only the smoke prefix, and the reader role (the PROD checksum)
+   is read-only at S3. Scratch lives only under ducklake-neon-smoke/restore-rehearsal/. The restore target is a Neon
+   child branch holding a new role and a new database, deleted whole at teardown; a PROD role never connects to it.
+   Only PlatformAdmin can invoke or read the ephemeral functions. Fenced by code and named as residuals: the checksum
+   function's catalog login is the shared owner login, so it attaches READ_ONLY and an ephemeral function refuses
+   every other action; PlatformDev's bucket-wide write is used only through key builders that refuse a path outside
+   scratch. No Terraform, IAM change, standing resource or /secret/ parameter: the target role's password is a
+   transient branch-scoped credential outside Decision 237 cl.1, living only in the restore function's environment
+   and on the branch, and dies with them.
+3. **Data.** Production data leaves its prefixes only as an in-account server-side copy of the ops prefix into that
+   scratch prefix, deleted at teardown, and as one on-demand catalog dump the restore function reads once through a
+   short-lived presigned URL and restores for ducklake_ops only. Decision 81 cl.7's closed read boundary admits, for a
+   sitting only, those reads, the restore function's reads of the restored copy and the ephemeral checksum reader. pg_restore's
+   re-creation of the stats index in the scratch database is outside Decision 214 cl.2, which binds live catalog
+   schemas. No maintenance verb ever runs on a restored catalog. Evidence is counts only (Decision 101).
+4. **Native primitives (Decision 100).** pg_restore of the DR dump is the claim under test, because SIT's catalog will
+   live in SIT's catalog database, which no Neon branch reaches (rec-5024 decides its backend and account); restoring
+   into that backend itself is rec-5030's proof. The branch, S3 server-side copy and S3 versioning are used natively for
+   everything else.
+5. **Closure.** rec-5023 closes through a committed counts-only evidence fixture and its test, as rec-4070 did
+   (Decision 204 cl.5), whichever way its criteria fall: Decision 201's evaluator cannot run a live sitting. A step
+   that errors is fixed and the sitting re-run; a completed run, one stopped by a failed criterion or a Lambda limit, or a pg_restore that fails again after
+   one fix is a result. The candidate-engine leg
+   is rec-5036.
+6. **Scope.** Rehearsal sittings only, until SIT's reset path (rec-5030) exists. The SIT Decision (rec-5024) decides
+   whether the verb stays.
+
+```yaml reversal-conditions
+decision: 251
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: residue-left
+    kind: manual
+    description: "A sitting leaves a function, branch or scratch object behind twice: suspend cl.1 until the teardown is fixed."
+  - id: verb-reachable
+    kind: manual
+    description: "The verb runs on a production function, or a rehearsal role is found to write a production prefix: suspend cl.1 and fix first."
+  - id: sit-reset-exists
+    kind: manual
+    description: "SIT's reset path (rec-5030) is live: retire or re-scope cl.6."
+```
+
+**Related:** Decisions 77, 81, 88, 99, 100, 101, 126, 143, 201, 204, 213, 214, 216, 230, 236, 237, 239, 249; rec-5023, rec-5024, rec-5030, rec-5036.
+
+---
+
 ## Decision 250: Every warehouse table declares what should arrive, from an independent source and by when; a check that cannot read its source is red, and every check is itself watched (amends Decision 62) (Decided)
 
 ```yaml
@@ -1038,6 +1124,8 @@ conditions:
 > for the planner's PR session, does not apply to it.
 
 > **Update (2026-11-06):** Decision 248 clause 5 amends clauses 1 and 4 for the terraform/github apply App key, which stays in its Secrets Manager entry under a resource policy denying every action but reading its metadata to all but four principals; it fires this Decision's second-gate-wanted condition.
+
+> **Update (2026-11-09):** Decision 251 cl.2 amends clause 1 for the restore rehearsal's target role: a transient branch-scoped password that lives only in an ephemeral function's environment and on a throwaway Neon branch, never a /secret/ parameter.
 
 ---
 
@@ -8668,6 +8756,8 @@ mutation. `deploy-paths.yaml`'s admin_out_of_band.scoped_login_provisioning inde
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 > **Update (2026-11-06):** Decision 248 clauses 1 and 6 bring terraform/github under CI: terraform-github-apply.yml applies it behind one operator approval, and its two terraform/bootstrap roles and the apply App key's resource policy change only by a bootstrap apply an ADMIN-session agent runs on the operator's explicit direction.
+
+> **Update (2026-11-09):** Decision 251 cl.1 admits the restore rehearsal sitting (docs/contracts/restore-rehearsal.yaml) to the admin tier for an ADMIN-container agent under explicit human direction, on ephemeral functions and a throwaway Neon branch only.
 ---
 
 ## Decision 125: Ratify decoupling DuckLake Lambda code deploys from terraform/personal infra apply (environment-taxonomy.md section 5 conformance) (Decided)
@@ -11160,6 +11250,8 @@ provision_telemetry_login, invocable by an ADMIN-container agent only under expl
 [Amendment 2026-10-25, PLAN-telemetry-reader-and-smoke-twin (Decision 236 cl.6): runtime artifacts add the smoke telemetry writer twin and the telemetry reader; the closed read boundary is two readers.]
 
 [Amendment 2026-10-29, Decision 239: runtime artifacts add the telemetry content reader; the closed read boundary is three readers.]
+
+[Amendment 2026-11-09, Decision 251: cl.6's agent carve-outs gain the restore_rehearsal verb, on ephemeral functions only, under explicit human direction; cl.7's closed read boundary admits, for a sitting only, its ephemeral checksum reader, a server-side copy of ducklake/ into the smoke scratch prefix, one dump read through a presigned URL and the restore function's reads of the restored copy.]
 
 ---
 
