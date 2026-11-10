@@ -19,6 +19,8 @@ BASE = yaml.safe_load((FIXTURES / "review_page_base.yaml").read_text(encoding="u
 OWN_TEXT = HISTORY["approved-text-operator-approval@211f307c"]
 OWN = aw.parse_sidecar(OWN_TEXT)
 SLUG = "demo"
+TLDR = "Lets the operator see why the change is made."
+OWN_TEXT_WITH_TLDR = OWN_TEXT.rstrip("\n") + f"\ntldr: {TLDR}\n"
 
 
 def _sidecar(*blocks: dict[str, str]) -> aw.Sidecar:
@@ -44,6 +46,8 @@ def base_dir(tmp_path_factory) -> Path:
 
 
 def _page(sidecar: aw.Sidecar, base: Path, **over: str) -> str:
+    if sidecar.tldr is None:
+        sidecar = sidecar.model_copy(update={"tldr": TLDR})
     approved = over.get("expected", aw.approved_digest(sidecar))
     finger = over["finger"] if "finger" in over else review_page.fingerprint(approved)
     return aw.render_page(sidecar, over.get("slug", SLUG), approved, finger, base)
@@ -241,17 +245,17 @@ class TestCli:
 
     def test_a_good_render_prints_the_page(self, base_dir, tmp_path, capsys) -> None:
         side = tmp_path / "s.yaml"
-        side.write_text(OWN_TEXT, encoding="utf-8")
+        side.write_text(OWN_TEXT_WITH_TLDR, encoding="utf-8")
         approved = aw.approved_digest(OWN)
         assert aw.main(self._argv(side, base_dir, approved, review_page.fingerprint(approved))) == 0
         assert "# Approve wording: demo" in capsys.readouterr().out
 
     def test_a_refusal_exits_non_zero_with_nothing_on_stdout(self, base_dir, tmp_path, capsys) -> None:
         side = tmp_path / "s.yaml"
-        side.write_text(OWN_TEXT, encoding="utf-8")
+        side.write_text(OWN_TEXT_WITH_TLDR, encoding="utf-8")
         assert aw.main(self._argv(side, base_dir, "0" * 64, review_page.fingerprint("0" * 64))) == 2
         captured = capsys.readouterr()
-        assert captured.out == "" and "REFUSED" in captured.err
+        assert captured.out == "" and "REFUSED" in captured.err and "differs" in captured.err
 
     @pytest.mark.parametrize("content", ["schema_version: [1\n", None], ids=["unparsable", "missing"])
     def test_a_sidecar_file_that_does_not_parse_or_read_is_refused(self, base_dir, tmp_path, capsys, content) -> None:
@@ -263,10 +267,63 @@ class TestCli:
 
     def test_main_reads_sys_argv_when_given_no_arguments(self, base_dir, tmp_path, monkeypatch, capsys) -> None:
         side = tmp_path / "s.yaml"
-        side.write_text(OWN_TEXT, encoding="utf-8")
+        side.write_text(OWN_TEXT_WITH_TLDR, encoding="utf-8")
         approved = aw.approved_digest(OWN)
         monkeypatch.setattr(
             sys, "argv", ["approved_words", *self._argv(side, base_dir, approved, review_page.fingerprint(approved))]
         )
         assert aw.main() == 0
         assert "Approve wording" in capsys.readouterr().out
+
+
+class TestTldr:
+    def _one(self, **over: object) -> aw.Sidecar:
+        return _sidecar(_blk("a", "a b")).model_copy(update=over)
+
+    def _render(self, sidecar: aw.Sidecar, base: Path) -> str:
+        approved = aw.approved_digest(sidecar)
+        return aw.render_page(sidecar, SLUG, approved, review_page.fingerprint(approved), base)
+
+    def test_a_sidecar_without_a_tldr_parses(self) -> None:
+        assert OWN.tldr is None
+        assert aw.parse_sidecar(OWN_TEXT_WITH_TLDR).tldr == TLDR
+
+    @pytest.mark.parametrize("tldr", [None, "", "   \n\t"], ids=["missing", "empty", "blank"])
+    def test_a_missing_or_blank_tldr_is_refused(self, base_dir, tldr) -> None:
+        with pytest.raises(aw.RenderRefused, match="sidecar carries no tldr"):
+            self._render(self._one(tldr=tldr), base_dir)
+
+    def test_a_tldr_over_600_characters_is_refused_and_600_is_allowed(self, base_dir) -> None:
+        with pytest.raises(aw.RenderRefused, match="over 600"):
+            self._render(self._one(tldr="x" * 601), base_dir)
+        assert "x" * 600 in self._render(self._one(tldr="x" * 600), base_dir)
+
+    def test_the_length_is_measured_on_the_raw_value(self, base_dir) -> None:
+        with pytest.raises(aw.RenderRefused, match="over 600"):
+            self._render(self._one(tldr="a " + " " * 600), base_dir)
+
+    @pytest.mark.parametrize(
+        "bad", ["\x07", "\u202e", "\u200b", "\ufeff", "\x1b"], ids=["bell", "bidi", "zero-width", "bom", "escape"]
+    )
+    def test_a_control_bidi_or_zero_width_code_point_is_refused(self, base_dir, bad) -> None:
+        with pytest.raises(aw.RenderRefused, match="tldr carries a control"):
+            self._render(self._one(tldr=f"a{bad}b"), base_dir)
+
+    def test_the_page_carries_the_tldr_directly_under_the_h1(self, base_dir) -> None:
+        lines = self._render(self._one(tldr=TLDR), base_dir).splitlines()
+        assert lines[0] == "# Approve wording: demo" and lines[2] == f"**TLDR:** {TLDR}"
+        assert lines[4].startswith("_Context only") and lines[6].startswith("Fingerprint:")
+
+    def test_the_tldr_is_outside_both_digests(self) -> None:
+        plain, told = self._one(), self._one(tldr=TLDR)
+        assert aw.digest(plain) == aw.digest(told) and aw.approved_digest(plain) == aw.approved_digest(told)
+
+    def test_the_cli_exits_2_on_a_sidecar_without_a_tldr(self, base_dir, tmp_path, capsys) -> None:
+        side = tmp_path / "s.yaml"
+        side.write_text(OWN_TEXT, encoding="utf-8")
+        approved = aw.approved_digest(OWN)
+        argv = ["render", "--sidecar-file", str(side), "--slug", SLUG, "--base-file-dir", str(base_dir),
+                "--expect-approved", approved, "--fingerprint", review_page.fingerprint(approved)]  # fmt: skip
+        assert aw.main(argv) == 2
+        captured = capsys.readouterr()
+        assert captured.out == "" and "APPROVED-WORDS REFUSED" in captured.err and "no tldr" in captured.err

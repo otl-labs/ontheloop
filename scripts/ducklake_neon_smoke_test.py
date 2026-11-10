@@ -287,11 +287,37 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="[pre-deploy] OQ.12 full canary rehearsal from CC-web (no TCP/5432): publish candidate layers, "
         "create ephemeral canaries, prove attach + RYW + real-prod read-clone, teardown.",
     )
+    group.add_argument(
+        "--restore-rehearsal",
+        action="store_true",
+        dest="restore_rehearsal",
+        help="[post-deploy, ADMIN sitting] SIT restore rehearsal (rec-5023); see docs/contracts/restore-rehearsal.yaml",
+    )
+    group.add_argument(
+        "--restore-rehearsal-version-recovery",
+        action="store_true",
+        dest="restore_rehearsal_version_recovery",
+        help="[post-deploy] S3 versioning recovery rehearsal as the dev profile (rec-5023)",
+    )
+    parser.add_argument("--evidence-out", default=None, dest="evidence_out", help="[--restore-rehearsal*] evidence file path")
+    parser.add_argument(
+        "--dev-profile", default="agent_platform", dest="dev_profile", help="[--restore-rehearsal*] non-admin profile"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", dest="dry_run", help="[--restore-rehearsal] list the admin mutations, call nothing"
+    )
+    parser.add_argument("--run-id", default=None, dest="run_id", help="[--restore-rehearsal] the run id the dry-run printed")
+    parser.add_argument(
+        "--restore-final",
+        action="store_true",
+        dest="restore_final",
+        help="[--restore-rehearsal] sitting re-run after one restore fix",
+    )
     parser.add_argument(
         "--project-id",
         default=None,
         dest="project_id",
-        help="[--canary-rehearsal] Neon project id; skips the org-level project listing a project-scoped key cannot make "
+        help="[--canary-rehearsal, --restore-rehearsal] Neon project id; skips the org listing a scoped key cannot make "
         "(default: env NEON_PROJECT_ID)",
     )
     parser.add_argument("--profile", default=None, help="AWS profile override for Secrets Manager / S3 creds")
@@ -325,6 +351,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             lambda_warm_reuse(profile=args.profile, region=args.region, json_output=args.json_output)
         elif args.lambda_warm_reuse_writer:
             lambda_warm_reuse_writer(profile=args.profile, region=args.region, json_output=args.json_output)
+        elif args.restore_rehearsal or args.restore_rehearsal_version_recovery:
+            return _restore_rehearsal_dispatch(args)
         elif args.canary_rehearsal:
             extra = {"project_id": args.project_id} if args.project_id else {}
             canary_rehearsal(profile=args.profile, region=args.region, json_output=args.json_output, **extra)
@@ -335,6 +363,24 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     return 0
+
+
+def _restore_rehearsal_dispatch(args: argparse.Namespace) -> int:
+    """Hand the restore-rehearsal flags to scripts.ducklake_smoke.restore_rehearsal (rec-5023)."""
+    from scripts.ducklake_smoke import restore_rehearsal  # noqa: PLC0415
+
+    argv = ["version-recovery" if args.restore_rehearsal_version_recovery else "run", "--dev-profile", args.dev_profile]
+    argv += ["--region", args.region]
+    for flag, value in (
+        ("--profile", args.profile),
+        ("--run-id", args.run_id),
+        ("--evidence-out", args.evidence_out),
+        ("--project-id", args.project_id),
+    ):
+        if value:
+            argv += [flag, value]
+    argv += [f for f, on in (("--dry-run", args.dry_run), ("--restore-final", args.restore_final)) if on]
+    return restore_rehearsal.main(argv)
 
 
 def _selected_lambda_gate(args: argparse.Namespace) -> Callable[..., None]:

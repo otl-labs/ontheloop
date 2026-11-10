@@ -327,6 +327,11 @@ def test_t4_32_records_spend_ceiling(items):
     if _live(items, "T4.32"):
         bracket = _bracket(items["T4.32"]["intent"])
         assert not _missing(bracket, start + spend), _missing(bracket, start + spend)
+        edges = [{"ref": e["ref"], "once": e["once"]} for e in items["T4.32"].get("start_edges", [])]
+        has_start = "may start once T4.10a is in_progress" in bracket
+        assert (edges == [{"ref": "T4.10a", "once": "in_progress"}]) == has_start, (
+            "T4.32 START sentence and start_edges drifted"
+        )
     else:
         mirrored = all("SPEND" in _criterion(items, item_id, crit_id) for item_id, crit_id in ADDS)
         assert mirrored or "rec-5039" in _flat(items["T4.32"]["intent"]), "T4.32's compacted intent must name rec-5039"

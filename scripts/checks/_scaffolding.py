@@ -126,10 +126,11 @@ def _run_precommit_body(failed: list[str], *, all_files: bool, files: list[str] 
             print(f"\n=== {name} ===\nNo changed files vs origin/main; skipping.")
             registry.skipped("no changed files vs origin/main")
             return False
-        # "origin/main" directly, not push_context_base(): this branch (all_files=False) is only
-        # ever reached from the --pre call site, which never runs in push/post-merge context --
-        # the full tier's own call site always passes all_files=True.
-        if precommit_escalates(target, "origin/main"):
+        # This branch (all_files=False) is the --pre call site; it runs in push context for plans-only
+        # pushes to main (Decision 205 cl.5), so the diff base is the push base there. Probed only when the
+        # CI event is a push, so every other context keeps its git call sequence unchanged.
+        push_base = _common.push_context_base() if os.environ.get("GITHUB_EVENT_NAME") == "push" else None
+        if precommit_escalates(target, push_base or "origin/main"):
             all_files = True
             escalated = True
 
