@@ -11,6 +11,7 @@ import yaml
 
 from scripts.ci.deploy_gate import FULL_TIER_JOB, FULL_TIER_STEP
 from scripts.convergence_health.code_drift import DUCKLAKE_SOURCE_PATHSPECS, PROD_SOURCE_PATHSPECS
+from scripts.verify_ci_workflow._shared import FULL_STEP_IF
 
 _WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 _CHANNELS = {
@@ -142,7 +143,7 @@ def test_deploy_gate_is_workflow_call_only_with_outputs_and_manifest() -> None:
 def test_ci_still_has_the_full_tier_step_the_gate_matches() -> None:
     job = _load("ci.yml")["jobs"][FULL_TIER_JOB]
     (step,) = [s for s in job["steps"] if s.get("name") == FULL_TIER_STEP]
-    assert step["run"].strip() == "python -m scripts.validate" and "if" not in step
+    assert step["run"].strip() == "python -m scripts.validate" and step["if"] == FULL_STEP_IF
 
 
 def test_convergence_health_drift_steps_carry_a_token() -> None:

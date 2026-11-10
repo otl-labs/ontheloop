@@ -126,10 +126,9 @@ def _run_precommit_body(failed: list[str], *, all_files: bool, files: list[str] 
             print(f"\n=== {name} ===\nNo changed files vs origin/main; skipping.")
             registry.skipped("no changed files vs origin/main")
             return False
-        # "origin/main" directly, not push_context_base(): this branch (all_files=False) is only
-        # ever reached from the --pre call site, which never runs in push/post-merge context --
-        # the full tier's own call site always passes all_files=True.
-        if precommit_escalates(target, "origin/main"):
+        # This branch (all_files=False) is the --pre call site; it runs in push context for plans-only
+        # pushes to main (Decision 205 cl.5), so the diff base is the push base there.
+        if precommit_escalates(target, _common.push_context_base() or "origin/main"):
             all_files = True
             escalated = True
 

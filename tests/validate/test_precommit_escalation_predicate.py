@@ -61,6 +61,19 @@ class TestRunPrecommitBodyDelegatesToPredicate:
         assert "--all-files" in cmd
 
 
+class TestPushContextBase:
+    def test_push_context_uses_push_base(self) -> None:
+        for base, expected in (("abc123", "abc123"), (None, "origin/main")):
+            with (
+                patch("scripts.checks._scaffolding.precommit_escalates", return_value=False) as mock_pred,
+                patch("scripts.checks._common.push_context_base", return_value=base),
+                patch("scripts.checks._common.run") as mock_run,
+            ):
+                mock_run.return_value = _mock_completed(0)
+                run_precommit_checks([], all_files=False, files=["scripts/foo.py"])
+            mock_pred.assert_called_once_with(["scripts/foo.py"], expected)
+
+
 class TestRunPrecommitChecksReturnsAppliedDecision:
     def test_returns_true_when_escalated(self) -> None:
         with (
