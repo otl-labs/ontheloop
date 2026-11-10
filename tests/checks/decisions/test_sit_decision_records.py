@@ -61,7 +61,7 @@ def test_sit_and_rds_decisions_and_notes() -> None:
         note = _last_annotation(decision_entry(text, number))
         assert phrase in note, (number, note[:120])
         other = sit if str(rds) in phrase else rds
-        assert f"Decision {other}" not in note, (number, "cites the other new Decision")
+        assert not re.search(rf"Decision {other}\b", note), (number, "cites the other new Decision")
 
 
 def test_account_rule_and_tier_gating() -> None:
