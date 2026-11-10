@@ -434,7 +434,7 @@ _NON_ROW_WRITING: dict[str, dict[str, str]] = {
             (
                 "catalog_reinit restore_drill merge_ops gc_ops catalog_stats reconcile_columns "
                 "clone_catalog control_health reconcile_partitions rewrite_partition_layout "
-                "provision_telemetry_login ensure_catalog_indexes"
+                "provision_telemetry_login ensure_catalog_indexes restore_rehearsal"
             ).split(),
             "maintenance: moves or removes files, writes no caller row",
         ),

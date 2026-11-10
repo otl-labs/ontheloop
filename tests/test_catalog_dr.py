@@ -327,3 +327,86 @@ def test_run_pg_restore_nonzero_loud_fails():
 
     with pytest.raises(cdr.CatalogDrError, match="pg_restore exited 1"):
         cdr.run_pg_restore("/tmp/c.dump", {"host": "h", "dbname": "db", "username": "u", "password": "p"}, runner=_runner)
+
+
+# ---------------------------------------------------------------------------
+# restore-rehearsal additions: opt-in --no-acl and --schema, clean passthrough, returncode, encoded DSN
+# ---------------------------------------------------------------------------
+
+_DSN = {"host": "h", "dbname": "db", "username": "u", "password": "p"}
+
+
+def test_build_pg_restore_cmd_default_argv_unchanged():
+    import src.common.catalog_dr as cdr
+
+    cmd = cdr.build_pg_restore_cmd("/tmp/c.dump", "uri")
+    assert cmd == [
+        cdr.LAMBDA_PG_RESTORE_PATH,
+        "--clean",
+        "--if-exists",
+        "--no-owner",
+        "--exit-on-error",
+        "--dbname",
+        "uri",
+        "/tmp/c.dump",
+    ]
+
+
+def test_build_pg_restore_cmd_no_acl_flag():
+    import src.common.catalog_dr as cdr
+
+    assert "--no-acl" in cdr.build_pg_restore_cmd("/tmp/c.dump", "uri", no_acl=True)
+    assert "--no-acl" not in cdr.build_pg_restore_cmd("/tmp/c.dump", "uri")
+
+
+def test_build_pg_restore_cmd_restore_schema_flag():
+    import src.common.catalog_dr as cdr
+
+    cmd = cdr.build_pg_restore_cmd("/tmp/c.dump", "uri", schema="ducklake_ops")
+    assert "--schema=ducklake_ops" in cmd
+    assert cmd[-1] == "/tmp/c.dump"
+    assert not any(c.startswith("--schema") for c in cdr.build_pg_restore_cmd("/tmp/c.dump", "uri"))
+
+
+def test_run_pg_restore_passes_restore_clean_no_acl_schema():
+    import src.common.catalog_dr as cdr
+
+    seen = {}
+
+    def _runner(cmd, **kw):
+        seen["cmd"] = cmd
+        return type("R", (), {"returncode": 0, "stderr": ""})()
+
+    cdr.run_pg_restore("/tmp/c.dump", _DSN, runner=_runner, clean=False, no_acl=True, schema="ducklake_ops")
+    assert "--clean" not in seen["cmd"] and "--no-acl" in seen["cmd"] and "--schema=ducklake_ops" in seen["cmd"]
+
+
+def test_restore_clean_error_carries_returncode():
+    import src.common.catalog_dr as cdr
+
+    def _runner(cmd, **kw):
+        return type("R", (), {"returncode": 3, "stderr": "x"})()
+
+    with pytest.raises(cdr.CatalogDrError) as info:
+        cdr.run_pg_restore("/tmp/c.dump", _DSN, runner=_runner)
+    assert info.value.returncode == 3
+    assert cdr.CatalogDrError("plain").returncode is None
+
+
+def test_restore_clean_dsn_uri_percent_encodes_reserved_characters():
+    import urllib.parse
+
+    import src.common.catalog_dr as cdr
+
+    uri = cdr.dsn_uri({**_DSN, "username": "u@x", "password": "p/w:@#?"})
+    parsed = urllib.parse.urlsplit(uri)
+    assert parsed.hostname == "h"
+    assert urllib.parse.unquote(parsed.password) == "p/w:@#?"
+    assert urllib.parse.unquote(parsed.username) == "u@x"
+
+
+def test_build_pg_dump_cmd_schema_flag():
+    import src.common.catalog_dr as cdr
+
+    cmd = cdr.build_pg_dump_cmd("uri", "/tmp/o.dump", schema="scratch_meta")
+    assert "--schema=scratch_meta" in cmd and cmd[-1] == "uri"

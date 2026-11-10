@@ -27,6 +27,9 @@ _COMPILED_CACHE_KEY = (
     "pip-${{ hashFiles('requirements.in', 'requirements-dev.in', 'requirements.txt', 'requirements-dev.txt') }}"
 )
 
+_FULL_IF = "steps.scope.outputs.plans_only != 'true'"
+_FAST_IF = "steps.scope.outputs.plans_only == 'true'"
+
 _VALID_CI_DATA: dict[str, Any] = {
     "jobs": {
         "pr-validate": {
@@ -43,12 +46,17 @@ _VALID_CI_DATA: dict[str, Any] = {
             "runs-on": "ubuntu-latest",
             "steps": [
                 {"uses": "actions/checkout@v4", "with": {"fetch-depth": 0}},
+                {"id": "scope", "run": "python3 -I scripts/ci/push_scope.py classify"},
                 {
                     "uses": "actions/cache@v6",
+                    "if": _FULL_IF,
                     "with": {"key": _COMPILED_CACHE_KEY},
                 },
-                {"run": "pip install -r requirements.txt\npip install -r requirements-dev.txt"},
-                {"run": "bin/venv-python -m scripts.validate"},
+                {"if": _FULL_IF, "run": "pip install -r requirements.txt\npip install -r requirements-dev.txt"},
+                {"if": _FULL_IF, "run": "bin/venv-python -m scripts.validate"},
+                {"uses": "actions/cache@v6", "if": _FAST_IF, "with": {"key": "pip-${{ hashFiles('requirements-dev.txt') }}"}},
+                {"if": _FAST_IF, "run": "pip install -r requirements-fast.txt\npip install -r requirements-dev.txt"},
+                {"if": _FAST_IF, "run": "bin/venv-python -m scripts.validate --pre"},
             ],
         },
         "terraform-validate": {
@@ -91,9 +99,9 @@ class TestFullTierRuntimeLock:
         ci_data = copy.deepcopy(_VALID_CI_DATA)
         steps = ci_data["jobs"]["main-validate"]["steps"]
         if missing == "install":
-            steps[2]["run"] = "pip install -r requirements.txt"
+            steps[3]["run"] = "pip install -r requirements.txt"
         else:
-            steps[1]["with"]["key"] = "pip-runtime"
+            steps[2]["with"]["key"] = "pip-runtime"
         with patch("scripts.verify_ci_workflow._ci_yaml._load") as mock_load:
             mock_load.side_effect = [ci_data, _VALID_CANARY_COMPILED_DATA]
             with pytest.raises(AssertionError, match=re.escape(expected)):
@@ -147,7 +155,7 @@ class TestCheckJobsAndFlagsFailPath:
         import copy
 
         data = copy.deepcopy(_VALID_CI_DATA)
-        data["jobs"]["main-validate"]["steps"][2]["run"] = "pip install -r requirements.txt"
+        data["jobs"]["main-validate"]["steps"][3]["run"] = "pip install -r requirements.txt"
         with patch("scripts.verify_ci_workflow._ci_yaml._load", return_value=data):
             with pytest.raises(AssertionError, match="requirements-dev.txt"):
                 _check_jobs_and_flags()
@@ -270,3 +278,89 @@ class TestCheckFullTierDepth:
             mock_load.side_effect = [_VALID_CI_DATA, canary_data]
             with pytest.raises(AssertionError, match=r"canary checkout fetch-depth.*expected 0"):
                 _check_fetch_depth()
+
+
+# ---------------------------------------------------------------------------
+# main-validate step-level tier guards (Decision 205 cl.5)
+# ---------------------------------------------------------------------------
+
+
+def _mv_data() -> dict[str, Any]:
+    import copy
+
+    return copy.deepcopy(_VALID_CI_DATA)
+
+
+def _run_flags(data: dict[str, Any]) -> None:
+    with patch("scripts.verify_ci_workflow._ci_yaml._load", return_value=data):
+        _check_jobs_and_flags()
+
+
+def _step(data: dict[str, Any], needle: str) -> dict[str, Any]:
+    steps = data["jobs"]["main-validate"]["steps"]
+    return next(s for s in steps if needle in s.get("run", ""))
+
+
+def _full_step(data: dict[str, Any]) -> dict[str, Any]:
+    steps = data["jobs"]["main-validate"]["steps"]
+    return next(s for s in steps if s.get("if") == _FULL_IF and s.get("run", "").endswith(".validate"))
+
+
+def test_fails_when_full_step_is_unconditionally_off() -> None:
+    data = _mv_data()
+    _full_step(data)["if"] = "false"
+    with pytest.raises(AssertionError, match="full-tier step if must be"):
+        _run_flags(data)
+
+
+def test_fails_when_fast_step_is_unconditioned() -> None:
+    data = _mv_data()
+    del _step(data, "scripts.validate --pre")["if"]
+    with pytest.raises(AssertionError, match="fast-tier step if must be"):
+        _run_flags(data)
+
+
+def test_fails_when_classify_step_is_missing() -> None:
+    data = _mv_data()
+    steps = data["jobs"]["main-validate"]["steps"]
+    steps[:] = [s for s in steps if s.get("id") != "scope"]
+    with pytest.raises(AssertionError, match="no classify step"):
+        _run_flags(data)
+
+
+def test_fails_when_classify_runs_after_validate() -> None:
+    data = _mv_data()
+    steps = data["jobs"]["main-validate"]["steps"]
+    scope = next(s for s in steps if s.get("id") == "scope")
+    steps.remove(scope)
+    steps.append(scope)
+    with pytest.raises(AssertionError, match="classify step must precede"):
+        _run_flags(data)
+
+
+def test_fails_when_second_full_step_is_added() -> None:
+    data = _mv_data()
+    data["jobs"]["main-validate"]["steps"].append({"if": _FULL_IF, "run": "bin/venv-python -m scripts.validate"})
+    with pytest.raises(AssertionError, match="exactly one full-tier validate step"):
+        _run_flags(data)
+
+
+@pytest.mark.parametrize("drop", ["install", "cache"])
+def test_runtime_lock_ignores_fast_path_install(drop: str) -> None:
+    data = _mv_data()
+    steps = data["jobs"]["main-validate"]["steps"]
+    if drop == "install":
+        steps[3]["run"] = "pip install -r requirements.txt"
+        expected = "does not install compiled requirements-dev.txt"
+    else:
+        steps[2]["with"]["key"] = "pip-runtime"
+        expected = "cache key omits requirements.txt"
+    with pytest.raises(AssertionError, match=re.escape(expected)):
+        _run_flags(data)
+
+
+def test_full_tier_jobs_classifies_by_step() -> None:
+    both = {"jobs": {"j": {"steps": [{"run": "python -m scripts.validate"}, {"run": "python -m scripts.validate --pre"}]}}}
+    pre_only = {"jobs": {"j": {"steps": [{"run": "python -m scripts.validate --pre"}]}}}
+    assert [name for name, _ in _check_jobs_and_flags.__globals__["_full_tier_jobs"](both)] == ["j"]
+    assert _check_jobs_and_flags.__globals__["_full_tier_jobs"](pre_only) == []
