@@ -1,0 +1,484 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: plugin-hooks-locate-checkout
+intent: >-
+  Clear the Critical telemetry-arrival red rec-5055 and restore the guards: since 2026-11-09 the claude.ai harness
+  starts project threads in the parent of the checkout, so the ontheloop plugin gate finds no manifest and skips every
+  hook (no capture, no PreToolUse guard, no canary). The plugin ships a locator that finds the checkout from the start
+  directory, the gate runs each hook from it, an unusable layout is visible instead of silent, and the uncaptured
+  window is recorded once the fix is proven live (NS.8: the hooks are part of the floor; NS.6: capture proven, not
+  assumed).
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-plugin-hooks-locate-checkout.yaml
+phase: >-
+  ci_rca (soft-warn exception category): Track B repair of rec-5055 under docs/contracts/red-main-recovery.yaml
+  (Decision 226). No tier_item is targeted and no exit criterion is closed, so closes_criteria is empty.
+closes_criteria: []
+scope:
+  # ---------------------------------------------------------------- PR 1: the fix (unguarded build thread, undeclared)
+  - file: .claude/hooks/locate_checkout.bash
+    action: Create
+    purpose: >-
+      PR 1. The locator, shipped inside the plugin and run as bash FILE (mode bits vary in the synced copy). No
+      argument: print the checkout's absolute path and exit 0, or print nothing and exit 1; nothing on stderr. A
+      directory is a candidate when its .claude/.claude-plugin/plugin.json is a regular file containing the manifest
+      name literal ("name": "ontheloop"; test -f before reading, so a FIFO cannot hang it). Rule, first match wins:
+      (1) CLAUDE_PROJECT_DIR, when absolute and a candidate; (2) its direct, non-hidden children that are candidates,
+      the same directory reached by two names counted once: exactly one is the checkout; (3) among several, the one
+      whose .git is a directory when exactly one is (a linked worktree's .git is a file); otherwise fail. It never
+      consults PWD, never recurses below the direct children, never reads stdin and never executes or evaluates a
+      name it finds. --notice SessionStart: when the rule fails, one stderr line
+      "[plugin_hooks] no ontheloop checkout (candidates=N)", N the candidate count of step 2. --notice
+      UserPromptSubmit: when the rule fails with N above 1, one UserPromptSubmit hookSpecificOutput JSON object whose
+      additionalContext is "[plugin_hooks] repo hooks not loaded: N ontheloop checkouts under the session start
+      directory, so the ontheloop plugin ran no hook (no guards, no capture). Follow the AGENTS.md hook canary rule.";
+      nothing otherwise. Notice mode exits 0 on every path. The name must not end .sh or .py (constraint 2).
+  - file: .claude/hooks/plugin_hooks.py
+    action: Modify
+    purpose: >-
+      PR 1. GATE becomes exactly:
+      [ -n "${ONTHELOOP_PROJECT_SETTINGS:-}" ] || ! CLAUDE_PROJECT_DIR="$(bash "${CLAUDE_PLUGIN_ROOT}/hooks/locate_checkout.bash" </dev/null)" || ! cd "$CLAUDE_PROJECT_DIR" || ! export CLAUDE_PROJECT_DIR ||
+      followed by one space and the settings command byte for byte. render adds two plugin-only notice commands,
+      [ -n "${ONTHELOOP_PROJECT_SETTINGS:-}" ] || bash "${CLAUDE_PLUGIN_ROOT}/hooks/locate_checkout.bash" --notice EVENT </dev/null,
+      with no statusMessage: EVENT SessionStart after the drift check in the leading plugin-only SessionStart group,
+      and EVENT UserPromptSubmit in a new leading UserPromptSubmit group. gated keeps refusing control operators in
+      the settings command only. check and the CLI are unchanged in behaviour. The manifest path and name literal
+      move to the locator; the docstring describes the new gate.
+  - file: .claude/hooks/hooks.json
+    action: Modify
+    purpose: >-
+      PR 1. Re-rendered with bin/venv-python .claude/hooks/plugin_hooks.py render; never edited by hand
+      (docs/contracts/mechanical-conflicts.yaml names the generator).
+  - file: tests/hooks/test_plugin_hooks.py
+    action: Modify
+    purpose: >-
+      PR 1. New class TestLocatedGate (VP 1), each case run with /bin/sh -c on the gated command against directories
+      under tmp_path, CLAUDE_PLUGIN_ROOT naming a plugin root that holds the locator: (a) project dir is the parent of
+      one checkout and cwd is the parent: the hook runs with cwd and CLAUDE_PROJECT_DIR equal to the checkout (read in
+      the hook's own environment), receives a PreToolUse payload on stdin byte for byte, and its exit status 2 is the
+      gate's; (b) project dir is the checkout: the same; (c) a settings command that names
+      "$CLAUDE_PROJECT_DIR/.claude/hooks/x.sh" runs the checkout's copy; (d) the settings marker set: not run, exit
+      0, no output; (e) zero candidates and two clones: not run, exit 0, stdout and stderr empty; (f) the locator
+      absent from the plugin root, and CLAUDE_PLUGIN_ROOT unset: not run, exit 0; (g) cwd inside a second checkout
+      outside the project dir, and inside a sibling whose .git is a file (a linked worktree's shape): the same
+      checkout as (a). Existing
+      nodes re-pointed, none loosened: the gated-in-place node expects the two notice entries and still requires
+      every settings hook to equal GATE plus its command; the parser node also asserts that no whitespace-split token
+      of GATE or of a notice command ends .py or .sh and that the pin hook's command still names
+      "$CLAUDE_PROJECT_DIR/.claude/hooks/"; the marketplace node asserts the gate names
+      "${CLAUDE_PLUGIN_ROOT}/hooks/locate_checkout.bash", that the file ships under .claude/hooks, and that it reads
+      .claude/.claude-plugin/plugin.json for the same name literal plugin.json carries; the marker-and-checkout node
+      runs through the new gate with CLAUDE_PLUGIN_ROOT set.
+  - file: tests/hooks/test_locate_checkout.py
+    action: Create
+    purpose: >-
+      PR 1. TestLocate (VP 2), the locator run with bash against tmp_path layouts: the project dir wins when it is a
+      candidate, even with candidate children; a single child (also with spaces in its path); a symlink twin counts
+      once; a hidden child and a checkout two levels down are not found; an empty or relative CLAUDE_PROJECT_DIR
+      fails; two clones fail; a clone with a linked worktree beside it (real git init, commit and worktree add, with
+      -c user.name, -c user.email and -c commit.gpgsign=false) gives the clone from any cwd; a clone beside a copy
+      with no .git gives the clone; two linked worktrees with no clone fail; a FIFO named plugin.json returns under a
+      5 s timeout; a directory named with $(...), backticks, a semicolon and * is printed verbatim and creates
+      nothing; success prints exactly one line, failure prints nothing, stderr is empty in both, and input waiting on
+      stdin is left unread. TestNotice (VP 2): the SessionStart line for zero and for two clones, nothing when a
+      checkout is found; the UserPromptSubmit object only for two clones, parsed as JSON, its additionalContext
+      containing "repo hooks not loaded" and the count and never "[hook_canary]"; exit 0 on every path; and in the
+      rendered hooks.json both notice entries are absent from settings.json, start with the marker test, carry no
+      statusMessage and end </dev/null.
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      PR 1. structural_assumptions gains the next free SA id (SA-12 at plan write; another unbuilt plan may take it
+      first), status open, owning_item "T4.24:c9", location .claude/hooks/locate_checkout.bash, and one amendment_log
+      row (field_add, semantic_break false, summary naming PLAN-plugin-hooks-locate-checkout and rec-5055,
+      migration_story "Prose only; no code or contract consumer reads it."). The assumption text lands word for word
+      as quoted here (operator-approved at the alignment sign-off, context item 2; the SA id is the only variance): "The ontheloop plugin gate assumes three facts about the claude.ai cloud harness and one layout.
+      Facts: a project thread may start in the parent of the checkout rather than in it; hook shells get
+      CLAUDE_PROJECT_DIR equal to that start directory, wherever the session shell has moved; and hook shells get
+      CLAUDE_PLUGIN_ROOT naming the synced plugin directory, which holds every file under .claude/hooks, the locator
+      included. Layout: the checkout is the start directory or one level below it. A directory counts as the checkout
+      when its .claude/.claude-plugin/plugin.json names ontheloop, so the plugin runs that directory's hooks and
+      bin/venv-python; among several it uses the one whose .git is a directory (a linked worktree's is a file) when
+      exactly one is, and otherwise runs no hook. A checkout two or more levels down, a second clone beside the
+      first, or a missing or edited synced locator therefore switches every plugin hook off with exit 0 (rec-5060 owns
+      the fail-closed witness; rec-5062 owns guards that judge by the located checkout rather than the tool call's own
+      directory)." The file has 32 effective lines of headroom (plan_obligations) and the row takes about 16.
+  - file: config/agent/verification_registry/entries/plugin-gate-runs-hooks-from-the-located-checkout.yaml
+    action: Create
+    purpose: >-
+      PR 1. Standing guard for VP 1, written in the PR that adds its nodes so the differential admission gate admits
+      it against pre-PR main: primitive_slot test_selector, node_id tests/hooks/test_plugin_hooks.py::TestLocatedGate,
+      guard_target .claude/hooks/plugin_hooks.py, plan_slug plugin-hooks-locate-checkout.
+  - file: config/agent/verification_registry/entries/plugin-locator-picks-one-checkout.yaml
+    action: Create
+    purpose: >-
+      PR 1. Standing guard for VP 2, same route: primitive_slot test_selector, node_id
+      tests/hooks/test_locate_checkout.py::TestLocate, guard_target .claude/hooks/locate_checkout.bash, plan_slug
+      plugin-hooks-locate-checkout.
+  # ---------------------------------------------------------------- PR 2: the lost window (fresh, guarded thread)
+  - file: config/telemetry/arrival.yaml
+    action: Modify
+    purpose: >-
+      PR 2. lost_windows gains one row {from: "2026-11-09T22:33:00Z", to: TO, owner: rec-5055, reason: "plugin hooks
+      skipped after the harness start directory moved, no backfill"}; TO is the proof thread's session_started_at
+      read back in VP 16, UTC to the second. excused_sessions gains {key, owner: rec-5055} only for a key VP 11 lists
+      with its evidence; none otherwise.
+  - file: tests/telemetry_verify/test_session_presence.py
+    action: Modify
+    purpose: >-
+      PR 2. New node test_the_shipped_config_records_the_rec_5055_lost_window: load_config(ROOT) passes check_config
+      and holds at least one window owned by rec-5055 that starts 2026-11-09T22:33:00Z and ends later; with the
+      shipped config a lone uncaptured commit whose PR was created at that start, or one second before the row's own
+      end, is lost_window=1 missing=0, and one created at the row's end is missing=1. The end is read from the row,
+      never restated.
+bundled_recommendations: [rec-5055]
+followon_recs: [rec-5060, rec-5061, rec-5062, rec-5063]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "From a project dir that is the checkout's parent (the harness layout since 2026-11-09) every plugin hook runs from the checkout with CLAUDE_PROJECT_DIR set to it, its stdin payload intact and its exit status passed through; the old layout (project dir is the checkout) and the settings-marker path behave as before."
+  - "The locator picks the project dir when it is the checkout, else the single direct child that is one, else the single candidate whose .git is a directory; the shell's directory never changes the answer; it reads no stdin and prints one path or nothing."
+  - "With no usable checkout the plugin runs no hook and exits 0. SessionStart writes one stderr line with the candidate count; with more than one unresolved candidate every prompt carries a model-visible line containing repo hooks not loaded; zero candidates never reach model context."
+  - "hooks.json is the render of settings.json under the new gate, and every hook keeps the name and the capture pin the capture parser reads."
+  - "ports.yaml records the harness and layout assumption in the words its scope row quotes."
+  - "In a fresh project thread after PR 1 merges the synced plugin holds the locator, the canary line and the SessionStart capture pin are in the transcript's hook records, a PreToolUse guard denies a protected command, and the thread's root session row is in the warehouse."
+  - "config/telemetry/arrival.yaml records one lost window from 2026-11-09T22:33:00Z to the proof thread's start, owned by rec-5055; telemetry-arrival on main is green on PR 2's merge, and rec-5055 is closed by PR 2's Resolves trailer with fixed_by_sha equal to that merge."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: PR 1 -- the gate runs a hook from the located checkout with stdin and exit status intact, and skips silently otherwise.
+    command: bin/venv-python -m pytest "tests/hooks/test_plugin_hooks.py::TestLocatedGate" -q
+    expected: exit 0; red before (the class is absent, and under the old gate case (a) does not run the hook).
+    fix_if: the hook does not run from the parent, sees the parent as CLAUDE_PROJECT_DIR, loses stdin, or a skip prints anything
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: waive
+    graduation_waiver_reason: >-
+      Its nodes land in PR 1, which leaves the plan undeclared and adds the standing guard
+      plugin-gate-runs-hooks-from-the-located-checkout itself (a scope row), admitted by the differential gate against
+      pre-PR main; PR 2's implementation_declared flip cannot graduate a row whose nodes are already on main
+      (PLAN-telemetry-catalog-aware-capture precedent).
+  - step: 2
+    phase: pre-deploy
+    action: PR 1 -- the locator's rule and both notices.
+    command: bin/venv-python -m pytest "tests/hooks/test_locate_checkout.py::TestLocate" "tests/hooks/test_locate_checkout.py::TestNotice" -q
+    expected: exit 0; red before (the file is absent).
+    fix_if: PWD changes the answer, a linked worktree or a copy switches the plugin off, two clones pick one, stdin is read, or zero candidates print to stdout
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: waive
+    graduation_waiver_reason: >-
+      Its nodes land in PR 1, which adds the standing guard plugin-locator-picks-one-checkout itself (a scope row),
+      admitted by the differential gate against pre-PR main; PR 2's implementation_declared flip cannot graduate a row
+      whose nodes are already on main (PLAN-telemetry-catalog-aware-capture precedent).
+  - step: 3
+    phase: pre-deploy
+    action: PR 1 -- the committed hooks.json is the render, every settings hook is gated in place, and the capture parser reads the same hook names and pin.
+    command: >-
+      bin/venv-python -m pytest "tests/hooks/test_plugin_hooks.py::test_the_committed_hooks_file_is_the_render_of_the_settings"
+      "tests/hooks/test_plugin_hooks.py::test_every_settings_hook_is_gated_in_place_and_the_check_leads_session_start"
+      "tests/hooks/test_plugin_hooks.py::test_gating_keeps_what_the_capture_parser_reads"
+      "tests/hooks/test_plugin_hooks.py::test_the_marketplace_lists_the_claude_dir_as_the_ontheloop_plugin"
+      "tests/hooks/test_plugin_hooks.py::test_the_gate_runs_a_hook_only_without_the_settings_marker_and_inside_a_plugin_checkout"
+      "tests/hooks/test_plugin_hooks.py::test_a_command_the_gate_would_split_is_refused" -q
+    expected: exit 0. These nodes exist today; after the GATE edit they are red until the file is re-rendered and the assertions re-pointed.
+    fix_if: hooks.json was edited by hand or not re-rendered, a hook name or the pin changes under the gate, or an assertion was dropped instead of re-pointed
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: waive
+    graduation_waiver_reason: Existing nodes edited in place, already run by both tiers; steps 1 and 2 carry the new standing guards.
+  - step: 4
+    phase: pre-deploy
+    action: PR 1 -- every suite that reads hooks.json or the hook registration.
+    command: >-
+      bin/venv-python -m pytest tests/hooks/test_plugin_hooks.py tests/hooks/test_locate_checkout.py
+      tests/hooks/test_capture_hook_registration.py tests/hooks/test_protected_action_gate.py
+      tests/hooks/test_merge_gate_shim.py tests/session/test_hook_canary.py
+      tests/checks/contracts/test_validate_mechanical_conflicts.py -q
+    expected: exit 0
+    fix_if: a consumer of hooks.json assumed the old gate text or the old group layout; fix the consumer's expectation only where it restated the gate, never the guard it tests
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-file re-runs of suites already in the --pre pytest_diff set; steps 1 and 2 carry the durable regressions.
+  - step: 5
+    phase: pre-deploy
+    action: PR 1 -- the ports contract holds the new assumption row and validates.
+    command: >-
+      bin/venv-python -c "import yaml; rows=[r for r in
+      yaml.safe_load(open('docs/contracts/ports.yaml',encoding='utf-8'))['structural_assumptions'] if
+      r.get('location')=='.claude/hooks/locate_checkout.bash']; text=' '.join(str(rows[0].get('assumption','')).split())
+      if len(rows)==1 else ''; need=['a project thread may start in the parent of the checkout rather than in it',
+      'CLAUDE_PLUGIN_ROOT naming the synced plugin directory', 'the checkout is the start directory or one level below it',
+      'among several it uses the one whose .git is a directory', 'when exactly one is, and otherwise runs no hook',
+      'switches every plugin hook off with exit 0', 'rec-5060 owns the fail-closed witness']; miss=[n for n in need if n
+      not in text]; print('PORTS_ROW', 'OK' if len(rows)==1 and not miss else ('rows=%d' % len(rows), miss)); raise
+      SystemExit(0 if len(rows)==1 and not miss else 1)" && bin/venv-python -c "from
+      scripts.checks.contracts.validate_ports_contract import validate_ports_contract as f; failed=[]; f(failed);
+      raise SystemExit(1 if failed else 0)"
+    expected: exit 0; red before (no row has that location).
+    fix_if: the row is missing a field, reuses an SA id, departs from the approved wording (restore it; a wording change is a plan amendment that goes to the operator first), or the amendment_log row is malformed
+    hermetic: true
+    expected_literals: ["PORTS_ROW OK"]
+    graduation: waive
+    graduation_waiver_reason: A prose row read by the already-registered validate_ports_contract; no consumer reads its content.
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      PR 1 -- hand proof on the branch from the harness's own start directory (stage 1 of the live proof): the
+      rendered canary command, run under /bin/sh from /home/user with CLAUDE_PROJECT_DIR=/home/user and the branch's
+      .claude as the plugin root, prints the canary; the locator prints the checkout.
+    command: >-
+      cd /home/user && C=$(/home/user/ontheloop/bin/venv-python -c "import json; print(next(h['command'] for g in
+      json.load(open('/home/user/ontheloop/.claude/hooks/hooks.json'))['hooks']['UserPromptSubmit'] for h in g['hooks']
+      if 'hook_canary' in h['command']))") && env -u ONTHELOOP_PROJECT_SETTINGS CLAUDE_PROJECT_DIR=/home/user
+      CLAUDE_PLUGIN_ROOT=/home/user/ontheloop/.claude /bin/sh -c "$C" </dev/null && CLAUDE_PROJECT_DIR=/home/user bash
+      /home/user/ontheloop/.claude/hooks/locate_checkout.bash </dev/null
+    expected: the canary JSON carrying [hook_canary] repo hooks loaded, then /home/user/ontheloop. Record both lines in the PR body.
+    fix_if: nothing prints -- read the gate's stderr; the container's start directory or checkout name differs from the report's (REPORT.md section 2), so re-observe before changing the rule
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      PR 1 -- the declaration-scoped gates, run by hand because PR 1 leaves the plan undeclared (Decision 163): the
+      scope boundary on PR 1's diff, then the weakening-candidate report with one disposition per candidate.
+    command: >-
+      bin/venv-python -c "from scripts.checks.verification.validate_scope_boundary import validate_scope_boundary as f;
+      failed=[]; f(failed, plan_paths=['docs/plans/PLAN-plugin-hooks-locate-checkout.yaml']); print('SCOPE_BOUNDARY',
+      'FAILED' if failed else 'OK', failed); raise SystemExit(1 if failed else 0)" && bin/venv-python -c "from
+      scripts.checks.verification.validate_weakening_candidates import validate_weakening_candidates as f; f([])"
+    expected: SCOPE_BOUNDARY OK; every weakening candidate dispositioned planned-change citing a test_obligations row, none weakening. Record the output and the dispositions in the PR body.
+    fix_if: a touched path is outside scope (stop; report a plan defect, never widen by hand), or a candidate is a real weakening (restore the assertion)
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: pre-deploy
+    action: PR 1 -- full tier on the committed, rebased, clean tree, then HEAD attestation (handoff_policy); start it from the top-level session, backgrounded with a 2 h limit, and read only the attestation.
+    command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure -- fix and rerun the full tier from the start; a timeout is BLOCKED, no push
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and steps 1 and 2 carry the durable regressions.
+  - step: 9
+    phase: pre-deploy
+    action: >-
+      PR 1 -- the guards the thread does not have, run by hand before the merge call (operator item 3; Decision 163):
+      the branch is not main, the git commit hooks are installed, premerge passes on the exact squash message
+      (MSG_FILE), and the merge gate allows the exact merge_pull_request payload (PAYLOAD_FILE holds the tool_name and
+      tool_input JSON the merge call will send).
+    command: >-
+      cd /home/user/ontheloop && test "$(git branch --show-current)" != main && test -x .git/hooks/pre-commit && test -x
+      .git/hooks/commit-msg && AWS_PROFILE=agent_platform bin/venv-python -m scripts.session.merge_step premerge --slug
+      plugin-hooks-locate-checkout --message-file "$MSG_FILE" && AWS_PROFILE=agent_platform
+      CLAUDE_PROJECT_DIR=/home/user/ontheloop bash .claude/hooks/merge_gate.sh < "$PAYLOAD_FILE"; echo "rc=$?"
+    expected: rc=0, premerge prints PREMERGE HEAD and no MISMATCH, UNDECLARED or ATTRIBUTION failure line (the message carries the branch commits' Claude-Session lines and no Resolves line). Record the output in the PR body, then merge with that message and expectedHeadSha.
+    fix_if: rc=2 is a deny -- follow its remedy (update the branch on GitHub, wait for green CI, re-run); never merge on a deny or an error
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: pre-deploy
+    action: PR 2 -- the shipped config records the lost window and judges its two edges.
+    command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence.py::test_the_shipped_config_records_the_rec_5055_lost_window" -q
+    expected: exit 0; red before (node absent, and with the node but no row, no window is owned by rec-5055).
+    fix_if: check_config refuses the row (owner pattern, instant format, to not after from), or the end edge is judged inside the window
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: arrival-config-records-rec-5055-lost-window
+  - step: 11
+    phase: pre-deploy
+    action: >-
+      PR 2 -- on the PR 2 branch, the arrival check with the new row against the live warehouse. Every ARRIVAL_MISSING
+      line is settled before the push: a sha whose PR was created at or after the row's end and whose session branch
+      has a commit authored before PR 1's merge is a thread started without hooks, and gets an excused_sessions row
+      (owner rec-5055) with that evidence in the PR body; anything else is a capture failure, which stops the build.
+    command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival
+    expected: the ARRIVAL line reads status=green (or skipped) with missing=0 and lost_window at least 1; record the line in the PR body.
+    fix_if: status=unreadable is a reader or config problem (fix, re-run); missing above 0 after the rule above is a new capture failure -- stop, report to the coordinator, do not excuse it
+    hermetic: false
+    graduation: not-applicable
+  - step: 12
+    phase: pre-deploy
+    action: PR 2 -- full tier on the committed, rebased, clean tree, then HEAD attestation (handoff_policy), backgrounded from the top-level session with a 2 h limit.
+    command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure -- fix and rerun the full tier from the start; a timeout is BLOCKED, no push
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and step 10 carries the durable regression.
+  - step: 13
+    phase: pre-deploy
+    action: PR 2 -- premerge on the exact squash message, which carries Resolves for rec-5055 and the branch commits' Claude-Session lines.
+    command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.session.merge_step premerge --slug plugin-hooks-locate-checkout --message-file "$MSG_FILE"
+    expected: exit 0; the preview line for rec-5055 reads holds; no MISMATCH, STALE or ATTRIBUTION failure line
+    fix_if: the preview is not holds -- the acceptance names a node that is absent or failing at HEAD; fix the tree, never the acceptance (a change to it needs the operator's word, Decision 235)
+    hermetic: false
+    graduation: not-applicable
+  - step: 14
+    phase: post-deploy
+    action: After PR 1 merges (build thread) -- its squash commit carries no Resolves line, so rec-5055 stays open until PR 2.
+    command: git fetch origin main --quiet && git log origin/main -1 --format=%B --grep='^fix(plugin-hooks-locate-checkout)' | grep -c '^Resolves:'
+    expected: prints 0 and a commit was found (PR 1's title starts fix(plugin-hooks-locate-checkout):). Report the merge sha to the coordinator, who starts the fresh proof thread.
+    fix_if: a Resolves line landed -- tell the coordinator at once; the closure job will refuse or close early, and PR 2 then follows git-ops.yaml's late-closure or refusal route
+    hermetic: false
+  - step: 15
+    phase: post-deploy
+    action: >-
+      Fresh project thread, started after PR 1's merge (stage 2 of the live proof) -- the synced plugin holds the
+      locator and a hooks.json that names it, and this thread's transcript holds hook records carrying the canary
+      line and the capture pin. The thread also confirms the canary line is in its opening context.
+    command: >-
+      ls "$HOME"/.claude/plugins/synced/*/ontheloop/hooks/locate_checkout.bash && grep -c locate_checkout.bash
+      "$HOME"/.claude/plugins/synced/*/ontheloop/hooks/hooks.json && /home/user/ontheloop/bin/venv-python -c "import
+      json,os,glob; p=glob.glob(os.path.expanduser('~/.claude/projects/*/'+os.environ['CLAUDE_CODE_SESSION_ID']+'.jsonl'))[0];
+      a=[json.dumps(r['attachment']) for r in (json.loads(l) for l in open(p,encoding='utf-8',errors='replace') if
+      l.startswith('{')) if isinstance(r.get('attachment'),dict) and r['attachment'].get('hookEvent')];
+      print('canary',sum('[hook_canary] repo hooks loaded' in s for s in a),'pin',sum('capture pin project_ref=ontheloop'
+      in s for s in a))"
+    expected: the locator path, a count above 0, then canary and pin both above 0 (in this plan's own unguarded thread the same probe printed canary 0 pin 0).
+    fix_if: >-
+      no locator file -- the sync did not carry the .bash file: stop and report (fix-forward PR: inline the locator's
+      rule or rename it to a synced form, keeping constraint 2); canary 0 -- read the gate's stderr in the transcript's
+      hook records and the container's start directory before changing anything; pin 0 with canary above 0 --
+      SessionStart did not fire or the pin hook failed: report to the coordinator (U2 in HANDOFF-planning.md)
+    hermetic: false
+  - step: 16
+    phase: post-deploy
+    action: >-
+      Fresh project thread -- a PreToolUse guard denies, and the thread's own root session row is in the warehouse.
+      First run AWS_PROFILE=agent_platform_admin aws --version and capture the deny (it uses no credentials and
+      contacts no backend, PLAN-protected-action-gate VP 9 precedent). Then, after the thread's first turn has ended
+      at least once, read the row; its session_started_at is the lost window's end, TO.
+    command: >-
+      AWS_PROFILE=agent_platform /home/user/ontheloop/bin/venv-python -c "import os; from datetime import datetime,
+      timezone; from scripts.telemetry_capture import read_route; from scripts.telemetry_verify import completeness;
+      d=datetime.now(timezone.utc).date().isoformat(); k=completeness.normalise_key(os.environ['CLAUDE_CODE_REMOTE_SESSION_ID']);
+      print([(r.get('session_started_at'), r.get('branch')) for r in
+      read_route.make_routed_reader().named('telemetry_root_sessions', day_from=d, day_to=d) if
+      completeness.normalise_key(r.get('harness_session_key'))==k])"
+    expected: the aws command is blocked with a reason naming admin-credential; the read prints exactly one row with a session_started_at after PR 1's merge (its branch reads HEAD until rec-5061 lands). Record both in the PR 2 body.
+    fix_if: aws prints a version -- the guards are not running, stop and report; no row after two ended turns -- read the Stop hook's record in the transcript for the capture outcome and report, do not write the lost window
+    hermetic: false
+  - step: 17
+    phase: post-deploy
+    action: After PR 2 merges -- telemetry-arrival is green on main at PR 2's merge sha, and again on the first run after PR 2's own session passes its SLA.
+    command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival
+    expected: status=green (or skipped) with missing=0; record the two telemetry-arrival workflow run ids on main and their conclusions.
+    fix_if: "missing above 0 on a sha: read its PR's creation time against the window and its key against step 11's list before suspecting capture; a new red is ci-rca's to file, never excused here"
+    hermetic: false
+  - step: 18
+    phase: post-deploy
+    action: >-
+      rec-5055 is closed by PR 2's Resolves trailer through the Decision 186 closure obligation: it is
+      escape-classified (escape_class no-edge), and its closure_artifact shard:arrival-config-records-rec-5055-lost-window
+      was recorded at plan write, so the trailer closure resolves it once step 10's graduated shard is on main.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "import json; from src.common.ducklake_reader_client import
+      fetch_recs_by_ids, make_reader; rows, _ = fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-5055']);
+      r=rows[0]; print(r['id'], r['status'], json.loads(r.get('context_v2_json') or '{}').get('fixed_by_sha'))"
+    expected: prints rec-5055 closed and PR 2's merge sha, after the closure job runs on the merge commit; record that run id.
+    fix_if: >-
+      still open: read the closure job's log for a ClosureArtifactRequired or acceptance refusal marker (it exits 0 and
+      leaves the rec open). Leading causes: the squash body lacks Resolves for rec-5055, the graduated shard is not on
+      main, or a named node is absent from the run's junit report. Never close it with a direct status write after a
+      refusal (git-ops.yaml resolves_trailer); fix the cause and re-run the closure route.
+    hermetic: false
+test_obligations:
+  - source: .claude/hooks/plugin_hooks.py
+    behavior: a hook gated by the plugin runs from the located checkout with stdin and exit status intact, and is skipped silently without exactly one usable checkout or under the settings marker
+    verification_step: 1
+    test_selector: tests/hooks/test_plugin_hooks.py::TestLocatedGate
+    red_green_expectation: red before (class absent; the old gate skips from the parent), green after
+  - source: .claude/hooks/locate_checkout.bash
+    behavior: the locator's three-step rule, its independence from PWD and stdin, and its single-line output
+    verification_step: 2
+    test_selector: tests/hooks/test_locate_checkout.py::TestLocate
+    red_green_expectation: red before (file absent), green after
+  - source: .claude/hooks/locate_checkout.bash
+    behavior: the SessionStart stderr line and the model-visible UserPromptSubmit line appear only in their stated cases
+    verification_step: 2
+    test_selector: tests/hooks/test_locate_checkout.py::TestNotice
+    red_green_expectation: red before (file absent), green after
+  - source: config/agent/verification_registry/entries/plugin-gate-runs-hooks-from-the-located-checkout.yaml
+    behavior: the standing guard runs the located-gate class
+    verification_step: 1
+    test_selector: tests/hooks/test_plugin_hooks.py::TestLocatedGate
+    red_green_expectation: red before (class absent), green after
+  - source: config/agent/verification_registry/entries/plugin-locator-picks-one-checkout.yaml
+    behavior: the standing guard runs the locator's rule class
+    verification_step: 2
+    test_selector: tests/hooks/test_locate_checkout.py::TestLocate
+    red_green_expectation: red before (file absent), green after
+  - source: .claude/hooks/hooks.json
+    behavior: the committed file is the render of settings.json under the new gate
+    verification_step: 3
+    test_selector: tests/hooks/test_plugin_hooks.py::test_the_committed_hooks_file_is_the_render_of_the_settings
+    red_green_expectation: red after the GATE edit until the file is re-rendered, green after
+  - source: docs/contracts/ports.yaml
+    behavior: the new assumption row and its amendment_log row validate
+    verification_step: 5
+    command: bin/venv-python -c "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as f; failed=[]; f(failed); raise SystemExit(1 if failed else 0)"
+    waiver_reason: A prose row read by the already-registered validate_ports_contract; no consumer reads its content, so no new test can fail without the change.
+  - source: config/telemetry/arrival.yaml
+    behavior: the outage window is recorded, owner-bound, and its two edges are judged as the oracle's rule states
+    verification_step: 10
+    test_selector: tests/telemetry_verify/test_session_presence.py::test_the_shipped_config_records_the_rec_5055_lost_window
+    red_green_expectation: red before (node absent; no window owned by rec-5055), green after
+constraints:
+  - "The web-session path is unchanged: with ONTHELOOP_PROJECT_SETTINGS set, the plugin copy of every hook and both notices stay skipped (HANDOFF-planning.md U4)."
+  - "The settings command follows the gate byte for byte; no whitespace-split token of the gate or of a notice command ends .py or .sh (src/turn_capture/transcript.py hook_script names a hook by the first such token); the capture pin hook stays the checkout's copy."
+  - "The gate, the notices and the locator never read stdin (a PreToolUse hook reads its payload there)."
+  - "The gate spells ${CLAUDE_PLUGIN_ROOT} exactly, with no default expansion, so it resolves whether the harness substitutes the text or exports the variable."
+  - "Skip, never deny, when no checkout is usable (operator item 4, 2026-11-10); no session-scoped pin file or other state."
+  - "Not edited: .claude/settings.json, never_on_main.py, the protected-action, merge and handoff gates, docs/contracts/protected-actions.yaml, src/turn_capture/**, scripts/telemetry_verify/** (the oracle is unchanged, Decision 250 cl.5)."
+  - "No existing assertion is loosened (Decisions 181, 235): an edited assertion is re-pointed at the new gate text and stays as strict."
+  - "Operator-approved text lands word for word: the ports.yaml assumption (its scope row), the lost_windows row's from, owner and reason (its scope row) and rec-5055's acceptance (context). A change to any of them is a plan amendment that goes to the operator first (Decisions 181, 235)."
+  - "No Resolves trailer on the plan PR or on PR 1; rec-5055 closes only on PR 2. PR 1 leaves implementation_declared unset."
+  - "The lost window's end is an instant read back from the warehouse and earlier than PR 2's creation, so PR 2's own session is judged, never excused. excused_sessions rows need the evidence VP 11 names."
+  - "No thread is resumed or restarted for backfill (operator item 5). PlatformDev only (AWS_PROFILE=agent_platform); no admin step."
+  - "No rescue agents or workaround loops (Decision 55)."
+context:
+  - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: 250 (cl.5 oracle unchanged; lost_windows grammar; cl.4 the live check gates nothing), 226 (Track B, Critical; cl.5 preventive_action names rec-5060 and SA-12; past the 4 h SLO every other plan waits for PR 2), 212 (ports.yaml row), 201 (closure needs holds on the current acceptance at PR 2's squash), 235 (cl.1: the skip on ambiguity and the acceptance swap are named here and operator-confirmed), 176/244 (one shard per check_id; VP 10 asserts at least one window, a lasting rule), 189 (the plan lands alone; PR 1 never carries it). CONTRADICT: 245 WARN and 203 WARN (two clones switch the fail-closed gates off, a state an agent can create) -- operator item 4 chose skip with a visible notice; recorded as a residual owned by rec-5060; a linked worktree no longer triggers it. 132 WARN (PR 2 cannot graduate PR 1's nodes) -- PR 1 adds its own shards, steps 1-2 waive. 181 WARN (acceptance swap) and 186 NOTE (which artifact) -- the rec-5055 item below. SPIRIT: 163 NOTE -- VP 7, 8, 9 are the hand-run gates with recorded output. RELATED: 25, 55, 101, 117/239, 126, 138, 162, 228/236, 247, 66/84. Decisions triaged: 203 of 203. Roadmap items intersected: 4; CONFLICT: 0; RELATED: 4. Serves: NS.8 4/5."
+  - "Cause, evidence and the operator's seven decisions: /mnt/project-files/telemetry-harness-failures/REPORT.md and HANDOFF-planning.md (approval cmsg_012XgaFy8VaDQbxP5D8nC958FXfJ9FTsfsdX4WKY6epcm8, 2026-11-10T16:31Z; item 3 lets this plan's plan and build threads write without guards). Alignment sign-off: the operator chose \"Write it: worktrees keep hooks on\" on decision card cmsg_012XgaFy8VaDQbxP5D8nC958CL1h4c2q5ALN24GDs5ojzC, 2026-11-10T18:08Z, which also approved the three exact texts of planning/PRESENTATION.md section 3 (the ports.yaml assumption, rec-5055's acceptance swap, the lost_windows row). Design consult: planning/FABLE-ADVICE.md in that folder. Prototype (scratch, not repo code): 24 cases under dash, planning/prototype-cases.txt."
+  - "rec-5055 at plan write (updated and read back 2026-11-10T18:11:46Z): acceptance replaced, because the filed live probe (scripts.telemetry_verify arrival) needs warehouse credentials the closure job lacks, with bin/venv-python -m pytest \"tests/hooks/test_plugin_hooks.py::TestLocatedGate\" \"tests/telemetry_verify/test_session_presence.py::test_the_shipped_config_records_the_rec_5055_lost_window\" -q (junit route); the live end state stays proven by VP 11, 17 and 18. closure_artifact shard:arrival-config-records-rec-5055-lost-window (PR 2, fix-bound to the commit that turns arrival green); the guards against the escape itself are PR 1's two shards. context_v2 corrected: proximate cause per REPORT.md, preventive_action naming rec-5060 and SA-12. Operator-confirmed with the plan (Decisions 181, 235)."
+  - "Landing: the plan PR carries no code. PR 1 (build thread, hooks not loaded: it says so, checks its branch by hand before each commit and runs VP 7-9) holds the whole fix and stays undeclared, the PLAN-telemetry-catalog-aware-capture route. PR 2 (a fresh thread that shows the canary) holds the lost window, flips implementation_declared and carries Resolves, so fixed_by_sha is the first commit on which arrival can be green and no red between the two PRs is read as a regression of a closed rec (ci-rca-lifecycle.yaml status_aware_chain)."
+  - "Plugin delivery: a merge to main re-syncs the plugin for every cloud session of the account, new processes only (coordinator-harness-claude-projects.yaml plugin-updates); no operator step, VP 15 proves it. A .bash file has never been synced before (today's synced set is json, md, py, sh): UNPROVEN until VP 15."
+  - "Unknown until observed: U2 (a thread started before the fix writes a SessionStart record on its next process start) and U3 (it self-heals on its next turn), HANDOFF-planning.md section 4; observed only if such a thread next starts on its own (none is resumed for it). They decide whether VP 11 finds keys to excuse."
+  - "Out of scope, owned elsewhere: rec-5060 (commits refuse when the guards are absent), rec-5061 (session branch from the capture pin; captured threads read HEAD until then), rec-5062 (guards judge by the tool call's own directory; it should also name handoff_evidence_gate.py and protected_action_gate.py, which judge by cwd or CLAUDE_PROJECT_DIR too), rec-5063 (protected-actions.yaml known_limits names the locator and the second-clone state; that contract is code-owned and Project Review's)."
+  - "Graduated shards kept unchanged (tests/telemetry_verify/test_session_presence.py gains one node; their claims hold): arrival-config-excuses-rec-5004-key, telemetry-arrival-oracle."
+  - "Unbuilt plans scoping the same files (plan_obligations at write): hooks.json -- hook-canary-evidence, telemetry-content-reader-lock; ports.yaml -- environment-gates-fail-closed, telemetry-capture-hook-labels, telemetry-capture-hooks, telemetry-claude-p-capture-adapter, telemetry-late-hook-records, work-graph-edge-model. Whichever builds second rebases; hooks.json is re-rendered, never merged by hand, and VP 5 matches the ports row by its location line."
+  - "red_overlap at plan write (2026-11-10, PlatformDev): verdict clear; rec-5055 repairs_this_red, track product_regression (Track B), about 11 h old, so past the 4 h SLO: every plan that does not bundle an open ci_rca red is blocked until PR 2 closes it (red-main-recovery.yaml rule 1), rec-5060, rec-5061, rec-5062 and rec-5063 included."
+  - "No approved-text sidecar: ports.yaml is Class D and its assumption rows land from the plan's own scope text by convention (two of 45 sidecars bind it), and a sidecar's words cannot land in a PR other than the declaring one (rec-5057; PLAN-sit-restore-spike could not declare for that reason), which this plan's two PRs would hit. The approved words are bound by the scope row, a constraint, VP 5's phrase check and code review."
+  - "fork: whether a linked git worktree beside the checkout counts as a second checkout and switches the plugin off | chosen: it does not; among several candidates the one whose .git is a directory wins when exactly one is, and two clones still run no hook, with the per-prompt notice (option A of the alignment card) | class: asked | precedent: Decision 25 | precedent_kind: decision | reversible: yes | persisted: ports.yaml structural_assumptions row; locate_checkout.bash rule 3"
+  - "fork: which acceptance and closure artifact close rec-5055 | chosen: the junit-routed pytest command naming TestLocatedGate and the lost-window node, with closure_artifact shard:arrival-config-records-rec-5055-lost-window; the live arrival probe stays as VP 11 and 17 | class: asked | precedent: Decision 181; Decision 186; Decision 235 | precedent_kind: decision | reversible: yes | persisted: rec-5055 acceptance and closure_artifact (warehouse)"
+  - "fork: where the locator looks for the checkout | chosen: the session start directory, then its direct children; never the shell's own directory, so no cd by the agent switches the guards on or off | class: consistency-only | precedent: Decision 203 | precedent_kind: decision | reversible: yes | persisted: locate_checkout.bash; ports.yaml structural_assumptions row"
+  - "fork: one pull request or two, and which closes rec-5055 | chosen: two under this one plan; PR 1 (the fix) stays undeclared with no trailer, PR 2 (the lost window) declares and carries Resolves, so fixed_by_sha is the first commit on which arrival can be green | class: consistency-only | precedent: ci-rca-lifecycle.yaml#status_aware_chain; git-ops.yaml#resolves_trailer | precedent_kind: contract | reversible: yes | persisted: this plan's execution_steps and constraints"
+  - "fork: how PR 1 meets the gates that run only on a declaring pull request | chosen: the build thread runs them by hand as numbered steps with recorded output (VP 7, 8 and 9) | class: consistency-only | precedent: Decision 163 | precedent_kind: decision | reversible: yes | persisted: verification_plan steps 7, 8 and 9"
+  - "fork: whether rec-5055's filed cause is corrected at plan write | chosen: yes, context_v2 corrected to the verified cause with a preventive_action naming rec-5060 and the ports row | class: consistency-only | precedent: Decision 226; red-main-recovery.yaml#context_fields | precedent_kind: decision | reversible: yes | persisted: rec-5055 context_v2 (warehouse)"
+  - "fork: whether this plan edits protected-actions.yaml known_limits | chosen: no; the contract is code-owned and Project Review's, so the gap is filed as rec-5063 | class: consistency-only | precedent: implement-scope-boundary.yaml | precedent_kind: contract | reversible: yes | persisted: rec-5063; followon_recs"
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+pre_implementation_checklist:
+  - Branch confirmed not on main (by hand in the build thread, git -C /home/user/ontheloop branch --show-current)
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 163, 181, 186, 201, 226, 235 and 250 sections read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+  - "Build thread only: the first status says repo hooks not loaded; origin main fetched by hand (the session-start hooks did not run)"
+execution_steps:
+  - "BUILD THREAD, PR 1. Locator: write .claude/hooks/locate_checkout.bash and tests/hooks/test_locate_checkout.py; run VP 2."
+  - "PR 1. Gate: edit plugin_hooks.py (GATE, the two notice commands, render, docstring), re-render hooks.json with bin/venv-python .claude/hooks/plugin_hooks.py render, edit tests/hooks/test_plugin_hooks.py; run VP 1, 3 and 4."
+  - "PR 1. Contract and guards: the ports.yaml row and amendment_log row; the two registry shards; run VP 5 and 6."
+  - "PR 1 closure, each outcome reported separately: implementation_declared stays unset; commit (branch checked by hand); VP 7; git fetch origin main && git rebase origin/main; VP 8; push; open the PR with a title starting fix(plugin-hooks-locate-checkout): and a body that says repo hooks not loaded and records VP 6, 7 and 9; subscribe; code review in a fresh context, fixing every blocking finding; on PROCEED and green CI run VP 9 and merge (squash) with the explicit commit_message and expectedHeadSha, no Resolves line; VP 14; report the merge sha to the coordinator and stop."
+  - "FRESH THREAD (started by the coordinator after PR 1 merges; it must show the canary line, else it says repo hooks not loaded and stops). Proof: VP 15 and 16; report the proof to the coordinator before writing anything, and ask it which threads started before PR 1's merge are still live and whether any has shown a canary since (U2, U3); never resume or message such a thread to find out."
+  - "PR 2. Window: the lost_windows row with TO from VP 16, the session_presence node, VP 10; write the graduated shard under its graduation_check_id; VP 11 (add an excused_sessions row only on its evidence rule)."
+  - "PR 2 closure (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit with Resolves: rec-5055 in the message; rebase; VP 12; push; PR; subscribe; code review in a fresh context; VP 13; merge on PROCEED and green CI with Resolves: rec-5055 in the squash body; merge_step readback; then VP 17 and 18, reporting PR numbers, run ids and merge shas."
+  - "Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)"
+  - "Report: what was implemented, verification results"
+rollback: >-
+  PR 1: revert it; the plugin re-syncs to the old gate, which skips every hook in the parent-directory layout (the
+  state before the fix) and behaves as before elsewhere. PR 2: revert it; arrival turns red again on the uncaptured
+  merges until they leave the judge window, and rec-5055 reopens through ci-rca.
