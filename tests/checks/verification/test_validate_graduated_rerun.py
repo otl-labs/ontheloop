@@ -269,3 +269,10 @@ class TestHelpers:
         failed = _run(tmp_path)
         assert failed
         assert "malformed" in failed[0]
+
+    def test_evaluate_select_keeps_only_accepted_rows(self, tmp_path: Path) -> None:
+        _record(tmp_path, "rec-a", RED)
+        _record(tmp_path, "rec-b")
+        outcomes = rerun.evaluate(tmp_path, select=lambda row: row["check_id"] == "rec-b")
+        assert [o.check_id for o in outcomes] == ["rec-b"]
+        assert not outcomes[0].red

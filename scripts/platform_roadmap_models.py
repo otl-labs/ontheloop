@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from scripts.platform_roadmap_gate_rules import GateRuleParser
+from scripts.platform_roadmap_gate_rules import _INACTIVE_FOR_TIER, GateRuleParser
 
 _SUPPORTED_VERSIONS: frozenset[int] = frozenset({1})
 _OPS_DECISIONS_RE = re.compile(r"^ops_decisions:dec-\d+$")
@@ -70,6 +70,16 @@ class CriterionBlocker(BaseModel):
     note: str | None = None
 
 
+class StartEdge(BaseModel):
+    """A START order on a tier_item: the item may be planned once `ref` (one of its depends_on
+    entries) is in_progress; depends_on still orders completion."""
+
+    model_config = ConfigDict(extra="forbid")
+    ref: str
+    once: Literal["in_progress"]
+    note: str | None = None
+
+
 class ExitCriterion(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
@@ -86,6 +96,7 @@ class TierItem(BaseModel):
     name: str
     intent: str = ""
     depends_on: list[str] = Field(default_factory=list)
+    start_edges: list[StartEdge] = Field(default_factory=list)
     files_in_scope: list[str] = Field(default_factory=list)
     exit_criteria: list[ExitCriterion] = Field(default_factory=list)
     related_candidate_decisions: list[str] = Field(default_factory=list)
@@ -225,6 +236,34 @@ class RoadmapDocument(BaseModel):
                     raise ValueError(
                         f"tier_item '{item.id}': depends_on '{dep}' does not resolve to a known id or tier shortcut"
                     )
+
+        # (b2) start_edges: concrete refs inside depends_on, no duplicates, and an item carrying
+        # start edges may not complete ahead of its dependencies.
+        by_id = {item.id: item for item in self.tier_items}
+        for item in self.tier_items:
+            edge_refs: set[str] = set()
+            for edge in item.start_edges:
+                if _TIER_SHORTCUT_RE.match(edge.ref):
+                    raise ValueError(f"tier_item '{item.id}': start_edges ref '{edge.ref}' must not be a tier shortcut")
+                if edge.ref not in item.depends_on:
+                    raise ValueError(f"tier_item '{item.id}': start_edges ref '{edge.ref}' is not in its own depends_on")
+                if edge.ref in edge_refs:
+                    raise ValueError(f"tier_item '{item.id}': duplicate start_edges ref '{edge.ref}'")
+                edge_refs.add(edge.ref)
+            if item.start_edges and item.status == "complete":
+                for dep in item.depends_on:
+                    if _TIER_SHORTCUT_RE.match(dep):
+                        unfinished = any(
+                            i.tier == dep and i.status not in _INACTIVE_FOR_TIER and i.status != "complete"
+                            for i in self.tier_items
+                        )
+                    else:
+                        unfinished = by_id[dep].status != "complete"
+                    if unfinished:
+                        raise ValueError(
+                            f"tier_item '{item.id}' carries start_edges and is complete while depends_on '{dep}' "
+                            "is not complete"
+                        )
 
         # (c) cycle detection (DFS, gray-set algorithm)
         adj: dict[str, list[str]] = {item.id: [] for item in self.tier_items}

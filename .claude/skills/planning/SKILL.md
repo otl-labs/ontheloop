@@ -71,7 +71,7 @@ Broad orientation -- surfacing `next_eligible`, `strategic_pending`, the eligibi
 
 Retained here: the per-item **Tier Item Freshness Gate** (below), which fires at commitment time once intent resolves to a specific tier_item id. `/orient` references that gate; it does not re-author it.
 
-**Soft-warn exception categories** (used by the Tier Item Freshness Gate firing condition): `ci_rca`, `hotfix`, `security_advisory`, `ad_hoc_rec`, `user_explicit_out_of_scope`. When the human's stated intent matches one of these and names no tier_item, the Freshness Gate is skipped. Do NOT reject the session -- issue a soft warning and proceed. Reject only when the intent *claims* tier_item alignment but the referenced id does not exist or its depends_on are not satisfied.
+**Soft-warn exception categories** (used by the Tier Item Freshness Gate firing condition): `ci_rca`, `hotfix`, `security_advisory`, `ad_hoc_rec`, `user_explicit_out_of_scope`. When the human's stated intent matches one of these and names no tier_item, the Freshness Gate is skipped; warn softly and proceed. Reject only when the intent *claims* tier_item alignment but the referenced id does not exist or its depends_on are unmet (a `start_edges` ref counts once in_progress).
 
 ## Clarification (Workflow Step 3)
 Decompose the human's input into structured components:
