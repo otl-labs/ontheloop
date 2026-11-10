@@ -74,7 +74,7 @@ The orient deliverable is a structured chat reply with seven sections, in order:
 
 ### 1. Status Digest
 
-Compact table of tier_items currently `in_progress` or eligible (`not_started` with all depends_on satisfied). Source: `platform_roadmap.next_eligible` and `platform_roadmap.in_progress` from preflight cache.
+Compact table of tier_items currently `in_progress` or eligible (`next_eligible`; it honours `start_edges`). Source: `platform_roadmap.next_eligible` and `platform_roadmap.in_progress` from preflight cache.
 
 ```
 | Tier Item | Status | Open Criteria | Phase | Notes |
@@ -107,7 +107,7 @@ That `/plan` session would also draft the ratifying Decision, separately (`docs/
 
 **Blocked-on-CD annotation**: for each item in `platform_roadmap.blocked_on_cd`, add a "gated by CD.NN" note in the Notes column including the relationship type (`gates`, `related`, or `decision_required_before`) and whether the item carries `bootstrap_completion_exempt: true` (in which case it may start/complete despite the pending CD). An item can be eligible-to-start while still annotated as gated-by-CD; the annotation informs planning, it is not a hard block on eligibility.
 
-Omit items with status `complete`, `reserved`, or blocked (depends_on not satisfied).
+Omit items that are `complete`, `reserved`, or blocked (`platform_roadmap.blocked`).
 
 **Gate-evaluation summary** (below the status table): one line per cross-tier gate from `platform_roadmap.gate_evaluations`:
 ```
