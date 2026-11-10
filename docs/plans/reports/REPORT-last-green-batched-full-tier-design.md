@@ -1,8 +1,9 @@
 # REPORT: batched full tier on main, culprit finding, and a last-green ref deploys consume (rec-4874 design)
 
 Plan: docs/plans/PLAN-last-green-batched-full-tier-design.yaml (REPORT-ONLY, V1). Written 2026-11-09 against main
-70d86bef. This report designs and drafts; it builds, files, closes and flips nothing. The Decision in section 6 is a
-draft: it lands only through its own IMPLEMENTATION plan, with its wording approved on GitHub (Decision 246).
+70d86bef and re-anchored on 73485749 (2026-11-10). This report designs and drafts; it builds, files, closes and
+flips nothing. The Decision in section 6 is a draft: it lands only through its own IMPLEMENTATION plan, with its
+wording approved on GitHub (Decision 246).
 
 Precondition for any later use of this report: re-run the plan's VP steps 1-4 (the premise probes) on the current
 main. A step that no longer prints its expected line means a premise below moved; re-ground the section it names
@@ -176,7 +177,10 @@ last-green ref.)
 - Forward-fix stays the default (Decision 73 cl.3, Decision 226 cl.4). When the culprit is a Track B commit outside
   terraform/** and governed deploy paths, CI also OPENS a revert PR of it, never auto-merged. The repairing session
   merges it or closes it when the forward fix lands. Automated revert stays excluded: Decision 73 cl.3's reason
-  (moving main under live worktrees) binds a merge, and opening a PR moves nothing.
+  (moving main under live worktrees) binds a merge, and opening a PR moves nothing. The operator's card said "any
+  Track B culprit"; this design keeps Decision 226 cl.4's terraform/** and deploy-path exclusion unchanged, because
+  Terraform applies on push ungated by the last-green ref (3.7), and build plan 1's wording approval (Decision 246)
+  puts that exclusion in front of the operator explicitly.
 - The opener is deterministic, not an LLM, and runs in its own job after the ci-rca agent files the rec, since Track
   B is known only from the filed rec's derived priority (red-main-recovery.yaml priority row), and only when the
   culprit job named a culprit by the pair (3.3). It pushes a `git revert` of the culprit SHA to a branch named
@@ -187,7 +191,7 @@ last-green ref.)
   Actions is verdict-shaped, never a commit) does not bind, and the ci-rca agent's "Do not propose or execute any
   autonomous fix" (.claude/agents/scheduled/ ci-rca.md:205) stays true of the agent. The pipeline does now propose a
   fix, though, so the Decision amends Decision 72's "does NOT propose or execute any autonomous fix"
-  (docs/DECISIONS.md:11537), as Decision 226 narrowed it to a manual revert PR, and Decision 226 cl.4's "manual" and
+  (docs/DECISIONS.md:11539), as Decision 226 narrowed it to a manual revert PR, and Decision 226 cl.4's "manual" and
   "when the fix is not obvious" conditions (not 73 cl.3). A deterministic opener is the recovery Decision 55 already
   allows ("Deterministic recovery remains valid"), so 55 is cited, not amended.
 - Weakening (Decision 235): reverting a culprit that added the failing check, assertion or budget removes a check
@@ -198,7 +202,11 @@ last-green ref.)
   pull-requests write, with checkout credentials not persisted and no LLM step in the job. The App is a dedicated
   one the operator creates out of band; its private key is a secret of a main-only GitHub Environment, as
   tf-trusted-plan holds the plan App's (terraform/github/environments.tf:62-89), because a repository secret is
-  readable by any same-repo branch's pull_request workflow. The Environment has no admin bypass and the App is not
+  readable by any same-repo branch's pull_request workflow. Decision 248 rejected an Environment secret for the
+  terraform/github apply App (no AWS audit or resource policy for an admin key); the opener's App holds contents and
+  pull-requests write only, so an Environment secret with a main-only policy is proportionate, and plan 3 says so.
+  The Environment is declared in terraform/github and applied through Decision 248 cl.3, with gate_change naming it.
+  The Environment has no admin bypass and the App is not
   in the ruleset's bypass list, so only main's opener job can mint the token and it cannot skip required checks (the
   Decision 248 intent: a control an agent cannot satisfy for itself); the job never calls a merge. The key's home is
   an Actions secret (Decision 224 cl.2); plan 3 adds its project-configuration.yaml and account-credential-inventory
@@ -305,7 +313,7 @@ is correct under one run per push too (prev is HEAD^ until plan 3, 3.1), so this
 | ci.yml trailer-junit-verdict and trailer census (needs main-validate, same-run artifact) | same-run provenance (Decision 201; git-ops.yaml trailer_acceptance_gate.source_admission); the census reads HEAD's message only (scripts/rec_trailer_acceptance.py:283-285) | the covering run censuses the junit-routed entries still open for merge commits in its range (not every trailer again); a verdict binds to the first completed run whose range contains the merge commit, and Decision 201's closing-sha key becomes that merge commit; the junit report measures the head tree, which contains it; closure latency grows to up to about two full-tier durations, so the merge_step readback and implement closeout window (git-ops.yaml:338-341), which assume closure inside the push run, widen to the covering run instead of routing to recover |
 | scripts/ci_rca/red_overlap.py | the rec's file plus the failing nodes' files, expanded by the dependency selector (red_overlap.py:41-44, 96); no run input | unchanged; the rec's file comes from the culprit's diff once named (ci-rca agent prompt), and a red no commit caused names its failing nodes' files only |
 | scripts/checks/_common.py:41 push_context_base | prefers GITHUB_EVENT_BEFORE, then HEAD~1 (Decision 159 cl.1; :83-96) | prev from the workflow's environment variable; unresolvable widens to the last-green ref or fails red, never HEAD~1 (3.1; scout flag, Decision 159) |
-| validate_graduated_rerun (Decision 244 cl.1 "before handoff and on main") | full tier both legs | the "before handoff" leg follows 3.6; whole-tree attribution per 3.3 (scout flag, Decision 244) |
+| validate_graduated_rerun (Decision 244 cl.1 "before handoff and on main") and validate_graduated_rerun_plan_readers (244's 2026-11-09 Update: fast tier, docs/plans/ diffs) | full tier both legs; the plan-reader leg reads the push diff | the "before handoff" leg follows 3.6; whole-tree attribution per 3.3 (scout flag, Decision 244); the plan-reader leg inherits the range through push_context_base (plan 2 lists it) |
 
 Unaffected (audit dd_c items 3-5): Decision 226's is_track_a workflow tier (both CI and Main Canary are tier CI),
 rec-autoclose.yml (per push, DECISIONS.md diff), the merge gate, signal-green and pr-conflict-signal (per PR). Items 6
@@ -436,7 +444,7 @@ Child recs are filed by the Decision-landing plan, not now, so a change to the D
 |---|---|---|---|---|
 | 1 | Land the Decision, taxonomy term, Decision 245/249 reversal annotations, SIT cl.6 alignment (section 2); file child recs for plans 2-6 | this plan merged; the SIT Decision (PR #1936) merged | docs/DECISIONS.md, environment-taxonomy.yaml, decisions-index.json | wording-check PASS; approval run (Decision 246) |
 | 2 | Range-aware consumers (3.8) and the shared last-green resolver (3.2) | 1 | ci-rca.yml, scripts/ci_rca/**, trailer census and junit jobs, scripts/rec_trailer_acceptance*.py, git-ops.yaml PROVENANCE, trailer_acceptance_gate and the merge_step readback window, scripts/session/merge_step.py, ci-rca-lifecycle.yaml, scripts/checks/_common.py, the resolver module | fixture batch of three merges, one failing test: one rec naming the range's PRs, two junit-routed recs closed, the red_overlap halt set unchanged (the rec's file plus the failing nodes' files through the selector); with prev = HEAD^ every consumer's output is unchanged |
-| 3 | Vehicle, prev step, timed-out alarm, culprit job, canary head-check skip, revert-PR opener [A] (3.1, 3.3, 3.4) | 2; rec-4114's PLAN-plans-only-main-fast-tier built (constraint: scripts/ci/push_scope.py exists on main, else stop) | ci.yml main-validate concurrency (`queue: single`, re-run key), workflow_dispatch trigger, prev step, attempt-2 self-dispatch, the job-level timed-out alarm and the staleness alarm, main-canary.yml, ci-rca.yml culprit and opener jobs, .claude/agents/scheduled/ci-rca.md (the rec names the culprit; the PR body names the rec), the App-token mint and its main-only Environment | a dispatched batch on a fixture branch: one rec naming the culprit PR, halt set equal to the culprit's affected set, a revert PR whose head runs CI; a canary run on a head-checked HEAD concludes skipped |
+| 3 | Vehicle, prev step, timed-out alarm, culprit job, canary head-check skip, revert-PR opener [A] (3.1, 3.3, 3.4) | 2; rec-4114's PLAN-plans-only-main-fast-tier built (constraint: scripts/ci/push_scope.py exists on main, else stop) | ci.yml main-validate concurrency (`queue: single`, re-run key), workflow_dispatch trigger, prev step, attempt-2 self-dispatch, the job-level timed-out alarm and the staleness alarm, main-canary.yml, ci-rca.yml culprit and opener jobs, .claude/agents/scheduled/ci-rca.md (the rec names the culprit; the PR body names the rec), the App-token mint and its main-only Environment (terraform/github, Decision 248 cl.3), git-ops.yaml's branch-rule exception and AGENTS.md's Branching paragraph | a dispatched batch on a fixture branch: one rec naming the culprit PR, halt set equal to the culprit's affected set, a revert PR whose head runs CI; a canary run on a head-checked HEAD concludes skipped |
 | 4 | Deploy gate on the paginated last-green resolver; rec-4874 acceptance test; halt and alarm rules [B]; update-branch attempt cap; expand/contract rule (3.9) | 3 | scripts/ci/deploy_gate.py, tests/ci/test_last_green_ref.py, red_overlap and red-main-recovery.yaml, merge_gate, deploy-paths.yaml | test_green_batch_advances_last_green_and_red_does_not |
 | 5 | Retire the per-PR GitHub full tier (3.6) | 4 live 30 days; rec-5019 live, which retired the local full tier and owns its surfaces; the measure read | the retiring Decision, the handoff gate's ready-head evidence requirement, rec-5019's job, the AGENTS.md tier table row and docs/PROJECT_CONTEXT.md:144 again (post-merge only) | m1-m3 report and the operator-approved Decision; closes rec-4874 |
 | 6 | Narrow Decision 245's refusal [D] (3.7) | 4; three real multi-commit reds whose culprit the step named correctly, none misattributed | merge_gate and merge_overlap, Decision 245 annotation | the three culprits cited; a stale same-file merge outside terraform/** and deploy paths is allowed, one inside them refused |
