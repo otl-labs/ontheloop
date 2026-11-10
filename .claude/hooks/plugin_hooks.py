@@ -4,9 +4,11 @@
 Project threads never read .claude/settings.json, so the repository's hooks reach them through the plugin, which claude.ai
 loads in every cloud session of the account. Each plugin hook is the settings hook behind GATE, which skips it silently
 (no transcript record) when the project settings loaded, since their `env` sets ONTHELOOP_PROJECT_SETTINGS, or when the
-session's project is not a checkout whose plugin manifest names this plugin. A hook therefore runs exactly once wherever the
-settings load, in project threads, and nowhere else. The gate keeps the command's own tokens, so the capture parser
-reads the same script stem and pin (rules H-1, P-1).
+shipped locator (hooks/locate_checkout.bash) finds no single ontheloop checkout at the session start directory or one level
+below it. Otherwise GATE runs the hook from that checkout with CLAUDE_PROJECT_DIR set to it. A hook therefore runs exactly
+once wherever the settings load, in project threads, and nowhere else. The gate keeps the command's own tokens, so the
+capture parser reads the same script stem and pin (rules H-1, P-1). Two plugin-only notice commands leave a trace when the
+locator finds no usable layout, or does not run at all (see NOTICE_*).
 
 `render` rewrites .claude/hooks/hooks.json from .claude/settings.json. `check` is a plugin-only SessionStart hook that
 warns when the plugin claude.ai installed differs from this checkout's render; it exits 0 on every path.
@@ -24,9 +26,23 @@ CLAUDE_DIR = Path(__file__).resolve().parents[1]
 SETTINGS = CLAUDE_DIR / "settings.json"
 HOOKS_FILE = CLAUDE_DIR / "hooks" / "hooks.json"
 MARKER_ENV = "ONTHELOOP_PROJECT_SETTINGS"
-MANIFEST_NAME = '"name": "ontheloop"'
-MANIFEST = "$CLAUDE_PROJECT_DIR/.claude/.claude-plugin/plugin.json"
-GATE = f'[ -n "${{{MARKER_ENV}:-}}" ] || ! grep -qs \'{MANIFEST_NAME}\' "{MANIFEST}" || '
+LOCATOR = '"${CLAUDE_PLUGIN_ROOT}/hooks/locate_checkout.bash"'
+_SKIP = f'[ -n "${{{MARKER_ENV}:-}}" ] || '
+GATE = (
+    _SKIP
+    + f'! CLAUDE_PROJECT_DIR="$(bash {LOCATOR} </dev/null)" || ! cd "$CLAUDE_PROJECT_DIR" || ! export CLAUDE_PROJECT_DIR || '
+)
+_BROKEN = {
+    "hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit",
+        "additionalContext": (
+            "[plugin_hooks] repo hooks not loaded: the synced ontheloop locator is missing or does not run, so the "
+            "ontheloop plugin ran no hook (no guards, no capture). Follow the AGENTS.md hook canary rule."
+        ),
+    }
+}
+NOTICE_SESSION_START = _SKIP + f"bash {LOCATOR} --notice SessionStart </dev/null || :"
+NOTICE_PROMPT = _SKIP + f"bash {LOCATOR} --notice UserPromptSubmit </dev/null || printf '%s\\n' '{json.dumps(_BROKEN)}'"
 CHECK = "bin/venv-python .claude/hooks/plugin_hooks.py check"
 TAG = "[plugin_hooks]"
 _CONTROL = (";", "&", "|", "\n", "`", "$(")
@@ -51,7 +67,9 @@ def render(settings: dict[str, Any]) -> dict[str, Any]:
                     raise ValueError(f"only command hooks can be gated: {event} {hook!r}")
                 entries.append({**hook, "command": gated(hook["command"])})
             hooks[event].append({**group, "hooks": entries})
-    hooks.setdefault("SessionStart", []).insert(0, {"hooks": [{"type": "command", "command": gated(CHECK)}]})
+    start = [{"type": "command", "command": gated(CHECK)}, {"type": "command", "command": NOTICE_SESSION_START}]
+    hooks.setdefault("SessionStart", []).insert(0, {"hooks": start})
+    hooks.setdefault("UserPromptSubmit", []).insert(0, {"hooks": [{"type": "command", "command": NOTICE_PROMPT}]})
     return {"hooks": hooks}
 
 
