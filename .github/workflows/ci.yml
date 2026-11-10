@@ -1,4 +1,6 @@
 name: CI
+# main-validate runs the fast tier instead of the full tier for a push confined to docs/plans/
+# (Decision 205 cl.5, git-ops.yaml two_tier_presubmit_model.full.plans_only_exception).
 # Thin safety net: calls python -m scripts.validate (single source of truth for validation logic).
 # Agents validate locally via python -m scripts.validate before pushing.
 # To add a new check: add it to validate.py first, then it runs both locally and here.
@@ -110,9 +112,18 @@ jobs:
       with:
         fetch-depth: 0
 
+    - name: Classify push scope
+      id: scope
+      env:
+        BEFORE: ${{ github.event.before }}
+        AFTER: ${{ github.sha }}
+        FORCED: ${{ github.event.forced }}
+      run: python3 -I scripts/ci/push_scope.py classify
+
     - uses: ./.github/actions/aws-region
 
     - name: Configure AWS credentials (OIDC -- branch role)
+      if: steps.scope.outputs.plans_only != 'true'
       uses: aws-actions/configure-aws-credentials@v6
       env:
         MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
@@ -126,6 +137,7 @@ jobs:
         python-version: '3.12'
 
     - name: Cache dependencies
+      if: steps.scope.outputs.plans_only != 'true'
       uses: actions/cache@v6
       with:
         path: ~/.cache/pip
@@ -142,6 +154,7 @@ jobs:
           ${{ runner.os }}-precommit-
 
     - name: Install dependencies
+      if: steps.scope.outputs.plans_only != 'true'
       # requirements-dev.txt supplies pre-commit (pinned), needed for the full-tier
       # `pre-commit run --all-files` step inside validate.py.
       run: |
@@ -150,7 +163,30 @@ jobs:
         pip install -r requirements-dev.txt
 
     - name: Validate full tier (ruff, mypy, pytest, DQ runner, verifier harness)
+      if: steps.scope.outputs.plans_only != 'true'
       run: python -m scripts.validate
+
+    - name: Cache fast-tier dependencies
+      if: steps.scope.outputs.plans_only == 'true'
+      uses: actions/cache@v6
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements-fast.txt', 'requirements-dev.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install fast-tier dependencies only
+      if: steps.scope.outputs.plans_only == 'true'
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-fast.txt
+        pip install -r requirements-dev.txt
+
+    - name: Validate fast tier (ruff lint, ruff format, mypy, prompt checks)
+      if: steps.scope.outputs.plans_only == 'true'
+      env:
+        GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+      run: python -m scripts.validate --pre
 
     - name: Upload pytest junit report (v2 fingerprint substrate)
       # ci-rca-identity-lifecycle: the full-tier unit-test step emits logs/debug/pytest-junit.xml

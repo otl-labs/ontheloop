@@ -580,6 +580,8 @@ significance:
 
 **Coverage (Decision 181 cl.2):** cl.1 and cl.2 -- validate_graduated_rerun (full tier) and validate_known_red_shrinks (both tiers); cl.4 -- plan critique, unenforced by design; cl.5 -- Decision 235's gate.
 
+> **Update (2026-11-09, PLAN-graduated-rerun-plan-readers, rec-4114):** clause 1's "The fast tier does not run it" has one exception. validate_graduated_rerun_plan_readers re-runs, in the fast tier on any diff under docs/plans/, the live records whose command names docs/plans/ outside a `:!` exclusion, and honours clause 2's list, so a plans-only merge, which runs the fast tier on main (Decision 205 clause 5), is still checked by the records that read plan content. Every other record stays full-tier only. A record that reads plans only through an indirection is rec-5040's declared residual (Decision 181 cl.2).
+
 **Options considered:** Admitted once (the 2026-09-26 verdict) -- rejected: reds grew from 3 to 50 and plans rely on records as pins. Re-run when a diff touches guard_target -- rejected: guard_target misses checks that read other files and adds minutes to every DECISIONS.md change. Fast-tier re-run of every record -- rejected: about 7 minutes serial against a 270-second budget.
 
 ```yaml reversal-conditions

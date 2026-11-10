@@ -5,7 +5,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from scripts.verify_ci_workflow._shared import _assert_runtime_lock, _full_tier_jobs, _get_steps_text, _load
+from scripts.verify_ci_workflow._shared import (
+    FAST_STEP_IF,
+    FULL_STEP_IF,
+    _assert_runtime_lock,
+    _full_tier_jobs,
+    _get_steps_text,
+    _load,
+    _runs_validate_full,
+    _runs_validate_pre,
+)
 
 
 def _check_jobs_and_flags() -> None:
@@ -23,10 +32,26 @@ def _check_jobs_and_flags() -> None:
     assert main_job.get("if") == "github.event_name == 'push'", f"main-validate.if is wrong: {main_job.get('if')!r}"
 
     pr_steps = _get_steps_text(pr_job)
-    main_steps = _get_steps_text(main_job)
 
     assert "--pre" in pr_steps, "pr-validate steps do not contain --pre"
-    assert "--pre" not in main_steps, "main-validate steps contain --pre (should not)"
+    main_list = main_job.get("steps", [])
+    full_steps = [i for i, s in enumerate(main_list) if _runs_validate_full(s)]
+    pre_steps = [i for i, s in enumerate(main_list) if _runs_validate_pre(s)]
+    scope_steps = [i for i, s in enumerate(main_list) if s.get("id") == "scope"]
+    assert len(full_steps) == 1, f"main-validate must have exactly one full-tier validate step, found {len(full_steps)}"
+    assert str(main_list[full_steps[0]].get("if", "")).strip() == FULL_STEP_IF, (
+        f"main-validate full-tier step if must be {FULL_STEP_IF!r}, got {main_list[full_steps[0]].get('if')!r}"
+    )
+    assert len(pre_steps) == 1, f"main-validate must have exactly one fast-tier (--pre) step, found {len(pre_steps)}"
+    assert str(main_list[pre_steps[0]].get("if", "")).strip() == FAST_STEP_IF, (
+        f"main-validate fast-tier step if must be {FAST_STEP_IF!r}, got {main_list[pre_steps[0]].get('if')!r}"
+    )
+    assert len(scope_steps) == 1, "main-validate has no classify step (id scope) running scripts/ci/push_scope.py classify"
+    scope = main_list[scope_steps[0]]
+    assert "if" not in scope and "scripts/ci/push_scope.py classify" in str(scope.get("run", "")), (
+        "main-validate classify step (id scope) must have no if and run scripts/ci/push_scope.py classify"
+    )
+    assert scope_steps[0] < min(full_steps[0], pre_steps[0]), "main-validate classify step must precede both validate steps"
     _assert_runtime_lock(main_job, "main-validate")
 
 
