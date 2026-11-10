@@ -188,11 +188,9 @@ def _step_restore(event: dict[str, Any], dsn: dict[str, str]) -> dict[str, Any]:
     return {"restore_ms": restore_ms, **_measure(dsn)}
 
 
-def _step_rewrite(event: dict[str, Any], dsn: dict[str, str], prefix: str) -> dict[str, Any]:
+def _step_rewrite(event: dict[str, Any], dsn: dict[str, str]) -> dict[str, Any]:
     started = time.monotonic()
     new_path = str(event.get("data_path"))
-    if not new_path.startswith(prefix):
-        raise RestoreRehearsalRefused("rewrite target outside the rehearsal scratch prefix")
     conn = _connect(dsn)
     try:
         with conn.cursor() as cur:
@@ -356,7 +354,7 @@ def action_restore_rehearsal(event: dict[str, Any], _con: Any) -> dict[str, Any]
             assert dsn is not None  # noqa: S101 -- _guard guarantees a target for every other step
             body = {
                 "restore": lambda: _step_restore(event, dsn),
-                "rewrite": lambda: _step_rewrite(event, dsn, prefix),
+                "rewrite": lambda: _step_rewrite(event, dsn),
                 "verify": lambda: _step_verify(event, dsn),
                 "duckdb_copy": lambda: _step_duckdb_copy(event, dsn),
                 "write_probe": lambda: _step_write_probe(event, dsn, prefix),
