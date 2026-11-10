@@ -30,7 +30,7 @@ scope:
       the same directory reached by two names counted once: exactly one is the checkout; (3) among several, the one
       whose .git is a directory when exactly one is (a linked worktree's .git is a file); otherwise fail. It never
       consults PWD, never recurses below the direct children, never reads stdin and never executes or evaluates a
-      name it finds. --notice SessionStart: when the rule fails, one stderr line
+      name it finds; the path it prints is always the physical path (pwd -P), so a symlink twin resolves to one name. --notice SessionStart: when the rule fails, one stderr line
       "[plugin_hooks] no ontheloop checkout (candidates=N)", N the candidate count of step 2. --notice
       UserPromptSubmit: when the rule fails with N above 1, one UserPromptSubmit hookSpecificOutput JSON object whose
       additionalContext is "[plugin_hooks] repo hooks not loaded: N ontheloop checkouts under the session start
@@ -86,11 +86,13 @@ scope:
     purpose: >-
       PR 1. TestLocate (VP 2), the locator run with bash against tmp_path layouts: the project dir wins when it is a
       candidate, even with candidate children; a single child (also with spaces in its path); a symlink twin counts
-      once; a hidden child and a checkout two levels down are not found; an empty or relative CLAUDE_PROJECT_DIR
+      once and the printed path is the physical one (pwd -P); a hidden child and a checkout two levels down are not found; an empty or relative CLAUDE_PROJECT_DIR
       fails; two clones fail; a clone with a linked worktree beside it (real git init, commit and worktree add, with
       -c user.name, -c user.email and -c commit.gpgsign=false) gives the clone from any cwd; a clone beside a copy
       with no .git gives the clone; two linked worktrees with no clone fail; a FIFO named plugin.json returns under a
-      5 s timeout; a directory named with $(...), backticks, a semicolon and * is printed verbatim and creates
+      5 s timeout; one checkout among 3000 non-candidate direct children is found under a 5 s timeout (the locator
+      runs on every hook, about seven per tool call, in other repositories' sessions too: FABLE-ADVICE.md F4 gap
+      2); a directory named with $(...), backticks, a semicolon and * is printed verbatim and creates
       nothing; success prints exactly one line, failure prints nothing, stderr is empty in both, and input waiting on
       stdin is left unread. TestNotice (VP 2): the SessionStart line for zero and for two clones, nothing when a
       checkout is found; the UserPromptSubmit object only for two clones, parsed as JSON, its additionalContext
@@ -331,7 +333,7 @@ verification_plan:
       "differs from the fetched PR head"; rc=0. Record the output in the PR body, then merge with exactly that payload.
     fix_if: >-
       rc=2 is a deny -- follow its remedy (update the branch on GitHub, wait for green CI, then git pull --ff-only
-      origin on the branch so local HEAD is the new PR head, rebuild PAYLOAD_FILE with that expectedHeadSha, and
+      origin "$(git branch --show-current)" so local HEAD is the new PR head, rebuild PAYLOAD_FILE with that expectedHeadSha, and
       re-run this step); control_rc=0 means
       the gate did not judge the payload (wrong tool name, repository or pull number): fix the payload, never merge;
       never merge on a deny or an error
@@ -401,11 +403,14 @@ verification_plan:
       in s for s in a))"
     expected: the locator path, a count above 0, then canary and pin both above 0 (in this plan's own unguarded thread the same probe printed canary 0 pin 0).
     fix_if: >-
-      no locator file -- the sync did not carry the .bash file: stop and report (fix-forward PR: inline the locator's
-      rule or rename it to a synced form, keeping constraint 2); canary 0 -- read the gate's stderr in the transcript's
-      hook records and the container's start directory before changing anything (a hook record whose command shows a
-      literal start-directory path where $CLAUDE_PROJECT_DIR was means the harness substitutes the text: stop and
-      report, fix-forward PR); pin 0 with canary above 0 --
+      no locator file -- the sync did not carry the .bash file: stop and report at once, because the broken-locator
+      line is then on every prompt of every cloud session of the account where the plugin loads, other repositories
+      and the coordinator included (fix-forward PR: inline the locator's rule or rename it to a synced form, keeping
+      constraint 2; or revert PR 1, which is account-wide and immediate for new processes); canary 0 -- read the gate's stderr in the transcript's
+      hook records and the container's start directory before changing anything (hook records may carry a label such as
+      command hook 2 instead of the command text, so judge by the gate's stderr: a cd or bash exit-127 error naming a
+      path under the start directory, such as /home/user/.claude/hooks/, where the checkout path was expected means
+      the harness substitutes the text of $CLAUDE_PROJECT_DIR: stop and report, fix-forward PR); pin 0 with canary above 0 --
       SessionStart did not fire or the pin hook failed: report to the coordinator (U2 in HANDOFF-planning.md)
     hermetic: false
   - step: 16
@@ -438,7 +443,10 @@ verification_plan:
     phase: post-deploy
     action: After PR 2 merges -- telemetry-arrival is green on main at PR 2's merge sha, and again on the first run after PR 2's own session passes its SLA.
     command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival
-    expected: status=green (or skipped) with missing=0; record the two telemetry-arrival workflow run ids on main and their conclusions.
+    expected: >-
+      status=green (or skipped) with missing=0. The workflow run ids come from GitHub, not from this command:
+      mcp__github__actions_list for the telemetry-arrival workflow's runs on main, read for the first run after PR 2's
+      merge and the first run after PR 2's own session passes its SLA; record both run ids and their conclusions.
     fix_if: "missing above 0 on a sha: read its PR's creation time against the window and its key against step 11's list before suspecting capture; a new red is ci-rca's to file, never excused here"
     hermetic: false
   - step: 19
@@ -544,6 +552,7 @@ context:
   - "rec-5055 at plan write (updated and read back 2026-11-10T18:11:46Z): acceptance replaced, because the filed live probe (scripts.telemetry_verify arrival) needs warehouse credentials the closure job lacks, with bin/venv-python -m pytest \"tests/hooks/test_plugin_hooks.py::TestLocatedGate\" \"tests/telemetry_verify/test_session_presence.py::test_the_shipped_config_records_the_rec_5055_lost_window\" -q (junit route); the live end state stays proven by VP 11, 18 and 19. closure_artifact shard:arrival-config-records-rec-5055-lost-window (PR 2, fix-bound to the commit that turns arrival green); the guards against the escape itself are PR 1's three shards (the sign-off text said two; critique round 1 added the TestNotice shard, a strengthening that leaves the approved acceptance text unchanged). context_v2 corrected: proximate cause per REPORT.md, preventive_action naming rec-5060 and the ports.yaml structural assumption row located at .claude/hooks/locate_checkout.bash (by location, since SA-12 may be taken first). Operator-confirmed with the plan (Decisions 181, 235)."
   - "Landing: the plan PR carries no code. PR 1 (build thread, hooks not loaded: it says so, checks its branch by hand before each commit and runs VP 7-9) holds the whole fix and stays undeclared, the PLAN-telemetry-catalog-aware-capture route. PR 2 (a fresh thread that shows the canary) holds the lost window, flips implementation_declared and carries Resolves, so fixed_by_sha is the first commit on which arrival can be green and no red between the two PRs is read as a regression of a closed rec (ci-rca-lifecycle.yaml status_aware_chain)."
   - "Plugin delivery: a merge to main re-syncs the plugin for every cloud session of the account, new processes only (coordinator-harness-claude-projects.yaml plugin-updates); no operator step, VP 15 proves it. A .bash file has never been synced before (today's synced set is json, md, py, sh): UNPROVEN until VP 15. Also UNPROVEN until VP 15: that the harness hands plugin hook commands CLAUDE_PROJECT_DIR as an exported variable rather than substituting its text (REPORT M2 saw only the process environment); if it substitutes, the gate's cd and every $CLAUDE_PROJECT_DIR/.claude/hooks path resolve to the start directory and the plugin stays off with non-blocking errors."
+  - "Covered by unit cases, not by a live step (FABLE-ADVICE.md section 6 risks 3 and 4): a plain web session still runs each hook once (TestLocatedGate case (d) and the unchanged marker clause), and a session of another repository gets no model-context line while the locator is healthy (case (e), TestNotice). Neither is probed live; the operator saw the web path working on 2026-11-10 (HANDOFF-planning.md U4)."
   - "Unknown until observed: U2 (a thread started before the fix writes a SessionStart record on its next process start) and U3 (it self-heals on its next turn), HANDOFF-planning.md section 4; observed only if such a thread next starts on its own (none is resumed for it). They decide whether VP 11 finds keys to excuse."
   - "Out of scope, owned elsewhere: rec-5060 (commits refuse when the guards are absent), rec-5061 (session branch from the capture pin; captured threads read HEAD until then), rec-5062 (guards judge by the tool call's own directory; it should also name handoff_evidence_gate.py and protected_action_gate.py, which judge by cwd or CLAUDE_PROJECT_DIR too), rec-5063 (protected-actions.yaml known_limits names the locator, the second-clone state, and two guards-off states with no per-prompt notice: a manifest naming ontheloop planted at the session start directory itself, which rule 1 picks so every hook fails without blocking, and an edited manifest in the checkout, which leaves zero candidates and a stderr line only; that contract is code-owned and Project Review's)."
   - "Graduated shards kept unchanged (tests/telemetry_verify/test_session_presence.py gains one node; their claims hold): arrival-config-excuses-rec-5004-key, telemetry-arrival-oracle."
@@ -564,6 +573,7 @@ gate_rounds:
   - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 7}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 4}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main (by hand in the build thread, git -C /home/user/ontheloop branch --show-current)
   - docs/PROJECT_CONTEXT.md read
@@ -584,5 +594,7 @@ execution_steps:
   - "Report: what was implemented, verification results"
 rollback: >-
   PR 1: revert it; the plugin re-syncs to the old gate, which skips every hook in the parent-directory layout (the
-  state before the fix) and behaves as before elsewhere. PR 2: revert it; arrival turns red again on the uncaptured
+  state before the fix) and behaves as before elsewhere. Both the fix and its revert reach every cloud session of
+  the account on its next process start, so a revert is the fast route when the broken-locator line appears in
+  sessions of other repositories. PR 2: revert it; arrival turns red again on the uncaptured
   merges until they leave the judge window, and rec-5055 reopens through ci-rca.
