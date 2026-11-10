@@ -12,8 +12,7 @@ from pathlib import Path
 import yaml
 
 from scripts.checks import _common, registry
-from scripts.persona_contracts.schema import load_index
-from scripts.persona_contracts.sources import open_criteria
+from scripts.persona_contracts.schema import load_index, open_criteria
 
 _LABEL = "Persona contract binding"
 

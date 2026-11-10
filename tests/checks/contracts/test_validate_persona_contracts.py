@@ -101,3 +101,11 @@ def test_missing_source_file_is_a_failure_not_a_crash(tree: Path) -> None:
 def test_prose_containing_a_substring_is_not_a_money_budget(tree: Path) -> None:
     edit_contract(tree, lambda c: c["budget"]["provisional"].__setitem__("measure", "neuron turn counts"), rerender=True)
     assert _run(tree) == []
+
+
+def test_compute_plane_contract_needs_no_skill_tether(tree: Path) -> None:
+    from tests.persona_contracts.fixture_tree import INDEX_REL, edit_text
+
+    edit_text(tree, INDEX_REL, "    kind: verdict\n    contract:", "    kind: compute_plane\n    contract:")
+    edit_contract(tree, lambda c: (c.pop("skill_tether"), c.__setitem__("kind", "compute_plane")), rerender=True)
+    assert _run(tree) == []

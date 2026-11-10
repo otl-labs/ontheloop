@@ -21,9 +21,11 @@ from scripts.persona_contracts.schema import (
     PersonaIndex,
     check_schema_dialect,
     load_index,
+    named_read_keys,
+    open_criteria,
     parse_capability,
+    resolve_values_ref,
 )
-from scripts.persona_contracts.sources import named_read_keys, open_criteria, resolve_values_ref
 
 _INDEX_REL = "docs/contracts/executor-personas.yaml"
 _CAPS_REL = "config/agent/executor/capabilities.yaml"

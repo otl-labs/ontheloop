@@ -243,7 +243,13 @@ def _parameter_on_plain(root: Path) -> None:
     edit_contract(root, lambda c: c.__setitem__("capabilities", ["read_repo:x"]), rerender=True)
 
 
+def _contract_deleted(root: Path) -> None:
+    (root / CONTRACT_REL).unlink()
+
+
 MUTATORS: dict[str, Callable[[Path], None]] = {
+    "contract_file_deleted": _contract_deleted,
+    "parameter_missing_on_read_input": _set("capabilities", ["read_input"]),
     "values_ref_broken": _values_ref_broken,
     "backend_outside_values": _backend_outside,
     "provisional_bare": _provisional_bare,
@@ -285,6 +291,8 @@ MUTATORS: dict[str, Callable[[Path], None]] = {
 }
 
 EXPECTED: dict[str, str] = {
+    "contract_file_deleted": "missing or unparseable",
+    "parameter_missing_on_read_input": "needs a parameter",
     "values_ref_broken": "does not resolve to a values list",
     "backend_outside_values": "outside persona_backend values",
     "provisional_bare": "provisional must be",
