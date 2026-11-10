@@ -102,6 +102,72 @@ def is_governed_extension_depth(rel: str) -> bool:
     return "/" not in rel and Path(rel).suffix in _GOVERNED_EXTENSIONS
 
 
+def load_declared_subtrees(population_path: Path) -> list[dict[str, Any]]:
+    """The declared_subtrees rows of contract-population.yaml (an empty list when the key is absent)."""
+    import yaml
+
+    try:
+        data = yaml.safe_load(population_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return []
+    rows = data.get("declared_subtrees") if isinstance(data, dict) else None
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+
+def under_declared_subtree(rel: str, rows: list[dict[str, Any]]) -> bool:
+    """True iff `rel` (posix, relative to the contracts dir) lies under a declared sub-tree's path."""
+    return any(rel.startswith(str(r.get("path", "\0"))) for r in rows)
+
+
+def _member_file_failures(contracts_dir: Path, rel: str, extensions: tuple[str, ...], label: str) -> list[str]:
+    import yaml
+
+    if Path(rel).suffix not in extensions:
+        return [f"{label}: member {rel} has an extension outside {list(extensions)}"]
+    if Path(rel).suffix not in _GOVERNED_EXTENSIONS:
+        return []
+    try:
+        body = yaml.safe_load((contracts_dir / rel).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return []
+    if isinstance(body, dict) and "contract" in body:
+        return [f"{label}: member {rel} carries a top-level contract block"]
+    return []
+
+
+def _subtree_failures(contracts_dir: Path, row: dict[str, Any]) -> list[str]:
+    import yaml
+
+    sub, index_name, label = str(row["path"]), str(row["index"]), f"Contract drift (subtree {row['path']})"
+    try:
+        idx = yaml.safe_load((contracts_dir / index_name).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        idx = None
+    contract = idx.get("contract") if isinstance(idx, dict) else None
+    if not isinstance(contract, dict) or contract.get("class") != "D":
+        return [f"{label}: index {index_name} is not a depth-1 Class D contract"]
+    out: list[str] = []
+    if (contract.get("evaluator") or {}).get("check") != row.get("evaluator"):
+        out.append(f"{label}: index {index_name} evaluator check is not {row.get('evaluator')}")
+    members: set[str] = set()
+    for entry in idx.get(str(row.get("members_key")), []) or []:
+        for field in row.get("member_fields", []):
+            if isinstance(entry, dict) and isinstance(entry.get(field), str):
+                members.add(entry[field].removeprefix("docs/contracts/"))
+    present = {f.relative_to(contracts_dir).as_posix() for f in scan_tree(contracts_dir / sub)}
+    extensions = tuple(row.get("extensions", []))
+    out += [f"{label}: {rel} is not listed as a member by {index_name}" for rel in sorted(present - members)]
+    out += [f"{label}: listed member {rel} has no file" for rel in sorted(members - present)]
+    for rel in sorted(present & members):
+        out += _member_file_failures(contracts_dir, rel, extensions, label)
+    return out
+
+
+def subtree_member_failures(contracts_dir: Path, rows: list[dict[str, Any]]) -> list[str]:
+    """Failure strings for each declared sub-tree: the index lists exactly the files present."""
+    return [failure for row in rows for failure in _subtree_failures(contracts_dir, row)]
+
+
 def scan_tree(contracts_dir: Path) -> list[Path]:
     """Every file under `contracts_dir`, recursively, any extension/depth."""
     return sorted(p for p in contracts_dir.rglob("*") if p.is_file())

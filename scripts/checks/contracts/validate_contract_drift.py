@@ -141,12 +141,16 @@ def validate_contract_drift(
                 return None
             return result.stdout
 
+        # ---- declared sub-trees (contract-population.yaml declared_subtrees): a closed set, checked every run ----
+        subtrees = _population.load_declared_subtrees(target_dir / _CONTRACT_POPULATION)
+        failed.extend(_population.subtree_member_failures(target_dir, subtrees))
+
         # ---- extension/depth conformance over the WHOLE tree (not just *.yaml/*.yml) ----
         if baseline_available:
             baseline_rel = {p[len(_DOCS_CONTRACTS_PREFIX) :] for p in baseline_paths if p.startswith(_DOCS_CONTRACTS_PREFIX)}
             for f in _population.scan_tree(target_dir):
                 rel = f.relative_to(target_dir).as_posix()
-                if _population.is_governed_extension_depth(rel):
+                if _population.is_governed_extension_depth(rel) or _population.under_declared_subtree(rel, subtrees):
                     continue
                 if rel in baseline_rel:
                     continue

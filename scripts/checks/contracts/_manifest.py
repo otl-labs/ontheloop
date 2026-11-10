@@ -406,4 +406,18 @@ ENTRIES: tuple[Entry, ...] = (
         ),
         full_segment="full_after_lint",
     ),
+    Entry(
+        name="validate_persona_contracts",
+        module="scripts.checks.contracts.validate_persona_contracts",
+        attr="validate_persona_contracts",
+        pre=True,
+        full_segment="full_after_lint",
+    ),
+    Entry(
+        name="validate_persona_contract_binding",
+        module="scripts.checks.contracts.validate_persona_contract_binding",
+        attr="validate_persona_contract_binding",
+        pre=True,
+        full_segment="full_after_lint",
+    ),
 )
