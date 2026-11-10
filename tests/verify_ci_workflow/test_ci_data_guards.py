@@ -18,7 +18,6 @@ from scripts.verify_ci_workflow import (
     _check_full_tier_runtime_lock,
     _check_jobs_and_flags,
 )
-from scripts.verify_ci_workflow._shared import FAST_STEP_IF, FULL_STEP_IF, _full_tier_jobs
 
 # ---------------------------------------------------------------------------
 # Shared fixture data for the five guards below
@@ -28,8 +27,8 @@ _COMPILED_CACHE_KEY = (
     "pip-${{ hashFiles('requirements.in', 'requirements-dev.in', 'requirements.txt', 'requirements-dev.txt') }}"
 )
 
-_FULL_IF = FULL_STEP_IF
-_FAST_IF = FAST_STEP_IF
+_FULL_IF = "steps.scope.outputs.plans_only != 'true'"
+_FAST_IF = "steps.scope.outputs.plans_only == 'true'"
 
 _VALID_CI_DATA: dict[str, Any] = {
     "jobs": {
@@ -297,14 +296,19 @@ def _run_flags(data: dict[str, Any]) -> None:
         _check_jobs_and_flags()
 
 
-def _step(data: dict[str, Any], needle: str, exact_end: bool = False) -> dict[str, Any]:
+def _step(data: dict[str, Any], needle: str) -> dict[str, Any]:
     steps = data["jobs"]["main-validate"]["steps"]
-    return next(s for s in steps if needle in s.get("run", "") and (not exact_end or "--pre" not in s["run"]))
+    return next(s for s in steps if needle in s.get("run", ""))
+
+
+def _full_step(data: dict[str, Any]) -> dict[str, Any]:
+    steps = data["jobs"]["main-validate"]["steps"]
+    return next(s for s in steps if s.get("if") == _FULL_IF and s.get("run", "").endswith(".validate"))
 
 
 def test_fails_when_full_step_is_unconditionally_off() -> None:
     data = _mv_data()
-    _step(data, "scripts.validate", exact_end=True)["if"] = "false"
+    _full_step(data)["if"] = "false"
     with pytest.raises(AssertionError, match="full-tier step if must be"):
         _run_flags(data)
 
@@ -358,5 +362,5 @@ def test_runtime_lock_ignores_fast_path_install(drop: str) -> None:
 def test_full_tier_jobs_classifies_by_step() -> None:
     both = {"jobs": {"j": {"steps": [{"run": "python -m scripts.validate"}, {"run": "python -m scripts.validate --pre"}]}}}
     pre_only = {"jobs": {"j": {"steps": [{"run": "python -m scripts.validate --pre"}]}}}
-    assert [name for name, _ in _full_tier_jobs(both)] == ["j"]
-    assert _full_tier_jobs(pre_only) == []
+    assert [name for name, _ in _check_jobs_and_flags.__globals__["_full_tier_jobs"](both)] == ["j"]
+    assert _check_jobs_and_flags.__globals__["_full_tier_jobs"](pre_only) == []

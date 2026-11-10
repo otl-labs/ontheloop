@@ -127,8 +127,10 @@ def _run_precommit_body(failed: list[str], *, all_files: bool, files: list[str] 
             registry.skipped("no changed files vs origin/main")
             return False
         # This branch (all_files=False) is the --pre call site; it runs in push context for plans-only
-        # pushes to main (Decision 205 cl.5), so the diff base is the push base there.
-        if precommit_escalates(target, _common.push_context_base() or "origin/main"):
+        # pushes to main (Decision 205 cl.5), so the diff base is the push base there. Probed only when the
+        # CI event is a push, so every other context keeps its git call sequence unchanged.
+        push_base = _common.push_context_base() if os.environ.get("GITHUB_EVENT_NAME") == "push" else None
+        if precommit_escalates(target, push_base or "origin/main"):
             all_files = True
             escalated = True
 
