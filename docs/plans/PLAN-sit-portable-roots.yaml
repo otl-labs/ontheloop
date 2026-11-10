@@ -103,8 +103,9 @@ scope:
       substitutes every ${local.<account-name local>} interpolation with its value for that env and every bare
       local.<account-name local> reference (main.tf's bucket = local.data_lake_bucket_name,
       platform_admin_data_policies.tf's [local.data_lake_bucket_arn]) with the quoted value, leaving every other token
-      alone, so existing literal-matching checks and tests read the files as rendered for sandbox. Pure, no I/O at
-      import.
+      alone, so existing literal-matching checks and tests read the files as rendered for sandbox. The values are read
+      from _common.ROOT at call time (never at import), and render is the identity when account_names.tf is absent, so
+      synthetic-tree and patched-ROOT tests keep working.
   - file: scripts/checks/iam_tf/validate_account_portable_names.py
     action: Create
     purpose: >-
@@ -142,7 +143,13 @@ scope:
     purpose: Taxonomy row validate_account_portable_names (environment class, like validate_terraform_try).
   - file: tests/checks/iam_tf/test_validate_account_portable_names.py
     action: Create
-    purpose: Red cases per predicate (a)-(e) on synthetic trees, render() cases, the real tree green, and registration on the fast tier.
+    purpose: Red cases per predicate (a)-(f) on synthetic trees, the real tree green, and registration on the fast tier.
+  - file: tests/checks/iam_tf/test__account_names.py
+    action: Create
+    purpose: >-
+      The mirror test validate_test_coverage maps _account_names.py to: render() for both environments, the
+      interpolation and bare-reference forms, other tokens untouched, an absent account_names.tf (identity), and a
+      patched ROOT read at call time; full line coverage.
   - file: scripts/checks/iam_tf/_read_coverage.py
     action: Modify
     new_imports: [scripts.checks.iam_tf._account_names]
@@ -150,10 +157,6 @@ scope:
       Terraform text is read through _account_names.render before locals and names resolve, so aws_s3_bucket
       data_lake / ducklake_catalog_dr names and every policy ARN resolve exactly as today (fixes the
       ci-refresh-read, trusted read and agent-observability read real-tree reds the dry run showed).
-  - file: scripts/checks/iam_tf/_write_coverage.py
-    action: Modify
-    new_imports: [scripts.checks.iam_tf._account_names]
-    purpose: Reads bootstrap and personal text through render; _DATA_LAKE_BUCKET_ARN stays the sandbox literal it is matched against.
   - file: scripts/checks/ci_guards/validate_github_settings_apply.py
     action: Modify
     new_imports: [scripts.checks.iam_tf._account_names]
@@ -172,8 +175,8 @@ scope:
   - file: tests/checks/iam_tf/test_platform_iam_bootstrap_adoption.py
     action: Modify
     purpose: >-
-      _bootstrap_texts renders through render; the two self-access-guard mutation cases replace the guard's new key
-      text (${local.bootstrap_state_bucket_arn}) with a corrupted literal, keeping their detected-violation assertions.
+      _bootstrap_texts renders through render; the mutation cases are unchanged (they act on the rendered text, whose
+      literals and alignment match today's), keeping their detected-violation assertions.
 bundled_recommendations: [rec-5025]
 followon_recs: [rec-5058]
 infrastructure_dependencies:
@@ -185,16 +188,17 @@ acceptance_criteria:
   - validate_account_portable_names passes on the real tree and each of its predicates has a red case.
   - Every pre-existing iam_tf and ci_guards node passes with no assertion loosened.
   - The pre-merge admin plan of terraform/bootstrap at the PR head shows zero changes and main's own plan shows zero rows.
-  - The PR's speculative plan of terraform/personal reads No changes with predicted guard verdict PASS.
-  - The post-merge admin apply of terraform/bootstrap applies zero changes and a fresh plan exits 0 with -detailed-exitcode.
+  - "The PR's trusted plan of terraform/personal reads State: NO_CHANGES with predicted guard verdict PASS."
+  - The post-merge saved plan of terraform/bootstrap exits 0, its apply applies zero changes, and a fresh plan exits 0 with -detailed-exitcode.
   - rec-5025 reads closed with its closure trailer; T2.57 c3 is met if T2.57 exists on main.
 verification_plan:
   - step: 1
     phase: pre-deploy
     action: >-
-      The new validator's unit tests: one red case per predicate (a)-(e) on synthetic trees, render() for both envs,
-      the real tree green, and the fast-tier registration. The file is absent on main, so this is red before.
-    command: bin/venv-python -m pytest tests/checks/iam_tf/test_validate_account_portable_names.py -q
+      The new validator's unit tests: one red case per predicate (a)-(f) on synthetic trees (for (f): a wrong bucket, a
+      wrong key, a region set), the real tree green and the fast-tier registration; and render()'s own mirror test.
+      Both files are absent on main, so this is red before.
+    command: bin/venv-python -m pytest tests/checks/iam_tf/test_validate_account_portable_names.py tests/checks/iam_tf/test__account_names.py -q
     expected: exit 0; red before (file absent on main).
     fix_if: a predicate has no red case, the real tree fails, or the Entry or taxonomy row is missing
     hermetic: true
@@ -233,7 +237,8 @@ verification_plan:
       before handoff. Not hermetic: the pr-validate runner has no terraform binary.
     command: >-
       terraform fmt -check -recursive terraform/bootstrap && terraform fmt -check -recursive terraform/personal && bin/venv-python -m pytest tests/checks/ci_guards/test_validate_trusted_plan_screen.py tests/checks/ci_guards/test_validate_project_region.py -q &&
-      bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+      bin/venv-python -m scripts.validate --pre; then the full tier, started backgrounded with a 2 h limit from the top-level session: bin/venv-python -m scripts.validate;
+      on its completion: bin/venv-python -m scripts.checks.validation_result --verify-head
     expected: >-
       exit 0, no file listed by fmt; then the fast tier and the full tier (backgrounded with a 2 h limit from the
       top-level session, handoff_policy) with validation_result --verify-head exit 0 for HEAD
@@ -288,8 +293,8 @@ verification_plan:
       branch>"}) -> the newest run whose head_sha is the head; list_workflow_jobs -> job plan's conclusion;
       mcp__github__pull_request_read(method="get_comments") -> the newest trusted-plan comment for that sha.
     expected: >-
-      Job plan conclusion success; the comment's plan summary line reads No changes; its line "Predicted guard verdict:
-      PASS" is present; no refusal comment for that sha. Record the run URL on the PR.
+      Job plan conclusion success; the comment carries "State: NO_CHANGES", "0 to import, 0 to add, 0 to change, 0 to
+      destroy (0 replaced)." and "Predicted guard verdict: PASS"; no refusal comment for that sha. Record the run URL.
     fix_if: any change row -- the rename moved a value (most likely the bucket name or the lock key); fix and re-push
     hermetic: false
     graduation: not-applicable
@@ -297,15 +302,27 @@ verification_plan:
     phase: post-deploy
     action: >-
       After merge, on the operator's direction in an ADMIN session: in a worktree at the merge sha, a saved plan of
-      terraform/bootstrap whose counts are presented to the operator (zero rows expected); on their word, apply that
-      saved plan (the Decision 126 procedure: plan, present, accept, apply), then a fresh plan with -detailed-exitcode.
-      Then read back the merge-time apply-sandbox run.
+      terraform/bootstrap with -detailed-exitcode; its counts are presented to the operator (zero rows expected) and the
+      worktree and merge.bin are kept for step 9. Nothing is applied in this step (Decision 126: plan, present).
     command: >-
       set -o pipefail; R=$(tr -d '[:space:]' < config/aws-region); W="${TMPDIR:-/tmp}/spr-merge"; git worktree add --detach "$W" "$MERGE_SHA" -q &&
-      cp terraform/bootstrap/terraform.bootstrap.tfvars "$W/terraform/bootstrap/" && export TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc &&
-      terraform -chdir="$W/terraform/bootstrap" init -input=false -backend-config="region=$R" > /dev/null &&
-      terraform -chdir="$W/terraform/bootstrap" plan -input=false -var-file=terraform.bootstrap.tfvars -out=merge.bin 2>&1 | grep -E '^Plan:|No changes';
-      echo "(present the line above; apply only on the operator's word)";
+      cp terraform/bootstrap/terraform.bootstrap.tfvars "$W/terraform/bootstrap/" &&
+      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W/terraform/bootstrap" init -input=false -backend-config="region=$R" > /dev/null &&
+      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W/terraform/bootstrap" plan -input=false -detailed-exitcode -var-file=terraform.bootstrap.tfvars -out=merge.bin > /dev/null; echo "MERGE_PLAN_EXIT $?"
+    expected: MERGE_PLAN_EXIT 0 (no changes); present that line to the operator and wait for their word.
+    fix_if: >-
+      MERGE_PLAN_EXIT 2 -- STOP: never run step 9; delete merge.bin and the worktree, present the change count and
+      re-run step 6 at the merge sha (the merge differs from what step 6 planned); EXIT 1 -- read the error locally
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: >-
+      Only after step 8 printed MERGE_PLAN_EXIT 0 and the operator's word in that session: apply the saved merge.bin
+      (an empty plan, so the apply proves the merged code is the applied code), a fresh plan with -detailed-exitcode,
+      cleanup, then the merge-time apply-sandbox run read back.
+    command: >-
+      W="${TMPDIR:-/tmp}/spr-merge"; export TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc;
       terraform -chdir="$W/terraform/bootstrap" apply -input=false merge.bin 2>&1 | grep -E '^Apply complete';
       terraform -chdir="$W/terraform/bootstrap" plan -input=false -detailed-exitcode -var-file=terraform.bootstrap.tfvars > /dev/null; echo "BOOTSTRAP_PLAN_EXIT $?";
       rm -f "$W/terraform/bootstrap/merge.bin"; git worktree remove --force "$W"
@@ -313,14 +330,13 @@ verification_plan:
       workflow_runs_filter={"event": "push", "branch": "main"}) -> the run whose head_sha is the merge sha, and
       list_workflow_jobs -> its apply job's conclusion.
     expected: >-
-      "No changes", then "Apply complete! Resources: 0 added, 0 changed, 0 destroyed", then BOOTSTRAP_PLAN_EXIT 0; the
-      apply-sandbox run on the merge sha concluded success. Record the merge sha, the lines and the run URL on the PR.
-    fix_if: >-
-      the saved plan shows any row -- STOP before applying and present it; the merge differs from what step 6 planned
-      (re-run step 6 at the merge sha)
+      "Apply complete! Resources: 0 added, 0 changed, 0 destroyed", then BOOTSTRAP_PLAN_EXIT 0; the apply-sandbox run on
+      the merge sha concluded success. Record the merge sha, the lines and the run URL as a counts-only comment on the
+      merged PR.
+    fix_if: BOOTSTRAP_PLAN_EXIT 2 after the apply -- report on the PR and STOP; never apply again without a fresh step 8
     hermetic: false
     graduation: not-applicable
-  - step: 9
+  - step: 10
     phase: post-deploy
     action: rec-5025 closed by the squash commit's Resolves trailer; read back.
     command: bin/venv-python -c "from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids; rows, _ = fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-5025']); print(rows[0]['id'], rows[0]['status'])"
@@ -337,7 +353,7 @@ test_obligations:
   - source: scripts/checks/iam_tf/_account_names.py
     behavior: render substitutes each account-name local for sandbox and sit, and leaves other tokens alone
     verification_step: 1
-    test_selector: tests/checks/iam_tf/test_validate_account_portable_names.py
+    test_selector: tests/checks/iam_tf/test__account_names.py
     red_green_expectation: red before (module absent), green after
   - source: scripts/checks/iam_tf/_manifest.py
     behavior: the new check runs on the fast tier
@@ -425,10 +441,10 @@ test_obligations:
     test_selector: tests/checks/iam_tf/test_validate_account_portable_names.py
     red_green_expectation: predicate (a)'s literal state-key case is red before the edit; step 7's No changes proves the sandbox value is unchanged
   - source: terraform/bootstrap/backend-sit.hcl
-    behavior: a backend file with no region
-    verification_step: 4
-    test_selector: tests/checks/ci_guards/test_validate_project_region.py
-    waiver_reason: Static settings only; the existing region check (step 4) already scans every backend*.hcl, and the file is first used by rec-5027's SIT init.
+    behavior: bucket matches the sit render; no region
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_validate_account_portable_names.py
+    red_green_expectation: predicate (f)'s real-tree case is red before the file lands
   - source: config/terraform/backend-personal-sit.hcl
     behavior: bucket and key match the sit render; no region
     verification_step: 1
@@ -444,11 +460,6 @@ test_obligations:
     verification_step: 2
     test_selector: tests/checks/iam_tf/validate_ci_refresh_read_coverage/test_real_tree.py
     red_green_expectation: red after the HCL edit alone (dry run 2026-11-10), green once the reader renders
-  - source: scripts/checks/iam_tf/_write_coverage.py
-    behavior: reads through render; real-tree write coverage unchanged
-    verification_step: 2
-    test_selector: tests/checks/iam_tf/test__write_coverage.py
-    red_green_expectation: red after the HCL edit alone (dry run), green once the reader renders
   - source: scripts/checks/ci_guards/validate_github_settings_apply.py
     behavior: reads through render; exact-ARN predicates unchanged
     verification_step: 2
@@ -475,7 +486,7 @@ test_obligations:
     test_selector: tests/checks/iam_tf/test_platform_iam_bootstrap_adoption.py
     red_green_expectation: red after the HCL edit alone (dry run), green after
 constraints:
-  - "PROD must not change: zero rows in both plans (steps 6-8). Any non-zero row stops the build; nothing is applied to make a plan converge."
+  - "PROD must not change: zero rows in both plans (steps 6, 8 and 9). Any non-zero row stops the build; nothing is applied to make a plan converge."
   - "No assertion, expected ARN, Sid or count in an existing check or test is changed; readers are re-routed through render only. A node that needs more is a plan defect, never a local fix."
   - "Never print or commit an account id, ExternalId, e-mail, tfvars value or rendered policy (Decision 101); posted evidence is counts, exit codes and shas."
   - "The bootstrap apply runs only on the operator's direction given in that ADMIN session (Decision 126 cl.1, protected-actions.yaml), one admin mutation at a time: not while another bootstrap apply (rec-5026's Organization sittings, T4.15 c13, rec-4694) is in flight."
@@ -484,7 +495,7 @@ constraints:
 context:
   - "Operator: Benjamin said 'write the plan' 2026-11-10 15:33Z in thread 'Plan the SIT account bootstrap' after the sign-off /mnt/project-files/sit-account-bootstrap/PRESENTATION.md; forks answered on cards (separate management admin environment; baseline SCPs on PROD now, staged) bind the Organization plan, not this one."
   - "Hooks: this planning session ran without the repo's plugin hooks (session started outside the repo; operator chose to carry on 2026-11-10 15:03Z); never-on-main and scope guards were applied by hand."
-  - "Decision-scout r1 FLAGS_FOUND (/mnt/project-files/sit-account-bootstrap/SCOUT-portable-roots-r1.md). Decisions triaged: 203 of 203. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 3. Serves: NS.9 3/5. CITE: 223, 248, 126, 77, 202, 237, 242, 101, 238, SIT Decision (rec-5024) cl.1/3/7/9. Flags resolved: 77 cl.5/single_account_rule -> build starts only after the rec-5024 build merges; 224 cl.6 -> environment is not user-set configuration (each apply channel passes it: admin -var, rec-5028's CI), so no project-configuration.yaml row; scope gaps platform_admin_data_policies.tf added, terraform/github/main.tf left alone (one repository's settings, one copy, stays in PROD)."
+  - "Decision-scout r1 FLAGS_FOUND (/mnt/project-files/sit-account-bootstrap/SCOUT-portable-roots-r1.md). Decisions triaged: 203 of 203. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 3. Serves: NS.9 3/5. CITE: 223, 248, 126, 77, 202, 237, 242, 101, 238, SIT Decision (rec-5024) cl.1/3/7/9. Flags resolved: 77 cl.5/single_account_rule -> build starts only after the rec-5024 build merges; 224 cl.1/cl.6 -> environment is a deploy-target selector each apply channel sets (admin -var, rec-5028's CI), outside cl.1's user-set configuration class, so no project-configuration.yaml row; scope gaps platform_admin_data_policies.tf added, terraform/github/main.tf left alone (one repository's settings, one copy, stays in PROD)."
   - "Advisor: blind Fable consult 2026-11-10 (/mnt/project-files/sit-account-bootstrap/ADVICE.md q1-4, q15). Adopted: two plans with this one applied first; RDS guard row and denies split to rec-5058; locals with today's values as defaults; acceptance widened by the no-op plans. Adapted: one environment variable instead of a committed sit.tfvars; SIT state stays inside SIT's data lake at PROD's layout (keeps every CI policy identical across accounts; rec-5030's context now carries the replicate/reset prefix rule) instead of a dedicated bucket."
   - "Dry run 2026-11-10 on main f866f98 in a scratch worktree: the literal-to-local edit turned 18 nodes red across validate_github_settings_apply, _read_coverage (refresh, trusted, agent-observability), _write_coverage/_write_companions, the state and telemetry fence tests, the bootstrap adoption suite and the trusted-plan screen (a ? / == conditional in terraform/personal). The map-index form passes the screen and terraform validate; can(regex()) is the allowed validation form. Every other test referencing terraform/bootstrap (18 files, 411 nodes) stayed green."
   - "Probe 2026-11-10 (Terraform 1.10.5, local backend): a -backend-config value overrides the same attribute set in the backend block, so main.tf's bootstrap backend block stays and backend-sit.hcl overrides its bucket."
@@ -495,15 +506,17 @@ context:
   - "Overlap: platform_dev_policies.tf is also named by rec-4694, rec-4043, rec-4048 and T4.15 c13; check open PRs at build start and rebase onto whichever lands first; bootstrap applies run one at a time."
   - "Related-work check 2026-11-10 (main f866f98): red_overlap blocked by rec-5055 alone (slo_breached, 8.5 h; telemetry-arrival red, 2 merged sessions missing from telemetry_sessions, file scripts/telemetry_verify/session_presence.py), sharing no path with this scope. Deferral rationale: this plan does not repair it and touches no telemetry path; it is the coordinator's halt to route (the hook-gating thread is the inferred cause); the build re-runs red_overlap at start and waits for a clear verdict or the operator's word."
   - "Start condition: the rec-5024 build ('Build the SIT Decision and roadmap item') has merged, so single_account_rule no longer forbids this; cite the SIT Decision by its number then."
-  - "Approvals at build start: the operator's direction for step 6 (read-only admin plan) and step 8 (bootstrap apply), each given in the ADMIN session (protected-actions.yaml); the final-diff word on the build PR (IAM text under terraform/bootstrap)."
+  - "Approvals at build start: the operator's direction for step 6 (read-only admin plan) and step 9 (bootstrap apply, after step 8's saved plan reads zero changes), each given in the ADMIN session (protected-actions.yaml); the final-diff word on the build PR (IAM text under terraform/bootstrap)."
   - "Critique r1 (REVISE, 4 blocking, 10 nits), dispositions: B1 the trusted PR plan refuses a PR that changes backend-sandbox.hcl (main-only) or adds a non-.tf file under terraform/personal (file_not_tf): the comment edit is dropped and terraform/personal's SIT backend moves to config/terraform/backend-personal-sit.hcl, with rec-5025's acceptance updated to that path (update_rec 2026-11-10); VP7 reads terraform-plan-trusted.yml. B2 predicate (a) is limited to S3 contexts (the DR role and function names stay). B3 validate_github_settings_apply's pre_globs gain every render input, with a closure test. B4 VP3 is waived as subsumed by step 1. N1 VP8 plans, presents and applies a saved plan in a merge-sha worktree and reads the apply-sandbox run back. N2 ARN locals interpolate the name local. N3 render covers bare local references. N4 purpose names the files read. N5 predicate (f). N9 VP2 widened. N10 VP7 names the facts."
+  - "Critique r2 (REVISE, 3 blocking, 9 nits), dispositions: B1 step 8 plans and presents only, and step 9 applies the kept merge.bin only after MERGE_PLAN_EXIT 0 and the operator's word; B2 tests/checks/iam_tf/test__account_names.py is the render mirror test; B3 the _write_coverage.py row is dropped (it reads no Terraform text; _read_coverage's render fixes its reds). N1 the trusted-plan comment's own strings; N2 predicate (f) red cases and backend-sit.hcl linked to step 1; N3 render reads ROOT at call time; N4 mutations unchanged; N5 V3 line names the comment; N6 build converts what (a) finds at its head; N7 validate_invoke_implies_resolve.py keeps its own unrendered _read_root_text on purpose (it reads resource blocks, not names); N8 the full tier runs backgrounded; N9 224 cl.1 cited. Risk 1 (an init with backend-sit but no -var environment=sit plans PROD names in SIT) is named for rec-5027 and rec-5028: each SIT apply channel sets environment beside the backend, and rec-5027 adds a precondition tying the two."
   - "Closes criteria at build time: after rebasing onto the rec-5024 build, the build declares closes_criteria: [T2.57:c3] with acceptance criterion 7 as its 1:1 match (T2.57 is absent on main today)."
   - "SIT size headroom (measured at build, step 6 session): terraform -chdir=<worktree>/terraform/bootstrap console -var environment=sit -var-file=terraform.bootstrap.tfvars, evaluating length(jsonencode(...)) of each Decision 156 size-guarded policy local; record each headroom in the PR body as bytes only."
   - "For rec-5027 (named in its context at handoff): the SIT bootstrap carries github_settings_apply.tf, whose data source for the apply App's key secret does not exist in SIT; rec-5027 decides whether that file's resources are PROD-only."
-  - "V3 resolution: the posted step 6 and step 7 evidence for the current head substitutes for pre-merge post-deploy evidence; the behavioural acceptance is the post-merge zero-change apply and plan (step 8)."
+  - "V3 resolution: the posted step 6 and step 7 evidence for the current head substitutes for pre-merge post-deploy evidence; the behavioural acceptance is the post-merge zero-change saved plan, apply and fresh plan (steps 8-9), whose evidence is a counts-only comment on the merged PR naming the applied sha."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 10}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 9}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -512,9 +525,9 @@ pre_implementation_checklist:
   - The rec-5024 build is merged; no other bootstrap apply in flight; ADMIN_CHAIN_OK in this session or an ADMIN session lined up for steps 6 and 8
 execution_steps:
   - "Create both account_names.tf files and the environment variables; replace each literal listed in scope with its local (map-index suffix, no ? or ==); delete the two superseded locals in platform_dev_policies.tf and ducklake_catalog_dr.tf; parameterise the lock key; add terraform/bootstrap/backend-sit.hcl and config/terraform/backend-personal-sit.hcl; leave terraform/personal/backend-sandbox.hcl untouched (main-only for the trusted plan)."
-  - "Create _account_names.py (render) and validate_account_portable_names.py with its Entry, taxonomy row and tests; route the readers in _read_coverage.py, _write_coverage.py, validate_github_settings_apply.py and the three test files through render; move the two mutation fixtures to the new text. Run steps 1-4."
+  - "Create _account_names.py (render) and validate_account_portable_names.py with its Entry, taxonomy row and tests; route the readers in _read_coverage.py (_read_root_text and _scan_resources, which _write_coverage and _write_companions read through) and validate_github_settings_apply.py and the three test files through render; convert every literal predicate (a) finds at the build head (the scope counts are main f866f98 snapshots). Run steps 1-4."
   - "Update terraform/bootstrap/CLAUDE.md. Open the PR with the hooks-inactive note and the SIT size headroom; steps 5-7 at the CI-green head; post the evidence."
-  - "Merge on code review PROCEED, green CI, the step 6-7 evidence and the operator's final-diff word; squash body carries 'Resolves: rec-5025'. Then step 8 on the operator's direction and step 9. Flip T2.57 c3 if T2.57 exists."
+  - "Merge on code review PROCEED, green CI, the step 6-7 evidence and the operator's final-diff word; squash body carries 'Resolves: rec-5025'. Then steps 8 and 9 on the operator's direction and step 10. Flip T2.57 c3 if T2.57 exists."
   - "Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)"
   - "Report: what was implemented, verification results"
 rollback: >-
