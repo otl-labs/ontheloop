@@ -64,7 +64,7 @@ def test_real_tree_resolves_every_persona_and_role(real) -> None:
         assert s.effort == persona_block[s.persona][s.role]["effort"]
         assert s.billing_shape == tier["billing_shape"]
         assert s.cold_start_assertion == tier["cold_start_assertion"]
-        assert s.api_key_variable == _key_row(config, ts._API_KEY_ROW_PREFIX + s.role)["variable"]
+        assert s.env_name == _key_row(config, ts._ENV_ROW_PREFIX + s.role)["variable"]
 
 
 def test_end_user_resolves_primary_alone(real) -> None:
@@ -183,7 +183,7 @@ def test_missing_api_key_row_refused(real) -> None:
         _resolve(real, "decision_scout", "primary")
 
 
-def test_wrong_api_key_variable_refused(real) -> None:
+def test_wrong_env_name_refused(real) -> None:
     _key_row(real[1], _PRIMARY_KEY_ROW)["variable"] = "WRONG_VARIABLE"
     with pytest.raises(ts.TierSelectionError, match="api_key_row"):
         _resolve(real, "decision_scout", "primary")

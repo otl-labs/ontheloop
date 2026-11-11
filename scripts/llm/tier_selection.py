@@ -24,7 +24,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 _INFERENCE_PROVIDER = "docs/contracts/inference-provider.yaml"
 _PROJECT_CONFIGURATION = "docs/contracts/project-configuration.yaml"
 _ROLES = ("primary", "warm_fetched_escape_hatch")
-_API_KEY_ROW_PREFIX = "ports.run_persona.litellm.api_key."  # pragma: allowlist secret
+_ENV_ROW_PREFIX = "ports.run_persona.litellm.api_key."  # pragma: allowlist secret
 
 
 class TierSelectionError(ValueError):
@@ -41,7 +41,7 @@ class Selection:
     effort: str
     billing_shape: str
     cold_start_assertion: str
-    api_key_variable: str
+    env_name: str
 
 
 def _refuse(persona: str, role: str, rule: str, detail: str) -> TierSelectionError:
@@ -159,13 +159,13 @@ def resolve(
                 persona, role, "persona_settings", f"{key} {settings.get(key)!r} is outside the vocabulary {allowed}"
             )
 
-    row_id = _API_KEY_ROW_PREFIX + role
-    key_rows = [r for r in project_configuration.get("settings", []) if isinstance(r, dict) and r.get("id") == row_id]
-    if not key_rows:
+    row_id = _ENV_ROW_PREFIX + role
+    matched_rows = [r for r in project_configuration.get("settings", []) if isinstance(r, dict) and r.get("id") == row_id]
+    if not matched_rows:
         raise _refuse(persona, role, "api_key_row", f"project-configuration has no row {row_id}")
-    variable = key_rows[0].get("variable")
-    if variable != f"{prefix.upper()}_API_KEY":
-        raise _refuse(persona, role, "api_key_row", f"{row_id} variable {variable!r} is not {prefix.upper()}_API_KEY")
+    declared = matched_rows[0].get("variable")
+    if declared != f"{prefix.upper()}_API_KEY":
+        raise _refuse(persona, role, "api_key_row", f"{row_id} variable {declared!r} is not {prefix.upper()}_API_KEY")
 
     return Selection(
         persona=persona,
@@ -176,7 +176,7 @@ def resolve(
         effort=settings["effort"],
         billing_shape=str(billing),
         cold_start_assertion=str(assertion),
-        api_key_variable=variable,
+        env_name=declared,
     )
 
 
@@ -230,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
         print(exc)
         return 1
     for s in selections:
-        print(f"{s.persona} {s.role} {s.model} thinking={s.thinking} effort={s.effort} key={s.api_key_variable}")
+        print(f"{s.persona} {s.role} {s.model} thinking={s.thinking} effort={s.effort} key={s.env_name}")
     print("TIER-SELECTION OK")
     return 0
 
