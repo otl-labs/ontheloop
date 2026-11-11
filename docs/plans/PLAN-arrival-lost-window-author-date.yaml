@@ -27,7 +27,9 @@ scope:
       listing holds 250 or more commits it raises (GitHub truncates silently and lists in history order, so a partial list's
       minimum is unreadable evidence); a key-carrying commit without a readable commit.author.date raises, and so does any page that is not a JSON list,
       any item that is not an object, or any commit whose commit.message is not a string (each is unreadable evidence,
-      which leaves the key missing); every raise is sp.Unreadable with a named cause; otherwise it
+      which leaves the key missing); the adapter's own refusals raise sp.Unreadable with a named cause, while transport, decode and shape errors
+      (HTTPError, URLError, JSONDecodeError, IncompleteRead, KeyError, TypeError) propagate unwrapped and only the
+      helper's broad except Exception (with the BLE001 noqa) catches them; otherwise it
       returns the minimum commit.author.date over commits whose message carries key, None when none does
       (commit.author.date is read even when the top-level author is null). A new _keys_in(text) helper holds _session_keys' trailer parsing
       and _session_keys calls it on commit.body, so existing behaviour is unchanged and the adapter calls _keys_in on
@@ -48,7 +50,8 @@ scope:
       adds authored_lookup_failed and leaves it missing (fail closed, Decision 250 cl.2). The authored
       lookup (gate, try/except, window-and-grace test and counters) lives in one helper called from the classify loop,
       so _judge (18 branches at plan time) and check_config (16, about 19 with the present-only grace check) each stay at
-      or under 20 branches (validate_cc_limits; re-measure at build); no complexity-waiver header.
+      or under 20 branches (validate_cc_limits; re-measure every new or changed function at build, test nodes included, and keep test fakes
+      at module level); no complexity-waiver header.
       (4) ArrivalResult gains lost_window_authored and authored_lookup_failed (ints, default 0) and
       lost_window_authored_shas; the ARRIVAL head line appends lost_window_authored=N authored_lookup_failed=N after
       elapsed_s, and one ARRIVAL_LOST_WINDOW_AUTHORED sha=<12> line per such commit follows the missing lines.
@@ -76,8 +79,9 @@ scope:
       authored inside A, the PR created at or after B's end and before B's end plus the grace (outside both windows) and
       past A's end plus the grace;
       the three positive edge cases, authored exactly at W's from, the PR created exactly at W's end, and authored at
-      W's from with the PR at W's end plus the grace minus 1 s, each read lost_window=1 missing=0); test_an_authored_lookup_failure_is_missing_and_the_cap_bounds_both_lookups (two raising lookups, one raising
-      sp.Unreadable("X") and one raising OSError: each reads authored_lookup_failed=1 missing=1 status red; with max_pr_lookups=1 the second lookup is not made; when the created_at lookup raises the authored callable is
+      W's from with the PR at W's end plus the grace minus 1 s, each read lost_window=1 missing=0); test_an_authored_lookup_failure_is_missing_and_the_cap_bounds_both_lookups (three raising lookups, one raising
+      sp.Unreadable("X"), one OSError and one ValueError("x") (what json.load raises): each reads
+      authored_lookup_failed=1 pr_lookup_failed=0 missing=1 status red; with max_pr_lookups=1 the second lookup is not made; when the created_at lookup raises the authored callable is
       never called and pr_lookups=1);
       test_the_author_date_rule_is_off_without_its_config_key_or_callable (CONFIG unchanged, or no callable: the
       callable is never called and missing=1); test_a_created_in_window_pr_makes_no_authored_lookup;
@@ -88,7 +92,8 @@ scope:
       earlier than both sits on page 1, every own-trailer commit's commit.committer.date later than the page-2 commit's author date, and
       the node asserts the page-2 author time; so the URLs carry per_page=100&page=1
       and page=2 and no third request is made; other keys and a later own commit ignored; the earliest own commit (the page-2 one) has a null top-level author and is still read from commit.author.date; token header asserted with the existing fake token "tok"; fake shas use the low-entropy f"{n:040x}" form; None when no commit carries the key; pages of 100, 100
-      and 50 raise with no fourth request while pages of 100, 100 and 49 return a time; a key-carrying commit with no commit.author.date raises; a page whose first item has no commit.message raises; a page that is a dict rather than a list raises; each raise
+      and 50 raise with no fourth request while pages of 100, 100 and 49 return a time; a key-carrying commit with no commit.author.date raises; a page whose first item has no commit.message raises; a page that is a dict rather than a list raises; a page whose first item is a string raises; one later-in-UTC own
+      commit carries a +01:00 offset that sorts earlier as a string, so a raw-string minimum fails; each raise
       case asserts pytest.raises(sp.Unreadable, match=<cause>); the fake records the timeout and the node asserts 10; an earlier commit naming the key only in prose, outside a
       Claude-Session trailer, is ignored);
       test_run_wires_the_github_authored_lookup_by_default (times are window-relative only, since the classifier
@@ -145,7 +150,7 @@ verification_plan:
     action: The rule fails closed on a raised lookup and the cap bounds both lookups.
     command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence_authored.py::test_an_authored_lookup_failure_is_missing_and_the_cap_bounds_both_lookups" -q
     expected: exit 0; red before (node absent); red if a failed lookup counts lost_window.
-    fix_if: a failed lookup counts lost_window, a narrowly caught exception class escapes or turns the run unreadable, or a second lookup is made past max_pr_lookups
+    fix_if: a failed lookup counts lost_window, a narrowly caught exception class (for example ValueError) escapes or turns the run unreadable, or a second lookup is made past max_pr_lookups
     hermetic: true
     expected_literals: [" passed"]
     graduation: graduate
@@ -279,7 +284,7 @@ test_obligations:
     test_selector: tests/telemetry_verify/test_session_presence_authored.py::test_a_key_whose_own_commit_was_authored_in_a_lost_window_is_lost_window
     red_green_expectation: red before (node absent, or TypeError on the unknown keyword), green after
   - source: scripts/telemetry_verify/session_presence.py
-    behavior: the author-date rule fails closed on a failed lookup and the cap bounds both lookups
+    behavior: the author-date rule fails closed on a failed lookup of any exception class (Unreadable, OSError, ValueError) and the cap bounds both lookups
     verification_step: 2
     test_selector: tests/telemetry_verify/test_session_presence_authored.py::test_an_authored_lookup_failure_is_missing_and_the_cap_bounds_both_lookups
     red_green_expectation: red before (node absent), green after; red if a failed lookup counts lost_window
@@ -350,6 +355,7 @@ gate_rounds:
   - {gate: plan-critique, round: 10, verdict: REVISE, blocking: 1, nits: 5}
   - {gate: plan-critique, round: 11, verdict: PROCEED, blocking: 0, nits: 4}
   - {gate: plan-critique, round: 12, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 13, verdict: REVISE, blocking: 1, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
