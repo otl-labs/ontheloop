@@ -121,7 +121,10 @@ def build_tree(tmp_path: Path) -> Path:
         f"    contract: {CONTRACT_REL}\n    rendered_prompt: {RENDERED_REL}\n"
         '    implementation: {status: pending, owning_item: "T4.10a:c5"}\n'
     )
-    edit_text(root, INDEX_REL, "personas: []", row.rstrip("\n"))
+    index = root / INDEX_REL
+    head, sep, _ = index.read_text(encoding="utf-8").rpartition("\npersonas:")
+    assert sep, (INDEX_REL, "personas")
+    index.write_text(head + "\n" + row, encoding="utf-8")
     (root / "docs/ROADMAP-PLATFORM.yaml").write_text(yaml.safe_dump(_ROADMAP), encoding="utf-8")
     skill = root / SKILL_REL
     skill.parent.mkdir(parents=True, exist_ok=True)

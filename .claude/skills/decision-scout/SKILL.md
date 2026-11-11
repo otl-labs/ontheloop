@@ -121,7 +121,7 @@ Verify before returning:
 - [ ] You read north-star.yaml first, applied both mechanical shortlists (step 3) before judgment, and read ONLY shortlisted entries as targeted sections -- never a whole-file load
 - [ ] Every CITE and CONTRADICT entry names a decision number that exists in the index
 - [ ] Every CONTRADICT entry has both a clause-level citation AND a severity
-- [ ] The Verdict line is one of the three exact strings (no variations)
+- [ ] Verdict: NO_FLAGS | FLAGS_FOUND | BLOCK -- one exact string
 - [ ] "Decisions triaged: N of M" is present and N equals M (the live:true count from Phase 1 step 1)
 - [ ] Total length under 1,200 words; ROADMAP section, integrity line and copy instruction present, at most 5 rows shown, none marked BLOCK
 - [ ] Every SPIRIT flag carries a verbatim quote per gate (ii), no paraphrase
