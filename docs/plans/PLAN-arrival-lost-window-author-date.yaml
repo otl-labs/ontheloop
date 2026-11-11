@@ -22,9 +22,11 @@ scope:
     purpose: >-
       (1) New adapter github_pr_key_authored_at(repo, number, key) -> datetime | None: GET
       /repos/{repo}/pulls/{number}/commits?per_page=100&page=P for P = 1, 2, 3 (GitHub lists at most 250 commits),
-      stopping at a short page, with the same headers, token rule and 10 s timeout as github_pr_created_at; returns the
-      minimum commit.author.date over commits whose message carries key, None when none does (commit.author.date is
-      read even when the top-level author is null). A new _keys_in(text) helper holds _session_keys' trailer parsing
+      stopping at a short page, with the same headers, token rule and 10 s timeout as github_pr_created_at; when the
+      listing reaches 250 commits it raises (GitHub truncates silently and lists in history order, so a partial list's
+      minimum is unreadable evidence); a key-carrying commit without a readable commit.author.date raises; otherwise it
+      returns the minimum commit.author.date over commits whose message carries key, None when none does
+      (commit.author.date is read even when the top-level author is null). A new _keys_in(text) helper holds _session_keys' trailer parsing
       and _session_keys calls it on commit.body, so existing behaviour is unchanged and the adapter calls _keys_in on
       each commit.message. (2) Config: authored_grace_days joins check_config's allowed-key set but not _PARAMS (every
       _PARAMS key is required, and existing configs lack this one); a separate present-only check refuses a value that
@@ -54,20 +56,23 @@ scope:
       the grace, key authored inside it: lost_window=1 lost_window_authored=1 missing=0 pr_lookups=2, and an
       ARRIVAL_LOST_WINDOW_AUTHORED line names the sha); test_the_author_date_rule_holds_its_approved_bounds (each case missing=1: authored after the
       end, at exactly the end, inside only an open-start window, None, authored inside with the PR created at the
-      window end plus the grace, and authored inside with the PR created before the window's from); test_an_authored_lookup_failure_is_missing_and_the_cap_bounds_both_lookups (a raising lookup:
+      window end plus the grace, and authored inside with the PR created before the window's from, and the same-window case: two bounded windows A and
+      B, authored inside A, the PR created outside both, past A's end plus the grace but within B's end plus the grace); test_an_authored_lookup_failure_is_missing_and_the_cap_bounds_both_lookups (a raising lookup:
       authored_lookup_failed=1 missing=1; with max_pr_lookups=1 the second lookup is not made);
       test_the_author_date_rule_is_off_without_its_config_key_or_callable (CONFIG unchanged, or no callable: the
       callable is never called and missing=1); test_a_created_in_window_pr_makes_no_authored_lookup;
       test_a_bad_authored_grace_days_is_unreadable (0, a bool, a string); test_github_adapter_reads_the_earliest_own_commit_author_date
       (urlopen monkeypatched: two pages, the first full of 100 and the second short, so the URLs carry per_page=100&page=1
       and page=2 and no third request is made; other keys and a later own commit ignored; a commit whose top-level
-      author is null still read from commit.author.date; token header asserted; None when no commit carries the key);
+      author is null still read from commit.author.date; token header asserted with the existing fake token "tok"; None when no commit carries the key; pages of 100, 100
+      and 50 raise with no fourth request; a key-carrying commit with no commit.author.date raises);
       test_run_wires_the_github_authored_lookup_by_default (times are window-relative only, since the classifier
-      never compares them with NOW or the squash time: sp.github_pr_created_at monkeypatched to return a time after the
-      shipped rec-5055 window's end 2026-11-11T10:38:16Z and within 7 days of it, sp.github_pr_key_authored_at
-      monkeypatched to record (repo, n, key) and return 2026-11-10T15:22:45Z, inside that window; a local Reader whose
+      never compares them with NOW or the squash time: times read from the shipped rec-5055 lost_windows row, as the
+      existing shipped-window node does: sp.github_pr_created_at monkeypatched to return the row's to plus 1 h,
+      sp.github_pr_key_authored_at monkeypatched to record (repo, n, key) and return the row's from plus 1 h; a local Reader whose
       named() returns []; sp.run(ROOT, Reader(), NOW, repo="o/r", commits=[commit(1, "KKK", pr=5)]) with the shipped
-      config records ("o/r", 5, "KKK") and reads lost_window_authored=1);
+      config records ("o/r", 5, "KKK") and reads lost_window_authored=1; a second call passing an explicit
+      pr_key_authored_at uses it and leaves the module adapter uncalled);
       test_the_shipped_config_enables_the_author_date_rule (load_config(ROOT) passes check_config and carries
       authored_grace_days 7). The lost-window node also asserts re.search(r" elapsed_s=\S+
       lost_window_authored=1 authored_lookup_failed=0$", sp.lines(result)[0]) (field order pinned, elapsed_s value not) and that the ARRIVAL_LOST_WINDOW_AUTHORED output
@@ -127,7 +132,7 @@ verification_plan:
     action: The GitHub adapter reads the earliest own-trailer author date across pages.
     command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence.py::test_github_adapter_reads_the_earliest_own_commit_author_date" -q
     expected: exit 0; red before (adapter absent).
-    fix_if: a later own commit or another key's commit wins, the second page is not read, or a third request is made
+    fix_if: a later own commit or another key's commit wins, the second page is not read, a third request is made after a short page, or a 250-commit listing or an unreadable own author date returns a time instead of raising
     hermetic: true
     expected_literals: [" passed"]
     graduation: graduate
@@ -154,10 +159,10 @@ verification_plan:
     graduation_check_id: arrival-config-enables-author-date-rule
   - step: 6
     phase: pre-deploy
-    action: The rule holds the bounds the operator confirmed (end exclusive, open start excluded, None, PR before the window, past the grace).
+    action: The rule holds the bounds the operator confirmed (end exclusive, open start excluded, None, PR before the window, past the grace, grace measured from the same window the commit was authored in).
     command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence.py::test_the_author_date_rule_holds_its_approved_bounds" -q
     expected: exit 0; red before (node absent).
-    fix_if: any bound case counts lost_window (the rule is looser than approved; a looser rule goes to the operator first)
+    fix_if: any bound case counts lost_window, including a PR within the grace of a different window than the authored one (the rule is looser than approved; a looser rule goes to the operator first)
     hermetic: true
     expected_literals: [" passed"]
     graduation: graduate
@@ -267,7 +272,7 @@ test_obligations:
     test_selector: tests/telemetry_verify/test_session_presence.py::test_the_shipped_config_enables_the_author_date_rule
     red_green_expectation: red before (key absent), green after
   - source: scripts/telemetry_verify/session_presence.py
-    behavior: the rule holds its approved bounds (end exclusive, open start, None, PR before the window, past the grace)
+    behavior: the rule holds its approved bounds (end exclusive, open start, None, PR before the window, past the grace, same window)
     verification_step: 6
     test_selector: tests/telemetry_verify/test_session_presence.py::test_the_author_date_rule_holds_its_approved_bounds
     red_green_expectation: red before (node absent), green after
@@ -284,7 +289,7 @@ test_obligations:
 constraints:
   - "Loosened assertion (Decision 235 cl.1): the only widening is the author-date rule as worded in scope[0] (3), operator-confirmed with this plan, and the operator's word on the build's final diff is still needed for the code (the sidecar binds only the arrival.yaml line and SA-07); any looser variant (any commit in the PR, a commit date, a later own commit, an open-start window, no grace bound) is a plan amendment that goes to the operator first."
   - "The arrival.yaml line and SA-07 land word for word as the approved-text sidecar docs/plans/approved/arrival-lost-window-author-date.yaml binds them (Decision 246)."
-  - "Fail closed (Decision 250 cl.2): a failed, capped or empty commit lookup leaves the key missing; nothing the new read returns can make an otherwise-red run unreadable or green except an own-trailer author date inside a recorded window."
+  - "Fail closed (Decision 250 cl.2): a failed, truncated (250 commits) or empty commit lookup, or an unreadable own author date, leaves the key missing; nothing the new read returns can make an otherwise-red run unreadable or green except an own-trailer author date inside a recorded window with a from, on a PR opened within the grace after that same window's end."
   - "lost_windows, excused_sessions and their grammar are unchanged; the rec-5081 excused row stays as a standing guard (Decision 244); retiring it later is its own operator-approved change."
   - "The default of the new judge keyword is no lookup and an absent authored_grace_days turns the rule off, so every existing caller and node keeps today's behaviour."
   - "No rescue agents or workaround loops (Decision 55)."
@@ -307,6 +312,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 7}
   - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 7}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
