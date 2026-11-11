@@ -5,57 +5,75 @@ handoff_policy:
 slug: mcp-2x-server-migration
 intent: >-
   Move the DuckLake read-only MCP stdio server every interactive session uses onto the mcp 2.x SDK and lift the mcp<2 pin
-  (rec-3795), with today's wire behaviour kept and typed tool errors made visible to clients (rec-2871), so litellm tool calls
-  and litellm.experimental_mcp_client work for the verdict-persona LiteLLM backend (T4.32 c1, T4.10a c7) without a private
-  workaround.
+  (rec-3795), keeping today's wire behaviour except two declared additions and making typed tool errors visible to clients
+  (rec-2871), so litellm tool calls and litellm.experimental_mcp_client work for the verdict-persona LiteLLM backend (T4.32 c1)
+  without a private workaround.
 plan_type: IMPLEMENTATION
 verification_tier: V2
 plan_path: docs/plans/PLAN-mcp-2x-server-migration.yaml
 phase: >-
   ad_hoc_rec (soft-warn exception category) -- resolves rec-3795 (Medium, risk high) and rec-2871 (Medium). No tier_item
-  criterion claimed; enabling dependency for T4.32 c1 (the LiteLLM backend consumes this server as an MCP client per T4.10a c7).
+  criterion claimed: T4.32 (not_started) is the consumer this enables; T4.10a (in_progress) is context only and its c7 (one
+  MCP server, consumed by the LiteLLM backend as an MCP client) is already met, so closes_criteria is empty by design.
 closes_criteria: []
 scope:
   - file: scripts/agent_sdk/mcp_server.py
     action: Modify
     purpose: >-
-      Port create_server to the mcp 2.x lowlevel Server: handlers passed as on_list_tools= / on_call_tool= constructor kwargs
-      with (ctx, params) signatures returning types.ListToolsResult / types.CallToolResult; Tool built with input_schema=. A new
-      module-level _call_tool_result(reader, tool_by_name, name, arguments) does explicitly what mcp 1.x did implicitly, in this
-      order: unknown tool -> error result error_type "unknown_tool"; jsonschema.validate(arguments, tool.input_schema) failure ->
-      error result text "Input validation error: <message>", error_type "input_validation", reader never called; AgentToolError
-      family -> error result text str(exc), structured_content {"error_type": <class name>, "message": str(exc)}; any other
-      exception -> error result text "<tool> failed: class=<ClassName>", structured_content {"error_type": "internal",
-      "error_class": <ClassName>} with NO exception text (Decision 101; same class-only rule as _default_surface); success ->
-      structured_content {"rows": rows, "row_count": len(rows)} plus one TextContent of json.dumps(payload, indent=2).
-      params.arguments None reads as {}. The tool list stays derived from describe() (Decision 81 cl.2), read-only (Decision 84
-      I-3, Decision 143), fail-loud on describe failure (Decision 55); _run_stdio, main, _default_surface, build_tool_registry's
-      derivation and _CACHE_FIRST_NOTE (Decision 215) are unchanged in behaviour.
+      Port create_server to the mcp 2.x LOWLEVEL Server: handlers passed as on_list_tools= / on_call_tool= constructor kwargs with
+      (ctx, params) signatures returning types.ListToolsResult / types.CallToolResult; Tool built with input_schema=. A new
+      module-level _call_tool_result(reader, tool_by_name, name, arguments) makes every path return a CallToolResult (a raised
+      exception in 2.x becomes a JSON-RPC -32603 error, not an isError result). In order: unknown tool -> error result whose text
+      stays today's "unknown tool '<name>': expected one of [...]", structured_content {"error_type": "unknown_tool", "message":
+      <text>}; then ONE try block around jsonschema.validate(arguments, tool.input_schema), _invoke_verb and json.dumps, with
+      except clauses in this order: jsonschema.ValidationError -> text "Input validation error: <message>", structured_content
+      {"error_type": "input_validation", "message": <text>}, reader never called; AgentToolError family -> text str(exc),
+      structured_content {"error_type": <class name>, "message": str(exc)}; any other exception (including a jsonschema
+      SchemaError from a malformed describe() schema and a non-serialisable row) -> text "<tool> failed: class=<ClassName>",
+      structured_content {"error_type": "internal", "error_class": <ClassName>}, NO exception text (Decision 101; the same
+      class-only rule as _default_surface). Success -> structured_content {"rows": rows, "row_count": len(rows)} plus one
+      TextContent of json.dumps(payload, indent=2) (today's bytes). params.arguments None reads as {}. The tool list stays
+      derived from describe() (Decision 81 cl.2), read-only (Decision 84 I-3, Decision 143), fail-loud on describe failure
+      (Decision 55); _run_stdio, main, _default_surface, build_tool_registry's derivation and _CACHE_FIRST_NOTE (Decision 215)
+      keep their behaviour.
     new_imports: []
   - file: tests/test_agent_sdk_mcp_server.py
     action: Modify
     purpose: >-
       Replace the removed server.request_handlers harness with the public in-memory mcp.Client (async with Client(server)); read
       results through 2.x snake_case attributes (is_error, structured_content, input_schema). Keep EVERY existing class and test
-      name (verification-registry entries pin TestReadOnlySurface, TestFailLoud, TestTypedErrors, TestCreateServer and its
+      name (graduated shards pin TestReadOnlySurface, TestFailLoud, TestTypedErrors, TestCreateServer and its
       test_default_reader_is_the_routed_reader / test_ops_tools_survive_an_unavailable_event_reader nodes, TestProjection,
-      TestToolDescriptions, TestAgentFacingProjection). Add module-level tests: test_tool_round_trip_on_mcp_2x (rec-3795
-      acceptance), test_call_tool_error_carries_error_type (rec-2871 acceptance), test_unexpected_exception_text_never_reaches_the_client,
-      test_input_validation_error_is_an_error_result, test_requirements_only_diff_selects_this_file,
-      test_jsonschema_is_a_direct_requirement (requirements.in declares it and requirements.txt annotates it via -r requirements.in).
+      TestToolDescriptions, TestAgentFacingProjection). Add module-level tests -- test_tool_round_trip_on_mcp_2x (rec-3795
+      acceptance: list_tools, a successful call's structured_content and JSON text, an unknown tool's is_error, and the installed
+      mcp major equal to the mcp== pin major read from ROOT / "requirements.txt" -- that quoted literal is the Decision 135 data
+      edge); test_call_tool_error_carries_error_type (rec-2871 acceptance: a ReaderInvokeError body {"error_type": "runtime"}
+      yields structured_content error_type "ReaderRuntimeError" with its message); test_unexpected_exception_text_never_reaches_the_client
+      (a RuntimeError carrying a URL and an ARN-shaped string yields error_type "internal", the class name, and neither string);
+      test_input_validation_error_is_an_error_result (wrong-typed argument -> "Input validation error", reader not called);
+      test_jsonschema_is_a_direct_requirement (requirements.in declares jsonschema and the lock's annotation block for
+      jsonschema==, which is multi-line because mcp also requires it, contains "-r requirements.in").
+  - file: tests/checks/deps/affected_tests/test_derivation.py
+    action: Modify
+    purpose: >-
+      Add test_requirements_lock_selects_mcp_server_tests_through_data_edge beside test_setup_cloud_script_selects_contract_test_through_data_edge:
+      derive_affected_tests over the real repo for a requirements.txt-only diff selects tests/test_agent_sdk_mcp_server.py
+      (Decision 135 data edge, so a lock-only Dependabot mcp bump runs the server tests in --pre).
   - file: requirements.in
     action: Modify
     purpose: 'mcp>=1.30.0,<2 -> mcp>=2.3.0,<3; add jsonschema>=4.20.0 (now imported directly by mcp_server.py; mcp 2.3.0 declares the same floor).'
   - file: requirements-fast.txt
     action: Modify
-    purpose: 'Same two lines as requirements.in (its header requires runtime-tool floor parity).'
+    purpose: >-
+      Same two lines as requirements.in; add jsonschema to the header's runtime-tool floor list "(pydantic, pyyaml, networkx,
+      import-linter, mcp, python-ulid)".
   - file: requirements.txt
     action: Modify
     purpose: >-
       Minimal relock: pip-compile --strip-extras --upgrade-package mcp with the existing lock as preference. Only the mcp closure
       moves (drops httpx, httpcore, httpx-sse, pydantic-settings, python-dotenv; adds httpx2, httpcore2, mcp-types,
-      opentelemetry-api, truststore; mcp 1.30.0 -> 2.3.0; jsonschema annotation gains requirements.in). Every other pin,
-      duckdb included (Decision 99), byte-identical. The `--no-index` header command line kept byte-identical to Dependabot's.
+      opentelemetry-api, truststore; mcp 1.30.0 -> 2.3.0; jsonschema's annotation gains -r requirements.in). Every other pin,
+      duckdb included (Decision 99), byte-identical. The header command line kept byte-identical to main's (Dependabot's).
   - file: requirements-dev.txt
     action: Modify
     purpose: 'Recompile against the new requirements.txt constraint (annotation-only changes expected; litellm stays 1.106.2; header line kept byte-identical).'
@@ -64,14 +82,23 @@ scope:
     purpose: >-
       Replace test_mcp_declaration_rejects_major_two (vacuous once the floor is 2.3.0) with test_mcp_declaration_rejects_the_next_major:
       Version(f"{pin.major + 1}.0.0") not in the mcp declaration's specifier, pin read from the compiled requirements.txt (same
-      independent oracle as test_mcp_declaration_admits_the_compiled_pin), parametrized over requirements.in and requirements-fast.txt.
-      No Version("1.x.y") literal (graduated shard mcp-declaration-test-has-no-pinned-1x-literal). Replace-only: the file is
-      NEAR_CAP (472 of 500 SLOC); the jsonschema direct-requirement test lives in tests/test_agent_sdk_mcp_server.py instead.
+      independent oracle as test_mcp_declaration_admits_the_compiled_pin), parametrized over requirements.in and
+      requirements-fast.txt. No Version("1.x.y") literal (graduated shard mcp-declaration-test-has-no-pinned-1x-literal).
+      Replace-only: the file is NEAR_CAP (472 of 500 SLOC).
   - file: config/agent/verification_registry/entries/mcp-declaration-admits-compiled-pin.yaml
+    action: Delete
+    purpose: >-
+      Retire by git mv to config/agent/verification_registry/entries/deprecated/ (Decision 244 cl.5 retirement path; its pinned
+      node test_mcp_declaration_rejects_major_two no longer exists). Operator-confirmed (Decision 235 cl.1). Its replacement
+      record is VP step 4's graduation, check_id mcp-declaration-caps-next-major.
+  - file: config/agent/verification_registry/entries/deprecated/mcp-declaration-admits-compiled-pin.yaml
+    action: Create
+    purpose: The git mv destination of the retired record, content unchanged.
+  - file: tests/persona_contracts/test_schema_metaschema.py
     action: Modify
     purpose: >-
-      Re-point the second node id from ...::test_mcp_declaration_rejects_major_two to ...::test_mcp_declaration_rejects_the_next_major
-      (operator-confirmed retirement of the literal "2.0.0 rejected" claim, Decision 235 cl.1 / Decision 244 cl.5).
+      The importorskip reason "jsonschema is a transitive pin (via mcp and litellm), not a direct requirement" becomes false;
+      reword it to "env: jsonschema absent (a direct requirement since rec-3795)". The guard itself stays.
 bundled_recommendations:
   - rec-3795
   - rec-2871
@@ -81,13 +108,21 @@ acceptance_criteria:
   - >-
     rec-3795's acceptance holds: bin/venv-python -m pytest tests/test_agent_sdk_mcp_server.py::test_tool_round_trip_on_mcp_2x -q
   - >-
-    rec-2871's acceptance (as updated at planning time) holds: grep -q 'structured_content' scripts/agent_sdk/mcp_server.py && bin/venv-python -m pytest tests/test_agent_sdk_mcp_server.py::test_call_tool_error_carries_error_type -q
-  - requirements.txt pins mcp==2.3.0 (or a later 2.x the build must justify); requirements.in and requirements-fast.txt declare mcp>=2.3.0,<3 and jsonschema>=4.20.0; no pin outside the mcp closure changed.
-  - Every existing test in tests/test_agent_sdk_mcp_server.py and tests/test_import_governance.py passes under mcp 2.x with its node id unchanged, except the one operator-confirmed rename.
-  - A non-AgentToolError exception's text never reaches the client; an AgentToolError's does, with its class as error_type.
+    rec-2871's acceptance (updated 2026-11-11 to the 2.x spelling) holds: grep -q 'structured_content'
+    scripts/agent_sdk/mcp_server.py && bin/venv-python -m pytest tests/test_agent_sdk_mcp_server.py::test_call_tool_error_carries_error_type -q
+  - requirements.txt pins mcp 2.x (2.3.0 unless the build justifies a later 2.x); requirements.in and requirements-fast.txt declare mcp>=2.3.0,<3 and jsonschema>=4.20.0; no pin outside the mcp closure changed.
+  - Every pre-existing test in tests/test_agent_sdk_mcp_server.py and tests/test_import_governance.py passes under mcp 2.x with its node id unchanged, except the one operator-confirmed replacement.
+  - A non-AgentToolError exception's text never reaches the client; an AgentToolError's does, with its class name as error_type.
   - A requirements.txt-only diff selects tests/test_agent_sdk_mcp_server.py in --pre affected-set selection (Decision 135).
-  - Live stdio wire output (tools/list, a recs_by_ids call, an unknown tool, a bad-arguments call) is identical to mcp 1.30's across protocol versions 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25, except the dropped empty experimental capability.
+  - >-
+    Live stdio parity against origin/main on mcp 1.x, at protocol versions 2024-11-05, 2025-03-26, 2025-06-18 and 2025-11-25,
+    over initialize, tools/list, a successful recs_by_ids call, an unknown tool and a bad-arguments call: identical full JSON
+    except exactly two declared differences -- (1) 2.x no longer advertises the empty capabilities.experimental; (2) every error
+    result carries structuredContent with a string error_type (rec-2871). Error texts, isError flags, tools/list and the success
+    payload are identical. (Class-only text for unexpected exceptions is a third, intended change no live call can trigger; the
+    hermetic test proves it.)
   - litellm 1.106.2 completion and acompletion with tools= work WITHOUT _skip_mcp_handler, and import litellm.experimental_mcp_client succeeds.
+  - The retired record sits in entries/deprecated/ and a new graduated record mcp-declaration-caps-next-major pins the two pin-guard nodes.
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -100,54 +135,81 @@ verification_plan:
     graduation_check_id: mcp-server-round-trip-on-mcp-2x
   - step: 2
     phase: pre-deploy
-    action: rec-2871 acceptance -- typed errors carry error_type; unexpected exception text withheld.
-    command: grep -q 'structured_content' scripts/agent_sdk/mcp_server.py && bin/venv-python -m pytest tests/test_agent_sdk_mcp_server.py::test_call_tool_error_carries_error_type tests/test_agent_sdk_mcp_server.py::test_unexpected_exception_text_never_reaches_the_client -q
-    expected: 2 passed.
+    action: rec-2871 acceptance and the other new server behaviours -- typed error payload, withheld unexpected exception text, input validation, round trip.
+    command: >-
+      grep -q 'structured_content' scripts/agent_sdk/mcp_server.py && bin/venv-python -m pytest
+      tests/test_agent_sdk_mcp_server.py::test_call_tool_error_carries_error_type
+      tests/test_agent_sdk_mcp_server.py::test_unexpected_exception_text_never_reaches_the_client
+      tests/test_agent_sdk_mcp_server.py::test_input_validation_error_is_an_error_result
+      tests/test_agent_sdk_mcp_server.py::test_tool_round_trip_on_mcp_2x -q
+    expected: 4 passed.
     fix_if: Fix _call_tool_result; never put exception text in the non-AgentToolError branch.
     hermetic: true
     graduation: graduate
     graduation_check_id: mcp-server-typed-error-payload
   - step: 3
     phase: pre-deploy
-    action: Whole server suite under mcp 2.x, existing node ids intact, 100% coverage of mcp_server.py (Decision 159).
-    command: bin/venv-python -m pytest tests/test_agent_sdk_mcp_server.py -q -m "not integration" --cov=scripts.agent_sdk.mcp_server --cov-report=term-missing --cov-fail-under=100
+    action: Whole server suite under mcp 2.x, pre-existing node ids intact, 100% coverage of mcp_server.py (Decision 159).
+    command: >-
+      bin/venv-python -m pytest tests/test_agent_sdk_mcp_server.py -q -m "not integration"
+      --cov=scripts.agent_sdk.mcp_server --cov-report=term-missing --cov-fail-under=100
     expected: All pass; coverage 100%.
-    fix_if: A missing class/test name breaks a registry pin -- restore the name. Uncovered lines -- add a test, never a pragma.
+    fix_if: A missing class/test name breaks a graduated shard -- restore the name. Uncovered lines -- add a test, never a pragma.
     hermetic: false
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: >-
+      Duplicates graduated shard mcp-server-hermetic-coverage plus the repo's standing 100% coverage gate (Decision 159).
+      Stays hermetic false under vp-red-before hermetic_authoring carve-out (v) -- a whole-file re-run of a test file this
+      plan's scope modifies -- and pytest-cov is absent from requirements-fast.txt, so a venv-less replay could not run it.
   - step: 4
     phase: pre-deploy
-    action: Pin guards -- the declaration admits the compiled pin and rejects the next major; jsonschema is a direct requirement.
-    command: bin/venv-python -m pytest tests/test_import_governance.py::TestCheckLockfileSync tests/test_agent_sdk_mcp_server.py::test_jsonschema_is_a_direct_requirement -q
-    expected: All pass.
+    action: Pin guards -- the mcp declaration admits the compiled pin and rejects the next major, in both requirements.in and requirements-fast.txt.
+    command: >-
+      bin/venv-python -m pytest tests/test_import_governance.py::TestCheckLockfileSync::test_mcp_declaration_admits_the_compiled_pin
+      tests/test_import_governance.py::TestCheckLockfileSync::test_mcp_declaration_rejects_the_next_major -q
+    expected: 4 passed (2 nodes x 2 files).
     fix_if: Fix the declaration or the lock, never the oracle.
     hermetic: true
-    graduation: waive
-    graduation_waiver_reason: mcp-declaration-admits-compiled-pin already graduates these nodes (re-pointed in this plan); a second row would duplicate it.
+    graduation: graduate
+    graduation_check_id: mcp-declaration-caps-next-major
   - step: 5
+    phase: pre-deploy
+    action: jsonschema is a direct requirement, and a requirements.txt-only diff selects the server tests (Decision 135 data edge).
+    command: >-
+      bin/venv-python -m pytest tests/test_agent_sdk_mcp_server.py::test_jsonschema_is_a_direct_requirement
+      tests/checks/deps/affected_tests/test_derivation.py::test_requirements_lock_selects_mcp_server_tests_through_data_edge -q
+    expected: 2 passed.
+    fix_if: >-
+      Selection test red -- keep the quoted requirements.txt literal in test_tool_round_trip_on_mcp_2x (it is the edge). Direct-requirement
+      test red -- declare jsonschema in requirements.in and relock.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: Both tests live in files every tier already runs (the test suite re-runs them, Decision 244 cl.1); a registry row would re-run two nodes of them.
+  - step: 6
     phase: pre-deploy
     action: Relock is minimal -- only the mcp closure moved; duckdb lockstep intact.
     command: >-
-      git diff origin/main -U0 -- requirements.txt requirements-dev.txt | grep -E '^[-+][a-z0-9]' | sed -E 's/^[-+]([A-Za-z0-9_.-]+).*/\1/' | sort -u | tr '\n' ' ' ; echo; bin/venv-python -m scripts.validate --check validate_ducklake_version_lockstep
-    expected: The changed-name set is a subset of {mcp, mcp-types, httpx, httpx2, httpcore, httpcore2, httpx-sse, pydantic-settings, python-dotenv, opentelemetry-api, truststore, jsonschema}; the lockstep check passes.
-    fix_if: Any other name moved -- re-run the relock with --upgrade-package mcp only, from the main lock.
+      git diff origin/main -U0 -- requirements.txt requirements-dev.txt | grep -E '^[-+][a-z0-9]' | sed -E 's/^[-+]([A-Za-z0-9_.-]+).*/\1/'
+      | sort -u | tr '\n' ' '; echo; bin/venv-python -m scripts.validate --check validate_ducklake_version_lockstep
+    expected: >-
+      The printed name set is a subset of mcp, mcp-types, httpx, httpx2, httpcore, httpcore2, httpx-sse, pydantic-settings,
+      python-dotenv, opentelemetry-api, truststore, jsonschema; the lockstep check passes.
+    fix_if: Any other name moved -- re-run the relock with --upgrade-package mcp only, starting from main's lock.
     hermetic: false
     graduation: not-applicable
-  - step: 6
-    phase: pre-deploy
-    action: Decision 135 data edge -- a requirements.txt-only diff selects the MCP server tests.
-    command: bin/venv-python -m pytest tests/test_agent_sdk_mcp_server.py::test_requirements_only_diff_selects_this_file -q
-    expected: 1 passed.
-    fix_if: Keep the quoted requirements.txt literal in test_tool_round_trip_on_mcp_2x.
-    hermetic: true
-    graduation: waive
-    graduation_waiver_reason: The test lives in the same file steps 1-2 graduate and runs in every tier that selects the file.
   - step: 7
     phase: pre-deploy
-    action: Live stdio wire parity against main (credentials; agent_platform). Run the probe against the built branch and against a main worktree on mcp 1.30 and diff.
-    command: AWS_PROFILE=agent_platform bin/venv-python /mnt/project-files/rec-3795-plan/evidence/stdio_probe.py "$(pwd)/.venv/bin/python" "$(pwd)"
-    expected: For each of 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25 the line reads tools N call_isError False rows 1 bad_isError True err None, N equal to main's.
-    fix_if: A JSON-RPC error instead of isError means an exception escaped _call_tool_result.
+    action: >-
+      Live stdio wire parity, branch vs origin/main on mcp 1.x. The script builds a throwaway origin/main worktree and uv venv
+      outside the checkout, captures full JSON for five requests at four protocol versions from both servers, and diffs them
+      allowing only the two declared differences (acceptance criterion 7). Precondition: this project's shared folder is
+      mounted (/mnt/project-files/rec-3795-plan/evidence/ holds wire_parity.sh, wire_probe.py, wire_compare.py; recorded
+      prototype run in wire-main-mcp1.json and wire-prototype-mcp2.json).
+    command: AWS_PROFILE=agent_platform bash /mnt/project-files/rec-3795-plan/evidence/wire_parity.sh
+    expected: Prints "wire parity OK - 4 protocol versions identical modulo the two declared differences" and exits 0.
+    fix_if: >-
+      A JSON-RPC error instead of isError means an exception escaped _call_tool_result; a text or payload difference is an
+      undeclared wire change -- fix the port, never widen wire_compare.py's allowances.
     hermetic: false
     graduation: not-applicable
   - step: 8
@@ -160,9 +222,9 @@ verification_plan:
     graduation: not-applicable
   - step: 9
     phase: pre-deploy
-    action: litellm tool calls without the private flag, and the MCP bridge import (mock only, no network model call).
+    action: litellm tool calls without the private flag, and the MCP bridge import (mock only, no network model call). Same mount precondition as step 7.
     command: bin/venv-python -I /mnt/project-files/rec-3795-plan/evidence/litellm_probe.py
-    expected: 'Prints flag False sync OK, flag False async OK, flag True sync OK, flag True async OK and experimental_mcp_client import OK.'
+    expected: Prints flag False sync OK, flag False async OK, flag True sync OK, flag True async OK and experimental_mcp_client import OK.
     fix_if: An ImportError means mcp 1.x is still installed -- bash bin/sync-deps.sh.
     hermetic: false
     graduation: not-applicable
@@ -170,15 +232,21 @@ verification_plan:
     phase: post-deploy
     action: Fresh session after merge loads the new lock and lists the ducklake-reads tools.
     command: bin/venv-python -c "import importlib.metadata as m; print(m.version('mcp'))" && bin/venv-python -m scripts.agent_sdk.mcp_server < /dev/null; echo exit=$?
-    expected: Prints a 2.x version; the server starts and exits cleanly on EOF; in that session the mcp__ducklake-reads__ tools are listed.
+    expected: Prints a 2.x version; the server starts and exits cleanly on EOF; that session lists the mcp__ducklake-reads__ tools.
     fix_if: A 1.x version means the sync hook failed (it is advisory and exits 0) -- run bash bin/sync-deps.sh and restart.
     hermetic: false
   - step: 11
     phase: post-deploy
-    action: Dependabot's stored "ignore this major version" on mcp is lifted (operator-approved comment on one open Dependabot pip PR, if one exists).
-    command: echo "comment '@dependabot show mcp ignore conditions' on an open Dependabot pip PR; if a 2.x ignore remains, comment '@dependabot unignore mcp'"
-    expected: No mcp ignore condition remains, or none can be checked because no Dependabot pip PR is open (recorded as unproven).
-    fix_if: An ignore condition remains -- the unignore comment, with the operator's word.
+    action: >-
+      Dependabot's stored "ignore this major version" on mcp is lifted. Operator-approved 2026-11-11: comment
+      "@dependabot show mcp ignore conditions" on one open Dependabot pip PR, and "@dependabot unignore mcp" only if a 2.x
+      ignore remains.
+    command: >-
+      bin/venv-python -c "print('list open PRs by dependabot[bot] touching requirements*.txt via mcp__github__list_pull_requests; comment on one; read back the reply')"
+    expected: >-
+      The report names the comment id and Dependabot's reply showing no mcp ignore condition (or the unignore comment id), or
+      records UNPROVEN because no Dependabot pip PR was open.
+    fix_if: An ignore condition remains -- post the unignore comment (covered by the same approval) and read the reply back.
     hermetic: false
   - step: 12
     phase: post-deploy
@@ -186,86 +254,101 @@ verification_plan:
     command: >-
       bin/venv-python -c "from src.common import ducklake_reader_client as rc; rows,_=rc.fetch_recs_by_ids(rc.make_reader(),['rec-3795','rec-2871']); print(sorted((r['id'], r['status']) for r in rows))"
     expected: Both closed.
-    fix_if: 'The squash commit body lacks Resolves: rec-3795, rec-2871.'
+    fix_if: The squash commit body lacks the Resolves trailer naming rec-3795 and rec-2871.
     hermetic: false
 test_obligations:
   - source: scripts/agent_sdk/mcp_server.py
-    behavior: Tool round trip over the mcp 2.x API, typed error payload, withheld unexpected exception text, input validation.
-    verification_step: 1
-    test_selector: tests/test_agent_sdk_mcp_server.py::test_tool_round_trip_on_mcp_2x
-    red_green_expectation: red before (target absent; and the main server raises AttributeError list_tools under mcp 2.x), green after
+    behavior: The 2.x port -- round trip, typed error payload, withheld unexpected exception text, input validation.
+    verification_step: 2
+    command: >-
+      bin/venv-python -m pytest
+      tests/test_agent_sdk_mcp_server.py::test_call_tool_error_carries_error_type
+      tests/test_agent_sdk_mcp_server.py::test_unexpected_exception_text_never_reaches_the_client
+      tests/test_agent_sdk_mcp_server.py::test_input_validation_error_is_an_error_result
+      tests/test_agent_sdk_mcp_server.py::test_tool_round_trip_on_mcp_2x -q
+    red_green_expectation: red before (main's decorator server raises AttributeError list_tools under mcp 2.x; the tests are absent on main), green after
   - source: tests/test_agent_sdk_mcp_server.py
     behavior: The harness drives the server only through the public mcp 2.x Client.
     verification_step: 3
-    command: bin/venv-python -m pytest tests/test_agent_sdk_mcp_server.py -q -m "not integration"
-    red_green_expectation: red before (6 fail under mcp 2.x on main), green after
+    test_selector: tests/test_agent_sdk_mcp_server.py
+    red_green_expectation: red before (6 pre-existing tests fail under mcp 2.x on main's harness), green after
+  - source: tests/checks/deps/affected_tests/test_derivation.py
+    behavior: A requirements.txt-only diff selects the MCP server tests.
+    verification_step: 5
+    test_selector: tests/checks/deps/affected_tests/test_derivation.py::test_requirements_lock_selects_mcp_server_tests_through_data_edge
+    red_green_expectation: red before (the requirements.txt literal is absent from the server test file on main, so it is not selected), green after
   - source: requirements.in
-    behavior: mcp declared >=2.3.0,<3 and jsonschema declared.
-    verification_step: 4
-    test_selector: tests/test_import_governance.py::TestCheckLockfileSync
-    red_green_expectation: red before (the next-major and jsonschema tests are absent), green after
+    behavior: mcp declared >=2.3.0,<3 and jsonschema declared directly.
+    verification_step: 5
+    test_selector: tests/test_agent_sdk_mcp_server.py::test_jsonschema_is_a_direct_requirement
+    red_green_expectation: red before (jsonschema undeclared), green after
   - source: requirements-fast.txt
-    behavior: Same floors as requirements.in.
+    behavior: The mcp floor matches requirements.in and caps the next major.
     verification_step: 4
-    test_selector: tests/test_import_governance.py::TestCheckLockfileSync
-    red_green_expectation: red before, green after
+    test_selector: tests/test_import_governance.py::TestCheckLockfileSync::test_mcp_declaration_rejects_the_next_major
+    red_green_expectation: red before (node absent), green after
   - source: requirements.txt
-    behavior: Lock pins mcp 2.x with jsonschema as a direct requirement.
+    behavior: The lock pins mcp 2.x and the declaration admits it.
     verification_step: 4
-    test_selector: tests/test_import_governance.py::TestCheckLockfileSync
-    red_green_expectation: red before (admits-the-compiled-pin fails for a 2.3.0 floor against the 1.30 lock), green after
+    test_selector: tests/test_import_governance.py::TestCheckLockfileSync::test_mcp_declaration_admits_the_compiled_pin
+    red_green_expectation: red before (a 2.3.0 floor against main's 1.30 lock fails), green after
   - source: requirements-dev.txt
-    behavior: Dev lock compiles against the new runtime constraint.
+    behavior: The dev lock compiles against the new runtime constraint and litellm tool calls work without the flag.
     verification_step: 9
     command: bin/venv-python -I /mnt/project-files/rec-3795-plan/evidence/litellm_probe.py
     waiver_reason: Generated lock with annotation-only changes; litellm behaviour is proven by step 9's probe, not a unit test.
   - source: tests/test_import_governance.py
-    behavior: Next-major guard cannot go vacuous; jsonschema direct-requirement guard.
-    verification_step: 4
-    test_selector: tests/test_import_governance.py::TestCheckLockfileSync
-    red_green_expectation: red before, green after
-  - source: config/agent/verification_registry/entries/mcp-declaration-admits-compiled-pin.yaml
-    behavior: Registry pin resolves to the renamed node.
+    behavior: The next-major guard is derived from the lock and cannot go vacuous.
     verification_step: 4
     test_selector: tests/test_import_governance.py::TestCheckLockfileSync::test_mcp_declaration_rejects_the_next_major
-    waiver_reason: The full tier's graduated-record resolution check (Decision 244 cl.1) is the guard; a unit test would restate it.
+    red_green_expectation: red before (node absent), green after
+  - source: tests/persona_contracts/test_schema_metaschema.py
+    behavior: Reason-string reword only.
+    verification_step: 3
+    test_selector: tests/test_agent_sdk_mcp_server.py
+    waiver_reason: A skip-reason string edit changes no behaviour; the file's own tests run unchanged in every tier.
 constraints:
-  - No pin outside the mcp closure moves (Decision 99 duckdb lockstep); relock with --upgrade-package mcp from the main lock.
-  - Keep every existing test class and node name in tests/test_agent_sdk_mcp_server.py (verification-registry pins, Decision 244).
+  - No pin outside the mcp closure moves (Decision 99 duckdb lockstep); relock with --upgrade-package mcp from main's lock.
+  - Keep every pre-existing test class and node name in tests/test_agent_sdk_mcp_server.py (graduated shards, Decision 244).
   - No exception text other than the AgentToolError family's reaches a client (Decision 101).
-  - Never loosen a test to get green (Decision 235); the only renamed test is the operator-confirmed one.
-  - tests/test_agent_sdk_mcp_server.py stays under 500 SLOC (Decision 128); split, never raise, if it would cross.
-  - mypy clean on mcp_server.py (Decision 161 ratchet has no baseline entry for it).
-  - The live tests (steps 7, 8) run by hand with agent_platform; never in a CI tier.
+  - Never loosen a test to get green (Decision 235); the only replaced test is the operator-confirmed one.
+  - Test files stay under 500 SLOC (Decision 128); split into a mirror package, never raise, if one would cross.
+  - mypy clean on mcp_server.py (the Decision 161 ratchet has no baseline entry for it).
+  - The live checks (steps 7, 8, 9) run by hand with agent_platform; never in a CI tier.
   - No rescue agents or workaround loops (Decision 55).
 context:
   - "Decision-scout r1 FLAGS_FOUND (WARN 244 registry pin; NOTE 101 error text; SPIRIT 135 requirements-only diffs) -- all adopted. Decisions triaged: 205 of 205. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.1 3/5. CITE: 55, 81, 84, 99, 212, 235."
   - "Related, no change needed: 76, 128, 131, 143, 159, 161, 215, 239. The LiteLLM transport plan (PLAN-llm-client-litellm-transport, unwritten) owns removing its _skip_mcp_handler workaround: amend before its build if this merges first, else a follow-on rec."
-  - "Prototype evidence (throwaway worktree, 2026-11-11): /mnt/project-files/rec-3795-plan/evidence/ -- prototype.diff, relock.diff, wire-mcp1.json vs wire-mcp2.json (identical but the empty experimental capability), stdio_probe.py, litellm_probe.py. Advisor: advisor-brief/ADVICE.md."
-  - "mcp 2.x gotchas: pydantic attrs are snake_case (is_error, structured_content, input_schema), constructors accept camelCase aliases, wire stays camelCase; a handler exception becomes JSON-RPC -32603 not an isError result, so every path must return a CallToolResult; 2.x no longer validates input against inputSchema."
-  - "pip-compile --no-index cannot resolve in a CC-web container: run without it, then restore the header's command line byte-identical to Dependabot's. Sync this session's venv after the relock (bash bin/sync-deps.sh) before running tests."
-  - "Rollout: session_start_sync_deps is advisory and exits 0 on failure; new code on mcp 1.30 fails in create_server, so a stale venv silently loses the ducklake-reads tools (step 10). Sessions already running are unaffected until restart."
-  - "Dependabot PR #980 was closed with '@dependabot ignore this major version'; GitHub documents that as lifted once the repo upgrades to that major itself; step 11 checks, operator-approved comment."
-  - "Graduated shards naming the two test files, all KEPT unchanged (node ids preserved): agent-verb-server-fails-loud-on-describe-failure, agent-verb-surface-is-read-only, agent-verb-tools-carry-nonempty-description, agent-verb-tools-derived-from-describe, agent-verb-typed-error-mapping, lockfile-sync-commented-absurd-bump-fails, lockfile-sync-hash-without-whitespace-not-comment, lockfile-sync-live-declarations-all-parsed, lockfile-sync-unparseable-declaration-fails, mcp-declaration-test-has-no-pinned-1x-literal, mcp-lock-major-compatibility, mcp-server-hermetic-coverage, preflight-summary-unavailable-and-agent-facing, telemetry-read-clients-use-the-route. Only mcp-declaration-admits-compiled-pin changes (scope)."
-  - "PR CI's fast tier installs requirements-fast.txt (a range), so --pre runs the latest 2.x while the full tier tests the lock."
-  - "Related-work check: red_overlap verdict clear (no reds, 2026-11-11). Operator sign-off 2026-11-11 covers confirmation A (rename + registry re-point, Decision 235) and B (Dependabot ignore-conditions comment, step 11)."
+  - "Why lowlevel, not the 2.x high-level server: the high-level server registers per-function tools with static signatures; this server's schemas are derived at runtime from describe() (Decision 81 cl.2)."
+  - "Evidence (throwaway worktree, 2026-11-11): /mnt/project-files/rec-3795-plan/evidence/ -- prototype.diff (matches this plan's error payload), relock.diff (taken before jsonschema was declared), wire_parity.sh run on the prototype passed. Advisor: advisor-brief/ADVICE.md. Critique: CRITIQUE-r1.md."
+  - "mcp 2.x gotchas: pydantic attrs are snake_case (is_error, structured_content, input_schema), constructors accept camelCase aliases, wire stays camelCase; 2.x no longer validates input against inputSchema; mcp.Client(server) connects in-process."
+  - "pip-compile --no-index cannot resolve in a CC-web container: run without it, then restore the header's command line byte-identical to main's. Sync the venv after the relock (bash bin/sync-deps.sh) before running tests."
+  - "Rollout: session_start_sync_deps is advisory and exits 0 on failure; new code on mcp 1.x fails in create_server, so a stale venv silently loses the ducklake-reads tools (step 10). Running sessions are unaffected until restart."
+  - "Dependabot PR #980 was closed with '@dependabot ignore this major version'; GitHub documents that as lifted once the repo upgrades to that major; step 11 checks."
+  - "Graduated shards naming scope test files, all KEPT unchanged (node ids preserved): agent-verb-server-fails-loud-on-describe-failure, agent-verb-surface-is-read-only, agent-verb-tools-carry-nonempty-description, agent-verb-tools-derived-from-describe, agent-verb-typed-error-mapping, lockfile-sync-commented-absurd-bump-fails, lockfile-sync-hash-without-whitespace-not-comment, lockfile-sync-live-declarations-all-parsed, lockfile-sync-unparseable-declaration-fails, mcp-declaration-test-has-no-pinned-1x-literal, mcp-lock-major-compatibility, mcp-server-hermetic-coverage, preflight-summary-unavailable-and-agent-facing, telemetry-read-clients-use-the-route, setup-cloud-affected-data-edge. Only mcp-declaration-admits-compiled-pin is retired (scope)."
+  - "PR CI's fast tier installs requirements-fast.txt (a range), so --pre runs the latest 2.x while the full tier tests the lock; an upstream 2.x minor can red PR CI with no repo change."
+  - "Related-work check: red_overlap verdict clear (no reds, 2026-11-11). Operator sign-off 2026-11-11 covers confirmation A (replace the major-two guard and retire its record, Decision 235) and B (step 11's Dependabot comments)."
   - "Not bundled: rec-3821 (fast-tier floor agreement check -- separate concern, seven registration surfaces); rec-4280 (future repo-tools MCP server, to be written against 2.x)."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 10}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
   - only the plan-cited decision sections
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
+  - /mnt/project-files/rec-3795-plan/evidence/ is mounted (steps 7, 9)
 execution_steps:
   - 'Pre: main''s requirements.txt still pins mcp==1.30.0 and no open PR touches the scope files. Post: none.'
-  - 'requirements.in and requirements-fast.txt: mcp>=2.3.0,<3 and jsonschema>=4.20.0.'
-  - 'Size relief (Decision 128): measure tests/test_import_governance.py and tests/test_agent_sdk_mcp_server.py SLOC against main after editing; if either crosses 500, split it into a mirror test package (Decision 131), never raise a budget.'
-  - 'Relock: .venv/bin/pip-compile --output-file=requirements.txt --strip-extras --upgrade-package mcp requirements.in, then .venv/bin/pip-compile --output-file=requirements-dev.txt --strip-extras requirements-dev.in; restore both header command lines to the main text byte for byte; bash bin/sync-deps.sh. Post: step 5 passes.'
+  - 'requirements.in and requirements-fast.txt: mcp>=2.3.0,<3 and jsonschema>=4.20.0; requirements-fast.txt header list gains jsonschema.'
+  - 'Relock: .venv/bin/pip-compile --output-file=requirements.txt --strip-extras --upgrade-package mcp requirements.in, then .venv/bin/pip-compile --output-file=requirements-dev.txt --strip-extras requirements-dev.in; restore both header command lines to main''s text byte for byte; bash bin/sync-deps.sh. Post: step 6 passes.'
   - scripts/agent_sdk/mcp_server.py -- the 2.x port and _call_tool_result per the scope row.
-  - tests/test_agent_sdk_mcp_server.py -- the Client harness, snake_case reads and the five new module-level tests per the scope row.
-  - tests/test_import_governance.py and the registry entry -- the next-major and jsonschema tests; re-point the entry.
-  - Execute Verification Plan -- run each pre-deploy step; loop until pass; stop and RCA on a step that cannot pass (Decision 55).
-  - 'Report: what was implemented, verification results, the stdio parity lines, and the Resolves: rec-3795, rec-2871 trailer.'
+  - tests/test_agent_sdk_mcp_server.py, tests/checks/deps/affected_tests/test_derivation.py, tests/test_import_governance.py, tests/persona_contracts/test_schema_metaschema.py -- per their scope rows.
+  - 'Registry: git mv config/agent/verification_registry/entries/mcp-declaration-admits-compiled-pin.yaml config/agent/verification_registry/entries/deprecated/; graduate VP steps 1, 2 and 4 with their graduation_check_id values.'
+  - 'Size relief (Decision 128): measure the four modified test files'' SLOC after editing; if any crosses 500, split it into a mirror test package (Decision 131), never raise a budget.'
+  - Run VP steps 1-9 until green; on unrecoverable failure stop and RCA (Decision 55).
+  - Code review via a fresh code-review subagent; fix blocking findings and rerun VP steps 1-9.
+  - 'Commit (flip implementation_declared to true; carry "Resolves: rec-3795, rec-2871" as its own paragraph), rebase on origin/main, run the full tier on the committed clean HEAD and confirm it with bin/venv-python -m scripts.checks.validation_result --verify-head (a blocking pre-handoff step, never a CI-only handoff), push, open the build PR, drive CI green, squash-merge with the Resolves trailer in the commit body.'
+  - 'Report, as separate facts: what was implemented; VP results including the wire_parity.sh line and the litellm probe lines; the full-tier exit plus validation_result --verify-head for the pushed HEAD; structured postflight evidence (scripts.session.postflight --evidence); the push, PR number, CI result and merge SHA; then run post-deploy steps 10-12 and report each read-back.'
 rollback: Forward-fix only. Reverting the PR restores mcp 1.30 and the decorator server; sessions pick the old lock up on their next start.
