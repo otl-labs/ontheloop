@@ -5,7 +5,11 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from scripts.persona_contracts import check_schema_dialect, load_index, parse_capability
+from scripts.persona_contracts.schema import PersonaRow
 
 ROOT = Path(__file__).resolve().parents[2]
 KEYWORDS = ["type", "properties", "required", "additionalProperties", "items", "enum", "description"]
@@ -60,3 +64,24 @@ def test_dialect_recurses_into_properties_and_items() -> None:
 def test_parse_capability_splits_ids_and_parameters() -> None:
     assert parse_capability("read_input:diff") == ("read_input", "diff")
     assert parse_capability("read_repo") == ("read_repo", None)
+
+
+def _row(**extra: object) -> dict[str, object]:
+    return {
+        "persona": "p",
+        "kind": "verdict",
+        "contract": "c",
+        "rendered_prompt": "r",
+        "implementation": {"status": "pending"},
+        **extra,
+    }
+
+
+def test_persona_row_registry_key_is_a_string() -> None:
+    assert PersonaRow.model_validate(_row(registry_key="code-review")).registry_key == "code-review"
+    with pytest.raises(ValidationError):
+        PersonaRow.model_validate(_row(registry_key=5))
+
+
+def test_persona_row_registry_key_may_be_absent() -> None:
+    assert PersonaRow.model_validate(_row()).registry_key is None
