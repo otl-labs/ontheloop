@@ -461,3 +461,10 @@ def test_setup_cloud_script_selects_contract_test_through_data_edge() -> None:
 
     assert "tests/test_setup_cloud_env.py" in result["selected"]
     assert result["manifest"]["provenance"]["tests/test_setup_cloud_env.py"] == "data_edge"
+
+
+def test_requirements_lock_selects_mcp_server_tests_through_data_edge() -> None:
+    result = at.derive_affected_tests([("M", "requirements.txt")])
+
+    assert "tests/test_agent_sdk_mcp_server.py" in result["selected"]
+    assert result["manifest"]["provenance"]["tests/test_agent_sdk_mcp_server.py"] == "data_edge"
