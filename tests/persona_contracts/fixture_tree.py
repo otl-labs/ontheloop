@@ -20,6 +20,7 @@ PERSONA = "fixture_verdict"
 CONTRACT_REL = f"docs/contracts/personas/{PERSONA}.yaml"
 RENDERED_REL = f"docs/contracts/personas/rendered/{PERSONA}.txt"
 INDEX_REL = "docs/contracts/executor-personas.yaml"
+REGISTRY_REL = "config/agent/data_quality/source_registry.yaml"
 SKILL_REL = ".claude/skills/fixture-verdict/SKILL.md"
 VERDICT_LINE = "Verdict: PROCEED or REVISE"
 VERDICT_RULE = "Return REVISE when any blocking finding remains."
@@ -29,6 +30,7 @@ _COPIED = (
     "docs/contracts/contract-population.yaml",
     "config/agent/executor/capabilities.yaml",
     "src/common/ducklake_named_reads.py",
+    REGISTRY_REL,
 )
 _ROADMAP = {
     "tier_items": [
@@ -120,6 +122,11 @@ def build_tree(tmp_path: Path) -> Path:
         "personas:\n  - persona: fixture_verdict\n    kind: verdict\n"
         f"    contract: {CONTRACT_REL}\n    rendered_prompt: {RENDERED_REL}\n"
         '    implementation: {status: pending, owning_item: "T4.10a:c5"}\n'
+        "    registry_key: fixture-verdict\n"
+    )
+    registry_file = root / REGISTRY_REL
+    registry_file.write_text(
+        registry_file.read_text(encoding="utf-8").rstrip("\n") + "\n  - canonical_id: fixture-verdict\n", encoding="utf-8"
     )
     index = root / INDEX_REL
     head, sep, _ = index.read_text(encoding="utf-8").rpartition("\npersonas:")
@@ -250,6 +257,33 @@ def _contract_deleted(root: Path) -> None:
     (root / CONTRACT_REL).unlink()
 
 
+def _key_unregistered(root: Path) -> None:
+    edit_text(root, INDEX_REL, "registry_key: fixture-verdict", "registry_key: not-registered")
+
+
+def _key_tether_mismatch(root: Path) -> None:
+    edit_text(root, INDEX_REL, "registry_key: fixture-verdict", "registry_key: code-review")
+
+
+def _key_duplicate(root: Path) -> None:
+    path = root / INDEX_REL
+    row = (
+        "  - persona: fixture_twin\n    kind: verdict\n"
+        f"    contract: {CONTRACT_REL}\n    rendered_prompt: {RENDERED_REL}\n"
+        '    implementation: {status: pending, owning_item: "T4.10a:c5"}\n'
+        "    registry_key: fixture-verdict\n"
+    )
+    path.write_text(path.read_text(encoding="utf-8").rstrip("\n") + "\n" + row, encoding="utf-8")
+
+
+def _registry_unreadable(root: Path) -> None:
+    (root / REGISTRY_REL).write_text("source: nothing\n", encoding="utf-8")
+
+
+def _registry_entry_not_mapping(root: Path) -> None:
+    (root / REGISTRY_REL).write_text("entries: [x]\n", encoding="utf-8")
+
+
 MUTATORS: dict[str, Callable[[Path], None]] = {
     "contract_file_deleted": _contract_deleted,
     "parameter_missing_on_read_input": _set("capabilities", ["read_input"]),
@@ -291,6 +325,11 @@ MUTATORS: dict[str, Callable[[Path], None]] = {
     "write_capability_personas": _vocab_write_personas,
     "warehouse_server": _vocab_server,
     "leash_not_in_boundary": _leash_uncovered,
+    "registry_key_unregistered": _key_unregistered,
+    "registry_key_tether_mismatch": _key_tether_mismatch,
+    "registry_key_duplicate": _key_duplicate,
+    "registry_unreadable": _registry_unreadable,
+    "registry_entry_not_mapping": _registry_entry_not_mapping,
 }
 
 EXPECTED: dict[str, str] = {
@@ -334,4 +373,9 @@ EXPECTED: dict[str, str] = {
     "write_capability_personas": "implement_agent] only",
     "warehouse_server": "warehouse_read binding server",
     "leash_not_in_boundary": "is not covered by capabilities.yaml boundary_patterns",
+    "registry_key_unregistered": "is not a registered canonical_id",
+    "registry_key_tether_mismatch": "differs from skill_tether.skill",
+    "registry_key_duplicate": "is not unique",
+    "registry_unreadable": "source_registry.yaml is unreadable",
+    "registry_entry_not_mapping": "source_registry.yaml is unreadable",
 }
