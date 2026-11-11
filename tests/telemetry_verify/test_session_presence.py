@@ -100,6 +100,21 @@ def test_the_shipped_config_excuses_the_rec_5004_key() -> None:
     assert result.status != "red"
 
 
+def test_the_shipped_config_excuses_the_reopened_rec_5055_session() -> None:
+    key = "01G2j5ReQ5S6d1QP6Rv4GJRi"
+    config = sp.load_config(ROOT)
+    sp.check_config(config)
+    after_window = created({1: "2026-11-11T13:03:54+00:00"})
+    result = run([commit(1, key, pr=1)], Roots([]), config, pr=after_window)
+    assert (result.excused, result.missing, result.lost_window) == (1, 0, 0)
+    assert result.status != "red"
+    assert [r for r in config["excused_sessions"] if r["key"] == key and r["owner"] == "rec-5055"]
+    assert result.pr_lookups == 0
+    stripped = {**config, "excused_sessions": [r for r in config["excused_sessions"] if r["key"] != key]}
+    control = run([commit(1, key, pr=1)], Roots([]), stripped, pr=after_window)
+    assert (control.missing, control.lost_window, control.excused) == (1, 0, 0)
+
+
 def test_the_shipped_config_records_the_rec_5055_lost_window() -> None:
     config = sp.load_config(ROOT)
     sp.check_config(config)
