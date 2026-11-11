@@ -1,0 +1,165 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: arrival-reopened-outage-session
+intent: >-
+  Clear the Critical telemetry-arrival red rec-5081 (squash 6f71e367, PR #1957) by excusing the
+  one session key it names that ran hookless inside the rec-5055 lost window and whose work was re-opened in a PR
+  created after the window closed, so the arrival oracle's denominator again counts only sessions that could have been
+  captured (NS.6: telemetry evidence proven, not assumed). The durable oracle rule is rec-5084's own plan.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-arrival-reopened-outage-session.yaml
+phase: >-
+  ci_rca (soft-warn exception category): Track B repair of rec-5081 under docs/contracts/red-main-recovery.yaml
+  (Decision 226). No tier_item is targeted and no exit criterion is closed, so closes_criteria is empty.
+closes_criteria: []
+scope:
+  - file: config/telemetry/arrival.yaml
+    action: Modify
+    purpose: >-
+      excused_sessions gains `- {key: 01G2j5ReQ5S6d1QP6Rv4GJRi, owner: rec-5055}` after the rec-5004 row, in the same
+      flow-mapping shape. Nothing else in the file changes; the rec-5055 lost_windows row keeps its end. Evidence (the
+      rec-5055 plan's VP 11 rule): PR #1957 was created 2026-11-11T13:03:54Z, after the window's end
+      2026-11-11T10:38:16Z, and the key's own commits e1eea28e and b1e1ecbb were authored 2026-11-10T15:22:45Z and
+      15:48:29Z, inside it.
+    new_imports: []
+  - file: tests/telemetry_verify/test_session_presence.py
+    action: Modify
+    purpose: >-
+      New node test_the_shipped_config_excuses_the_reopened_rec_5055_session: load_config(ROOT) passes check_config;
+      with the shipped config a lone uncaptured commit carrying key 01G2j5ReQ5S6d1QP6Rv4GJRi whose PR was created at
+      2026-11-11T13:03:54Z (after the window) is excused=1 missing=0 lost_window=0 and not red, and its excused row's
+      owner is rec-5055, with pr_lookups=0 (the excuse is judged before any PR lookup). Negative control in the same node: the shipped config minus this one row, with the same commit
+      and PR time, is missing=1 lost_window=0 excused=0, so the row and not the window greens it (the excuse is
+      judged before any PR lookup). Existing nodes byte-identical.
+    new_imports: []
+bundled_recommendations: [rec-5081]
+followon_recs: [rec-5084]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "config/telemetry/arrival.yaml excuses 01G2j5ReQ5S6d1QP6Rv4GJRi owned by rec-5055, and the shipped config turns a lone uncaptured commit with that key, PR created after the rec-5055 window, into excused=1 missing=0."
+  - "After the merge, telemetry-arrival on main no longer lists sha 6f71e367 in ARRIVAL_MISSING and reads excused at least 1 while 6f71e367 is inside judge_days, and rec-5081 is closed by the squash's Resolves trailer."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The shipped config excuses the re-opened outage-era key.
+    command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence.py::test_the_shipped_config_excuses_the_reopened_rec_5055_session" -q
+    expected: exit 0; red before (node absent, and with the node but no config row, missing=1).
+    fix_if: excused stays 0 (key typo, or the owner pattern refused by check_config)
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: arrival-config-excuses-reopened-rec-5055-session
+  - step: 2
+    phase: pre-deploy
+    action: The whole oracle suite still passes (no existing node edited).
+    command: bin/venv-python -m pytest tests/telemetry_verify/test_session_presence.py -q
+    expected: exit 0
+    fix_if: an existing node fails -- the edit touched more than the one row and the one node
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: waive
+    graduation_waiver_reason: >-
+      Duplicates the file's already-graduated nodes (telemetry-arrival-oracle, arrival-config-records-rec-5055-lost-window,
+      arrival-config-excuses-rec-5004-key) and the full tier's run of the whole file; step 1 graduates the new node.
+  - step: 3
+    phase: pre-deploy
+    action: Bind the config edit to the approved words.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug arrival-reopened-outage-session --base origin/main
+    expected: exit 0; the one block matches word for word
+    fix_if: any word differs; fix the edit, never the sidecar (operator-approved text)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      PR-relative to origin/main, so vacuous once merged; validate_merge_step's approved-text leg enforces the sidecar
+      on every PR declaring this plan.
+  - step: 4
+    phase: pre-deploy
+    action: On the build branch, the arrival check against the live warehouse with the new row.
+    command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival
+    expected: >-
+      the ARRIVAL line reads status=green (or skipped) with missing=0 and excused at least 1; record the line in the PR
+      body. At plan write an in-memory run with this row read status=green judged=31 captured=25 missing=0
+      lost_window=5 excused=1.
+    fix_if: >-
+      status=unreadable is a reader or config problem (fix, re-run); a missing sha other than 6f71e367 is a new red:
+      stop and report to the coordinator (ci-rca files it), never excuse it here
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it from the top-level session, backgrounded with a 2 h limit, and read only the attestation.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure -- fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and step 1 carries the durable regression.
+  - step: 6
+    phase: post-deploy
+    action: The arrival oracle is no longer red on main.
+    command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival
+    expected: >-
+      no ARRIVAL_MISSING line names 6f71e3679d7a and the ARRIVAL line reads excused at least 1 while 6f71e367 is inside
+      judge_days (to 2026-11-14T13:12Z), with missing=0 unless another sha is missing; also record the next
+      telemetry-arrival workflow run id on main and its status (a workflow_dispatch run on main counts when the
+      scheduled run is late).
+    fix_if: "missing>0 on another sha is a new red: read its PR's creation time and the key's commit author dates against the windows before suspecting capture; ci-rca files it"
+    hermetic: false
+  - step: 7
+    phase: post-deploy
+    action: rec-5081 is closed by the merge's Resolves trailer, its closure_artifact shard resolving once the graduated shard is on main.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
+      make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5081']); print(rows[0]['id'], rows[0]['status'])"
+    expected: prints rec-5081 closed after the closure job runs on the merge commit; record that run id.
+    fix_if: >-
+      still open: read the closure job's log for a ClosureArtifactRequired or acceptance refusal marker. Leading causes:
+      the squash body lacks Resolves for rec-5081, or the graduated shard is not on main. Never close it with a direct
+      status write after a Decision 186 refusal; fix the cause and re-run the closure route.
+    hermetic: false
+test_obligations:
+  - source: config/telemetry/arrival.yaml
+    behavior: the re-opened rec-5055 outage-era key is excused, owner-bound
+    verification_step: 1
+    test_selector: tests/telemetry_verify/test_session_presence.py::test_the_shipped_config_excuses_the_reopened_rec_5055_session
+    red_green_expectation: red before (missing=1), green after
+constraints:
+  - "The arrival oracle's code and its missing semantics are unchanged in this plan (Decision 250 cl.5): scripts/telemetry_verify/** is not in scope; the durable rule is rec-5084's plan."
+  - "The rec-5055 lost window's end is not moved: sessions started after 2026-11-11T10:38:16Z are hooked and stay judged."
+  - "The excused_sessions row lands word for word as the approved-text sidecar docs/plans/approved/arrival-reopened-outage-session.yaml binds it (Decision 246); rec-5081's replacement acceptance is operator-confirmed with the plan (Decisions 181, 235). A change to either is a plan amendment that goes to the operator first."
+  - "No existing assertion is loosened beyond the one owner-bound excuse row (Decision 235); no existing test node is edited."
+  - "No rescue agents or workaround loops (Decision 55)."
+context:
+  - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: 226 (Track B, Critical; cl.3 the red never blocks the plan that bundles it; cl.4 SLO to 18:54Z; cl.5 preventive_action names rec-5084), 250 (cl.5 denominator the row corrects; cl.4 arrival gates no merge; cl.2 unreadable is red, binding VP 4 and 6), 186 (cl.4 the shard lands in the Resolves commit; cl.7 refusal leaves the rec open), 201 (the replacement acceptance is written and read back before merge and must classify holds), 181 (no acceptance weakened to obtain green: the row and the acceptance swap carry review dispositions), 244 (the shard is a standing guard; retiring it later needs Decision 235 cl.1), 176, 132, 55. CONTRADICT: 235 NOTE (an excuse row greens a red oracle; the acceptance swap replaces a live probe) -- adopted: both are operator-confirmed with the plan (class asked), the row is a denominator correction under the rec-5055 plan VP 11 evidence rule, disposition planned-change citing acceptance_criteria[0], and VP 6 keeps the live proof. 246 NOTE (chat word does not bind wording) -- adopted: the row is bound by the approved-text sidecar docs/plans/approved/arrival-reopened-outage-session.yaml and its approval run. SPIRIT: 250 NOTE (false-red reversal condition: more than four arrival reds in a month closing with no data missing) -- November count from the repo plans: 2 (rec-5004, rec-5081); rec-5084 is sequenced next. RELATED: 189, 163, 66, 62, 236, 221, 117/185, 126/252; for rec-5084 also 212/234 (GitHub port, reuse max_pr_lookups, ports.yaml row). Decisions triaged: 205 of 205. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1. Serves: NS.6 3/5."
+  - "Red: run 43041634302 (telemetry-arrival run 56, main d312cba0, 2026-11-11T14:47:09Z) status=red judged=32 missing=1 lost_window=5 excused=0, ARRIVAL_MISSING sha=6f71e3679d7a; reproduced locally at main 6d01c076 (missing=1). #1957's other key 01G2j5Rfs4fo4gi8UrucgqNK is captured. #1953 (same commits, created 2026-11-10T16:19:09Z inside the window) closed unmerged 2026-11-11T13:12:23Z."
+  - "rec-5081 (ci_rca, Critical, filed 2026-11-11T14:54:43Z; SLO 4 h to 18:54Z): context_v2 why_chain, corrective_action and preventive_action corrected and title retitled via correct_rec_context, read back 2026-11-11 (the filed cause, a capture regression after the fix, was wrong). preventive_action names rec-5084."
+  - "Precedent: PLAN-plugin-hooks-locate-checkout VP 11 (operator-approved rule: a sha whose PR was created at or after the row's end and whose session branch has a commit authored before PR 1's merge is a hookless thread and gets an excused_sessions row owned by rec-5055); PLAN-arrival-trailer-attribution row 1 (a key excused as a denominator correction, owner-bound)."
+  - "Follow-on rec-5084 (filed 2026-11-11, read back): the oracle applies that rule itself from the PR's commit author dates. Other workspaces re-committed outage-era work on 2026-11-11, so until rec-5084 lands a further red of this shape is expected; each needs its own row under the same evidence rule."
+  - "Graduated shards kept unchanged (tests/telemetry_verify/test_session_presence.py gains one node, the claims hold): arrival-config-records-rec-5055-lost-window, telemetry-arrival-oracle, arrival-config-excuses-rec-5004-key."
+  - "Approvals: the operator chose 'Write it, with the acceptance swap' on this thread's alignment card, 2026-11-11T16:29:57Z, approving the plan and rec-5081's replacement acceptance (Decisions 181, 235). The excused_sessions row's wording is bound by the sidecar and approved on GitHub through approved-text run 43054885494 (sidecar commit 228dc69f; approved_text record: record digest fd5bda64, approved-words digest 53603379, fingerprint hollow-lagoon-dolphin-oasis); validate_merge_step reads that approval. The run's approve job succeeded 2026-11-11T16:19:22Z (reviewer approval check passed)."
+  - "rec-5081 at plan write (update_rec read back 2026-11-11T16:30:29Z): status open; acceptance replaced with bin/venv-python -m pytest \"tests/telemetry_verify/test_session_presence.py::test_the_shipped_config_excuses_the_reopened_rec_5055_session\" -q (lint holds), because the filed live probe needs warehouse credentials the closure job lacks and, negated, would pass on an unreadable run; closure_artifact shard:arrival-config-excuses-reopened-rec-5055-session stamped in context_v2_json. The live end state stays proven by VP 4 and 6."
+  - "Advisor (fresh-context, /mnt/project-files/arrival-fix/advisor-brief/ADVICE.md): adopt all four -- owner rec-5055 (contested; rec-5081 named as the authorising rec here and in the PR body), the acceptance swap, an excuse row over moving the window end or waiting out the judge window, and two plans."
+  - "fork: owner of the excused row | chosen: rec-5055, the outage the rec-5055 plan VP 11 rule names | class: consistency-only | precedent: Decision 250 | precedent_kind: decision | reversible: yes | persisted: config/telemetry/arrival.yaml"
+  - "fork: rec-5081 acceptance | chosen: the junit-routed pytest node, live probe kept as VP 4 and 6 | class: asked | precedent: Decision 181; Decision 186; Decision 235 | precedent_kind: decision | reversible: yes | persisted: rec-5081 acceptance and closure_artifact (warehouse)"
+  - "fork: repair shape | chosen: one excuse row now, the oracle rule under rec-5084's own plan | class: consistency-only | precedent: Decision 247 | precedent_kind: decision | reversible: yes | persisted: followon_recs"
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: wording-check, round: 1, verdict: PASS, digest: fd5bda644de51f583179d5bb7cdcc88452db294a8f35b9318b8ec8038457969d, base: 6d01c076304fbbac0c3c34d8548474a7eecdf0c1, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 3}
+  - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 3}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 3}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 186, 226, 235 and 250 sections read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Config: add the excused row; the session_presence node; run VP 1 and 2."
+  - "Add the graduated shard config/agent/verification_registry/entries/arrival-config-excuses-reopened-rec-5055-session.yaml (VP 1's graduation, same shape as arrival-config-excuses-rec-5004-key.yaml)."
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit with Resolves: rec-5081 in the message; git fetch origin main && git rebase origin/main; VP 3; VP 4; VP 5 (full tier backgrounded from the top-level session, then --verify-head; a timeout is BLOCKED, no push); push; open the PR (its body states the excuse row's weakening disposition, planned-change citing acceptance_criteria[0], a denominator correction under the rec-5055 plan VP 11 evidence rule, and names rec-5081 as the authorising rec); subscribe; code review in a fresh context (its brief carries the same disposition); merge on code review PROCEED and green CI with Resolves: rec-5081 in the squash body; then VP 6 and 7, reporting PR number, run ids, merge SHA and whether rec-5081's 18:54Z SLO was met or breached, with the time read back."
+  - "Report: what was implemented, verification results"
+rollback: Revert the build PR; arrival turns red again on 6f71e367 until it leaves the judge window (2026-11-14T13:12Z).
