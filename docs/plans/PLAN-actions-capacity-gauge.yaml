@@ -55,7 +55,7 @@ scope:
       no job overlapping it has status queued or in_progress (waiting and pending do not block); slot_demand = the sum of each non-skipped job's minutes inside the hour
       / 60; peak_concurrency = the most jobs running at one instant inside the hour (reported, never a trigger);
       queue_p90_s = p90 of (job started_at minus the job's own created_at, every attempt) over the contract's queue job (ci.yml
-      main-validate, push event) whose started_at falls in the hour, with queue_samples, pooled per validity.pooling;
+      main-validate, push event) whose started_at falls in the hour, with queue_samples, pooled per validity.pooling (nearest-rank p90; the row records the pool it used);
       merges = ci.yml push runs on main created in the hour. merge_tables(previous, fresh, contract): a freshly
       evaluated hour replaces the stored one, a not_evaluated result never replaces an evaluated hour, and hours older
       than window.table_hours drop. start_hour(previous, now, contract) per window.chaining: the oldest stored hour
@@ -73,7 +73,8 @@ scope:
       run_id, coverage, table, projection, verdict, green_predicate, late_start_minutes, calls, elapsed_s) and a Markdown job summary (to
       GITHUB_STEP_SUMMARY when set), calls actions_capacity_alarm, and prints one line "[actions_capacity]
       verdict=<v> evaluated_hours=<n> chained=<0|1> calls=<n> elapsed_s=<n> peak_slot_demand=<x> p90_queue_s=<y>
-      projected_peak=<z> late_start_minutes=<m> alarm=<action>". Exit 0 on every verdict, on GitHub read failures and on
+      projected_peak=<z> late_start_minutes=<m> alarm=<action> rate_remaining=<r>" (r from the last
+      response's X-RateLimit-Remaining header). Exit 0 on every verdict, on GitHub read failures and on
       a warehouse read failure (printed; the open-rec leg reads false and the alarm is skipped that tick); exit 1 only
       when a portal write raises (Decision 84 I-4). The open-rec leg is read before the alarm acts, so a tick that
       closes the last open rec reads green only from the next tick. If this module or its test file would pass 500
@@ -123,6 +124,12 @@ scope:
       actions-capacity-reading.json`) and "Upload Actions capacity reading" (actions/upload-artifact@v7, the pin the
       repository's other workflows use; name actions-capacity-reading, path actions-capacity-reading.json,
       retention-days 14, if-no-files-found warn). No existing step, input, permission, timeout or trigger changes.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      One r3_workflows row for the new inline run body, ".github/workflows/convergence-health.yml::health-check::measure-actions-capacity-rec-5022",
+      at its measured effective line count (2 as written: set -euo pipefail and the python line; re-measure at build).
+      validate_composite_action_shell_bodies fails --pre for an unlisted body. The upload step has no run body.
   - file: scripts/checks/contracts/validate_actions_capacity.py
     action: Create
     purpose: >-
@@ -132,7 +139,8 @@ scope:
       without job_minutes_per_unit; a queue, analog or live_signal workflow path that does not exist under
       .github/workflows/, or a job name (other than "*") that the workflow file does not define or whose job declares a
       name: other than its id (the API reports the display name); an item id that is
-      neither rec-NNNN nor a tier_item id in docs/ROADMAP-PLATFORM.yaml or docs/ROADMAP-PLATFORM-ARCHIVE.yaml; a trigger threshold at or above
+      neither rec-NNNN nor a tier_item id in docs/ROADMAP-PLATFORM.yaml or docs/ROADMAP-PLATFORM-ARCHIVE.yaml (both read
+      with yaml.safe_load, no roadmap loader imported, so the read set is the files the Entry's pre_globs name); a trigger threshold at or above
       cap.concurrent_jobs; duplicate ledger ids; an alarm source not registered in
       config/agent/data_quality/source_registry.yaml. Calls registry.examined(n, unit="ledger_rows").
   - file: scripts/checks/contracts/_manifest.py
@@ -148,7 +156,8 @@ scope:
     purpose: >-
       _CLOSURE_INPUTS gains a validate_actions_capacity row naming docs/contracts/actions-capacity.yaml,
       scripts/ci/actions_capacity_contract.py, scripts/checks/contracts/validate_actions_capacity.py,
-      .github/workflows/convergence-health.yml and config/agent/data_quality/source_registry.yaml, so
+      .github/workflows/convergence-health.yml, config/agent/data_quality/source_registry.yaml, docs/ROADMAP-PLATFORM.yaml
+      and docs/ROADMAP-PLATFORM-ARCHIVE.yaml (the check's whole read set), so
       TestPromotedGateClosures asserts the Entry's pre_globs match each and not an unrelated path. The graduated shards
       contract-pointer-evaluators-mirror-tests and ducklake-partition-spec-preglob-closure are kept: their nodes and commands are unchanged.
   - file: config/ci_rca_taxonomy.yaml
@@ -184,7 +193,7 @@ scope:
       acceptance: 17 slots of job-minutes in one hour gives red_measured; 15 slots with p90 301 s over 10 samples gives
       red_measured; 15 slots with p90 299 s gives no breach); test_open_hour_is_not_evaluated;
       test_hour_past_coverage_is_not_evaluated; test_job_spanning_two_hours_splits_its_minutes;
-      test_skipped_jobs_count_nothing; test_thin_hour_pools_trailing_24h_or_is_insufficient;
+      test_skipped_jobs_count_nothing; test_thin_hour_pools_24h_then_168h_or_is_insufficient;
       test_insufficient_data_is_never_green; test_planned_row_leaves_projection_once_live (no double count);
       test_analog_row_uses_measured_minutes_per_merge; test_projected_breach_is_red_projected_not_red_measured;
       test_merge_tables_never_replaces_evaluated_with_not_evaluated; test_start_hour_rereads_oldest_hole;
@@ -234,7 +243,14 @@ scope:
       list).
 bundled_recommendations: [rec-5022]
 followon_recs: []
-infrastructure_dependencies: []
+infrastructure_dependencies:
+  - >-
+    LAMBDA-DEPLOY (Decisions 79, 125, 126): field_semantics.yaml ships in six active artifacts, so the governed
+    deploy-ducklake-lambdas run on the merge commit (after main's full tier, Decision 249) redeploys them; VP step 7
+    asserts each job and smoke: ducklake_maintenance and ducklake_maintenance_smoke by deploy-maintenance and
+    maintenance-smoke; ducklake_reader and ducklake_writer by deploy-serving and smoke; ducklake_telemetry_reader and
+    ducklake_telemetry_writer by deploy-telemetry-twin, telemetry-twin-smoke, deploy-telemetry and telemetry-smoke.
+    Only two accepted_values lists widen by one value; no function gains behaviour. No Terraform or IAM.
 acceptance_criteria:
   - >-
     tests/ci/test_actions_capacity_gauge.py::test_trigger_fires_above_16_slots_or_p90_queue_300s passes (rec-5022's
@@ -296,9 +312,11 @@ verification_plan:
       tests/ci/test_actions_capacity_alarm.py::test_two_classes_are_separate_episodes
       tests/ci/test_actions_capacity_alarm.py::test_red_projected_files_nothing
       tests/ci/test_actions_capacity_alarm.py::test_insufficient_data_keeps_open_breach_rec
-      tests/ci/test_actions_capacity_alarm.py::test_reader_failure_is_read_failed_and_writes_nothing -q
-    expected: Exit 0, nine nodes pass; red before because the nodes are absent.
-    expected_literals: [9 passed]
+      tests/ci/test_actions_capacity_alarm.py::test_reader_failure_is_read_failed_and_writes_nothing
+      tests/ci/test_actions_capacity_alarm.py::test_breach_rec_closes_when_enough_hours_and_no_breach
+      tests/ci/test_actions_capacity_alarm.py::test_blind_class_files_when_evaluated_hours_low -q
+    expected: Exit 0, eleven nodes pass; red before because the nodes are absent.
+    expected_literals: [11 passed]
     fix_if: A budget overrun or duplicate filing is a code defect; never raise the contract's budgets to pass.
     hermetic: true
     graduation: graduate
@@ -363,7 +381,7 @@ verification_plan:
       test -s "$DEPLOY_JOBS_JSON" && bin/venv-python -c "import json,os;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));
       jobs={x['name']:x.get('conclusion') for x in (j.get('jobs') if isinstance(j,dict) else j)};print(jobs);
       want=['deploy-maintenance','maintenance-smoke','reconcile-gate','deploy-serving','smoke','deploy-telemetry-twin','telemetry-twin-smoke','deploy-telemetry'];
-      ok=lambda w:any(n.startswith(w) and c=='success' for n,c in jobs.items()); assert all(ok(w) for w in want),jobs;
+      ok=lambda w:jobs.get(w)=='success'; assert all(ok(w) for w in want),jobs;
       hold='TELEMETRY_PRODUCTION_HOLD' in open(os.environ['DEPLOY_LOG']).read(); assert hold or ok('telemetry-smoke'),jobs;
       print('DEPLOY_OK hold=%d'%hold)"
     expected: >-
@@ -475,6 +493,11 @@ test_obligations:
     verification_step: 4
     test_selector: 'tests/checks/contracts/test__manifest.py::TestPromotedGateClosures::test_a_diff_touching_only_this_closure_member_still_matches_the_gate[validate_actions_capacity-.github/workflows/convergence-health.yml]'
     red_green_expectation: red before (the row and the Entry are absent), green after
+  - source: config/composite_action_body_baseline.yaml
+    behavior: the new step's inline body is registered at its measured size
+    verification_step: 6
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: One baseline row; validate_composite_action_shell_bodies fails --pre for an inline workflow body with no row.
   - source: config/ci_rca_taxonomy.yaml
     behavior: the new check maps to a category
     verification_step: 6
@@ -533,7 +556,7 @@ context:
     API calls per tick (CI Reform condition 3): up to 8 for the previous artifact, 1 for the job's start, about 1 per
     100 runs listed and 1 per non-skipped run's jobs; a 9 h gap plus 2 h overlap at about 6 runs an hour is about 85,
     and 300 runs fit the 400 budget. 180 s plus one 30 s call keeps the step near 3.5 min, under about 8 of the job's
-    10. GITHUB_TOKEN allows 1,000 requests an hour. Latency UNPROVEN until step 8. A hole a stuck job pins ends when
+    10. GITHUB_TOKEN's 1,000 requests an hour are shared by every workflow here. Latency UNPROVEN until step 8. A hole a stuck job pins ends when
     GitHub expires the job (inferred, UNPROVEN); gauge_blind reports it meanwhile.
   - 'Other projects: CI Reform open PR #1930 (one line of convergence-health.yml, no overlap); #1953''s replacement #1957 (Decisions 252/253) merged 2026-11-11 and this branch is rebased on it; scout round 3 covers it.'
   - >-
@@ -545,7 +568,7 @@ context:
     telemetry-capture-hook-labels and telemetry-claude-p-capture-adapter; github-actions-evidence.yaml (37 lines headroom) with telemetry-content-reader-lock and
     trusted-plan-cutover; source_registry.yaml with telemetry-producer-admission-plan-review-capture.
   - 'Related-work check (Decision 226): red_overlap verdict clear, no open reds (2026-11-11).'
-  - 'Gotcha: the evaluator resolves only if validate_actions_capacity.py names the literal ''actions-capacity.yaml'' in executable code and is in pre_sequence and full_sequence (contract-population evaluator_kinds.check).'
+  - 'Gotcha: the evaluator resolves only if validate_actions_capacity.py names the literal ''actions-capacity.yaml'' in executable code and is in pre_sequence and full_sequence (contract-population evaluator_kinds.check); it first runs on the approved words in VP step 4 (the wording check''s one pending evaluator).'
   - 'Gotcha: the artifact zip endpoint redirects to blob storage, which refuses the GitHub Authorization header; fetch the Location without it.'
   - 'Gotcha: until the governed deploy lands, the writer refuses source actions_capacity; a breach in that window reds the step once (alarm, not gate).'
 gate_rounds:
@@ -558,6 +581,8 @@ gate_rounds:
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 5, nits: 10}
   - {gate: wording-check, round: 3, verdict: PASS, digest: e9b6c9b36046e2db3b2439470b91c328fd076a679d27b6cacc88284f30691969, base: 6f71e3679d7aee1598d277e8b4f9ee6cf4073e96, selection: complete, pending_evaluators: 1}  # pragma: allowlist secret
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 11}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 3, nits: 6}
+  - {gate: wording-check, round: 4, verdict: PASS, digest: 9f0ea1d45ffc13427aa4b205a0f126c084c074539d763615e96e4c2b87e1de28, base: a0a47562e033fe9435defb1856edaf0dfbb22795, selection: complete, pending_evaluators: 1}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -589,8 +614,8 @@ execution_steps:
     the ci_rca_taxonomy row (pre:
     contract and source registered; post: VP step 4 passes, validate_pre_glob_closure clean).
   - >-
-    Edit convergence-health.yml: the header paragraph and the two last steps exactly as scope states; write
-    tests/ci/test_actions_capacity_steps.py first and see it red.
+    Edit convergence-health.yml: the header paragraph and the two last steps exactly as scope states, plus the
+    composite_action_body_baseline.yaml row; write tests/ci/test_actions_capacity_steps.py first and see it red.
   - >-
     Create the three graduated registry shards config/agent/verification_registry/entries/actions-capacity-trigger-and-validity.yaml,
     actions-capacity-budgets-and-episodes.yaml and actions-capacity-evaluator-and-steps.yaml from VP steps 2-4 (check_id
