@@ -1,8 +1,7 @@
 schema_version: 1
 slug: actions-capacity-gauge
 tldr: Adds the Actions capacity contract (the 20-job cap, the trigger at 16 slots or a 300 s p90 queue, what a reading means,
-  the planned-load ledger and an alarm that only lists the levers for you), one project-configuration row pointing at it,
-  and one artifact retention row for the gauge's hourly table.
+  the planned-load ledger and an alarm that only lists the levers for you) and one project-configuration row pointing at it.
 blocks:
 - id: contract-create
   file: docs/contracts/actions-capacity.yaml
@@ -48,15 +47,18 @@ blocks:
         threshold_seconds: 300
         job: {workflow: .github/workflows/ci.yml, job: main-validate, event: push}
         definition: >-
-          The 90th percentile, over the hour, of the job's started_at minus its run's created_at, taken over the jobs that
-          started in that hour. main-validate has no needs and no concurrency group, so its wait is runner queueing only.
+          The 90th percentile, over the hour, of the job's started_at minus the job's own created_at, taken over the jobs
+          that started in that hour, every run attempt included; a re-run attempt's job has its own created_at, so a re-run
+          never yields a long sample. main-validate has no needs and no concurrency group, so its wait is runner queueing
+          only.
       peak_concurrency: "Reported for each hour (the most jobs running at one instant); it never fires the trigger."
       fires_when: "Any evaluated hour in the trailing 24 hours exceeds either threshold."
 
     validity:
       evaluated_hour: >-
-        A closed hour in which no job that overlaps it is queued or in progress, and that the tick's request and time
-        budgets covered.
+        A closed hour that the tick read in full (every run created from overlap_hours before it to its end) and in which
+        no job that overlaps it is queued or in progress. A job waiting on an Environment approval holds no runner and does
+        not block an hour.
       min_queue_samples_per_hour: 10
       pooled_min_samples: 20
       pooling: >-
@@ -71,12 +73,14 @@ blocks:
       request_budget_per_tick: 400
       time_budget_seconds: 180
       chaining: >-
-        Each tick reads the previous tick's actions-capacity-reading artifact, re-reads the runs created since its newest
-        evaluated hour minus overlap_hours, and keeps the newer value for each hour. With no readable previous artifact it
-        reads bootstrap_hours. A tick stops reading when either budget is spent, newest runs first; an hour the budgets did
-        not cover reads not_evaluated, never green, and the next tick reads it again.
+        Each tick reads the previous tick's actions-capacity-reading artifact and starts at its oldest hour that is not
+        evaluated, or else after its newest evaluated hour, minus overlap_hours; with no readable previous artifact it starts
+        bootstrap_hours back. It reads forward one hour at a time, oldest first, until either budget is spent. An hour it
+        did not read in full reads not_evaluated, never green, and the next tick starts there. A freshly evaluated hour
+        replaces the stored one; a not_evaluated result never replaces an evaluated hour.
 
     reading:
+      precedence: "red_measured, then insufficient_data, then red_projected, then green: the first that holds is the verdict."
       verdicts:
         green: "Every leg of green_predicate holds."
         red_measured: "The trigger fires on measured hours; the alarm files or updates its rec."
@@ -101,7 +105,9 @@ blocks:
     alarm:
       source: actions_capacity
       classes:
-        capacity_breach: "Open while the verdict is red_measured; closed by the first tick whose trailing 24 hours are under both thresholds."
+        capacity_breach: >-
+          Opened by a red_measured verdict; closed only by a tick whose trailing 24 hours hold at least
+          min_evaluated_hours_24h evaluated hours and none exceeds either threshold. Any other tick leaves it as it is.
         gauge_blind: "Open while the trailing 24 hours hold fewer than min_evaluated_hours_24h evaluated hours; closed when they hold enough."
       episode: >-
         One rec per class and episode through the shared episode helper: filed when the class opens, updated only when
@@ -167,7 +173,7 @@ blocks:
     amendment_log:
   after: |
     amendment_log:
-      - {date: "{{DATE}}", semantic_break: false, change_class: field_add, summary: "PLAN-actions-capacity-gauge (rec-5022, Decision 224): settings gains ports.verdict_plane.github_actions.concurrent_job_cap, the GitHub concurrent-job cap the Actions capacity gauge measures against; its value lives in docs/contracts/actions-capacity.yaml until T4.24 c16 moves it to the platform file."}
+      - {date: "{{DATE}}", semantic_break: false, change_class: field_add, summary: "PLAN-actions-capacity-gauge (rec-5022, Decision 224): settings gains ports.verdict_plane.github_actions.concurrent_job_cap, the GitHub concurrent-job cap the Actions capacity gauge measures against; its value lives in docs/contracts/actions-capacity.yaml until T4.24 c16 moves it."}
 - id: pc-row
   file: docs/contracts/project-configuration.yaml
   before: |2
@@ -188,35 +194,3 @@ blocks:
         defaults: {local: null, cloud: null}
         this_repository: {current_home: docs/contracts/actions-capacity.yaml, note: "cap.concurrent_jobs, read by the Actions capacity gauge on convergence-health.yml; an adopter on a Team plan sets 60", status: open, owning_item: "T4.24:c16"}
         enforcement: advisory
-- id: gae-amendment-log
-  file: docs/contracts/github-actions-evidence.yaml
-  before: |
-    amendment_log:
-  after: |
-    amendment_log:
-      - date: "{{DATE}}"
-        semantic_break: false
-        change_class: field_add
-        summary: >-
-          PLAN-actions-capacity-gauge (rec-5022): artifact_uploads gains convergence-health.yml's actions-capacity-reading
-          upload (ordinary_ci, 14 days, the class maximum), which the next tick reads to chain the capacity table. No
-          retention class, diagnostic class or field semantics changed.
-- id: gae-upload
-  file: docs/contracts/github-actions-evidence.yaml
-  before: |
-    - workflow: .github/workflows/deploy-gate.yml
-      job: gate
-      step: Upload deploy manifest
-      artifact: deploy-manifest
-      retention_class: governed_deployment
-  after: |
-    - workflow: .github/workflows/deploy-gate.yml
-      job: gate
-      step: Upload deploy manifest
-      artifact: deploy-manifest
-      retention_class: governed_deployment
-    - workflow: .github/workflows/convergence-health.yml
-      job: health-check
-      step: Upload Actions capacity reading
-      artifact: actions-capacity-reading
-      retention_class: ordinary_ci
