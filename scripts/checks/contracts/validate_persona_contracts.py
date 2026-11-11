@@ -2,7 +2,9 @@
 
 Registered check and the evaluator of docs/contracts/executor-personas.yaml: the closed capability vocabulary, the
 refused targets and verbs, every personas row's contract shape, budget, schema dialect, rendered prompt and skill
-tether, and the leash's own paths being executor boundary paths. Never imports jsonschema (fast tier).
+tether, a row's optional registry_key (a registered, unique source_registry.yaml canonical_id equal to the contract's
+skill_tether.skill; the registry is read only when a row carries a key), and the leash's own paths being executor
+boundary paths. Never imports jsonschema (fast tier).
 """
 
 from __future__ import annotations
