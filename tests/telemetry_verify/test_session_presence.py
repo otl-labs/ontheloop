@@ -100,6 +100,24 @@ def test_the_shipped_config_excuses_the_rec_5004_key() -> None:
     assert result.status != "red"
 
 
+def test_the_shipped_config_records_the_rec_5055_lost_window() -> None:
+    config = sp.load_config(ROOT)
+    sp.check_config(config)
+    rows = [w for w in config["lost_windows"] if w.get("owner") == "rec-5055"]
+    assert len(rows) >= 1
+    row = rows[0]
+    start, end = datetime.fromisoformat(row["from"]), datetime.fromisoformat(row["to"])
+    assert start == datetime(2026, 11, 9, 22, 33, tzinfo=timezone.utc) and end > start
+    pr = created({1: row["from"], 2: (end - timedelta(seconds=1)).isoformat()})
+    shipped = run([commit(1, "AAA")], Roots([]), config, pr=pr)
+    assert (shipped.lost_window, shipped.missing) == (1, 0)
+    last = run([commit(2, "BBB")], Roots([]), config, pr=pr)
+    assert (last.lost_window, last.missing) == (1, 0)
+    only = {**config, "lost_windows": rows[:1]}
+    edge = run([commit(3, "CCC")], Roots([]), only, pr=created({3: row["to"]}))
+    assert (edge.lost_window, edge.missing) == (0, 1)
+
+
 def test_an_untrailered_commit_is_counted_not_red() -> None:
     result = run([commit(1, None), commit(2, "AAA")], Roots(["AAA"]))
     assert (result.status, result.untrailered) == ("green", 1)
