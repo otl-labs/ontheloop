@@ -24,7 +24,9 @@ scope:
       /repos/{repo}/pulls/{number}/commits?per_page=100&page=P for P = 1, 2, 3 (GitHub lists at most 250 commits),
       stopping at a short page, with the same headers, token rule and 10 s timeout as github_pr_created_at; when the
       listing reaches 250 commits it raises (GitHub truncates silently and lists in history order, so a partial list's
-      minimum is unreadable evidence); a key-carrying commit without a readable commit.author.date raises; otherwise it
+      minimum is unreadable evidence); a key-carrying commit without a readable commit.author.date raises, and so does any page that is not a JSON list,
+      any item that is not an object, or any commit whose commit.message is not a string (each is unreadable evidence,
+      which leaves the key missing); otherwise it
       returns the minimum commit.author.date over commits whose message carries key, None when none does
       (commit.author.date is read even when the top-level author is null). A new _keys_in(text) helper holds _session_keys' trailer parsing
       and _session_keys calls it on commit.body, so existing behaviour is unchanged and the adapter calls _keys_in on
@@ -56,16 +58,18 @@ scope:
       the grace, key authored inside it: lost_window=1 lost_window_authored=1 missing=0 pr_lookups=2, and an
       ARRIVAL_LOST_WINDOW_AUTHORED line names the sha); test_the_author_date_rule_holds_its_approved_bounds (each case missing=1: authored after the
       end, at exactly the end, inside only an open-start window, None, authored inside with the PR created at the
-      window end plus the grace, and authored inside with the PR created before the window's from, and the same-window case: two bounded windows A and
+      window end plus the grace, and authored inside with the PR created before the window's from, authored 1 s before a bounded window's from (after the module CONFIG's open-start to, inside no other window) with
+      the PR created within the grace after that window's end, and the same-window case: two bounded windows A and
       B, authored inside A, the PR created outside both, past A's end plus the grace but within B's end plus the grace); test_an_authored_lookup_failure_is_missing_and_the_cap_bounds_both_lookups (a raising lookup:
-      authored_lookup_failed=1 missing=1; with max_pr_lookups=1 the second lookup is not made);
+      authored_lookup_failed=1 missing=1; with max_pr_lookups=1 the second lookup is not made; when the created_at lookup raises the authored callable is
+      never called and pr_lookups=1);
       test_the_author_date_rule_is_off_without_its_config_key_or_callable (CONFIG unchanged, or no callable: the
       callable is never called and missing=1); test_a_created_in_window_pr_makes_no_authored_lookup;
       test_a_bad_authored_grace_days_is_unreadable (0, a bool, a string); test_github_adapter_reads_the_earliest_own_commit_author_date
       (urlopen monkeypatched: two pages, the first full of 100 and the second short, so the URLs carry per_page=100&page=1
       and page=2 and no third request is made; other keys and a later own commit ignored; a commit whose top-level
       author is null still read from commit.author.date; token header asserted with the existing fake token "tok"; None when no commit carries the key; pages of 100, 100
-      and 50 raise with no fourth request; a key-carrying commit with no commit.author.date raises);
+      and 50 raise with no fourth request; a key-carrying commit with no commit.author.date raises; a page whose first item has no commit.message raises);
       test_run_wires_the_github_authored_lookup_by_default (times are window-relative only, since the classifier
       never compares them with NOW or the squash time: times read from the shipped rec-5055 lost_windows row, as the
       existing shipped-window node does: sp.github_pr_created_at monkeypatched to return the row's to plus 1 h,
@@ -87,7 +91,7 @@ scope:
     purpose: >-
       One new line after collapse_min_commits, exactly as the approved-text sidecar
       docs/plans/approved/arrival-lost-window-author-date.yaml binds it: "authored_grace_days: 7". Nothing else
-      changes; the rec-5081 excused row stays.
+      changes; the 01G2j5ReQ5S6d1QP6Rv4GJRi excused row (owner rec-5055, added for rec-5081) stays.
     new_imports: []
   - file: docs/contracts/ports.yaml
     action: Modify
@@ -105,7 +109,7 @@ infrastructure_dependencies: []
 acceptance_criteria:
   - "An uncaptured key whose PR was created after every lost window but whose earliest own-trailer commit was authored inside one is counted lost_window (and lost_window_authored), not missing."
   - "A key whose earliest own-trailer commit was authored outside every window, whose PR lists no commit carrying it, or whose commit lookup fails stays missing; a PR created inside a window makes no commit lookup."
-  - "Against the live warehouse with the rec-5081 excused row removed in memory, 6f71e367's outage-era key is lost_window and the ARRIVAL line reads missing=0."
+  - "Against the live warehouse with the 01G2j5ReQ5S6d1QP6Rv4GJRi excused row (owner rec-5055, added for rec-5081) removed in memory, 6f71e367's outage-era key is lost_window and the ARRIVAL line reads missing=0."
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -132,7 +136,7 @@ verification_plan:
     action: The GitHub adapter reads the earliest own-trailer author date across pages.
     command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence.py::test_github_adapter_reads_the_earliest_own_commit_author_date" -q
     expected: exit 0; red before (adapter absent).
-    fix_if: a later own commit or another key's commit wins, the second page is not read, a third request is made after a short page, or a 250-commit listing or an unreadable own author date returns a time instead of raising
+    fix_if: a later own commit or another key's commit wins, the second page is not read, a third request is made after a short page, or a 250-commit listing, an unreadable own author date or an unreadable commit message returns a time instead of raising
     hermetic: true
     expected_literals: [" passed"]
     graduation: graduate
@@ -159,10 +163,10 @@ verification_plan:
     graduation_check_id: arrival-config-enables-author-date-rule
   - step: 6
     phase: pre-deploy
-    action: The rule holds the bounds the operator confirmed (end exclusive, open start excluded, None, PR before the window, past the grace, grace measured from the same window the commit was authored in).
+    action: The rule holds the bounds the operator confirmed (start inclusive, authored before from, end exclusive, open start excluded, None, PR before the window, past the grace, grace measured from the same window the commit was authored in).
     command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence.py::test_the_author_date_rule_holds_its_approved_bounds" -q
     expected: exit 0; red before (node absent).
-    fix_if: any bound case counts lost_window, including a PR within the grace of a different window than the authored one (the rule is looser than approved; a looser rule goes to the operator first)
+    fix_if: any bound case counts lost_window, including a commit authored before a window's from or a PR within the grace of a different window than the authored one (the rule is looser than approved; a looser rule goes to the operator first)
     hermetic: true
     expected_literals: [" passed"]
     graduation: graduate
@@ -196,7 +200,7 @@ verification_plan:
       on every PR declaring this plan.
   - step: 9
     phase: pre-deploy
-    action: Live, on the build branch, through run() with the rec-5081 row removed in memory and now pinned, the rule alone classifies 6f71e367's outage-era key.
+    action: Live, on the build branch, through run() with the 01G2j5ReQ5S6d1QP6Rv4GJRi row removed in memory and now pinned, the rule alone classifies 6f71e367's outage-era key.
     command: >-
       AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival && AWS_PROFILE=agent_platform
       bin/venv-python -c "from datetime import datetime, timezone; from pathlib import Path; from scripts.telemetry_verify
@@ -230,9 +234,11 @@ verification_plan:
   - step: 11
     phase: post-deploy
     action: telemetry-arrival on main after the merge.
-    command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival
+    command: >-
+      set -o pipefail; AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival | tee /dev/stderr |
+      grep -q ' lost_window_authored=[0-9]* authored_lookup_failed='
     expected: >-
-      the ARRIVAL line carries lost_window_authored=N and reads status green or skipped; record the next
+      exit 0; the ARRIVAL line carries lost_window_authored=N and reads status green or skipped; record the next
       telemetry-arrival run id on main (a workflow_dispatch run on main counts when the scheduled run is late).
     fix_if: "missing>0: read the sha's PR commits' author dates against the windows; a key with no outage-era commit is a real red for ci-rca"
     hermetic: false
@@ -241,8 +247,9 @@ verification_plan:
     action: rec-5084 is closed by the merge's Resolves trailer.
     command: >-
       AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
-      make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5084']); print(rows[0]['id'], rows[0]['status'])"
-    expected: prints rec-5084 closed after the closure job runs on the merge commit; record that run id.
+      make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5084']); print(rows[0]['id'], rows[0]['status']); raise
+      SystemExit(0 if rows and rows[0]['status'] == 'closed' else 1)"
+    expected: prints rec-5084 closed and exits 0 after the closure job runs on the merge commit; record that run id.
     fix_if: still open -- read the closure job's log for an acceptance refusal; fix the cause and re-run the closure route, never a direct status write
     hermetic: false
 test_obligations:
@@ -272,7 +279,7 @@ test_obligations:
     test_selector: tests/telemetry_verify/test_session_presence.py::test_the_shipped_config_enables_the_author_date_rule
     red_green_expectation: red before (key absent), green after
   - source: scripts/telemetry_verify/session_presence.py
-    behavior: the rule holds its approved bounds (end exclusive, open start, None, PR before the window, past the grace, same window)
+    behavior: the rule holds its approved bounds (authored before from, end exclusive, open start, None, PR before the window, past the grace, same window)
     verification_step: 6
     test_selector: tests/telemetry_verify/test_session_presence.py::test_the_author_date_rule_holds_its_approved_bounds
     red_green_expectation: red before (node absent), green after
@@ -289,8 +296,8 @@ test_obligations:
 constraints:
   - "Loosened assertion (Decision 235 cl.1): the only widening is the author-date rule as worded in scope[0] (3), operator-confirmed with this plan, and the operator's word on the build's final diff is still needed for the code (the sidecar binds only the arrival.yaml line and SA-07); any looser variant (any commit in the PR, a commit date, a later own commit, an open-start window, no grace bound) is a plan amendment that goes to the operator first."
   - "The arrival.yaml line and SA-07 land word for word as the approved-text sidecar docs/plans/approved/arrival-lost-window-author-date.yaml binds them (Decision 246)."
-  - "Fail closed (Decision 250 cl.2): a failed, truncated (250 commits) or empty commit lookup, or an unreadable own author date, leaves the key missing; nothing the new read returns can make an otherwise-red run unreadable or green except an own-trailer author date inside a recorded window with a from, on a PR opened within the grace after that same window's end."
-  - "lost_windows, excused_sessions and their grammar are unchanged; the rec-5081 excused row stays as a standing guard (Decision 244); retiring it later is its own operator-approved change."
+  - "Fail closed (Decision 250 cl.2): a failed, truncated (250 commits) or empty commit lookup, or an unreadable own author date, an unreadable page or commit message, leaves the key missing; nothing the new read returns can make an otherwise-red run unreadable or green except an own-trailer author date inside a recorded window with a from, on a PR opened within the grace after that same window's end."
+  - "lost_windows, excused_sessions and their grammar are unchanged; the 01G2j5ReQ5S6d1QP6Rv4GJRi excused row (owner rec-5055, added for rec-5081) stays as a standing guard (Decision 244); retiring it later is its own operator-approved change."
   - "The default of the new judge keyword is no lookup and an absent authored_grace_days turns the rule off, so every existing caller and node keeps today's behaviour."
   - "No rescue agents or workaround loops (Decision 55)."
 context:
@@ -305,7 +312,7 @@ context:
   - "Advisor (fresh-context, /mnt/project-files/arrival-fix/advisor-brief-b/ADVICE.md): adopted -- own-trailer author date; shared max_pr_lookups counting lookups not pages; a separate lost_window_authored count plus per-sha lines; keep the rec-5081 row; the amend hole bounded by a PR-creation grace after the window end; open-start windows excluded; a separate authored_lookup_failed count. Rejected: a committer-date bound (rebases reset it, so rec-5081's case would stay red)."
   - "fork: evidence that an uncaptured key ran in a lost window | chosen: earliest own-trailer author date in a window with a from, PR created within authored_grace_days (7) of that window's end | class: asked | precedent: Decision 235 | precedent_kind: decision | reversible: yes | persisted: scripts/telemetry_verify/session_presence.py; config/telemetry/arrival.yaml"
   - "fork: lookup budget | chosen: share max_pr_lookups, one per key | class: consistency-only | precedent: Decision 212 | precedent_kind: decision | reversible: yes | persisted: scripts/telemetry_verify/session_presence.py"
-  - "fork: the rec-5081 excused row | chosen: keep as a standing guard | class: consistency-only | precedent: Decision 244 | precedent_kind: decision | reversible: yes | persisted: config/telemetry/arrival.yaml"
+  - "fork: the 01G2j5ReQ5S6d1QP6Rv4GJRi excused row (owner rec-5055, added for rec-5081) | chosen: keep as a standing guard | class: consistency-only | precedent: Decision 244 | precedent_kind: decision | reversible: yes | persisted: config/telemetry/arrival.yaml"
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: wording-check, round: 1, verdict: PASS, digest: 44250d56e045b1a04b78c24c37d510701c73c9fa12a9aeb9ee4eceaaab6f53bc, base: 555d0c6eddbd69be72ee89b2776736877de50a9c, selection: complete}  # pragma: allowlist secret
@@ -313,6 +320,7 @@ gate_rounds:
   - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 7}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 5}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 4}
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 2, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
