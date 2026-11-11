@@ -35,7 +35,8 @@ scope:
       health-check, step: Upload Actions capacity reading, artifact: actions-capacity-reading, retention_class:
       ordinary_ci}, and one new first amendment_log entry (date the build date, semantic_break false, change_class
       field_add, summary "PLAN-actions-capacity-gauge (rec-5022): artifact_uploads gains convergence-health.yml's
-      actions-capacity-reading upload (ordinary_ci, 14 days, the class maximum), which the next tick reads to chain the
+      actions-capacity-reading upload (ordinary_ci, 14 days, the class maximum; chaining state read by the next tick, not a governed
+      deployment record), which the next tick reads to chain the
       capacity table. No retention class, diagnostic class or field semantics changed."). Lands in the same commit as
       the workflow step, since validate_actions_evidence pins the two equal.
   - file: scripts/ci/actions_capacity_contract.py
@@ -57,7 +58,10 @@ scope:
       / 60; peak_concurrency = the most jobs running at one instant inside the hour (reported, never a trigger);
       queue_p90_s = p90 of (job started_at minus the job's own created_at, every attempt) over the contract's queue job (ci.yml
       main-validate, push event) whose started_at falls in the hour, with queue_samples, pooled per validity.pooling (nearest-rank p90; the row records the pool it used);
-      merges = ci.yml push runs on main created in the hour. merge_tables(previous, fresh, contract): a freshly
+      merges = ci.yml push runs on main created in the hour. Each persisted HourRow also carries what later ticks
+      recompute from: queue_waits_s (list[int], the raw main-validate waits whose started_at falls in the hour) and
+      job_minutes ({"<workflow>|<job>|<event>": minutes inside the hour}, which also records the job identities seen), so
+      pooling, analog means and live_signal read hours that exist only in the previous tick's table. merge_tables(previous, fresh, contract): a freshly
       evaluated hour replaces the stored one, a not_evaluated result never replaces an evaluated hour, and hours older
       than window.table_hours drop. start_hour(previous, now, contract) per window.chaining: the oldest stored hour
       within table_hours that is not evaluated, else the hour after the newest evaluated one, minus overlap_hours; else
@@ -70,7 +74,9 @@ scope:
       leg is true at generation and judged again by the citing plan; the projected-peak leg is computed over the ledger
       as on main, and the citing plan recomputes it with its own row), choosing the
       verdict in reading.precedence order (a breaching evaluated hour gives red_measured even when too few hours are
-      evaluated).
+      evaluated). "Measured hours" in red_projected means the trailing 24 hours, the window red_measured judges, so an
+      older breach with a projected peak over the threshold reads red_projected; test_every_reading_has_exactly_one_verdict
+      names that case.
       main(argv) for `python -m scripts.ci.actions_capacity_gauge [--reading-out PATH]`: reads the previous table and
       the runs through actions_capacity_github, computes, writes the JSON reading (contract_version, generated_at,
       run_id, coverage, table, projection, verdict, green_predicate, late_start_minutes, calls, elapsed_s) and a Markdown job summary (to
@@ -91,9 +97,10 @@ scope:
       window.time_budget_seconds, capped at the time left in the job (its started_at, read once from
       /actions/runs/{GITHUB_RUN_ID}/jobs, plus a JOB_TIMEOUT_MINUTES constant of 10 that test_existing_steps_permissions_and_inputs_unchanged pins
       equal to the workflow's timeout-minutes, less 90 s for the upload). previous_table(caller, budget): the newest readable artifact named
-      actions-capacity-reading among convergence-health.yml's last 5 completed runs (window.chaining), where an artifact
-      from a run whose head_branch is not main or whose head_repository is not this repository counts as not readable
-      (so a branch run of modified gauge code never seeds the chain); the zip URL is requested without following its redirect, and the
+      actions-capacity-reading among convergence-health.yml's last 5 completed runs (window.chaining), reading an artifact
+      from a run on another branch or repository as not readable: the runs list is queried with branch=main and
+      status=completed and the head_repository is checked, so branch runs neither seed the chain nor push main runs out
+      of the five; the zip URL is requested without following its redirect, and the
       redirect target is fetched without the Authorization header (the scripts/convergence_health/budget_ingest.py
       _AuthStrippingRedirectHandler precedent, re-written here, not imported, so CI Reform's module stays private); returns the parsed table or None (absent, expired
       or unparsable: printed, never fatal). fetch_runs_and_jobs(caller, since, budget): pages
@@ -111,7 +118,8 @@ scope:
       capacity_breach (filed or updated when the verdict is red_measured; closed only when the trailing 24 h hold at
       least validity.min_evaluated_hours_24h evaluated hours and none exceeds either threshold; on any other tick the
       episode is not called, so an open rec stays open) and gauge_blind (over_threshold when the
-      trailing 24 h hold fewer than validity.min_evaluated_hours_24h evaluated hours). build_fields gives title,
+      trailing 24 h hold fewer than validity.min_evaluated_hours_24h evaluated hours). build_fields gives the literal "source": "actions_capacity" (which check_source_registry's scan matches,
+      and a test asserts equals the contract's alarm.source), title,
       priority High, the class marker, the breaching hours with their values, the run URL and the contract's
       trigger_response verbatim; build_update returns None unless the breaching-hour set changed; build_close records
       the clearing tick. red_projected files nothing. open_rec_exists() reads find_recs(source actions_capacity, status
@@ -211,7 +219,9 @@ scope:
       test_rerun_attempt_queue_uses_job_created_at; test_waiting_job_does_not_block_an_hour;
       test_lead_in_hours_emit_no_rows;
       test_chained_ticks_never_move_start_backward (from a bootstrap, at least 5 chained ticks through a fake caller:
-      start_hour never decreases once the bootstrap holes fill, and calls per tick stay bounded); test_breach_outranks_insufficient_data;
+      start_hour never decreases once the bootstrap holes fill, and calls per tick stay bounded);
+      test_previous_table_hours_feed_pooling_analog_and_live_signal (a pooled p90, an analog mean and a live_signal flip
+      computed from hours present only in the previous tick's table); test_breach_outranks_insufficient_data;
       test_every_reading_has_exactly_one_verdict (every combination of green_predicate legs and red conditions maps to
       exactly one verdict; the filling table and an older breach read amber); test_late_start_minutes_reported;
       test_warehouse_read_failure_exits_zero_and_is_not_green;
@@ -230,7 +240,7 @@ scope:
       Injected portal_caller and rows. test_breach_files_one_rec_then_updates_only_on_change;
       test_breach_rec_closes_when_enough_hours_and_no_breach (a red_projected tick included); test_insufficient_data_keeps_open_breach_rec; test_red_projected_files_nothing; test_blind_class_files_when_evaluated_hours_low;
       test_two_classes_are_separate_episodes; test_diagnose_writes_nothing;
-      test_rec_context_carries_trigger_response_verbatim; test_write_failure_propagates;
+      test_rec_context_carries_trigger_response_verbatim; test_alarm_source_literal_matches_contract; test_write_failure_propagates;
       test_reader_failure_is_read_failed_and_writes_nothing.
   - file: tests/ci/test_actions_capacity_contract.py
     action: Create
@@ -300,12 +310,14 @@ verification_plan:
       tests/ci/test_actions_capacity_gauge.py::test_merge_tables_never_replaces_evaluated_with_not_evaluated
       tests/ci/test_actions_capacity_gauge.py::test_start_hour_rereads_oldest_hole
       tests/ci/test_actions_capacity_gauge.py::test_chained_ticks_never_move_start_backward
+      tests/ci/test_actions_capacity_gauge.py::test_previous_table_hours_feed_pooling_analog_and_live_signal
+      tests/ci/test_actions_capacity_gauge.py::test_thin_hour_pools_24h_then_168h_or_is_insufficient
       tests/ci/test_actions_capacity_gauge.py::test_rerun_attempt_queue_uses_job_created_at
       tests/ci/test_actions_capacity_gauge.py::test_breach_outranks_insufficient_data
       tests/ci/test_actions_capacity_gauge.py::test_every_reading_has_exactly_one_verdict
       tests/ci/test_actions_capacity_gauge.py::test_warehouse_read_failure_exits_zero_and_is_not_green -q
-    expected: Exit 0, twelve nodes pass; red before because the nodes are absent (pytest exit 4).
-    expected_literals: [12 passed]
+    expected: Exit 0, fourteen nodes pass; red before because the nodes are absent (pytest exit 4).
+    expected_literals: [14 passed]
     fix_if: Fix the computation, never the threshold or fixture values the contract states.
     hermetic: true
     graduation: graduate
@@ -344,13 +356,14 @@ verification_plan:
       tests/ci/test_actions_capacity_steps.py::test_existing_steps_permissions_and_inputs_unchanged
       tests/ci/test_actions_capacity_steps.py::test_upload_step_matches_evidence_contract
       tests/ci/test_actions_capacity_contract.py::test_real_contract_loads
+      tests/ci/test_actions_capacity_contract.py::test_unknown_key_is_refused
       'tests/checks/contracts/test__manifest.py::TestPromotedGateClosures::test_a_diff_touching_only_this_closure_member_still_matches_the_gate[validate_actions_capacity-.github/workflows/ci.yml]'
       tests/checks/ops_governance/test_check_source_registry.py::TestScannedPaths::test_scanned_paths_includes_portal_and_producer_modules
       -q
     expected: >-
-      Exit 0, nine nodes pass. Eight are red before because they are absent; the source-registry node is red before
+      Exit 0, ten nodes pass. Nine are red before because they are absent; the source-registry node is red before
       because SCANNED_PATHS lacks scripts/ci/actions_capacity_alarm.py.
-    expected_literals: [9 passed]
+    expected_literals: [10 passed]
     fix_if: Fix the check or the workflow edit; never widen the workflow test's pinned list of existing steps.
     hermetic: true
     graduation: graduate
@@ -478,7 +491,7 @@ test_obligations:
   - source: scripts/ci/actions_capacity_contract.py
     behavior: the contract loads with every key and refuses unknown keys
     verification_step: 4
-    test_selector: tests/ci/test_actions_capacity_contract.py::test_real_contract_loads
+    test_selector: tests/ci/test_actions_capacity_contract.py::test_unknown_key_is_refused
     red_green_expectation: red before (module and tests absent), green after
   - source: scripts/checks/contracts/validate_actions_capacity.py
     behavior: the contract's cross-reference and closed-set rules and the examined declaration
@@ -583,7 +596,7 @@ context:
   - 'Related-work check (Decision 226): red_overlap verdict clear, no open reds (2026-11-11).'
   - 'Gotcha: the evaluator resolves only if validate_actions_capacity.py names the literal ''actions-capacity.yaml'' in executable code and is in pre_sequence and full_sequence (contract-population evaluator_kinds.check); it first runs on the approved words in VP step 4 (the wording check''s one pending evaluator).'
   - 'Gotcha: the artifact zip endpoint redirects to blob storage, which refuses the GitHub Authorization header; fetch the Location without it.'
-  - 'Gotcha: until the governed deploy lands, the writer refuses source actions_capacity; a breach in that window reds the step once (alarm, not gate).'
+  - 'Gotcha: until the governed deploy lands, the writer refuses source actions_capacity; any alarm filing in that window reds the step once (alarm, not gate).'
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND}
@@ -598,6 +611,7 @@ gate_rounds:
   - {gate: wording-check, round: 4, verdict: PASS, digest: 9f0ea1d45ffc13427aa4b205a0f126c084c074539d763615e96e4c2b87e1de28, base: a0a47562e033fe9435defb1856edaf0dfbb22795, selection: complete, pending_evaluators: 1}  # pragma: allowlist secret
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 2, nits: 7}
   - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 2, nits: 5}
+  - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 2, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
