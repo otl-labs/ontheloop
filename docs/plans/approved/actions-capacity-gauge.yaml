@@ -1,0 +1,222 @@
+schema_version: 1
+slug: actions-capacity-gauge
+tldr: Adds the Actions capacity contract (the 20-job cap, the trigger at 16 slots or a 300 s p90 queue, what a reading means,
+  the planned-load ledger and an alarm that only lists the levers for you), one project-configuration row pointing at it,
+  and one artifact retention row for the gauge's hourly table.
+blocks:
+- id: contract-create
+  file: docs/contracts/actions-capacity.yaml
+  before: ''
+  after: |
+    # GitHub Actions capacity (rec-5022; audit ci-merge-throughput-scaling-269e630a CMTS-06 and CMTS-13). Class D mechanism
+    # contract: the concurrent-job cap this repository's CI shares, the capacity trigger, when a reading is valid, what a
+    # reading means, the planned-load ledger and what the alarm asks for. scripts/ci/actions_capacity_gauge.py computes the
+    # reading as a step of convergence-health.yml; validate_actions_capacity checks this file.
+    contract:
+      id: actions-capacity
+      class: D
+      contract_version: 1
+      status: draft
+      description: >-
+        How close this repository's CI is to GitHub's concurrent-job cap, measured from the Actions API, and how much the
+        planned loads in the ledger would add. An alarm, never a gate (Decision 83): no check or plan is blocked by a
+        reading; plans that add Actions load cite one.
+      subject: actions-capacity
+      evaluator:
+        check: validate_actions_capacity
+
+    amendment_log:
+      - {date: "{{DATE}}", semantic_break: false, change_class: field_add, summary: "PLAN-actions-capacity-gauge (rec-5022): created."}
+
+    cap:
+      concurrent_jobs: 20
+      basis: >-
+        GitHub's Free plan: 20 concurrent jobs per account or organisation, shared by every repository in it. A public
+        repository's free minutes do not raise it.
+      scope: >-
+        The gauge reads this repository's runs only. On 2026-11-11 this is the only repository in its organisation, so the
+        reading covers the whole cap; once another repository there runs Actions, the reading is a lower bound.
+        ports.verdict_plane.github_actions.concurrent_job_cap in project-configuration.yaml names this value's home.
+
+    trigger:
+      slot_demand:
+        threshold: 16
+        definition: >-
+          For one closed UTC clock hour: the minutes every non-skipped job of this repository spent running inside that
+          hour, summed and divided by 60. A job spanning two hours counts in each for its minutes there.
+      queue_p90:
+        threshold_seconds: 300
+        job: {workflow: .github/workflows/ci.yml, job: main-validate, event: push}
+        definition: >-
+          The 90th percentile, over the hour, of the job's started_at minus its run's created_at, taken over the jobs that
+          started in that hour. main-validate has no needs and no concurrency group, so its wait is runner queueing only.
+      peak_concurrency: "Reported for each hour (the most jobs running at one instant); it never fires the trigger."
+      fires_when: "Any evaluated hour in the trailing 24 hours exceeds either threshold."
+
+    validity:
+      evaluated_hour: >-
+        A closed hour in which no job that overlaps it is queued or in progress, and that the tick's request and time
+        budgets covered.
+      min_queue_samples_per_hour: 10
+      pooled_min_samples: 20
+      pooling: >-
+        An hour with fewer queue samples than min_queue_samples_per_hour takes the p90 of the trailing 24 hours when that
+        pool holds pooled_min_samples; otherwise its queue leg is insufficient for that hour.
+      min_evaluated_hours_24h: 12
+
+    window:
+      table_hours: 168
+      bootstrap_hours: 24
+      overlap_hours: 2
+      request_budget_per_tick: 400
+      time_budget_seconds: 180
+      chaining: >-
+        Each tick reads the previous tick's actions-capacity-reading artifact, re-reads the runs created since its newest
+        evaluated hour minus overlap_hours, and keeps the newer value for each hour. With no readable previous artifact it
+        reads bootstrap_hours. A tick stops reading when either budget is spent, newest runs first; an hour the budgets did
+        not cover reads not_evaluated, never green, and the next tick reads it again.
+
+    reading:
+      verdicts:
+        green: "Every leg of green_predicate holds."
+        red_measured: "The trigger fires on measured hours; the alarm files or updates its rec."
+        red_projected: "Measured hours are under the trigger, but the projected peak exceeds slot_demand.threshold; files nothing."
+        insufficient_data: >-
+          Fewer than min_evaluated_hours_24h evaluated hours in the trailing 24 hours, or the queue leg is insufficient in
+          every hour; never green.
+      green_predicate:
+        - The reading's tick finished less than 3 hours before it is cited; when the newest tick is older, the citing plan dispatches convergence-health.yml and cites that run.
+        - At least 144 of the table's last 168 hours are evaluated, so the first green reading comes 7 days after the gauge first runs.
+        - No rec with source actions_capacity is open.
+        - No evaluated hour in the table exceeds either trigger threshold.
+        - The projected peak, including the citing plan's own ledger row, is at or below slot_demand.threshold.
+      projected_peak: >-
+        The highest, over the table's evaluated hours, of that hour's slot_demand plus, for each ledger row not yet live,
+        its job-minutes per unit times that hour's merges divided by 60. Merges are ci.yml push runs on main.
+      consumer_rule: >-
+        A plan that adds Actions load (a ledger row's owner) cites a green reading by run id in its context, adds or
+        updates its ledger row, and sets its live_signal in the change that makes the load run. A reading that is not
+        green is reported to the operator with the trigger_response options; nothing enforces it.
+
+    alarm:
+      source: actions_capacity
+      classes:
+        capacity_breach: "Open while the verdict is red_measured; closed by the first tick whose trailing 24 hours are under both thresholds."
+        gauge_blind: "Open while the trailing 24 hours hold fewer than min_evaluated_hours_24h evaluated hours; closed when they hold enough."
+      episode: >-
+        One rec per class and episode through the shared episode helper: filed when the class opens, updated only when
+        its breaching hours change, closed when it clears. red_projected files nothing.
+      step_outcome: >-
+        The step exits 0 on every verdict and when GitHub reads fail (those hours read not_evaluated). It fails only when
+        a portal write fails (Decision 84 I-4), which loop_liveness_stale backstops. It dispatches nothing, changes no
+        plan, runner or workflow, and is never a required check.
+
+    ledger:
+      units: [per_merge]
+      sources:
+        assumed: "A figure from the audit's capacity model, not measured here."
+        analog: "The measured mean job-minutes per merge of named existing jobs, times multiplier, read from the same table."
+      live_signal: >-
+        {workflow, job}: once a job with that workflow path and name appears in the table, the row is live and leaves the
+        projection, because its load is then measured. null until the owning plan names its workflow.
+      rows:
+        - id: verdict-personas
+          items: [T4.28, T4.29, T4.30]
+          unit: per_merge
+          source: assumed
+          job_minutes_per_unit: 26.7
+          basis: "Audit capacity_model: 1.87 PR runs per merge x 1.43 persona jobs per PR update x 10 minutes (ASSUMED)."
+          live_signal: null
+        - id: github-full-tier-per-ready-pr
+          items: [rec-5019]
+          unit: per_merge
+          source: analog
+          analog: [{workflow: .github/workflows/ci.yml, job: main-validate, event: push}]
+          multiplier: 1.0
+          basis: "rec-5019 runs the full tier on the ready head of each PR; one ready-head run per merge is a lower bound."
+          live_signal: null
+        - id: sit-deploy-per-merge
+          items: [rec-5028]
+          unit: per_merge
+          source: analog
+          analog:
+            - {workflow: .github/workflows/deploy-ducklake-lambdas.yml, job: "*", event: workflow_run}
+            - {workflow: .github/workflows/deploy-prod-lambdas.yml, job: "*", event: workflow_run}
+            - {workflow: .github/workflows/terraform-apply-sandbox.yml, job: "*", event: push}
+          multiplier: 1.0
+          basis: "rec-5028 repeats today's deploy chain against SIT on every merge."
+          live_signal: null
+        - id: sit-per-pr-lambda-stacks
+          items: [rec-5032]
+          unit: per_merge
+          source: analog
+          analog: [{workflow: .github/workflows/deploy-ducklake-lambdas.yml, job: "*", event: workflow_run}]
+          multiplier: 1.87
+          basis: "rec-5032 builds a Lambda stack per PR update; 1.87 PR runs per merge (audit E5), every PR counted (an upper bound)."
+          live_signal: null
+
+    trigger_response: >-
+      The alarm rec lists these options for the operator and decides none of them: the cheap levers first (rec-4114's
+      plans-only fast tier, merged; per-push job consolidation, audit CMTS-06); a Team plan at 60 concurrent jobs, which
+      is spend (always_ask, monthly cost stated); or moving verdict jobs off Actions, which needs Decision 205 clauses 1 and
+      6 and Decision 184 clause 3 amended first and is not licensed by this contract. Their order is not ratified; the
+      Decision that pulls a lever records it.
+- id: pc-amendment-log
+  file: docs/contracts/project-configuration.yaml
+  before: |
+    amendment_log:
+  after: |
+    amendment_log:
+      - {date: "{{DATE}}", semantic_break: false, change_class: field_add, summary: "PLAN-actions-capacity-gauge (rec-5022, Decision 224): settings gains ports.verdict_plane.github_actions.concurrent_job_cap, the GitHub concurrent-job cap the Actions capacity gauge measures against; its value lives in docs/contracts/actions-capacity.yaml until T4.24 c16 moves it to the platform file."}
+- id: pc-row
+  file: docs/contracts/project-configuration.yaml
+  before: |2
+        this_repository: {current_home: null, note: "a Secrets Manager GitHub PAT, the Actions GITHUB_TOKEN and the cloud environment setup script", status: open, owning_item: "T4.24:c16"}
+        enforcement: advisory
+  after: |2
+        this_repository: {current_home: null, note: "a Secrets Manager GitHub PAT, the Actions GITHUB_TOKEN and the cloud environment setup script", status: open, owning_item: "T4.24:c16"}
+        enforcement: advisory
+      - id: ports.verdict_plane.github_actions.concurrent_job_cap
+        kind: project
+        basis: "rec-5022; Decision 224 clauses 1 and 6: the adopter sets it by choosing a GitHub plan (20 concurrent jobs on Free, 60 on Team), so it is not a value CI sets on its own; docs/contracts/actions-capacity.yaml cap"
+        applies_when: {port: verdict_plane, adapter: github_actions}
+        homes: {local: platform_file, ci: platform_file, cloud: platform_file}
+        variable: null
+        exports: []
+        readers: [rec-5022]
+        set_by: user
+        defaults: {local: null, cloud: null}
+        this_repository: {current_home: docs/contracts/actions-capacity.yaml, note: "cap.concurrent_jobs, read by the Actions capacity gauge on convergence-health.yml; an adopter on a Team plan sets 60", status: open, owning_item: "T4.24:c16"}
+        enforcement: advisory
+- id: gae-amendment-log
+  file: docs/contracts/github-actions-evidence.yaml
+  before: |
+    amendment_log:
+  after: |
+    amendment_log:
+      - date: "{{DATE}}"
+        semantic_break: false
+        change_class: field_add
+        summary: >-
+          PLAN-actions-capacity-gauge (rec-5022): artifact_uploads gains convergence-health.yml's actions-capacity-reading
+          upload (ordinary_ci, 14 days, the class maximum), which the next tick reads to chain the capacity table. No
+          retention class, diagnostic class or field semantics changed.
+- id: gae-upload
+  file: docs/contracts/github-actions-evidence.yaml
+  before: |
+    - workflow: .github/workflows/deploy-gate.yml
+      job: gate
+      step: Upload deploy manifest
+      artifact: deploy-manifest
+      retention_class: governed_deployment
+  after: |
+    - workflow: .github/workflows/deploy-gate.yml
+      job: gate
+      step: Upload deploy manifest
+      artifact: deploy-manifest
+      retention_class: governed_deployment
+    - workflow: .github/workflows/convergence-health.yml
+      job: health-check
+      step: Upload Actions capacity reading
+      artifact: actions-capacity-reading
+      retention_class: ordinary_ci
