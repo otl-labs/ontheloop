@@ -2,6 +2,181 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 253: The DuckLake catalog moves to RDS PostgreSQL -- SIT is born on it, PROD follows once SIT's reset has rehearsed the restore, and SIT's instance runs only while a pipeline uses it (amends Decisions 107 and 214) (Decided)
+
+```yaml
+number: 253
+status: Decided
+decided_date: "2026-11-10"
+kind:
+  value: mechanism
+  justification: >-
+    Every clause says how the catalog is run: clause 1 picks its vendor and placement (RDS PostgreSQL in each account,
+    in place of the Neon that Decisions 107 and 214 kept), and clause 2 how SIT's instance starts and stops. No gate
+    or data commitment moves. Undone, SIT gets a Neon project and key and PROD stays on Neon.
+amends: [107, 214]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable and reversal-relevant: it reverses Decision 214 cl.1's deferral with running cost. Not a contract note:
+    ports.yaml and ducklake_maintenance.yaml record adapters and verbs, not which backend holds production. Not
+    amendment_forms: an annotation cannot reverse a clause.
+```
+
+**Status:** Decided
+**Date:** 2026-11-10
+**Warehouse ID:** dec-253 (per Decision 84 backfill)
+
+**Problem:** Decision 214 kept the catalog on Neon and deferred RDS (rec-4223). None of its measured triggers has
+fired; the move rests on a new requirement that Neon cannot meet: SIT needs its own
+catalog instance, and on Neon that adds a second project, a Neon key in SIT and CI, and a control plane outside the
+Organization's SCPs and CloudTrail. The 11-14 s cold start is DuckDB extension loading and ATTACH, the same on either
+backend (rec-5042).
+
+**Intent:** One cloud, one bill and one set of guards over every catalog, with the PROD move rehearsed before it runs.
+
+**Decision:**
+1. **Backend (amends 107, 214 cl.1).** The catalog runs on RDS PostgreSQL (db.t4g.micro at first) in each account.
+   SIT's instance is created by the SIT bootstrap (rec-5027); SIT has no Neon project or key. PROD moves by dump,
+   restore and secret flip (rec-4223) after SIT's replicate-and-reset (rec-5030) has rehearsed that restore and before
+   catalog copies (rec-5031), with Neon kept as a 14-day fallback. rec-4223 also sweeps text that names Neon as the
+   store.
+2. **SIT on demand.** Each pipeline that uses SIT starts its instance and waits until it is available; an alarm on no
+   connections for a set time stops it, including after AWS's own restart of an instance stopped for seven days; no
+   schedule starts or stops it. A read outside a pipeline sees the catalog unavailable and retries. The SIT pipeline
+   role may only start and describe that instance, and the idle stop may only stop it.
+3. **Carried over.** Decision 214 cl.2 (the stats index and Decision 88's invariant (v)), cl.4 (the latency signal)
+   and cl.5 (the file-catalog conditions) hold on RDS, as do one owner role and one login per binding (Decisions 216,
+   230) and Decision 237 for the catalog's secrets (values under /secret/, rotation deferred). Neon history (214
+   cl.3) becomes RDS's 7-day automated backups. 214's Neon-specific reversal conditions lapse at the PROD move.
+4. **Copies.** A catalog copy for a risky change is a DuckDB-file copy by default, or a database copy on SIT's
+   instance for Lambda and concurrency tests, through the catalog port's copy verb (rec-5031); there is no Neon branch
+   adapter, and the canary's PROD-branch clone retires there. Once PROD is on RDS, rec-5030 may restore SIT from an
+   RDS snapshot instead of a dump.
+5. **Spend.** About $20 a month per always-on instance (instance, 20 GB storage, public IPv4); SIT's costs less while
+   stopped. rec-5027 and rec-4223 each give their estimate before they apply.
+6. **Coverage (Decision 181 cl.2).** Cl.1 rec-4223's cutover checks and rec-5030's restore; cl.2 rec-5027's IAM tests
+   pin start and describe to the SIT pipeline role and stop to the idle stop. Residual: cl.5's estimates are procedural.
+
+**Rationale:** At always-on use the bills are at parity, RDS brings the catalog under the Organization's guards, and
+SIT's weekly restore rehearses the PROD move for free. Rejected: Aurora (higher floor, no gain at this size),
+self-managed EC2 Postgres (self-patched, with backups and recovery to run ourselves), and staying on Neon (a
+third-party credential inside SIT's boundary).
+
+```yaml reversal-conditions
+decision: 253
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: cutover-rehearsal-failed
+    kind: manual
+    description: "SIT's restore onto RDS or the PROD cutover fails: keep PROD on Neon and re-decide clause 1."
+  - id: idle-stop-unreliable
+    kind: manual
+    description: "SIT's instance runs idle past the alarm's window twice in a month, or a pipeline fails because it did not start: re-decide clause 2."
+  - id: connection-ceiling
+    kind: manual
+    description: "Catalog connections stay above 80% of the instance limit for a 7-day window: re-decide the instance class."
+```
+
+**Related:** Decisions 84, 88, 100, 107, 212, 214, 216, 230, 237; rec-4223, rec-4300, rec-5027, rec-5030, rec-5031, rec-5042.
+
+---
+
+## Decision 252: SIT is stood up now as its own AWS account holding a reset copy of PROD -- merges deploy to SIT, PROD receives only the identical artifact behind one human gate, and data only flows PROD to SIT (amends Decisions 24, 73, 77, 126, 144, 202, 237 and 242) (Decided)
+
+```yaml
+number: 252
+status: Decided
+decided_date: "2026-11-10"
+kind:
+  value: direction
+  justification: >-
+    Clauses 1, 2 and 6 set what the operator deployment is: three accounts, and code reaching PROD only through a
+    human gate after running on a production copy. Undone, one account auto-applies on merge.
+amends: [24, 73, 77, 126, 144, 202, 237, 242]
+serves: [NS.9]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable: it ends Decision 77's single-account rule and binds every SIT item. Not an environment-taxonomy.yaml
+    note (it records tiers, not whether an account exists); not amendment_forms (it changes clause meanings).
+```
+
+**Status:** Decided
+**Date:** 2026-11-10
+**Warehouse ID:** dec-252 (per Decision 84 backfill)
+
+**Problem:** Code that passed mocked tests deploys, and Terraform auto-applies, straight into the account holding
+production data, which agents share. Decision 77 cl.5 waits for live_full, which no remaining code can reach.
+
+**Intent:** Every change runs on a copy of production first, PROD gets only what ran there, and SIT cannot touch
+PROD.
+
+**Decision:**
+1. **Now (amends 77 cl.5, 144 cl.6, 242 cl.3).** SIT and PROD are stood up now; live_full is no longer a trigger.
+   Only roadmap T2.57 and T2.58 items author multi-account infrastructure.
+2. **Topology.** An AWS Organization in Terraform, no Control Tower, with a new workload-free management account.
+   Today's account joins by invitation as PROD, re-creating nothing (242 cl.1 holds); a new SIT account is created.
+   One region (202 cl.4). The company owns every account: company-mailbox root e-mail kept out of this repository,
+   consolidated billing (242 cl.2).
+3. **Isolation.** Data flows only PROD to SIT, pushed by a PROD-owned role that writes only SIT's replica location.
+   No credential stored in, or assumable from, SIT reaches PROD: SIT has its own catalog instance, its own values
+   under the same /secret/ names (237 cl.1) and lower-capped third-party keys; CI holds no PROD catalog
+   credential. Agent sessions keep PROD portal access (Decision 84). Each root keeps state in the
+   account it governs (Decision 223).
+4. **Data.** SIT holds a copy of PROD from native primitives (Decision 100): S3 replication plus a restore of a
+   catalog dump taken after replication caught up and younger than the gc grace, data_path rewritten. SIT resets
+   weekly and before each promotion, keeping no history. If the restore spike (rec-5023) fails, SIT starts from
+   synthetic data and the copy stays the target (spike-failed); extension-upgrade migration stays unproven
+   (rec-5036). Catalog copies for risky changes come off SIT through the catalog port, never PROD, and never delete
+   objects; only SIT main's maintainer deletes, older than the longest copy lifetime.
+5. **Agent reads.** In SIT agents read production-derived data only through named verbs; SIT agent roles are denied
+   direct S3 and catalog access to it. Transcripts are copied unredacted under Decision 239's fence: masked content
+   reader only, same change lock; rec-5043 masks it later.
+6. **Deploy (amends 77 cl.3, 73 cl.5, 126 cl.1).** Once SIT stands, every merge applies terraform/personal and deploys
+   code to SIT behind the deterministic guard and its human-gated fail-closed set, licensed by pre-deploy
+   verification, append-only data and that routing, not mocked externals; 77 cl.3's human gate holds for PROD only.
+   PROD is promote-only: the artifact that ran on SIT (same zip by CodeSha256, same saved plan) behind one operator
+   approval in a reviewer-gated Environment, replacing 73 cl.5's train. SIT deploys keep 249 cl.2; promotion uses
+   rec-4874's last-green ref once decided. A SIT deploy and its observation complete a loop iteration (Decision 93).
+7. **Admin tier.** The Organization root, SCPs included, stays admin-tier: an ADMIN-session agent applies it on the
+   operator's direction after the pre-merge admin plan (Decision 248 cl.6). Management-account roles escape its own
+   SCPs, so no CI role is created there. The SIT bootstrap root is admin-tier too (sit-bootstrap-frequent). Both
+   close on an admin apply with a read-back, one at a time.
+8. **SCPs (amends 237 cl.4, 144).** A baseline on each member before any workload (deny leaving, root actions,
+   other regions, CloudTrail changes); workload SCPs before production data lands, including a deny of /secret/*
+   value reads except to declared roles. SCPs add to the permissions boundary, never replace it. The organisation
+   trail replaces 202's account trail; never both run.
+9. **Rest.** SSE-S3 stays (second-data-gate). Today's account is PROD; "sandbox" stays its working name until the
+   last item retires the label. The nightly PROD rehearsal stays deferred (rehearsal-wanted). The SIT items own the
+   rest; the promotion item re-decides 249 cl.1, whose tier-stood-up condition this fires.
+10. **Coverage (Decision 181 cl.2).** Cl.1 a taxonomy test pins the account rule; cl.3, cl.8 rec-5029's pre-data checklist;
+    cl.4 rec-5023, rec-5030; cl.6 deploy-gate tests; cl.7 validate_admin_root_premerge_gate. Residual: cl.2 is console work.
+
+```yaml reversal-conditions
+decision: 252
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: spike-failed
+    kind: manual
+    description: "The restore spike fails: re-decide clause 4."
+  - id: sit-bootstrap-frequent
+    kind: manual
+    description: "SIT bootstrap applied over twice a quarter: re-decide a Decision 248 gated CI apply."
+  - id: rehearsal-wanted
+    kind: manual
+    description: "A defect a PROD rehearsal would catch reaches PROD: re-decide clause 9."
+  - id: second-data-gate
+    kind: manual
+    description: "A key-policy gate on data is wanted: re-decide SSE-S3."
+```
+
+**Related:** Decisions 93, 100, 223, 239, 248, 249; rec-4874, rec-5023 to rec-5035.
+
+---
+
 ## Decision 251: The SIT restore rehearsal runs as one human-directed ADMIN-agent sitting on ephemeral functions and a throwaway Neon branch, never on a production function, catalog or prefix (amends Decisions 81, 126 and 237) (Decided)
 
 ```yaml
@@ -206,6 +381,8 @@ conditions:
 ```
 
 **Related:** Decisions 24, 55, 73, 77, 125, 126, 166, 181, 205, 226, 236, 239, 245; rec-4874, rec-4912.
+
+> **Update (2026-11-10):** Decision 252 fires the tier-stood-up condition ahead of the tier and replaces the green-streak train that clause 1 calls future state (see the note on Decision 73): the PROD promotion item re-decides clause 1. Until then clause 2 holds, and SIT deploys keep it (Decision 252 cl.6).
 
 ---
 
@@ -747,6 +924,8 @@ conditions:
 > employee; since then the company card has had no fallback. rec-4545 tracks the billing proof (the
 > first invoice addressed to the company); rec-4546 the prose sweep.
 
+> **Amended by Decision 252 (2026-11-10):** Clause 3's standalone account and its live_full gate end: the account joins a company Organization with a workload-free management account as its PROD member, which re-creates nothing, so clause 1 holds (Decision 252 cl.1 and cl.2).
+
 ---
 
 ## Decision 241: The coordination model -- a deterministic engine runs the work graph, a bounded coordinator step handles only what the graph cannot, context travels as notes, streams are epics, and concurrency and WIP climb under human ceilings (amends Decision 229 clause 2) (Decided)
@@ -1126,6 +1305,8 @@ conditions:
 > **Update (2026-11-06):** Decision 248 clause 5 amends clauses 1 and 4 for the terraform/github apply App key, which stays in its Secrets Manager entry under a resource policy denying every action but reading its metadata to all but four principals; it fires this Decision's second-gate-wanted condition.
 
 > **Update (2026-11-09):** Decision 251 cl.2 amends clause 1 for the restore rehearsal's target role: a transient branch-scoped password that lives only in an ephemeral function's environment and on a throwaway Neon branch, never a /secret/ parameter.
+
+> **Amended by Decision 252 (2026-11-10):** Once the Organization exists, an SCP denies value reads on /secret/* except to declared roles, so clause 4's "the parameter grant is the only gate" no longer holds there. Clause 1's rule that a new name carries no environment lets each account hold its own values under the same names (Decision 252 cl.3 and cl.8).
 
 ---
 
@@ -2680,6 +2861,8 @@ conditions:
 
 **Related:** Decision 107, 88, 82, 81 cl.6, 84, 143, 191, 200, 204, 212; rec-4170, rec-4220, rec-4221, rec-4223.
 
+> **Amended by Decision 253 (2026-11-10):** Clause 1's deferral ends: the catalog moves to RDS PostgreSQL, SIT first and PROD after SIT's reset has rehearsed the restore. Clauses 2, 4 and 5 hold on RDS; clause 3's Neon history becomes RDS's 7-day backups.
+
 ---
 
 ## Decision 213: An identity-trusting Lambda is reachable only through its AWS_IAM Function URL, enforced in the permissions boundary; telemetry writes get their own function and their own scoped catalog login (amends Decision 81 clauses 1, 5, 6 and 7, Decision 91 clause 1 and Decision 126) (Decided)
@@ -3476,6 +3659,8 @@ Roadmap refs: rec-4044, rec-4049, rec-4067.
 > **Update (2026-10-18):** Clause 6's "email until rec-4049 lands" is discharged by Decision 225: CI holds no IAM grant on PlatformDev, so the platform-role alarm has no sanctioned CI source. Alerts stay unfiltered by actor.
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+> **Amended by Decision 252 (2026-11-10):** Reversal condition (a)'s organisation trail arrives with the Organization, not at live_full; its rule stands: re-point the detector at its log delivery, retire this trail, never run both (Decision 252 cl.8).
 
 ---
 
@@ -7604,6 +7789,8 @@ post-merge, never written directly).
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
+> **Amended by Decision 252 (2026-11-10):** Clause 6's live_full gate on Organizations, the organisation trail and SCPs is lifted: the Organization is stood up now. SCPs add to the permissions boundary and never replace it, so the Reversal's supersession of this boundary does not fire (Decision 252 cl.1 and cl.8).
+
 ---
 
 ## Decision 143: Privileged-verb Lambda decomposition -- scope identities by worst reachable verb; enforce the boundary in a primitive outside the agent merge loop (amends Decision 81 cl.1) (Decided)
@@ -8758,6 +8945,8 @@ mutation. `deploy-paths.yaml`'s admin_out_of_band.scoped_login_provisioning inde
 > **Update (2026-11-06):** Decision 248 clauses 1 and 6 bring terraform/github under CI: terraform-github-apply.yml applies it behind one operator approval, and its two terraform/bootstrap roles and the apply App key's resource policy change only by a bootstrap apply an ADMIN-session agent runs on the operator's explicit direction.
 
 > **Update (2026-11-09):** Decision 251 cl.1 admits the restore rehearsal sitting (docs/contracts/restore-rehearsal.yaml) to the admin tier for an ADMIN-container agent under explicit human direction, on ephemeral functions and a throwaway Neon branch only.
+
+> **Amended by Decision 252 (2026-11-10):** Once SIT stands, clause 1's provision intent applies on merge to SIT; once PROD is promote-only, PROD receives the same saved plan through the gated promotion. The Organization root and the SIT bootstrap root join the admin tier (Decision 252 cl.6 and cl.7).
 ---
 
 ## Decision 125: Ratify decoupling DuckLake Lambda code deploys from terraform/personal infra apply (environment-taxonomy.md section 5 conformance) (Decided)
@@ -9621,6 +9810,8 @@ endpoint basis), Decision 81/CD.33 (runtime architecture retained), Decision 77 
 guard), Decision 100/75 (managed-service-native preference the Neon choice aligns with).
 
 [Amendment 2026-10-09, Decision 214: a pre-emptive swap-back was evaluated and deferred; once rec-4220 caps the compute, cond. 1's baseline is the capped Neon bill (~$20), not $12-15; the RDS path is no longer Terraformed (retired in #82) and its reviewed design is kept on rec-4223; history is 7 days, ruling on cond. 2.]
+
+> **Amended by Decision 253 (2026-11-10):** The swap-back runs: the catalog moves to RDS PostgreSQL, SIT first and PROD after SIT's reset has rehearsed the restore (rec-4223).
 
 ---
 
@@ -10979,6 +11170,8 @@ queue current-state semantics referenced here are this decision's own `priority_
 > `DuckLakeReader.query` are removed. No reader action accepts caller-supplied SQL. Sources:
 > `src/common/ducklake_dq_checks.py`, `src/lambdas/ducklake_reader/handler.py`, `docs/contracts/ducklake_reader.yaml`.
 
+> **Update (2026-11-10):** Decision 253 moves the catalog to RDS PostgreSQL; once PROD moves (rec-4223), I-1's DuckLake-on-Neon reads DuckLake-on-RDS. The single-backend rule is unchanged.
+
 ---
 
 ## Decision 83: Branch Protection Now Active -- Amends Decision 89 Premise (Decided)
@@ -11429,6 +11622,8 @@ OIDC CI), `docs/contracts/environment-taxonomy.md`, `docs/INTENT-ci-cd-architect
 
 > **Amended by Decision 249 (2026-11-07):** Clause 3's "except the mocked sandbox": the sandbox tier now serves production with real externals; sandbox auto-apply stays licensed by the deterministic guard and its human-gated fail-closed set, not by mocked externals (Decision 249 cl.5). The apply model is unchanged.
 
+> **Amended by Decision 252 (2026-11-10):** Clause 5's single-account-until-live_full rule ends: SIT and PROD member accounts are stood up now, and live_full is no longer a trigger. Clause 3's "SIT and PROD stay human-gated" holds for PROD only: once SIT is stood up, auto-apply also runs there behind the same guard, and PROD keeps today's gating until its promotion gate lands and it becomes promote-only (Decision 252 cl.1 and cl.6).
+
 ---
 
 ## Decision 76: Claude-Code-on-the-Web Workflow Migration; .claude as Canonical Interactive Layer (Decided)
@@ -11616,6 +11811,8 @@ Key elements:
 > **Amended by Decision 249 (2026-11-07):** Clause 5's "Sandbox tolerates red `main`" no longer holds for code deploys: the sandbox tier serves production, and each governed code-deploy channel deploys only the newest main commit whose full tier passed, so a red pauses code deploys (Decision 249 cl.1-3). Merging stays optimistic, Terraform apply stays on push, and the SIT/PROD green-streak train stays future state.
 
 > **Amended by Decision 247 (2026-11-02):** Clause 4's suspension of mandatory discussion when `non_automatable_recommendations > 0` is permanent: Decision 67 never reverses and the executor it waited on is retired. Counts stay informational.
+
+> **Amended by Decision 252 (2026-11-10):** Clause 5's green-streak train (sandbox to SIT after 24 h green, SIT to PROD after 7 d) is replaced: merges deploy to SIT, and PROD receives only the identical artifact, promoted behind one operator approval (Decision 252 cl.6).
 
 ---
 
@@ -12393,6 +12590,8 @@ terraform/
 > **2026-05 migration update:** The `company-aws-profile` credential referenced in the Agent SSO Profile Restrictions section was retired; the current model is the `agent_platform` static-key assume-role chain (Decision 73 / CD.21). The multi-environment promotion strategy (separate sandbox/staging/production AWS accounts) is architecturally superseded by the single personal-account model.
 
 > **Amended by Decision 249 (2026-11-07):** The `sandbox` line's "Auto-deploys on every push to main" no longer holds for Lambda code: code deploys ship only the newest main commit whose full tier passed (Decision 249 cl.2); Terraform apply stays on push.
+
+> **Amended by Decision 252 (2026-11-10):** The separate staging and production accounts return as the SIT and PROD member accounts of a company Organization (Decision 252 cl.2); the 2026-05 note's single-account model ends when SIT is stood up.
 
 ---
 
