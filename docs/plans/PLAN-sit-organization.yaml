@@ -112,7 +112,8 @@ scope:
       ObjectLockConfiguration, CORS, Website) with the Put verbs for the settings this root declares; on the state
       bucket's objects GetObject, PutObject and DeleteObject for terraform.tfstate and its .tflock (use_lockfile).
       Logs: CreateLogGroup, PutRetentionPolicy, TagResource, TagLogGroup, ListTagsForResource, ListTagsLogGroup,
-      PutMetricFilter on its log group; DescribeLogGroups and DescribeMetricFilters on "*". CloudWatch: PutMetricAlarm,
+      PutMetricFilter on its log group; DescribeLogGroups, DescribeMetricFilters and TestMetricFilter on "*" (the last
+      for step 7's live pattern check, as PROD's PlatformSecurityLogsRead grants it). CloudWatch: PutMetricAlarm,
       TagResource, ListTagsForResource on its alarms; DescribeAlarms on "*". SNS: CreateTopic, SetTopicAttributes,
       GetTopicAttributes, TagResource, ListTagsForResource, Subscribe, ListSubscriptionsByTopic on its topic; ListTopics
       and, in its own Sid TopicSubscriptionRead, GetSubscriptionAttributes on "*" (the repo's CI policies record that
@@ -135,7 +136,7 @@ scope:
       grant (OrgRead, OrgManage, OrgTrustedAccessIam, OrgServiceLinkedRole, RootFeatures,
       OrgSecurityTrailManage, OrgSecurityTrailRead, BucketManage, StateObjects, LogGroupManage, LogsRead, AlarmManage,
       AlarmRead, TopicManage, TopicSubscriptionRead, DeliveryRole, DeliveryRolePass, SelfUser, SelfRole, TfvarsRead;
-      20 statements after critique r5, 104 actions) renders to about 5,100 characters (5,032 measured before the r5 split) with 12-digit and region stand-ins, json.dumps with no whitespace. If the build's grant measures
+      20 statements, 105 actions after critiques r5 and r6) renders to 5,131 characters (re-measured after r6) with 12-digit and region stand-ins, json.dumps with no whitespace. If the build's grant measures
       over 7,000, STOP and amend the plan (an operator-seeded, imported customer-managed policy changes the seed, the
       import count and step 7's expected list) and re-critique; the build never mints or attaches a policy itself,
       as Decision 156 cl.3 keeps iam:CreatePolicy* off github_ci_apply's own identity, the precedent for a self-applying role (critique r4 BLK-1; critique r2
@@ -158,12 +159,17 @@ scope:
       log-delivery role. Metric filters and alarms, each to SNS topic agent-platform-org-security-alerts with an e-mail
       subscription to var.alerts_email: admin role assumed (AssumeRole of OrganizationAdmin, so every sitting alarms by
       design); the admin user acting other than AssumeRole and GetCallerIdentity (the proxy re-signs the provider's
-      identity call as the user, which is not a misuse); an IAM or Organizations policy change by the management admin
-      identities (PutRolePolicy, PutUserPolicy, AttachRolePolicy, AttachUserPolicy, CreateAccessKey,
-      UpdateAssumeRolePolicy, and organizations AttachPolicy, DetachPolicy, UpdatePolicy, DisablePolicyType, since
-      OrganizationAdmin's policy verbs reach every target on Resource "*", PROD's OU once rec-5065 lands; critique r4
-      N6), so a self-grant or an SCP change is its own alarm and not hidden in the every-sitting one; root activity (userIdentity.type Root
-      outside AWS service events); and trail tampering (StopLogging, DeleteTrail, UpdateTrail, PutEventSelectors). Names
+      identity call as the user, which is not a misuse); an IAM or Organizations policy change by any principal (PutRolePolicy, PutUserPolicy, AttachRolePolicy,
+      AttachUserPolicy, CreateAccessKey, CreateRole, UpdateAssumeRolePolicy, and organizations AttachPolicy,
+      DetachPolicy, UpdatePolicy, DisablePolicyType, since OrganizationAdmin's policy verbs reach every target on
+      Resource "*", PROD's OU once rec-5065 lands; critique r4 N6), never filtered by actor (Decision 202's rule,
+      critique r6 N1), so a self-grant, a new role or an SCP change is its own alarm and not hidden in the
+      every-sitting one; root activity (userIdentity.type Root outside AWS service events); and detector tampering
+      (cloudtrail StopLogging, DeleteTrail, UpdateTrail, PutEventSelectors; logs PutMetricFilter, DeleteMetricFilter,
+      PutRetentionPolicy, DeleteLogGroup; sns Subscribe, Unsubscribe, SetTopicAttributes, DeleteTopic, as PROD's
+      detector-tamper filter covers Logs and SNS; critique r6 N3). The five patterns live in one map,
+      local.org_security_filter_patterns, keyed by alarm name, so the fixture and the live check read them as PROD's do
+      (local.platform_security_filter_patterns). Names
       sit under the agent-platform-* family Decision 101(b) freezes, so no new name family is authorised.
   - file: terraform/organization/CLAUDE.md
     action: Create
@@ -214,6 +220,16 @@ scope:
       seventh verb in OrgSecurityTrailManage, that Sid on another trail ARN, a third write statement, a Deny of
       StopLogging staying green; the real tree green. The file has about 230 lines of headroom under the 500-line
       default; if the change would cross it, split the template reader into a helper module (Decision 128), never raise.
+  - file: tests/fixtures/organization_security_filter_events.yaml
+    action: Create
+    purpose: >-
+      Sanitised CloudTrail events in real CloudTrail shape for the five filters, PROD's
+      tests/fixtures/platform_security_filter_events.yaml pattern: each entry names in must_match the exact set of
+      alarm names its event must match, with at least one match and one near-miss non-match per filter (a denied call
+      in CloudTrail's real denied shape, with null requestParameters, for the policy-change filter); the account id is
+      the literal ACCOUNT, never twelve digits. Read by test_organization_baseline.py (shape, coverage, no account id)
+      and by step 7's live logs test-metric-filter run (critique r6 B1: text pins cannot prove a pattern matches what
+      CloudTrail emits; PROD's filter 1 once never fired for that reason).
   - file: .gitignore
     action: Modify
     purpose: Ignore terraform/**/terraform.organization.tfvars (lock files are already ignored by terraform/**/.terraform.lock.hcl).
@@ -311,11 +327,12 @@ scope:
       grants none of the operator-only verbs, no StopLogging, DeleteTrail or cloudtrail:*, no UpdateAssumeRolePolicy,
       and no Delete* except the state lock object's DeleteObject; each Sid's action set equals the template row's
       write or read set, so a missing refresh read is red; all inline policies on OrganizationAdmin total under 10,240 characters and OrganizationAdminOps alone under 7,000;
-      each of the five metric filters' patterns names its exact event set and identities (the ten IAM and
-      Organizations policy-change events by org-admin-agent or OrganizationAdmin; the four tamper events; Root outside
+      each of the five metric filters' patterns names its exact event set and identities (the eleven IAM and
+      Organizations policy-change events with no actor clause; the twelve tamper events; Root outside
       AWS service events; AssumeRole of OrganizationAdmin; the user acting other than AssumeRole and
       GetCallerIdentity), each pattern fits CloudWatch Logs' 1,024-character limit, and each alarm targets the topic
-      (critique r5 B2); aws_iam_organizations_features depends on the organization; every
+      (critique r5 B2); the event fixture covers every filter with a match and a non-match, carries no 12-digit id, and
+      each denied event has null requestParameters (critique r6 B1); aws_iam_organizations_features depends on the organization; every
       templatefile call sits inside try() with a Deny-all fallback; the SSM grant is ssm:GetParameter alone on the one
       literal parameter ARN shape (validate_secret_parameter_grants reads only .tf files of two roots, so this test pins
       the template's grant; critique r3 N7); every resource name starts agent-platform- or is
@@ -334,7 +351,8 @@ acceptance_criteria:
   - "rec-5026's acceptance node, tests/checks/iam_tf/test_organization_baseline.py::test_baseline_scps_deny_leaving_the_organization, passes, with every other case in that file (step 1)."
   - "The bound files hold exactly the sidecar's words (validate_merge_step green on the PR against the operator's approval run; step 3)."
   - "protected-actions.yaml, environment-taxonomy.yaml and deploy-paths.yaml treat terraform/organization as an admin-only live root with the management profile, the hook classifies every aws or terraform call under that ambient profile once the contract is on main, and their tests say so (step 2); the trail-write guard admits the management trail's one grant and treats Deny statements as no grant (step 2)."
-  - "From the management environment the session's identity is the assumed OrganizationAdmin role, the management account's root MFA is on, every service host the apply uses answers and the provider initialises at the PR head (step 4), and the state bucket's name was free and is owned by the management account (steps 5-6)."
+  - "From the management environment the session's identity is the assumed OrganizationAdmin role, the management account's root MFA is on, every service host the apply uses answers and the provider initialises at the PR head (step 4), and the state bucket's name was free and is owned by the management account (steps 5-6); every alarm's filter
+  pattern matches exactly its fixture events when evaluated live (step 7)."
   - "After the apply: the Organization has feature set ALL with SCPs enabled, iam.amazonaws.com trusted access and both root features on, OUs prod and sit, baseline attached to sit, the trail logging and five alarms present with a confirmed subscription, and a fresh plan exits 0 (steps 8-10)."
   - "T2.57 c4 reads met in the PR on acceptance criteria 1-4 and the step 7 plan; rec-5026 reads closed with its closure trailer after merge (step 11)."
 verification_plan:
@@ -458,7 +476,10 @@ verification_plan:
       Pre-merge read-only admin plan of terraform/organization (deploy-paths.yaml pre_merge_live_plan) at the CI-green
       $PR_HEAD_SHA, in the management environment on the operator's direction, in a worktree at the literal path
       /tmp/org-wt with the tfvars and plan file in /tmp/org-evidence outside it, -lock=false, plan file deleted in the
-      step; counts and addresses only on the PR with the head sha. There is no origin/main plan (the root is new).
+      step; counts and addresses only on the PR with the head sha. There is no origin/main plan (the root is new). Then
+      every filter pattern is evaluated live with logs test-metric-filter against the committed fixture events, so a
+      pattern that cannot match what CloudTrail emits is caught before merge (critique r6 B1; PROD's precedent is
+      PLAN-platform-role-iam-change-alarms step 13).
     command: >-
       set -o pipefail; test -n "$PR_HEAD_SHA" || { echo PR_HEAD_SHA_UNSET; exit 1; }; git cat-file -e "$PR_HEAD_SHA^{commit}" 2>/dev/null || git fetch -q origin "$PR_HEAD_SHA"; R=$(tr -d '[:space:]' < config/aws-region); E=/tmp/org-evidence; rm -rf "$E"; mkdir -p "$E";
       { git worktree remove --force /tmp/org-wt 2> /dev/null; git worktree prune; git worktree add --detach /tmp/org-wt "$PR_HEAD_SHA" -q; } &&
@@ -466,6 +487,7 @@ verification_plan:
       terraform -chdir=/tmp/org-wt/terraform/organization init -input=false -backend-config="region=$R" > /dev/null 2>> "$E/tf.err" &&
       terraform -chdir=/tmp/org-wt/terraform/organization plan -input=false -no-color -lock=false -detailed-exitcode -var-file="$E/terraform.organization.tfvars" -out="$E/p.bin" > /dev/null 2>> "$E/tf.err"; rc=$?;
       terraform -chdir=/tmp/org-wt/terraform/organization show -json "$E/p.bin" 2>/dev/null | bin/venv-python -c "import json,sys,collections; p=json.load(sys.stdin); c=collections.Counter(); [c.update(['import']) if r['change'].get('importing') else c.update(['+'.join(r['change']['actions'])]) for r in p.get('resource_changes', [])]; print('COUNTS', dict(c)); d=lambda ch: sorted(k for k in set(ch.get('before') or {}) | set(ch.get('after') or {}) if (ch.get('before') or {}).get(k) != (ch.get('after') or {}).get(k)) if 'update' in ch['actions'] else []; [print(r['change']['actions'], r['address'], d(r['change'])) for r in p.get('resource_changes', []) if r['change']['actions'] != ['no-op']]";
+      echo 'jsonencode(local.org_security_filter_patterns)' | terraform -chdir=/tmp/org-wt/terraform/organization console -var-file="$E/terraform.organization.tfvars" 2>> "$E/tf.err" | bin/venv-python -c "import json,subprocess,sys,yaml; pats=json.loads(json.loads(sys.stdin.read())); ev=yaml.safe_load(open('/tmp/org-wt/tests/fixtures/organization_security_filter_events.yaml'))['events']; bad=[]; [bad.append((name,e['name'],hit)) for e in ev for name,p in pats.items() for hit in [bool(json.loads(subprocess.run(['aws','logs','test-metric-filter','--filter-pattern',p,'--log-event-messages',json.dumps(e['event']),'--profile','agent_platform_admin_org','--output','json'],check=True,capture_output=True,text=True).stdout)['matches'])] if hit != (name in e['must_match'])]; sys.exit('MISMATCH '+repr(bad)) if bad else print('FILTERS OK -- '+str(len(pats))+' patterns x '+str(len(ev))+' events')";
       echo "EXIT $rc"; rm -f "$E/p.bin" "$E/terraform.organization.tfvars"; git worktree remove --force /tmp/org-wt
     expected: >-
       EXIT 2 and exactly: 5 imports (the state bucket, aws_iam_user.org_admin_agent, aws_iam_user_policy, aws_iam_role,
@@ -474,9 +496,12 @@ verification_plan:
       aws_organizations_policy_attachment (sit), 5 state-bucket settings (versioning, public-access block, encryption,
       ownership, policy), 1 aws_cloudtrail, 1 trail bucket with its 5 settings, 1 log group, 1 delivery role with its
       policy, 5 metric filters, 5 alarms, 1 topic, 1 subscription; 0 to destroy. The build confirms the create count
-      against the merged code and posts COUNTS, the address list and EXIT on the PR with the head sha.
+      against the merged code and posts COUNTS, the address list and EXIT on the PR with the head sha. Then FILTERS OK
+      -- 5 patterns x every fixture event.
     fix_if: >-
-      a delete or replace anywhere -- STOP; an imported IAM item's changed-attribute list names anything but tags or
+      a delete or replace anywhere -- STOP; MISMATCH or a refused pattern -- fix the pattern in HCL (or the fixture if
+      it does not carry CloudTrail's real shape), push, and re-run steps 1 and 7 at the new head; never drop a clause
+      silently; an imported IAM item's changed-attribute list names anything but tags or
       tags_all (the step prints attribute names, never values) -- the seed differs from the
       template: re-seed from the same sha, never edit the template to match a hand edit; EXIT 1 -- read
       /tmp/org-evidence/tf.err locally
@@ -599,6 +624,11 @@ test_obligations:
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_organization_baseline.py
     red_green_expectation: red before (root absent)
+  - source: tests/fixtures/organization_security_filter_events.yaml
+    behavior: real-shape events, a match and a non-match per filter, no account id
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_organization_baseline.py
+    red_green_expectation: the fixture coverage case is red before the file lands; step 7 evaluates it live
   - source: terraform/organization/main.tf
     behavior: backend without region; no account id literal
     verification_step: 1
@@ -749,6 +779,7 @@ context:
   - "Critique r4 (REVISE, 1 blocking, 6 nits), dispositions: BLK-1 the grant was measured at planning (19 statements, 104 actions, 5,032 characters) and an over-7,000 build result is STOP-and-amend, never an in-build managed policy (Decision 156 cl.3); N1 the secret-read approval names VP 7 and VP 8 only; N2 step 8 fetches main, checks the merge sha is on it (the hook reads the contract from origin/main) and reports WORKTREE_ABSENT; N3 a new management session re-asks both session lines; N4 the final-diff word names the gate files; N5 EnableAWSServiceAccess has its own statement; N6 the IAM-change alarm also covers Organizations policy changes."
   - "Decision 202 cl.2 and cl.6 put PlatformAdmin's six verbs in a managed policy and reject inline AdminOps statements for Decision 156 headroom on that role; OrganizationAdmin carries OrgSecurityTrailManage inline because its inline aggregate has room (measured, 7,000 cap with about 3,000 left for the children) and it cannot create managed policies itself (critique r5 N2)."
   - "Critique r5 (REVISE, 2 blocking, 4 nits), dispositions: B1 sns:GetSubscriptionAttributes moves to its own Resource * Sid (TopicSubscriptionRead), following the repo's CI policies; B2 the baseline test pins each metric filter's event set, identities and size, named in the trail.tf obligation; N1 Decision 156 cl.3 cited as precedent; N2 the inline placement of the trail verbs explained here; N3 step 8 reports a failed fetch apart from a sha not on main; N4 the step 7 re-run sets PR_HEAD_SHA to the merge sha."
+  - "Critique r6 (REVISE, 1 blocking, 3 nits), dispositions: B1 a committed real-shape event fixture (tests/fixtures/organization_security_filter_events.yaml, PROD's pattern) with a match and a non-match per filter, checked by the baseline test, and step 7 evaluates every pattern live with logs test-metric-filter before merge (TestMetricFilter added to LogsRead), tied to AC4; N1 the policy-change alarm has no actor clause (Decision 202) and adds CreateRole; N2 the grant re-measured at 5,131 characters (20 statements, 105 actions); N3 the tamper alarm covers Logs and SNS changes as PROD's does."
   - "PR shape: one PR. It declares this plan, carries every sidecar block, flips T2.57 c4 and carries 'Resolves: rec-5026'."
   - "Cost check (AWS public price list, eu-west-2, 2026-11-10): five standard alarms $0.50/month; management-account events are a first trail copy (free) at a volume of a few hundred a month, so CloudWatch Logs ingestion and S3 storage are cents; Organizations, SCPs and an SSM standard parameter cost nothing. Total about $0.60/month."
   - "Carried to the child items (in their contexts at filing, 2026-11-11 12:58Z-13:00Z, each read back): rec-5064 -- the AccountMFAEnabled read is replaced by list-organizations-features plus an audit that SIT has no root password, and every SIT read goes through a separate regional STS client with frozen role credentials (scripts.aws_identity's pattern), because a chained assume-role to the project region's STS host is re-signed as the management user; the account quota read must not override the profile region. rec-5065 -- the PROD acceptance by the break-glass user, the import with prevent_destroy and ignore_changes, and consolidated billing moving PROD's Cost Explorer and CUR view to the payer (tell the Cost Optimisation project). rec-5066 -- the 400-day region and root lookback over PROD's trail with a bounded wait on query status (no foreground sleep); only PROD-health checks (portal round trip, drift, bootstrap plan, alarms) trigger an emergency detach, while a wrong simulator line triggers investigation through the fallback call, with aws:PrincipalArn passed as a context entry; each --selftest-roundtrip writes one probe rec; PRs that do not declare that plan run validate_scope_boundary through its plan_paths seam as a VP step."
@@ -765,6 +796,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 11}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 6}
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 2, nits: 4}
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 1, nits: 3}
   - {gate: wording-check, round: 5, verdict: PASS, digest: 733f14d17decb1a00e2bd2d9fd9ebd024ff4ca15f16a8097ee0a049db23fe91d, base: a0a47562e033fe9435defb1856edaf0dfbb22795, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
