@@ -77,12 +77,14 @@ scope:
       evaluated). "Measured hours" in red_projected means the trailing 24 hours, the window red_measured judges, so an
       older breach with a projected peak over the threshold reads red_projected; test_every_reading_has_exactly_one_verdict
       names that case.
-      main(argv) for `python -m scripts.ci.actions_capacity_gauge [--reading-out PATH]`: reads the previous table and
+      main(argv) for `python -m scripts.ci.actions_capacity_gauge [--reading-out PATH]` (and `--assert-clear <class>
+      --reading <path>`, the alarm recs' acceptance, which reads a saved reading and writes nothing): reads the previous table and
       the runs through actions_capacity_github, computes, writes the JSON reading (contract_version, generated_at,
-      run_id, coverage, table, projection, verdict, green_predicate, late_start_minutes, calls, elapsed_s) and a Markdown job summary (to
+      run_id, coverage, table, projection, verdict, green_predicate, late_start_minutes, calls, elapsed_s,
+      read_failed_ticks: consecutive ticks whose open-rec read failed, carried from the previous reading) and a Markdown job summary (to
       GITHUB_STEP_SUMMARY when set), calls actions_capacity_alarm, and prints one line "[actions_capacity]
       verdict=<v> evaluated_hours=<n> chained=<0|1> calls=<n> elapsed_s=<n> peak_slot_demand=<x> p90_queue_s=<y>
-      projected_peak=<z> late_start_minutes=<m> alarm=<action> rate_remaining=<r>" (r from the last
+      projected_peak=<z> late_start_minutes=<m> alarm=<action> rate_remaining=<r> read_failed_ticks=<k>" (r from the last
       response's X-RateLimit-Remaining header). Exit 0 on every verdict, on GitHub read failures and on
       a warehouse read failure (printed; the open-rec leg reads false and the alarm is skipped that tick); exit 1 only
       when a portal write raises (Decision 84 I-4). The open-rec leg is read before the alarm acts, so a tick that
@@ -119,13 +121,18 @@ scope:
       least validity.min_evaluated_hours_24h evaluated hours and none exceeds either threshold; on any other tick the
       episode is not called, so an open rec stays open) and gauge_blind (over_threshold when the
       trailing 24 h hold fewer than validity.min_evaluated_hours_24h evaluated hours). build_fields gives the literal "source": "actions_capacity" (which check_source_registry's scan matches,
-      and a test asserts equals the contract's alarm.source), title,
-      priority High, the class marker, the breaching hours with their values, the run URL and the contract's
-      trigger_response verbatim; build_update returns None unless the breaching-hour set changed; build_close records
-      the clearing tick. red_projected files nothing. open_rec_exists() reads find_recs(source actions_capacity, status
-      open) for the green predicate's open-rec leg. A reader exception in that read or in run_episode's lookup is
-      caught and reported to the caller as read_failed (no write is attempted); only a portal write exception
-      propagates. CONVERGENCE_HEALTH_DIAGNOSE set: print the decision, write
+      and a test asserts equals the contract's alarm.source) and the full field set the writer requires: title (at least
+      10 characters), file scripts/ci/actions_capacity_gauge.py, status open, priority High, effort S, risk low,
+      automatable false, verification_tier V2, a context of at least 80 characters (the class marker, the breaching
+      hours with their values, the run URL and the contract's trigger_response verbatim) and acceptance, the per-class
+      command `bin/venv-python -m scripts.ci.actions_capacity_gauge --assert-clear <class> --reading <path>` (exits 0
+      when that class's clear condition holds in the reading; the telemetry_verify acceptance_for precedent);
+      build_update returns None unless the breaching-hour set changed; build_close returns status closed with the
+      clearing tick's run URL (the convergence_health escalate precedent). red_projected files nothing.
+      open_rec_exists() makes the module's one find_recs(source actions_capacity, status open) read, for the green
+      predicate's open-rec leg, and passes those rows as rows= to each run_episode call, so run_episode makes no read
+      and only a portal write exception can escape it; a reader exception in that one read is caught and reported as
+      read_failed (no write is attempted). CONVERGENCE_HEALTH_DIAGNOSE set: print the decision, write
       nothing. A write failure propagates (no outbox).
   - file: .github/workflows/convergence-health.yml
     action: Modify
@@ -226,7 +233,8 @@ scope:
       exactly one verdict; the filling table and an older breach read amber); test_late_start_minutes_reported;
       test_warehouse_read_failure_exits_zero_and_is_not_green;
       test_green_needs_every_predicate_leg;
-      test_main_exits_zero_on_read_failure_and_one_on_write_failure; test_status_line_shape.
+      test_main_exits_zero_on_read_failure_and_one_on_write_failure;
+      test_assert_clear_mode; test_read_failed_ticks_carry_and_reset; test_status_line_shape.
   - file: tests/ci/test_actions_capacity_github.py
     action: Create
     purpose: >-
@@ -241,7 +249,9 @@ scope:
       test_breach_rec_closes_when_enough_hours_and_no_breach (a red_projected tick included); test_insufficient_data_keeps_open_breach_rec; test_red_projected_files_nothing; test_blind_class_files_when_evaluated_hours_low;
       test_two_classes_are_separate_episodes; test_diagnose_writes_nothing;
       test_rec_context_carries_trigger_response_verbatim; test_alarm_source_literal_matches_contract; test_write_failure_propagates;
-      test_reader_failure_is_read_failed_and_writes_nothing.
+      test_reader_failure_is_read_failed_and_writes_nothing;
+      test_build_fields_pass_the_portal_write_gate (both classes' build_fields through
+      scripts.ops_portal.write_validators.gate_write("ops_recommendations", ..., insert=True), no network).
   - file: tests/ci/test_actions_capacity_contract.py
     action: Create
     purpose: >-
@@ -261,7 +271,7 @@ scope:
       test_upload_step_matches_evidence_contract (artifact name and retention-days equal the
       github-actions-evidence.yaml row and its class maximum); test_existing_steps_permissions_and_inputs_unchanged
       (the step names before the gauge, the job permissions, timeout-minutes 10 and the dispatch inputs equal a pinned
-      list).
+      list, and actions_capacity_github.JOB_TIMEOUT_MINUTES equals the job's timeout-minutes).
 bundled_recommendations: [rec-5022]
 followon_recs: []
 infrastructure_dependencies:
@@ -337,9 +347,13 @@ verification_plan:
       tests/ci/test_actions_capacity_alarm.py::test_insufficient_data_keeps_open_breach_rec
       tests/ci/test_actions_capacity_alarm.py::test_reader_failure_is_read_failed_and_writes_nothing
       tests/ci/test_actions_capacity_alarm.py::test_breach_rec_closes_when_enough_hours_and_no_breach
-      tests/ci/test_actions_capacity_alarm.py::test_blind_class_files_when_evaluated_hours_low -q
-    expected: Exit 0, eleven nodes pass; red before because the nodes are absent.
-    expected_literals: [11 passed]
+      tests/ci/test_actions_capacity_alarm.py::test_blind_class_files_when_evaluated_hours_low
+      tests/ci/test_actions_capacity_alarm.py::test_build_fields_pass_the_portal_write_gate
+      tests/ci/test_actions_capacity_alarm.py::test_write_failure_propagates
+      tests/ci/test_actions_capacity_alarm.py::test_diagnose_writes_nothing
+      tests/ci/test_actions_capacity_github.py::test_http_error_stops_without_retry -q
+    expected: Exit 0, fifteen nodes pass; red before because the nodes are absent.
+    expected_literals: [15 passed]
     fix_if: A budget overrun or duplicate filing is a code defect; never raise the contract's budgets to pass.
     hermetic: true
     graduation: graduate
@@ -435,7 +449,8 @@ verification_plan:
       One matching line and ARTIFACT_OK, which also asserts the run concluded success. Report the line verbatim: its calls and elapsed_s
       are the first live measurement of the budgets in context.
     fix_if: >-
-      No line means the step did not run or crashed: read the log, fix forward. evaluated_hours 0 on the first run means
+      A run cancelled while pending (the concurrency group) is re-dispatched. No line means the step did not run or
+      crashed: read the log, fix forward. evaluated_hours 0 on the first run means
       every bootstrap hour was open or uncovered: read the coverage field. A red run with a portal error is a write
       failure to root-cause; never mark the step continue-on-error. If the run is red from another sensor's step, that is
       not this plan's defect: report it, and judge the gauge by its own two steps' conclusions in the job's steps list.
@@ -612,6 +627,7 @@ gate_rounds:
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 2, nits: 7}
   - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 2, nits: 5}
   - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 2, nits: 7}
+  - {gate: plan-critique, round: 8, verdict: REVISE, blocking: 1, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
