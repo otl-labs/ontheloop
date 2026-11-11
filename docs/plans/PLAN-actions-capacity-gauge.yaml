@@ -52,7 +52,8 @@ scope:
       row per closed UTC clock hour from read_from plus window.overlap_hours up to now; the overlap_hours after
       read_from are read context only and never become rows, so a chained tick never moves its start backward. An hour
       is evaluated only when the tick read every run created from window.overlap_hours before its start to its end and
-      no job overlapping it has status queued or in_progress (waiting and pending do not block); slot_demand = the sum of each non-skipped job's minutes inside the hour
+      no job overlapping it has status queued, requested or in_progress (waiting and pending do not block, and neither
+      does the tick's own run, GITHUB_RUN_ID); slot_demand = the sum of each non-skipped job's minutes inside the hour
       / 60; peak_concurrency = the most jobs running at one instant inside the hour (reported, never a trigger);
       queue_p90_s = p90 of (job started_at minus the job's own created_at, every attempt) over the contract's queue job (ci.yml
       main-validate, push event) whose started_at falls in the hour, with queue_samples, pooled per validity.pooling (nearest-rank p90; the row records the pool it used);
@@ -65,7 +66,9 @@ scope:
       then contributes nothing, so nothing is counted twice); assumed rows use job_minutes_per_unit, analog rows the
       measured mean job-minutes per merge of their analog jobs over the table times multiplier. verdict(table,
       projection, contract, now) -> Reading with verdict green | red_measured | red_projected | insufficient_data | amber and
-      one boolean per reading.green_predicate leg (the open-rec leg is filled by the alarm module's read), choosing the
+      one boolean per reading.green_predicate leg (the open-rec leg is filled by the alarm module's read; the freshness
+      leg is true at generation and judged again by the citing plan; the projected-peak leg is computed over the ledger
+      as on main, and the citing plan recomputes it with its own row), choosing the
       verdict in reading.precedence order (a breaching evaluated hour gives red_measured even when too few hours are
       evaluated).
       main(argv) for `python -m scripts.ci.actions_capacity_gauge [--reading-out PATH]`: reads the previous table and
@@ -86,7 +89,8 @@ scope:
       scripts/convergence_health/approvals.py _make_github_caller header shape, written here, never imported or edited
       there). A Budget object counts calls against window.request_budget_per_tick and wall-clock against
       window.time_budget_seconds, capped at the time left in the job (its started_at, read once from
-      /actions/runs/{GITHUB_RUN_ID}/jobs, plus timeout-minutes, less 90 s for the upload). previous_table(caller, budget): the newest readable artifact named
+      /actions/runs/{GITHUB_RUN_ID}/jobs, plus a JOB_TIMEOUT_MINUTES constant of 10 that test_existing_steps_permissions_and_inputs_unchanged pins
+      equal to the workflow's timeout-minutes, less 90 s for the upload). previous_table(caller, budget): the newest readable artifact named
       actions-capacity-reading among convergence-health.yml's last 5 completed runs (window.chaining); the zip URL is requested without following its redirect, and the
       redirect target is fetched without the Authorization header; returns the parsed table or None (absent, expired
       or unparsable: printed, never fatal). fetch_runs_and_jobs(caller, since, budget): pages
@@ -147,7 +151,8 @@ scope:
     action: Modify
     purpose: >-
       One Entry validate_actions_capacity (pre=True; pre_globs docs/contracts/actions-capacity.yaml,
-      scripts/ci/actions_capacity_contract.py, scripts/checks/contracts/validate_actions_capacity.py, .github/workflows/**,
+      scripts/ci/actions_capacity_contract.py, scripts/checks/contracts/validate_actions_capacity.py, scripts/checks/_common.py,
+      scripts/checks/registry.py, any other first-party module the check or loader imports, .github/workflows/**,
       config/agent/data_quality/source_registry.yaml, docs/ROADMAP-PLATFORM.yaml, docs/ROADMAP-PLATFORM-ARCHIVE.yaml;
       full_segment full_after_lint), placed
       in pre_sequence and full_sequence; validate_pre_glob_closure then reports no uncovered path.
@@ -156,8 +161,9 @@ scope:
     purpose: >-
       _CLOSURE_INPUTS gains a validate_actions_capacity row naming docs/contracts/actions-capacity.yaml,
       scripts/ci/actions_capacity_contract.py, scripts/checks/contracts/validate_actions_capacity.py,
+      scripts/checks/_common.py, scripts/checks/registry.py,
       .github/workflows/convergence-health.yml, config/agent/data_quality/source_registry.yaml, docs/ROADMAP-PLATFORM.yaml
-      and docs/ROADMAP-PLATFORM-ARCHIVE.yaml (the check's whole read set), so
+      and docs/ROADMAP-PLATFORM-ARCHIVE.yaml (the check's read set and import closure, as validate_pre_glob_closure computes it), so
       TestPromotedGateClosures asserts the Entry's pre_globs match each and not an unrelated path. The graduated shards
       contract-pointer-evaluators-mirror-tests and ducklake-partition-spec-preglob-closure are kept: their nodes and commands are unchanged.
   - file: config/ci_rca_taxonomy.yaml
@@ -257,7 +263,7 @@ acceptance_criteria:
     acceptance) and every new test fails before the change.
   - >-
     validate_actions_capacity passes on the real contract and runs in --pre on a diff touching the contract, its loader,
-    the check, a workflow or the source registry; the two sidecar-bound contract files equal the approved sidecar
+    the check or its registry imports, a workflow, the source registry or a roadmap file; the two sidecar-bound contract files equal the approved sidecar
     (scripts.roadmap.approved_text verify exits 0).
   - >-
     After merge, the governed DuckLake deploy of the merge commit succeeds, and a convergence-health run on main after
@@ -375,8 +381,8 @@ verification_plan:
     action: >-
       The governed deploy of the merge commit succeeded, every job included. Read with mcp__github__actions_list
       (list_workflow_runs, workflow deploy-ducklake-lambdas.yml) the run whose deploy gate resolved $MERGE_SHA (or the
-      newest green commit after it), then list_workflow_jobs for that run, writing the jobs JSON to $DEPLOY_JOBS_JSON and its logs to
-      $DEPLOY_LOG (mcp__github__get_job_logs).
+      newest green commit after it), then list_workflow_jobs for that run, writing the jobs JSON to $DEPLOY_JOBS_JSON and the deploy-telemetry job's log (which carries any
+      TELEMETRY_PRODUCTION_HOLD notice) to $DEPLOY_LOG (mcp__github__get_job_logs).
     command: >-
       test -s "$DEPLOY_JOBS_JSON" && bin/venv-python -c "import json,os;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));
       jobs={x['name']:x.get('conclusion') for x in (j.get('jobs') if isinstance(j,dict) else j)};print(jobs);
@@ -413,7 +419,8 @@ verification_plan:
     fix_if: >-
       No line means the step did not run or crashed: read the log, fix forward. evaluated_hours 0 on the first run means
       every bootstrap hour was open or uncovered: read the coverage field. A red run with a portal error is a write
-      failure to root-cause; never mark the step continue-on-error.
+      failure to root-cause; never mark the step continue-on-error. If the run is red from another sensor's step, that is
+      not this plan's defect: report it, and judge the gauge by its own two steps' conclusions in the job's steps list.
     hermetic: false
     graduation: not-applicable
   - step: 9
@@ -489,7 +496,7 @@ test_obligations:
     test_selector: tests/checks/ops_governance/test_check_source_registry.py::TestScannedPaths::test_scanned_paths_includes_portal_and_producer_modules
     red_green_expectation: red before (path absent from SCANNED_PATHS), green after
   - source: scripts/checks/contracts/_manifest.py
-    behavior: the Entry's pre_globs match the contract, its loader, the check, a workflow and the source registry
+    behavior: the Entry's pre_globs match the check's read set and import closure (contract, loader, check, registry, a workflow, source registry, roadmaps)
     verification_step: 4
     test_selector: 'tests/checks/contracts/test__manifest.py::TestPromotedGateClosures::test_a_diff_touching_only_this_closure_member_still_matches_the_gate[validate_actions_capacity-.github/workflows/convergence-health.yml]'
     red_green_expectation: red before (the row and the Entry are absent), green after
@@ -545,7 +552,8 @@ context:
   - >-
     Decision 100: GitHub's organisation Actions usage and performance metrics are insights pages with no hourly
     concurrency, no per-job p90 and no alarm, so the gauge derives them from the runs and jobs API (inferred from the
-    docs, not probed: UNPROVEN). Decision 249: the redeploy ships only once main's full tier passes; step 7 waits on it.
+    docs, not probed: UNPROVEN). Decision 249: the redeploy ships only once main's full tier passes; step 7 waits on it. No ports.yaml note is owed
+    (Decision 212): the gauge reaches the ops reader and portal only through rec_episode, as the convergence-health sensors do.
   - 'Sign-off: operator "write the plan" with fork A (levers listed as options, no order ratified) on 2026-11-11 12:48 UTC; presentation /mnt/project-files/rec-5022-plan/PRESENTATION.md.'
   - 'Org fact (operator, 2026-11-11): GitHub Free, public repository, the only repository in the organisation; so the reading covers the whole cap and no org-wide follow-on rec is filed.'
   - >-
@@ -583,6 +591,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 11}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 3, nits: 6}
   - {gate: wording-check, round: 4, verdict: PASS, digest: 9f0ea1d45ffc13427aa4b205a0f126c084c074539d763615e96e4c2b87e1de28, base: a0a47562e033fe9435defb1856edaf0dfbb22795, selection: complete, pending_evaluators: 1}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 2, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -624,4 +633,9 @@ execution_steps:
     tests/ci/test_actions_capacity_alarm.py::test_breach_files_one_rec_then_updates_only_on_change and
     tests/checks/contracts/test_validate_actions_capacity.py::test_real_contract_passes_and_declares_examined.
   - Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55).
-  - 'Report: what was implemented, verification results, step 8''s status line verbatim, and the merge SHA.'
+  - >-
+    Closure evidence as four separate facts (implement skill Commit Flows): GitHub readiness, full-tier evidence for the
+    pushed HEAD (VP 6's --verify-head), structured postflight evidence (scripts.session.postflight --evidence), and the
+    real outcome (CI green by event wake, squash-merge SHA, VP 7-10). The squash-merge commit body carries
+    `Resolves: rec-5022` (git-ops.yaml resolves_trailer), which VP 10 reads back.
+  - 'Report: what was implemented, verification results, the four closure facts, step 8''s status line verbatim, and the merge SHA.'
