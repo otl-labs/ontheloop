@@ -52,7 +52,8 @@ scope:
       ServiceUnavailableError or BadGatewayError, or status 408, 429 or any 5xx (LiteLLM reports a refused connection
       as InternalServerError 500); provider_error = anything else (auth, not found, bad request, context window) --
       never retried, never failed over. A response whose choices list is empty is malformed_output, and one whose
-      content is blank with no tool calls is empty_output; neither is retried or failed over. LiteLLM 1.106.2 itself
+      content is blank with no tool calls is empty_output; neither is retried or failed over. The transport checks
+      both before calling read_response, which assumes at least one choice and never raises. LiteLLM 1.106.2 itself
       raises APIError 500 for a body with no choices key at all and APIConnectionError 500 for an Anthropic body with
       no model, so those
       reach the transport as outages and are retried; this is accepted and documented in the module docstring.
@@ -104,7 +105,8 @@ scope:
       The probe builds its request through litellm_wire.request_kwargs and reads the key through
       litellm_wire.read_secret. ensure_asserted(role, *, credential_holder, root) -> ColdStartResult runs
       cold_start_check unless an asserted result is cached; aensure_asserted is its async twin and probes through a
-      private _acold_start_probe that calls litellm.acompletion, never the sync path. Only an asserted outcome is
+      private _acold_start_probe that calls litellm.acompletion, never the sync path; the two probes share one key-read
+      and request-building helper and one response-interpretation helper, so only the call differs. Only an asserted outcome is
       cached, per process per (contracts root, model); spent, not_asserted and a transient failure are re-probed at the
       next gate. A threading.Lock (ensure_asserted) and an asyncio.Lock created lazily per running event loop
       (aensure_asserted) hold the probe, so concurrent gates in one mode run it once; a sync and an async gate in one
@@ -125,7 +127,8 @@ scope:
       and no selection literal: read_secret(variable) -> str (the transport's row (2); the one environment read); the frozen dataclasses CallRecord and Attempt and TransportError (defined here, re-exported by the
       transport). request_kwargs(selection, messages, *, api_key, max_tokens, tools, tool_choice, response_format,
       timeout) -> dict: model=selection.model, api_key, messages, max_tokens, timeout, num_retries=0 (the transport
-      owns retries), the tools, tool_choice and response_format given, and _skip_mcp_handler=True, and never fallbacks=
+      owns retries), tools, tool_choice and response_format passed through unconditionally (None included), and
+      _skip_mcp_handler=True, and never fallbacks=
       (LiteLLM's own fallbacks drop the flag). The flag is needed because litellm 1.106.2 imports its MCP handler on any
       tools call and that import fails under the pinned mcp<2 (rec-3795 owns the migration). Thinking and effort, by
       the model's LiteLLM prefix: deepseek -> thinking={"type": "enabled"|"disabled"} and, when enabled,
@@ -140,8 +143,8 @@ scope:
       assumptions: the anthropic row assumes every model under that prefix always thinks (true of the current
       fallback; a later Anthropic model that accepts disabled thinking needs this row edited, and no persona sets
       disabled today), and the wire shape for an Anthropic model comes from LiteLLM's own per-model knowledge (probed
-      2026-11-11: claude-opus-5-5 gets adaptive thinking, claude-sonnet-4-5 a budgeted one, an unknown id raises
-      UnsupportedParamsError), so a model bump may also need a LiteLLM bump (rec-5069). classify(exc) -> outcome, from
+      2026-11-11: the current fallback model gets adaptive thinking, an older Sonnet a budgeted one, an unknown id
+      raises UnsupportedParamsError; the docstring names no model id, per the constraints), so a model bump may also need a LiteLLM bump (rec-5069). classify(exc) -> outcome, from
       the status_code (the exception class varies with the body): credit_exhausted = status 402, or a 400 whose
       message contains "credit balance is too low"; outage = litellm Timeout, APIConnectionError, RateLimitError,
       InternalServerError, ServiceUnavailableError or BadGatewayError, or status 408, 429 or any 5xx (LiteLLM reports a
@@ -153,10 +156,12 @@ scope:
       DeepSeek's reasoning_content and Anthropic's thinking_blocks with their signatures and provider_specific_fields
       survive a tool loop with thinking on (verified 2026-11-11 under 1.106.2: both are replayed in turn 2's request);
       model is response.model as the provider reports it (None if absent, which only the deepseek path can return);
-      tokens_cache_read is usage.prompt_tokens_details.cached_tokens or 0, tokens_cache_creation is
-      getattr(details, "cache_creation_tokens", None) or 0 (DeepSeek's details carry no such attribute), tokens_input is usage.prompt_tokens minus both (LiteLLM 1.106.2 reports prompt_tokens
+      tokens_cache_read is getattr(usage.prompt_tokens_details, "cached_tokens", None) or 0 and tokens_cache_creation
+      getattr(usage.prompt_tokens_details, "cache_creation_tokens", None) or 0 (LiteLLM 1.106.2 gives a None details
+      block for a DeepSeek body without prompt_cache_hit_tokens, and DeepSeek's block has no cache_creation_tokens), tokens_input is usage.prompt_tokens minus both (LiteLLM 1.106.2 reports prompt_tokens
       inclusive of cached tokens for both current providers), tokens_output is usage.completion_tokens and
-      reasoning_tokens is usage.completion_tokens_details.reasoning_tokens or None for the deepseek prefix and None for
+      reasoning_tokens is getattr(usage.completion_tokens_details, "reasoning_tokens", None) (the block can be None
+      too) for the deepseek prefix and None for
       anthropic (LiteLLM derives Anthropic's figure from the returned summarized thinking text, not the billed count,
       and tokens are facts, Decision 217 clause 4). Under 500 SLOC (plan-defect STOP otherwise, as above).
   - file: tests/test_llm_litellm_transport.py
@@ -190,13 +195,17 @@ scope:
       async one probing through httpx.AsyncClient.send) and raises fallback_unavailable after a spent one;
       TransportResult.attempts never includes the probe's call; end_user without fail_over is served by the primary
       alone (the positive half of T4.17 c5's BYOK clause), and end_user with fail_over raises end_user_primary_only
-      before any request or environment read. (f) the key string (a sentinel set in the environment) appears in
+      before any request or environment read; a missing key and a refused anthropic shape (thinking disabled) surface
+      through complete and acomplete with their own kinds, missing_credential and refused, one Attempt-free raise each
+      and no captured request, never reclassified as provider_error. (f) the key string (a sentinel set in the environment) appears in
       neither str() of a raised TransportError nor its __cause__ chain, nor repr() of CallRecord or TransportResult
       (Decision 224 clause 2); a TierSelectionError propagates from two mutated contract copies (root=tmp), one
       breaking 2(a) (a retired_providers prefix, with that row's provider string and key variable aligned to the
       prefix so no other resolver rule fires first) and one breaking 2(b) (same vendor in both roles), each asserting
       the rule tag. (h) A contract swap (class TestContractSwap, which VP step 6 selects by name): a tmp root whose
-      tier_1 default_model and models name another model id routes the request to it with no code change. (i)
+      tier_1 default_model and models name another model id routes the request to it with no code change. Tests (i)
+      and (j) cover no transport lines; if this file nears 500 SLOC the build moves them to
+      tests/test_llm_litellm_wire.py (in scope) before any STOP. (i)
       Importing any of the three modules makes no request and does not import litellm, checked in a subprocess
       (subprocess.run([sys.executable, "-c", "import scripts.llm.litellm_transport, scripts.llm.litellm_wire,
       scripts.llm.litellm_cold_start, sys; assert 'litellm' not in sys.modules"], cwd=ROOT, check=True); not -I,
@@ -219,7 +228,8 @@ scope:
       with the selected effort and no output_config; the fallback's body carries thinking {"type": "adaptive", ...}
       and output_config.effort equal to the selected effort; both carry the requested model without its prefix, and
       the key reaches the request's auth header from the environment variable. request_kwargs directly: every result
-      carries num_retries=0 and _skip_mcp_handler=True and no fallbacks; a deepseek selection with thinking disabled
+      carries num_retries=0 and _skip_mcp_handler=True and no fallbacks, and passes tools, tool_choice and
+      response_format through (a json_schema response_format given is in the result); a deepseek selection with thinking disabled
       sends thinking disabled and no extra_body; another prefix (a Selection built with dataclasses.replace) gets
       reasoning_effort when thinking is enabled and neither field when disabled; an anthropic selection with thinking
       disabled is refused anthropic_thinking_always_on, and tool_choice {"type": "function", ...} or "required" on
@@ -228,7 +238,8 @@ scope:
       returned. (c) Records, through read_response on canned responses: served model taken from the response (a
       dated string differing from the requested alias is recorded as given), the four token classes from a canned
       usage block per provider (cached tokens subtracted from tokens_input; a DeepSeek details block without
-      cache_creation_tokens gives 0), reasoning_tokens (None on an anthropic-prefixed record), tool calls as plain
+      cache_creation_tokens gives 0, and a DeepSeek body with neither prompt_cache_hit_tokens nor
+      completion_tokens_details gives 0 cache tokens and reasoning_tokens None), reasoning_tokens (None on an anthropic-prefixed record), tool calls as plain
       dicts, message with None values dropped, and model None on a deepseek body without one. classify over a
       parametrized table of status codes and exception classes (402, the credit-balance 400, 401, 404, plain 400,
       408, 429, 500, 503, 529, an exception with no status_code, UnsupportedParamsError), each to its outcome. Under
@@ -589,6 +600,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 8}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 9}
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 2}
+  - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
