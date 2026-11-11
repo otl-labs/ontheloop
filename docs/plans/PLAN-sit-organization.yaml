@@ -84,7 +84,9 @@ scope:
       sts:AssumeRole on the OrganizationAdmin role), aws_iam_role OrganizationAdmin (trust: that user only,
       max_session_duration 3600) and aws_iam_role_policy OrganizationAdminOps, all seeded by the operator in step 4 from
       the same templates. Each policy and the trust document is try(templatefile("${path.module}/policies/<name>.json.tftpl",
-      {...}), <a single explicit Deny * statement>) so a missing template fails closed. No aws_iam_access_key and no
+      {...}), <fallback>) so a missing template fails closed: for the two policies a single Deny of Action * on
+      Resource *, and for the trust document a single Deny of sts:AssumeRole to Principal {"AWS": "*"} (a trust policy
+      needs a Principal and an sts action, and a Deny-only trust admits no one). No aws_iam_access_key and no
       access-key verb anywhere (Decision 237: the key is minted out of band).
   - file: terraform/organization/policies/organization_admin.json.tftpl
     action: Create
@@ -166,11 +168,18 @@ scope:
       fast_path_ok treats every profile whose name starts with agent_platform_admin as an admin ambient (today it
       hard-codes the one name agent_platform_admin), so in the management environment, whose ambient AWS_PROFILE is
       agent_platform_admin_org, a bare aws or terraform command is classified, never fast-pathed (critique r1 B1).
+  - file: .claude/hooks/protected_action_gate.sh
+    action: Modify
+    purpose: >-
+      The fail-closed shim's admin-profile line (today [ "${AWS_PROFILE:-}" = "agent_platform_admin" ]) becomes a case
+      match on agent_platform_admin*, so when the Python hook is missing or crashes an aws call under ambient
+      agent_platform_admin_org is refused too, the same prefix rule fast_path_ok gets (critique r3 N2).
   - file: tests/hooks/test_protected_action_gate.py
     action: Modify
     purpose: >-
       With ambient AWS_PROFILE=agent_platform_admin_org and the repo's contract, a bare aws s3 ls exits 2 naming
-      admin-credential (the hook itself is unchanged; the fast_path_ok change makes it classify). The deny message's
+      admin-credential (the Python hook is unchanged; the fast_path_ok change makes it classify); with the adapter missing,
+      the shim refuses an aws call under ambient agent_platform_admin_org and still under agent_platform_admin. The deny message's
       self-serve hint stays as protected-actions.yaml gate.on_deny defines it (critique r2 BLK-5).
   - file: tests/checks/iam_tf/test_cloudtrail_write_grant_scoped.py
     action: Modify
@@ -181,7 +190,10 @@ scope:
       (2) It also reads terraform/organization/policies/*.json.tftpl as JSON, and admits exactly one second write
       statement: Sid OrgSecurityTrailManage in organization_admin.json.tftpl, Action equal to the six, Resource the
       single management trail ARN template (trail/agent-platform-org-security-trail), its template read only by the
-      aws_iam_role_policy on aws_iam_role.organization_admin. Red cases: an Allow of StopLogging in a template, a
+      aws_iam_role_policy on aws_iam_role.organization_admin. statements() parses only Statement = [ arrays, and
+      scps.tf keeps its statements in the map local.baseline_statements, so the Effect test finds the enclosing
+      statement object of each occurrence itself (critique r3 N4). Red cases: an Allow statement that only nests a
+      Deny-shaped map stays red; an Allow of StopLogging in a template, a
       seventh verb in OrgSecurityTrailManage, that Sid on another trail ARN, a third write statement, a Deny of
       StopLogging staying green; the real tree green. The file has about 230 lines of headroom under the 500-line
       default; if the change would cross it, split the template reader into a helper module (Decision 128), never raise.
@@ -282,7 +294,9 @@ scope:
       grants none of the operator-only verbs, no StopLogging, DeleteTrail or cloudtrail:*, no UpdateAssumeRolePolicy,
       and no Delete* except the state lock object's DeleteObject; each Sid's action set equals the template row's
       write or read set, so a missing refresh read is red; the rendered document is under 10,240 characters; aws_iam_organizations_features depends on the organization; every
-      templatefile call sits inside try() with a Deny-all fallback; every resource name starts agent-platform- or is
+      templatefile call sits inside try() with a Deny-all fallback; the SSM grant is ssm:GetParameter alone on the one
+      literal parameter ARN shape (validate_secret_parameter_grants reads only .tf files of two roots, so this test pins
+      the template's grant; critique r3 N7); every resource name starts agent-platform- or is
       an IAM name the root owns (org-admin-agent, OrganizationAdmin); no 12-digit literal, e-mail or region literal
       outside variables.tf's default; each aws_organizations_* resource has prevent_destroy; the tfvars file is ignored
       (git check-ignore) and CODEOWNERS names the root.
@@ -355,18 +369,20 @@ verification_plan:
       per service host the apply uses (Organizations, CloudTrail, Logs, CloudWatch, SNS, SSM; IAM through the MFA read;
       S3 in step 5; the second-region STS host through the identity read) and a provider init in a worktree at the PR
       head (main has no terraform/organization before merge). Before merge the hook reads main's protected-actions.yaml,
-      which does not name agent_platform_admin_org, so it classifies nothing under that profile in steps 4-7: each agent
-      act in those steps runs only on the operator's own words naming it in that session (critique r2 BLK-6).
+      which does not name agent_platform_admin_org, so no admin-credential hit fires under that profile in steps 4-7:
+      each agent act there runs only on the operator's own words naming it in that session (critique r2 BLK-6). The
+      secret-read class does fire on the tfvars parameter whatever the profile (critique r3 B1), so the management
+      session's first ask, before this step, is the secret-read approve line with the exact step 4 and step 7 reads.
     command: >-
-      test -n "$PR_HEAD_SHA" || { echo PR_HEAD_SHA_UNSET; exit 1; }; P=agent_platform_admin_org; X=agent-platform-org-security-;
-      bin/venv-python -m scripts.aws_identity caller-arn --profile $P 2>/dev/null | grep -q 'assumed-role/OrganizationAdmin/' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT;
-      aws iam get-account-summary --profile $P --query 'SummaryMap.AccountMFAEnabled' --output text | sed 's/^/ROOT_MFA /';
-      aws organizations describe-organization --profile $P > /dev/null 2> /tmp/org-probe.err; { test ! -s /tmp/org-probe.err || grep -q AWSOrganizationsNotInUseException /tmp/org-probe.err; } && echo ORG_ENDPOINT_OK || echo ORG_ENDPOINT_BLOCKED;
-      aws cloudtrail describe-trails --profile $P > /dev/null 2>&1 && echo CLOUDTRAIL_OK || echo CLOUDTRAIL_BLOCKED;
-      aws logs describe-log-groups --profile $P --log-group-name-prefix $X > /dev/null 2>&1 && echo LOGS_OK || echo LOGS_BLOCKED;
-      aws cloudwatch describe-alarms --profile $P --alarm-name-prefix $X > /dev/null 2>&1 && echo CLOUDWATCH_OK || echo CLOUDWATCH_BLOCKED;
-      aws sns list-topics --profile $P > /dev/null 2>&1 && echo SNS_OK || echo SNS_BLOCKED;
-      aws ssm get-parameter --profile $P --name /secret/agent-platform-terraform-organization-tfvars --query Parameter.Name --output text > /dev/null 2>&1 && echo SSM_OK || echo SSM_BLOCKED;
+      test -n "$PR_HEAD_SHA" || { echo PR_HEAD_SHA_UNSET; exit 1; }; git cat-file -e "$PR_HEAD_SHA^{commit}" 2>/dev/null || git fetch -q origin "$PR_HEAD_SHA"; X=agent-platform-org-security-;
+      bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin_org 2>/dev/null | grep -q 'assumed-role/OrganizationAdmin/' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT;
+      aws iam get-account-summary --profile agent_platform_admin_org --query 'SummaryMap.AccountMFAEnabled' --output text | sed 's/^/ROOT_MFA /';
+      aws organizations describe-organization --profile agent_platform_admin_org > /dev/null 2> /tmp/org-probe.err; { test ! -s /tmp/org-probe.err || grep -q AWSOrganizationsNotInUseException /tmp/org-probe.err; } && echo ORG_ENDPOINT_OK || echo ORG_ENDPOINT_BLOCKED;
+      aws cloudtrail describe-trails --profile agent_platform_admin_org > /dev/null 2>&1 && echo CLOUDTRAIL_OK || echo CLOUDTRAIL_BLOCKED;
+      aws logs describe-log-groups --profile agent_platform_admin_org --log-group-name-prefix $X > /dev/null 2>&1 && echo LOGS_OK || echo LOGS_BLOCKED;
+      aws cloudwatch describe-alarms --profile agent_platform_admin_org --alarm-name-prefix $X > /dev/null 2>&1 && echo CLOUDWATCH_OK || echo CLOUDWATCH_BLOCKED;
+      aws sns list-topics --profile agent_platform_admin_org > /dev/null 2>&1 && echo SNS_OK || echo SNS_BLOCKED;
+      aws ssm get-parameter --profile agent_platform_admin_org --name /secret/agent-platform-terraform-organization-tfvars --query Parameter.Name --output text > /dev/null 2>&1 && echo SSM_OK || echo SSM_BLOCKED;
       { git worktree remove --force /tmp/org-probe-wt 2> /dev/null; git worktree add --detach /tmp/org-probe-wt "$PR_HEAD_SHA" -q; } &&
       terraform -chdir=/tmp/org-probe-wt/terraform/organization init -backend=false -input=false > /dev/null 2>&1 && echo PROVIDER_OK || echo PROVIDER_BLOCKED; git worktree remove --force /tmp/org-probe-wt; rm -f /tmp/org-probe.err
     expected: >-
@@ -422,7 +438,7 @@ verification_plan:
       /tmp/org-wt with the tfvars and plan file in /tmp/org-evidence outside it, -lock=false, plan file deleted in the
       step; counts and addresses only on the PR with the head sha. There is no origin/main plan (the root is new).
     command: >-
-      set -o pipefail; test -n "$PR_HEAD_SHA" || { echo PR_HEAD_SHA_UNSET; exit 1; }; R=$(tr -d '[:space:]' < config/aws-region); E=/tmp/org-evidence; rm -rf "$E"; mkdir -p "$E";
+      set -o pipefail; test -n "$PR_HEAD_SHA" || { echo PR_HEAD_SHA_UNSET; exit 1; }; git cat-file -e "$PR_HEAD_SHA^{commit}" 2>/dev/null || git fetch -q origin "$PR_HEAD_SHA"; R=$(tr -d '[:space:]' < config/aws-region); E=/tmp/org-evidence; rm -rf "$E"; mkdir -p "$E";
       { git worktree remove --force /tmp/org-wt 2> /dev/null; git worktree prune; git worktree add --detach /tmp/org-wt "$PR_HEAD_SHA" -q; } &&
       aws ssm get-parameter --profile agent_platform_admin_org --name /secret/agent-platform-terraform-organization-tfvars --with-decryption --query Parameter.Value --output text > "$E/terraform.organization.tfvars" &&
       terraform -chdir=/tmp/org-wt/terraform/organization init -input=false -backend-config="region=$R" > /dev/null 2>> "$E/tf.err" &&
@@ -492,18 +508,17 @@ verification_plan:
       on the sit OU, the trail logging, the alarms and the confirmed subscription (the operator clicks the confirmation
       e-mail first). Names, states and counts only; no --region override on any call that assumes the role.
     command: >-
-      P=agent_platform_admin_org;
-      aws organizations describe-organization --profile $P --query 'Organization.FeatureSet' --output text;
-      ROOT=$(aws organizations list-roots --profile $P --query 'Roots[0].Id' --output text);
-      aws organizations list-roots --profile $P --query "Roots[0].PolicyTypes[?Type=='SERVICE_CONTROL_POLICY'].Status" --output text;
-      aws iam list-organizations-features --profile $P --query 'EnabledFeatures' --output text;
-      aws organizations list-organizational-units-for-parent --profile $P --parent-id "$ROOT" --query 'OrganizationalUnits[].Name' --output text;
-      SIT_OU=$(aws organizations list-organizational-units-for-parent --profile $P --parent-id "$ROOT" --query "OrganizationalUnits[?Name=='sit'].Id" --output text);
-      aws organizations list-policies-for-target --profile $P --target-id "$SIT_OU" --filter SERVICE_CONTROL_POLICY --query 'Policies[].Name' --output text;
-      aws cloudtrail get-trail-status --profile $P --name agent-platform-org-security-trail --query IsLogging --output text;
-      aws cloudwatch describe-alarms --profile $P --alarm-name-prefix agent-platform-org-security- --query 'length(MetricAlarms)' --output text;
-      T=$(aws sns list-topics --profile $P --query "Topics[?ends_with(TopicArn, ':agent-platform-org-security-alerts')].TopicArn" --output text);
-      aws sns list-subscriptions-by-topic --profile $P --topic-arn "$T" --query "length(Subscriptions[?SubscriptionArn!='PendingConfirmation'])" --output text
+      aws organizations describe-organization --profile agent_platform_admin_org --query 'Organization.FeatureSet' --output text;
+      ROOT=$(aws organizations list-roots --profile agent_platform_admin_org --query 'Roots[0].Id' --output text);
+      aws organizations list-roots --profile agent_platform_admin_org --query "Roots[0].PolicyTypes[?Type=='SERVICE_CONTROL_POLICY'].Status" --output text;
+      aws iam list-organizations-features --profile agent_platform_admin_org --query 'EnabledFeatures' --output text;
+      aws organizations list-organizational-units-for-parent --profile agent_platform_admin_org --parent-id "$ROOT" --query 'OrganizationalUnits[].Name' --output text;
+      SIT_OU=$(aws organizations list-organizational-units-for-parent --profile agent_platform_admin_org --parent-id "$ROOT" --query "OrganizationalUnits[?Name=='sit'].Id" --output text);
+      aws organizations list-policies-for-target --profile agent_platform_admin_org --target-id "$SIT_OU" --filter SERVICE_CONTROL_POLICY --query 'Policies[].Name' --output text;
+      aws cloudtrail get-trail-status --profile agent_platform_admin_org --name agent-platform-org-security-trail --query IsLogging --output text;
+      aws cloudwatch describe-alarms --profile agent_platform_admin_org --alarm-name-prefix agent-platform-org-security- --query 'length(MetricAlarms)' --output text;
+      T=$(aws sns list-topics --profile agent_platform_admin_org --query "Topics[?ends_with(TopicArn, ':agent-platform-org-security-alerts')].TopicArn" --output text);
+      aws sns list-subscriptions-by-topic --profile agent_platform_admin_org --topic-arn "$T" --query "length(Subscriptions[?SubscriptionArn!='PendingConfirmation'])" --output text
     expected: ALL; ENABLED; RootCredentialsManagement RootSessions (either order); prod sit (either order); FullAWSAccess baseline (either order); True; 5; 1. Post on the merged PR.
     fix_if: any value differs -- report it on the PR; a missing subscription confirmation is the operator's click
     hermetic: false
@@ -577,6 +592,11 @@ test_obligations:
     verification_step: 2
     test_selector: tests/test_session_protected_action_match.py
     red_green_expectation: the agent_platform_admin_org fast-path case is red against main's hard-coded name, green after
+  - source: .claude/hooks/protected_action_gate.sh
+    behavior: the fail-closed shim refuses an aws call under any agent_platform_admin* ambient profile
+    verification_step: 2
+    test_selector: tests/hooks/test_protected_action_gate.py
+    red_green_expectation: the missing-adapter case under agent_platform_admin_org is red against main's exact-name test, green after
   - source: tests/hooks/test_protected_action_gate.py
     behavior: the management-profile deny cases
     verification_step: 2
@@ -690,7 +710,7 @@ context:
   - "Credentials: the management environment's proxy signs the project region's STS host with the management key only, so ~/.aws there holds agent_static (placeholders) and agent_platform_admin_org (role OrganizationAdmin); the environment holds no PROD key, and OrganizationAdmin can assume no PROD role. Its proxy carrying a second key the same way is UNVERIFIED until step 4. STS rule (scripts/aws_identity.py): no call in this plan overrides the profile's region; the identity read goes through aws_identity caller-arn; the account-id read is exempt. OrganizationAdmin can put its own inline policy (needed for refresh and the child plans' grants), so 'those verbs stay the operator's' is enforced by the IAM self-change alarm and review of each template diff, not by IAM alone: named as a residual risk. A permissions boundary on OrganizationAdmin (critique r2 NIT-10) is not adopted here: to bind, it must also deny its own removal and any new version of the boundary policy, and each child plan's grant would then edit two documents; the alarm fires on every PutRolePolicy by the management identities, so a self-grant is seen at once. Revisit if a child plan's grant needs a verb that could remove an account."
   - "Centralized root access (operator's card choice 2026-11-11): AWS documents that an SCP restricts a member account's root user, including its own MFA set-up, and that accounts created in AWS Organizations have no root credentials by default; with RootCredentialsManagement and RootSessions on, the management account deletes or audits member root credentials and runs root-only tasks as a scoped root session, so no SIT root password or MFA exists to manage. PROD's root is left as it is. AWS's pages name no price for the feature: inferred free. AWS's condition-key reference (aws:AssumedRoot, read 2026-11-11) gives the deny-root SCP with a Null aws:AssumedRoot condition so AssumeRoot sessions keep their tasks; deny_root_user uses that form (raised by the rec-5064 planning thread)."
   - "Start condition: the rec-5024 build has merged (#1957, 6f71e367, 2026-11-11; T2.57 and Decision 252 exist), and rec-5025's build has merged and applied, so PROD's no-op is proven before any SCP work."
-  - "Approvals at build start: approve admin-credential agent_platform_admin_org -- covers, in the management environment after merge (once main's protected-actions.yaml names the profile), VP 8 (terraform -chdir=/tmp/org-merge/wt/terraform/organization init and plan), VP 9's fresh plan and VP 10's read-only reads. approve secret-read /secret/agent-platform-terraform-organization-tfvars -- covers VP 8's aws ssm get-parameter --with-decryption of that parameter. VP 9's terraform -chdir=/tmp/org-merge/wt/terraform/organization apply is tf-state-change, a one_shot_at_commit class asked when step 8's plan is shown (approve tf-state-change organization <merge sha>), so it is not listed here. Before merge the gate does not know the profile (main's contract), so VP 4-7 (the probes, the name probe, the create-bucket and the pre-merge plan with its tfvars read) each run only on the operator's own words naming that step in the management session, as do the operator's own acts in step 4 and the final-diff word on the PR (IAM text and a new CLAUDE.md) (critique r2 BLK-6)."
+  - "Approvals at build start: approvals count only in the session whose transcript the hook reads (protected-actions.yaml), so each is asked in the session that runs the step. In the management-environment session, first ask before step 4: approve secret-read /secret/agent-platform-terraform-organization-tfvars -- covers VP 4's aws ssm get-parameter --query Parameter.Name read and VP 7 and VP 8's aws ssm get-parameter --with-decryption of that parameter (the secret-read class fires on that path under any profile). In the same session after merge, once main's protected-actions.yaml names the profile: approve admin-credential agent_platform_admin_org -- covers VP 8 (terraform -chdir=/tmp/org-merge/wt/terraform/organization init and plan), VP 9's fresh plan and VP 10's reads (each with the literal --profile agent_platform_admin_org). VP 9's terraform -chdir=/tmp/org-merge/wt/terraform/organization apply is tf-state-change, a one_shot_at_commit class asked when step 8's plan is shown (approve tf-state-change organization <merge sha>). Before merge no admin-credential hit fires under the new profile, so VP 4-7 (the probes, the name probe, the create-bucket and the pre-merge plan) each run only on the operator's own words naming that step in the management session, as do the operator's own acts in step 4. In the build session (default environment): the final-diff word on the PR (IAM text and a new CLAUDE.md) and VP 11's rec read, which needs no admin approval (critique r2 BLK-6, r3 B1)."
   - "V3 resolution: the posted step 7 evidence for the PR's current head substitutes for pre-merge post-deploy evidence, and the bookkeeping walk that flips c4 runs on the pre-deploy rows (steps 1-7); the behavioural acceptance is the post-merge apply and read-back (steps 8-10), posted counts-only on the merged PR with its applied sha."
   - "Closes criteria: T2.57 is on main since the rec-5024 build merged (#1957, 6f71e367), so closes_criteria [T2.57:c4] is declared in this plan, with acceptance criterion 6 as its 1:1 match; c4 reads open on main (re-read 2026-11-11). The bookkeeping walk flips it in the build PR."
   - >-
@@ -701,8 +721,9 @@ context:
     Lambda-packaged. Precedent: PLAN-plans-only-main-fast-tier, PLAN-sit-decision.
   - "Wording check: round 1 FAILED on an unquoted comma in AWS-15, company rows without evidence_ledger entries, and the hook's COARSE pre-filter not matching the new admin profile's name. The profile is therefore named agent_platform_admin_org: it contains the existing coarse word agent_platform_admin, so the hook's COARSE pre-filter catches it in a command; the fast path's ambient-profile check is a separate code change in scope (critique r1 B1). Round 2 FAILED on the premerge-gate tests' synthetic taxonomy; the sidecar binds that fixture row too. Round 3 PASSED at main 33fe369d (an unrecorded rehearsal before it failed only on a shallow clone). The sidecar then changed after critique r1 (AWS-15's root wording and creator, the dropped admin_default_roots block, Decision 113's note basis), so round 4 ran on the final words and PASSED at main 33fe369d (digest 1410b406). Critique r2 then added the decision-202-note block and dropped '(PR 1)' from the ledger entry, so round 5 ran on those words and PASSED at main a0a47562 (after the rec-5024 build merged; digest 733f14d1)."
   - "Kept graduated shards (each stays registered; this plan adds cases beside them): admin-chain-check-caller-arn, admin-root-premerge-approvals-clause, admin-root-premerge-gate-validator-tests, protected-action-gate-hook."
-  - "Critique r1 (REVISE, 12 blocking, 19 nits), dispositions: B1 fast_path_ok and the hook's deny hint change in scope with tests; B2 apply from a literal-path worktree with the saved plan and tfvars outside it, plan and apply as steps 8 and 9; B3 no --region override, identity through aws_identity, account id read without a region, the chained SIT reads carried to rec-5064; B4 split into four atomic plans (this one, rec-5064, rec-5065, rec-5066) on a blind advisor consult; B5 centralized root access (operator's card), no SIT root password; B6 OrganizationAdmin's trail verbs are Decision 202 cl.2's six plus two reads, tested; B7 every name under agent-platform-org-security-*; B8 the organisation trail split to rec-5059 on the operator's card; B9 LAMBDA-DEPLOY DEFERRED line; B10 every VP command is literal shell, step 4 folds the operator acts into one probe, plan and apply are separate steps; B11 closes_criteria T2.57:c4 at build time with code-review re-check; B12 carried to rec-5066 (only PROD-health checks trigger a detach). N1 the hooks line cites the full-tier result; N2 card message ids cited; N3 step 4 inits at the PR head, probes the Organizations endpoint and reports [hook_canary]; N4 and N11 carried to rec-5066; N5 GetCallerIdentity excluded from the misuse alarm; N6 an IAM self-change alarm, residual named; N7 protect_cloudtrail pins aws:PrincipalAccount; N8 no admin_default_roots row; N9 a Terraform size precondition; N10 read verbs on Resource *; N12 Decision 113 note basis corrected; N13 AC4 reworded to what step 4 shows; N14 step 7 names counts by type; N15 overlap line; N16 main.tf linked to step 1; N17 region-check docstring in scope, ci.yml comment left; N18 start condition names #1953's re-run gates; N19 centralized root access makes PROD root tasks reachable from the management account (named in CLAUDE.md)."
+  - "Critique r1 (REVISE, 12 blocking, 19 nits), dispositions: B1 fast_path_ok in scope with tests (the hook's deny hint change superseded by r2 BLK-5); B2 apply from a literal-path worktree with the saved plan and tfvars outside it, plan and apply as steps 8 and 9; B3 no --region override, identity through aws_identity, account id read without a region, the chained SIT reads carried to rec-5064; B4 split into four atomic plans (this one, rec-5064, rec-5065, rec-5066) on a blind advisor consult; B5 centralized root access (operator's card), no SIT root password; B6 OrganizationAdmin's trail verbs are Decision 202 cl.2's six plus two reads, tested; B7 every name under agent-platform-org-security-*; B8 the organisation trail split to rec-5059 on the operator's card; B9 LAMBDA-DEPLOY DEFERRED line; B10 every VP command is literal shell, step 4 folds the operator acts into one probe, plan and apply are separate steps; B11 closes_criteria T2.57:c4 at build time with code-review re-check; B12 carried to rec-5066 (only PROD-health checks trigger a detach). N1 the hooks line cites the full-tier result; N2 card message ids cited; N3 step 4 inits at the PR head, probes the Organizations endpoint and reports [hook_canary]; N4 and N11 carried to rec-5066; N5 GetCallerIdentity excluded from the misuse alarm; N6 an IAM self-change alarm, residual named; N7 superseded by r2 BLK-4 (no exemption here); N8 no admin_default_roots row; N9 a Terraform size precondition; N10 read verbs on Resource *; N12 Decision 113 note basis corrected; N13 AC4 reworded to what step 4 shows; N14 step 7 names counts by type; N15 overlap line; N16 main.tf linked to step 1; N17 region-check docstring in scope, ci.yml comment left; N18 start condition names #1953's re-run gates; N19 centralized root access makes PROD root tasks reachable from the management account (named in CLAUDE.md)."
   - "Critique r2 (REVISE, 7 blocking, 10 nits), dispositions: BLK-1 OrganizationAdminOps lists a write set and a refresh-read set per service from PROD's policy (trail reads, delivery-role create, tag verbs, state-object and lock verbs, unscopable reads on *), and the test pins each set and the size; BLK-2 the trail-write guard in scope, Deny-aware and reading the templates, with OrganizationAdmin's one second grant; BLK-3 a dated note on Decision 202 (sidecar block, new wording round); BLK-4 no protect_cloudtrail exemption in this PR, the child adds a single ArnNotLike; BLK-5 the hook's deny-hint change dropped (fast_path_ok alone fixes r1 B1; gate.on_deny unchanged); BLK-6 the gate is inert for the new profile before merge, so VP 4-7 run on the operator's words and the build-start approvals cover VP 8-10 only; BLK-7 step 5 is a name probe, step 6 reads the account id in its own command, steps 4 and 7 guard PR_HEAD_SHA. NIT-1 closes_criteria in the build's first commit; NIT-2 c4 says what merge proves; NIT-3 '(PR 1)' dropped; NIT-4 test ! -s; NIT-5 one read per service host in step 4; NIT-6 step 11 in the build session; NIT-7 step 7 prints changed attribute names; NIT-8 mirror fallback removed; NIT-9 depends_on; NIT-10 boundary not adopted, reason recorded."
+  - "Critique r3 (REVISE, 1 blocking, 11 nits), dispositions: B1 approvals are asked in the session that runs the step: the management session asks secret-read before step 4 (that class fires on the tfvars path under any profile, so step 7 is caught before merge) and admin-credential after merge; N1 VP 4 and VP 10 pass the literal --profile agent_platform_admin_org (an unexpanded --profile $P clears the ambient hit; a fail-closed rule for a non-literal --profile is a matcher change outside this plan, filed as rec-5070); N2 the fail-closed shim matches agent_platform_admin*, in scope with a test; N3 {{N}} in the sidecar is 252 (Decision 252, the SIT Decision), the placement fills that number; N4 the guard finds the enclosing statement object for map-held statements, with a nested-map red case; N5 steps 4 and 7 fetch the PR head commit if absent; N6 the r1 line's B1 hook-hint and N7 exemption items are superseded by r2 BLK-5 and BLK-4; N7 the baseline test pins the SSM grant's shape; N8 not taken: the project-configuration.yaml aws-region note is owned by rec-4404 (T4.24:c16) and terraform/CLAUDE.md is at its prose cap, while terraform/organization/CLAUDE.md loads in that directory; N9 c9 stays: T2.57 gains a criterion for each child item filed under it, rec-5058 among them, so the item lists all its remaining work; N10 not taken: validate_handoff_full_tier requires the full-tier command in the step text, and the action states it is started backgrounded; N11 the trust fallback is a Deny of sts:AssumeRole to any principal."
   - "PR shape: one PR. It declares this plan, carries every sidecar block, flips T2.57 c4 and carries 'Resolves: rec-5026'."
   - "Cost check (AWS public price list, eu-west-2, 2026-11-10): five standard alarms $0.50/month; management-account events are a first trail copy (free) at a volume of a few hundred a month, so CloudWatch Logs ingestion and S3 storage are cents; Organizations, SCPs and an SSM standard parameter cost nothing. Total about $0.60/month."
   - "Carried to the child items (in their contexts at filing, 2026-11-11 12:58Z-13:00Z, each read back): rec-5064 -- the AccountMFAEnabled read is replaced by list-organizations-features plus an audit that SIT has no root password, and every SIT read goes through a separate regional STS client with frozen role credentials (scripts.aws_identity's pattern), because a chained assume-role to the project region's STS host is re-signed as the management user; the account quota read must not override the profile region. rec-5065 -- the PROD acceptance by the break-glass user, the import with prevent_destroy and ignore_changes, and consolidated billing moving PROD's Cost Explorer and CUR view to the payer (tell the Cost Optimisation project). rec-5066 -- the 400-day region and root lookback over PROD's trail with a bounded wait on query status (no foreground sleep); only PROD-health checks (portal round trip, drift, bootstrap plan, alarms) trigger an emergency detach, while a wrong simulator line triggers investigation through the fallback call, with aws:PrincipalArn passed as a context entry; each --selftest-roundtrip writes one probe rec; PRs that do not declare that plan run validate_scope_boundary through its plan_paths seam as a VP step."
@@ -716,6 +737,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 12, nits: 19}
   - {gate: wording-check, round: 4, verdict: PASS, digest: 1410b4065d10543653181b29fd7ac30461f4d68179156c7f0fafbd6ffd18894a, base: 33fe369dea441cf967490ff9472e51a34ef21a3d, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 7, nits: 10}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 11}
   - {gate: wording-check, round: 5, verdict: PASS, digest: 733f14d17decb1a00e2bd2d9fd9ebd024ff4ca15f16a8097ee0a049db23fe91d, base: a0a47562e033fe9435defb1856edaf0dfbb22795, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
