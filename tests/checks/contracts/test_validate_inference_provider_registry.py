@@ -7,6 +7,7 @@ and a malformed-YAML red path.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -170,6 +171,88 @@ class TestPassLineOutput:
         out = capsys.readouterr().out
         expected = "  PASS: inference-provider.yaml provider_defaults and retired_providers agree with model_registry.py."
         assert expected in out
+
+
+_REAL_CONTRACTS = Path(__file__).resolve().parents[3] / "docs" / "contracts"
+_PROJECT_CONFIG_NAME = "project-configuration.yaml"
+
+
+def _copy_real_contracts(target: Path) -> None:
+    for name in (_CONTRACT_NAME, _PROJECT_CONFIG_NAME):
+        shutil.copy(_REAL_CONTRACTS / name, target / name)
+
+
+class TestTierSelectionLeg:
+    def test_real_contracts_pass_and_print_second_pass_line(self, capsys: pytest.CaptureFixture[str]) -> None:
+        failed: list[str] = []
+        validate_inference_provider_registry(failed, contracts_dir=_REAL_CONTRACTS)
+
+        assert failed == []
+        out = capsys.readouterr().out
+        assert "  PASS: tier selection resolves " in out
+        assert " persona-role pairs." in out
+
+    def test_copies_of_real_contracts_pass(self, tmp_path: Path) -> None:
+        _copy_real_contracts(tmp_path)
+
+        failed: list[str] = []
+        validate_inference_provider_registry(failed, contracts_dir=tmp_path)
+
+        assert failed == []
+
+    def test_same_vendor_fixture_fails_naming_rule(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        _copy_real_contracts(tmp_path)
+        provider = yaml.safe_load((tmp_path / _CONTRACT_NAME).read_text(encoding="utf-8"))
+        config = yaml.safe_load((tmp_path / _PROJECT_CONFIG_NAME).read_text(encoding="utf-8"))
+        rows = provider["model_id_formats"]["litellm_tier_models"]
+        for field in ("provider", "models", "default_model"):
+            rows["tier_2"][field] = rows["tier_1"][field]
+        by_id = {r["id"]: r for r in config["settings"]}
+        by_id["ports.run_persona.litellm.api_key.warm_fetched_escape_hatch"]["variable"] = by_id[
+            "ports.run_persona.litellm.api_key.primary"
+        ]["variable"]
+        (tmp_path / _CONTRACT_NAME).write_text(yaml.safe_dump(provider), encoding="utf-8")
+        (tmp_path / _PROJECT_CONFIG_NAME).write_text(yaml.safe_dump(config), encoding="utf-8")
+
+        failed: list[str] = []
+        validate_inference_provider_registry(failed, contracts_dir=tmp_path)
+
+        assert any("2(b) vendor_independence" in f for f in failed)
+        assert "PASS" not in capsys.readouterr().out
+
+    def test_missing_project_configuration_fails_naming_file(self, tmp_path: Path) -> None:
+        _copy_real_contracts(tmp_path)
+        (tmp_path / _PROJECT_CONFIG_NAME).unlink()
+
+        failed: list[str] = []
+        validate_inference_provider_registry(failed, contracts_dir=tmp_path)
+
+        assert any(_PROJECT_CONFIG_NAME in f for f in failed)
+
+    def test_unparseable_project_configuration_fails_naming_file(self, tmp_path: Path) -> None:
+        _copy_real_contracts(tmp_path)
+        (tmp_path / _PROJECT_CONFIG_NAME).write_text("a: [unclosed\n", encoding="utf-8")
+
+        failed: list[str] = []
+        validate_inference_provider_registry(failed, contracts_dir=tmp_path)
+
+        assert any(_PROJECT_CONFIG_NAME in f for f in failed)
+
+    def test_fixture_without_tier_model_prints_no_second_line(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _write_contract(
+            tmp_path,
+            list(model_registry._VALID_PROVIDERS),
+            model_registry._DEFAULT_EXECUTOR_PROVIDER,
+            _VALID_RETIRED,
+        )
+
+        failed: list[str] = []
+        validate_inference_provider_registry(failed, contracts_dir=tmp_path)
+
+        assert failed == []
+        assert "tier selection resolves" not in capsys.readouterr().out
 
 
 def test_local_server_rows_state_how_credential_holder_applies() -> None:

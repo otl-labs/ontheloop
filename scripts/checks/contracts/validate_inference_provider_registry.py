@@ -3,7 +3,8 @@
 Asserts docs/contracts/inference-provider.yaml's provider_defaults.executor_path
 (valid_providers/default) agrees with scripts/llm/model_registry.py's
 _VALID_PROVIDERS / _DEFAULT_EXECUTOR_PROVIDER, and that retired_providers stay disjoint from the
-valid set.
+valid set. When the contract carries a tier_model mapping, a further leg resolves every persona and
+tier role through scripts/llm/tier_selection.py (project-configuration.yaml read from the same directory).
 """
 
 from __future__ import annotations
@@ -59,6 +60,20 @@ def _check_retired_providers(failed: list[str], retired: list) -> None:
         failed.append(f"Inference-provider registry: {_CONTRACT_NAME} retired_providers overlap valid providers: {overlap}")
 
 
+def _check_tier_selection(failed: list[str], target_dir: Path, data: dict) -> int:
+    if not isinstance(data.get("tier_model"), dict):
+        return 0
+    from scripts.llm import tier_selection  # noqa: PLC0415
+
+    try:
+        project_configuration = tier_selection._load_one(target_dir / "project-configuration.yaml")
+        selections = tier_selection.resolve_all(inference_provider=data, project_configuration=project_configuration)
+    except tier_selection.TierSelectionError as exc:
+        failed.append(f"Inference-provider registry: {exc}")
+        return 0
+    return len(selections)
+
+
 @registry.register("validate_inference_provider_registry", owner="platform")
 def validate_inference_provider_registry(failed: list[str], *, contracts_dir: Path | None = None) -> None:
     """Fail if provider_defaults or retired_providers drift from scripts/llm/model_registry.py."""
@@ -98,7 +113,12 @@ def validate_inference_provider_registry(failed: list[str], *, contracts_dir: Pa
         examined_count += len(retired_providers)
         _check_retired_providers(failed, retired_providers)
 
+    resolved = _check_tier_selection(failed, target_dir, data)
+    examined_count += resolved
+
     registry.examined(examined_count, unit="provider_registry_entries")
 
     if len(failed) == error_count_before:
         print(f"  PASS: {_CONTRACT_NAME} provider_defaults and retired_providers agree with model_registry.py.")
+        if resolved:
+            print(f"  PASS: tier selection resolves {resolved} persona-role pairs.")
