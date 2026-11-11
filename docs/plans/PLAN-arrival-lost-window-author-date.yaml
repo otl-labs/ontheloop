@@ -63,16 +63,19 @@ scope:
       (urlopen monkeypatched: two pages, the first full of 100 and the second short, so the URLs carry per_page=100&page=1
       and page=2 and no third request is made; other keys and a later own commit ignored; a commit whose top-level
       author is null still read from commit.author.date; token header asserted; None when no commit carries the key);
-      test_run_wires_the_github_authored_lookup_by_default (sp.github_pr_created_at monkeypatched to a time after
-      2026-11-11T10:38:16Z and within 7 days of it, sp.github_pr_key_authored_at monkeypatched to record (repo, n, key)
-      and return 2026-11-10T15:22:45Z; sp.run(ROOT, Reader(), NOW, repo="o/r", commits=[commit(1, "KKK", pr=5)]) with
-      the shipped config records ("o/r", 5, "KKK") and reads lost_window_authored=1);
+      test_run_wires_the_github_authored_lookup_by_default (times are window-relative only, since the classifier
+      never compares them with NOW or the squash time: sp.github_pr_created_at monkeypatched to return a time after the
+      shipped rec-5055 window's end 2026-11-11T10:38:16Z and within 7 days of it, sp.github_pr_key_authored_at
+      monkeypatched to record (repo, n, key) and return 2026-11-10T15:22:45Z, inside that window; a local Reader whose
+      named() returns []; sp.run(ROOT, Reader(), NOW, repo="o/r", commits=[commit(1, "KKK", pr=5)]) with the shipped
+      config records ("o/r", 5, "KKK") and reads lost_window_authored=1);
       test_the_shipped_config_enables_the_author_date_rule (load_config(ROOT) passes check_config and carries
-      authored_grace_days 7). The lost-window node also asserts the ARRIVAL_LOST_WINDOW_AUTHORED output carries no
-      session key (Decision 101, as the existing missing-line node does), and the outside node adds a positive edge
+      authored_grace_days 7). The lost-window node also asserts sp.lines(result)[0] ends with
+      elapsed_s=<x> lost_window_authored=1 authored_lookup_failed=0 and that the ARRIVAL_LOST_WINDOW_AUTHORED output
+      carries no session key (Decision 101, as the existing missing-line node does), and the outside node adds a positive edge
       at exactly a window's from (start inclusive). Existing nodes byte-identical. Measure at build: if the file would
-      pass 500 SLOC, the new nodes go in a new module tests/telemetry_verify/test_session_presence_authored.py instead,
-      and every selector below names that module.
+      pass 500 SLOC, stop BLOCKED for a scope amendment (a new test module is not a sanctioned companion under
+      docs/contracts/implement-scope-boundary.yaml).
     new_imports: []
   - file: config/telemetry/arrival.yaml
     action: Modify
@@ -182,18 +185,21 @@ verification_plan:
     phase: pre-deploy
     action: Live, on the build branch, through run() with the rec-5081 row removed in memory and now pinned, the rule alone classifies 6f71e367's outage-era key.
     command: >-
-      AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival; AWS_PROFILE=agent_platform
+      AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival && AWS_PROFILE=agent_platform
       bin/venv-python -c "from datetime import datetime, timezone; from pathlib import Path; from scripts.telemetry_verify
       import session_presence as sp; from scripts.telemetry_capture import read_route; root = Path('.').resolve(); load =
       sp.load_config; sp.load_config = lambda r, n=False: (lambda c: {**c, 'excused_sessions': [x for x in
       c['excused_sessions'] if x['key'] != '01G2j5ReQ5S6d1QP6Rv4GJRi']})(load(r, n)); res = sp.run(root,
-      read_route.make_routed_reader(), datetime(2026, 11, 12, 12, tzinfo=timezone.utc)); print(*sp.lines(res),
-      sep=chr(10))"
+      read_route.make_routed_reader(), min(datetime.now(timezone.utc), datetime(2026, 11, 12, 12, tzinfo=timezone.utc)));
+      t = chr(10).join(sp.lines(res)); print(t); raise SystemExit(0 if res.missing == 0 and res.lost_window_authored >= 1
+      and 'ARRIVAL_LOST_WINDOW_AUTHORED sha=6f71e3679d7a' in t else 1)"
     expected: >-
       the shipped run reads missing=0 (or skipped); the in-memory run (the shipped config without the
-      01G2j5ReQ5S6d1QP6Rv4GJRi row, through run() so the production wiring is exercised, now pinned to
-      2026-11-12T12:00Z so 6f71e367 stays inside judge_days whenever the build runs) reads missing=0 with
-      lost_window_authored at least 1. Record both lines in the PR body.
+      01G2j5ReQ5S6d1QP6Rv4GJRi row, through run() so the production wiring is exercised, now capped at
+      2026-11-12T12:00Z so 6f71e367 stays inside judge_days whenever the build runs while merges in the last real hour
+      stay pending) reads missing=0 with lost_window_authored at least 1 and prints ARRIVAL_LOST_WINDOW_AUTHORED
+      sha=6f71e3679d7a; exit 0. Red before (current code): missing=1 with ARRIVAL_MISSING sha=6f71e3679d7a, exit 1.
+      Record both outputs in the PR body.
     fix_if: >-
       missing=1 on 6f71e367 in the in-memory run: the adapter, the wiring or the window test is wrong; a missing sha
       with no outage-era commit is a real capture failure: stop and report to the coordinator, never excuse it
@@ -257,6 +263,11 @@ test_obligations:
     verification_step: 6
     test_selector: tests/telemetry_verify/test_session_presence.py::test_an_authored_time_outside_every_window_stays_missing
     red_green_expectation: red before (node absent), green after
+  - source: scripts/telemetry_verify/session_presence.py
+    behavior: a bad authored_grace_days (0, a bool, a string) makes the config unreadable
+    verification_step: 6
+    test_selector: tests/telemetry_verify/test_session_presence.py::test_a_bad_authored_grace_days_is_unreadable
+    red_green_expectation: red before (node absent), green after
   - source: docs/contracts/ports.yaml
     behavior: SA-07 names the second GitHub read and still validates
     verification_step: 6
@@ -286,6 +297,7 @@ gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: wording-check, round: 1, verdict: PASS, digest: 44250d56e045b1a04b78c24c37d510701c73c9fa12a9aeb9ee4eceaaab6f53bc, base: 555d0c6eddbd69be72ee89b2776736877de50a9c, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 7}
+  - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -293,7 +305,7 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - "Confirm PLAN-arrival-reopened-outage-session's build is merged (its node exists in tests/telemetry_verify/test_session_presence.py), the approved-text lookup for this slug reads APPROVED, and red_overlap --plan on this plan is clear; otherwise stop BLOCKED."
+  - "Confirm PLAN-arrival-reopened-outage-session's build is merged (its node exists in tests/telemetry_verify/test_session_presence.py), the approved-text lookup for this slug reads APPROVED, and bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-arrival-lost-window-author-date.yaml is clear; otherwise stop BLOCKED."
   - "Module: the adapter, the optional config key, the keyword, the classify branch, the counters and lines, run() wiring, docstring; then the arrival.yaml line exactly as the sidecar binds it; run VP 1-5."
   - "Contract: SA-07 text and the amendment_log row exactly as the sidecar binds them (measure ports.yaml against its budget first; over budget is BLOCKED); run VP 6 and 7."
   - "Add the five graduated shards (VP 1-5), shape as arrival-config-excuses-rec-5004-key.yaml; guard_target is scripts/telemetry_verify/session_presence.py for VP 1-4 and config/telemetry/arrival.yaml for VP 5."
