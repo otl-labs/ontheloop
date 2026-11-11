@@ -1,0 +1,382 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: arrival-lost-window-author-date
+intent: >-
+  Stop the arrival oracle turning main red when a session that ran inside a recorded lost window has its work merged
+  through a pull request opened after the window closed (rec-5084; first instance rec-5081): when the PR's creation
+  time misses every window, the oracle reads the PR's commits and counts the key as lost_window when the earliest commit
+  carrying that key's own Claude-Session trailer was authored inside a window that has a from and the PR was opened at
+  or after that same window's end and less than authored_grace_days (7) after it. The denominator then keeps judging only
+  sessions that could have been captured, without a hand-written row per re-opened session (NS.6).
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-arrival-lost-window-author-date.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category): rec-5084, the preventive_action of the Track B red rec-5081 (Decision
+  226 cl.5). No tier_item is targeted and no exit criterion is closed, so closes_criteria is empty.
+closes_criteria: []
+scope:
+  - file: scripts/telemetry_verify/session_presence.py
+    action: Modify
+    purpose: >-
+      (1) New adapter github_pr_key_authored_at(repo, number, key) -> datetime | None: GET
+      /repos/{repo}/pulls/{number}/commits?per_page=100&page=P for P = 1, 2, 3 (GitHub lists at most 250 commits),
+      stopping at a short page, with the same headers, token rule and 10 s timeout as github_pr_created_at; when the
+      listing holds 250 or more commits it raises (GitHub truncates silently and lists in history order, so a partial list's
+      minimum is unreadable evidence); a key-carrying commit without a readable commit.author.date raises, and so does any page that is not a JSON list,
+      any item that is not an object, or any commit whose commit.message is not a string (each is unreadable evidence,
+      which leaves the key missing); the adapter's own refusals raise sp.Unreadable with a named cause, while transport, decode and shape errors
+      (HTTPError, URLError, JSONDecodeError, IncompleteRead, KeyError, TypeError, AttributeError) propagate unwrapped and only the
+      helper's broad except Exception (with the BLE001 noqa) catches them; otherwise it
+      returns the minimum commit.author.date over commits whose message carries key, None when none does
+      (commit.author.date is read even when the top-level author is null). A new _keys_in(text) helper holds _session_keys' trailer parsing
+      and _session_keys calls it on commit.body, so existing behaviour is unchanged and the adapter calls _keys_in on
+      each commit.message (kept local rather than importing scripts/session/session_trailer.trailer_keys, under the
+      module's import rule; tests/test_session_session_trailer.py already pins the two parsers as equal). (2) Config: authored_grace_days joins check_config's allowed-key set but not _PARAMS (every
+      _PARAMS key is required, and existing configs lack this one); a separate present-only check refuses a value that
+      is not an int, is a bool, or is below 1. Absent, the author-date rule is off and the oracle behaves exactly as
+      today.
+      (3) judge/_judge gain a keyword-only pr_key_authored_at: Callable[[int, str], datetime | None] | None = None.
+      In the classify loop, after the existing created_at lookup returned a time outside every window (never after
+      it raised), the rule runs only when pr_key_authored_at is set, authored_grace_days is set and r.pr_lookups <
+      max_pr_lookups (the authored lookup is one lookup per key, not per HTTP page, counted against max_pr_lookups together with the
+      created_at lookup): r.pr_lookups += 1; the key counts
+      lost_window and lost_window_authored, and its sha is listed, only when the authored time lies inside a window
+      that has a from (start <= authored < end) and the PR's created_at is at or after that window's end and before
+      that end plus authored_grace_days; an open-start window, a None or outside time, a PR created before the window began, or a PR
+      created past the grace leaves the key missing; a raised lookup (the helper catches Exception, as the created_at lookup does at session_presence.py:205)
+      adds authored_lookup_failed and leaves it missing (fail closed, Decision 250 cl.2). The authored
+      lookup (gate, try/except, window-and-grace test and counters) lives in one helper called from the classify loop,
+      shaped as try: created = pr_created_at(...) / except: pr_lookup_failed += 1 / else: a helper taking created that
+      does both the in-window test and the authored rule,
+      so _judge (18 branches at plan time) and check_config (16, about 19 with the present-only grace check) each stay at
+      or under 20 branches (validate_cc_limits; re-measure every new or changed function at build, test nodes included, and keep test fakes
+      at module level); no complexity-waiver header.
+      (4) ArrivalResult gains lost_window_authored and authored_lookup_failed (ints, default 0) and
+      lost_window_authored_shas; the ARRIVAL head line appends lost_window_authored=N authored_lookup_failed=N after
+      elapsed_s, and one ARRIVAL_LOST_WINDOW_AUTHORED sha=<12> line per such key (mirroring missing_shas) follows the missing lines.
+      (5) run() gains a keyword-only pr_key_authored_at: Callable[[int, str], datetime | None] | None = None and passes
+      judge pr_key_authored_at if it is not None, else lambda n, k: github_pr_key_authored_at(repo, n, k) (the
+      production path from scripts/telemetry_verify/__main__.py). (6) The module docstring names the rule. excused_sessions, the created_at rule, the walk and the junit
+      shape are unchanged.
+    new_imports: []
+  - file: tests/telemetry_verify/test_session_presence_authored.py
+    action: Create
+    purpose: >-
+      A new test module, so tests/telemetry_verify/test_session_presence.py (319 of 500 SLOC) stays unchanged; it
+      imports nothing from another test_* module (validate_no_cross_test_imports, --pre and full tiers) and defines
+      its own small copies: NOW, a CONFIG dict with the same seven keys, ROOT = Path(__file__).resolve().parents[2],
+      a commit(n, key, hours_ago=10, *, pr=None, extra="") helper and an empty-roots callable, plus compact fakes. New nodes, each with a config that adds authored_grace_days to the module's CONFIG and a bounded window:
+      test_a_key_whose_own_commit_was_authored_in_a_lost_window_is_lost_window (PR created after the window and inside
+      the grace, key authored inside it: lost_window=1 lost_window_authored=1 missing=0 pr_lookups=2, and an
+      ARRIVAL_LOST_WINDOW_AUTHORED line names the sha; plus a two-trailer squash whose first key is captured (returned by
+      Roots) and second uncaptured, with a fake that records the key it receives and returns an in-window time only for
+      the second key: the recorded key is the uncaptured one and lost_window_authored=1); test_the_author_date_rule_holds_its_approved_bounds (parametrized with an explicit expected outcome per case;
+      every negative case changes one condition against a positive case under the same config (the base positive case: authored inside bounded window W with the PR created at W's
+      end plus 1 h; the open-start case pairs with authored inside W under the module CONFIG plus W, and the same-window
+      case with the PR before A's end plus the grace under the A/B config, both lost_window=1) and reads missing=1: authored at W's end plus 1 s; authored exactly at
+      W's end; authored None; authored 1 s before W's from (after the module CONFIG's open-start to, inside no other
+      window); the PR created at W's end plus the grace; the PR created before W's from; open start: authored inside
+      the open-start window with the PR at that window's to plus 1 h; same window: two bounded windows A and B,
+      authored inside A, the PR created at or after B's end and before B's end plus the grace (outside both windows) and
+      past A's end plus the grace;
+      the three positive edge cases, authored exactly at W's from, the PR created exactly at W's end, and authored at
+      W's from with the PR at W's end plus the grace minus 1 s, each read lost_window=1 missing=0); test_an_authored_lookup_failure_is_missing_and_the_cap_bounds_both_lookups (six raising lookups, raising
+      sp.Unreadable("X"), OSError, ValueError("x") (what json.load raises), KeyError("commit") and
+      http.client.IncompleteRead(b"") (an HTTPException, neither OSError nor ValueError) and a module-level
+      class Boom(Exception) that only a bare except Exception catches: each reads
+      authored_lookup_failed=1 pr_lookup_failed=0 missing=1 status red; with max_pr_lookups=1 the second lookup is not made; when the created_at lookup raises the authored callable is
+      never called and pr_lookups=1);
+      test_the_author_date_rule_is_off_without_its_config_key_or_callable (CONFIG unchanged, or no callable: the
+      callable is never called and missing=1); test_a_created_in_window_pr_makes_no_authored_lookup;
+      test_a_bad_authored_grace_days_is_unreadable (0, a bool, a string); test_github_adapter_reads_the_earliest_own_commit_author_date
+      (urlopen monkeypatched: two pages, the first full of 100 and the second short; page 1 lists a later-authored own-trailer
+      commit ahead of the earliest one, the earliest own-trailer commit sits on page 2 followed by a later-authored own-trailer commit listed last (so
+      first-match, last-match and maximum readings all fail), and another key's commit authored
+      earlier than both sits on page 1, every own-trailer commit's commit.committer.date later than the page-2 commit's author date, and
+      the node asserts the page-2 author time; so the URLs are exactly
+      https://api.github.com/repos/o/r/pulls/7/commits?per_page=100&page=1 and the same with page=2 and no third request is made; other keys and a later own commit ignored; the earliest own commit (the page-2 one) has a null top-level author and is still read from commit.author.date; token header asserted with the existing fake token "tok"; fake shas use the low-entropy f"{n:040x}" form; fake commit messages carry the trailer as Claude-Session:
+      https://claude.ai/code/session_<key> while the call passes the bare <key>; None when no commit carries the key; pages of 100, 100
+      and 50 raise with no fourth request while pages of 100, 100 and 49 return a time; a key-carrying commit with no commit.author.date raises; a page whose first item has no commit.message raises; a page that is a dict rather than a list raises; a page whose first item is a string raises; one later-in-UTC own
+      commit carries a -01:00 offset that sorts earlier as a string (for example 2026-11-10T14:52:45-01:00 against a
+      15:22:45Z earliest), so a raw-string minimum fails; each raise
+      case asserts pytest.raises(sp.Unreadable, match=<cause>); the fake records the timeout and the node asserts 10; an earlier commit naming the key only in prose, outside a
+      Claude-Session trailer, is ignored);
+      test_run_wires_the_github_authored_lookup_by_default (times are window-relative only, since the classifier
+      never compares them with NOW or the squash time: times read from the shipped rec-5055 lost_windows row, as the
+      existing shipped-window node does: sp.github_pr_created_at monkeypatched to return the row's to plus 1 h,
+      sp.github_pr_key_authored_at monkeypatched to record (repo, n, key) and return the row's from plus 1 h; a module-level Reader whose
+      named() returns []; sp.run(ROOT, Reader(), NOW, repo="o/r", commits=[commit(1, "KKK", pr=5)]) with the shipped
+      config records ("o/r", 5, "KKK") and reads lost_window_authored=1; a second call passing an explicit
+      pr_key_authored_at uses it and leaves the module adapter uncalled);
+      test_the_shipped_config_enables_the_author_date_rule (load_config(ROOT) passes check_config and carries
+      authored_grace_days 7). The lost-window node also asserts re.search(r" elapsed_s=\S+
+      lost_window_authored=1 authored_lookup_failed=0$", sp.lines(result)[0]) (field order pinned, elapsed_s value not) and that the ARRIVAL_LOST_WINDOW_AUTHORED output
+      carries no session key (Decision 101, as the existing missing-line node does), and the bounds node keeps its cases compact. Keep the fakes
+      compact (one shared response class; parametrize the bound cases). Existing nodes in test_session_presence.py are untouched. If this module would pass 500 SLOC, stop
+      BLOCKED.
+    new_imports: []
+  - file: config/telemetry/arrival.yaml
+    action: Modify
+    purpose: >-
+      One new line after collapse_min_commits, exactly as the approved-text sidecar
+      docs/plans/approved/arrival-lost-window-author-date.yaml binds it: "authored_grace_days: 7". Nothing else
+      changes; the 01G2j5ReQ5S6d1QP6Rv4GJRi excused row (owner rec-5055, added for rec-5081) stays.
+    new_imports: []
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      SA-07's assumption gains the second GitHub read, exactly as the sidecar binds it: "The arrival check
+      assumes squash-merge first-parent history on main whose subject ends with a (#N) pull request number, the
+      harness's Claude-Session trailer whose URL's last segment is the harness session key, GitHub's pulls/{n}
+      created_at, GitHub's pulls/{n}/commits author dates (at most 250 commits listed, and an author date a rebase
+      keeps), and the literal default repository slug otl-labs/ontheloop when GITHUB_REPOSITORY is unset." One
+      amendment_log row (semantic_break false, change_class field_add, naming this plan and rec-5084).
+    new_imports: []
+bundled_recommendations: [rec-5084]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "An uncaptured key whose PR was created outside every lost window, at or after the end of a window that has a from and less than authored_grace_days (7) after that end, and whose earliest own-trailer commit was authored inside that same window (from <= authored < to), is counted lost_window (and lost_window_authored), not missing."
+  - "A key whose earliest own-trailer commit was authored outside every window or only in an open-start window, whose PR was created before the window began or at or past the window's end plus the grace, whose PR lists no commit carrying it, or whose commit lookup fails stays missing; a PR created inside a window makes no commit lookup."
+  - "Against the live warehouse with the 01G2j5ReQ5S6d1QP6Rv4GJRi excused row (owner rec-5055, added for rec-5081) removed in memory, 6f71e367's outage-era key is lost_window and the ARRIVAL line reads missing=0."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The author-date rule counts an outage-era key lost_window.
+    command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence_authored.py::test_a_key_whose_own_commit_was_authored_in_a_lost_window_is_lost_window" -q
+    expected: exit 0; red before (node absent, or TypeError on the unknown pr_key_authored_at keyword).
+    fix_if: missing stays 1 (the second lookup is not wired, or the window test is wrong)
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: arrival-author-date-lost-window
+  - step: 2
+    phase: pre-deploy
+    action: The rule fails closed on a raised lookup and the cap bounds both lookups.
+    command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence_authored.py::test_an_authored_lookup_failure_is_missing_and_the_cap_bounds_both_lookups" -q
+    expected: exit 0; red before (node absent); red if a failed lookup counts lost_window.
+    fix_if: a failed lookup counts lost_window, a narrowly caught exception class (for example ValueError, KeyError or IncompleteRead) escapes or turns the run unreadable, or a second lookup is made past max_pr_lookups
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: arrival-author-date-fails-closed
+  - step: 3
+    phase: pre-deploy
+    action: The GitHub adapter reads the earliest own-trailer author date across pages.
+    command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence_authored.py::test_github_adapter_reads_the_earliest_own_commit_author_date" -q
+    expected: exit 0; red before (adapter absent).
+    fix_if: a later own commit, a last-listed own commit, another key's commit or a committer date wins (first-match, last-match, any-commit or committer-date reading), the second page is not read, a third request is made after a short page, or a 250-commit listing, an unreadable own author date or an unreadable commit message returns a time instead of raising
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: arrival-author-date-adapter
+  - step: 4
+    phase: pre-deploy
+    action: run(), the production path, wires the GitHub authored lookup by default.
+    command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence_authored.py::test_run_wires_the_github_authored_lookup_by_default" -q
+    expected: exit 0; red before (node absent, or lost_window_authored=0 when run() does not pass the adapter).
+    fix_if: the recorded call is absent or lost_window_authored is 0 (run() does not wire the adapter, or authored_grace_days is absent from the shipped config; the node reads the shipped rec-5055 row, the 60-minute SLA and judge_days, and a new lost window covering that row's end plus 1 h would change it)
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: arrival-author-date-run-wiring
+  - step: 5
+    phase: pre-deploy
+    action: The shipped config enables the author-date rule with a 7-day grace.
+    command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence_authored.py::test_the_shipped_config_enables_the_author_date_rule" -q
+    expected: exit 0; red before (key absent).
+    fix_if: authored_grace_days is absent or not 7 in config/telemetry/arrival.yaml
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: arrival-config-enables-author-date-rule
+  - step: 6
+    phase: pre-deploy
+    action: The rule holds the bounds the operator confirmed (start inclusive, authored before from, end exclusive, open start excluded, None, PR before the window, past the grace, grace measured from the same window the commit was authored in).
+    command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence_authored.py::test_the_author_date_rule_holds_its_approved_bounds" -q
+    expected: exit 0; red before (node absent).
+    fix_if: any bound case counts lost_window (an open-start or end-inclusive window test, a commit authored before a window's from, or a PR within the grace of a different window than the authored one); the rule is looser than approved, and a looser rule goes to the operator first
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: arrival-author-date-approved-bounds
+  - step: 7
+    phase: pre-deploy
+    action: The remaining edge nodes (rule off, created-in-window, bad grace) and the ports contract pass; the full tier (VP 10) runs both whole test files.
+    command: >-
+      bin/venv-python -m pytest
+      "tests/telemetry_verify/test_session_presence_authored.py::test_the_author_date_rule_is_off_without_its_config_key_or_callable"
+      "tests/telemetry_verify/test_session_presence_authored.py::test_a_created_in_window_pr_makes_no_authored_lookup"
+      "tests/telemetry_verify/test_session_presence_authored.py::test_a_bad_authored_grace_days_is_unreadable" -q && bin/venv-python -c
+      "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as f; failed=[]; f(failed);
+      raise SystemExit(1 if failed else 0)"
+    expected: exit 0; the edge nodes are red before (nodes absent).
+    fix_if: the rule runs without its config key or callable, a created-in-window PR makes a lookup, a bad grace is readable, or SA-07 no longer validates
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: waive
+    graduation_waiver_reason: These nodes guard defaults that keep today's behaviour (rule off, no extra lookup, config refusal), run in the full tier and validate --pre's diff-aware selection, and carry no operator-confirmed bound; steps 1-6 graduate one durable claim each, and validate_ports_contract is already registered.
+  - step: 8
+    phase: pre-deploy
+    action: Bind the config line and SA-07 to the approved words.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug arrival-lost-window-author-date --base origin/main
+    expected: exit 0; every block matches with only {{DATE}} filled
+    fix_if: any word differs; fix the edit, never the sidecar (operator-approved text)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      PR-relative to origin/main, so vacuous once merged; validate_merge_step's approved-text leg enforces the sidecar
+      on every PR declaring this plan.
+  - step: 9
+    phase: pre-deploy
+    action: Live, on the build branch, through run() with the 01G2j5ReQ5S6d1QP6Rv4GJRi row removed in memory and now pinned, the rule alone classifies 6f71e367's outage-era key.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival && AWS_PROFILE=agent_platform
+      bin/venv-python -c "from datetime import datetime, timezone; from pathlib import Path; from scripts.telemetry_verify
+      import session_presence as sp; from scripts.telemetry_capture import read_route; root = Path('.').resolve(); load =
+      sp.load_config; sp.load_config = lambda r, n=False: (lambda c: {**c, 'excused_sessions': [x for x in
+      c['excused_sessions'] if x['key'] != '01G2j5ReQ5S6d1QP6Rv4GJRi']})(load(r, n)); res = sp.run(root,
+      read_route.make_routed_reader(), min(datetime.now(timezone.utc), datetime(2026, 11, 12, 12, tzinfo=timezone.utc)));
+      t = chr(10).join(sp.lines(res)); print(t); raise SystemExit(0 if res.missing == 0 and res.lost_window_authored >= 1
+      and 'ARRIVAL_LOST_WINDOW_AUTHORED sha=6f71e3679d7a' in t else 1)"
+    expected: >-
+      the shipped run reads missing=0 (or skipped); the in-memory run (the shipped config without the
+      01G2j5ReQ5S6d1QP6Rv4GJRi row, through run() so the production wiring is exercised, now capped at
+      2026-11-12T12:00Z so 6f71e367 stays inside judge_days whenever the build runs while merges in the last real hour
+      stay pending) reads missing=0 with lost_window_authored at least 1 and prints ARRIVAL_LOST_WINDOW_AUTHORED
+      sha=6f71e3679d7a; exit 0. Red before (current code): missing=1 with ARRIVAL_MISSING sha=6f71e3679d7a, exit 1.
+      Record both outputs in the PR body.
+    fix_if: >-
+      missing=1 on 6f71e367 in the in-memory run: the adapter, the wiring or the window test is wrong; a missing sha
+      with no outage-era commit is a real capture failure: stop and report to the coordinator, never excuse it
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Live warehouse and GitHub read pinned to 6f71e367's judge window, vacuous once that commit ages out of judge_days; VP 4 graduates the run() wiring and VP 1 and 6 the rule.
+  - step: 10
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it from the top-level session, backgrounded with a 2 h limit, and read only the attestation.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure -- fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and steps 1-6 carry the durable regressions.
+  - step: 11
+    phase: post-deploy
+    action: telemetry-arrival on main after the merge.
+    command: >-
+      set -o pipefail; AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival | tee /dev/stderr |
+      grep ' lost_window_authored=[0-9]* authored_lookup_failed=' >/dev/null
+    expected: >-
+      run from an up-to-date main checkout after the merge; exit 0; the ARRIVAL line carries lost_window_authored=N and reads status green or skipped; record the next
+      telemetry-arrival run id on main (a workflow_dispatch run on main counts when the scheduled run is late).
+    fix_if: "missing>0: read the sha's PR commits' author dates against the windows; a key with no outage-era commit is a real red for ci-rca"
+    hermetic: false
+  - step: 12
+    phase: post-deploy
+    action: rec-5084 is closed by the merge's Resolves trailer.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
+      make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5084']); print(rows[0]['id'], rows[0]['status']) if rows else print('absent'); raise
+      SystemExit(0 if rows and rows[0]['status'] == 'closed' else 1)"
+    expected: prints rec-5084 closed and exits 0 after the closure job runs on the merge commit; record that run id.
+    fix_if: still open -- read the closure job's log for an acceptance refusal; fix the cause and re-run the closure route, never a direct status write
+    hermetic: false
+test_obligations:
+  - source: scripts/telemetry_verify/session_presence.py
+    behavior: an outage-era key re-opened after its window is lost_window by its own commit's author date
+    verification_step: 1
+    test_selector: tests/telemetry_verify/test_session_presence_authored.py::test_a_key_whose_own_commit_was_authored_in_a_lost_window_is_lost_window
+    red_green_expectation: red before (node absent, or TypeError on the unknown keyword), green after
+  - source: scripts/telemetry_verify/session_presence.py
+    behavior: the author-date rule fails closed on a failed lookup of any exception class (Unreadable, OSError, ValueError, KeyError, IncompleteRead) and the cap bounds both lookups
+    verification_step: 2
+    test_selector: tests/telemetry_verify/test_session_presence_authored.py::test_an_authored_lookup_failure_is_missing_and_the_cap_bounds_both_lookups
+    red_green_expectation: red before (node absent), green after; red if a failed lookup counts lost_window
+  - source: scripts/telemetry_verify/session_presence.py
+    behavior: the GitHub adapter returns the earliest own-trailer author date across pages
+    verification_step: 3
+    test_selector: tests/telemetry_verify/test_session_presence_authored.py::test_github_adapter_reads_the_earliest_own_commit_author_date
+    red_green_expectation: red before (adapter absent), green after
+  - source: scripts/telemetry_verify/session_presence.py
+    behavior: run() wires the GitHub authored lookup by default
+    verification_step: 4
+    test_selector: tests/telemetry_verify/test_session_presence_authored.py::test_run_wires_the_github_authored_lookup_by_default
+    red_green_expectation: red before (node absent, or lost_window_authored=0 without the wiring), green after
+  - source: config/telemetry/arrival.yaml
+    behavior: the shipped config enables the author-date rule with a 7-day grace
+    verification_step: 5
+    test_selector: tests/telemetry_verify/test_session_presence_authored.py::test_the_shipped_config_enables_the_author_date_rule
+    red_green_expectation: red before (key absent), green after
+  - source: scripts/telemetry_verify/session_presence.py
+    behavior: the rule holds its approved bounds (authored before from, end exclusive, open start, None, PR before the window, past the grace, same window)
+    verification_step: 6
+    test_selector: tests/telemetry_verify/test_session_presence_authored.py::test_the_author_date_rule_holds_its_approved_bounds
+    red_green_expectation: red before (node absent), green after
+  - source: scripts/telemetry_verify/session_presence.py
+    behavior: a bad authored_grace_days (0, a bool, a string) makes the config unreadable
+    verification_step: 7
+    test_selector: tests/telemetry_verify/test_session_presence_authored.py::test_a_bad_authored_grace_days_is_unreadable
+    red_green_expectation: red before (node absent), green after
+  - source: docs/contracts/ports.yaml
+    behavior: SA-07 names the second GitHub read and still validates
+    verification_step: 7
+    command: bin/venv-python -c "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as f; failed=[]; f(failed); raise SystemExit(1 if failed else 0)"
+    waiver_reason: Prose row read by the already-registered validate_ports_contract; no consumer parses the sentence, so no new test can fail without the change.
+constraints:
+  - "Loosened assertion (Decision 235 cl.1): the only widening is the author-date rule as worded in scope[0] (3), operator-confirmed with this plan, and the operator's word on the build's final diff is still needed for the code (the sidecar binds only the arrival.yaml line and SA-07); any looser variant (any commit in the PR, a commit date, a later own commit, an open-start window, no grace bound) is a plan amendment that goes to the operator first."
+  - "The arrival.yaml line and SA-07 land word for word as the approved-text sidecar docs/plans/approved/arrival-lost-window-author-date.yaml binds them (Decision 246)."
+  - "Fail closed (Decision 250 cl.2): a failed, truncated (250 commits) or empty commit lookup, or an unreadable own author date, an unreadable page or commit message, leaves the key missing; nothing the new read returns can make an otherwise-red run unreadable or green except an own-trailer author date inside a recorded window with a from, on a PR opened within the grace after that same window's end."
+  - "lost_windows, excused_sessions and their grammar are unchanged; the 01G2j5ReQ5S6d1QP6Rv4GJRi excused row (owner rec-5055, added for rec-5081) stays as a standing guard (Decision 244); retiring it later is its own operator-approved change."
+  - "The default of the new judge keyword is no lookup and an absent authored_grace_days turns the rule off, so every existing caller and node keeps today's behaviour."
+  - "No rescue agents or workaround loops (Decision 55)."
+context:
+  - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: 235 (cl.1 the widening needs a human-confirmed plan naming it; never on a check red on the change, so the build waits for rec-5081 to close; outside the cl.5 floor), 250 (cl.2 fail closed; cl.5 denominator; false-reds reversal condition this relieves), 212 (cl.3, cl.6 SA-07 is the home for the second read), 244 (cl.1, cl.4 the new shards are standing guards; existing shards stay), 226 (cl.3 overlap halt on rec-5081; cl.5 rec-5084 is the owed preventive). CONTRADICT: 246 WARN (SA-07 exact text with no sidecar) -- adopted: the sidecar binds the arrival.yaml line and SA-07; the code loosening still takes the operator's word on the final diff. 234 NOTE (new surface keyed on a PR number) -- adopted: cl.4 accepts PR coupling while the repository bootstraps, and SA-07 records it; the keyword mirrors pr_created_at. SPIRIT: 250 NOTE (the excusal reads author dates the measured sessions write) -- adopted: the residual goes on the operator's confirmation, and lost_window_authored plus per-sha lines keep each excusal auditable. RELATED: 181, 187, 55, 132/189, 176, 163, 201, 245, 128/166, 186, 168, 221. Decisions triaged: 205 of 205. Roadmap items intersected: 4; CONFLICT: 0; RELATED: 4. Serves: NS.6 3/5."
+  - "Defect: rec-5084 (filed 2026-11-11, High); first instance rec-5081 (run 43041634302, sha 6f71e367, PR #1957), repaired by PLAN-arrival-reopened-outage-session (merged #1965, 555d0c6e), whose build merged as #1967 (65fb6cb5) before this plan was written (both edit tests/telemetry_verify/test_session_presence.py)."
+  - "Prototype (scratch, 2026-11-11, anonymous GitHub reads): PR #1957 created_at is outside every window; the earliest commit carrying 01G2j5ReQ5S6d1QP6Rv4GJRi was authored 2026-11-10T15:22:45Z, inside the rec-5055 window; the other key's earliest own commit, 2026-11-11T12:14:55Z, is outside it."
+  - "Why author date: harness session ids carry no timestamp; git keeps the author date through rebase and cherry-pick, and the rec-5004 stamp hook leaves a sequencer pick's trailer as it was, so the earliest own-trailer commit bounds when the session ran. Lost windows are closed past intervals, so a session that runs today authors commits outside every window and a live capture failure stays red. Residuals, accepted with the operator's confirmation: a session started in a window whose first commit came after it still needs an excused_sessions row, as does an in-window session that pushed to a PR opened before the window began; the shared max_pr_lookups (100) with a 10 s timeout could exceed the telemetry-arrival job's 30-minute limit only if GitHub hangs on every read, which fails closed (the job goes red); only the commits GitHub lists on this PR are read, so a session's commits in other PRs (as #1953 was for rec-5081) are not seen, and the earliest is the earliest listed here (the rule counts only PRs opened at or after the window's end, as presented to the operator; narrower is fail closed); a current session that is itself uncaptured and amends (--amend, -c, -C) an outage-era commit gets its own key on an old author date (scripts/session/session_trailer.py stamps outside the sequencer), as does a hand-set date -- bounded by the 7-day grace after the window's end and the open-start exclusion, and visible on the ARRIVAL_LOST_WINDOW_AUTHORED lines."
+  - "Decision 250 cl.5 coverage now spans tests/telemetry_verify/test_session_presence.py and the new tests/telemetry_verify/test_session_presence_authored.py; no Decision edit."
+  - "authored_grace_days is a repo-governed oracle parameter like judge_days and max_pr_lookups, not a user-set setting, so it gets no docs/contracts/project-configuration.yaml row (Decision 224); no arrival.yaml key has one."
+  - "Graduated shards kept unchanged (tests/telemetry_verify/test_session_presence.py is not edited; the new nodes live in tests/telemetry_verify/test_session_presence_authored.py; the default path is unchanged, so their claims hold): telemetry-arrival-oracle, arrival-config-records-rec-5055-lost-window, arrival-config-excuses-rec-5004-key, arrival-config-excuses-reopened-rec-5055-session."
+  - "red_overlap --plan 2026-11-11 at draft: blocked by rec-5081 (overlap on scripts/telemetry_verify/session_presence.py and its selected tests); re-run 2026-11-11 at write, after #1967 merged: verdict clear, reds []. Execution step 1 re-runs it; a new red overlapping this scope is BLOCKED."
+  - "Operator alignment 2026-11-11T20:32:24Z: chose \"Write it, with 7-day grace\" on the decision card for the author-date rule (alternatives offered: no grace bound; manual excused rows only). This confirms the widening named in scope[0] (3) under Decision 235 cl.1; the sidecar wording is approved separately on GitHub: run 43064712652 recorded the operator's approval but concluded failure on its wake job, so it was re-dispatched as run 43100691303, which the operator approved and the lookup reads APPROVED (2026-11-11T21:25Z), and the code diff still takes the operator's word at build."
+  - "ports.yaml headroom 16 of 500 at draft (NEAR_CAP), and seven unbuilt plans also scope it. This edit adds about 3 lines; measure at build time against main, and if the file would pass its budget, stop BLOCKED and report for a compaction amendment, never a raise (Decision 128)."
+  - "Advisor (fresh-context, /mnt/project-files/arrival-fix/advisor-brief-b/ADVICE.md): adopted -- own-trailer author date; shared max_pr_lookups counting lookups not pages; a separate lost_window_authored count plus per-sha lines; keep the rec-5081 row; the amend hole bounded by a PR-creation grace after the window end; open-start windows excluded; a separate authored_lookup_failed count. Rejected: a committer-date bound (rebases reset it, so rec-5081's case would stay red)."
+  - "fork: evidence that an uncaptured key ran in a lost window | chosen: earliest own-trailer author date in a window with a from, PR created within authored_grace_days (7) of that window's end | class: asked | precedent: Decision 235 | precedent_kind: decision | reversible: yes | persisted: scripts/telemetry_verify/session_presence.py; config/telemetry/arrival.yaml"
+  - "fork: lookup budget | chosen: share max_pr_lookups, one per key | class: consistency-only | precedent: Decision 212 | precedent_kind: decision | reversible: yes | persisted: scripts/telemetry_verify/session_presence.py"
+  - "fork: the 01G2j5ReQ5S6d1QP6Rv4GJRi excused row (owner rec-5055, added for rec-5081) | chosen: keep as a standing guard | class: consistency-only | precedent: Decision 244 | precedent_kind: decision | reversible: yes | persisted: config/telemetry/arrival.yaml"
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: wording-check, round: 1, verdict: PASS, digest: 44250d56e045b1a04b78c24c37d510701c73c9fa12a9aeb9ee4eceaaab6f53bc, base: 555d0c6eddbd69be72ee89b2776736877de50a9c, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 7}
+  - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 7}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 4}
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 2, nits: 4}
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 8, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 9, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 10, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 11, verdict: PROCEED, blocking: 0, nits: 4}
+  - {gate: plan-critique, round: 12, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 13, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 14, verdict: PROCEED, blocking: 0, nits: 5}
+  - {gate: plan-critique, round: 15, verdict: PROCEED, blocking: 0, nits: 6}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 212, 235, 244 and 250 sections read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Confirm PLAN-arrival-reopened-outage-session's build is merged (its node exists in tests/telemetry_verify/test_session_presence.py), bin/venv-python -m scripts.roadmap.approved_text_github check --slug arrival-lost-window-author-date prints lookup: APPROVED, the sidecar is on main (git cat-file -e origin/main:docs/plans/approved/arrival-lost-window-author-date.yaml), and bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-arrival-lost-window-author-date.yaml is clear; otherwise stop BLOCKED."
+  - "Module: the adapter, the optional config key, the keyword, the classify branch, the counters and lines, run() wiring, docstring; then the arrival.yaml line exactly as the sidecar binds it; run VP 1-6."
+  - "Contract: SA-07 text and the amendment_log row exactly as the sidecar binds them (measure ports.yaml against its budget first; over budget is BLOCKED); run VP 7 and 8."
+  - "Add the six graduated shards (VP 1-6), shape as arrival-config-excuses-rec-5004-key.yaml; guard_target is scripts/telemetry_verify/session_presence.py for VP 1-4 and 6, and config/telemetry/arrival.yaml for VP 5; guard_symbol is judge for VP 1, 2 and 6, github_pr_key_authored_at for VP 3, run for VP 4, and null for VP 5."
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit with Resolves: rec-5084; run validate_weakening_candidates and, if it lists any candidate, record it in this plan's weakening_dispositions (a permitted field edit) before VP 10; rebase; VP 9; VP 10 (full tier backgrounded, then --verify-head; a timeout is BLOCKED, no push); push; PR (its body states the weakening disposition: planned-change citing acceptance_criteria[0], operator-confirmed with the plan; dispositions recorded earlier); subscribe; code review in a fresh context; ask for the operator's word on the final diff of scripts/telemetry_verify/session_presence.py (the loosened assertion the sidecar does not bind), pasting the classify branch inline and restating the residuals (earliest means the earliest commit this PR lists; a PR opened before the window stays missing); merge on that word, code review PROCEED and green CI with Resolves: rec-5084 in the squash body; VP 11 and 12, reporting PR number, run ids and merge SHA."
+  - "Report: what was implemented, verification results"
+rollback: Revert the build PR; re-opened outage-era sessions then need excused_sessions rows again, and the default path is as today.
