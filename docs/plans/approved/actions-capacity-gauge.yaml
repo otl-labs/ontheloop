@@ -42,7 +42,10 @@ blocks:
         threshold: 16
         definition: >-
           For one closed UTC clock hour: the minutes every non-skipped job of this repository spent running inside that
-          hour, summed and divided by 60. A job spanning two hours counts in each for its minutes there.
+          hour, summed and divided by 60. A job spanning two hours counts in each for its minutes there. Runs are read by
+          creation time, so a job that starts more than window.overlap_hours after its run was created (a late re-run
+          attempt, or a job held for an Environment approval) is missed: for such jobs the figure is a lower bound, and
+          each reading reports late_start_minutes, the minutes of read jobs that started that late, as its measure.
       queue_p90:
         threshold_seconds: 300
         job: {workflow: .github/workflows/ci.yml, job: main-validate, event: push}
@@ -73,14 +76,17 @@ blocks:
       request_budget_per_tick: 400
       time_budget_seconds: 180
       chaining: >-
-        Each tick reads the previous tick's actions-capacity-reading artifact and starts at its oldest hour that is not
+        Each tick reads the newest readable actions-capacity-reading artifact among the workflow's last 5 completed runs
+        and starts at its oldest hour that is not
         evaluated, or else after its newest evaluated hour, minus overlap_hours; with no readable previous artifact it starts
         bootstrap_hours back. It reads forward one hour at a time, oldest first, until either budget is spent. An hour it
         did not read in full reads not_evaluated, never green, and the next tick starts there. A freshly evaluated hour
         replaces the stored one; a not_evaluated result never replaces an evaluated hour.
 
     reading:
-      precedence: "red_measured, then insufficient_data, then red_projected, then green: the first that holds is the verdict."
+      precedence: >-
+        red_measured, then insufficient_data, then red_projected, then green: the first that holds is the verdict, and a
+        reading that matches none of them is amber.
       verdicts:
         green: "Every leg of green_predicate holds."
         red_measured: "The trigger fires on measured hours; the alarm files or updates its rec."
@@ -88,6 +94,9 @@ blocks:
         insufficient_data: >-
           Fewer than min_evaluated_hours_24h evaluated hours in the trailing 24 hours, or the queue leg is insufficient in
           every hour; never green.
+        amber: >-
+          None of the above: for example the table is still filling (fewer than 144 of its last 168 hours evaluated), or
+          an hour older than 24 hours breached. Files nothing; never green.
       green_predicate:
         - The reading's tick finished less than 3 hours before it is cited; when the newest tick is older, the citing plan dispatches convergence-health.yml and cites that run.
         - At least 144 of the table's last 168 hours are evaluated, so the first green reading comes 7 days after the gauge first runs.
@@ -113,8 +122,9 @@ blocks:
         One rec per class and episode through the shared episode helper: filed when the class opens, updated only when
         its breaching hours change, closed when it clears. red_projected files nothing.
       step_outcome: >-
-        The step exits 0 on every verdict and when GitHub reads fail (those hours read not_evaluated). It fails only when
-        a portal write fails (Decision 84 I-4), which loop_liveness_stale backstops. It dispatches nothing, changes no
+        The step exits 0 on every verdict, when GitHub reads fail (those hours read not_evaluated) and when the warehouse
+        read of open recs fails (the open-rec leg then reads false, so the reading is not green, and the alarm is skipped
+        that tick). It fails only when a portal write fails (Decision 84 I-4), which loop_liveness_stale backstops. It dispatches nothing, changes no
         plan, runner or workflow, and is never a required check.
 
     ledger:
@@ -150,7 +160,10 @@ blocks:
             - {workflow: .github/workflows/deploy-prod-lambdas.yml, job: "*", event: workflow_run}
             - {workflow: .github/workflows/terraform-apply-sandbox.yml, job: "*", event: push}
           multiplier: 1.0
-          basis: "rec-5028 repeats today's deploy chain against SIT on every merge."
+          basis: >-
+            rec-5028 repeats today's deploy chain against SIT on every merge. Additive only until rec-5033 makes PROD
+            promote-only (Decision 252 cl.6); then this row overstates, and its owner updates it. Excludes the SIT catalog
+            instance's start wait (Decision 253 cl.2), measured once live.
           live_signal: null
         - id: sit-per-pr-lambda-stacks
           items: [rec-5032]
@@ -158,11 +171,13 @@ blocks:
           source: analog
           analog: [{workflow: .github/workflows/deploy-ducklake-lambdas.yml, job: "*", event: workflow_run}]
           multiplier: 1.87
-          basis: "rec-5032 builds a Lambda stack per PR update; 1.87 PR runs per merge (audit E5), every PR counted (an upper bound)."
+          basis: >-
+            rec-5032 builds a Lambda stack per PR update; 1.87 PR runs per merge (audit E5), every PR counted (an upper
+            bound). Excludes the SIT catalog instance's start wait (Decision 253 cl.2), measured once live.
           live_signal: null
 
     trigger_response: >-
-      The alarm rec lists these options for the operator and decides none of them: the cheap levers first (rec-4114's
+      The alarm rec lists these options for the operator and decides none of them: levers that cost nothing (rec-4114's
       plans-only fast tier, merged; per-push job consolidation, audit CMTS-06); a Team plan at 60 concurrent jobs, which
       is spend (always_ask, monthly cost stated); or moving verdict jobs off Actions, which needs Decision 205 clauses 1 and
       6 and Decision 184 clause 3 amended first and is not licensed by this contract. Their order is not ratified; the
@@ -184,7 +199,7 @@ blocks:
         enforcement: advisory
       - id: ports.verdict_plane.github_actions.concurrent_job_cap
         kind: project
-        basis: "rec-5022; Decision 224 clauses 1 and 6: the adopter sets it by choosing a GitHub plan (20 concurrent jobs on Free, 60 on Team), so it is not a value CI sets on its own; docs/contracts/actions-capacity.yaml cap"
+        basis: "rec-5022; Decision 224 clauses 1 and 6: the adopter sets it by choosing a GitHub plan, so it is not a value CI sets on its own; docs/contracts/actions-capacity.yaml cap"
         applies_when: {port: verdict_plane, adapter: github_actions}
         homes: {local: platform_file, ci: platform_file, cloud: platform_file}
         variable: null
@@ -192,5 +207,5 @@ blocks:
         readers: [rec-5022]
         set_by: user
         defaults: {local: null, cloud: null}
-        this_repository: {current_home: docs/contracts/actions-capacity.yaml, note: "cap.concurrent_jobs, read by the Actions capacity gauge on convergence-health.yml; an adopter on a Team plan sets 60", status: open, owning_item: "T4.24:c16"}
+        this_repository: {current_home: docs/contracts/actions-capacity.yaml, note: "cap.concurrent_jobs, read by the Actions capacity gauge on convergence-health.yml; an adopter on another GitHub plan sets that plan's cap", status: open, owning_item: "T4.24:c16"}
         enforcement: advisory
