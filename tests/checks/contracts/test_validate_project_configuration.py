@@ -135,7 +135,7 @@ def test_rejects_row_home_not_a_declared_home(root: Path, capsys: pytest.Capture
 
 
 def _add_vendor_store_without_citation(d: dict[str, Any]) -> None:
-    _row(d, "ports.run_persona.litellm.api_key")["homes"].update(local=["user_env_file", "vendor_store"])
+    _row(d, "ports.run_persona.litellm.api_key.primary")["homes"].update(local=["user_env_file", "vendor_store"])
     if "vendor_store" not in d["kind_homes"]["secret"]["local"]:
         d["kind_homes"]["secret"]["local"].append("vendor_store")
 
