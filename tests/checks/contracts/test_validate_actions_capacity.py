@@ -89,3 +89,26 @@ def test_rejects_bad_item_id(tmp_path: Path) -> None:
 
 def test_rejects_unregistered_alarm_source(tmp_path: Path) -> None:
     assert _run(_tree(tmp_path, lambda r: r["alarm"].__setitem__("source", "not_a_registered_source"))) == [LABEL]
+
+
+def test_live_signal_job_is_checked(tmp_path: Path) -> None:
+    def edit(raw: dict[str, Any]) -> None:
+        raw["ledger"]["rows"][0]["live_signal"] = {"workflow": ".github/workflows/ci.yml", "job": "no-such-job"}
+
+    assert _run(_tree(tmp_path, edit)) == [LABEL]
+
+
+def test_unparseable_workflow_and_missing_archive_are_findings(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _tree(tmp_path)
+    (root / "docs/ROADMAP-PLATFORM-ARCHIVE.yaml").unlink()
+    (root / ".github/workflows/ci.yml").write_text("jobs: [unclosed", encoding="utf-8")
+    capsys.readouterr()
+    assert _run(root) == [LABEL]
+    assert "not parseable" in capsys.readouterr().out
+
+
+def test_unloadable_contract_fails_and_declares_skipped(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    (root / "docs/contracts/actions-capacity.yaml").write_text("cap: {surprise: 1}\n", encoding="utf-8")
+    assert _run(root) == [LABEL]
+    assert registry._CURRENT_DECLARATION.kind == "skipped"
