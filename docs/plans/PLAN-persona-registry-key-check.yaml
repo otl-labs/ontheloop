@@ -1,0 +1,212 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: persona-registry-key-check
+intent: >-
+  Let a docs/contracts/executor-personas.yaml personas row carry a checked registry_key, the persona's
+  config/agent/data_quality/source_registry.yaml canonical_id, before any row carries one. PersonaRow accepts an
+  optional registry_key and validate_persona_contracts checks every key a row carries: registered, unique across rows,
+  and equal to the persona contract's skill_tether.skill. Code only, no contract text. It goes first so
+  PLAN-persona-run-identity-contract (rec-4433 plan 1, planned next) can bind the rows' keys and their definition in its
+  approved-text sidecar without binding a scripts/ module, whose import closure would cap the wording check's test
+  selection; that plan's build then makes the key required.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-persona-registry-key-check.yaml
+phase: >-
+  rec-4433 (open), precursor of its plan 1 (CAPTURE FROM DAY ONE for T4.28 c3, T4.29 c3 and T4.30 c3). V2: Python
+  checks and their tests only; nothing here is Lambda-packaged, deployed or read by a producer.
+scope:
+  - file: scripts/persona_contracts/schema.py
+    action: Modify
+    purpose: >-
+      PersonaRow gains registry_key: str | None = None (the model stays extra-forbid). Nothing else changes.
+  - file: scripts/checks/contracts/validate_persona_contracts.py
+    action: Modify
+    purpose: >-
+      New _registry_key_failures(index, root), called from validate_persona_contracts after the vocabulary check. When
+      no row carries a registry_key it reads nothing and returns no failure. Otherwise it reads
+      config/agent/data_quality/source_registry.yaml (the canonical_id of every entry; unreadable or without an entries
+      list -> one failure "Persona contracts: config/agent/data_quality/source_registry.yaml is unreadable") and fails a
+      key that is not a registered canonical_id ("Persona contracts: <persona>: registry_key '<key>' is not a registered
+      canonical_id") or that two rows carry ("Persona contracts: registry_key '<key>' is not unique"). In
+      _contract_failures, once the contract parses, a row whose registry_key is set and whose contract carries a
+      skill_tether fails when they differ ("Persona contracts: <persona>: registry_key '<key>' differs from
+      skill_tether.skill '<skill>'"). The module docstring names the rule. No other failure text changes.
+  - file: tests/persona_contracts/fixture_tree.py
+    action: Modify
+    purpose: >-
+      REGISTRY_REL = "config/agent/data_quality/source_registry.yaml" joins _COPIED; build_tree appends one entry,
+      canonical_id fixture-verdict, to the copy, and the fixture personas row carries registry_key fixture-verdict (its
+      skill_tether.skill). Four mutators and their EXPECTED substrings: registry_key_unregistered ("is not a registered
+      canonical_id"), registry_key_tether_mismatch (key set to code-review: "differs from skill_tether.skill"),
+      registry_key_duplicate (a second personas row with the same key: "is not unique") and registry_unreadable (the
+      copied registry deleted: "source_registry.yaml is unreadable"). Every existing mutator and expectation is
+      unchanged.
+  - file: tests/persona_contracts/test_schema.py
+    action: Modify
+    purpose: >-
+      test_persona_row_registry_key_is_optional: PersonaRow validates a row without registry_key (None) and with a
+      string key, and refuses a non-string key.
+  - file: tests/checks/contracts/test_validate_persona_contracts.py
+    action: Modify
+    purpose: >-
+      test_registry_is_not_read_when_no_row_carries_a_key: on a fixture tree whose row has no registry_key and whose
+      registry copy is deleted, validate_persona_contracts reports no registry failure. The existing test_red_rule
+      covers the four new mutators through MUTATORS and EXPECTED.
+bundled_recommendations: []
+followon_recs: []
+acceptance_criteria:
+  - >-
+    A personas row may carry a registry_key; validate_persona_contracts refuses an unregistered, duplicated or
+    tether-mismatched key and an unreadable registry, and reads nothing when no row carries a key (VP 2).
+  - >-
+    The real tree stays green with no key on any row, and executor-personas.yaml, the persona contracts, their rendered
+    prompts and hashes are unchanged (VP 2, VP 3).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: "Precondition: this plan is on main, the verdict persona rows are present, and the branch is current."
+    command: >-
+      git fetch origin main --quiet && git cat-file -e origin/main:docs/plans/PLAN-persona-registry-key-check.yaml &&
+      git show origin/main:docs/contracts/executor-personas.yaml | grep -q "persona: plan_critic" && git merge-base
+      --is-ancestor origin/main HEAD && echo PRECONDITION_OK
+    expected: Prints PRECONDITION_OK.
+    fix_if: A missing plan means this plan's PR has not merged; missing persona rows mean main is older than d312cba0; a failed ancestry test means a stale branch -- merge origin/main first.
+    hermetic: false
+    graduation: not-applicable
+  - step: 2
+    phase: pre-deploy
+    action: The registry_key rule on the fixture tree and every mutator, the optional field, and the real tree green.
+    command: >-
+      bin/venv-python -m pytest -q tests/checks/contracts/test_validate_persona_contracts.py
+      tests/checks/contracts/test_validate_persona_contract_binding.py tests/persona_contracts
+    expected: >-
+      Exit 0, with test_red_rule run for registry_key_unregistered, registry_key_tether_mismatch, registry_key_duplicate
+      and registry_unreadable. Red before: those mutators find no failure, and the fixture row's registry_key is an extra
+      key PersonaRow refuses.
+    fix_if: Fix validate_persona_contracts.py or schema.py; never loosen an existing expectation.
+    hermetic: true
+    expected_literals:
+      - passed
+    graduation: graduate
+    graduation_check_id: persona-registry-key-check
+  - step: 3
+    phase: pre-deploy
+    action: The registered persona checks pass on the real tree and nothing else under docs/contracts changed.
+    command: >-
+      bin/venv-python -c "from scripts.checks.contracts.validate_persona_contracts import validate_persona_contracts as a;
+      from scripts.checks.contracts.validate_persona_contract_binding import validate_persona_contract_binding as b; f=[];
+      a(f); b(f); print('PERSONA_FAILS', len(f)); assert not f, f" && git diff --quiet origin/main -- docs/contracts
+      config/agent/data_quality && echo CONTRACTS_UNCHANGED
+    expected: PERSONA_FAILS 0, then CONTRACTS_UNCHANGED.
+    fix_if: A real-tree failure means the rule fires without a key -- fix the no-key path; a contract diff is out of scope -- revert it.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Replays two registered checks; the git diff is a one-time scope check.
+  - step: 4
+    phase: pre-deploy
+    action: SLOC budgets hold with no raise.
+    command: >-
+      bin/venv-python -c "from scripts.checks.sloc.sloc_limits import validate_sloc_limits as c; f=[]; c(f);
+      print('SLOC_FAILS', len(f)); assert not f, f"
+    expected: SLOC_FAILS 0.
+    fix_if: Decompose an oversized file (Decision 128), never raise.
+    hermetic: true
+    expected_literals:
+      - SLOC_FAILS 0
+    graduation: waive
+    graduation_waiver_reason: Replays a registered check.
+  - step: 5
+    phase: pre-deploy
+    action: Red-main overlap verdict for the touched files (Decision 226).
+    command: bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-persona-registry-key-check.yaml
+    expected: No open ci_rca rec overlaps the scope.
+    fix_if: An overlap -- STOP and tell the coordinator before building.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: Fast tier, then the full tier before handoff (handoff_policy), the full tier started in the background from the top-level session.
+    command: bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: The fast tier exits 0 and the verify-head read reports a completed full run for HEAD with exit 0.
+    fix_if: In-scope failures are fixed on the branch; out-of-scope failures become recs (Decisions 59, 55). A timeout is blocked, never a warning.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/persona_contracts/schema.py
+    behavior: PersonaRow accepts an optional string registry_key.
+    verification_step: 2
+    test_selector: tests/persona_contracts/test_schema.py::test_persona_row_registry_key_is_optional
+    red_green_expectation: red before (a row with registry_key is refused as an extra key), green after.
+  - source: scripts/checks/contracts/validate_persona_contracts.py
+    behavior: An unregistered, duplicated or tether-mismatched registry_key and an unreadable registry are refused; no key means no registry read.
+    verification_step: 2
+    test_selector: tests/checks/contracts/test_validate_persona_contracts.py::test_red_rule
+    red_green_expectation: red before (the four registry_key mutators find no failure), green after.
+  - source: tests/persona_contracts/fixture_tree.py
+    behavior: The fixture tree carries the copied registry, a registered fixture key and the four registry_key mutators.
+    verification_step: 2
+    test_selector: tests/checks/contracts/test_validate_persona_contracts.py::test_fixture_tree_green
+    waiver_reason: Test helper; its red-before is the validator change it exercises, guarded by test_red_rule.
+  - source: tests/persona_contracts/test_schema.py
+    behavior: The optional-field test itself.
+    verification_step: 2
+    test_selector: tests/persona_contracts/test_schema.py::test_persona_row_registry_key_is_optional
+    waiver_reason: The test module is its own evidence; its red-before is the extra-key refusal it asserts against.
+  - source: tests/checks/contracts/test_validate_persona_contracts.py
+    behavior: The no-key, no-read test itself.
+    verification_step: 2
+    test_selector: tests/checks/contracts/test_validate_persona_contracts.py::test_registry_is_not_read_when_no_row_carries_a_key
+    waiver_reason: The test module is its own evidence; it pins the no-key path that keeps the real tree green today.
+constraints:
+  - >-
+    Code and tests only: no edit under docs/contracts/ or config/agent/data_quality/, so no persona contract, rendered
+    prompt, hash, registry entry or personas row changes; no row carries a registry_key after this plan.
+  - The field stays optional here; PLAN-persona-run-identity-contract's build makes it required once every row carries one.
+  - No rescue agents or workaround loops (Decision 55); never skip, disable or quarantine a test (Decision 235).
+  - "Public repository (Decision 101): no ARN, account id, Function URL or hostname in any test value or PR text."
+context:
+  - >-
+    Decision-scout: rec-4433 round 2 (2026-11-11), run on the whole persona-key design of which this plan is the first
+    slice: Verdict: NO_FLAGS. Decisions triaged: 205 of 205. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 7.
+    Serves: NS.6 4/5. CITE: 66, 199, 206, 210, 212, 222, 229, 230, 231, 249; of these this slice touches 66 (the
+    registry owns the ids) and 231 cl.4 (persona ids keep their spelling). Report: /mnt/project-files/rec-4433-plan/SCOUT-r2.md.
+  - >-
+    Sign-off (2026-11-11 14:13 UTC): Benjamin chose "Map, and write the plan" (keep the persona ids, add a checked
+    registry_key per index row). Settled with notice (blind Fable consult 4,
+    /mnt/project-files/rec-4433-plan/advisor-brief-4/): this code-only precursor first, because binding schema.py in the
+    rec-4433 sidecar puts 564 test modules in its import closure, the affected-test cap defers 365, and
+    validate_plan_documents refuses a wording-check row whose selection is degraded; then plan 1 makes the key required.
+  - >-
+    Registry read: config/agent/data_quality/source_registry.yaml is read directly (yaml entries[].canonical_id), as
+    scripts/checks/ops_governance/check_source_registry.py does; T1.6 c7's retirement of config/agent/data_quality/
+    migrates this read with the others.
+  - "red_overlap 2026-11-11: clear, no reds. No open PR touches the scope files (checked 2026-11-11 15:00 UTC)."
+  - "Cloud-only operator: every step runs in a CC-web session or PR CI. Live-infrastructure assumptions: none."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS}
+pre_implementation_checklist:
+  - Branch confirmed not on main; rebased onto main
+  - docs/PROJECT_CONTEXT.md read
+  - No open plan or PR edits scripts/persona_contracts/schema.py, validate_persona_contracts.py or fixture_tree.py; if any does, STOP and tell the coordinator
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "1. Rebase onto main; run VP 1 and VP 5."
+  - >-
+    2. Red first: the fixture tree's registry copy, fixture key and four mutators, test_schema.py's new test and the
+    no-key test; see them fail (extra key refused; no failure found).
+  - >-
+    3. PersonaRow.registry_key (optional), then _registry_key_failures and the tether comparison in
+    validate_persona_contracts.py. Run VP 2-4.
+  - >-
+    4. Closure per the implement skill's Commit Flows and docs/contracts/git-ops.yaml: graduation shard for
+    persona-registry-key-check; set implementation_declared: true; commit; rebase; VP 6 on the committed clean tree;
+    postflight evidence; push; open the PR and report it only with the returned number; subscribe; merge (squash) on
+    code review PROCEED and green CI under standing authorisation (no always_ask content). No Resolves trailer: rec-4433
+    closes with its plan 2.
+  - "5. Report: what was implemented and the VP results (counts and markers only); PLAN-persona-run-identity-contract may now be wording-checked."
+rollback: >-
+  Revert the squash commit: no row carries a registry_key and no contract changed, so nothing else depends on it until
+  PLAN-persona-run-identity-contract merges.
