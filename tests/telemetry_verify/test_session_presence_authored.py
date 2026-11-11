@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import http.client
+import json
+import re
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,6 +32,14 @@ CONFIG: dict[str, Any] = {
 }
 ROOT = Path(__file__).resolve().parents[2]
 GRACE = timedelta(days=7)
+A_FROM, A_TO = datetime(2026, 10, 20, tzinfo=timezone.utc), datetime(2026, 10, 22, tzinfo=timezone.utc)
+A_B_CONFIG = {
+    **CONFIG,
+    "lost_windows": [
+        {"from": A_FROM.isoformat(), "to": A_TO.isoformat(), "owner": "rec-1111", "reason": "x"},
+        *CONFIG["lost_windows"][1:],
+    ],
+}
 HOUR = timedelta(hours=1)
 
 
@@ -85,8 +95,6 @@ def test_a_key_whose_own_commit_was_authored_in_a_lost_window_is_lost_window() -
     assert result.status == "green"
     text = sp.lines(result)
     assert f"ARRIVAL_LOST_WINDOW_AUTHORED sha={1:040x}"[:-28] in text[-1] and "AAA" not in "".join(text)
-    import re
-
     assert re.search(r" elapsed_s=\S+ lost_window_authored=1 authored_lookup_failed=0$", text[0])
     two = Fakes(W_TO + HOUR, None)
     two.authored = W_FROM + HOUR
@@ -96,37 +104,28 @@ def test_a_key_whose_own_commit_was_authored_in_a_lost_window_is_lost_window() -
 
 
 @pytest.mark.parametrize(
-    ("created_at", "authored", "expected"),
+    ("created_at", "authored", "expected", "config"),
     [
-        (W_TO + HOUR, W_FROM + HOUR, 1),
-        (W_TO + HOUR, W_FROM, 1),
-        (W_TO, W_FROM + HOUR, 1),
-        (W_TO + GRACE - timedelta(seconds=1), W_FROM, 1),
-        (W_TO + HOUR, W_TO + timedelta(seconds=1), 0),
-        (W_TO + HOUR, W_TO, 0),
-        (W_TO + HOUR, None, 0),
-        (W_TO + HOUR, W_FROM - timedelta(seconds=1), 0),
-        (W_TO + GRACE, W_FROM + HOUR, 0),
-        (W_FROM - HOUR, W_FROM + HOUR, 0),
-        (datetime(2026, 10, 28, 1, tzinfo=timezone.utc), datetime(2026, 10, 27, 23, tzinfo=timezone.utc), 0),
+        (W_TO + HOUR, W_FROM + HOUR, 1, CONFIG),
+        (W_TO + HOUR, W_FROM, 1, CONFIG),
+        (W_TO, W_FROM + HOUR, 1, CONFIG),
+        (W_TO + GRACE - timedelta(seconds=1), W_FROM, 1, CONFIG),
+        (W_TO + HOUR, W_TO + timedelta(seconds=1), 0, CONFIG),
+        (W_TO + HOUR, W_TO, 0, CONFIG),
+        (W_TO + HOUR, None, 0, CONFIG),
+        (W_TO + HOUR, W_FROM - timedelta(seconds=1), 0, CONFIG),
+        (W_TO + GRACE, W_FROM + HOUR, 0, CONFIG),
+        (W_FROM - HOUR, W_FROM + HOUR, 0, CONFIG),
+        (datetime(2026, 10, 28, 1, tzinfo=timezone.utc), datetime(2026, 10, 27, 23, tzinfo=timezone.utc), 0, CONFIG),
+        (A_TO + HOUR, A_FROM + HOUR, 1, A_B_CONFIG),
+        (W_TO + HOUR, A_FROM + HOUR, 0, A_B_CONFIG),
     ],
 )
-def test_the_author_date_rule_holds_its_approved_bounds(created_at: datetime, authored: Any, expected: int) -> None:
-    result = judge([commit(1, "AAA", pr=5)], Fakes(created_at, authored))
+def test_the_author_date_rule_holds_its_approved_bounds(
+    created_at: datetime, authored: Any, expected: int, config: Any
+) -> None:
+    result = judge([commit(1, "AAA", pr=5)], Fakes(created_at, authored), config)
     assert (result.lost_window, result.missing) == (expected, 1 - expected)
-
-
-def test_the_grace_is_measured_from_the_window_the_commit_was_authored_in() -> None:
-    a_from, a_to = datetime(2026, 10, 20, tzinfo=timezone.utc), datetime(2026, 10, 22, tzinfo=timezone.utc)
-    windows = [
-        {"from": a_from.isoformat(), "to": a_to.isoformat(), "owner": "rec-1111", "reason": "x"},
-        *CONFIG["lost_windows"][1:],
-    ]
-    config = {**CONFIG, "lost_windows": windows}
-    kept = judge([commit(1, "AAA", pr=5)], Fakes(a_to + HOUR, a_from + HOUR), config)
-    assert (kept.lost_window, kept.missing) == (1, 0)
-    past = judge([commit(1, "AAA", pr=5)], Fakes(W_TO + HOUR, a_from + HOUR), config)
-    assert (past.lost_window, past.missing) == (0, 1)
 
 
 @pytest.mark.parametrize(
@@ -189,8 +188,6 @@ def item(n: int, key: str, author: str | None, *, top: bool = True) -> dict[str,
 
 
 def serve(monkeypatch: pytest.MonkeyPatch, pages: list[Any]) -> list[Any]:
-    import json
-
     seen: list[Any] = []
 
     def fake(request: urllib.request.Request, timeout: int) -> Response:
