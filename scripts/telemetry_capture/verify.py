@@ -291,7 +291,7 @@ class _Check:
             raise _Stop("tree_moved")
 
     def _transcript_legs(self, view: Any, expected: Any) -> None:
-        self.findings = ledger.reconcile_ledger(view)
+        self.findings = ledger.reconcile_ledger(view, raw=FsTree(self.path))
         if self.findings:
             final = expected if self.cursor.finalized else cursor_tree.expected_rows(view, self.cursor, session_final=True)
             self.inputs = _record_inputs(view, self.findings, expected, final)
