@@ -29,32 +29,20 @@ time, using the `agent_platform_admin` profile (PlatformAdmin, `iam:*`).
 
 ### 1. Create the dedicated state bucket
 
-The bootstrap state bucket must exist before `terraform init` can succeed. Create it once:
+Create the state bucket once:
 
 ```bash
-aws s3api create-bucket \
-  --bucket agent-platform-bootstrap-tfstate \
-  --region eu-west-2 \
-  --create-bucket-configuration LocationConstraint=eu-west-2 \
-  --profile agent_platform_admin
-
-aws s3api put-bucket-versioning \
-  --bucket agent-platform-bootstrap-tfstate \
-  --versioning-configuration Status=Enabled \
-  --profile agent_platform_admin
-
-aws s3api put-bucket-encryption \
-  --bucket agent-platform-bootstrap-tfstate \
-  --server-side-encryption-configuration \
-    '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}' \
-  --profile agent_platform_admin
-
-aws s3api put-public-access-block \
-  --bucket agent-platform-bootstrap-tfstate \
-  --public-access-block-configuration \
-    'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true' \
-  --profile agent_platform_admin
+B=agent-platform-bootstrap-tfstate; P=agent_platform_admin; R=$(tr -d '[:space:]' < config/aws-region)
+aws s3api create-bucket --bucket $B --region $R --create-bucket-configuration LocationConstraint=$R --profile $P
+aws s3api put-bucket-versioning --bucket $B --versioning-configuration Status=Enabled --profile $P
+aws s3api put-bucket-encryption --bucket $B --profile $P --server-side-encryption-configuration \
+  '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+aws s3api put-public-access-block --bucket $B --profile $P --public-access-block-configuration \
+  'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
 ```
+
+SIT (rec-5027's apply): `B=...-sit`, `P` = the SIT account's own admin profile (never PROD's), init with
+`-backend-config=backend-sit.hcl -backend-config="region=$R"`, `-var environment=sit` on each plan and apply.
 
 ### 2. Initialise
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from scripts.checks.iam_tf import _account_names
 from scripts.checks.iam_tf import validate_invoke_implies_resolve as _vir
 from scripts.checks.iam_tf._secure_string_coverage import secure_string_findings, type_attr
 
@@ -123,7 +124,9 @@ def _read_root_text(root_dir: Path) -> str:
     position within this concatenation. A missing/empty root (no *.tf files) returns "" rather
     than raising, so every caller can fail loud on that one shared condition.
     """
-    return "\n".join(p.read_text(encoding="utf-8") for p in sorted(root_dir.glob("*.tf")))
+    return _account_names.render(
+        "\n".join(p.read_text(encoding="utf-8") for p in sorted(root_dir.glob("*.tf"))), root=root_dir
+    )
 
 
 ROLE_APPLY = "apply"
@@ -333,7 +336,7 @@ def _scan_resources(personal_dir: Path):
     locals_map: dict[str, str] = {}
     attr_index: dict[tuple[str, str], dict[str, str]] = {}
     for tf_path in sorted(personal_dir.glob("*.tf")):
-        text = tf_path.read_text(encoding="utf-8")
+        text = _account_names.render(tf_path.read_text(encoding="utf-8"), root=personal_dir)
         locals_map.update(_parse_locals(text))
         for m in _RESOURCE_BLOCK_RE.finditer(text):
             rtype, rname = m.group(1), m.group(2)

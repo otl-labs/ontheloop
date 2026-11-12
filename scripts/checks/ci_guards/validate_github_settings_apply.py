@@ -47,6 +47,7 @@ from scripts.checks.ci_guards.validate_trusted_plan_environment import (
     _steps,
     _triggers,
 )
+from scripts.checks.iam_tf import _account_names
 from scripts.verify_ci_workflow import _load
 
 WORKFLOW = "terraform-github-apply.yml"
@@ -516,7 +517,10 @@ def _load_tree() -> tuple[dict[str, str], dict[str, str], dict[str, Any] | None,
         for pattern in (".github/workflows/*.y*ml", ".github/actions/**/action.y*ml")
         for p in sorted(root.glob(pattern))
     }
-    bootstrap = {n: (root / "terraform" / "bootstrap" / n).read_text(encoding="utf-8") for n in (SETTINGS_TF, ADMIN_TF)}
+    boot_dir = root / "terraform" / "bootstrap"
+    bootstrap = {
+        n: _account_names.render((boot_dir / n).read_text(encoding="utf-8"), root=boot_dir) for n in (SETTINGS_TF, ADMIN_TF)
+    }
     wf_path = root / ".github" / "workflows" / WORKFLOW
     workflow = _load(str(wf_path)) if wf_path.exists() else None
     github_tf = {p.name: p.read_text(encoding="utf-8") for p in sorted((root / "terraform" / "github").glob("*.tf"))}
