@@ -336,7 +336,7 @@ def _admin_hits(simple: sh.Simple, contract: Mapping[str, Any], inline: list[str
     spec = _class(contract, "admin-credential")
     approval, control = _class_info(contract, "admin-credential")
     hits = [Hit("admin-credential", p, approval, control) for p in _selected_profiles(simple, inline, admins)]
-    profiles = (_class(contract, "secret-read").get("entry_point_profiles") or {}) or (spec.get("entry_point_profiles") or {})
+    profiles = spec.get("entry_point_profiles") or {}
     entry = _entry_spec(simple, list(profiles))
     if entry is not None and isinstance(profiles[entry], str) and profiles[entry]:
         hits.append(Hit("admin-credential", profiles[entry], approval, control))
