@@ -1671,6 +1671,8 @@ conditions:
 
 > **Amended by Decision 257 (2026-11-14):** Clause 2's tf-trusted-plan also admits terraform-bootstrap-apply.yml's preview job under its own role, bootstrap-preview, which reads terraform/bootstrap's state (its trust documents carry ExternalIds) and shows names only; no LLM runs in it (clause 3).
 
+> **Update (2026-11-12, PLAN-trusted-plan-github-root, rec-4638):** the terraform/github speculative plan runs under its own role, agent-platform-github-ci-trusted-github-plan. It has cl.2's subject form (the tf-trusted-plan Environment and a job_workflow_ref naming terraform-github-plan.yml at refs/heads/main), carries the mandatory boundary, and holds only tfstate/github read and provider-mirror read and list (Decision 143 cl.1). agent-platform-github-ci-trusted-plan's terraform-github-plan.yml entry and its tfstate/github read leave it: the grant in rec-4638, the trust entry in rec-4640's admin split-apply. Coverage: test_terraform_github_plan_trusted, test_trusted_github_plan_identity and test_trusted_plan_identity.
+
 ---
 
 ## Decision 237: Secrets live as SSM SecureString parameters under a separate /secret/ root -- value verbs enumerated per parameter, out-of-band values outside Terraform, no secret read by a data source (amends Decision 101 point (b), Decision 213 clause 5 and Decision 230 clause 4) (Decided)
