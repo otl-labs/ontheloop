@@ -37,8 +37,10 @@ scope:
       side counts as changed; demoted files (demotions.rows[].file plus reverted_files) count on any change. exempt(map,
       file, base_text, head_text) -> True only when the parsed change is an append to approval-routing.yaml
       demotions.rows or to config/agent/executor/capabilities.yaml boundary_patterns (every base entry kept, in order).
-      in_surfaces(map, file) -> True when the file starts with a notice.surfaces prefix. notice_changes(map, ...) -> the
-      changed files not gated and in_surfaces (code, tests and workflows are neither class). reverted_files(map, root,
+      in_surfaces(map, file) -> True when the file starts with a notice.surfaces prefix and its name ends in one of
+      notice.wording_suffixes (so .claude/hooks/*.py and *.sh and .claude/settings.json are not). notice_changes(map,
+      root, base, head, changed) -> the changed files not gated and in_surfaces (code, settings, tests and workflows are
+      neither class). reverted_files(map, root,
       base) -> the non-gated files, code included (operator 2026-11-12), changed by any commit reachable from base since
       lane.sampled_since whose
       subject starts with "revert" (case-insensitive; this repo's squash reverts, e.g. eb752615) or whose body carries
@@ -56,8 +58,11 @@ scope:
       active per rung; each selector (exact path, **/CLAUDE.md at root and at depth, a yaml key value change, a
       comment-only edit outside the key reading notice, a key added on one side, an unparseable head, an md section
       change, a change outside the section reading notice, the "12p." list item, a missing section); exempt for a
-      demotions append, a boundary_patterns append, a boundary_patterns removal (not exempt) and a reorder (not exempt);
-      notice_changes leaves out a .py, a tests/ file and a workflow; reverted_files for a "revert: ..." subject, a
+      demotions append, a boundary_patterns append, a boundary_patterns removal (not exempt), a reorder (not exempt), a
+      demotions append riding with a lane.kind_floor change (not exempt) and a boundary_patterns append riding with a
+      removal of another entry (not exempt); notice_changes leaves out scripts/x.py, a tests/ file, a workflow,
+      .claude/hooks/x.py, .claude/hooks/x.sh and .claude/settings.json and keeps .claude/skills/x/SKILL.md and a
+      config/ yaml; reverted_files for a "revert: ..." subject, a
       "This reverts commit" body, a reverted .py (listed), a reverted gated file (not listed: already gated), a
       restoration and a revert before sampled_since;
       bound_files present and absent; declared_plan for a flipping commit and a non-flipping one; kind_floor. Also a
@@ -68,16 +73,20 @@ scope:
     purpose: >-
       PR 1. @register'd check validate_approval_routing(failed, root=None, base=None, changed=None, event=None) (seams
       for fixtures). Push context (_common.push_context_base) calls registry.skipped("push context") and returns (Decision
-      170 accounting). base = status_diff_base or
+      170 accounting). changed defaults to every path of _common.get_status_aware_diff(root) (deleted rows kept,
+      --no-renames, so a deleted or renamed gated file, the map included, is a change; get_changed_files drops
+      deletions). base = status_diff_base or
       origin/main; the map is read AT THE BASE (approval_routing.load_map); absent or not active prints "inert: lane not
       on sampled at <base>" and registry.examined(0). Leg P: each gated change with no plan in
       _common.resolve_declared_plans(changed, root, base) whose base sidecar (approved_text.load_sidecar_at) has a block
       on that file is a finding naming the file and selector: "gated text changed with no declared plan's base sidecar
       binding it; route it through /plan and a sidecar, or the operator merges in the GitHub UI (Decision 83)". Leg B:
-      for each docs/plans/PLAN-*.yaml in changed, each drafted Decision in its head sidecar
+      for each sidecar docs/plans/approved/<slug>.yaml in changed whose approved_text.sidecar_state is added or changed
+      (where the operator's reading mode is set; a build PR or an amendment that leaves a sidecar approved before the
+      switch untouched is not re-judged), each drafted Decision in that head sidecar
       (plan_decision_drafts.drafted_entries) whose kind is mechanism is a finding when any of these holds: the sidecar
-      drafts more than one Decision (one blind row cannot speak for two drafts; a label only escalates); the plan has
-      no gate_rounds row with gate kind-blind, or its last one reads direction; its amends list names an entry whose
+      drafts more than one Decision (one blind row cannot speak for two drafts; a label only escalates); the plan
+      docs/plans/PLAN-<slug>.yaml has no gate_rounds row with gate kind-blind, or its last one reads direction; its amends list names an entry whose
       kind at the base (scripts.decisions_md) is direction or missing. A reverted_files git failure is a finding (fail
       closed). Findings
       fail only when GITHUB_EVENT_NAME is pull_request; elsewhere each prints ADVISORY and nothing fails (the
@@ -101,10 +110,13 @@ scope:
       event=pull_request and ADVISORY (no failure) under event=None; the same change with a declared plan whose base
       sidecar binds the file -> PASS; a plan whose sidecar binds another file -> FAIL; a notice-class change -> PASS;
       a map at read_all -> inert; no map -> inert; a map only at HEAD (this build's PR 2 shape) -> inert; push context ->
-      registry.skipped; a code-only change -> PASS; a demoted file, a reverted wording file and a reverted .py -> FAIL without a sidecar; leg B:
+      registry.skipped; a code-only change -> PASS; a deleted gated file and the deleted map -> FAIL; a demoted file, a
+      reverted wording file and a reverted .py -> FAIL without a sidecar; a reverted_files git failure -> FAIL under
+      pull_request; leg B:
       a mechanism draft with no kind-blind row, with a row reading direction, amending a direction entry, and beside a
       second draft with a row reading mechanism -> FAIL; a sole draft with a row reading mechanism amending a mechanism
-      entry -> PASS; a direction draft needs no row; an appended demotion row alone -> PASS.
+      entry -> PASS; a build PR whose unchanged pre-switch sidecar drafts a mechanism entry with no row -> PASS; a
+      direction draft needs no row; an appended demotion row alone -> PASS.
   - file: scripts/checks/_marker_guard.py
     action: Modify
     purpose: >-
@@ -127,22 +139,28 @@ scope:
       but unparseable, or on sampled without an int lane.kind_floor -> True only when the body's envelope kind is
       mechanism (fail closed on the stricter side). Int floor -> True when number > floor and the envelope kind
       (scripts.decisions_md.extract_entry_envelope, this module's existing import source) is not direction; an entry
-      with no kind reads as direction (decision-kind.yaml consumer_contract). About 30 SLOC.
+      with no kind reads as direction (decision-kind.yaml consumer_contract). When it returns True it prints one line,
+      "kind rule: Decision <n> is above kind_floor <floor> and is not direction (approval-routing.yaml); cite a
+      direction entry", so the callers' "does not authorize (mention ...)" line is not read as a missing mention. About
+      30 SLOC.
     new_imports: []
   - file: tests/checks/test__marker_guard_state_options.py
     action: Modify
     purpose: >-
       Two new nodes only (VP 4 names them). test_kind_failure_reads_the_floor, over tmp_path roots: a map at sampled with kind_floor 300 -> a mechanism body numbered 301 fails;
       301 direction passes; 301 with no kind passes; 300 mechanism passes (at the floor); a map at read_all passes; no
-      map passes; an unparseable map -> mechanism 250 fails, direction passes; an edited map is re-read (mtime).
+      map passes; an unparseable map -> mechanism 250 fails, direction passes; a map on sampled without an int
+      kind_floor -> mechanism fails, direction passes; the refusal prints the kind-rule line; an edited map is re-read
+      (mtime).
       test_kind_rule_through_authorization_failure, through _marker_guard.authorization_failure with _common.ROOT monkeypatched to the tmp root: a 301 mechanism body naming
       the key fails, a 301 direction body naming it passes, and the supersession hop to a mechanism target above the
       floor fails. Existing nodes unchanged.
   - file: scripts/roadmap/plan_gate_rounds.py
     action: Modify
     purpose: >-
-      PR 1. _GATE_VERDICTS gains "kind-blind": {mechanism, direction} and the gate Literal gains "kind-blind"; a
-      kind-blind row carries no digest, base, selection, blocking or nits (the existing non-wording-check rule). Docstring
+      PR 1. _GATE_VERDICTS gains "kind-blind": {mechanism, direction} and the gate Literal gains "kind-blind"; the
+      existing non-wording-check rule already refuses digest, base and selection on it, and a new rule refuses a
+      kind-blind row with blocking or nits above 0 or escalated true. Docstring
       names it: the verdict a fresh subagent gave, shown only plan_obligations --blind-drafts output (planning SKILL.md 8b).
     new_imports: []
   - file: tests/test_plan_gate_rounds.py
@@ -151,14 +169,17 @@ scope:
   - file: scripts/roadmap/plan_decision_drafts.py
     action: Modify
     purpose: >-
-      PR 1. Two public functions beside the report: drafted_entries(plan_path, root) -> one record per drafted Decision in
-      the plan's sidecar blocks on docs/DECISIONS.md (title, kind value or None, amends list, raw block), reusing
-      _sidecar_contents and extract_entry_envelope; blind_text(block) -> the block with the envelope's kind mapping (key,
-      value and justification lines) removed and nothing else changed. Advisory module stays total.
+      PR 1. Two public functions beside the report: drafted_entries(plan_path, root) -> one dict per drafted Decision in
+      the plan's sidecar blocks on docs/DECISIONS.md (keys title, kind (the value or None), amends, block), reusing
+      _sidecar_contents and extract_entry_envelope; amends is the envelope's amends list, else
+      scripts.decisions_md.extract_amends_edges(title) (the parse_decisions_md order, so a title-only "(amends Decision
+      N)" still counts). blind_text(block) -> the block with the envelope's kind mapping (key, value and justification
+      lines) removed and nothing else changed. The module stays total; its docstring's "nothing here feeds a gate
+      verdict" becomes: the report is advisory, and validate_approval_routing's leg B reads drafted_entries.
     new_imports: []
   - file: tests/test_plan_decision_drafts.py
     action: Modify
-    purpose: "One new node, test_drafted_entries_and_blind_text (VP 5 names it): drafted_entries on a fixture plan with one mechanism and one direction draft; blind_text drops exactly the kind mapping and keeps significance, amends and the body. Existing nodes unchanged."
+    purpose: "One new node, test_drafted_entries_and_blind_text (VP 5 names it): drafted_entries on a fixture plan with one mechanism and one direction draft, and amends taken from a title when the envelope has none; blind_text drops exactly the kind mapping and keeps significance, amends and the body. Existing nodes unchanged."
   - file: scripts/roadmap/plan_obligations.py
     action: Modify
     purpose: >-
@@ -205,7 +226,8 @@ scope:
   - file: .github/workflows/notice-digest.yml
     action: Create
     purpose: >-
-      PR 1. on push branches [main]; permissions contents read, issues write; no concurrency group (each run digests
+      PR 1. name: notice-digest (the ci_rca_taxonomy key); on push branches [main]; permissions contents read, issues
+      write; no concurrency group (each run digests
       only its own push's range, so runs never share work, and a shared group would cancel a pending run and lose its
       rows); one job, ubuntu-latest, timeout 10 min: actions/checkout@v7 fetch-depth 0; a shell step (id map) that
       writes present=false to GITHUB_OUTPUT when git cat-file finds docs/contracts/approval-routing.yaml at neither
@@ -219,8 +241,9 @@ scope:
     purpose: >-
       PR 1. function_to_category gains validate_approval_routing: schema_drift; workflows gains notice-digest as one
       flow-style line (tier not_a_gate, ci_rca watched, owner `platform` as every row's value, rationale: a failed run means the operator's
-      notice read misses rows); validate_ci_rca_taxonomy requires every workflow name in that map. NEAR_CAP (497 of 500
-      effective lines on main fb642ec9, and other unbuilt plans add rows): measure at build time; if the two lines
+      notice read misses rows); validate_ci_rca_taxonomy requires every workflow name in that map. NEAR_CAP (498 of 500
+      effective lines on main b4004297, so the two lines reach 500 exactly, and other unbuilt plans add rows): measure
+      at build time; if the two lines
       would pass 500, compact existing multi-line rationale scalars to one line each (Decision 166 relief valve,
       prose only, no key or value changed) until it fits; never a raise.
     new_imports: []
@@ -335,10 +358,10 @@ infrastructure_dependencies:
     only the job's GITHUB_TOKEN (contents read, issues write), no AWS role, no secret, no spend.
 acceptance_criteria:
   - rec-5137's acceptance (tests/checks/contracts/test_approval_routing_contract.py::test_kind_routes_wording_approvals) exits 0.
-  - With the map on sampled at the base, validate_approval_routing fails in pull-request CI a PR that changes gated text no declared plan's base sidecar binds, a demoted or reverted file without a sidecar, and a drafted mechanism Decision with no kind-blind row reading mechanism or amending a direction entry; it is inert with no map or on read_all, advisory outside pull-request CI and skipped on a push.
+  - With the map on sampled at the base, validate_approval_routing fails in pull-request CI a PR that changes, deletes or renames gated text (the map included) no declared plan's base sidecar binds, a demoted or reverted file without a sidecar, and, in a PR that adds or changes a sidecar, a drafted mechanism Decision that is not its plan's only draft, has no kind-blind row reading mechanism, or amends a direction entry; it is inert with no map or on read_all, advisory outside pull-request CI and skipped on a push.
   - The shared marker guard refuses, for every token, a cited entry numbered above the map's kind_floor unless its kind is direction; dec-250's existing marker still authorizes (250 is below the floor).
   - notice-digest.yml posts one comment per merged commit with notice-class changes to the open issue labelled notice-digest, one run per push with no shared concurrency group, and posts nothing while the lane is absent or on read_all.
-  - Replayed over real main history with the sidecar's map, the classifier marks every changed gated.files path and every changed gated yaml_keys file whose listed key moved as gated, never lists code, tests or workflows as notice, and the revert detector's count on that window is printed (VP 7).
+  - Replayed over real main history with the sidecar's map, the classifier marks every changed gated.files path and every changed gated yaml_keys file whose listed key moved as gated, lists as notice only files under the notice surfaces with a wording suffix, and the revert detector's count on that window is printed (VP 7).
   - The Decision, notes and contracts carry exactly the sidecar's 25 blocks (approved_text verify exits 0) and every existing test passes with no assert line changed outside the two sidecar-approved test blocks.
   - After PR 2 merges, rec-5137 reads closed, T4.38 reads complete, and the coordinator's shared copy matches coordinator.yaml at the merge commit.
 verification_plan:
@@ -431,7 +454,7 @@ verification_plan:
       for s in run('rev-list', '--max-count=40', 'origin/main').split() for f in [run('diff-tree', '--no-commit-id', '--name-only', '-r', s).split()]];
       want=lambda s, f: {x for x in f if x in m['gated']['files'] or pathlib.PurePosixPath(x).name == 'CLAUDE.md'}
       | {x for x in f if x in m['gated']['yaml_keys'] and any(key(s + '^', x, k) != key(s, x, k) for k in m['gated']['yaml_keys'][x])};
-      [print(s[:8], 'gated', len(g), 'notice', len(n), 'ok', want(s, f) <= g and not any(x.endswith('.py') or x.startswith(('tests/', '.github/workflows/')) for x in n))
+      [print(s[:8], 'gated', len(g), 'notice', len(n), 'ok', want(s, f) <= g and all(x.startswith(tuple(m['notice']['surfaces'])) and x.endswith(tuple(m['notice']['wording_suffixes'])) for x in n))
       for s, f, g, n in rows]; print('reverted', r.reverted_files(m, root, 'origin/main'))"
       && bin/venv-python -m scripts.ci.notice_digest --before origin/main~1 --after origin/main --map-file "$M" --dry-run
     expected: >-
@@ -439,7 +462,8 @@ verification_plan:
       its file count in the build report: the measured recall of the revert leg); then the dry-run prints either one
       row in the documented shape or "no notice-class changes", never an inert line (the map file is on sampled).
     fix_if: >-
-      ok False (a selector misses a gated file or key, or code reads as notice), every commit all-gated or all-notice,
+      ok False (a selector misses a gated file or key, or a file outside the wording surfaces or suffixes reads as
+      notice), every commit all-gated or all-notice,
       a reason string on the reverted line, or the dry-run errors or prints inert
     hermetic: false
     graduation: waive
@@ -465,7 +489,9 @@ verification_plan:
       bin/venv-python -c "import pathlib, re; t=pathlib.Path('docs/DECISIONS.md').read_text(encoding='utf-8');
       nums=[int(n) for n in re.findall(r'^## Decision (\\d+):', t, re.M)];
       print('next_decision=' + str(max(nums) + 1) + ' pr1_merged=' + str(pathlib.Path('scripts/roadmap/approval_routing.py').exists()
-      and 'kind_floor' in pathlib.Path('scripts/checks/_marker_guard.py').read_text(encoding='utf-8') and pathlib.Path('.github/workflows/notice-digest.yml').exists())
+      and 'kind_failure' in pathlib.Path('scripts/checks/_marker_guard.py').read_text(encoding='utf-8')
+      and 'def kind_failure(' in pathlib.Path('scripts/checks/_marker_guard_state_options.py').read_text(encoding='utf-8')
+      and pathlib.Path('.github/workflows/notice-digest.yml').exists())
       + ' map_absent=' + str(not pathlib.Path('docs/contracts/approval-routing.yaml').exists()))"
     expected: One line, next_decision=<number> (that is {{N}}), pr1_merged=True, map_absent=True.
     fix_if: pr1_merged=False means PR 1 has not merged (wait); map_absent=False means a premise moved (plan-defect report)
@@ -474,10 +500,10 @@ verification_plan:
     graduation_waiver_reason: Red-before premise evidence this build itself makes false; step 10 binds the words.
   - step: 10
     phase: pre-deploy
-    action: PR 2. Bind the Decision, contracts, skill, roadmap and the two test pins to the approved words.
+    action: PR 2. Bind the Decision, notes, contracts, skill and the two test pins to the approved words (T4.38 is outside the sidecar).
     command: >-
       bin/venv-python -m scripts.roadmap.approved_text verify --slug wording-approval-routing --base origin/main
-      --expect d6997c45b1d32a9aec9f8abae20d0da582aaaaf1fb3b18d737998e09d182081c
+      --expect 5bff863a54b7f059288ba94ca6cabbf5a404c18683e599353e097d2e601ada8f
     expected: exit 0; all twenty-five blocks match
     fix_if: any word differs from the sidecar; fix the edit, never the sidecar (operator-approved text)
     hermetic: false
@@ -515,10 +541,15 @@ verification_plan:
       and not rel.endswith('PLAN-wording-approval-routing.yaml')
       for sc in [load(pathlib.Path('docs/plans/approved') / (pathlib.PurePosixPath(rel).stem.removeprefix('PLAN-') + '.yaml'))]
       for miss in [{s.get('file', '') for s in d.get('scope') or [] if hit(s.get('file', ''))} - {b.get('file') for b in sc.get('blocks') or []}]
-      if miss]"
+      if miss]; from scripts.roadmap.plan_decision_drafts import drafted_entries;
+      [print(rel, 'leg B on its next sidecar change: mechanism draft', e['title'][:60]) for rel in _recent_plan_paths(pathlib.Path('.'))
+      if not rel.endswith('PLAN-wording-approval-routing.yaml') and load(pathlib.Path(rel)).get('implementation_declared') is not True
+      for e in drafted_entries(pathlib.Path(rel), pathlib.Path('.')) if e['kind'] == 'mechanism']"
     expected: >-
-      Zero or more lines "<plan> [files]" (about 14 plans were in the unbuilt set at planning time). Send them to the
-      coordinator before PR 2 merges, so it can sequence the switch: each listed plan needs a sidecar amendment before
+      Zero or more lines "<plan> [files]" (about 14 plans were in the unbuilt set at planning time), then zero or more
+      "leg B on its next sidecar change" lines (PLAN-persona-verdict-credential's mechanism draft at planning time: its
+      build passes, since leg B runs only where a sidecar is added or changed). Send them to the coordinator before PR 2
+      merges, so it can sequence the switch: each listed plan needs a sidecar amendment before
       its build reaches PR CI, or builds before PR 2 merges (a yaml_keys file counts here even when the build would
       touch only notice keys, so a line is a prompt to check, not a defect).
     fix_if: the command errors (fix the command per the map's shape, never the map)
@@ -529,7 +560,10 @@ verification_plan:
     phase: post-deploy
     action: >-
       After PR 2's squash merge, confirm the rec closed, T4.38 complete and the digest inert for the merge itself (the
-      map is absent at the merge's parent).
+      map is absent at the merge's parent); then read the notice-digest.yml run for that merge commit through
+      mcp__github__actions_list (workflow runs, head_sha the merge commit) and record its run id and conclusion. The
+      first real comment, with the job token creating the label and issue, stays UNPROVEN until the first notice-class
+      merge after the switch; the build report says so.
     command: >-
       git fetch -q origin main && M=$(git log origin/main --diff-filter=A --format=%H -- docs/contracts/approval-routing.yaml | tail -1)
       && bin/venv-python -c "import subprocess, yaml; from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids;
@@ -539,7 +573,8 @@ verification_plan:
       && bin/venv-python -m scripts.ci.notice_digest --before "$M~1" --after "$M" --dry-run
     expected: >-
       prints complete [('rec-5137', 'closed')], then one line "inert: lane not on sampled at <the merge's parent sha>"
-      and no row
+      and no row; the notice-digest run for the merge commit concluded success (its map step found the map at AFTER, and
+      the digest printed the same inert line)
     fix_if: >-
       rec still open after the closure job: read its log; a Decision 186 or 201 refusal routes per git-ops
       resolves_trailer (merge_step recover), never a hand close; T4.38 absent means the bookkeeping block was dropped
@@ -557,7 +592,7 @@ verification_plan:
     hermetic: false
 test_obligations:
   - source: scripts/roadmap/approval_routing.py
-    behavior: Loads the map at a ref or from text, classifies changed files by the three selectors failing closed, limits notice to wording surfaces, exempts only tightening appends, and derives reverted, demoted and bound files and the declared plan.
+    behavior: Loads the map at a ref or from text, classifies changed files by the three selectors failing closed, limits notice to wording files under the surfaces, exempts only pure tightening appends, and derives reverted, demoted and bound files and the declared plan.
     verification_step: 2
     test_selector: tests/test_approval_routing.py
     red_green_expectation: red before (module absent), green after.
@@ -697,7 +732,8 @@ context:
   - "Changes since the presentation, decided with notice: two build PRs, not three (the sidecar verify binds whole files and runs only where implementation_declared flips, so all bound words share the last PR); the blind label is a separate kind-blind subagent row, not a plan-critique edit, and a mechanism draft must be its plan's only draft; the marker rule reads kind_floor (the Decision's own number) from the working-tree map (no subprocess, Decision 153; any map change is gated) instead of git history; git-ops.yaml untouched. A mechanism entry stays sidecar-bound whole (DECISIONS.md is gated whole): the kind saves the operator reading, not a run."
   - "Notice domain (critique r1 finding 7; operator 2026-11-12): notice class, and so the digest, is wording under docs/, .claude/, config/, .github/prompts/ and .github/agents/; code, tests and workflows keep their review rules. The revert leg covers every non-gated file, code included (the operator takes reverted code on: likely misalignment; Feedback Loop told on the Coordinator Log), and reads this repo's squash reverts (subject starts with revert; 0 of 1960 main commits carry the git trailer). Decision 254 cl.3 culprit reverts count too, by design (a label only escalates)."
   - "Tripwire for direction (Decision {{N}} cl.2) is deterministic only for amends; carried_by cannot list a draft. The kind-blind row is a run fact the check requires, like the wording-check row validate_plan_documents requires (Decision 87/205: never an approval input)."
-  - "Residuals (Decision 181 cl.2): reading the digest is procedural (reversal condition unread; owner rec-5139); the kind-blind subagent runs in the planning session until T4.29's persona flip (rec-5140); a GitHub UI merge bypasses leg P by design (Decision 83); a PR that edits a non-gated file to imitate gated meaning is caught only by the drift review (reversal condition drift); the routing code, check and digest are judged by their own copy and CODEOWNERS stays procedural (the rec-2827 self-judging residual Decision 246 names; boundary_patterns keeps them off the executor)."
+  - "Residuals (Decision 181 cl.2): reading the digest is procedural (reversal condition unread; owner rec-5139); the kind-blind subagent runs in the planning session until T4.29's persona flip (rec-5140); a GitHub UI merge bypasses leg P by design (Decision 83); a PR that edits a non-gated file to imitate gated meaning is caught only by the drift review (reversal condition drift); the routing code, check and digest are judged by their own copy and CODEOWNERS stays procedural (the rec-2827 self-judging residual Decision 246 names; boundary_patterns keeps them off the executor). Demoted code meets the repair lanes: a Decision 226 Track A tests-only fix or a Decision 254 cl.3 culprit revert touching a demoted or gated file stays red on leg P until a sidecar binds it or the operator merges in the GitHub UI (follow-on rec to file; the approved words stand)."
+  - "The map is a data input of the marker-guard --pre entries but in none of their pre_globs: a map change is gated, rides a plan whose build runs the full tier before handoff (VP 8), and the full tier reads every marker, so a tightening that bites surfaces there."
   - "Kept graduated records (asserts unchanged, new nodes only): code-review-weakening-dispositions, followon-half-filing-step-pinned, scope-boundary-prose-surfaces-carry-the-rule and scope-boundary-weakening-surfacing-shape (tests/test_scope_boundary_contract.py; the one sidecar-approved phrase pin is the only assert change), plan-decision-drafts-report and serves-claim-verification-pins (tests/test_plan_decision_drafts.py), plan-edges-cites-and-gate-fingerprint (tests/test_plan_gate_rounds.py), marker-guard-state-options (tests/checks/test__marker_guard_state_options.py), plan-obligations-accounting-pointer-reported, plan-obligations-grammar-guard-g1, plan-obligations-grammar-guard-g2, plan-obligations-grammar-guard-g3, plan-obligations-grammar-guard-g4, plan-obligations-grammar-guard-g5, plan-obligations-live-contract-grammar-clean and plan-obligations-workflow-taxonomy-rule (tests/test_plan_obligations.py)."
   - "Overlaps: see plan_obligations --plan; whichever unbuilt plan edits coordinator.yaml, DECISIONS.md, ROADMAP-PLATFORM.yaml or capabilities.yaml first, the other rebases. The dispatcher plan (#2009) guards workflow_dispatch workflows; notice-digest.yml has no dispatch trigger."
   - "rec-5137's acceptance re-pointed 2026-11-12 to tests/checks/contracts/test_approval_routing_contract.py::test_kind_routes_wording_approvals (portal, read back). red_overlap (2026-11-12, main fb642ec9): clear."
@@ -710,6 +746,8 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 8, nits: 10}
   - {gate: wording-check, round: 3, verdict: PASS, digest: 79c2c1fba6262dcc3ceef110e536d50cbb9f65cd1f7bdc32a69390d6b2b3c686, base: b40042977be19802a92d8504dc520c70612e3f57, selection: complete, pending_evaluators: 1}  # pragma: allowlist secret
   - {gate: wording-check, round: 4, verdict: PASS, digest: d6997c45b1d32a9aec9f8abae20d0da582aaaaf1fb3b18d737998e09d182081c, base: b40042977be19802a92d8504dc520c70612e3f57, selection: complete, pending_evaluators: 1}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 5, nits: 11}
+  - {gate: wording-check, round: 5, verdict: PASS, digest: 5bff863a54b7f059288ba94ca6cabbf5a404c18683e599353e097d2e601ada8f, base: b40042977be19802a92d8504dc520c70612e3f57, selection: complete, pending_evaluators: 1}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -727,8 +765,9 @@ execution_steps:
   - "Closure evidence, recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state (scripts.session.github_readiness); parent validator evidence (VP 8 plus --verify-head for the pushed HEAD); structured postflight evidence (scripts.session.postflight --evidence); the real outcome - push, build PR, CI green by event-driven wake (never polled), merge SHA."
   - "Report: what was implemented, verification results, the four closure-evidence facts, both merge SHAs, VP 7, 12 and 13 results."
 rollback: >-
-  Before PR 2 merges, revert PR 1 alone (nothing reads its code). After PR 2, the fast rollback is a sidecar-bound plan
-  amendment setting lane.rung to read_all (every reader goes inert and the old always-ask reading returns, Decision {{N}}
-  on_trigger); that amendment also re-words coordinator.yaml always_ask, which otherwise still says other wording needs
+  Before PR 2 merges, revert PR 1 alone (nothing reads its code). After PR 2, the fast rollback is a new rollback plan
+  (this plan is already declared, so an amendment to it can never satisfy leg P) whose sidecar and build set lane.rung
+  to read_all (every reader goes inert and the old always-ask reading returns, Decision {{N}}
+  on_trigger); that plan also re-words coordinator.yaml always_ask, which otherwise still says other wording needs
   no word, so it is one sidecar covering both files. A full revert of PR 2 then PR 1 follows the same route. The
-  operator's GitHub-UI merge is the valve if the check itself wedges.
+  operator's GitHub-UI merge is the valve if the check itself wedges, and the immediate route for an urgent rollback.
