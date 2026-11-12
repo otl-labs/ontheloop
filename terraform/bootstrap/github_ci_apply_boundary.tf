@@ -250,8 +250,8 @@ locals {
           "s3:DeleteObject"
         ]
         Resource = [
-          "arn:aws:s3:::agent-platform-data-lake/ducklake-telemetry/*",
-          "arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/ducklake_telemetry/*"
+          "${local.data_lake_bucket_arn}/ducklake-telemetry/*",
+          "${local.data_lake_bucket_arn}/telemetry-blobs/ducklake_telemetry/*"
         ]
         Condition = {
           ArnNotLike = {
@@ -268,7 +268,7 @@ locals {
         Sid      = "DenyTelemetryBlobPut"
         Effect   = "Deny"
         Action   = ["s3:PutObject"]
-        Resource = ["arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/*"]
+        Resource = ["${local.data_lake_bucket_arn}/telemetry-blobs/*"]
         Condition = {
           ArnNotLike = {
             "aws:PrincipalArn" = [
@@ -284,7 +284,7 @@ locals {
         Sid      = "DenyTelemetryBlobDelete"
         Effect   = "Deny"
         Action   = ["s3:DeleteObject"]
-        Resource = ["arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/*"]
+        Resource = ["${local.data_lake_bucket_arn}/telemetry-blobs/*"]
         Condition = {
           ArnNotLike = {
             "aws:PrincipalArn" = ["arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-maintenance"]
@@ -297,8 +297,8 @@ locals {
         Effect = "Deny"
         Action = ["s3:DeleteObjectVersion"]
         Resource = [
-          "arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/*",
-          "arn:aws:s3:::agent-platform-data-lake/ducklake-telemetry/*"
+          "${local.data_lake_bucket_arn}/telemetry-blobs/*",
+          "${local.data_lake_bucket_arn}/ducklake-telemetry/*"
         ]
       },
       {
@@ -317,9 +317,9 @@ locals {
           "s3:DeleteObjectVersion"
         ]
         Resource = [
-          "arn:aws:s3:::agent-platform-data-lake/tfstate/*",
-          "arn:aws:s3:::agent-platform-data-lake/tfplan/*",
-          "arn:aws:s3:::agent-platform-data-lake/ci-rca-evidence/review-transcripts/*"
+          "${local.data_lake_bucket_arn}/tfstate/*",
+          "${local.data_lake_bucket_arn}/tfplan/*",
+          "${local.data_lake_bucket_arn}/ci-rca-evidence/review-transcripts/*"
         ]
         Condition = {
           ArnLike = {

@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from scripts.checks.iam_tf import _account_names
 from tests.checks.iam_tf._platform_security_hcl import _mask, _resource_body, _resources, _strip_comments
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -34,7 +35,13 @@ _SEVEN = {
 
 
 def _bootstrap_texts() -> dict[str, str]:
-    return {p.name: p.read_text(encoding="utf-8") for p in sorted(_BOOTSTRAP.glob("*.tf"))}
+    return {p.name: _account_names.render(p.read_text(encoding="utf-8")) for p in sorted(_BOOTSTRAP.glob("*.tf"))}
+
+
+def _flex_replace(text: str, old: str, new: str) -> str:
+    """Replace old with new in rendered text, tolerating terraform fmt's differing key alignment padding."""
+    pattern = r"\s+".join(re.escape(part) for part in old.split())
+    return re.sub(pattern, lambda _m: new, text, count=1)
 
 
 def _joined(texts: dict[str, str]) -> str:
@@ -410,10 +417,10 @@ class TestBootstrapOwnsPlatformIam:
 
     def test_bootstrap_state_bucket_arn_corrupted_is_detected(self) -> None:
         texts = dict(_bootstrap_texts())
-        texts["platform_admin_data_policies.tf"] = texts["platform_admin_data_policies.tf"].replace(
+        texts["platform_admin_data_policies.tf"] = _flex_replace(
+            texts["platform_admin_data_policies.tf"],
             '"arn:aws:s3:::agent-platform-bootstrap-tfstate"   = ["s3:ListBucket"]',
             '"arn:aws:s3:::agent-platform-bootstrap-tfstate-x" = ["s3:ListBucket"]',
-            1,
         )
         assert texts["platform_admin_data_policies.tf"] != _bootstrap_texts()["platform_admin_data_policies.tf"]
         assert any(
@@ -472,8 +479,9 @@ class TestBootstrapOwnsPlatformIam:
             "      )"
         )
         base = texts["platform_admin_data_policies.tf"]
-        assert old_block in base
-        texts["platform_admin_data_policies.tf"] = base.replace(old_block, strcontains_block, 1)
+        flexed = _flex_replace(base, old_block, strcontains_block)
+        assert flexed != base
+        texts["platform_admin_data_policies.tf"] = flexed
         assert texts["platform_admin_data_policies.tf"] != _bootstrap_texts()["platform_admin_data_policies.tf"]
         assert any(
             "PlatformAdmin BootstrapStateProvisioning" in p
