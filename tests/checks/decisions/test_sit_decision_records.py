@@ -36,8 +36,20 @@ def _envelope(entry: str) -> dict:
     return yaml.safe_load(re.search(r"```yaml\n(.*?)\n```", entry, re.DOTALL).group(1))
 
 
-def _last_annotation(entry: str) -> str:
-    return entry.rstrip().removesuffix("---").rstrip().split("\n\n")[-1]
+def _noting_paragraph(entry: str, phrase: str) -> str:
+    """The one paragraph carrying the note, wherever later dated notes push it."""
+    paragraphs = [p for p in entry.rstrip().removesuffix("---").rstrip().split("\n\n") if phrase in p]
+    assert len(paragraphs) == 1, (phrase, len(paragraphs))
+    return paragraphs[0]
+
+
+def test_noting_paragraph_survives_a_later_note() -> None:
+    entry = "Body.\n\nDecision 9 fires here.\n\nA later dated note.\n\n---\n"
+    assert _noting_paragraph(entry, "Decision 9 fires") == "Decision 9 fires here."
+    with pytest.raises(AssertionError):
+        _noting_paragraph(entry, "absent phrase")
+    with pytest.raises(AssertionError):
+        _noting_paragraph(entry + "\n\nDecision 9 fires again.", "Decision 9 fires")
 
 
 def _rds_directly_above_sit(numbers: list[int], rds: int, sit: int) -> bool:
@@ -71,8 +83,7 @@ def test_sit_and_rds_decisions_and_notes() -> None:
     expected |= dict.fromkeys(_SIT_NOTED, f"Amended by Decision {sit} (")
     expected[249] = f"Decision {sit} fires"
     for number, phrase in expected.items():
-        note = _last_annotation(decision_entry(text, number))
-        assert phrase in note, (number, note[:120])
+        note = _noting_paragraph(decision_entry(text, number), phrase)
         other = sit if str(rds) in phrase else rds
         assert not re.search(rf"Decision {other}\b", note), (number, "cites the other new Decision")
 
