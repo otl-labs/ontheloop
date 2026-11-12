@@ -37,3 +37,4 @@ variable "gated_apply_reviewer_user_ids" {
     error_message = "gated_apply_reviewer_user_ids must contain at least one GitHub numeric user id; an empty list silently disables the tf-gated-apply required-reviewer gate."
   }
 }
+# throwaway comment line for rec-4913 VP 9 (closed unmerged)

@@ -22,3 +22,4 @@ resource "aws_ssm_parameter" "ci_rca_strict_mode" {
     TierItem  = "T1.13"
   }
 }
+# throwaway comment line for rec-4913 VP 9 (closed unmerged)
