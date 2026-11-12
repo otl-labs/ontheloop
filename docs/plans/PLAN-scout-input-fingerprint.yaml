@@ -1,0 +1,339 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "scout-input-fingerprint"
+intent: >-
+  Build THE single plan-edge extractor and the scout-input fingerprint that T4.32 c4 defines, so a decision-scout
+  verdict is bound to exactly the plan inputs it judged and any change to those inputs is visible as a different
+  digest. scripts/roadmap/plan_edges.py reads a plan's decision edges (a new typed PlanDocument.cites field, plus
+  amends), its introduces names and the roadmap items it touches with their depends_on and start_edges edges.
+  scripts/roadmap/plan_fingerprint.py hashes the scout-input projection, including the roadmap rows the scout's
+  ROADMAP overlay reads for the plan's scope, into a versioned digest, failing closed on any unreadable input. Its
+  completeness test proves that each input moves the digest and that approach-only text and gate rows do not, and a
+  classification test fails while any plan field is neither hashed, derived nor excluded. PlanDocument gains
+  schema_version 6 (v5 plus cites); a decision-scout gate_rounds row gains an optional scout_input_fingerprint; the
+  exit-criteria ledger documents both. Plan 1 of 2: a separate thread plans rec-4490 (interactive /plan and the plan
+  check re-scout on a fingerprint change), and PLAN-persona-verdict-jobs is the Actions caller (rec-5103).
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-scout-input-fingerprint.yaml
+phase: T4.32
+scope:
+  - file: scripts/roadmap/plan_edges.py
+    action: Create
+    purpose: >-
+      THE single plan-edge extractor (T4.32 c4). extract_edges(plan, roadmap, extra_cites=()) is pure over a plan
+      MAPPING (the raw YAML dict, so a scratch draft that is not yet schema-complete works) and a roadmap mapping of
+      tier_item id -> {depends_on, start_edges}. It returns a frozen PlanEdges: cites and amends (dec:<n>[#<clause>]
+      tokens, verbatim, sorted, de-duplicated; extra_cites merged into cites), decision_numbers (the int of every cites
+      and amends token, sorted and de-duplicated, so dec:217 and dec:217#6 give one 217), introduces (sorted, de-duplicated), items (sorted, de-duplicated: the item half of each closes_criteria token,
+      plus phase's first whitespace-delimited token with trailing ",;:" stripped only when it matches the tier_item id
+      shape ^T-?[0-9]+(\.[0-9]+)+[a-z]?$, so an id the roadmap lacks is kept with edges None whichever field names
+      it), and edges (item -> {depends_on: sorted list, start_edges: sorted [ref, once] pairs}, or None
+      for an item the roadmap lacks). load_roadmap(root) returns scripts.roadmap.platform_roadmap.load(<root>/docs/
+      ROADMAP-PLATFORM.yaml), the repository's own loader, so archived stubs are hydrated; its OSError, YAML error or
+      ValueError (pydantic's ValidationError included) becomes PlanEdgesError. roadmap_edges(doc) builds the mapping
+      from doc.tier_items. A token failing the dec grammar (scripts.roadmap.plan_document._DECISION_TOKEN_RE), a non-list
+      cites, amends, introduces or closes_criteria, or a closes_criteria token without exactly one ":" raises
+      PlanEdgesError naming the field. It never reads context, purposes, steps, constraints, acceptance, VP or any
+      other free text, and never imports a network, AWS or portal module.
+    new_imports: [scripts.roadmap.plan_document, scripts.roadmap.platform_roadmap]
+  - file: scripts/roadmap/plan_fingerprint.py
+    action: Create
+    purpose: >-
+      The scout-input projection and digest, exactly as the ledger's plan_scout_input_fingerprint field states (its
+      semantics in sidecar block l03 are the spec). load_tree(root) reads, once: decision content hashes from
+      scripts.decisions_md.parse_decisions_md(paths=[<root>/docs/DECISIONS.md, <root>/docs/DECISIONS_ARCHIVE.md]) (a
+      missing DECISIONS.md raises, checked explicitly because parse_decisions_md skips a missing path; the archive is
+      read when present), plan_edges.load_roadmap(root) once for both the edge mapping and the tier items, and the
+      north-star file's sha256 (None when absent). projection(plan, tree, sidecar=None, extra_cites=()) returns the payload with
+      keys exactly v (1), intent (" ".join(intent.split())), scope_paths (sorted unique scope[].file), verification_tier,
+      plan_type, cites, amends, introduces, decisions ([n, content_hash or None] per decision number), items, edges,
+      roadmap_projection (scripts.roadmap.scope_projection.project_items(tree items, scope_paths), rows sorted by id,
+      and inside each row open_criteria sorted by id and depends_on, related_candidate_decisions and matched sorted),
+      approved_blocks (sorted sha256 hex of json.dumps([file, words(before), words(after)]) using
+      scripts.roadmap.approved_words.words, for sidecar blocks whose file is docs/DECISIONS.md,
+      docs/ROADMAP-PLATFORM.yaml or docs/contracts/north-star.yaml) and north_star. fingerprint(payload) returns
+      "v1:" + sha256 of json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False) in UTF-8.
+      FIELD_CLASSES maps every PlanDocument field and every ScopeEntry field to hashed, derived (phase, closes_criteria,
+      slug: they select inputs but are not hashed themselves) or excluded. Every list in the payload, nested ones
+      included, is sorted and de-duplicated, as the ledger's l03 states. PAYLOAD_KEYS is the module's tuple of
+      payload keys, which projection emits exactly and both test files read. A plan mapping missing intent, scope,
+      verification_tier or plan_type, or with a non-list scope, raises FingerprintError naming the key; the CLI also
+      raises it naming slug when the plan has none, because the sidecar lookup needs it. CLI: --plan PATH
+      [--root DIR, default the repository root] [--with-cites dec:N[,dec:M...]] [--json]; reads the plan and, when
+      <root>/docs/plans/approved/<plan slug>.yaml exists, the sidecar through approved_words.parse_sidecar; prints one
+      line scout_input_fingerprint=v1:<64 hex> (or the payload as sorted JSON with --json) and exits 0. Any
+      PlanEdgesError, FingerprintError, ApprovedTextError, OSError or YAML error prints "FINGERPRINT-ERROR: <reason>" to
+      stderr (an unreadable plan path's reason starts "cannot read plan") and exits 2, printing no digest. No broad
+      except that turns an error into a digest or exit 0.
+    new_imports: [scripts.roadmap.plan_edges, scripts.roadmap.approved_words, scripts.roadmap.scope_projection, scripts.decisions_md]
+  - file: scripts/roadmap/plan_document.py
+    action: Modify
+    purpose: >-
+      _SUPPORTED_VERSIONS gains 6; _validate_handoff_policy's {3, 4, 5} becomes {3, 4, 5, 6} and its message names 6;
+      add cites: list[str] (default []) with a field validator reusing _DECISION_TOKEN_RE and the amends error shape
+      ("cites entry ... is not a valid 'dec:<number>[#<clause-id>]' token"), refused below schema_version 6 with a
+      message naming 6. Every rule that binds at 5 binds at 6 unchanged (the existing comparisons are all >= 5 or
+      < 5). The new-plan floor in validate_plan_documents stays 5 (rec-5102 replaces it). Stays under 500 SLOC (466
+      today): about 15 lines; decompose rather than raise if it would cross.
+    new_imports: []
+  - file: scripts/roadmap/plan_gate_rounds.py
+    action: Modify
+    purpose: >-
+      GateRound gains scout_input_fingerprint: str | None, allowed only when gate is decision-scout and matching
+      v[1-9][0-9]*:[0-9a-f]{64}; otherwise a ValueError naming the field. The docstring adds that it is a run fact,
+      never a reason to skip a scout.
+    new_imports: []
+  - file: docs/contracts/exit-criteria-ledger.yaml
+    action: Modify
+    purpose: >-
+      Sidecar blocks l01-l05 of docs/plans/approved/scout-input-fingerprint.yaml, word for word ({{DATE}} = build date):
+      l01 contract.description names PlanDocument.cites and GateRound.scout_input_fingerprint; l02 plan_amends' consumer
+      note names the built extractor and fingerprint; l03 the plan_cites and plan_scout_input_fingerprint field entries
+      (the latter's semantics are the payload spec; kept out of audit_invariants because tests/test_scope_projection.py
+      requires exactly one there); l04 the seven oldest top-level amendment_log rows reflowed to one flow line each,
+      words and parsed values unchanged (the contracts class's relief valve); l05 one field_add amendment_log row.
+      439 -> 448 of 500 effective lines (measured on a scratch tree of main d75c76f3).
+  - file: tests/test_plan_edges.py
+    action: Create
+    purpose: >-
+      (The flat tests/test_<stem>.py home that scripts.test_coverage_checker maps scripts/roadmap/ modules to.)
+      Extractor cases: cites plus amends tokens and numbers (dec:217#6 counts as 217); extra_cites merged and
+      de-duplicated; introduces sorted; items from closes_criteria and from a phase that is an id ("T4.32"), a phase
+      with a trailing comma ("T4.32, c4"), and phase prose that names no id ("persona foundation") yielding none; edges
+      read from a fixture roadmap including start_edges and an archived stub, and None for an unknown item named by
+      phase or by closes_criteria alike; PlanEdgesError for a bad dec token, a non-list field, a closes_criteria token
+      without one ":", and a missing or unparsable roadmap file; and
+      that context, purposes, constraints and execution_steps text naming "Decision 999" or "dec:999" yields no edge.
+  - file: tests/test_plan_fingerprint.py
+    action: Create
+    purpose: >-
+      (Flat home, as for test_plan_edges.py.) FINGERPRINT-COMPLETENESS TEST (T4.32 c4), table-driven from the payload keys so a key with no fixture fails the
+      test, PAYLOAD_KEYS being the table's key set: for each fingerprinted input a fixture change moves the digest --
+      v (a patched version changes both the digest and its "v<N>:" prefix), set(projection(...)) == set(PAYLOAD_KEYS)
+      on every fixture, intent, a scope path added, tier, plan
+      type, a cites token, an amends token, an introduces name, a closes_criteria item, phase id, a roadmap depends_on
+      edge and a start_edges entry of a touched item, an open criterion's text and the status of a roadmap item whose
+      files_in_scope intersects a scope path (roadmap_projection), the raw text of a cited Decision in a fixture DECISIONS.md, a
+      sidecar block on each of the three hashed files, and north-star.yaml's bytes. Unchanged-digest cases: an edit to
+      context, a scope purpose, execution_steps, constraints, acceptance_criteria or a VP step; an added gate_rounds
+      row; whitespace re-wrapping of intent; reordering of scope, cites and closes_criteria, and of the depends_on,
+      exit_criteria and related_candidate_decisions of a fixture item that is both named by closes_criteria and matched
+      by a scope path; the same item named by phase and by two closes_criteria tokens yielding one item; a sidecar
+      block on any other file. A malformed --with-cites token exits 2. Plus --with-cites dec:N then writing dec:N into cites gives the same digest; the digest starts "v1:"
+      and is 67 characters; every PlanDocument and ScopeEntry field appears in FIELD_CLASSES and nothing else does;
+      each FingerprintError and the CLI's exit 2 with "FINGERPRINT-ERROR:" and no digest on stdout for a missing plan,
+      missing DECISIONS.md, unparsable roadmap and unparsable sidecar.
+  - file: tests/roadmap/plan_document/test_cites_field.py
+    action: Create
+    purpose: >-
+      schema_version 6 accepted with and without cites; cites refused at 5 naming 6; malformed tokens refused; a v6
+      IMPLEMENTATION plan still requires handoff_policy; a v6 hermetic step still refuses a backtick literal in expected;
+      and the ledger contract: plan_cites and plan_scout_input_fingerprint present with required inline fields, their
+      descriptions naming PlanDocument.cites and GateRound.scout_input_fingerprint, the latter's semantics naming every
+      key in plan_fingerprint.PAYLOAD_KEYS (read from the module, never a literal list); contract.description names
+      PlanDocument.cites and GateRound.scout_input_fingerprint; plan_amends' semantics no longer says "not built" and
+      still names T4.32 c4; audit_invariants still holds exactly one entry.
+  - file: tests/test_plan_gate_rounds.py
+    action: Modify
+    purpose: >-
+      scout_input_fingerprint accepted on a decision-scout row (v1 and a later version prefix), refused on
+      plan-critique and wording-check rows, refused for a bad prefix, upper-case hex or a short digest.
+bundled_recommendations: []
+followon_recs: [rec-4490, rec-5103]
+closes_criteria: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - The FINGERPRINT-COMPLETENESS TEST passes, and it covers every payload key, so a key with no fixture fails it.
+  - Every PlanDocument and ScopeEntry field is classified hashed, derived or excluded, and a test fails when one is not.
+  - "The CLI prints `scout_input_fingerprint=v1:` and 64 hex for this plan and the same value twice, and the projection fingerprints every docs/plans/PLAN-*.yaml on main, with its sidecar where one exists."
+  - On any unreadable plan, decision file, roadmap or sidecar, the CLI exits 2 and prints no digest.
+  - PlanDocument accepts schema_version 6 with cites and refuses cites below 6, and every v5 rule still binds at 6.
+  - A decision-scout row accepts scout_input_fingerprint and every other gate refuses it.
+  - exit-criteria-ledger.yaml equals main plus the approved sidecar's five blocks, word for word.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: "Precondition: this plan and its sidecar are on main; branch current."
+    command: >-
+      git fetch origin main --quiet && git cat-file -e origin/main:docs/plans/PLAN-scout-input-fingerprint.yaml && git
+      cat-file -e origin/main:docs/plans/approved/scout-input-fingerprint.yaml && git merge-base --is-ancestor origin/main
+      HEAD && echo PRECONDITION_OK
+    expected: Prints PRECONDITION_OK.
+    fix_if: A missing plan or sidecar means this plan's PR has not merged; stop. A failed ancestry test means a stale branch; merge origin/main first.
+    hermetic: false
+    graduation: not-applicable
+  - step: 2
+    phase: pre-deploy
+    action: The ledger is exactly main plus the approved sidecar.
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug scout-input-fingerprint --base origin/main
+      --expect 1bdee4cdac6a0ef7b6ef9fde2e691d18bd20aa8fef091d687787c6ab9360d019  # pragma: allowlist secret
+    expected: Exit 0, printing APPROVED-TEXT OK. Red before the blocks are placed.
+    fix_if: >-
+      A word mismatch means a placed block drifted: restore its after text exactly, never edit the sidecar. A digest
+      mismatch means the sidecar on main is not the approved one: stop and ask the operator. If
+      PLAN-work-graph-edge-model built first and moved an anchor, send a plan-defect report.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      A base-relative, one-time binding of this build's diff to its sidecar; validate_merge_step enforces the same
+      binding on the build PR's fast tier.
+  - step: 3
+    phase: pre-deploy
+    action: The completeness and classification tests (the lasting rule that every input moves the digest and only those).
+    command: bin/venv-python -m pytest tests/test_plan_fingerprint.py -q
+    expected: All pass. Red before (the test file and module do not exist).
+    expected_literals: [" passed"]
+    fix_if: Fix plan_fingerprint.py; never drop a table row or move a field to excluded to get green.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: scout-input-fingerprint-completeness
+  - step: 4
+    phase: pre-deploy
+    action: Extractor, schema, gate-row and ledger-contract tests.
+    command: >-
+      bin/venv-python -m pytest tests/test_plan_edges.py tests/roadmap/plan_document/test_cites_field.py
+      tests/test_plan_gate_rounds.py -q
+    expected: All pass. Red before (two test files do not exist).
+    expected_literals: [" passed"]
+    fix_if: Fix the module the failing test names; never loosen an existing plan_document test.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: plan-edges-cites-and-gate-fingerprint
+  - step: 5
+    phase: pre-deploy
+    action: The CLI fingerprints a real plan deterministically.
+    command: >-
+      a=$(bin/venv-python -m scripts.roadmap.plan_fingerprint --plan docs/plans/PLAN-scout-input-fingerprint.yaml) &&
+      b=$(bin/venv-python -m scripts.roadmap.plan_fingerprint --plan docs/plans/PLAN-scout-input-fingerprint.yaml) &&
+      [ "$a" = "$b" ] && echo "$a" | grep -Eq '^scout_input_fingerprint=v[1-9][0-9]*:[0-9a-f]{64}$' && echo FINGERPRINT-CLI OK
+    expected: Prints FINGERPRINT-CLI OK. Red before (the module does not exist).
+    expected_literals: ["FINGERPRINT-CLI OK"]
+    fix_if: Two different values mean non-determinism (set or dict order, a timestamp); fix the canonicalisation.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: scout-input-fingerprint-cli-deterministic
+  - step: 6
+    phase: pre-deploy
+    action: Fail closed -- an unreadable plan exits 2 with the error prefix and prints no digest.
+    command: >-
+      out=$(bin/venv-python -m scripts.roadmap.plan_fingerprint --plan docs/plans/PLAN-does-not-exist.yaml 2>&1); rc=$?;
+      [ "$rc" -eq 2 ] && echo "$out" | grep -q '^FINGERPRINT-ERROR: cannot read plan' && ! echo "$out" | grep -q
+      'scout_input_fingerprint=' && echo FAIL-CLOSED OK
+    expected: Prints FAIL-CLOSED OK. Red before (a missing module exits 1, not 2).
+    expected_literals: ["FAIL-CLOSED OK"]
+    fix_if: Any exit other than 2, or a digest on stdout, is the silent-failure path this plan forbids; fix the CLI.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: scout-input-fingerprint-fails-closed
+  - step: 7
+    phase: pre-deploy
+    action: Every plan on main fingerprints without error, and the payload's decision hash is decisions_md's.
+    command: >-
+      bin/venv-python -c "import glob, yaml; from pathlib import Path; from scripts.roadmap import plan_fingerprint as f;
+      from scripts.decisions_md import parse_decisions_md; t=f.load_tree(Path('.')); ps=sorted(glob.glob('docs/plans/PLAN-*.yaml'));
+      from scripts.roadmap.approved_words import parse_sidecar; load=lambda p: yaml.safe_load(open(p, encoding='utf-8'));
+      side=lambda d: (lambda q: parse_sidecar(q.read_text(encoding='utf-8')) if q.exists() else None)(Path('docs/plans/approved')/(str(d.get('slug'))+'.yaml'));
+      [f.fingerprint(f.projection(d, t, side(d))) for d in map(load, ps)];
+      d={r['decision_id']: r['content_hash'] for r in parse_decisions_md()};
+      pay=f.projection({'intent': 'x', 'scope': [{'file': 'a'}], 'verification_tier': 'V1', 'plan_type': 'IMPLEMENTATION', 'cites': ['dec:229#4']}, t);
+      assert pay['decisions'] == [[229, d[229]]], pay['decisions']; print('FINGERPRINT-ALL OK', len(ps))"
+    expected: Prints FINGERPRINT-ALL OK and the plan count (more than 700 today).
+    expected_literals: ["FINGERPRINT-ALL OK"]
+    fix_if: >-
+      A historical plan that raises shows a shape the extractor does not tolerate (for example a scalar where a list is
+      expected): fix the extractor to read it, or, if the plan really is malformed, stop and report; never catch and skip.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      A corpus pass over every merged plan at build time; as a standing guard it would re-judge merged history on every
+      run (rec-4813). The lasting rules are steps 3-6.
+  - step: 8
+    phase: pre-deploy
+    action: Fast tier on the branch.
+    command: bin/venv-python -m scripts.validate --pre
+    expected: Exit 0.
+    fix_if: Fix the named failure on the branch; never skip, disable or quarantine a test.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: pre-deploy
+    action: Full tier before handoff (handoff_policy), started in the background from the top-level session.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: The verify-head read reports a completed full run for HEAD with exit 0.
+    fix_if: A red full tier blocks handoff; fix and rerun from the start. A timeout is blocked, never a warning.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/roadmap/plan_edges.py
+    behavior: extracts cites, amends, introduces, items and edges from typed fields only, and raises on malformed input
+    verification_step: 4
+    test_selector: tests/test_plan_edges.py
+    red_green_expectation: red before (module and tests absent), green after
+  - source: scripts/roadmap/plan_fingerprint.py
+    behavior: each fingerprinted input moves the digest, approach-only text and gate rows do not, every field is classified, and errors exit 2 with no digest
+    verification_step: 3
+    test_selector: tests/test_plan_fingerprint.py
+    red_green_expectation: red before (module and tests absent), green after
+  - source: scripts/roadmap/plan_document.py
+    behavior: schema_version 6 with cites; cites refused below 6; v5 rules bind at 6
+    verification_step: 4
+    test_selector: tests/roadmap/plan_document/test_cites_field.py
+    red_green_expectation: red before (the v6 cases fail and the file is absent), green after
+  - source: scripts/roadmap/plan_gate_rounds.py
+    behavior: scout_input_fingerprint only on decision-scout rows, with the v<N>:<hex> shape
+    verification_step: 4
+    test_selector: tests/test_plan_gate_rounds.py
+    red_green_expectation: red before (the new cases fail on extra=forbid), green after
+  - source: docs/contracts/exit-criteria-ledger.yaml
+    behavior: plan_cites and plan_scout_input_fingerprint are documented and the stale consumer note is gone
+    verification_step: 4
+    test_selector: tests/roadmap/plan_document/test_cites_field.py
+    red_green_expectation: red before (no plan_cites entry), green after
+constraints:
+  - Place sidecar blocks l01-l05 byte for byte, filling only {{DATE}}; never edit the sidecar (Decision 246). Any other edit to exit-criteria-ledger.yaml fails approved_text verify.
+  - The extractor and fingerprint read typed fields only; no search over free text in either module (phase's first token is matched whole against the tier-id shape, nothing else in phase is read).
+  - "Fail closed (scope rows): no error path yields a digest or exit 0; no broad except. Silent failure is the risk the operator named."
+  - plan_fingerprint.py is the only module that computes the payload or digest, and plan_edges.py the only extractor; callers import them (T4.32 c4 "THE single plan-edge extractor").
+  - No scripts.validate check registration (the graduated verification-registry shards for VP steps 3-6 are derived scope), no workflow, no skill or command text, no roadmap or Decision text, no network, AWS or portal call.
+  - Tests derive counts from the sources they check, never a literal count of plans or fields (tests/CLAUDE.md count coupling).
+  - No rescue agents or workaround loops (Decision 55); never skip, disable or quarantine a test (Decision 235).
+context:
+  - "Decision-scout verdict + CITE list (round 1, 2026-11-12): Verdict: FLAGS_FOUND. Decisions triaged: 205 of 205. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: mission 3/5. CITE: 229 (cl.4), 217 (cl.8 as amended by 229; cl.5-6 clause deferral), 205 (cl.1 as amended), 246 (cl.1-3, 5), 86 (cl.2). Report: /mnt/project-files/scout-input-fingerprint/SCOUT-A-r1.md."
+  - "Scout flags folded in: 205 cl.5 NOTE (the gate-row fingerprint is a run fact; readers recompute; stated in l03 and the GateRound docstring); 86 SPIRIT NOTE (the payload's semantics now live in the ledger's plan_scout_input_fingerprint field, block l03); RELATED 85 (plan_document.py:355's {3, 4, 5} widened), 118/168 (field_add amendment_log row l05), 128 (SLOC watch on plan_document.py), 181 cl.2 (plan_cites governance_notes), 197 cl.5 (declaration wording)."
+  - "Sign-off: operator 'please write the plan, I agree with all of your recommendations' 2026-11-12 12:20 UTC, after asking that this thread write only this plan and hand plan 2 (rec-4490) to a separate thread; forks taken: typed cites field, approved blocks on DECISIONS.md + ROADMAP-PLATFORM.yaml + north-star.yaml, deterministic barrier (plan 2's). Presentation and consult: /mnt/project-files/scout-input-fingerprint/PRESENTATION.md, advisor-brief/ADVICE.md (Fable 5.2)."
+  - "Split settled on the blind consult (Q9): this plan binds nothing and changes no planning behaviour; plan 2 (rec-4490, followon_recs) wires the planning skill, plan.md, project-alignment.yaml and the validate_plan_documents 're-scout required' barrier, and should bundle rec-5102 (only the newest schema_version on main may merge), which the operator asked for 2026-11-12."
+  - "closes_criteria is empty: c4's verdict-chain legs (recompute per push, 're-scout required' on Actions, push-to-main re-scout) cannot be proven before the verdict jobs; rec-5103 (followon_recs) names PLAN-persona-verdict-jobs as their closer and the flip of T4.32 c4. Audit WP-05's roadmap_closes says T4.32:c4; that is the deviation recorded here."
+  - "rec-4916 and rec-4946 are already closed (their c4 amendment landed in #1935); north-star.yaml is hashed per that amendment. rec-4517 (existence of a named decision) stays with the unbuilt PLAN-work-graph-edge-model; until then an unknown decision number hashes as null rather than failing."
+  - "This plan's own document stays schema_version 5: v6 is not valid until this build merges. New plans keep the v5 floor until rec-5102."
+  - "Overlap: unbuilt PLAN-work-graph-edge-model also edits exit-criteria-ledger.yaml (plan_amends' first sentences and governance_notes, plus an amendment row). No sidecar block here touches those words; whichever builds second rebases. If it builds first, its row follows the 2026-10-25 row and l05 still places this row directly after that row."
+  - "Size (Decision 166): the ledger lands at 448 of 500 effective lines (scratch tree of main d75c76f3), after block l04 reflows seven old amendment rows (precedent: PLAN-inference-tier-selection); PLAN-work-graph-edge-model's rows fit in the 52 left. plan_document.py 466 of 500 SLOC (+ about 15)."
+  - "No '## Step <id>:' heading of .claude/commands/plan.md and no planning-skill text changes here (the compute-plane contracts pin the headings; plan 2 must keep them)."
+  - "Related-work check (2026-11-12, main 7c1b9b6d): scripts.ci_rca.red_overlap verdict clear (no reds, SLO 4 h). Cloud-only operator: every step runs in a CC-web session or PR CI. Live-infrastructure assumptions: none."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: wording-check, round: 1, verdict: FAIL, digest: 00fa236729228c172eef04914d92f13f5edbf6153be9eba905e90164028c8364, base: 7c1b9b6d9de5621dc68e0d332861fc0168385dc0, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 3}
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 1bdee4cdac6a0ef7b6ef9fde2e691d18bd20aa8fef091d687787c6ab9360d019, base: d75c76f33f5c320bee099e45e36b0308a2c68d7c, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 6}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 5}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections (229 cl.4, 217 cl.8, 205 cl.1 and cl.5, 246, 86)
+  - All files in scope located and readable; docs/plans/approved/scout-input-fingerprint.yaml read
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "STEP 0: run VP step 1. Post: PRECONDITION_OK."
+  - "STEP 1: place sidecar blocks l01-l05 byte for byte ({{DATE}} = build date). Run VP step 2. Post: APPROVED-TEXT OK."
+  - "STEP 2: plan_document.py (v6, cites, handoff set) and plan_gate_rounds.py per their scope rows, then tests/roadmap/plan_document/test_cites_field.py and the tests/test_plan_gate_rounds.py cases. Pre: STEP 1 done. Post: those tests pass."
+  - "STEP 3: scripts/roadmap/plan_edges.py and tests/test_plan_edges.py. Post: the edges tests pass."
+  - "STEP 4: scripts/roadmap/plan_fingerprint.py and tests/test_plan_fingerprint.py. Run VP steps 3-7. Post: FINGERPRINT-CLI OK, FAIL-CLOSED OK, FINGERPRINT-ALL OK."
+  - "STEP 5: validate --pre (VP step 8), then the full tier (VP step 9). Loop until pass; on an unrecoverable failure stop and RCA (Decision 55)."
+  - "Report: what was implemented, the VP results, and that rec-5103 and rec-4490 remain open for their own plans."
+rollback: >-
+  Revert the build PR. A v6 plan written after the build would then fail to load, so revert only before any v6 plan
+  merges; after that, forward-fix.
