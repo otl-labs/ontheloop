@@ -31,6 +31,7 @@ class TestScannedPaths:
             "scripts/ducklake_smoke/lambda_ops_gates.py",
             "scripts/backlog_health/escalate.py",
             "scripts/telemetry_verify/alarms.py",
+            "scripts/ci/actions_capacity_alarm.py",
         }
         assert required <= set(SCANNED_PATHS)
 

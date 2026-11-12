@@ -64,6 +64,15 @@ name: convergence-health
 # it. The step needs the job's existing `actions: read` grant (per-peer run queries plus one
 # workflow-state listing) and GH_TOKEN; it never touches terraform apply, the convergence record,
 # or main-protection required_status_checks (Decision 83 non-wedging).
+#
+# Also runs the rec-5022 Actions capacity gauge on the same cron/identity: reads this repository's recent workflow runs
+# and jobs from the Actions API, computes per closed UTC hour the slot demand (job-minutes / 60) and the main-validate
+# queue p90, chains an hourly table through the actions-capacity-reading artifact of the previous tick, and compares it
+# with the trigger in docs/contracts/actions-capacity.yaml (20 concurrent jobs: 16 slots or a 300 s p90 queue). It
+# files, updates and closes deduped actions_capacity recs through the ops portal (capacity_breach, gauge_blind). The
+# steps need the job's existing `actions: read` grant and GH_TOKEN, and run last so no earlier step is affected. Alarm-only
+# invariants: no workflow_dispatch, no workflow, plan or runner change, red only on a portal write failure (every
+# verdict and every GitHub or warehouse read failure exits 0), never a required check (Decision 83 non-wedging).
 
 on:
   schedule:
@@ -154,3 +163,21 @@ jobs:
         run: |
           set -euo pipefail
           .venv/bin/python -m scripts.convergence_health --sensor-liveness
+
+      - name: Measure Actions capacity (rec-5022)
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONVERGENCE_HEALTH_DIAGNOSE: ${{ inputs.diagnose && '1' || '' }}
+        run: |
+          set -euo pipefail
+          .venv/bin/python -m scripts.ci.actions_capacity_gauge --reading-out actions-capacity-reading.json
+
+      - name: Upload Actions capacity reading
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: actions-capacity-reading
+          path: actions-capacity-reading.json
+          retention-days: 14
+          if-no-files-found: warn
