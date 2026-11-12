@@ -1,0 +1,377 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "github-environment-tidy"
+intent: >-
+  Stop every tf-trusted-plan job creating a GitHub deployment record by running all three of them with deployment:
+  false (the terraform/personal and terraform/github PR plans and the terraform/github apply preview), adopted only
+  after live proof that the Environment still refuses a non-main ref and still binds the OIDC environment subject under
+  deployment: false (rec-4913), so the Deployments panel stops filling with speculative-plan records. The
+  deployment-approval-probe Environment is kept: Decision 248 cl.8-9 uses it as the apply App's approval oracle, so
+  rec-4914's retirement was declined.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-github-environment-tidy.yaml
+phase: >-
+  ad_hoc_rec (rec-4913 Medium; soft-warn category, no tier_item claimed, so the Tier Item Freshness Gate is skipped).
+  closes_criteria empty: rec-4913 is not a roadmap exit criterion (precedent PLAN-deployment-approval-probe).
+scope:
+  - file: .github/workflows/terraform-plan-trusted.yml
+    action: Modify
+    purpose: >-
+      The plan job's environment becomes the mapping {name: tf-trusted-plan, deployment: false}; one header sentence
+      says the job creates no deployment record and names this plan (VP 3 and VP 4 proved the branch policy and the
+      OIDC subject under deployment: false).
+  - file: .github/workflows/terraform-github-plan.yml
+    action: Modify
+    purpose: >-
+      The plan job's environment becomes the mapping {name: tf-trusted-plan, deployment: false}; the same header
+      sentence. The tf-trusted-plan environment secret TF_GITHUB_PLAN_APP_PRIVATE_KEY still applies under deployment:
+      false (GitHub docs), which VP 3's branch refusal keeps away from non-main refs.
+  - file: .github/workflows/terraform-github-apply.yml
+    action: Modify
+    purpose: >-
+      The preview job's environment becomes the mapping {name: tf-trusted-plan, deployment: false}; one header-line
+      clause on the preview's row says it creates no deployment record. The apply job is untouched
+      (validate_github_settings_apply predicate (c), line 412, keeps its tf-gated-apply environment a literal string; it
+      stays reviewer-gated and recorded). This file is a push path of the workflow itself, so the merge push runs the
+      flipped preview (VP 8).
+  - file: scripts/checks/ci_guards/validate_trusted_plan_environment.py
+    action: Modify
+    purpose: >-
+      New predicate (l) in this module: every job in ENV_WORKFLOWS whose environment is ENV declares the mapping form
+      with deployment the YAML boolean false (is False; a quoted "false", a bare string, deployment true or an absent
+      key is refused), registered with the existing predicates; the module docstring gains its (l) line worded as
+      Deployments-panel hygiene, not the trust boundary. _env_name stays as is (it already reads the mapping). Headroom
+      62 SLOC; the change is about ten.
+    new_imports: []
+  - file: tests/checks/ci_guards/test_validate_trusted_plan_environment.py
+    action: Modify
+    purpose: >-
+      New node test_trusted_environment_job_requires_deployment_false: synthetic red cases (bare string, deployment
+      true, quoted "false", key absent) for a job in each of the three ENV_WORKFLOWS files, and the green mapping form.
+      test_real_tree_is_green keeps its id (graduated record trusted-plan-environment-fence, Decision 244) and now runs
+      over the three flipped workflows.
+  - file: tests/checks/ci_guards/test_terraform_plan_trusted.py
+    action: Modify
+    purpose: >-
+      The shape pin (line 71) reads the mapping form (name tf-trusted-plan and deployment is False); one new mutation
+      (deployment true) must be refused; the existing "no environment" mutation stays. Node ids unchanged (graduated
+      record trusted-plan-cutover-workflow).
+  - file: tests/checks/ci_guards/test_terraform_github_plan_trusted.py
+    action: Modify
+    purpose: >-
+      The job pin (line 65) reads the mapping form; the remove-environment mutation (line 193), whose literal string
+      replace would become a silent no-op, is rewritten to remove the mapping; one new mutation (deployment true) is
+      refused. Node ids unchanged (graduated record terraform-github-plan-trusted).
+  - file: tests/test_terraform_github_plan_workflow.py
+    action: Modify
+    purpose: >-
+      The environment assertion (line 46) reads the mapping form (name and deployment is False). Node ids unchanged
+      (graduated record terraform-github-plan-workflow-wiring).
+bundled_recommendations: []
+# rec-4913 is deliberately not bundled (a stated departure from the closure-obligation listing rule): its acceptance
+# is the post-merge live proof (VP 8 and VP 9); a Resolves trailer would close it at merge, before that proof, and a
+# closed rec is never reopened. It closes by update_rec after VP 9 (VP 10 reads back). rec-4914 was declined
+# 2026-11-12 by the planning worker on the operator's agreement (read back: status declined); rec-4716 stays open.
+followon_recs: []
+infrastructure_dependencies:
+  - >-
+    No IAM, OIDC trust, secret, Lambda, Neon or terraform change. Three roles trust the environment:tf-trusted-plan
+    sub plus an exact main job_workflow_ref and are untouched: agent-platform-github-ci-trusted-plan
+    (terraform/personal/oidc_trusted_plan_role.tf; terraform-plan-trusted.yml), the trusted terraform/github plan role
+    (terraform/personal/oidc_trusted_github_plan_role.tf; terraform-github-plan.yml) and github-settings-preview
+    (terraform/bootstrap/github_settings_apply.tf:146-162; terraform-github-apply.yml preview). Each is proven against
+    the flipped job after merge (VP 8, VP 9).
+  - >-
+    OPERATOR STEP A (his click, during VP 4): approve the one pending deployment-approval-probe job of the temporary
+    probe workflow in the Actions UI. It is the Environment's required reviewer; no agent can approve (rec-4695).
+  - >-
+    The temporary probe workflow (.github/workflows/deployment-false-probe.yml) exists only on the build branch: it is
+    committed, pushed, observed and deleted in the next commit BEFORE the PR opens, so it never reaches main, PR CI or
+    the squash diff. No workflow in the repo triggers on push to a non-main branch (checked 2026-11-11), so the push
+    runs only it.
+  - >-
+    terraform/github is not edited by the merged diff (only the throwaway VP 9 PR adds one comment line there and is
+    closed unmerged). The merge push runs terraform-github-apply.yml (its own path is a push path): its preview plans
+    terraform/github read-only; if pending drift makes it offer an apply, the apply job waits on tf-gated-apply and the
+    operator leaves it unapproved (told in the merge-word message). An unnamed gate change ends a push run neutral.
+acceptance_criteria:
+  - >-
+    VP 3: a job on a non-main branch naming {name: tf-trusted-plan, deployment: false} with permissions {} is refused by
+    the Environment's branch policy and never runs a step, while a sibling job without an Environment runs; the
+    tf-trusted-plan deployment count is unchanged.
+  - >-
+    VP 4: a job naming {name: deployment-approval-probe, deployment: false} waits for the operator's approval, then its
+    OIDC token's sub is the immutable form repo:otl-labs@<owner id>/ontheloop@<repo id>:environment:deployment-approval-probe
+    and the environment claim is present; that Environment's deployment count is unchanged.
+  - >-
+    All three tf-trusted-plan jobs (terraform-plan-trusted.yml plan, terraform-github-plan.yml plan,
+    terraform-github-apply.yml preview) declare {name: tf-trusted-plan, deployment: false}, and
+    validate_trusted_plan_environment refuses any job naming tf-trusted-plan without deployment false.
+  - >-
+    VP 8: the merge push's terraform-github-apply run's preview job assumes github-settings-preview under the flipped
+    job. VP 9: one throwaway PR's terraform-plan-trusted and terraform-github-plan runs each assume their role and post
+    their plan comment. Across VP 8 and VP 9 the tf-trusted-plan deployment count does not grow.
+  - >-
+    rec-4913 is closed by update_rec only after VP 8 and VP 9 read green, naming the three run URLs and the merge SHA,
+    and reads back closed in VP 10.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The fence refuses a tf-trusted-plan job without the mapping form and deployment false.
+    command: >-
+      bin/venv-python -m pytest
+      tests/checks/ci_guards/test_validate_trusted_plan_environment.py::test_trusted_environment_job_requires_deployment_false -q
+    expected: The node passes; it does not exist before the change.
+    fix_if: Exit 4 (node missing) or a failing assertion.
+    hermetic: true
+    expected_literals: [passed]
+    graduation: graduate
+    graduation_check_id: trusted-plan-deployment-false
+  - step: 2
+    phase: pre-deploy
+    action: >-
+      Whole-file re-run of the modified fence and workflow-shape tests, plus the sibling guards that parse these
+      three workflows' environment key.
+    command: >-
+      bin/venv-python -m pytest tests/checks/ci_guards/test_validate_trusted_plan_environment.py
+      tests/checks/ci_guards/test_terraform_plan_trusted.py tests/checks/ci_guards/test_terraform_github_plan_trusted.py
+      tests/test_terraform_github_plan_workflow.py tests/checks/ci_guards/test_validate_github_settings_apply.py
+      tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+      tests/checks/ci_guards/test__trusted_plan_role_partition.py -q
+    expected: All pass, including test_real_tree_is_green over the three flipped workflows.
+    fix_if: A real-tree, mutation or sibling-guard failure; fix in scope, never loosen an assertion.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Whole-file pytest re-run of files this plan modifies or whose guards read them, always inside the --pre affected
+      set; the durable regression is VP 1's node.
+  - step: 3
+    phase: pre-deploy
+    action: >-
+      LEG 1, before the flip and before the PR opens. Commit .github/workflows/deployment-false-probe.yml on the build
+      branch: on push (branches-ignore main, paths that file only); top-level permissions {}; job ran (no environment,
+      one echo); job branch-refusal (environment {name: tf-trusted-plan, deployment: false}, permissions {}, one echo,
+      no secrets); job claims (VP 4). Record the tf-trusted-plan deployment count, push, then read the run.
+    command: >-
+      gh api "repos/otl-labs/ontheloop/deployments?environment=tf-trusted-plan&per_page=100" --jq length;
+      echo 'RUN BEFORE AND AFTER THE PUSH (gh because no mcp__github__ verb lists deployments; read-only GET proven
+      2026-11-11). VIA MCP: actions_list list_workflow_runs for deployment-false-probe.yml on the build branch,
+      list_workflow_jobs, get_job_logs, and the run annotations'
+    expected: >-
+      ran concludes success; branch-refusal concludes failure with no step executed and an annotation that the branch is
+      not allowed to deploy to tf-trusted-plan due to environment protection rules; the deployment count is unchanged.
+    fix_if: >-
+      branch-refusal runs its step: STOP, do not flip; the main-only policy does not gate deployment: false, which
+      Decision 238 cl.2 relies on and which keeps TF_GITHUB_PLAN_APP_PRIVATE_KEY off non-main refs; bring it to the
+      operator. ran did not run: the push did not trigger, fix the trigger. The count grew: record it and STOP. The
+      refusal annotation is not the branch-policy text (for example a custom deployment protection rule): STOP and
+      report. On any STOP, cancel the pending claims job and delete the probe workflow in the next commit before
+      anything else.
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      LEG 2, same run. Job claims: environment {name: deployment-approval-probe, deployment: false}; permissions
+      {contents: read, id-token: write}; SHA-pinned checkout with persist-credentials false; python3 -I
+      scripts/ci/oidc_claims_probe.py --audience sts.amazonaws.com --require sub --require environment --require
+      job_workflow_ref (allowlisted claims only). This use knowingly breaks the probe Environment's own invariant
+      (never a job holding id-token, environments.tf:96-97), as the operator agreed on 2026-11-12; it is safe because
+      no role trusts the environment:deployment-approval-probe sub (grep of terraform/personal and terraform/bootstrap
+      sub conditions, 2026-11-11). Tell the operator it waits for his approval (OPERATOR STEP A) with the run link.
+    command: >-
+      gh api "repos/otl-labs/ontheloop/deployments?environment=deployment-approval-probe&per_page=100" --jq length;
+      echo 'RUN BEFORE AND AFTER (gh as in VP 3). VIA MCP: get_job_logs for the claims job'
+    expected: >-
+      The job waited for review and ran only after the operator approved; sub is the immutable-id form
+      repo:otl-labs@<owner id>/ontheloop@<repo id>:environment:deployment-approval-probe (Decision 172; the ids are the
+      ones local.github_repos in terraform/personal/oidc.tf carries), environment is deployment-approval-probe,
+      job_workflow_ref names deployment-false-probe.yml at the build branch; ref and event_name recorded; no token
+      text; the count is unchanged.
+    fix_if: >-
+      sub is anything other than the expected immutable environment form, or the environment claim is absent: STOP,
+      do not flip (the Environment would no longer bind the identity of three roles) and bring it to the operator. It
+      ran without waiting: STOP and report (reviewers do not gate deployment: false, contradicting GitHub's docs and
+      affecting tf-gated-apply). The claims job is refused by the probe Environment's protected-branches policy
+      (expected to admit a build branch: Decision 248 cl.9 records that tf-gated-apply, which this Environment mirrors,
+      admits any branch under the ruleset-only main, rec-4651; unproven for a branch push): STOP, do not flip, and ask
+      the operator whether to fall back to legs 1 and 3 only (needs his word). On any STOP, cancel the run if still
+      pending; in every case delete the probe workflow in the next commit and push before anything else.
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: Full tier before the commit that hands off (handoff_policy).
+    command: bin/venv-python -m scripts.validate (backgrounded, 2 h) then bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: Exit 0 on the committed head.
+    fix_if: >-
+      A failure in this scope: diagnose and fix on the branch. A failure that is an open ci_rca red outside this scope:
+      timeout_disposition blocked; wait for its repair, then rerun from the start.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion).
+  - step: 6
+    phase: pre-deploy
+    action: Code review of the PR diff.
+    command: >-
+      echo 'VIA SKILL: ontheloop:code-review over the branch diff against origin/main'
+    expected: PROCEED.
+    fix_if: Fix findings and re-review.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      Merge readiness. Confirm no terraform-github-apply run is queued, waiting or in progress (its concurrency group
+      would hold the merge push's run pending, delaying VP 8), and record the tf-trusted-plan deployment count. Then ask
+      the operator for the merge word with the VP 3 and VP 4 evidence inline, telling him that if the merge push's
+      preview offers an apply because of terraform/github drift he leaves it unapproved.
+    command: >-
+      gh api "repos/otl-labs/ontheloop/deployments?environment=tf-trusted-plan&per_page=100" --jq length;
+      echo 'VIA MCP: actions_list list_workflow_runs resource_id=terraform-github-apply.yml with workflow_runs_filter
+      status waiting, then queued, then in_progress'
+    expected: No pending terraform-github-apply run; the count recorded; the operator's merge word in the session.
+    fix_if: A pending run exists - tell the operator and wait for it to finish or be cancelled by him; never cancel it.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: >-
+      LEG 3a, the merge push. Read the terraform-github-apply run the squash-merge commit triggered: the preview job's
+      "Configure AWS credentials (OIDC -- github-settings-preview, state and mirror read only)" step.
+    command: >-
+      gh api "repos/otl-labs/ontheloop/deployments?environment=tf-trusted-plan&per_page=100" --jq length;
+      echo 'VIA MCP: actions_list list_workflow_runs resource_id=terraform-github-apply.yml (event push, head_sha the
+      merge SHA), list_workflow_jobs, get_job_logs for the preview job'
+    expected: >-
+      The preview job ran (not refused), its assume step succeeded as github-settings-preview, and the count did not
+      grow. The run's overall conclusion is not the proof (an unnamed gate change ends neutral; drift may leave an
+      apply job waiting, which stays unapproved).
+    fix_if: >-
+      The assume step failed, the job was refused before any step, or the count grew: open the forward-fix PR restoring
+      the string form in terraform-github-apply.yml at once (rollback), tell the operator; leave rec-4913 open. "Check
+      preview configuration" failed before the assume: the run proves nothing about OIDC; dispatch the workflow on main
+      with no inputs once and read that run instead.
+    hermetic: false
+  - step: 9
+    phase: post-deploy
+    action: >-
+      LEG 3b, real PR-plan roles, right after merge. The throwaway PR reuses the build's own harness-assigned session
+      branch (agents never create a branch, git-ops.yaml branch_rule): git fetch origin main, git reset --hard
+      origin/main on that branch, commit one comment line in terraform/personal/feature_flags.tf and one comment line in
+      terraform/github/variables.tf (no resource change), push with --force-with-lease (the branch holds only
+      already-merged history) carrying Decision 203 handoff evidence for that tree, open the PR, read both trusted plan
+      runs, then close the PR unmerged. No branch is created or deleted.
+    command: >-
+      gh api "repos/otl-labs/ontheloop/deployments?environment=tf-trusted-plan&per_page=100" --jq length;
+      echo 'RUN BEFORE AND AFTER (gh as in VP 3). VIA MCP: actions_list list_workflow_runs for terraform-plan-trusted.yml
+      and terraform-github-plan.yml on the throwaway PR, get_job_logs for each assume step, pull_request_read
+      get_comments for the two plan comments'
+    expected: >-
+      terraform-plan-trusted's assume step succeeds as agent-platform-github-ci-trusted-plan and its plan comment posts
+      with the SAVED_PLAN sentence of scripts/ci/terraform_personal_plan_report.py; terraform-github-plan's assume step
+      succeeds and its names-only plan comment posts; the count did not grow.
+    fix_if: >-
+      ASSUME_FAILED or a job refused before any step in either run: open the forward-fix PR restoring the string form in
+      that workflow at once, tell the operator, leave rec-4913 open with the run URL added by update_rec; until it merges
+      any terraform/personal PR gets no saved plan (recovery: blank workflow_dispatch of terraform-apply-sandbox). The
+      count grew: the same forward-fix, then report. A non-empty plan caused by pre-existing drift is not a leg failure
+      (the PR is closed unmerged, so nothing applies).
+    hermetic: false
+  - step: 10
+    phase: post-deploy
+    action: Rec closure read-back.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common import ducklake_reader_client as r;
+      rows,_=r.fetch_recs_by_ids(r.make_reader(),['rec-4913','rec-4914']); print({x['id']: x['status'] for x in rows})"
+    expected: rec-4913 closed (after VP 8 and VP 9 green); rec-4914 declined.
+    fix_if: rec-4913 still open after a green VP 8 and VP 9 - redo the update_rec close and read back again.
+    hermetic: false
+test_obligations:
+  - source: scripts/checks/ci_guards/validate_trusted_plan_environment.py
+    behavior: A job naming tf-trusted-plan without the mapping form and deployment false is refused (predicate (l)).
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_trusted_plan_environment.py::test_trusted_environment_job_requires_deployment_false
+    red_green_expectation: red before (node absent), green after.
+  - source: .github/workflows/terraform-plan-trusted.yml
+    behavior: "The plan job declares {name: tf-trusted-plan, deployment: false}; deployment true is refused by the shape pin."
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_terraform_plan_trusted.py
+    red_green_expectation: red before (the pin reads the mapping form the old string fails), green after.
+  - source: .github/workflows/terraform-github-plan.yml
+    behavior: "The plan job declares {name: tf-trusted-plan, deployment: false}; deployment true is refused by the job pin."
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_terraform_github_plan_trusted.py
+    red_green_expectation: red before (the pin reads the mapping form the old string fails), green after.
+  - source: .github/workflows/terraform-github-apply.yml
+    behavior: "The preview job declares {name: tf-trusted-plan, deployment: false}."
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_trusted_plan_environment.py::test_real_tree_is_green
+    red_green_expectation: red with predicate (l) over the unflipped preview, green after the flip.
+# The build adds planned-change weakening_dispositions entries for the three rewritten environment pins (cite
+# acceptance_criteria[2]) with the exact candidate strings validate_weakening_candidates reports (implementing-plan
+# bookkeeping); every edit is a tightening and no assertion is loosened (Decision 235).
+constraints:
+  - No role trust, IAM, secret, Lambda, Neon or terraform change. No Decision text edit (Decisions 238 cl.2, 246 and 248 stand as written).
+  - The flip lands only after VP 3 and VP 4 pass; a surprise in either stops the flip and goes to the operator.
+  - >-
+    The temporary .github/workflows/deployment-false-probe.yml is a sanctioned out-of-scope write: it is not a scope row
+    because it never reaches a PR head, the squash diff or main; it is deleted in the commit after VP 4 and before the PR
+    opens, so validate_scope_boundary sees a clean net diff.
+  - No agent approves a deployment, creates, edits or deletes a GitHub Environment, or approves a terraform-github-apply apply job.
+  - Never print an OIDC token or Authorization header; the claims probe prints allowlisted claims only (Decision 101).
+  - AWS calls use PlatformDev (--profile agent_platform).
+  - "The merge needs the operator's word: the three workflows are CODEOWNERS paths (rec-2827, Decision 246 cl.4)."
+  - >-
+    The coordinator holds other terraform/personal and terraform/github PRs from the merge until VP 8 and VP 9 read
+    green (ruling 2026-11-05); open VP 9's PR as soon as its push is allowed (Decision 203 needs a fresh full tier on
+    the post-merge tree, about 30 to 40 min).
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout verdict: FLAGS_FOUND (Decisions triaged: 205 of 205; Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2). CITE: Decision 238, 248, 246, 94, 226, 244. Report /mnt/project-files/environment-tidy/SCOUT-REPORT.md."
+  - "Scout flag 248 NOTE (leg 2 id-token job on the probe; inferred branch refusal): handled in VP 4 (operator agreed the exception 2026-11-12; Decision 248 cl.9 records the mirrored policy admits any branch; fall-back to legs 1 + 3 needs his word). 226: forward-fix only. 244: graduated records trusted-plan-environment-fence, trusted-plan-cutover-workflow, terraform-github-plan-trusted and terraform-github-plan-workflow-wiring are kept, node ids unchanged."
+  - "Advisor (blind, facts-only, 2026-11-11): /mnt/project-files/environment-tidy/advisor-brief/ADVICE.md. Adopted: keep the probe and decline rec-4914; all three jobs; legs 1+2+3; proof is each assume step; check no pending apply run before merge; predicate (l). Rejected: a control job naming tf-trusted-plan without deployment: false (it could add the record this plan removes)."
+  - "Re-grounded 2026-11-11 at main d312cba0 from the unmerged 994e5c97 plan (copy and evidence in /mnt/project-files/handover/carry-over/ci-environments/). Changes since: Decision 248 gated apply (#1897, probe oracle), #1928 terraform-github-plan onto tf-trusted-plan, #1917 fail-closed preflight. Scope files unchanged on main through d8283f55."
+  - "Probes 2026-11-11 (read-only gh api GET): tf-trusted-plan 25 deployment records (13 on 2026-11-05), 9 of the 12 new ones main-ref terraform-github-apply preview runs; deployment-approval-probe 7. No code in scripts, src or .github reads deployment records."
+  - "Every out-of-scope parser of these jobs' environment key already reads the mapping form via _env_name (validate_trusted_plan_environment.py:76, _trusted_plan_role_partition, validate_environment_reviewer_preflight, validate_github_settings_apply.py:416); only the apply job must stay a literal (validate_github_settings_apply.py:412) and it is not flipped."
+  - "GitHub docs (read 2026-11-05): deployment: false keeps required reviewers, wait timers and environment secrets; custom protection rules fail the job; silent on branch policies and the OIDC sub. Hence VP 3 and VP 4; tf-trusted-plan has no custom protection rule declared in terraform/github."
+  - "Defence in depth, not the boundary: a branch job's job_workflow_ref is @refs/heads/<branch>, which each role's StringEquals refuses whatever the branch policy does; VP 3 still matters because the Environment secret TF_GITHUB_PLAN_APP_PRIVATE_KEY is gated only by the branch policy."
+  - "Old tf-trusted-plan deployment records stay (prevent_destroy Environment); the count stops growing, it does not shrink. Deleting records is out of scope."
+  - "Unbuilt plans scoping the same files (plan_obligations): PLAN-trusted-plan-github-root PR 5 (rec-4638; terraform-github-plan.yml, the fence and its tests), PLAN-pr-plan-opaque-iam-policy-check, PLAN-environment-gates-fail-closed and older trusted-plan plans; whichever builds second rebases."
+  - "red_overlap (2026-11-12): verdict clear, no reds (slo_hours 4)."
+  - "Out of scope (always-ask, not requested): rec-4651 tf-gated-apply main-only policy; stale 'inert' wording on the probe (environments.tf:93-97, terraform/github/CLAUDE.md:47) is rec-5098, filed 2026-11-12; rec-4716."
+  - "Operator chose by 'write the plan' on 2026-11-12: tidy stays in this workspace; rec-4914 declined; all three jobs; legs 1+2+3."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 238 (cl.2), 246 (approval-bypass condition) and 248 (cl.4, cl.8, cl.9) read
+  - All files in scope located and readable
+  - The operator is available for OPERATOR STEP A within the session
+execution_steps:
+  - >-
+    Write the temporary probe workflow; run VP 3 and VP 4 (operator approves the claims job); delete the probe workflow
+    in the next commit and push. Each of the two pushes carries handoff evidence for its exact tree (Decision 203); a
+    red validate on the probe commit (the fence flags the temporary file, predicate (a)) passes the gate with a
+    warning. Stop per VP 3 / VP 4 fix_if on any surprise.
+  - >-
+    Make the scope edits (three workflow flips, predicate (l), four test files) and commit; run VP 1, VP 2 and the fast
+    tier; set implementation_declared and commit; rebase on origin/main; run VP 5 (full tier) and VP 6 (code review)
+    on that head; push and open the PR (no Resolves trailer).
+  - >-
+    VP 7, then ask for the merge word; run merge_step premerge; squash-merge with an explicit commit message carrying
+    no Resolves trailer.
+  - >-
+    Run VP 8 on the merge push's run and VP 9 as soon as its push is allowed. On both green, close rec-4913 with
+    update_rec (status closed, resolution naming the three run URLs and the merge SHA, profile agent_platform; the
+    acceptance-verdict route of scripts.rec_trailer_acceptance where its API allows it, else a verdict-less close
+    reported as such, Decision 201 cl.2); then VP 10.
+  - 'Report: what was implemented, verification results'
+rollback: >-
+  If VP 8 or VP 9 fails, a forward-fix PR restores environment: tf-trusted-plan as a string in the failing workflow(s)
+  and drops predicate (l) or narrows it to the still-flipped files, never a whole-PR revert (Decision 226 cl.4); the
+  roles and the Environment are unchanged, so the old behaviour returns on the next run.
