@@ -310,3 +310,32 @@ def test_scope_entry_without_a_file_raises(tmp_path: Path) -> None:
     state["plan"]["scope"] = [{"purpose": "no file"}]
     with pytest.raises(pf.FingerprintError, match="file"):
         _payload(tmp_path, state)
+
+
+@pytest.mark.parametrize("target", ["plan", "sidecar"])
+def test_cli_non_utf8_input_exits_2(target: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = tmp_path / "r"
+    _write_tree(root, _state())
+    plan = tmp_path / "PLAN-demo.yaml"
+    plan.write_text(yaml.safe_dump(_PLAN), encoding="utf-8")
+    bad = plan if target == "plan" else root / "docs" / "plans" / "approved" / "demo.yaml"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_bytes(b"\xff\xfe\x00bad")
+    rc = pf.main(["--plan", str(plan), "--root", str(root)])
+    out = capsys.readouterr()
+    assert rc == 2 and out.out == "" and out.err.startswith("FINGERPRINT-ERROR: cannot read")
+
+
+@pytest.mark.parametrize("key", ["verification_tier", "plan_type"])
+def test_non_string_tier_or_type_raises(key: str, tmp_path: Path) -> None:
+    state = _state()
+    state["plan"][key] = ["V2"]
+    with pytest.raises(pf.FingerprintError, match=key):
+        _payload(tmp_path, state)
+
+
+def test_malformed_decisions_row_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_tree(tmp_path / "r", _state())
+    monkeypatch.setattr(pf, "parse_decisions_md", lambda paths: [{"decision_id": 1}])
+    with pytest.raises(pf.FingerprintError, match="usable decision_id"):
+        pf.load_tree(tmp_path / "r")

@@ -102,7 +102,13 @@ def load_tree(root: Path) -> Tree:
     if not decisions_md.is_file():
         raise FingerprintError(f"cannot read decisions file {decisions_md}")
     rows = parse_decisions_md(paths=[decisions_md, root / "docs" / "DECISIONS_ARCHIVE.md"])
-    hashes = {int(row["decision_id"]): str(row["content_hash"]) for row in rows}
+    hashes: dict[int, str] = {}
+    for row in rows:
+        try:
+            number, content_hash = int(row["decision_id"]), str(row["content_hash"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise FingerprintError(f"decisions row without a usable decision_id and content_hash: {exc!r}") from exc
+        hashes[number] = content_hash
     roadmap = plan_edges.load_roadmap(root)
     north_star = root / "docs" / "contracts" / "north-star.yaml"
     return Tree(
@@ -162,6 +168,9 @@ def projection(
     scope_paths = _scope_paths(plan)
     tier = _require(plan, "verification_tier")
     plan_type = _require(plan, "plan_type")
+    for key, value in (("verification_tier", tier), ("plan_type", plan_type)):
+        if not isinstance(value, str):
+            raise FingerprintError(f"plan key {key!r} must be a string")
     edges = plan_edges.extract_edges(plan, tree.edge_map, extra_cites)
     return {
         "v": PAYLOAD_VERSION,
@@ -189,7 +198,7 @@ def fingerprint(payload: Mapping[str, Any]) -> str:
 def _read_plan(path: Path) -> Mapping[str, Any]:
     try:
         plan = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise FingerprintError(f"cannot read plan {path}: {exc}") from exc
     if not isinstance(plan, Mapping):
         raise FingerprintError(f"plan {path} is not a mapping")
@@ -203,7 +212,11 @@ def _read_sidecar(root: Path, plan: Mapping[str, Any]) -> Sidecar | None:
     path = root / "docs" / "plans" / "approved" / f"{slug}.yaml"
     if not path.exists():
         return None
-    return parse_sidecar(path.read_text(encoding="utf-8"))
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise FingerprintError(f"cannot read sidecar {path}: {exc}") from exc
+    return parse_sidecar(text)
 
 
 def _run(args: argparse.Namespace) -> str:
