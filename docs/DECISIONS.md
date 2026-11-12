@@ -2,6 +2,99 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 254: The full tier runs post-merge on batches of main, a red batch is searched for its culprit, and code deploys consume the newest commit a passing run covers; a red pauses deploys, never merging (amends Decisions 72, 73, 159, 163, 201, 203, 205, 226, 244, 245 and 249) (Decided)
+
+```yaml
+number: 254
+status: Decided
+decided_date: "2026-11-12"
+kind:
+  value: direction
+  justification: >-
+    Yes: clause 7 puts retiring the pre-merge full tier behind a later operator-approved Decision, a human gate,
+    and clause 3 lets CI open a revert PR that Decision 72 forbade.
+amends: [72, 73, 159, 163, 201, 203, 205, 226, 244, 245, 249]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable: it moves the full tier's routine run to post-merge batches and redefines what a red blocks. Not a
+    git-ops.yaml or red-main-recovery.yaml note: those record mechanisms, and an annotation cannot change a ratified
+    clause.
+```
+
+**Status:** Decided
+**Date:** 2026-11-12
+**Warehouse ID:** dec-254 (per Decision 84 backfill)
+
+**Problem:** Three full-tier placements cover one change (session container, every push to main, a 3-hourly canary).
+The per-push run is 59% of Actions job-minutes per merge; red occupancy is 0.34 (audit
+ci-merge-throughput-scaling-269e630a).
+
+**Intent:** Every merged tree still meets every check; production runs only covered trees; merging never waits on
+main's colour.
+
+**Decision:**
+1. **Batched full tier (amends 73 cl.2, 205 cl.5).** main-validate runs in one non-cancelling concurrency group,
+   re-runs apart; a run covers prev..head on first-parent history, prev being the nearest ancestor whose full tier
+   started and did not time out or get cancelled. An unresolvable or non-ancestor prev widens to the last-green ref,
+   else the run fails red, never HEAD~1; a timed-out or cancelled running job, or a stale last-green ref, alarms
+   outside ci-rca. Plans-only detection reads the range. Main Canary skips a head whose full tier is pending, running
+   or under 3 h old.
+2. **Last-green ref.** The newest first-parent main commit whose own main-validate run (push or dispatch, any attempt)
+   passed the full tier, derived from run evidence, never stored as authority. It and its ancestors are covered;
+   coverage is never withdrawn. It is not a promotion.
+3. **Culprit step (amends 244 cl.1).** A deterministic job screens every red: a node passing two head re-runs is
+   flaky; a check also failing at prev names no culprit; otherwise hermetic failing checks re-run per commit, oldest
+   first; a whole-tree check that does not localise goes to the range commit touching its measured files, else to the
+   range. After the rec is filed, a deterministic job outside the ci-rca agent opens, never merges, a revert PR of a
+   Track B culprit the per-commit pair named, outside terraform/** and governed deploy paths, never one that weakens a
+   check (235), runs the full tier on its head and never reverts its own revert; the repairing session adds the
+   Decision 186 artifact (amends 72's no-autonomous-fix rule and 226 cl.4's "manual" and "not obvious"). Automated
+   revert stays excluded (73 cl.3).
+4. **Range-aware evidence (amends 159 cl.1, 201).** ci-rca anchors, diffs and resolves PRs over the range and dedups
+   on the open fingerprint; the covering run censuses its range's open junit-routed recs, and a junit verdict binds to
+   the first completed run whose range holds the merge commit; in main-validate push_context_base anchors on prev.
+5. **Deploys (amends 249 cl.2).** Code-deploy channels to the first deploy tier consume the last-green ref; a red
+   pauses them (249 cl.3) and never withdraws coverage. Terraform apply stays on push behind the Decision 77 guard.
+   Every tier is fixed forward; what is promotable to PROD, and promoting an earlier record, are rec-5033's.
+6. **What a red blocks (amends 226 cl.3-4, 73 cl.3-4).** Never a merge (an inherited ready-head failure is
+   rec-5019's). Plan and dispatch keep 226 cl.3's overlap test, fail-closed reads and Track A clear; a named culprit's
+   diff supplies the red's file. Past the SLO an alarm replaces the block on all new plans and dispatch.
+7. **Presubmit end state (amends 163 pt.2-3, 203).** Once rec-5019's per-PR GitHub run is live, 203's push gate drops
+   the local full-tier evidence, keeping its destination and form refusals, and that run's check gates readiness or
+   merge. It retires in turn, leaving the fast tier the only presubmit, only through a later Decision the operator
+   approves, which also amends 226 cl.2, 244 cl.1's handoff leg and 217 cl.2, citing 30 days of pre-registered
+   measures taken once that and the culprit step are live (pre-merge catches per 100 merges, red occupancy, projected
+   occupancy without it under 0.5). The measure informs; it never decides (Decision 235).
+8. **Merge-overlap refusal (amends 245).** Narrowed to overlapping files under terraform/** and governed deploy paths
+   once the culprit step has named the culprit correctly on three real multi-commit reds, none misattributed; the
+   update-branch remedy gains an attempt cap.
+9. **Coverage (Decision 181 cl.2).** Cl.4 and cl.2's resolver rec-5106; cl.1 and cl.3 rec-5107; cl.2's deploy gate, cl.5,
+   cl.6 and cl.8's attempt cap rec-5108; cl.7's push gate rec-5019, its retirement rec-5109; cl.8's narrowing rec-5110.
+
+```yaml reversal-conditions
+decision: 254
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: culprit-misattribution
+    kind: manual
+    description: "Two wrong culprits in 30 days: revisit cl.3."
+  - id: red-occupancy
+    kind: manual
+    description: "Red occupancy above 0.5 for 7 days: revisit cl.6-7."
+  - id: batch-size
+    kind: manual
+    description: "Median batch above 8 commits: binary search or sharding."
+  - id: sit-stood-up
+    kind: manual
+    description: "rec-5028 lands: re-key cl.5 to the SIT deploy."
+```
+
+**Related:** Decisions 55, 77, 100, 142, 181, 186, 187, 217, 235, 246, 248, 252; rec-4874, rec-5019, rec-5033.
+
+---
+
 ## Decision 253: The DuckLake catalog moves to RDS PostgreSQL -- SIT is born on it, PROD follows once SIT's reset has rehearsed the restore, and SIT's instance runs only while a pipeline uses it (amends Decisions 107 and 214) (Decided)
 
 ```yaml
@@ -174,6 +267,8 @@ conditions:
 ```
 
 **Related:** Decisions 93, 100, 223, 239, 248, 249; rec-4874, rec-5023 to rec-5035.
+
+> **Update (2026-11-12):** Decision 254 decides rec-4874's last-green ref. Clause 6's "SIT deploys keep 249 cl.2" reads as 249 cl.2 amended by Decision 254 cl.5, whose green signal is the last-green ref; "promotion uses rec-4874's last-green ref" reads as a necessary condition, not a sufficient one: what is promotable is rec-5033's stronger condition (the artifact that ran on SIT, by CodeSha256 and saved plan).
 
 ---
 
@@ -383,6 +478,8 @@ conditions:
 ```
 
 **Related:** Decisions 24, 55, 73, 77, 125, 126, 166, 181, 205, 226, 236, 239, 245; rec-4874, rec-4912.
+
+> **Amended by Decision 254 (2026-11-12):** Decision 254 fires canary-model-decided and re-scopes clause 2: the green signal becomes the last-green ref, the newest first-parent main commit whose own run passed the full tier, which under batching is a batch head, and clause 4's "newest green commit" reads the same. Clauses 3 and 5 hold (Decision 254 cl.2, cl.5).
 
 > **Update (2026-11-10):** Decision 252 fires the tier-stood-up condition ahead of the tier and replaces the green-streak train that clause 1 calls future state (see the note on Decision 73): the PROD promotion item re-decides clause 1. Until then clause 2 holds, and SIT deploys keep it (Decision 252 cl.6).
 
@@ -723,6 +820,8 @@ conditions:
 
 **Related:** Decisions 55, 72, 73, 76, 83, 100, 135, 163, 177, 181, 186, 201, 203, 217, 226, 234, 241, 243; rec-2827, rec-4080, rec-4085, rec-4451, rec-4790, rec-4869, rec-4873, rec-4874.
 
+> **Amended by Decision 254 (2026-11-12):** Decision 254 fires tap-promotion-lands: clause 5's end state is decided (a last-green ref, not a promotion in environment-taxonomy.yaml's sense). The refusal stays as written until the culprit step has named the culprit correctly on three real multi-commit reds, none misattributed; it then narrows to overlapping files under terraform/** and governed deploy paths, and the update-branch remedy gains an attempt cap (Decision 254 cl.8).
+
 ---
 
 ## Decision 244: Graduated verification records are standing regression guards the full tier re-runs, behind a shrink-only known-red list; a claim that later work makes false stays one-time evidence (Decided)
@@ -778,6 +877,8 @@ conditions:
     kind: manual
     description: "T3.7's mutation and orphan legs are live; re-decide whether the pass/fail re-run still earns its cost."
 ```
+
+> **Amended by Decision 254 (2026-11-12):** Clause 1's red record on main is attributed by the culprit step: a whole-tree check that does not localise goes to the range commit whose diff touches its measured files, else to the whole range (Decision 254 cl.3). The "before handoff" leg follows cl.7.
 
 ---
 
@@ -2102,6 +2203,8 @@ conditions:
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
+> **Amended by Decision 254 (2026-11-12):** Clause 3's overlap test, fail-closed reads and Track A clear stay, and a named culprit's diff supplies the red's file; clause 3's L6 pause sentence lapses, since a red never blocks a merge. Clause 4: past the SLO an alarm to the operator replaces the block on all new plans and dispatch; a deterministic job opens, never merges, the revert PR of a Track B culprit the per-commit pair named, outside terraform/** and governed deploy paths, so "manual" and "when the fix is not obvious" no longer bind it (Decision 254 cl.3, cl.6).
+
 ---
 
 ## Decision 225: CI identities hold no IAM grant on PlatformDev or PlatformAdmin (elects Decision 180 reversal condition (a)'s re-narrow ahead of its trigger; amends Decision 180 clauses 1-2) (Decided)
@@ -3417,6 +3520,8 @@ conditions:
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
+> **Amended by Decision 254 (2026-11-12):** Clause 5's plans-only test reads the batch range prev..head, never the head commit alone, so a batch holding any non-plans commit runs the full tier (Decision 254 cl.1).
+
 ---
 
 ## Decision 204: Sanctioned admin-tier partition-layout rewrite for the ops history tables' day-of-month legacy files, human-directed ADMIN-agent execution (amends Decision 81, 126, 192) (Decided)
@@ -3558,6 +3663,8 @@ live (Decision 67 reversal) -- re-derive the per-push cost basis.
 187, 189. Roadmap refs: rec-4083, rec-4085, rec-4086, rec-4087, T2.54.
 
 > **Amended by Decision 247 (2026-11-02):** Reversal condition (e) reads as the Decision 185 loop going live (T4.2): the legacy executor never returns.
+
+> **Amended by Decision 254 (2026-11-12):** Once rec-5019's per-PR GitHub full tier is live, the gate drops its local full-tier evidence requirement and keeps its destination and canonical-form refusals; that run's check gates readiness or merge (Decision 254 cl.7). Reversal condition (c) fires then.
 
 ---
 
@@ -3754,6 +3861,8 @@ re-audit the vocabulary or sandbox fidelity, never widen the refusal's escape.
 (thin-adapter spirit), 142/155 (relocation survives), 189 (axis discipline), 181 (named
 residuals), 168 (`git-ops.yaml` evaluator binding), 55/72 (no rescue loops). Roadmap refs:
 rec-3867, rec-3999, rec-4000, rec-4001.
+
+> **Amended by Decision 254 (2026-11-12):** Clause 4's per-push census and closure become range-aware: the covering main-validate run censuses the still-open junit-routed recs (git-ops.yaml trailer_acceptance_gate) of the merge commits in its range; a junit verdict binds to the first completed run whose range holds the merge commit, and clause 2's closing sha is that merge commit (Decision 254 cl.4).
 
 ---
 
@@ -6588,6 +6697,8 @@ The fast (`--pre`) tier's diff-scoped design (Decision 73) is deliberately narro
 
 **Related:** Decision 48 (executor autonomy calibration -- the judgment-required-vs-hard-wall framing this Decision's point 1 generalizes), Decision 60 (static-key recovery is non-fatal but non-negotiable -- a prior instance of the same enforcement-shape distinction), Decision 73 (the two-tier presubmit model this Decision amends in the forward direction only), Decision 128 (decompose-by-default / raise-approved marker grammar -- the same "remove the exception path" instrument applied to SLOC budgets), Decision 132 (verification-graduation obligation -- this plan's VP steps 3-8, 11-12, 14 graduate into the registry per that Decision's mechanism), Decision 148 (hermetic:true default for narrow deterministic pre-deploy steps, restored and relied on by this plan's own VP steps), Decision 150 (significance bar this entry clears), Decision 153 (fast-tier budget -- the reason this obligation is scoped to the full tier and not promoted into `--pre`), Decision 159 (coverage-baseline grandfather is one-time, not precedent -- the framing this Decision's Problem section relies on when explaining why rec-2965's debt is paid rather than baselined), Decision 161 (mypy downward-ratchet -- a sibling instance of a structurally-unskippable obligation this Decision's principle also describes).
 
+> **Amended by Decision 254 (2026-11-12):** Once rec-5019's per-PR GitHub full tier is live, it replaces point 3's pre-handoff local run, and point 2's validate_handoff_full_tier check is rec-5019's to retire or re-point (Decision 254 cl.7). Where Decisions 217 cl.2, 226 cl.2 and 245 cl.4 name the pre-handoff full tier, they read as that run. Retiring that run too needs a later operator-approved Decision.
+
 ## Decision 162: A composite-action shell body producing a consumed step output must be a thin adapter to a testable script, ratcheted against reintroducing rec-2923's defect class (Decided)
 
 **Status:** Decided
@@ -6952,6 +7063,8 @@ after 3 rounds with all blocking items applied. Roadmap/queue refs (not DECISION
 **Related:** Decision 104/148 (`_common.py` sole-home), Decision 135 pt 3, Decision 73/142 (two-tier presubmit), Decision 82 (measurement-correction framing), Decision 48 (100% coverage V2 row, narrowed), Decision 124 (amended), Decision 128 (tamper-guard mirror), Decision 130 (roster precedent), Decision 76 (squash-merge), Decision 55/72/129 (fix the generator -- supersedes rec-2903's fetch-depth-alone fix). Bundled: rec-2903, rec-943.
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+> **Amended by Decision 254 (2026-11-12):** In main-validate, clause 1's push_context_base anchors on the batch's prev, which the job passes in; an unresolvable or non-ancestor prev widens to the last-green ref, else the run fails red, never HEAD~1 (Decision 254 cl.1, cl.4).
 
 ## Decision 157: Secrets Manager split by value-capability -- metadata verbs ride the agent-platform-* prefix, value verbs enumerated (amends Decision 129 pt 2) (Decided)
 
@@ -11814,6 +11927,8 @@ Key elements:
 
 > **Amended by Decision 247 (2026-11-02):** Clause 4's suspension of mandatory discussion when `non_automatable_recommendations > 0` is permanent: Decision 67 never reverses and the executor it waited on is retired. Counts stay informational.
 
+> **Amended by Decision 254 (2026-11-12):** Clause 2's full tier on every push to main becomes one batched run covering prev..head, and Main Canary skips a head checked within 3 h (Decision 254 cl.1). Clauses 3-4: a red never blocks a merge, and past Decision 226's SLO an alarm replaces the block on all new plans (cl.6). Automated revert stays excluded; a revert PR that CI opens and never itself merges is not one (cl.3).
+
 > **Amended by Decision 252 (2026-11-10):** Clause 5's green-streak train (sandbox to SIT after 24 h green, SIT to PROD after 7 d) is replaced: merges deploy to SIT, and PROD receives only the identical artifact, promoted behind one operator approval (Decision 252 cl.6).
 
 ---
@@ -11847,6 +11962,8 @@ Reuses the cc-scheduled-agents infrastructure (Decision 71) with a `workflow_run
 > rec-filing path.
 
 > **Amended by Decision 226 (2026-10-18):** Priority is derived in code from the agent's repair_track: High for a tests-only repair on a CI-tier workflow, Critical otherwise and for every regression filing (Decision 226 cl.1). Consumption via /plan, or a cl.4 manual revert PR, stands for Track B; a Track A repair takes the fast lane with no plan cycle (cl.2).
+
+> **Amended by Decision 254 (2026-11-12):** The pipeline, not the agent, now proposes one fix: a deterministic job outside the ci-rca agent opens, never merges, a revert PR of a named Track B culprit outside terraform/** and governed deploy paths (Decision 254 cl.3). The agent itself still proposes and executes no fix.
 
 ---
 
