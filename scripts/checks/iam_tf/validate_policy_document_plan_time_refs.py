@@ -41,6 +41,7 @@ REQUIRED_DOCUMENTS = (
     "github_ci_deploy",
     "github_ci_trusted_plan",
     "github_ci_trusted_github_plan",
+    "github_ci_persona_verdict",
     "ci_full_refresh_read",
     "ci_ssm_refresh_read",
 )

@@ -22,6 +22,8 @@ _DUCKLAKE_INVOKE_MARKERS = ("ducklake_writer", "ducklake_reader", "ducklake_tele
 _INVOKE_ACTIONS = {"lambda:InvokeFunction", "lambda:*"}
 _SSM_READ_ACTIONS = {"ssm:Get*", "ssm:*"}
 _SSM_RESOURCE_MARKER = "parameter/agent-platform"
+_URL_PARAMETER_BY_MARKER = {"ducklake_telemetry_writer": "parameter/agent-platform/ducklake/telemetry_writer_url"}
+_URL_PARAMETER_ACTIONS = {"ssm:GetParameter"}
 
 
 def _read_root_text(root_dir: Path) -> str:
@@ -132,12 +134,14 @@ def _resolve_statements(
     return resolved
 
 
-def _invokes_ducklake(statements: list[dict]) -> bool:
-    return any(
-        action in _INVOKE_ACTIONS and any(marker in stmt["resources_raw"] for marker in _DUCKLAKE_INVOKE_MARKERS)
+def _invoked_markers(statements: list[dict]) -> set[str]:
+    return {
+        marker
         for stmt in statements
-        for action in stmt["actions"]
-    )
+        if any(action in _INVOKE_ACTIONS for action in stmt["actions"])
+        for marker in _DUCKLAKE_INVOKE_MARKERS
+        if marker in stmt["resources_raw"]
+    }
 
 
 def _resolves_ssm_read(statements: list[dict]) -> bool:
@@ -146,6 +150,24 @@ def _resolves_ssm_read(statements: list[dict]) -> bool:
         for stmt in statements
         for action in stmt["actions"]
     )
+
+
+def _reads_url_parameters(statements: list[dict], markers: set[str]) -> bool:
+    if not markers or not markers <= _URL_PARAMETER_BY_MARKER.keys():
+        return False
+    read_actions = _URL_PARAMETER_ACTIONS | _SSM_READ_ACTIONS
+
+    def _reads(path: str) -> bool:
+        return any(
+            any(action in read_actions for action in stmt["actions"])
+            and any(
+                res.endswith(":" + path) and "*" not in res and "?" not in res
+                for res in _QUOTED_RE.findall(stmt["resources_raw"])
+            )
+            for stmt in statements
+        )
+
+    return all(_reads(_URL_PARAMETER_BY_MARKER[marker]) for marker in markers)
 
 
 @registry.register("validate_invoke_implies_resolve", owner="platform")
@@ -167,6 +189,13 @@ def validate_invoke_implies_resolve(failed: list[str]) -> None:
     taking the "PASS (vacuous)" branch -- an unresolvable document is not evidence the role doesn't
     invoke, it is evidence the parse couldn't tell. This is distinguished from the legitimately
     vacuous case (every referenced document resolves; none of them invokes the DuckLake reader/writer).
+
+    Narrow form (PLAN-persona-verdict-credential): a Decision 213 URL-only caller that invokes only the telemetry
+    writer and reads that writer's URL from its one parameter does not need every /agent-platform/ parameter. Such a
+    role also passes when, for every DuckLake marker it invokes, _URL_PARAMETER_BY_MARKER names a parameter and some
+    statement grants ssm:GetParameter (or a broad read) on a quoted resource ending exactly in that path, with no
+    wildcard. A role invoking the DuckLake writer or reader, alone or with the telemetry writer, still needs the
+    broad read.
     """
     print("\n=== CI role invoke-implies-resolve invariant (T2.34:c2) ===")
     personal_dir = _common.ROOT / _PERSONAL_DIR_REL
@@ -199,16 +228,20 @@ def validate_invoke_implies_resolve(failed: list[str]) -> None:
             )
             print(f"  FAIL: {role} references unresolvable document(s) {sorted(set(unresolved))}.")
             continue
-        if not _invokes_ducklake(statements):
+        markers = _invoked_markers(statements)
+        if not markers:
             print(f"  PASS (vacuous): {role} does not invoke the DuckLake reader/writer.")
             continue
         if _resolves_ssm_read(statements):
             print(f"  PASS: {role} invokes the DuckLake reader/writer and resolves SSM parameter reads.")
+        elif _reads_url_parameters(statements, markers):
+            print(f"  PASS: {role} invokes the telemetry writer and reads its URL parameter.")
         else:
             failed.append(
                 f"invoke-implies-resolve: role {role!r} (policy document {doc_name!r}) grants "
                 "lambda:InvokeFunction on the DuckLake reader/writer but its resolved composition "
                 "lacks ssm:Get* on parameter/agent-platform/* -- source ci_ssm_refresh_read (directly "
-                "or transitively) from its aws_iam_policy_document"
+                "or transitively) from its aws_iam_policy_document, or, for a role that invokes only the telemetry "
+                "writer, grant ssm:GetParameter on the literal parameter/agent-platform/ducklake/telemetry_writer_url ARN"
             )
             print(f"  FAIL: {role} invokes the DuckLake reader/writer but does not resolve SSM parameter reads.")
