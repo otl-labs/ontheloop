@@ -25,9 +25,7 @@ class Verdict:
 
 def _slug(run: Mapping[str, object]) -> object:
     app = run.get("app")
-    if isinstance(app, Mapping):
-        return app.get("slug")
-    return run.get("app_slug")
+    return app.get("slug") if isinstance(app, Mapping) else None
 
 
 def _newest_key(run: Mapping[str, object]) -> tuple[int, str, int]:
