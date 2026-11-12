@@ -10,12 +10,13 @@ a coverage measurement (rec-4273); TestCreateServer is the hermetic coverage of 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
-from mcp import types
+from mcp import Client, types
 
 from scripts.agent_sdk import errors as agent_errors
 from scripts.agent_sdk import mcp_server
@@ -73,16 +74,13 @@ class _CountingOps(_StubReader):
 
 
 async def _list_tools_via_server(server) -> list[types.Tool]:
-    handler = server.request_handlers[types.ListToolsRequest]
-    result = await handler(types.ListToolsRequest(method="tools/list"))
-    return result.root.tools
+    async with Client(server) as client:
+        return (await client.list_tools()).tools
 
 
 async def _call_tool_via_server(server, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
-    handler = server.request_handlers[types.CallToolRequest]
-    req = types.CallToolRequest(method="tools/call", params=types.CallToolRequestParams(name=name, arguments=arguments))
-    result = await handler(req)
-    return result.root
+    async with Client(server) as client:
+        return await client.call_tool(name, arguments)
 
 
 class TestProjection:
@@ -248,9 +246,9 @@ class TestEndToEnd:
         assert {"open_recs", "preflight_signal_rows", "recs_related"}.isdisjoint(names)
 
         result = anyio.run(_call_tool_via_server, server, "recs_by_ids", {"ids": "rec-100"})
-        assert not result.isError, result.content
-        assert result.structuredContent is not None
-        rows = result.structuredContent["rows"]
+        assert not result.is_error, result.content
+        assert result.structured_content is not None
+        rows = result.structured_content["rows"]
         assert len(rows) == 1
         assert rows[0]["id"] == "rec-100"
 
@@ -269,14 +267,14 @@ class TestCreateServer:
     def test_call_forwards_arguments_and_returns_rows(self) -> None:
         server, reader = self._server(named_result=[{"id": "rec-1"}])
         result = anyio.run(_call_tool_via_server, server, "shown", {"ids": "rec-1"})
-        assert not result.isError, result.content
+        assert not result.is_error, result.content
         assert reader.named_calls == [("shown", {"ids": "rec-1"})]
-        assert result.structuredContent == {"rows": [{"id": "rec-1"}], "row_count": 1}
+        assert result.structured_content == {"rows": [{"id": "rec-1"}], "row_count": 1}
 
     def test_unknown_tool_returns_an_error_result(self) -> None:
         server, reader = self._server()
         for name in ("absent", "hidden"):
-            assert anyio.run(_call_tool_via_server, server, name, {}).isError
+            assert anyio.run(_call_tool_via_server, server, name, {}).is_error
         assert reader.named_calls == []
 
     def test_run_stdio_serves_over_the_stdio_streams(self) -> None:
@@ -308,7 +306,7 @@ class TestCreateServer:
         assert set(tools) == {_OPS_VERB, _EVENT_VERB} and tools[_EVENT_VERB].description.startswith("telemetry")
         for verb, reader in ((_EVENT_VERB, events), (_OPS_VERB, ops)):
             result = anyio.run(_call_tool_via_server, server, verb, {})
-            assert not result.isError and reader.named_calls == [(verb, {})], result.content
+            assert not result.is_error and reader.named_calls == [(verb, {})], result.content
         assert ops.describes == 1
 
     def test_ops_tools_survive_an_unavailable_event_reader(
@@ -333,8 +331,8 @@ class TestCreateServer:
                 monkeypatch.delenv(unset, raising=False)
             server = create_server()
             assert [tool.name for tool in anyio.run(_list_tools_via_server, server)] == [_OPS_VERB]
-            assert anyio.run(_call_tool_via_server, server, _EVENT_VERB, {}).isError and ops.named_calls == []
-            assert not anyio.run(_call_tool_via_server, server, _OPS_VERB, {}).isError and ops.describes == 1
+            assert anyio.run(_call_tool_via_server, server, _EVENT_VERB, {}).is_error and ops.named_calls == []
+            assert not anyio.run(_call_tool_via_server, server, _OPS_VERB, {}).is_error and ops.describes == 1
             assert capsys.readouterr().err == f"{mcp_server.SERVER_NAME}: event tools unavailable class={cls}\n"
 
     def test_main_builds_the_server_and_runs_stdio(self) -> None:
@@ -366,3 +364,111 @@ class TestAgentFacingProjection:
     def test_tool_note_cites_the_retirement_decision(self):
         (tool,) = build_tool_registry({"v": _verb_meta()})
         assert "no local recommendations cache (Decision 215)" in tool.description
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _one_verb_server(**named: Any) -> tuple[Any, _StubReader]:
+    schema = {"type": "object", "properties": {"ids": {"type": "string"}}, "required": ["ids"]}
+    reader = _StubReader({"shown": _verb_meta(params_schema=schema)}, **named)
+    return create_server(reader=reader), reader  # type: ignore[arg-type]
+
+
+def test_tool_round_trip_on_mcp_2x() -> None:
+    import importlib.metadata as md
+
+    server, _ = _one_verb_server(named_result=[{"id": "rec-1"}])
+    tools = anyio.run(_list_tools_via_server, server)
+    assert [t.name for t in tools] == ["shown"]
+    ok = anyio.run(_call_tool_via_server, server, "shown", {"ids": "rec-1"})
+    assert not ok.is_error and ok.structured_content == {"rows": [{"id": "rec-1"}], "row_count": 1}
+    assert ok.content[0].text == '{\n  "rows": [\n    {\n      "id": "rec-1"\n    }\n  ],\n  "row_count": 1\n}'
+    bad = anyio.run(_call_tool_via_server, server, "absent", {})
+    assert bad.is_error and bad.structured_content["error_type"] == "unknown_tool"
+    pin = next(ln for ln in ((_ROOT / "requirements.txt").read_text().splitlines()) if ln.startswith("mcp=="))
+    assert md.version("mcp").split(".")[0] == pin.split("==")[1].split(".")[0]
+
+
+def test_call_tool_error_carries_error_type() -> None:
+    err = ReaderInvokeError("named", 500, "boom", {"ok": False, "error_type": "runtime", "error": "bad verb"})
+    server, _ = _one_verb_server(named_error=err)
+    result = anyio.run(_call_tool_via_server, server, "shown", {"ids": "x"})
+    assert result.is_error
+    assert result.structured_content["error_type"] == "ReaderRuntimeError"
+    assert result.structured_content["message"] == result.content[0].text and "bad verb" in result.content[0].text
+
+
+def test_unexpected_exception_text_never_reaches_the_client() -> None:
+    leak = "https://example.invalid/hook arn:aws:iam::x:role/r"
+    server, _ = _one_verb_server(named_error=RuntimeError(leak))
+    result = anyio.run(_call_tool_via_server, server, "shown", {"ids": "x"})
+    assert result.is_error
+    assert result.structured_content == {"error_type": "internal", "error_class": "RuntimeError"}
+    assert result.content[0].text == "shown failed: class=RuntimeError"
+    assert "example.invalid" not in repr(result) and "arn:aws" not in repr(result)
+
+
+def test_input_validation_error_is_an_error_result() -> None:
+    server, reader = _one_verb_server()
+    result = anyio.run(_call_tool_via_server, server, "shown", {"ids": 5})
+    assert result.is_error and result.content[0].text.startswith("Input validation error")
+    assert result.structured_content["error_type"] == "input_validation"
+    assert reader.named_calls == []
+
+
+def test_jsonschema_is_a_direct_requirement() -> None:
+    import re
+
+    assert re.search(r"^jsonschema\b", (_ROOT / "requirements.in").read_text(), re.M)
+    lock = (_ROOT / "requirements.txt").read_text()
+    block = lock[lock.index("\njsonschema==") :].split("\n\n")[0].split("\njsonschema-specifications")[0]
+    assert "-r requirements.in" in block
+
+
+def test_schema_error_and_unserialisable_row_map_to_internal() -> None:
+    bad_schema = {"type": "object", "properties": {"ids": {"type": "nonsense"}}}
+    reader = _StubReader({"shown": _verb_meta(params_schema=bad_schema)})
+    server = create_server(reader=reader)  # type: ignore[arg-type]
+    schema_result = anyio.run(_call_tool_via_server, server, "shown", {"ids": "x"})
+    assert schema_result.structured_content == {"error_type": "internal", "error_class": "SchemaError"}
+    server, _ = _one_verb_server(named_result=[{"id": object()}])
+    row_result = anyio.run(_call_tool_via_server, server, "shown", {"ids": "x"})
+    assert row_result.structured_content == {"error_type": "internal", "error_class": "TypeError"}
+    assert row_result.content[0].text == "shown failed: class=TypeError"
+
+
+def test_mcp_types_is_a_direct_requirement() -> None:
+    import re
+
+    assert re.search(r"^mcp-types\b", (_ROOT / "requirements.in").read_text(), re.M)
+    lock = (_ROOT / "requirements.txt").read_text()
+    block = lock[lock.index("\nmcp-types==") :].split("\nmdurl")[0]
+    assert "-r requirements.in" in block
+
+
+def test_importing_the_server_loads_no_mcp_transport() -> None:
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; sys.modules['fcntl'] = None\n"
+        "import scripts.agent_sdk.mcp_server\n"
+        "print(sorted(m for m in sys.modules if m == 'mcp' or m.startswith('mcp.')))\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert (done.returncode, done.stdout.strip()) == (0, "[]"), done.stderr[-2000:]
+
+
+def test_stdio_server_wrapper_returns_the_sdk_context() -> None:
+    sentinel = object()
+    with patch("mcp.server.stdio.stdio_server", return_value=sentinel):
+        assert mcp_server.stdio_server() is sentinel
