@@ -361,45 +361,48 @@ verification_plan:
   - step: 8
     phase: post-deploy
     action: >-
-      OPERATOR STEP (Amendment 2): after merge, the operator runs this one block in the operator's own admin shell, not
-      in an agent session (the agent proxy refuses the sts:AssumeRole that mints the PlatformAdmin credential, so no
-      agent session can plan or apply terraform/bootstrap). Prerequisites: a bash shell with git, terraform (>= 1.10)
-      and the AWS CLI; a checkout of this repo at or after the merge sha, run from its root; an AWS profile
-      agent_platform_admin resolving to the PlatformAdmin role (the bootstrap root's default aws_profile); and the
-      gitignored terraform/bootstrap/terraform.bootstrap.tfvars (terraform/bootstrap/CLAUDE.md section 3). Set M to the
-      merge sha 8c231181 (written into the block, so it pastes as is). The block runs in a subshell so a stop never
-      closes the shell, and an EXIT trap removes the saved plan, the tfvars copy and the worktree on every path. It checks the
-      credential, plans terraform/bootstrap at the merge sha in a throwaway worktree with -detailed-exitcode to a saved
-      plan outside the worktree, applies that saved plan only when the plan exit is 0 (no changes, so nothing is
-      reviewed away: an exit-2 plan is never applied) and re-plans. Its typing of the block is the operator's direction for the apply (Decision 126 cl.1: operators may
-      always invoke it directly), so no approve line is asked. Terraform errors go to $D/tf.err in the operator's
-      shell and are never pasted anywhere. The operator sends the build thread the printed lines.
+      OPERATOR STEP (Amendments 2 and 3): after merge, the operator pastes this one block into AWS CloudShell in the
+      PROD account, signed in to the console with MFA as an admin identity that can manage IAM and read the bootstrap
+      state bucket. No agent session runs it: the agent proxy refuses the sts:AssumeRole that mints the PlatformAdmin
+      credential. CloudShell needs no repo, key or profile: the block fetches this public repo's merge commit 8c231181
+      (written into the block) into a scratch folder under /tmp (CloudShell's 1 GB home cannot hold the AWS provider
+      as well), installs the pinned terraform (config/terraform-version, checked
+      against HashiCorp's SHA256SUMS), checks that the shell reaches the bootstrap state bucket (the right account),
+      reads the tfvars values from the SSM parameter /secret/agent-platform-terraform-personal-tfvars (the documented
+      source of owner_email and both ExternalIds, terraform-cc-web-operations.yaml) and account_id from the caller
+      identity, never printing either, and runs on the console sign-in's own credentials (-var aws_profile= empty, so
+      the provider uses the ambient chain). It then plans terraform/bootstrap with -detailed-exitcode to a saved plan,
+      applies that saved plan only when the plan exit is 0 (no changes: an exit-2 plan is never applied) and re-plans.
+      An EXIT trap deletes the scratch folder (clone, terraform, tfvars, saved plan) on every path. The operator's
+      paste is the direction for the apply (Decision 126 cl.1: operators may always invoke it directly), so no approve
+      line is asked. Terraform errors go to $HOME/spr-merge-tf.err, read in CloudShell only and deleted after, never
+      pasted anywhere. The operator sends the build thread the printed lines.
     command: >-
-      ( M=8c231181f22ff2a5f91764b5675f334caff67410; set -o pipefail; export AWS_PROFILE=agent_platform_admin;
-      D="${TMPDIR:-/tmp}/spr-merge"; W="$D/wt"; B="$W/terraform/bootstrap"; R=$(tr -d '[:space:]' < config/aws-region);
-      trap 'rm -f "$D/merge.bin" "$D/terraform.bootstrap.tfvars"; git worktree remove --force "$W" 2> /dev/null' EXIT;
-      [ -f "$HOME/.terraform-mirror.tfrc" ] && export TF_CLI_CONFIG_FILE="$HOME/.terraform-mirror.tfrc";
-      aws sts get-caller-identity --region "$R" --query Arn --output text 2> /dev/null | grep -q 'assumed-role/PlatformAdmin/' || { echo ADMIN_CHAIN_ABSENT; exit 1; };
-      test -s terraform/bootstrap/terraform.bootstrap.tfvars || { echo TFVARS_ABSENT; exit 1; };
-      git fetch -q origin main && git cat-file -e "$M^{commit}" || { echo MERGE_SHA_UNKNOWN; exit 1; };
-      mkdir -p "$D"; : > "$D/tf.err"; git worktree remove --force "$W" 2> /dev/null; rm -rf "$W"; git worktree prune;
-      { git worktree add --detach "$W" "$M" -q && cp terraform/bootstrap/terraform.bootstrap.tfvars "$D/"; } || { echo WORKTREE_FAILED; exit 1; };
-      terraform -chdir="$B" init -input=false -backend-config="region=$R" > /dev/null 2>> "$D/tf.err" || { echo INIT_FAILED; exit 1; };
-      terraform -chdir="$B" plan -input=false -no-color -detailed-exitcode -var-file="$D/terraform.bootstrap.tfvars" -out="$D/merge.bin" > /dev/null 2>> "$D/tf.err"; rc=$?; echo "MERGE_PLAN_EXIT $rc";
-      if [ "$rc" = 0 ]; then terraform -chdir="$B" apply -input=false -no-color "$D/merge.bin" 2>> "$D/tf.err" | grep -E '^Apply complete!';
-      terraform -chdir="$B" plan -input=false -no-color -detailed-exitcode -var-file="$D/terraform.bootstrap.tfvars" > /dev/null 2>> "$D/tf.err"; echo "BOOTSTRAP_PLAN_EXIT $?";
+      ( set -o pipefail; M=8c231181f22ff2a5f91764b5675f334caff67410; W="${TMPDIR:-/tmp}/spr-merge"; L="$HOME/spr-merge-tf.err";
+      rm -rf "$W"; mkdir -p "$W/bin"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE;
+      { git init -q "$W/repo" && git -C "$W/repo" fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git "$M" && git -C "$W/repo" checkout -q --detach FETCH_HEAD; } 2>> "$L" || { echo CLONE_FAILED; exit 1; };
+      R=$(tr -d '[:space:]' < "$W/repo/config/aws-region"); export AWS_REGION="$R" AWS_DEFAULT_REGION="$R";
+      V=$(tr -d '[:space:]' < "$W/repo/config/terraform-version"); case "$(uname -m)" in aarch64) P=linux_arm64 ;; *) P=linux_amd64 ;; esac; Z="terraform_${V}_${P}.zip";
+      { curl -fsSL -o "$W/$Z" "https://releases.hashicorp.com/terraform/$V/$Z" && curl -fsSL -o "$W/sums" "https://releases.hashicorp.com/terraform/$V/terraform_${V}_SHA256SUMS" &&
+      ( cd "$W" && grep " $Z\$" sums | sha256sum -c --quiet - ) && unzip -qo "$W/$Z" -d "$W/bin"; } >> "$L" 2>&1 || { echo TERRAFORM_INSTALL_FAILED; exit 1; }; export PATH="$W/bin:$PATH";
+      aws s3api head-bucket --bucket agent-platform-bootstrap-tfstate > /dev/null 2>> "$L" || { echo STATE_BUCKET_UNREACHABLE; exit 1; };
+      aws ssm get-parameter --name /secret/agent-platform-terraform-personal-tfvars --with-decryption --query Parameter.Value --output text > "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT; exit 1; };
+      A=$(aws sts get-caller-identity --query Account --output text 2>> "$L"); test -n "$A" || { echo IDENTITY_FAILED; exit 1; }; B="$W/repo/terraform/bootstrap";
+      terraform -chdir="$B" init -input=false -backend-config="region=$R" > /dev/null 2>> "$L" || { echo INIT_FAILED; exit 1; };
+      terraform -chdir="$B" plan -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" -out="$W/merge.bin" > /dev/null 2>> "$L"; rc=$?; echo "MERGE_PLAN_EXIT $rc";
+      if [ "$rc" = 0 ]; then terraform -chdir="$B" apply -input=false -no-color "$W/merge.bin" 2>> "$L" | grep -E '^Apply complete!';
+      terraform -chdir="$B" plan -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" > /dev/null 2>> "$L"; echo "BOOTSTRAP_PLAN_EXIT $?";
       else echo APPLY_SKIPPED; fi; echo "MERGE_SHA $M" )
     expected: >-
       Four lines, sent by the operator to the build thread: MERGE_PLAN_EXIT 0, "Apply complete! Resources: 0 added, 0
       changed, 0 destroyed.", BOOTSTRAP_PLAN_EXIT 0 and MERGE_SHA <merge sha>.
     fix_if: >-
-      ADMIN_CHAIN_ABSENT -- the shell's agent_platform_admin profile does not reach PlatformAdmin; fix the operator's AWS
-      config and re-paste. TFVARS_ABSENT -- create the file per terraform/bootstrap/CLAUDE.md section 3 (never commit
-      it). MERGE_SHA_UNKNOWN or WORKTREE_FAILED -- git printed the cause in the shell. INIT_FAILED -- read $D/tf.err locally. MERGE_PLAN_EXIT 2 with APPLY_SKIPPED -- nothing was
-      applied; the merge differs from what step 6 planned: STOP, the build reports it to the coordinator as a plan
-      defect, never a second paste. MERGE_PLAN_EXIT 1 -- read $D/tf.err locally and re-paste once fixed.
-      BOOTSTRAP_PLAN_EXIT 2 after the apply -- STOP and report; never paste again without a fresh step 8 read of the
-      cause.
+      Any *_FAILED, STATE_BUCKET_UNREACHABLE (wrong account, or a sign-in without that bucket's rights) or TFVARS_ABSENT
+      line -- nothing was planned; read $HOME/spr-merge-tf.err in CloudShell, fix and re-paste. MERGE_PLAN_EXIT 2 with
+      APPLY_SKIPPED -- nothing was applied; the merge differs from what step 6 planned, or a tfvars value differs from
+      the applied one: STOP, the build reports it to the coordinator as a plan defect, never a second paste.
+      MERGE_PLAN_EXIT 1 -- read the error file and re-paste once fixed. BOOTSTRAP_PLAN_EXIT 2 after the apply -- STOP
+      and report. Delete $HOME/spr-merge-tf.err once read.
     hermetic: false
     graduation: not-applicable
   - step: 9
@@ -407,7 +410,7 @@ verification_plan:
     action: >-
       The build session, after the operator has sent step 8's four lines: checks them against step 8's expected
       lines, reads back the merge-time run of terraform-apply-sandbox.yml (its job apply-sandbox) and records the merge
-      sha, the four lines (labelled operator-reported, from step 8 run in the operator's shell) and the run URL as a
+      sha, the four lines (labelled operator-reported, from step 8 run in the operator's CloudShell) and the run URL as a
       counts-only comment on the merged PR. No AWS credential is used.
     command: >-
       mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
@@ -594,7 +597,7 @@ constraints:
   - "PROD must not change: zero rows in both plans (steps 6 and 8). Any non-zero row stops the build; nothing is applied to make a plan converge."
   - "No assertion, expected ARN, Sid or count in an existing check or test is changed; readers are re-routed through render only. A node that needs more is a plan defect, never a local fix."
   - "Never print or commit an account id, ExternalId, e-mail, tfvars value or rendered policy (Decision 101); posted evidence is counts, exit codes and shas."
-  - "The bootstrap apply is run only by the operator, in the operator's own admin shell (step 8, Amendment 2; Decision 126 cl.1), one admin mutation at a time: not while another bootstrap apply (rec-5026's Organization sittings, T4.15 c13, rec-4694) is in flight."
+  - "The bootstrap apply is run only by the operator, in AWS CloudShell in the PROD account (step 8, Amendments 2 and 3; Decision 126 cl.1), one admin mutation at a time: not while another bootstrap apply (rec-5026's Organization sittings, T4.15 c13, rec-4694) is in flight."
   - "terraform/personal uses no conditional or comparison operator (Decision 238 cl.4 screen); the env map index is the only form."
   - No rescue agents or workaround loops (Decision 55).
 context:
@@ -638,6 +641,7 @@ context:
   - "SIT size headroom evidence is recorded in the build PR body as bytes only and is ungated: it stays UNPROVEN for SIT until rec-5027's admin plan."
   - "Amendment 2 (2026-11-12, build PR #1987 merged as 8c231181, nothing planned or applied): the agent proxy refuses the sts:AssumeRole that mints the agent_platform_admin credential (\"request blocked by policy: sts:AssumeRole would mint new AWS credentials\"), seen in the build session and in an outside admin session the operator started; it is not worked around. Benjamin (build thread, 2026-11-12 20:52Z and 21:00Z) chose to run the apply himself, so step 8 is one copy-paste operator block (credential check, saved plan at the merge sha, apply only on plan exit 0, fresh plan, cleanup) and step 9 is the build's GitHub read-back and PR comment. The evidence is unchanged: MERGE_PLAN_EXIT 0, Apply complete with 0 added, 0 changed, 0 destroyed, BOOTSTRAP_PLAN_EXIT 0 and the apply-sandbox run on the merge sha. The worktree-clean check and the approve tf-state-change line served the agent gate's one-shot approval and are dropped with it. Step 10 gains a GitHub fallback because agent_platform is refused the same way in this planning session (scripts.aws_identity caller-arn --profile agent_platform: ResponseParserError, 2026-11-12 21:15Z). No assertion or expected result is loosened."
   - "Critique r10 (PROCEED, 0 blocking, 6 nits), dispositions: N1 the merge sha is written into the block and the assignment sits inside the subshell, so an unedited paste cannot leak exits into the operator's shell; N2 an EXIT trap removes the saved plan, the tfvars copy and the worktree on every path; N3 WORKTREE_FAILED split from INIT_FAILED, git errors read in the shell, aws sts gets --region; N4 step 10 names the literal trailer-closure log lines and posts a follow-up comment; N5 constraints name steps 6 and 8; N6 step 9 labels the four lines operator-reported."
+  - "Amendment 3 (2026-11-12): Benjamin chose AWS CloudShell, signed in to each account, as where he pastes admin blocks (planning thread card, 22:24Z). Step 8 now needs no repo, key or profile: it fetches this public repo's merge commit into /tmp, installs the pinned terraform checked against HashiCorp's SHA256SUMS, checks the bootstrap state bucket is reachable, reads the tfvars values from the documented SSM parameter and account_id from the caller identity, and runs on the console sign-in's credentials (aws_profile empty). The apply identity is the operator's MFA console sign-in rather than PlatformAdmin; terraform/bootstrap/CLAUDE.md's 'under agent_platform_admin' wording is outside this amendment and is carried as a follow-on. The evidence lines, the exit-0-only apply and the stop rules are unchanged."
   - "V3 resolution: the posted step 6 and step 7 evidence for the current head substitutes for pre-merge post-deploy evidence; the behavioural acceptance is the post-merge zero-change saved plan, apply and fresh plan (steps 8-9), whose evidence is a counts-only comment on the merged PR naming the applied sha."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
@@ -661,7 +665,7 @@ execution_steps:
   - "Create both account_names.tf files and the environment variables; replace each literal listed in scope with its local (map-index suffix, no ? or ==); delete the two superseded locals in platform_dev_policies.tf and ducklake_catalog_dr.tf; parameterise the lock key; add terraform/bootstrap/backend-sit.hcl and config/terraform/backend-personal-sit.hcl; leave terraform/personal/backend-sandbox.hcl untouched (main-only for the trusted plan)."
   - "Create _account_names.py (render) and validate_account_portable_names.py with its Entry, taxonomy row and tests; route the readers in _read_coverage.py (_read_root_text and _scan_resources, which _write_coverage and _write_companions read through) and validate_github_settings_apply.py and the three test files through render; convert every literal predicate (a) finds at the build head (the scope counts are main f866f98 snapshots). Run steps 1, 2, 11, 3 and 4."
   - "Update terraform/bootstrap/CLAUDE.md. Open the PR with the SIT size headroom and the build session's own [hook_canary] state; steps 5-7 at the CI-green head; post the evidence."
-  - "Merge on code review PROCEED, green CI, the step 6-7 evidence and the operator's final-diff word; squash body carries 'Resolves: rec-5025'; the bookkeeping walk's c3 flip lands in this PR. Then the operator runs step 8 in the operator's own admin shell and sends its four lines; the build runs steps 9 and 10."
+  - "Merge on code review PROCEED, green CI, the step 6-7 evidence and the operator's final-diff word; squash body carries 'Resolves: rec-5025'; the bookkeeping walk's c3 flip lands in this PR. Then the operator pastes step 8 into AWS CloudShell in the PROD account and sends its four lines; the build runs steps 9 and 10."
   - "Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)"
   - "Report: what was implemented, verification results"
 rollback: >-
