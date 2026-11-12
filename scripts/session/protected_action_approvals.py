@@ -17,7 +17,11 @@ from scripts.session.protected_action_match import Hit
 
 _TAG_RE = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9_-]*)([^<>]*?)(/?)>")
 _ATTR_RE = re.compile(r'([A-Za-z_-]+)="([^"]*)"')
-_APPROVE_RE = re.compile(r"^approve (\S+) (\S+?)(?: ([0-9a-f]{7,40}))?$")
+_APPROVE_RE = re.compile(r"^approve (\S+) (\S+?)(?: ([0-9a-f]{7,40}))?$", re.IGNORECASE)
+_REWRITE_NOTE = (
+    "the gate cannot name the secret: rewrite the command as an aws call naming each secret (--secret-id or --name), "
+    "or as a declared entry point (docs/contracts/protected-actions.yaml amendment_log migration_story)"
+)
 _CARD_RE = re.compile(r'^Chose "([^"]*)"')
 _RELAY_TAGS = frozenset({"relay", "coordinator-relay", "cited"})
 _BASH_TOOLS = frozenset({"Bash", "Monitor"})
@@ -113,7 +117,7 @@ def _lines(text: str) -> list[str]:
     card = _CARD_RE.match(text)
     if card:
         text = card.group(1)
-    return [" ".join(item.split()).lower() for line in text.splitlines() for item in line.split(",") if item.strip()]
+    return [" ".join(item.split()) for line in text.splitlines() for item in line.split(",") if item.strip()]
 
 
 def approvals(records: Sequence[Mapping[str, Any]]) -> list[Approve]:
@@ -135,12 +139,18 @@ def approvals(records: Sequence[Mapping[str, Any]]) -> list[Approve]:
             for item in _lines(message):
                 m = _APPROVE_RE.match(item)
                 if m:
-                    found.append(Approve(m.group(1), m.group(2), m.group(3), idx))
+                    found.append(Approve(m.group(1).lower(), m.group(2), (m.group(3) or "").lower() or None, idx))
     return found
 
 
+def _same_target(hit: Hit, a: Approve) -> bool:
+    return a.target == hit.target if hit.exact else a.target.lower() == hit.target.lower()
+
+
 def _session_ok(hit: Hit, items: list[Approve]) -> bool:
-    return any(a.commit is None and a.cls == hit.cls and a.target in (hit.target.lower(), "any") for a in items)
+    if hit.target in ("any", "unknown"):
+        return False
+    return any(a.commit is None and a.cls == hit.cls and _same_target(hit, a) for a in items)
 
 
 def _bash_commands(rec: Mapping[str, Any], current_id: str | None) -> list[str]:
@@ -171,7 +181,7 @@ def _unused_credits(
     unused: list[str] = []
     by_pos: dict[int, list[Approve]] = {}
     for a in items:
-        if a.commit and a.cls == hit.cls and a.target == hit.target.lower():
+        if a.commit and a.cls == hit.cls and a.target.lower() == hit.target.lower():
             by_pos.setdefault(a.pos, []).append(a)
     for idx, rec in enumerate(records):
         unused.extend(a.commit for a in by_pos.get(idx, []) if a.commit)
@@ -197,7 +207,11 @@ def evaluate(
     denials: list[Denial] = []
     for hit in hits:
         if hit.approval != "one_shot_at_commit":
-            if not _session_ok(hit, items):
+            if _session_ok(hit, items):
+                continue
+            if hit.target in ("any", "unknown"):
+                denials.append(Denial(hit, "", [_REWRITE_NOTE]))
+            else:
                 denials.append(Denial(hit, f"approve {hit.cls} {hit.target}"))
             continue
         denial = _one_shot(hit, records, items, agent_id, tool_use_id, input_cwd, classify_prev, git_state)
