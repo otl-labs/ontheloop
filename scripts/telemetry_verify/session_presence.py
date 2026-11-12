@@ -5,6 +5,11 @@ resolve to a captured root session (set inclusion on harness_session_key). A mer
 warehouse is red; a source that cannot be read is unreadable (red, never a pass); an empty denominator is skipped, never
 green. The SLA is read from the data-modeling standard's arrival_expectations declaration, never restated here. Output
 is counts and commit shas only (Decision 101). Imports only the standard library, yaml, read_route and completeness.
+
+Author-date rule (rec-5084, Decision 235): when a pull request's creation misses every lost window, an uncaptured key
+still counts lost_window if the earliest commit that PR lists with that key's own trailer was authored inside a window
+that has a from, and the PR was opened at or after that window's end and less than authored_grace_days after it. The
+rule is off without authored_grace_days or the lookup callable, and every failed read leaves the key missing.
 """
 
 from __future__ import annotations
@@ -32,6 +37,8 @@ CONFIG = "config/telemetry/arrival.yaml"
 TABLE = "telemetry_sessions"
 DEFAULT_REPO = "otl-labs/ontheloop"
 _PARAMS = {"judge_days", "window_days", "max_lookback_days", "max_pr_lookups", "collapse_min_commits"}
+_GRACE = "authored_grace_days"
+_COMMITS_PER_PAGE, _COMMIT_PAGES, _COMMIT_LIST_CAP = 100, 3, 250
 _LISTS = {"lost_windows", "excused_sessions"}
 _SLA = re.compile(r"^([1-9][0-9]*)([mhd])$")
 _UNITS = {"m": 60, "h": 3600, "d": 86400}
@@ -68,9 +75,12 @@ class ArrivalResult:
     windows_read: int = 0
     pr_lookups: int = 0
     pr_lookup_failed: int = 0
+    lost_window_authored: int = 0
+    authored_lookup_failed: int = 0
     elapsed_s: float = 0.0
     cause: str = ""
     missing_shas: list[str] = field(default_factory=list)
+    lost_window_authored_shas: list[str] = field(default_factory=list)
     missing_day: str = ""
 
     def exit_code(self) -> int:
@@ -96,9 +106,17 @@ def check_expectation(expectation: Any) -> timedelta:
     return parse_sla(expectation.get("sla"))
 
 
+def _check_grace(config: Mapping[str, Any]) -> None:
+    if _GRACE in config:
+        value = config[_GRACE]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise Unreadable("BadConfig")
+
+
 def check_config(config: Any) -> list[tuple[datetime | None, datetime, str]]:
-    if not isinstance(config, Mapping) or set(config) - _PARAMS - _LISTS:
+    if not isinstance(config, Mapping) or set(config) - _PARAMS - _LISTS - {_GRACE}:
         raise Unreadable("BadConfig")
+    _check_grace(config)
     if any(not isinstance(config.get(k), int) or isinstance(config.get(k), bool) or config[k] < 1 for k in _PARAMS):
         raise Unreadable("BadConfig")
     windows: list[tuple[datetime | None, datetime, str]] = []
@@ -119,13 +137,45 @@ def check_config(config: Any) -> list[tuple[datetime | None, datetime, str]]:
     return windows
 
 
-def _session_keys(commit: Commit) -> list[str]:
-    keys = (completeness.normalise_key(url.rstrip("/").rsplit("/", 1)[-1]) for url in _TRAILER.findall(commit.body))
+def _keys_in(text: str) -> list[str]:
+    keys = (completeness.normalise_key(url.rstrip("/").rsplit("/", 1)[-1]) for url in _TRAILER.findall(text))
     return [k for k in keys if k]
+
+
+def _session_keys(commit: Commit) -> list[str]:
+    return _keys_in(commit.body)
 
 
 def _in_window(created: datetime, windows: list[tuple[datetime | None, datetime, str]]) -> bool:
     return any((start is None or created >= start) and created < end for start, end, _ in windows)
+
+
+def _excused_by_window(
+    created: datetime,
+    number: int,
+    key: str,
+    sha: str,
+    ctx: tuple[list[tuple[datetime | None, datetime, str]], Mapping[str, Any], Callable[[int, str], datetime | None] | None],
+    r: ArrivalResult,
+) -> bool:
+    windows, config, pr_key_authored_at = ctx
+    if _in_window(created, windows):
+        return True
+    grace = config.get(_GRACE)
+    if pr_key_authored_at is None or grace is None or r.pr_lookups >= config["max_pr_lookups"]:
+        return False
+    r.pr_lookups += 1
+    try:
+        authored = pr_key_authored_at(number, key)
+    except Exception:  # noqa: BLE001 -- a failed lookup leaves the key missing
+        r.authored_lookup_failed += 1
+        return False
+    for start, end, _ in windows:
+        if authored is not None and start is not None and start <= authored < end <= created < end + timedelta(days=grace):
+            r.lost_window_authored += 1
+            r.lost_window_authored_shas.append(sha)
+            return True
+    return False
 
 
 def _walk(
@@ -159,6 +209,7 @@ def _judge(
     config: Mapping[str, Any],
     pr_created_at: Callable[[int], datetime],
     r: ArrivalResult,
+    pr_key_authored_at: Callable[[int, str], datetime | None] | None = None,
 ) -> None:
     sla = check_expectation(expectation)
     windows = check_config(config)
@@ -199,11 +250,15 @@ def _judge(
         if number and r.pr_lookups < config["max_pr_lookups"]:
             r.pr_lookups += 1
             try:
-                if _in_window(pr_created_at(int(number.group(1))), windows):
-                    r.lost_window += 1
-                    continue
+                created = pr_created_at(int(number.group(1)))
             except Exception:  # noqa: BLE001 -- a failed lookup leaves the key missing
                 r.pr_lookup_failed += 1
+            else:
+                if _excused_by_window(
+                    created, int(number.group(1)), key, commit.sha, (windows, config, pr_key_authored_at), r
+                ):
+                    r.lost_window += 1
+                    continue
         r.missing += 1
         r.missing_shas.append(commit.sha)
         r.missing_day = r.missing_day or commit.committed_at.date().isoformat()
@@ -217,11 +272,13 @@ def judge(
     expectation: Any,
     config: Any,
     pr_created_at: Callable[[int], datetime],
+    *,
+    pr_key_authored_at: Callable[[int, str], datetime | None] | None = None,
 ) -> ArrivalResult:
     began = time.monotonic()
     result = ArrivalResult()
     try:
-        _judge(commits, roots_for, now, expectation, config, pr_created_at, result)
+        _judge(commits, roots_for, now, expectation, config, pr_created_at, result, pr_key_authored_at)
     except Unreadable as exc:
         result.status, result.cause = "unreadable", str(exc)
     result.elapsed_s = round(time.monotonic() - began, 1)
@@ -232,10 +289,12 @@ def lines(r: ArrivalResult) -> list[str]:
     head = (
         f"ARRIVAL status={r.status} judged={r.judged} captured={r.captured} missing={r.missing} lost_window={r.lost_window} "
         f"excused={r.excused} pending={r.pending} untrailered={r.untrailered} windows_read={r.windows_read} "
-        f"pr_lookups={r.pr_lookups} pr_lookup_failed={r.pr_lookup_failed} elapsed_s={r.elapsed_s}"
+        f"pr_lookups={r.pr_lookups} pr_lookup_failed={r.pr_lookup_failed} elapsed_s={r.elapsed_s} "
+        f"lost_window_authored={r.lost_window_authored} authored_lookup_failed={r.authored_lookup_failed}"
     )
     cause = [f"ARRIVAL_UNREADABLE cause={r.cause}"] if r.status == "unreadable" else []
-    return [head, *cause, *(f"ARRIVAL_MISSING sha={sha[:12]}" for sha in r.missing_shas)]
+    missing = (f"ARRIVAL_MISSING sha={sha[:12]}" for sha in r.missing_shas)
+    return [head, *cause, *missing, *(f"ARRIVAL_LOST_WINDOW_AUTHORED sha={sha[:12]}" for sha in r.lost_window_authored_shas)]
 
 
 def write_junit(path: Path | str, r: ArrivalResult) -> None:
@@ -267,13 +326,51 @@ def git_commits(root: Path, ref: str = "origin/main", since: datetime | None = N
     return out
 
 
-def github_pr_created_at(repo: str, number: int) -> datetime:
+def _github_json(path: str) -> Any:
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     if os.environ.get("GITHUB_TOKEN"):
         headers["Authorization"] = f"Bearer {os.environ['GITHUB_TOKEN']}"
-    request = urllib.request.Request(f"https://api.github.com/repos/{repo}/pulls/{number}", headers=headers)
+    request = urllib.request.Request(f"https://api.github.com/repos/{path}", headers=headers)
     with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310 -- fixed https host
-        return _utc(json.load(response)["created_at"])
+        return json.load(response)
+
+
+def github_pr_created_at(repo: str, number: int) -> datetime:
+    return _utc(_github_json(f"{repo}/pulls/{number}")["created_at"])
+
+
+def _own_author_date(item: Any, key: str) -> datetime | None:
+    if not isinstance(item, dict):
+        raise Unreadable("BadCommitItem")
+    detail = item.get("commit")
+    detail = detail if isinstance(detail, dict) else {}
+    message = detail.get("message")
+    if not isinstance(message, str):
+        raise Unreadable("BadCommitMessage")
+    if key not in _keys_in(message):
+        return None
+    author = detail.get("author")
+    stamp = author.get("date") if isinstance(author, dict) else None
+    if not stamp:
+        raise Unreadable("NoAuthorDate")
+    return _utc(stamp)
+
+
+def github_pr_key_authored_at(repo: str, number: int, key: str) -> datetime | None:
+    wanted, seen, dates = completeness.normalise_key(key), 0, []
+    if not wanted:
+        return None
+    for page in range(1, _COMMIT_PAGES + 1):
+        items = _github_json(f"{repo}/pulls/{number}/commits?per_page={_COMMITS_PER_PAGE}&page={page}")
+        if not isinstance(items, list):
+            raise Unreadable("BadCommitPage")
+        seen += len(items)
+        dates += [d for d in (_own_author_date(item, wanted) for item in items) if d is not None]
+        if len(items) < _COMMITS_PER_PAGE:
+            break
+    if seen >= _COMMIT_LIST_CAP:
+        raise Unreadable("CommitListTruncated")
+    return min(dates) if dates else None
 
 
 def load_expectation(root: Path) -> Any:
@@ -308,6 +405,7 @@ def run(
     no_lost_windows: bool = False,
     commits: list[Commit] | Callable[[], list[Commit]] | None = None,
     pr_created_at: Callable[[int], datetime] | None = None,
+    pr_key_authored_at: Callable[[int, str], datetime | None] | None = None,
 ) -> ArrivalResult:
     """Read the expectation and config, then judge; an unreadable expectation or config is an unreadable result."""
     began = time.monotonic()
@@ -322,4 +420,7 @@ def run(
         expectation,
         config,
         pr_created_at if pr_created_at is not None else (lambda n: github_pr_created_at(repo, n)),
+        pr_key_authored_at=(
+            pr_key_authored_at if pr_key_authored_at is not None else (lambda n, k: github_pr_key_authored_at(repo, n, k))
+        ),
     )
