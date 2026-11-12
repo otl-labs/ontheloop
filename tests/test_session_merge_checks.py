@@ -96,3 +96,8 @@ def test_contexts_from_two_rules_are_both_required() -> None:
 def test_null_started_at_outranks_a_completed_success() -> None:
     queued = run("pr-validate", None, "queued", started=None, run_id=3)
     assert judge([run("pr-validate", run_id=1), queued, run("terraform-validate", run_id=2)]).kind == mc.REFUSE
+
+
+def test_run_without_an_app_object_is_never_a_github_actions_run() -> None:
+    bare = {"name": "pr-validate", "status": "completed", "conclusion": "success", "started_at": None, "id": 1}
+    assert judge([bare, run("terraform-validate", run_id=2)]).kind == mc.REFUSE

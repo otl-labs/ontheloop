@@ -61,7 +61,7 @@ def test_slow_reader_get_denies_at_first_chunk_after_deadline(clock: _Clock, mon
     class Slow(io.BytesIO):
         status = 200
 
-        def read(self, n: int = -1) -> bytes:  # noqa: A003
+        def read(self, n: int | None = -1) -> bytes:  # noqa: A003
             clock.now += 3.0
             return b"x" * 10
 
