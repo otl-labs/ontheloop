@@ -42,8 +42,8 @@ locals {
           "s3:GetBucketNotification"
         ]
         Resource = [
-          "arn:aws:s3:::agent-platform-data-lake",
-          "arn:aws:s3:::agent-platform-ducklake-catalog-dr",
+          local.data_lake_bucket_arn,
+          local.ducklake_dr_bucket_arn,
         ]
       },
       {

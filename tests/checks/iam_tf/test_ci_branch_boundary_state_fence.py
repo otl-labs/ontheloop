@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.checks.iam_tf import _account_names
 from scripts.checks.iam_tf._read_coverage import _extract_bracket_block, _split_top_level_objects
 from tests.checks.iam_tf._platform_security_hcl import _block_body, _mask, _strip_comments
 
@@ -24,7 +25,7 @@ _ROOT = Path(__file__).resolve().parents[3]
 
 
 def _read(name: str) -> str:
-    return (_ROOT / "terraform" / "bootstrap" / name).read_text(encoding="utf-8")
+    return _account_names.render((_ROOT / "terraform" / "bootstrap" / name).read_text(encoding="utf-8"))
 
 
 def _list(raw: str) -> list[str]:

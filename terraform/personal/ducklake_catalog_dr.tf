@@ -24,7 +24,6 @@
 
 locals {
   ducklake_catalog_dr_function = "agent-platform-ducklake-catalog-dr"
-  ducklake_dr_bucket_name      = "agent-platform-ducklake-catalog-dr"
 }
 
 # ---------------------------------------------------------------------------
