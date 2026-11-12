@@ -21,16 +21,17 @@ scope:
     action: Create
     purpose: >-
       The re-scout barrier, kept out of validate_plan_documents.py like _plan_sidecar_approval.py, with its own mirror
-      test. It imports scripts.roadmap.plan_fingerprint (load_tree, projection, fingerprint, FingerprintError) and never
-      re-derives the payload or the edges (T4.32 c4, THE single extractor). Each value is
+      test. It imports scripts.roadmap.plan_fingerprint (load_tree, projection, fingerprint, FingerprintError) and
+      scripts.roadmap.plan_edges (PlanEdgesError) inside barrier(), so an ImportError there is a failure "scout-input
+      fingerprint module cannot be imported: <error>", never a skip or a pass; it never re-derives the payload or the edges (T4.32 c4, THE single extractor). Each value is
       fingerprint(projection(yaml.safe_load(plan text), tree, approved_words.parse_sidecar(sidecar text) or None)), the
       inputs the plan_fingerprint CLI assembles for the same plan and root with no --with-cites; the loaded PlanDocument
       in docs supplies only schema_version and gate_rounds. Entry point
       barrier(entries, docs, root, base, push_context, read_base) -> BarrierResult(failures, warnings, examined, compared),
       where entries are the status-aware (status, path) pairs of docs/plans/PLAN-*.yaml, docs maps a plan filename to its
       loaded PlanDocument, base is the diff base (None when unresolved), push_context is
-      _common.push_context_base(root) is not None, and read_base(rel) returns the file text at base or None (default:
-      git show base:rel; the seam the tests drive). Rules, FINGERPRINT_MIN_SCHEMA_VERSION = 6:
+      _common.push_context_base(root) is not None, and read_base(rel) returns the file text at base or None (default: git show base:rel, None on a non-zero exit;
+      the seam the tests drive). Rules, FINGERPRINT_MIN_SCHEMA_VERSION = 6:
       (1) An ADDED plan (status A or ??) at schema_version >= 6 is compared. (2) A MODIFIED plan (status M): a
       schema_version lower than at base fails ("schema_version lowered from B to H"); at head >= 6 it computes the base
       fingerprint from the base plan text and the base sidecar text (docs/plans/approved/<base plan's slug>.yaml at base, None
@@ -43,7 +44,7 @@ scope:
       the decision scout after the pivot; a BLOCK the operator accepted is merged only by the operator's admin bypass in
       the GitHub UI)". Operator ruling 2026-11-12: a BLOCK binds everyone but the operator, whose release valve is the
       main-protection ruleset's Repository Admin bypass (bypass_mode always, audit-logged by GitHub); agent merges of a
-      red PR stay refused (PLAN-merge-requires-green-checks), and the post-merge push run only warns, so main stays green.
+      red PR are refused once PLAN-merge-requires-green-checks builds (rec-4080 until then), and the post-merge push run only warns, so main stays green.
       T4.32 c6's approved override run is the later in-band route (rec-5128); a row whose scout_input_fingerprint is None fails "re-scout required: the last decision-scout
       row records no scout_input_fingerprint"; a value unequal to the recomputed one fails "re-scout required: the last
       decision-scout row records <recorded>; this tree gives <recomputed>"; every message names the plan file and ends
@@ -71,29 +72,45 @@ scope:
   - file: scripts/checks/roadmap/validate_plan_documents.py
     action: Modify
     purpose: >-
-      (a) The newest-version rule (rec-5102): a newly added plan whose schema_version is at least
-      _MIN_NEW_PLAN_SCHEMA_VERSION but below _newest_schema_version() (a new module-level helper returning
-      max(scripts.roadmap.plan_document._SUPPORTED_VERSIONS), imported lazily inside it) gets the finding "<plan>:
-      newly-added plans must declare schema_version N, the newest this tree supports (got M): bump it, add cites,
-      re-run the decision scout and record scout_input_fingerprint", a failure outside push context and a WARN in it.
-      _new_plan_version_failures and _MIN_NEW_PLAN_SCHEMA_VERSION = 5 stay exactly as they are: the constant still
-      bounds _gate_round_gaps, _wording_check_gaps, _approval_gaps and the sidecar_unchecked advisory, so every v5 plan
-      stays bound by Decision 246 cl.3 (scout WARN, Decision 235). (b) Wire the barrier: after the plan loop, import scripts.checks.roadmap._plan_rescout_barrier lazily (inside the
-      seam below, never through the existing plan_document ImportError path, which records a skip), pass
-      the status-aware entries of docs/plans/PLAN-*.yaml and diff_count from one get_status_aware_diff call over the
-      whole tree (_added_plan_names() stays as it is, a no-argument callable the existing tests call), the loaded docs (a plan that failed its schema load is absent from docs and is not passed to the barrier: it has
-      already failed the check), each entry's head text read from the path the loop loaded (plans_dir/<name> under the
-      seam), _common.ROOT, wording_base, the push-context flag and the default
-      read_base; failures join errors and warnings join advisories. Print one line on every run that reaches the barrier (the empty-plans-dir early return and the plan_document
-      ImportError branch keep their own lines), "  re-scout barrier:
-      E plan(s) examined, C compared, F failing" (Decision 170: never a bare PASS), or, when there is nothing to
-      examine, "  re-scout barrier: no added or modified plan in this diff". The call goes through one module-level seam, _rescout_barrier(**inputs) -> (failures, warnings, examined,
-      compared), which does the lazy import; an ImportError there prints "FAIL: could not import
-      scripts.checks.roadmap._plan_rescout_barrier: <error>" and fails the check, so the message names the barrier, not
-      plan_document. (c) A new test seam
-      modified_plan_names: set[str] | None = None beside added_plan_names, used only when plans_dir is given. Stays
-      well under 500 SLOC (218 today).
-    new_imports: [scripts.checks.roadmap._plan_rescout_barrier]
+      (a) A top-level import of scripts.checks.roadmap._plan_rescout_wiring (importing it cannot fail on a missing
+      optional module: the barrier loads plan_fingerprint and plan_edges lazily) and the alias _newest_schema_version =
+      _plan_rescout_wiring.newest_schema_version, which the template test reads. If the helper itself cannot be
+      imported, this module cannot be imported, which raises through scripts/checks/registry.py:295 and stops the run
+      loudly, never a pass. (b) After the plan loop, inside the existing try, one call failures, warnings, line =
+      _plan_rescout_wiring.run(...) passing docs, the loaded paths, _common.ROOT, wording_base, the push-context flag,
+      GITHUB_EVENT_NAME and, when plans_dir is given, added_plan_names and modified_plan_names; failures join errors,
+      warnings join advisories, and the line is printed. The plan_document ImportError branch and the empty-plans-dir
+      early return are unchanged and keep their own lines. (c) A new test seam modified_plan_names: set[str] | None =
+      None beside added_plan_names, used only when plans_dir is given. _added_plan_names(), _new_plan_version_failures
+      and _MIN_NEW_PLAN_SCHEMA_VERSION = 5 stay exactly as they are: the constant still bounds _gate_round_gaps,
+      _wording_check_gaps, _approval_gaps and the sidecar_unchecked advisory, so every v5 plan stays bound by Decision
+      246 cl.3 (scout WARN, Decision 235). Every new line runs under the existing mirror test with run stubbed, so the
+      file keeps 100% mirror coverage. Stays well under 500 SLOC (218 today).
+    new_imports: [scripts.checks.roadmap._plan_rescout_wiring]
+  - file: scripts/checks/roadmap/_plan_rescout_wiring.py
+    action: Create
+    purpose: >-
+      The plan check's two new legs, kept out of validate_plan_documents.py so every new line is covered by this
+      module's own mirror test (validate_test_coverage measures a source only through its mirror, and the existing
+      mirror of validate_plan_documents.py stubs run). newest_schema_version() returns
+      max(scripts.roadmap.plan_document._SUPPORTED_VERSIONS), importing plan_document inside the function.
+      newest_version_findings(added_names, docs, push_context) is the newest-version rule (rec-5102): a newly added plan
+      whose schema_version is at least validate_plan_documents._MIN_NEW_PLAN_SCHEMA_VERSION (5, passed in) but below
+      newest_schema_version() gets the finding "<plan>: newly-added plans must declare schema_version N, the newest this
+      tree supports (got M): bump it, add cites, re-run the decision scout and record scout_input_fingerprint", a
+      failure outside push context and a WARN in it. _new_plan_version_failures and _MIN_NEW_PLAN_SCHEMA_VERSION = 5
+      stay exactly as they are: the constant still bounds _gate_round_gaps, _wording_check_gaps, _approval_gaps and the
+      sidecar_unchecked advisory, so every v5 plan stays bound by Decision 246 cl.3 (scout WARN, Decision 235).
+      run(docs, plan_paths, root, base, push_context, event, added_plan_names=None, modified_plan_names=None) ->
+      (failures, warnings, line): without names it builds the barrier's entries (docs/plans/PLAN-*.yaml) and diff_count
+      (tracked A, M and D entries of every path; never the untracked ?? leg) from one _common.get_status_aware_diff
+      call; with names it uses them (the plans_dir test seam, diff_count the number of names); it passes each plan's
+      head text read from the path the loop loaded (a plan that failed its schema load is absent from docs and not
+      passed: it has already failed), calls _plan_rescout_barrier.barrier with the default read_base, adds
+      newest_version_findings, routes both per the barrier's rule (4), and returns the line " re-scout barrier: E
+      plan(s) examined, C compared, F failing" (Decision 170: never a bare PASS) or " re-scout barrier: no added or
+      modified plan in this diff".
+    new_imports: [scripts.checks.roadmap._plan_rescout_barrier, scripts.checks._common, scripts.roadmap.plan_document]
   - file: scripts/checks/roadmap/_manifest.py
     action: Modify
     purpose: >-
@@ -225,48 +242,56 @@ scope:
       escalated: true and escalation_choice accept-with-deferral, its message naming the admin-bypass remedy; on a pull_request event with base
       resolved, diff_count 0 fails and diff_count 1 with no plan entry passes; under the seam with no names passed,
       base None neither fails nor warns;
-      for one fixture plan with a sidecar, the barrier's value equals the digest the plan_fingerprint CLI prints for
+      the default read_base reads a committed file back from a tmp git repo and returns None for a missing path; an
+      ImportError of plan_fingerprint (patched) is a failure naming the module, never a pass; for one fixture plan with a sidecar, the barrier's value equals the digest the plan_fingerprint CLI prints for
       the same plan and --root (the standing parity guard, since VP step 7 is waived).
   - file: tests/checks/roadmap/test_validate_plan_documents_scout_fingerprint.py
     action: Create
     purpose: >-
-      Wiring, with _common.status_diff_base and push context pinned by monkeypatch in every test, through the real
-      _rescout_barrier seam (never stubbed here) and validate_plan_documents(plans_dir=...,
-      added_plan_names=..., modified_plan_names=...) with
-      GITHUB_EVENT_NAME and push context monkeypatched: a stale row fails the check on a pull_request event and locally,
-      and is a WARN in push context; the "re-scout barrier:" line is printed on every run with the examined and compared
-      counts; an ImportError of _plan_rescout_barrier fails the check with a message naming the barrier (never a skip); on a
-      pull_request event an empty whole diff fails (this case runs without plans_dir: _common.ROOT is monkeypatched to a
-      tmp tree holding docs/plans/PLAN-x.yaml, _common.get_status_aware_diff to return [] and status_diff_base to a sha,
-      so the real diff_count wiring is exercised); a matching row passes. Sibling file
-      because test_validate_plan_documents.py is at 497 of 500 SLOC (Decision 130).
+      Integration through validate_plan_documents with nothing stubbed but git state (_common.status_diff_base and push
+      context pinned by monkeypatch in every test), using validate_plan_documents(plans_dir=..., added_plan_names=...,
+      modified_plan_names=...) and GITHUB_EVENT_NAME: a stale row fails the check on a pull_request event and locally,
+      and is a WARN in push context; the "re-scout barrier:" line is printed with the examined and compared counts; a
+      matching row passes; on a pull_request event an empty whole diff fails (this case runs without plans_dir:
+      _common.ROOT is monkeypatched to a tmp tree holding docs/plans/PLAN-x.yaml, _common.get_status_aware_diff to
+      return [] and status_diff_base to a sha). Sibling file because test_validate_plan_documents.py is at 497 of 500
+      SLOC (Decision 130); coverage of the new lines is the two helpers' mirror tests'.
+  - file: tests/checks/roadmap/test__plan_rescout_wiring.py
+    action: Create
+    purpose: >-
+      Mirror test of _plan_rescout_wiring.py, covering every line (validate_test_coverage runs only this file for that
+      source): newest_schema_version() equals max(plan_document._SUPPORTED_VERSIONS) and is at least
+      validate_plan_documents._MIN_NEW_PLAN_SCHEMA_VERSION; newest_version_findings: an added plan below the newest
+      fails naming both versions and the remedy, at the newest passes, a historical (not added) plan passes, a plan
+      below 5 is left to the floor rule, push context turns the finding into a WARN; run with
+      _common.get_status_aware_diff monkeypatched: plan entries are filtered to docs/plans/PLAN-*.yaml, diff_count
+      counts tracked A, M and D entries and not a ?? entry, the seam path uses the names given, a schema-failed plan is
+      not passed, the count line in both forms, and the barrier's failures and warnings are returned as routed. The
+      barrier is driven for real over a fixture tree; nothing is stubbed but git.
   - file: tests/checks/roadmap/test_validate_plan_documents_latest_format.py
     action: Create
     purpose: >-
-      rec-5102's acceptance test test_added_plan_below_newest_supported_version_is_refused (an added plan at
-      _MIN_NEW_PLAN_SCHEMA_VERSION but below the newest fails, the message naming both versions and the remedy), plus:
-      an added plan at the newest passes the rule; a historical (not added) plan at an older version passes; push
-      context turns the finding into a WARN; a plan below 5 still fails in every context; _newest_schema_version()
-      equals max(plan_document._SUPPORTED_VERSIONS) and is at least _MIN_NEW_PLAN_SCHEMA_VERSION; a modified v5 plan
-      whose sidecar the diff changes still gets the wording-check gap (the gates bound at 5 still bind v5 plans).
+      rec-5102's acceptance test test_added_plan_below_newest_supported_version_is_refused, through
+      validate_plan_documents (an added plan at _MIN_NEW_PLAN_SCHEMA_VERSION but below the newest fails, the message
+      naming both versions and the remedy), plus: an added plan at the newest passes the rule; a plan below 5 still
+      fails in every context; a modified v5 plan whose sidecar the diff changes still gets the wording-check gap (the
+      gates bound at 5 still bind v5 plans).
   - file: tests/checks/roadmap/test_validate_plan_documents.py
     action: Modify
     purpose: >-
-      Exactly three changes, +1 SLOC (497 -> 498 of 500; Decision 130): (1) the template retarget:
+      Exactly two changes, +1 SLOC (497 -> 498 of 500; Decision 130): (1) the template retarget:
       test_canonical_plan_template_declares_the_gated_schema_version's final assertion changes from "==
       module._MIN_NEW_PLAN_SCHEMA_VERSION" to "== module._newest_schema_version()" (it tightens: the newest is at least
       the floor; operator-confirmed 2026-11-12, Decision 235 cl.1). (2) The autouse fixture _approved_provenance gains
-      one line, monkeypatch.setattr(module, "_rescout_barrier", lambda **_: ([], [], 0, 0)): this file tests the other
-      legs over fixture plans with no fingerprint, so it stubs the barrier by name, as the same fixture already stubs
-      the approval leg; the barrier's own and wiring tests run it for real. (3) Fixture versions, assertions unchanged:
-      "data["schema_version"] = 5" in test_newly_added_plan_at_current_schema_version_is_accepted (line 164) and in
-      _plan_with_linked_obligation (line 181) becomes "= module._newest_schema_version()", so the added fixture plans the
-      tests assert pass are at the current version (measured: the tests that add a fixture plan and assert failed == []
-      all build it at those two lines; lines 467 and 552 re-set 5 on plans not added). No assertion other than (1)
-      changes; test_authoring_floor_is_five and the two merge-base tests stay as they are (the stub keeps rule (5) out of
-      them; the wiring file covers it). If a rebase on another build pushes the file past 500, move the three
-      context-cap tests (lines 195-223) byte for byte into a sibling file rather than raise. Shards naming this file
-      are kept: wording-check-row-required-on-plan-pr.
+      one line, monkeypatch.setattr(module._plan_rescout_wiring, "run", lambda **_: ([], [], " re-scout barrier:
+      stubbed")): this file tests the other legs over fixture plans with no fingerprint, so it stubs the new legs by
+      name, as the same fixture already stubs the approval leg; validate_plan_documents.py's new lines (the import, the
+      alias, the call and the print) still run here, and the helpers' mirror tests and the two sibling integration files
+      run the legs for real. No other line changes: the fixture versions stay at 5 (the stub keeps the newest-version
+      rule out of these tests), and test_authoring_floor_is_five and the two merge-base tests stay as they are. If a
+      rebase on another build pushes the file past 500, stop and amend this plan (a concern-split test package for
+      validate_plan_documents.py needs scripts/test_coverage_checker.py in scope); never raise the limit or move tests
+      out of the mirror. Shards naming this file are kept: wording-check-row-required-on-plan-pr.
   - file: tests/test_planning_skill_scout_fingerprint.py
     action: Create
     purpose: >-
@@ -336,11 +361,13 @@ verification_plan:
     graduation_check_id: plan-rescout-barrier-rules
   - step: 4
     phase: pre-deploy
-    action: The barrier is wired into validate_plan_documents, prints its counts and fails on import error.
-    command: bin/venv-python -m pytest tests/checks/roadmap/test_validate_plan_documents_scout_fingerprint.py -q
-    expected: All pass. Red before (test absent; the seam and the wiring do not exist).
+    action: The new legs' helper and its wiring into validate_plan_documents, with the count line and the empty-diff failure.
+    command: >-
+      bin/venv-python -m pytest tests/checks/roadmap/test__plan_rescout_wiring.py
+      tests/checks/roadmap/test_validate_plan_documents_scout_fingerprint.py -q
+    expected: All pass. Red before (both test files and the helper are absent).
     expected_literals: [" passed"]
-    fix_if: Fix the wiring in validate_plan_documents.py.
+    fix_if: Fix _plan_rescout_wiring.py or its call in validate_plan_documents.py.
     hermetic: true
     graduation: graduate
     graduation_check_id: plan-rescout-barrier-wired
@@ -352,7 +379,7 @@ verification_plan:
       tests/checks/roadmap/test_validate_plan_documents.py -q
     expected: All pass. Red before (the new file is absent and the retargeted template assertion fails while the template says 5).
     expected_literals: [" passed"]
-    fix_if: Fix validate_plan_documents.py or the template line; never change _MIN_NEW_PLAN_SCHEMA_VERSION.
+    fix_if: Fix _plan_rescout_wiring.newest_version_findings or the template line; never change _MIN_NEW_PLAN_SCHEMA_VERSION.
     hermetic: true
     graduation: graduate
     graduation_check_id: new-plans-declare-newest-schema-version
@@ -441,11 +468,16 @@ test_obligations:
     verification_step: 3
     test_selector: tests/checks/roadmap/test__plan_rescout_barrier.py
     red_green_expectation: red before (module and test absent), green after
+  - source: scripts/checks/roadmap/_plan_rescout_wiring.py
+    behavior: builds the barrier's entries and diff_count, applies the newest-version rule and returns the count line
+    verification_step: 4
+    test_selector: tests/checks/roadmap/test__plan_rescout_wiring.py
+    red_green_expectation: red before (module and test absent), green after
   - source: scripts/checks/roadmap/validate_plan_documents.py
-    behavior: wires the barrier through its seam with the count line on every run, the import-failure path and push-context routing
+    behavior: calls the new legs and fails a stale row or an empty PR diff through the real check
     verification_step: 4
     test_selector: tests/checks/roadmap/test_validate_plan_documents_scout_fingerprint.py
-    red_green_expectation: red before (the file and the seam do not exist), green after
+    red_green_expectation: red before (the file and the call do not exist), green after
   - source: scripts/checks/roadmap/validate_plan_documents.py
     behavior: refuses an added plan below the newest supported version while the floor of 5 keeps binding the gate legs
     verification_step: 5
@@ -482,14 +514,14 @@ constraints:
   - _plan_rescout_barrier.py imports plan_fingerprint and never computes a payload, digest or edge itself (T4.32 c4, THE single extractor).
   - _MIN_NEW_PLAN_SCHEMA_VERSION stays 5 and keeps bounding the gate-record, wording-check and approval legs (Decision 235, Decision 246 cl.3).
   - The skill and plan.md edits are exactly the scope rows' text; the planning skill stays at or below main's prose budget and every "## Step <id>:" heading of plan.md is unchanged.
-  - In existing tests only the three changes the test_validate_plan_documents.py scope row names are made (one assertion retarget, the named barrier stub, two fixture versions); never skip, disable or quarantine a test (Decision 235).
+  - In existing tests only the two changes the test_validate_plan_documents.py scope row names are made (one assertion retarget and the named stub line); never skip, disable or quarantine a test (Decision 235).
   - Tests derive digests from plan_fingerprint and counts from their own fixtures, never a literal digest or a count of repository plans (tests/CLAUDE.md count coupling).
   - No rescue agents or workaround loops (Decision 55).
 context:
   - "Decision-scout verdict + CITE list (round 3, 2026-11-12, main 755944d2, plan v6 with sidecar and the manifest row): Verdict: FLAGS_FOUND. Decisions triaged: 206 of 206. Roadmap items intersected: 6; CONFLICT: 1; RELATED: 5. Serves: mission 3/5. CITE: 229 (cl.4), 217 (cl.8 as amended by 229), 205 (cl.1, cl.5), 163 (cl.1-3), 170, 181 (cl.2), 235 (cl.1), 244 (cl.4, cl.5), 246 (cl.1-3), 86. Report: /mnt/project-files/plan-rescout-on-fingerprint/SCOUT-r3.md (same flags and CITE ids as round 2, SCOUT-r2.md; round 1, FLAGS_FOUND 205 of 205: SCOUT-r1.md)."
   - "Scout flags folded in: 244 WARN (retire skill-template-emits-v5, never retarget its claim); 235 WARN (keep the floor constant; a separate newest-version rule); 217 cl.8 NOTE and 163 SPIRIT NOTE (residuals with owners rec-5103 and rec-5129, recorded in the ledger); T4.29 c1's exact string 're-scout required'; T4.30 c5 flip (rec-5128). Round 2: 217 cl.8 NOTE and 163 SPIRIT NOTE (residuals unchanged, owners rec-5102, rec-5103, rec-5129); NS.9 SPIRIT NOTE and T4.32 c6 CONFLICT on the accepted-BLOCK exemption: put to the operator (2026-11-12 18:21, this thread), who chose no exemption, his GitHub admin bypass being the release valve; that removes the agent-written override, so both flags are resolved (scope row, ledger note, rec-5128)."
   - "Sign-off (operator, 2026-11-12, this thread): fork 1A (the scout prints the fingerprint it judged; rec-5129 for a telemetry match later), fork 2B (modified plans below 6 unchecked; gap appended to rec-5102 at his request), fork 3A (bind only the contract text; the skill and plan.md text pinned by tests); fork 1A rides in the planning skill's scout dispatch prompt, not a decision-scout skill edit as presented (same effect; both files have zero byte headroom), retirement of skill-template-emits-v5 and the template-test retarget confirmed; then 'write the plan'. Presentation and consult: /mnt/project-files/plan-rescout-on-fingerprint/PRESENTATION.md, advisor-brief/ADVICE.md (Fable 5.2)."
-  - "ORDER: the sidecar's ledger blocks edit words plan 1's build places (docs/plans/approved/scout-input-fingerprint.yaml block l03 governance_notes), and the barrier imports plan 1's module, so the sidecar, its wording check, the approval run and this plan's PR follow plan 1's build merge; this plan's build follows plan 1's build. VP step 2 carries the sidecar's digest (wording check round 3, base 888f5b56). Critique rounds before then review everything but the bound words; the round that ends Step 9 runs after the sidecar, its wording-check row and a re-scout."
+  - "ORDER: the sidecar's ledger blocks edit words plan 1's build places (docs/plans/approved/scout-input-fingerprint.yaml block l03 governance_notes), and the barrier imports plan 1's module, so the sidecar, its wording check, the approval run and this plan's PR follow plan 1's build merge; this plan's build follows plan 1's build. VP step 2 carries the sidecar's digest (wording check round 3, base 888f5b56). Critique rounds before then review everything but the bound words; the round that ends Step 9 runs after the sidecar, its wording-check row and a re-scout if the fingerprint moved."
   - "Overlap: unbuilt PLAN-work-graph-edge-model also scopes exit-criteria-ledger.yaml, validate_plan_documents.py, scripts/checks/roadmap/_manifest.py and test_validate_plan_documents.py; whichever builds second rebases. Unbuilt PLAN-hook-canary-evidence and PLAN-sit-organization also scope config/prose_budgets.yaml (other entries). PLAN-planning-eligibility-start-edges is built (#1944) though undeclared."
   - "Other projects: once this build merges, every plan still being written below the newest version fails its plan PR until it bumps, adds cites and re-scouts once (no grace list; ADVICE Q8). Before merging, the build posts a notice on the coordinator log (issue #1963) naming the change and the remedy."
   - "Residuals (Decision 181 cl.2, in the ledger): a Decision amended on main after the PR's last CI run (rec-5103's push-to-main trigger); a copied fingerprint without a scout run (rec-5129; rec-5103 on Actions); a merged-plan amendment whose own inputs are unchanged while a cited Decision moved (rec-5103); modified plans below 6 (rec-5102 note)."
@@ -516,7 +548,7 @@ execution_steps:
   - "STEP 0: run VP step 1. Post: PRECONDITION_OK."
   - "STEP 1: place the sidecar's blocks in project-alignment.yaml and exit-criteria-ledger.yaml byte for byte ({{DATE}} = build date). Run VP step 2. Post: APPROVED-TEXT OK."
   - "STEP 2: scripts/checks/roadmap/_plan_rescout_barrier.py and tests/checks/roadmap/test__plan_rescout_barrier.py. Run VP step 3."
-  - "STEP 3: validate_plan_documents.py wiring, newest-version rule and seam; tests/checks/roadmap/test_validate_plan_documents_scout_fingerprint.py, test_validate_plan_documents_latest_format.py and the three changes in test_validate_plan_documents.py its scope row names. Run VP step 4 (VP 5 is red until STEP 4 sets the template to 6)."
+  - "STEP 3: validate_plan_documents.py wiring, newest-version rule and seam; scripts/checks/roadmap/_plan_rescout_wiring.py and tests/checks/roadmap/test__plan_rescout_wiring.py; tests/checks/roadmap/test_validate_plan_documents_scout_fingerprint.py, test_validate_plan_documents_latest_format.py and the two changes in test_validate_plan_documents.py its scope row names. Run VP step 4 (VP 5 is red until STEP 4 sets the template to 6)."
   - "STEP 4: the planning skill and plan.md replacements exactly as the scope rows give them; measure the skill and set its prose budget; git mv the retired record; tests/test_planning_skill_scout_fingerprint.py. Run VP steps 5, 6 and 8 (the template edit, the retargeted assertion and the record retirement land together here)."
   - "STEP 5: VP step 7 (end to end), then validate --pre (VP 9) and the full tier (VP 10). Loop until pass; on an unrecoverable failure stop and RCA (Decision 55)."
   - "STEP 6: post the coordinator-log notice (context), then merge with the squash commit body carrying 'Resolves: rec-4490, rec-5102' as its own paragraph; run VP step 11 after the closure job."
