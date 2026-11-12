@@ -43,7 +43,7 @@ def _noting_paragraph(entry: str, phrase: str) -> str:
     return paragraphs[0]
 
 
-def test_noting_paragraph_survives_a_later_note() -> None:
+def test_sit_notes_survive_a_later_note_on_the_same_entry() -> None:
     entry = "Body.\n\nDecision 9 fires here.\n\nA later dated note.\n\n---\n"
     assert _noting_paragraph(entry, "Decision 9 fires") == "Decision 9 fires here."
     with pytest.raises(AssertionError):
