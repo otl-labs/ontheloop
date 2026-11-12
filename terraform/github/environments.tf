@@ -177,3 +177,33 @@ resource "github_repository_environment_deployment_policy" "tf_github_apply_main
   environment    = github_repository_environment.tf_github_apply.environment
   branch_pattern = "main"
 }
+
+# GitHub Environment: persona-verdict (PLAN-persona-verdict-credential, T4.32 c1).
+#
+# The verdict persona jobs' Environment. No reviewer gates it, because the jobs run unattended on every pull
+# request. Its safety is the main-only deployment policy below (matched against GITHUB_REF, refs/heads/main under
+# workflow_run), the persona-verdict role's job_workflow_ref binding in terraform/personal, and
+# tests/checks/iam_tf/test_persona_verdict_role.py; never put it in a reviewer-gated list. No Environment secret
+# or variable, ever. Created by the first approved terraform-github-apply.yml dispatch naming both addresses in
+# gate_change (Decision 248), with no UI step and no import block. Destroying it fails open for the same reason
+# as tf_gated_apply.
+resource "github_repository_environment" "persona_verdict" {
+  repository        = github_repository.this.name
+  environment       = "persona-verdict"
+  can_admins_bypass = false
+
+  deployment_branch_policy {
+    protected_branches     = false
+    custom_branch_policies = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "github_repository_environment_deployment_policy" "persona_verdict_main" {
+  repository     = github_repository.this.name
+  environment    = github_repository_environment.persona_verdict.environment
+  branch_pattern = "main"
+}

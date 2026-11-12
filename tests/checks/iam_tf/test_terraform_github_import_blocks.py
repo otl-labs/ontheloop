@@ -30,11 +30,17 @@ _HISTORICAL_REPOSITORY_NAME = "agent-platform"
 _APPROVED_TEXT_REASON = (
     "created by terraform-github-apply.yml's first approved run (Decision 248); rec-4911 adds their import blocks"
 )
+_PERSONA_VERDICT_REASON = (
+    "created by the first approved terraform-github-apply.yml dispatch naming it in gate_change (Decision 248,"
+    " PLAN-persona-verdict-credential); the remote object does not exist before it"
+)
 EXEMPT: dict[str, str] = {
     "github_repository_environment.approved_text": _APPROVED_TEXT_REASON,
     "github_repository_environment_deployment_policy.approved_text_main": _APPROVED_TEXT_REASON,
     "github_repository_environment.tf_github_apply": _APPROVED_TEXT_REASON,
     "github_repository_environment_deployment_policy.tf_github_apply_main": _APPROVED_TEXT_REASON,
+    "github_repository_environment.persona_verdict": _PERSONA_VERDICT_REASON,
+    "github_repository_environment_deployment_policy.persona_verdict_main": _PERSONA_VERDICT_REASON,
 }
 
 _REQUIRED_IGNORED = (
