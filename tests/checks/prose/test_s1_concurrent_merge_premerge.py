@@ -53,6 +53,7 @@ def test_second_identical_shrink_merge_is_refused_until_updated(tmp_path: Path) 
     fx.git(f.work, "push", "-f", "origin", "HEAD:refs/pull/2/head")
     fx.git(f.work, "checkout", "-q", "main")
     f.fetch_refs(f.work, 2)
+    f.set_checks(f.head_of(2), f.green_runs())
     assert mo.overlap(f.work, "refs/pr/2", "refs/remotes/origin/main").kind == mo.CLEAR
-    allowed = fx.run_shim(project, fx.merge_payload(2), cwd=tmp_path)
+    allowed = fx.run_shim(project, fx.merge_payload(2, expectedHeadSha=f.head_of(2)), cwd=tmp_path)
     assert (allowed.returncode, allowed.stderr) == (0, "")
