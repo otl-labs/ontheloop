@@ -120,6 +120,18 @@ def test_bounded_models_compare_as_bounds() -> None:
         assert _run(refs, stored, lower).counts == {"stored_ledger_bound_exceeded": 1}, cls
 
 
+def test_the_side_query_bound_compares_stored_rows_as_a_bound() -> None:
+    refs, stored = _two()
+    higher = _finding(
+        "ledger_bounded_side_query", ledger={"input": 100, "output": 200, "cache_read": 300, "cache_creation": 400}
+    )
+    assert _run(refs, stored, higher).counts == {"stored_ledger_bounded": 1}
+    equal = _finding("ledger_bounded_side_query")
+    assert _run(refs, stored, equal).counts == {"stored_ledger_bounded": 1}
+    above = {**stored, "b/model_call": [_row("b/model_call", tokens_input=6)]}
+    assert _run(refs, above, equal).counts == {"stored_ledger_bound_exceeded": 1}
+
+
 def test_a_ledger_alarm_is_not_compared_again() -> None:
     refs, stored = _two()
     for cls in ("ledger_input_class_mismatch", "ledger_output_excess", "ledger_model_unexplained", "ledger_auxiliary_only"):
