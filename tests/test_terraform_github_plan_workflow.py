@@ -115,6 +115,7 @@ class TestWorkflowAndTaxonomy:
         assert "terraform/github" in row["code_vs_infra"]
         gating = row["apply_gating"]
         assert "terraform-github-plan.yml" in gating and "NEVER auto-apply" in gating and not gating.startswith("admin-only")
+        assert "rec-4638" in gating
 
     def test_admin_root_gate_does_not_derive_github(self) -> None:
         from scripts.checks.verification import validate_admin_root_premerge_gate as gate
