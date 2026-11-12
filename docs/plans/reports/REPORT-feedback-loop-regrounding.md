@@ -10,7 +10,8 @@
 > (section 16). Nothing here is built, ratified, flipped or closed. Section 17 separates three kinds of row: the
 > operator's rulings in this re-grounding (R), the operator's rulings relayed on the coordinator log (X), and
 > proposals shown to the operator with notice but not asked (S), which are not rulings and not precedent. Every R
-> and X row except R4 (about this report itself) names a rec as its durable home; this report is the snapshot.
+> row except R4 (about this report itself) names a rec as its durable home; X rows name the coordinator log entry
+> and a rec where one fits; this report is the snapshot.
 > Section 11's readings are not rulings: each one's home is the Decision or design it cites.
 
 Evidence base and claim marks:
@@ -58,13 +59,15 @@ Evidence base and claim marks:
 6. **The loop record journal (CD.47) is shared and PROD-only.** Decisions 221 cl.7, 231 and 235 and CD.47-r1 put
    loop records, init attempts (rec-4388), persona-eval runs, shadowed-check verdicts and operator decisions in one
    journal. The append kernel cannot write it (rec-5077). SIT resets weekly and event verbs refuse off the PROD data
-   path (Decision 252), so the journal lives in PROD.
-7. **"One filer" has a dated exception.** Two machine filing paths are live: ci-rca, the only caller of the
-   portal's fingerprint backstop, and `scripts/rec_episode.py`, which files, updates and closes recs for the
-   convergence-health, backlog-health, cost-reconciliation, telemetry-verification and capacity alarms. The operator
-   ruled that both stay separate filers, a dated exception revisited when the loop's filer is planned, on condition
-   that the loop's filer reuses their dedupe and adds no third (X2, section 7) **[reported]**. This report reads it as
-   outside Decision 221 cl.7's scope (the clause binds the loop and the product to one filer).
+   path (Decision 252), so the journal lives in PROD. Decision 241 cl.4 adds coordination events (work-item notes)
+   to the same journal.
+7. **"One filer" has a dated exception.** Several machine filers are live. The two families the question named are
+   ci-rca, the only caller of the portal's fingerprint backstop, and `scripts/rec_episode.py`, which files, updates
+   and closes recs for the convergence-health, backlog-health, cost-reconciliation, telemetry-verification and
+   capacity alarms. The operator ruled that both stay separate filers, a dated exception revisited when the loop's
+   filer is planned, on condition that the loop's filer reuses their dedupe and adds no third (X2, section 7)
+   **[reported]**. Other direct `file_rec` callers, such as the hourly security detector probe, are not covered by
+   X2. Whether X2 needs a numbered Decision is open (section 16).
 8. **The allow-list's premises moved again**: 19 closed vocabularies, not 15; no `enforced: false` flags; its column
    inventory no longer matches; Decision 221 cl.1 keeps `cost_usd` out of any crossing set.
 9. **New since October and since the 2026-11-10 draft** (section 1): Decisions 249, 250, 252, 253 and 254; two
@@ -242,9 +245,10 @@ bring the dependency back.
   never restated" needs one, or a pinned literal **[repo]**.
 - The register counter built on this component (`visibility_consistency`) is constant 1.0 on stored rows, because
   the writer rejects none-with-tokens **[repo; review]**.
-- The drift monitor's substrate exists: the telemetry-verification workflow runs reader verbs daily, alarm-not-gate,
-  watched under Decision 250 cl.3 (ROADMAP T3.20 c3 met; .github/workflows/telemetry-verification.yml). The drift
-  check rides it **[repo]**.
+- The drift monitor's substrate exists (CI Reform's #2009 plan adds a bot-refusal guard to its workflow, and to this
+  workspace's other telemetry workflows, in its PR 2): the telemetry-verification workflow runs reader verbs daily,
+  alarm-not-gate, watched under Decision 250 cl.3 (ROADMAP T3.20 c3 met;
+  .github/workflows/telemetry-verification.yml). The drift check rides it **[repo]**.
 
 **Not built:** the verb, the five derived session fields and the observation field (Class A field adds with no
 physical column), the response-shape home (delib-q4, operator), the drift check, durable per-day history (rec-4438;
@@ -296,9 +300,12 @@ timestamps (Decision 207 grain); seeds that break a write rule can only be repla
 **Not built:** the register table, its daily series, the drill log and the verdict job.
 
 **Waits on:** CD.46 and CD.47 (operator); capture-q1 and the review-load envelope (operator); the series home (R2,
-rec-5077) and rec-5080 for its version key; history depth (28 clean days, about 2026-11-29 counted in total, section
-0) and window reach for the seed read; rec-4233 for sensor liveness of a scheduled register job (the CI Reform
-workspace's by the operator's choice, in planning there) **[reported]**.
+rec-5077), and rec-5080 if the series is keyed on an integer verb version (open, section 8); history depth (28 clean
+days, about 2026-11-29 counted in total, section 0) and window reach for the seed read. rec-4233 (the CI Reform
+workspace's by the operator's choice) does not cover a register job yet: its plan (#2009) registers exactly three
+workflows (terraform-drift, convergence-health and main-canary) in
+config/lambda/scheduled_workflow_dispatcher/schedules.yaml, so a scheduled register job gets on-time dispatch only if
+a row is added there **[reported; repo]**.
 
 **Overlap:** a register alarm route ends at the alert address (rec-3904, the Property Transfer workspace's)
 **[inferred]**.
@@ -315,10 +322,12 @@ attributed ledger, a verdict per line; dollars derived at read.
 allowance, local or unpriced (ducklake_event_read_verbs.py:127-139; ducklake_event_read_sql.py:250-262), and the
 token rollups (`model_usage_rollup`, `agent_run_token_rollup`).
 
-**Still holds:** the budget is in physical units (tokens, GB-seconds, bytes, requests) with no price table (proposal
-S5, noted on rec-4031). Cloud sessions are `fixed_non_rollover_allowance`, so they derive no dollars; Decision 221
-cl.1 makes "dollars derive at read and are never stored or published" Decided and names "tokens and GB-seconds per
-verified merge" a PROCESS metric, and cl.5 publishes tokens and GB-seconds, never dollars.
+**Still holds:** budget-k3 (a), accepted by the operator on 2026-10-04: physical units per line (tokens, GB-seconds,
+bytes, requests), priced at read (REPORT-w3:590); staged CD.50 says dollars are derived when read from a versioned
+price table (REPORT-w3:375-382). The price table is rec-4031 (Low, post-MVP). Cloud sessions are
+`fixed_non_rollover_allowance`, so they derive no dollars; Decision 221 cl.1 makes "dollars derive at read and are
+never stored or published" Decided and names "tokens and GB-seconds per verified merge" a PROCESS metric, and cl.5
+publishes tokens and GB-seconds, never dollars.
 
 **Stale, with the corrected anchor:**
 - The model inputs (52 KB per turn, four requests per pass) predate parser v2's single-request append; the writer
@@ -337,16 +346,18 @@ verified merge" a PROCESS metric, and cl.5 publishes tokens and GB-seconds, neve
   :606), its calibration is the monthly Neon invoice and budget-k4 (b) is a read-only Neon key (REPORT-w3:591). Those
   premises go; the envelope and its calibration need a new source once the RDS catalog runs **[repo; source not
   chosen]**.
-- telemetry_observations.yaml's `cost_usd` text still says "MVP static price table, rec-4031" (:256-260), which
-  S5 would contradict; rec-4031's 2026-11-12 note asks the next contract amendment to align it **[repo + recs]**.
+- telemetry_observations.yaml's `cost_usd` text still says "MVP static price table, rec-4031" (:256-260), while
+  rec-4031 is post-MVP; rec-4031's 2026-11-12 note asks the next contract amendment to align the two
+  **[repo + recs]**.
 
 **Not built:** the register, ledger and verdict; the price table (rec-4031, Low, post-MVP); a scheduled egress
 reading; loop-owned model call marking.
 
 **Waits on:** CD.50 (re-seeded after Decision 253) and budget-q2 (operator); rec-4706; rec-4734 (cost
 reconciliation has never run, High), because c3 shows the prior month's reconciliation residual beside the register
-**[recs]**. Under S5, a price table returns only if a metered lane joins this loop's budget. C12's effective-dated
-price is contract text only (section 2).
+**[recs]**. Proposal S5 is about timing only: rec-4031 stays post-MVP until a metered lane joins this loop's
+budget, and until then pricing at read returns allowance or unpriced, never a 0. It does not reverse budget-k3 (a)
+or CD.50. C12's effective-dated price is contract text only (section 2).
 
 **Overlap:** storage cost (rec-4729) is the Cost Optimisation workspace's per the operator (2026-10-29). rec-4734's
 context points cost reconciliation to an AWS cost project the operator is setting up; which workspace that is was
@@ -361,8 +372,8 @@ metered lane, with their own spend guard (rec-5021); persona-eval spend is its o
 **What the design asked:** one fingerprinted rec per (detector, subject, window) finding; file, update, hold or
 suppress against the open rec; covered_by links; a run record per run; T3.3's "files anomaly recs".
 
-**Built** **[repo]**: no loop filer. Two machine filing paths are live, and every write goes through the one portal
-(scripts/ops_data_portal.py; AGENTS.md Single Portal Invariant):
+**Built** **[repo]**: no loop filer. Several machine filers are live, and every write goes through the one portal
+(scripts/ops_data_portal.py; AGENTS.md Single Portal Invariant). The two families X2 names:
 - ci-rca (.github/workflows/ci-rca.yml, scripts/ci_rca/), the only caller of the portal's fingerprint dedupe
   backstop, which is keyed to `source == "ci_rca"` (scripts/ops_data_portal.py:315-332).
 - `scripts/rec_episode.py` (`find_recs`, `decide`, `run_episode`, :70-236): a scoped read of open recs by source,
@@ -411,16 +422,21 @@ What this changes for the design:
   `sha256(salt, detector_id, subject_key)` (REPORT-w1-rec-filing-dedupe.md:30-36, :111-116, :547). Whether that
   generalisation counts as reusing the existing dedupe or as a third one is the filer plan's first reading under
   X2. This report does not settle it.
-- Its route. cl.7's own source says the product gets "not a third mechanism, and likewise one allow-list, one
-  journal and one filer" (REPORT-showcase-product-and-rsi-proof.md:238-241): the product shares the loop's filer.
-  Read that way, ci-rca and rec_episode were never inside cl.7, and X2 is a scope reading that a note on rec-4388
-  (cl.7's coverage home) can carry under docs/contracts/decision-entry.yaml's routing rule. If the operator means an
-  exception to the clause itself, an annotation cannot change a ratified clause (Decision 254's own routing
-  justification), so it needs a numbered Decision. This report records X2 as the scope reading and lists the route
-  for the operator (section 16).
-- Staged CD.50 already gives the loop two rec writers, the filer and cost reconciliation's existing rec path, each
-  with its own dedupe (REPORT-w3:396-398). scripts/cost_reconciliation.py is a rec_episode caller, so that row fits
-  X2's condition.
+- Other filers. Machine code also calls `file_rec` directly outside those two families, for example the hourly
+  security detector probe (.github/workflows/security-detector-liveness.yml; scripts/ci/security_detector_probe.py,
+  source `security_detector_stale`, its own dedupe on run transitions) and ci-rca's probe-health filer
+  (scripts/ci_rca/probe_health.py). A grep of `file_rec` callers lists more, not classified here. X2 as relayed does
+  not cover them.
+- Its route, which is this report's reading and not part of the ruling. On 2026-10-04 the operator had already given
+  the loop a second rec writer: a budget breach files through cost reconciliation's existing rec path, not the
+  filer (q2, REPORT-w3:548; staged CD.50, REPORT-w3:396-398), and that path is a rec_episode caller
+  (scripts/cost_reconciliation.py:389-399). Decision 221 cl.7 (2026-10-17) did not revisit it; its source says the
+  product shares the loop's mechanisms, "likewise one allow-list, one journal and one filer"
+  (REPORT-showcase-product-and-rsi-proof.md:238-241). So cl.7's "one filer" reads as one detector filer for the
+  loop and the product, not one rec writer, and ci-rca and rec_episode sit beside it; recorded that way, a note on
+  rec-4388 (cl.7's coverage home) carries X2 under docs/contracts/decision-entry.yaml's routing rule. If the
+  operator means an exception to the clause itself, an annotation cannot change a ratified clause (Decision 254's
+  own routing justification), so it needs a numbered Decision. The operator chooses (section 16).
 
 ---
 
@@ -448,8 +464,9 @@ that amendment was not read against a telemetry verdict **[partial]**.
   `lines_added`, `lines_removed`, `scope_drift_files`, and `rec_id` on observations and transcripts
   (telemetry_sessions.yaml realization.unproduced; telemetry_observations.yaml:472; telemetry_transcripts.yaml:339).
   Decision 221 cl.1's "per verified merge" metrics need the same join. Ruling R1: `rec_ids` stays held until
-  back-validation is planned, which chooses a merge-time annotate producer or a client-side trailer join (one
-  already walks the trailers: scripts/telemetry_verify/session_presence.py); a reader verb cannot derive it,
+  back-validation is planned, which chooses a merge-time annotate producer or a client-side trailer join
+  (scripts/telemetry_verify/session_presence.py already walks Claude-Session trailers, and scripts/rec_trailer.py
+  parses Resolves trailers); a reader verb cannot derive it,
   because the trailers live in git. Proposal S6: decide the other nine at the same planning, by the same
   reasoning. Both routes miss sessions that never merge (rec-4606 note).
 - The ancestry test itself is client-side too: a fix C reaches a segment when C is an ancestor of
@@ -483,11 +500,14 @@ a ratio; insert-only, with a restatement as a new row; written after a lateness 
 versions; a sample re-derivation as a drift check). Round 2 of this plan's review found that the shape leans on
 things that do not exist, so these points are open for that Decision and rec-5077's design **[repo]**:
 - Gating. data-modeling-standard.yaml's derived-state rule makes materialization "a distinct, separately-gated
-  decision owned by tier_item T2.52 clause 1", and T2.52 is deferred post-MVP. Decision 199's 2026-11-03 Update says
-  a materialized aggregate waits on the derived-read-too-costly condition, which rec-4833 watches. That condition is
-  about latency; R2's reason is reproducibility (long inputs cannot be re-read as judged). Under Decision 93 a live
-  T3.3 or T3.4 cannot lean on deferred T2.52, so the amending Decision either reactivates T2.52 c1 or rehomes the
-  write mode, and says how it relates to rec-4833.
+  decision owned by tier_item T2.52 clause 1", and T2.52 is deferred post-MVP. Under Decision 93 a live T3.3 or T3.4
+  cannot lean on a deferred item, so the amending Decision either reactivates T2.52 c1 or rehomes the write mode.
+  T2.52's own activation trigger names "telemetry lands on DuckLake (T2.36)", and T2.36 is complete, so reactivation
+  is a status restore once a real consumer asks. Decision 199's general gate for materialization is its
+  derived-read-too-costly reversal condition, which is about latency; R2's reason is reproducibility (long inputs
+  cannot be re-read as judged), so the Decision states that reason itself. Decision 199's 2026-11-03 Update applies
+  the same condition to the ops_sessions aggregate, which rec-4833 watches; the amending Decision says how the two
+  relate.
 - Native primitives first. Decision 100 has managed services own their primitives. Longer snapshot retention or
   snapshot-pinned reads are the native alternative to frozen rows, so the amending Decision records why they do not
   serve (Decision 199's 2026-11-03 Update already notes that snapshot retention defeats redaction after the write).
@@ -506,8 +526,9 @@ things that do not exist, so these points are open for that Decision and rec-507
   today would count late arrivals as drift.
 - Producers that are not verbs. rec-4438's monitor counts are re-derived client-side over `session_tree_rows`
   (scripts/telemetry_verify/monitor.py), the budget's daily ledger comes from CloudWatch (REPORT-w1-cost-egress.md),
-  and the register's capture counter and R1's trailer join are computed from git. Either the Decision admits
-  declared non-verb producers, each stamping its own code version, or these series need other homes.
+  and the register's capture counter and R1's trailer join are computed from git. Admitting declared non-verb
+  producers, each stamping its own code version, would widen the ruled "copied from named verbs", so it is a
+  re-ruling for the operator, not a design detail; otherwise these series need other homes.
 - Grain details. A retried write must be a no-op: a supersedes pointer, as CD.47-r1 does, rather than `settled_at`
   in the key. Segments (per tool, real or drill, ladder lane or control arm, Decision 221 cl.3) sit inside
   `metric_id`, because the digest hashes parameter names, not values. "UTC day" is the `session_started_at` day
@@ -632,7 +653,7 @@ The only change across the four runs is deliberation VP 3, which runs since mcp 
 
 | Component | Steps run | Pass | Differs from the pinned literal (what moved) | Did not finish |
 |---|---|---|---|---|
-| friction | VP 1, 2, 4, 5, 6 | 2, 6 | VP 1 raises `TypeError` (`build_observations` now needs `sidecars`, #1405). VP 4: registered hooks in .claude/settings.json 13 to 21; none falls back to `hook:PreToolUse.Bash` (the plugin hooks' fallbacks are in section 3). VP 5: rework and exception inputs widened to the k2 set | - |
+| friction | VP 1 (by hand: the suite skips it on a skip word in its fixture text), 2, 4, 5, 6 | 2, 6 | VP 1 raises `TypeError` (`build_observations` now needs `sidecars`, #1405). VP 4: registered hooks in .claude/settings.json 13 to 21; none falls back to `hook:PreToolUse.Bash` (the plugin hooks' fallbacks are in section 3). VP 5: rework and exception inputs widened to the k2 set | - |
 | deliberation | VP 1-5 | 4, 5 | VP 1: parser_version 2 to 9; diagnostics also count `absent_usage_key`. VP 2: parser 9; `reasoning_effort` joined the reasoning fields; LiteLLM tier 1 is `['deepseek/deepseek-flash']`, was `['deepseek/deepseek-chat', 'deepseek/deepseek-reasoner']` (#1969). VP 3: with mcp 2.3.0 (#1984, rec-3795 closed) it runs and prints the pinned behaviour (reasoning content returned, echoed back, a single-space placeholder when stripped under explicit thinking) on litellm 1.106.2, not the pinned 1.102.1 | - |
 | Goodhart register | VP 2-5 | 3, 5 | VP 2: two failure_signal readers exist (was 0); `drill_markers=0` because the probe misses `ops_projects.purpose` | VP 4 (over 200 s) |
 | cost and egress | VP 2-5 | 3, 5 | VP 2: a telemetry catalog-stats alarm exists (`tf_catalog_stats_lines` 0 to 1); capture hooks include SessionEnd, Stop, StopFailure and UserPromptSubmit | VP 4 (over 200 s) |
@@ -656,7 +677,7 @@ Three long runs did not finish and were not retried **[partial]**.
 | 4 | reader-q2 shadow re-derivation | Done in slice 4 | rec-4025 closed |
 | 5 | DQ-monitor substrate | Exists (telemetry-verification workflow); drift check unbuilt; durable per-day counts are rec-4438, stored under R2 only once its amending Decision exists, and the monitor is not a verb (section 8) | deliberation build; rec-4438 |
 | 6 | Self-describing gate markers | Done | rec-4172 closed |
-| 7 | MVP price map | Not needed for this loop if S5 stands: `cost_source` exists, no price table; the budget is in physical units | rec-4031 (post-MVP, S5 note) |
+| 7 | MVP price map | Priced at read stands (budget-k3 (a), CD.50); `cost_source` exists; the table itself can wait for a metered lane (S5, proposed) | rec-4031 (post-MVP, S5 note) |
 | 8 | `input_key` | Producer field at the next parser bump (S3, proposed) | rec-5079 |
 | 9 | Ops homes (close_proposed, covered_by, close time, fix attempt) | Unbuilt | rec-5078 |
 | 10 | Producer diagnostics storage; deliberation loss counter; transcript-read access log and retention | Diagnostics storage, rejection record and halt signal on rec-4026; access log and 90-day window built (Decision 239 cl.4); text retention rec-4698; loss counter with the LiteLLM producer | rec-4026; rec-4698; rec-4028 note |
@@ -676,22 +697,24 @@ plus a read of rec-5040 to rec-5089 (2026-11-11) **[recs]**. Each id was read ba
 | rec-5077 | Design the loop record journal's writer: generalised kernel or dedicated verb; covers verdict records and, once its amending Decision exists, R2's settled kind | Medium | draft P2; R2 note |
 | rec-5078 | Ops homes: covered_by and fix_attempt stamps, close-time read, durable close_proposed | Medium | draft P3 |
 | rec-5079 | `input_key` on claude_code tool_call rows at the next parser bump | Low | draft P6; S3 |
-| rec-5080 | Integer version per event verb beside the digest, lockstep check; a wave 3 prerequisite; the digest's scope to narrow first | Low | S1; R2 note |
+| rec-5080 | Integer version per event verb beside the digest, lockstep check; a wave 3 prerequisite if R2's series is keyed on it; the digest's scope to narrow first | Low | S1 |
 | rec-5097 | Friction G1 absorb with absorbed count; G2 NULL-name closes out of repeat runs; classifier_version 2 | Medium | draft P5; R3 |
 | rec-4706 (note) | `component` stamp on the telemetry reader's request line | - | draft P4, folded |
 | rec-4606 (note) | `rec_ids` held until back-validation planning (R1); the other nine decided there (S6, proposed); the named gate list (S4, proposed; rec-4913 closed, rec-4914 declined; CD.46, 47, 48, 50, 51); this report's path | - | R1, S4, S6 |
 | rec-4438 (note) | The monitor's per-day counts become rows of R2's settled kind only once the amending Decision exists, and only if it admits a non-verb producer; the acceptance below is stale | - | R2 |
 | rec-5077 (note) | R2 as ruled, its precondition, and the open design points of section 8 | - | R2 |
 | rec-4388 (note) | The one-filer dated exception and its no-third-dedupe condition, at Decision 221 cl.7's coverage home | - | X2 |
-| rec-4696 (note) | Technical dependency only: the deliberation verb reads no content; the gate still holds | - | S2 |
-| rec-4031 (note) | Post-MVP stands: the budget is in physical units, no price table; the contract's `cost_usd` wording to align; a proposal shown with notice, not a ruling | - | S5 |
-| rec-4028 (note) | Owner the Agents in GitHub workspace; reasoning mapping reviewed here; loss counter | - | R5 |
+| rec-4696 (note) | Technical dependency only: the deliberation verb reads no content; the gate still holds; a proposal shown with notice, not a ruling | - | S2 |
+| rec-5079 (note) | Its parser-bump timing is a proposal shown with notice, not a ruling | - | S3 |
+| rec-4031 (note) | Post-MVP stands until a metered lane joins this loop's budget; budget-k3 (a) and CD.50's priced-at-read clause stand; the contract's `cost_usd` wording to align; a proposal shown with notice, not a ruling | - | S5 |
+| rec-4028 (note) | Owner the Agents in GitHub workspace (ruling of 2026-11-11); reasoning mapping reviewed here; loss counter | - | R5 |
 
 Not filed: draft P1 (derive `rec_ids` at read), withdrawn by R1. Hygiene, not done, for whoever next touches these
 recs: rec-4026's title still names the friction classifier, which is built; rec-5077's acceptance test presumes its
 option (a) (a generalised kernel) although the rec asks for a choice between (a) and (b); rec-4438's acceptance
-(`test -f docs/contracts/telemetry-verification-results.yaml`) contradicts its note; rec-5080 is Low but is a wave 3
-prerequisite, so its priority is for wave 3 planning.
+(`test -f docs/contracts/telemetry-verification-results.yaml`) presumes a separate results table, which R2 may
+replace if its amending Decision admits the monitor; rec-5080 is Low but may be a wave 3
+prerequisite (if R2's series is keyed on it), so its priority is for wave 3 planning.
 
 ---
 
@@ -704,9 +727,9 @@ Earliest seed dates assume no new capture gap (section 0): counting clean days i
 |---|---|---|---|
 | 2 | friction classifier | per-session verb, rules, classifier_version, vectors | rec-4605, rec-4959, rec-5097 (this workspace); rules guard; unmapped-share window verb; rec-4474 for windows; c3 label review (operator) |
 | 2 | deliberation capture | inputs write-enforced; monitor home | field adds and text-bearing marker (this workspace); delib-q4 (operator); verb build; rec-4028 for the LiteLLM lane (Agents in GitHub) |
-| 3 | Goodhart register | drill identity, real-only windows, arrival oracle (merged sessions only) | CD.46, CD.47, capture-q1, review-load envelope (operator); R2's amending Decision; rec-5077 and rec-5080 for the series key; 28 clean days and seed windows; rec-4233 for liveness (CI Reform) |
+| 3 | Goodhart register | drill identity, real-only windows, arrival oracle (merged sessions only) | CD.46, CD.47, capture-q1, review-load envelope (operator); R2's amending Decision; rec-5077, and rec-5080 if the series key is an integer verb version; 28 clean days and seed windows; rec-4233 for liveness (CI Reform) |
 | 3 | cost and egress budget | writer attribution, blob meters, token rollups, cost verb (no price) | CD.50 re-seeded after Decision 253, budget-q2 (operator); rec-4706; catalog_stats schedule and filter; rec-4734 |
-| 3 | rec filer | two machine filing paths (ci-rca with the fingerprint backstop; rec_episode) | CD.47 (operator); rec-5077, rec-5078; subject window verb; W3-2, W3-6 (operator); the X2 reading of W1's fingerprint (section 7) |
+| 3 | rec filer | machine filers outside the loop (ci-rca with the fingerprint backstop; rec_episode; direct `file_rec` callers) | CD.47 (operator); rec-5077, rec-5078; subject window verb; W3-2, W3-6 (operator); the X2 reading of W1's fingerprint (section 7) |
 | 4 | back-validation | checkout columns, read_version, rec-4592 | CD.48, CD.47, backval-q1, backval-q2 (operator); rec-4426, rec-4641, rec-4963, rec-5056; R1's choice; rec-5078; the filer; 57 clean days |
 | 4 | maturity ladder | classifier_version, read_version digest | CD.46, CD.47, P7, fixture fate (operator); rec-5080 after the digest's scope narrows; settled series (R2's amending Decision); 30 clean days; a restart key per lane, not parser_version |
 | 4 | allow-list transport | write-enforced vocabularies | CD.51, k1-k4, W3-4, allow-q2 (operator, always-ask); rec-4141 post-MVP |
@@ -733,16 +756,19 @@ workspace tells it, on the coordinator log, that T3.4 is near (X1) **[reported]*
   after Decision 253 (section 6).
 - **R2's amending Decision**, filed with CD.47: it amends Decision 199 cl.1, re-drafts CD.47's "derived-at-read
   state" and grain, says how it relates to T2.52 c1 (deferred) and rec-4833's derived-read-too-costly watch, limits
-  `metric_id` (no dollars, no recursive aggregates, no operator-decision metrics), and decides whether producers that
-  are not verbs (the monitor, the CloudWatch ledger, git-side counters) may write settled rows. The other design
-  points in section 8 follow in rec-5077's design.
+  `metric_id` (no dollars, no recursive aggregates, no operator-decision metrics), and records why native snapshot
+  retention or snapshot-pinned reads do not serve (Decision 100). Whether producers that are not verbs (the monitor,
+  the CloudWatch ledger, git-side counters) may write settled rows widens the ruled "copied from named verbs", so it
+  is a re-ruling for the operator. The other design points in section 8 follow in rec-5077's design.
 - **Confirm or reverse the proposals S1-S6** (section 17). Each was shown with notice and not asked, so none is a
-  ruling or a precedent until the operator answers. S5 is a spend fork, which always asks, and reads against
-  Decision 217 cl.4 (dollars derive via the telemetry contract's effective-dated price table).
-- **Confirm X1 and X2 in this workspace, and X2's route** (section 7). Both were relayed by another workspace, not
-  heard here; Decision 241's "a note carries no authority" applies until the operator confirms them. X2 is recorded
-  as a scope reading of Decision 221 cl.7 (no numbered Decision needed); an exception to the clause itself would
-  need one.
+  ruling or a precedent until the operator answers. S5 touches spend reporting, so it always asks; it keeps
+  budget-k3 (a) and CD.50's priced-at-read clause and Decision 217 cl.4 (dollars derive via the telemetry
+  contract's effective-dated price table), and only defers the table itself.
+- **Confirm X1 and X2 in this workspace, and choose X2's route** (section 7). Both were relayed by another workspace,
+  not heard here. The log entries' own footer says approvals come from the operator's own words in the acting thread,
+  and Decision 241 cl.4 ("a note carries no authority") points the same way by analogy. This report reads X2 as
+  outside Decision 221 cl.7 (one detector filer, not one rec writer), which a rec-4388 note can carry; an exception to
+  the clause itself would need a numbered Decision.
 - **capture-q1** (the register's capture denominator): Decision 250's oracle sees merged sessions only (section
   5). W2 calls this the loop's critical path. With it, **W2's review-load envelope** (about 60 reviews a day,
   REPORT-w2-feedback-loop-synthesis.md:19-27), not re-grounded here.
@@ -770,17 +796,17 @@ confirms it (section 16).
 | Id | Ruling or proposal | Date | Home |
 |---|---|---|---|
 | R1 | `rec_ids` stays unproduced under `held:feedback-loop-gate` until back-validation is planned; that plan picks a merge-time annotate producer or a client-side trailer join; read-time derivation rejected (trailers live in git) | 2026-11-12 | rec-4606 note |
-| R2 | The loop record journal keeps its verdict records plus frozen daily rows copied from named verbs, the loop's series source. This needs a numbered Decision amending Decision 199 cl.1, filed with CD.47; nothing is stored before it exists. The shape and its open points are in section 8. The first ruling (plain settled rows) was re-asked the same day because it clashed with Decision 199 cl.1 and staged CD.47; an independent advisor recommended this form | 2026-11-12 | rec-4438, rec-5077 notes; rec-5080 note (wave 3 prerequisite) |
+| R2 | The loop record journal keeps its verdict records plus frozen daily rows copied from named verbs, the loop's series source. This needs a numbered Decision amending Decision 199 cl.1, filed with CD.47; nothing is stored before it exists. The shape and its open points are in section 8. The first ruling (plain settled rows) was re-asked the same day because it clashed with Decision 199 cl.1 and staged CD.47; an independent advisor recommended this form | 2026-11-12 | rec-4438, rec-5077 notes |
 | R3 | Friction G1: absorb the tool_error into the gate label, and report the absorbed count | 2026-11-12 | rec-5097 |
 | R4 | This report is a dated snapshot; lasting rulings live in recs | 2026-11-11 | this section (about this report only) |
 | R5 | rec-4028 (LiteLLM producer) is the Agents in GitHub workspace's; this workspace reviews its reasoning mapping | 2026-11-11 | rec-4028 note |
-| X1 | T1.13 is the CI Reform workspace's, which plans its close-out when this workspace says T3.4 is near; T1.13 c2's back-validation is ci-rca's own `ops_data_portal --back-validate`, not this loop's; rec-4233 is CI Reform's; rec-4696 is this workspace's and, as a terraform/bootstrap change, waits its turn behind any other merged but unapplied bootstrap change | 2026-11-12 | coordinator log; rec-4606 note (gate) |
-| X2 | ci-rca and every rec_episode filer stay separate filers, recorded as a dated exception and revisited when the loop's filer is planned; the loop's filer reuses their dedupe and adds no third. Read here as outside Decision 221 cl.7's scope, which needs no numbered Decision (section 7) | 2026-11-12 | rec-4388 note |
+| X1 | T1.13 is the CI Reform workspace's, which plans its close-out when this workspace says T3.4 is near; T1.13 c2's back-validation is ci-rca's own `ops_data_portal --back-validate`, not this loop's; rec-4233 is CI Reform's; rec-4696 is this workspace's and, as a terraform/bootstrap change, waits its turn behind any other merged but unapplied bootstrap change (#1987's apply was still pending at 20:35Z on 2026-11-12) | 2026-11-12 | coordinator log; rec-4606 note (gate) |
+| X2 | ci-rca and every rec_episode filer stay separate filers, recorded as a dated exception and revisited when the loop's filer is planned; the loop's filer reuses their dedupe and adds no third. The route (scope reading or numbered Decision) is open (section 16) | 2026-11-12 | coordinator log; rec-4388 note |
 | S1 | Integer verb versions beside the digest (the digest's scope to narrow first, section 8) | 2026-11-11 | rec-5080 |
 | S2 | As a technical dependency, the content reader deploy is needed only for forensic deliberation reads; the operator's gate is unchanged | 2026-11-11 | rec-4696 note |
 | S3 | Producer `input_key` at the next parser bump | 2026-11-11 | rec-5079 |
 | S4 | The gate's named list is the operator's 2026-11-10 list | 2026-11-11 | rec-4606 note |
-| S5 | The budget is kept in physical units (tokens, GB-seconds, bytes, requests) with no price table; rec-4031 stays post-MVP | 2026-11-11, changed 2026-11-12 | rec-4031 note |
+| S5 | rec-4031's versioned price table stays post-MVP until a metered lane joins this loop's budget; budget-k3 (a) (physical units, priced at read) and CD.50's priced-at-read clause stand | 2026-11-11, changed 2026-11-12 | rec-4031 note |
 | S6 | The nine other held session-to-merge columns (`plan_slug`, `pr_url`, `ci_outcome`, `files_changed`, `lines_added`, `lines_removed`, `scope_drift_files`, and `rec_id` on observations and transcripts) are decided at back-validation planning with `rec_ids` | 2026-11-12 | rec-4606 note |
 
 ---
