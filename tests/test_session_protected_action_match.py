@@ -414,3 +414,9 @@ def test_entry_point_reads_bind_to_their_scripts() -> None:
         assert names == set(declared_names), entry
         assert {p for p in profiles if p in admins} == ({declared[entry]} if entry in declared else set()), entry
     assert set(declared) <= set(reads)
+
+
+def test_option_value_reads_both_flag_forms() -> None:
+    assert match._option_value(["aws", "--profile", "p"], ("--profile",)) == "p"
+    assert match._option_value(["aws", "--profile=p"], ("--profile",)) == "p"
+    assert match._option_value(["aws", "--profile"], ("--profile",)) is None
