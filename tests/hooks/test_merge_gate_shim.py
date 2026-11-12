@@ -37,8 +37,12 @@ def project(base: Path, tmp_path: Path) -> Path:
     return dest
 
 
+def _head(project: Path) -> str:
+    return fx.git(project, "ls-remote", "origin", "refs/pull/1/head").split()[0]
+
+
 def _run(project: Path, payload: str | None = None, **kw):  # noqa: ANN003, ANN202
-    return fx.run_shim(project, payload or fx.merge_payload(1), cwd=project, **kw)
+    return fx.run_shim(project, payload or fx.merge_payload(1, expectedHeadSha=_head(project)), cwd=project, **kw)
 
 
 def test_non_merge_payload_exits_zero_without_python(project: Path) -> None:
@@ -107,7 +111,7 @@ def test_planted_stdlib_name_is_not_loaded(project: Path, tmp_path: Path) -> Non
     marker = tmp_path / "planted"
     (project / ".claude/hooks/json.py").write_text(f"open({str(marker)!r}, 'w').close()\n", encoding="utf-8")
     (project / "json.py").write_text(f"open({str(marker)!r}, 'w').close()\n", encoding="utf-8")
-    r = fx.run_shim(project, fx.merge_payload(1), cwd=project)
+    r = fx.run_shim(project, fx.merge_payload(1, expectedHeadSha=_head(project)), cwd=project)
     assert r.returncode == 0 and not marker.exists()
 
 
