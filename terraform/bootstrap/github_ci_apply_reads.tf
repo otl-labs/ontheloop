@@ -93,6 +93,10 @@ locals {
           # precedent as the trusted-plan entry above): the terraform/github PR-plan role is created by a
           # gated apply that reads it back, so this applies before that create merges.
           "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-trusted-github-plan",
+          # Pre-staged ahead of the role's own creation (PLAN-persona-verdict-credential, the same precedent as the
+          # two trusted-plan entries above): the gated apply that creates the role reads it back, so this applies
+          # before that create merges.
+          "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-persona-verdict",
           "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-catalog-dr",
           "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-writer",
           "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-reader",
