@@ -91,7 +91,7 @@ def _disjuncts(expr: object) -> list[str]:
     return [_strip_parens(d) for d in split_top(_unwrap(str(expr)), "||")] if isinstance(expr, str) else []
 
 
-def triggers(doc: dict[str, Any]) -> set[str]:
+def triggers(doc: dict[Any, Any]) -> set[str]:
     on = doc.get("on", doc.get(True))
     if isinstance(on, str):
         return {on}
@@ -100,7 +100,7 @@ def triggers(doc: dict[str, Any]) -> set[str]:
     return {str(k) for k in on} if isinstance(on, dict) else set()
 
 
-def _upstream_names(doc: dict[str, Any]) -> list[str]:
+def _upstream_names(doc: dict[Any, Any]) -> list[str]:
     on = doc.get("on", doc.get(True))
     wr = on.get("workflow_run") if isinstance(on, dict) else None
     names = wr.get("workflows") if isinstance(wr, dict) else None

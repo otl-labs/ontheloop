@@ -246,3 +246,9 @@ def test_live_designed_refusal_command_uses_only_declared_arguments() -> None:
     assert set(re.findall(r"--[a-z-]+", line)) <= declared
     for arg in declared:
         assert f'"{arg}"' in main_text
+
+
+def test_persona_gate_refusal_ignores_non_dict_job_entries() -> None:
+    payload = _gate_jobs()
+    payload["jobs"].insert(0, "not-a-job")
+    assert is_persona_gate_refusal(payload, _MARKER_LOG)

@@ -130,3 +130,25 @@ def test_triggers_reads_the_true_key_spelling() -> None:
     assert v.triggers(yaml.safe_load("on: [push, workflow_dispatch]\n")) == {"push", "workflow_dispatch"}
     assert v.triggers({True: {"push": None}}) == {"push"}
     assert v.triggers({"jobs": {}}) == set()
+
+
+def test_non_llm_workflow_run_upstream_is_followed(tmp_path: Path) -> None:
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "down.yml").write_text(
+        "name: Down\non:\n  workflow_run:\n    workflows: [Mid]\njobs:\n  j:\n    runs-on: x\n    steps:\n"
+        "      - id: review\n        env:\n          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}\n        run: echo\n",
+        encoding="utf-8",
+    )
+    (wf / "mid.yml").write_text(
+        "name: Mid\non:\n  workflow_run:\n    workflows: [Nowhere]\njobs:\n  j:\n    runs-on: x\n"
+        "    steps:\n      - run: echo\n",
+        encoding="utf-8",
+    )
+    problems, _ = v.check_tree(tmp_path, LIVE)
+    assert any("Nowhere" in p for p in problems)
+
+
+def test_load_workflows_tolerates_malformed_yaml(tmp_path: Path) -> None:
+    (tmp_path / "bad.yml").write_text("a: [unclosed\n", encoding="utf-8")
+    assert v.load_workflows(tmp_path) == {"bad.yml": {}}

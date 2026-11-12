@@ -33,6 +33,7 @@ def test_compute_plane_ids_come_from_the_index() -> None:
     [
         {"env": {"DEEPSEEK_API_KEY": "x"}},
         {"with": {"k": "${{ secrets.ANTHROPIC_API_KEY }}"}},
+        {"with": {"k": ["${{ secrets.ANTHROPIC_API_KEY }}"]}},
         {"run": 'echo "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}" | tool'},
         {"run": 'claude -p "hi"'},
         {"run": "claude --print hi"},
