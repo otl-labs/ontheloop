@@ -21,17 +21,21 @@ session (server restart). The derivation property still holds; freshness is per-
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
-from typing import Any, cast
+from contextlib import AbstractAsyncContextManager
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
-import mcp.types as types
-from mcp.server.lowlevel import NotificationOptions, Server
-from mcp.server.stdio import stdio_server
+import jsonschema
+import mcp_types as types
 
 from scripts.agent_sdk.errors import AgentToolError, map_reader_error
 from src.common.ducklake_reader_client import DuckLakeReader, ReaderInvokeError, make_reader
+
+if TYPE_CHECKING:
+    from mcp.server.lowlevel import Server
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +62,7 @@ def build_tool_registry(verbs: dict[str, dict[str, Any]]) -> list[types.Tool]:
     declares it not agent-facing (a describe without the key projects everything).
     """
     return [
-        types.Tool(name=verb, description=_tool_description(meta), inputSchema=meta["params_schema"])
+        types.Tool(name=verb, description=_tool_description(meta), input_schema=meta["params_schema"])
         for verb, meta in verbs.items()
         if meta.get("agent_facing", True)
     ]
@@ -74,6 +78,42 @@ def _invoke_verb(reader: Any, verb: str, arguments: dict[str, Any]) -> list[dict
         return reader.named(verb, **arguments)
     except ReaderInvokeError as exc:
         raise map_reader_error(exc) from exc
+
+
+def _error_result(text: str, structured: dict[str, Any]) -> types.CallToolResult:
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=text)], structured_content=structured, is_error=True
+    )
+
+
+def _call_tool_result(
+    reader: Any, tool_by_name: dict[str, types.Tool], name: str, arguments: dict[str, Any]
+) -> types.CallToolResult:
+    """Run one tool call and return a CallToolResult on every path.
+
+    A raised exception under mcp 2.x becomes a JSON-RPC -32603 error rather than an isError result, so nothing
+    escapes. Only the AgentToolError family's text reaches the client; any other exception is reported by class
+    name alone (Decision 101).
+    """
+    tool = tool_by_name.get(name)
+    if tool is None:
+        text = f"unknown tool {name!r}: expected one of {sorted(tool_by_name)}"
+        return _error_result(text, {"error_type": "unknown_tool", "message": text})
+    try:
+        jsonschema.validate(arguments, tool.input_schema)
+        rows = _invoke_verb(reader, name, arguments)
+        payload = {"rows": rows, "row_count": len(rows)}
+        text = json.dumps(payload, indent=2)
+    except jsonschema.ValidationError as exc:
+        text = f"Input validation error: {exc.message}"
+        return _error_result(text, {"error_type": "input_validation", "message": text})
+    except AgentToolError as exc:
+        return _error_result(str(exc), {"error_type": type(exc).__name__, "message": str(exc)})
+    except Exception as exc:  # noqa: BLE001 -- class-only text; the exception text may carry a URL or a value
+        return _error_result(
+            f"{name} failed: class={type(exc).__name__}", {"error_type": "internal", "error_class": type(exc).__name__}
+        )
+    return types.CallToolResult(content=[types.TextContent(type="text", text=text)], structured_content=payload)
 
 
 def _default_surface() -> tuple[Any, dict[str, dict[str, Any]]]:
@@ -108,6 +148,8 @@ def create_server(reader: DuckLakeReader | None = None) -> Server:
     routes event verbs by the writer's catalog (scripts/telemetry_capture/read_route.py) and serves every tool through the
     routed reader, or serves the ops tools alone when the event route is unavailable (_default_surface).
     """
+    from mcp.server.lowlevel import Server  # noqa: PLC0415 -- lazy: importing mcp loads mcp.server.stdio, which imports fcntl off Windows
+
     if reader is not None:
         active_reader: Any = reader
         verbs = reader.describe()
@@ -117,23 +159,25 @@ def create_server(reader: DuckLakeReader | None = None) -> Server:
     tools = build_tool_registry(verbs)
     tool_by_name = {tool.name: tool for tool in tools}
 
-    server: Server = Server(SERVER_NAME)
+    async def _list_tools(_ctx: Any, _params: types.PaginatedRequestParams | None) -> types.ListToolsResult:
+        return types.ListToolsResult(tools=tools)
 
-    @server.list_tools()
-    async def _list_tools() -> list[types.Tool]:
-        return tools
+    async def _call_tool(_ctx: Any, params: types.CallToolRequestParams) -> types.CallToolResult:
+        return _call_tool_result(active_reader, tool_by_name, params.name, params.arguments or {})
 
-    @server.call_tool()
-    async def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if name not in tool_by_name:
-            raise AgentToolError(f"unknown tool {name!r}: expected one of {sorted(tool_by_name)}")
-        rows = _invoke_verb(active_reader, name, arguments)
-        return {"rows": rows, "row_count": len(rows)}
-
+    server: Server = Server(SERVER_NAME, on_list_tools=_list_tools, on_call_tool=_call_tool)
     return server
 
 
+def stdio_server() -> AbstractAsyncContextManager[tuple[Any, Any]]:
+    from mcp.server.stdio import stdio_server as sdk_stdio_server  # noqa: PLC0415 -- lazy: importing mcp loads mcp.server.stdio, which imports fcntl off Windows
+
+    return sdk_stdio_server()
+
+
 async def _run_stdio(server: Server) -> None:
+    from mcp.server.lowlevel import NotificationOptions  # noqa: PLC0415 -- lazy: importing mcp loads mcp.server.stdio, which imports fcntl off Windows
+
     async with stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,

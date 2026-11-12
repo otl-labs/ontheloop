@@ -6,9 +6,7 @@ from pathlib import Path
 
 import pytest
 
-jsonschema = pytest.importorskip(
-    "jsonschema", reason="env: jsonschema is a transitive pin (via mcp and litellm), not a direct requirement"
-)
+jsonschema = pytest.importorskip("jsonschema", reason="env: jsonschema absent (a direct requirement since rec-3795)")
 
 from scripts.persona_contracts import load_index  # noqa: E402
 from scripts.persona_contracts.schema import load_yaml  # noqa: E402

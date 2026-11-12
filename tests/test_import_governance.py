@@ -245,14 +245,18 @@ class TestCheckLockfileSync:
         assert pin in Requirement(declaration).specifier, f"declared floor {declaration!r} rejects compiled pin {pin}"
 
     @pytest.mark.parametrize("requirements_file", ["requirements.in", "requirements-fast.txt"])
-    def test_mcp_declaration_rejects_major_two(self, requirements_file: str) -> None:
+    def test_mcp_declaration_rejects_the_next_major(self, requirements_file: str) -> None:
         from packaging.requirements import Requirement
         from packaging.version import Version
 
         declaration = next(
             line for line in Path(requirements_file).read_text(encoding="utf-8").splitlines() if line.startswith("mcp")
         )
-        assert Version("2.0.0") not in Requirement(declaration).specifier
+        pin_line = next(
+            line for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines() if line.startswith("mcp==")
+        )
+        pin = Version(pin_line.split("==")[1].strip())
+        assert Version(f"{pin.major + 1}.0.0") not in Requirement(declaration).specifier
 
     def test_pytz_is_a_direct_requirement_not_a_transitive_survivor(self) -> None:
         """pytz must be DECLARED in requirements.in and pinned in the compiled requirements.txt.
