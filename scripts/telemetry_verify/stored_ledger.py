@@ -35,7 +35,12 @@ _STORED_KEYS = {
     "cache_creation": "tokens_cache_creation",
 }
 _EXACT = ("ledger_exact", "ledger_output_residual_nonfinal")
-_BOUNDED = ("ledger_bounded_compaction", "ledger_bounded_background", "ledger_bounded_auxiliary")
+_BOUNDED = (
+    "ledger_bounded_compaction",
+    "ledger_bounded_background",
+    "ledger_bounded_auxiliary",
+    "ledger_bounded_side_query",
+)
 _UNCOMPARED = ("ledger_auxiliary_only", "ledger_unavailable", *LEDGER_ALARMS)
 
 DECLARED = {
