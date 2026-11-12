@@ -41,6 +41,7 @@ def _bootstrap_texts() -> dict[str, str]:
 def _flex_replace(text: str, old: str, new: str) -> str:
     """Replace old with new in rendered text, tolerating terraform fmt's differing key alignment padding."""
     pattern = r"\s+".join(re.escape(part) for part in old.split())
+    assert re.search(pattern, text), "the block to mutate is absent from the rendered text"
     return re.sub(pattern, lambda _m: new, text, count=1)
 
 

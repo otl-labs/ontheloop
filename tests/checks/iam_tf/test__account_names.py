@@ -70,3 +70,8 @@ def test_suffix_map_and_validation_parsing() -> None:
 def test_name_locals_resolves_nested_locals_and_stops_on_a_cycle() -> None:
     cyc = 'locals {\n  name_suffix = { sandbox = "" }[var.environment]\n  a = "${local.b}"\n  b = "${local.a}"\n}\n'
     assert set(an.name_locals(cyc)) == {"a", "b"}
+
+
+def test_an_explicit_root_without_its_own_file_is_the_identity_not_the_repo_values(tmp_path: Path) -> None:
+    assert an.account_names_files(tmp_path) == []
+    assert an.render("b = local.data_lake_bucket_name", root=tmp_path) == "b = local.data_lake_bucket_name"

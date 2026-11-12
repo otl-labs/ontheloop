@@ -140,6 +140,18 @@ def test_d_the_sit_render_without_the_suffix_is_red(tmp_path: Path) -> None:
     assert any(f.startswith("(d)") and "sit render" in f for f in account_portable_findings(root))
 
 
+def test_d_a_local_reformatted_out_of_the_parsed_form_is_red(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    for rel in ("terraform/bootstrap/account_names.tf", "terraform/personal/account_names.tf"):
+        _edit(
+            root,
+            rel,
+            'data_lake_bucket_name = "agent-platform-data-lake${local.name_suffix}"',
+            'data_lake_bucket_name = join("", ["x"])',
+        )
+    assert any(f.startswith("(d)") and "data_lake_bucket_name" in f for f in account_portable_findings(root))
+
+
 def test_e_a_suffix_map_wider_than_the_validation_is_red(tmp_path: Path) -> None:
     root = _tree(tmp_path)
     for rel in ("terraform/bootstrap/account_names.tf", "terraform/personal/account_names.tf"):

@@ -22,11 +22,9 @@ _INTERP_RE = re.compile(r"\$\{local\.([a-z_]+)\}")
 
 
 def account_names_files(root: Path | None = None) -> list[Path]:
-    """Candidate account_names.tf files, bootstrap first. An explicit root dir is tried before the repo's roots."""
-    found = [root / "account_names.tf"] if root is not None else []
-    for rel in ("bootstrap", "personal"):
-        found.append(_common.ROOT / "terraform" / rel / "account_names.tf")
-    return [p for p in found if p.is_file()]
+    """account_names.tf candidates: only the explicit root's own file when a root is given, else bootstrap then personal."""
+    dirs = [root] if root is not None else [_common.ROOT / "terraform" / rel for rel in ("bootstrap", "personal")]
+    return [d / "account_names.tf" for d in dirs if (d / "account_names.tf").is_file()]
 
 
 def suffix_map(text: str) -> dict[str, str]:
@@ -51,7 +49,10 @@ def name_locals(text: str, env: str = "sandbox") -> dict[str, str]:
         value = raw[name]
         if depth > 8:
             return value
-        return _INTERP_RE.sub(lambda m: suffix if m.group(1) == "name_suffix" else resolve(m.group(1), depth + 1), value)
+        return _INTERP_RE.sub(lambda m: suffix if m.group(1) == "name_suffix" else lookup(m, depth), value)
+
+    def lookup(m: re.Match[str], depth: int) -> str:
+        return resolve(m.group(1), depth + 1) if m.group(1) in raw else m.group(0)
 
     for name in raw:
         resolved[name] = resolve(name)
@@ -62,7 +63,8 @@ def render(text: str, env: str = "sandbox", root: Path | None = None) -> str:
     """Substitute every account-name local reference in text with its value for env.
 
     `${local.<name>}` becomes the value inline; a bare `local.<name>` (optionally parenthesised, as a map key) becomes
-    the quoted value. Every other token is left alone. Identity when no account_names.tf is found.
+    the quoted value. Every other token is left alone.
+    Identity when no account_names.tf is found (an explicit root uses only its own file).
     """
     files = account_names_files(root)
     if not files:
