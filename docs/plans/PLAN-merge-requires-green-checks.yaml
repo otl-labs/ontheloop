@@ -48,8 +48,10 @@ scope:
       merge naming the head whose CI-green wake you received (expectedHeadSha=<sha>)", printing the fetched head;
       the existing equality check stays. enable_pr_auto_merge, which carries no expectedHeadSha, is judged on the
       fetched head. (3) Reads, in order, each GET bounded by min(4 s, remaining) in wall-clock terms (the body is read
-      in chunks against the deadline with a 1 MiB cap, each chunk read re-setting the socket timeout to min(4 s,
-      remaining), since urllib's timeout bounds each socket operation only), no
+      in chunks against the deadline with a 1 MiB cap, checking the remaining budget before each chunk read and
+      denying when it is spent; urllib's timeout bounds each socket operation only, so one chunk read can still
+      take up to 4 s past the deadline (40 + 4 is under the 45 s TERM, the 2 s cleanup then racing it: the shim's
+      kill fails closed, the named residual), and the adapter reaches no private socket attribute), no
       retry, no Authorization header, no credential read, and no tool_input field or variable of the gate's own that
       changes an endpoint or skips the leg: main's ruleset (rules/branches/main?per_page=100; a full page of 100
       rules reads partial, UNAVAILABLE) and the head's check runs
@@ -65,7 +67,9 @@ scope:
       reason> on <sha12>. Fix the check with a new push and wait for its CI-green wake; never merge past a red
       required check (Decision {{N}})"; UNAVAILABLE -> exit 2, "merge-gate: checks: UNAVAILABLE: <reason>; retry the
       merge later, or the operator merges in the GitHub UI". Add `read_checks_verdict(root, owner, repo, sha,
-      seconds=10.0) -> merge_checks.Verdict`, the adapter's read-and-judge seam the VP replay calls. The module
+      seconds=10.0) -> merge_checks.Verdict`, the adapter's read-and-judge seam the VP replay calls. Stdlib
+      modules the leg uses (urllib.request, http.client, socket, time) are imported at module top, before the
+      sys.path insert at line 22, so a same-named file in the project root cannot shadow them. The module
       docstring names rec-4080's predicate as built and keeps rec-4755 and rec-4451 as later predicates. Stays under
       500 SLOC; no override argument or variable.
   - file: tests/fixtures/merge_overlap_repos.py
@@ -82,15 +86,17 @@ scope:
     action: Modify
     purpose: >-
       The nodes that expect a merge_pull_request to be allowed (at planning base 2fc58b50: test_clear_allows_silently,
-      the 2.0 pullNumber node, and the trailer nodes at lines 188 and 197-198) pass expectedHeadSha=f.head_of(n) in
-      their payload, since a merge without it is now refused. No assert line changes, and no node is renamed or
+      the 2.0 pullNumber node, and the trailer nodes with payloads at lines 187 and 197-198) pass the PR head as
+      expectedHeadSha in their payload, since a merge without it is now refused: the module `env` fixture also
+      returns its Fixture under "fixture" (so f.head_of(n) is reachable), or the node reads the head with the line-100
+      pattern fx.git(env["origin"], "rev-parse", "refs/pull/N/head"). No assert line changes, and no node is renamed or
       removed; deny-path nodes are untouched.
   - file: tests/hooks/test_merge_gate_shim.py
     action: Modify
     purpose: >-
       Same edit for the shim nodes that expect a merge payload to pass through (test_clean_pass_through,
-      test_github_actions_env_is_still_gated, test_planted_stdlib_name_is_not_loaded): their default payload names the
-      fixture PR head as expectedHeadSha. No assert line changes; the fail-closed nodes are untouched.
+      test_github_actions_env_is_still_gated, and test_planted_stdlib_name_is_not_loaded, whose explicit
+      fx.merge_payload(1) at line 110 gains it too): their payload names the fixture PR head as expectedHeadSha. No assert line changes; the fail-closed nodes are untouched.
   - file: tests/checks/prose/test_s1_concurrent_merge_premerge.py
     action: Modify
     purpose: >-
@@ -134,7 +140,8 @@ scope:
       urllib.request.urlopen monkeypatched: the request URLs (https://api.github.com/repos/<o>/<r>/rules/branches/main?
       per_page=100 and .../commits/<40hex>/check-runs?per_page=100&filter=all) and no Authorization header on the
       captured Request; 401, 403, 404, 429 and 503 each UNAVAILABLE naming the endpoint and status; unparseable JSON
-      and a body past 1 MiB each UNAVAILABLE; plus a node that the adapter's deadline plus its
+      and a body past 1 MiB each UNAVAILABLE; read_checks_verdict called in process on the file:// fixture gives
+      CLEAR for a green head and REFUSE naming pr-validate for a red one (the seam step 9 uses); plus a node that the adapter's deadline plus its
       cleanup reserve stays below the shim's timeout limit (read from merge_gate.sh, not restated; the existing shim
       node keeps limit plus kill-after below the registered 60 s).
   - file: tests/checks/decisions/test_merge_green_checks_decision_records.py
@@ -274,7 +281,7 @@ verification_plan:
       bin/venv-python -c "import subprocess, yaml; base = yaml.safe_load(subprocess.run(['git', 'show', 'origin/main:docs/contracts/git-ops.yaml'],
       capture_output=True, text=True, check=True).stdout); head = yaml.safe_load(open('docs/contracts/git-ops.yaml', encoding='utf-8'));
       assert head['contract']['contract_version'] == base['contract']['contract_version'] + 1;
-      assert 'expectedHeadSha' in str(head['push_pr_ci_merge_flow']) and 'merge_checks.py' in str(head['merge_step_coverage']);
+      assert 'newest GitHub Actions check run' in str(head['push_pr_ci_merge_flow']) and 'merge_checks.py' in str(head['merge_step_coverage']);
       assert 'rec-4080' not in str({k: v for k, v in head.items() if k != 'amendment_log'}); p = yaml.safe_load(open('docs/contracts/ports.yaml', encoding='utf-8'));
       sa = next(r for r in p['structural_assumptions'] if r['id'] == 'SA-04'); assert 'check-runs' in sa['assumption'] and 'github-actions' in sa['assumption'];
       print('CONTRACTS-OK')" && bin/venv-python -m pytest tests/checks/contracts/test_validate_git_ops_contract.py -q
@@ -454,6 +461,7 @@ gate_rounds:
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 8}
   - {gate: wording-check, round: 3, verdict: PASS, digest: edde3f4f3413f9f48a5a24bfb05751dff656ec2f48f77e3bfa15df86192a3353, base: 2fc58b50b6807ed9715e8cf71e5cc72de13eb6b2, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 4, verdict: PASS, digest: ac9f0a44146a3fdcc5f0240225f7a10a1d54f1a651b154217dae4af9025b6f47, base: 2fc58b50b6807ed9715e8cf71e5cc72de13eb6b2, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -471,7 +479,7 @@ execution_steps:
   - "Commit locally (no push) before VP step 10: --verify-head attests only a full run that started on a clean, committed tree."
   - "Execute VP steps 1-10; loop until pass; on an unrecoverable failure stop and send a plan-defect report (Decision 55)."
   - "The implementation commit message carries 'Resolves: rec-4080, rec-4891', and merge_pull_request passes an explicit commit_message carrying it and expectedHeadSha (git-ops.yaml resolves_trailer). Merge only on code review PROCEED, green CI and the operator's word on the final diff (hook code)."
-  - "After merge: run step 12, ask the operator for the plugin update, then run steps 11 and 13; update_rec rec-5121's context with one sentence naming the merged Decision number and scripts/session/merge_checks.py as the predicate its persona leg extends."
+  - "After merge: run step 12, then steps 11 and 13; update_rec rec-5121's context with one sentence naming the merged Decision number and scripts/session/merge_checks.py as the predicate its persona leg extends."
   - "Closure evidence, recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state (scripts.session.github_readiness); parent validator evidence (VP 10 plus --verify-head for the pushed HEAD); structured postflight evidence (scripts.session.postflight --evidence); the real outcome - push, build PR, CI green by event-driven wake (never polled), merge SHA."
   - "Report: what was implemented, verification results, the four closure-evidence facts, merge SHA, steps 9 and 11-13 results."
 rollback: >-
