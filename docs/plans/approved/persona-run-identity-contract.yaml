@@ -1,0 +1,434 @@
+schema_version: 1
+slug: persona-run-identity-contract
+tldr: On a persona run, telemetry_agents.agent_type carries the persona's registry key (code-review, plan-critique, decision-scout), mapped by a new checked registry_key on each executor-personas.yaml row; persona ids stay. A new nullable definition_sha256 column holds the hash of the definition text the run loaded; production telemetry deploys hold until it is added there. Parity reads group by (agent_type, persona_backend), metadata.prompt_hash goes, and five old log entries are compacted, values unchanged. ci-rca and the advice consult are a named gap (rec-5071). Producers come in plan 2.
+blocks:
+- id: t01-agent-type
+  file: docs/contracts/telemetry_agents.yaml
+  before: |-
+    governance_notes_local: >-
+      The agent-identity DIMENSION KEY: a canonical lineage key from
+      config/agent/data_quality/source_registry.yaml (Decision 66), the SAME registry
+      ops_recommendations.source draws from. Registry membership is validated at write time.
+    joins:
+      - lineage_join_source_to_agent_type
+  after: |-
+    governance_notes_local: >-
+      The agent-identity DIMENSION KEY: a canonical lineage key from
+      config/agent/data_quality/source_registry.yaml (Decision 66), the SAME registry
+      ops_recommendations.source draws from. Registry membership is validated at write time.
+      On a PERSONA RUN it is that persona's registry_key from the personas rows of
+      docs/contracts/executor-personas.yaml, on every producer and both run shapes, so one
+      persona's runs share one key on every backend and the lineage join meets the recs filed
+      under that key; on any other run it is the producer's or the agent's own key (run_shapes).
+      A reader tells a persona run by agent_type being one of those registry_key values. The
+      claude_code producer writes a persona's key from parser_version 10 (rec-4433); every
+      sub-agent row it wrote before carries claude-code-subagent.
+    joins:
+      - lineage_join_source_to_agent_type
+    amendment_log:
+      - {date: "{{DATE}}", semantic_break: true, change_class: governance_note_add, summary: "PLAN-persona-run-identity-contract (rec-4433, Decision 206 cl.4): on a persona run agent_type is that persona's registry_key from executor-personas.yaml, on every producer and both run shapes; the persona ids keep Decision 231 cl.4's spelling and the personas rows hold the map.", migration_story: "No stored row changes (append-only): every stored sub-agent row carries claude-code-subagent, so a read of rows before claude_code parser_version 10 cannot tell a persona run from another sub-agent run; top-level rows keep their agent's key (ci_rca)."}
+- id: t02-agent-name
+  file: docs/contracts/telemetry_agents.yaml
+  before: |-
+    description: Optional human-facing display label for the agent instance, when it differs from the canonical agent_type. Usually redundant with agent_type.
+    semantics: Retained as an OPTIONAL display alias only, so agent_type stays the single authoritative key. Null when identical to agent_type.
+    populated_by: the claude_code producer, at the open event.
+    dq_intent: {}
+    amendment_log:
+  after: |-
+    description: The producer's own name for the agent instance as spawned; for claude_code, the Agent tool's subagent_type (e.g. general-purpose). NULL on a top-level run.
+    semantics: >-
+      A raw label for display and grouping (tool_use_rollup groups on it), never the identity key: agent_type stays the
+      single authoritative key, and a persona run's persona is read from agent_type, not from this label (several
+      personas spawn as general-purpose).
+    populated_by: the claude_code producer, at the open event (the spawn's subagent_type); NULL on a top-level run row.
+    dq_intent: {}
+    amendment_log:
+      - {date: "{{DATE}}", semantic_break: true, change_class: governance_note_add, summary: "PLAN-persona-run-identity-contract (rec-4433): agent_name is re-described as what the claude_code producer writes, the spawn's subagent_type, and is never the persona key.", migration_story: "No stored row changes: every claude_code version writes the spawn's subagent_type here (src/turn_capture/sessions.py _agent_row) and leaves it NULL on a top-level row, so the old 'Null when identical to agent_type' text never matched a stored row."}
+- id: t03-definition-hash
+  file: docs/contracts/telemetry_agents.yaml
+  before: |-
+    host_run_ref:
+      type: str
+      iceberg_type: string
+  after: |-
+    definition_sha256:
+      type: str
+      iceberg_type: string
+      nullable: true
+      description: "SHA-256 of the persona definition text a persona run loaded as its instructions, 64 lower-case hex characters; NULL on a run that is not a persona run."
+      semantics: >-
+        One meaning on every producer: the definition the run was given, never its inputs, its host or its run
+        configuration. claude_code: the text of the persona's gate-skill definition that the harness injected into the
+        run's own stream (the meta record answering the run's first persona Skill call), as UTF-8, with the leading
+        "Base directory for this skill: <path>" line and the blank line after it removed and any trailing "ARGUMENTS:"
+        block removed, so one definition hashes the same on every host. A run_persona producer: the rendered system
+        prompt it sends, which equals the persona contract's rendered_prompt_sha256 (Decision 206 cl.7). The two
+        producers hash different texts, so one persona's hashes are not expected to match across backends; within one
+        producer a changed definition is a changed hash. Run configuration (model, thinking, effort;
+        docs/contracts/inference-provider.yaml) and run inputs are outside the hash, so a reader that needs a
+        configuration change reads it from its own column or contract (rec-5072 owns the dual-run reset rule for
+        thinking and effort). Written on the run's open and close rows (Decision 199 cl.1).
+      populated_by: "unproduced: rec-4433 (no producer writes it)"
+      dq_intent:
+        pattern: "^[0-9a-f]{64}$"
+      amendment_log:
+        - {date: "{{DATE}}", semantic_break: false, change_class: field_add, summary: "PLAN-persona-run-identity-contract (rec-4433, Decisions 206 cl.7, 210 cl.1, 222): one nullable definition_sha256 column, 64 lower-case hex characters, write-enforced; the hash of the definition text a persona run loaded.", migration_story: "Additive nullable column; no stored row changes. Production add owed (provision_telemetry_catalog, Decision 230 cl.4); until then it is pending_reconcile and the governed deploy holds the production telemetry writer and reader."}
+    host_run_ref:
+      type: str
+      iceberg_type: string
+- id: t04-realization
+  file: docs/contracts/telemetry_agents.yaml
+  before: |-
+    realization:
+      produced: {write_boundary: [event_id, created_timestamp, tenant_id, project_id, session_id, observation_id, agent_run_id], claude_code: [event_kind, event_timestamp, session_started_at, source_ordinal, external_ref, entity_ref, producer, producer_version, parser_version, agent_type, agent_name, model, version, trigger, outcome, error, workflow_run_id, host_run_ref]}
+      unproduced: {T4.32:c1: [provider], rec-4711: [lambda_request_id, findings_count, recs_created, queue_entries_written]}
+  after: |-
+    realization:
+      produced: {write_boundary: [event_id, created_timestamp, tenant_id, project_id, session_id, observation_id, agent_run_id], claude_code: [event_kind, event_timestamp, session_started_at, source_ordinal, external_ref, entity_ref, producer, producer_version, parser_version, agent_type, agent_name, model, version, trigger, outcome, error, workflow_run_id, host_run_ref]}
+      unproduced: {T4.32:c1: [provider], rec-4711: [lambda_request_id, findings_count, recs_created, queue_entries_written], rec-4433: [definition_sha256]}
+- id: t05-run-shape-sub-agent
+  file: docs/contracts/telemetry_agents.yaml
+  before: |-
+    agent_type: "the producer's registry key (claude-code-subagent for claude_code)"
+  after: |-
+    agent_type: "the persona's registry_key on a persona run (executor-personas.yaml personas rows), else the producer's registry key (claude-code-subagent for claude_code)"
+- id: t06-run-shape-top-level
+  file: docs/contracts/telemetry_agents.yaml
+  before: |-
+    agent_type: "the source_registry key of the agent (e.g. ci_rca)"
+  after: |-
+    agent_type: "the source_registry key of the agent (e.g. ci_rca); the persona's registry_key on a persona run"
+- id: t07-governance-note
+  file: docs/contracts/telemetry_agents.yaml
+  before: |-
+    governance_notes: >-
+      TOP-LEVEL RUN: a CI job running claude -p, a Fargate task, a Lambda or a local unattended run is its root session plus one open/close
+  after: |-
+    governance_notes: >-
+      PERSONA RUN: a run whose instructions are a registered persona's definition (the personas rows of
+      docs/contracts/executor-personas.yaml) carries that persona's registry_key in agent_type and the definition's hash in
+      definition_sha256, on its open and close rows and on either run shape; outcome-parity reads group by (agent_type,
+      persona_backend) (telemetry_observations.yaml persona_backend). Declared residuals: a custom named sub-agent is not a
+      persona run (its definition is not in the transcript), and the judgment personas ci-rca and the advice consult have no
+      personas row yet, so their runs carry their agent's or the producer's key and a NULL definition_sha256 (rec-5071).
+      TOP-LEVEL RUN: a CI job running claude -p, a Fargate task, a Lambda or a local unattended run is its root session plus one open/close
+- id: t08-contract-log
+  file: docs/contracts/telemetry_agents.yaml
+  before: |-
+    amendment_log:
+      - {date: "2026-10-30", semantic_break: false, change_class: governance_note_add, summary: "PLAN-telemetry-claude-p-capture-adapter (rec-4424): governance note for the claude_code top-level run rows
+  after: |-
+    amendment_log:
+      - {date: "{{DATE}}", semantic_break: false, change_class: field_add, summary: "PLAN-persona-run-identity-contract (rec-4433, Decisions 199, 206, 210, 222): the PERSONA RUN governance note, definition_sha256, persona-aware agent_type text in run_shapes, and definition_sha256 unproduced under rec-4433. Per-field changes are on their own fields' logs.", migration_story: "Additive; no stored row changes. Production column add owed for definition_sha256."}
+      - {date: "2026-10-30", semantic_break: false, change_class: governance_note_add, summary: "PLAN-telemetry-claude-p-capture-adapter (rec-4424): governance note for the claude_code top-level run rows
+- id: o01-parity-read
+  file: docs/contracts/telemetry_observations.yaml
+  before: |-
+    semantics: >-
+      Decision 206 -- inference-provider.yaml vocabulary axis persona_backend: litellm is On The Loop's own harness calling a model through LiteLLM; claude_cli is the unmodified Claude Code CLI run as a subprocess (T4.27). codex_cli is reserved and not accepted until its start gate passes. NULL when
+      the model_call was not made under run_persona (e.g. a routine scheduled agent). Independent of billing_shape; outcome-parity reads group by (telemetry_agents.agent_name, persona_backend) at read.
+    populated_by: "unproduced: T4.32:c1 (no producer writes it)"
+    dq_intent:
+      accepted_values: {values: [litellm, claude_cli]}
+    amendment_log:
+  after: |-
+    semantics: >-
+      Decision 206 -- inference-provider.yaml vocabulary axis persona_backend: litellm is On The Loop's own harness calling a model through LiteLLM; claude_cli is the unmodified Claude Code CLI run as a subprocess (T4.27). codex_cli is reserved and not accepted until its start gate passes. NULL when
+      the model_call was not made under run_persona (e.g. a routine scheduled agent). Independent of billing_shape; outcome-parity reads group by (telemetry_agents.agent_type, persona_backend) at read, over runs whose agent_type is a persona's registry_key (docs/contracts/executor-personas.yaml); a NULL persona_backend there is the in-session lane, so a dual-run's two lanes stay apart (Decision 229 cl.4).
+    populated_by: "unproduced: T4.32:c1 (no producer writes it)"
+    dq_intent:
+      accepted_values: {values: [litellm, claude_cli]}
+    amendment_log:
+      - {date: "{{DATE}}", semantic_break: true, change_class: governance_note_add, summary: "PLAN-persona-run-identity-contract (rec-4433, Decision 206 cl.4): the outcome-parity read groups by telemetry_agents.agent_type, the persona key, instead of agent_name, the raw spawn label.", migration_story: "No stored row changes and no reader verb reads it yet: no producer writes persona_backend (unproduced under T4.32:c1)."}
+- id: o02-metadata-prompt-hash
+  file: docs/contracts/telemetry_observations.yaml
+  before: |-
+    semantics: >-
+      By observation_type: STEP -> target_file, action, acceptance_command, diff_stat, model_escalated_from, prompt_hash; PHASE -> max_attempts, revision_count, blocking_findings_count; PROCESS_EVENT -> description, root_cause, resolution, rec_filed, detected_by; MODEL_CALL -> purpose_detail,
+      prompt_hash, error. The high-value analytic fields are PROMOTED to typed columns (provider, acceptance_passed, exit_code, time_lost_seconds, the four token classes) and are NOT in this bag.
+    populated_by: the claude_code producer (serialised JSON of the type-specific facts).
+    dq_intent: {}
+    amendment_log:
+  after: |-
+    semantics: >-
+      By observation_type: STEP -> target_file, action, acceptance_command, diff_stat, model_escalated_from; PHASE -> max_attempts, revision_count, blocking_findings_count; PROCESS_EVENT -> description, root_cause, resolution, rec_filed, detected_by; MODEL_CALL -> purpose_detail,
+      error. The high-value analytic fields are PROMOTED to typed columns (provider, acceptance_passed, exit_code, time_lost_seconds, the four token classes) and are NOT in this bag. A definition hash is the typed telemetry_agents.definition_sha256, never a metadata key.
+    populated_by: the claude_code producer (serialised JSON of the type-specific facts).
+    dq_intent: {}
+    amendment_log:
+      - {date: "{{DATE}}", semantic_break: true, change_class: governance_note_add, summary: "PLAN-persona-run-identity-contract (rec-4433, Decision 222's typed-columns choice): prompt_hash leaves the STEP and MODEL_CALL key lists; a definition hash is the typed telemetry_agents.definition_sha256.", migration_story: "No stored row changes: no telemetry producer ever wrote metadata.prompt_hash (src/turn_capture writes no such key), so no stored row carries it."}
+- id: e01-index-log
+  file: docs/contracts/executor-personas.yaml
+  before: |2-
+      - {date: "2026-11-11", semantic_break: false, change_class: accepted_values_extend, summary: "PLAN-persona-contracts-verdict-personas
+  after: |2-
+      - {date: "{{DATE}}", semantic_break: false, change_class: field_add, summary: "PLAN-persona-run-identity-contract (rec-4433, Decision 66): personas_row gains registry_key, the persona's source_registry canonical_id that telemetry_agents.agent_type carries on its runs; the three verdict rows carry code-review, decision-scout and plan-critique. The persona ids, contracts and rendered prompts are unchanged."}
+      - {date: "2026-11-11", semantic_break: false, change_class: accepted_values_extend, summary: "PLAN-persona-contracts-verdict-personas
+- id: e02-row-shape
+  file: docs/contracts/executor-personas.yaml
+  before: |-
+    personas_row:
+      persona: The persona id.
+      kind: verdict or compute_plane, equal to the contract's kind.
+      contract: "docs/contracts/personas/<persona>.yaml"
+      rendered_prompt: "docs/contracts/personas/rendered/<persona>.txt"
+      implementation: "{status: pending, owning_item} or {status: implemented, location} (implementation_binding)."
+
+    personas:
+  after: |-
+    personas_row:
+      persona: The persona id.
+      kind: verdict or compute_plane, equal to the contract's kind.
+      contract: "docs/contracts/personas/<persona>.yaml"
+      rendered_prompt: "docs/contracts/personas/rendered/<persona>.txt"
+      implementation: "{status: pending, owning_item} or {status: implemented, location} (implementation_binding)."
+      registry_key: >-
+        The persona's canonical_id in config/agent/data_quality/source_registry.yaml (Decision 66): the key
+        telemetry_agents.agent_type carries on this persona's runs on every backend (rec-4433). Unique across rows, and for
+        a verdict persona equal to skill_tether.skill, so the in-session skill and the persona share one key.
+
+    personas:
+- id: e03-rows
+  file: docs/contracts/executor-personas.yaml
+  before: |-
+    - persona: code_reviewer
+      kind: verdict
+      contract: docs/contracts/personas/code_reviewer.yaml
+      rendered_prompt: docs/contracts/personas/rendered/code_reviewer.txt
+      implementation: {status: pending, owning_item: "T4.28:c4"}
+    - persona: decision_scout
+      kind: verdict
+      contract: docs/contracts/personas/decision_scout.yaml
+      rendered_prompt: docs/contracts/personas/rendered/decision_scout.txt
+      implementation: {status: pending, owning_item: "T4.30:c3"}
+    - persona: plan_critic
+      kind: verdict
+      contract: docs/contracts/personas/plan_critic.yaml
+      rendered_prompt: docs/contracts/personas/rendered/plan_critic.txt
+      implementation: {status: pending, owning_item: "T4.29:c3"}
+  after: |-
+    - persona: code_reviewer
+      kind: verdict
+      contract: docs/contracts/personas/code_reviewer.yaml
+      rendered_prompt: docs/contracts/personas/rendered/code_reviewer.txt
+      implementation: {status: pending, owning_item: "T4.28:c4"}
+      registry_key: code-review
+    - persona: decision_scout
+      kind: verdict
+      contract: docs/contracts/personas/decision_scout.yaml
+      rendered_prompt: docs/contracts/personas/rendered/decision_scout.txt
+      implementation: {status: pending, owning_item: "T4.30:c3"}
+      registry_key: decision-scout
+    - persona: plan_critic
+      kind: verdict
+      contract: docs/contracts/personas/plan_critic.yaml
+      rendered_prompt: docs/contracts/personas/rendered/plan_critic.txt
+      implementation: {status: pending, owning_item: "T4.29:c3"}
+      registry_key: plan-critique
+- id: r01-code-review-entry
+  file: config/agent/data_quality/source_registry.yaml
+  before: |-
+    signal_interpretation: "Recommendation filed by the code-review skill post-implementation. Medium/Low priority recs from this source are deferred improvement items; Critical/High are mandatory pre-merge."
+  after: |-
+    signal_interpretation: "Recommendation filed by the code-review skill post-implementation. Medium/Low priority recs from this source are deferred improvement items; Critical/High are mandatory pre-merge. Also telemetry_agents.agent_type of a code_reviewer persona run on every backend (executor-personas.yaml registry_key, rec-4433)."
+- id: r02-subagent-entry
+  file: config/agent/data_quality/source_registry.yaml
+  before: |-
+    description: "A sub-agent spawned by the Claude Code Agent tool; its raw agentType is carried in telemetry_agents.agent_name (the Claude Code set is open and user-extensible)."
+    signal_interpretation: "telemetry_agents.agent_type for every sub-agent run captured from a Claude Code transcript (PLAN-telemetry-turn-capture-core). Also a valid ops_recommendations.source value by the shared-registry contract."
+  after: |-
+    description: "A sub-agent spawned by the Claude Code Agent tool that is not a persona run; its raw agentType is carried in telemetry_agents.agent_name (the Claude Code set is open and user-extensible). A persona run carries its persona's registry_key instead (docs/contracts/executor-personas.yaml)."
+    signal_interpretation: "telemetry_agents.agent_type for every non-persona sub-agent run captured from a Claude Code transcript (PLAN-telemetry-turn-capture-core), and for every sub-agent run captured before claude_code parser_version 10 (rec-4433). Also a valid ops_recommendations.source value by the shared-registry contract."
+- id: r03-new-persona-entries
+  file: config/agent/data_quality/source_registry.yaml
+  before: |-
+    - canonical_id: planning
+  after: |-
+    - canonical_id: plan-critique
+      description: "The plan-critique gate: a fresh-context critic that reviews a docs/plans/PLAN-{slug}.yaml before implementation (the plan-critique skill in session; the plan_critic verdict persona, docs/contracts/personas/plan_critic.yaml)."
+      signal_interpretation: "telemetry_agents.agent_type of a plan_critic persona run on every backend (executor-personas.yaml registry_key, rec-4433). A rec with this source is a critique finding deferred out of the plan it reviewed; expect few, since findings are normally fixed in the plan."
+      added_date: '{{DATE}}'
+
+    - canonical_id: decision-scout
+      description: "The decision-scout gate: a fresh-context triage of a proposed plan against the active Decisions, north stars and roadmap before sign-off (the decision-scout skill in session; the decision_scout verdict persona, docs/contracts/personas/decision_scout.yaml)."
+      signal_interpretation: "telemetry_agents.agent_type of a decision_scout persona run on every backend (executor-personas.yaml registry_key, rec-4433). A rec with this source records a Decision or roadmap conflict the scout surfaced and the plan deferred; expect few."
+      added_date: '{{DATE}}'
+
+    - canonical_id: planning
+- id: t09-compact-old-log
+  file: docs/contracts/telemetry_agents.yaml
+  before: |-
+    - date: "2026-09-26"
+      semantic_break: false
+      change_class: prose_improvement
+      summary: >-
+        PLAN-telemetry-kernel-identity-append implement-time deviation (rec-4073): governance.partition_by
+        respelled from the bare calendar-day triple to the role-prefixed
+        "history=year(session_started_at), month(session_started_at), day(session_started_at)" -- main's
+        src/common/ducklake_partition_spec.parse_partition_by (the shared ops grammar,
+        PLAN-ducklake-calendar-day-partition) requires a role= prefix per segment
+        ('history=...; current=...'); an append-only event table declares only the history role, no
+        current=. scripts/field_semantics_event_projection.py now delegates to parse_partition_by +
+        validate_partition_spec for this field instead of its own regex, closing rec-4073. The resolved
+        (unprefixed) spec is still what the generator's ops_tables.<table>.partition.history projection
+        carries -- only this raw contract field gained the role prefix.
+      migration_story: No live telemetry writer exists (TARGET-STATE only); no runtime migration is required.
+    - date: "2026-09-25"
+      semantic_break: false
+      change_class: prose_improvement
+      summary: >-
+        PLAN-telemetry-kernel-identity-append (rec-4065): governance.partition_by respelled from the
+        bare day(session_started_at) to the calendar-day triple year(session_started_at),
+        month(session_started_at), day(session_started_at) -- DuckLake evaluates a bare day() as
+        DAY-OF-MONTH, not calendar day; the two populated_by read-verb bounds reworded to
+        "calendar-day partition". Decision 199 always meant a calendar day; no table exists yet.
+      migration_story: No live telemetry writer exists (TARGET-STATE only); no runtime migration is required.
+    - date: "2026-09-24"
+      semantic_break: false
+      change_class: prose_improvement
+      summary: >-
+        PLAN-telemetry-event-journal-contracts (Decision 199): contract.description re-grounded from
+        a single mutate-in-place run row to an open+close event-journal pair keyed by the new derived
+        PK agent_run_id, naming the shared telemetry-event-envelope.yaml fields. The per-field shape
+        changes (token totals and duration moved to read-derived, ingested_at retired) are recorded
+        on their own fields' amendment_log entries; this entry covers the contract-level description.
+      migration_story: >-
+        No live telemetry writer exists (this contract stays TARGET-STATE, dq_INTENT only); the
+        Phase 4 rebuild (T2.36) and rec-4024 build directly to this contract_version 2 shape.
+    - date: "2026-08-25"
+      semantic_break: false
+      change_class: prose_improvement
+      summary: >-
+        Decision 95 was pointerized (wave restructure, rec-3249): contract.description's
+        "Decision 95 cl.4" authority citation re-pointed to docs/contracts/telemetry-lexicon.yaml's
+        `agent` term, the surface that now owns the agent-dimension shape Decision 95 originally
+        established. No semantic change.
+    - date: "2026-10-15"
+      semantic_break: false
+      change_class: prose_improvement
+      summary: >-
+        PLAN-rule-declarations-and-writer-conformance (rec-4158, Decision 210): the dq_intent `enforced` key is retired
+        from every rule leg. not_null is declared by presence (`true`, or `{exclude_before: D}`); an optional column or a
+        loosest-baseline field carries no not_null leg; the other legs lose the key. A declared rule is an enforced rule.
+      migration_story: >-
+        Declarations re-spelled only. No rule is added, removed or re-dated: the declared rule set, read through
+        scripts.contract_rules, is identical before and after, and the generated field_semantics.yaml projection of
+        this contract is unchanged.
+  after: |-
+    - {date: "2026-09-26", semantic_break: false, change_class: "prose_improvement", summary: "PLAN-telemetry-kernel-identity-append implement-time deviation (rec-4073): governance.partition_by respelled from the bare calendar-day triple to the role-prefixed \"history=year(session_started_at), month(session_started_at), day(session_started_at)\" -- main's src/common/ducklake_partition_spec.parse_partition_by (the shared ops grammar, PLAN-ducklake-calendar-day-partition) requires a role= prefix per segment ('history=...; current=...'); an append-only event table declares only the history role, no current=. scripts/field_semantics_event_projection.py now delegates to parse_partition_by + validate_partition_spec for this field instead of its own regex, closing rec-4073. The resolved (unprefixed) spec is still what the generator's ops_tables.<table>.partition.history projection carries -- only this raw contract field gained the role prefix.", migration_story: "No live telemetry writer exists (TARGET-STATE only); no runtime migration is required."}
+    - {date: "2026-09-25", semantic_break: false, change_class: "prose_improvement", summary: "PLAN-telemetry-kernel-identity-append (rec-4065): governance.partition_by respelled from the bare day(session_started_at) to the calendar-day triple year(session_started_at), month(session_started_at), day(session_started_at) -- DuckLake evaluates a bare day() as DAY-OF-MONTH, not calendar day; the two populated_by read-verb bounds reworded to \"calendar-day partition\". Decision 199 always meant a calendar day; no table exists yet.", migration_story: "No live telemetry writer exists (TARGET-STATE only); no runtime migration is required."}
+    - {date: "2026-09-24", semantic_break: false, change_class: "prose_improvement", summary: "PLAN-telemetry-event-journal-contracts (Decision 199): contract.description re-grounded from a single mutate-in-place run row to an open+close event-journal pair keyed by the new derived PK agent_run_id, naming the shared telemetry-event-envelope.yaml fields. The per-field shape changes (token totals and duration moved to read-derived, ingested_at retired) are recorded on their own fields' amendment_log entries; this entry covers the contract-level description.", migration_story: "No live telemetry writer exists (this contract stays TARGET-STATE, dq_INTENT only); the Phase 4 rebuild (T2.36) and rec-4024 build directly to this contract_version 2 shape."}
+    - {date: "2026-08-25", semantic_break: false, change_class: "prose_improvement", summary: "Decision 95 was pointerized (wave restructure, rec-3249): contract.description's \"Decision 95 cl.4\" authority citation re-pointed to docs/contracts/telemetry-lexicon.yaml's `agent` term, the surface that now owns the agent-dimension shape Decision 95 originally established. No semantic change."}
+    - {date: "2026-10-15", semantic_break: false, change_class: "prose_improvement", summary: "PLAN-rule-declarations-and-writer-conformance (rec-4158, Decision 210): the dq_intent `enforced` key is retired from every rule leg. not_null is declared by presence (`true`, or `{exclude_before: D}`); an optional column or a loosest-baseline field carries no not_null leg; the other legs lose the key. A declared rule is an enforced rule.", migration_story: "Declarations re-spelled only. No rule is added, removed or re-dated: the declared rule set, read through scripts.contract_rules, is identical before and after, and the generated field_semantics.yaml projection of this contract is unchanged."}
+- id: v01-host-run-ref-not-pending
+  file: tests/checks/contracts/test_telemetry_top_level_agent_run.py
+  before: |-
+    assert ops["pending_reconcile"]["history"] == []
+    entry = ops["reconciled"]["history"]["host_run_ref"]
+  after: |-
+    assert "host_run_ref" not in ops["pending_reconcile"]["history"]
+    entry = ops["reconciled"]["history"]["host_run_ref"]
+- id: p01-sa11-registry
+  file: docs/contracts/ports.yaml
+  before: |-
+    assumption: >-
+      The persona contract mechanism assumes this repository's layout: the index docs/contracts/executor-personas.yaml,
+      persona contracts and rendered prompts under docs/contracts/personas/, each verdict persona's skill tether to a
+      .claude/skills/<skill>/SKILL.md file, and NAMED_READS in src/common/ducklake_named_reads.py as the warehouse_read
+      parameter domain. Persona inputs are named by role and the verdict shell resolves each role to a path; an adopting
+      repository is guaranteed none of these paths.
+  after: |-
+    assumption: >-
+      The persona contract mechanism assumes this repository's layout: the index docs/contracts/executor-personas.yaml,
+      its rows' registry_key canonical_ids in config/agent/data_quality/source_registry.yaml, contracts and rendered
+      prompts under docs/contracts/personas/, verdict skill tethers to .claude/skills/<skill>/SKILL.md files,
+      compute-plane step maps keyed by the "## Step <id>:" headings of .claude/commands/plan.md or implement.md, and
+      NAMED_READS in src/common/ducklake_named_reads.py as the warehouse_read parameter domain. Persona inputs are named
+      by role and the verdict shell resolves each role to a path; an adopting repository is guaranteed none of them.
+- id: p02-ports-log
+  file: docs/contracts/ports.yaml
+  before: |2-
+      - {date: "2026-11-11", semantic_break: false, change_class: field_add, summary: "PLAN-inference-tier-selection (T4.32 c1,
+  after: |2-
+      - {date: "{{DATE}}", semantic_break: false, change_class: field_add, summary: "PLAN-persona-run-identity-contract (rec-4433, Decision 212): structural_assumptions SA-11 extends to config/agent/data_quality/source_registry.yaml, whose canonical_ids each executor-personas.yaml personas row's registry_key names (read by validate_persona_contracts since PLAN-persona-registry-key-check), and to the compute-plane step maps keyed by the command files' Step headings (PLAN-persona-contracts-compute-plane); no new port.", migration_story: "Prose only; no code or contract consumer reads it."}
+      - {date: "2026-11-11", semantic_break: false, change_class: field_add, summary: "PLAN-inference-tier-selection (T4.32 c1,
+- id: c01-static-pending
+  file: config/lambda/ducklake/field_semantics.static.yaml
+  before: |-
+    pending_reconcile:
+      history: []
+    reconciled:
+      history:
+        host_run_ref:
+  after: |-
+    pending_reconcile:
+      history: [definition_sha256]
+    reconciled:
+      history:
+        host_run_ref:
+- id: g01-projection
+  file: config/lambda/ducklake/field_semantics.yaml
+  before: |2-
+      not_null: '2026-05-01'
+    accepted_values:
+    - executor-postmortem
+    - executor-supervision
+    - code-review
+    - planning
+    - brainstorm
+    - doc-freshness
+    - orphan-code
+    - transcript-review
+  after: |2-
+      not_null: '2026-05-01'
+    accepted_values:
+    - executor-postmortem
+    - executor-supervision
+    - code-review
+    - plan-critique
+    - decision-scout
+    - planning
+    - brainstorm
+    - doc-freshness
+    - orphan-code
+    - transcript-review
+- id: g02-projection
+  file: config/lambda/ducklake/field_semantics.yaml
+  before: |-
+    nullable: false
+    accepted_values:
+    - executor-postmortem
+    - executor-supervision
+    - code-review
+    - planning
+    - brainstorm
+    - doc-freshness
+    - orphan-code
+    - transcript-review
+  after: |-
+    nullable: false
+    accepted_values:
+    - executor-postmortem
+    - executor-supervision
+    - code-review
+    - plan-critique
+    - decision-scout
+    - planning
+    - brainstorm
+    - doc-freshness
+    - orphan-code
+    - transcript-review
+- id: g03-projection
+  file: config/lambda/ducklake/field_semantics.yaml
+  before: |2-
+      nullable: true
+    host_run_ref:
+  after: |2-
+      nullable: true
+    definition_sha256:
+      role: input
+      sql_type: VARCHAR
+      nullable: true
+      pattern: ^[0-9a-f]{64}$
+    host_run_ref:

@@ -40,12 +40,25 @@ def _last_annotation(entry: str) -> str:
     return entry.rstrip().removesuffix("---").rstrip().split("\n\n")[-1]
 
 
+def _rds_directly_above_sit(numbers: list[int], rds: int, sit: int) -> bool:
+    """Newest-first heading order: RDS sits immediately above SIT, wherever later Decisions push the pair."""
+    return rds in numbers and sit in numbers and numbers.index(rds) + 1 == numbers.index(sit)
+
+
+def test_rds_directly_above_sit_survives_a_newer_decision() -> None:
+    assert _rds_directly_above_sit([253, 252, 251], 253, 252)
+    assert _rds_directly_above_sit([255, 254, 253, 252, 251], 253, 252)
+    assert not _rds_directly_above_sit([253, 254, 252], 253, 252)
+    assert not _rds_directly_above_sit([252, 253], 253, 252)
+    assert not _rds_directly_above_sit([254, 251], 253, 252)
+
+
 def test_sit_and_rds_decisions_and_notes() -> None:
     text = _decisions_text()
     sit, rds = _numbers(text)
     assert rds == sit + 1
     headings = re.findall(r"^## Decision (\d+):", text, re.MULTILINE)
-    assert [int(n) for n in headings[:2]] == [rds, sit]
+    assert _rds_directly_above_sit([int(n) for n in headings], rds, sit)
 
     for number, amends, kind in ((sit, list(_SIT_NOTED), "direction"), (rds, list(_RDS_NOTED), "mechanism")):
         entry = decision_entry(text, number)
