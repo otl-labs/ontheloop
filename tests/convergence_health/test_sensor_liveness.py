@@ -151,10 +151,10 @@ class TestThresholdOracle:
             sl.cron_period_seconds("0 6 4 * 1")
 
     def test_hourly_clamps_up_to_floor(self) -> None:
-        assert sl.staleness_threshold_seconds("37 * * * *") == 21600
+        assert sl.staleness_threshold_seconds("37 * * * *") == 86400
 
-    def test_three_hour_period_lands_exactly_on_floor(self) -> None:
-        assert sl.staleness_threshold_seconds("0 */3 * * *") == 21600
+    def test_three_hour_period_clamps_up_to_floor(self) -> None:
+        assert sl.staleness_threshold_seconds("0 */3 * * *") == 86400
 
     def test_weekly_unclamped(self) -> None:
         assert sl.staleness_threshold_seconds("0 6 * * 1") == 1209600
@@ -163,7 +163,7 @@ class TestThresholdOracle:
         assert sl.staleness_threshold_seconds("0 6 4 * *") == 3888000
 
     def test_fleet_threshold_is_min_over_derived_peers(self) -> None:
-        assert sl.fleet_threshold_seconds({"a.yml": ["0 * * * *"], "b.yml": ["0 6 * * 1"]}) == 21600
+        assert sl.fleet_threshold_seconds({"a.yml": ["0 * * * *"], "b.yml": ["0 6 * * 1"]}) == 86400
 
     def test_wrong_field_count_raises(self) -> None:
         with pytest.raises(ValueError, match="unclassifiable"):
@@ -390,7 +390,7 @@ class TestFleetCollapse:
         resolved = [
             {
                 "id": "rec-fleet-closed",
-                "title": _episode_title("__fleet__", since_anchor, 4),
+                "title": _episode_title("__fleet__", since_anchor, 2),
                 "status": "closed",
                 "source": "loop_liveness_stale",
                 "last_updated_timestamp": NOW - timedelta(days=1),
@@ -401,14 +401,14 @@ class TestFleetCollapse:
             peers=peers, now=NOW, gh_caller=gh, open_recs=[], resolved_recs=resolved, portal_caller=portal
         )
         assert result["fleet_collapse"] is True
-        # under the rejected min(bucket over stale peers) formula this would DROP (min bucket = 1 <= 4+1);
-        # the own-anchor derivation instead rises past the dwell and files.
+        # under the rejected min(bucket over stale peers) formula this would DROP (min bucket = 1 <= 2+1);
+        # the own-anchor derivation (bucket 4 at a 24h fleet threshold) instead rises past the dwell and files.
         assert result["filed"], "fleet bucket must rise (own-anchor age), never fall, as a new peer joins"
         assert result["dropped"] == []
 
     def test_open_per_loop_recs_are_suppressed_not_closed(self) -> None:
         peers = {"a.yml": ["37 * * * *"], "b.yml": ["17 * * * *"], "c.yml": ["0 */3 * * *"]}
-        t0 = NOW - timedelta(seconds=21600)
+        t0 = NOW - timedelta(seconds=sl.fleet_threshold_seconds(peers))
         runs = {name: _run(i, t0) for i, name in enumerate(peers, start=1)}
         gh = _gh_caller(runs=runs, success_runs={name: _run(0, NOW) for name in peers})
         open_per_loop = {"id": "rec-a-open", "title": _episode_title("a.yml", "run:1", 1)}

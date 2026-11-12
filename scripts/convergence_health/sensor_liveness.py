@@ -14,7 +14,7 @@ on an empty result by DEFAULT -- the production chain `main_sensor_liveness -> d
 
 THRESHOLD IS DERIVED FROM EACH CRON: `cron_period_seconds` is a bounded 5-field shape matcher (no
 croniter) covering the four live shapes; anything else raises. `staleness_threshold_seconds`
-clamps 2x the nominal period into [6h, 45d] -- the floor tolerates best-effort scheduled delivery,
+clamps 2x the nominal period into [24h, 45d] -- the floor tolerates best-effort scheduled delivery,
 the ceiling is the largest threshold whose first bucket [T, 2T) still fits the 90-day Actions
 run-retention window, so a `run:{id}` anchor never flips to `intro:{sha}` mid-bucket.
 
@@ -78,7 +78,7 @@ _GhCaller = Callable[[str], Any]
 _GitRunner = Callable[[list[str]], str]
 _PortalCaller = Callable[[str, _Info], Any]
 
-_MIN_THRESHOLD_SECONDS = 6 * 3600
+_MIN_THRESHOLD_SECONDS = 24 * 3600
 _MAX_THRESHOLD_SECONDS = 45 * 86400
 _THRESHOLD_MULTIPLIER = 2
 
@@ -171,7 +171,7 @@ def cron_period_seconds(expr: str) -> int:
 
 
 def staleness_threshold_seconds(expr: str) -> int:
-    """clamp(2 x nominal period, 6h, 45d) -- see module docstring for the bounds' rationale."""
+    """clamp(2 x nominal period, 24h, 45d) -- see module docstring for the bounds' rationale."""
     period = cron_period_seconds(expr)
     return min(max(_THRESHOLD_MULTIPLIER * period, _MIN_THRESHOLD_SECONDS), _MAX_THRESHOLD_SECONDS)
 
