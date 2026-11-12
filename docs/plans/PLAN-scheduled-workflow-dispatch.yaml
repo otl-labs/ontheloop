@@ -1,0 +1,1585 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "scheduled-workflow-dispatch"
+intent: >-
+  Start terraform-drift.yml, convergence-health.yml and main-canary.yml on time from AWS, keeping each one's GitHub cron
+  as the fallback (rec-4233: GitHub drops about 80% of their hourly ticks). Three EventBridge scheduled rules, rendered
+  from one register (config/lambda/scheduled_workflow_dispatcher/schedules.yaml), invoke one Lambda,
+  agent-platform-workflow-dispatcher, which mints a short-lived token from a dedicated GitHub App (Actions write and
+  Metadata read, this repository only; key in one SSM /secret/ parameter, put out of band), starts the named workflow on
+  main through workflow_dispatch, and revokes the token. Every other dispatchable workflow refuses a run whose
+  github.actor is the App's bot; the liveness sensor counts the bot's runs as cadence and checks each tick for misuse
+  of the App's Actions write; four production alarms watch the AWS side. The SIT copy is built switched off. A new
+  Decision records the Decision 143 clause 1 gap as an accepted residual. Four PRs: (1) the apply role's IAMRolesRead
+  pre-stage in terraform/bootstrap (admin root); (2) the handler, register, refusal guards, sensor, Decision and contract
+  rows; (3) the terraform/personal stack (tf-gated-apply); (4) the deploy-channel wiring. Written against main after
+  rec-5025's PR #1987 merges: every PR's build starts only after that merge.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-scheduled-workflow-dispatch.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category): rec-4233, which the operator placed in the CI Reform project on 2026-11-12.
+  No tier_item is targeted and no exit criterion is closed, so closes_criteria is empty.
+closes_criteria: []
+scope:
+  # ---------------------------------------------------------------- PR 1: bootstrap pre-stage (admin root)
+  - file: terraform/bootstrap/github_ci_apply_reads.tf
+    action: Modify
+    purpose: >-
+      PR 1. In the IAMRolesRead statement's Resource list add the role ARN for agent-platform-workflow-dispatcher in the
+      same form as its neighbours on main after PR #1987 (today "arn:aws:iam::${var.account_id}:role/..."), directly
+      after the agent-platform-github-ci-persona-verdict entry, under a two-line comment in the existing pre-stage form:
+      "Pre-staged ahead of the role's own creation (PLAN-scheduled-workflow-dispatch, the precedent of the entries
+      above): the gated apply that creates the role reads it back, so this applies before that create merges." Nothing
+      else in the file changes. The file's 6,144 B managed-policy precondition fails closed at plan time if a parallel
+      change used the headroom (about 80 B here); VP step 5's plan then errors.
+  - file: tests/checks/iam_tf/test_scheduled_workflow_dispatch.py
+    action: Create
+    purpose: >-
+      Created by PR 1, extended by PR 3. The class TestScheduledWorkflowDispatch is rec-4233's acceptance selector and
+      holds every real-tree case; red cases on synthetic text live in sibling classes. PR 1 cases: the IAMRolesRead
+      Resource list in terraform/bootstrap/github_ci_apply_reads.tf names the role ARN exactly once (the
+      _iam_roles_read_resources shape of tests/checks/iam_tf/test_trusted_github_plan_identity.py, written locally,
+      since test modules never import each other); a red case on a copy with the ARN removed. Helpers come from
+      tests/checks/iam_tf/_ci_platform_role_iam.py and _platform_security_hcl.py only. Module docstring names this plan
+      and its four PRs. Stays under 500 SLOC after PR 3.
+  - file: config/agent/verification_registry/entries/scheduled-workflow-dispatch-stack.yaml
+    action: Create
+    purpose: >-
+      PR 1. Registry row for VP step 2 in the shape of entries/persona-verdict-role.yaml: check_id
+      scheduled-workflow-dispatch-stack, primitive_slot test_selector, guard_target
+      tests/checks/iam_tf/test_scheduled_workflow_dispatch.py, guard_symbol null, plan_slug scheduled-workflow-dispatch,
+      graduated_at PR 1's build date, graduated_by implement-agent, check_spec.node_id the test file. PR 3's cases join
+      the same file and so the same record, which PR 3 never edits.
+  # ---------------------------------------------------------------- PR 2: handler, register, guards, sensor, paperwork
+  - file: config/lambda/scheduled_workflow_dispatcher/schedules.yaml
+    action: Create
+    purpose: >-
+      PR 2. The dispatcher's register and allowlist, the one source for the handler, Terraform (PR 3), the sensor and the
+      guard test. Header comment (Decision N): what reads it, that terraform/personal/scheduled_workflow_dispatch.tf repeats each
+      row's cron, name and alarm periods as literals (the HCL screen allows no file read here) and the stack test holds
+      them equal, so a row change lands with its HCL change, that a row is a workflow the dispatcher may start on main
+      with no inputs, that a new row is rec-5113's and needs the 14-day soak first. Keys: app.client_id (the value the
+      operator reports in VP step 8, public), app.bot_login ("<app slug>[bot]", from VP step 8), key_parameter
+      /secret/agent-platform-workflow-dispatcher-app-key, repository otl-labs/ontheloop, ref main, and schedules, a map
+      keyed by schedule name with exactly three rows: terraform-drift {workflow: terraform-drift.yml, aws_cron:
+      "cron(17 * * * ? *)", skip_window_seconds: 900, alarm_period_seconds: 3600, alarm_evaluation_periods: 2};
+      convergence-health {workflow: convergence-health.yml, aws_cron: "cron(37 * * * ? *)", skip_window_seconds: 900,
+      alarm_period_seconds: 3600, alarm_evaluation_periods: 2}; main-canary {workflow: main-canary.yml, aws_cron:
+      "cron(0 0/3 * * ? *)", skip_window_seconds: 900, alarm_period_seconds: 10800, alarm_evaluation_periods: 1}. No
+      installation id (looked up at run time) and no value of any secret.
+  - file: src/data/handlers/github_app_token.py
+    action: Create
+    purpose: >-
+      PR 2. GitHub App token helpers, stdlib urllib plus PyJWT; jwt and cryptography imported inside the functions that
+      need them (no import-time work). app_jwt(client_id, private_key_pem, now) -> RS256 JWT with iat = now - 60, exp =
+      now + 540, iss = client_id. GitHubApi(base="https://api.github.com", timeout=10).call(method, path, token, body) ->
+      (status, parsed JSON or None), headers Accept application/vnd.github+json, X-GitHub-Api-Version 2022-11-28 and a
+      fixed User-Agent, Authorization "Bearer <token>"; a non-2xx raises GitHubApiError(status, method, path, message)
+      whose text carries only the status, the method, the path and the response's message field, never a token, a JWT
+      or a header. installation_token(api, jwt, repository, permissions) -> str: GET /repos/{repository}/installation,
+      then POST /app/installations/{id}/access_tokens with {"repositories": [<name>], "permissions": permissions}; raises
+      unless the response's permissions equal the requested map exactly and repository_selection is "selected".
+      revoke(api, token): DELETE /installation/token, raises unless 204. Lives under src/data/handlers so the prod
+      deploy gate's src/data/handlers pathspec covers it.
+  - file: src/data/handlers/workflow_dispatcher_handler.py
+    action: Create
+    purpose: >-
+      PR 2. handler(event, context) for agent-platform-workflow-dispatcher. Order: (1) an event with no "schedule"
+      key imports jwt and cryptography.hazmat.primitives.serialization (so a zip missing either fails the smoke) and
+      returns {"status": "smoke", "schedules": [sorted register names]} (the deploy smoke, no secret read, so a SIT
+      copy's smoke passes too once SIT has a deploy channel, Decision 252 cl.6); (2) WORKFLOW_DISPATCH_ENABLED != "true"
+      returns {"status": "disabled"} before anything else is read, so the SIT copy reads no secret;
+      (3) load_register() and look the name up; an unknown name raises ValueError (the Errors alarm); (4) read
+      key_parameter with boto3's ssm get_parameter(WithDecryption=True), refusing a name outside /secret/; (5) mint the JWT and an
+      installation token for the register's repository with permissions {"actions": "write", "metadata": "read"}; (6)
+      GET /repos/{repository}/actions/workflows/{workflow}/runs?created=>=<now minus skip_window_seconds, ISO
+      UTC>&per_page=1; a non-zero total_count returns {"status": "skipped", "schedule", "workflow", "recent_run_id"};
+      (7) otherwise POST /repos/{repository}/actions/workflows/{workflow}/dispatches with {"ref": register ref,
+      "return_run_details": true} and no inputs, accepting 200 or 204, and return {"status": "dispatched", "schedule", "workflow", "workflow_run_id": the
+      response's workflow_run_id or None}; (8) revoke the token in a finally block, after any outcome of steps 6-7; a
+      revoke failure after a successful dispatch raises too. One log line per outcome, in key=value form
+      ("status=<status> schedule=<name> workflow=<file> run_id=<id or none>"), never a token, JWT, key or response
+      body. boto3 is imported inside the step-4 read only, so load_register and the CloudShell probe never import it.
+      The handler is an exemption from src/data/handlers/CLAUDE.md's "All handlers must accept a force_{param} event
+      field for plan-driven re-runs": a field that skipped step 6 would start a workflow inside the skip window, which
+      Decision N clause 1 excludes, and a re-run is simply the next tick. An event key other than schedule is ignored. load_register(path=None) parses the register next to the bundle
+      root (the same path in the repository and in the zip) and validates it at call time, raising ValueError on: no
+      schedules, a workflow not matching ^[a-z0-9-]+\.yml$, ref other than main, key_parameter outside /secret/, a
+      bot_login not ending in [bot], skip_window_seconds outside 60-3600, or an aws_cron not of the form cron(...).
+  - file: src/lambdas/data-pipeline/manifest.yaml
+    action: Modify
+    purpose: >-
+      PR 2. handlers gains src/data/handlers/workflow_dispatcher_handler.py; config gains
+      config/lambda/scheduled_workflow_dispatcher/; pip_packages gains four plain pins
+      (pyjwt, cryptography and its own dependencies), in this order after the existing pyyaml entry:
+      "pycparser==3.0", "cffi==2.0.0", "cryptography==49.0.0", "pyjwt==2.13.0" (stage_bundle runs one pip install
+      --target per entry without --upgrade and keeps a directory that exists, so each dependency lands at its pin
+      before anything pulls it; no extra; requirements.txt's pins; the existing manylinux --only-binary flags fit). functions is NOT
+      changed here: the function is created by PR 3 and joins the deploy list in PR 4, so PR 2's deploy ships the new zip
+      to the two existing functions only. notes: the existing "pip_packages carries only pyyaml ..." sentence is
+      corrected to name the four new pins and their sole importer (the workflow dispatcher handler), and one sentence
+      says the dispatcher handler and its packages ride in this zip (PLAN-scheduled-workflow-dispatch).
+  - file: requirements.in
+    action: Modify
+    purpose: >-
+      PR 2. Add "pyjwt[crypto]>=2.13,<3" under a comment naming the dispatcher handler: it becomes a direct dependency
+      (today it arrives only through mcp).
+  - file: requirements.txt
+    action: Modify
+    purpose: >-
+      PR 2. pip-compile's "# via" lines for pyjwt (now "-r requirements.in" and mcp) and cryptography; no pin changes.
+      Regenerate with the header's pip-compile command when it runs offline; otherwise edit only those comment lines to
+      the shape pip-compile writes, and the fast tier's requirements checks prove it.
+  - file: requirements-fast.txt
+    action: Modify
+    purpose: >-
+      PR 2. Add the floor "pyjwt[crypto]>=2.13,<3", the same specifier as requirements.in, so the fast tier's
+      dependency parity holds (tests/validate/test_pytest_diff_runtime_dep_artifact.py requires every requirements.in
+      distribution to be a fast-tier floor or a declared heavy exclusion) and the token-helper tests' jwt and
+      cryptography imports are explicit in the venv-less fast tier; the header's list of runtime floors names pyjwt.
+  - file: tests/data/handlers/test_github_app_token.py
+    action: Create
+    purpose: >-
+      PR 2. Mirror test, 100% line coverage. A real RSA key generated in the test (cryptography): the JWT decodes with
+      the public key, carries iss, iat now-60 and exp now+540, alg RS256. A fake opener records each request: the
+      installation lookup and token mint paths and body; a token whose granted permissions differ from the requested
+      map (an extra contents: read, a missing metadata) raises; repository_selection "all" raises; a non-2xx raises
+      GitHubApiError whose text holds no token, JWT or Authorization value even when the response body echoes one;
+      revoke sends DELETE /installation/token and raises on 401.
+  - file: tests/data/handlers/test_workflow_dispatcher_handler.py
+    action: Create
+    purpose: >-
+      PR 2. Mirror test, 100% line coverage, boto3 and the GitHub API faked. Cases: flag unset or "false" with a
+      schedule event returns disabled and touches neither SSM nor the network; {} returns smoke with the three names and
+      reads no secret, with the flag unset and set, and
+      raises when the jwt import fails; an
+      unknown schedule raises before any SSM call; the happy path reads the key parameter with WithDecryption, mints with
+      exactly {actions: write, metadata: read}, dispatches ref main with no inputs and revokes; a recent run skips and
+      still revokes; a force_dispatch key with a recent run still skips; a 422 on dispatch (a disabled workflow) raises and still revokes; a revoke failure raises; a 200
+      without workflow_run_id returns None for it; no log record contains the fake key, JWT or token. The real register
+      parses and has exactly the three rows; load_register rejects each malformed field listed in the handler row; the
+      register's repository equals scripts.repo_identity.full_name(); the manifest's pip_packages pins of pyjwt,
+      cryptography, cffi and pycparser equal requirements.txt's.
+  - file: scripts/session/workflow_dispatcher_probe.py
+    action: Create
+    purpose: >-
+      PR 2. Approval-bypass probe for VP step 21 (Decision 248 cl.8 precedent), run by the operator in AWS CloudShell in
+      the production account (operator step M3): the session's GitHub proxy refuses the App and installation-token paths
+      (/app/installations, POST .../access_tokens, DELETE /installation/token; measured 2026-11-12), and CloudShell has
+      direct egress and the operator's own identity. CLI: --run-id N --key-parameter
+      /secret/agent-platform-workflow-dispatcher-app-key [--profile P] (no profile means the ambient CloudShell
+      credentials; the flag must equal the register's key_parameter). It refuses to start below Python 3.12 (printing
+      the version and the dnf line of VP 21). Its imports are the stdlib, pyyaml (load_register), pyjwt and
+      cryptography, which the operator installs with python3.12 -m pip install --user at requirements.txt's pins; it
+      reads the PEM through an aws ssm get-parameter --with-decryption --region <config/aws-region's value> subprocess
+      (the CLI CloudShell ships, so no boto3; the explicit region because CloudShell's default is the console's),
+      capturing stdout and never printing it. It mints an installation token with the register's two
+      permissions through src/data/handlers/github_app_token.py, runs sys.executable -m scripts.session.deployment_approval_probe
+      --leg env:GH_TOKEN --repo <register repository> --run-id N --wait-pending 180 with GH_TOKEN set only in that
+      child's environment, revokes the token in a finally block, and prints the child's JSON line and its exit code
+      only. It never prints the PEM, the JWT or the token. It exits 0 only when the child's verdict is
+      TOKEN_LACKS_PERMISSION or NOT_REVIEWER (the two refusals scripts/session/deployment_approval_probe.py classifies),
+      1 on APPROVED and 2 on any other verdict (REFUSED, PROXY_BLOCKED, UNAVAILABLE, INCONCLUSIVE, PROBE_INVALID), which
+      proves nothing.
+  - file: tests/test_session_workflow_dispatcher_probe.py
+    action: Create
+    purpose: >-
+      PR 2. Mirror test (the scripts/session/ test_session_<name>.py rule), 100% line coverage, SSM, minting and the
+      child process faked: a --key-parameter other than the register's refuses before any read; the token reaches the
+      child only through its env and never stdout; revoke runs after a child failure; an APPROVED child line exits 1; TOKEN_LACKS_PERMISSION and NOT_REVIEWER exit 0;
+      REFUSED, PROXY_BLOCKED, UNAVAILABLE, INCONCLUSIVE and PROBE_INVALID exit 2; no --profile uses the
+      ambient credentials; below Python 3.12 it exits 2 before any read; its import closure is exactly the stdlib,
+      yaml, jwt, cryptography and this repository's modules (asserted with a module-scan case, so a boto3 import fails).
+  - file: .github/workflows/approved-text-approval.yml
+    action: Modify
+    purpose: >-
+      PR 2 refusal guard (Decision N clause 3). On each listed job, the if: becomes the guard G =
+      "(github.event_name != 'workflow_dispatch' || github.actor != '<bot_login>')" when it had none, or "G && (<existing expression>)" when
+      it had one, keeping a ${{ }}
+      wrapper where there was one and collapsing a block-scalar if to one line in the same block; <bot_login> is the
+      register's app.bot_login literal. The guarded jobs are every root job (no needs) and every job whose if calls a
+      status function (always(), cancelled(), failure(), success(), including !cancelled()); a refused root skips its
+      dependants. G refuses only a bot dispatch (or a re-run of one): a workflow_run child of a bot-dispatched register
+      run keeps its upstream's actor (ci-rca.yml after Main Canary, measured on CI RCA run 43262113763), so keying on
+      actor alone would skip ci-rca's red-main diagnosis of every bot-started canary (Decision 73 pt.3, Decision 226).
+      Nothing else in the file changes. Ownership: the build re-reads open PRs touching each file just before
+      editing it and asks the operator before editing a file another project's open PR changes; the operator's fork 4
+      answer (2026-11-12) covers editing other projects' files, provided the coordinator log carries the file list.
+      Jobs: render. Owner: CI Reform, inferred. The 26 files and 35 jobs below were measured on main 2fc60314; the
+      build re-derives the set at its head, and a dispatchable workflow added since is guarded or registered too.
+  - file: .github/workflows/backlog-health.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: census. Owner: CI Reform."
+  - file: .github/workflows/branch-cleanup.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: cleanup. Owner: CI Reform."
+  - file: .github/workflows/ci-rca-inactivity-sweep.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: sweep. Owner: CI Reform."
+  - file: .github/workflows/ci-rca.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: rca. Owner: CI Reform."
+  - file: .github/workflows/codeql.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: analyze. Owner: CI Reform."
+  - file: .github/workflows/cost-reconciliation.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: reconcile. Owner: Cost Optimisation."
+  - file: .github/workflows/dedup-probe.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: probe. Owner: CI Reform, inferred."
+  - file: .github/workflows/dependabot-stranded.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: sweep. Owner: CI Reform."
+  - file: .github/workflows/deploy-ducklake-lambdas.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: gate (a reusable-workflow call job; job-level if is allowed there), telemetry-twin-smoke, smoke, telemetry-smoke. Owner: CI Reform."
+  - file: .github/workflows/deploy-prod-lambdas.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: gate (a reusable-workflow call job). Owner: CI Reform."
+  - file: .github/workflows/deployment-approval-probe.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: gated, bot-attempt. Owner: CI Reform, inferred."
+  - file: .github/workflows/ghas-probe.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: probe. Owner: CI Reform, inferred."
+  - file: .github/workflows/pr-conflict-signal.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: detect-conflicts. Owner: CI Reform."
+  - file: .github/workflows/publish-ontheloop.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: publish. Owner: Property Transfer, inferred."
+  - file: .github/workflows/reconcile.yml
+    action: Modify
+    purpose: >-
+      PR 2 refusal guard as for approved-text-approval.yml, on resolve-target, gated-apply-reconcile and
+      file-reconcile-starved-rec. The file is at its 513 effective-line ci_workflows cap (config/structural_size_budgets.yaml)
+      and the new if line on resolve-target would make 514 (measured on a scratch tree, 2026-11-12): in the same edit,
+      resolve-target's two-line permissions block becomes the flow mapping "permissions: {id-token: write, contents:
+      read}", which parses to the same map, so the file ends at 512. No budget raise.
+  - file: .github/workflows/security-detector-liveness.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: probe. Owner: Feedback Loop, inferred."
+  - file: .github/workflows/subagent-review-smoke.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: smoke. Owner: Agents in GitHub."
+  - file: .github/workflows/telemetry-arrival.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: arrival. Owner: Feedback Loop."
+  - file: .github/workflows/telemetry-causal-chain.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: probe. Owner: Feedback Loop."
+  - file: .github/workflows/telemetry-golden-replay.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: decision. Owner: Feedback Loop."
+  - file: .github/workflows/telemetry-verification.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: monitor. Owner: Feedback Loop."
+  - file: .github/workflows/terraform-apply-sandbox.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: apply-sandbox, ducklake-artifacts, advisory-status, gated-apply. Owner: CI Reform."
+  - file: .github/workflows/terraform-github-apply.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: preview. Owner: CI Reform."
+  - file: .github/workflows/terraform-provider-mirror-seed.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: seed-mirror. Owner: CI Reform."
+  - file: .github/workflows/tf-gated-apply-prototype.yml
+    action: Modify
+    purpose: "PR 2 refusal guard, the rule in the approved-text-approval.yml row. Jobs: gate-smoke-test. Owner: CI Reform."
+  - file: tests/test_approved_text_approval_workflow.py
+    action: Modify
+    purpose: >-
+      PR 2. test_render_job_is_main_only_and_read_only's exact if assertion (line 62 on main) expects the guarded string
+      "(github.event_name != 'workflow_dispatch' || github.actor != '<bot_login>') && (github.ref == 'refs/heads/main')", read from the
+      register; the main-only
+      condition stays asserted. On a scratch tree with every guard placed, this was the only existing assertion that
+      failed (workflow suites, ci_guards and verify_ci_workflow tests and the fast tier, 2026-11-12).
+  - file: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    action: Create
+    purpose: >-
+      PR 2. The deny-by-default classification test (Decision N clause 3), reading the register. (a) Every
+      .github/workflows/*.yml whose on: declares workflow_dispatch is either a register workflow or guarded: each root
+      job and each job whose if calls a status function has an if that, with any ${{ }} wrapper stripped and whitespace
+      normalised, equals G or starts with "G && (" and ends with ")", G as in the approved-text-approval.yml row. (b) No register workflow names the bot login anywhere, and each declares both workflow_dispatch and
+      on.schedule (the cron stays the fallback). (c) Decision 205 cl.1: no register workflow has a step whose uses names
+      claude-code-action, whose run calls claude -p or claude --print or names scripts.llm, run_persona or litellm, or
+      whose env or with references a secret whose name contains CLAUDE, ANTHROPIC, DEEPSEEK or OPENAI. (d) Every register
+      row names an existing workflow file. Red cases on synthetic workflows: an unguarded new dispatchable workflow; a
+      guard on a root job but not on an always() job; a guard with another login; the guard in the wrong position (after
+      the existing expression); an actor-only guard without the event_name leg (it would refuse ci-rca's workflow_run
+      child of a bot canary); a register workflow carrying the guard; a register workflow that dropped on.schedule;
+      one with a claude -p step; one referencing secrets.ANTHROPIC_API_KEY.
+  - file: config/agent/verification_registry/entries/dispatch-bot-guard.yaml
+    action: Create
+    purpose: >-
+      PR 2. Registry row for VP step 7 in the same shape as the PR 1 record: check_id dispatch-bot-guard, guard_target
+      tests/verify_ci_workflow/test_dispatch_bot_guard.py, plan_slug scheduled-workflow-dispatch.
+  - file: scripts/convergence_health/sensor_liveness_dispatch.py
+    action: Create
+    purpose: >-
+      PR 2. The cadence extension (Decision N clause 6), a sibling module because sensor_liveness.py is at 495 of 500
+      SLOC. newer_cadence_run(schedule_run, loop, caller, api_base, query_suffix="", register=None) -> the newer, by
+      created_at, of the given event=schedule run and the loop's newest bot dispatch, or schedule_run unchanged when
+      loop is not a register workflow. The dispatch query is
+      {api_base}/actions/workflows/{loop}/runs?event=workflow_dispatch&actor=<url-quoted bot_login>{query_suffix}&per_page=5,
+      taking the newest run whose actor.login really is the bot (the actor filter also matches runs a person started,
+      measured 2026-11-12);
+      a dead query raises (Decision 55, the sensor's dead-query rule); a returned run whose actor.login is not the bot or
+      whose head_branch is not main earns no cadence credit (printed, never trusted). The register comes from
+      src/data/handlers/workflow_dispatcher_handler.load_register, the one parser. Imports nothing from
+      sensor_liveness.py (no cycle).
+  - file: scripts/convergence_health/sensor_liveness.py
+    action: Modify
+    purpose: >-
+      PR 2. _assess_peer's one query line becomes run = newer_cadence_run(_query_last_run(loop, caller, api_base,
+      query_suffix=query_suffix), loop, caller, api_base, query_suffix=query_suffix), plus one import line; the success
+      leg inherits it through its query_suffix. No other line changes (ruff wraps the call to three lines); the file ends
+      at 498 SLOC or below, never raised.
+      The existing sensor suites stay green unchanged: their fake caller answers every runs URL with the loop's fixture
+      run, which carries no actor, so it earns no dispatch credit.
+  - file: scripts/convergence_health/dispatch_integrity.py
+    action: Create
+    purpose: >-
+      PR 2. The detective controls of Decision N clause 5, run on each convergence-health tick. Three reads through the
+      sensor's GitHub caller: (1) {api_base}/actions/oidc/customization/sub, breach oidc_subject unless use_default is
+      true; (2) two run listings over the last 3 h: A = {api_base}/actions/runs?actor=<url-quoted
+      bot_login>&created=>=<now minus 3 h>&per_page=100 (up to 5 pages) and B = the same without actor (up to 10 pages,
+      for re-runs, whose triggering_actor cannot be filtered); breach off_register_run for a run whose event is
+      workflow_dispatch, whose actor or triggering_actor is the bot and whose path is not a register workflow; for a
+      register-workflow run by the bot whose head_branch is not main; and for any run with run_attempt above 1 whose
+      triggering_actor is the bot and whose path is not a register workflow. A workflow_run run whose actor is the bot
+      and whose run_attempt is 1 is a chained child of a register run (ci-rca.yml after Main Canary) and is clear; (3) the workflows listing, breach
+      disabled_workflow for any workflow whose state starts with disabled_ (disabled_manually, disabled_inactivity; all
+      39 are active on 2026-11-12; Actions write can disable any workflow, ci-rca.yml and the deploy channels included;
+      a deleted workflow, which Actions write cannot cause, is not a breach). A failed
+      read, or a last full page of either listing (5 for A, 10 for B), is integrity_blind. One rec per class through scripts.rec_episode.run_episode (source
+      workflow_dispatch_integrity, a sub_key over context naming the class, the actions_capacity_alarm.py shape):
+      breach classes priority High, run_episode called for them only while a finding exists (so the sensor never closes
+      one: an empty finding set skips the call), updated only when the finding set changes; integrity_blind priority
+      Medium, the one class whose episode the sensor closes, on the first tick whose reads all succeed. Acceptance strings come from a function
+      (acceptance_for(check), the validate_acceptance_literals rule): bin/venv-python -m scripts.convergence_health
+      --dispatch-integrity-probe <check>. A portal write failure propagates (Decision 84 I-4). CONVERGENCE_HEALTH_DIAGNOSE
+      prints and writes nothing. Context and titles carry run ids, workflow paths and class names only.
+  - file: scripts/convergence_health/__main__.py
+    action: Modify
+    purpose: >-
+      PR 2. main_sensor_liveness runs dispatch_integrity after detect_stale_loops, each in its own try, and returns 1 if
+      either raised (a read failure inside dispatch_integrity is a blind episode, not a raise); a new
+      --dispatch-integrity-probe [check] flag returns 0 iff that class (or every class) is clear now, 1 on a finding and
+      2 when a read is refused by an egress proxy (a 403 with no x-github-request-id header, the rule
+      scripts/session/deployment_approval_probe.py uses for PROXY_BLOCKED; the CC-web session proxy refuses
+      actions/oidc/customization/sub, measured with no such header), printing the findings, writing nothing.
+      A probe of one class performs only that class's reads (off_register_run: listings A and B; disabled_workflow: the
+      workflows listing; oidc_subject: the customization read). In CI (convergence-health.yml) the reads have direct
+      egress, and every tick prints one fixed status line, "[convergence_health] dispatch_integrity:
+      oidc_subject=<clear|breach|blind> off_register_run=<...> disabled_workflow=<...>", which VP 14 and VP 24 read.
+      Tests: _dispatch routes --dispatch-integrity-probe before its main() fallback and the probe never calls escalate;
+      a probe of off_register_run exits 0 while the oidc read raises a proxy 403 (and makes no oidc call); the
+      liveness run prints the status line. No workflow edit: convergence-health.yml's liveness step already calls
+      --sensor-liveness with the GitHub token and actions: read.
+  - file: tests/convergence_health/test_sensor_liveness_dispatch.py
+    action: Create
+    purpose: >-
+      PR 2. Mirror test, 100% coverage: a newer bot dispatch wins over an older schedule run and the reverse; a
+      non-register loop makes no second call; a dead dispatch query raises; a run with another actor or another branch
+      earns no credit; a loop with no schedule run yet (schedule_run None) takes the bot run, or None when there is
+      neither; the bot login is URL-quoted in the query; the success suffix reaches the dispatch query;
+      _assess_peer on a register loop anchors on the bot run (one integration case through
+      scripts.convergence_health.sensor_liveness, so the one-line wiring is red without the change).
+  - file: tests/convergence_health/test_dispatch_integrity.py
+    action: Create
+    purpose: >-
+      PR 2. Mirror test, 100% coverage, fake caller and portal: clear state writes nothing; a custom OIDC subject, a bot
+      run of a non-register workflow, a bot re-run (triggering_actor) of a human run, a bot run on another branch and a
+      disabled workflow each file their class once (and a ci-rca workflow_run child with the bot as
+      actor at run_attempt 1 files nothing, while a bot re-run of it at run_attempt 2 files off_register_run) and update only on a changed finding set; a 403 on
+      any read files integrity_blind and returns without raising, and the next clear tick closes it; five full pages is
+      blind, as is a tenth full page of listing B; a portal failure raises; diagnose writes nothing; acceptance_for passes scripts/executor/acceptance_lint's
+      lint with require_discrimination.
+  - file: tests/convergence_health/test___main__.py
+    action: Modify
+    purpose: >-
+      PR 2. main_sensor_liveness now also calls dispatch_integrity (patched in every existing case that calls it); new
+      cases: liveness ok and integrity raising returns 1; liveness raising still runs integrity and returns 1;
+      --dispatch-integrity-probe returns 0 when clear and 1 on a finding.
+  - file: scripts/convergence_health/code_drift.py
+    action: Modify
+    purpose: >-
+      PR 2. PROD_SOURCE_PATHSPECS gains "config/lambda/scheduled_workflow_dispatcher", so a register change redeploys the
+      zip (src/data/handlers already covers both new modules). _PROD_FUNCTION_NAMES is PR 4's.
+  - file: tests/convergence_health/code_drift/test_prod.py
+    action: Modify
+    purpose: >-
+      PR 2: one assertion that PROD_SOURCE_PATHSPECS contains the register directory. PR 4: the module's prod function
+      fixture set _ALL_PROD_FUNCTIONS (lines 29-32 on main) gains agent-platform-workflow-dispatcher where test_reads_all_prod_functions' equality
+      (seen_functions == _ALL_PROD_FUNCTIONS) requires it; nothing loosened.
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: >-
+      PR 2. Sidecar block decision-entry, word for word: Decision N ({{N}} = the highest number on main plus one after
+      rebasing; {{DATE}} = the build date, UTC).
+  - file: docs/decisions-index.json
+    action: Modify
+    purpose: PR 2. Regenerated from DECISIONS.md after the Decision lands (generated; never hand-edited).
+  - file: docs/contracts/project-configuration.yaml
+    action: Modify
+    purpose: PR 2. Sidecar blocks pc-amendment-log (the new amendment_log entry) and pc-dispatch-app-rows, word for word.
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: PR 2. Sidecar blocks ports-amendment-log (the new amendment_log entry) and ports-pc-10, word for word.
+  - file: docs/contracts/account-credential-inventory.yaml
+    action: Modify
+    purpose: >-
+      PR 2. Sidecar blocks inventory-amendment-log (the new amendment_log entry), inventory-gh-15 and
+      inventory-gh-15-ledger, word for word; the ledger
+      entry's evidence is VP step 9's read-back, so PR 2 commits only after that step's markers are posted.
+  - file: config/agent/data_quality/source_registry.yaml
+    action: Modify
+    purpose: >-
+      PR 2 (outside the sidecar: the registry is a config row set, not always-ask wording). Two edits. (1) The
+      loop_liveness_stale row's description: "the newest event=schedule run" becomes "the newest cadence run"
+      in both the CADENCE and SUCCESS sentences, and the description's end (after its final "...fails every single
+      time.", once) gains " A cadence run is an event=schedule run or, for a workflow the scheduled workflow dispatcher's
+      register names (Decision N), a workflow_dispatch run on main whose actor is the dispatcher's bot." (a sentence of its own, so the
+      two-leg CADENCE and SUCCESS sentence and the peer set's "(never a declared register)" are untouched). (2) A new row after actions_capacity: canonical_id workflow_dispatch_integrity;
+      description "Scheduled workflow dispatcher integrity reads (rec-4233, Decision N clause 5): each
+      convergence-health.yml tick reads the repository's OIDC subject template, the runs created in the last three hours
+      and every workflow's state, and flags a subject template other than GitHub's default, a run
+      outside the dispatcher's register that its bot dispatched or re-ran, or a disabled workflow.";
+      signal_interpretation: Alarm-not-gate (Decision 55), one deduped rec per check class (oidc_subject,
+      off_register_run, disabled_workflow, integrity_blind) updated only when the finding changes; the three breach
+      classes (High) never close automatically and Decision N's integrity-breach condition has the operator delete the
+      App key first, except that a disabled_workflow finding is first checked with the operator, who may have disabled
+      the workflow himself (disabled_manually is a normal state elsewhere, sensor_liveness_episodes.py); integrity_blind
+      (Medium: a read failed or the listing was truncated) closes on the first tick whose
+      reads all succeed; not source=ci_rca, so it does not hard-block the /plan queue; added_date the build date.
+  - file: config/lambda/ducklake/field_semantics.yaml
+    action: Modify
+    purpose: >-
+      PR 2. Regenerated by bin/venv-python -m scripts.schema_to_field_semantics after the registry row lands (generated;
+      never hand-edited, Decision 55): ops_recommendations.source and telemetry_agents.agent_type gain
+      workflow_dispatch_integrity, which validate_write_time_enforcement_conformance and validate_field_semantics_drift
+      require. The file ships in the DuckLake zips, so PR 2's merge also wakes deploy-ducklake-lambdas.yml; until that
+      deploy lands the deployed writer refuses the new source (PC-07, the #1974 precedent), and VP step 14 reads the
+      writer deploy back before the first integrity tick can file.
+  - file: scripts/checks/ops_governance/check_source_registry.py
+    action: Modify
+    purpose: >-
+      PR 2. SCANNED_PATHS gains "scripts/convergence_health/dispatch_integrity.py" (it files under the new source), the
+      #1974 precedent.
+  - file: tests/checks/ops_governance/test_check_source_registry.py
+    action: Modify
+    purpose: >-
+      PR 2. The SCANNED_PATHS pin gains the same path; fails without the check edit.
+  - file: config/structural_size_budgets.yaml
+    action: Modify
+    purpose: >-
+      PR 2. One budgets entry after data-modeling-standard.yaml: "docs/contracts/ports.yaml: 501  # raise-approved:
+      dec-N PC-10, the scheduled workflow dispatcher coupling row (PLAN-scheduled-workflow-dispatch)". ports.yaml has
+      499 effective lines on main against the contracts cap of 500; PC-10 (one flow line) and its amendment entry make
+      501, and Decision N clause 5 names the raise, so validate_structural_size_budget_raises passes on a fresh mention.
+      The wording check placed this same line as its companion.
+  - file: .secrets.baseline
+    action: Modify
+    purpose: >-
+      PR 2 and PR 4, only if the fast tier's detect-secrets refresh moves line numbers in a file this plan edits; no new
+      finding is ever allowlisted without reading it.
+  # ---------------------------------------------------------------- PR 3: the stack (terraform/personal, tf-gated-apply)
+  - file: terraform/personal/scheduled_workflow_dispatch.tf
+    action: Create
+    purpose: >-
+      PR 3. Header: what the stack is (Decision N), that the rules start three workflows through a GitHub App, that the
+      SIT copy is switched off three ways, that the role CREATE routes to tf-gated-apply (Decision 144 cl.4), that the
+      key value is put out of band (Decision 237 cl.3) and never by Terraform, and that code deploys through
+      deploy-prod-lambdas.yml (Decision 125/126) from PR 4 on, and that the file passes the trusted-plan HCL screen
+      (Decision 238 cl.4; scripts/ci/terraform_hcl_screen.py refuses count, for_each, the ? operator and any file() read
+      outside its allowlist, so every resource is written out literally and nothing reads the register). locals:
+      workflow_dispatcher_function = "agent-platform-workflow-dispatcher"; workflow_dispatch_production = { sandbox =
+      true, sit = false }[var.environment] (the map-index form #1987 uses). Resources: aws_cloudwatch_log_group
+      named "/aws/lambda/${local.workflow_dispatcher_function}" (that interpolated form, which
+      validate_agent_observability_read_coverage resolves; retention 14, as prod_lambdas.tf); aws_iam_role
+      workflow_dispatcher (name local.workflow_dispatcher_function, permissions_boundary
+      "arn:aws:iam::${var.account_id}:policy/agent-platform-github-ci-apply-boundary", assume_role_policy
+      data.aws_iam_policy_document.lambda_assume.json); data aws_iam_policy_document workflow_dispatcher with exactly two
+      statements, resources as strings from variables and locals only: WorkflowDispatcherLogs (logs:CreateLogStream,
+      logs:PutLogEvents on "arn:aws:logs:${var.aws_region}:${var.account_id}:log-group:/aws/lambda/agent-platform-workflow-dispatcher:*")
+      and WorkflowDispatcherAppKeyRead (ssm:GetParameter on the literal
+      "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-workflow-dispatcher-app-key");
+      aws_iam_role_policy; aws_lambda_function workflow_dispatcher (handler
+      src.data.handlers.workflow_dispatcher_handler.handler, python3.12, x86_64, timeout 60, memory_size 256,
+      reserved_concurrent_executions 1, s3_bucket aws_s3_bucket.data_lake.id, s3_key lambda-packages/data-pipeline.zip,
+      no source_code_hash, environment WORKFLOW_DISPATCH_ENABLED = { sandbox = "true", sit = "false" }[var.environment],
+      depends_on the policy and log group, lifecycle ignore_changes [source_code_hash]). Per register row, three
+      literal resource sets named by the row (terraform_drift, convergence_health, main_canary):
+      aws_cloudwatch_event_rule workflow_dispatch_<row> (name "agent-platform-workflow-dispatch-<row name>",
+      schedule_expression the row's aws_cron as a literal string, state = { sandbox = "ENABLED", sit = "DISABLED"
+      }[var.environment]); aws_cloudwatch_event_target (input jsonencode({ schedule = "<row name>" })); aws_lambda_permission
+      (principal events.amazonaws.com, source_arn the rule). Four literal aws_cloudwatch_metric_alarm resources, all
+      named agent-platform-workflow-dispatch*, alarm_actions [aws_sns_topic.alerts.arn] and actions_enabled =
+      local.workflow_dispatch_production (in SIT they exist with their actions off, Decision N clause 4):
+      workflow_dispatcher_errors (AWS/Lambda Errors by FunctionName, Sum, period 300, 1 of 1,
+      GreaterThanOrEqualToThreshold 1, treat_missing_data notBreaching) and one workflow_dispatch_not_fired_<row> per
+      rule (AWS/Events TriggeredRules by RuleName, Sum, period and evaluation_periods the row's alarm_period_seconds and
+      alarm_evaluation_periods as literals, LessThanThreshold 1, treat_missing_data breaching). The register stays the
+      handler's source; the stack test holds every literal equal to its register row, so a register edit without the
+      matching HCL edit fails the fast tier and the HCL edit triggers the apply. Tag values use only the tag charset (no
+      parentheses). No KMS, no Scheduler, no SSM parameter resource, no data source on /secret/, no
+      aws_lambda_function_event_invoke_config (not in the screen's resource allowlist): EventBridge's async invoke
+      retries a failed tick up to twice, and the skip window turns a retry after a successful dispatch into skipped.
+  - file: terraform/personal/oidc.tf
+    action: Modify
+    purpose: >-
+      PR 3. IAMPlatformRolesRead gains the agent-platform-workflow-dispatcher role ARN beside the prod roles, so the
+      planner can refresh-read it (validate_ci_refresh_read_coverage enumerates roles by name).
+  - file: terraform/personal/oidc_ci_roles.tf
+    action: Modify
+    purpose: >-
+      PR 3 (not PR 4, so the grant is applied before PR 4's first deploy smoke runs). ProdLambdaInvokeCI gains
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.workflow_dispatcher_function}" for the deploy
+      smoke. The smoke payload {} never reaches a secret; a branch-role invoke naming a schedule can only start a
+      register workflow, as the clock does, and the skip window absorbs a burst.
+  - file: scripts/checks/ops_governance/validate_deploy_channel_conformance.py
+    action: Modify
+    purpose: >-
+      PR 3. The prod class scans prod_lambdas.tf and scheduled_workflow_dispatch.tf (a tuple of names in place of
+      _PROD_TF_GLOB), so the new function's ignore_changes block is held by the same check. Widening only.
+  - file: tests/checks/ops_governance/test_validate_deploy_channel_conformance.py
+    action: Modify
+    purpose: >-
+      PR 3. One case: a fixture scheduled_workflow_dispatch.tf whose function lacks ignore_changes fails the prod class;
+      the existing cases unchanged.
+  - file: tests/checks/iam_tf/test_scheduled_workflow_dispatch.py
+    action: Modify
+    purpose: >-
+      PR 3 cases in TestScheduledWorkflowDispatch, parsed with the PR 1 helpers: the role carries the boundary and the
+      lambda_assume trust; its policy document has exactly the two statements with exactly those actions and resources,
+      and the key ARN's parameter path equals the register's key_parameter; the function's handler, s3_key, runtime,
+      reserved concurrency 1 and ignore_changes, and no source_code_hash argument; the enabled flag, rule state and
+      production local are exact map-index expressions over var.environment whose keys equal the environments the
+      variable's validation admits (sandbox, sit), with sit off in all three; exactly one rule, target and permission per
+      register row, and each rule's schedule_expression, name and target input, and each not-fired alarm's period and
+      evaluation periods, equal the register row's literals (a fourth register row with no rule, or a changed aws_cron
+      on one side only, fails); every alarm's actions_enabled is the production local, it names
+      agent-platform-workflow-dispatch*, targets the alerts topic and carries the treat_missing_data above; each register
+      row's aws_cron minute equals the minute of its workflow's GitHub cron (17, 37, 0) and its alarm period is at least
+      its cron period; scripts/ci/terraform_hcl_screen.py's screen passes on a copy of terraform/personal with the file
+      (the case runs the screen function on the real root); oidc.tf's IAMPlatformRolesRead and
+      oidc_ci_roles.tf's ProdLambdaInvokeCI name the role and the function. Red cases on synthetic HCL for each: an
+      extra ssm action, a wildcard key ARN, kms:Decrypt, a sit rule ENABLED, a sit flag "true", an alarm with
+      actions_enabled true, a rule whose cron differs from its register row, a register row with no rule, a for_each on a
+      rule, a missing ignore_changes.
+  # ---------------------------------------------------------------- PR 4: deploy-channel wiring
+  - file: docs/contracts/build-lambda.yaml
+    action: Modify
+    purpose: >-
+      PR 4. deploy_targets.prod_functions gains agent-platform-workflow-dispatcher; deploy_channels.prod_functions.root's
+      comment names scheduled_workflow_dispatch.tf beside prod_lambdas.tf; a new amendment_log entry (field_add) names
+      the third function and this plan. Data and a comment only, outside the
+      approved-text sidecar (the operator was told at sign-off that the function list rides in the build).
+  - file: scripts/build_lambda_config.py
+    action: Modify
+    purpose: PR 4. _LAMBDA_FUNCTION_NAMES (the contract fallback) gains agent-platform-workflow-dispatcher.
+  - file: scripts/convergence_health/code_drift.py
+    action: Modify
+    purpose: PR 4. _PROD_FUNCTION_NAMES gains agent-platform-workflow-dispatcher (test_prod.py pins it equal to the contract).
+  - file: src/lambdas/data-pipeline/manifest.yaml
+    action: Modify
+    purpose: PR 4. functions gains agent-platform-workflow-dispatcher.
+  - file: .github/workflows/deploy-prod-lambdas.yml
+    action: Modify
+    purpose: >-
+      PR 4. The freshness step names the third function; a new smoke step "Smoke invoke -- workflow-dispatcher (expect
+      status=smoke and the three schedules)" in the existing two steps' shape, asserting d.get('status') == 'smoke' and
+      d.get('schedules') == ['convergence-health', 'main-canary', 'terraform-drift']; the header's "two prod-class Lambdas"
+      becomes three. The gate job's PR 2 guard is untouched.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      PR 4. r3_workflows gains the new smoke body's entry (deploy-prod-lambdas.yml::smoke::<step slug>: <lines>), the
+      same length as the two existing smoke bodies; no ceiling raise.
+  - file: tests/verify_ci_workflow/test_deploy_gate_wiring.py
+    action: Modify
+    purpose: >-
+      PR 4, only if a pin on the prod smoke job's steps or the freshness step's function list fails: it then expects the
+      third function; nothing removed.
+  - file: tests/build_lambda_deploy/test_update_functions.py
+    action: Modify
+    purpose: PR 4, only if its membership assertions (lines 129-130 on main) enumerate the functions; they then include the third.
+  - file: src/data/handlers/CLAUDE.md
+    action: Modify
+    purpose: >-
+      PR 4. The packaging paragraph names three functions: the dispatcher, the findings-processor and the workflow
+      dispatcher (scheduled_workflow_dispatch.tf, Decision N), all deployed by deploy-prod-lambdas.yml. The file is at its
+      pinned prose size (config/prose_budgets.yaml ratchet, 3,709 B): the edit is byte-neutral or smaller, paid for by
+      tightening the same paragraph; no raise.
+  - file: src/lambdas/CLAUDE.md
+    action: Modify
+    purpose: >-
+      PR 4. Its list of the prod-class functions (lines 18-20 on main) names the workflow dispatcher too, byte-neutral or
+      smaller (pinned at 1,190 B by the prose ratchet): the added name is paid for by tightening the same lines; no raise.
+bundled_recommendations: [rec-4233]
+followon_recs: [rec-5126, rec-5127]
+infrastructure_dependencies:
+  - "PR 1 (terraform/bootstrap, admin-only root): the read-only ADMIN pre-merge plan of VP step 5 at the CI-green head, then the human-directed bootstrap apply of VP step 6 after the operator directs it in the ADMIN session. It builds only after PR #1987 (rec-5025, which also edits github_ci_apply_reads.tf) is merged AND applied, in its own admin window, and it must be applied BEFORE PR 3 merges, or the gated apply's own iam:GetRole after the create, and every later refresh, fail closed."
+  - "PR 2: no infrastructure. Its merge wakes deploy-prod-lambdas.yml (src/data/handlers changed), which ships the bigger data-pipeline.zip (handler, register, PyJWT and cryptography) to the two existing functions; VP step 14 reads that deploy back, because PR 3's function is created from the same S3 object."
+  - "Out of band (Decision 237 cl.3): the operator creates the GitHub App before PR 2's register is written (VP step 8) and puts its private key into /secret/agent-platform-workflow-dispatcher-app-key from AWS CloudShell in the production account before PR 3 merges (VP step 15). No Terraform change; SIT gets no key."
+  - "PR 3 (terraform/personal): the file passes the trusted-plan HCL screen (Decision 238 cl.4: literal resources, no count, for_each, ? or file read); a new role routes to tf-gated-apply (guard exit 2); the operator approves the gated-apply job in Actions (VP step 18). The rules are ENABLED in production by the same apply, so dispatching starts then. The branch role's ProdLambdaInvokeCI grant on the new function is an in-budget inline-policy update in the same apply."
+  - "PR 4: no infrastructure. Its merge wakes deploy-prod-lambdas.yml, which deploys the zip to all three functions (the new function's absent deploy record reads baseline_unknown, Decision 249) and runs the new smoke step (VP step 23)."
+  - "Lambda: the data-pipeline.zip artifact (status active, Decision 79) gains one handler and two packages in PR 2 and one function in PR 4; the build, deploy and smoke sequence is VP steps 12, 14 and 23. PR 2's regenerated config/lambda/ducklake/field_semantics.yaml also changes the six active DuckLake artifacts it ships in (ducklake_writer, ducklake_reader, ducklake_maintenance, ducklake_maintenance_smoke, ducklake_telemetry_reader, ducklake_telemetry_writer): deploy-ducklake-lambdas.yml deploys them and VP step 14 reads its smoke, maintenance-smoke, telemetry-twin-smoke and telemetry-smoke jobs by name. Deploys consume the last-green ref (Decision 254 cl.5), so each read-back names the first deploy whose sha has the merge as ancestor."
+  - "Holds: terraform/personal PRs are held from merge while Feedback Loop's rec-4913 hold stands (coordinator log, 2026-11-12); rec-4913 itself read closed on 2026-11-12, so VP 1's log read decides whether the hold still stands; PR 3 and PR 4 check the log before merging and wait if the hold is still open."
+acceptance_criteria:
+  - "Three EventBridge rules in production start terraform-drift.yml, convergence-health.yml and main-canary.yml on main through the dispatcher's bot at their register crons; each workflow keeps its on.schedule (VP steps 19, 20 and test_dispatch_bot_guard.py (b))."
+  - "The dispatcher's role reads exactly its one /secret/ parameter by literal ARN and writes its own logs, nothing else; it carries the apply boundary (VP step 19's simulation and the stack test)."
+  - "The App holds Actions write and Metadata read on this repository only, and its token cannot approve a pending deployment (VP steps 9 and 21)."
+  - "Every dispatchable workflow outside the register refuses a workflow_dispatch run whose github.actor is the bot on each root and status-function job, while a workflow_run child of a bot-started register run still runs; a new dispatchable workflow that neither refuses nor is registered fails the test (test_dispatch_bot_guard.py)."
+  - "The SIT copy is switched off three ways: rules DISABLED, the flag false and checked before any secret read, and SIT holds no key; its alarms exist with actions_enabled false (stack test, handler test)."
+  - "loop_liveness_stale counts the bot's dispatches of the register's workflows as cadence (VP step 24), and each convergence-health tick runs the three integrity reads with no breach on a clean repository (VP steps 14 and 24)."
+  - "Four production alarms exist on the alerts topic and read OK after the first three hours (VP step 24)."
+  - "deploy-prod-lambdas.yml deploys and smoke-tests all three functions (VP step 23)."
+  - "The Decision, the three settings rows, PC-10, GH-15 with its ledger entry and the three amendment_log entries match the approved sidecar word for word (approved_text verify at the recorded digest, VP step 13); the source_registry rows pass check_source_registry and the field_semantics drift gate (VP steps 11 and 26)."
+  - "rec-4233 reads closed after PR 4's merge (VP step 27)."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: >-
+      Precondition at each PR's build start: this plan and its sidecar are on main, rec-5025's PR #1987 has merged, and
+      the branch is current. PR 2 also needs VP step 8's two values; PR 3 also needs PR 1 applied (VP step 6's
+      PRESTAGE_READ_OK posted on merged PR 1), VP step 14's deploy read-back (PR 2's zip is live in S3, so PR 3's
+      function is created from it) and VP step 15's KEY_PARAMETER_OK; PR 4 needs PR 3 applied (VP step 19).
+      For PR 3 and PR 4 also read the coordinator log (issue #1963) for Feedback Loop's rec-4913 hold on
+      terraform/personal merges; while no close entry follows it, the PR builds and waits at merge.
+    command: >-
+      git fetch origin main --quiet && git cat-file -e origin/main:docs/plans/PLAN-scheduled-workflow-dispatch.yaml &&
+      git cat-file -e origin/main:docs/plans/approved/scheduled-workflow-dispatch.yaml && git log origin/main --oneline
+      -F --grep='(#1987)' | grep -q . && git merge-base --is-ancestor origin/main HEAD && echo PRECONDITION_OK; then
+      mcp__github__issue_read(method=get_comments, owner=otl-labs, repo=ontheloop, issue_number=1963) for PR 3 and PR 4
+    expected: >-
+      PRECONDITION_OK for every PR; for PR 3 and PR 4 the read prior markers named above and, before merge, a close entry
+      for the rec-4913 hold (or the operator's ruling that it does not apply). Red today: the plan is not on main and
+      #1987 is open.
+    fix_if: >-
+      No #1987 merge: stop, every PR waits for it. A missing plan or sidecar: this plan's PR has not merged, stop. A stale
+      branch: merge origin/main first. An open hold: build and push, then wait at merge and tell the coordinator.
+    hermetic: false
+    graduation: not-applicable
+  - step: 2
+    phase: pre-deploy
+    action: The stack guard holds on the real tree and reddens on every synthetic breach (grows in PR 1 and PR 3)
+    command: bin/venv-python -m pytest tests/checks/iam_tf/test_scheduled_workflow_dispatch.py -q
+    expected: >-
+      All pass at each PR's head. Red before PR 1's edit (the IAMRolesRead case) and before PR 3's file (the role,
+      policy, function, rule-state, flag, alarm, register-read and grant cases).
+    fix_if: A real-tree assertion fails -- fix the HCL, never the assertion; never skip a case.
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: scheduled-workflow-dispatch-stack
+  - step: 3
+    phase: pre-deploy
+    action: Provider-free formatting of the touched roots (init, validate and plan are CI's and the gate's job, Decision 119)
+    command: terraform fmt -check terraform/bootstrap && terraform fmt -check terraform/personal
+    expected: Exit 0 at PR 1's and PR 3's heads.
+    fix_if: Run terraform fmt on the touched files only.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: The required terraform-validate CI job enforces fmt on every terraform change; a record would duplicate it.
+  - step: 4
+    phase: pre-deploy
+    action: ENVIRONMENT CHECK -- PR 1's gate, PR 1's apply and the post-apply simulations need the ADMIN chain
+    command: bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin 2>/dev/null | grep -q 'assumed-role/PlatformAdmin/' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT
+    expected: >-
+      ADMIN_CHAIN_OK in the ADMIN session. The build session (DEV) prints ADMIN_CHAIN_ABSENT: PR 1 then waits at
+      CI-green and steps 5, 6, 19 and 21 go to an ADMIN session through the coordinator.
+    fix_if: ADMIN_CHAIN_ABSENT in a session expected to hold admin credentials -- report it; never widen a role.
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      PR 1 PRE-MERGE GATE (ADMIN): read-only plan of terraform/bootstrap at the CI-green PR head, compared with main's
+      own plan (export PR_HEAD_SHA=<the PR head sha from pull_request_read> first; the bootstrap root runs on the ADMIN
+      session's admin profile). No hook writes the gitignored terraform/bootstrap/terraform.bootstrap.tfvars: the command
+      first materialises it when absent from the personal tfvars SSM parameter, the store holding all four of the root's
+      no-default values (terraform-cc-web-operations.yaml where_values_live), keeping only those keys and
+      agent_service_account_user_name, mode 600, printing no value (PLAN-platform-iam-bootstrap-adopt step 8's precedent
+      on Decision 237's SSM store). It needs the build-start secret-read line.
+      The head's only state-changing row is the reads policy update, whose IAMRolesRead gains exactly the one role ARN
+      with every other statement equal; main's plan is empty. Plan files are deleted in the step; errors go to a local
+      log, never posted.
+    command: >-
+      set -o pipefail; TV=terraform/bootstrap/terraform.bootstrap.tfvars; TV_OK=0; [ -s "$TV" ] || { install -m 600 /dev/null "$TV" && aws ssm get-parameter --name /secret/agent-platform-terraform-personal-tfvars --with-decryption --profile agent_platform_admin --query Parameter.Value --output text 2> "${TMPDIR:-/tmp}/swd-tfvars.err" |
+      grep -E '^[[:space:]]*(account_id|owner_email|platform_dev_external_id|platform_admin_external_id|agent_service_account_user_name)[[:space:]]*=' > "$TV"; };
+      git check-ignore -q "$TV" && [ "$(grep -cE '^[[:space:]]*(account_id|owner_email|platform_dev_external_id|platform_admin_external_id)[[:space:]]*=' "$TV")" = 4 ] && TV_OK=1 && echo BOOTSTRAP_TFVARS_OK || { rm -f "$TV"; echo BOOTSTRAP_TFVARS_FAILED; };
+      R=$(tr -d '[:space:]' < config/aws-region); E="${TMPDIR:-/tmp}/swd-evidence"; ok=0;
+      CHK="import json,sys; d,h=sys.argv[1],sys.argv[2]; L=lambda v: v if isinstance(v, list) else [v]; S=lambda s: {x.get('Sid'): {k: (sorted(L(v)) if k in ('Action', 'Resource') else v) for k, v in x.items()} for x in L(json.loads(s or '{}').get('Statement', []))}; rows=lambda p: sorted(r['address']+':'+'/'.join(r['change']['actions'])+(':import' if r['change'].get('importing') is not None else '')+(':moved' if r.get('previous_address') else '') for r in p.get('resource_changes', []) if r['change']['actions'] != ['no-op'] or r['change'].get('importing') is not None or r.get('previous_address')); m=json.load(open(d+'/origin-main.json')); p=json.load(open(d+'/'+h+'.json')); A='aws_iam_policy.github_ci_apply_reads'; G='IAMRolesRead'; ch=[r for r in p.get('resource_changes', []) if r['address'] == A]; b=S(ch[0]['change']['before']['policy']) if ch else {}; a=S(ch[0]['change']['after']['policy']) if ch else {}; rb=set(b.get(G, {}).get('Resource', [])); ra=set(a.get(G, {}).get('Resource', [])); new=sorted(ra - rb); ok=bool(ch) and len(new) == 1 and new[0].endswith(':role/agent-platform-workflow-dispatcher') and rb <= ra and {k: v for k, v in a.items() if k != G} == {k: v for k, v in b.items() if k != G} and {k: v for k, v in a.get(G, {}).items() if k != 'Resource'} == {k: v for k, v in b.get(G, {}).items() if k != 'Resource'}; print('HEAD_ROWS', rows(p)); print('MAIN_ROWS', len(rows(m)), rows(m)); print('READS_CHECK_OK' if ok and rows(p) == [A+':update'] and not rows(m) else 'READS_CHECK_MISMATCH')";
+      [ "$TV_OK" = 1 ] && test -n "$PR_HEAD_SHA" && rm -rf "${E:?}" && mkdir -p "$E" && git fetch origin main "$PR_HEAD_SHA" -q && ok=1 &&
+      for ref in origin/main "$PR_HEAD_SHA"; do tag=$(echo "$ref" | tr '/' '-'); W="${TMPDIR:-/tmp}/swd-wt-$tag";
+      { git worktree add --detach "$W" "$ref" -q && cp "$TV" "$W/terraform/bootstrap/" &&
+      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W/terraform/bootstrap" init -input=false -backend-config="region=$R" > /dev/null 2>> "$E/tf.err" &&
+      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir="$W/terraform/bootstrap" plan -input=false -lock=false -var-file=terraform.bootstrap.tfvars -out="$E/p.bin" > /dev/null 2>> "$E/tf.err" &&
+      terraform -chdir="$W/terraform/bootstrap" show -json "$E/p.bin" > "$E/$tag.json"; } || ok=0; rm -f "${E:?}/p.bin";
+      git worktree remove --force "$W"; [ "$ok" = 1 ] || break; done;
+      [ "$ok" = 1 ] && bin/venv-python -I -c "$CHK" "$E" "$PR_HEAD_SHA" || echo PLAN_FAILED; rm -f "${E:?}"/origin-main.json "${E:?}/$PR_HEAD_SHA.json"
+    expected: >-
+      BOOTSTRAP_TFVARS_OK, then HEAD_ROWS ['aws_iam_policy.github_ci_apply_reads:update']; MAIN_ROWS 0 []; READS_CHECK_OK. Post HEAD_ROWS,
+      MAIN_ROWS and the marker with the head sha on PR 1 (addresses and counts only); a new head re-runs it.
+    fix_if: >-
+      BOOTSTRAP_TFVARS_FAILED (the parameter read was refused, or it lacks one of the four keys; the file is removed; the read's error is in the local swd-tfvars.err, never posted): an
+      AccessDenied means the session is not on PlatformAdmin, so re-run VP 4; otherwise STOP and report the key count only,
+      never a value. PLAN_FAILED (read the local tf.err; a precondition error on the 6,144 B size check means a parallel change used
+      the headroom: stop and report) or READS_CHECK_MISMATCH with HEAD_ROWS wrong: fix on the branch and re-run at the
+      new head. MAIN_ROWS above 0: another bootstrap change is merged but unapplied, or main drifted, or a materialised value
+      differs from the applied one (rows on the PlatformDev or PlatformAdmin trust, or on Owner tags); STOP and report
+      before merge, never fold it into this apply.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: >-
+      PR 1 HUMAN-DIRECTED ADMIN APPLY of terraform/bootstrap at the merge sha in a fresh worktree, in an ADMIN session,
+      as three separate calls, never self-directed. Export MERGE_SHA=<the merge sha from pull_request_read> first.
+      Command A (below) materialises the bootstrap tfvars as VP 5 does, plans in the worktree and proves with show -json
+      that the only state-changing row is the reads policy update adding just the one ARN; it prints the Plan: counts
+      line and APPLY_READY with the exact approve line, and leaves the worktree and saved plan in place. The worktree
+      must exist before the apply call, because the protected-action gate reads the HEAD and status of the literal
+      -chdir directory before the command runs. PRESENT the counts line; the operator then writes that approve line in
+      the ADMIN thread (one_shot_at_commit, used up by the next matching call). Command B, its own call, applies the
+      SAME saved plan, written literally:
+      set -o pipefail; D=/tmp/swd-apply; W=/tmp/swd-apply/wt; export TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc;
+      terraform -chdir=/tmp/swd-apply/wt/terraform/bootstrap apply -input=false -no-color "$D/bs.bin" 2>> "$D/tf.err" |
+      grep '^Apply complete!' && echo APPLY_OK || echo APPLY_FAILED; rm -f "${D:?}/bs.bin"; git worktree remove --force "$W".
+      Command C, its own call after APPLY_OK or APPLY_ALREADY, removes the bootstrap tfvars and runs the standing
+      live-simulate gate (deploy-paths.yaml admin_out_of_band.procedure POST-APPLY: this widens the apply role's grant
+      surface) and one simulation that the apply role can now read the new role:
+      D=/tmp/swd-apply; rm -f terraform/bootstrap/terraform.bootstrap.tfvars;
+      bin/venv-python -m scripts.ci.iam_simulate --profile agent_platform_admin --fixture docs/contracts/iam-simulate-fixture.yaml > "$D/sim.log" 2>&1 && echo FIXTURE_SIM_OK || echo FIXTURE_SIM_MISMATCH;
+      A=$(aws sts get-caller-identity --profile agent_platform_admin --query Account --output text);
+      [ "$(aws iam simulate-principal-policy --profile agent_platform_admin --policy-source-arn "arn:aws:iam::$A:role/agent-platform-github-ci-apply" --action-names iam:GetRole --resource-arns "arn:aws:iam::$A:role/agent-platform-workflow-dispatcher" --query 'EvaluationResults[0].EvalDecision' --output text 2> /dev/null)" = allowed ] && echo PRESTAGE_READ_OK || echo PRESTAGE_READ_MISMATCH
+    command: >-
+      set -o pipefail; test -n "$MERGE_SHA" || { echo MERGE_SHA_UNSET; exit 1; }; R=$(tr -d '[:space:]' < config/aws-region); D=/tmp/swd-apply; W=/tmp/swd-apply/wt; mkdir -p "$D"; OK=0; export TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc;
+      TV=terraform/bootstrap/terraform.bootstrap.tfvars; TV_OK=0; [ -s "$TV" ] || { install -m 600 /dev/null "$TV" && aws ssm get-parameter --name /secret/agent-platform-terraform-personal-tfvars --with-decryption --profile agent_platform_admin --query Parameter.Value --output text 2> "${TMPDIR:-/tmp}/swd-tfvars.err" |
+      grep -E '^[[:space:]]*(account_id|owner_email|platform_dev_external_id|platform_admin_external_id|agent_service_account_user_name)[[:space:]]*=' > "$TV"; };
+      git check-ignore -q "$TV" && [ "$(grep -cE '^[[:space:]]*(account_id|owner_email|platform_dev_external_id|platform_admin_external_id)[[:space:]]*=' "$TV")" = 4 ] && TV_OK=1 && echo BOOTSTRAP_TFVARS_OK || { rm -f "$TV"; echo BOOTSTRAP_TFVARS_FAILED; };
+      CHK="import json,sys; L=lambda v: v if isinstance(v, list) else [v]; S=lambda s: {x.get('Sid'): {k: (sorted(L(v)) if k in ('Action', 'Resource') else v) for k, v in x.items()} for x in L(json.loads(s or '{}').get('Statement', []))}; p=json.load(sys.stdin); rc=[r for r in p.get('resource_changes', []) if r['change']['actions'] != ['no-op'] or r['change'].get('importing') is not None or r.get('previous_address')]; G='IAMRolesRead'; ok=len(rc) == 1 and rc[0]['address'] == 'aws_iam_policy.github_ci_apply_reads' and rc[0]['change']['actions'] == ['update']; b=S(rc[0]['change']['before']['policy']) if ok else {}; a=S(rc[0]['change']['after']['policy']) if ok else {}; rb=set(b.get(G, {}).get('Resource', [])); ra=set(a.get(G, {}).get('Resource', [])); new=sorted(ra - rb); ok=ok and len(new) == 1 and new[0].endswith(':role/agent-platform-workflow-dispatcher') and rb <= ra and {k: v for k, v in a.items() if k != G} == {k: v for k, v in b.items() if k != G}; sys.exit(3 if not rc else 0 if ok else 1)";
+      [ "$TV_OK" = 1 ] && git fetch -q origin main && { git worktree remove --force "$W" 2> /dev/null; rm -rf "${W:?}" "${D:?}/bs.bin"; git worktree prune; git worktree add --detach "$W" "$MERGE_SHA" -q; } &&
+      { git merge-base --is-ancestor "$MERGE_SHA" origin/main && grep -q 'role/agent-platform-workflow-dispatcher' "$W/terraform/bootstrap/github_ci_apply_reads.tf" || { echo MERGE_SHA_WRONG; false; }; } &&
+      cp "$TV" "$W/terraform/bootstrap/" && terraform -chdir=/tmp/swd-apply/wt/terraform/bootstrap init -input=false -backend-config="region=$R" > /dev/null 2>> "$D/tf.err" &&
+      terraform -chdir=/tmp/swd-apply/wt/terraform/bootstrap plan -input=false -var-file=terraform.bootstrap.tfvars -out="$D/bs.bin" > /dev/null 2>> "$D/tf.err" && OK=1 || echo APPLY_PLAN_FAILED;
+      c=9; [ "$OK" = 1 ] && { terraform -chdir=/tmp/swd-apply/wt/terraform/bootstrap show -json "$D/bs.bin" | bin/venv-python -I -c "$CHK"; c=$?; };
+      [ "$c" = 3 ] && echo APPLY_ALREADY; [ "$c" = 1 ] && echo APPLY_STOPPED;
+      [ "$c" = 0 ] && terraform -chdir=/tmp/swd-apply/wt/terraform/bootstrap show -no-color "$D/bs.bin" | grep -E '^Plan:' && echo "APPLY_READY approve tf-state-change bootstrap $(git -C "$W" rev-parse HEAD | cut -c1-12)";
+      [ "$c" = 0 ] || { rm -f "${D:?}/bs.bin"; git worktree remove --force "$W" 2> /dev/null; }
+    expected: >-
+      Command A: BOOTSTRAP_TFVARS_OK, 'Plan: 0 to add, 1 to change, 0 to destroy.' and APPLY_READY with the approve line
+      (APPLY_ALREADY on a re-run after a completed apply: skip B, run C). Command B: APPLY_OK. Command C: FIXTURE_SIM_OK
+      and PRESTAGE_READ_OK. Post the markers, the counts line and the merge sha as a counts-only comment on the merged
+      PR 1; that comment is PR 3's merge precondition.
+    fix_if: >-
+      MERGE_SHA_UNSET (export it and re-run A); BOOTSTRAP_TFVARS_FAILED (as VP 5's fix_if); APPLY_STOPPED (the plan
+      carries another row or another statement change: STOP and report, never -target or fold it in); APPLY_PLAN_FAILED
+      or APPLY_FAILED (read the local tf.err; re-run A, which plans afresh, then ask for the approve line again before B,
+      because the failed B used up the one-shot); a gate refusal on B that names a dirty
+      repository or an unreadable root (the worktree was removed or edited: re-run A); FIXTURE_SIM_MISMATCH (read
+      sim.log locally: a mismatch on a by_design denial is a grant leak, STOP); PRESTAGE_READ_MISMATCH after APPLY_OK
+      (IAM propagation: re-run C after a minute, then STOP and report).
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: The refusal-guard classification holds on the real tree and reddens on every synthetic breach
+    command: bin/venv-python -m pytest tests/verify_ci_workflow/test_dispatch_bot_guard.py tests/test_approved_text_approval_workflow.py -q
+    expected: >-
+      All pass at PR 2's head. Red before the guards are placed: (a) names every dispatchable workflow outside the
+      register, 26 on main 2fc60314 (the build's own count at its head is the one it reports).
+    fix_if: >-
+      Place the missing guard by the scope rule; never add a workflow to the register to silence (a), and never loosen
+      the equality.
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: dispatch-bot-guard
+  - step: 8
+    phase: pre-deploy
+    action: >-
+      (VP 8 and VP 9 carry operator commands, not session ones: the session proxy refuses the App and installation
+      pages and paths, measured 2026-11-12, and both steps precede PR 2's code.) OPERATOR STEP M1 (before PR 2's register is written): the operator creates the GitHub App under the organisation
+      on github.com (Settings, Developer settings, GitHub Apps, New GitHub App): name e.g. otl-workflow-dispatcher,
+      homepage the repository URL, webhook unticked, repository permissions Actions read and write and Metadata read
+      only, no organisation or account permissions, "Only on this account"; then Install App on the organisation with
+      "Only select repositories" naming this repository alone; then generate one private key and keep the downloaded
+      .pem for step M2 only (never in a chat, a file in the repository or the thread). He reports the App's slug and
+      client id, both public.
+    command: >-
+      Operator, in the browser (the session's GitHub proxy refuses github.com/apps pages, measured 2026-11-12, so the
+      check is his): he opens the App's settings page and reports the owner shown there, the slug and the client id
+    expected: >-
+      The operator's reply names the organisation as owner and gives the slug and the client id
+      (Iv23... form). The register's app.bot_login is "<slug>[bot]" and app.client_id the reported value.
+    fix_if: >-
+      The App is owned by a personal account: delete it and create it under the organisation (GH-15's target). A webhook
+      or any extra permission ticked: edit the App before the key is put; step 9 reads them back.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: pre-deploy
+    action: >-
+      Capability read-back of the new installation (read-only; the GH-15 ledger entry's evidence), before PR 2 commits
+      the inventory blocks. The session's GitHub proxy refuses /user/installations (measured 2026-11-12), so the
+      operator's read of the installation page is the expected path; no session read can show it (even unrefused, /user/installations
+      lists only installations of the session's own App), so the command below is the operator's. Every later mint re-proves it: installation_token raises unless the granted
+      permissions equal exactly {actions: write, metadata: read} (VP 20).
+    command: >-
+      Operator, in the browser: the organisation's Settings, GitHub Apps (installed), the App's Configure page; he
+      pastes its repository access and its permission list
+    expected: >-
+      The paste shows repository access "Only select repositories" naming this repository alone and the permissions
+      Actions: read and write and Metadata: read-only, nothing else. Post it on PR 2 (names and permissions only); the
+      ledger entry cites it.
+    fix_if: >-
+      The paste shows another permission or repository: he removes it and re-accepts the installation's permission
+      request; re-read.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: pre-deploy
+    action: The handler, token helper and probe hold, at 100% line coverage
+    command: >-
+      bin/venv-python -m pytest tests/data/handlers/test_github_app_token.py
+      tests/data/handlers/test_workflow_dispatcher_handler.py tests/test_session_workflow_dispatcher_probe.py
+      tests/validate/test_pytest_diff_runtime_dep_artifact.py -q &&
+      bin/venv-python -m scripts.test_coverage_checker --check-coverage --files src/data/handlers/github_app_token.py
+      src/data/handlers/workflow_dispatcher_handler.py scripts/session/workflow_dispatcher_probe.py
+    expected: All pass and "all 3 source files at 100%". Red before the modules exist (collection errors).
+    fix_if: Add the uncovered branch's case; never a coverage_baseline entry; never print a key, JWT or token in a fixture assertion message.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: New mirror test modules; the --pre affected set selects them whenever their sources change, and the coverage gate holds them at 100%.
+  - step: 11
+    phase: pre-deploy
+    action: The sensor extension, the integrity reads and the existing sensor suites hold
+    command: >-
+      bin/venv-python -m pytest tests/convergence_health/test_sensor_liveness_dispatch.py
+      tests/convergence_health/test_dispatch_integrity.py tests/convergence_health/test___main__.py
+      tests/convergence_health/ tests/checks/ops_governance/test_check_source_registry.py -q && bin/venv-python -m
+      scripts.test_coverage_checker --check-coverage --files scripts/convergence_health/sensor_liveness_dispatch.py
+      scripts/convergence_health/dispatch_integrity.py
+    expected: >-
+      All pass and "all 2 source files at 100%". Red before the change: the _assess_peer integration case (the bot run
+      does not anchor) and every new module case. The existing sensor_liveness suites pass unchanged before and after.
+    fix_if: Fix the module; an existing sensor case going red means the wiring changed more than the one call -- revert to the single wrapped call.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: New mirror test modules of convergence_health sources; the --pre affected set selects them with every sensor change.
+  - step: 12
+    phase: pre-deploy
+    action: The data-pipeline bundle carries the handler, the token helper and the register; the packages pin to requirements.txt
+    command: >-
+      bin/venv-python -m scripts.build_lambda --list-bundle data-pipeline | grep -cE
+      '(workflow_dispatcher_handler\.py|github_app_token\.py|scheduled_workflow_dispatcher/schedules\.yaml)$'
+    expected: >-
+      3. The manifest's pyjwt, cryptography, cffi and pycparser pins equal requirements.txt's (the handler test's pin
+      case, VP step 10).
+      The deployed zip's imports are proven by VP step 19's smoke invoke, which imports both packages.
+    fix_if: A count below 3 -- the manifest's handlers or config list misses the file; fix the manifest.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: The bundle list is re-proven live by every deploy-prod-lambdas.yml smoke from PR 4 on.
+  - step: 13
+    phase: pre-deploy
+    action: The placed wording equals the approved sidecar at its recorded digest (Decision 246)
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug scheduled-workflow-dispatch
+    expected: >-
+      Every one of the eight blocks verifies with {{N}} and {{DATE}} filled, at the digest the approval run recorded; exit
+      0 at PR 2's head.
+    fix_if: Re-place the block word for word from the sidecar; never edit the sidecar or a bound file's placed text.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      A base-relative, one-time binding of the build's diff to its sidecar; validate_merge_step enforces the same
+      binding on the PR's fast tier.
+  - step: 14
+    phase: post-deploy
+    action: >-
+      After PR 2 merges: the prod deploy shipped the bigger zip to the two existing functions and stayed smoke-green, the
+      DuckLake deploy shipped the regenerated field_semantics.yaml to the six artifacts, and the next convergence-health
+      tick ran the three integrity reads with nothing filed. Deploys consume the last-green ref (Decision 254 cl.5), so
+      the read-back is of the first successful deploy whose deployed sha has PR 2's merge as an ancestor, not a run at the
+      merge sha; it is PR 3's precondition.
+    command: >-
+      mcp__github__actions_list(method=list_workflow_runs, owner=otl-labs, repo=ontheloop,
+      resource_id=deploy-prod-lambdas.yml) and the same for deploy-ducklake-lambdas.yml and convergence-health.yml; for
+      each run created after the merge, mcp__github__actions_list(method=list_workflow_jobs) and
+      mcp__github__get_job_logs on deploy-prod's deploy and smoke jobs, deploy-ducklake's smoke, maintenance-smoke,
+      telemetry-twin-smoke and telemetry-smoke jobs and convergence-health's health-check job (step "Assert scheduled loop liveness (LSA-02)"); for each deploy run read
+      the deployed sha, the sha in its gate job's "DEPLOY-GATE deploy reason=<r> sha=<sha>" line (scripts/ci/deploy_gate.py; a run whose gate printed skip does not count), and run git merge-base --is-ancestor <PR 2 merge sha> <that deployed sha>
+      (the run's head sha is not the deployed sha: the gate ships the newest green full-tier commit); then, from the session, bin/venv-python -m
+      scripts.convergence_health --dispatch-integrity-probe off_register_run and the same for disabled_workflow (the
+      oidc_subject read is refused by the session proxy, so its evidence is the CI job log above)
+    expected: >-
+      deploy-prod-lambdas: deploy and smoke success on the first run whose deployed sha has the merge as ancestor
+      (both existing smokes green; its smoke lines "OK <fn> deploy record fresh: <sha>" name that sha). deploy-ducklake-lambdas: the same, with its four smoke jobs success by name. The first convergence-health run after both: the liveness step succeeds and its
+      log carries "[convergence_health] dispatch_integrity: oidc_subject=clear off_register_run=clear
+      disabled_workflow=clear" (the CI run has direct egress, so this is the oidc_subject evidence);
+      both session probes exit 0. Record the run ids on merged PR 2.
+    fix_if: >-
+      A red prod smoke: the zip broke an existing handler (a top-level import); revert PR 2 and fix. integrity_blind
+      filed: read the class's context for the failing read (a 403 on the OIDC customization read means the job's token
+      lacks a permission it needs; fix in a follow-up of this plan, never by widening the dispatcher). A breach filed on a
+      clean repository: the check is wrong; stop and report before PR 3.
+    hermetic: false
+    graduation: not-applicable
+  - step: 15
+    phase: pre-deploy
+    action: >-
+      OPERATOR STEP M2 (after PR 2 merges, before PR 3 merges): the operator opens AWS CloudShell in the production
+      account and puts the App's private key into the SSM SecureString parameter (Decision 237 cl.3), then deletes the
+      downloaded .pem
+    command: >-
+      Operator, in CloudShell, after uploading the .pem through CloudShell's Actions, Upload file: aws ssm put-parameter
+      --name /secret/agent-platform-workflow-dispatcher-app-key --type SecureString --value "file://$HOME/<file>.pem"
+      --description "workflow dispatcher GitHub App private key (rec-4233)" && rm "$HOME/<file>.pem". Check, from the
+      session (metadata only, no decryption): AWS_PROFILE=agent_platform aws ssm describe-parameters
+      --parameter-filters Key=Name,Values=/secret/agent-platform-workflow-dispatcher-app-key --query
+      'Parameters[0].[Type,Version]' --output text | grep -qE '^SecureString[[:space:]]+1$' && echo KEY_PARAMETER_OK, run
+      in the ADMIN session with --profile agent_platform_admin in place of AWS_PROFILE=agent_platform (PlatformDev's
+      DailyOps policy grants no ssm:DescribeParameters)
+    expected: KEY_PARAMETER_OK (SecureString, version 1). Post it on merged PR 2.
+    fix_if: >-
+      AccessDenied: the check ran on PlatformDev; re-run it in the ADMIN session (VP 4 first). No row: the put ran in
+      another account or region; ask the operator to re-run it with the region from
+      config/aws-region. A version above 1: a second put; fine if he confirms it was the same key. Never read the value.
+    hermetic: false
+    graduation: not-applicable
+  - step: 16
+    phase: pre-deploy
+    action: PR 3's neighbouring guards hold with the new role and function
+    command: >-
+      bin/venv-python -m pytest tests/checks/ops_governance/test_validate_deploy_channel_conformance.py
+      tests/checks/iam_tf/test_validate_secret_parameter_grants.py tests/checks/iam_tf/test_validate_boundary_attached.py
+      tests/checks/iam_tf/test_validate_policy_document_plan_time_refs.py tests/checks/iam_tf/test__read_coverage_trusted.py
+      tests/checks/decisions/test_sit_decision_records.py -q
+    expected: All pass. Red before the conformance-check widening (the new fixture case).
+    fix_if: Fix the HCL or the widening the failure names; never weaken a guard.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Existing test modules of registered checks; each runs in the --pre affected set for terraform/personal changes.
+  - step: 17
+    phase: pre-deploy
+    action: >-
+      PR 3's trusted PR plan screens clean (Decision 238 cl.4) and routes to the gated apply: the role CREATE is
+      trust-bearing (guard exit 2, Decision 144 cl.4), and every planned row is this plan's
+    command: >-
+      bin/venv-python scripts/ci/terraform_hcl_screen.py screen --root terraform/personal locally first; then
+      mcp__github__actions_list(method=list_workflow_runs, resource_id=terraform-plan-trusted.yml) for the PR head and
+      mcp__github__get_job_logs on its plan job's "Screen the PR's Terraform", "Terraform plan (full refresh, output to a private log)", "Backstop" and
+      "Deterministic apply guard (predicted verdict)" steps
+    expected: >-
+      The local screen and the job's screen and backstop steps pass; the predicted verdict is gated. The plan lists only
+      creates of this plan's addresses (the log group, the role, its inline policy, the
+      function, three rules, three targets, three permissions, four alarms) and updates of exactly three existing inline
+      policies: aws_iam_role_policy.github_ci_planner and aws_iam_role_policy.github_ci_trusted_plan (both source
+      ci_full_refresh_read, whose IAMPlatformRolesRead gains the role) and aws_iam_role_policy.github_ci_branch
+      (ProdLambdaInvokeCI); the guard classifies it gated.
+      Counts and addresses only on the PR.
+    fix_if: >-
+      Any other address: another merged-but-unapplied terraform/personal change, or drift; stop and report, never fold
+      it in. A precondition error on the planner or trusted-plan policy's 10,240 B size check: a parallel change used
+      the headroom; stop and report. An iam:GetRole AccessDenied: PR 1 is not applied; run VP step 6 first. A screen refusal: rewrite the HCL in
+      the literal form of the scope row; never widen the screen policy (a Decision 238 containment).
+    hermetic: false
+    graduation: not-applicable
+  - step: 18
+    phase: post-deploy
+    action: >-
+      After PR 3 merges: the operator approves the tf-gated-apply job in Actions; read the apply and its clean re-plan
+    command: >-
+      mcp__github__actions_list(method=list_workflow_runs, resource_id=terraform-apply-sandbox.yml) at the merge sha; tell
+      the operator the gated-apply job is waiting for his approval, with the run link; after it ends,
+      mcp__github__actions_list(method=list_workflow_jobs) and mcp__github__get_job_logs on the gated-apply job
+    expected: >-
+      The gated-apply job concludes success with the same counts and addresses as VP step 17 and a clean re-plan.
+      Record the run id on merged PR 3. Tell the operator before he approves that the three not-fired alarms will likely
+      page the alerts topic once (missing data is breaching) until each rule's first tick lands, up to three hours for
+      main-canary; that page is expected, and VP 24 reads them OK afterwards.
+    fix_if: On a failed apply, read the names-only report and stop; never re-run with -target (Decision 55).
+    hermetic: false
+    graduation: not-applicable
+  - step: 19
+    phase: post-deploy
+    action: >-
+      Post-apply read-back (ADMIN, read-only plus one smoke invoke): the role can read only its key and write its logs;
+      the function exists on the shipped zip, its flag is true, the rules are ENABLED, and a smoke invoke imports both
+      packages
+    command: >-
+      R=$(tr -d '[:space:]' < config/aws-region); A=$(aws sts get-caller-identity --profile agent_platform_admin --query
+      Account --output text); P=arn:aws:ssm:$R:$A:parameter; F=agent-platform-workflow-dispatcher; aws iam
+      simulate-principal-policy --profile agent_platform_admin --policy-source-arn arn:aws:iam::$A:role/$F --action-names
+      ssm:GetParameter --resource-arns $P/secret/agent-platform-workflow-dispatcher-app-key
+      $P/secret/agent-platform-terraform-personal-tfvars --query 'EvaluationResults[].EvalDecision' --output text; aws
+      lambda get-function-configuration --profile agent_platform_admin --function-name $F --query
+      'Environment.Variables.WORKFLOW_DISPATCH_ENABLED' --output text; aws events list-rules --profile
+      agent_platform_admin --name-prefix agent-platform-workflow-dispatch- --query 'Rules[].State' --output text; aws lambda
+      invoke --profile agent_platform_admin --function-name $F --payload '{}' --cli-binary-format raw-in-base64-out
+      /dev/stdout 2>/dev/null | head -c 200
+    expected: >-
+      "allowed implicitDeny" (the key only); "true"; "ENABLED ENABLED ENABLED"; a JSON body with status smoke and the
+      three schedule names. Post the decisions, the flag, the states and the smoke status on merged PR 3 (no account id,
+      no ARN).
+    fix_if: >-
+      allowed on the second parameter: the role is wider than the scope; stop, revert PR 3. A smoke error naming jwt or
+      cryptography: the zip lacks the packages; fix the manifest in a follow-up PR (the rules keep firing and fail into
+      the Errors alarm until then; disable them with aws events disable-rule only on the operator's word). State
+      DISABLED: the environment var is not sandbox; read the plan. A throttled smoke invoke (reserved concurrency 1
+      overlapping a tick): wait a minute and re-run it.
+    hermetic: false
+    graduation: not-applicable
+  - step: 20
+    phase: post-deploy
+    action: The first live bot dispatches start each register workflow on main, and the Lambda's log shows one outcome line per tick
+    command: >-
+      After the next :17, :37 and three-hourly :00 ticks: mcp__github__actions_list(method=list_workflow_runs,
+      owner=otl-labs, repo=ontheloop, resource_id=<each register workflow>, workflow_runs_filter={event:
+      workflow_dispatch, actor: "<bot_login>"}); then aws logs filter-log-events --profile agent_platform --log-group-name
+      /aws/lambda/agent-platform-workflow-dispatcher --start-time <apply time in ms> --filter-pattern '"status"' --query
+      'events[].message' --output text | grep -cE 'status=(dispatched|skipped)'. If the MCP tool does not take the
+      event or actor filter, list the workflow's runs unfiltered (perPage 20) and keep those whose event is
+      workflow_dispatch and whose actor.login is the bot
+    expected: >-
+      At least one run per register workflow with event workflow_dispatch, actor the bot, head_branch main, created
+      within a minute of its rule's minute; the log count is at least the number of ticks elapsed. Record the three run
+      ids on merged PR 3.
+    fix_if: >-
+      No run and a dispatched log line: the dispatch was accepted but refused by the workflow (read the run list without
+      the actor filter). An error line: read its status and path (a 404 on the installation means the App is not
+      installed on this repository; a 403 means a missing permission). Never paste a log line that holds a body.
+    hermetic: false
+    graduation: not-applicable
+  - step: 21
+    phase: post-deploy
+    action: >-
+      OPERATOR STEP M3, APPROVAL-BYPASS PROBE (Decision 248 cl.8 precedent): the App's token cannot approve a pending
+      deployment. The session dispatches deployment-approval-probe.yml (a person's dispatch, so its guard does not
+      refuse it); the operator runs the probe in AWS CloudShell in the production account, because the session's GitHub
+      proxy refuses the token mint and revoke paths; the session then reads the run's approvals record independently
+    command: >-
+      mcp__github__actions_run_trigger(method=run_workflow, owner=otl-labs, repo=ontheloop,
+      workflow_id=deployment-approval-probe.yml, ref=main); read its run id with mcp__github__actions_list; the operator
+      in CloudShell: python3.12 --version || sudo dnf install -y python3.12 python3.12-pip; git clone --depth 1
+      https://github.com/otl-labs/ontheloop && cd ontheloop && python3.12 -m pip install --user pyyaml==6.0.3
+      pycparser==3.0 cffi==2.0.0 cryptography==49.0.0 pyjwt==2.13.0 && python3.12 -m
+      scripts.session.workflow_dispatcher_probe --run-id <id> --key-parameter
+      /secret/agent-platform-workflow-dispatcher-app-key; echo "exit=$?"; he pastes the printed JSON line's verdict and
+      the exit line only. Afterwards the session cancels the probe run (mcp__github__actions_run_trigger
+      method=cancel_workflow_run), so no pending run is left. Then, from the session: bin/venv-python -m
+      scripts.session.deployment_approval_probe --observe --repo otl-labs/ontheloop --run-id <id>
+    expected: >-
+      The operator's paste shows verdict TOKEN_LACKS_PERMISSION or NOT_REVIEWER and exit=0; the session's --observe
+      read shows no approval entry by the bot. Post the verdict on merged PR 3.
+    fix_if: >-
+      APPROVED: Decision N's probe-approves condition fires; tell the operator at once, ask him to delete the key
+      parameter and the App's key, and re-plan with Decision 248. Exit 2 proves nothing: PROXY_BLOCKED should not occur
+      in CloudShell (stop and report); REFUSED means GitHub refused the attempt before classifying it (report the class);
+      an install or import failure (no python3.12 package, a pip error): report the step that failed and stop, never
+      install unpinned versions; ParameterNotFound: the key is not in config/aws-region's region (re-check VP 15), stop
+      and report;
+      UNAVAILABLE means the token was not accepted (re-check VP 9 and the installation); INCONCLUSIVE means the run was
+      not pending in time (dispatch a fresh probe run and re-run with it); PROBE_INVALID means the repository read
+      failed. Report the class, never the text.
+    hermetic: false
+    graduation: not-applicable
+  - step: 22
+    phase: pre-deploy
+    action: PR 4's deploy-channel pins hold with the third function
+    command: >-
+      bin/venv-python -m pytest tests/convergence_health/code_drift/test_prod.py tests/verify_ci_workflow/test_deploy_gate_wiring.py
+      tests/build_lambda_deploy/ tests/checks/contracts/ -q
+    expected: All pass. Red before the four function-list edits move together (the contract-equality pins).
+    fix_if: Move the lists together; never drop a pin.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Existing pin suites; the --pre affected set selects them with every edit to the deploy files.
+  - step: 23
+    phase: post-deploy
+    action: After PR 4 merges, deploy-prod-lambdas.yml deploys all three functions and the new smoke step passes
+    command: >-
+      mcp__github__actions_list(method=list_workflow_runs, owner=otl-labs, repo=ontheloop,
+      resource_id=deploy-prod-lambdas.yml) for runs created after PR 4's merge; for each, mcp__github__actions_list(method=list_workflow_jobs) and
+      mcp__github__get_job_logs on its gate job, reading the deployed sha, the sha in its gate job's "DEPLOY-GATE deploy reason=<r> sha=<sha>" line (scripts/ci/deploy_gate.py; a run whose gate printed skip does not count); take the first successful
+      run whose deployed sha passes git merge-base --is-ancestor <PR 4 merge sha> <deployed sha> (deploys consume the
+      last-green ref, Decision 254 cl.5, so the run woken by the merge can ship an older sha); then
+      mcp__github__get_job_logs on that run's deploy and smoke jobs
+    expected: >-
+      deploy success naming three functions (the new one's absent deploy record reads baseline_unknown, Decision 249);
+      smoke success with "OK workflow-dispatcher smoke: status=smoke". Record the run id on merged PR 4.
+    fix_if: On a smoke failure, read the step's printed status; a deploy failure on the new function's update permission is the apply role's grant, stop and report.
+    hermetic: false
+    graduation: not-applicable
+  - step: 24
+    phase: post-deploy
+    action: >-
+      Three hours after VP step 19: the liveness sensor counts the bot runs as cadence, the integrity reads stay clear,
+      and the four alarms read OK
+    command: >-
+      bin/venv-python -m scripts.convergence_health --dispatch-integrity-probe off_register_run && bin/venv-python -m
+      scripts.convergence_health --dispatch-integrity-probe disabled_workflow; the newest convergence-health run's
+      health-check job log (mcp__github__get_job_logs) for its dispatch_integrity status line; for wf in
+      terraform-drift.yml convergence-health.yml main-canary.yml; do bin/venv-python -m scripts.convergence_health
+      --liveness-probe "$wf"; done (read-only, through _assess_peer and so the new wiring); then, read-only (never the sensor's --sensor-liveness,
+      which writes recs): for wf in terraform-drift.yml convergence-health.yml main-canary.yml; do bin/venv-python -c
+      "import os,sys; from scripts.convergence_health.approvals import _make_github_caller as M; from
+      scripts.convergence_health.sensor_liveness import _query_last_run as Q; from
+      scripts.convergence_health.sensor_liveness_dispatch import newer_cadence_run as N; c=M(os.environ.get('GH_TOKEN')
+      or os.environ.get('GITHUB_TOKEN','')); b='https://api.github.com/repos/otl-labs/ontheloop'; w=sys.argv[1];
+      r=N(Q(w,c,b),w,c,b) or {}; print(w, r.get('event'), (r.get('actor') or {}).get('login'), r.get('id'))" "$wf";
+      done;
+      aws cloudwatch describe-alarms --profile agent_platform --alarm-name-prefix agent-platform-workflow-dispatch
+      --query 'MetricAlarms[].[AlarmName,StateValue]' --output text
+    expected: >-
+      Both probes exit 0 and the job log's status line reads oidc_subject=clear; the three --liveness-probe runs exit
+      0; the one-liner prints event workflow_dispatch and the bot's login as each register loop's newest cadence run;
+      four alarms, all OK. Record them on merged PR 4.
+    fix_if: >-
+      A not-fired alarm in ALARM: its rule did not trigger in the period; read the rule state and the Lambda log. An
+      INSUFFICIENT_DATA Errors alarm is fine before any error. A sensor line naming a schedule run although a newer bot
+      run exists: the wiring is wrong; fix in a follow-up PR.
+    hermetic: false
+    graduation: not-applicable
+  - step: 25
+    phase: post-deploy
+    action: Start the 14-day soak on rec-5126 (Decision N clause 6), so the floor change and rec-5113 wait for its end
+    command: >-
+      PYTHONPATH=. bin/venv-python -c "from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids;
+      from scripts.ops_data_portal import update_rec; c=fetch_recs_by_ids(make_reader(profile='agent_platform'),
+      ['rec-5126'])[0][0]['context']; update_rec('rec-5126', {'context': c + ' Soak started <UTC date of VP step 19> (gated
+      apply run <id>); it ends 14 days later if no tick was missed (PLAN-scheduled-workflow-dispatch VP 25).'},
+      profile='agent_platform')"
+    expected: The returned row shows the appended context. Report the rec id and the soak end date.
+    fix_if: A portal failure fails loudly (Decision 84 I-4); restore connectivity and re-run.
+    hermetic: false
+    graduation: not-applicable
+  - step: 26
+    phase: pre-deploy
+    action: Fast tier on each PR head (advisory locally; PR CI is authoritative, Decision 73), then the full tier before each hand-off (handoff_policy), started in the background from the top-level session with a 2 h limit
+    command: bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: The fast tier exits 0; the verify-head read reports a completed full run for HEAD with exit 0.
+    fix_if: Diagnose and fix on the branch; never skip, disable or quarantine a test (Decision 235). A full-tier timeout is blocked, never a warning.
+    hermetic: false
+    graduation: not-applicable
+  - step: 27
+    phase: post-deploy
+    action: After PR 4's squash merge, whose body carries the Resolves trailer naming rec-4233, ci.yml's closure job closes the rec
+    command: >-
+      PYTHONPATH=. bin/venv-python -c "from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids;
+      rows, missing = fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-4233']); print('REC_STATUS',
+      rows[0]['status'] if rows else missing)"
+    expected: REC_STATUS closed. Report it with PR 4's merge sha.
+    fix_if: >-
+      open: the closure job did not run or the trailer was missing; read ci.yml's closure job on the merge commit and
+      close it through the portal's update verb with the merge sha as evidence. A read failure fails loudly (Decision 84
+      I-4).
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: terraform/bootstrap/github_ci_apply_reads.tf
+    behavior: the apply role's IAMRolesRead names the workflow dispatcher role ahead of its creation
+    verification_step: 2
+    test_selector: tests/checks/iam_tf/test_scheduled_workflow_dispatch.py
+    red_green_expectation: red before PR 1's edit (the ARN is absent), green after
+  - source: config/lambda/scheduled_workflow_dispatcher/schedules.yaml
+    behavior: the register parses, has exactly the three rows and names existing workflows; malformed fields are refused
+    verification_step: 10
+    test_selector: tests/data/handlers/test_workflow_dispatcher_handler.py
+    red_green_expectation: red before the register exists (the real-register case), green after
+  - source: src/data/handlers/github_app_token.py
+    behavior: JWT shape, exact-permission token mint, revoke, and error text free of credentials
+    verification_step: 10
+    test_selector: tests/data/handlers/test_github_app_token.py
+    red_green_expectation: red before the module exists, green after
+  - source: src/data/handlers/workflow_dispatcher_handler.py
+    behavior: disabled before any secret read, smoke proves the packages, allowlist, skip window, dispatch and revoke on every outcome
+    verification_step: 10
+    test_selector: tests/data/handlers/test_workflow_dispatcher_handler.py
+    red_green_expectation: red before the module exists, green after
+  - source: src/lambdas/data-pipeline/manifest.yaml
+    behavior: the zip carries the handler, the helper, the register and the two pinned packages; PR 4 lists the third function
+    verification_step: 10
+    test_selector: tests/data/handlers/test_workflow_dispatcher_handler.py
+    red_green_expectation: red before the manifest edit (the pin-equality case finds no pyjwt pin), green after
+  - source: requirements.in
+    behavior: pyjwt[crypto] is a direct dependency whose pins match the manifest
+    verification_step: 10
+    test_selector: tests/data/handlers/test_workflow_dispatcher_handler.py
+    red_green_expectation: red if the manifest pin and requirements.txt differ, green when equal
+  - source: requirements-fast.txt
+    behavior: the fast tier's floors cover every requirements.in distribution
+    verification_step: 10
+    test_selector: tests/validate/test_pytest_diff_runtime_dep_artifact.py
+    red_green_expectation: red after the requirements.in line alone (pyjwt omitted without a reason), green with the floor
+  - source: requirements.txt
+    behavior: pip-compile's via lines record the direct dependency
+    verification_step: 26
+    waiver_reason: Comment lines only (pip-compile's via lines); no check reads them, and validate_lockfile_sync checks the pins, which do not change.
+    command: bin/venv-python -m scripts.validate --pre
+  - source: scripts/session/workflow_dispatcher_probe.py
+    behavior: the bypass probe names only the register's key, keeps the token out of stdout, revokes after any outcome
+    verification_step: 10
+    test_selector: tests/test_session_workflow_dispatcher_probe.py
+    red_green_expectation: red before the module exists, green after
+  - source: .github/workflows/approved-text-approval.yml
+    behavior: every dispatchable workflow outside the register refuses the bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before the guards (case (a) names the 26 files), green after
+  - source: .github/workflows/backlog-health.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/branch-cleanup.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/ci-rca-inactivity-sweep.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/ci-rca.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/codeql.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/cost-reconciliation.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/dedup-probe.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/dependabot-stranded.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/deploy-ducklake-lambdas.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/deploy-prod-lambdas.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/deployment-approval-probe.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/ghas-probe.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/pr-conflict-signal.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/publish-ontheloop.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/security-detector-liveness.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/subagent-review-smoke.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/telemetry-arrival.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/telemetry-causal-chain.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/telemetry-golden-replay.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/telemetry-verification.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/terraform-apply-sandbox.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/terraform-github-apply.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/terraform-provider-mirror-seed.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/tf-gated-apply-prototype.yml
+    behavior: the workflow refuses the dispatcher's bot on each root and status-function job
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after
+  - source: .github/workflows/reconcile.yml
+    behavior: the workflow refuses the bot on its three root and status-function jobs; resolve-target's permissions parse to the same map in flow form
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    red_green_expectation: red before its guard (case (a) names the file), green after; the structural size gate holds it at or under 513
+  - source: config/agent/verification_registry/entries/scheduled-workflow-dispatch-stack.yaml
+    behavior: the registry record for step 2's graduated guard
+    verification_step: 2
+    test_selector: tests/checks/iam_tf/test_scheduled_workflow_dispatch.py
+    waiver_reason: Registry data; validate_verification_registry in the fast tier checks that the record's node resolves, and step 2 runs the node it names.
+  - source: config/agent/verification_registry/entries/dispatch-bot-guard.yaml
+    behavior: the registry record for step 7's graduated guard
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py
+    waiver_reason: Registry data; validate_verification_registry in the fast tier checks that the record's node resolves, and step 7 runs the node it names.
+  - source: tests/test_approved_text_approval_workflow.py
+    behavior: the render job stays main-only with the guard prefix
+    verification_step: 7
+    test_selector: tests/test_approved_text_approval_workflow.py
+    red_green_expectation: red against the guarded workflow until the assertion expects the prefix, green after
+  - source: scripts/convergence_health/sensor_liveness_dispatch.py
+    behavior: a bot dispatch on main counts as cadence for a register loop only
+    verification_step: 11
+    test_selector: tests/convergence_health/test_sensor_liveness_dispatch.py
+    red_green_expectation: red before the module exists, green after
+  - source: scripts/convergence_health/sensor_liveness.py
+    behavior: _assess_peer anchors a register loop on its newer bot dispatch
+    verification_step: 11
+    test_selector: tests/convergence_health/test_sensor_liveness_dispatch.py
+    red_green_expectation: red before the one-line wiring (the integration case), green after
+  - source: scripts/convergence_health/dispatch_integrity.py
+    behavior: the three integrity reads file one rec per class and never close a breach
+    verification_step: 11
+    test_selector: tests/convergence_health/test_dispatch_integrity.py
+    red_green_expectation: red before the module exists, green after
+  - source: scripts/convergence_health/__main__.py
+    behavior: the liveness run also runs the integrity reads; the probe flag reports the classes
+    verification_step: 11
+    test_selector: tests/convergence_health/test___main__.py
+    red_green_expectation: red before the wiring (the new cases), green after
+  - source: scripts/convergence_health/code_drift.py
+    behavior: a register change redeploys the zip (PR 2); the prod function list names the third function (PR 4)
+    verification_step: 22
+    test_selector: tests/convergence_health/code_drift/test_prod.py
+    red_green_expectation: red before each edit (the pathspec and the contract-equality pins), green after
+  - source: config/agent/data_quality/source_registry.yaml
+    behavior: the new source is registered and its filer is scanned
+    verification_step: 11
+    test_selector: tests/checks/ops_governance/test_check_source_registry.py
+    red_green_expectation: red before the SCANNED_PATHS pin moves with the check, green after
+  - source: scripts/checks/ops_governance/check_source_registry.py
+    behavior: the integrity filer's sources are scanned against the registry
+    verification_step: 11
+    test_selector: tests/checks/ops_governance/test_check_source_registry.py
+    red_green_expectation: red before the SCANNED_PATHS entry, green after
+  - source: config/lambda/ducklake/field_semantics.yaml
+    behavior: the generated projection matches the registry
+    verification_step: 26
+    waiver_reason: Generated; validate_field_semantics_drift in the fast tier fails a stale file.
+    command: bin/venv-python -m scripts.validate --pre
+  - source: config/structural_size_budgets.yaml
+    behavior: ports.yaml's one-line raise carries a marker the new Decision authorizes
+    verification_step: 26
+    waiver_reason: Governed by validate_structural_size_budget_raises and validate_structural_size_limits in the fast tier, which the wording check already ran with this line.
+    command: bin/venv-python -m scripts.validate --pre
+  - source: docs/DECISIONS.md
+    behavior: the Decision matches the approved wording and fits the per-entry cap
+    verification_step: 13
+    waiver_reason: Approved text; approved_text verify and validate_decisions_size hold it.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug scheduled-workflow-dispatch
+  - source: docs/contracts/project-configuration.yaml
+    behavior: the three settings rows match the approved wording and the registry's own rules
+    verification_step: 13
+    waiver_reason: Approved text; approved_text verify and validate_project_configuration hold it.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug scheduled-workflow-dispatch
+  - source: docs/contracts/ports.yaml
+    behavior: PC-10 matches the approved wording
+    verification_step: 13
+    waiver_reason: Approved text; approved_text verify and validate_ports_contract hold it.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug scheduled-workflow-dispatch
+  - source: docs/contracts/account-credential-inventory.yaml
+    behavior: GH-15 and its ledger entry match the approved wording
+    verification_step: 13
+    waiver_reason: Approved text; approved_text verify and the inventory's own validator hold it.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug scheduled-workflow-dispatch
+  - source: docs/decisions-index.json
+    behavior: the index matches DECISIONS.md
+    verification_step: 26
+    waiver_reason: Generated; the decisions-index freshness check in the fast tier fails a stale index.
+    command: bin/venv-python -m scripts.validate --pre
+  - source: .secrets.baseline
+    behavior: detect-secrets' own line-number refresh
+    verification_step: 26
+    waiver_reason: Generated by the pre-commit hook; the hook in the fast tier fails a stale baseline.
+    command: bin/venv-python -m scripts.validate --pre
+  - source: terraform/personal/scheduled_workflow_dispatch.tf
+    behavior: two-statement role with the boundary, literal rules held equal to the register, SIT switched off three ways, alarms acting in production only, a clean HCL screen
+    verification_step: 2
+    test_selector: tests/checks/iam_tf/test_scheduled_workflow_dispatch.py
+    red_green_expectation: red before PR 3's file (the stack cases), green after
+  - source: terraform/personal/oidc.tf
+    behavior: the planner can refresh-read the new role
+    verification_step: 2
+    test_selector: tests/checks/iam_tf/test_scheduled_workflow_dispatch.py
+    red_green_expectation: red before the IAMPlatformRolesRead entry, green after
+  - source: terraform/personal/oidc_ci_roles.tf
+    behavior: the branch role may invoke the new function for the deploy smoke
+    verification_step: 2
+    test_selector: tests/checks/iam_tf/test_scheduled_workflow_dispatch.py
+    red_green_expectation: red before the ProdLambdaInvokeCI entry, green after
+  - source: scripts/checks/ops_governance/validate_deploy_channel_conformance.py
+    behavior: the prod class scans the new file
+    verification_step: 16
+    test_selector: tests/checks/ops_governance/test_validate_deploy_channel_conformance.py
+    red_green_expectation: red before the widening (the new fixture case), green after
+  - source: docs/contracts/build-lambda.yaml
+    behavior: the prod function list names the third function
+    verification_step: 22
+    test_selector: tests/convergence_health/code_drift/test_prod.py
+    red_green_expectation: red when the contract and the code lists differ, green when they move together
+  - source: scripts/build_lambda_config.py
+    behavior: the fallback function list equals the contract's
+    verification_step: 22
+    test_selector: tests/build_lambda_deploy/
+    red_green_expectation: red when the fallback and the contract differ, green when equal
+  - source: .github/workflows/deploy-prod-lambdas.yml
+    behavior: the deploy names three functions and smoke-tests the third
+    verification_step: 22
+    test_selector: tests/verify_ci_workflow/test_deploy_gate_wiring.py
+    red_green_expectation: red where a wiring pin enumerates the prod functions until it names the third, green after; the live proof is VP 23
+  - source: config/composite_action_body_baseline.yaml
+    behavior: the new smoke body is registered at its length
+    verification_step: 26
+    waiver_reason: The R3 body ratchet in the fast tier fails an unregistered or mis-sized body.
+    command: bin/venv-python -m scripts.validate --pre
+  - source: src/data/handlers/CLAUDE.md
+    behavior: documentation of the third prod function
+    verification_step: 26
+    waiver_reason: Documentation only; no behaviour.
+    command: bin/venv-python -m scripts.validate --pre
+  - source: src/lambdas/CLAUDE.md
+    behavior: documentation of the third prod function
+    verification_step: 26
+    waiver_reason: Documentation only; no behaviour.
+    command: bin/venv-python -m scripts.validate --pre
+weakening_dispositions: []
+constraints:
+  - "Never put a key value, an account id or an ARN with one in a file, a log, a PR, a comment or the thread (Decision 101). Simulation and plan evidence is markers and counts only. The App's slug, bot login and client id are public."
+  - "Agents never apply terraform/bootstrap as a self-directed act: VP step 6 runs in an ADMIN session only after the operator directs it there; terraform/personal applies through tf-gated-apply behind his approval (Decision 126, Decision 144 cl.4)."
+  - "Place every sidecar block word for word, filling only {{N}} and {{DATE}}; never edit the sidecar (Decision 246). Any other edit to the bound text fails approved_text verify. The source_registry rows, the size-budget line and the function lists are scope edits outside the sidecar."
+  - "No key ever becomes an Actions secret, an Environment secret, a variable or a file in the repository; only the Lambda (at run time) and VP step 21's probe (inside its own process) read the key value."
+  - "terraform-drift.yml, convergence-health.yml and main-canary.yml are never edited (rec-5107 is Agents in GitHub's lane on main-canary.yml); each keeps its on.schedule."
+  - "Before editing each guarded workflow, re-read the open PRs that touch it; if another project's open PR changes it, ask the operator first. The coordinator posts the file list on the coordinator log when the plan PR opens (the operator's fork 4 condition)."
+  - "Never loosen an existing assertion (Decision 235); the one changed assertion (the approved-text render job's if) keeps its main-only condition and gains the prefix."
+  - "No new row in the register before rec-5126's 14-day soak ends (Decision N clause 6); rec-5113 adds rows."
+  - "terraform/personal/scheduled_workflow_dispatch.tf passes scripts/ci/terraform_hcl_screen.py as it stands on main (Decision 238 cl.4); never widen the screen policy for this plan."
+  - "PR 4's build fills weakening_dispositions from code review's stub for any candidate in PR 4's own diff (planned-change citing acceptance_criteria[7]); none is expected, so the plan carries none (a stale entry fails validate_weakening_dispositions)."
+  - "No rescue agents or workaround loops (Decision 55); a failed apply is stopped and reported, never retried with -target."
+  - "A Class D contract edit outside the sidecar (build-lambda.yaml) adds the amendment_log entry validate_contract_drift asks for, in the file's existing one-line form."
+context:
+  - "Decision-scout verdict + CITE list (round 1, 2026-11-12): Verdict: FLAGS_FOUND. Decisions triaged: 205 of 205. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.3 3/5. CITE: 250 cl.3, 205 cl.1/cl.3, 237 cl.1-3, 126, 125, 249 cl.2/cl.4, 79, 144 cl.2-3, 212 cl.3, 224 cl.6, 128, 162, 101. Flags and dispositions: WARN 143 cl.1 -- adopted as an accepted residual in the new Decision (clause 5) with the three integrity reads and the approval-bypass probe (VP 21), the operator's fork 3 answer; WARN 252 -- adopted, the SIT copy is built switched off three ways and the untried mint path is recorded against the production promotion item (Decision clause 4), the operator's fork 2 answer; NOTE NS.1 -- adopted, PC-10 in ports.yaml. Full text: /mnt/project-files/scheduled-dispatch/SCOUT-r1.md."
+  - "Sign-off: the operator's 'write the plan' (2026-11-12 15:46 UTC) after his fork answers on /mnt/project-files/scheduled-dispatch/PRESENTATION.md: 1 EventBridge rules, not Scheduler; 2 the SIT copy switched off, plus a rec for SIT's own drift and health checks (rec-5127); 3 the Decision 143 gap recorded as an accepted residual in a new Decision; 4 every dispatchable workflow outside the three refuses the bot (option B), 'so long as the coordinator log is updated'; 5 a 14-day soak before tightening the floor (rec-5126) and starting rec-5113. After sign-off the planner corrected one claim in the thread (15:58 UTC): rules still need the one-line bootstrap pre-stage and its admin apply, as every new role has; the deploy-race split into a fourth PR followed in drafting and is told to him with the wording approval ask."
+  - "Settled with notice on a blind Fable consult and its follow-up (/mnt/project-files/scheduled-dispatch/ADVICE.md): a dedicated Lambda and role; the key in SSM under /secret/ (Actions write cannot change a gate, Decision 248); github.actor, not triggering_actor, for the guard; the skip window in the Lambda, not a concurrency group on main-canary.yml (rec-5107's lane); deny-by-default with a classification test; the four alarm shapes; the SIT copy disabled, not count-gated, with the flag checked before any secret read and the alarms production-only; the accepted residual routed to a numbered Decision (decision-entry.yaml significance.routing_rule). One departure from the advice, recorded here: its item 6 suggested a guard that fails loudly; the plan uses a job-level if that skips silently, because a failing job on a refused bot dispatch would turn every such attempt red on GitHub and page ci-rca for no defect, while the integrity read (Decision clause 5) already files a High rec on any off-register bot dispatch."
+  - "Critique round 1 corrections (2026-11-12): the guard is event-scoped, (github.event_name != 'workflow_dispatch' || github.actor != '<bot>'), because a workflow_run child keeps its upstream's actor: ci-rca.yml runs after Main Canary with the upstream actor (CI RCA run 43262113763, a user upstream; the same for an App bot is inferred), so an actor-only guard would silence ci-rca's red-main diagnosis of every bot-started canary (Decision 73 pt.3, Decision 226), and the integrity read would flag every such child. The integrity read now treats a bot-actor workflow_run run at run_attempt 1 as a chained child and keys re-runs on run_attempt and triggering_actor. ci-rca running claude on a canary failure is a GitHub-originated workflow_run on main, as it is today after a cron canary; the register workflows themselves stay deterministic (Decision clause 1). The Decision's kind is direction, since clause 5 moves Decision 143 clause 1's human gate (decision-kind.yaml tie_break)."
+  - "Critique round 2 corrections (2026-11-12): the PR 3 stack is written for the trusted-plan HCL screen (Decision 238 cl.4; scripts/ci/terraform_hcl_screen.py refuses count, for_each, the ? operator and file reads outside its allowlist): three literal rule, target and permission sets and four literal alarms, the crons and periods repeated from the register and held equal by the stack test, rather than widening the code-owned screen policy to read the register. SIT therefore keeps its four alarms with actions_enabled false (the sidecar's clause 4 says so). Actions write can also approve fork pull-request runs, disable any workflow and delete runs and logs: the integrity read now flags any disabled workflow (all 39 are active today), and fork-run approval and run deletion are named in the Decision as accepted residuals. VP 15's metadata check runs as PlatformAdmin (PlatformDev has no ssm:DescribeParameters); VP 17 reads terraform-plan-trusted.yml. The handler asks the dispatch API for return_run_details. ports.yaml's budget line is re-measured at build: if another plan lands a line first, the number moves with the marker."
+  - "Critique round 3 corrections (2026-11-12): requirements-fast.txt joins scope with the floor pyjwt[crypto]>=2.13,<3 (tests/validate/test_pytest_diff_runtime_dep_artifact.py requires every requirements.in distribution to be a fast-tier floor or a declared heavy exclusion); PR 3's plan updates three inline policies, aws_iam_role_policy.github_ci_planner and aws_iam_role_policy.github_ci_trusted_plan (both source ci_full_refresh_read, which holds IAMPlatformRolesRead, and each carries a 10,240 B precondition that fails closed at plan time) and aws_iam_role_policy.github_ci_branch (ProdLambdaInvokeCI); the log group is named /aws/lambda/${local.workflow_dispatcher_function}, the only form validate_agent_observability_read_coverage resolves; the not-fired alarms may page once right after the apply, before the first ticks land."
+  - "Critique round 4 corrections (2026-11-12, measured from this cloud session): the session's GitHub egress proxy refuses /app, /app/installations, /installation/*, /user/installations, github.com/apps pages and actions/oidc/customization/sub (403 not permitted through this proxy), while actions/runs, actions/workflows and the run approvals paths answer. So the approval-bypass probe is operator step M3 in AWS CloudShell (direct egress, his own identity), with the session reading the approvals record independently; VP 8 and VP 9 rest on the operator's reads of the App and installation pages, and every Lambda mint re-proves the exact permission map; the integrity probe returns 2 on a proxy refusal and the session checks only off_register_run and disabled_workflow, the oidc_subject evidence coming from the convergence-health job log. convergence-health.yml's header (lines 56-62) will still say the sensor asserts the newest event=schedule run; the file is frozen here, so rec-5126's build corrects that comment. Optional hardening not taken: a run_attempt and triggering_actor leg on the guard would refuse bot re-runs too; re-runs stay detected, not refused (Decision clause 5), and the guard stays one expression. A workflow that exists only on a branch is outside the guard test (it reads main); the integrity read sees a bot dispatch of it."
+  - "Decision 254 (2026-11-12 15:53 UTC, after the scout and the sign-off) is read and adopted: code deploys consume the last-green ref (cl.5), so VP 14 and VP 23 read the first deploy whose sha has the merge as an ancestor, and PR 3 waits for VP 14 (else its function would be created from a stale data-pipeline.zip); Main Canary skips a head whose full tier is pending, running or under 3 h old (cl.1, rec-5107's build), which turns some dispatched canary runs into quick skips, still a cadence run. No clause of 254 conflicts with this plan."
+  - "Decision 237 fit: clause 1 derives a /secret/ name from a Secrets Manager name; this key never had one, so the name follows the /secret/agent-platform-<purpose> form and the grant is the literal ARN (clause 2). It is not in secret_parameters.tf's nine-name map (pinned by tests/test_secret_parameters_expand.py) because Terraform never writes the value and has nothing to copy; rec-5029's SCP must declare the dispatcher role as a /secret/ reader (noted on rec-5029, 2026-11-12). VP 21 (M3) reads the key with the operator's own CloudShell identity, so it runs before that SCP lands; if the SCP lands first, rec-5029's planning names the operator's admin identity as an exception or M3 waits for one."
+  - "Why four PRs: PR 1 is the admin-root pre-stage (the apply role's own iam:GetRole read-back after the create); PR 3 creates the function from the S3 object PR 2's deploy shipped, so PR 2's zip must be live first; and the function joins deploy-prod-lambdas.yml's list only in PR 4, because the gate reads an absent deploy record as baseline_unknown and deploys (Decision 249), so listing it before PR 3's apply would make PR 2's own deploy fail on a missing function."
+  - "Approvals at build start: approve admin-credential agent_platform_admin -- covers VP 4 (bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin), VP 5 and VP 6 command A (the materialisation's aws ssm get-parameter --name /secret/agent-platform-terraform-personal-tfvars --with-decryption --profile agent_platform_admin, then terraform -chdir=<worktree>/terraform/bootstrap init, plan and show on the bootstrap root's admin profile), VP 6 command B's admin profile and command C, VP 19 (aws sts get-caller-identity, aws iam simulate-principal-policy, aws lambda get-function-configuration, aws events list-rules and one aws lambda invoke with the {} smoke payload, each with --profile agent_platform_admin), VP 15's check (aws ssm describe-parameters with --profile agent_platform_admin, metadata only); approve secret-read /secret/agent-platform-terraform-personal-tfvars -- the one read in VP 5 and VP 6 command A, which writes the four bootstrap values to the gitignored terraform/bootstrap/terraform.bootstrap.tfvars and prints none. Each is a session line the operator writes in the ADMIN thread itself (approvals relayed by the coordinator do not count). VP 6 command B (the bootstrap apply) is tf-state-change, asked when command A prints its exact line. The build also asks, in the same first message, for the operator's word on VP 8 (M1, creating the App), VP 15 (M2, putting the key) and VP 21 (M3, the approval-bypass probe in CloudShell, which reads the key with his own identity there)."
+  - "V3 resolution: the posted pre-merge gate evidence for PR 1's head (VP step 5) and PR 3's routed plan (VP step 17) substitute for pre-merge post-deploy evidence; the behavioural acceptance (Decision 48) is the post-merge walk of VP steps 6, 14, 18, 19, 20, 21, 23 and 24, evidenced by counts-only comments on the merged PRs. The approval-bypass probe needs a live token, so it runs after PR 3's apply."
+  - "UNPROVEN until the build's live steps: that a workflow_dispatch from an App installation token starts the run with github.actor the bot (GitHub's documented behaviour, first seen at VP 20); that the integrity reads' endpoints answer with the convergence-health job token's permissions in CI (the OIDC customization read may need actions: read on the repository; VP 14's job log is the first live read); that pip install --user in CloudShell installs the four pins (VP 21); that EventBridge TriggeredRules reports per rule with a RuleName dimension at the alarm periods chosen; SecureString decryption under the new role with the aws/ssm managed key (Decision 237 cl.4: the parameter grant is the only gate)."
+  - "Prototype evidence (2026-11-12, scratch worktree of main 2fc60314): the guard rule placed by a script on all 26 dispatchable workflows outside the register (35 jobs); actionlint and yaml parse clean; the only existing assertion that failed in the workflow, ci_guards and verify_ci_workflow suites and the fast tier was test_approved_text_approval_workflow.py's render-job if (in scope); reconcile.yml needed the permissions flow-mapping relief to stay under its 513 cap (in scope)."
+  - "Ownership (fork 4): the guarded files' owners are listed on their scope rows (Cost Optimisation: cost-reconciliation.yml; Feedback Loop: the four telemetry-*.yml and, inferred, security-detector-liveness.yml; Agents in GitHub: subagent-review-smoke.yml; Property Transfer, inferred: publish-ontheloop.yml; CI Reform: the rest). The coordinator posted the heads-up on the coordinator log (comment 6828250980) and posts the exact list when this plan's PR opens. terraform/bootstrap/github_ci_apply_reads.tf: PR 1 builds only after #1987 (rec-5025, same file) is merged and applied, in its own admin window. terraform/personal PRs (3 and 4's deploy is code-only; PR 3 is the hold's subject) wait on Feedback Loop's rec-4913 hold (coordinator log, 2026-11-12 12:22 UTC) until its close entry."
+  - "Overlaps (to re-run with red_overlap at each PR's go/no-go): project-configuration.yaml, ports.yaml and account-credential-inventory.yaml are shared contract files (anchors are the bare amendment_log line, the actions-capacity row's tail, PC-09's tail and GH-14 / BILL-02's lines); PLAN-persona-verdict-credential (built through PR 1 at 2fc60314) shares github_ci_apply_reads.tf and the IAMRolesRead pattern; rec-5025's #1987 shares the same bootstrap file; rec-5107 (Agents in GitHub) touches main-canary.yml, which this plan does not edit; rec-4931's merged threshold change (#1995) is the sensor's floor this plan does not move. PLAN-environment-gates-fail-closed, PLAN-persona-trigger-policy and PLAN-neon-key-out-of-pr-plans (unbuilt) share reconcile.yml and terraform-apply-sandbox.yml, both at zero size headroom, and the first also config/structural_size_budgets.yaml's ports.yaml line: whichever builds second re-measures. plan_obligations' overlap report is the full list (terraform-apply-sandbox.yml and github_ci_apply_reads.tf are shared with several unbuilt plans, among them PLAN-trusted-plan-cutover, PLAN-secrets-to-ssm-retire, PLAN-trusted-plan-identity, PLAN-trusted-plan-github-root and PLAN-telemetry-producer-admission-plan-review-capture); terraform-apply-sandbox.yml's four guarded jobs already carry an if:, so the guard adds no line there."
+  - "Size facts (measured 2026-11-12): sensor_liveness.py 495 of 500 SLOC (hence the sibling module); reconcile.yml 513 of its 513 cap (flow-mapping relief); ports.yaml 499 effective lines of 500 on main, 501 with PC-10 and its amendment entry (the cited raise, Decision clause 5); the Decision 6,095 B of the 6,144 B per-entry cap; github_ci_apply_reads.tf about 80 B under its 6,144 B managed-policy cap after #1987 (the precondition fails closed)."
+  - "Graduated shards kept, node ids unchanged: actions-capacity-evaluator-and-steps, backlog-health-package-suite and source-registry-guard-producer-scan (their commands run test_check_source_registry.py, which gains one SCANNED_PATHS pin); approved-text-approval-workflow-shape (test_approved_text_approval_workflow.py; one assertion gains the guard prefix and keeps its main-only condition); deploy-channel-block-spans-nested-inner-blocks, deploy-channel-blocks-do-not-bleed-into-next-resource, deploy-channel-conformance-missing-key-fails, deploy-channel-conformance-unit-tests and deploy-channel-pass-line-only-when-clean (test_validate_deploy_channel_conformance.py gains one case; existing cases unchanged); deploy-gate-wiring (test_deploy_gate_wiring.py, edited only if a pin names the function list, then extended, never narrowed); telemetry-writer-smoke-gate (test_update_functions.py, edited only if its membership assertions enumerate the functions). No record is edited."
+  - "red_overlap at plan time (2026-11-12): blocked by rec-5130 (Critical ci_rca, the telemetry-arrival canary's cold reader deadline, Feedback Loop's area), on shared test-selection residue only; no file of this plan is the red's subject. Each PR's go/no-go re-runs it and waits while a red it overlaps is open."
+  - "Cost: about USD 0.40 a month (Lambda invocations and logs at about 750 runs a month, four CloudWatch alarms at USD 0.10 each, free standard-tier SSM reads). Actions minutes: the dispatches run the ticks GitHub was meant to run; the skip window absorbs a cron run that arrives first, but a late GitHub cron run after an on-time dispatch runs again (main-canary.yml has no concurrency group and is not edited here, rec-5107's lane), so a few duplicate runs a day are expected, fewer than the ticks GitHub drops today."
+  - "Cloud-only operator: the ADMIN steps run in an ADMIN cloud session, M1 in the browser and M2 in AWS CloudShell; no local machine."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: wording-check, round: 1, verdict: FAIL, digest: bc81159a69d742f47a52401dcf6cbf5fd06ede5f3bcc544bd59898b85063e873, base: 2fc60314939efe7f1edf2f598ae9635d22530661, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 9051c580e30951e8a7b4ed82ede44802c2a8ea06d7a8204bbd89095cf2abc4b8, base: da92675361da1a93a705120ae83011d3cc3e4d00, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 3, verdict: PASS, digest: 9051c580e30951e8a7b4ed82ede44802c2a8ea06d7a8204bbd89095cf2abc4b8, base: da92675361da1a93a705120ae83011d3cc3e4d00, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 10, nits: 10}
+  - {gate: wording-check, round: 4, verdict: PASS, digest: aa01b229ebabe72a696090cc525d6c333a36f8cf4cdb4ad627a75686747e5d7f, base: 755944d206cd0d5e07a2c1ec7e13225669f7e8cd, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 4, nits: 10}
+  - {gate: wording-check, round: 5, verdict: PASS, digest: 2c1c2ff9fc2435bfb060b2ce22dda7fe95d2ea0fb76ddc9539c95466fd677824, base: 755944d206cd0d5e07a2c1ec7e13225669f7e8cd, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 8}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 10}
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 3, nits: 6}
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 2, nits: 11}
+  - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 6}
+  - {gate: plan-critique, round: 8, verdict: PROCEED, blocking: 0, nits: 6}
+  - {gate: wording-check, round: 6, verdict: PASS, digest: 2c1c2ff9fc2435bfb060b2ce22dda7fe95d2ea0fb76ddc9539c95466fd677824, base: 888f5b5635196100751e7a068b698847faf5c9e4, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 9, verdict: PROCEED, blocking: 0, nits: 3}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited Decision sections (73, 101, 125, 126, 143, 144, 166, 205, 212, 224, 226, 235, 237, 238, 248, 249, 250, 252, 254)
+  - All files in scope located and readable; docs/plans/approved/scheduled-workflow-dispatch.yaml read and its approval run recorded
+  - The open PRs on each file in scope and the coordinator log (#1963) checked before each PR
+execution_steps:
+  - "STEP 0: post the 'Approvals at build start' ask (context) as the first message, with VP 8's and VP 15's operator steps. Run VP step 1."
+  - "PR 1 (after #1987 is merged and applied): the IAMRolesRead entry, the stack test file with its PR 1 cases and its registry record; VP 2, 3, 26; commit (feat(scheduled-workflow-dispatch): pre-stage the workflow dispatcher role in the apply role's IAMRolesRead (PR 1 of 4)); push; open; subscribe; at CI green run VP 4 and VP 5 in an ADMIN session and post the markers; code review in a fresh context; merge on PROCEED, green CI and the operator's final-diff word; then VP 6 in the ADMIN session only on the operator's direction there."
+  - "PR 2 (builds beside PR 1; needs VP 8's values and VP 9's read-back): the register, the handler and helper, the probe, the manifest and requirements edits, the 26 guards (re-reading each file's open PRs first), the guard test and record, the sensor sibling, the wiring line, the integrity module and its flag, the source_registry rows, the regenerated field_semantics.yaml, the check_source_registry entry, the size-budget line; place the sidecar's eight blocks word for word ({{N}} = max + 1 after rebasing, {{DATE}} = build date UTC; the budget marker names the same dec-N); regenerate docs/decisions-index.json; VP 7, 10, 11, 12, 13, 26; commit (PR 2 of 4); push; open (body carries 'Approved text: <sidecar path + approval run link>'); subscribe; code review; merge on PROCEED and green CI; then VP 14 and tell the operator M2 (VP 15) is due."
+  - "PR 3 (after VP 6's PRESTAGE_READ_OK, VP 14's deploy read-back and VP 15's KEY_PARAMETER_OK; held while rec-4913's hold stands): scheduled_workflow_dispatch.tf, the oidc.tf and oidc_ci_roles.tf entries, the conformance widening and its case, the PR 3 stack cases; VP 2, 3, 16, 17, 26; commit (PR 3 of 4); push; open; subscribe; merge on PROCEED, green CI and the operator's final-diff word (IAM); then VP 18, 19, 20 and 21."
+  - "PR 4 (after VP 19): the function lists in build-lambda.yaml, build_lambda_config.py, code_drift.py and the manifest, the deploy workflow's freshness list and smoke step, the R3 baseline entry, the CLAUDE.md lines; VP 22, 26; commit (PR 4 of 4); push; open; subscribe; merge on PROCEED and green CI; then VP 23, 24, 25 and 27."
+  - >-
+    CLOSURE for each PR, each outcome reported separately (implement skill Commit Flows; docs/contracts/git-ops.yaml
+    handoff_sequence): go/no-go first, re-run bin/venv-python -m scripts.ci_rca.red_overlap --plan on this plan and
+    proceed only if clear; bin/venv-python -m scripts.session.github_readiness; the structured handoff and postflight
+    evidence of git-ops.yaml handoff_sequence; on PR 4 only, set
+    implementation_declared: true and run /implement's Verification Graduation walk (scheduled-workflow-dispatch-stack
+    and dispatch-bot-guard, written by PR 1 and PR 2, still name their test files); commit; git fetch origin main && git
+    rebase origin/main (renumber the Decision and the budget marker on a collision); the full tier (VP 26, backgrounded,
+    then --verify-head; a timeout is BLOCKED, no push); push (git push -u origin HEAD as its own call); open the PR and
+    report it only with the returned number; the squash-merge body of PR 4 carries 'Resolves: rec-4233'; report each PR
+    number, run id and merge sha.
+  - "Report: what was built, the live read-backs, the soak end date on rec-5126, and the UNPROVEN items that remain."
+rollback: >-
+  PR 4: revert it; the function leaves the deploy list and keeps its last code. PR 3: first disable the three rules
+  (a revert's plan destroys them), then revert; the revert's plan destroys the role, its policy, the function, the
+  rules, targets, permissions and alarms through tf-gated-apply, and the cron fallback keeps the three loops running.
+  The operator then deletes the key parameter from CloudShell and the App's private key on GitHub (or the App itself).
+  PR 2: revert it; the guards, sensor extension and integrity reads go, and the Decision is marked by a later Decision
+  (Decision text is append-only, Decision 177); the settings and inventory rows return with a new amendment entry. PR 1:
+  the pre-staged ARN is harmless if left (a read of a role that does not exist); remove it by a human-directed bootstrap
+  apply of a revert.
