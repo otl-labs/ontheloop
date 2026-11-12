@@ -321,6 +321,8 @@ conditions:
 
 **Related:** Decisions 55, 62, 83, 88, 167, 170, 181, 210, 215, 226, 236; rec-4233, rec-4439, rec-4734, rec-4939, rec-4940, rec-4949.
 
+> **Update (2026-11-12):** Clause 3's last sentence no longer holds for the threshold. PLAN-sensor-liveness-delivery-floor (rec-4931) raised the sweep's floor from 6 to 24 hours to fit up to 89 days of measured GitHub schedule delivery, whose worst sub-daily gap was 16 hours, so every sub-daily loop is judged at 24 hours and a dead one is found within a day. rec-4233 still owns delivery itself, and a tighter floor waits for it. telemetry-arrival, the one enforced expectation, was already judged at 24 hours.
+
 ---
 
 ## Decision 249: Lambda code deploys ship only the newest main commit whose full tier passed, because the sandbox tier now serves production (amends Decisions 24, 73 and 77) (Decided)
@@ -12222,6 +12224,8 @@ The presubmit tier on the self-hosted EC2 runner already has SSO credentials and
 > **2026-09-25 correction (PLAN-monitor-liveness-sweep -- the 2026-06-16 clause's named alarm does not operate on the primary dev surface):** The 2026-06-16 amendment above states "the silent-cron failure mode 62 worried about is mitigated by a persistent-unavailability alarm (Decision 74)." That alarm does not run on Claude Code on the web (CC-web), the primary dev surface (AGENTS.md "Role and environment") -- it never armed here, so the named mitigation was not actually in force. The operative mitigation is the derived-peer scheduled-loop liveness backstop (`scripts/convergence_health/sensor_liveness.py`, audit finding LSA-02, PLAN-sensor-liveness, landed 2026-09-07) plus its success-age leg (PLAN-monitor-liveness-sweep, 2026-09-25): a schedule that stops firing, and a schedule that fires on cadence but never succeeds, both alarm via the `loop_liveness_stale` source rather than via Decision 74's alarm. Separately, this leg's staleness threshold is CRON-DERIVED (`clamp(2 x nominal cron period, 6h, 45d)`, `config/agent/data_quality/source_registry.yaml`), not a declared constant, so Decision 83's condition (b) prose ("more than 14 days") agrees with the live weekly-cadence loops only by coincidence (`0 7 * * 1` x 2 = 1209600s = 14d) and would silently redefine itself if that cron ever changed. Decision 83 itself is NOT edited by this annotation -- arming its predicate is a separate, deferred follow-up (rec-3979).
 
 > **Update (2026-11-07):** Decision 250 clause 4 amends the 2026-06-16 amendment above for arrival checks: an arrival check may be ci-rca watched instead of filing its own recs, so its red files a source=ci_rca rec under Decision 226. Every other live-reader check keeps the 2026-06-16 route.
+
+> **Update (2026-11-12):** The threshold the 2026-09-25 correction quotes is now clamp(2 x nominal cron period, 24h, 45d) (PLAN-sensor-liveness-delivery-floor, rec-4931); the loop_liveness_stale row of config/agent/data_quality/source_registry.yaml is authoritative. The weekly coincidence that correction describes (2 x 7 days = 14 days) is unchanged.
 
 ---
 
