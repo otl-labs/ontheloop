@@ -177,33 +177,32 @@ def _has_env_token(value: str) -> bool:
     return any(tok in _ENV_TOKENS for tok in re.split(r"[-_/:.\s]+", value.replace("${", "-").replace("}", "-")))
 
 
-def _secret_name_findings(root: Path) -> list[str]:
+def _env_token_findings(root: Path) -> list[str]:
     out: list[str] = []
     for _r, path in _tf_files(root):
         code = _code(path.read_text(encoding="utf-8"))
         rel = path.relative_to(root)
 
-        def flag(value: str, where: str) -> None:
+        def flag(value: str, where: str, pos: int) -> None:
             if _has_env_token(value):
-                out.append(
-                    f"(g) {rel}: {where} {value!r} carries an environment token; secret names are the same in every account"
-                )
+                line = code.count("\n", 0, pos) + 1
+                out.append(f"(g) {rel}:{line}: {where} carries an environment token; names must match in every account")
 
         for m in _BLOCK_RE.finditer(code):
             nm = _NAME_RE.search(_block_body(code, m.end() - 1))
             if nm:
-                flag(nm.group(1), f"{m.group(1)} name")
+                flag(nm.group(1), f"{m.group(1)} name", m.start())
         for m in _NAMES_LOCAL_RE.finditer(code):
-            for s in re.findall(r'"([^"]*)"', _block_body(code, m.end(1) - 1)):
-                flag(s, "secret/parameter name local")
-        for frag in _FRAGMENT_RE.findall(code):
-            flag(frag, "IAM grant fragment")
+            for lit in re.finditer(r'"([^"]*)"', _block_body(code, m.end(1) - 1)):
+                flag(lit.group(1), "name-list local", m.start())
+        for frag in _FRAGMENT_RE.finditer(code):
+            flag(frag.group(0), "IAM grant fragment", frag.start())
     return out
 
 
 def account_portable_findings(root: Path) -> list[str]:
     """Every violation of predicates (a)-(g) under root, as printable lines."""
-    return _literal_findings(root) + _consistency_findings(root) + _secret_name_findings(root)
+    return _literal_findings(root) + _consistency_findings(root) + _env_token_findings(root)
 
 
 @registry.register("validate_account_portable_names", owner="platform")
@@ -217,4 +216,4 @@ def validate_account_portable_names(failed: list[str]) -> None:
             print(f"  - {f}")
         failed.append("Account-portable names")
     else:
-        print("No literal per-account names; both roots agree; SIT backends and secret names portable.")
+        print("No literal per-account names; both roots agree; SIT backends and shared names portable.")
