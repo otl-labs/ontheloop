@@ -25,7 +25,9 @@ scope:
       GITHUB_TRIGGERING_ACTOR does not end in [bot]; or, only with --own-failure (ci-rca), when GITHUB_ACTOR is
       github-actions[bot] and --run-json names a run of this repository (GITHUB_REPOSITORY) on the default branch,
       whose workflow name is in the --watched-from workflow file's on.workflow_run.workflows list, and which has
-      conclusion failure or (status in_progress and --jobs-json shows a job with conclusion failure); an admission prints
+      conclusion failure, or status in_progress and --jobs-json (that run's jobs, fetched in the same step) shows a job or a
+      step with conclusion failure (a self-dispatch from a failing step reaches ci-rca while its own job still runs);
+      an admission prints
       "PERSONA_DISPATCH_ADMITTED: <user|own-failure> <actor>" and writes refused=false. Anything else,
       an unreadable input included: prints "PERSONA_DISPATCH_REFUSED: <reason>" to stderr and the step summary, writes
       refused=true, exits 1 (fail closed).
@@ -34,15 +36,18 @@ scope:
     purpose: >-
       Truth table over the gate: push, pull_request and workflow_run pass; User dispatch admitted; Bot sender refused;
       User sender with a [bot] triggering_actor refused; github-actions[bot] own-failure admitted on a completed
-      failed run and on an in-progress run with a failed job (the terraform-apply-sandbox self-dispatch shape);
+      failed run, on an in-progress run with a failed job, and on an in-progress run whose only failure is a step of a
+      job still in progress (the gated-apply self-dispatch shape);
       refused when the run is in another repository, off the default branch, of an unwatched workflow, green, or
       unreadable; refused without --own-failure. Each refusal writes refused=true and exits 1.
   - file: .github/workflows/ci-rca.yml
     action: Modify
     purpose: >-
       One step, id persona_gate, immediately before "Run ci-rca agent": if: github.event_name == 'workflow_dispatch'
-      plus rca_agent's existing conjuncts; fetches the dispatched run's metadata to a file and runs the gate with
-      --own-failure --run-json, --jobs-json /tmp/ci-rca-jobs.json and --watched-from .github/workflows/ci-rca.yml.
+      plus rca_agent's existing conjuncts; under set -euo pipefail it fetches the dispatched run (gh api
+      repos/<repo>/actions/runs/<run_id>) and its jobs (.../jobs) to two files at gate time, then runs the gate with
+      --own-failure, --run-json, --jobs-json and --watched-from .github/workflows/ci-rca.yml (a failed fetch fails the
+      step, so the LLM step is skipped).
       rca_agent's if gains "&& steps.persona_gate.outputs.refused != 'true'". The job if (pinned by
       tests/verify_ci_workflow/test_ci_rca_and_canary.py) is unchanged.
   - file: .github/workflows/reconcile.yml
@@ -95,28 +100,36 @@ scope:
   - file: .github/actions/write-convergence-record/action.yml
     action: Modify
     purpose: >-
-      New input dispatch-refused (default "false"): when "true" the writer prints "Dispatch refused by the persona
-      dispatch gate (Decision 205 cl.1); NOT overwriting the convergence record." and exits 0, checked first. The
-      existing refused input and its description are unchanged.
+      New input dispatch-refused (default "false"). The existing step (positional #0, body at its R3 ceiling of 97)
+      gains only if: inputs.dispatch-refused != 'true' and its body is untouched; a new step after it, id
+      dispatch_refused, if: inputs.dispatch-refused == 'true', shell bash, runs one echo of "Dispatch refused by the
+      persona dispatch gate (Decision 205 cl.1); NOT overwriting the convergence record." The existing refused input
+      and its description are unchanged.
   - file: tests/test_convergence_dispatch_refused.py
     action: Create
     purpose: >-
-      Drives the writer body under the composite bash argv: dispatch-refused true makes no aws call and exits 0 for
-      any apply outcome; false leaves the existing branches unchanged (apply skipped with no other skip still latches
-      red).
+      Parses the action: step #0's if is exactly inputs.dispatch-refused != 'true' and its run body is byte-identical
+      to main's; the dispatch_refused step is if-gated on "true" and contains no aws call. Then drives step #0's body
+      under the composite bash argv with an aws stub: with dispatch-refused false, apply skipped with no other skip
+      still latches red (red before the input exists: the input is absent from action.yml).
   - file: scripts/checks/ci_guards/_persona_llm_signatures.py
     action: Create
     purpose: >-
-      The one LLM-step detector (T4.26 c3 can re-point the claude -p guards onto it): over a parsed step, an env key
-      or secrets.<NAME> reference whose name is the variable of a docs/contracts/project-configuration.yaml row with
-      kind secret and applies_when.port run_persona; a comment-stripped run body invoking the claude CLI,
-      scripts/ci/claude_p_retry.sh or the run_persona entrypoint; a uses: of anthropics/claude-code-action or of a
-      local composite action or reusable workflow whose own steps match (one hop, ./ and ./.dispatch-tooling/
-      prefixes). Plus the compute-plane start detector: aws ecs run-task, persona_compute_host, or a persona id whose
+      The one LLM-step detector (T4.26 c3 can re-point the claude -p guards onto it). A parsed step is an LLM step
+      when it (a) names, as an env key or a secrets.<NAME> reference, the variable of a
+      docs/contracts/project-configuration.yaml row with kind secret and applies_when.port run_persona; (b) has a
+      comment-stripped run body that invokes claude with -p or --print, scripts/ci/claude_p_retry.sh, or the
+      run_persona entrypoint; or (c) uses anthropics/claude-code-action, or a local composite action or reusable
+      workflow (one hop, ./ and ./.dispatch-tooling/ prefixes) one of whose steps matches (a) or (b). Installing or
+      probing the CLI (command -v claude, claude --version, an npm install) is not an LLM step: no prompt runs and no
+      credential is read (ci-rca.yml's "Install Claude Code CLI" step). Plus the compute-plane start detector: aws ecs run-task, persona_compute_host, or a persona id whose
       executor-personas.yaml index row has kind compute_plane.
   - file: tests/checks/ci_guards/test__persona_llm_signatures.py
     action: Create
-    purpose: Each signature matched and not matched; a name mentioned only in a comment is not a match (the ghas-probe.yml shape).
+    purpose: >-
+      Each signature matched and not matched; a name mentioned only in a comment is not a match (the ghas-probe.yml
+      shape); a CLI install and version probe body is not a match; each compute-plane signature, the kind branch over
+      an injected personas index (no compute_plane row exists on main yet).
   - file: scripts/checks/ci_guards/validate_persona_trigger_policy.py
     action: Create
     purpose: >-
@@ -124,10 +137,15 @@ scope:
       filename list; claude.yml exempt by name with its Decision 184 cl.4 reason): an LLM workflow's triggers must be
       in {pull_request, push, workflow_run, workflow_dispatch}; a workflow_dispatch LLM workflow must gate every LLM
       step (if: has no ||, always() or failure(), has a top-level && term steps.<id>.outputs.refused != 'true' with
-      <id> starting persona_gate, and an earlier step with that id runs the gate script); a workflow_run LLM workflow
-      qualifies when each named upstream qualifies itself, or when its LLM job's if requires
-      github.event.workflow_run.conclusion == 'failure' and each named upstream carries no LLM signature; an
-      unresolved upstream name is refused. Refuses checks: write or write-all (top or job level) on any
+      <id> starting persona_gate, and an earlier step with that id runs the gate script). workflow_run, per named
+      upstream U (resolved by name: across .github/workflows/*.yml; an unresolved name is refused): when the LLM job is
+      failure-gated, U is admitted if U carries no LLM signature (a deterministic run's failure) or U qualifies
+      itself; when it is not, U qualifies itself only if all of U's triggers are push, pull_request, or workflow_run
+      whose own upstreams qualify. An LLM-bearing U qualifies itself when it passes every rule of this check (cycles
+      refused). "Failure-gated" is read syntactically from the job's or the step's if:, never evaluated: split on
+      top-level || (parentheses and quotes respected, the expression wrapper stripped); every disjunct is either
+      exactly github.event_name == 'workflow_dispatch' (the dispatch path, which the gate rule covers) or has
+      github.event.workflow_run.conclusion == 'failure' as a top-level && conjunct (ci-rca.yml's pinned job if). Refuses checks: write or write-all (top or job level) on any
       pull_request-triggered workflow, and any workflow that starts a compute-plane persona. examined(n,
       unit="workflows"); each failure names the workflow and branch.
   - file: scripts/checks/ci_guards/_manifest.py
@@ -139,9 +157,37 @@ scope:
   - file: config/ci_rca_taxonomy.yaml
     action: Modify
     purpose: >-
-      Companion row: function_to_category validate_persona_trigger_policy: environment (as its siblings). The file is
-      497 of the config class 500 and other unbuilt plans add rows: measured at build; past 500 is a STOP to the
-      planning thread, never a raise.
+      Companion row: function_to_category validate_persona_trigger_policy: environment (as its siblings). Relief (497
+      of the config class 500; other unbuilt plans add rows; measured at build, never a raise): only while over 500,
+      rewrite one block-style workflows: entry as a one-line flow mapping (as telemetry-arrival is), parsed value
+      unchanged, each saving four lines.
+  - file: scripts/ci_rca/designed_refusal.py
+    action: Modify
+    purpose: >-
+      A refused dispatch must not mint a ci_rca rec: the terraform-apply-sandbox run it fails is watched, and a Critical
+      rec there would gate overlapping work (Decision 226). Adds a step-granular designed refusal for any watched slug:
+      skip=true also when every failing job's failed steps are exactly one step whose name starts "Persona dispatch
+      gate". Fail-closed as today: a job with no steps array, any other failed step, or an empty failing set gives
+      skip=false. The refusal self-documents (PERSONA_DISPATCH_REFUSED in the run's step summary and log).
+  - file: tests/test_ci_rca_designed_refusal.py
+    action: Modify
+    purpose: >-
+      Adds cases (existing assertions unchanged): a sole failing gate step skips; the gate step plus another failed
+      step, a missing steps array, and a differently named failed step do not.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      R3 registrations at their measured counts: every new persona_gate* inline body (ci-rca, reconcile x2, the sandbox
+      workflow, the smoke workflow) under r3_workflows and the writer's dispatch_refused step under r3; the extracted
+      relief bodies ratchet down to their new counts. No marker, no raise; .github/actions/write-convergence-record::#0
+      stays 97.
+  - file: tests/ci/test_persona_gate_wiring.py
+    action: Create
+    purpose: >-
+      Live-tree wiring, workflows found by content: in every job holding a persona_gate* step, each
+      write-convergence-record call passes dispatch-refused naming every gate step's refused output, and the review
+      step's if is its gate's if plus the refused conjunct; the one gate invoked with --own-failure also passes
+      --run-json, --jobs-json and --watched-from naming its own workflow file, and that workflow's job if is unchanged.
   - file: tests/checks/ci_guards/test_validate_persona_trigger_policy.py
     action: Create
     purpose: >-
@@ -154,14 +200,19 @@ scope:
       Synthetic workflows. Red: schedule, repository_dispatch, pull_request_target, issue_comment, workflow_call and
       an ungated workflow_dispatch on an LLM workflow; a gate conjunct behind ||; a gated step with no gate step; a
       workflow_run on a schedule-only LLM upstream; a failure-gated workflow_run on an LLM upstream that does not
-      qualify; an unresolved upstream; checks: write top-level, job-level and write-all on pull_request; an ecs
-      run-task start. Green: a comment-only secret mention; claude.yml; a gated dispatch; a push LLM workflow; a
-      failure-gated workflow_run on a deterministic schedule upstream.
+      qualify; a non-failure-gated workflow_run on a dispatchable deterministic upstream; an unresolved upstream; a
+      workflow_run cycle; checks: write top-level, job-level and write-all on pull_request; an ecs run-task start; a
+      persona_compute_host start; a start naming a compute_plane persona id (injected index). Green: a comment-only
+      secret mention; a CLI install and version probe; claude.yml; a gated dispatch; a push LLM workflow; a
+      failure-gated workflow_run on a deterministic schedule upstream; a ci-rca-shaped failure-gated job (dispatch ||
+      failure) over mixed upstreams: deterministic schedule ones and a gated LLM one.
   - file: docs/ROADMAP-PLATFORM.yaml
     action: Modify
     purpose: >-
       Bookkeeping: T4.2 c10 met (closes_criteria); progress_note bullets on T4.2 and T4.32; T4.32 files_in_scope gains
-      the new script and check paths. No intent, hint or criterion text edit.
+      the new script and check paths. T4.2's note records the one departure from c10's wording, as signed off: an App
+      dispatch is admitted on the no-op and guard-ROUTE paths but refused where it would reach a review gating an
+      automatic apply (rec-5100 owns routing it to approval). No intent, hint or criterion text edit.
   - file: docs/DECISIONS.md
     action: Modify
     purpose: >-
@@ -173,13 +224,14 @@ followon_recs: ["rec-5100", "rec-5101"]
 closes_criteria: ["T4.2:c10"]
 infrastructure_dependencies:
   - >-
-    None. No .tf file is in scope and compute_affected_artifacts(<scope>) is checked at VP 1; the roadmap is a packaged
-    asset of data-pipeline but carries bookkeeping only (the transport plan's reasoned disposition).
+    None. No .tf file is in scope. compute_affected_artifacts(<scope>) names only data-pipeline, through
+    docs/ROADMAP-PLATFORM.yaml, which carries bookkeeping only (PLAN-llm-client-litellm-transport's reasoned
+    disposition): no build or deploy step.
 acceptance_criteria:
-  - The gate admits only a maintainer user dispatch or ci-rca's own-failure bot dispatch, and refuses everything else fail-closed (VP 2).
-  - A refused dispatch writes no convergence record (VP 3).
-  - validate_persona_trigger_policy is registered, red on each fixture, green on the live tree (VP 4, VP 5).
-  - Every live LLM workflow_dispatch path carries the gate; the reconcile reachability and topology guards stay green (VP 6).
+  - The gate admits only a maintainer user dispatch or ci-rca's own-failure bot dispatch, and refuses everything else fail-closed (VP 3).
+  - A refused dispatch writes no convergence record and mints no ci_rca rec (VP 4, VP 6).
+  - validate_persona_trigger_policy is registered, red on each fixture, green on the live tree (VP 5, VP 6).
+  - Every live LLM workflow_dispatch path carries the gate, wired to its record write; the reconcile reachability and topology guards stay green (VP 6, VP 7).
   - "Live read-back after merge: a maintainer dispatch of subagent-review-smoke is admitted (VP 11)."
 verification_plan:
   - step: 1
@@ -195,8 +247,8 @@ verification_plan:
     graduation: not-applicable
   - step: 2
     phase: pre-deploy
-    action: The two DECISIONS.md annotations are exactly main plus the approved sidecar, at its approved digest.
-    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-trigger-policy --base origin/main --expect f7bcb1e8b15291805c65ffb33aee3ff44512affebdccf2a5f12ee95e259ddbb8
+    action: The two DECISIONS.md annotations are exactly main plus the approved sidecar, at its recorded wording digest.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-trigger-policy --base origin/main --expect aa55dda4e52ff7c260d569c19260b9ae33721215e51ca38627209bcb70176e09
     expected: Exit 0, printing APPROVED-TEXT OK. Red before the blocks are placed.
     fix_if: A word mismatch means a placed block drifted -- restore its after text; never edit the sidecar. A digest mismatch is a STOP to the planning thread.
     hermetic: false
@@ -245,16 +297,18 @@ verification_plan:
   - step: 6
     phase: pre-deploy
     action: >-
-      Registered and green through the registry, its taxonomy row and manifest Entry valid, and the relief delegates
-      tested.
+      Registered and green through the registry, its taxonomy row and manifest Entry valid; the gates wired to their
+      record writes and ci-rca's own-failure arguments; a sole failing gate step is a designed refusal; the relief
+      delegates tested.
     command: >-
       bin/venv-python -c "from scripts.checks.ci_guards.validate_persona_trigger_policy import
       validate_persona_trigger_policy as a; from scripts.checks.ci_guards.validate_ci_rca_taxonomy import
       validate_ci_rca_taxonomy as b; f=[]; [x(f) for x in (a,b)]; print('POLICY_FAILS', len(f)); assert not f, f" &&
-      bin/venv-python -m pytest tests/ci/test_verify_plan_sha256.py tests/checks/ci_guards/test__manifest.py
+      bin/venv-python -m pytest tests/ci/test_persona_gate_wiring.py tests/test_ci_rca_designed_refusal.py
+      tests/ci/test_verify_plan_sha256.py tests/checks/ci_guards/test__manifest.py
       tests/checks/ci_guards/test_validate_ci_rca_taxonomy.py -q && (test ! -e scripts/ci/originating_pr_sha.py ||
       bin/venv-python -m pytest tests/ci/test_originating_pr_sha.py -q)
-    expected: POLICY_FAILS 0, then the delegate suites exit 0.
+    expected: POLICY_FAILS 0, then the suites exit 0. Red before (the wiring test does not exist; a gate-step failure is not a designed refusal).
     fix_if: A taxonomy failure means the companion row is missing or misnamed; a delegate failure means its text drifted from the inline body it replaced.
     hermetic: true
     expected_literals:
@@ -281,13 +335,17 @@ verification_plan:
     graduation_waiver_reason: Existing registered suites; the diff guard is a one-time build check.
   - step: 8
     phase: pre-deploy
-    action: Size limits hold with no raise (reconcile.yml and the sandbox workflow are at budget on main).
+    action: >-
+      Size limits hold with no raise: files (reconcile.yml and the sandbox workflow are at budget on main) and inline
+      shell bodies (every new body registered; the writer's #0 body unchanged at 97).
     command: >-
       bin/venv-python -c "from scripts.checks.sloc.sloc_limits import validate_sloc_limits as a; from
       scripts.checks.structural.size_limits import validate_structural_size_limits as b; from
-      scripts.checks.structural.budget_raises import validate_structural_size_budget_raises as c; f=[]; [x(f) for x in
-      (a,b,c)]; print('SIZE_FAILS', len(f)); assert not f, f" && git diff --quiet origin/main -- config/sloc_budgets.yaml
-      config/structural_size_budgets.yaml && echo NO_RAISE
+      scripts.checks.structural.budget_raises import validate_structural_size_budget_raises as c; from
+      scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as d;
+      f=[]; [x(f) for x in (a,b,c,d)]; print('SIZE_FAILS', len(f)); assert not f, f" && git diff --quiet origin/main --
+      config/sloc_budgets.yaml config/structural_size_budgets.yaml && ! git diff origin/main --
+      config/composite_action_body_baseline.yaml | grep -q raise-approved && echo NO_RAISE
     expected: SIZE_FAILS 0, then NO_RAISE.
     fix_if: Over budget -- apply the next relief named in the workflow's scope row; past the last one, STOP to the planning thread (never raise).
     hermetic: false
@@ -302,7 +360,8 @@ verification_plan:
     expected: The roadmap validates; no open ci_rca rec overlaps the scope.
     fix_if: A roadmap error names the field; an overlap is a STOP -- tell the coordinator.
     hermetic: false
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: red_overlap is time-dependent (it reads the open ci_rca recs of the day); the roadmap validator is registered in both tiers.
   - step: 10
     phase: pre-deploy
     action: Fast tier, then the full tier before handoff, started in the background from the top-level session.
@@ -352,25 +411,40 @@ test_obligations:
     test_selector: tests/checks/ci_guards/test__persona_llm_signatures.py
     red_green_expectation: red before (module missing), green after.
   - source: .github/workflows/ci-rca.yml
-    behavior: The LLM step is gated by persona_gate (with --own-failure).
-    verification_step: 5
-    test_selector: tests/checks/ci_guards/test_validate_persona_trigger_policy.py::test_live_tree_is_green
-    red_green_expectation: red before (the live tree has ungated dispatch LLM steps), green after.
+    behavior: The LLM step is gated by persona_gate, invoked with --own-failure, --run-json, --jobs-json and its own --watched-from.
+    verification_step: 6
+    test_selector: tests/ci/test_persona_gate_wiring.py
+    red_green_expectation: red before (no gate step, and the wiring test file is new), green after.
   - source: .github/workflows/reconcile.yml
-    behavior: Both review steps are gated; the record write takes dispatch-refused; reachability holds.
-    verification_step: 5
-    test_selector: tests/checks/ci_guards/test_validate_persona_trigger_policy.py::test_live_tree_is_green
+    behavior: Both review steps are gated; the record write takes dispatch-refused from both gates; reachability holds.
+    verification_step: 6
+    test_selector: tests/ci/test_persona_gate_wiring.py
     red_green_expectation: red before, green after (VP 7 keeps the reachability and topology pins green).
   - source: .github/workflows/terraform-apply-sandbox.yml
     behavior: The apply-sandbox review is gated; the record write takes dispatch-refused.
-    verification_step: 5
-    test_selector: tests/checks/ci_guards/test_validate_persona_trigger_policy.py::test_live_floor_review_workflows_are_gated
+    verification_step: 6
+    test_selector: tests/ci/test_persona_gate_wiring.py
     red_green_expectation: red before (no gate on the review step), green after.
   - source: .github/workflows/subagent-review-smoke.yml
     behavior: The smoke LLM step is gated.
     verification_step: 5
     test_selector: tests/checks/ci_guards/test_validate_persona_trigger_policy.py::test_live_tree_is_green
     red_green_expectation: red before, green after.
+  - source: scripts/ci_rca/designed_refusal.py
+    behavior: A run whose only failure is the persona dispatch gate step is a designed refusal; anything else still files.
+    verification_step: 6
+    test_selector: tests/test_ci_rca_designed_refusal.py
+    red_green_expectation: red before (a sole failing gate step returns skip=false), green after.
+  - source: tests/test_ci_rca_designed_refusal.py
+    behavior: The new step-granular cases.
+    verification_step: 6
+    test_selector: tests/test_ci_rca_designed_refusal.py
+    waiver_reason: The test module is its own evidence; existing assertions are unchanged.
+  - source: config/composite_action_body_baseline.yaml
+    behavior: Each new inline body registered at its measured count; no ceiling raised.
+    verification_step: 8
+    command: scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies
+    waiver_reason: Registration data; validate_composite_action_shell_bodies fails any unregistered or grown body in both tiers.
   - source: scripts/ci/verify_plan_sha256.py
     behavior: Same verdicts and markers as the inline bodies it replaces.
     verification_step: 6
@@ -446,26 +520,27 @@ context:
     after it would run unreviewed (the review action fails only on REVISE or STARVED). The gate shares its review's
     if:, so the no-op and guard-ROUTE paths never reach it and stay open to any dispatcher.
   - >-
-    Gap kept: reconcile runs its writer from the red commit's checkout. For a red commit made before this lands the old
-    writer has no dispatch-refused input, so a refused bot dispatch re-latches an already-red record red (no status
-    change).
+    Gap kept: reconcile runs its writer from the red commit's checkout, so for a red commit older than this change a
+    refused bot dispatch re-latches an already-red record red (no status change).
   - >-
-    Residual outside this plan: the gate guards main's workflow files only; a branch-pushed workflow can still read the
-    repository secret. T4.2 c9's Environment-scoped key (PLAN for the verdict persona credential) is that control.
+    Residual: the gate guards main's workflow files only; a branch-pushed workflow can still read the repository
+    secret. T4.2 c9's Environment-scoped key is that control.
   - >-
-    Probe 2026-11-12: every ci-rca workflow_dispatch on record had actor and triggering_actor the operator's user, which
-    agent sessions also use (GitHub MCP under the operator's token), so the User branch admits all of today's traffic.
+    Probe 2026-11-12: every workflow_dispatch on record of ci-rca (7), reconcile (10), the smoke (2) and the sandbox
+    workflow (latest 10 of 72; older unread) had actor and triggering_actor the operator's user, which agent sessions
+    also use, so the User branch admits today's traffic.
   - >-
-    Overlaps (unbuilt, approved; whichever builds second rebases and re-measures size): PLAN-environment-gates-fail-closed,
-    PLAN-neon-key-out-of-pr-plans, PLAN-telemetry-producer-admission-plan-review-capture (Feedback Loop),
-    PLAN-trusted-plan-cutover, PLAN-telemetry-claude-p-capture-adapter, PLAN-plan-review-digest-actionable-first,
-    PLAN-secrets-to-ssm-retire, PLAN-telemetry-content-reader-lock. No open PR touched these workflows at planning.
+    One gate script for all four sites, not an inline actor if: per site: one predicate and one marker, a testable truth
+    table, recognisable from a fixed conjunct without an evaluator; ci-rca's own-failure lookups need a script anyway.
+    Two LLM detectors coexist until T4.26 c3 re-points check_workflow_agent_safety onto _persona_llm_signatures.py.
   - >-
-    Downstream: H1 (rec-5020) builds after this; T8's persona-verdict workflows inherit the check. T4.26 c3 can point the
-    claude -p guards at _persona_llm_signatures.py.
+    Overlaps: plan_obligations --plan lists the unbuilt plans on these files (Feedback Loop's plan-review capture plan
+    among them); whichever builds second rebases and re-measures size. No open PR touched them at planning.
+  - "Downstream: H1 (rec-5020) builds after this; T8's persona-verdict workflows inherit the check."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: wording-check, round: 1, verdict: PASS, digest: f7bcb1e8b15291805c65ffb33aee3ff44512affebdccf2a5f12ee95e259ddbb8, base: 282c4ab3415f479ec6e403965455b3f6f5864dd3, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 8, nits: 8}
 pre_implementation_checklist:
   - Branch confirmed not on main; rebased onto main
   - docs/PROJECT_CONTEXT.md read
@@ -485,9 +560,12 @@ execution_steps:
     steps), then _persona_llm_signatures.py, validate_persona_trigger_policy.py, the manifest Entry and the taxonomy
     row.
   - >-
-    5. Wire the gates: ci-rca.yml, reconcile.yml (both review steps, from .dispatch-tooling), the sandbox workflow's
-    apply-sandbox review, subagent-review-smoke.yml, and dispatch-refused on both record writes. Measure each file; apply
-    the relief in its scope row's order only while it is over budget, with the delegate's test first. Run VP 5-8.
+    5. Red first: tests/ci/test_persona_gate_wiring.py and the designed-refusal cases. Wire the gates: ci-rca.yml,
+    reconcile.yml (both review steps, from .dispatch-tooling), the sandbox workflow's apply-sandbox review,
+    subagent-review-smoke.yml, and dispatch-refused on both record writes; add the step-granular designed refusal.
+    Measure each file; apply the relief in its scope row's order only while it is over budget, with the delegate's test
+    first. Register every new inline body in config/composite_action_body_baseline.yaml at its measured count. Run
+    VP 5-8.
   - "6. Roadmap bookkeeping (T4.2 c10 met; T4.2 and T4.32 progress notes; T4.32 files_in_scope). Run VP 9."
   - >-
     7. Closure per the implement skill's Commit Flows and docs/contracts/git-ops.yaml: graduation shards
