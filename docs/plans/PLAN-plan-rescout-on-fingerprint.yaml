@@ -1,0 +1,446 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "plan-rescout-on-fingerprint"
+intent: >-
+  Make the scout-input fingerprint (scripts/roadmap/plan_fingerprint.py, built by PLAN-scout-input-fingerprint) decide
+  when interactive /plan re-runs the decision scout, replacing the judged "material change", and make the plan check
+  enforce it: validate_plan_documents fails with "re-scout required" when a newly added plan, or a modified plan whose
+  own fingerprint moved, has a last decision-scout row that does not equal the fingerprint recomputed on the checked-out
+  tree (on a PR, the merge with main), and it fails closed on every path where it cannot tell. A newly added plan must
+  also declare the newest PlanDocument schema_version the tree supports (rec-5102), so no plan can dodge the barrier by
+  declaring an older version. Plan 2 of 2 of T4.32 c4's interactive half (rec-4490); the Actions legs are rec-5103's.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-plan-rescout-on-fingerprint.yaml
+phase: T4.32
+scope:
+  - file: scripts/checks/roadmap/_plan_rescout_barrier.py
+    action: Create
+    purpose: >-
+      The re-scout barrier, kept out of validate_plan_documents.py like _plan_sidecar_approval.py, with its own mirror
+      test. It imports scripts.roadmap.plan_fingerprint (load_tree, projection, fingerprint, FingerprintError) and never
+      re-derives the payload or the edges (T4.32 c4, THE single extractor). Entry point
+      barrier(entries, docs, root, base, push_context, read_base) -> BarrierResult(failures, warnings, examined, compared),
+      where entries are the status-aware (status, path) pairs of docs/plans/PLAN-*.yaml, docs maps a plan filename to its
+      loaded PlanDocument, base is the diff base (None when unresolved), push_context is
+      _common.push_context_base(root) is not None, and read_base(rel) returns the file text at base or None (default:
+      git show base:rel; the seam the tests drive). Rules, FINGERPRINT_MIN_SCHEMA_VERSION = 6:
+      (1) An ADDED plan (status A or ??) at schema_version >= 6 is compared. (2) A MODIFIED plan (status M): a
+      schema_version lower than at base fails ("schema_version lowered from B to H"); at head >= 6 it computes the base
+      fingerprint from the base plan text and the base sidecar text (docs/plans/approved/<slug>.yaml at base, None when
+      absent) and the head fingerprint from the head plan and head sidecar, both over ONE load_tree(root) of the head
+      tree, and is compared only when the two differ; an unreadable or absent base plan is compared as if added. A
+      modified plan below 6 is not examined (operator ruling 2026-11-12, fork 2B; the gap is recorded on rec-5102 and
+      in the ledger). (3) Compare: the last gate_rounds row with gate decision-scout; none fails "re-scout required: no
+      decision-scout row"; a row whose scout_input_fingerprint is None fails "re-scout required: the last decision-scout
+      row records no scout_input_fingerprint"; a value unequal to the recomputed one fails "re-scout required: the last
+      decision-scout row records <recorded>; this tree gives <recomputed>"; every message names the plan file and ends
+      with the remedy "(re-run the decision scout on the plan as it is now and record the value its report prints)".
+      Any FingerprintError, PlanEdgesError, ApprovedTextError, OSError, UnicodeDecodeError or YAML error while loading
+      the tree or computing either fingerprint is a failure "<plan>: scout-input fingerprint cannot be computed:
+      FINGERPRINT-ERROR: <reason>", never "equal" and never skipped; no broad except. (4) Routing: every finding is a
+      failure unless push_context, where it is a warning (a Decision changed on main by an unrelated merge must not
+      turn main red; the PR check is the gate). (5) Fail closed: when base is None and not push_context the result
+      carries the failure "cannot resolve a diff base, so the re-scout barrier cannot tell which plans are new or
+      changed" (a warning in push context); on a pull_request event (GITHUB_EVENT_NAME) an empty entries list for a
+      diff that resolved no plan while a docs/plans/PLAN-*.yaml is staged, untracked or committed since base is
+      impossible by construction, so no special case beyond base None. (6) The tree is loaded lazily, once, only when
+      some plan needs a fingerprint. (7) examined counts every added or modified plan file seen, compared counts the
+      comparisons made; an added plan at >= 6 that reaches the end uncompared is a failure ("<plan>: added at
+      schema_version N but not compared"), so a bug in the routing cannot pass silently.
+    new_imports: [scripts.roadmap.plan_fingerprint, scripts.roadmap.approved_words, scripts.checks._common]
+  - file: scripts/checks/roadmap/validate_plan_documents.py
+    action: Modify
+    purpose: >-
+      (a) The newest-version rule (rec-5102): a newly added plan whose schema_version is at least
+      _MIN_NEW_PLAN_SCHEMA_VERSION but below _newest_schema_version() (a new module-level helper returning
+      max(scripts.roadmap.plan_document._SUPPORTED_VERSIONS), imported lazily inside it) gets the finding "<plan>:
+      newly-added plans must declare schema_version N, the newest this tree supports (got M): bump it, add cites,
+      re-run the decision scout and record scout_input_fingerprint", a failure outside push context and a WARN in it.
+      _new_plan_version_failures and _MIN_NEW_PLAN_SCHEMA_VERSION = 5 stay exactly as they are: the constant still
+      bounds _gate_round_gaps, _wording_check_gaps, _approval_gaps and the sidecar_unchecked advisory, so every v5 plan
+      stays bound by Decision 246 cl.3 (scout WARN, Decision 235). (b) Wire the barrier: inside the existing try (so an
+      ImportError reaches the existing failure path), import scripts.checks.roadmap._plan_rescout_barrier lazily, pass
+      the status-aware entries of docs/plans/PLAN-*.yaml (one get_status_aware_diff call, from which _added_plan_names'
+      set is also derived), the loaded docs, _common.ROOT, wording_base, the push-context flag and the default
+      read_base; failures join errors and warnings join advisories. Print one line on every run, "  re-scout barrier:
+      E plan(s) examined, C compared, F failing" (Decision 170: never a bare PASS), or, when there is nothing to
+      examine, "  re-scout barrier: no added or modified plan in this diff". (c) A new test seam
+      modified_plan_names: set[str] | None = None beside added_plan_names, used only when plans_dir is given. Stays
+      well under 500 SLOC (218 today).
+    new_imports: [scripts.checks.roadmap._plan_rescout_barrier]
+  - file: .claude/skills/planning/SKILL.md
+    action: Modify
+    purpose: >-
+      Exactly these replacements, each anchor occurring once (measured on main fd8b7de9: 42996 -> 42924 bytes):
+      (1) Decision Scout Gate opening sentence "This gate fires BEFORE the alignment sign-off presentation to the
+      human. Its job is to surface any active decisions the proposed approach must cite, contradict, or pivot around --
+      without paying the cost of loading the full DECISIONS.md (large -- near its Decision 134 size ceiling) into the
+      planning agent." -> "This gate fires BEFORE the alignment sign-off. It surfaces the active decisions the approach
+      must cite, contradict or pivot around, without loading DECISIONS.md into the planning agent." (2) In the example
+      prompt body "including the final `Verdict:` line. Do not edit any files.\"" -> "including the final `Verdict:`
+      line, then what `bin/venv-python -m scripts.roadmap.plan_fingerprint --plan [draft] --with-cites [your CITE ids]`
+      prints. Do not edit any files.\"" (3) Dispatch shape "scope: Step 4; tier: Step 5; cited decisions: the human." ->
+      "scope: Step 4; tier: Step 5; cited decisions: the human; draft: Step 6." (4) FLAGS_FOUND bullet: " If the human
+      pivots on any flag in a way that changes the proposed approach materially, re-dispatch this gate against the
+      revised approach before re-presenting." -> " A pivot re-scouts per the Convergence rule." (5) Gate-error bullet
+      replaced whole by "- **Gate-error:** the gate has NOT completed if the subagent errors, its output lacks the
+      `Verdict:` line, lacks \"Decisions triaged: N of M\" or shows N != M (a truncated read), or lacks the fingerprint
+      line or shows FINGERPRINT-ERROR -- re-dispatch; never proceed past an incomplete gate." (6) "**Convergence rule --
+      findings, not rounds:** re-dispatch after each pivot;" -> "**Convergence rule -- findings, not rounds:** each row
+      records the printed `scout_input_fingerprint`, and its CITE ids go into `cites`; re-dispatch when the fingerprint
+      moves (`docs/contracts/project-alignment.yaml` task_sequencing), never otherwise;" (7) Alignment Sign-off "re-run
+      the Decision Scout if material to decision alignment," -> "re-run the Decision Scout if the fingerprint moved,"
+      (8) "**Assertion carrier (schema_version 5):**" -> "**Assertion carrier (schema_version 5+):**" (9) template
+      "schema_version: 5 # required on every NEW plan; historical versions 1-4 stay valid" -> "schema_version: 6 # NEW
+      plans: the newest version on main; versions 1-5 stay valid" (10) after the template's "phase:" entry and its
+      "  ..." line, a new line "cites: [] # the human's dec:N ids plus the scout's CITE ids; scout rows add
+      scout_input_fingerprint" (11) "# v5 hermetic steps: NEVER a backtick literal here" -> "# v5+ hermetic steps: NEVER
+      a backtick literal here" (12) "# v5 ONLY, hermetic steps: the sole assertion carrier" -> "# v5+, hermetic steps:
+      the sole assertion carrier" (13) Critique Gate "The fresh-context requirement is non-negotiable: it eliminates the
+      cognitive bias the planning agent has from authoring the artefact." -> "Fresh context is non-negotiable: it
+      removes the author's bias." (14) "Do not use `scripts.agent_development.run_skill` -- it is broken per rec-568;
+      dispatch the gate via the `Agent` tool + `Skill` instead." -> "Never use `scripts.agent_development.run_skill`
+      (broken, rec-568)." The "**Verdict handling** (add a `gate_rounds` row per scout round):" header and the gate_rounds
+      template row stay byte for byte (tests/test_workflow_skill_antidrift.py pins both). Measure after placing: a
+      different byte count from main's file minus 72 means an anchor drifted on main; re-measure and set
+      config/prose_budgets.yaml to the measured size, never above main's entry.
+  - file: .claude/commands/plan.md
+    action: Modify
+    purpose: >-
+      Exactly these replacements inside Step 6 and Step 9; every "## Step <id>:" heading stays byte for byte (the
+      compute-plane persona contracts pin them, #1977): (1) after "Substitute the synthesis produced in Steps 3-5 into
+      the dispatch." append " First write the scratch draft (below) with the slug you will use (Step 7 derives it from
+      the task, so it is known now), intent, plan_type, verification_tier, phase, scope, closes_criteria, amends,
+      introduces and `cites` (the human's `dec:N` ids), and name it in the dispatch. Record the
+      `scout_input_fingerprint=` line the scout prints on that round's `gate_rounds` row, and write the scout's CITE ids
+      into the draft's `cites`. A report without that line, or with FINGERPRINT-ERROR, is an incomplete gate." (2)
+      "Before presenting, write the draft plan to a scratch path outside the repo" -> "The draft plan lives at a scratch
+      path outside the repo" and "so the tracked plan write stays at Step 8) and run" -> "so the tracked plan write stays
+      at Step 8). Before presenting, run" (3) "Any other response is feedback -- incorporate it, re-run the Decision
+      Scout if the change is material to decision alignment, re-present, and ask again." -> "Any other response is
+      feedback -- incorporate it into the draft, run `bin/venv-python -m scripts.roadmap.plan_fingerprint --plan
+      <draft>`, re-run the Decision Scout if the value differs from the last scout row's (never otherwise), re-present,
+      and ask again." (4) after Step 9's "Invoke per the planning skill's Critique Gate (dispatch shape, example prompt,
+      context files, and verdict handling all live there)." append " Before every dispatch, including the first and
+      after writing an approved-text sidecar, recompute `bin/venv-python -m scripts.roadmap.plan_fingerprint --plan
+      docs/plans/PLAN-{slug}.yaml` and re-run the Decision Scout first when it differs from the last scout row's value;
+      `validate --pre` fails the plan with \"re-scout required\" until it matches."
+  - file: docs/contracts/project-alignment.yaml
+    action: Modify
+    purpose: >-
+      Sidecar-bound (docs/plans/approved/plan-rescout-on-fingerprint.yaml; approval run per Decision 246): task_sequencing
+      becomes the fingerprint rule (re-run decision_scout_recon when the draft's scout-input fingerprint differs from the
+      last scout round's value, checked before re-presenting, before each plan-critique round and after an approved-text
+      sidecar is written; an equal value never re-runs it; validate_plan_documents fails a plan PR that does not match,
+      "re-scout required"), pointing at scripts/roadmap/plan_fingerprint.py, T4.32 c4 and Decision 229 cl.4 rather than
+      restating the payload (Decision 86); contract_version 1 -> 2; a new amendment_log row (semantic_break true,
+      change_class governance_note_add) naming PLAN-plan-rescout-on-fingerprint and rec-4490. Words exactly as the
+      sidecar binds them; nothing else in the file changes.
+  - file: docs/contracts/exit-criteria-ledger.yaml
+    action: Modify
+    purpose: >-
+      Sidecar-bound, same sidecar: the governance_notes of plan_cites and plan_scout_input_fingerprint (placed by plan 1's
+      build) stop saying the comparison is UNENFORCED "until rec-4490's plan adds the comparison" and name the barrier
+      (scripts/checks/roadmap/_plan_rescout_barrier.py via validate_plan_documents): enforced for every added plan and
+      every modified plan whose fingerprint moved, at schema_version 6 and above, failing everywhere except the push to
+      main, where it warns; modified plans below 6 unchecked, a gap that closes as they are built (rec-5102); that a
+      scout run produced the value UNENFORCED in session (a planner can compute it; rec-5129, and closed on Actions by
+      rec-5103), as are a Decision amended on main after a PR's last CI run and a merged-plan amendment whose own inputs
+      are unchanged (rec-5103); after the decision_scout flip the legs follow gates.decision_scout.verdict_source
+      (rec-5128, T4.32 c5). One new top-level amendment_log row (governance_note_add, semantic_break false). No field
+      description or semantics changes, so validate_contract_drift category 6 needs no field-level row. About 461 -> 465
+      of 500 effective lines.
+  - file: config/prose_budgets.yaml
+    action: Modify
+    purpose: >-
+      Ratchet the .claude/skills/planning/SKILL.md entry down to the byte size measured after its edits (42924 if no
+      anchor drifted), never above main's value.
+  - file: config/agent/verification_registry/entries/skill-template-emits-v5.yaml
+    action: Delete
+    purpose: >-
+      Retired by git mv to entries/deprecated/skill-template-emits-v5.yaml (a 100% rename, content untouched; Decision
+      244 cl.5, Decision 176 cl.5). Its claim (the template says schema_version 5) becomes false by design here, and a
+      check_id is immutable, so it cannot be repaired in place (scout WARN, Decision 244 cl.4). Operator-approved
+      retirement 2026-11-12 (Decision 235 cl.1). VP step 6's graduate replaces it with a version-agnostic guard.
+  - file: config/agent/verification_registry/entries/deprecated/skill-template-emits-v5.yaml
+    action: Create
+    purpose: The rename target of the retired record above, byte for byte.
+  - file: tests/checks/roadmap/test__plan_rescout_barrier.py
+    action: Create
+    purpose: >-
+      Mirror test of the helper, over fixture plans, a fixture tree (tmp_path with docs/DECISIONS.md, a roadmap,
+      north-star.yaml and an optional sidecar) and a read_base stub; fingerprints come from plan_fingerprint itself
+      (never a literal digest). Cases: added v6 plan with a matching row passes and counts one comparison; mismatch fails
+      with "re-scout required" and both values; missing value fails; no decision-scout row fails; a later
+      non-scout row after the scout row does not change which row is read; a Decision's text changed in the tree after
+      the row was recorded fails (the merge-with-main case); FINGERPRINT-ERROR for an unreadable DECISIONS.md and an
+      unparsable sidecar, never a pass; modified v6 plan with only context, execution_steps or implementation_declared
+      changed is not compared even with a stale row; modified v6 plan with a new scope path, or with a sidecar block on
+      docs/DECISIONS.md changed at head only, is compared; base plan unreadable is compared as added; schema_version
+      lowered fails; a modified v5 plan is not examined for comparison; push_context turns each failure into a warning;
+      base None fails outside push context and warns in it; the tree is loaded once for two plans; an added v6 plan the
+      routing leaves uncompared fails.
+  - file: tests/checks/roadmap/test_validate_plan_documents_scout_fingerprint.py
+    action: Create
+    purpose: >-
+      Wiring through validate_plan_documents(plans_dir=..., added_plan_names=..., modified_plan_names=...) with
+      GITHUB_EVENT_NAME and push context monkeypatched: a stale row fails the check on a pull_request event and locally,
+      and is a WARN in push context; the "re-scout barrier:" line is printed on every run with the examined and compared
+      counts; an ImportError of _plan_rescout_barrier fails the check (never a skip); a matching row passes. Sibling file
+      because test_validate_plan_documents.py is at 497 of 500 SLOC (Decision 130).
+  - file: tests/checks/roadmap/test_validate_plan_documents_latest_format.py
+    action: Create
+    purpose: >-
+      rec-5102's acceptance test test_added_plan_below_newest_supported_version_is_refused (an added plan at
+      _MIN_NEW_PLAN_SCHEMA_VERSION but below the newest fails, the message naming both versions and the remedy), plus:
+      an added plan at the newest passes the rule; a historical (not added) plan at an older version passes; push
+      context turns the finding into a WARN; a plan below 5 still fails in every context; _newest_schema_version()
+      equals max(plan_document._SUPPORTED_VERSIONS) and is at least _MIN_NEW_PLAN_SCHEMA_VERSION; a modified v5 plan
+      whose sidecar the diff changes still gets the wording-check gap (the gates bound at 5 still bind v5 plans).
+  - file: tests/checks/roadmap/test_validate_plan_documents.py
+    action: Modify
+    purpose: >-
+      One line, line-neutral: test_canonical_plan_template_declares_the_gated_schema_version's final assertion changes
+      from "== module._MIN_NEW_PLAN_SCHEMA_VERSION" to "== module._newest_schema_version()" (a retarget that tightens:
+      the template must name the newest version, which is at least the floor). test_authoring_floor_is_five and every
+      other test stay unchanged. Named as a retarget, operator-confirmed 2026-11-12 (Decision 235 cl.1). Shards
+      naming this file are kept: wording-check-row-required-on-plan-pr.
+  - file: tests/test_planning_skill_scout_fingerprint.py
+    action: Create
+    purpose: >-
+      rec-4490's acceptance test test_planning_skill_rescouts_on_scout_input_fingerprint_change, the guard that keeps the
+      unbound instruction text from being reworded away (operator fork 3A): the planning skill's Decision Scout Gate
+      asks the scout for the plan_fingerprint line, its Gate-error bullet names the fingerprint line and FINGERPRINT-ERROR,
+      its Convergence rule says re-dispatch when the fingerprint moves and never otherwise, and its Alignment Sign-off
+      says "if the fingerprint moved"; neither the skill nor .claude/commands/plan.md contains "material to decision
+      alignment" or "changes the proposed approach materially"; plan.md Step 6 records the scout's fingerprint line and
+      Step 9 recomputes before every dispatch; the template's schema_version equals max(_SUPPORTED_VERSIONS) and carries a
+      cites line; project-alignment.yaml's task_sequencing names scripts/roadmap/plan_fingerprint.py and "re-scout
+      required" and no longer says "material change"; the ledger's plan_scout_input_fingerprint governance_notes name
+      _plan_rescout_barrier and no longer say "until rec-4490's plan".
+bundled_recommendations: [rec-4490, rec-5102]
+followon_recs: [rec-5128, rec-5129]
+closes_criteria: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "An added plan at schema_version 6 or above fails validate_plan_documents outside push context with \"re-scout required\" when its last decision-scout row's fingerprint is missing or differs from the one recomputed on the checked-out tree, and passes when they are equal."
+  - A modified plan at 6 or above is compared only when its base and head fingerprints differ, and a lowered schema_version fails.
+  - Every error computing a fingerprint, an unresolved diff base outside push context, and an import failure of the barrier fail the check; nothing on those paths reads as a pass.
+  - Every run prints how many plans the barrier examined and compared.
+  - A newly added plan below the newest supported schema_version fails outside push context, naming both versions; the floor of 5 and every gate it bounds still bind v5 plans.
+  - The planning skill and plan.md say to record the scout's printed fingerprint and to re-scout exactly when it moves; neither says "material"; the planning skill shrinks and its prose budget ratchets down.
+  - project-alignment.yaml and exit-criteria-ledger.yaml equal main plus the approved sidecar's blocks, word for word.
+  - skill-template-emits-v5 is retired to entries/deprecated/ as a 100% rename and no live surface names it.
+  - rec-4490 and rec-5102 read closed after the merge.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: "Precondition: plan 1's build (plan_fingerprint) and this plan with its sidecar are on main; branch current."
+    command: >-
+      git fetch origin main --quiet && git cat-file -e origin/main:scripts/roadmap/plan_fingerprint.py && git cat-file -e
+      origin/main:docs/plans/approved/plan-rescout-on-fingerprint.yaml && git merge-base --is-ancestor origin/main HEAD
+      && echo PRECONDITION_OK
+    expected: Prints PRECONDITION_OK.
+    fix_if: A missing plan_fingerprint.py means plan 1's build has not merged; stop and wait. A missing sidecar means this plan's PR has not merged. A failed ancestry test means a stale branch; merge origin/main first.
+    hermetic: false
+    graduation: not-applicable
+  - step: 2
+    phase: pre-deploy
+    action: The two contracts are exactly main plus the approved sidecar.
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug plan-rescout-on-fingerprint --base origin/main
+      --expect SIDECAR_DIGEST_PENDING
+    expected: Exit 0, printing APPROVED-TEXT OK. Red before the blocks are placed.
+    fix_if: >-
+      A word mismatch means a placed block drifted: restore its after text exactly, never edit the sidecar. A digest
+      mismatch means the sidecar on main is not the approved one: stop and ask the operator. If PLAN-work-graph-edge-model
+      built first and moved an anchor, send a plan-defect report.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      A base-relative, one-time binding of this build's diff to its sidecar; validate_merge_step enforces the same binding
+      on the build PR's fast tier.
+  - step: 3
+    phase: pre-deploy
+    action: The barrier's rules, including every fail-closed path.
+    command: bin/venv-python -m pytest tests/checks/roadmap/test__plan_rescout_barrier.py -q
+    expected: All pass. Red before (module and test absent).
+    expected_literals: [" passed"]
+    fix_if: Fix _plan_rescout_barrier.py; never drop a case or turn a failure into a warning outside push context.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: plan-rescout-barrier-rules
+  - step: 4
+    phase: pre-deploy
+    action: The barrier is wired into validate_plan_documents, prints its counts and fails on import error.
+    command: bin/venv-python -m pytest tests/checks/roadmap/test_validate_plan_documents_scout_fingerprint.py -q
+    expected: All pass. Red before (test absent; the seam and the wiring do not exist).
+    expected_literals: [" passed"]
+    fix_if: Fix the wiring in validate_plan_documents.py.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: plan-rescout-barrier-wired
+  - step: 5
+    phase: pre-deploy
+    action: The newest-version rule, the unchanged floor of 5, and the retargeted template test.
+    command: >-
+      bin/venv-python -m pytest tests/checks/roadmap/test_validate_plan_documents_latest_format.py
+      tests/checks/roadmap/test_validate_plan_documents.py -q
+    expected: All pass. Red before (the new file is absent and the retargeted template assertion fails while the template says 5).
+    expected_literals: [" passed"]
+    fix_if: Fix validate_plan_documents.py or the template line; never change _MIN_NEW_PLAN_SCHEMA_VERSION.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: new-plans-declare-newest-schema-version
+  - step: 6
+    phase: pre-deploy
+    action: The instruction and contract text says re-scout exactly when the fingerprint moves (rec-4490 acceptance).
+    command: bin/venv-python -m pytest tests/test_planning_skill_scout_fingerprint.py tests/test_workflow_skill_antidrift.py tests/persona_contracts/test_verdict_persona_contracts.py -q
+    expected: All pass. Red before (the rec-4490 test file is absent).
+    expected_literals: [" passed"]
+    fix_if: Restore the exact replacement text the scope rows give; never reword a pinned sentence to get green.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: planning-skill-rescouts-on-fingerprint
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      End to end through the real git diff: an untracked v6 fixture plan copied from this plan with a stale fingerprint
+      fails the check with "re-scout required"; with the recomputed value recorded it passes; the fixture is removed.
+    command: >-
+      f=docs/plans/PLAN-zz-rescout-fixture.yaml; trap 'rm -f "$f"' EXIT; bin/venv-python -c "import yaml, sys;
+      d=yaml.safe_load(open('docs/plans/PLAN-plan-rescout-on-fingerprint.yaml', encoding='utf-8'));
+      d.update(schema_version=6, cites=[], slug='zz-rescout-fixture', plan_path='docs/plans/PLAN-zz-rescout-fixture.yaml');
+      d['gate_rounds']=[{'gate':'decision-scout','round':1,'verdict':'NO_FLAGS','scout_input_fingerprint':'v1:'+'0'*64},
+      {'gate':'plan-critique','round':1,'verdict':'PROCEED'}]; yaml.safe_dump(d, open(sys.argv[1],'w',encoding='utf-8'),
+      sort_keys=False)" "$f" && out=$(bin/venv-python -c "from scripts.checks.roadmap.validate_plan_documents import
+      validate_plan_documents as v; f=[]; v(f); print('FAILED' if f else 'CLEAN')") ; echo "$out" | grep -q 're-scout
+      required' && echo "$out" | grep -q '^FAILED' && fp=$(bin/venv-python -m scripts.roadmap.plan_fingerprint --plan "$f"
+      | cut -d= -f2) && sed -i "s/v1:0\{64\}/$fp/" "$f" && out2=$(bin/venv-python -c "from
+      scripts.checks.roadmap.validate_plan_documents import validate_plan_documents as v; f=[]; v(f); print('FAILED' if
+      f else 'CLEAN')") ; ! echo "$out2" | grep -q 're-scout required' && echo "$out2" | grep -q 're-scout barrier:' &&
+      echo E2E-BARRIER OK
+    expected: Prints E2E-BARRIER OK, and the fixture file is gone afterwards.
+    fix_if: >-
+      No "re-scout required" on the stale value means the barrier did not see the untracked plan as added (check the "??"
+      leg) or did not compare it; a "re-scout required" after recording the recomputed value means the barrier and the
+      CLI disagree about the payload (they must share plan_fingerprint). Any other FAIL line in out2 is unrelated to this
+      step only if it also appears with the fixture absent.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      It writes and removes a file in the working tree and reads git status; steps 3-4 are the standing guards of the
+      same rules.
+  - step: 8
+    phase: pre-deploy
+    action: The retired record is a pure rename and nothing live names it; the prose budget equals the measured size.
+    command: >-
+      git diff --find-renames=100% --name-status origin/main -- config/agent/verification_registry/entries/ | grep -qE
+      '^R100\s+config/agent/verification_registry/entries/skill-template-emits-v5.yaml\s+config/agent/verification_registry/entries/deprecated/skill-template-emits-v5.yaml$'
+      && ! grep -rlq 'skill-template-emits-v5' config/agent/verification_registry/entries/*.yaml config/agent/verification_registry/known_red.yaml
+      && [ "$(grep -E '^  \.claude/skills/planning/SKILL\.md:' config/prose_budgets.yaml | awk '{print $2}')" = "$(wc -c <
+      .claude/skills/planning/SKILL.md | tr -d ' ')" ] && echo RETIRE-AND-BUDGET OK
+    expected: Prints RETIRE-AND-BUDGET OK.
+    fix_if: A non-100% rename means the record's content changed; restore it. A budget mismatch means the ratchet was not set to the measured size.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: pre-deploy
+    action: Fast tier on the branch.
+    command: bin/venv-python -m scripts.validate --pre
+    expected: Exit 0.
+    fix_if: Fix the named failure on the branch; never skip, disable or quarantine a test.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: pre-deploy
+    action: Full tier before handoff (handoff_policy), started in the background from the top-level session.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: The verify-head read reports a completed full run for HEAD with exit 0, including the contract drift gate on the committed ledger and project-alignment.yaml.
+    fix_if: A red full tier blocks handoff; fix and rerun from the start. A timeout is blocked, never a warning.
+    hermetic: false
+    graduation: not-applicable
+  - step: 11
+    phase: post-deploy
+    action: The bundled recs closed through the squash commit's Resolves trailer.
+    command: >-
+      bin/venv-python -c "from src.common import ducklake_reader_client as c; rows, missing =
+      c.fetch_recs_by_ids(c.make_reader(), ['rec-4490', 'rec-5102']); s={r['id']: r['status'] for r in rows};
+      print(s, missing); assert not missing and set(s.values()) == {'closed'}; print('RECS-CLOSED OK')"
+    expected: Prints RECS-CLOSED OK.
+    fix_if: An open rec means the trailer closure job did not run or rejected the acceptance; read its CI run and close through ops_data_portal only with its acceptance passing.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/checks/roadmap/_plan_rescout_barrier.py
+    behavior: compares the last decision-scout row with the recomputed fingerprint for added and fingerprint-moved modified v6 plans, failing closed on every error and unresolved base, warning only in push context
+    verification_step: 3
+    test_selector: tests/checks/roadmap/test__plan_rescout_barrier.py
+    red_green_expectation: red before (module and test absent), green after
+  - source: scripts/checks/roadmap/validate_plan_documents.py
+    behavior: wires the barrier with its count line and import-failure path, and refuses an added plan below the newest supported version while the floor of 5 keeps binding the gate legs
+    verification_step: 5
+    test_selector: tests/checks/roadmap/test_validate_plan_documents_latest_format.py::test_added_plan_below_newest_supported_version_is_refused
+    red_green_expectation: red before (the rule and the file do not exist), green after
+  - source: docs/contracts/project-alignment.yaml
+    behavior: task_sequencing states the fingerprint rule
+    verification_step: 6
+    test_selector: tests/test_planning_skill_scout_fingerprint.py::test_planning_skill_rescouts_on_scout_input_fingerprint_change
+    red_green_expectation: red before (the file is absent and the contract still says material change), green after
+  - source: docs/contracts/exit-criteria-ledger.yaml
+    behavior: the fingerprint governance notes name the barrier instead of an unbuilt comparison
+    verification_step: 6
+    test_selector: tests/test_planning_skill_scout_fingerprint.py::test_planning_skill_rescouts_on_scout_input_fingerprint_change
+    red_green_expectation: red before (the notes say until rec-4490's plan), green after
+  - source: config/prose_budgets.yaml
+    behavior: the planning skill's budget equals its measured size
+    verification_step: 9
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: validate_prose_limits (in --pre) fails any budget that differs from the measured size in either direction
+  - source: config/agent/verification_registry/entries/deprecated/skill-template-emits-v5.yaml
+    behavior: retired record kept byte for byte outside the live loader
+    verification_step: 8
+    command: git diff --find-renames=100% --name-status origin/main -- config/agent/verification_registry/entries/
+    waiver_reason: a pure rename into the loader-excluded subtree; VP step 8 proves the 100 percent rename and that nothing live names it
+constraints:
+  - Place the sidecar's blocks byte for byte, filling only {{DATE}}; never edit the sidecar (Decision 246). Any other edit to project-alignment.yaml or exit-criteria-ledger.yaml fails approved_text verify.
+  - "Fail closed (scope rows): no error, unresolved base or import failure yields a pass; no broad except; a finding is a warning only in push context. Silent failure is the risk the operator named."
+  - _plan_rescout_barrier.py imports plan_fingerprint and never computes a payload, digest or edge itself (T4.32 c4, THE single extractor).
+  - _MIN_NEW_PLAN_SCHEMA_VERSION stays 5 and keeps bounding the gate-record, wording-check and approval legs (Decision 235, Decision 246 cl.3).
+  - The skill and plan.md edits are exactly the scope rows' text; the planning skill stays at or below main's prose budget and every "## Step <id>:" heading of plan.md is unchanged.
+  - Only the two test assertions named here change (the template retarget); no other existing test changes; never skip, disable or quarantine a test (Decision 235).
+  - Tests derive digests from plan_fingerprint and counts from their own fixtures, never a literal digest or a count of repository plans (tests/CLAUDE.md count coupling).
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout verdict + CITE list (round 1, 2026-11-12, draft r1): Verdict: FLAGS_FOUND. Decisions triaged: 205 of 205. Roadmap items intersected: 6; CONFLICT: 0; RELATED: 3. Serves: mission 3/5. CITE: 229 (cl.4), 217 (cl.8 as amended), 205 (cl.1, cl.5), 246 (cl.3), 170, 163, 181 (cl.2), 127, 86. Report: /mnt/project-files/plan-rescout-on-fingerprint/SCOUT-r1.md."
+  - "Scout flags folded in: 244 WARN (retire skill-template-emits-v5, never retarget its claim); 235 WARN (keep the floor constant; a separate newest-version rule); 217 cl.8 NOTE and 163 SPIRIT NOTE (residuals with owners rec-5103 and rec-5129, recorded in the ledger); T4.29 c1's exact string 're-scout required'; T4.30 c5 flip (rec-5128)."
+  - "Sign-off (operator, 2026-11-12, this thread): fork 1A (the scout prints the fingerprint it judged; rec-5129 for a telemetry match later), fork 2B (modified plans below 6 unchecked; gap appended to rec-5102 at his request), fork 3A (bind only the contract text; the skill and plan.md text pinned by tests), retirement of skill-template-emits-v5 and the template-test retarget confirmed; then 'write the plan'. Presentation and consult: /mnt/project-files/plan-rescout-on-fingerprint/PRESENTATION.md, advisor-brief/ADVICE.md (Fable 5.2)."
+  - "ORDER: the sidecar's ledger blocks edit words plan 1's build places (docs/plans/approved/scout-input-fingerprint.yaml block l03 governance_notes), and the barrier imports plan 1's module, so the sidecar, its wording check, the approval run and this plan's PR follow plan 1's build merge; this plan's build follows plan 1's build. SIDECAR_DIGEST_PENDING in VP step 2 is filled with the sidecar's digest when the sidecar is written, before the plan PR."
+  - "Overlap: unbuilt PLAN-work-graph-edge-model also scopes exit-criteria-ledger.yaml, validate_plan_documents.py and test_validate_plan_documents.py; whichever builds second rebases. Unbuilt PLAN-hook-canary-evidence and PLAN-sit-organization also scope config/prose_budgets.yaml (other entries). PLAN-planning-eligibility-start-edges is built (#1944) though undeclared."
+  - "Other projects: once this build merges, every plan still being written below the newest version fails its plan PR until it bumps, adds cites and re-scouts once (no grace list; ADVICE Q8). Before merging, the build posts a notice on the coordinator log (issue #1963) naming the change and the remedy."
+  - "Residuals (Decision 181 cl.2, in the ledger): a Decision amended on main after the PR's last CI run (rec-5103's push-to-main trigger); a copied fingerprint without a scout run (rec-5129; rec-5103 on Actions); a merged-plan amendment whose own inputs are unchanged while a cited Decision moved (rec-5103); modified plans below 6 (rec-5102 note)."
+  - "This plan's own document stays schema_version 5: v6 is not valid until plan 1's build merges; the barrier binds only plans added after this build."
+  - "Related-work check (Decision 226): red_overlap verdict clear, no open reds (2026-11-12). Cloud-only operator: every step runs in a CC-web session or PR CI. Live-infrastructure assumptions: none."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections (229 cl.4, 217 cl.8, 205 cl.1 and cl.5, 246, 235, 244, 170, 163, 181 cl.2, 127, 86)
+  - All files in scope located and readable; docs/plans/approved/plan-rescout-on-fingerprint.yaml and docs/plans/PLAN-scout-input-fingerprint.yaml read
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "STEP 0: run VP step 1. Post: PRECONDITION_OK."
+  - "STEP 1: place the sidecar's blocks in project-alignment.yaml and exit-criteria-ledger.yaml byte for byte ({{DATE}} = build date). Run VP step 2. Post: APPROVED-TEXT OK."
+  - "STEP 2: scripts/checks/roadmap/_plan_rescout_barrier.py and tests/checks/roadmap/test__plan_rescout_barrier.py. Run VP step 3."
+  - "STEP 3: validate_plan_documents.py wiring, newest-version rule and seam; tests/checks/roadmap/test_validate_plan_documents_scout_fingerprint.py, test_validate_plan_documents_latest_format.py and the one-line retarget in test_validate_plan_documents.py. Run VP steps 4-5."
+  - "STEP 4: the planning skill and plan.md replacements exactly as the scope rows give them; measure the skill and set its prose budget; git mv the retired record; tests/test_planning_skill_scout_fingerprint.py. Run VP steps 6 and 8."
+  - "STEP 5: VP step 7 (end to end), then validate --pre (VP 9) and the full tier (VP 10). Loop until pass; on an unrecoverable failure stop and RCA (Decision 55)."
+  - "STEP 6: post the coordinator-log notice (context), then merge with the squash commit body carrying 'Resolves: rec-4490, rec-5102' as its own paragraph; run VP step 11 after the closure job."
+  - "Report: what was implemented, the VP results, the notice link, and that rec-5103, rec-5128 and rec-5129 remain open."
+rollback: >-
+  Revert the build PR: the barrier and the newest-version rule disappear and the instruction text returns to the judged
+  re-scout. Plans written at v6 meanwhile stay valid (plan 1's schema), so a revert breaks nothing already merged.
