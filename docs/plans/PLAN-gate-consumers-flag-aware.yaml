@@ -40,6 +40,18 @@ scope:
       reader reads (T4.24 c16 moves the reader first). Stdlib and yaml only; it does not import
       scripts.session.merge_checks. Stays under 500 SLOC.
     new_imports: []
+  - file: scripts/checks/contracts/_manifest.py
+    action: Modify
+    purpose: >-
+      The validate_project_configuration Entry's pre_globs gain docs/contracts/executor-personas.yaml and
+      ontheloop/platform.yaml, the two inputs rule (l) reads, so a PR adding a verdict persona without its row, or
+      creating ontheloop/platform.yaml with a gates key, reruns the check in --pre rather than surfacing on main.
+    new_imports: []
+  - file: tests/checks/contracts/test__manifest.py
+    action: Modify
+    purpose: >-
+      One node: each of docs/contracts/executor-personas.yaml and ontheloop/platform.yaml matches a
+      validate_project_configuration pre_glob (red before the Entry edit). Existing nodes unchanged.
   - file: tests/checks/contracts/test_validate_project_configuration.py
     action: Modify
     purpose: >-
@@ -76,7 +88,7 @@ scope:
       reason; pr_class(changed) -> plan when scripts.ci.push_scope.confined_to_plans(changed) else code (an empty or
       None set is code); persona_checks(sources, pr_class) -> sorted check names of actions rows serving that class;
       switch_backs(base_sources, head_sources) -> sorted personas whose row reads actions on base and in_session on
-      head. No I/O, no pull request number (Decision 234 cl.4). Stays under 500 SLOC.
+      head (the adapter passes the PR's merge base as base, so the judgement is the PR's own change). No I/O, no pull request number (Decision 234 cl.4). Stays under 500 SLOC.
     new_imports: [scripts.ci.push_scope]
   - file: tests/test_session_merge_checks.py
     action: Modify
@@ -88,20 +100,25 @@ scope:
   - file: .claude/hooks/merge_gate.py
     action: Modify
     purpose: >-
-      The persona leg (Decision {{N}} cl.4-5), on merge_pull_request and enable_pr_auto_merge alike, after the overlap and trailer checks and before the two GETs, inside
-      plan 1's 40 s deadline: read docs/contracts/project-configuration.yaml from refs/remotes/origin/main with git
-      show (never the working tree, a variable or a tool_input field); verdict_sources failing -> exit 2
-      "merge-gate: verdict-source: UNAVAILABLE: <reason>; retry later, or the operator merges in the GitHub UI". When
-      no row reads actions the leg adds nothing and reads nothing more. Otherwise: read the same file at the fetched PR
-      head; a head whose rows fail verdict_sources -> exit 2 "merge-gate: verdict-source: REFUSE: the PR head's
-      gates rows do not read: <reason>"; switch_backs non-empty -> exit 2 "merge-gate: verdict-source: REFUSE: this
+      The persona leg (Decision {{N}} cl.4-5), on merge_pull_request and enable_pr_auto_merge alike, after the
+      overlap and trailer checks and before the two GETs, inside plan 1's 40 s deadline. (1) Read
+      docs/contracts/project-configuration.yaml from refs/remotes/origin/main with git show (never the working tree,
+      a variable or a tool_input field); verdict_sources failing -> exit 2 "merge-gate: verdict-source: UNAVAILABLE:
+      <reason>; retry later, or the operator merges in the GitHub UI". (2) changed = git diff --name-only
+      --no-renames <merge base> <head>, using the merge base merge_overlap returned (a failed diff is UNAVAILABLE).
+      (3) Only when changed includes docs/contracts/project-configuration.yaml, judge the PR's own change: read the
+      file at the merge base and at the head; a merge base whose rows fail verdict_sources is UNAVAILABLE; a head whose
+      rows fail it -> exit 2 "merge-gate: verdict-source: REFUSE: the PR head's gates rows do not read: <reason>";
+      switch_backs(merge-base sources, head sources) non-empty -> exit 2 "merge-gate: verdict-source: REFUSE: this
       PR returns <persona list> from actions to in_session; the operator merges it in the GitHub UI (Decision {{N}}
-      cl.5)"; changed = git diff --name-only --no-renames <merge base> <head> using the merge base merge_overlap
-      returned (a failed diff is UNAVAILABLE); the persona_checks names join the ruleset's required contexts in the one
+      cl.5)". A PR that does not change the file is never judged a switch-back, however old its head. (4) The
+      persona_checks(main's sources, pr_class(changed)) names join the ruleset's required contexts in the one
       merge_checks.verdict call, so a persona check reads exactly like a required check, and each such REFUSE reason
       adds "(gates.<persona>.verdict_source reads actions on origin/main; if that persona's Actions lane is down, a PR
-      returning the row to in_session is the fallback, merged by the operator)". Plan 1's read_checks_verdict seam
-      gains a keyword argument extra (a sequence of check names, default empty) required beside the ruleset's
+      returning the row to in_session is the fallback, merged by the operator)". With every main row in_session and
+      the file unchanged the leg costs one git show and one git diff and adds no check. yaml is imported at the
+      hook's top, before its project-root sys.path insert, like plan 1's stdlib imports. Plan 1's read_checks_verdict
+      seam gains a keyword argument extra (a sequence of check names, default empty) required beside the ruleset's
       contexts, used by the VP replay. No new GitHub endpoint, no override. Stays under 500 SLOC.
   - file: tests/fixtures/merge_overlap_repos.py
     action: Modify
@@ -121,7 +138,10 @@ scope:
       by another app -> exit 2; plan_critic actions on a plans-only PR -> exit 2 until its check is green, and a code
       PR is unaffected; a mixed PR counts as code; missing config file on main, a missing row, a bad value and
       local != cloud -> exit 2 naming UNAVAILABLE; a PR switching an actions row back to in_session -> exit 2 naming
-      the operator even with every check green, on either tool; a main with no gates rows and a PR adding them at
+      the operator even with every check green, on either tool; a PR branched before main's row was set to actions
+      that does not touch the file, with a green persona check, -> exit 0; a PR whose head predates the rows -> exit 0
+      once main reads actions (with its persona check green); a PR that itself changes a row from actions to
+      in_session after that -> exit 2; a main with no gates rows and a PR adding them at
       in_session -> exit 0 (this build's own merge); a working-tree edit of the file, an OTL_ variable and an unknown
       tool_input key cannot turn a refusal into exit 0; enable_pr_auto_merge behaves the same. Module-scoped fixtures
       to protect the --pre budget.
@@ -168,8 +188,11 @@ scope:
     action: Modify
     purpose: >-
       Exactly the sidecar's blocks roadmap-t4-28-c1 (a dated amendment saying a PR changing code is every PR not
-      confined to docs/plans/) and roadmap-t4-32-c5-met (closes_criteria's flip of T4.32 c5 to met, bound like every
-      other word of this file); no other word of the file changes, so the bookkeeping walk adds nothing here.
+      confined to docs/plans/), roadmap-t4-32-c5-met (closes_criteria's flip of T4.32 c5 to met), and the bookkeeping
+      walk's strict-subset outcome for T4.32 written out in advance: roadmap-t4-32-status (status not_started ->
+      in_progress) and roadmap-t4-32-progress (one dated progress_note bullet appended after the last bullet on main).
+      No other word of the file changes; the walk's staging is exactly these blocks. If another build has already
+      moved T4.32's status or that bullet, the anchor fails: stop and send a plan-defect report.
 bundled_recommendations:
   - rec-5121
 followon_recs: []
@@ -183,8 +206,8 @@ infrastructure_dependencies:
 acceptance_criteria:
   - rec-5121's acceptance (the three tests/checks/contracts/test_gate_verdict_source_rows.py nodes it names) exits 0.
   - docs/contracts/project-configuration.yaml holds the three rows at in_session and validate_project_configuration rejects a missing or extra row, a variable, local != cloud, a value outside the enum and an unread platform.yaml gates key.
-  - Through the shim, a row reading actions makes the gate require persona-verdict/<persona> (newest github-actions run, completed, success, on the head) on the PRs of that persona's class; all in_session adds nothing; any unreadable row or diff refuses; a PR switching a row from actions back to in_session is refused for an agent.
-  - Replayed on real data, the persona leg reads CLEAR on #1990's head with the build's committed rows and REFUSE naming persona-verdict/code_reviewer once a copy of the file sets code_reviewer to actions.
+  - Through the shim, a row reading actions makes the gate require persona-verdict/<persona> (newest github-actions run, completed, success, on the head) on the PRs of that persona's class; all in_session adds nothing; any unreadable row or diff refuses; a PR whose own change (merge base to head) switches a row from actions back to in_session or removes one is refused for an agent, and a PR that does not change the file never is, however old its head.
+  - Replayed on real data, #1990 (plans-only) reads class plan, and the persona leg reads CLEAR on its head with the build's committed rows and REFUSE naming persona-verdict/plan_critic once a copy of the file sets plan_critic to actions.
   - The five contracts and the roadmap carry exactly the sidecar's blocks (approved_text verify exits 0) and ports.yaml has fewer effective lines than its base.
   - Existing merge-gate suites, plan 1's suites, rec-4869's replay and the contract tests stay green with no assert line changed, except the sidecar-approved test-profile-entry line.
   - After merge, the coordinator's shared copy matches coordinator.yaml at the merge commit, T4.32 c5 reads met, and rec-5121 reads closed.
@@ -227,7 +250,7 @@ verification_plan:
     action: Run rec-5121's acceptance file and the validator's red fixtures.
     command: >-
       bin/venv-python -m pytest tests/checks/contracts/test_gate_verdict_source_rows.py
-      tests/checks/contracts/test_validate_project_configuration.py -q
+      tests/checks/contracts/test_validate_project_configuration.py tests/checks/contracts/test__manifest.py -q
     expected: exit 0, all nodes pass; red before (file absent, rows absent, rule (l) absent).
     fix_if: a red fixture passes the validator, or the real rows do not parse to three in_session
     hermetic: true
@@ -267,8 +290,8 @@ verification_plan:
     action: Bind the contract and roadmap edits to the approved words.
     command: >-
       bin/venv-python -m scripts.roadmap.approved_text verify --slug gate-consumers-flag-aware --base origin/main
-      --expect 32f21a884879535a93865784effa0446b1d135ea06933a5a6b1195fefe584424
-    expected: exit 0; all twenty-one blocks match
+      --expect 713186d4252938469a91cbda93b51db258694d8d414d5d50a98c55acc8beec71
+    expected: exit 0; all twenty-three blocks match
     fix_if: any word differs from the sidecar; fix the edit, never the sidecar (operator-approved text)
     hermetic: false
     graduation: waive
@@ -294,21 +317,25 @@ verification_plan:
   - step: 8
     phase: pre-deploy
     action: >-
-      Live replay on real data (network): the committed build HEAD's rows (all in_session) and a copy with
-      code_reviewer at actions, judged with #1990's real check runs through the adapter's read seam.
+      Live replay on real data (network): #1990's class from its real diff, then the committed build HEAD's rows (all
+      in_session) and a copy with plan_critic at actions, judged with #1990's real check runs through the adapter's
+      read seam.
     command: >-
       git fetch -q origin refs/pull/1990/head:refs/replay/1990 && bin/venv-python -c "import sys, pathlib, subprocess, yaml;
       sys.path.insert(0, '.claude/hooks'); import merge_gate as g; from scripts.session import merge_checks as m;
-      sha=subprocess.run(['git', 'rev-parse', 'refs/replay/1990'], capture_output=True, text=True, check=True).stdout.strip();
-      text=subprocess.run(['git', 'show', 'HEAD:docs/contracts/project-configuration.yaml'], capture_output=True, text=True, check=True).stdout;
-      d=yaml.safe_load(text); [s.update(defaults={'local': 'actions', 'cloud': 'actions'}) for s in d['settings'] if s['id'] == 'gates.code_reviewer.verdict_source'];
-      [print(label, g.read_checks_verdict(pathlib.Path('.'), 'otl-labs', 'ontheloop', sha, extra=m.persona_checks(m.verdict_sources(t), 'code')))
+      run=lambda *a: subprocess.run(['git', *a], capture_output=True, text=True, check=True).stdout;
+      sha=run('rev-parse', 'refs/replay/1990').strip(); base=run('merge-base', 'origin/main', sha).strip();
+      cls=m.pr_class(run('diff', '--name-only', '--no-renames', base, sha).split());
+      text=run('show', 'HEAD:docs/contracts/project-configuration.yaml'); d=yaml.safe_load(text);
+      [s.update(defaults={'local': 'actions', 'cloud': 'actions'}) for s in d['settings'] if s['id'] == 'gates.plan_critic.verdict_source'];
+      print('class', cls); [print(label, g.read_checks_verdict(pathlib.Path('.'), 'otl-labs', 'ontheloop', sha, extra=m.persona_checks(m.verdict_sources(t), cls)))
       for label, t in (('main', text), ('flipped', yaml.safe_dump(d)))]"; git update-ref -d refs/replay/1990
     expected: >-
-      two lines labelled main (the HEAD rows) and flipped: main a CLEAR verdict; flipped a REFUSE verdict whose reasons name persona-verdict/code_reviewer as
-      missing. An UNAVAILABLE line is a read failure on this surface: re-run once; if it persists, record it and send a
-      plan-defect report
-    fix_if: main reads REFUSE (the leg adds a check with every row in_session) or flipped reads CLEAR (the leg misses the flip)
+      three lines: class plan (#1990 changed only docs/plans/ files); main (the HEAD rows, all in_session) a CLEAR
+      verdict; flipped (plan_critic at actions) a REFUSE verdict whose reasons name persona-verdict/plan_critic as
+      missing. An UNAVAILABLE line is a read failure on this surface: re-run once; if it persists, record it and send
+      a plan-defect report
+    fix_if: class reads code (pr_class misreads a plans-only diff), main reads REFUSE (the leg adds a check with every row in_session) or flipped reads CLEAR (the leg misses the flip)
     hermetic: false
     graduation: waive
     graduation_waiver_reason: Depends on network reads of GitHub; steps 2-4 graduate the same verdicts hermetically.
@@ -361,6 +388,11 @@ test_obligations:
     verification_step: 3
     test_selector: tests/checks/contracts/test_validate_project_configuration.py
     red_green_expectation: red before (rule absent, red fixtures pass), green after.
+  - source: scripts/checks/contracts/_manifest.py
+    behavior: validate_project_configuration's pre_globs match docs/contracts/executor-personas.yaml and ontheloop/platform.yaml.
+    verification_step: 3
+    test_selector: tests/checks/contracts/test__manifest.py
+    red_green_expectation: red before (globs absent), green after.
   - source: docs/contracts/project-configuration.yaml
     behavior: Holds the three rows at in_session, parsed by the gate's own parser; a one-field flip changes the requirement.
     verification_step: 3
@@ -408,7 +440,7 @@ test_obligations:
     test_selector: tests/checks/contracts/test_gate_verdict_source_rows.py
     red_green_expectation: red before (amendment absent), green after; the c5 flip is read back at step 10.
 constraints:
-  - "Build only after PLAN-merge-requires-green-checks' build and PLAN-persona-verdict-credential's build have merged (step 1); {{N}} is plan 1's Decision number on the base."
+  - "Build only after PLAN-merge-requires-green-checks' build and PLAN-persona-verdict-credential's build have merged (step 1): the build order is the operator's itinerary ruling (both earlier builds edit project-configuration.yaml or the gate), not an anchor need; {{N}} is plan 1's Decision number on the base."
   - "The merge gate reads the rows only from origin/main and the fetched PR head; no flag, environment variable, working-tree file or tool_input field changes what it reads or skips the leg (Decision 203 cl.3-4 pattern); a false refusal is fixed in the checker."
   - "merge_checks.py stays pure: no I/O, no pull request number (Decision 234 cl.4); git and GitHub plumbing stay in the adapter (Decision 212 cl.3)."
   - "No new GitHub endpoint: persona checks come from the check-run read plan 1 adds; only check runs by the app github-actions count."
@@ -422,12 +454,13 @@ context:
   - "Decision-scout verdict + CITE list (round 1, 2026-11-12): Verdict: FLAGS_FOUND. Decisions triaged: 205 of 205. Roadmap items intersected: 8; CONFLICT: 1; RELATED: 4. Serves: NS.9 4/5. CITE: 245 (cl.1, cl.3), 83, 203 (cl.3-4), 205 (cl.1-2), 229 (cl.4), 234 (cl.4), 246, 247, 128, 166. Report: /mnt/project-files/gate-consumers-flag-aware/SCOUT-plan2-r1.md."
   - "Scout flags folded in: 224 WARN -> c5's id kept (fixed by c5 and plan 1's Decision), each row's basis says so for T4.24 c16, the header and note state the origin/main-only read with plan 1's Decision cl.4 as its authority; 212 WARN -> coupling PC-10, open, owned T4.2:c9; 100 WARN -> carried by plan 1's Decision cl.3 and native-gate-available; 235 NOTE -> the switch-back refusal (operator fork, see sign-off); T4.28 CONFLICT -> the dated c1 amendment; 118 -> an amendment_log row in each edited contract."
   - "Consult (blind Fable 5.2, 2026-11-12): /mnt/project-files/gate-consumers-flag-aware/plan2-advisor-brief/ADVICE.md. Adapted: the persona functions live in plan 1's merge_checks.py, not a new module, so git-ops' merge_step_coverage entry still names every gate file and git-ops is not edited; SA-04 is not edited (plan 1 rewrites it, so no anchor survives both bases) and the coupling goes to PC-10."
-  - "Anchors: every sidecar block anchors on text present on main da926753 that neither plan 1 nor PLAN-persona-verdict-credential (project-configuration.yaml api_key rows, amendment_log head) nor #1992 (ports.yaml contract description, verbs_status, SA-11) changes."
-  - "Kept graduated records (node ids and asserts unchanged; new nodes only): project-configuration-ambient-trigger and project-configuration-secret-never-tracked (tests/checks/contracts/test_validate_project_configuration.py), and plan 1's merge-gate records; their entries under config/agent/verification_registry/entries/ are not edited."
+  - "Anchors: every sidecar block anchors on text present on main 755944d2 that neither plan 1 nor PLAN-persona-verdict-credential (project-configuration.yaml api_key rows, amendment_log head) nor #1992 (ports.yaml contract description, verbs_status, SA-11) changes."
+  - "Kept graduated records (node ids and asserts unchanged; new nodes only): project-configuration-ambient-trigger and project-configuration-secret-never-tracked (tests/checks/contracts/test_validate_project_configuration.py), actions-capacity-evaluator-and-steps, contract-pointer-evaluators-mirror-tests and ducklake-partition-spec-preglob-closure (tests/checks/contracts/test__manifest.py), and plan 1's merge-gate records; their entries under config/agent/verification_registry/entries/ are not edited."
   - "rec-5121's acceptance was re-pointed 2026-11-12 (portal update_rec, read back) to three ::node ids in tests/checks/contracts/test_gate_verdict_source_rows.py (junit route); it reads UNDECIDABLE at planning only because this plan creates that file. Unbuilt plans on these files: PLAN-persona-verdict-credential (project-configuration.yaml), PLAN-persona-run-identity-contract (#1992, ports.yaml), PLAN-merge-requires-green-checks (merge_gate.py, merge_checks.py, the fixture and tests); plan_obligations --plan lists the rest (telemetry, environment-gates and work-graph plans on ports.yaml and project-configuration.yaml, several on the roadmap); whichever builds second rebases, and this one builds last."
   - "Alignment sign-off (2026-11-12 16:13 UTC, operator, planning thread): 'write the plan'. Fork switch-back guard -> A: the gate refuses an agent merge whose head returns any gates row from actions to in_session or removes one; the operator merges it in the GitHub UI (rests on plan 1's Decision cl.5 sentence, requested 2026-11-12, premise in VP 1). Decided with notice: one plan (blind consult), build after plan 1's and the credential build, check name persona-verdict/<persona>, a mixed PR is code class, no git-ops.yaml edit, c5's row id kept."
   - "red_overlap (2026-11-12, main da926753): clear, no reds (slo_hours 4)."
   - "Switch-back refusal: Decision {{N}} cl.5's sentence ('The gate also refuses an agent merge of a pull request that changes a gates.<persona>.verdict_source row from actions to in_session or removes one, so the operator merges it in the GitHub UI'), added by plan 1 at faaf148d, with its cl.6 naming this plan as the refusal's builder; this plan's approval run waits for plan 1's approved text, and VP 1's switch_back_clause checks it on the build base. It ships in this one PR with the rows, on both merge tools."
+  - "git-ops.yaml merge_step_coverage names merge_checks.py for required checks only; the persona leg lives in the same module and is recorded by Decision {{N}} cl.4-6 and this plan, a residual for the next git-ops edit (the file is at its line budget)."
   - "Persona-check forgery: a PR adding a workflow that posts a github-actions run named persona-verdict/<persona> satisfies the leg (for code_reviewer, a PR certifying its own review); Decision {{N}} cl.6 names that residual for required checks and it covers these the same way. Each flip plan must close or accept it before its row reads actions."
   - "Plan class is every PR confined to docs/plans/, a REPORT-ONLY deliverable under docs/plans/reports/ and a plan-defect amendment included: those are the PRs the scout and critic serve (coordinator.yaml plan_pr), so both checks are intended there."
   - "Wording check rehearsal: the scratch tree is origin/main with this plan and its sidecar present as on the build base (untracked there), since roadmap-t4-32-c5-met's met_by resolves only to an existing plan; contract drift re-run on the committed placed text (rec-5123)."
@@ -440,6 +473,8 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 7, nits: 8}
   - {gate: wording-check, round: 2, verdict: FAIL, digest: 8bdfc1ff4a3c60bd34ba38549086a77c8e1989017a74198226b2cf1515e85a90, base: da92675361da1a93a705120ae83011d3cc3e4d00, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 3, verdict: PASS, digest: 32f21a884879535a93865784effa0446b1d135ea06933a5a6b1195fefe584424, base: da92675361da1a93a705120ae83011d3cc3e4d00, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 4, nits: 5}
+  - {gate: wording-check, round: 4, verdict: PASS, digest: 713186d4252938469a91cbda93b51db258694d8d414d5d50a98c55acc8beec71, base: 755944d206cd0d5e07a2c1ec7e13225669f7e8cd, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
