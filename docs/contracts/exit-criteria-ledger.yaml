@@ -9,8 +9,9 @@ contract:
     Per-criterion status ledger on roadmap tier_items (docs/ROADMAP-PLATFORM.yaml
     TierItem.exit_criteria[]), plus the plan-linkage fields: closes_criteria (the plan->criterion
     link), followon_recs and its followon_recs_readiness projection (deferred halves), and the
-    declared plan edges PlanDocument.amends / PlanDocument.introduces / PlanDocument.principal,
-    with the roadmap_alignment_projection audit_invariant. Makes in_progress resolvable: remaining work == the set
+    declared plan edges PlanDocument.amends / PlanDocument.cites / PlanDocument.introduces / PlanDocument.principal,
+    with the roadmap_alignment_projection audit_invariant, and the gate-row field
+    GateRound.scout_input_fingerprint. Makes in_progress resolvable: remaining work == the set
     of open criteria (Decision 59). The ledger is git-authoritative (roadmap YAML), not an
     ops_* warehouse table (see governance_notes below).
 
@@ -249,7 +250,8 @@ fields:
       (integers) and the dec-NNN warehouse id on purpose: a typed-namespace prefix plus a #clause
       fragment, so the extractor emits it verbatim as an edge target ref. A DECLARATION, never the
       durable record -- the implementation merge writes the edge (Decision 197 cl.5, Decision 205 cl.5).
-      Consumer: T4.32 c4's single plan-edge extractor, not built and not claimed here. Decision 217
+      Consumer: the single plan-edge extractor (scripts/roadmap/plan_edges.py; T4.32 c4), which feeds the
+      scout-input fingerprint (scripts/roadmap/plan_fingerprint.py). Decision 217
       cl.5-6 deferral (home T4.24 c7): numbers only until Decision 196 cl.8's split; a #clause is
       recorded but resolves to the whole decision until then; the slug form and Decision 196 cl.6
       prefixes arrive by amendment. Refused below schema_version 5 -- only current and future-version
@@ -274,6 +276,58 @@ fields:
       assert edges. Default [].
     populated_by: >-
       The plan author at /plan time, when the plan introduces a named artefact; omitted otherwise.
+    dq_intent: {}
+  plan_cites:
+    type: "list[str]"
+    description: >-
+      PlanDocument.cites field (scripts/roadmap/plan_document.py) -- the decisions that govern a plan's approach, declared
+      as typed tokens so the plan-edge extractor reads a field instead of free text.
+    semantics: >-
+      Each entry is a "dec:<number>[#<clause-id>]" token with plan_amends' grammar and clause deferral. Holds the ids the
+      human cited and every id on the decision scout's CITE list; the scout-input fingerprint (plan_scout_input_fingerprint)
+      hashes each cited and amended decision's content. The context CITE line stays the verbatim scout record and the
+      extractor never reads it. A DECLARATION, never the durable record (Decision 197 cl.5). Refused below schema_version 6.
+      Default [].
+    populated_by: >-
+      The plan author at /plan time: the human-cited ids before the scout runs, the scout's CITE ids after it.
+    governance_notes: >-
+      Decision 181 cl.2 per-surface coverage: token shape and the version floor are enforced by validate_plan_documents in
+      both tiers; existence of the named decision is UNENFORCED, owned by rec-4517; that a plan's cites hold the scout's
+      CITE ids is enforced only by the fingerprint comparison rec-4490's plan adds.
+    dq_intent: {}
+  plan_scout_input_fingerprint:
+    type: "str | None"
+    description: >-
+      GateRound.scout_input_fingerprint field (scripts/roadmap/plan_gate_rounds.py), on decision-scout rows of a plan's
+      gate_rounds -- the scout-input fingerprint T4.32 c4 binds a scout verdict to (Decision 229 cl.4, Decision 217 cl.8).
+    semantics: >-
+      Computed only by scripts.roadmap.plan_fingerprint over the edges scripts.roadmap.plan_edges extracts (THE single
+      plan-edge extractor); no other module re-derives either. Payload keys, exactly: v; intent, whitespace runs collapsed
+      to one space; scope_paths; verification_tier; plan_type; cites; amends; introduces; decisions, one [number,
+      content_hash] pair per cited or amended decision, content_hash being scripts.decisions_md's sha256 of that decision's
+      raw block in the fingerprinted tree, null when no such decision exists, a #clause resolving to the whole decision
+      until Decision 196 cl.8's split; items, the item half of each closes_criteria token plus phase's first token when it
+      has a tier_item id's shape; edges, each such item's depends_on and start_edges in that tree's roadmap as
+      scripts.roadmap.platform_roadmap.load reads it (archived stubs hydrated), null for an item it lacks;
+      roadmap_projection, scripts.roadmap.scope_projection.project_items over scope_paths, the roadmap rows the scout's
+      ROADMAP overlay reads, sorted by id; approved_blocks, the sha256 of [file, words(before), words(after)] for each
+      approved-text sidecar block on docs/DECISIONS.md, docs/ROADMAP-PLATFORM.yaml or docs/contracts/north-star.yaml; and
+      north_star, the sha256 of docs/contracts/north-star.yaml's bytes, null when absent. Lists sorted and de-duplicated;
+      canonical JSON (sorted keys, compact separators, UTF-8); recorded as "v<N>:<64 lowercase hex>", N raised on any
+      payload change, so an older record never equals a newer digest. phase, closes_criteria and slug feed derived keys
+      only; every other plan field is excluded, context, scope purposes, execution_steps, constraints, acceptance_criteria,
+      verification_plan and gate_rounds among them, and a test fails while any PlanDocument or ScopeEntry field is
+      classified neither hashed, derived nor excluded. Fail closed: a plan, roadmap, decision file or sidecar that cannot be
+      read or parsed is an error, never a digest. The recorded value is a run fact, the digest of the scouted input with the
+      scout's CITE ids merged into cites; it never excuses a scout, and every reader recomputes and compares rather than
+      trusting it (Decision 205 cl.5). Optional; default None.
+    populated_by: >-
+      The planner, when it records a decision-scout round: bin/venv-python -m scripts.roadmap.plan_fingerprint --plan
+      <draft> --with-cites <the scout's CITE ids>.
+    governance_notes: >-
+      Decision 181 cl.2 per-surface coverage: shape and decision-scout-only placement are enforced by
+      validate_plan_documents in both tiers; that the recorded value equals the recomputed one is UNENFORCED until
+      rec-4490's plan adds the comparison, and on Actions until rec-5103's verdict jobs.
     dq_intent: {}
   plan_principal:
     type: "str | None"
@@ -356,66 +410,13 @@ audit_invariants:
     bidirectional directory-prefix match.
 
 amendment_log:
-  - date: "2026-10-10"
-    semantic_break: false
-    change_class: prose_improvement
-    summary: >-
-      PLAN-recs-full-cache-retirement (Decision 215): followon_recs_readiness is computed from
-      the bounded preflight_signal_rows rows, not the warm-sync ops_recommendations pull, which
-      no longer exists. Population rule and field shape unchanged.
-  - date: "2026-09-25"
-    semantic_break: false
-    change_class: prose_improvement
-    summary: >-
-      PLAN-roadmap-terminal-compaction: corrected the roadmap_alignment_projection
-      audit_invariants KNOWN LIMITATION again -- completion_compaction emptied T2.56's
-      files_in_scope, so the roadmap now carries exactly one .claude/skills/ entry (T3.19,
-      deferred_post_mvp), not "at least two". No field shape or enum changed.
-  - date: "2026-09-12"
-    semantic_break: false
-    change_class: prose_improvement
-    summary: >-
-      PLAN-skills-layer-prose-relocation (T2.56 c1 skills-layer conjunct): received the
-      criterion-level FIELD SEMANTICS half of the implement skill's relocated Tier_item
-      bookkeeping walk -- the closes_criteria flip procedure (fields.met_by) and the
-      exit-criteria truth-maintenance realized-differently rule (fields.status), each with its
-      own field-level amendment_log entry. Also corrected the roadmap_alignment_projection
-      audit_invariants KNOWN LIMITATION, now false since T2.56's files_in_scope was re-grounded
-      to name the skills layer. No new top-level key (Class A extra="forbid").
-  - date: "2026-09-07"
-    semantic_break: false
-    change_class: prose_improvement
-    summary: >-
-      PLAN-roadmap-blocking-liveness-detector: corrected blocked_by's semantics -- it no longer
-      "carries no runtime consumer beyond the schema validator today". Names
-      scripts/platform_roadmap_liveness.py (via scripts/checks/roadmap/
-      validate_roadmap_liveness.py) as the field's runtime consumer, closing rec-3395. No field
-      shape changed.
-  - date: "2026-09-04"
-    semantic_break: false
-    change_class: field_add
-    summary: >-
-      PLAN-roadmap-blocking-edge-semantics: added the blocked_by field (per-criterion blocking
-      edges, {ref, until, note}), split out of the overloaded gates/depends_on proxy so a
-      criterion's blocking relationship is an authored field rather than an inferred side
-      effect of depends_on or CandidateDecision.gates. Deliberately excluded from the
-      depends_on cycle DFS (see the field's own governance_notes). Also corrected fields.id's
-      stale model-home pointer (own amendment_log entry on that field).
-  - date: "2026-09-03"
-    semantic_break: false
-    change_class: governance_note_add
-    summary: >-
-      PLAN-decision-scout-roadmap-projection (PDB-04, remedy B2-R5): added the
-      roadmap_alignment_projection audit_invariants entry declaring the reader contract for
-      scripts/roadmap/scope_projection.py's field roster. Audit trail only -- inert for the
-      drift gate (no field description/semantics changed).
-  - date: "2026-09-03"
-    semantic_break: false
-    change_class: field_add
-    summary: >-
-      PLAN-orient-followon-adhoc-lane (PDB-01, remedies B1-R4 + B4-O1): added the
-      followon_recs_readiness field documenting the /orient ad-hoc lane's preflight-derived
-      readiness projection over plan_followon_recs (PlanDocument.followon_recs).
+  - {date: "2026-10-10", semantic_break: false, change_class: prose_improvement, summary: "PLAN-recs-full-cache-retirement (Decision 215): followon_recs_readiness is computed from the bounded preflight_signal_rows rows, not the warm-sync ops_recommendations pull, which no longer exists. Population rule and field shape unchanged."}
+  - {date: "2026-09-25", semantic_break: false, change_class: prose_improvement, summary: "PLAN-roadmap-terminal-compaction: corrected the roadmap_alignment_projection audit_invariants KNOWN LIMITATION again -- completion_compaction emptied T2.56's files_in_scope, so the roadmap now carries exactly one .claude/skills/ entry (T3.19, deferred_post_mvp), not \"at least two\". No field shape or enum changed."}
+  - {date: "2026-09-12", semantic_break: false, change_class: prose_improvement, summary: "PLAN-skills-layer-prose-relocation (T2.56 c1 skills-layer conjunct): received the criterion-level FIELD SEMANTICS half of the implement skill's relocated Tier_item bookkeeping walk -- the closes_criteria flip procedure (fields.met_by) and the exit-criteria truth-maintenance realized-differently rule (fields.status), each with its own field-level amendment_log entry. Also corrected the roadmap_alignment_projection audit_invariants KNOWN LIMITATION, now false since T2.56's files_in_scope was re-grounded to name the skills layer. No new top-level key (Class A extra=\"forbid\")."}
+  - {date: "2026-09-07", semantic_break: false, change_class: prose_improvement, summary: "PLAN-roadmap-blocking-liveness-detector: corrected blocked_by's semantics -- it no longer \"carries no runtime consumer beyond the schema validator today\". Names scripts/platform_roadmap_liveness.py (via scripts/checks/roadmap/ validate_roadmap_liveness.py) as the field's runtime consumer, closing rec-3395. No field shape changed."}
+  - {date: "2026-09-04", semantic_break: false, change_class: field_add, summary: "PLAN-roadmap-blocking-edge-semantics: added the blocked_by field (per-criterion blocking edges, {ref, until, note}), split out of the overloaded gates/depends_on proxy so a criterion's blocking relationship is an authored field rather than an inferred side effect of depends_on or CandidateDecision.gates. Deliberately excluded from the depends_on cycle DFS (see the field's own governance_notes). Also corrected fields.id's stale model-home pointer (own amendment_log entry on that field)."}
+  - {date: "2026-09-03", semantic_break: false, change_class: governance_note_add, summary: "PLAN-decision-scout-roadmap-projection (PDB-04, remedy B2-R5): added the roadmap_alignment_projection audit_invariants entry declaring the reader contract for scripts/roadmap/scope_projection.py's field roster. Audit trail only -- inert for the drift gate (no field description/semantics changed)."}
+  - {date: "2026-09-03", semantic_break: false, change_class: field_add, summary: "PLAN-orient-followon-adhoc-lane (PDB-01, remedies B1-R4 + B4-O1): added the followon_recs_readiness field documenting the /orient ad-hoc lane's preflight-derived readiness projection over plan_followon_recs (PlanDocument.followon_recs)."}
   - date: "2026-10-15"
     semantic_break: false
     change_class: prose_improvement
@@ -444,3 +445,11 @@ amendment_log:
     semantic_break: false
     change_class: prose_improvement
     summary: "PLAN-silent-failure-prevention: plan_followon_recs governance_notes gains the existing-rec deferral rule (Decision 181: write-time refusal is rec-4603's)."
+  - date: "2026-11-12"
+    semantic_break: false
+    change_class: field_add
+    summary: >-
+      PLAN-scout-input-fingerprint (T4.32 c4): added the plan_cites field documenting PlanDocument.cites
+      (schema_version 6) and the plan_scout_input_fingerprint field documenting GateRound.scout_input_fingerprint;
+      plan_amends' consumer note names the now-built extractor; contract.description names both. The seven
+      oldest rows are compacted to one line each, words unchanged, to stay under the contracts size cap.
