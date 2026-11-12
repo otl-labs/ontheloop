@@ -73,7 +73,7 @@ class TestTwoLegIntegration:
         # FLEET_COLLAPSE_MIN_STALE=3); the rejected (peer, leg)-PAIR count of 4 would spuriously
         # collapse a correlated-outage-sized event out of two independent peers.
         peers = {"a.yml": ["37 * * * *"], "b.yml": ["17 * * * *"]}
-        t0 = NOW - timedelta(seconds=21600)
+        t0 = NOW - timedelta(seconds=sl.fleet_threshold_seconds(peers))
         runs = {name: _run(i, t0) for i, name in enumerate(peers, start=1)}
         gh = _gh_caller(runs=runs, success_runs=runs)
         result = sl.detect_stale_loops(
