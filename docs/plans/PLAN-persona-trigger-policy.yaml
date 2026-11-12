@@ -1,0 +1,502 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: persona-trigger-policy
+intent: >-
+  Enforce Decision 205 clause 1 mechanically before any verdict persona lands on Actions (T4.2 c10, part of T4.32 c1):
+  a deterministic dispatch gate stops a workflow_dispatch from an App or bot reaching an LLM step (and so an unreviewed
+  apply), and a registered check refuses any workflow that runs an LLM persona on an inadmissible trigger, grants
+  checks: write to a pull_request-triggered workflow, or starts a compute-plane persona.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-persona-trigger-policy.yaml
+phase: >-
+  T4.32 c1 (part: the trigger-policy check, which also refuses a compute-plane start; Decision 229 cl.3), discharging
+  T4.2 c10 (closes_criteria). V2: Python check, gate script, workflow YAML and tests; nothing Lambda-packaged, no
+  Terraform, no deploy. Live dispatch behaviour is read back post-merge (VP 11).
+scope:
+  - file: scripts/ci/persona_dispatch_gate.py
+    action: Create
+    purpose: >-
+      The deterministic dispatch gate (thin-adapter target, Decision 162). Reads GITHUB_EVENT_NAME, GITHUB_EVENT_PATH
+      (sender.type), GITHUB_ACTOR, GITHUB_TRIGGERING_ACTOR and GITHUB_OUTPUT. Any event other than workflow_dispatch:
+      refused=false, exit 0. workflow_dispatch: admitted (refused=false, exit 0) when sender.type is User and
+      GITHUB_TRIGGERING_ACTOR does not end in [bot]; or, only with --own-failure (ci-rca), when GITHUB_ACTOR is
+      github-actions[bot] and --run-json names a run of this repository (GITHUB_REPOSITORY) on the default branch,
+      whose workflow name is in the --watched-from workflow file's on.workflow_run.workflows list, and which has
+      conclusion failure or (status in_progress and --jobs-json shows a job with conclusion failure); an admission prints
+      "PERSONA_DISPATCH_ADMITTED: <user|own-failure> <actor>" and writes refused=false. Anything else,
+      an unreadable input included: prints "PERSONA_DISPATCH_REFUSED: <reason>" to stderr and the step summary, writes
+      refused=true, exits 1 (fail closed).
+  - file: tests/ci/test_persona_dispatch_gate.py
+    action: Create
+    purpose: >-
+      Truth table over the gate: push, pull_request and workflow_run pass; User dispatch admitted; Bot sender refused;
+      User sender with a [bot] triggering_actor refused; github-actions[bot] own-failure admitted on a completed
+      failed run and on an in-progress run with a failed job (the terraform-apply-sandbox self-dispatch shape);
+      refused when the run is in another repository, off the default branch, of an unwatched workflow, green, or
+      unreadable; refused without --own-failure. Each refusal writes refused=true and exits 1.
+  - file: .github/workflows/ci-rca.yml
+    action: Modify
+    purpose: >-
+      One step, id persona_gate, immediately before "Run ci-rca agent": if: github.event_name == 'workflow_dispatch'
+      plus rca_agent's existing conjuncts; fetches the dispatched run's metadata to a file and runs the gate with
+      --own-failure --run-json, --jobs-json /tmp/ci-rca-jobs.json and --watched-from .github/workflows/ci-rca.yml.
+      rca_agent's if gains "&& steps.persona_gate.outputs.refused != 'true'". The job if (pinned by
+      tests/verify_ci_workflow/test_ci_rca_and_canary.py) is unchanged.
+  - file: .github/workflows/reconcile.yml
+    action: Modify
+    purpose: >-
+      Steps persona_gate (before review, same if as review) and persona_gate_fresh (before review_fresh, same if as
+      review_fresh), each running python3 "$GITHUB_WORKSPACE/.dispatch-tooling/scripts/ci/persona_dispatch_gate.py"
+      (the RED_SHA checkout predates the script). review and review_fresh gain the matching refused != 'true'
+      conjunct. record_write gains dispatch-refused from either gate. Gate step if: strings use only the tokens
+      scripts/ci/reconcile_reachability.py accepts. Relief (the file is 513 of its 513 structural budget; measured
+      against main at build, never a raise): gated-apply-reconcile's "Verify downloaded fresh plan.bin sha256" body
+      becomes one call of scripts/ci/verify_plan_sha256.py from .dispatch-tooling, and, only while still over, the
+      artifact_sha bodies of apply-reconcile and gated-apply-reconcile become one call each of
+      scripts/ci/originating_pr_sha.py from .dispatch-tooling. Step ids, names, if: and env are unchanged. The resolved,
+      route, apply, recheck and starved-rec bodies are pinned by tests and are never moved.
+  - file: scripts/ci/verify_plan_sha256.py
+    action: Create
+    purpose: >-
+      Relief delegate (both workflow rows): --label <MARKER> --plan plan.bin, expected digest from env
+      FRESH_PLAN_SHA256; on mismatch prints "::error::<MARKER> sha256 mismatch: expected X, got Y. Refusing to apply a
+      possibly-corrupted plan." to stderr and exits 1; else prints "<MARKER> sha256 verified: Y". Same text as today's
+      inline bodies.
+  - file: tests/ci/test_verify_plan_sha256.py
+    action: Create
+    purpose: Match, mismatch, missing plan.bin and empty expected digest (all but match exit 1 with the marker).
+  - file: scripts/ci/originating_pr_sha.py
+    action: Create
+    purpose: >-
+      Conditional relief delegate (reconcile.yml row only): resolves the originating PR head sha of RED_SHA through
+      gh api, writes value=<sha> to GITHUB_OUTPUT, and on an empty or null answer prints today's "No originating PR
+      resolved for <sha>; cannot resolve the content-addressed artifact sha (Decision 77 no-TOCTOU)." error and exits
+      1 (fail closed, as now). Not created if reconcile.yml fits without it.
+  - file: tests/ci/test_originating_pr_sha.py
+    action: Create
+    purpose: Conditional with its script -- resolved, empty, null and gh failure (the last three exit 1 with the marker).
+  - file: .github/workflows/terraform-apply-sandbox.yml
+    action: Modify
+    purpose: >-
+      apply-sandbox: step persona_gate before review (same if as review), running the gate from the checkout; review
+      gains the refused != 'true' conjunct; record_write gains dispatch-refused from the gate. refused stays exactly
+      ${{ steps.precond.outputs.refused }} (pinned by tests/test_gated_apply_drift_guard.py). gated-apply has no LLM
+      step. Relief (409 of 409; measured at build, never a raise): gated-apply's verify_fresh_plan_sha256 body becomes
+      one call of scripts/ci/verify_plan_sha256.py, id, if: and env unchanged. artifact_sha and precond are pinned
+      (test_validate_masked_errexit_steps.py, topology invariant vi) and are never moved.
+  - file: .github/workflows/subagent-review-smoke.yml
+    action: Modify
+    purpose: >-
+      Step persona_gate before run-smoke; run-smoke gains the conjunct. Not in T4.2 c10's named set, but a live
+      maintainer-only dispatch path its header asserts and nothing enforces (Q8 of the consult).
+  - file: .github/actions/write-convergence-record/action.yml
+    action: Modify
+    purpose: >-
+      New input dispatch-refused (default "false"): when "true" the writer prints "Dispatch refused by the persona
+      dispatch gate (Decision 205 cl.1); NOT overwriting the convergence record." and exits 0, checked first. The
+      existing refused input and its description are unchanged.
+  - file: tests/test_convergence_dispatch_refused.py
+    action: Create
+    purpose: >-
+      Drives the writer body under the composite bash argv: dispatch-refused true makes no aws call and exits 0 for
+      any apply outcome; false leaves the existing branches unchanged (apply skipped with no other skip still latches
+      red).
+  - file: scripts/checks/ci_guards/_persona_llm_signatures.py
+    action: Create
+    purpose: >-
+      The one LLM-step detector (T4.26 c3 can re-point the claude -p guards onto it): over a parsed step, an env key
+      or secrets.<NAME> reference whose name is the variable of a docs/contracts/project-configuration.yaml row with
+      kind secret and applies_when.port run_persona; a comment-stripped run body invoking the claude CLI,
+      scripts/ci/claude_p_retry.sh or the run_persona entrypoint; a uses: of anthropics/claude-code-action or of a
+      local composite action or reusable workflow whose own steps match (one hop, ./ and ./.dispatch-tooling/
+      prefixes). Plus the compute-plane start detector: aws ecs run-task, persona_compute_host, or a persona id whose
+      executor-personas.yaml index row has kind compute_plane.
+  - file: tests/checks/ci_guards/test__persona_llm_signatures.py
+    action: Create
+    purpose: Each signature matched and not matched; a name mentioned only in a comment is not a match (the ghas-probe.yml shape).
+  - file: scripts/checks/ci_guards/validate_persona_trigger_policy.py
+    action: Create
+    purpose: >-
+      @registry.register("validate_persona_trigger_policy"). Over every .github/workflows/*.yml (glob, never a
+      filename list; claude.yml exempt by name with its Decision 184 cl.4 reason): an LLM workflow's triggers must be
+      in {pull_request, push, workflow_run, workflow_dispatch}; a workflow_dispatch LLM workflow must gate every LLM
+      step (if: has no ||, always() or failure(), has a top-level && term steps.<id>.outputs.refused != 'true' with
+      <id> starting persona_gate, and an earlier step with that id runs the gate script); a workflow_run LLM workflow
+      qualifies when each named upstream qualifies itself, or when its LLM job's if requires
+      github.event.workflow_run.conclusion == 'failure' and each named upstream carries no LLM signature; an
+      unresolved upstream name is refused. Refuses checks: write or write-all (top or job level) on any
+      pull_request-triggered workflow, and any workflow that starts a compute-plane persona. examined(n,
+      unit="workflows"); each failure names the workflow and branch.
+  - file: scripts/checks/ci_guards/_manifest.py
+    action: Modify
+    purpose: >-
+      One Entry: validate_persona_trigger_policy, pre=True, pre_globs (.github/workflows/**, .github/actions/**,
+      docs/contracts/project-configuration.yaml, docs/contracts/executor-personas.yaml, the two new modules,
+      scripts/checks/_common.py, scripts/checks/registry.py), full_segment full_after_lint.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      Companion row: function_to_category validate_persona_trigger_policy: environment (as its siblings). The file is
+      497 of the config class 500 and other unbuilt plans add rows: measured at build; past 500 is a STOP to the
+      planning thread, never a raise.
+  - file: tests/checks/ci_guards/test_validate_persona_trigger_policy.py
+    action: Create
+    purpose: >-
+      Red on one fixture per refused branch, green on the green fixtures, green on the live tree with examined >= 1,
+      and a live-tree floor: every dispatchable workflow using subagent-plan-review is gated and at least one exists
+      (no filename named).
+  - file: tests/checks/ci_guards/fixtures/persona_trigger_policy/
+    action: Create
+    purpose: >-
+      Synthetic workflows. Red: schedule, repository_dispatch, pull_request_target, issue_comment, workflow_call and
+      an ungated workflow_dispatch on an LLM workflow; a gate conjunct behind ||; a gated step with no gate step; a
+      workflow_run on a schedule-only LLM upstream; a failure-gated workflow_run on an LLM upstream that does not
+      qualify; an unresolved upstream; checks: write top-level, job-level and write-all on pull_request; an ecs
+      run-task start. Green: a comment-only secret mention; claude.yml; a gated dispatch; a push LLM workflow; a
+      failure-gated workflow_run on a deterministic schedule upstream.
+  - file: docs/ROADMAP-PLATFORM.yaml
+    action: Modify
+    purpose: >-
+      Bookkeeping: T4.2 c10 met (closes_criteria); progress_note bullets on T4.2 and T4.32; T4.32 files_in_scope gains
+      the new script and check paths. No intent, hint or criterion text edit.
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: >-
+      Two dated Update annotations, sidecar-bound (Decision 177 form, Decision 246 approval): Decision 229's Coverage
+      residual is now this check; Decision 158's route set and the refused dispatch (with Decision 154 point 5's
+      account and Decision 183 cl.1's totality per admitted dispatcher).
+bundled_recommendations: []
+followon_recs: ["rec-5100", "rec-5101"]
+closes_criteria: ["T4.2:c10"]
+infrastructure_dependencies:
+  - >-
+    None. No .tf file is in scope and compute_affected_artifacts(<scope>) is checked at VP 1; the roadmap is a packaged
+    asset of data-pipeline but carries bookkeeping only (the transport plan's reasoned disposition).
+acceptance_criteria:
+  - The gate admits only a maintainer user dispatch or ci-rca's own-failure bot dispatch, and refuses everything else fail-closed (VP 2).
+  - A refused dispatch writes no convergence record (VP 3).
+  - validate_persona_trigger_policy is registered, red on each fixture, green on the live tree (VP 4, VP 5).
+  - Every live LLM workflow_dispatch path carries the gate; the reconcile reachability and topology guards stay green (VP 6).
+  - "Live read-back after merge: a maintainer dispatch of subagent-review-smoke is admitted (VP 11)."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: "Precondition: this plan and its sidecar are on main and the branch is current."
+    command: >-
+      git fetch origin main --quiet && git cat-file -e origin/main:docs/plans/PLAN-persona-trigger-policy.yaml && git
+      cat-file -e origin/main:docs/plans/approved/persona-trigger-policy.yaml && git merge-base --is-ancestor origin/main
+      HEAD && echo PRECONDITION_OK
+    expected: Prints PRECONDITION_OK.
+    fix_if: A missing plan or sidecar means this plan's PR has not merged -- stop. A failed ancestry test means merge origin/main first.
+    hermetic: false
+    graduation: not-applicable
+  - step: 2
+    phase: pre-deploy
+    action: The two DECISIONS.md annotations are exactly main plus the approved sidecar, at its approved digest.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-trigger-policy --base origin/main --expect f7bcb1e8b15291805c65ffb33aee3ff44512affebdccf2a5f12ee95e259ddbb8
+    expected: Exit 0, printing APPROVED-TEXT OK. Red before the blocks are placed.
+    fix_if: A word mismatch means a placed block drifted -- restore its after text; never edit the sidecar. A digest mismatch is a STOP to the planning thread.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A base-relative one-time binding; validate_merge_step enforces it on the build PR's fast tier.
+  - step: 3
+    phase: pre-deploy
+    action: >-
+      The gate's truth table: non-dispatch events pass; a User dispatch is admitted; a Bot sender, a [bot] re-runner,
+      and every malformed or non-qualifying own-failure case are refused fail-closed; ci-rca's own-failure shapes
+      (completed failed run, in-progress run with a failed job) are admitted.
+    command: bin/venv-python -m pytest tests/ci/test_persona_dispatch_gate.py -q
+    expected: Exit 0. Red before (the module and the test do not exist).
+    fix_if: Fix the gate; never relax a refusal case.
+    hermetic: true
+    expected_literals:
+      - passed
+    graduation: graduate
+    graduation_check_id: persona-dispatch-gate
+  - step: 4
+    phase: pre-deploy
+    action: A refused dispatch writes no convergence record for any apply outcome; dispatch-refused false keeps every existing branch.
+    command: bin/venv-python -m pytest tests/test_convergence_dispatch_refused.py tests/test_gated_apply_drift_guard.py -q
+    expected: Exit 0. Red before (the input does not exist, so a skipped apply latches red).
+    fix_if: Fix the writer; the existing refused input and its pinned wiring stay as they are.
+    hermetic: true
+    expected_literals:
+      - passed
+    graduation: graduate
+    graduation_check_id: convergence-dispatch-refused
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      The check: red on each refused-branch fixture, green on the green fixtures and on the live tree (examined >= 1),
+      the live floor holds, and each signature matches and a comment-only mention does not.
+    command: >-
+      bin/venv-python -m pytest tests/checks/ci_guards/test_validate_persona_trigger_policy.py
+      tests/checks/ci_guards/test__persona_llm_signatures.py -q
+    expected: Exit 0. Red before (modules, tests and fixtures do not exist).
+    fix_if: Fix the check or a live workflow's gate wiring; never add a filename exemption beyond claude.yml.
+    hermetic: true
+    expected_literals:
+      - passed
+    graduation: graduate
+    graduation_check_id: persona-trigger-policy
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      Registered and green through the registry, its taxonomy row and manifest Entry valid, and the relief delegates
+      tested.
+    command: >-
+      bin/venv-python -c "from scripts.checks.ci_guards.validate_persona_trigger_policy import
+      validate_persona_trigger_policy as a; from scripts.checks.ci_guards.validate_ci_rca_taxonomy import
+      validate_ci_rca_taxonomy as b; f=[]; [x(f) for x in (a,b)]; print('POLICY_FAILS', len(f)); assert not f, f" &&
+      bin/venv-python -m pytest tests/ci/test_verify_plan_sha256.py tests/checks/ci_guards/test__manifest.py
+      tests/checks/ci_guards/test_validate_ci_rca_taxonomy.py -q && (test ! -e scripts/ci/originating_pr_sha.py ||
+      bin/venv-python -m pytest tests/ci/test_originating_pr_sha.py -q)
+    expected: POLICY_FAILS 0, then the delegate suites exit 0.
+    fix_if: A taxonomy failure means the companion row is missing or misnamed; a delegate failure means its text drifted from the inline body it replaced.
+    hermetic: true
+    expected_literals:
+      - POLICY_FAILS 0
+    graduation: waive
+    graduation_waiver_reason: Replays checks registered in both tiers; VP 5 graduates the policy check itself.
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      Wiring regressions stay green with no pinned expectation edited: reconcile reachability (the gate if: strings are
+      evaluator-safe), the dispatch-gated-apply topology, the recovery-workflow topology, the apply and terraform
+      shapes, masked errexit, ci-rca's pinned job if, and the reviewer action.
+    command: >-
+      bin/venv-python -m pytest tests/test_reconcile_reachability.py tests/verify_ci_workflow
+      tests/checks/ci_guards/test_validate_dispatch_gated_apply_topology.py
+      tests/checks/ci_guards/test_validate_masked_errexit_steps.py tests/test_convergence_infra_error_acceptance.py -q &&
+      git diff --quiet origin/main -- tests/test_reconcile_reachability.py tests/verify_ci_workflow
+      tests/test_gated_apply_drift_guard.py tests/checks/ci_guards/test_validate_dispatch_gated_apply_topology.py
+      tests/checks/ci_guards/test_validate_masked_errexit_steps.py && echo PINS_UNCHANGED
+    expected: Exit 0, then PINS_UNCHANGED.
+    fix_if: A red pinned test means the wiring broke an invariant -- fix the workflow edit, never the test (Decision 235). A changed pin file is a STOP.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Existing registered suites; the diff guard is a one-time build check.
+  - step: 8
+    phase: pre-deploy
+    action: Size limits hold with no raise (reconcile.yml and the sandbox workflow are at budget on main).
+    command: >-
+      bin/venv-python -c "from scripts.checks.sloc.sloc_limits import validate_sloc_limits as a; from
+      scripts.checks.structural.size_limits import validate_structural_size_limits as b; from
+      scripts.checks.structural.budget_raises import validate_structural_size_budget_raises as c; f=[]; [x(f) for x in
+      (a,b,c)]; print('SIZE_FAILS', len(f)); assert not f, f" && git diff --quiet origin/main -- config/sloc_budgets.yaml
+      config/structural_size_budgets.yaml && echo NO_RAISE
+    expected: SIZE_FAILS 0, then NO_RAISE.
+    fix_if: Over budget -- apply the next relief named in the workflow's scope row; past the last one, STOP to the planning thread (never raise).
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Replays registered checks; the no-raise diff is a one-time build check.
+  - step: 9
+    phase: pre-deploy
+    action: Roadmap bookkeeping valid (T4.2 c10 met, T4.32 files_in_scope) and the red-main overlap clear (Decision 226).
+    command: >-
+      bin/venv-python -m scripts.roadmap.platform_roadmap docs/ROADMAP-PLATFORM.yaml && bin/venv-python -m
+      scripts.ci_rca.red_overlap --plan docs/plans/PLAN-persona-trigger-policy.yaml
+    expected: The roadmap validates; no open ci_rca rec overlaps the scope.
+    fix_if: A roadmap error names the field; an overlap is a STOP -- tell the coordinator.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: pre-deploy
+    action: Fast tier, then the full tier before handoff, started in the background from the top-level session.
+    command: bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: The fast tier exits 0 and the verify-head read reports a completed full run for HEAD with exit 0.
+    fix_if: In-scope failures are fixed on the branch; out-of-scope failures become recs (Decisions 59, 55). A timeout is blocked.
+    hermetic: false
+    graduation: not-applicable
+  - step: 11
+    phase: post-deploy
+    action: >-
+      Live read-back: a maintainer dispatch of the reviewer smoke workflow on main is admitted by the gate and the
+      reviewer runs. From a session (the operator's own token): mcp__github__actions_run_trigger (run_workflow,
+      subagent-review-smoke.yml, ref main); then list_workflow_runs to find that run, list_workflow_jobs to
+      $SMOKE_JOBS_JSON once completed, and get_job_logs for the smoke job to $SMOKE_LOG_FILE.
+    command: >-
+      test -s "$SMOKE_JOBS_JSON" && test -s "$SMOKE_LOG_FILE" && grep -q "PERSONA_DISPATCH_ADMITTED: user" "$SMOKE_LOG_FILE"
+      && bin/venv-python -c "import json,os;j=json.load(open(os.environ['SMOKE_JOBS_JSON']));
+      jobs=j.get('jobs') if isinstance(j,dict) else j;print([(x['name'],x.get('conclusion')) for x in jobs]);
+      assert all(x.get('conclusion')=='success' for x in jobs),jobs;print('SMOKE_ADMITTED_OK')"
+    expected: SMOKE_ADMITTED_OK, after the admission marker is found in the smoke job's log.
+    fix_if: >-
+      No marker -- the gate did not run (check the step order). A refusal on the operator's dispatch -- the User branch
+      is wrong: revert the gate conjuncts by a forward PR and STOP to the planning thread. A reviewer failure after
+      admission is the smoke's own (Decision 55: RCA, never re-run to green).
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/ci/persona_dispatch_gate.py
+    behavior: Admits a maintainer user dispatch or ci-rca's own-failure bot dispatch; refuses everything else fail-closed.
+    verification_step: 3
+    test_selector: tests/ci/test_persona_dispatch_gate.py
+    red_green_expectation: red before (module missing), green after.
+  - source: .github/actions/write-convergence-record/action.yml
+    behavior: dispatch-refused true writes nothing for any apply outcome; false leaves every branch unchanged.
+    verification_step: 4
+    test_selector: tests/test_convergence_dispatch_refused.py
+    red_green_expectation: red before (a skipped apply with no other skip latches red), green after.
+  - source: scripts/checks/ci_guards/validate_persona_trigger_policy.py
+    behavior: Red on each refused-branch fixture, green on the green fixtures and the live tree.
+    verification_step: 5
+    test_selector: tests/checks/ci_guards/test_validate_persona_trigger_policy.py
+    red_green_expectation: red before (module missing), green after.
+  - source: scripts/checks/ci_guards/_persona_llm_signatures.py
+    behavior: Each LLM and compute-plane signature matched, comment-only mentions not.
+    verification_step: 5
+    test_selector: tests/checks/ci_guards/test__persona_llm_signatures.py
+    red_green_expectation: red before (module missing), green after.
+  - source: .github/workflows/ci-rca.yml
+    behavior: The LLM step is gated by persona_gate (with --own-failure).
+    verification_step: 5
+    test_selector: tests/checks/ci_guards/test_validate_persona_trigger_policy.py::test_live_tree_is_green
+    red_green_expectation: red before (the live tree has ungated dispatch LLM steps), green after.
+  - source: .github/workflows/reconcile.yml
+    behavior: Both review steps are gated; the record write takes dispatch-refused; reachability holds.
+    verification_step: 5
+    test_selector: tests/checks/ci_guards/test_validate_persona_trigger_policy.py::test_live_tree_is_green
+    red_green_expectation: red before, green after (VP 7 keeps the reachability and topology pins green).
+  - source: .github/workflows/terraform-apply-sandbox.yml
+    behavior: The apply-sandbox review is gated; the record write takes dispatch-refused.
+    verification_step: 5
+    test_selector: tests/checks/ci_guards/test_validate_persona_trigger_policy.py::test_live_floor_review_workflows_are_gated
+    red_green_expectation: red before (no gate on the review step), green after.
+  - source: .github/workflows/subagent-review-smoke.yml
+    behavior: The smoke LLM step is gated.
+    verification_step: 5
+    test_selector: tests/checks/ci_guards/test_validate_persona_trigger_policy.py::test_live_tree_is_green
+    red_green_expectation: red before, green after.
+  - source: scripts/ci/verify_plan_sha256.py
+    behavior: Same verdicts and markers as the inline bodies it replaces.
+    verification_step: 6
+    test_selector: tests/ci/test_verify_plan_sha256.py
+    red_green_expectation: red before (module missing), green after.
+  - source: scripts/ci/originating_pr_sha.py
+    behavior: Conditional relief -- same output and fail-closed marker as the inline artifact_sha bodies.
+    verification_step: 6
+    test_selector: tests/ci/test_originating_pr_sha.py
+    red_green_expectation: red before (module missing), green after; absent if the relief is not needed.
+  - source: scripts/checks/ci_guards/_manifest.py
+    behavior: One registration Entry.
+    verification_step: 6
+    test_selector: tests/checks/ci_guards/test__manifest.py
+    waiver_reason: Registration data; validate_check_manifest and the registry import in both tiers fail a missing or malformed Entry.
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: The companion function_to_category row.
+    verification_step: 6
+    test_selector: tests/checks/ci_guards/test_validate_ci_rca_taxonomy.py
+    waiver_reason: Data row; validate_ci_rca_taxonomy refuses a registered check without one.
+  - source: docs/ROADMAP-PLATFORM.yaml
+    behavior: Bookkeeping only.
+    verification_step: 9
+    command: bin/venv-python -m scripts.roadmap.platform_roadmap docs/ROADMAP-PLATFORM.yaml
+    waiver_reason: Roadmap data; its validator runs in both tiers.
+  - source: docs/DECISIONS.md
+    behavior: Two sidecar-bound annotations.
+    verification_step: 2
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-trigger-policy --base origin/main
+    waiver_reason: Prose; its evidence is the word-for-word binding.
+constraints:
+  - >-
+    Place each sidecar block word for word (only {{DATE}} is filled, with the build date); never edit the sidecar
+    (Decision 246). No other DECISIONS.md edit.
+  - >-
+    Never edit a pinned assertion: tests/test_reconcile_reachability.py, tests/verify_ci_workflow/**,
+    tests/test_gated_apply_drift_guard.py, test_validate_dispatch_gated_apply_topology.py,
+    test_validate_masked_errexit_steps.py and tests/verify_ci_workflow/test_ci_rca_and_canary.py's job if. A change any
+    of them would need is a STOP to the planning thread (Decision 235).
+  - >-
+    No filename list: the check and tests find workflows by glob and by what they contain; the only name in code is
+    claude.yml's exemption (Decision 184 cl.4). The sandbox workflow may be renamed by another project (rec-5035).
+  - >-
+    Fail closed: an unreadable event, run or jobs file is a refusal. The gate never evaluates a GitHub expression; the
+    check recognises the gate by its fixed conjunct and the earlier gate step only (no second evaluator).
+  - >-
+    The writer's existing refused input, its description and the sandbox's refused wiring stay byte-identical.
+  - >-
+    No new secret, variable or configuration key (no project-configuration.yaml row). No Terraform, no Lambda package.
+  - >-
+    Public repository (Decision 101): no account id, ARN or hostname in any fixture, log marker or PR text.
+  - No rescue agents or workaround loops (Decision 55); never skip, disable or quarantine a test (Decision 235).
+context:
+  - >-
+    Decision-scout round 1 (2026-11-12): Verdict: FLAGS_FOUND. Decisions triaged: 205 of 205. Roadmap items
+    intersected: 9; CONFLICT: 0; RELATED: 8. Serves: NS.3 4/5. CITE: 205, 229, 184, 77, 74, 162, 169, 170, 177, 181,
+    246. Flags (154, 158, 166 WARN; 205, 183 NOTE; 55, 224 SPIRIT) adopted or recorded:
+    /mnt/project-files/persona-trigger-policy/SCOUT-r1.md.
+  - >-
+    Sign-off (project-alignment, 2026-11-12): Benjamin chose fail closed and said "write the plan": a non-maintainer
+    dispatch that reaches a review gating an automatic apply stops there, rather than routing to tf-gated-apply. He
+    wants the routing longer term but outside this project's remit: rec-5100.
+  - >-
+    Settled with notice (blind Fable consult, /mnt/project-files/persona-trigger-policy/advisor-brief/ADVICE.md): one
+    plan; trigger allowlist; maintainer = sender.type User and a non-bot re-runner (T4.2 c10's line; a machine user
+    passes -- rec-5101 adds an adopter allowlist reusing T4.2 c9's and moves claude.yml's exemption to
+    configuration, Decision 224); the gate is recognised by one fixed conjunct plus the earlier gate step (no second
+    evaluator, reconcile_reachability.py docstring); ci-rca's own re-dispatch admitted only for a qualifying failed run;
+    workflow_run upstreams checked; the reviewer smoke workflow guarded; compute-plane refusal by launch signature and
+    by persona kind; size relief by extraction, never a raise; no sandbox filename in code.
+  - >-
+    Why the gate fails the step rather than skipping the review: a skipped review leaves success() true, so the apply
+    after it would run unreviewed (the review action fails only on REVISE or STARVED). The gate shares its review's
+    if:, so the no-op and guard-ROUTE paths never reach it and stay open to any dispatcher.
+  - >-
+    Gap kept: reconcile runs its writer from the red commit's checkout. For a red commit made before this lands the old
+    writer has no dispatch-refused input, so a refused bot dispatch re-latches an already-red record red (no status
+    change).
+  - >-
+    Residual outside this plan: the gate guards main's workflow files only; a branch-pushed workflow can still read the
+    repository secret. T4.2 c9's Environment-scoped key (PLAN for the verdict persona credential) is that control.
+  - >-
+    Probe 2026-11-12: every ci-rca workflow_dispatch on record had actor and triggering_actor the operator's user, which
+    agent sessions also use (GitHub MCP under the operator's token), so the User branch admits all of today's traffic.
+  - >-
+    Overlaps (unbuilt, approved; whichever builds second rebases and re-measures size): PLAN-environment-gates-fail-closed,
+    PLAN-neon-key-out-of-pr-plans, PLAN-telemetry-producer-admission-plan-review-capture (Feedback Loop),
+    PLAN-trusted-plan-cutover, PLAN-telemetry-claude-p-capture-adapter, PLAN-plan-review-digest-actionable-first,
+    PLAN-secrets-to-ssm-retire, PLAN-telemetry-content-reader-lock. No open PR touched these workflows at planning.
+  - >-
+    Downstream: H1 (rec-5020) builds after this; T8's persona-verdict workflows inherit the check. T4.26 c3 can point the
+    claude -p guards at _persona_llm_signatures.py.
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+pre_implementation_checklist:
+  - Branch confirmed not on main; rebased onto main
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 154, 158, 162, 166, 183, 184, 205 and 229 read (only the cited clauses)
+  - >-
+    reconcile.yml and the sandbox workflow measured on main; every unbuilt plan editing them is one context lists (an
+    unlisted one, or a sidecar before that no longer occurs exactly once, is a STOP to the planning thread)
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "1. Rebase onto main; run VP 1 and VP 9."
+  - "2. Place sidecar blocks d158 and d229 word for word ({{DATE}} = build date). Run VP 2."
+  - >-
+    3. Red first: tests/ci/test_persona_dispatch_gate.py, then scripts/ci/persona_dispatch_gate.py (VP 3). Then
+    tests/test_convergence_dispatch_refused.py, then the writer's dispatch-refused input (VP 4).
+  - >-
+    4. Red first: the signature and check tests and fixtures (the live-tree test fails on today's ungated dispatch
+    steps), then _persona_llm_signatures.py, validate_persona_trigger_policy.py, the manifest Entry and the taxonomy
+    row.
+  - >-
+    5. Wire the gates: ci-rca.yml, reconcile.yml (both review steps, from .dispatch-tooling), the sandbox workflow's
+    apply-sandbox review, subagent-review-smoke.yml, and dispatch-refused on both record writes. Measure each file; apply
+    the relief in its scope row's order only while it is over budget, with the delegate's test first. Run VP 5-8.
+  - "6. Roadmap bookkeeping (T4.2 c10 met; T4.2 and T4.32 progress notes; T4.32 files_in_scope). Run VP 9."
+  - >-
+    7. Closure per the implement skill's Commit Flows and docs/contracts/git-ops.yaml: graduation shards
+    persona-dispatch-gate, convergence-dispatch-refused and persona-trigger-policy (each over its VP's command); set
+    implementation_declared: true; commit; rebase; VP 10 on the committed clean tree; push; open the PR and report it
+    only with the returned number; subscribe; squash-merge on code review PROCEED and green CI.
+  - "8. Post-merge: VP 11 from a session under the operator's token. Report VP results (markers only) and the run id."
+rollback: >-
+  A forward PR, never a revert of the squash commit while a build that depends on the check (H1, T8) is in flight.
+  Removing the gates without the check fails validate_persona_trigger_policy on the live tree, so they go together; the
+  writer's dispatch-refused input is inert at "false" and may stay. Retiring the three graduated nodes needs Decision
+  235 cl.1 approval. The DECISIONS.md annotations are append-only (Decision 177): a reversal is a further dated
+  annotation, never a deletion. The relief delegates are behaviour-identical and stay.
