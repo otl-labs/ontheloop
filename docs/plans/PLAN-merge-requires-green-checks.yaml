@@ -31,17 +31,15 @@ scope:
       (a queued run has none): status completed and conclusion
       success passes; a missing run, a newer queued or in-progress run, or any other conclusion (failure, skipped,
       neutral, cancelled, timed_out, action_required, stale) is REFUSE with a reason naming the check and its state.
-      CLEAR only when every required name passes. Also a CLI for the VP replay: `python -m
-      scripts.session.merge_checks judge --required A,B --runs FILE.json` prints one line `MERGE-CHECKS <KIND>
-      <reasons>` and exits 0 CLEAR, 1 REFUSE, 2 UNAVAILABLE.
+      CLEAR only when every required name passes. No CLI: the VP replay calls the adapter's read_checks_verdict.
   - file: .claude/hooks/merge_gate.py
     action: Modify
     purpose: >-
       The GitHub adapter gains the required-checks leg (Decision {{N}}). (1) Deadline (rec-4891): one monotonic 40 s
       budget for the adapter's own work; every git call the adapter makes gets timeout min(25, remaining), the deepen
       retry only what is left, and each GET what is left (below); before each core call (merge_overlap.overlap,
-      session_trailer.gate_denial, both local git reads with their own timeouts) the adapter checks the remaining
-      budget; when it is spent the adapter denies "UNAVAILABLE: deadline spent (<step>)". The finally cleanup
+      whose local git reads have no timeout, and session_trailer.gate_denial, whose local git reads are bounded at
+      60 s) the adapter checks the remaining budget; when it is spent the adapter denies "UNAVAILABLE: deadline spent (<step>)". The finally cleanup
       (update-ref -d) runs outside the budget with its own fixed 2 s reserve, and a timeout there is swallowed so it
       never overrides the verdict. Budget plus reserve (42 s) stays below the shim's 45 s TERM, so on the adapter's
       own calls the shim's kill never decides; a core call's local git read is the residual the shim's fail-closed
@@ -50,9 +48,11 @@ scope:
       merge naming the head whose CI-green wake you received (expectedHeadSha=<sha>)", printing the fetched head;
       the existing equality check stays. enable_pr_auto_merge, which carries no expectedHeadSha, is judged on the
       fetched head. (3) Reads, in order, each GET bounded by min(4 s, remaining) in wall-clock terms (the body is read
-      in chunks against the deadline with a 1 MiB cap, since urllib's timeout bounds each socket operation only), no
+      in chunks against the deadline with a 1 MiB cap, each chunk read re-setting the socket timeout to min(4 s,
+      remaining), since urllib's timeout bounds each socket operation only), no
       retry, no Authorization header, no credential read, and no tool_input field or variable of the gate's own that
-      changes an endpoint or skips the leg: main's ruleset (rules/branches/main) and the head's check runs
+      changes an endpoint or skips the leg: main's ruleset (rules/branches/main?per_page=100; a full page of 100
+      rules reads partial, UNAVAILABLE) and the head's check runs
       (commits/<sha>/check-runs?per_page=100&filter=all, every run so the predicate picks the newest itself; more
       than 100 runs on one head reads partial, UNAVAILABLE). <sha> is always the fetched 40-hex head
       (rev-parse of the fetched ref), never the tool_input value, which may be short or upper case. Transport from origin's resolved fetch URL (`git ls-remote --get-url
@@ -107,14 +107,14 @@ scope:
       newer success -> CLEAR (equal started_at broken by id); a required name with no run -> REFUSE; a run by another
       app -> REFUSE (treated as missing); required None or empty -> UNAVAILABLE; total_count above the runs read ->
       UNAVAILABLE; an extra non-required failing run -> CLEAR; contexts from two required_status_checks rules are
-      both required (union); a run with null started_at outranks a completed success; the CLI line format and exit
-      codes 0/1/2 through main(argv).
+      both required (union); a run with null started_at outranks a completed success.
   - file: tests/hooks/test_merge_requires_green_checks.py
     action: Create
     purpose: >-
       rec-4080's acceptance file, run through the shim as the harness does (tests/fixtures/merge_overlap_repos.py,
       GIT_ALLOW_PROTOCOL=file): required checks green with expectedHeadSha -> exit 0, empty stderr; pr-validate
-      failure on the head -> exit 2 naming pr-validate and "REFUSE"; pending, skipped and a newer queued re-run -> exit
+      failure on the head (terraform-validate success, the #1265 shape) -> exit 2 naming pr-validate and "REFUSE",
+      node test_red_pr_validate_refuses (rec-4080's acceptance node; keep the name); pending, skipped and a newer queued re-run -> exit
       2; a missing terraform-validate run -> exit 2; a run by another app only -> exit 2; a ruleset file with no
       required_status_checks rule, a missing ruleset file, a missing check-runs file and a truncated list
       (total_count above the runs) -> exit 2 naming UNAVAILABLE; merge_pull_request without expectedHeadSha on an
@@ -130,7 +130,11 @@ scope:
       git and HTTP runners that report the time each call used, the worst path (a slow first fetch, the deepen retry,
       both GETs) never asks for a timeout past the 40 s deadline, and a spent deadline denies naming UNAVAILABLE and
       the step; a slow-reader GET (a body trickling past the deadline) denies UNAVAILABLE within the budget; a
-      cleanup timeout in finally does not change the verdict; plus a node that the adapter's deadline plus its
+      cleanup timeout in finally does not change the verdict; the production https transport, in process with
+      urllib.request.urlopen monkeypatched: the request URLs (https://api.github.com/repos/<o>/<r>/rules/branches/main?
+      per_page=100 and .../commits/<40hex>/check-runs?per_page=100&filter=all) and no Authorization header on the
+      captured Request; 401, 403, 404, 429 and 503 each UNAVAILABLE naming the endpoint and status; unparseable JSON
+      and a body past 1 MiB each UNAVAILABLE; plus a node that the adapter's deadline plus its
       cleanup reserve stays below the shim's timeout limit (read from merge_gate.sh, not restated; the existing shim
       node keeps limit plus kill-after below the registered 60 s).
   - file: tests/checks/decisions/test_merge_green_checks_decision_records.py
@@ -150,7 +154,8 @@ scope:
     action: Modify
     purpose: >-
       Exactly the sidecar's git-ops blocks: contract_version 15 -> 16, one amendment_log row, push_pr_ci_merge_flow's green-confirmation item (re-flowed onto one
-      line, words unchanged, plus the merge-gate sentence) and merge_step_coverage's hook files and residual owners.
+      line, words unchanged, plus the merge-gate sentence), merge_step_coverage's hook files and residual owners, and
+      rec-4080 re-pointed to rec-2827 in the handoff_sequence coverage row and the approved-text binding residuals.
       referenced_repo_paths is not edited: validate_git_ops_contract requires each listed path to exist, and the
       wording check runs before merge_checks.py does. Line budget: 499 of 500 effective lines on 2fc58b50 and 497
       with the blocks placed; over 500 at build is BLOCKED for a compaction amendment, never a raise (Decision 128).
@@ -169,7 +174,7 @@ followon_recs:
   - rec-5122
 infrastructure_dependencies: []
 acceptance_criteria:
-  - rec-4080's acceptance (pytest tests/hooks/test_merge_requires_green_checks.py) and rec-4891's acceptance node exit 0.
+  - rec-4080's acceptance node (tests/hooks/test_merge_requires_green_checks.py::test_red_pr_validate_refuses) and rec-4891's (tests/hooks/test_merge_gate_deadline.py::test_retry_path_stays_under_shim_cap) exit 0.
   - The shim refuses merge_pull_request and enable_pr_auto_merge on this repository unless every required check of main's ruleset has a newest github-actions check run completed with success on the head; every other state, a partial or failed read, and a merge_pull_request without expectedHeadSha refuse; an all-green head with expectedHeadSha is allowed.
   - Replayed on the real heads, the adapter's read-and-judge seam reads REFUSE naming pr-validate for #1265 and #1261 and CLEAR for #1990's head.
   - Every git call the adapter makes and both GitHub reads stay inside the adapter's 40 s deadline, checked before each core call; deadline plus the 2 s cleanup reserve stays under the shim's 45 s limit.
@@ -219,7 +224,7 @@ verification_plan:
     action: Run rec-4891's acceptance node and the cap node.
     command: bin/venv-python -m pytest tests/hooks/test_merge_gate_deadline.py -q
     expected: exit 0, all nodes pass; red before (file absent; today two 40 s fetches can exceed the 45 s cap).
-    fix_if: a requested timeout runs past the deadline, or the deadline plus kill grace reaches the shim cap
+    fix_if: a requested timeout runs past the deadline, or the deadline plus the 2 s cleanup reserve reaches the shim's 45 s limit
     hermetic: true
     expected_literals: [" passed"]
     graduation: graduate
@@ -254,8 +259,8 @@ verification_plan:
     action: Bind the DECISIONS.md, git-ops.yaml and ports.yaml edits to the approved words.
     command: >-
       bin/venv-python -m scripts.roadmap.approved_text verify --slug merge-requires-green-checks --base origin/main
-      --expect 1cf533117ac9934c257e8c30d8dea0c45e2fa5edfa915df63b861751766708c9
-    expected: exit 0; all eleven blocks match
+      --expect edde3f4f3413f9f48a5a24bfb05751dff656ec2f48f77e3bfa15df86192a3353
+    expected: exit 0; all thirteen blocks match
     fix_if: any word differs from the sidecar; fix the edit, never the sidecar (operator-approved text)
     hermetic: false
     graduation: waive
@@ -270,7 +275,7 @@ verification_plan:
       capture_output=True, text=True, check=True).stdout); head = yaml.safe_load(open('docs/contracts/git-ops.yaml', encoding='utf-8'));
       assert head['contract']['contract_version'] == base['contract']['contract_version'] + 1;
       assert 'expectedHeadSha' in str(head['push_pr_ci_merge_flow']) and 'merge_checks.py' in str(head['merge_step_coverage']);
-      assert 'rec-4080' not in str(head['merge_step_coverage']); p = yaml.safe_load(open('docs/contracts/ports.yaml', encoding='utf-8'));
+      assert 'rec-4080' not in str({k: v for k, v in head.items() if k != 'amendment_log'}); p = yaml.safe_load(open('docs/contracts/ports.yaml', encoding='utf-8'));
       sa = next(r for r in p['structural_assumptions'] if r['id'] == 'SA-04'); assert 'check-runs' in sa['assumption'] and 'github-actions' in sa['assumption'];
       print('CONTRACTS-OK')" && bin/venv-python -m pytest tests/checks/contracts/test_validate_git_ops_contract.py -q
     expected: prints CONTRACTS-OK and the contract tests pass
@@ -316,10 +321,10 @@ verification_plan:
   - step: 11
     phase: post-deploy
     action: >-
-      After the squash merge and the operator's plugin update (Customize > Plugins), in a fresh claude.ai project
-      thread, on #1819 (closed, never merged, pr-validate failure on head 1933f7ea at planning; GitHub refuses any
+      After the squash merge, in a fresh claude.ai project thread whose checkout contains the merged adapter (the
+      plugin hook runs the checkout's own .claude/hooks/merge_gate.sh, so no plugin update is needed), on #1819 (closed, never merged, pr-validate failure on head 1933f7ea at planning; GitHub refuses any
       merge of a closed PR, so a hook that did not fire yields only a harmless GitHub error). First confirm its
-      overlap reads CLEAR (`git fetch -q origin refs/pull/1819/head:refs/replay/1819 && bin/venv-python -m
+      overlap reads CLEAR (`git fetch -q origin main refs/pull/1819/head:refs/replay/1819 && bin/venv-python -m
       scripts.session.merge_overlap check --head refs/replay/1819`); if it reads OVERLAP, pick the newest closed,
       unmerged PR whose required check concluded failure and whose overlap reads CLEAR, and use its number and head.
       Then run the shell probe, then call mcp__github__merge_pull_request(owner="otl-labs", repo="ontheloop",
@@ -416,8 +421,8 @@ test_obligations:
 constraints:
   - "terraform/github is not touched: the ruleset, strict=false and the admin bypass stay (Decision 83); operator GitHub-UI merges are unaffected; the persona checks become required status checks only after rec-4624."
   - "No agent override, no variable of the gate's own, flag or tool_input field that skips the leg or redirects a read, and no credential read or stored (Decision 203 cl.3 pattern); a false refusal is fixed in the checker. Git configuration (repository config and GIT_CONFIG_* in the environment, which CC-web itself sets for its github.com insteadOf) resolves origin for the checks exactly as for the fetch: it is the trust root the fetch already has, the rec-4085 residual the Decision names, not stripped."
-  - "merge_checks.py never names a pull request number and does no I/O (Decision 234 cl.4); GitHub plumbing stays in the adapter (Decision 212 cl.3)."
-  - "Only check runs count; commit statuses are never read (a token holder can post a status, not a github-actions check run)."
+  - "merge_checks.verdict never names a pull request number and does no I/O (Decision 234 cl.4); GitHub plumbing stays in the adapter (Decision 212 cl.3)."
+  - "Only check runs by the github-actions app count; commit statuses are never read (the agent's MCP token can post a status but not a github-actions check run). A workflow in the PR itself can post a github-actions run named like a required check; the Decision names that residual, which native required checks share."
   - "The Decision text, the four notes and the git-ops and ports blocks are operator-approved; place them exactly, never re-word; a moved anchor is a plan-defect report."
   - "Never edit CI Reform's tests/checks/decisions/test_sit_decision_records.py; it pins none of the four Decisions this plan annotates."
   - "No persona leg, no gates.* rows and no coordinator, tier-item-lifecycle or project-alignment edit: those are rec-5121's plan."
@@ -430,20 +435,23 @@ context:
   - "Sign-off: operator chose fork A (outage fallback = the persona flag's rollback on main, operator UI merge if the gate refuses it) and asked for a rec to move the fallback to Fargate later (rec-5122), then said 'write the plan' (2026-11-12 15:16 UTC). Clause 5 was widened at that sign-off to name a second verdict plane's check run as an automatic fallback's possible input. Presentation: /mnt/project-files/gate-consumers-flag-aware/PRESENTATION.md."
   - "Live probes (2026-11-12, claude.ai project thread): rules/branches/main and commits/<sha>/check-runs returned 200 with no credential through the egress proxy (rate limit 15000); the ruleset lists pr-validate and terraform-validate, both check runs by github-actions on every PR head; #1265 (1e4044c9) and #1261 (36ce76ca) show pr-validate failure, terraform-validate success. A pulls/<N> read returned 503 three times about 15:30 UTC and 200 minutes later, so the adapter reads no pulls endpoint (the head is the fetched refs/pull/N/head). The critic (round 1) read the same endpoints with 200 from a CC-web container's Bash; reads from inside the hook process are proven only by step 11, in a project thread. #1819 (closed, never merged, head 1933f7ea) shows pr-validate failure and its overlap read CLEAR on 2fc58b50, so step 11 reaches the checks leg."
   - "A 2026-09 measurement (PLAN-drain-glue-orphan-mcp-transport) recorded api.github.com refused from CC-web; the proxy has since changed. If a surface regresses, every agent merge there refuses and the operator merges in the GitHub UI (clause 3; read-surface-lost)."
-  - "rec-4080's file field named .claude/hooks/merge_requires_green_checks.py, which never existed (relevance gate: stale_target); re-pointed to .claude/hooks/merge_gate.py through the portal at planning, per its own context. rec-4891 relevance: unknown (proceed). rec-4080's acceptance (pytest tests/hooks/test_merge_requires_green_checks.py -q) reads UNDECIDABLE at planning only because the plan creates that file; it decides once built."
+  - "rec-4080's file field named .claude/hooks/merge_requires_green_checks.py, which never existed (relevance gate: stale_target); re-pointed to .claude/hooks/merge_gate.py through the portal at planning, per its own context. rec-4891 relevance: unknown (proceed). rec-4080's acceptance was a whole-file pytest command, which the Decision 201 grammar reads undecidable (out_of_grammar at premerge); re-pointed through the portal at planning to the node tests/hooks/test_merge_requires_green_checks.py::test_red_pr_validate_refuses (read back)."
   - "Other plans touching these files: unbuilt PLAN-last-green-batched-full-tier-decision anchors a note on Decision 245's Related line and PLAN-persona-trigger-policy (#1988) one on Decision 229's Decision 247 note, the same anchors as decision-245-note and decision-229-note; the sidecar check is word-based, so either build order verifies, and the later note may sit above the earlier one. Unbuilt PLAN-persona-run-identity-contract edits other ports.yaml rows and its amendment_log head (whichever builds second updates its branch; a moved amendment_log anchor stays valid, the before text is the key line only). The handoff-gate trio's queued plans (rec-5019 full tier on GitHub, the verdict jobs' wake row, the code-reviewer flip) are unplanned, so this plan edits git-ops.yaml first. plan_obligations also lists unbuilt PLAN-merge-race-attestation (edits push_pr_ci_merge_flow.steps, the region of git-ops-merge-flow) and PLAN-plans-only-main-fast-tier on git-ops.yaml, and PLAN-telemetry-capture-hooks, PLAN-telemetry-capture-hook-labels, PLAN-telemetry-claude-p-capture-adapter, PLAN-telemetry-late-hook-records, PLAN-environment-gates-fail-closed and PLAN-work-graph-edge-model on ports.yaml: whichever builds second rebases; a moved anchor here is a plan-defect report, and a file past 500 effective lines is BLOCKED for compaction (the re-flowed git-ops line is 1732 of 2000 characters, so it takes no more words)."
   - "Kept graduated records (their node ids and asserts are unchanged; only allow-path payloads gain expectedHeadSha and the fixture seeds green checks): merge-gate-trailer-attribution, merge-overlap-gate-fails-closed and merge-overlap-s1-incident-replay. Their entries under config/agent/verification_registry/entries/ are not edited."
   - "git-ops.yaml contract_version 15 is an approved anchor: if another plan bumps it before this build, the build stops with a plan-defect report (new wording run), never a hand re-bump."
   - "Hook code and the merge gate are always-ask at the final diff (coordinator standing_authorisation): the build PR merges only with the operator's word on its final diff, besides the sidecar's approval."
-  - "Transition: the gate binds top-level sessions started after merge and project threads after the operator's plugin update. The build's own merge passes through the new gate; with its own checks green and expectedHeadSha named it should clear."
+  - "Transition: hooks.json is unchanged and the plugin hook runs the checkout's own .claude/hooks/merge_gate.sh, so the gate binds any session or project thread once its checkout contains the merged adapter; a thread on an older checkout keeps the old gate until it pulls main. The build's own merge passes through the new gate; with its own checks green and expectedHeadSha named it should clear."
   - "red_overlap (2026-11-12, main 2fc58b50): {\"verdict\": \"clear\", \"slo_hours\": 4, \"reds\": []}."
   - "Critique round 1 (REVISE, 1 blocking): step 11 moved off #1990 (its overlap leg refuses first, since main changed its files) to #1819; fixture seeding for raw pushes in the s1 replay; deadline wording narrowed to the adapter's own calls plus a 2 s cleanup reserve; chunked GET bodies; predicate details (rule union, null started_at, filter=all, fetched 40-hex head); git configuration named as the rec-4085 trust root; Decision cl.6 gains the residual that a PR can edit the workflow behind a required check (native required checks share it)."
+  - "Critique round 2 (REVISE, 1 blocking): rec-4080's acceptance re-pointed to a node (the whole-file form is out_of_grammar at premerge); two git-ops blocks re-point the remaining rec-4080 residual owners to rec-2827; CLI dropped; https transport nodes; per-chunk socket timeout; rules per_page=100; plugin-update wording corrected (the checkout's shim runs); cl.6 residual widened to a workflow posting a run named like a required check."
   - "Owning planning session: the claude.ai project thread 'Plan flag-aware merge gate consumers' (Agents in GitHub). Plan defects come back here through the coordinator."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: wording-check, round: 1, verdict: PASS, digest: 15372764c7426e1c60963478b5878eeaec44cddbb0ab15c489a16f14c07a6734, base: 2fc58b50b6807ed9715e8cf71e5cc72de13eb6b2, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 9}
   - {gate: wording-check, round: 2, verdict: PASS, digest: 1cf533117ac9934c257e8c30d8dea0c45e2fa5edfa915df63b861751766708c9, base: 2fc58b50b6807ed9715e8cf71e5cc72de13eb6b2, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 8}
+  - {gate: wording-check, round: 3, verdict: PASS, digest: edde3f4f3413f9f48a5a24bfb05751dff656ec2f48f77e3bfa15df86192a3353, base: 2fc58b50b6807ed9715e8cf71e5cc72de13eb6b2, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
