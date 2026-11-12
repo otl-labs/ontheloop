@@ -2,12 +2,15 @@
 
 Registered check and the evaluator of docs/contracts/executor-personas.yaml: the closed capability vocabulary, the
 refused targets and verbs, every personas row's contract shape, budget, schema dialect, rendered prompt and skill
-tether, and the leash's own paths being executor boundary paths. Never imports jsonschema (fast tier).
+tether, a row's optional registry_key (a registered, unique source_registry.yaml canonical_id equal to the contract's
+skill_tether.skill; the registry is read only when a row carries a key), and the leash's own paths being executor
+boundary paths. Never imports jsonschema (fast tier).
 """
 
 from __future__ import annotations
 
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +32,7 @@ from scripts.persona_contracts.schema import (
 
 _INDEX_REL = "docs/contracts/executor-personas.yaml"
 _CAPS_REL = "config/agent/executor/capabilities.yaml"
+_REGISTRY_REL = "config/agent/data_quality/source_registry.yaml"
 _MCP_SERVER = "scripts/agent_sdk/mcp_server.py"
 _LABEL = "Persona contracts"
 _MONEY = re.compile(r"\b(cost|price|spend|currency|dollars?|usd|eur|gbp|money)\b|\$", re.IGNORECASE)
@@ -152,6 +156,36 @@ def _budget_failures(persona: str, budget: dict[str, Any], index: PersonaIndex, 
     return out
 
 
+def _registry_ids(root: Path) -> set[str] | None:
+    raw = _load_raw(root / _REGISTRY_REL)
+    entries = raw.get("entries") if raw else None
+    if not isinstance(entries, list):
+        return None
+    ids: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("canonical_id"), str):
+            return None
+        ids.add(entry["canonical_id"])
+    return ids
+
+
+def _registry_key_failures(index: PersonaIndex, root: Path) -> list[str]:
+    keyed = [r for r in index.personas if r.registry_key is not None]
+    if not keyed:
+        return []
+    ids = _registry_ids(root)
+    if ids is None:
+        return [f"{_LABEL}: {_REGISTRY_REL} is unreadable"]
+    out = [
+        f"{_LABEL}: {r.persona}: registry_key '{r.registry_key}' is not a registered canonical_id"
+        for r in keyed
+        if r.registry_key not in ids
+    ]
+    counts = Counter(r.registry_key for r in keyed)
+    out += [f"{_LABEL}: registry_key '{key}' is not unique" for key, n in counts.items() if n > 1]
+    return out
+
+
 def _git_show(root: Path, rel: str) -> str | None:
     mb = _common.run(["git", "merge-base", "origin/main", "HEAD"], capture_output=True, text=True, cwd=root)
     if mb.returncode != 0:
@@ -245,6 +279,9 @@ def _contract_failures(row: Any, index: PersonaIndex, root: Path) -> list[str]:
     ]
     out += _rendered_failures(persona, row, raw, contract, index, root)
     out += _tether_failures(persona, contract, root)
+    tether = contract.skill_tether
+    if row.registry_key is not None and tether is not None and row.registry_key != tether.skill:
+        out.append(f"{_LABEL}: {persona}: registry_key '{row.registry_key}' differs from skill_tether.skill '{tether.skill}'")
     return out
 
 
@@ -269,6 +306,7 @@ def validate_persona_contracts(failed: list[str], root: Path | None = None) -> N
         return
     try:
         failed.extend(_vocabulary_failures(index, root))
+        failed.extend(_registry_key_failures(index, root))
         for row in index.personas:
             failed.extend(_contract_failures(row, index, root))
     except (OSError, yaml.YAMLError, ImportError, AttributeError, KeyError) as exc:

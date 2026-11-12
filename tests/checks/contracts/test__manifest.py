@@ -42,6 +42,18 @@ class TestContractsManifest:
 # One row per promoted gated Entry: repo-relative paths in that check's read set (transitive
 # first-party import closure plus every data/config path the body opens).
 _CLOSURE_INPUTS: dict[str, tuple[str, ...]] = {
+    # The contract, its loader, the check, the shared check modules, a workflow it names, the source registry and the roadmaps.
+    "validate_actions_capacity": (
+        "docs/contracts/actions-capacity.yaml",
+        "scripts/ci/actions_capacity_contract.py",
+        "scripts/checks/contracts/validate_actions_capacity.py",
+        "scripts/checks/_common.py",
+        "scripts/checks/registry.py",
+        ".github/workflows/ci.yml",
+        "config/agent/data_quality/source_registry.yaml",
+        "docs/ROADMAP-PLATFORM.yaml",
+        "docs/ROADMAP-PLATFORM-ARCHIVE.yaml",
+    ),
     # One Path.exists() on the Decision 38 ghost file: creating it is necessarily a .github/ diff.
     "validate_no_underscore_instructions": (
         ".github/copilot_instructions.md",

@@ -109,3 +109,11 @@ def test_compute_plane_contract_needs_no_skill_tether(tree: Path) -> None:
     edit_text(tree, INDEX_REL, "    kind: verdict\n    contract:", "    kind: compute_plane\n    contract:")
     edit_contract(tree, lambda c: (c.pop("skill_tether"), c.__setitem__("kind", "compute_plane")), rerender=True)
     assert _run(tree) == []
+
+
+def test_registry_is_not_read_when_no_row_carries_a_key(tree: Path) -> None:
+    from tests.persona_contracts.fixture_tree import INDEX_REL, REGISTRY_REL, edit_text
+
+    edit_text(tree, INDEX_REL, "    registry_key: fixture-verdict\n", "")
+    (tree / REGISTRY_REL).unlink()
+    assert _run(tree) == []
