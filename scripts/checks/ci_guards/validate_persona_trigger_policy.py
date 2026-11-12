@@ -166,10 +166,15 @@ class Policy:
             return [f"{where}: step {gate_id} if: differs from the LLM step's if: less the refused term"]
         return []
 
+    @staticmethod
+    def _disjuncts_gated(expr: object) -> bool:
+        parts = _disjuncts(expr)
+        return bool(parts) and all(p == DISPATCH_TERM or FAILURE_TERM in and_terms(p) for p in parts)
+
     def failure_gated(self, doc: dict[str, Any], job: dict[str, Any], step: dict[str, Any]) -> bool:
+        """Read syntactically: the if: or one of its own top-level && conjuncts (an && only narrows) is failure-gated."""
         for expr in (job.get("if"), step.get("if")):
-            parts = _disjuncts(expr)
-            if parts and all(p == DISPATCH_TERM or FAILURE_TERM in and_terms(p) for p in parts):
+            if self._disjuncts_gated(expr) or any(self._disjuncts_gated(term) for term in and_terms(expr)):
                 return True
         return False
 
