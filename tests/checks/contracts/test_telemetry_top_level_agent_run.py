@@ -137,7 +137,7 @@ def test_telemetry_catalog_scope_needs_a_scope_reason(reason: str | None) -> Non
 def test_host_run_ref_production_add_is_reconciled_in_the_sidecar() -> None:
     sidecar = yaml.safe_load((ROOT / "config" / "lambda" / "ducklake" / "field_semantics.static.yaml").read_text("utf-8"))
     ops = sidecar["contract_table_ops"]["telemetry_agents"]
-    assert ops["pending_reconcile"]["history"] == []
+    assert "host_run_ref" not in ops["pending_reconcile"]["history"]
     entry = ops["reconciled"]["history"]["host_run_ref"]
     assert "telemetry_agents.host_run_ref" in entry["evidence"]
     assert "added" in entry["evidence"]
