@@ -129,9 +129,9 @@ scope:
       transport). request_kwargs(selection, messages, *, api_key, max_tokens, tools, tool_choice, response_format,
       timeout) -> dict: model=selection.model, api_key, messages, max_tokens, timeout, num_retries=0 (the transport
       owns retries), tools, tool_choice and response_format passed through unconditionally (None included), and
-      _skip_mcp_handler=True, and never fallbacks=
-      (LiteLLM's own fallbacks drop the flag). The flag is needed because litellm 1.106.2 imports its MCP handler on any
-      tools call and that import fails under the pinned mcp<2 (rec-3795 owns the migration). Thinking and effort, by
+      never fallbacks= (the transport owns fail-over, first turn only) nor _skip_mcp_handler (litellm 1.106.2 imports
+      its MCP handler on any tools call; that works under the lock's mcp 2.x, PLAN-mcp-2x-server-migration #1984, and
+      TestToolsCallUnderPins guards it). Thinking and effort, by
       the model's LiteLLM prefix: deepseek -> thinking={"type": "enabled"|"disabled"} and, when enabled,
       extra_body={"reasoning_effort": effort} (LiteLLM 1.106.2 drops a bare reasoning_effort for DeepSeek);
       anthropic -> reasoning_effort=effort, which LiteLLM sends as adaptive thinking with output_config.effort;
@@ -181,7 +181,8 @@ scope:
       fail-over in both complete and acomplete (primary answers 503 for every attempt, fallback answers with a tool
       call; failed_over is true and record.role names the fallback); the class's docstring quotes
       "requirements-dev.txt", "requirements.txt" and "requirements-fast.txt" (the mcp pin lives in requirements.txt
-      and its floor in requirements-fast.txt), and one test asserts derive_affected_tests([("M", f)]) selects this
+      and its floor in requirements-fast.txt) and says the class guards LiteLLM's tools path, which needs mcp>=2 in
+      the lock, and one test asserts derive_affected_tests([("M", f)]) selects this
       file for each of the three (Decision 135 data edge); and a second turn built from result.message plus a tool
       result sends DeepSeek's reasoning_content and Anthropic's thinking block with its signature (canned first
       responses carrying both). (d) Outcomes through complete and acomplete: 402 and the credit-balance 400 are
@@ -231,7 +232,7 @@ scope:
       with the selected effort and no output_config; the fallback's body carries thinking {"type": "adaptive", ...}
       and output_config.effort equal to the selected effort; both carry the requested model without its prefix, and
       the key reaches the request's auth header from the environment variable. request_kwargs directly: every result
-      carries num_retries=0 and _skip_mcp_handler=True and no fallbacks, and passes tools, tool_choice and
+      carries num_retries=0 and neither _skip_mcp_handler nor fallbacks, and passes tools, tool_choice and
       response_format through (a json_schema response_format given is in the result); a deepseek selection with thinking disabled
       sends thinking disabled and no extra_body; another prefix (a Selection built with dataclasses.replace) gets
       reasoning_effort when thinking is enabled and neither field when disabled; an anthropic selection with thinking
@@ -356,7 +357,7 @@ infrastructure_dependencies:
     120 a month ceiling, which also bounds smoke runs (T4.32 SPEND annotation; the fallback's call draws on
     the organisation's monthly credit).
 acceptance_criteria:
-  - A tools call through complete, acomplete and fail-over returns its tool call under the pinned litellm 1.106.2 and mcp 1.30.0, a second turn built from TransportResult.message replays each provider's reasoning state (DeepSeek reasoning_content, Anthropic signed thinking block), and a diff touching only requirements-dev.txt, requirements.txt or requirements-fast.txt selects every LiteLLM test file; each new module is fully covered by its own mirror test.
+  - A tools call through complete, acomplete and fail-over returns its tool call under the pinned litellm 1.106.2 and mcp 2.3.0 with no _skip_mcp_handler, a second turn built from TransportResult.message replays each provider's reasoning state (DeepSeek reasoning_content, Anthropic signed thinking block), and a diff touching only requirements-dev.txt, requirements.txt or requirements-fast.txt selects every LiteLLM test file; each new module is fully covered by its own mirror test.
   - The primary's request carries DeepSeek's thinking field and top-level reasoning_effort, and the fallback's carries adaptive thinking with output_config.effort, each at the persona's selected effort, with model and key taken from the contracts and the environment; a forced tool_choice or disabled thinking on the anthropic fallback is refused before any request.
   - Every call returns a record naming the requested model, the served model as the provider reports it and the four token classes; failed attempts are listed.
   - Outages retry to the bound; credit exhaustion, auth, not-found, bad-request, blank and malformed responses never retry or fail over; fail-over is off by default and, when on, happens only on a run's first call and needs an asserted fallback cold start (a later turn raises fail_over_mid_run); end_user is served by the primary alone and cannot fail over.
@@ -370,13 +371,13 @@ verification_plan:
     command: >-
       git fetch origin main --quiet && git cat-file -e origin/main:docs/plans/PLAN-llm-client-litellm-transport.yaml
       && git cat-file -e origin/main:scripts/llm/tier_selection.py && git merge-base --is-ancestor origin/main HEAD
-      && bin/venv-python -m scripts.llm.tier_selection --check >/dev/null && grep -qE '^mcp==1\.' requirements.txt
+      && bin/venv-python -m scripts.llm.tier_selection --check >/dev/null && grep -qE '^mcp==2\.' requirements.txt
       && echo PRECONDITION_OK
     expected: Prints PRECONDITION_OK.
     fix_if: >-
       No tier_selection.py on main means PLAN-inference-tier-selection's build has not merged: stop and wait. A failed
       ancestry test means a stale branch: merge origin/main first. A failed mcp grep means the lock no longer pins mcp
-      1.x (PLAN-mcp-2x-server-migration landed): stop and send a plan-defect report (context, mcp ordering).
+      2.x: stop and send a plan-defect report (context, mcp line).
     hermetic: false
     graduation: not-applicable
   - step: 2
@@ -384,10 +385,13 @@ verification_plan:
     action: Tools calls work under the current pins, sync, async and through fail-over, and a lock-only diff selects the proof.
     command: bin/venv-python -m pytest -q "tests/test_llm_litellm_transport.py::TestToolsCallUnderPins"
     expected: >-
-      Exit 0. Red before: the module does not exist; with the module but without _skip_mcp_handler every test in the
-      class that sends tools (sync, async, both fail-over cases and the turn-2 replay) fails on LiteLLM's MCP import,
-      while the lock-selection test is unaffected.
-    fix_if: Fix the transport; never drop the flag while the lock pins mcp below 2, and never mark the class skipped.
+      Exit 0. Red before: the module does not exist. The class guards LiteLLM's tools path against the lock: under an
+      mcp 1.x lock every test in it that sends tools (sync, async, both fail-over cases and the turn-2 replay) fails on
+      LiteLLM's MCP import (measured 2026-11-11, ImportError CacheableResult), while the lock-selection test is
+      unaffected.
+    fix_if: >-
+      Fix the transport; never mark the class skipped and never add _skip_mcp_handler. A failure on LiteLLM's MCP
+      import means the lock regressed below mcp 2: stop and report it (no pin changes in this plan).
     hermetic: true
     graduation: graduate
     graduation_check_id: litellm-transport-tools-call-under-pins
@@ -571,7 +575,7 @@ constraints:
   - Do not edit scripts/llm/client.py or scripts/llm/__init__.py (Lambda-packaged, data-pipeline); the transport is its own module.
   - No selection literal -- model id, default_model, key variable or parameter name -- in scripts/llm/litellm_transport.py, scripts/llm/litellm_wire.py, scripts/llm/litellm_cold_start.py or scripts/smoke_test_inference_credentials.py (Decision 173 clause 2, Decision 224); tests read them from the contracts. The transport's table keyed by LiteLLM prefix (deepseek, anthropic) for request fields and error classification, including the "credit balance is too low" match, is adapter knowledge and allowed; the smoke test holds no provider name either.
   - The transport, wire and cold-start modules make no AWS or SSM call and reads secrets from the process environment only (Decision 212 clause 3); only the smoke test reads SSM.
-  - No pin changes to requirements.txt, requirements-dev.txt or their .in files; never pass LiteLLM's fallbacks= or drop _skip_mcp_handler while the lock pins mcp below 2.
+  - No pin changes to requirements.txt, requirements-dev.txt or their .in files; never pass LiteLLM's fallbacks= or _skip_mcp_handler.
   - No contract, Decision or capabilities.yaml edit; tier_selection.py is consumed, not changed (a needed change is a plan-defect report to this plan's planning thread).
   - No live model call or credential read before VP step 9; tests keep sockets disabled.
   - "No new file beyond the scope rows: a module or test file that would pass 500 SLOC is a plan-defect STOP, not a build-time split (the transport test row's move of tests (i) and (j) into the wire test file, both in scope, excepted)."
@@ -582,9 +586,8 @@ context:
   - "Depends on PLAN-inference-tier-selection's build (resolver, per-role api_key rows, litellm_persona_selection); VP step 1 stops the build until it is on main."
   - "Decided with notice, a change from the presentation: client.py is not edited and does not re-export the transport. client.py and scripts/llm/__init__.py are packaged in the active data-pipeline Lambda, so any edit would owe a build, deploy and smoke (Decision 79) for no runtime gain; T4.17 c5 is met because a swap needs no client.py edit. The legacy Gemini path stays as is (T5.6 removes it)."
   - "Verified 2026-11-11 against litellm 1.106.2 with sockets blocked and httpx send replaced: DeepSeek takes extra_body reasoning_effort plus thinking {type: enabled} (a bare reasoning_effort is dropped); Anthropic reasoning_effort becomes thinking {type: adaptive} with output_config.effort; prompt_tokens includes cached tokens for both, reported in prompt_tokens_details; the LiteLLM exception class varies with the response body (a canned DeepSeek 402 surfaced as BadRequestError in one probe and APIError in another; 529 as InternalServerError or APIError), so classification keys on status_code and never on the class alone; Anthropic's credit refusal is a 400 with 'credit balance is too low'; a refused connection is InternalServerError 500; LiteLLM's fallbacks= drops _skip_mcp_handler."
-  - "PLAN-mcp-2x-server-migration merged as a plan in #1964 (fd9ba854, 2026-11-11); its build had not started at this revision and main still pins mcp==1.30.0."
-  - "mcp ordering: PLAN-mcp-2x-server-migration (rec-3795) may land first. If the lock holds mcp>=2 when this build starts, the build stops and sends a plan-defect report to this plan's planning thread, which amends the plan to drop the flag and keep TestToolsCallUnderPins as the compat guard. If this build lands first, the flag is harmless on mcp 2.x and the build files a follow-on rec to drop it (execution STEP 7)."
-  - "Follow-on recs filed at planning (2026-11-11): rec-5082 (High, Decision 173 review before 2026-11-19: tier 2's hard-cap remaining-allowance reading of clause 4 and clause 5's realization note, re-arming review_by); rec-5083 (Medium, add scripts/llm/tier_selection.py, scripts/llm/litellm_transport.py, scripts/llm/litellm_wire.py and scripts/llm/litellm_cold_start.py (acceptance updated 2026-11-11 for the split modules) to config/agent/executor/capabilities.yaml boundary_patterns, Decision 247 clause 1 and Decision 117; a capabilities edit is leash code needing its own final-diff word under Decision 246 clause 4, so not edited here). The build files a third only if it lands before mcp>=2: drop _skip_mcp_handler (execution STEP 7)."
+  - "mcp: PLAN-mcp-2x-server-migration (rec-3795) built and merged as #1984 (433bc4b4, 2026-11-12); the lock pins mcp==2.3.0 and a litellm 1.106.2 tools call works without _skip_mcp_handler (hermetic probe 2026-11-12, httpx send replaced, sockets blocked). Amended 2026-11-12 to drop the flag; TestToolsCallUnderPins stays as the compat guard. This plan edits no contract, so no ports.yaml row records the mcp>=2 dependency; the class docstring names it."
+  - "Follow-on recs filed at planning (2026-11-11): rec-5082 (High, Decision 173 review before 2026-11-19: tier 2's hard-cap remaining-allowance reading of clause 4 and clause 5's realization note, re-arming review_by); rec-5083 (Medium, add scripts/llm/tier_selection.py, scripts/llm/litellm_transport.py, scripts/llm/litellm_wire.py and scripts/llm/litellm_cold_start.py (acceptance updated 2026-11-11 for the split modules) to config/agent/executor/capabilities.yaml boundary_patterns, Decision 247 clause 1 and Decision 117; a capabilities edit is leash code needing its own final-diff word under Decision 246 clause 4, so not edited here)."
   - "rec-3222's acceptance was updated 2026-11-11 (it named an inference-provider.yaml secret_envelope key plan 1 did not add; the parameter names live in the project-configuration api_key rows) to VP step 5's last three clauses."
   - "Repository-path assumptions: the transport reads docs/contracts through tier_selection.load (SA-13, plan 1); the smoke test reads config/aws-region, a script-only read (not port or adapter code), so no ports.yaml row is owed. It is not listed among project-configuration.yaml's clouds.aws.region readers (nor is scripts/ops/secrets_to_ssm_copy.py); the readers list is left to rec-4404's region work, since this plan edits no contract."
   - "T4.17 eligibility: T4.17 depends_on T4.32 (not_started) and has no start_edges, so staging it in_progress before T4.32 completes is out of eligibility order; the closes_criteria flip is the ledger's own rule (exit-criteria-ledger.yaml) and nothing gates it. T4.17 c4 (assertion exercised) stays open until VP step 9's read-back is recorded by a later plan."
@@ -613,7 +616,7 @@ pre_implementation_checklist:
   - scripts/llm/tier_selection.py and the litellm_tier_models, litellm_persona_selection and api_key rows on main read
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - "STEP 0: run VP step 1 (its mcp grep stops the build if the lock no longer pins mcp 1.x)."
+  - "STEP 0: run VP step 1 (its mcp grep stops the build if the lock no longer pins mcp 2.x)."
   - "STEP 1: write scripts/llm/litellm_wire.py, scripts/llm/litellm_cold_start.py and scripts/llm/litellm_transport.py per their scope rows."
   - "STEP 2: write tests/fixtures/litellm_capture.py, tests/test_llm_litellm_wire.py, tests/test_llm_litellm_cold_start.py and tests/test_llm_litellm_transport.py per their scope rows. Run VP steps 2, 4 and 6."
   - "STEP 3: rewrite scripts/smoke_test_inference_credentials.py and its tests; move the cutover assertion. Run VP steps 3 and 5."
@@ -629,10 +632,6 @@ execution_steps:
     and per-role api_key rows (plan 1), the LiteLLM transport with requested and served model and token records
     (plan 2; in its own module, not scripts/llm/client.py); rec-4566 has its own plan; c1's credential, backend,
     verdict and wake legs open."
-  - >-
-    STEP 7: only if the lock still pins mcp below 2, file the flag-removal rec (acceptance: _skip_mcp_handler absent
-    from scripts/llm/litellm_transport.py and TestToolsCallUnderPins still present) through scripts.ops_data_portal
-    file_rec after get_rec_write_guidance, and append its id to followon_recs.
   - >-
     CLOSURE, each outcome reported separately: readiness, parent-validator evidence, postflight evidence and the real
     push and PR outcome (implement skill Commit Flows; docs/contracts/git-ops.yaml handoff_sequence): bin/venv-python -m
