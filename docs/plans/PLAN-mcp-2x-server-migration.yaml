@@ -34,7 +34,15 @@ scope:
       TextContent of json.dumps(payload, indent=2) (today's bytes). params.arguments None reads as {}. The tool list stays
       derived from describe() (Decision 81 cl.2), read-only (Decision 84 I-3, Decision 143), fail-loud on describe failure
       (Decision 55); _run_stdio, main, _default_surface, build_tool_registry's derivation and _CACHE_FIRST_NOTE (Decision 215)
-      keep their behaviour.
+      keep their behaviour. Import layout (scope amendment 2026-11-12): importing this module loads no mcp or mcp.* module,
+      because importing any mcp submodule runs mcp/__init__.py, which loads mcp/server/stdio.py, which imports fcntl off
+      Windows, and the read clients import this module on any host. So the module scope imports `mcp_types as types` (mcp 2.x's
+      own types package; mcp.types re-exports the same objects) and imports Server only under TYPE_CHECKING; create_server
+      imports mcp.server.lowlevel.Server at its top, _run_stdio imports NotificationOptions, and a module-level
+      stdio_server() -> AbstractAsyncContextManager[tuple[Any, Any]] (Any if mypy rejects it) imports mcp.server.stdio and
+      returns its stdio_server(), keeping the module attribute the existing test_run_stdio_serves_over_the_stdio_streams
+      patches. Each local import carries `# noqa: PLC0415 -- lazy: importing mcp loads mcp.server.stdio, which imports fcntl
+      off Windows`.
     new_imports: []
   - file: tests/test_agent_sdk_mcp_server.py
     action: Modify
@@ -54,7 +62,13 @@ scope:
       test_input_validation_error_is_an_error_result (wrong-typed argument -> "Input validation error", structured_content
       error_type "input_validation", reader not called);
       test_jsonschema_is_a_direct_requirement (requirements.in declares jsonschema and the lock's annotation block for
-      jsonschema==, which is multi-line because mcp also requires it, contains "-r requirements.in").
+      jsonschema==, which is multi-line because mcp also requires it, contains "-r requirements.in"). Scope amendment
+      2026-11-12 adds three: test_mcp_types_is_a_direct_requirement (the same twin for mcp-types and its mcp-types==
+      annotation block); test_importing_the_server_loads_no_mcp_transport (in a subprocess, because this file imports mcp at
+      module scope: code "import sys; sys.modules['fcntl'] = None\nimport scripts.agent_sdk.mcp_server\nprint(sorted(m for m in
+      sys.modules if m == 'mcp' or m.startswith('mcp.')))\n" run with sys.executable and cwd at the repo root; assert
+      (returncode, stdout.strip()) == (0, "[]") with stderr[-2000:] as the message); and test_stdio_server_wrapper_returns_the_sdk_context (patch
+      mcp.server.stdio.stdio_server with return_value=sentinel and assert mcp_server.stdio_server() is sentinel) for 100% coverage.
   - file: tests/checks/deps/affected_tests/test_derivation.py
     action: Modify
     purpose: >-
@@ -64,18 +78,21 @@ scope:
       runs the server tests in --pre; selection through another channel cannot pass it).
   - file: requirements.in
     action: Modify
-    purpose: 'mcp>=1.30.0,<2 -> mcp>=2.3.0,<3; add jsonschema>=4.20.0 (now imported directly by mcp_server.py; mcp 2.3.0 declares the same floor).'
+    purpose: >-
+      mcp>=1.30.0,<2 -> mcp>=2.3.0,<3; add jsonschema>=4.20.0 (now imported directly by mcp_server.py; mcp 2.3.0 declares the
+      same floor); add mcp-types>=2.3.0,<3 (scope amendment 2026-11-12: imported directly by mcp_server.py; mcp 2.3.0 pins
+      mcp-types==2.3.0, so the mcp relock adds no further pin).
   - file: requirements-fast.txt
     action: Modify
     purpose: >-
-      Same two lines as requirements.in; add jsonschema to the header's runtime-tool floor list "(pydantic, pyyaml, networkx,
-      import-linter, mcp, python-ulid)".
+      Same three lines as requirements.in, specifiers identical; add jsonschema and mcp-types to the header's runtime-tool floor
+      list "(pydantic, pyyaml, networkx, import-linter, mcp, python-ulid)".
   - file: requirements.txt
     action: Modify
     purpose: >-
       Minimal relock: pip-compile --strip-extras --upgrade-package mcp with the existing lock as preference. Only the mcp closure
       moves (drops httpx, httpcore, httpx-sse, pydantic-settings, python-dotenv; adds httpx2, httpcore2, mcp-types,
-      opentelemetry-api, truststore; mcp 1.30.0 -> 2.3.0; jsonschema's annotation gains -r requirements.in). Every other pin,
+      opentelemetry-api, truststore; mcp 1.30.0 -> 2.3.0; the jsonschema and mcp-types annotations gain -r requirements.in). Every other pin,
       duckdb included (Decision 99), byte-identical. The header command line kept byte-identical to main's (Dependabot's).
   - file: requirements-dev.txt
     action: Modify
@@ -113,7 +130,7 @@ acceptance_criteria:
   - >-
     rec-2871's acceptance (updated 2026-11-11 to the 2.x spelling) holds: grep -q 'structured_content'
     scripts/agent_sdk/mcp_server.py && bin/venv-python -m pytest tests/test_agent_sdk_mcp_server.py::test_call_tool_error_carries_error_type -q
-  - requirements.txt pins mcp==2.3.0 (a later 2.x only via a plan amendment); requirements.in and requirements-fast.txt declare mcp>=2.3.0,<3 and jsonschema>=4.20.0; no pin outside the mcp closure changed.
+  - requirements.txt pins mcp==2.3.0 (a later 2.x only via a plan amendment); requirements.in and requirements-fast.txt declare mcp>=2.3.0,<3, jsonschema>=4.20.0 and mcp-types>=2.3.0,<3; no pin outside the mcp closure changed.
   - Every pre-existing test in tests/test_agent_sdk_mcp_server.py and tests/test_import_governance.py passes under mcp 2.x with its node id unchanged, except test_mcp_declaration_rejects_major_two, replaced by test_mcp_declaration_rejects_the_next_major with its record retired and replaced (operator-approved 2026-11-11; scope row 9).
   - A non-AgentToolError exception's text never reaches the client; an AgentToolError's does, with its class name as error_type.
   - A requirements.txt-only diff selects tests/test_agent_sdk_mcp_server.py in --pre affected-set selection (Decision 135).
@@ -126,6 +143,9 @@ acceptance_criteria:
     hermetic test proves it.)
   - litellm 1.106.2 completion and acompletion with tools= work WITHOUT _skip_mcp_handler, and import litellm.experimental_mcp_client succeeds.
   - The retired record sits in entries/deprecated/ and a new graduated record mcp-declaration-caps-next-major pins the two pin-guard nodes.
+  - >-
+    Importing scripts.agent_sdk.mcp_server loads no mcp or mcp.* module, and tests/telemetry_capture/test_read_route.py::test_the_read_clients_import_where_fcntl_is_absent
+    passes with that file unchanged (scope amendment 2026-11-12).
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -153,9 +173,10 @@ verification_plan:
     phase: pre-deploy
     action: >-
       Whole server suite under mcp 2.x, pre-existing node ids intact, 100% coverage of mcp_server.py (Decision 159); the
-      reworded test_schema_metaschema.py runs alongside.
+      reworded test_schema_metaschema.py runs alongside, and so does the other project's unchanged fcntl-absent import test.
     command: >-
-      bin/venv-python -m pytest tests/test_agent_sdk_mcp_server.py tests/persona_contracts/test_schema_metaschema.py -q -m "not integration"
+      bin/venv-python -m pytest tests/test_agent_sdk_mcp_server.py tests/persona_contracts/test_schema_metaschema.py
+      tests/telemetry_capture/test_read_route.py::test_the_read_clients_import_where_fcntl_is_absent -q -m "not integration"
       --cov=scripts.agent_sdk.mcp_server --cov-report=term-missing --cov-fail-under=100
     expected: All pass; coverage 100%.
     fix_if: A missing class/test name breaks a graduated shard -- restore the name. Uncovered lines -- add a test, never a pragma.
@@ -165,6 +186,8 @@ verification_plan:
       Duplicates graduated shard mcp-server-hermetic-coverage plus the repo's standing 100% coverage gate (Decision 159).
       Stays hermetic false under vp-red-before hermetic_authoring carve-out (v) -- a whole-file re-run of a test file this
       plan's scope modifies -- and pytest-cov is absent from requirements-fast.txt, so a venv-less replay could not run it.
+      The added read_route node is another project's existing test, run here only as a regression check; step 6 is the
+      graduated guard.
   - step: 4
     phase: pre-deploy
     action: Pin guards -- the mcp declaration admits the compiled pin and rejects the next major, in both requirements.in and requirements-fast.txt.
@@ -178,18 +201,30 @@ verification_plan:
     graduation_check_id: mcp-declaration-caps-next-major
   - step: 5
     phase: pre-deploy
-    action: jsonschema is a direct requirement, and a requirements.txt-only diff selects the server tests (Decision 135 data edge).
+    action: jsonschema and mcp-types are direct requirements, and a requirements.txt-only diff selects the server tests (Decision 135 data edge).
     command: >-
       bin/venv-python -m pytest tests/test_agent_sdk_mcp_server.py::test_jsonschema_is_a_direct_requirement
+      tests/test_agent_sdk_mcp_server.py::test_mcp_types_is_a_direct_requirement
       tests/checks/deps/affected_tests/test_derivation.py::test_requirements_lock_selects_mcp_server_tests_through_data_edge -q
-    expected: 2 passed.
+    expected: 3 passed.
     fix_if: >-
       Selection test red -- keep the quoted requirements.txt literal in test_tool_round_trip_on_mcp_2x (it is the edge). Direct-requirement
-      test red -- declare jsonschema in requirements.in and relock.
+      test red -- declare the package in requirements.in and requirements-fast.txt and relock.
     hermetic: true
     graduation: graduate
     graduation_check_id: mcp-server-lock-data-edge
   - step: 6
+    phase: pre-deploy
+    action: >-
+      Importing the server loads no mcp or mcp.* module even where fcntl is absent (scope amendment 2026-11-12), so the read
+      clients keep importing on any host.
+    command: bin/venv-python -m pytest tests/test_agent_sdk_mcp_server.py::test_importing_the_server_loads_no_mcp_transport -q
+    expected: 1 passed.
+    fix_if: Move the offending module-scope mcp import into the function that uses it (types come from mcp_types); never edit tests/telemetry_capture/test_read_route.py (another project's file).
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: mcp-server-import-loads-no-transport
+  - step: 7
     phase: pre-deploy
     action: Relock is minimal -- only the mcp closure moved; duckdb lockstep intact.
     command: >-
@@ -203,7 +238,7 @@ verification_plan:
     fix_if: Any other name moved -- re-run the relock with --upgrade-package mcp only, starting from main's lock. A header line moved -- restore main's text byte for byte. An option line appeared or vanished (such as --index-url) -- delete or restore it, or relock with --no-emit-index-url, so the lock matches main's.
     hermetic: false
     graduation: not-applicable
-  - step: 7
+  - step: 8
     phase: pre-deploy
     action: Stale-reference sweep -- the retired 1.x surfaces are gone from the server and its tests, and nothing live pins the retired test name.
     command: >-
@@ -215,8 +250,8 @@ verification_plan:
     fix_if: A match is a leftover 1.x spelling or a live pin on the retired node -- port or retire it. A missing deprecated/ file means the record was deleted, not moved -- redo it with git mv.
     hermetic: true
     graduation: waive
-    graduation_waiver_reason: A one-time migration sweep; steps 1-5 graduate the lasting behaviour, and the full tier's shard resolution (Decision 244 cl.1) catches any dangling pin.
-  - step: 8
+    graduation_waiver_reason: A one-time migration sweep; steps 1, 2, 4, 5 and 6 graduate the lasting behaviour, and the full tier's shard resolution (Decision 244 cl.1) catches any dangling pin.
+  - step: 9
     phase: pre-deploy
     action: mypy reports no error in scripts/agent_sdk/mcp_server.py (constraint; the Decision 161 ratchet has no baseline entry for it).
     command: >-
@@ -230,8 +265,8 @@ verification_plan:
     graduation: waive
     graduation_waiver_reason: >-
       Duplicates the standing full-tier validate_mypy_ratchet (Decision 161 cl.3; mcp_server.py's implicit baseline is 0),
-      which step 12 runs before handoff and main-validate runs after merge; the fast tier's mypy output is informational only.
-  - step: 9
+      which step 13 runs before handoff and main-validate runs after merge; the fast tier's mypy output is informational only.
+  - step: 10
     phase: pre-deploy
     action: >-
       Live stdio wire parity, branch vs origin/main on mcp 1.x. The script builds a throwaway origin/main worktree and uv venv
@@ -251,7 +286,7 @@ verification_plan:
       changed -- stop and report it, never re-pin. A "no reply within 120s" is a slow live reader -- rerun once, then RCA.
     hermetic: false
     graduation: not-applicable
-  - step: 10
+  - step: 11
     phase: pre-deploy
     action: Live end-to-end test (by hand only, never a CI tier).
     command: AWS_PROFILE=agent_platform bin/venv-python -m pytest tests/test_agent_sdk_mcp_server.py::TestEndToEnd -q -m integration
@@ -259,11 +294,11 @@ verification_plan:
     fix_if: Fix the port; the test carries no credentials skip by design.
     hermetic: false
     graduation: not-applicable
-  - step: 11
+  - step: 12
     phase: pre-deploy
     action: >-
       litellm tool calls without the private flag, and the MCP bridge import (mock only, no network model call). Same mount
-      precondition and digest pins as step 9.
+      precondition and digest pins as step 10.
     command: >-
       (cd /mnt/project-files/rec-3795-plan/evidence/ && printf '%s  %s\n' fc2fe67dcfb82710cb16613df32437ce3778c84968eaf157e182f4eb9c64c42b wire_parity.sh e2fb27474a75c4d361c981eec9a1737cba11f0209e250c27229b34ac190e845a wire_probe.py eeba6beedab3282bd9fa8e98e2f359a54b2213d422b24495d79d9ec74f5a7980 wire_compare.py 8a6bfe103127c9e6d8dc787f2e8ee3621adac1fc9a156d56e711a5c6b5d8a722 litellm_probe.py | sha256sum -c)
       && bin/venv-python -I /mnt/project-files/rec-3795-plan/evidence/litellm_probe.py | tee /dev/stderr | grep -cE ' OK( |$)' | grep -qx 5
@@ -273,7 +308,7 @@ verification_plan:
     fix_if: An ImportError means mcp 1.x is still installed -- bash bin/sync-deps.sh. A digest FAILED -- stop and report it, never re-pin.
     hermetic: false
     graduation: not-applicable
-  - step: 12
+  - step: 13
     phase: pre-deploy
     action: Full validation before handoff, attested for the pushed HEAD (backgrounded, 2 h limit, top-level session).
     command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
@@ -284,7 +319,7 @@ verification_plan:
     hermetic: false
     graduation: waive
     graduation_waiver_reason: Invokes scripts.validate (recursion refusal); it is the handoff gate itself.
-  - step: 13
+  - step: 14
     phase: post-deploy
     action: >-
       A fresh CC-web session after merge has the new lock and the ducklake-reads tools, with no reconnect. Run in that
@@ -303,7 +338,7 @@ verification_plan:
       it worked is this step passing in the next fresh session with no reconnect. Report which case occurred; neither case
       is a reason to revert.
     hermetic: false
-  - step: 14
+  - step: 15
     phase: post-deploy
     action: >-
       Dependabot's stored "ignore this major version" on mcp is lifted. Operator-approved 2026-11-11: comment
@@ -320,7 +355,7 @@ verification_plan:
       which names only a re-open, so the read-back matters.)
     fix_if: An ignore condition remains -- post the unignore comment (covered by the same approval) and read the reply back.
     hermetic: false
-  - step: 15
+  - step: 16
     phase: post-deploy
     action: Bundled recs closed by the squash trailer.
     command: >-
@@ -338,6 +373,11 @@ test_obligations:
       tests/test_agent_sdk_mcp_server.py::test_unexpected_exception_text_never_reaches_the_client
       tests/test_agent_sdk_mcp_server.py::test_input_validation_error_is_an_error_result -q
     red_green_expectation: red before (main's decorator server raises AttributeError list_tools under mcp 2.x; the tests are absent on main), green after
+  - source: scripts/agent_sdk/mcp_server.py
+    behavior: Importing the module loads no mcp transport, so it imports where fcntl is absent (scope amendment 2026-11-12).
+    verification_step: 6
+    test_selector: tests/test_agent_sdk_mcp_server.py::test_importing_the_server_loads_no_mcp_transport
+    red_green_expectation: red before (the port as first built imports mcp at module scope, which imports fcntl; the node is also absent on main), green after
   - source: tests/test_agent_sdk_mcp_server.py
     behavior: The harness drives the server only through the public mcp 2.x Client.
     verification_step: 3
@@ -349,10 +389,15 @@ test_obligations:
     test_selector: tests/checks/deps/affected_tests/test_derivation.py::test_requirements_lock_selects_mcp_server_tests_through_data_edge
     red_green_expectation: red before (the requirements.txt literal is absent from the server test file on main, so it is not selected), green after
   - source: requirements.in
-    behavior: mcp declared >=2.3.0,<3 and jsonschema declared directly.
+    behavior: jsonschema declared directly.
     verification_step: 5
     test_selector: tests/test_agent_sdk_mcp_server.py::test_jsonschema_is_a_direct_requirement
     red_green_expectation: red before (jsonschema undeclared), green after
+  - source: requirements.in
+    behavior: mcp-types declared directly (scope amendment 2026-11-12).
+    verification_step: 5
+    test_selector: tests/test_agent_sdk_mcp_server.py::test_mcp_types_is_a_direct_requirement
+    red_green_expectation: red before (mcp-types undeclared on main and absent from main's lock), green after
   - source: requirements-fast.txt
     behavior: The mcp floor matches requirements.in and caps the next major.
     verification_step: 4
@@ -365,9 +410,9 @@ test_obligations:
     red_green_expectation: red before (a 2.3.0 floor against main's 1.30 lock fails), green after
   - source: requirements-dev.txt
     behavior: The dev lock compiles against the new runtime constraint and litellm tool calls work without the flag.
-    verification_step: 11
+    verification_step: 12
     command: bin/venv-python -I /mnt/project-files/rec-3795-plan/evidence/litellm_probe.py
-    waiver_reason: Generated lock with annotation-only changes; litellm behaviour is proven by step 11's probe, not a unit test.
+    waiver_reason: Generated lock with annotation-only changes; litellm behaviour is proven by step 12's probe, not a unit test.
   - source: tests/test_import_governance.py
     behavior: The next-major guard is derived from the lock and cannot go vacuous.
     verification_step: 4
@@ -389,23 +434,24 @@ constraints:
   - No exception text other than the AgentToolError family's reaches a client (Decision 101).
   - Never loosen a test to get green (Decision 235); the only replaced test is the one the operator's sign-off names.
   - Test files stay under 500 SLOC (Decision 128); split into a mirror package, never raise, if one would cross.
-  - mypy clean on mcp_server.py (the Decision 161 ratchet has no baseline entry for it; VP step 8).
-  - The live checks (steps 9, 10, 11) run by hand with agent_platform; never in a CI tier.
+  - mypy clean on mcp_server.py (the Decision 161 ratchet has no baseline entry for it; VP step 9).
+  - The live checks (steps 10, 11, 12) run by hand with agent_platform; never in a CI tier.
   - No rescue agents or workaround loops (Decision 55).
 context:
   - "Decision-scout r1 FLAGS_FOUND (WARN 244 registry pin; NOTE 101 error text; SPIRIT 135 requirements-only diffs) -- all adopted. Decisions triaged: 205 of 205. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.1 3/5. CITE: 55, 81, 84, 99, 212, 235."
   - "Related, no change needed: 76, 128, 131, 143, 159, 161, 215, 239. The LiteLLM transport plan (PLAN-llm-client-litellm-transport, unwritten) owns removing its _skip_mcp_handler workaround: amend before its build if this merges first, else a follow-on rec. That planning work was told on 2026-11-11, and the implementation report repeats it."
   - "Why lowlevel, not the 2.x high-level server: the high-level server registers per-function tools with static signatures; this server's schemas are derived at runtime from describe() (Decision 81 cl.2)."
-  - "Evidence (throwaway worktree, 2026-11-11): /mnt/project-files/rec-3795-plan/evidence/ -- prototype.diff (its error payload matches this plan, but it is NOT to be applied wholesale: it carries unrelated base-drift hunks in tests/persona_contracts/, keeps jsonschema.validate outside the catch-all try, and does not declare jsonschema), relock.diff (taken before jsonschema was declared), wire_parity.sh run on the prototype passed. Advisor: advisor-brief/ADVICE.md. Critique: CRITIQUE-r1.md to CRITIQUE-r6.md."
+  - "Evidence (throwaway worktree, 2026-11-11): /mnt/project-files/rec-3795-plan/evidence/ -- prototype.diff (its error payload matches this plan, but it is NOT to be applied wholesale: it carries unrelated base-drift hunks in tests/persona_contracts/, keeps jsonschema.validate outside the catch-all try, and does not declare jsonschema), relock.diff (taken before jsonschema was declared), wire_parity.sh run on the prototype passed. Advisor: advisor-brief/ADVICE.md. Critique: CRITIQUE-r1.md to CRITIQUE-r9.md."
   - "mcp 2.x gotchas: pydantic attrs are snake_case (is_error, structured_content, input_schema), constructors accept camelCase aliases, wire stays camelCase; 2.x no longer validates input against inputSchema; mcp.Client(server) connects in-process."
   - "pip-compile --no-index cannot resolve in a CC-web container: run without it, then restore the header's command line byte-identical to main's. Sync the venv after the relock (bash bin/sync-deps.sh) before running tests."
-  - "Rollout: the venv is baked into the CC-web environment snapshot and session_start_sync_deps heals it each session; it is advisory and exits 0 on failure. New code on mcp 1.x fails in create_server, so a session whose server starts on the snapshot's 1.x venv has no ducklake-reads tools -- either because the sync failed, or (inferred, not verified) because .mcp.json's launch ran before the SessionStart sync finished. A running session keeps its already-started server; a CC-web restart boots the same stale snapshot, so recovery is /mcp reconnect after sync, and the lasting fix is a snapshot rebuild (step 13 covers both cases)."
-  - "Dependabot PR #980 was closed with '@dependabot ignore this major version'; GitHub documents that as lifted once the repo upgrades to that major; step 14 checks."
+  - "Rollout: the venv is baked into the CC-web environment snapshot and session_start_sync_deps heals it each session; it is advisory and exits 0 on failure. New code on mcp 1.x fails in create_server, so a session whose server starts on the snapshot's 1.x venv has no ducklake-reads tools -- either because the sync failed, or (inferred, not verified) because .mcp.json's launch ran before the SessionStart sync finished. A running session keeps its already-started server; a CC-web restart boots the same stale snapshot, so recovery is /mcp reconnect after sync, and the lasting fix is a snapshot rebuild (step 14 covers both cases)."
+  - "Dependabot PR #980 was closed with '@dependabot ignore this major version'; GitHub documents that as lifted once the repo upgrades to that major; step 15 checks."
   - "Graduated shards naming scope test files, all KEPT unchanged (node ids preserved): agent-verb-server-fails-loud-on-describe-failure, agent-verb-surface-is-read-only, agent-verb-tools-carry-nonempty-description, agent-verb-tools-derived-from-describe, agent-verb-typed-error-mapping, lockfile-sync-commented-absurd-bump-fails, lockfile-sync-hash-without-whitespace-not-comment, lockfile-sync-live-declarations-all-parsed, lockfile-sync-unparseable-declaration-fails, mcp-declaration-test-has-no-pinned-1x-literal, mcp-lock-major-compatibility, mcp-server-hermetic-coverage, preflight-summary-unavailable-and-agent-facing, telemetry-read-clients-use-the-route, setup-cloud-affected-data-edge. Only mcp-declaration-admits-compiled-pin is retired (scope)."
-  - "PR CI's fast tier installs requirements-fast.txt (a range), so --pre runs the latest 2.x while the full tier tests the lock; an upstream 2.x minor can red PR CI with no repo change (mcp 2.3.0's lowlevel server marks part of its surface provisional for 2.x minors). tests/validate/test_pytest_diff_runtime_dep_artifact.py already enforces fast-tier floor parity for the new jsonschema line."
+  - "PR CI's fast tier installs requirements-fast.txt (a range), so --pre runs the latest 2.x while the full tier tests the lock; an upstream 2.x minor can red PR CI with no repo change (mcp 2.3.0's lowlevel server marks part of its surface provisional for 2.x minors). tests/validate/test_pytest_diff_runtime_dep_artifact.py already enforces fast-tier floor parity for the new jsonschema and mcp-types lines."
   - "AgentToolError text still reaches the client as today: ReaderBoundaryError / ReaderUnavailableError carry up to 300 characters of the reader's response body; only unexpected exceptions become class-only."
-  - "Related-work check: red_overlap verdict clear (no reds, 2026-11-11). Operator sign-off 2026-11-11 covers confirmation A (replace the major-two guard; the sign-off text said its record is re-pointed -- the critique showed Decision 244 cl.5 allows repair or retirement only, so the form was put back to the operator, who approved retire-and-replace on 2026-11-11) and B (step 14's Dependabot comments). Approval message ids live in the handoff note, never here."
+  - "Related-work check: red_overlap verdict clear (no reds, 2026-11-11). Operator sign-off 2026-11-11 covers confirmation A (replace the major-two guard; the sign-off text said its record is re-pointed -- the critique showed Decision 244 cl.5 allows repair or retirement only, so the form was put back to the operator, who approved retire-and-replace on 2026-11-11) and B (step 15's Dependabot comments). Approval message ids live in the handoff note, never here."
   - "T4.10a (in_progress) is related context only: its c7 (one MCP server, consumed by the LiteLLM backend as an MCP client) is already met, so this plan claims no criterion of it."
+  - "Scope amendment 2026-11-12 (build plan-defect, reviewed by this plan's planning worker): the build's full tier failed tests/telemetry_capture/test_read_route.py::test_the_read_clients_import_where_fcntl_is_absent (Feedback Loop's file, not in scope; no open PR touches it). Under mcp 2.3.0 importing any mcp submodule loads mcp/server/stdio.py, which imports fcntl unless sys.platform is win32, so the test's simulation (fcntl removed on Linux) failed at our module-scope mcp import. The guarantee it states is import on any host; serving is outside it (on real Windows mcp skips fcntl itself; on the simulated host create_server would still raise, a state no real host has). Fix on our side, test unchanged: lazy mcp imports, types from mcp_types, mcp-types declared like jsonschema, plus our own subprocess guard (step 6). Settled on a blind consult (advisor-brief-amend-1/ADVICE.md): lazy over changing the test, mcp_types over per-function mcp.types imports, declared over undeclared (mild). Proven on the prototype: the fcntl test, the read_route file and the server suite pass (41); the guard is red on the first port."
   - "Not bundled: rec-3821 (fast-tier floor agreement check -- separate concern, seven registration surfaces); rec-4280 (future repo-tools MCP server, to be written against 2.x)."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
@@ -415,26 +461,29 @@ gate_rounds:
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 7}
   - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 4}
   - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 1}
+  - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 2, nits: 3}
+  - {gate: plan-critique, round: 8, verdict: PROCEED, blocking: 0, nits: 3}
+  - {gate: plan-critique, round: 9, verdict: PROCEED, blocking: 0, nits: 1}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
   - only the plan-cited decision sections
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
-  - /mnt/project-files/rec-3795-plan/evidence/ is mounted (steps 9, 11)
+  - /mnt/project-files/rec-3795-plan/evidence/ is mounted (steps 10, 12)
 execution_steps:
   - 'Pre: main''s requirements.txt still pins mcp==1.30.0 and no open PR touches the scope files. Post: none.'
-  - 'requirements.in and requirements-fast.txt: mcp>=2.3.0,<3 and jsonschema>=4.20.0; requirements-fast.txt header list gains jsonschema.'
-  - 'Relock: .venv/bin/pip-compile --output-file=requirements.txt --strip-extras --upgrade-package mcp requirements.in, then .venv/bin/pip-compile --output-file=requirements-dev.txt --strip-extras requirements-dev.in; restore both header command lines to main''s text byte for byte; bash bin/sync-deps.sh. Post: step 6 passes.'
+  - 'requirements.in and requirements-fast.txt: mcp>=2.3.0,<3, jsonschema>=4.20.0 and mcp-types>=2.3.0,<3; requirements-fast.txt header list gains jsonschema and mcp-types.'
+  - 'Relock: .venv/bin/pip-compile --output-file=requirements.txt --strip-extras --upgrade-package mcp requirements.in, then .venv/bin/pip-compile --output-file=requirements-dev.txt --strip-extras requirements-dev.in; restore both header command lines to main''s text byte for byte; bash bin/sync-deps.sh. Post: step 7 passes.'
   - scripts/agent_sdk/mcp_server.py -- the 2.x port and _call_tool_result per the scope row.
   - tests/test_agent_sdk_mcp_server.py, tests/checks/deps/affected_tests/test_derivation.py, tests/test_import_governance.py, tests/persona_contracts/test_schema_metaschema.py -- per their scope rows.
-  - 'Registry: git mv config/agent/verification_registry/entries/mcp-declaration-admits-compiled-pin.yaml config/agent/verification_registry/entries/deprecated/; graduate VP steps 1, 2, 4 and 5 with their graduation_check_id values.'
+  - 'Registry: git mv config/agent/verification_registry/entries/mcp-declaration-admits-compiled-pin.yaml config/agent/verification_registry/entries/deprecated/; graduate VP steps 1, 2, 4, 5 and 6 with their graduation_check_id values.'
   - 'Size relief (Decision 128): measure the four modified test files'' SLOC after editing; if any crosses 500, split it into a mirror test package (Decision 131), never raise a budget.'
-  - Run VP steps 1-11 until green; on unrecoverable failure stop and RCA (Decision 55).
-  - 'Code review via a fresh code-review subagent; fix blocking findings and rerun VP steps 1-11. Expected weakening dispositions for validate_weakening_dispositions -- removed test_mcp_declaration_rejects_major_two: planned-change with the literal cite acceptance_criteria[3] (0-based; the node-ids-unchanged criterion naming this replacement); reworded importorskip in test_schema_metaschema.py: owned-skip (reason starts "env: " and cites rec-3795); harness assertion rewrites (request_handlers to mcp.Client, camelCase to snake_case attributes): refactor, each cite written as tests/test_agent_sdk_mcp_server.py::<test name>.'
-  - 'Commit (flip implementation_declared to true; carry "Resolves: rec-3795, rec-2871" as its own paragraph), rebase on origin/main, run VP step 12 (full tier + validation_result --verify-head) on the committed clean HEAD (a blocking pre-handoff step, never a CI-only handoff), push, open the build PR, drive CI green, squash-merge with the Resolves trailer in the commit body.'
-  - 'Report, as separate facts: what was implemented; VP results including the wire_parity.sh line and the litellm probe lines; the full-tier exit plus validation_result --verify-head for the pushed HEAD; structured postflight evidence (scripts.session.postflight --evidence); a reminder that the LiteLLM transport plan drops its _skip_mcp_handler workaround; the push, PR number, CI result and merge SHA; then run post-deploy steps 13-15 and report each read-back.'
+  - Run VP steps 1-12 until green; on unrecoverable failure stop and RCA (Decision 55).
+  - 'Code review via a fresh code-review subagent; fix blocking findings and rerun VP steps 1-12. Expected weakening dispositions for validate_weakening_dispositions -- removed test_mcp_declaration_rejects_major_two: planned-change with the literal cite acceptance_criteria[3] (0-based; the node-ids-unchanged criterion naming this replacement); reworded importorskip in test_schema_metaschema.py: owned-skip (reason starts "env: " and cites rec-3795); harness assertion rewrites (request_handlers to mcp.Client, camelCase to snake_case attributes): refactor, each cite written as tests/test_agent_sdk_mcp_server.py::<test name>.'
+  - 'Commit (flip implementation_declared to true; carry "Resolves: rec-3795, rec-2871" as its own paragraph), rebase on origin/main, run VP step 13 (full tier + validation_result --verify-head) on the committed clean HEAD (a blocking pre-handoff step, never a CI-only handoff), push, open the build PR, drive CI green, squash-merge with the Resolves trailer in the commit body.'
+  - 'Report, as separate facts: what was implemented; VP results including the wire_parity.sh line and the litellm probe lines; the full-tier exit plus validation_result --verify-head for the pushed HEAD; structured postflight evidence (scripts.session.postflight --evidence); a reminder that the LiteLLM transport plan drops its _skip_mcp_handler workaround; the push, PR number, CI result and merge SHA; then run post-deploy steps 14-16 and report each read-back.'
 rollback: >-
   Forward-fix only. Reverting the PR restores mcp 1.30 and the decorator server; sessions pick the old lock up through the
   SessionStart sync. If the environment snapshot was already rebuilt on the 2.x lock, the reverted server can start on 2.x
-  before the sync heals the venv and fail in create_server -- the same recovery as step 13: /mcp reconnect after sync.
+  before the sync heals the venv and fail in create_server -- the same recovery as step 14: /mcp reconnect after sync.
