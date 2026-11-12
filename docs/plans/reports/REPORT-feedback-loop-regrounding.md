@@ -3,7 +3,7 @@
 > REPORT-ONLY deliverable of `docs/plans/PLAN-feedback-loop-regrounding.yaml` (Decision 86 cl.2; file-router
 > report-deliverables route). A dated, point-in-time reading of the October 2026 feedback-loop designs (the eight
 > wave 2-4 component reports among `docs/plans/reports/REPORT-w1-*.md`, the W2 synthesis and the W3 staging report)
-> against main at d75c76f3. The other two W1 reports, `REPORT-w1-reader-verbs.md` and
+> against main at b4d76e92. The other two W1 reports, `REPORT-w1-reader-verbs.md` and
 > `REPORT-w1-capture-producer-wiring.md`, are wave 1, built, and out of scope. It supersedes the eight by reference
 > for their premises and anchors; it edits none of them, because W1 and W3 text is cited by line elsewhere
 > (Decision 221 cites REPORT-w3:423 and :627). It plans no wave 2-4 work: the operator's 2026-11-10 gate holds
@@ -12,13 +12,12 @@
 > snapshot. Section 11's readings are not rulings: each one's home is the Decision or design it cites.
 
 Evidence base and claim marks:
-- **[repo]** read on main at d75c76f3, with path:line where it matters. Decisions are cited by number and clause,
+- **[repo]** read on main at b4d76e92, with path:line where it matters. Decisions are cited by number and clause,
   not DECISIONS.md line, because new Decisions are inserted at the top of that file.
 - **[recs]** read from the rec store through the ducklake-reads named verbs on 2026-11-10 to 2026-11-12.
 - **[review]** a finding of the 2026-10-05 feedback-loop review, which is not in this repository; each finding this
   report relies on is restated here.
-- **[probe]** a W1 plan's own verification command, re-run on 2026-11-12 at d8283f55 and again at 3f8edd12 with
-  identical results (section 12).
+- **[probe]** a W1 plan's own verification command, last re-run on 2026-11-12 at b4d76e92 (section 12).
 - **[inferred]** a reading not verified. **[partial]** only partly checked.
 
 ---
@@ -42,7 +41,8 @@ Evidence base and claim marks:
    before about late November, early December and early January. Window reach comes next: window verbs are capped at
    7 days, cold window reads time out (rec-4474), pagination truncates with no cursor (rec-4363), and responses carry
    no completeness watermark. Snapshots are kept 30 days (SNAPSHOT_RETAIN_DAYS), so no long input can be re-read as
-   it was judged. Where the loop's daily series live is ruling R2 (section 17).
+   it was judged. The operator ruled that the loop's daily series are settled, version-keyed observation rows in the
+   journal, beside its verdict records (R2, section 17).
 4. **Back-validation's join keys are still missing where they matter.** `checkout_base_sha` is not populated on
    cloud sessions (rec-4426), and all ten session-to-merge columns held under `held:feedback-loop-gate` (`rec_ids`
    among them) are unproduced; the operator ruled they stay held until back-validation is planned (R1).
@@ -57,7 +57,7 @@ Evidence base and claim marks:
    convergence-health, backlog-health, cost-reconciliation, telemetry-verification and capacity alarms (section 7).
 8. **The allow-list's premises moved again**: 19 closed vocabularies, not 15; no `enforced: false` flags; its column
    inventory no longer matches; Decision 221 cl.1 keeps `cost_usd` out of any crossing set.
-9. **New since October and since the 2026-11-10 draft** (section 1): Decisions 249, 250, 252 and 253; two
+9. **New since October and since the 2026-11-10 draft** (section 1): Decisions 249, 250, 252, 253 and 254; two
    no-backfill capture gaps; the arrival oracle dates lost-window excuses by commit author date; the inference tier
    selection (#1969) changes the LiteLLM lane's reasoning premise.
 10. **Wave order holds; prerequisites changed** (section 15). T3.4 also needs T1.13, whose owner was asked of the
@@ -77,10 +77,10 @@ Evidence base and claim marks:
 | Decisions 231 and 235 | Persona-eval run records (231) and shadowed-check verdicts (235 cl.3) join the one loop record journal; 235 cl.2 binds a verification-weakening ladder lane at CD.46's ratification; 235 cl.7 holds its build until rec-4413's re-measure (from 2027-01-18) and an out-of-scope evidence producer (T3.7) | [repo] Decisions 231, 235 |
 | Decision 228 | A root session's end is read from its turns | [repo] Decision 228 |
 | Decision 239 | Agents read production transcript text only through the masked content reader; its deploy lock is rec-4696 | [repo] Decision 239 cl.1, cl.5 |
-| Decision 249 | Lambda channels deploy only the newest main commit whose full tier passed, so a deploy day differs from the merge day | [repo] Decision 249 cl.2 |
+| Decision 249, amended by 254 | Code-deploy channels consume only the last-green ref, the newest main commit a passing full-tier run covers (254 cl.5, amending 249 cl.2), so a deploy day differs from the merge day | [repo] Decisions 249 cl.2, 254 cl.2, cl.5 |
 | Decision 250 | Arrival expectations: telemetry_sessions is checked against every merged Claude-Session trailer (cl.5); an empty denominator is skipped, never green (cl.2); every check is watched (cl.3) | [repo] Decision 250; scripts/telemetry_verify/session_presence.py |
 
-### 1.2 Since the 2026-11-10 draft (f866f98b to d75c76f3)
+### 1.2 Since the 2026-11-10 draft (f866f98b to b4d76e92)
 
 - src/, the four telemetry contracts, parser_versions.yaml, scripts/rec_episode.py, scripts/ops_data_portal.py and
   the W1, W2 and W3 reports are unchanged **[repo: git diff]**. Other probe inputs did move, so every W1 probe was
@@ -109,6 +109,11 @@ Evidence base and claim marks:
   friction correctness work (rec-4959) is expected to take parser_version 10, and that producer the next version
   (coordinator log, 2026-11-12) **[reported]**: two more derivation changes for any series keyed on parser
   version (section 9).
+- **Decision 254** (2026-11-12): the full tier runs post-merge on batches of main, and code deploys consume the
+  last-green ref (cl.5, amending Decision 249 cl.2); a red pauses deploys, never merging. A fix's deploy day can
+  therefore trail its merge by a batch (section 8) **[repo]**.
+- mcp 2.x landed (#1984, rec-3795 resolved) and the LiteLLM transport (#1991); #1994 makes the cost ledger a
+  declared bound on transcript models (refs rec-4430, still open, High) **[repo: git log; recs]**.
 - New related recs: rec-5056 (High; harness_key_missing alarm, 2 sessions; any join on `harness_session_key`
   inherits it); rec-5061 (High; threads started in the checkout's parent store branch `HEAD`, so a branch-prefix
   read miscounts them); rec-5042 (DuckLake Lambda cold connect 11-14 s on any backend, beside rec-4474) **[recs]**.
@@ -227,7 +232,7 @@ choosing delib-k3 (b) or (c), or a read-side chain-of-thought regex, would bring
 
 **Not built:** the verb, the five derived session fields and the observation field (Class A field adds with no
 physical column), the response-shape home (delib-q4, operator), the drift check, durable per-day history (rec-4438;
-its home is ruling R2), the loss counter (delib-k2, now with rec-4028), retention of stored text
+its home is R2), the loss counter (delib-k2, now with rec-4028), retention of stored text
 (rec-4698) and erasure (rec-4029, Low) **[recs]**.
 
 **Waits on:** the field adds and the text-bearing marker (contract amendments in this workspace's remit); delib-q4
@@ -426,9 +431,10 @@ record unchanged **[review; closure_gate.py not re-read]**.
   truncate with no cursor, rec-4363) and every page's `read_version` is equal; telemetry_usage.py does not check
   `read_version` today, so that check is new. Snapshots are kept 30 days (SNAPSHOT_RETAIN_DAYS,
   src/common/ducklake_maintenance.py:85), so days older than that cannot be re-read as they were. Where the settled
-  daily series live is ruling R2.
-- backval-q2 (effective day of a fix not live at merge): Decision 249 deploys only the newest full-tier-green
-  commit, so today a fix's effective day is its Decision 249 deploy day. Once SIT stands (T2.57, T2.58), Decision
+  daily series live is R2: settled observation rows in the journal.
+- backval-q2 (effective day of a fix not live at merge): code deploys consume the last-green ref, the newest main
+  commit a passing batched full-tier run covers (Decision 254 cl.2, cl.5, amending Decision 249 cl.2), so today a
+  fix's effective day is the deploy of the first last-green ref that covers it. Once SIT stands (T2.57, T2.58), Decision
   252 cl.6 makes PROD promote-only, and the PROD effective day becomes the promotion day; backval-q2's "deploy's own
   timestamp" then reads the promotion record **[repo]**.
 - The post-merge `deterministic_auto_close` venue remains (recommendation-relevance.yaml); whether it can close a
@@ -531,18 +537,19 @@ The forks the operator was shown (S1-S5) have rec homes in section 17.
 
 ---
 
-## 12. Probe re-runs (each W1 plan's own hermetic VPs, 2026-11-12 at d8283f55 and 3f8edd12)
+## 12. Probe re-runs (each W1 plan's own hermetic VPs, 2026-11-12, last at b4d76e92)
 
 Each W1 plan's hermetic verification steps were re-run with a 200 s limit per step; steps that fetch old SHAs, run
 `--pre` or render the plan document were skipped. "Pass" means exit 0 and every `expected_literals` string printed.
 The 2026-11-10 run at f866f98b is superseded, because probe inputs moved in between (section 1.2). The suite ran at
-d8283f55 and again at 3f8edd12, after #1977 changed probe inputs (docs/contracts/, docs/ROADMAP-PLATFORM.yaml);
-every step's status and output were identical. Raw outputs are not committed. **[probe]**
+d8283f55, at 3f8edd12 and at b4d76e92, each time main had moved probe inputs, in a venv synced to main's pins. The
+only change across the three runs is deliberation VP 3, which runs since mcp 2.x landed (#1984). Raw outputs are not
+committed. **[probe]**
 
 | Component | Steps run | Pass | Differs from the pinned literal (what moved) | Did not finish |
 |---|---|---|---|---|
 | friction | VP 1, 2, 4, 5, 6 | 2, 6 | VP 1 raises `TypeError` (`build_observations` now needs `sidecars`, #1405). VP 4: registered hooks in .claude/settings.json 13 to 21; none falls back to `hook:PreToolUse.Bash` (the plugin hooks' fallbacks are in section 3). VP 5: rework and exception inputs widened to the k2 set | - |
-| deliberation | VP 1-5 | 4, 5 | VP 1: parser_version 2 to 9; diagnostics also count `absent_usage_key`. VP 2: parser 9; `reasoning_effort` joined the reasoning fields; LiteLLM tier 1 is `['deepseek/deepseek-flash']`, was `['deepseek/deepseek-chat', 'deepseek/deepseek-reasoner']` (#1969). VP 3: fails in the pinned litellm 1.106.2 and mcp 1.30.0 pair, whose tool-call path imports `mcp.types.CacheableResult`, absent in mcp 1.30.0 (rec-3795) | - |
+| deliberation | VP 1-5 | 4, 5 | VP 1: parser_version 2 to 9; diagnostics also count `absent_usage_key`. VP 2: parser 9; `reasoning_effort` joined the reasoning fields; LiteLLM tier 1 is `['deepseek/deepseek-flash']`, was `['deepseek/deepseek-chat', 'deepseek/deepseek-reasoner']` (#1969). VP 3: with mcp 2.3.0 (#1984, rec-3795 closed) it runs and prints the pinned behaviour (reasoning content returned, echoed back, a single-space placeholder when stripped under explicit thinking) on litellm 1.106.2, not the pinned 1.102.1 | - |
 | Goodhart register | VP 2-5 | 3, 5 | VP 2: two failure_signal readers exist (was 0); `drill_markers=0` because the probe misses `ops_projects.purpose` | VP 4 (over 200 s) |
 | cost and egress | VP 2-5 | 3, 5 | VP 2: a telemetry catalog-stats alarm exists (`tf_catalog_stats_lines` 0 to 1); capture hooks include SessionEnd, Stop, StopFailure and UserPromptSubmit | VP 4 (over 200 s) |
 | rec filer | VP 1-5 | all | - | - |
@@ -563,7 +570,7 @@ Three long runs did not finish and were not retried **[partial]**.
 | 2 | `rec_ids` and `rec_id` population, and the other eight held session-to-merge columns | Held until back-validation is planned (R1) | rec-4606 note; the back-validation plan |
 | 3 | CD.47 journal writer | Operator decision first (handover B2 item 5), then design | rec-5077 |
 | 4 | reader-q2 shadow re-derivation | Done in slice 4 | rec-4025 closed |
-| 5 | DQ-monitor substrate | Exists (telemetry-verification workflow); drift check unbuilt; durable per-day counts are rec-4438, stored as ruling R2 says | deliberation build; rec-4438 |
+| 5 | DQ-monitor substrate | Exists (telemetry-verification workflow); drift check unbuilt; durable per-day counts are rec-4438, stored as R2 settles | deliberation build; rec-4438 |
 | 6 | Self-describing gate markers | Done | rec-4172 closed |
 | 7 | MVP price map | Not needed for this loop: `cost_source` exists, no price table; the budget is in physical units (S5) | rec-4031 (post-MVP, S5 note) |
 | 8 | `input_key` | Producer field at the next parser bump (S3) | rec-5079 |
@@ -582,15 +589,15 @@ plus a read of rec-5040 to rec-5089 (2026-11-11) **[recs]**. Each id was read ba
 
 | Rec | What | Priority | Origin |
 |---|---|---|---|
-| rec-5077 | Design the loop record journal's writer: generalised kernel or dedicated verb; covers the daily-series row kind | Medium | draft P2; R2 note |
+| rec-5077 | Design the loop record journal's writer: generalised kernel or dedicated verb; covers every record kind R2 settles | Medium | draft P2; R2 note |
 | rec-5078 | Ops homes: covered_by and fix_attempt stamps, close-time read, durable close_proposed | Medium | draft P3 |
 | rec-5079 | `input_key` on claude_code tool_call rows at the next parser bump | Low | draft P6; S3 |
-| rec-5080 | Integer version per event verb beside the digest, lockstep check | Low | S1 |
+| rec-5080 | Integer version per event verb beside the digest, lockstep check; noted as a wave 3 prerequisite | Low | S1; R2 note |
 | rec-5097 | Friction G1 absorb with absorbed count; G2 NULL-name closes out of repeat runs; classifier_version 2 | Medium | draft P5; R3 |
 | rec-4706 (note) | `component` stamp on the telemetry reader's request line | - | draft P4, folded |
 | rec-4606 (note) | All ten held session-to-merge columns stay held until back-validation planning; the named gate list (rec-4914 declined; CD.46, 47, 48, 50, 51); this report's path | - | R1, S4 |
-| rec-4438 (note) | Where the monitor's per-day counts are stored | - | R2 |
-| rec-5077 (note) | The journal's series row kind and its grain, as R2 rules | - | R2 |
+| rec-4438 (note) | The monitor's per-day counts are rows of the journal's settled observation kind | - | R2 |
+| rec-5077 (note) | The writer covers verdict records and the observation kind, PROD-only, with its grain | - | R2 |
 | rec-4696 (note) | Technical dependency only: the deliberation verb reads no content; the gate still holds | - | S2 |
 | rec-4031 (note) | Post-MVP stands: the budget is in physical units, no price table; the contract's `cost_usd` wording to align | - | S5 |
 | rec-4028 (note) | Owner the Agents in GitHub workspace; reasoning mapping reviewed here; loss counter | - | R5 |
@@ -633,7 +640,8 @@ docs/ROADMAP-PLATFORM.yaml T1.13]**.
   into CD.50, and CD.52's substance landed as Decision 199's 2026-10-16 note (its T2.52 reactivation half is
   open). Read-only re-grounding (this report) may run first. S2 is a technical reading and lifts none of this.
 - **File CD.46, CD.47, CD.48, CD.50, CD.51** with their REPORT-w3 section 9 amendments, through Decision 246
-  approval runs; CD.45 is the highest candidate decision on main. CD.47 is filed with the numbered Decision R2 needs.
+  approval runs; CD.45 is the highest candidate decision on main. CD.47 is filed with the numbered Decision amending
+  Decision 199 cl.1 that R2 needs.
   CD.50's catalog-egress seed needs a new source after Decision 253 (section 6).
 - **capture-q1** (the register's capture denominator): Decision 250's oracle sees merged sessions only (section
   5). W2 calls this the loop's critical path. With it, **W2's review-load envelope** (about 60 reviews a day,
@@ -662,7 +670,7 @@ evidence and shown to the operator before the plan was written; "ruled" rows (R)
 | Id | Ruling | Date | Home |
 |---|---|---|---|
 | R1 | All ten session-to-merge columns held under `held:feedback-loop-gate` (`rec_ids`, `plan_slug`, `pr_url`, `ci_outcome`, `files_changed`, `lines_added`, `lines_removed`, `scope_drift_files`, and `rec_id` on observations and transcripts) stay unproduced until back-validation is planned; that plan picks a merge-time annotate producer or a client-side trailer join; read-time derivation rejected (trailers live in git) | 2026-11-12 | rec-4606 note |
-| R2 | The journal stores verdict records (each carrying the numbers it judged and its read version) and one settled daily observation kind as the loop's series source: one insert-only row per (tenant_id, project_id, metric_id, UTC day, read_version, integer verb version, settled_at) with numerator and denominator, never a ratio, plus the producing verb, the parser and classifier versions seen, the catalog snapshot and a lost-window coverage flag. Rows are written only from a named verb's response after a stated lateness bound; a restatement is a new row; no comparison joins across versions; a sample re-derivation inside the 30-day snapshot window reports drift as a fault. It needs a numbered Decision amending Decision 199 cl.1, filed with CD.47 | re-asked 2026-11-12 | rec-4438, rec-5077 notes |
+| R2 | The loop record journal stores verdict records (each carrying the numbers it judged and its read version) and one settled daily observation kind as the loop's series source: one insert-only row per (tenant_id, project_id, metric_id, UTC day, read_version, integer verb version, settled_at) with numerator and denominator, never a ratio, plus the producing verb, the parser and classifier versions seen, the catalog snapshot and a lost-window coverage flag. Rows are written only from a named verb's response after a stated lateness bound; a restatement is a new row; no comparison joins across versions; a sample re-derivation inside the 30-day snapshot window reports drift as a fault. It needs a numbered Decision amending Decision 199 cl.1, filed with CD.47, stating its own reason (Decision 199's derived-read-too-costly condition is about latency, not reproducibility). The first ruling (settled journal rows with no governance) was re-asked the same day because it clashed with Decision 199 cl.1 and staged CD.47; an independent advisor recommended this form | 2026-11-12 | rec-4438, rec-5077 notes; rec-5080 note (wave 3 prerequisite) |
 | R3 | Friction G1: absorb the tool_error into the gate label, and report the absorbed count | 2026-11-12 | rec-5097 |
 | R4 | This report is a dated snapshot; lasting rulings live in recs | 2026-11-11 | this section |
 | R5 | rec-4028 (LiteLLM producer) is the Agents in GitHub workspace's; this workspace reviews its reasoning mapping | 2026-11-11 | rec-4028 note |
@@ -678,7 +686,7 @@ evidence and shown to the operator before the plan was written; "ruled" rows (R)
 ## 18. Known gaps
 
 - The W1 VPs that need git history at old SHAs or a network fetch were skipped; three long simulations did not
-  finish, and deliberation VP 3 cannot run in the pinned litellm and mcp pair (section 12).
+  finish (section 12).
 - G1 and G2 were re-read against the live SQL, not re-probed with vectors (rec-5097 adds them).
 - Which hooks rec-4959 affects, and the 17 friction vectors' exact coverage, were not re-derived.
 - Whether the post-merge `deterministic_auto_close` venue can close a telemetry-routed acceptance without a verdict
