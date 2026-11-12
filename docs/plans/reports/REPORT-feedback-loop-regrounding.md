@@ -3,7 +3,7 @@
 > REPORT-ONLY deliverable of `docs/plans/PLAN-feedback-loop-regrounding.yaml` (Decision 86 cl.2; file-router
 > report-deliverables route). A dated, point-in-time reading of the October 2026 feedback-loop designs (the eight
 > wave 2-4 component reports among `docs/plans/reports/REPORT-w1-*.md`, the W2 synthesis and the W3 staging report)
-> against main at 282c4ab3. The other two W1 reports, `REPORT-w1-reader-verbs.md` and
+> against main at d75c76f3. The other two W1 reports, `REPORT-w1-reader-verbs.md` and
 > `REPORT-w1-capture-producer-wiring.md`, are wave 1, built, and out of scope. It supersedes the eight by reference
 > for their premises and anchors; it edits none of them, because W1 and W3 text is cited by line elsewhere
 > (Decision 221 cites REPORT-w3:423 and :627). It plans no wave 2-4 work: the operator's 2026-11-10 gate holds
@@ -12,14 +12,13 @@
 > snapshot. Section 11's readings are not rulings: each one's home is the Decision or design it cites.
 
 Evidence base and claim marks:
-- **[repo]** read on main at 282c4ab3 (d8283f55 plus five new plan files under docs/plans/, none of them a loop
-  design), with path:line where it matters. Decisions are cited by number and clause,
+- **[repo]** read on main at d75c76f3, with path:line where it matters. Decisions are cited by number and clause,
   not DECISIONS.md line, because new Decisions are inserted at the top of that file.
 - **[recs]** read from the rec store through the ducklake-reads named verbs on 2026-11-10 to 2026-11-12.
 - **[review]** a finding of the 2026-10-05 feedback-loop review, which is not in this repository; each finding this
   report relies on is restated here.
-- **[probe]** a W1 plan's own verification command, re-run on 2026-11-12 at d8283f55 (section 12). No probe reads
-  any file changed between d8283f55 and 282c4ab3.
+- **[probe]** a W1 plan's own verification command, re-run on 2026-11-12 at d8283f55 and again at 3f8edd12 with
+  identical results (section 12).
 - **[inferred]** a reading not verified. **[partial]** only partly checked.
 
 ---
@@ -81,7 +80,7 @@ Evidence base and claim marks:
 | Decision 249 | Lambda channels deploy only the newest main commit whose full tier passed, so a deploy day differs from the merge day | [repo] Decision 249 cl.2 |
 | Decision 250 | Arrival expectations: telemetry_sessions is checked against every merged Claude-Session trailer (cl.5); an empty denominator is skipped, never green (cl.2); every check is watched (cl.3) | [repo] Decision 250; scripts/telemetry_verify/session_presence.py |
 
-### 1.2 Since the 2026-11-10 draft (f866f98b to 282c4ab3)
+### 1.2 Since the 2026-11-10 draft (f866f98b to d75c76f3)
 
 - src/, the four telemetry contracts, parser_versions.yaml, scripts/rec_episode.py, scripts/ops_data_portal.py and
   the W1, W2 and W3 reports are unchanged **[repo: git diff]**. Other probe inputs did move, so every W1 probe was
@@ -103,9 +102,13 @@ Evidence base and claim marks:
   and the journal is PROD-only. **Decision 253**: the catalog moves to RDS PostgreSQL, SIT first; the named-verb
   surface is unchanged, and the Neon egress premise of the W1 budget's catalog-egress line goes (section 6)
   **[repo]**.
+- #1977 added the plan_agent and implement_agent persona contracts and re-sequenced T4 roadmap rows; no loop
+  design or telemetry contract changed **[repo: git diff]**.
 - New plans on main, not yet built: PLAN-persona-run-identity-contract (#1975) adds a nullable
-  `telemetry_agents.definition_sha256` and plans claude_code parser_version 10 in its plan 2, one more derivation
-  change for any series keyed on parser version (section 9) **[repo]**.
+  `telemetry_agents.definition_sha256`, and its unplanned plan 2 is a claude_code producer change **[repo]**. The
+  friction correctness work (rec-4959) is expected to take parser_version 10, and that producer the next version
+  (coordinator log, 2026-11-12) **[reported]**: two more derivation changes for any series keyed on parser
+  version (section 9).
 - New related recs: rec-5056 (High; harness_key_missing alarm, 2 sessions; any join on `harness_session_key`
   inherits it); rec-5061 (High; threads started in the checkout's parent store branch `HEAD`, so a branch-prefix
   read miscounts them); rec-5042 (DuckLake Lambda cold connect 11-14 s on any backend, beside rec-4474) **[recs]**.
@@ -463,7 +466,7 @@ includes parser_version **[review]**.
   and first-seen ordering mis-orders a revert. Ruling S1: an integer version per verb in its data block beside the
   digest, with a check that a digest change needs an integer bump (rec-5080).
 - Derivation cadence: claude_code parser versions 3 to 9 landed in 24 days (config/telemetry/parser_versions.yaml:20-57),
-  and PLAN-persona-run-identity-contract plans version 10. The ladder restarts a lane on every stamp bump and needs
+  and two more producer changes are expected (section 1.2). The ladder restarts a lane on every stamp bump and needs
   30 days of signal (REPORT-w1-maturity-ladder.md:721-750), so a lane keyed on parser_version (deliberation's)
   would rarely clear at that cadence. A lane's restart key needs to be the derivation it actually reads (its
   verb's integer version under S1, or a narrower declared input), not the producer's parser version
@@ -528,12 +531,13 @@ The forks the operator was shown (S1-S5) have rec homes in section 17.
 
 ---
 
-## 12. Probe re-runs (each W1 plan's own hermetic VPs, 2026-11-12 at d8283f55)
+## 12. Probe re-runs (each W1 plan's own hermetic VPs, 2026-11-12 at d8283f55 and 3f8edd12)
 
 Each W1 plan's hermetic verification steps were re-run with a 200 s limit per step; steps that fetch old SHAs, run
 `--pre` or render the plan document were skipped. "Pass" means exit 0 and every `expected_literals` string printed.
-The 2026-11-10 run at f866f98b is superseded, because probe inputs moved in between (section 1.2). No probe reads a
-file changed between d8283f55 and 282c4ab3 (only five new plan files). Raw outputs are not committed. **[probe]**
+The 2026-11-10 run at f866f98b is superseded, because probe inputs moved in between (section 1.2). The suite ran at
+d8283f55 and again at 3f8edd12, after #1977 changed probe inputs (docs/contracts/, docs/ROADMAP-PLATFORM.yaml);
+every step's status and output were identical. Raw outputs are not committed. **[probe]**
 
 | Component | Steps run | Pass | Differs from the pinned literal (what moved) | Did not finish |
 |---|---|---|---|---|
