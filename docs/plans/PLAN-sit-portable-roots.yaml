@@ -361,60 +361,83 @@ verification_plan:
   - step: 8
     phase: post-deploy
     action: >-
-      After merge, on the operator's direction in an ADMIN session: in a worktree at the literal path
-      /tmp/spr-merge/wt at the merge sha, a saved plan of terraform/bootstrap with -detailed-exitcode, written to
-      /tmp/spr-merge/merge.bin outside the worktree so the worktree stays clean for the one-shot approval
-      (protected-actions.yaml approval.one_shot_at_commit). Its counts are presented to the operator (zero rows
-      expected) with the exact step 9 apply command and the line to write, "approve tf-state-change bootstrap <merge
-      sha>"; the worktree and merge.bin are kept for step 9. Nothing is applied in this step (Decision 126: plan,
-      present). Terraform errors go to /tmp/spr-merge/tf.err, never posted.
+      OPERATOR STEP (Amendment 2): after merge, the operator runs this one block in the operator's own admin shell, not
+      in an agent session (the agent proxy refuses the sts:AssumeRole that mints the PlatformAdmin credential, so no
+      agent session can plan or apply terraform/bootstrap). Prerequisites: a bash shell with git, terraform (>= 1.10)
+      and the AWS CLI; a checkout of this repo at or after the merge sha, run from its root; an AWS profile
+      agent_platform_admin resolving to the PlatformAdmin role (the bootstrap root's default aws_profile); and the
+      gitignored terraform/bootstrap/terraform.bootstrap.tfvars (terraform/bootstrap/CLAUDE.md section 3). Set M to the
+      merge sha 8c231181 (written into the block, so it pastes as is). The block runs in a subshell so a stop never
+      closes the shell, and an EXIT trap removes the saved plan, the tfvars copy and the worktree on every path. It checks the
+      credential, plans terraform/bootstrap at the merge sha in a throwaway worktree with -detailed-exitcode to a saved
+      plan outside the worktree, applies that saved plan only when the plan exit is 0 (no changes, so nothing is
+      reviewed away: an exit-2 plan is never applied) and re-plans. Its typing of the block is the operator's direction for the apply (Decision 126 cl.1: operators may
+      always invoke it directly), so no approve line is asked. Terraform errors go to $D/tf.err in the operator's
+      shell and are never pasted anywhere. The operator sends the build thread the printed lines.
     command: >-
-      set -o pipefail; test -n "$MERGE_SHA" || { echo MERGE_SHA_UNSET; exit 1; }; R=$(tr -d '[:space:]' < config/aws-region); mkdir -p /tmp/spr-merge; export TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc;
-      { git worktree remove --force /tmp/spr-merge/wt 2> /dev/null; rm -rf /tmp/spr-merge/wt; git worktree prune; git worktree add --detach /tmp/spr-merge/wt "$MERGE_SHA" -q; } &&
-      cp terraform/bootstrap/terraform.bootstrap.tfvars /tmp/spr-merge/ &&
-      terraform -chdir=/tmp/spr-merge/wt/terraform/bootstrap init -input=false -backend-config="region=$R" > /dev/null 2>> /tmp/spr-merge/tf.err &&
-      terraform -chdir=/tmp/spr-merge/wt/terraform/bootstrap plan -input=false -no-color -detailed-exitcode -var-file=/tmp/spr-merge/terraform.bootstrap.tfvars -out=/tmp/spr-merge/merge.bin > /dev/null 2>> /tmp/spr-merge/tf.err; echo "MERGE_PLAN_EXIT $?";
-      git -C /tmp/spr-merge/wt status --porcelain --untracked-files=all | grep -q . && echo WORKTREE_DIRTY || echo WORKTREE_CLEAN
+      ( M=8c231181f22ff2a5f91764b5675f334caff67410; set -o pipefail; export AWS_PROFILE=agent_platform_admin;
+      D="${TMPDIR:-/tmp}/spr-merge"; W="$D/wt"; B="$W/terraform/bootstrap"; R=$(tr -d '[:space:]' < config/aws-region);
+      trap 'rm -f "$D/merge.bin" "$D/terraform.bootstrap.tfvars"; git worktree remove --force "$W" 2> /dev/null' EXIT;
+      [ -f "$HOME/.terraform-mirror.tfrc" ] && export TF_CLI_CONFIG_FILE="$HOME/.terraform-mirror.tfrc";
+      aws sts get-caller-identity --region "$R" --query Arn --output text 2> /dev/null | grep -q 'assumed-role/PlatformAdmin/' || { echo ADMIN_CHAIN_ABSENT; exit 1; };
+      test -s terraform/bootstrap/terraform.bootstrap.tfvars || { echo TFVARS_ABSENT; exit 1; };
+      git fetch -q origin main && git cat-file -e "$M^{commit}" || { echo MERGE_SHA_UNKNOWN; exit 1; };
+      mkdir -p "$D"; : > "$D/tf.err"; git worktree remove --force "$W" 2> /dev/null; rm -rf "$W"; git worktree prune;
+      { git worktree add --detach "$W" "$M" -q && cp terraform/bootstrap/terraform.bootstrap.tfvars "$D/"; } || { echo WORKTREE_FAILED; exit 1; };
+      terraform -chdir="$B" init -input=false -backend-config="region=$R" > /dev/null 2>> "$D/tf.err" || { echo INIT_FAILED; exit 1; };
+      terraform -chdir="$B" plan -input=false -no-color -detailed-exitcode -var-file="$D/terraform.bootstrap.tfvars" -out="$D/merge.bin" > /dev/null 2>> "$D/tf.err"; rc=$?; echo "MERGE_PLAN_EXIT $rc";
+      if [ "$rc" = 0 ]; then terraform -chdir="$B" apply -input=false -no-color "$D/merge.bin" 2>> "$D/tf.err" | grep -E '^Apply complete!';
+      terraform -chdir="$B" plan -input=false -no-color -detailed-exitcode -var-file="$D/terraform.bootstrap.tfvars" > /dev/null 2>> "$D/tf.err"; echo "BOOTSTRAP_PLAN_EXIT $?";
+      else echo APPLY_SKIPPED; fi; echo "MERGE_SHA $M" )
     expected: >-
-      MERGE_PLAN_EXIT 0 (no changes) and WORKTREE_CLEAN; present both lines, the step 9 command and the approve line to
-      the operator and wait for their word.
+      Four lines, sent by the operator to the build thread: MERGE_PLAN_EXIT 0, "Apply complete! Resources: 0 added, 0
+      changed, 0 destroyed.", BOOTSTRAP_PLAN_EXIT 0 and MERGE_SHA <merge sha>.
     fix_if: >-
-      MERGE_PLAN_EXIT 2 -- STOP: never run step 9; delete /tmp/spr-merge and the worktree, present the change count and
-      re-run step 6 at the merge sha (the merge differs from what step 6 planned); EXIT 1 -- read /tmp/spr-merge/tf.err
-      locally; WORKTREE_DIRTY -- an init or plan wrote inside the worktree (check .gitignore covers .terraform/ and the
-      lock file is unchanged); clean it before asking, since the one-shot approval is refused on a dirty tree
+      ADMIN_CHAIN_ABSENT -- the shell's agent_platform_admin profile does not reach PlatformAdmin; fix the operator's AWS
+      config and re-paste. TFVARS_ABSENT -- create the file per terraform/bootstrap/CLAUDE.md section 3 (never commit
+      it). MERGE_SHA_UNKNOWN or WORKTREE_FAILED -- git printed the cause in the shell. INIT_FAILED -- read $D/tf.err locally. MERGE_PLAN_EXIT 2 with APPLY_SKIPPED -- nothing was
+      applied; the merge differs from what step 6 planned: STOP, the build reports it to the coordinator as a plan
+      defect, never a second paste. MERGE_PLAN_EXIT 1 -- read $D/tf.err locally and re-paste once fixed.
+      BOOTSTRAP_PLAN_EXIT 2 after the apply -- STOP and report; never paste again without a fresh step 8 read of the
+      cause.
     hermetic: false
     graduation: not-applicable
   - step: 9
     phase: post-deploy
     action: >-
-      Only after step 8 printed MERGE_PLAN_EXIT 0 and WORKTREE_CLEAN and the operator wrote "approve tf-state-change
-      bootstrap <merge sha>" in that session: apply the saved /tmp/spr-merge/merge.bin with -no-color (an empty plan, so
-      the apply proves the merged code is the applied code), a fresh plan with -detailed-exitcode, cleanup, then the
-      merge-time run of terraform-apply-sandbox.yml read back (its job apply-sandbox). The apply names its root by the
-      literal -chdir path, the form the protected-action gate resolves.
+      The build session, after the operator has sent step 8's four lines: checks them against step 8's expected
+      lines, reads back the merge-time run of terraform-apply-sandbox.yml (its job apply-sandbox) and records the merge
+      sha, the four lines (labelled operator-reported, from step 8 run in the operator's shell) and the run URL as a
+      counts-only comment on the merged PR. No AWS credential is used.
     command: >-
-      export TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc;
-      terraform -chdir=/tmp/spr-merge/wt/terraform/bootstrap apply -input=false -no-color /tmp/spr-merge/merge.bin 2>> /tmp/spr-merge/tf.err | grep -E '^Apply complete!';
-      terraform -chdir=/tmp/spr-merge/wt/terraform/bootstrap plan -input=false -no-color -detailed-exitcode -var-file=/tmp/spr-merge/terraform.bootstrap.tfvars > /dev/null 2>> /tmp/spr-merge/tf.err; echo "BOOTSTRAP_PLAN_EXIT $?";
-      rm -f /tmp/spr-merge/merge.bin /tmp/spr-merge/terraform.bootstrap.tfvars; git worktree remove --force /tmp/spr-merge/wt
-      -- then mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
+      mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
       resource_id="terraform-apply-sandbox.yml", workflow_runs_filter={"event": "push", "branch": "main"}) -> the run
-      whose head_sha is the merge sha, and list_workflow_jobs -> job apply-sandbox's conclusion.
+      whose head_sha is the merge sha, and list_workflow_jobs -> job apply-sandbox's conclusion; then
+      mcp__github__add_issue_comment on the merged PR with the merge sha, the four lines and the run URL.
     expected: >-
-      "Apply complete! Resources: 0 added, 0 changed, 0 destroyed", then BOOTSTRAP_PLAN_EXIT 0; job apply-sandbox of the
-      run on the merge sha concluded success. Record the merge sha, the lines and the run URL as a counts-only comment on
-      the merged PR.
+      The operator's lines match step 8's expected lines and MERGE_SHA names the merge sha; job apply-sandbox of the
+      run on the merge sha concluded success; the comment carries counts, exit codes, the sha and the run URL only.
     fix_if: >-
-      the gate denies the apply (re-check WORKTREE_CLEAN and that the approve line names this merge sha); BOOTSTRAP_PLAN_EXIT
-      2 after the apply -- report on the PR and STOP; never apply again without a fresh step 8
+      a line differs from step 8's expected -- do not post success; report the exact line to the operator and the
+      coordinator; job apply-sandbox not success -- read its log, report on the PR and STOP
     hermetic: false
     graduation: not-applicable
   - step: 10
     phase: post-deploy
-    action: rec-5025 closed by the squash commit's Resolves trailer; read back.
-    command: bin/venv-python -c "from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids; rows, _ = fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-5025']); print(rows[0]['id'], rows[0]['status'])"
-    expected: rec-5025 closed
+    action: >-
+      rec-5025 closed by the squash commit's Resolves trailer; read back. If the session's agent_platform profile is
+      refused by the agent proxy (the same sts:AssumeRole refusal as step 8, seen 2026-11-12), the read-back is
+      ci.yml's trailer-closure job on the merge sha instead.
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids; rows, _ =
+      fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-5025']); print(rows[0]['id'], rows[0]['status'])"
+      || (mcp__github__actions_list(method="list_workflow_runs", resource_id="ci.yml", workflow_runs_filter={"event":
+      "push", "branch": "main"}) -> the run whose head_sha is the merge sha; list_workflow_jobs -> job trailer-closure;
+      mcp__github__get_job_logs on it)
+    expected: >-
+      rec-5025 closed; or, on the fallback, job trailer-closure concluded success and its log carries "rec-autoclose:
+      closed rec-5025" or "rec-autoclose: rec-5025 already closed" (the job concludes success even when it refuses to
+      close, so the line is required); record it in a follow-up comment on the merged PR
     fix_if: still open after the closure job ran -- read ci.yml's closure job log; never close by hand without the trailer evidence
     hermetic: false
     graduation: not-applicable
@@ -568,10 +591,10 @@ test_obligations:
     test_selector: tests/checks/iam_tf/test_platform_iam_bootstrap_adoption.py
     red_green_expectation: red after the HCL edit alone (dry run), green after
 constraints:
-  - "PROD must not change: zero rows in both plans (steps 6, 8 and 9). Any non-zero row stops the build; nothing is applied to make a plan converge."
+  - "PROD must not change: zero rows in both plans (steps 6 and 8). Any non-zero row stops the build; nothing is applied to make a plan converge."
   - "No assertion, expected ARN, Sid or count in an existing check or test is changed; readers are re-routed through render only. A node that needs more is a plan defect, never a local fix."
   - "Never print or commit an account id, ExternalId, e-mail, tfvars value or rendered policy (Decision 101); posted evidence is counts, exit codes and shas."
-  - "The bootstrap apply runs only on the operator's direction given in that ADMIN session (Decision 126 cl.1, protected-actions.yaml), one admin mutation at a time: not while another bootstrap apply (rec-5026's Organization sittings, T4.15 c13, rec-4694) is in flight."
+  - "The bootstrap apply is run only by the operator, in the operator's own admin shell (step 8, Amendment 2; Decision 126 cl.1), one admin mutation at a time: not while another bootstrap apply (rec-5026's Organization sittings, T4.15 c13, rec-4694) is in flight."
   - "terraform/personal uses no conditional or comparison operator (Decision 238 cl.4 screen); the env map index is the only form."
   - No rescue agents or workaround loops (Decision 55).
 context:
@@ -589,7 +612,7 @@ context:
   - "Overlap: platform_dev_policies.tf is also named by rec-4694, rec-4043, rec-4048 and T4.15 c13; check open PRs at build start and rebase onto whichever lands first; bootstrap applies run one at a time."
   - "Related-work check 2026-11-10 (main f866f98): red_overlap blocked by rec-5055 alone (slo_breached, 8.5 h; telemetry-arrival red, 2 merged sessions missing from telemetry_sessions, file scripts/telemetry_verify/session_presence.py), sharing no path with this scope. Deferral rationale: this plan does not repair it and touches no telemetry path; it is the coordinator's halt to route (the hook-gating thread is the inferred cause); the build re-runs red_overlap at start and waits for a clear verdict or the operator's word. 2026-11-11: rec-5055 is fixed (#1955, #1956 merged); the build's own red_overlap run is the check."
   - "Start condition: the rec-5024 build has merged (#1957, 6f71e367, 2026-11-11), so single_account_rule no longer forbids this; the SIT Decision is Decision 252."
-  - "Approvals at build start: approve admin-credential agent_platform_admin -- covers VP 5 (bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin), VP 6 (terraform -chdir=<worktree>/terraform/bootstrap init, plan -lock=false -detailed-exitcode and show -json at origin/main and the PR head, on the bootstrap root's default admin profile), the SIT size-headroom terraform console read in the step 6 session, and VP 8 and VP 9's terraform -chdir=/tmp/spr-merge/wt/terraform/bootstrap init and plan calls. terraform.bootstrap.tfvars must already be in the ADMIN session; if it is absent, the build recovers it per terraform-cc-web-operations.yaml's recovery and adds that recovery's exact secret-read command and its line (approve secret-read <parameter name>) to this list before asking, and reads no other secret. VP 9's literal terraform -chdir=/tmp/spr-merge/wt/terraform/bootstrap apply is tf-state-change, a one_shot_at_commit class asked when step 8's plan is shown (approve tf-state-change bootstrap <merge sha>), so it is not listed here. The operator's final-diff word on the build PR (IAM text under terraform/bootstrap) is asked at CI green."
+  - "Approvals at build start: approve admin-credential agent_platform_admin -- covers VP 5 (bin/venv-python -m scripts.aws_identity caller-arn --profile agent_platform_admin), VP 6 (terraform -chdir=<worktree>/terraform/bootstrap init, plan -lock=false -detailed-exitcode and show -json at origin/main and the PR head, on the bootstrap root's default admin profile) and the SIT size-headroom terraform console read in the step 6 session. terraform.bootstrap.tfvars must already be in the ADMIN session; if it is absent, the build recovers it per terraform-cc-web-operations.yaml's recovery and adds that recovery's exact secret-read command and its line (approve secret-read <parameter name>) to this list before asking, and reads no other secret. VP 8 is the operator's own block (Amendment 2), so no agent approval covers it and no tf-state-change line is asked; VP 9 uses no AWS credential. The operator's final-diff word on the build PR (IAM text under terraform/bootstrap) is asked at CI green."
   - "Critique r1 (REVISE, 4 blocking, 10 nits), dispositions: B1 the trusted PR plan refuses a PR that changes backend-sandbox.hcl (main-only) or adds a non-.tf file under terraform/personal (file_not_tf): the comment edit is dropped and terraform/personal's SIT backend moves to config/terraform/backend-personal-sit.hcl, with rec-5025's acceptance updated to that path (update_rec 2026-11-10); VP7 reads terraform-plan-trusted.yml. B2 predicate (a) is limited to S3 contexts (the DR role and function names stay). B3 validate_github_settings_apply's pre_globs gain every render input, with a closure test. B4 VP3 is waived as subsumed by step 1. N1 VP8 plans, presents and applies a saved plan in a merge-sha worktree and reads the apply-sandbox run back. N2 ARN locals interpolate the name local. N3 render covers bare local references. N4 purpose names the files read. N5 predicate (f). N9 VP2 widened. N10 VP7 names the facts."
   - "Critique r2 (REVISE, 3 blocking, 9 nits), dispositions: B1 step 8 plans and presents only, and step 9 applies the kept merge.bin only after MERGE_PLAN_EXIT 0 and the operator's word; B2 tests/checks/iam_tf/test__account_names.py is the render mirror test; B3 the _write_coverage.py row is dropped (it reads no Terraform text; _read_coverage's render fixes its reds). N1 the trusted-plan comment's own strings; N2 predicate (f) red cases and backend-sit.hcl linked to step 1; N3 render reads ROOT at call time; N4 mutations unchanged; N5 V3 line names the comment; N6 build converts what (a) finds at its head; N7 validate_invoke_implies_resolve.py keeps its own unrendered _read_root_text on purpose (it reads resource blocks, not names); N8 the full tier runs backgrounded; N9 224 cl.1 cited. Risk 1 (an init with backend-sit but no -var environment=sit plans PROD names in SIT) is named for rec-5027 and rec-5028: each SIT apply channel sets environment beside the backend, and rec-5027 adds a precondition tying the two."
   - "Critique r3 (REVISE, 4 blocking, 9 nits), dispositions: B1 steps 8-9 use the literal worktree path /tmp/spr-merge/wt, keep the saved plan and tfvars outside the worktree (one-shot approval needs a clean tree), add -no-color, and step 8 presents the approve tf-state-change bootstrap <merge sha> line; B2 the build-start line names approve admin-credential agent_platform_admin with the exact commands it covers, the conditional secret-read line, and leaves the one-shot apply out; B3 docs/ROADMAP-PLATFORM.yaml joins scope and c3 flips in the build PR on pre-merge evidence; B4 the four carried items are written into rec-5027 and rec-5028 at planning time and read back. N1 VP4 command is literal; N2 (a)-(f); N3 job apply-sandbox named; N4 pre_globs gain _common.py and registry.py; N5 code review re-checks the late closes_criteria; N6 environment-value line; N7 and N8 carried to rec-5027 and rec-5028; N9 the build PR reports its own hook canary."
@@ -613,6 +636,8 @@ context:
   - "config/ci_rca_taxonomy.yaml relief: 4 lines of headroom on main and about ten unbuilt plans each adding a row. If this build's row crosses the cap, the build stops and files a rec to split the taxonomy by class (the data file's own decomposition), never raises the budget; whichever later plan crosses it follows the same rule."
   - "Overlap (plan_obligations 2026-11-11): unbuilt PLAN-secrets-to-ssm-retire (7 shared files), PLAN-trusted-plan-cutover (_read_coverage.py, personal main.tf, oidc_pipeline_roles.tf, variables.tf), PLAN-telemetry-content-reader-lock (rec-4696, Feedback Loop project: the boundary, platform_dev_policies.tf, ci_guards/_manifest.py, the taxonomy, the telemetry fence test) and PLAN-neon-key-out-of-pr-plans share files. The build checks their open PRs at start, rebases onto whichever lands first, and asks the operator before editing a file another project's open PR changes. A later plan that adds a literal data-lake ARN turns predicate (a) red, and its message names the local to use."
   - "SIT size headroom evidence is recorded in the build PR body as bytes only and is ungated: it stays UNPROVEN for SIT until rec-5027's admin plan."
+  - "Amendment 2 (2026-11-12, build PR #1987 merged as 8c231181, nothing planned or applied): the agent proxy refuses the sts:AssumeRole that mints the agent_platform_admin credential (\"request blocked by policy: sts:AssumeRole would mint new AWS credentials\"), seen in the build session and in an outside admin session the operator started; it is not worked around. Benjamin (build thread, 2026-11-12 20:52Z and 21:00Z) chose to run the apply himself, so step 8 is one copy-paste operator block (credential check, saved plan at the merge sha, apply only on plan exit 0, fresh plan, cleanup) and step 9 is the build's GitHub read-back and PR comment. The evidence is unchanged: MERGE_PLAN_EXIT 0, Apply complete with 0 added, 0 changed, 0 destroyed, BOOTSTRAP_PLAN_EXIT 0 and the apply-sandbox run on the merge sha. The worktree-clean check and the approve tf-state-change line served the agent gate's one-shot approval and are dropped with it. Step 10 gains a GitHub fallback because agent_platform is refused the same way in this planning session (scripts.aws_identity caller-arn --profile agent_platform: ResponseParserError, 2026-11-12 21:15Z). No assertion or expected result is loosened."
+  - "Critique r10 (PROCEED, 0 blocking, 6 nits), dispositions: N1 the merge sha is written into the block and the assignment sits inside the subshell, so an unedited paste cannot leak exits into the operator's shell; N2 an EXIT trap removes the saved plan, the tfvars copy and the worktree on every path; N3 WORKTREE_FAILED split from INIT_FAILED, git errors read in the shell, aws sts gets --region; N4 step 10 names the literal trailer-closure log lines and posts a follow-up comment; N5 constraints name steps 6 and 8; N6 step 9 labels the four lines operator-reported."
   - "V3 resolution: the posted step 6 and step 7 evidence for the current head substitutes for pre-merge post-deploy evidence; the behavioural acceptance is the post-merge zero-change saved plan, apply and fresh plan (steps 8-9), whose evidence is a counts-only comment on the merged PR naming the applied sha."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
@@ -625,17 +650,18 @@ gate_rounds:
   - {gate: plan-critique, round: 7, verdict: PROCEED, blocking: 0, nits: 2}
   - {gate: plan-critique, round: 8, verdict: REVISE, blocking: 3, nits: 3}
   - {gate: plan-critique, round: 9, verdict: PROCEED, blocking: 0, nits: 3}
+  - {gate: plan-critique, round: 10, verdict: PROCEED, blocking: 0, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
   - Decisions 77, 101, 126, 156, 202, 223, 224, 237, 238, 242, 248 and 252 (the SIT Decision) read
   - All files in scope located and readable
-  - The rec-5024 build is merged; no other bootstrap apply in flight; ADMIN_CHAIN_OK in this session or an ADMIN session lined up for steps 6 and 8
+  - The rec-5024 build is merged; no other bootstrap apply in flight; ADMIN_CHAIN_OK in this session or an ADMIN session lined up for step 6 (step 8 is the operator's own block)
 execution_steps:
   - "Create both account_names.tf files and the environment variables; replace each literal listed in scope with its local (map-index suffix, no ? or ==); delete the two superseded locals in platform_dev_policies.tf and ducklake_catalog_dr.tf; parameterise the lock key; add terraform/bootstrap/backend-sit.hcl and config/terraform/backend-personal-sit.hcl; leave terraform/personal/backend-sandbox.hcl untouched (main-only for the trusted plan)."
   - "Create _account_names.py (render) and validate_account_portable_names.py with its Entry, taxonomy row and tests; route the readers in _read_coverage.py (_read_root_text and _scan_resources, which _write_coverage and _write_companions read through) and validate_github_settings_apply.py and the three test files through render; convert every literal predicate (a) finds at the build head (the scope counts are main f866f98 snapshots). Run steps 1, 2, 11, 3 and 4."
   - "Update terraform/bootstrap/CLAUDE.md. Open the PR with the SIT size headroom and the build session's own [hook_canary] state; steps 5-7 at the CI-green head; post the evidence."
-  - "Merge on code review PROCEED, green CI, the step 6-7 evidence and the operator's final-diff word; squash body carries 'Resolves: rec-5025'; the bookkeeping walk's c3 flip lands in this PR. Then steps 8 and 9 on the operator's direction and step 10."
+  - "Merge on code review PROCEED, green CI, the step 6-7 evidence and the operator's final-diff word; squash body carries 'Resolves: rec-5025'; the bookkeeping walk's c3 flip lands in this PR. Then the operator runs step 8 in the operator's own admin shell and sends its four lines; the build runs steps 9 and 10."
   - "Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)"
   - "Report: what was implemented, verification results"
 rollback: >-
