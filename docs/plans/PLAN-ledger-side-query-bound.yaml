@@ -1,0 +1,336 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: ledger-side-query-bound
+intent: >-
+  Correct the in-session ledger check's oracle so the feedback loop can trust the telemetry it reads (NS.6, T3.3/T3.4
+  prerequisite): Claude Code's cost-state ledger credits every model request, including side requests that write no
+  transcript record, so for a non-auxiliary model with transcript records the ledger is a superset of the transcript.
+  The check compares that model as a declared bound (ledger >= transcript, exact still reported when equal), keeps
+  every ledger-below-transcript alarm, and gains a compensating sub-agent linkage check so the bound cannot hide a
+  stream the walk never links (rec-4430; rec-4654 stays open).
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-ledger-side-query-bound.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category): rec-4430, a telemetry verification alarm. It is a prerequisite the
+  feedback loop needs before it reads cost or token figures (alarm triage 2026-11-10), but no tier_item exit criterion
+  is closed, so closes_criteria is empty.
+closes_criteria: []
+scope:
+  - file: scripts/telemetry_verify/ledger.py
+    action: Modify
+    purpose: >-
+      (1) DECLARED gains ledger_bounded_side_query: "a model with transcript records: Claude Code side requests that
+      write no transcript record (resume cache warm, sub-agent and away summaries, WebSearch's inner request) credit the
+      ledger [inferred, Claude Code 2.1.322 bundle], so a bound". ALARMS gains ledger_stream_unlinked (a sub-agent stream
+      on disk that started before the cut and that no spawn record in the counted prefix links: its calls are in the
+      ledger but neither in the walk nor, since the producer claims only linked spawns, in the store; an interrupted sync
+      spawn, whose result is never written, is the known case, rec-5105). (2) _classify: the auxiliary,
+      compaction and background bounds are unchanged. For any other model with transcript records: if the three input
+      classes are all equal, the existing output rules run unchanged (ledger_exact, ledger_output_residual_nonfinal,
+      ledger_output_residual_unexplained, ledger_output_excess); else if the ledger is at or above the transcript on all
+      four classes the class is ledger_bounded_side_query; else if any input class is below,
+      ledger_input_class_mismatch; else (inputs at or above, output below) ledger_output_excess. A ledger-only
+      non-auxiliary model and a transcript model absent from the ledger stay ledger_model_unexplained. (3) Linkage: reconcile_ledger gains a keyword-only raw: TranscriptTree | None = None (default None: the tree itself).
+      At each cut, S is the agent ids in raw.agent_ids() plus tree.agent_ids() that _included does not reach and whose
+      earliest timestamped record (read from raw) is at or before the latest timestamped root record before the cut (the
+      cost-state record has no timestamp); a stream with no timestamped record, or a cut with no timestamped root record
+      before it, counts as started before the cut (fail toward the alarm); one Finding per stream in S with cls ledger_stream_unlinked and model None is
+      appended. Unlinked streams are never summed into the prefix, so prefix_calls and _prefix are unchanged and stay the
+      same walk. A stream that starts after the cut is not counted; a linked stream never is. Counts only leave the module
+      (Decision 101). Module docstring: one sentence each for the bound and the linkage rule.
+    new_imports: []
+  - file: scripts/telemetry_verify/stored_ledger.py
+    action: Modify
+    purpose: >-
+      _BOUNDED gains ledger_bounded_side_query, so the stored rows of such a model compare as stored <= ledger on all
+      four classes (stored_ledger_bounded, else stored_ledger_bound_exceeded) instead of falling to the exact compare.
+      Nothing else changes: an unlinked stream's calls are in no prefix_calls set, so the stored leg never sees them; the
+      transcript leg's ledger_stream_unlinked alarm reports them (producer gap, rec-5105).
+    new_imports: []
+  - file: scripts/telemetry_capture/verify.py
+    action: Modify
+    purpose: >-
+      The production in-session verify reconciles a CursorTree view, whose agent_ids() lists only streams the producer
+      consumed (scripts/telemetry_capture/cursor_tree.py:31-32), so an unlinked stream is invisible to it. The single
+      call self.findings = ledger.reconcile_ledger(view) in _transcript_legs becomes
+      self.findings = ledger.reconcile_ledger(view, raw=FsTree(self.path)), edited in place on its existing line: the file
+      is at 498 of 500 SLOC (NEAR_CAP), so the edit adds no line; if a measured build would pass 500, stop BLOCKED and
+      report for a decomposition amendment, never a raise (Decision 128). FsTree is already imported.
+    new_imports: []
+  - file: tests/telemetry_verify/test_ledger.py
+    action: Modify
+    purpose: >-
+      In test_cut_bounded_reconciliation_classifies_every_model (pinned by the graduated record
+      telemetry-verify-ledger-and-shape-classify), the case _one_call(dict(_LED, inputTokens=11)) changes from
+      ledger_input_class_mismatch to ledger_bounded_side_query (the operator-confirmed planned change); every other
+      assertion in it stays, including cacheCreationInputTokens=0 (ledger below) as ledger_input_class_mismatch. New
+      nodes: test_a_superset_ledger_on_a_transcript_model_is_the_side_query_bound (the alarmed shape: one model, two
+      cost-state records, ledger above on input, cache_read and cache_creation, both cuts the bound; plus a sub-agent-only
+      model above is the bound); test_a_ledger_below_the_transcript_still_alarms (each input class one below with the
+      others above is ledger_input_class_mismatch; output below with inputs above is ledger_output_excess; exact inputs
+      with output above and no nonfinal call stays ledger_output_residual_unexplained); test_an_unlinked_stream_before_the_cut_alarms (an
+      interrupted sync spawn: a root Agent tool_use with no result and its stream on disk started before the cut is
+      ledger_stream_unlinked once per cut; a nested chain, root to A to B, both interrupted, is two findings; a stream
+      whose records start after the cut is not counted; a linked stream never is; with raw given and the view lacking the
+      stream, the raw stream is still found; a stream with no timestamped record, and a cut with no timestamped root
+      record before it, both count as before the cut and alarm). All trees synthetic (Decision 101).
+  - file: tests/telemetry_verify/test_stored_ledger.py
+    action: Modify
+    purpose: >-
+      New node test_the_side_query_bound_compares_stored_rows_as_a_bound: a ledger_bounded_side_query finding with
+      stored rows at or below the ledger is stored_ledger_bounded, one class above is stored_ledger_bound_exceeded; red
+      before (the class falls to the exact compare and reads stored_ledger_input_class_mismatch). Existing nodes are
+      not edited.
+  - file: tests/telemetry/test_in_session_verify_chain.py
+    action: Modify
+    purpose: >-
+      test_ledger_classes_on_the_resume_trap_and_a_planted_input_mismatch: the plant changes from inputTokens += 1 to
+      inputTokens -= 1 (ledger below the transcript), so the same filed ledger_input_class_mismatch alarm, portal class
+      list and single file call are still asserted end to end (operator-confirmed planned change; the assertions are
+      unchanged, only the plant's sign). New node test_an_unconsumed_interrupted_stream_files_ledger_stream_unlinked:
+      through Session.verify (the CursorTree path), a final tree plus a stream file the producer never claimed (a root
+      Agent tool_use with no result, its stream written to disk before the cost-state record) files
+      ledger_stream_unlinked; red before (no such class, and the view hides the stream).
+bundled_recommendations: []
+followon_recs: [rec-5104, rec-5105]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "A non-auxiliary model with transcript records whose ledger is at or above the transcript on all four classes, and above on at least one input class, is ledger_bounded_side_query, a declared class; equal stays ledger_exact."
+  - "Every ledger-below-transcript case still alarms: an input class below is ledger_input_class_mismatch, output below is ledger_output_excess, and exact inputs with an unexplained output excess stay ledger_output_residual_unexplained; ledger_model_unexplained is unchanged."
+  - "A sub-agent stream on disk that started before a cut and that no spawn record in the prefix links is the alarm ledger_stream_unlinked, on the production CursorTree path as well as on a raw tree."
+  - "The stored-row leg compares a ledger_bounded_side_query model as a bound."
+  - "rec-4430 is not closed by the merge (no Resolves trailer; the squash body carries a non-closing Refs: rec-4430): the unit tests prove the code, not the superset diagnosis, and post-merge silence cannot prove it because the bound never fires above the transcript. These exit criteria are pre-registered HERE, in the merged plan; before the build PR opens, rec-4430's acceptance is set to the lint-passing command in execution_steps[4], which names this text. rec-4430 closes through the portal (update_rec status closed, resolution naming the VP 8 and VP 10 counts and the merge SHA) only when both legs pass by the deadline (merge date plus 7 days). POSITIVE, VP 8: a Claude Code process resumed after the merge, in a checkout containing the merge SHA, judged by that code on its newest tree, shows compared cuts, at least one ledger_bounded_side_query finding with strictly positive excess on an input class, and zero ledger_input_class_mismatch (raw tree and verify), stored_ledger_bound_exceeded and ledger_stream_unlinked. WATCH, VP 10 from merge plus 3 days: no ledger_input_class_mismatch version from a root session started after the merge on a branch containing the merge SHA, over at least 45 root sessions started after the merge (unit: root sessions; floor from the measured base rate of 8 alarmed roots in 118 over 2026-11-06..11-12, about 0.068 per root, so 45 clean roots leave under 5 percent chance of passing if every past firing had been ledger-below; if only part of the diagnosis is wrong the chance of a false pass rises to about 36 percent (power about 64 percent) at a third of the rate, which is why the POSITIVE leg and the falsifier carry the rest; short of 45 re-runs daily to the deadline). FALSIFIER: any such post-merge ledger_input_class_mismatch, or either leg unmet by the deadline, keeps rec-4430 open and reopens the diagnosis (reported to the coordinator; rec-5104's measurement becomes the next step). rec-4654 stays open."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The alarmed shape (a superset ledger on transcript models) is the declared bound.
+    command: bin/venv-python -m pytest "tests/telemetry_verify/test_ledger.py::test_a_superset_ledger_on_a_transcript_model_is_the_side_query_bound" -q
+    expected: exit 0; red before (node absent, then ledger_input_class_mismatch on both cuts).
+    fix_if: either cut reads ledger_input_class_mismatch, or a sub-agent-only model stays exact
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: ledger-side-query-bound
+  - step: 2
+    phase: pre-deploy
+    action: Every ledger-below-transcript case still alarms.
+    command: bin/venv-python -m pytest "tests/telemetry_verify/test_ledger.py::test_a_ledger_below_the_transcript_still_alarms" -q
+    expected: exit 0; red before (node absent).
+    fix_if: any below case reads a declared class (the bound is one-sided only)
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: ledger-below-transcript-alarms
+  - step: 3
+    phase: pre-deploy
+    action: An unlinked stream before the cut alarms on a raw tree, and a raw tree passed beside a view is read.
+    command: bin/venv-python -m pytest "tests/telemetry_verify/test_ledger.py::test_an_unlinked_stream_before_the_cut_alarms" -q
+    expected: exit 0; red before (node absent).
+    fix_if: an unlinked stream is silently absorbed by the bound, a post-cut or linked stream is counted, or a raw-only stream is missed
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: ledger-stream-linkage
+  - step: 11
+    phase: pre-deploy
+    action: Through the production verify path (Session.verify over a CursorTree view), an unconsumed interrupted stream files ledger_stream_unlinked.
+    command: bin/venv-python -m pytest "tests/telemetry/test_in_session_verify_chain.py::test_an_unconsumed_interrupted_stream_files_ledger_stream_unlinked" -q
+    expected: exit 0 in the full venv (the chain module skips under the fast tier's requirements); red before (node absent).
+    fix_if: the Session path files nothing (verify.py does not pass the raw tree, or the view hides the stream)
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: verify-passes-raw-tree-to-ledger-linkage
+  - step: 4
+    phase: pre-deploy
+    action: The stored-row leg compares the new class as a bound.
+    command: bin/venv-python -m pytest "tests/telemetry_verify/test_stored_ledger.py::test_the_side_query_bound_compares_stored_rows_as_a_bound" -q
+    expected: exit 0; red before (node absent, then stored_ledger_input_class_mismatch for the new class).
+    fix_if: the new class reads stored_ledger_input_class_mismatch, or stored rows above the ledger read stored_ledger_bounded
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: stored-ledger-side-query-bound
+  - step: 5
+    phase: pre-deploy
+    action: The in-session chain still files ledger_input_class_mismatch end to end on a planted ledger-below record.
+    command: >-
+      bin/venv-python -m pytest "tests/telemetry/test_in_session_verify_chain.py::test_ledger_classes_on_the_resume_trap_and_a_planted_input_mismatch"
+      tests/telemetry_verify/test_ledger.py tests/telemetry_verify/test_stored_ledger.py -q
+    expected: >-
+      exit 0, including the changed graduated node test_cut_bounded_reconciliation_classifies_every_model; with the plant
+      still at += 1 the chain node fails under the new rule (no alarm filed), which is why the sign changes. The chain
+      module needs the full requirements (it skips under the fast tier's set), so run it in the full venv.
+    fix_if: no alarm is filed, a second class is filed, or any existing ledger node fails
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Existing nodes (one plant sign and one case changed under the operator's confirmation); they run in the full tier (the chain module skips under the fast tier's requirements) and the changed ledger node stays pinned by telemetry-verify-ledger-and-shape-classify.
+  - step: 6
+    phase: pre-deploy
+    action: Fast tier.
+    command: bin/venv-python -m scripts.validate --pre
+    expected: exit 0
+    fix_if: any check fails; fix on the branch, never by weakening (Decision 235)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole fast-tier run; graduate steps may not invoke scripts.validate (recursion), and steps 1-4 carry the durable regressions.
+  - step: 7
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it from the top-level session, backgrounded with a 2 h limit, and read only the attestation.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure -- fix and rerun the full tier from the start; a timeout is BLOCKED, no push
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and steps 1-4 carry the durable regressions.
+  - step: 8
+    phase: post-deploy
+    action: >-
+      Live read-back on post-merge code through the production verify path: after a Claude Code process resume that
+      happened after the merge, in a checkout containing the merge SHA (the build session after a resume, or the next
+      worker the coordinator names). MERGE_SHA is the squash merge commit on origin/main; in the build session first run
+      git fetch origin main and git checkout --detach "$MERGE_SHA" (the branch HEAD is never its descendant). Run the in-session verify on that session's newest tree asserting zero on the two classes that mean this
+      plan is wrong, then print the counts-only excess (ledger minus transcript per class) of each model.
+    command: >-
+      git merge-base --is-ancestor "$MERGE_SHA" HEAD || exit 2; T="$(ls -t ~/.claude/projects/*/*.jsonl | head -1)"; for c in ledger_input_class_mismatch stored_ledger_bound_exceeded;
+      do AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_capture verify --tree "$T" --no-alarms
+      --assert-zero "$c" || exit $?; done; bin/venv-python -c "import sys; from pathlib import Path; from
+      scripts.telemetry_verify import ledger; from src.turn_capture.transcript import ROOT, FsTree, inherited_lines,
+      read_lines; tr = FsTree(Path(sys.argv[1])); fk = bool(inherited_lines(read_lines(tr.read(ROOT) or b''))); f =
+      ledger.reconcile_ledger(tr); print([(x.cut_index, x.model, x.cls, {k: x.ledger.get(k, 0) -
+      x.transcript.get(k, 0) for k in ledger.CLASSES}) for x in f]); u = [x for x in f if x.cls == 'ledger_stream_unlinked'];
+      pos = [x for x in f if x.cls == 'ledger_bounded_side_query' and any(x.ledger.get(k, 0) > x.transcript.get(k, 0) for k
+      in ledger.CLASSES if k != 'output')]; mm = [x for x in f if x.cls == 'ledger_input_class_mismatch']; print('positive', len(pos), 'unlinked', len(u),
+      'mismatch', len(mm), 'forked', fk); raise SystemExit(3 if fk else (1 if mm else (0 if pos and not u else 3)))" "$T"
+    expected: >-
+      exit 0 is the POSITIVE leg of rec-4430's exit criteria (acceptance_criteria[4]). Exit 3 means this session is not
+      evidence (no bound finding with strictly positive input excess, or an unlinked stream): not a failure; repeat on the
+      next resumed post-merge session until the deadline. Exit 1 from the raw leg is a ledger-below cut verify did not
+      judge (past the capture cursor): the falsifier. A forked tree (inherited root lines; verify reports such alarms as
+      ledger_fork_unmeasured) exits 3, not evidence. Exit 2 before any read means the checkout lacks MERGE_SHA. Exit 2 from verify means no compared cost-state cut (or an incomplete pass): the step is pending and handed
+      to the coordinator with the merge SHA, never passed. Exit 1 means an asserted class is nonzero. Record the VERIFY
+      lines (counts and class names) and the excess list in the close-out report. A ledger_stream_unlinked or
+      stored_ledger_call_unemitted count is reported, not failed: the designed true alarm for an interrupted sync spawn
+      routes to rec-5105, and unemitted calls to rec-4840.
+    fix_if: exit 1 on post-merge code; stop and report to the coordinator (the mechanism is [inferred]); the alarm path files or updates a rec of that class, which becomes the defect
+    hermetic: false
+  - step: 9
+    phase: post-deploy
+    action: >-
+      rec-4430 is closed through the portal (update_rec status closed after get_rec_write_guidance, resolution naming
+      the VP 8 and VP 10 counts and the merge SHA; no closure_artifact token), only once both legs of its pre-registered exit criteria pass by the deadline; never by a
+      Resolves trailer or a direct status write.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
+      make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-4430']); print(rows[0]['id'], rows[0]['status']) if rows else print('absent'); raise
+      SystemExit(0 if rows and rows[0]['status'] == 'closed' and (rows[0].get('resolution') or '').strip() else 1)"
+    expected: prints rec-4430 closed and exits 0 (status closed with a non-empty resolution) after the portal closure; record the returned version timestamp.
+    fix_if: "still open after both legs passed: re-run the portal update and read its refusal; a leg not passed by the deadline is the falsifier in acceptance_criteria[4], reported to the coordinator, not a fix"
+    hermetic: false
+  - step: 10
+    phase: post-deploy
+    action: >-
+      Watch window (pre-registered): three days after the merge, read every history version, newer than the merge, of
+      rec-4430 and of any open rec titled "telemetry verification alarm: ledger_input_class_mismatch" (the alarm path keeps
+      one episode rec per class and overwrites its context with the newest scope, so the history is read, not only the
+      current row), resolve each version's scope to its root session's start through telemetry_root_sessions, and fail on
+      any version from a session started after the merge or whose scope does not resolve. Root sessions are read from 6
+      days before the merge date to today in chunks of at most 7 days (the verb's max_window_days). MERGED_AT is the
+      merge commit's committer time in ISO 8601 with an offset. Report the result to the coordinator.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "import os, datetime as d; from scripts.telemetry_verify.dedupe import
+      parse_timestamp as P; from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids; from
+      scripts.telemetry_capture import read_route; r = make_reader(); m = P(os.environ['MERGED_AT']); t =
+      d.datetime.now(d.timezone.utc).date(); a = m.date() - d.timedelta(days=6); rr = read_route.make_routed_reader();
+      roots = []; chunks = [a + d.timedelta(days=7 * i) for i in range((t - a).days // 7 + 1)]; [roots.extend(rr.named('telemetry_root_sessions',
+      day_from=x.isoformat(), day_to=min(x + d.timedelta(days=6), t).isoformat())) for x in chunks]; start = {x['entity_ref']:
+      P(x['session_started_at']) for x in roots}; ids = sorted({'rec-4430', *[x['id'] for x in r.named('recs_by_title_prefix',
+      title_prefix='telemetry verification alarm: ledger_input_class_mismatch') if x['status'] == 'open']}); rows, _ =
+      fetch_recs_by_ids(r, ids); vs = [v for x in rows for v in [x, *r.named('rec_history', id=x['id'])] if
+      P(v['last_updated_timestamp']) > m and 'scope=' in (v.get('context') or '')]; sc = [v['context'].split('scope=')[1].split()[0]
+      for v in vs]; bad = [s for s in sc if s in start and start[s] > m]; unres = [s for s in sc if s not in start];
+      n = sum(1 for v in start.values() if v > m); print('versions_after_merge', len(vs), 'post_merge', len(bad), 'unresolved',
+      len(unres), 'post_merge_sessions', n); raise SystemExit(1 if bad or unres else (0 if n >= 45 else 3))"
+    expected: >-
+      exit 0, printing post_merge 0 unresolved 0 and post_merge_sessions at least 45: the WATCH leg of rec-4430's exit
+      criteria. Exit 3 means fewer than 45 root sessions started after the merge: re-run daily until the deadline. Counts
+      only (no scope ids are printed).
+    fix_if: "post_merge above 0: first confirm each hit's session branch (telemetry_root_sessions branch) contains the merge SHA (git fetch it, then git merge-base --is-ancestor); a hit that does not ran the old rule and is excluded with its count reported; a hit that does is the falsifier: stop and report, reopen the diagnosis; unresolved above 0: widen the day window or read that session's start another way before judging"
+    hermetic: false
+test_obligations:
+  - source: scripts/telemetry_verify/ledger.py
+    behavior: A superset ledger on a transcript model is the declared bound.
+    verification_step: 1
+    test_selector: tests/telemetry_verify/test_ledger.py::test_a_superset_ledger_on_a_transcript_model_is_the_side_query_bound
+    red_green_expectation: red before (ledger_input_class_mismatch), green after
+  - source: scripts/telemetry_verify/ledger.py
+    behavior: Every ledger-below-transcript case still alarms.
+    verification_step: 2
+    test_selector: tests/telemetry_verify/test_ledger.py::test_a_ledger_below_the_transcript_still_alarms
+    red_green_expectation: red before (node absent), green after
+  - source: scripts/telemetry_verify/ledger.py
+    behavior: An unlinked stream before the cut alarms, read from the raw tree when a view hides it.
+    verification_step: 3
+    test_selector: tests/telemetry_verify/test_ledger.py::test_an_unlinked_stream_before_the_cut_alarms
+    red_green_expectation: red before (node absent), green after
+  - source: scripts/telemetry_capture/verify.py
+    behavior: The production verify passes the raw tree, so an unconsumed interrupted stream files ledger_stream_unlinked.
+    verification_step: 11
+    test_selector: tests/telemetry/test_in_session_verify_chain.py::test_an_unconsumed_interrupted_stream_files_ledger_stream_unlinked
+    red_green_expectation: red before (node absent; the view hides the stream), green after
+  - source: scripts/telemetry_verify/stored_ledger.py
+    behavior: The new class compares stored rows as a bound.
+    verification_step: 4
+    test_selector: tests/telemetry_verify/test_stored_ledger.py::test_the_side_query_bound_compares_stored_rows_as_a_bound
+    red_green_expectation: red before (stored_ledger_input_class_mismatch), green after
+constraints:
+  - Check-only change; no producer, parser, contract, Decision, terraform, Lambda, IAM or workflow file is edited.
+  - Counts and class names only in every output and fixture; fixtures synthetic (Decision 101).
+  - No exact-equality assertion is deleted; only the two named, operator-confirmed changes (Decisions 181, 235).
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: 235, 244, 181, 201, 101. RELATED: 199, 221, 228, 189, 128, 236, 239, 117. Decisions triaged: 205 of 205. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1. Serves: NS.6 4/5."
+  - "Root cause and evidence: /mnt/project-files/ledger-mismatch/evidence/ROOT-CAUSE-NOTES.md is session-only; the repo record is rec-4430 and the follow-on recs. Mechanism [inferred]: read from the Claude Code 2.1.322 bundle (every request credits modelUsage under its model; side requests marked skipTranscript). rec-4430: 66 history versions 2026-10-18..2026-11-12, about 55 sessions, parser v4-v9."
+  - "Measurement 1 (planning session, 2026-11-12): first cost-state record, one model, two noticed background sub-agents: ledger_exact on all four classes. Consistent with the mechanism; the resume cache warm is untested until a second record."
+  - "red_overlap --plan 2026-11-12 at write: verdict clear, reds []. Execution step 1 re-runs it."
+  - "Open plan overlap: none on these files at draft. The friction-correctness plan (rec-4605, rec-4959) bumps PARSER_VERSION in the producer; this plan touches no producer file."
+  - "Follow-on recs filed 2026-11-12: rec-5104 (capture the cost-state ledger in telemetry, with the field-semantics note that stored token sums are a lower bound on spend) and rec-5105 (store interrupted sync sub-agents' calls). Both are producer changes with a PARSER_VERSION bump, so neither rides here."
+  - "Operator alignment 2026-11-12T12:54Z in the planning thread: agreed both recommendations (check-only fix now with rec-5104 and rec-5105 as follow-ons; the field-semantics note goes with rec-5104) and said write the plan, which confirms the two planned-change assertions in weakening_dispositions and the _classify widening in scope[0] (2) under Decision 235 cl.1."
+  - "verify.py is at 498 of 500 SLOC (NEAR_CAP); its edit is one in-place line; measure at build against main and stop BLOCKED rather than raise (Decision 128)."
+  - "Graduated shards kept unchanged on disk (their node ids and commands are untouched): telemetry-verify-ledger-and-shape-classify (its test_ledger node keeps its name; one case inside changes as confirmed, Decision 244 cl.5), telemetry-verify-compare-classifies (test_stored_ledger nodes it lists are not edited), telemetry-verify-golden-agreement and telemetry-verify-mutation-evidence (their test_in_session_verify_chain nodes are not edited; golden trees reconcile exactly, so the new bound never applies to them)."
+  - "rec-4654 (ledger_model_unexplained) is not bundled: a ledger-only non-auxiliary model has no transcript record to bound, so it stays an alarm (advisor, round 1)."
+  - "Advisor (fresh-context, two rounds) adopted: bound with alarms kept, stored_ledger _BOUNDED, a compensating linkage check, Decision 235 framing, closure evidence. Adapted: the bound covers sub-agent models because the summary request runs on the sub-agent's own model; linkage is per cut on streams already started before it. Changed after critique round 1 (stricter, no new loosening): an unlinked stream always alarms instead of being paired by count with an unanswered spawn and summed, because count pairing fails on nested interrupted chains and can pair unrelated streams, and exact pairing needs the agent's meta.json sidecar, which the TranscriptTree protocol in src/turn_capture/transcript.py does not read (a producer-module change; an exact-pairing option belongs with rec-5105). Rejected: an origin tag (no consumer yet; rec-5104 measures the excess)."
+  - "Hand-off to rec-5105 (its context was updated 2026-11-12 with this hand-off): once interrupted sync spawns are stored, ledger_stream_unlinked still cannot link them (this walk reads transcript records only), so rec-5105 must re-scope or retire that alarm in the same change. Unmasking: models the stored leg used to skip (ledger alarm) are now compared as bounds, so stored_ledger_bound_exceeded is asserted zero in VP 8."
+  - "Residuals: the bound gives up exact discrimination for transcript models, so a defect in this check's own walk that drops linked records would read as the bound (acceptable until rec-5104 measures the excess); a Workflow-spawned or other non-Agent stream under subagents/, if Claude Code writes one, reads ledger_stream_unlinked (none in the corpora or this container at write time; such calls are equally unstored, so the alarm is true)."
+  - "fork: fix shape | chosen: check-only bound plus linkage check now; ledger capture and interrupted-spawn storage as rec-5104, rec-5105 | class: asked | precedent: Decision 235 | precedent_kind: decision | reversible: yes | persisted: scripts/telemetry_verify/ledger.py"
+  - "fork: field-semantics lower-bound note | chosen: with rec-5104 | class: asked | precedent: Decision 86 | precedent_kind: decision | reversible: yes | persisted: rec-5104"
+  - "Closure advice (blind Fable consult 2026-11-12, /mnt/project-files/ledger-mismatch/advisor-brief/ADVICE-closure.md, session-only): the rec carries two questions, whether the code is right (answerable at merge) and whether the superset diagnosis is true (not answerable at merge); evidence for a loosened oracle must be independent of the loosened assertion; split merge from closure with pre-registered exit criteria, a denominator, a falsifier and a deadline. Adapted: a cross-session positive count and reclassifying the 66 past firings are not possible (rec history keeps only finding_class, count, scope and parser_version; the ledger and non-alarm outcomes are not stored), so one live resumed session carries the positive leg and rec-5104 carries the cross-session measurement and any ceiling on the bound."
+  - "Why rec-4430 is not bundled: validate_merge_step requires the branch Resolves trailers to equal bundled_recommendations, and the trailer-closure job judges the rec's acceptance at the merge SHA in a credential-less sandbox that cannot run VP 8 or VP 10; after a refusal git-ops.yaml forbids a manual close. A portal close of a non-trailer rec is Decision 201's declared residual, and VP 9 verifies the closure (critique round 3 judged this compliant with 12k)."
+  - "Full-tier risk: tests/telemetry_verify/test_real_transcript_checks.py asserts no alarm from reconcile_ledger over this machine's real trees, so a true ledger_stream_unlinked (an interrupted sync spawn in the build session) can turn VP 7 red. Handling: record the stream count for rec-5105, re-run VP 7 from a session with no interrupted spawn; never edit that test (out of scope)."
+  - "Observation, not a gate: the root-cause notes predict the side-request excess is mostly cache_read with a small output share; VP 8 prints the per-class excess, and the close-out report says whether that shape held."
+  - "fork: rec-4430 closure | chosen: pre-registered exit criteria and portal closure, no Resolves trailer (operator chose it on the closure decision card, 2026-11-12T13:34Z) | class: asked | precedent: Decision 201 | precedent_kind: decision | reversible: yes | persisted: rec-4430"
+  - "fork: unlinked sub-agent stream | chosen: alarm ledger_stream_unlinked, never summed (stricter than the presented count-paired declaration; changed after critique round 1) | class: consistency-only | precedent: Decision 235 | precedent_kind: decision | reversible: yes | persisted: scripts/telemetry_verify/ledger.py"
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 2}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 6}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 4, nits: 7}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 3}
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 1}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Re-run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-ledger-side-query-bound.yaml; a red overlapping this scope is BLOCKED."
+  - "scripts/telemetry_verify/ledger.py: scope row 1; then scripts/telemetry_verify/stored_ledger.py: scope row 2."
+  - "Tests per scope rows 3-5; confirm each new node is red on main and green on the branch."
+  - "Execute the Verification Plan steps 1-7 and 11; loop until pass; on an unrecoverable failure stop and RCA (Decision 55)."
+  - "Before the PR: after calling get_rec_write_guidance, update_rec rec-4430's acceptance to AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_capture verify --tree \"$(ls -t ~/.claude/projects/*/*.jsonl | head -1)\" --no-alarms --assert-zero ledger_input_class_mismatch && grep -q \"POSITIVE, VP 8\" docs/plans/PLAN-ledger-side-query-bound.yaml (passes acceptance_lint with require_discrimination; the portal bans python -c acceptances, so the exit criteria stay in acceptance_criteria[4] of this merged plan, and the rec context is no home because the alarm path overwrites it). Owner of the open rec until it closes: the build worker, then the coordinator."
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit with Refs: rec-4430 (never Resolves); run validate_weakening_candidates and record each candidate it lists in this plan's weakening_dispositions as planned-change (expected: the changed case in tests/telemetry_verify/test_ledger.py::test_cut_bounded_reconciliation_classifies_every_model citing acceptance_criteria[0], and the plant sign in tests/telemetry/test_in_session_verify_chain.py::test_ledger_classes_on_the_resume_trap_and_a_planted_input_mismatch citing acceptance_criteria[1], both operator-confirmed with the plan); any other candidate is BLOCKED and reported; rebase; VP 7; push; PR (its body names both dispositions); subscribe; code review in a fresh context; ask for the operator's word on the final diff of the changed _classify branch and the two changed test lines, pasting them inline; merge on that word, code review PROCEED and green CI with Refs: rec-4430 and no Resolves trailer in the squash body; VP 8 until its positive leg passes, VP 10 from three days after the merge, then VP 9, all by the deadline (merge plus 7 days), reporting PR number, run ids and merge SHA; a falsifier result is reported to the coordinator and rec-4430 stays open."
+  - "Report: what was implemented, verification results"
+rollback: Revert the build PR; the check returns to exact equality and rec-4430 resumes firing.

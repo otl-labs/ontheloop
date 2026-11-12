@@ -1,7 +1,7 @@
 """tf-trusted-plan Environment and pull_request_target fence (PLAN-trusted-plan-identity, rec-4636).
 
 The trusted role trusts one subject form: the tf-trusted-plan Environment plus a job_workflow_ref naming a
-trusted workflow file. This guard keeps that premise true on the repo side. Predicates (a)-(h) each take parsed
+trusted workflow file. This guard keeps that premise true on the repo side. Predicates (a)-(l) each take parsed
 data (workflows as {filename: parsed yaml}, terraform as {filename: text}, CODEOWNERS text) so the red cases run
 on synthetic input; the registered check loads the real tree.
 
@@ -18,6 +18,8 @@ on synthetic input; the registered check loads the real tree.
   (i) every non-local uses: in a governed job (and in the composites it uses) is pinned to a 40-hex commit SHA
   (j) role partition: each trusted workflow assumes only its own role (see _trusted_plan_role_partition)
   (k) a job reading TF_GITHUB_PLAN_APP_PRIVATE_KEY declares the tf-trusted-plan environment (same module)
+  (l) every ENV_WORKFLOWS job on ENV declares the mapping form with deployment: false, so a speculative plan creates
+      no deployment record (Deployments-panel hygiene, rec-4913; not the trust boundary)
 
 Predicates (g) also refuse git fetch and git checkout in a governed run body: only scripts/ci/trusted_plan_overlay.py
 touches the PR's ref.
@@ -208,6 +210,20 @@ def check_environment_references(workflows: dict[str, dict[str, Any]]) -> list[s
                 out.append(f"a: {name}:{jid} names an environment by expression")
             if env == ENV and name not in ENV_WORKFLOWS:
                 out.append(f"a: {name}:{jid} references {ENV}")
+    return out
+
+
+def check_deployment_false(workflows: dict[str, dict[str, Any]]) -> list[str]:
+    out = []
+    for name, wf in workflows.items():
+        if name not in ENV_WORKFLOWS:
+            continue
+        for jid, job in _jobs(wf).items():
+            if _env_name(job) != ENV:
+                continue
+            env = job.get("environment")
+            if not isinstance(env, dict) or env.get("deployment") is not False:
+                out.append(f"l: {name}:{jid} must declare environment {{name: {ENV}, deployment: false}}")
     return out
 
 
@@ -487,6 +503,7 @@ def run_all(
         check_pinned_actions(workflows, read),
         _partition.check_role_partition(workflows),
         _partition.check_key_location(workflows),
+        check_deployment_false(workflows),
     ]
 
 
@@ -523,6 +540,6 @@ def validate_trusted_plan_environment(failed: list[str]) -> None:
     for violation in violations:
         print(f"  FAIL: {violation}")
         failed.append(f"trusted-plan-environment: {violation}")
-    registry.examined(11, unit="fence_predicates")
+    registry.examined(12, unit="fence_predicates")
     if not violations:
-        print("  PASS: predicates (a)-(k)")
+        print("  PASS: predicates (a)-(l)")
