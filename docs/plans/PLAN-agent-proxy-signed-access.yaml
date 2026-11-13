@@ -74,13 +74,16 @@ scope:
       under terraform/; none exists today [verified by grep]);
       test_agent_session_boundary_holds_no_user_write (the boundary's Allow ceiling in github_ci_apply_boundary.tf names
       no iam action containing User, AccessKey, LoginProfile, PolicyVersion, ServiceSpecificCredential, SSHPublicKey,
-      SigningCertificate or MFA, and no iam wildcard: the premise context's Decision 144/225 note rests on).
+      SigningCertificate or MFA, and no iam wildcard, while the parsed ceiling holds at least iam:GetRole and
+      iam:PassRole, so a parse truncated by a bracket in a comment fails: the premise context's Decision 144/225 note
+      rests on).
       The eleventh, test_agent_session_predicates_are_red_on_each_mutation, is parametrized over one mutation of the real
-      text per class and asserts each yields a problem: an extra Allow verb, an InvokeFunction Allow without the Bool
-      condition, an s3:GetObject Allow, a parameter/secret/ Resource, a dropped DailyOps Deny Sid, an extra aws_iam_role
+      text per class and asserts each yields a problem: an extra Allow verb, an iam verb beyond the four reads, an
+      InvokeFunction Allow without the Bool condition, a fifth function in the invoke Resources, an s3:GetObject
+      Allow, a parameter/secret/ Resource, a secretsmanager ARN Resource, a dropped DailyOps Deny Sid, an extra aws_iam_role
       with an sts:ExternalId trust, a verb dropped from DenySessionEscalation, DenyTemporaryCredentialUse dropped, an
       added aws_iam_access_key resource, a
-      dropped permissions_boundary and iam:CreateAccessKey added to the boundary ceiling.
+      dropped permissions_boundary, a dropped prevent_destroy and iam:CreateAccessKey added to the boundary ceiling.
   - file: scripts/aws_identity.py
     action: Modify
     purpose: >-
@@ -96,7 +99,8 @@ scope:
       test_identity_call_uses_profile_session replaces test_identity_call_uses_probe_region (rewrite: the STS client
       comes from the profile session with no region override and no explicit credentials);
       test_probe_region_differs_from_project_region is retired with IDENTITY_PROBE_REGION (the constant it pins is
-      deleted; the replacement node pins the opposite rule). The CLI still masks the account id and prints only
+      deleted; the replacement node asserts the call shape, the STS client built from the profile session with no
+      region_name, and never names IDENTITY_PROBE_REGION, so VP 5's residue stays as listed). The CLI still masks the account id and prints only
       exception type and error code on failure; profile None uses the default chain; test_no_credentials_raises stays
       (existing nodes unchanged).
   - file: tests/test_sts_call_sites.py
@@ -252,7 +256,7 @@ infrastructure_dependencies:
   - "Merge and VP 8 happen in one operator sitting: from merge, security_detector_probe.py expects the sixth alarm, so an hourly security-detector-liveness run before the apply reports it missing; a security_detector_stale rec filed in that window is closed in VP 13 with VP 8's read-back."
   - "No Lambda code changes: no deploy channel runs."
 acceptance_criteria:
-  - "terraform/bootstrap declares agent-platform-session with the permissions boundary and exactly the three managed policies; test_agent_session_user.py's ten real-tree nodes pass, and its red-case node shows each predicate failing on one mutation per class: an extra verb, a non-URL invoke grant, an S3 grant, a secret grant, a missing PlatformDev Deny, an unlisted ExternalId trust, a missing escalation Deny, a missing temporary-credential Deny, an access-key resource, a missing boundary and a user-write verb in the boundary ceiling."
+  - "terraform/bootstrap declares agent-platform-session with the permissions boundary and exactly the three managed policies; test_agent_session_user.py's ten real-tree nodes pass, and its red-case node shows each predicate failing on one mutation per class: an extra verb, a non-URL invoke grant, an unlisted invoke target, an S3 grant, a secret grant, a missing PlatformDev Deny, an unlisted ExternalId trust, a missing escalation Deny, a missing temporary-credential Deny, an access-key resource, a missing boundary or prevent_destroy and a user-write verb in the boundary ceiling."
   - "Decision 202's detector gains platform-security-agent-session-iam-change, matching any IAM write, made or denied, that names agent-platform-session or an agent-platform-session-* policy (fixture events and red cases in the detector tests; security_detector_probe.py expects six alarms); it is live from VP 8's apply, before the key exists, and metric data shows it matching the key creation (VP 9) and the denied write (VP 12, read in VP 13)."
   - "No session code calls a credential-returning STS API (test_no_session_code_mints_credentials), and a token minted from the user's key is denied every action (test_agent_session_temporary_credentials_denied)."
   - "scripts.aws_identity caller-arn reads the identity from the profile's own session; the session-start hook reports OK: user/agent-platform-session for that user and warns otherwise."
@@ -345,6 +349,8 @@ verification_plan:
           print("PROBE lambda-url", "AccessDenied" if ok else f"STOP_{e.status}")
       except RuntimeError:
           print("PROBE lambda-url NO_URL")
+      except Exception as e:
+          print("PROBE lambda-url", "STOP_" + type(e).__name__)
       PY
     expected: >-
       Five lines, each PROBE <class> AccessDenied or PROBE <class> SIGNED_OK, for ssm, logs, cloudwatch, iam and
@@ -389,7 +395,9 @@ verification_plan:
     action: >-
       ENVIRONMENT CHECK (deploy-paths.yaml admin_out_of_band.pre_merge_live_plan), operator-run in AWS CloudShell in the
       PROD account: the shell's caller is user/platform-breakglass (the CloudShell lane terraform/github/CLAUDE.md
-      names), never an agent identity. The build posts this block at CI green; the operator returns the one line.
+      names), never an agent identity. The build posts this block after the operator's final-diff word; the operator
+      returns the one line. Its "caller-arn check" label is the marker validate_admin_root_premerge_gate reads; no repo
+      helper runs in CloudShell.
     command: >-
       ( printf 'caller-arn check: '; aws sts get-caller-identity --query Arn --output text 2> /dev/null | grep -q
       ':user/platform-breakglass$' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT )
@@ -402,7 +410,12 @@ verification_plan:
   - step: 7
     phase: pre-deploy
     action: >-
-      PRE-MERGE GATE (ADMIN), operator-run in AWS CloudShell after VP 6. CloudShell needs no repo, key or profile: the
+      PRE-MERGE GATE (ADMIN), operator-run in AWS CloudShell after VP 6, and posted only after the operator's
+      final-diff word on the PR at PR_HEAD_SHA: planning runs provider code under the operator's admin sign-in, so a
+      human reads the HCL first. Before init the block refuses (SCREEN_REFUSED) a head whose diff from main's tip
+      touches any terraform/ file other than the two scope rows, or the region or version file, or adds a provider,
+      module, external or http data source or provisioner (bootstrap has no HCL screen row; owed rec 2). CloudShell
+      needs no repo, key or profile: the
       block fetches this public repo's PR head (the build writes the full sha into PR_HEAD_SHA) into a scratch folder
       under /tmp, installs the pinned terraform checked against HashiCorp's SHA256SUMS, reads the bootstrap variable
       values from /secret/agent-platform-terraform-personal-tfvars (the source PLAN-sit-portable-roots' CloudShell
@@ -413,8 +426,14 @@ verification_plan:
     command: >-
       ( set -o pipefail; PR_HEAD_SHA=<full PR head sha>; W="${TMPDIR:-/tmp}/aps-head"; L="$HOME/aps-tf.err"; rm -rf "$W";
       mkdir -p "$W/bin"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE; { git init -q "$W/repo" && git -C
+      "$W/repo" fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git +refs/heads/main:refs/o/main && git -C
       "$W/repo" fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git "$PR_HEAD_SHA" && git -C "$W/repo" checkout
-      -q --detach FETCH_HEAD; } 2>> "$L" || { echo CLONE_FAILED; exit 1; }; R=$(tr -d '[:space:]' <
+      -q --detach FETCH_HEAD; } 2>> "$L" || { echo CLONE_FAILED; exit 1; }; F=$(git -C "$W/repo" diff --name-only
+      refs/o/main HEAD -- terraform config/aws-region config/terraform-version 2>> "$L" | LC_ALL=C sort | tr '\n' ' ');
+      X=$(git -C "$W/repo" diff refs/o/main HEAD -- terraform 2>> "$L" | grep -E '^\+' | grep -cE
+      'data "(external|http)"|provider "|required_providers|module "|provisioner|local-exec'); [ "$F" =
+      "terraform/bootstrap/agent_session_user.tf terraform/bootstrap/platform_security_alarms.tf " ] && [ "$X" = 0 ] ||
+      { echo SCREEN_REFUSED; exit 1; }; echo SCREEN_OK; R=$(tr -d '[:space:]' <
       "$W/repo/config/aws-region"); export AWS_REGION="$R" AWS_DEFAULT_REGION="$R"; V=$(tr -d '[:space:]' <
       "$W/repo/config/terraform-version"); case "$(uname -m)" in aarch64) P=linux_arm64 ;; *) P=linux_amd64 ;; esac;
       Z="terraform_${V}_${P}.zip"; { curl -fsSL -o "$W/$Z" "https://releases.hashicorp.com/terraform/$V/$Z" && curl
@@ -452,7 +471,7 @@ verification_plan:
       '{"eventSource":"iam.amazonaws.com","eventName":"GetUser","readOnly":true,"requestParameters":{"userName":"agent-platform-session"}}'
       )
     expected: >-
-      HEAD_PLAN_EXIT 2; Plan: 9 to add, 0 to change, 0 to destroy.; exactly nine lines, create
+      SCREEN_OK; HEAD_PLAN_EXIT 2; Plan: 9 to add, 0 to change, 0 to destroy.; exactly nine lines, create
       aws_cloudwatch_log_metric_filter.platform_security["platform-security-agent-session-iam-change"], create
       aws_cloudwatch_metric_alarm.platform_security_agent_session_iam_change, create aws_iam_policy.agent_session_ducklake, create aws_iam_policy.agent_session_guard, create
       aws_iam_policy.agent_session_observe, create aws_iam_user.agent_session, create
@@ -461,8 +480,10 @@ verification_plan:
       new pattern evaluated live by logs:TestMetricFilter, which changes nothing: TMF key-create 1, TMF upper-boundary 1,
       TMF policy-version 1, TMF denied-resource 1, TMF denied-policy 1, TMF other-user 0, TMF read 0.
     fix_if: >-
-      Any *_FAILED, JQ_ABSENT or TFVARS_ABSENT line means nothing was planned; the operator reads $HOME/aps-tf.err in
-      CloudShell, fixes and re-pastes. Any other address, an update or a destroy (for example another merged-unapplied
+      SCREEN_REFUSED: nothing was initialised or planned; if main moved under terraform/ the build rebases and asks
+      the word again, else the head carries HCL beyond scope and the build stops and reports; the screen is never
+      widened. Any *_FAILED, JQ_ABSENT or TFVARS_ABSENT line means nothing was planned; the operator reads
+      $HOME/aps-tf.err in CloudShell, fixes and re-pastes. Any other address, an update or a destroy (for example another merged-unapplied
       bootstrap change): stop, do not merge, report the lines to the coordinator. A precondition failure names the
       oversized policy: split it. "aws_profile=" leaving the provider on the sign-in's own credentials is UNPROVEN until
       this step; INIT_FAILED or a profile error here is fixed before merge. A TMF count other than expected, or an empty
@@ -473,7 +494,8 @@ verification_plan:
     phase: post-deploy
     action: >-
       OPERATOR STEP, AWS CloudShell in the PROD account, after merge. The same fetch, install, variable and init lines as
-      VP 7 at the merge sha (the build writes the full sha into M), then a saved plan that is applied only when its
+      VP 7 at the merge sha (the build writes the full sha into M), with VP 7's screen run on the merge commit's own
+      diff, then a saved plan that is applied only when its
       summary is exactly 9 to add, 0 to change, 0 to destroy and its nine addresses are exactly VP 7's, then a fresh plan.
       The operator's paste is the direction for the apply (Decision 126 cl.1: operators may always invoke it directly).
       Expected emails from the apply itself: platform-security-detector-tamper (its PutMetricFilter and PutMetricAlarm
@@ -483,8 +505,13 @@ verification_plan:
     command: >-
       ( set -o pipefail; M=<full merge sha>; W="${TMPDIR:-/tmp}/aps-merge"; L="$HOME/aps-tf.err"; rm -rf "$W"; mkdir -p
       "$W/bin"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE; { git init -q "$W/repo" && git -C "$W/repo" fetch
-      -q --depth 1 https://github.com/otl-labs/ontheloop.git "$M" && git -C "$W/repo" checkout -q --detach FETCH_HEAD; }
-      2>> "$L" || { echo CLONE_FAILED; exit 1; }; R=$(tr -d '[:space:]' < "$W/repo/config/aws-region"); export
+      -q --depth 2 https://github.com/otl-labs/ontheloop.git "$M" && git -C "$W/repo" checkout -q --detach FETCH_HEAD; }
+      2>> "$L" || { echo CLONE_FAILED; exit 1; }; F=$(git -C "$W/repo" diff --name-only HEAD^ HEAD -- terraform
+      config/aws-region config/terraform-version 2>> "$L" | LC_ALL=C sort | tr '\n' ' '); X=$(git -C "$W/repo" diff
+      HEAD^ HEAD -- terraform 2>> "$L" | grep -E '^\+' | grep -cE
+      'data "(external|http)"|provider "|required_providers|module "|provisioner|local-exec'); [ "$F" =
+      "terraform/bootstrap/agent_session_user.tf terraform/bootstrap/platform_security_alarms.tf " ] && [ "$X" = 0 ] ||
+      { echo SCREEN_REFUSED; exit 1; }; echo SCREEN_OK; R=$(tr -d '[:space:]' < "$W/repo/config/aws-region"); export
       AWS_REGION="$R" AWS_DEFAULT_REGION="$R"; V=$(tr -d '[:space:]' < "$W/repo/config/terraform-version"); case
       "$(uname -m)" in aarch64) P=linux_arm64 ;; *) P=linux_amd64 ;; esac; Z="terraform_${V}_${P}.zip"; { curl -fsSL -o
       "$W/$Z" "https://releases.hashicorp.com/terraform/$V/$Z" && curl -fsSL -o "$W/sums"
@@ -509,10 +536,10 @@ verification_plan:
       -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" >
       /dev/null 2>> "$L"; echo "BOOTSTRAP_PLAN_EXIT $?"; else echo APPLY_SKIPPED; fi; echo "MERGE_SHA $M" )
     expected: >-
-      MERGE_PLAN Plan: 9 to add, 0 to change, 0 to destroy.; Apply complete! Resources: 9 added, 0 changed, 0
+      SCREEN_OK; MERGE_PLAN Plan: 9 to add, 0 to change, 0 to destroy.; Apply complete! Resources: 9 added, 0 changed, 0
       destroyed.; BOOTSTRAP_PLAN_EXIT 0; MERGE_SHA with the merge sha.
     fix_if: >-
-      APPLY_SKIPPED or any other count: nothing was applied; stop and report to the coordinator as a plan defect, never
+      SCREEN_REFUSED, APPLY_SKIPPED or any other count: nothing was applied; stop and report to the coordinator as a plan defect, never
       a second paste. A setup failure line: read $HOME/aps-tf.err in CloudShell and re-paste. BOOTSTRAP_PLAN_EXIT 2 after
       the apply: stop and report; a half-applied state is re-planned, never hand-edited.
     hermetic: false
@@ -548,7 +575,7 @@ verification_plan:
       operator returns the ALARM_STATE, ACTIVE_KEYS and MATCHES lines and whether the agent-session email arrived, then
       "cutover done".
     fix_if: >-
-      First run ALARM or MATCHES above 0: wait 10 minutes and re-run before creating the key. ACTIVE_KEYS 2 or more:
+      First run ALARM, INSUFFICIENT_DATA or MATCHES above 0: wait 10 minutes and re-run before creating the key. ACTIVE_KEYS 2 or more:
       deactivate the extra key in the console first, so exactly one key is live. Second run MATCHES 0 twenty minutes
       after the key's creation: stop before (d); the filter did not match the key creation, so the build and the operator
       check it in CloudWatch (VP 7's TMF lines first) and fix forward before any session uses the key. A match with no
@@ -692,21 +719,21 @@ test_obligations:
 constraints:
   - No rescue agents or workaround loops (Decision 55); never attempt or retry sts:AssumeRole or any other credential-minting call.
   - Never write a key, account id, ExternalId, Function URL host or ARN containing an account id into the repo, a PR, a comment or the shared folder (AGENTS.md public boundary, Decision 101); probes print tokens, never AWS error text.
-  - The governed files get exactly the sidecar's words (Decision 246); the operator's word on the final diff is still required for the IAM text under terraform/bootstrap and the session-start hook (coordinator always_ask).
+  - The governed files get exactly the sidecar's words (Decision 246); the operator's word on the final diff is still required for the IAM text under terraform/bootstrap and the session-start hook (coordinator always_ask), and comes before VP 7 plans that head.
   - No grant beyond scope row 1; a missing grant found in VP 11 is a plan defect, never a build-time widening.
   - Loosens no assertion (Decision 235); the retired and rewritten test nodes are exactly those the test rows name. The protected-action gate, its contract, validate_admin_root_premerge_gate and deploy-paths' pre_merge_live_plan ENVIRONMENT CHECK with its test pin stay as they are (owed rec 2).
   - Files other projects own are not edited (telemetry code and contracts are Feedback Loop's; account-credential-inventory.yaml is reported, not edited).
 context:
   - "Decision-scout r1 FLAGS_FOUND (/mnt/project-files/agent-aws-access/SCOUT-r1.md); NORTH STAR: NS.9 3/5, no Serves line claimed. CITE: 113, 213, 144, 223, 225, 180, 126, 237, 84, 127, 235, 167/177. Dispositions: 248 cl.6, 252 cl.5/cl.7 and 202 cl.1 amended by sidecar notes; 238 held (no state, plan or transcript grant; the guard policy carries PlatformDev's Denies) and its check's reach to users is owed rec 5; 251 is the operator's under cl.3 (rec-5023 done); 143 deferred against rec-4206 (cl.7, owed rec 1); 229/T4.15 PlatformDev stays, c13's launcher successor goes to owed rec 3; 239 content reader waits for rec-4696 (owed rec 10); 202 cl.1's 'applied only by PlatformAdmin' amended by the sidecar's decision-202-note (PlatformAdmin's trust names only the old user, so CloudShell cannot assume it; the operator applies the detector as user/platform-breakglass until cl.4); 126 spirit met by VP 7 proving a CloudShell plan before merge."
-  - "Decision 144 and 225 for a user: the boundary's ceiling (github_ci_apply_boundary.tf:29-96) holds no user, access-key, login-profile or policy-version verb, so DenyBoundaryRemoval naming only the role verb leaves no user gap; the user's identity policies grant no IAM write, DenySessionEscalation denies them outright and DenyTemporaryCredentialUse denies everything to a token minted from the key. The read ceiling also lacks GetPolicy, GetPolicyVersion and GetUser, so agents cannot read the boundary or their own user's policies (narrower than F3's 'roles, policies and users'; disclosed to the operator)."
+  - "Decision 144 and 225 for a user: the boundary's ceiling (github_ci_apply_boundary.tf:29-103) holds no user, access-key, login-profile or policy-version verb, so DenyBoundaryRemoval naming only the role verb leaves no user gap; the user's identity policies grant no IAM write, DenySessionEscalation denies them outright and DenyTemporaryCredentialUse denies everything to a token minted from the key. The read ceiling also lacks GetPolicy, GetPolicyVersion and GetUser, so agents cannot read the boundary or their own user's policies (narrower than F3's 'roles, policies and users'; disclosed to the operator)."
   - "Design evidence: blind Fable consults /mnt/project-files/agent-aws-access/ADVICE.md and ADVICE-r2.md; PRESENTATION.md (F1-F6 taken as recommended, F4 revised to CloudShell now and an admin-environment follow-on); operator's 'write the plan' 2026-11-13 00:01Z with a standing ask that any new design fork gets a fresh blind Fable consult. Critique r1 raised three forks; ADVICE-r2 recommended A2 (deny GetRole on the two ExternalId-trust roles), B2 (no S3 host, no direct S3 read) and C1 (pre-merge probe with the old key), all taken; they narrow F2 and F3 and are put to the operator with the wording approval. Critique r2 raised a fourth (no Decision 202 alarm watches the new user); ADVICE-r3 recommended D1, a new filter and alarm in this change, live before the key exists, taken (its optional extras go to owed rec 4)."
   - "UNPROVEN until VP 4: that the proxy signs the ssm, logs, monitoring, global iam and Function URL hosts as it signs STS (verified for STS only, operator reproduction 2026-11-12 22:41Z). UNPROVEN until VP 7: that -var aws_profile= leaves the bootstrap provider on CloudShell's own credentials. UNPROVEN: whether the proxy leaves presigned requests alone; B2 sidesteps it by listing no S3 host. UNPROVEN, and never probed (the probe would itself mint): whether the proxy refuses sts:GetSessionToken; DenyTemporaryCredentialUse makes any token it returns useless."
   - "Session-side AWS consumers [verified by reading]: ducklake_reader_client.py and writer_transport.py (Function URLs, SSM lookup); telemetry_capture/transport.py (telemetry writer Function URL, then PUTs to presigned URLs on the bucket's regional S3 host, which must stay unsigned); preflight aws_infra.py's convergence read, which swallows every error and returns (None, None), so it degrades quietly until owed rec 6; session_start_aws.sh. s3_log_store.py writes S3 only when S3_LOG_BUCKET is set (CI only). No session code reads the inference keys; DynamoDB counters are legacy (Decision 84 I-2). Admin tooling that defaults to agent_platform_admin (iam_simulate, security_detector_probe, secrets_to_ssm_copy) is operator-run under cl.3; the terraform-assets hook skips without that profile."
   - "Telemetry writer records the caller's name parsed from userArn (handler.py:84-88): it becomes agent-platform-session, not PlatformDev; tenant keys on the account and is unchanged. ducklake_telemetry_writer.yaml's producer line is Feedback Loop's (owed rec 9)."
-  - "Owed follow-on recs, filed in VP 13 (exactly ten): 1 writer hardening, create_ops_tables force_recreate and smoke/churn actions off the routine identity's reach (cl.7; 143 cl.1; rec-4206; S, High). 2 admin environment plan (cl.4): admin user in a dedicated environment, protected-action gate, validate_admin_root_premerge_gate and deploy-paths pre_merge_live_plan ENVIRONMENT CHECK (with its test pin) re-grounded on environment identity, first step probes which IAM calls the proxy refuses; it also decides the ADMIN-session carve-outs cl.3's reading rule suspends (213 cl.5, 230 cl.4, 237 cl.6, 251 cl.1, 204 cl.2) and leaves them forward pointers (L, High). 3 retire the old user's key after a 7-day soak and re-point or retire the PlatformDev/PlatformAdmin trusts, removing DenyExternalIdTrustRead and deploy-paths' self-access trust rationale with them; name T4.15 c13's launcher (cl.6; 229 cl.3; M, Medium). 4 key rotation reminder, key-age and one-active-key alarm, the account-credential-inventory.yaml row for the new key (owner asked first), and ADVICE-r3's extras: a threshold alarm on the user's own denied calls and a GuardDuty evaluation, and the detector residuals scope row 10 accepts (cl.5; S, Medium). 5 Decision 238's check, the iam-simulate fixture and validate_agent_observability_read_coverage (which still treats PlatformDev as the dev agent identity) reach the session user (238 cl.1; the fixture is at 647 of 650 lines, so it decomposes; S, Medium). 6 serve the convergence record through the reader (cl.2; S, Medium). 7 stale-prose residue VP 5 lists, plus the agent_platform_admin apply wording in terraform/bootstrap/CLAUDE.md, terraform/CLAUDE.md and src/data/handlers/CLAUDE.md, each owner asked first (S, Low). 8 optional per-session attribution tag (cl.5; S, Low). 9 Feedback Loop: telemetry producer admission for the new user (S, Medium). 10 Feedback Loop: content reader grant after rec-4696 (239; S, Low). Drafts: /mnt/project-files/agent-aws-access/OWED-RECS.md."
+  - "Owed follow-on recs, filed in VP 13 (exactly ten): 1 writer hardening, create_ops_tables force_recreate and smoke/churn actions off the routine identity's reach (cl.7; 143 cl.1; rec-4206; S, High). 2 admin environment plan (cl.4): admin user in a dedicated environment, protected-action gate, validate_admin_root_premerge_gate and deploy-paths pre_merge_live_plan ENVIRONMENT CHECK (with its test pin) re-grounded on environment identity, first step probes which IAM calls the proxy refuses; it also decides the ADMIN-session carve-outs cl.3's reading rule suspends (213 cl.5, 230 cl.4, 237 cl.6, 251 cl.1, 204 cl.2) and leaves them forward pointers, and gives terraform/bootstrap a terraform_hcl_screen policy row so an admin plan is screened as Decision 238 cl.3 screens CI's (L, High). 3 retire the old user's key after a 7-day soak and re-point or retire the PlatformDev/PlatformAdmin trusts, removing DenyExternalIdTrustRead and deploy-paths' self-access trust rationale with them; name T4.15 c13's launcher (cl.6; 229 cl.3; M, Medium). 4 key rotation reminder, key-age and one-active-key alarm, the account-credential-inventory.yaml row for the new key (owner asked first), and ADVICE-r3's extras: a threshold alarm on the user's own denied calls and a GuardDuty evaluation, and the detector residuals scope row 10 accepts (cl.5; S, Medium). 5 Decision 238's check, the iam-simulate fixture and validate_agent_observability_read_coverage (which still treats PlatformDev as the dev agent identity) reach the session user (238 cl.1; the fixture is at 647 of 650 lines, so it decomposes; S, Medium). 6 serve the convergence record through the reader (cl.2; S, Medium). 7 stale-prose residue VP 5 lists, plus every agent_platform_admin instruction outside history: terraform/bootstrap/CLAUDE.md, terraform/CLAUDE.md, src/data/handlers/CLAUDE.md, terraform-cc-web-operations.yaml's break-glass loop, deploy-paths.yaml's procedure steps, build-lambda.yaml's break-glass deploy, restore-rehearsal.yaml and docs/runbooks/ducklake-catalog-operations.md, each owner asked first; acceptance rg -c agent_platform_admin over them finds none outside retirement notes (S, Low). 8 optional per-session attribution tag (cl.5; S, Low). 9 Feedback Loop: telemetry producer admission for the new user (S, Medium). 10 Feedback Loop: content reader grant after rec-4696 (239; S, Low). Drafts: /mnt/project-files/agent-aws-access/OWED-RECS.md."
   - "Overlaps: PLAN-sit-organization (rec-5026, unbuilt) adds its own Decision 113 Update after the same anchor, edits deploy-paths' ENVIRONMENT CHECK and designs a user + AssumeRole chain this Decision retires: its planning thread amends it before its build. PLAN-retired-repo-identity-sweep (unbuilt) also edits bin/setup-cloud-env.sh; PLAN-neon-key-out-of-pr-plans and PLAN-telemetry-content-reader-lock also edit deploy-paths.yaml; whichever builds second rebases. rec-4233 PR 1's bootstrap change queues after this one."
   - "V3 resolution: VP 7's operator-run pre-merge plan at the PR head substitutes for pre-merge post-deploy evidence, with VP 4 proving proxy signing before merge; behavioural acceptance is VP 8-13 after merge, with the operator's returned lines labelled operator-reported in a counts-only PR comment. VP 6 is the CloudShell analog of the ENVIRONMENT CHECK: CloudShell has no repo helper or profile, so it reads the operator's own sign-in with get-caller-identity under a 'caller-arn check' label; owed rec 2 re-grounds the check on environment identity."
-  - "Approvals at build start: none; the build session holds no AWS identity, VP 6-9 are the operator's own CloudShell blocks or console steps, VP 4 runs on the old key with no new grant, and VP 10-13 run in a fresh session as the new user. The operator's final-diff word on the build PR (IAM text, the session-start hook) is asked at CI green."
+  - "Approvals at build start: none; the build session holds no AWS identity, VP 6-9 are the operator's own CloudShell blocks or console steps, VP 4 runs on the old key with no new grant, and VP 10-13 run in a fresh session as the new user. The operator's final-diff word on the build PR (IAM text, the session-start hook) is asked at CI green, before VP 7 plans that head (planning runs provider code under the operator's admin sign-in)."
   - "red_overlap: the recs reader is unreachable (Decision 215 fails closed; scripts.ci_rca.red_overlap exits 2 and its reader lookup goes through the refused profile chain, so it is not re-run); main's GitHub CI state is the substitute evidence and the operator's override is asked before the plan PR merges."
   - "Registry shards kept, not edited: aws-identity-caller-arn and session-start-aws-caller-arn (file-level nodes, guard symbols kept), session-start-aws-no-account-id (its node test_output_never_contains_account_id_or_arn keeps its name), setup-cloud-env-proxy-template (node name kept), sts-call-site-census (scan_sts_call_sites kept), platform-role-iam-change-detector-declared and security-detector-probe-fails-closed (class nodes kept), setup-cloud-session-bootstrap-parity, github-mcp-server-neither-installed-nor-declared and github-session-readiness-capabilities (untouched nodes). PLAN-account-id-out-of-session-output, listed unbuilt by plan_obligations, is built (plan #1675, build #1681, its shard graduated 2026-10-27); PLAN-hook-canary-evidence (AGENTS.md) is built too (the canary rule is on main)."
 gate_rounds:
@@ -724,6 +751,8 @@ gate_rounds:
   - {gate: wording-check, round: 7, verdict: PASS, digest: 7fb1d4c304c8dad371c58b51aeb04daa930363c6800df5698e7cfbe86e0d2eb0, base: 9412b0ec4385060058ad545ddf35ecba8793c030, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 12}
   - {gate: wording-check, round: 8, verdict: PASS, digest: 35c6777acf0ef72e3adbbafcb9f8c8b61eb72e322474cac097868c8a7ac0dc64, base: 9412b0ec4385060058ad545ddf35ecba8793c030, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 1, nits: 10}
+  - {gate: wording-check, round: 9, verdict: PASS, digest: 6944f33f812be1427551cabb6a420328e01ba126671de89bac029b05ea99bf8c, base: 9412b0ec4385060058ad545ddf35ecba8793c030, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -737,7 +766,7 @@ execution_steps:
   - "terraform/bootstrap/agent_session_user.tf per scope row 1, reusing platform_dev_policies.tf's function locals and Deny statements, then the sixth detector pair in platform_security_alarms.tf and EXPECTED_ALARMS in security_detector_probe.py. Post: VP 1-2 pass."
   - "scripts/aws_identity.py, .claude/hooks/session_start_aws.sh and the bin/setup-cloud-env.sh header per their rows. Post: VP 1 and VP 5 pass."
   - "Hand-apply the sidecar's ten blocks verbatim, {{N}} the next free Decision number at build time and {{DATE}} the build date; AGENTS.md shrinks, so lower config/prose_budgets.yaml's S1 root_ambient_load_set to the measured value (the prose_budgets_ratchet_down sanction). Post: VP 3 passes."
-  - "Commit Flow (implement skill; git-ops.yaml handoff_sequence): full tier, push, PR. At CI green, with VP 4 passed, post VP 6 and VP 7's blocks for the operator, record the returned lines, ask the operator's final-diff word; merge only the head VP 7 matched (any new head, a rebase for {{N}} included, re-runs VP 6-7 first), only after #1987 is applied, and only when the operator is ready to run VP 8 in the same sitting."
+  - "Commit Flow (implement skill; git-ops.yaml handoff_sequence): full tier, push, PR. At CI green, with VP 4 passed, ask the operator's final-diff word on the head, naming its full sha (the terraform/bootstrap IAM text and the session-start hook first); only after that word post VP 6 and VP 7's blocks at that sha and record the returned lines; merge only the head both cover (any new head, a rebase for {{N}} included, needs the word and VP 6-7 again first), only after #1987 is applied, and only when the operator is ready to run VP 8 in the same sitting."
   - "After merge: post VP 8's block; on its lines, post VP 9's procedure; on 'cutover done', run VP 10-13 in a fresh session (the build thread itself if it was started after cutover, else a fresh one the coordinator starts)."
   - "Report: what was implemented, the operator-reported lines, VP 4 and VP 10-12 results, the filed rec ids and the merge SHA."
 rollback: >-
