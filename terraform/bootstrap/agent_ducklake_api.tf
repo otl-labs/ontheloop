@@ -29,22 +29,17 @@ locals {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "DuckLakeApiAccessLogWrite"
+        Sid    = "ApiGatewayAccountLogging"
         Effect = "Allow"
         Action = [
+          "logs:CreateLogGroup",
           "logs:CreateLogStream",
+          "logs:DescribeLogGroups",
+          "logs:DescribeLogStreams",
           "logs:PutLogEvents",
-          "logs:DescribeLogStreams"
+          "logs:GetLogEvents",
+          "logs:FilterLogEvents"
         ]
-        Resource = [
-          "arn:aws:logs:${var.aws_region}:${var.account_id}:log-group:/aws/apigateway/agent-platform-ducklake-api",
-          "arn:aws:logs:${var.aws_region}:${var.account_id}:log-group:/aws/apigateway/agent-platform-ducklake-api:*"
-        ]
-      },
-      {
-        Sid      = "DuckLakeApiAccessLogGroups"
-        Effect   = "Allow"
-        Action   = "logs:DescribeLogGroups"
         Resource = "*"
       },
     ]
@@ -95,14 +90,16 @@ resource "aws_cloudwatch_log_group" "agent_ducklake_api_access" {
   skip_destroy      = true
 }
 
-# Outside agent-platform-* so no CI IAM grant reaches it; a service role holding four logs actions gains nothing from
-# Decision 144 cl.3's boundary. Whether API Gateway supplies aws:SourceAccount when it assumes the account CloudWatch
-# role is unverified, so no condition (owed rec 19).
+# The account CloudWatch role serves every REST API in the region, and UpdateAccount refused a policy scoped to this
+# API's log group, so the role holds AWS's AmazonAPIGatewayPushToCloudWatchLogs actions inline on "*" (an inline copy,
+# not the managed attachment, which the bootstrap scan refuses). Outside agent-platform-* so no CI IAM grant reaches
+# it; a service role only API Gateway can use gains nothing from Decision 144 cl.3's boundary. Whether API Gateway
+# supplies aws:SourceAccount when it assumes the role is unverified, so no condition (owed rec 19).
 resource "aws_iam_role" "agent_ducklake_api_logs" {
   count = local.ducklake_api_count
 
   name        = "ducklake-api-access-logs"
-  description = "API Gateway account CloudWatch role: writes the DuckLake API access log only (Decision 255)"
+  description = "API Gateway account CloudWatch role: AWS's API Gateway logging actions, inline (Decision 255)"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -205,8 +202,8 @@ resource "aws_api_gateway_deployment" "agent_ducklake" {
     redeployment = sha1(jsonencode([
       local.ducklake_api_routes,
       aws_api_gateway_rest_api_policy.agent_ducklake[0].policy,
-      aws_api_gateway_method.agent_ducklake_route,
-      aws_api_gateway_integration.agent_ducklake_route,
+      { for k, m in aws_api_gateway_method.agent_ducklake_route : k => [m.id, m.http_method, m.authorization] },
+      { for k, i in aws_api_gateway_integration.agent_ducklake_route : k => [i.id, i.type, i.uri, i.timeout_milliseconds] },
     ]))
   }
 
