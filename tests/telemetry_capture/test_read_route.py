@@ -314,3 +314,55 @@ def test_content_and_event_verbs_never_cross_routes(aws: Aws, monkeypatch: pytes
     with pytest.raises(read_route.WrongRoute):
         read_route.content_reader().named(OPS_VERB)
     assert sent == [] and read_route.content_reader().named(CONTENT_VERB) == [] and sent == [CONTENT_VERB]
+
+
+class _ApiSession:
+    """A fake boto3.Session for the API transport: records profile names, every SSM name read, and any lambda client use."""
+
+    def __init__(self, value: str | None) -> None:
+        self.value, self.profiles, self.names, self.services = value, [], [], []
+
+    def __call__(self, profile_name: str | None = None) -> Any:
+        owner = self
+        owner.profiles.append(profile_name)
+
+        class _Session:
+            def client(self, service: str, region_name: str) -> Any:
+                owner.services.append(service)
+
+                class _Client:
+                    def get_parameter(self, *, Name: str, **_: Any) -> dict[str, Any]:  # noqa: N803 -- boto3's keyword
+                        owner.names.append(Name)
+                        if owner.value is None:
+                            raise RuntimeError(DENIED)
+                        return {"Parameter": {"Value": owner.value}}
+
+                return _Client()
+
+        return _Session()
+
+
+def test_telemetry_reader_uses_the_api_route_parameter(monkeypatch: pytest.MonkeyPatch) -> None:
+    import boto3
+
+    fake = _ApiSession("https://abc.execute-api.eu-west-2.amazonaws.com/v1/telemetry/reader/")
+    monkeypatch.setattr(boto3, "Session", fake)
+    for name in (read_route.READER_URL_ENV, "AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_LAMBDA_FUNCTION_NAME"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OTL_OPS_VERBS_TRANSPORT", "execute_api")
+    reader = read_route.TelemetryReader(profile=None)
+    assert reader._reader_url() == "https://abc.execute-api.eu-west-2.amazonaws.com/v1/telemetry/reader"
+    assert fake.names == ["/agent-platform/ducklake/api_url/telemetry/reader"]
+    assert fake.profiles == ["agent_platform"] and fake.services == ["ssm"]
+
+
+def test_content_reader_has_no_api_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    import boto3
+
+    fake = _ApiSession("https://never.example")
+    monkeypatch.setattr(boto3, "Session", fake)
+    monkeypatch.delenv(read_route.CONTENT_READER_URL_ENV, raising=False)
+    monkeypatch.setenv("OTL_OPS_VERBS_TRANSPORT", "execute_api")
+    with pytest.raises(RuntimeError, match="the telemetry content reader has no API route"):
+        read_route.content_reader("a-profile")._reader_url()
+    assert fake.names == [] and fake.profiles == [] and fake.services == []
