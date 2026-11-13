@@ -49,6 +49,7 @@ _AWS_REGION = "eu-west-2"
 # terraform/bootstrap .tf file outside _UNSCANNED_BOOTSTRAP_FILES (PLAN-bootstrap-ci-gated-apply).
 _SCANNED_BOOTSTRAP_FILES = (
     _BOOTSTRAP_DIR / "account_names.tf",
+    _BOOTSTRAP_DIR / "agent_ducklake_api.tf",
     _CI_APPLY_FILE,
     _BOOTSTRAP_DIR / "github_ci_apply.tf",
     _POLICY_FILE,
