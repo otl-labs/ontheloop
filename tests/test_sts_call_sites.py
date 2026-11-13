@@ -1,5 +1,5 @@
-"""Census of STS call sites (rec-4510): the agent proxy re-signs calls to the project region's STS host as the IAM user,
-so an identity-dependent or role-chaining STS call must not target that host. See scripts/aws_identity.py's docstring."""
+"""Census of STS call sites (rec-4510) and the no-minting rule (Decision 255 cl.1): session code never calls an API that
+returns credentials, and identity reads go through scripts/aws_identity.py (see its docstring)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 ROOTS = ("scripts", "src", "bin", ".claude/hooks", ".github/actions")
+MINTING_ROOTS = ("scripts", "src", "bin", ".claude/hooks")
 SCANNED_SUFFIXES = (".py", ".sh", ".yml", ".yaml")
 
 _STS_PATTERNS = (
@@ -28,6 +29,11 @@ ALLOWED: dict[str, str] = {
     "scripts/ci/iam_simulate.py": ACCOUNT_ID_ONLY,
     "scripts/ci/security_detector_probe.py": ACCOUNT_ID_ONLY,
 }
+
+_MINTING_PATTERNS = (
+    re.compile(r"\.(assume_role\w*|assume_root|get_session_token|get_federation_token)\("),
+    re.compile(r"\baws\s+sts\s+(assume-role[\w-]*|assume-root|get-session-token|get-federation-token)\b"),
+)
 
 _RULE_POINTER = "see the rule in scripts/aws_identity.py's docstring"
 
@@ -76,3 +82,42 @@ def test_scanner_names_an_extra_sts_file(tmp_path: Path) -> None:
     (tmp_path / "scripts" / "commented.py").write_text('# boto3.client("sts")\n', encoding="utf-8")
     (tmp_path / "scripts" / "offender.py").write_text('import boto3\nc = boto3.client("sts")\n', encoding="utf-8")
     assert scan_sts_call_sites(tmp_path) == {"scripts/offender.py"}
+
+
+def scan_minting_calls(repo_root: Path) -> set[str]:
+    """Repo-relative paths of any tracked text file under MINTING_ROOTS with a call-shaped credential-minting line."""
+    listing = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", *MINTING_ROOTS],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+    ).stdout.splitlines()
+    found: set[str] = set()
+    for rel in listing:
+        path = repo_root / rel
+        if not path.is_file():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError:
+            continue
+        if any(not line.lstrip().startswith("#") and any(p.search(line) for p in _MINTING_PATTERNS) for line in lines):
+            found.add(rel)
+    return found
+
+
+def test_no_session_code_mints_credentials() -> None:
+    assert scan_minting_calls(Path.cwd()) == set(), f"credential-minting call in session code; {_RULE_POINTER}"
+
+
+def test_minting_scanner_flags_a_synthetic_call(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "offender").write_text("c.assume_role_with_web_identity(x)\n", encoding="utf-8")
+    (tmp_path / "bin" / "commented").write_text("# c.assume_role(x)\n", encoding="utf-8")
+    (tmp_path / "bin" / "prose").write_text("assume_role_policy = x\n", encoding="utf-8")
+    (tmp_path / "bin" / "cli").write_text("aws sts get-session-token\n", encoding="utf-8")
+    assert scan_minting_calls(tmp_path) == {"bin/offender", "bin/cli"}

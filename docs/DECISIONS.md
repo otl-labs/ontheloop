@@ -2,6 +2,96 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 255: Agent sessions reach AWS only as a proxy-held IAM user that signs each call itself -- no session assumes a role or holds an AWS key, and admin authority stays out of agent environments (amends Decisions 113, 202, 223, 248 and 252) (Decided)
+
+```yaml
+number: 255
+status: Decided
+decided_date: "2026-11-13"
+kind:
+  value: direction
+  justification: >-
+    Yes: clause 3 removes admin applies and admin writes from agents and leaves them to the operator alone until
+    clause 4 lands, which moves a human gate.
+amends: [113, 202, 223, 248, 252]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable: it replaces Decision 113's chained AssumeRole with a proxy-signed user and moves admin authority out of
+    agent environments, with reversal conditions. Not a deploy-paths.yaml note: it indexes
+    procedures, and an annotation cannot retire a ratified auth model.
+```
+
+**Status:** Decided
+**Date:** 2026-11-13
+**Warehouse ID:** dec-255 (per Decision 84 backfill)
+
+**Problem:** Since 2026-11-12 the agent egress proxy refuses sts:AssumeRole in every session as a credential mint,
+so Decision 113's chain cannot start and agents lost Terraform, live IAM and the ops store. Calls the proxy signs directly as its held IAM user still
+succeed. The block is treated as deliberate: the proxy keeps usable credentials out of the sandbox, and a role
+session puts temporary keys inside it.
+
+**Intent:** No agent session ever holds a usable AWS credential, and admin authority is never reachable from a
+routine session.
+
+**Decision:**
+1. **Proxy-signed routine user (amends 113).** Agent sessions reach AWS as one IAM user, agent-platform-session,
+   declared in terraform/bootstrap (Decision 223 cl.1) with the mandatory permissions boundary (Decision 144) and
+   customer-managed policies only. No session calls sts:AssumeRole or any other API that returns credentials. The
+   operator creates the user's access key out of band (Decision 237 cl.3); it lives only as an environment's AWS
+   network secret whose allowed hosts are each named exactly, never a wildcard, and never in Terraform state.
+   `~/.aws` holds placeholder credentials and keeps its routine profile names; the environment, not the profile,
+   selects the signing identity.
+2. **Grants.** Only what sessions use: URL-only invoke (Decision 213 cl.1) of the DuckLake reader, writer,
+   telemetry reader and telemetry writer; endpoint lookup under /agent-platform/ducklake/; CloudWatch metric and
+   agent-platform Lambda log reads; IAM role reads within the boundary's ceiling, except the trust document of a
+   role whose trust requires an ExternalId. Never a direct S3 read or write (data goes through the Lambdas and
+   presigned URLs; no S3 host is on the proxy's list), a /secret/ or Secrets Manager value, Terraform state, a
+   saved plan or a plan-review transcript (Decision 238 cl.1), or any IAM write. Its policies keep every
+   PlatformDev Deny and explicitly deny role assumption, GetFederationToken, any call made with a token minted
+   from its key, and IAM writes. A new grant names its session consumer.
+3. **Admin work (interim).** No agent environment holds an admin identity. Admin applies, admin writes and secret
+   reads run as blocks an agent prepares and the operator runs in AWS CloudShell under the operator's own sign-in;
+   the operator returns the printed lines, never a secret. Where a Decision names an ADMIN-session agent as the
+   one who runs an admin step, the operator runs it this way until clause 4 lands; what the step does is unchanged.
+4. **Admin environment (direction).** A follow-on plan returns admin work to agents: a separate admin user whose
+   key only a dedicated admin environment's proxy holds, routine threads in environments holding only clause 1's
+   key, and the protected-action gate and its approvals keyed on the environment, not a profile name.
+5. **Keys.** One long-lived key per user, rotated at least every 90 days by the operator. Short-lived,
+   per-agent and per-container keys are not adopted while issuing them needs a minter outside the sandbox writing
+   environment secrets. Revocation is deactivating the key or an explicit Deny on the user. An IAM
+   write or denied attempt naming the user or its policies alarms (Decision 202).
+6. **The two roles.** PlatformDev and PlatformAdmin stay declared and the two-principal semantic stands: routine
+   work runs as clause 1's user, admin work as the operator or, after clause 4, the admin user. Retiring the old
+   IAM user's key and the roles' trusts waits until clause 1 is proven in a fresh session.
+7. **Coverage (Decision 181 cl.2).** Clauses 1-2: tests/checks/iam_tf/test_agent_session_user.py on the policy
+   text and PLAN-agent-proxy-signed-access's fresh-session checks; clause 5's alarm: its filter tests. The shared writer's create_ops_tables
+   force_recreate and smoke actions stay invocable by clause 1's user, as by PlatformDev today, deferred against
+   Decision 143 cl.1 with rec-4206 to the writer follow-on. Clause 3 is instruction-enforced. Clause 4, clause 5's
+   rotation reminder, clause 6's retirement, Decision 238's check reaching IAM users and the convergence record
+   served through the reader are follow-on recs the plan files once the recs store answers.
+
+```yaml reversal-conditions
+decision: 255
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: minting-allowed
+    kind: manual
+    description: "Anthropic exposes credential minting or a proxy-side role assumption to the operator: re-decide clauses 1 and 5, keeping direct signing for routine work unless the new route also keeps every credential out of the sandbox."
+  - id: proxy-stops-signing
+    kind: manual
+    description: "The proxy stops re-signing a host clause 2 needs, or refuses a clause 2 call: re-decide clause 1."
+  - id: admin-environment-lands
+    kind: manual
+    description: "Clause 4's plan merges: re-decide clause 3."
+```
+
+**Related:** Decisions 84, 93, 126, 143, 144, 180, 181, 213, 225, 229, 237, 238, 239; rec-4043, rec-4206,
+rec-4420.
+
+---
+
 ## Decision 254: The full tier runs post-merge on batches of main, a red batch is searched for its culprit, and code deploys consume the newest commit a passing run covers; a red pauses deploys, never merging (amends Decisions 72, 73, 159, 163, 201, 203, 205, 226, 244, 245 and 249) (Decided)
 
 ```yaml
@@ -269,6 +359,8 @@ conditions:
 **Related:** Decisions 93, 100, 223, 239, 248, 249; rec-4874, rec-5023 to rec-5035.
 
 > **Update (2026-11-12):** Decision 254 decides rec-4874's last-green ref. Clause 6's "SIT deploys keep 249 cl.2" reads as 249 cl.2 amended by Decision 254 cl.5, whose green signal is the last-green ref; "promotion uses rec-4874's last-green ref" reads as a necessary condition, not a sufficient one: what is promotable is rec-5033's stronger condition (the artifact that ran on SIT, by CodeSha256 and saved plan).
+
+> **Amended by Decision 255 (2026-11-13):** Clause 5's "SIT agent roles" reads as SIT's agent identities, held per Decision 255 cl.1; because the proxy signs by host and the accounts share the region's hosts, agent access to SIT needs its own environment. Clause 7's "an ADMIN-session agent applies it" reads "an ADMIN-session agent or, until Decision 255 cl.4 lands, the operator from an agent-prepared CloudShell block applies it".
 
 ---
 
@@ -582,6 +674,8 @@ conditions:
 > package the committed lockfile names and installs it from there, checked against the lockfile's hashes, and falls
 > back to a direct fetch from github.com when the package is missing or unreadable. Clause 6 still governs how the
 > grant is provisioned.
+
+> **Amended by Decision 255 (2026-11-13):** Clause 6's "an ADMIN-session agent runs" reads "an ADMIN-session agent or, until Decision 255 cl.4 lands, the operator from an agent-prepared CloudShell block runs", still after the pre-merge admin plan, which the operator's block also runs.
 
 ---
 
@@ -2503,6 +2597,8 @@ PLAN-platform-iam-bootstrap-adopt, PLAN-platform-iam-personal-release.
 
 > **Update (2026-10-18):** The Coverage loose ends rec-4049 owned (CI's read quartet on both roles and its metadata grant on PlatformDev) are retired by Decision 225, which also makes clause 3's deferred reversal (a) ruling.
 
+> **Amended by Decision 255 (2026-11-13):** separate-admin-principal is re-checked: Decision 255 separates the routine principal instead, a user declared in terraform/bootstrap per clause 1 with its policies beside it. Clause 2 stands; clause 1 reads "managed IAM role or user".
+
 ---
 
 ## Decision 221: Recursive self-improvement is proven against a judge the loop cannot edit -- three metric layers, a frozen control arm, pre-registration and public receipts on the designed feedback loop (Decided)
@@ -3770,6 +3866,8 @@ Roadmap refs: rec-4044, rec-4049, rec-4067.
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 > **Amended by Decision 252 (2026-11-10):** Reversal condition (a)'s organisation trail arrives with the Organization, not at live_full; its rule stands: re-point the detector at its log delivery, retire this trail, never run both (Decision 252 cl.8).
+
+> **Amended by Decision 255 (2026-11-13):** Clause 1's "applied only by PlatformAdmin under the human-gated admin tier" reads "applied by PlatformAdmin or, until Decision 255 cl.4 lands, by the operator from an agent-prepared CloudShell block under the operator's own sign-in, still human-gated": PlatformAdmin's trust names only the retiring agent user. The detector stays outside the reach of the principals it watches, and a sixth alarm pair watches the agent-platform-session user and its policies.
 
 ---
 
@@ -9746,6 +9844,8 @@ model the auth primitive change preserves).
 > **Update (2026-10-21):** "company-account (company-aws-profile)" above names the founder's former employer's AWS account, retired in the 2026-05 migration (T2.3; Decision 24's update), per the operator's confirmation of 2026-10-21 (rec-3924). It is not an account of On The Loop Labs Limited (Decision 195). This entry sets no requirement for how that company's accounts authenticate; that stays with this entry's reversal condition and Decision 195 clause 3.
 
 > **Update (2026-10-25):** The agent_static key no longer sits in the containers. Each cloud environment's agent proxy holds it as an AWS network secret and signs requests to the project region's STS host only; `~/.aws` holds placeholder credentials printed by `bin/aws-proxy-placeholder-credentials` (rec-4510, PLAN-agent-aws-proxy-credentials). Because the proxy re-signs every call to that host as the IAM user, identity checks read the assumed role from a second region's STS host (`scripts/aws_identity.py` `caller_arn`). The two roles, their ExternalId conditions and the two-principal semantic are unchanged.
+
+> **Amended by Decision 255 (2026-11-13):** The chained AssumeRole is retired for agent sessions: the proxy refuses it. Sessions reach AWS as the proxy-held user agent-platform-session, which signs each call itself; admin work is the operator's from CloudShell until Decision 255 cl.4's admin environment. The two roles stay declared and the two-principal semantic stands (Decision 255 cl.6).
 
 ---
 

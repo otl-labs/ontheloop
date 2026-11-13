@@ -42,18 +42,36 @@ def _run(tmp_path: Path, helper_body: str, with_config: bool = True) -> tuple[su
     return result, argv_log
 
 
-def test_reports_role_name_only(tmp_path: Path) -> None:
+def test_reports_session_user(tmp_path: Path) -> None:
     helper = (
         'if [ "$1" = "-c" ]; then exit 0; fi\necho "$@" > "$(dirname "$0")/helper-argv"\n'
-        'echo "arn:aws:sts::[ACCOUNT_ID]:assumed-role/PlatformDev/s"\n'
+        'echo "arn:aws:iam::[ACCOUNT_ID]:user/agent-platform-session"\n'
     )
     result, argv_log = _run(tmp_path, helper)
     argv = (tmp_path / "repo" / "bin" / "helper-argv").read_text(encoding="utf-8").strip()
     assert argv == "-m scripts.aws_identity caller-arn --profile agent_platform"
     assert result.returncode == 0
-    assert "OK: assumed-role/PlatformDev" in result.stdout
+    assert "OK: user/agent-platform-session" in result.stdout
     assert "arn:" not in result.stdout
+    assert not ACCOUNT_ID_SHAPE.search(result.stdout)
     assert not argv_log.exists() or "sts" not in argv_log.read_text(encoding="utf-8").split()
+
+
+def test_warns_on_assumed_role(tmp_path: Path) -> None:
+    helper = 'if [ "$1" = "-c" ]; then exit 0; fi\necho "arn:aws:sts::[ACCOUNT_ID]:assumed-role/PlatformDev/s"\n'
+    result, _ = _run(tmp_path, helper)
+    assert result.returncode == 0
+    assert "WARNING" in result.stdout
+    assert "did not resolve to user/agent-platform-session" in result.stdout
+    assert "OK:" not in result.stdout
+
+
+def test_warns_on_near_miss_user(tmp_path: Path) -> None:
+    helper = 'if [ "$1" = "-c" ]; then exit 0; fi\necho "arn:aws:iam::[ACCOUNT_ID]:user/agent-platform-session-x"\n'
+    result, _ = _run(tmp_path, helper)
+    assert result.returncode == 0
+    assert "did not resolve to user/agent-platform-session" in result.stdout
+    assert "OK:" not in result.stdout
 
 
 _ACCT = str(10**11 + 7)
@@ -63,9 +81,12 @@ _UNIQUE = "AROA" + "B" * 17
 @pytest.mark.parametrize(
     ("helper_body", "expected"),
     [
-        (f'echo "arn:aws:sts::{_ACCT}:assumed-role/PlatformDev/botocore-session-1"\n', "OK: assumed-role/PlatformDev"),
-        ('echo "arn:aws:sts::[ACCOUNT_ID]:assumed-role/PlatformDev/s"\n', "OK: assumed-role/PlatformDev"),
-        (f'echo "arn:aws:iam::{_ACCT}:user/agent-static {_UNIQUE}"\n', "did not resolve to an assumed role"),
+        (f'echo "arn:aws:iam::{_ACCT}:user/agent-platform-session"\n', "OK: user/agent-platform-session"),
+        ('echo "arn:aws:iam::[ACCOUNT_ID]:user/agent-platform-session"\n', "OK: user/agent-platform-session"),
+        (
+            f'echo "arn:aws:sts::{_ACCT}:assumed-role/PlatformDev/botocore-session-1"\n',
+            "did not resolve to user/agent-platform-session",
+        ),
         (
             (
                 f'echo "boom arn:aws:iam::{_ACCT}:user/x {_UNIQUE}" >&2\n'
@@ -75,7 +96,13 @@ _UNIQUE = "AROA" + "B" * 17
         ),
         (f'echo "arn:aws:iam::{_ACCT}:user/x" >&2\nexit 1\n', "helper exited with no diagnostic line"),
     ],
-    ids=["unmasked-success", "masked-success", "iam-user", "failure-with-diagnostic", "failure-without-diagnostic"],
+    ids=[
+        "unmasked-success",
+        "masked-success",
+        "assumed-role-warning",
+        "failure-with-diagnostic",
+        "failure-without-diagnostic",
+    ],
 )
 def test_output_never_contains_account_id_or_arn(tmp_path: Path, helper_body: str, expected: str) -> None:
     result, _ = _run(tmp_path, 'if [ "$1" = "-c" ]; then exit 0; fi\n' + helper_body)
@@ -91,7 +118,7 @@ def test_warns_and_exits_zero_when_helper_fails(tmp_path: Path) -> None:
     helper = 'if [ "$1" = "-c" ]; then exit 0; fi\necho "caller-arn failed: ClientError InvalidClientTokenId" >&2\nexit 1\n'
     result, _ = _run(tmp_path, helper)
     assert result.returncode == 0
-    assert "WARNING: could not assume" in result.stdout
+    assert "WARNING: could not read the identity" in result.stdout
     assert "InvalidClientTokenId" in result.stdout
     assert "network secret" in result.stdout
 

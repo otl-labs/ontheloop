@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,6 +11,7 @@ from scripts import aws_identity
 from scripts.ci.redaction_check import ACCOUNT_ID_SHAPE
 
 FROZEN = ("AK", "SK", "TOK")
+USER_ARN = "arn:aws:iam::acct:user/agent-platform-session"
 ROLE_ARN = "arn:aws:sts::acct:assumed-role/PlatformDev/session"
 
 
@@ -22,32 +22,28 @@ def _session_with_creds() -> MagicMock:
     return session
 
 
-def test_identity_call_uses_probe_region() -> None:
+def test_identity_call_uses_profile_session() -> None:
     session = _session_with_creds()
     client = MagicMock()
-    client.get_caller_identity.return_value = {"Arn": ROLE_ARN}
+    client.get_caller_identity.return_value = {"Arn": USER_ARN}
+    session.client.return_value = client
     with (
         patch.object(aws_identity.boto3, "Session", return_value=session) as session_cls,
-        patch.object(aws_identity.boto3, "client", return_value=client) as client_fn,
+        patch.object(aws_identity.boto3, "client") as bare_client,
     ):
-        assert aws_identity.caller_arn("agent_platform") == ROLE_ARN
+        assert aws_identity.caller_arn("agent_platform") == USER_ARN
     assert session_cls.call_args.kwargs == {"profile_name": "agent_platform"}
-    kwargs = client_fn.call_args.kwargs
-    assert client_fn.call_args.args == ("sts",)
-    assert kwargs["region_name"] == aws_identity.IDENTITY_PROBE_REGION
-    assert kwargs["config"] is aws_identity._IDENTITY_CONFIG
-    assert (kwargs["aws_access_key_id"], kwargs["aws_secret_access_key"], kwargs["aws_session_token"]) == FROZEN
+    bare_client.assert_not_called()
+    assert session.client.call_args.args == ("sts",)
+    assert session.client.call_args.kwargs == {"config": aws_identity._IDENTITY_CONFIG}
+    assert not [n for n in vars(aws_identity) if n.endswith("PROBE_REGION")]
 
 
 def test_profile_none_uses_default_chain(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "ci-key")
     session = _session_with_creds()
-    client = MagicMock()
-    client.get_caller_identity.return_value = {"Arn": ROLE_ARN}
-    with (
-        patch.object(aws_identity.boto3, "Session", return_value=session) as session_cls,
-        patch.object(aws_identity.boto3, "client", return_value=client),
-    ):
+    session.client.return_value.get_caller_identity.return_value = {"Arn": USER_ARN}
+    with patch.object(aws_identity.boto3, "Session", return_value=session) as session_cls:
         aws_identity.caller_arn(None)
     assert session_cls.call_args.kwargs == {"profile_name": None}
 
@@ -98,8 +94,3 @@ def test_identity_config_is_bounded() -> None:
     assert cfg.connect_timeout == 5
     assert cfg.read_timeout == 10
     assert cfg.retries == {"max_attempts": 2}
-
-
-def test_probe_region_differs_from_project_region() -> None:
-    project_region = Path("config/aws-region").read_text(encoding="utf-8").strip()
-    assert aws_identity.IDENTITY_PROBE_REGION != project_region

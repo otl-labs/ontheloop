@@ -2,7 +2,7 @@
 
 Pins terraform/bootstrap/platform_security_{admin_policy,trail,alarms}.tf (Decision 202): a
 multi-region, global-events, log-file-validated trail homed in var.aws_region with a protected
-CloudTrail-only bucket; exactly five alarms targeting the alerts topic, each filter pattern carrying
+CloudTrail-only bucket; exactly six alarms targeting the alerts topic, each filter pattern carrying
 its required clauses inside CloudWatch Logs' documented limits; the platform-security-* name family;
 no region literal or provider alias; and no CI identity statement able to write the detector. The
 heartbeat alarm is now fed by platform-security-heartbeat-canary (its own declaration, roles, cadence
@@ -34,6 +34,7 @@ from tests.checks.iam_tf._platform_security_hcl import (
     _strip_comments,
 )
 from tests.checks.iam_tf._platform_security_patterns import (
+    AGENT_SESSION_PATTERN_REDS,
     ALARMS,
     HEARTBEAT,
     fixture_problems,
@@ -371,6 +372,7 @@ _PATTERN_REDS: list[tuple] = [
         "",
     ),
 ]
+_PATTERN_REDS += AGENT_SESSION_PATTERN_REDS
 _MGMT = '  event_selector {\n    read_write_type           = "All"\n    include_management_events = true\n  }\n'
 
 
@@ -386,7 +388,7 @@ _OTHER_REDS: dict[str, Callable[[], list[str]]] = {
     "data selector first, write-only management second": lambda: trail_problems(
         _data_first(_MGMT.replace('"All"', '"WriteOnly"'))
     ),
-    "sixth alarm": lambda: alarm_problems(
+    "extra alarm": lambda: alarm_problems(
         _alarms()
         + '\nresource "aws_cloudwatch_metric_alarm" "platform_security_extra" {\n  alarm_name = "platform-security-x"\n}\n'
     ),

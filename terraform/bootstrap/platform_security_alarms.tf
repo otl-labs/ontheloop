@@ -1,6 +1,6 @@
 # Metric filters + alarms of the platform-security-* IAM-change detector (rec-4044, Decision 202).
 #
-# Five filter/alarm pairs on the trail's log group, all targeting the EXISTING agent-platform-alerts
+# Six filter/alarm pairs on the trail's log group, all targeting the EXISTING agent-platform-alerts
 # topic (Decision 39; the topic stays in terraform/personal and is referenced by ARN template only).
 #
 # Pattern rules (TestPlatformRoleIamChangeDetector enforces each):
@@ -22,6 +22,11 @@ locals {
     # requestParameters null, so it is matched on the role CloudTrail names in errorMessage
     # ("... on resource: role <name> because ...", or the older ":role/<name> ..." ARN form).
     "platform-security-platform-role-iam-change" = "{ ($.eventSource = \"iam.amazonaws.com\") && ($.readOnly IS FALSE) && (($.requestParameters.roleName = %^[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Dd][Ee][Vv]$|^[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Aa][Dd][Mm][Ii][Nn]$%) || ($.errorMessage = %role.[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Dd][Ee][Vv]\\s|role.[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Aa][Dd][Mm][Ii][Nn]\\s%) || ((($.eventName = \"CreatePolicyVersion\") || ($.eventName = \"SetDefaultPolicyVersion\") || ($.eventName = \"DeletePolicyVersion\") || ($.eventName = \"DeletePolicy\")) && (($.requestParameters.policyArn = \"*:policy/agent-platform-github-ci-apply-boundary\") || ($.requestParameters.policyArn = \"*:policy/platform-security-detector-admin\")))) }"
+
+    # Any IAM write naming the agent-platform-session user in any case, or its policies (Decision 255). A denied call carries
+    # requestParameters null, so it is matched on the user or policy CloudTrail names in errorMessage; policy-version verbs
+    # and Attach/Detach carry no userName, so the policyArn clause covers them.
+    "platform-security-agent-session-iam-change" = "{ ($.eventSource = \"iam.amazonaws.com\") && ($.readOnly IS FALSE) && (($.requestParameters.userName = %^[Aa][Gg][Ee][Nn][Tt]-[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm]-[Ss][Ee][Ss][Ss][Ii][Oo][Nn]$%) || ($.errorMessage = %user.[Aa][Gg][Ee][Nn][Tt]-[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm]-[Ss][Ee][Ss][Ss][Ii][Oo][Nn]\\s|policy.agent-platform-session-%) || ($.requestParameters.policyArn = \"*:policy/agent-platform-session-*\")) }"
 
     # Any denied IAM write, any role.
     "platform-security-denied-iam-write" = "{ ($.eventSource = \"iam.amazonaws.com\") && ($.readOnly IS FALSE) && ($.errorCode = \"AccessDenied*\") }"
@@ -52,6 +57,7 @@ locals {
     "platform-security-detector-tamper"          = "DetectorTamper"
     "platform-security-alerts-topic-change"      = "AlertsTopicChange"
     "platform-security-iam-event-heartbeat"      = "IamEventHeartbeat"
+    "platform-security-agent-session-iam-change" = "AgentSessionIamChange"
   }
 
   platform_security_alarm_triage = "Read who changed what: CloudWatch Logs Insights on log group platform-security-cloudtrail -- fields eventTime, userIdentity.arn, eventName, requestParameters.roleName, errorCode, errorMessage, eventID | sort eventTime desc | limit 50. Console: https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#logsV2:logs-insights"
@@ -76,6 +82,20 @@ resource "aws_cloudwatch_metric_alarm" "platform_security_platform_role_iam_chan
   alarm_description   = "An IAM write (or denied attempt) named PlatformDev or PlatformAdmin, or edited a policy attached to them. ${local.platform_security_alarm_triage}"
   namespace           = "PlatformSecurity"
   metric_name         = aws_cloudwatch_log_metric_filter.platform_security["platform-security-platform-role-iam-change"].metric_transformation[0].name
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [local.platform_security_alerts_topic_arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "platform_security_agent_session_iam_change" {
+  alarm_name          = "platform-security-agent-session-iam-change"
+  alarm_description   = "An IAM write (or denied attempt) named the agent-platform-session user or one of its agent-platform-session-* policies. ${local.platform_security_alarm_triage}"
+  namespace           = "PlatformSecurity"
+  metric_name         = aws_cloudwatch_log_metric_filter.platform_security["platform-security-agent-session-iam-change"].metric_transformation[0].name
   statistic           = "Sum"
   period              = 300
   evaluation_periods  = 1
