@@ -19,13 +19,17 @@ import re
 from pathlib import Path
 
 from tests.checks.iam_tf._ci_platform_role_iam import (
+    _jsonencode_statement_blocks,
+    _parse_jsonencode_statement,
     apply_role_universe_problems,
     attachment_problems,
-    ci_platform_role_iam_leaks,
     independent_jsonencode_counts,
     independent_statement_counts,
     policy_source_problems,
     structural_grant_surface_problems,
+)
+from tests.checks.iam_tf._ci_platform_role_iam import (
+    ci_platform_role_iam_leaks as _raw_leaks,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -34,14 +38,36 @@ _POLICY_FILE = _BOOTSTRAP_DIR / "github_ci_apply_policy.tf"
 _READS_FILE = _BOOTSTRAP_DIR / "github_ci_apply_reads.tf"
 # Decision 225 cl.5's unenforced residual: a bootstrap CI identity other than the apply role (Decision 248).
 _SETTINGS_FILE = _BOOTSTRAP_DIR / "github_settings_apply.tf"
+_CI_APPLY_FILE = _BOOTSTRAP_DIR / "bootstrap_ci_apply.tf"
 _PERSONAL_DIR = _REPO_ROOT / "terraform" / "personal"
 _ACCOUNT_ID = "123456789012"
 _AWS_REGION = "eu-west-2"
 
 # The guard's fail-closed scanned-file list (literal paths -- this is what makes --pre select
 # this module for an edit to any of these files; see test_platform_iam_admin_root_only.py for the
-# oidc.tf -> Decision 223 guard edge, kept by a docstring mention there, not here).
-_SCANNED_BOOTSTRAP_FILES = (_POLICY_FILE, _READS_FILE, _SETTINGS_FILE)
+# oidc.tf -> Decision 223 guard edge, kept by a docstring mention there, not here). Decision 225 cl.5: every
+# terraform/bootstrap .tf file outside _UNSCANNED_BOOTSTRAP_FILES (PLAN-bootstrap-ci-gated-apply).
+_SCANNED_BOOTSTRAP_FILES = (
+    _BOOTSTRAP_DIR / "account_names.tf",
+    _CI_APPLY_FILE,
+    _BOOTSTRAP_DIR / "github_ci_apply.tf",
+    _POLICY_FILE,
+    _READS_FILE,
+    _SETTINGS_FILE,
+    _BOOTSTRAP_DIR / "main.tf",
+    _BOOTSTRAP_DIR / "variables.tf",
+)
+_UNSCANNED_BOOTSTRAP_FILES = {
+    "github_ci_apply_boundary.tf": "a ceiling that grants nothing",
+    "platform_roles.tf": "PlatformDev and PlatformAdmin themselves, operator-applied (Decision 223)",
+    "platform_admin_policies.tf": "PlatformAdmin's own grants, operator-applied (Decision 223)",
+    "platform_admin_data_policies.tf": "PlatformAdmin's own grants, operator-applied (Decision 223)",
+    "platform_dev_policies.tf": "PlatformDev's own grants, operator-applied (Decision 223)",
+    "platform_security_admin_policy.tf": "the detector's, Decision 202",
+    "platform_security_alarms.tf": "the detector's, Decision 202",
+    "platform_security_heartbeat_canary.tf": "the detector's, Decision 202",
+    "platform_security_trail.tf": "the detector's, Decision 202",
+}
 _SCANNED_PERSONAL_GLOB = "*.tf"
 
 _EXPECTED_METADATA_WRITE_RESOURCES = frozenset(
@@ -49,6 +75,28 @@ _EXPECTED_METADATA_WRITE_RESOURCES = frozenset(
         "arn:aws:iam::${var.account_id}:role/agent-platform-*",
     }
 )
+
+
+_READS_ONLY_ACTIONS = frozenset({"iam:Get*", "iam:List*"})
+
+
+def ci_platform_role_iam_leaks(texts: dict[str, str]) -> list[tuple[str, str | None, str]]:
+    """The raw predicate minus its one allowance (PLAN-bootstrap-ci-gated-apply, Decision 225's
+    bootstrap-plan-under-ci-identity answer): bootstrap_ci_apply.tf's IAMRead, an Allow whose every action is iam:Get*
+    or iam:List*, may match the PlatformDev and PlatformAdmin ARNs. Every other match still fails."""
+    allowed: set[str] = set()
+    for fname, text in texts.items():
+        if fname.endswith("bootstrap_ci_apply.tf"):
+            for block in _jsonencode_statement_blocks(text):
+                stmt = _parse_jsonencode_statement(block)
+                if (
+                    stmt.sid == "IAMRead"
+                    and stmt.effect == "Allow"
+                    and stmt.actions
+                    and set(stmt.actions) <= _READS_ONLY_ACTIONS
+                ):
+                    allowed.add(fname)
+    return [leak for leak in _raw_leaks(texts) if not (leak[0] in allowed and leak[1] == "IAMRead")]
 
 
 def _policy_text() -> str:
@@ -154,11 +202,54 @@ class TestNoCIIamGrantOnPlatformRoles:
             "terraform/bootstrap/github_ci_apply_policy.tf",
             "terraform/bootstrap/github_ci_apply_reads.tf",
             "terraform/bootstrap/github_settings_apply.tf",
+            "terraform/bootstrap/bootstrap_ci_apply.tf",
             "terraform/personal/oidc.tf",
             "terraform/personal/oidc_ci_roles.tf",
             "terraform/personal/oidc_pipeline_roles.tf",
         ):
             assert required in texts and texts[required].strip()
+
+    def test_scanned_tuple_is_every_bootstrap_file_outside_the_unscanned_mapping(self) -> None:
+        on_disk = {f.name for f in _BOOTSTRAP_DIR.glob("*.tf")}
+        assert {f.name for f in _SCANNED_BOOTSTRAP_FILES} == on_disk - set(_UNSCANNED_BOOTSTRAP_FILES)
+        assert all(reason for reason in _UNSCANNED_BOOTSTRAP_FILES.values())
+
+    def test_every_unscanned_entry_names_an_existing_file(self) -> None:
+        assert all((_BOOTSTRAP_DIR / name).is_file() for name in _UNSCANNED_BOOTSTRAP_FILES)
+
+    def test_iam_write_added_to_bootstrap_plan_reads_iamread_is_detected(self) -> None:
+        texts = dict(_scanned_texts())
+        key = "terraform/bootstrap/bootstrap_ci_apply.tf"
+        old = 'Action   = ["iam:Get*", "iam:List*"]'
+        assert old in texts[key]
+        texts[key] = texts[key].replace(old, 'Action   = ["iam:Get*", "iam:List*", "iam:Put*"]', 1)
+        assert {role for _, sid, role in ci_platform_role_iam_leaks(texts) if sid == "IAMRead"} == {
+            "PlatformDev",
+            "PlatformAdmin",
+        }
+
+    def test_metadata_write_widened_to_every_role_is_detected(self) -> None:
+        texts = dict(_scanned_texts())
+        key = "terraform/bootstrap/bootstrap_ci_apply.tf"
+        old = (
+            'Action   = ["iam:TagRole", "iam:UntagRole", "iam:UpdateRole", "iam:UpdateRoleDescription"]\n'
+            '        Resource = ["arn:aws:iam::${var.account_id}:role/agent-platform-*"]'
+        )
+        assert old in texts[key]
+        texts[key] = texts[key].replace(old, old.replace("role/agent-platform-*", "role/*"), 1)
+        assert {role for _, sid, role in ci_platform_role_iam_leaks(texts) if sid == "IAMRoleMetadataWrite"} == {
+            "PlatformDev",
+            "PlatformAdmin",
+        }
+
+    def test_new_bootstrap_file_granting_trust_write_on_platformdev_is_detected(self) -> None:
+        texts = dict(_scanned_texts())
+        texts["terraform/bootstrap/sneaky_new.tf"] = (
+            'locals {\n  p = jsonencode({\n    Version = "2012-10-17"\n    Statement = [{\n      Sid = "Sneaky"\n'
+            '      Effect = "Allow"\n      Action = ["iam:UpdateAssumeRolePolicy"]\n'
+            '      Resource = ["arn:aws:iam::${var.account_id}:role/PlatformDev"]\n    }]\n  })\n}\n'
+        )
+        assert any(role == "PlatformDev" and sid == "Sneaky" for _, sid, role in ci_platform_role_iam_leaks(texts))
 
     def test_empty_scanned_file_fails_closed(self) -> None:
         texts = dict(_scanned_texts())
