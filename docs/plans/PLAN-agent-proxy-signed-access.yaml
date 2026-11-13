@@ -40,9 +40,12 @@ scope:
       DenyStateAndConvergenceVersionRead, DenyStateAndConvergenceVersionList); DenyExternalIdTrustRead, iam:GetRole on
       aws_iam_role.platform_dev.arn and aws_iam_role.platform_admin.arn (their trust documents carry the ExternalIds;
       removed when owed rec 3 retires those trusts); DenySessionEscalation on "*": sts:AssumeRole*,
-      sts:GetSessionToken, sts:GetFederationToken, iam:Create*, iam:Update*, iam:Put*, iam:Attach*, iam:Detach*,
+      sts:GetFederationToken, iam:Create*, iam:Update*, iam:Put*, iam:Attach*, iam:Detach*,
       iam:Delete*, iam:Add*, iam:Remove*, iam:Tag*, iam:Untag*, iam:Set*, iam:Upload*, iam:Enable*, iam:Deactivate*,
-      iam:Change*, iam:Reset*, iam:PassRole. No S3 Allow (no convergence read: the S3 host stays off the proxy's list so
+      iam:Change*, iam:Reset*, iam:PassRole; DenyTemporaryCredentialUse, Action "*" on Resource "*" with the one
+      condition Null aws:TokenIssueTime = "false": STS takes no policy on GetSessionToken, so the call cannot be denied,
+      but every request signed with a token minted from the key (GetSessionToken or GetFederationToken) is, while the
+      proxy's long-term-key signatures carry no token and pass. No S3 Allow (no convergence read: the S3 host stays off the proxy's list so
       presigned telemetry PUTs pass unsigned; owed rec 6 serves the record through the reader). No aws_iam_access_key
       (its secret would land in state), no inline policy, no literal account id, bucket name or region.
   - file: tests/checks/iam_tf/test_agent_session_user.py
@@ -50,7 +53,7 @@ scope:
     purpose: >-
       Credential-free text tests over the new file in the iam_tf convention (test_url_only_invoke_guard.py:1-3): each
       check is a predicate over the Terraform text that returns a problem list, so its red case drives the real
-      predicate on mutated input. Ten nodes. Nine assert an empty problem list on the real tree:
+      predicate on mutated input. Eleven nodes. Ten assert an empty problem list on the real tree:
       test_agent_session_user_carries_boundary (the boundary reference and prevent_destroy);
       test_agent_session_invoke_is_url_only (every lambda:InvokeFunction Allow carries the Bool condition; the invoke
       Resources name exactly the reader, writer, telemetry reader and telemetry writer locals);
@@ -62,17 +65,21 @@ scope:
       names, so an empty parse fails); test_agent_session_cannot_read_externalid_trusts (the aws_iam_role resources
       under terraform/ whose trust mentions sts:ExternalId are exactly the roles DenyExternalIdTrustRead names, and that
       set holds at least PlatformDev and PlatformAdmin, so an empty parse fails); test_agent_session_escalation_denied
-      (DenySessionEscalation covers sts:AssumeRole*, GetSessionToken, GetFederationToken, iam:Create* and iam:PassRole);
-      test_agent_session_has_no_key_resource (no resource "aws_iam_access_key" or resource "aws_iam_user_policy"
-      block, matched as whole resource types so aws_iam_user_policy_attachment does not count, anywhere under
-      terraform/);
+      (DenySessionEscalation covers sts:AssumeRole*, GetFederationToken, iam:Create* and iam:PassRole);
+      test_agent_session_temporary_credentials_denied (the guard holds a Deny of Action "*" on Resource "*" whose only
+      condition is Null aws:TokenIssueTime = "false");
+      test_agent_session_has_no_key_resource (no resource block of type aws_iam_access_key, aws_iam_user_policy,
+      aws_iam_user_login_profile, aws_iam_service_specific_credential, aws_iam_signing_certificate or
+      aws_iam_user_ssh_key, matched as whole resource types so aws_iam_user_policy_attachment does not count, anywhere
+      under terraform/; none exists today [verified by grep]);
       test_agent_session_boundary_holds_no_user_write (the boundary's Allow ceiling in github_ci_apply_boundary.tf names
       no iam action containing User, AccessKey, LoginProfile, PolicyVersion, ServiceSpecificCredential, SSHPublicKey,
       SigningCertificate or MFA, and no iam wildcard: the premise context's Decision 144/225 note rests on).
-      The tenth, test_agent_session_predicates_are_red_on_each_mutation, is parametrized over one mutation of the real
+      The eleventh, test_agent_session_predicates_are_red_on_each_mutation, is parametrized over one mutation of the real
       text per class and asserts each yields a problem: an extra Allow verb, an InvokeFunction Allow without the Bool
       condition, an s3:GetObject Allow, a parameter/secret/ Resource, a dropped DailyOps Deny Sid, an extra aws_iam_role
-      with an sts:ExternalId trust, a verb dropped from DenySessionEscalation, an added aws_iam_access_key resource, a
+      with an sts:ExternalId trust, a verb dropped from DenySessionEscalation, DenyTemporaryCredentialUse dropped, an
+      added aws_iam_access_key resource, a
       dropped permissions_boundary and iam:CreateAccessKey added to the boundary ceiling.
   - file: scripts/aws_identity.py
     action: Modify
@@ -95,11 +102,12 @@ scope:
   - file: tests/test_sts_call_sites.py
     action: Modify
     purpose: >-
-      Docstring re-points at the new rule; adds test_no_session_code_mints_credentials: no non-comment line under
-      scripts/, src/, bin/ or .claude/hooks/ (scripts/ci included: nothing there may mint either) matches the
+      Docstring re-points at the new rule; adds test_no_session_code_mints_credentials: no non-comment line of any
+      tracked text file, whatever its suffix (so the extensionless bin/ scripts the census's SCANNED_SUFFIXES skips are
+      read), under scripts/, src/, bin/ or .claude/hooks/ (scripts/ci included: nothing there may mint either) matches the
       call-shaped patterns \.(assume_role\w*|get_session_token|get_federation_token)\( or
       aws\s+sts\s+(assume-role[\w-]*|get-session-token|get-federation-token)\b, so the web-identity and SAML variants
-      match while assume_role_policy and prose mentions do not (zero hits today [verified by rg]); and
+      match while assume_role_policy and prose mentions do not (zero hits today over every tracked file [verified by grep]); and
       test_minting_scanner_flags_a_synthetic_call, the red case in test_scanner_names_an_extra_sts_file's shape (a tmp
       git tree whose offender file calls assume_role_with_web_identity( and whose commented line does not count). The
       census ALLOWED map and scan_sts_call_sites are unchanged.
@@ -109,7 +117,9 @@ scope:
       Reports the proxy-signed user: on a caller ARN ending :user/agent-platform-session it logs
       "OK: user/agent-platform-session"; on an assumed-role or any other identity it logs a WARNING naming
       bin/setup-cloud-env.sh's header (setup field and network secret) and deploy-paths.yaml
-      admin_out_of_band.agent_session_identity; failure text drops the ExternalId hint. Header comment describes the
+      admin_out_of_band.agent_session_identity; the OK branch's AccessDenied note points at
+      terraform/bootstrap/agent_session_user.tf (a missing grant is a plan defect, never a local widening) instead of
+      platform_dev_policies.tf; failure text drops the ExternalId hint. Header comment describes the
       new model without the phrases VP 5 sweeps. Still advisory, always exit 0, never echoes the ARN or account id.
   - file: tests/hooks/test_session_start_aws.py
     action: Modify
@@ -169,7 +179,10 @@ scope:
       verbs and DeletePolicy on the three policies and any Attach or Detach of them. A sixth aws_cloudwatch_metric_alarm,
       platform_security_agent_session_iam_change, in the role-change alarm's exact shape (period 300, threshold 1,
       notBreaching, the alerts topic), its description naming the user and its policies before the shared triage
-      text. Header comment says six pairs. No existing pattern, alarm or the triage query changes.
+      text. Header comment says six pairs. No existing pattern, alarm or the triage query changes. Accepted residuals,
+      owed rec 4: the shared triage query shows requestParameters.roleName, not userName or policyArn, so a successful
+      write's email names its target only through the alarm description; the policyArn clause and the errorMessage
+      policy alternative match lower case only, the residual the role filter's policyArn clause already carries.
   - file: tests/checks/iam_tf/_platform_security_patterns.py
     action: Modify
     purpose: >-
@@ -216,7 +229,10 @@ scope:
       Decision's Serves line is not claimed (the scout scored NS.9 3/5).
   - file: AGENTS.md
     action: Modify
-    purpose: Sidecar block agents-portal-line, verbatim.
+    purpose: >-
+      Sidecar block agents-portal-line, verbatim. The file shrinks, so config/prose_budgets.yaml's S1
+      root_ambient_load_set is lowered to the measured value under implement-scope-boundary.yaml's
+      prose_budgets_ratchet_down sanction (that edit needs no scope row of its own).
   - file: docs/contracts/deploy-paths.yaml
     action: Modify
     purpose: >-
@@ -224,7 +240,7 @@ scope:
       deploy-paths-log-compaction, verbatim. The file is at its 500-effective-line cap (contracts class,
       config/structural_size_budgets.yaml): the new procedure and log entry add 12 lines and the compaction block writes
       four older multi-line amendment_log entries as one-line flow mappings with their words unchanged (-21), so the
-      file nets about -9 against today's main; the build measures against main at build time and never raises the
+      file nets -8 against today's main (about 492 effective lines); the build measures against main at build time and never raises the
       budget (Decision 128).
 bundled_recommendations: []
 followon_recs: []
@@ -236,9 +252,9 @@ infrastructure_dependencies:
   - "Merge and VP 8 happen in one operator sitting: from merge, security_detector_probe.py expects the sixth alarm, so an hourly security-detector-liveness run before the apply reports it missing; a security_detector_stale rec filed in that window is closed in VP 13 with VP 8's read-back."
   - "No Lambda code changes: no deploy channel runs."
 acceptance_criteria:
-  - "terraform/bootstrap declares agent-platform-session with the permissions boundary and exactly the three managed policies; test_agent_session_user.py's nine real-tree nodes pass, and its red-case node shows each predicate failing on one mutation per class: an extra verb, a non-URL invoke grant, an S3 grant, a secret grant, a missing PlatformDev Deny, an unlisted ExternalId trust, a missing escalation Deny, an access-key resource, a missing boundary and a user-write verb in the boundary ceiling."
+  - "terraform/bootstrap declares agent-platform-session with the permissions boundary and exactly the three managed policies; test_agent_session_user.py's ten real-tree nodes pass, and its red-case node shows each predicate failing on one mutation per class: an extra verb, a non-URL invoke grant, an S3 grant, a secret grant, a missing PlatformDev Deny, an unlisted ExternalId trust, a missing escalation Deny, a missing temporary-credential Deny, an access-key resource, a missing boundary and a user-write verb in the boundary ceiling."
   - "Decision 202's detector gains platform-security-agent-session-iam-change, matching any IAM write, made or denied, that names agent-platform-session or an agent-platform-session-* policy (fixture events and red cases in the detector tests; security_detector_probe.py expects six alarms); it is live from VP 8's apply, before the key exists, and metric data shows it matching the key creation (VP 9) and the denied write (VP 12, read in VP 13)."
-  - "No session code calls a credential-returning STS API (test_no_session_code_mints_credentials)."
+  - "No session code calls a credential-returning STS API (test_no_session_code_mints_credentials), and a token minted from the user's key is denied every action (test_agent_session_temporary_credentials_denied)."
   - "scripts.aws_identity caller-arn reads the identity from the profile's own session; the session-start hook reports OK: user/agent-platform-session for that user and warns otherwise."
   - "DECISIONS.md, AGENTS.md and deploy-paths.yaml carry exactly the sidecar's words (approved_text verify passes), and the stale-reference sweep leaves only the residue owed rec 7 names (VP 5)."
   - "Before merge, the proxy is shown to sign the ssm, logs, monitoring, iam and Function URL host classes (VP 4)."
@@ -253,8 +269,8 @@ verification_plan:
       tests/checks/iam_tf/test_url_only_invoke_guard.py tests/checks/iam_tf/test_platform_role_iam_change_alarms.py
       tests/test_security_detector_probe.py -q
     expected: >-
-      All pass, including test_agent_session_user.py's ten nodes, test_no_session_code_mints_credentials and
-      test_minting_scanner_flags_a_synthetic_call, the detector's pattern, fixture and four new red-case nodes, and
+      All pass, including test_agent_session_user.py's eleven nodes, test_no_session_code_mints_credentials and
+      test_minting_scanner_flags_a_synthetic_call, the detector's pattern, fixture and five new red-case nodes, and
       test_expected_alarms_match_the_hcl.
     fix_if: Any failure; fix the code or the Terraform, never an assertion's meaning (Decision 235).
     hermetic: true
@@ -637,7 +653,7 @@ verification_plan:
     graduation: not-applicable
 test_obligations:
   - source: terraform/bootstrap/agent_session_user.tf
-    behavior: The user carries the boundary; grants are exactly the declared set; invokes are URL-only; no S3, secret or IAM-write grant; every PlatformDev Deny, the ExternalId trust Deny and the escalation Deny are present; no key resource.
+    behavior: The user carries the boundary; grants are exactly the declared set; invokes are URL-only; no S3, secret or IAM-write grant; every PlatformDev Deny, the ExternalId trust Deny, the escalation Deny and the temporary-credential Deny are present; no credential resource.
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_agent_session_user.py
     red_green_expectation: red before (file absent), green after
@@ -682,12 +698,12 @@ constraints:
   - Files other projects own are not edited (telemetry code and contracts are Feedback Loop's; account-credential-inventory.yaml is reported, not edited).
 context:
   - "Decision-scout r1 FLAGS_FOUND (/mnt/project-files/agent-aws-access/SCOUT-r1.md); NORTH STAR: NS.9 3/5, no Serves line claimed. CITE: 113, 213, 144, 223, 225, 180, 126, 237, 84, 127, 235, 167/177. Dispositions: 248 cl.6, 252 cl.5/cl.7 and 202 cl.1 amended by sidecar notes; 238 held (no state, plan or transcript grant; the guard policy carries PlatformDev's Denies) and its check's reach to users is owed rec 5; 251 is the operator's under cl.3 (rec-5023 done); 143 deferred against rec-4206 (cl.7, owed rec 1); 229/T4.15 PlatformDev stays, c13's launcher successor goes to owed rec 3; 239 content reader waits for rec-4696 (owed rec 10); 202 cl.1's 'applied only by PlatformAdmin' amended by the sidecar's decision-202-note (PlatformAdmin's trust names only the old user, so CloudShell cannot assume it; the operator applies the detector as user/platform-breakglass until cl.4); 126 spirit met by VP 7 proving a CloudShell plan before merge."
-  - "Decision 144 and 225 for a user: the boundary's ceiling (github_ci_apply_boundary.tf:29-96) holds no user, access-key, login-profile or policy-version verb, so DenyBoundaryRemoval naming only the role verb leaves no user gap; the user's identity policies grant no IAM write and DenySessionEscalation denies them outright. The read ceiling also lacks GetPolicy, GetPolicyVersion and GetUser, so agents cannot read the boundary or their own user's policies (narrower than F3's 'roles, policies and users'; disclosed to the operator)."
+  - "Decision 144 and 225 for a user: the boundary's ceiling (github_ci_apply_boundary.tf:29-96) holds no user, access-key, login-profile or policy-version verb, so DenyBoundaryRemoval naming only the role verb leaves no user gap; the user's identity policies grant no IAM write, DenySessionEscalation denies them outright and DenyTemporaryCredentialUse denies everything to a token minted from the key. The read ceiling also lacks GetPolicy, GetPolicyVersion and GetUser, so agents cannot read the boundary or their own user's policies (narrower than F3's 'roles, policies and users'; disclosed to the operator)."
   - "Design evidence: blind Fable consults /mnt/project-files/agent-aws-access/ADVICE.md and ADVICE-r2.md; PRESENTATION.md (F1-F6 taken as recommended, F4 revised to CloudShell now and an admin-environment follow-on); operator's 'write the plan' 2026-11-13 00:01Z with a standing ask that any new design fork gets a fresh blind Fable consult. Critique r1 raised three forks; ADVICE-r2 recommended A2 (deny GetRole on the two ExternalId-trust roles), B2 (no S3 host, no direct S3 read) and C1 (pre-merge probe with the old key), all taken; they narrow F2 and F3 and are put to the operator with the wording approval. Critique r2 raised a fourth (no Decision 202 alarm watches the new user); ADVICE-r3 recommended D1, a new filter and alarm in this change, live before the key exists, taken (its optional extras go to owed rec 4)."
-  - "UNPROVEN until VP 4: that the proxy signs the ssm, logs, monitoring, global iam and Function URL hosts as it signs STS (verified for STS only, operator reproduction 2026-11-12 22:41Z). UNPROVEN until VP 7: that -var aws_profile= leaves the bootstrap provider on CloudShell's own credentials. UNPROVEN: whether the proxy leaves presigned requests alone; B2 sidesteps it by listing no S3 host."
+  - "UNPROVEN until VP 4: that the proxy signs the ssm, logs, monitoring, global iam and Function URL hosts as it signs STS (verified for STS only, operator reproduction 2026-11-12 22:41Z). UNPROVEN until VP 7: that -var aws_profile= leaves the bootstrap provider on CloudShell's own credentials. UNPROVEN: whether the proxy leaves presigned requests alone; B2 sidesteps it by listing no S3 host. UNPROVEN, and never probed (the probe would itself mint): whether the proxy refuses sts:GetSessionToken; DenyTemporaryCredentialUse makes any token it returns useless."
   - "Session-side AWS consumers [verified by reading]: ducklake_reader_client.py and writer_transport.py (Function URLs, SSM lookup); telemetry_capture/transport.py (telemetry writer Function URL, then PUTs to presigned URLs on the bucket's regional S3 host, which must stay unsigned); preflight aws_infra.py's convergence read, which swallows every error and returns (None, None), so it degrades quietly until owed rec 6; session_start_aws.sh. s3_log_store.py writes S3 only when S3_LOG_BUCKET is set (CI only). No session code reads the inference keys; DynamoDB counters are legacy (Decision 84 I-2). Admin tooling that defaults to agent_platform_admin (iam_simulate, security_detector_probe, secrets_to_ssm_copy) is operator-run under cl.3; the terraform-assets hook skips without that profile."
   - "Telemetry writer records the caller's name parsed from userArn (handler.py:84-88): it becomes agent-platform-session, not PlatformDev; tenant keys on the account and is unchanged. ducklake_telemetry_writer.yaml's producer line is Feedback Loop's (owed rec 9)."
-  - "Owed follow-on recs, filed in VP 13 (exactly ten): 1 writer hardening, create_ops_tables force_recreate and smoke/churn actions off the routine identity's reach (cl.7; 143 cl.1; rec-4206; S, High). 2 admin environment plan (cl.4): admin user in a dedicated environment, protected-action gate, validate_admin_root_premerge_gate and deploy-paths pre_merge_live_plan ENVIRONMENT CHECK (with its test pin) re-grounded on environment identity, first step probes which IAM calls the proxy refuses; it also decides the ADMIN-session carve-outs cl.3's reading rule suspends (213 cl.5, 230 cl.4, 237 cl.6, 251 cl.1, 204 cl.2) and leaves them forward pointers (L, High). 3 retire the old user's key after a 7-day soak and re-point or retire the PlatformDev/PlatformAdmin trusts, removing DenyExternalIdTrustRead and deploy-paths' self-access trust rationale with them; name T4.15 c13's launcher (cl.6; 229 cl.3; M, Medium). 4 key rotation reminder, key-age and one-active-key alarm, the account-credential-inventory.yaml row for the new key (owner asked first), and ADVICE-r3's extras: a threshold alarm on the user's own denied calls and a GuardDuty evaluation (cl.5; S, Medium). 5 Decision 238's check, the iam-simulate fixture and validate_agent_observability_read_coverage (which still treats PlatformDev as the dev agent identity) reach the session user (238 cl.1; the fixture is at 647 of 650 lines, so it decomposes; S, Medium). 6 serve the convergence record through the reader (cl.2; S, Medium). 7 stale-prose residue VP 5 lists, plus the agent_platform_admin apply wording in terraform/bootstrap/CLAUDE.md, terraform/CLAUDE.md and src/data/handlers/CLAUDE.md, each owner asked first (S, Low). 8 optional per-session attribution tag (cl.5; S, Low). 9 Feedback Loop: telemetry producer admission for the new user (S, Medium). 10 Feedback Loop: content reader grant after rec-4696 (239; S, Low). Drafts: /mnt/project-files/agent-aws-access/OWED-RECS.md."
+  - "Owed follow-on recs, filed in VP 13 (exactly ten): 1 writer hardening, create_ops_tables force_recreate and smoke/churn actions off the routine identity's reach (cl.7; 143 cl.1; rec-4206; S, High). 2 admin environment plan (cl.4): admin user in a dedicated environment, protected-action gate, validate_admin_root_premerge_gate and deploy-paths pre_merge_live_plan ENVIRONMENT CHECK (with its test pin) re-grounded on environment identity, first step probes which IAM calls the proxy refuses; it also decides the ADMIN-session carve-outs cl.3's reading rule suspends (213 cl.5, 230 cl.4, 237 cl.6, 251 cl.1, 204 cl.2) and leaves them forward pointers (L, High). 3 retire the old user's key after a 7-day soak and re-point or retire the PlatformDev/PlatformAdmin trusts, removing DenyExternalIdTrustRead and deploy-paths' self-access trust rationale with them; name T4.15 c13's launcher (cl.6; 229 cl.3; M, Medium). 4 key rotation reminder, key-age and one-active-key alarm, the account-credential-inventory.yaml row for the new key (owner asked first), and ADVICE-r3's extras: a threshold alarm on the user's own denied calls and a GuardDuty evaluation, and the detector residuals scope row 10 accepts (cl.5; S, Medium). 5 Decision 238's check, the iam-simulate fixture and validate_agent_observability_read_coverage (which still treats PlatformDev as the dev agent identity) reach the session user (238 cl.1; the fixture is at 647 of 650 lines, so it decomposes; S, Medium). 6 serve the convergence record through the reader (cl.2; S, Medium). 7 stale-prose residue VP 5 lists, plus the agent_platform_admin apply wording in terraform/bootstrap/CLAUDE.md, terraform/CLAUDE.md and src/data/handlers/CLAUDE.md, each owner asked first (S, Low). 8 optional per-session attribution tag (cl.5; S, Low). 9 Feedback Loop: telemetry producer admission for the new user (S, Medium). 10 Feedback Loop: content reader grant after rec-4696 (239; S, Low). Drafts: /mnt/project-files/agent-aws-access/OWED-RECS.md."
   - "Overlaps: PLAN-sit-organization (rec-5026, unbuilt) adds its own Decision 113 Update after the same anchor, edits deploy-paths' ENVIRONMENT CHECK and designs a user + AssumeRole chain this Decision retires: its planning thread amends it before its build. PLAN-retired-repo-identity-sweep (unbuilt) also edits bin/setup-cloud-env.sh; PLAN-neon-key-out-of-pr-plans and PLAN-telemetry-content-reader-lock also edit deploy-paths.yaml; whichever builds second rebases. rec-4233 PR 1's bootstrap change queues after this one."
   - "V3 resolution: VP 7's operator-run pre-merge plan at the PR head substitutes for pre-merge post-deploy evidence, with VP 4 proving proxy signing before merge; behavioural acceptance is VP 8-13 after merge, with the operator's returned lines labelled operator-reported in a counts-only PR comment. VP 6 is the CloudShell analog of the ENVIRONMENT CHECK: CloudShell has no repo helper or profile, so it reads the operator's own sign-in with get-caller-identity under a 'caller-arn check' label; owed rec 2 re-grounds the check on environment identity."
   - "Approvals at build start: none; the build session holds no AWS identity, VP 6-9 are the operator's own CloudShell blocks or console steps, VP 4 runs on the old key with no new grant, and VP 10-13 run in a fresh session as the new user. The operator's final-diff word on the build PR (IAM text, the session-start hook) is asked at CI green."
@@ -706,6 +722,8 @@ gate_rounds:
   - {gate: wording-check, round: 6, verdict: PASS, digest: e731130e4c95f4d3e968cb2bdc14e1bc25e8d4490fa08ec4fd79751f5b8d45dd, base: 9412b0ec4385060058ad545ddf35ecba8793c030, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 16}
   - {gate: wording-check, round: 7, verdict: PASS, digest: 7fb1d4c304c8dad371c58b51aeb04daa930363c6800df5698e7cfbe86e0d2eb0, base: 9412b0ec4385060058ad545ddf35ecba8793c030, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 12}
+  - {gate: wording-check, round: 8, verdict: PASS, digest: 35c6777acf0ef72e3adbbafcb9f8c8b61eb72e322474cac097868c8a7ac0dc64, base: 9412b0ec4385060058ad545ddf35ecba8793c030, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
