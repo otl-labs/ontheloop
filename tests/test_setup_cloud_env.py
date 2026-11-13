@@ -151,7 +151,8 @@ def test_header_template_has_no_static_key_and_current_path() -> None:
     assert "/home/user/agent-platform" not in script
     assert "cd /home/user/ontheloop && bash bin/setup-cloud-env.sh" in script
     hosts = "\n".join(_header_block(script, "# AWS credentials", "# DEV environment"))
-    assert "sts.eu-west-2.amazonaws.com" in hosts
+    named = set(re.findall(r"[\w.-]+\.amazonaws\.com", hosts))
+    assert "sts.eu-west-2.amazonaws.com" in named
     assert not re.search(r"s3[\w.-]*\.amazonaws\.com", script)
     assert not re.search(r"\*\.[\w-]*\.?amazonaws\.com", script)
     assert not any(
