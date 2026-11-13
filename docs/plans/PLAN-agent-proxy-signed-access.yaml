@@ -1,0 +1,415 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "agent-proxy-signed-access"
+intent: >-
+  Give agent sessions their AWS access back without any session minting or holding an AWS credential: one new IAM user,
+  agent-platform-session, whose key only each environment's egress proxy holds, signs every call itself with grants
+  narrowed to what sessions use, and admin work moves to operator-run CloudShell blocks until a follow-on admin
+  environment lands (new Decision amending Decision 113).
+plan_type: IMPLEMENTATION
+implementation_declared: true
+verification_tier: V3
+plan_path: docs/plans/PLAN-agent-proxy-signed-access.yaml
+phase: >-
+  security_advisory (soft-warn exception category; no tier_item claimed, so the Tier Item Freshness Gate is skipped):
+  since 2026-11-12 the agent proxy refuses sts:AssumeRole, so no session reaches AWS. The operator approved writing
+  this plan with every presented recommendation on 2026-11-13 00:01Z. Closes no roadmap criterion; no rec exists
+  because the recs store is unreachable until this plan's cutover (VP 11 files the owed recs).
+scope:
+  - file: terraform/bootstrap/agent_session_user.tf
+    action: Create
+    purpose: >-
+      aws_iam_user.agent_session (name agent-platform-session, permissions_boundary =
+      aws_iam_policy.github_ci_apply_boundary.arn, lifecycle prevent_destroy, the platform_roles.tf tag pair), two
+      customer-managed policies aws_iam_policy.agent_session_ducklake and aws_iam_policy.agent_session_observe attached
+      by aws_iam_user_policy_attachment.agent_session_ducklake and .agent_session_observe (an IAM user's inline policies
+      share a 2,048 character quota), each from a hoisted local with a lifecycle precondition at the 6,144 B
+      managed-policy limit (validate_iam_policy_size): agent-platform-session-ducklake (Sids DuckLakeInvokeUrl and DuckLakeInvokeViaUrlOnly
+      copied from platform_dev_policies.tf:54-88 over the same four function locals, the second with Bool
+      lambda:InvokedViaFunctionUrl = "true"; DuckLakeEndpointDiscovery ssm:GetParameter on
+      parameter/agent-platform/ducklake/*) and agent-platform-session-observe (ObservabilityMetricRead and
+      ObservabilityLogStreamRead copied from platform_dev_policies.tf:119-141; ConvergenceRecordRead s3:GetObject on
+      "${local.data_lake_bucket_arn}/convergence/personal/*"; IAMRoleRead iam:GetRole, iam:GetRolePolicy,
+      iam:ListRolePolicies, iam:ListAttachedRolePolicies on arn:aws:iam::${var.account_id}:role/*, the boundary
+      ceiling's read verbs). No aws_iam_access_key (its secret would land in state), no inline policy, no literal
+      account id, bucket name or region.
+  - file: tests/checks/iam_tf/test_agent_session_user.py
+    action: Create
+    purpose: >-
+      Credential-free text tests over the new file: test_agent_session_user_carries_boundary (the boundary reference
+      and prevent_destroy); test_agent_session_invoke_is_url_only (every lambda:InvokeFunction Allow carries the Bool
+      condition; the invoke Resources name exactly the reader, writer, telemetry reader and telemetry writer locals);
+      test_agent_session_grants_are_closed (the union of Allow actions equals the declared set above, so a new verb
+      fails until this test names it); test_agent_session_never_reaches_state_or_secrets (no Resource reaches tfstate/,
+      tfplan/, the transcript prefixes, parameter/secret/ or a secretsmanager ARN; no s3:Put*/Delete*; no iam write
+      verb; Decision 238 cl.1); test_agent_session_has_no_key_resource (no aws_iam_access_key or
+      aws_iam_user_policy anywhere under terraform/).
+  - file: scripts/aws_identity.py
+    action: Modify
+    purpose: >-
+      caller_arn(profile) calls GetCallerIdentity from the profile's own session (its configured region, the
+      proxy-signed host) with the existing bounded Config; IDENTITY_PROBE_REGION and the second-region client are
+      removed. The module docstring's rule becomes: no session code calls sts:AssumeRole, GetSessionToken,
+      GetFederationToken or any other API that returns credentials (Decision {{N}} cl.1); identity reads go through
+      this helper; exit-code-only liveness probes and account-id reads stay exempt. CLI output and masking unchanged.
+  - file: tests/test_aws_identity.py
+    action: Modify
+    purpose: >-
+      test_identity_call_uses_profile_session (replaces test_identity_call_uses_probe_region): the STS client comes
+      from the profile session with no region override and no explicit credentials; the CLI still masks the account
+      id and prints only exception type and error code on failure; profile None uses the default chain.
+  - file: tests/test_sts_call_sites.py
+    action: Modify
+    purpose: >-
+      Docstring re-points at the new rule; adds test_no_session_code_mints_credentials: no non-comment line under
+      scripts/, src/, bin/ or .claude/hooks/ calls assume_role, get_session_token or get_federation_token or runs
+      aws sts assume-role, get-session-token or get-federation-token. The census ALLOWED map is unchanged.
+  - file: .claude/hooks/session_start_aws.sh
+    action: Modify
+    purpose: >-
+      Reports the proxy-signed user: on a caller ARN containing :user/agent-platform-session it logs
+      "OK: user/agent-platform-session"; on an assumed-role or any other identity it logs a WARNING naming
+      bin/setup-cloud-env.sh's header (setup field and network secret) and deploy-paths.yaml
+      admin_out_of_band.agent_session_identity; failure text drops the ExternalId hint. Header comment describes the
+      new model. Still advisory, always exit 0, never echoes the ARN or account id.
+  - file: tests/hooks/test_session_start_aws.py
+    action: Modify
+    purpose: >-
+      test_reports_session_user (the OK line, no arn: and no account id in output), test_warns_on_assumed_role (a
+      PlatformDev assumed-role ARN now warns), and the existing failure-path and masking tests updated to the new text.
+  - file: bin/setup-cloud-env.sh
+    action: Modify
+    purpose: >-
+      Header only: one template for every agent environment. The AWS network secret holds the agent-platform-session
+      key with the exact host list (deploy-paths.yaml admin_out_of_band.agent_session_identity); the setup field
+      writes [profile agent_platform] (and [profile agent_static], kept so scripts naming it still resolve) with
+      credential_process placeholders, region and output only, no role_arn, source_profile or external_id, no
+      agent_platform_admin profile; the env-var field sets no AWS_PROFILE (INSTALL_TERRAFORM=1 stays where wanted).
+      The script body is unchanged.
+  - file: tests/test_setup_cloud_env.py
+    action: Modify
+    purpose: >-
+      test_proxy_template_resolves_agent_static_through_credential_process keeps its name (its graduated shard
+      setup-cloud-env-proxy-template pins it) and now asserts agent_static resolves the placeholder key with no
+      role step; new test_proxy_template_profiles_are_placeholder_only (agent_platform resolves the same placeholder key;
+      no role_arn, source_profile, external_id or agent_platform_admin in the written config);
+      test_header_template_has_no_static_key_and_current_path asserts the host list names sts.eu-west-2.amazonaws.com
+      and contains no wildcard; the admin-template test drops AWS_PROFILE and keeps INSTALL_TERRAFORM=1.
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: >-
+      Sidecar blocks decision-new, decision-113-note, decision-223-note, decision-248-note and decision-252-note,
+      verbatim, {{N}} and {{DATE}} filled at build (docs/plans/approved/agent-proxy-signed-access.yaml).
+  - file: AGENTS.md
+    action: Modify
+    purpose: Sidecar block agents-portal-line, verbatim.
+  - file: docs/contracts/deploy-paths.yaml
+    action: Modify
+    purpose: >-
+      Sidecar blocks deploy-paths-session-identity, deploy-paths-log (a new amendment_log entry) and
+      deploy-paths-log-compaction, verbatim. The file is at its 500-effective-line cap (contracts class,
+      config/structural_size_budgets.yaml): the new procedure and log entry add 12 lines and the compaction block writes
+      four older multi-line amendment_log entries as one-line flow mappings with their words unchanged (-21), so the
+      file nets about -9 against today's main; the build measures against main at build time and never raises the
+      budget (Decision 128).
+bundled_recommendations: []
+followon_recs: []
+infrastructure_dependencies:
+  - "terraform/bootstrap is admin-only (environment-taxonomy.yaml axis_a): the operator plans it pre-merge (VP 4-5) and applies it post-merge (VP 6) from AWS CloudShell as user/platform-breakglass. Each block is self-contained (public-repo fetch at a sha, pinned terraform checked against SHA256SUMS, variables from SSM, account id from the caller), the same shape as PLAN-sit-portable-roots' paused CloudShell amendment, so this plan does not wait for that amendment."
+  - "One merged-unapplied bootstrap change at a time: this PR merges only after #1987 (rec-5025) is applied, and before rec-4233 PR 1 and rec-5026's bootstrap changes merge."
+  - "Apply precedes cutover: VP 7's key and network-secret edits need the user that VP 6 creates; the code changes merge with the PR and take effect at cutover."
+  - "No Lambda code changes: no deploy channel runs."
+acceptance_criteria:
+  - "terraform/bootstrap declares agent-platform-session with the permissions boundary and exactly the two managed policies' grants; test_agent_session_user.py passes and fails on any extra verb, a non-URL invoke grant, a state, plan, transcript or secret resource, or an access-key resource."
+  - "No session code calls a credential-returning STS API (test_no_session_code_mints_credentials)."
+  - "scripts.aws_identity caller-arn reads the identity from the profile's own session; the session-start hook reports OK: user/agent-platform-session for that user and warns otherwise."
+  - "DECISIONS.md, AGENTS.md and deploy-paths.yaml carry exactly the sidecar's words (approved_text verify passes)."
+  - "After the operator's apply and cutover, a fresh session reads and writes the ops store through the Function URLs, reads endpoints, logs, metrics, the convergence record and role policies, and is denied a data-lake write, a /secret/ read, a direct invoke and an IAM write."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Run the changed and new tests, including every named node.
+    command: >-
+      bin/venv-python -m pytest tests/checks/iam_tf/test_agent_session_user.py tests/test_aws_identity.py
+      tests/test_sts_call_sites.py tests/hooks/test_session_start_aws.py tests/test_setup_cloud_env.py
+      tests/checks/iam_tf/test_url_only_invoke_guard.py -q
+    expected: All pass, including the five new nodes in test_agent_session_user.py and test_no_session_code_mints_credentials.
+    fix_if: Any failure; fix the code or the Terraform, never an assertion's meaning (Decision 235).
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Duplicates PR CI's diff-selected pytest of these files on every change; the named nodes in test_obligations pin
+      the new behaviour.
+  - step: 2
+    phase: pre-deploy
+    action: Prove the IAM policy-size, secret-grant and account-portability checks accept the new file.
+    command: >-
+      bin/venv-python -m scripts.checks.iam_tf.validate_iam_policy_size && bin/venv-python -m
+      scripts.checks.iam_tf.validate_secret_parameter_grants && bin/venv-python -c "from
+      scripts.checks.iam_tf.validate_account_portable_names import validate_account_portable_names as v; f = []; v(f);
+      print(chr(10).join(f) or 'PORTABLE_OK'); raise SystemExit(1 if f else 0)"
+    expected: >-
+      The policy-size check's PASS line counts two more bootstrap policy resources than on main, the secret-grant check
+      exits 0, and PORTABLE_OK prints.
+    fix_if: A finding names the resource; fix the Terraform, never the check.
+    hermetic: false
+    graduation: not-applicable
+  - step: 3
+    phase: pre-deploy
+    action: Bind the governed wording to the sidecar.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug agent-proxy-signed-access --base origin/main
+    expected: verify reports every bound file equal to its base words with the nine blocks applied.
+    fix_if: Any mismatch; re-apply the block verbatim (only {{N}} and {{DATE}} may differ).
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      ENVIRONMENT CHECK (deploy-paths.yaml admin_out_of_band.pre_merge_live_plan), operator-run in AWS CloudShell in the
+      PROD account: the shell's caller is user/platform-breakglass (the CloudShell lane terraform/github/CLAUDE.md
+      names), never an agent identity. The build posts this block at CI green; the operator returns the one line.
+    command: >-
+      ( printf 'caller-arn check: '; aws sts get-caller-identity --query Arn --output text 2> /dev/null | grep -q
+      ':user/platform-breakglass$' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT )
+    expected: caller-arn check, ADMIN_CHAIN_OK. The ARN itself is never printed.
+    fix_if: >-
+      ADMIN_CHAIN_ABSENT; the operator signs in as the break-glass user and re-runs, and VP 5 waits. If the operator
+      uses another admin sign-in by choice, the build records that in the PR comment and asks before VP 5.
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      PRE-MERGE GATE (ADMIN), operator-run in AWS CloudShell after VP 4. CloudShell needs no repo, key or profile: the
+      block fetches this public repo's PR head (the build writes the full sha into PR_HEAD_SHA) into a scratch folder
+      under /tmp, installs the pinned terraform checked against HashiCorp's SHA256SUMS, reads the bootstrap variable
+      values from /secret/agent-platform-terraform-personal-tfvars (the source PLAN-sit-portable-roots' CloudShell
+      amendment uses; the build re-checks terraform-cc-web-operations.yaml) and account_id from the caller identity,
+      never printing either, and plans terraform/bootstrap read-only (-lock=false) on the sign-in's own credentials
+      (aws_profile empty). An EXIT trap deletes the scratch folder; terraform errors go to $HOME/aps-tf.err, read in
+      CloudShell only. The build records the returned lines as a counts-only PR comment.
+    command: >-
+      ( set -o pipefail; PR_HEAD_SHA=<full PR head sha>; W="${TMPDIR:-/tmp}/aps-head"; L="$HOME/aps-tf.err"; rm -rf "$W";
+      mkdir -p "$W/bin"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE; { git init -q "$W/repo" && git -C
+      "$W/repo" fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git "$PR_HEAD_SHA" && git -C "$W/repo" checkout
+      -q --detach FETCH_HEAD; } 2>> "$L" || { echo CLONE_FAILED; exit 1; }; R=$(tr -d '[:space:]' <
+      "$W/repo/config/aws-region"); export AWS_REGION="$R" AWS_DEFAULT_REGION="$R"; V=$(tr -d '[:space:]' <
+      "$W/repo/config/terraform-version"); case "$(uname -m)" in aarch64) P=linux_arm64 ;; *) P=linux_amd64 ;; esac;
+      Z="terraform_${V}_${P}.zip"; { curl -fsSL -o "$W/$Z" "https://releases.hashicorp.com/terraform/$V/$Z" && curl
+      -fsSL -o "$W/sums" "https://releases.hashicorp.com/terraform/$V/terraform_${V}_SHA256SUMS" && ( cd "$W" && grep "
+      $Z\$" sums | sha256sum -c --quiet - ) && unzip -qo "$W/$Z" -d "$W/bin"; } >> "$L" 2>&1 || { echo
+      TERRAFORM_INSTALL_FAILED; exit 1; }; export PATH="$W/bin:$PATH"; command -v jq > /dev/null || { echo JQ_ABSENT;
+      exit 1; }; aws ssm get-parameter --name /secret/agent-platform-terraform-personal-tfvars --with-decryption --query
+      Parameter.Value --output text > "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT;
+      exit 1; }; A=$(aws sts get-caller-identity --query Account --output text 2>> "$L"); test -n "$A" || { echo
+      IDENTITY_FAILED; exit 1; }; B="$W/repo/terraform/bootstrap"; terraform -chdir="$B" init -input=false
+      -backend-config="region=$R" > /dev/null 2>> "$L" || { echo INIT_FAILED; exit 1; }; terraform -chdir="$B" plan
+      -lock=false -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" -var "account_id=$A" -var
+      "aws_profile=" -out="$W/head.bin" > "$W/plan.txt" 2>> "$L"; echo "HEAD_PLAN_EXIT $?"; grep -E '^Plan: '
+      "$W/plan.txt"; terraform -chdir="$B" show -json "$W/head.bin" | jq -r '.resource_changes[] |
+      select(.change.actions != ["no-op"]) | "\(.change.actions | join(",")) \(.address)"' | LC_ALL=C sort; echo
+      "PR_HEAD_SHA $PR_HEAD_SHA" )
+    expected: >-
+      HEAD_PLAN_EXIT 2; Plan: 5 to add, 0 to change, 0 to destroy.; exactly five lines, create
+      aws_iam_policy.agent_session_ducklake, create aws_iam_policy.agent_session_observe, create aws_iam_user.agent_session,
+      create aws_iam_user_policy_attachment.agent_session_ducklake and create
+      aws_iam_user_policy_attachment.agent_session_observe; PR_HEAD_SHA with the sha the build wrote.
+    fix_if: >-
+      Any *_FAILED, JQ_ABSENT or TFVARS_ABSENT line means nothing was planned; the operator reads $HOME/aps-tf.err in
+      CloudShell, fixes and re-pastes. Any other address, an update or a destroy (for example another merged-unapplied
+      bootstrap change): stop, do not merge, report the lines to the coordinator. A precondition failure names the
+      oversized policy: split it.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: >-
+      OPERATOR STEP, AWS CloudShell in the PROD account, after merge. The same fetch, install, variable and init lines as
+      VP 5 at the merge sha (the build writes the full sha into M), then a saved plan that is applied only when its
+      summary is exactly 5 to add, 0 to change, 0 to destroy and its five addresses are exactly VP 5's, then a fresh plan.
+      The operator's paste is the direction for the apply (Decision 126 cl.1: operators may always invoke it directly).
+      Decision 202's IAM-change alarms fire on the user, policy and attachment creations by design.
+    command: >-
+      ( set -o pipefail; M=<full merge sha>; W="${TMPDIR:-/tmp}/aps-merge"; L="$HOME/aps-tf.err"; rm -rf "$W"; mkdir -p
+      "$W/bin"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE; { git init -q "$W/repo" && git -C "$W/repo" fetch
+      -q --depth 1 https://github.com/otl-labs/ontheloop.git "$M" && git -C "$W/repo" checkout -q --detach FETCH_HEAD; }
+      2>> "$L" || { echo CLONE_FAILED; exit 1; }; R=$(tr -d '[:space:]' < "$W/repo/config/aws-region"); export
+      AWS_REGION="$R" AWS_DEFAULT_REGION="$R"; V=$(tr -d '[:space:]' < "$W/repo/config/terraform-version"); case
+      "$(uname -m)" in aarch64) P=linux_arm64 ;; *) P=linux_amd64 ;; esac; Z="terraform_${V}_${P}.zip"; { curl -fsSL -o
+      "$W/$Z" "https://releases.hashicorp.com/terraform/$V/$Z" && curl -fsSL -o "$W/sums"
+      "https://releases.hashicorp.com/terraform/$V/terraform_${V}_SHA256SUMS" && ( cd "$W" && grep " $Z\$" sums |
+      sha256sum -c --quiet - ) && unzip -qo "$W/$Z" -d "$W/bin"; } >> "$L" 2>&1 || { echo TERRAFORM_INSTALL_FAILED; exit
+      1; }; export PATH="$W/bin:$PATH"; command -v jq > /dev/null || { echo JQ_ABSENT; exit 1; }; aws ssm get-parameter
+      --name /secret/agent-platform-terraform-personal-tfvars --with-decryption --query Parameter.Value --output text >
+      "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT; exit 1; }; A=$(aws sts
+      get-caller-identity --query Account --output text 2>> "$L"); test -n "$A" || { echo IDENTITY_FAILED; exit 1; };
+      B="$W/repo/terraform/bootstrap"; terraform -chdir="$B" init -input=false -backend-config="region=$R" > /dev/null
+      2>> "$L" || { echo INIT_FAILED; exit 1; }; terraform -chdir="$B" plan -input=false -no-color -var-file="$W/vars.tfvars"
+      -var "account_id=$A" -var "aws_profile=" -out="$W/merge.bin" > "$W/plan.txt" 2>> "$L"; s=$(grep -E '^Plan: '
+      "$W/plan.txt"); echo "MERGE_PLAN $s"; a=$(terraform -chdir="$B" show -json "$W/merge.bin" | jq -r
+      '.resource_changes[] | select(.change.actions != ["no-op"]) | "\(.change.actions | join(",")) \(.address)"' |
+      LC_ALL=C sort | tr '\n' ' '); e="create aws_iam_policy.agent_session_ducklake create
+      aws_iam_policy.agent_session_observe create aws_iam_user.agent_session create
+      aws_iam_user_policy_attachment.agent_session_ducklake create aws_iam_user_policy_attachment.agent_session_observe ";
+      if [ "$s" = "Plan: 5 to add, 0 to change, 0 to destroy." ] && [ "$a" = "$e" ]; then terraform -chdir="$B" apply
+      -input=false -no-color "$W/merge.bin" 2>> "$L" | grep -E '^Apply complete!'; terraform -chdir="$B" plan
+      -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" >
+      /dev/null 2>> "$L"; echo "BOOTSTRAP_PLAN_EXIT $?"; else echo APPLY_SKIPPED; fi; echo "MERGE_SHA $M" )
+    expected: >-
+      MERGE_PLAN Plan: 5 to add, 0 to change, 0 to destroy.; Apply complete! Resources: 5 added, 0 changed, 0
+      destroyed.; BOOTSTRAP_PLAN_EXIT 0; MERGE_SHA with the merge sha.
+    fix_if: >-
+      APPLY_SKIPPED or any other count: nothing was applied; stop and report to the coordinator as a plan defect, never
+      a second paste. A setup failure line: read $HOME/aps-tf.err in CloudShell and re-paste. BOOTSTRAP_PLAN_EXIT 2 after
+      the apply: stop and report; a half-applied state is re-planned, never hand-edited.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: >-
+      OPERATOR STEP, cutover, per deploy-paths.yaml admin_out_of_band.agent_session_identity. (a) In the IAM console
+      (Users, agent-platform-session, Security credentials) create one access key and paste its two values straight
+      into each agent environment's AWS network secret in place of the old key, never into a chat, a file or a shell.
+      (b) Run this block in CloudShell: it prints the active key count and the four Function URL hosts, in CloudShell
+      only. (c) Set each environment secret's allowed hosts to exactly the procedure's list, re-paste the setup field
+      from the merged bin/setup-cloud-env.sh header and clear AWS_PROFILE from the env-var field. (d) Start a fresh
+      session and reply "cutover done" in the build thread.
+    command: >-
+      ( unset AWS_PROFILE; aws iam list-access-keys --user-name agent-platform-session --query
+      'length(AccessKeyMetadata[?Status==`Active`])' --output text | sed 's/^/ACTIVE_KEYS /'; for p in reader writer
+      telemetry_reader telemetry_writer; do aws ssm get-parameter --name "/agent-platform/ducklake/${p}_url" --query
+      Parameter.Value --output text | sed -E 's#^https://([^/]+).*#\1#'; done )
+    expected: >-
+      ACTIVE_KEYS 1 and four lambda-url hosts, read in CloudShell only (they never go into the repo, a PR or a chat);
+      then the operator's "cutover done".
+    fix_if: ACTIVE_KEYS 2 or more; deactivate the extra key in the console first, so exactly one key is live.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: In a fresh session after VP 7, read the identity two ways.
+    command: >-
+      bash .claude/hooks/session_start_aws.sh | grep -c 'OK: user/agent-platform-session'; bin/venv-python -m
+      scripts.aws_identity caller-arn --profile agent_platform | grep -o ':user/agent-platform-session$'
+    expected: 1 and :user/agent-platform-session.
+    fix_if: >-
+      ResponseParserError or a proxy refusal on a non-STS host means the proxy does not re-sign it (UNPROVEN until
+      now): stop, report to the operator and fire Decision {{N}}'s proxy-stops-signing condition. An assumed-role
+      means the old setup field is still pasted.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: >-
+      Positive reads in that session: the ops store through the reader Function URL, preflight (credentials, recs read
+      and the convergence record), endpoint lookup, a log stream listing, a metric listing and a role policy read.
+    command: >-
+      bin/venv-python -m scripts.ops_data_portal --selftest-read --profile agent_platform | grep -cE '"row_count":
+      [1-9]'; bin/venv-python -m scripts.session.preflight > /dev/null 2>&1; bin/venv-python -c "import json; r =
+      json.load(open('logs/.preflight-report.json')); print('PREFLIGHT', r['creds_status'], r['recs_read_status'])"; aws
+      ssm get-parameter --profile agent_platform --name /agent-platform/ducklake/reader_url --query Parameter.Name
+      --output text; aws logs describe-log-streams --profile agent_platform --log-group-name
+      /aws/lambda/agent-platform-ducklake-reader --max-items 1 --query 'length(logStreams)'; aws cloudwatch list-metrics
+      --profile agent_platform --namespace AWS/Lambda --max-items 1 --query 'length(Metrics)'; aws iam list-role-policies
+      --profile agent_platform --role-name PlatformDev --query 'length(PolicyNames)'
+    expected: 1; PREFLIGHT ok ok; /agent-platform/ducklake/reader_url; 1; 1; 1. VP 11's filing proves the writer Function URL.
+    fix_if: >-
+      An AccessDenied names the missing grant: a plan defect (routing.plan_defect), never an ad-hoc widening. A proxy
+      refusal means the host is missing from the environment's list: fix the list per the procedure.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: post-deploy
+    action: >-
+      Negative checks in that session: a data-lake write, a data-lake read outside the convergence prefix, a /secret/
+      parameter read and an IAM write. No sts:AssumeRole is attempted; the proxy refuses it by design and it is never
+      retried.
+    command: >-
+      aws s3api put-object --profile agent_platform --bucket agent-platform-data-lake --key probe/agent-session-denied
+      --body /dev/null 2>&1 | grep -o AccessDenied | head -1; aws s3api get-object --profile agent_platform --bucket
+      agent-platform-data-lake --key probe/agent-session-denied /dev/null 2>&1 | grep -o AccessDenied | head -1; aws ssm
+      get-parameter --profile agent_platform --name /secret/agent-platform-terraform-personal-tfvars --query
+      Parameter.Name 2>&1 | grep -o AccessDenied | head -1; aws iam tag-role --profile agent_platform --role-name
+      PlatformDev --tags Key=probe,Value=x 2>&1 | grep -o AccessDenied | head -1
+    expected: AccessDenied four times.
+    fix_if: >-
+      Any success is a security finding; report to the operator at once and deactivate the key per the procedure. A
+      proxy refusal in place of AccessDenied proves nothing about IAM; fix the host list and re-run.
+    hermetic: false
+    graduation: not-applicable
+  - step: 11
+    phase: post-deploy
+    action: >-
+      File the owed follow-on recs through the portal (get_rec_write_guidance first) from
+      /mnt/project-files/agent-aws-access/OWED-RECS.md, read them back by id, then post a coordinator log entry (issue
+      #1963) naming the cutover and the stale AWS-04 row in account-credential-inventory.yaml for its owning project.
+    command: >-
+      bin/venv-python -c "import sys; from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; rows,
+      missing = fetch_recs_by_ids(make_reader(profile='agent_platform'), sys.argv[1:]); print('RECS', len(rows),
+      'MISSING', len(missing), sorted({r.get('status') for r in rows}))" <each id file_rec returned>
+    expected: RECS equal to the number filed, MISSING 0, ['open']; then the log comment id mcp__github__add_issue_comment returns.
+    fix_if: A write that fails loudly is re-filed after the cause is fixed (Decision 84 I-4); never an offline outbox.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: terraform/bootstrap/agent_session_user.tf
+    behavior: The user carries the boundary; grants are exactly the declared set; invokes are URL-only; nothing reaches state, plans, transcripts, secrets or IAM writes; no key resource.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_agent_session_user.py
+    red_green_expectation: red before (file absent), green after
+  - source: scripts/aws_identity.py
+    behavior: The identity call uses the profile's own session and region; no second-region client.
+    verification_step: 1
+    test_selector: tests/test_aws_identity.py::test_identity_call_uses_profile_session
+    red_green_expectation: red before (probe-region client), green after
+  - source: .claude/hooks/session_start_aws.sh
+    behavior: Reports OK for the session user and warns on an assumed role.
+    verification_step: 1
+    test_selector: tests/hooks/test_session_start_aws.py::test_reports_session_user
+    red_green_expectation: red before (expects assumed-role), green after
+  - source: bin/setup-cloud-env.sh
+    behavior: The header template writes placeholder-only profiles with no role step and an exact host list.
+    verification_step: 1
+    test_selector: tests/test_setup_cloud_env.py::test_proxy_template_profiles_are_placeholder_only
+    red_green_expectation: red before (node absent; the header writes role_arn profiles), green after
+constraints:
+  - No rescue agents or workaround loops (Decision 55); never attempt or retry sts:AssumeRole or any other credential-minting call.
+  - Never write a key, account id, ExternalId, Function URL host or ARN containing an account id into the repo, a PR, a comment or the shared folder (AGENTS.md public boundary, Decision 101).
+  - The governed files get exactly the sidecar's words (Decision 246); the operator's word on the final diff is still required for the IAM text under terraform/bootstrap and the session-start hook (coordinator always_ask).
+  - No grant beyond scope row 1; a missing grant found in VP 9 is a plan defect, never a build-time widening.
+  - Loosens no assertion (Decision 235); the protected-action gate, its contract and validate_admin_root_premerge_gate stay as they are (re-grounding is the Decision {{N}} cl.4 follow-on).
+  - Files other projects own are not edited (telemetry contracts are Feedback Loop's; account-credential-inventory.yaml is reported, not edited).
+context:
+  - "Decision-scout r1 FLAGS_FOUND (/mnt/project-files/agent-aws-access/SCOUT-r1.md). CITE: 113, 213, 144, 223, 225, 180, 126, 237, 84, 127, 235, 167/177. Dispositions: 248 cl.6 and 252 cl.5/cl.7 amended by sidecar notes; 238 held (no state grant) and its check's reach to users is a follow-on; 251 is the operator's under cl.3 (rec-5023 done); 143 deferred against rec-4206 (cl.7); 229/T4.15 PlatformDev stays; 239 content reader waits for rec-4696; 202 CloudShell runs as user/platform-breakglass (deploy-paths.yaml github_settings_apply_provisioning); 126 spirit met by VP 5 proving a CloudShell plan before merge."
+  - "Design evidence: blind Fable consult /mnt/project-files/agent-aws-access/ADVICE.md; presentation PRESENTATION.md (F1-F6 taken as recommended, F4 revised to CloudShell now and an admin-environment follow-on); operator's 'write the plan' 2026-11-13 00:01Z with a standing ask that any new design fork gets a fresh blind Fable consult."
+  - "UNPROVEN until VP 8: that the proxy re-signs non-STS hosts (lambda-url, ssm, logs, monitoring, s3, iam). Verified only for STS (operator reproduction 2026-11-12 22:41Z). An optional early probe was offered to the operator."
+  - "Session-side AWS consumers found [verified by reading]: ducklake_reader_client.py and writer_transport.py (Function URLs, SSM lookup), telemetry_capture/transport.py (telemetry writer), preflight aws_infra.py (convergence record), session_start_aws.sh. s3_log_store.py writes S3 only when S3_LOG_BUCKET is set (CI only). No session code reads the inference keys; DynamoDB counters are legacy (Decision 84 I-2)."
+  - "Telemetry writer records the caller's name parsed from userArn (handler.py:84-88): it becomes agent-platform-session, not PlatformDev; tenant keys on the account and is unchanged. ducklake_telemetry_writer.yaml's producer line is Feedback Loop's (owed rec 6)."
+  - "Overlaps: PLAN-sit-organization (rec-5026, unbuilt) adds its own Decision 113 Update after the same anchor and designs a user + AssumeRole chain this Decision retires: its planning thread amends it before its build. PLAN-sit-portable-roots' CloudShell amendment owns the prelude VP 4-7 reuse. rec-4233 PR 1's bootstrap change queues after this one."
+  - "V3 resolution: VP 5's operator-run pre-merge plan at the PR head substitutes for pre-merge post-deploy evidence; behavioural acceptance is VP 6-10 after merge, with the operator's returned lines labelled operator-reported in a counts-only PR comment."
+  - "Approvals at build start: none; the build session holds no AWS identity, VP 4-7 are the operator's own CloudShell blocks, and VP 8-11 run in a fresh session as the new user. The operator's final-diff word on the build PR (IAM text, the session-start hook) is asked at CI green."
+  - "red_overlap: the recs reader is unreachable (Decision 215 fails closed); main's GitHub CI state is the substitute evidence and the operator's override is asked before the plan PR merges."
+  - "Registry shards kept, not edited: aws-identity-caller-arn and session-start-aws-caller-arn (file-level nodes, guard symbols kept), session-start-aws-no-account-id (its node test_output_never_contains_account_id_or_arn keeps its name), setup-cloud-env-proxy-template (node name kept), sts-call-site-census (scan_sts_call_sites kept), setup-cloud-session-bootstrap-parity, github-mcp-server-neither-installed-nor-declared and github-session-readiness-capabilities (untouched nodes). PLAN-account-id-out-of-session-output, listed unbuilt by plan_obligations, is built (plan #1675, build #1681, its shard graduated 2026-10-27)."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections (113, 213, 144, 223, 237, 238, 248, 252, 143)
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+  - "Start condition for merge (not for the build): #1987 (rec-5025) is applied, so this is the only merged-unapplied bootstrap change; until then the build stops at CI green and tells the coordinator."
+execution_steps:
+  - "Tests first per the four test scope rows, seen red on the unchanged tree (record the red run). Post: the named nodes exist and fail."
+  - "terraform/bootstrap/agent_session_user.tf per scope row 1, reusing platform_dev_policies.tf's function locals and account_names.tf's bucket ARN. Post: VP 1-2 pass."
+  - "scripts/aws_identity.py, .claude/hooks/session_start_aws.sh and the bin/setup-cloud-env.sh header per their rows. Post: VP 1 passes."
+  - "Hand-apply the sidecar's nine blocks verbatim, {{N}} the next free Decision number at build time and {{DATE}} the build date. Post: VP 3 passes."
+  - "Commit Flow (implement skill; git-ops.yaml handoff_sequence): full tier, push, PR. At CI green post VP 4 and VP 5's blocks for the operator, record the returned lines, ask the operator's final-diff word; merge only when VP 5 matched and #1987 is applied."
+  - "After merge: post VP 6's block; on its lines, post VP 7's procedure; on 'cutover done', run VP 8-11 in a fresh session (the build thread itself if it was started after cutover, else a fresh one the coordinator starts)."
+  - "Report: what was implemented, the operator-reported lines, VP 8-10 results, the filed rec ids and the merge SHA."
+rollback: >-
+  Before cutover: revert the squash commit and, if VP 6 ran, the operator destroys the user from CloudShell (remove
+  prevent_destroy in a reviewed PR first). After cutover: deactivate the new key; sessions lose AWS again, which is
+  today's state, since the old chain stays refused.
