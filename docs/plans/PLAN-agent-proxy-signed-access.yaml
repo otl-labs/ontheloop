@@ -61,7 +61,7 @@ scope:
       fails until this test names it); test_agent_session_never_reaches_state_or_secrets (no Allow names an s3 action,
       parameter/secret/, a secretsmanager ARN or an iam verb outside the four reads; Decision 238 cl.1);
       test_agent_session_carries_platform_dev_denies (every Deny Sid in local.platform_dev_runtime_policy_json appears in
-      the guard policy with the same Action and Resource text, and the parsed Sid set holds at least the eight row 1
+      the guard policy with the same Action, Resource and Condition text, and the parsed Sid set holds at least the eight row 1
       names, so an empty parse fails); test_agent_session_cannot_read_externalid_trusts (the aws_iam_role resources
       under terraform/ whose trust mentions sts:ExternalId are exactly the roles DenyExternalIdTrustRead names, and that
       set holds at least PlatformDev and PlatformAdmin, so an empty parse fails); test_agent_session_escalation_denied
@@ -77,8 +77,9 @@ scope:
       SigningCertificate or MFA, and no iam wildcard, while the parsed ceiling holds at least iam:GetRole and
       iam:PassRole, so a parse truncated by a bracket in a comment fails: the premise context's Decision 144/225 note
       rests on).
-      The eleventh, test_agent_session_predicates_are_red_on_each_mutation, is parametrized over one mutation of the real
-      text per class and asserts each yields a problem: an extra Allow verb, an iam verb beyond the four reads, an
+      The eleventh, test_agent_session_predicates_are_red_on_each_mutation, is parametrized over (mutation, predicate,
+      expected problem substring) on the real text and asserts the named predicate reports that problem, so a mutation
+      that fails for another reason cannot pass as red: an extra Allow verb, an iam verb beyond the four reads, an
       InvokeFunction Allow without the Bool condition, a fifth function in the invoke Resources, an s3:GetObject
       Allow, a parameter/secret/ Resource, a secretsmanager ARN Resource, a dropped DailyOps Deny Sid, an extra aws_iam_role
       with an sts:ExternalId trust, iam:PassRole dropped from DenySessionEscalation, DenyTemporaryCredentialUse dropped, an
@@ -262,7 +263,7 @@ infrastructure_dependencies:
 acceptance_criteria:
   - "terraform/bootstrap declares agent-platform-session with the permissions boundary and exactly the three managed policies; test_agent_session_user.py's ten real-tree nodes pass, and its red-case node shows each predicate failing on one mutation per class: an extra verb, a non-URL invoke grant, an unlisted invoke target, an S3 grant, a secret grant, a missing PlatformDev Deny, an unlisted ExternalId trust, a missing escalation Deny, a missing temporary-credential Deny, an access-key resource, a missing boundary or prevent_destroy and a user-write verb in the boundary ceiling."
   - "Decision 202's detector gains platform-security-agent-session-iam-change, matching any IAM write, made or denied, that names agent-platform-session or an agent-platform-session-* policy (fixture events and red cases in the detector tests; security_detector_probe.py expects six alarms); it is live from VP 8's apply, before the key exists, and metric data shows it matching the key creation (VP 9) and the denied write (VP 12, read in VP 13)."
-  - "No session code calls a credential-returning STS API (test_no_session_code_mints_credentials), and a token minted from the user's key is denied every action (test_agent_session_temporary_credentials_denied)."
+  - "No session code calls a credential-returning STS API (test_no_session_code_mints_credentials), and a token minted from the user's key is denied every action IAM policy can deny, which is all but GetCallerIdentity (test_agent_session_temporary_credentials_denied)."
   - "scripts.aws_identity caller-arn reads the identity from the profile's own session; the session-start hook reports OK: user/agent-platform-session for that user and warns otherwise."
   - "DECISIONS.md, AGENTS.md and deploy-paths.yaml carry exactly the sidecar's words (approved_text verify passes), and the stale-reference sweep leaves only the residue owed rec 7 names (VP 5)."
   - "Before merge, the proxy is shown to sign the ssm, logs, monitoring, iam and Function URL host classes (VP 4)."
@@ -657,19 +658,19 @@ verification_plan:
       group outside the agent-platform prefix. No sts:AssumeRole is attempted; the proxy refuses it by design and it is
       never retried. The denied TagRole matches platform-security-denied-iam-write and the new agent-session filter
       (its errorMessage names the user as caller); VP 13 proves that from metric data, and any emails are expected.
-    command: >-
-      date -u +%Y-%m-%dT%H:%M:%SZ | sed 's/^/STARTED_AT /'; aws iam get-role --profile agent_platform --role-name
-      PlatformDev --query Role.RoleName 2>&1 | grep -o
-      AccessDenied | head -1; aws ssm get-parameter --profile agent_platform --name
-      /secret/agent-platform-terraform-personal-tfvars --query Parameter.Name 2>&1 | grep -o AccessDenied | head -1; aws
-      iam tag-role --profile agent_platform --role-name agent-session-probe-absent --tags Key=probe,Value=x 2>&1 | grep -o AccessDenied
-      | head -1; aws logs describe-log-streams --profile agent_platform --log-group-name /aws/lambda/probe-outside-scope
-      2>&1 | grep -o AccessDenied | head -1
+    command: |-
+      date -u +%Y-%m-%dT%H:%M:%SZ | sed 's/^/STARTED_AT /'
+      n() { l=$1; shift; o=$(aws "$@" --profile agent_platform 2>&1 > /dev/null); if [ $? = 0 ]; then echo "$l SUCCEEDED"; else t=$(printf '%s' "$o" | grep -oE 'AccessDenied[A-Za-z]*|InvalidClientTokenId|UnrecognizedClientException|IncompleteSignature|SignatureDoesNotMatch|ResponseParserError|blocked by policy' | head -1); echo "$l ${t:-OTHER}"; fi; }
+      n TRUST iam get-role --role-name PlatformDev --query Role.RoleName
+      n SECRET ssm get-parameter --name /secret/agent-platform-terraform-personal-tfvars --query Parameter.Name
+      n IAMWRITE iam tag-role --role-name agent-session-probe-absent --tags Key=probe,Value=x
+      n LOGS logs describe-log-streams --log-group-name /aws/lambda/probe-outside-scope
     expected: >-
-      A STARTED_AT line, then AccessDenied four times.
+      A STARTED_AT line, then TRUST, SECRET, IAMWRITE and LOGS, each AccessDenied (or AccessDeniedException).
     fix_if: >-
-      Any success is a security finding; report to the operator at once and deactivate the key per the procedure. A
-      proxy refusal in place of AccessDenied proves nothing about IAM; fix the host list and re-run.
+      SUCCEEDED on any line is a security finding; report to the operator at once and deactivate the key per the
+      procedure. A signing or proxy token, or OTHER, in place of AccessDenied proves nothing about IAM; fix the host
+      list and re-run.
     hermetic: false
     graduation: not-applicable
   - step: 13
@@ -792,6 +793,7 @@ gate_rounds:
   - {gate: plan-critique, round: 9, verdict: REVISE, blocking: 1, nits: 6}
   - {gate: plan-critique, round: 10, verdict: PROCEED, blocking: 0, nits: 10}
   - {gate: wording-check, round: 10, verdict: PASS, digest: b4707ded3acd79236157657a104de69f88b7ea4f8f1928a3004c1d0528154d38, base: 9412b0ec4385060058ad545ddf35ecba8793c030, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 11, verdict: PROCEED, blocking: 0, nits: 10}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -807,7 +809,7 @@ execution_steps:
   - "Hand-apply the sidecar's ten blocks verbatim, {{N}} the next free Decision number at build time and {{DATE}} the build date, and fill {{N}} the same way in scripts/aws_identity.py's docstring and the bin/setup-cloud-env.sh header (a rebase that renumbers re-fills every site); AGENTS.md shrinks, so lower config/prose_budgets.yaml's S1 root_ambient_load_set to the measured value (the prose_budgets_ratchet_down sanction). Post: VP 3 passes."
   - "Commit Flow (implement skill; git-ops.yaml handoff_sequence): full tier, push, PR. At CI green, with VP 4 passed, ask the operator's final-diff word on the head, naming its full sha (the terraform/bootstrap IAM text and the session-start hook first); only after that word post VP 6 and VP 7's blocks at that sha and record the returned lines; merge only the head both cover (any new head, a rebase for {{N}} included, needs the word and VP 6-7 again first), only after #1987 is applied, and only when the operator is ready to run VP 8 in the same sitting."
   - "After merge: post VP 8's block; on its lines, post VP 9's procedure; on 'cutover done', run VP 10-13 in a fresh session (the build thread itself if it was started after cutover, else a fresh one the coordinator starts)."
-  - "Report: what was implemented, the operator-reported lines, VP 4 and VP 10-12 results, the filed rec ids and the merge SHA."
+  - "Report: what was implemented, the validation_result --verify-head verdict, the postflight output, the operator-reported lines, VP 4 and VP 10-12 results, the filed rec ids and the merge SHA."
 rollback: >-
   Before cutover: revert the squash commit and, if VP 8 ran, the operator applies the revert from CloudShell after a
   reviewed PR removes prevent_destroy (the user, its policies and the sixth alarm pair go); if VP 4 stopped, the
