@@ -1,0 +1,649 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "agent-ducklake-rest-api"
+intent: >-
+  Put one IAM-authorised Regional REST API in front of the four DuckLake verb Lambdas, declared in terraform/bootstrap
+  and applied by the operator, so agent sessions can reach them on an amazonaws.com host the egress proxy signs (it
+  refuses the on.aws Function URL hosts); a new Decision amends Decision 213 cl.1 so an identity-trusting handler's
+  open paths are its Function URL and its named API route, each closed at its control points. Plan A of two:
+  PLAN-agent-proxy-signed-access (plan B, amended separately) then grants the agent user execute-api:Invoke and moves
+  the clients onto the routes.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-agent-ducklake-rest-api.yaml
+phase: >-
+  security_advisory (soft-warn exception category; no tier_item claimed, so the Tier Item Freshness Gate is skipped):
+  since 2026-11-12 no agent session reaches AWS, and plan B's build (draft PR #2023) stopped at its VP 4 when the
+  proxy refused the Function URL host (proxy-generated 502, body naming the host as not under amazonaws.com). The
+  operator chose this route on 2026-11-13 14:06Z and agreed the split and every presented fork 14:21Z. Closes no
+  roadmap criterion; no rec exists because the recs store is unreachable until plan B's cutover.
+scope:
+  - file: terraform/bootstrap/agent_ducklake_api.tf
+    action: Create
+    purpose: >-
+      The API, everything it needs, and nothing else; every regional ARN and host from var.aws_region (Decision 202
+      cl.4), every account from var.account_id, no literal account, region, API id or host. Locals:
+      ducklake_api_routes = { sandbox = { "ops/reader" = local.ducklake_reader_function, "ops/writer" =
+      local.ducklake_writer_function, "telemetry/reader" = local.ducklake_telemetry_reader_function, "telemetry/writer"
+      = local.ducklake_telemetry_writer_function }, sit = {} }[var.environment] (the function-name locals of
+      platform_dev_policies.tf); ducklake_api_count = { sandbox = 1, sit = 0 }[var.environment] (SIT's functions do not
+      exist when its bootstrap applies, so it gets its own API later; map index, no conditional operator, as
+      account_names.tf); ducklake_api_stage = "live"; ducklake_api_timeout_ms = 120000;
+      ducklake_api_session_user_arn = "arn:aws:iam::${var.account_id}:user/agent-platform-session" (plan B's user; a
+      condition value may name a principal that does not exist yet). Singletons, each count = local.ducklake_api_count:
+      aws_api_gateway_rest_api.agent_ducklake (name agent-platform-ducklake-api, endpoint_configuration REGIONAL, no
+      body or binary media types); aws_api_gateway_rest_api_policy.agent_ducklake (one statement, Sid
+      DenyAllButAgentSession, Effect Deny, Principal "*", Action execute-api:Invoke, Resource
+      "${execution_arn}/*", Condition StringNotEquals aws:PrincipalArn = local.ducklake_api_session_user_arn; no Allow:
+      a same-account caller is allowed by its identity policy unless a Deny matches); aws_cloudwatch_log_group.
+      agent_ducklake_api_access (name /aws/apigateway/agent-platform-ducklake-api, retention 30 days, the trail's);
+      aws_iam_role.agent_ducklake_api_logs (name agent-platform-ducklake-api-logs, trust Service
+      apigateway.amazonaws.com with StringEquals aws:SourceAccount = var.account_id, no permissions_boundary on
+      purpose: a boundary-carrying agent-platform-* role is in CI's write budget, a boundary-free one is not) with
+      aws_iam_role_policy.agent_ducklake_api_logs from a hoisted local with a lifecycle precondition at 10,240 B
+      (validate_iam_policy_size): logs:CreateLogStream, logs:PutLogEvents and logs:DescribeLogStreams on the log group
+      ARN and ":*", logs:DescribeLogGroups on "*"; aws_api_gateway_account.agent_ducklake (cloudwatch_role_arn = the
+      role, depends_on the role policy; API Gateway needs the account role to write any CloudWatch log);
+      aws_servicequotas_service_quota.apigateway_integration_timeout (service_code apigateway, quota_code L-E5AE38E3,
+      value 120000, written only after VP 4 shows the grant: the resource files a duplicate request while one is
+      pending); aws_api_gateway_deployment.agent_ducklake (triggers redeployment = sha1(jsonencode([...])) over the
+      route map, the policy document, every method and every integration, so a policy or route change ships; lifecycle
+      create_before_destroy; depends_on the integrations and the policy); aws_api_gateway_stage.agent_ducklake
+      (stage_name local.ducklake_api_stage, depends_on the account resource, access_log_settings to the log group with
+      a JSON format of exactly requestId, requestTime, caller $context.identity.userArn, resourcePath, httpMethod,
+      status, errorType $context.error.responseType, integrationStatus, integrationLatency, integrationError
+      $context.integrationErrorMessage, responseLatency and responseLength: no request or response body, no header);
+      aws_api_gateway_method_settings.agent_ducklake (method_path "*/*": metrics_enabled false, logging_level "OFF",
+      data_trace_enabled false, throttling_rate_limit 20, throttling_burst_limit 40, a runaway guard only).
+      Per route, each for_each = local.ducklake_api_routes: aws_api_gateway_resource.agent_ducklake_domain (for_each
+      toset of each route key's first path segment, so ops and telemetry, and none in SIT) and
+      aws_api_gateway_resource.agent_ducklake_route (parent the domain resource, path_part the second segment);
+      aws_api_gateway_method.agent_ducklake_route (POST, authorization AWS_IAM, no authorizer_id, no api_key_required);
+      aws_api_gateway_integration.agent_ducklake_route (type AWS_PROXY, integration_http_method POST, uri
+      "arn:aws:apigateway:${var.aws_region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${each.value}/invocations",
+      timeout_milliseconds local.ducklake_api_timeout_ms, no credentials, so API Gateway invokes through the function
+      policy alone); aws_lambda_permission.agent_ducklake_route (statement_id AgentDuckLakeApi, action
+      lambda:InvokeFunction, principal apigateway.amazonaws.com, function_name each.value, no qualifier, source_arn
+      "${execution_arn}/${local.ducklake_api_stage}/POST/${each.key}", never a wildcard);
+      aws_ssm_parameter.agent_ducklake_route_url (name "/agent-platform/ducklake/api_url/${each.key}", type String,
+      value "${stage invoke_url}/${each.key}", read by plan B's clients; never under /secret/, Decision 237).
+      No module, provider, data source or provisioner (VP 6's screen refuses them).
+  - file: tests/checks/iam_tf/test_agent_ducklake_api.py
+    action: Create
+    purpose: >-
+      Credential-free text tests over the new file and the boundary in the iam_tf convention
+      (test_url_only_invoke_guard.py:1-3, its _platform_security_hcl helpers): each check is a predicate returning a
+      problem list. Ten real-tree nodes, each asserting an empty list: test_api_routes_are_the_four_verbs (the sandbox
+      map's keys are exactly ops/reader, ops/writer, telemetry/reader, telemetry/writer, each mapped to its function
+      local; the sit map is empty; every singleton's count is local.ducklake_api_count);
+      test_api_methods_are_iam_post (every method POST with authorization AWS_IAM, no authorizer or API key);
+      test_api_integrations_are_proxy_without_credentials (AWS_PROXY, POST, no credentials attribute,
+      timeout_milliseconds is local.ducklake_api_timeout_ms, which equals the service quota resource's value, and its
+      quota_code is L-E5AE38E3); test_api_permissions_name_exact_routes (each permission's principal, action, unqualified
+      function and source_arn ending /${local.ducklake_api_stage}/POST/${each.key}; no "*" in any source_arn; no other
+      aws_lambda_permission under terraform/bootstrap, and none under terraform/ with principal apigateway.amazonaws.com
+      names a DuckLake function); test_api_policy_admits_only_the_session_user (exactly one statement, the Deny of row 1
+      with the aws:PrincipalArn exception equal to arn:aws:iam::${var.account_id}:user/agent-platform-session, no
+      Allow); test_api_stage_logs_no_bodies (logging_level OFF, data_trace_enabled false, metrics_enabled false, both
+      throttle fields set; the access-log format names $context.identity.userArn, $context.resourcePath and
+      $context.status and no $input, body or header variable); test_api_redeploys_on_change (the deployment's
+      redeployment trigger references the policy, the methods and the integrations, and create_before_destroy is set);
+      test_api_log_role_is_scoped (trust names only apigateway.amazonaws.com with aws:SourceAccount; no
+      permissions_boundary; the inline policy's Allows are exactly row 1's four logs actions, three on the log group);
+      test_api_route_urls_are_parameters (one String parameter per route under /agent-platform/ducklake/api_url/,
+      never /secret/); test_boundary_denies_api_gateway_writes (the boundary holds Sid DenyApiGatewayWrite, Effect
+      Deny, Action exactly apigateway:DELETE and apigateway:P*, Resource "*", no Condition, and the parsed
+      DataPlaneAllow ceiling names no apigateway or execute-api action while holding at least iam:GetRole, so a
+      truncated parse fails). The eleventh, test_api_predicates_are_red_on_each_mutation, is parametrized over
+      (mutation, predicate, expected problem substring) on the real text: a fifth route, a route mapped to another
+      function, a sit route, a literal count, authorization NONE, an added credentials attribute, a timeout above the
+      quota value, a source_arn ending /*, a second permission, an apigateway-principal permission added to
+      terraform/personal, an Allow added to the policy, a second exception principal, data_trace_enabled true,
+      $context.requestBody in the format, the policy dropped from the trigger, a boundary on the log role, a fifth logs
+      action, a /secret/ parameter name, DenyApiGatewayWrite dropped, apigateway:GET added to it, apigateway:P* narrowed to
+      apigateway:POST, and apigateway:* added to DataPlaneAllow.
+  - file: terraform/bootstrap/github_ci_apply_boundary.tf
+    action: Modify
+    purpose: >-
+      One new statement after DenyDuckLakeEventSourceMapping: Sid DenyApiGatewayWrite, Effect Deny, Action
+      apigateway:DELETE and apigateway:P* (PATCH, POST and PUT, every API Gateway write verb; GET stays outside),
+      Resource "*", unconditioned, with a comment citing Decision {{N}} cl.2 (no bounded identity creates, changes,
+      redeploys or deletes any API Gateway resource, the account's CloudWatch role setting included). The ceiling has no
+      apigateway action today, so this changes no current permission; it keeps a later ceiling widening from reaching
+      the API. The compact action form keeps the statement to about 110 B: the boundary renders about 5,266 B minified
+      today (estimated by rendering the HCL with a twelve-digit account id) and about 5,376 B after, against Decision
+      230's 5,632 B boundary-headroom tripwire; PLAN-telemetry-content-reader-lock (unbuilt, Feedback Loop's) also
+      adds to the boundary, so whichever builds second re-measures. VP 6 measures the real rendering.
+  - file: terraform/bootstrap/platform_security_alarms.tf
+    action: Modify
+    purpose: >-
+      Decision 202's detector reaches the API (live from the apply that creates it). A sixth
+      local.platform_security_filter_patterns entry, platform-security-ducklake-api-change (metric DuckLakeApiChange),
+      plain literals under 1,024 characters: { (($.eventSource = "apigateway.amazonaws.com") && ($.readOnly IS FALSE))
+      || (($.eventSource = "lambda.amazonaws.com") && ($.readOnly IS FALSE) && (($.eventName = "AddPermission*") ||
+      ($.eventName = "RemovePermission*") || ($.eventName = "*ResourcePolicy*")) && (($.errorCode = "AccessDenied*") ||
+      ($.requestParameters.functionName = "*agent-platform-ducklake-reader*") || ($.requestParameters.functionName =
+      "*agent-platform-ducklake-writer*") || ($.requestParameters.functionName = "*agent-platform-ducklake-telemetry-*")))
+      || (($.eventSource = "iam.amazonaws.com") && ($.readOnly IS FALSE) && ($.requestParameters.roleName =
+      %<anchored character-class regex for agent-platform-ducklake-api-logs>%)) }. Any API Gateway write in the
+      account matches (bounded identities hold none, so every one is an admin act or an attack); a Lambda permission or
+      resource-policy edit matches when it names a DuckLake verb function or was denied (a denied call carries
+      requestParameters null but keeps its eventName); the role regex is case-insensitive as the platform-role regex is.
+      A sixth aws_cloudwatch_metric_alarm, platform_security_ducklake_api_change, in the role-change alarm's exact shape
+      (period 300, threshold 1, notBreaching, the alerts topic), its description naming the API, the four functions'
+      permissions and the log role before the shared triage text. Header comment says six pairs. No existing pattern,
+      alarm or the triage query changes. Accepted residuals: the shared triage query shows requestParameters.roleName,
+      not the API or function, so the email names its target through the alarm description; a successful edit that
+      names the function only in a field other than functionName (for example a resource ARN) is not matched, and only
+      PlatformAdmin or root can make one.
+  - file: tests/checks/iam_tf/_platform_security_patterns.py
+    action: Modify
+    purpose: >-
+      ALARMS gains platform-security-ducklake-api-change; _REQUIRED_CLAUSES gains its row
+      ('$.eventSource = "apigateway.amazonaws.com"', '$.eventSource = "lambda.amazonaws.com"', '"AddPermission*"',
+      '"RemovePermission*"', '"*ResourcePolicy*"', '$.errorCode = "AccessDenied*"' and the three function clauses);
+      pattern_problems gains a log-role regex predicate in _role_regex_problems' shape (hits
+      agent-platform-ducklake-api-logs, AGENT-PLATFORM-DUCKLAKE-API-LOGS, Agent-Platform-DuckLake-Api-Logs; misses
+      agent-platform-ducklake-api-logs-x, xagent-platform-ducklake-api-logs, agent-platform-ducklake-reader,
+      agent-platform-ducklake-api-log).
+  - file: tests/checks/iam_tf/test_platform_role_iam_change_alarms.py
+    action: Modify
+    purpose: >-
+      Module docstring says six alarms. _PATTERN_REDS gains five rows on the new filter, each detected: the apigateway
+      clause dropped, the lambda readOnly clause dropped, the errorCode alternative dropped, the telemetry function
+      clause dropped, and the role regex made exact-case; the existing "sixth alarm" red-case label is renamed for an
+      extra alarm. Node names unchanged (the graduated shard platform-role-iam-change-detector-declared pins the
+      class). The file's SLOC stays under 500 (the build measures it; over budget, the rows move into
+      _platform_security_patterns.py).
+  - file: tests/fixtures/platform_security_filter_events.yaml
+    action: Modify
+    purpose: >-
+      Events naming the new filter in must_match, in the fixture's sanitised shape (literal ACCOUNT): CreateDeployment
+      on apigateway (readOnly false); UpdateRestApi patching the policy; AddPermission20150331v2 on
+      agent-platform-ducklake-reader by name; RemovePermission20150331v2 on the telemetry writer by ARN; a denied
+      AddPermission20150331v2 (requestParameters null, errorCode AccessDenied, errorMessage naming
+      lambda:AddPermission on resource: the writer's ARN); DeleteRolePolicy on role AGENT-PLATFORM-DUCKLAKE-API-LOGS
+      (also naming the heartbeat, as every iam event does); and three that must not match it: GetRestApis (readOnly
+      true), AddPermission20150331v2 on agent-platform-ducklake-maintenance and DeleteRolePolicy on
+      agent-platform-ducklake-reader. Each must_match is the event's exact filter set.
+  - file: scripts/ci/security_detector_probe.py
+    action: Modify
+    purpose: >-
+      EXPECTED_ALARMS gains platform-security-ducklake-api-change (test_expected_alarms_match_the_hcl pins the set to
+      the HCL's alarm names); the docstring says six alarms. The hourly liveness run reports it missing between merge
+      and VP 7's apply; infrastructure_dependencies keeps that window to one sitting.
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: >-
+      Sidecar blocks decision-new, decision-213-note and decision-84-note, verbatim, {{N}} and {{DATE}} filled at build
+      (docs/plans/approved/agent-ducklake-rest-api.yaml); {{N}} is also filled in row 3's boundary comment. The new
+      entry measures 6,066 B against the 6,144 B per-entry cap with N = 255; the build re-measures. No Serves line
+      (the scout scored NS.5 3/5).
+bundled_recommendations: []
+followon_recs: []
+infrastructure_dependencies:
+  - "terraform/bootstrap is admin-only (environment-taxonomy.yaml axis_a): the operator plans it pre-merge (VP 5-6) and applies it post-merge (VP 7) from AWS CloudShell as user/platform-breakglass, each block self-contained (public-repo fetch at a sha, pinned terraform checked against HashiCorp's SHA256SUMS, variables from SSM, account id from the caller), the shape plan B's VP 6-8 use."
+  - "Quota first: VP 4 shows quota L-E5AE38E3 granted at 120000 before the build writes the service quota resource or VP 6 plans; the operator filed the request 2026-11-13 14:32Z (PENDING, current value 29000)."
+  - "One merged-unapplied bootstrap change at a time: this PR merges only when no other bootstrap change is merged and unapplied (today #1987, rec-5025, whose apply is 0/0/0 by design and paused). If #1987 is still unapplied at CI green, VP 6's exact plan carries its merged content and shows no pending delta from it; the coordinator puts that evidence to the operator, whose ruling the one-at-a-time rule is. Plan B's bootstrap change queues after this apply; rec-4233 PR 1 after both."
+  - "Merge and VP 7 happen in one operator sitting: from merge, security_detector_probe.py expects the sixth alarm, so an hourly liveness run before the apply reports it missing; a security_detector_stale rec filed in that window is closed with VP 7's read-back once recs are reachable."
+  - "Cross-root dependency (Decision 223): the four permissions sit on functions terraform/personal owns. A personal-root replacement of a function drops its permission and the route returns 5XX until the operator re-applies this root; CI cannot re-create it (DenyDuckLakeResourcePolicyEdit). Code deploys change no function policy."
+  - "No Lambda code changes and no client changes: no deploy channel runs. Until plan B deploys the telemetry writer's REST caller read, that route fails closed (its handler finds no requestContext.authorizer.iam and answers 403 missing_caller_identity); the resource policy refuses every caller before then anyway."
+acceptance_criteria:
+  - "terraform/bootstrap declares one Regional REST API with exactly four AWS_IAM POST routes (/ops/reader, /ops/writer, /telemetry/reader, /telemetry/writer) as AWS_PROXY integrations without credentials at 120000 ms, one stage with a body-free access log, a resource policy that denies every principal but agent-platform-session, one exact-route Lambda permission per function and one URL parameter per route, all gated to the sandbox environment; test_agent_ducklake_api.py's ten real-tree nodes pass and its red-case node shows each predicate failing on its mutations."
+  - "The permissions boundary denies apigateway:DELETE and apigateway:P* (PATCH, POST, PUT) on every resource to every bounded identity, and its ceiling holds no apigateway or execute-api action (test_boundary_denies_api_gateway_writes); VP 6 measures the boundary at or below 5,632 B minified."
+  - "Decision 202's detector gains platform-security-ducklake-api-change, matching any API Gateway write, any Lambda permission or resource-policy edit on a DuckLake verb function or denied, and any IAM write to the log role (fixture events, red cases, live logs:TestMetricFilter in VP 6; security_detector_probe.py expects six alarms); metric data shows it matching the apply's own API Gateway events (VP 8)."
+  - "DECISIONS.md carries exactly the sidecar's words (approved_text verify passes)."
+  - "After the operator's apply, a signed call from the agent environment's old identity to each route is refused by the resource policy's explicit deny, naming that identity, and a call to an absent route answers Missing Authentication Token (VP 9); the access log records those calls with status 403 and the caller field set (VP 10), and each integration reads 120000 ms (VP 8)."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Run the changed and new tests, including every named node.
+    command: >-
+      bin/venv-python -m pytest tests/checks/iam_tf/test_agent_ducklake_api.py
+      tests/checks/iam_tf/test_url_only_invoke_guard.py tests/checks/iam_tf/test_platform_role_iam_change_alarms.py
+      tests/test_security_detector_probe.py tests/checks/iam_tf/test_platform_security_heartbeat_canary.py
+      tests/checks/iam_tf/test_telemetry_prefix_fence.py tests/checks/iam_tf/test_ci_branch_boundary_state_fence.py -q
+    expected: >-
+      All pass, including test_agent_ducklake_api.py's eleven nodes, the detector's pattern, fixture and five new
+      red-case nodes, and test_expected_alarms_match_the_hcl.
+    fix_if: Any failure; fix the code or the Terraform, never an assertion's meaning (Decision 235).
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Duplicates PR CI's diff-selected pytest of these files on every change; the named nodes in test_obligations pin
+      the new behaviour. The detector's graduated shards (platform-role-iam-change-detector-declared,
+      security-detector-probe-fails-closed) already cover its files; the new test_agent_ducklake_api.py has none, so
+      only review and the full tier would notice its deletion, a gap this plan accepts (owed rec 5 of plan B's list
+      graduates iam_tf shards).
+  - step: 2
+    phase: pre-deploy
+    action: Prove the policy-size, secret-grant, account-portability, tag-charset and region checks accept the new file.
+    command: >-
+      bin/venv-python -m scripts.checks.iam_tf.validate_iam_policy_size && bin/venv-python -m
+      scripts.checks.iam_tf.validate_secret_parameter_grants && bin/venv-python -m
+      scripts.checks.iam_tf.validate_terraform_tag_charset && bin/venv-python -c "from
+      scripts.checks.iam_tf.validate_account_portable_names import validate_account_portable_names as v; f = []; v(f);
+      print(chr(10).join(f) or 'PORTABLE_OK'); raise SystemExit(1 if f else 0)"
+    expected: >-
+      The policy-size check's PASS line counts one more bootstrap policy resource than on main, the secret-grant and
+      tag-charset checks exit 0, and PORTABLE_OK prints.
+    fix_if: A finding names the resource; fix the Terraform, never the check.
+    hermetic: false
+    graduation: not-applicable
+  - step: 3
+    phase: pre-deploy
+    action: Bind the governed wording to the sidecar, then run the full tier before handoff.
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug agent-ducklake-rest-api --base origin/main &&
+      export AWS_PROFILE=agent-platform-unset && bin/venv-python -m scripts.validate --pre && bin/venv-python -m
+      scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: >-
+      verify reports DECISIONS.md equal to its base words with the three blocks applied; the fast and full tiers pass
+      and validation_result verifies the head (the full tier is started in the background from the top-level session).
+      The profile no config names stops the DQ refresh at ProfileNotFound ("AWS credentials not available --
+      skipping") instead of reaching the refused role chain.
+    fix_if: >-
+      Any mismatch; re-apply the block verbatim (only {{N}} and {{DATE}} may differ). "unexpected credential-check
+      error" means the inline AWS_PROFILE was dropped: re-run with it.
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      QUOTA CHECK, operator-run in AWS CloudShell in the PROD account, before the build writes the service quota
+      resource (the HCL may be written meanwhile with the resource last). It reads the applied value and the latest
+      request's status; nothing changes. Re-run when the operator reports AWS's case closed.
+    command: >-
+      ( unset AWS_PROFILE; aws service-quotas get-service-quota --service-code apigateway --quota-code L-E5AE38E3
+      --query 'Quota.Value' --output text | sed 's/^/QUOTA_VALUE /'; aws service-quotas
+      list-requested-service-quota-change-history-by-quota --service-code apigateway --quota-code L-E5AE38E3 --query
+      'RequestedQuotas[0].[Status,DesiredValue]' --output text | sed 's/^/LATEST_REQUEST /' )
+    expected: QUOTA_VALUE 120000.0 and LATEST_REQUEST APPROVED 120000.0 (or CASE_CLOSED with the value applied).
+    fix_if: >-
+      PENDING or CASE_OPENED: wait for AWS; the build pauses before VP 6 and says so, never re-files. DENIED, or a value
+      below 120000: stop; reversal condition quota-below-deadline fires and the plan returns to planning (a lower
+      timeout with 504 retries of slow reads is not this plan's design). A value above 120000: the resource and the
+      local stay 120000 (the value test pins them equal) only if the quota resource is written at the granted value
+      and the integration local at 120000; the build asks before choosing.
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      ENVIRONMENT CHECK (deploy-paths.yaml admin_out_of_band.pre_merge_live_plan), operator-run in AWS CloudShell in the
+      PROD account: the shell's caller is user/platform-breakglass, never an agent identity. The build posts this block
+      after the operator's final-diff word; the operator returns the one line. Its "caller-arn check" label is the
+      marker validate_admin_root_premerge_gate reads; no repo helper runs in CloudShell.
+    command: >-
+      ( printf 'caller-arn check: '; aws sts get-caller-identity --query Arn --output text 2> /dev/null | grep -q
+      ':user/platform-breakglass$' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT )
+    expected: caller-arn check, ADMIN_CHAIN_OK. The ARN itself is never printed.
+    fix_if: >-
+      ADMIN_CHAIN_ABSENT; the operator signs in as the break-glass user and re-runs, and VP 6 waits.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      PRE-MERGE GATE (ADMIN), operator-run in AWS CloudShell after VP 4 and VP 5, posted only after the operator's
+      final-diff word on the PR at PR_HEAD_SHA: planning runs provider code under the operator's admin sign-in, so a
+      human reads the HCL first. Plan B's VP 7 block (PLAN-agent-proxy-signed-access.yaml) adapted: before init it
+      refuses (SCREEN_REFUSED) a head whose diff from main's tip touches any terraform/ file other than the three
+      terraform scope rows, or the region or version file, or adds a provider, module, external or http data source or
+      provisioner. It fetches this public repo's PR head (the build writes the full sha into PR_HEAD_SHA) into a
+      scratch folder under /tmp, installs the pinned terraform checked against HashiCorp's SHA256SUMS, reads the
+      bootstrap variable values from /secret/agent-platform-terraform-personal-tfvars and account_id from the caller,
+      never printing either, and plans terraform/bootstrap read-only (-lock=false) on the sign-in's own credentials
+      (aws_profile empty). It then evaluates the new filter live with logs:TestMetricFilter (changes nothing) against
+      nine events in scope row 7's shapes, and prints BOUNDARY_BYTES, the planned boundary document's byte count after
+      jq -c (AWS's whitespace-free measure). An EXIT trap deletes the scratch folder; terraform errors go to
+      $HOME/aps-tf.err, read in CloudShell only. The build records the returned lines as a counts-only PR comment.
+    command: >-
+      ( set -o pipefail; PR_HEAD_SHA=<full PR head sha>; W="${TMPDIR:-/tmp}/aps-api-head"; L="$HOME/aps-tf.err"; rm -rf
+      "$W"; mkdir -p "$W/bin"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE; { git init -q "$W/repo" && git -C
+      "$W/repo" fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git +refs/heads/main:refs/o/main && git -C
+      "$W/repo" fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git "$PR_HEAD_SHA" && git -C "$W/repo" checkout -q
+      --detach FETCH_HEAD; } 2>> "$L" || { echo CLONE_FAILED; exit 1; }; F=$(git -C "$W/repo" diff --name-only refs/o/main
+      HEAD -- terraform config/aws-region config/terraform-version 2>> "$L" | LC_ALL=C sort | tr '\n' ' '); X=$(git -C
+      "$W/repo" diff refs/o/main HEAD -- terraform 2>> "$L" | grep -E '^\+' | grep -cE 'data "(external|http)"|provider
+      "|required_providers|module "|provisioner|local-exec'); [ "$F" = "terraform/bootstrap/agent_ducklake_api.tf
+      terraform/bootstrap/github_ci_apply_boundary.tf terraform/bootstrap/platform_security_alarms.tf " ] && [ "$X" = 0 ] ||
+      { echo SCREEN_REFUSED; exit 1; }; echo SCREEN_OK; R=$(tr -d '[:space:]' < "$W/repo/config/aws-region"); export
+      AWS_REGION="$R" AWS_DEFAULT_REGION="$R"; V=$(tr -d '[:space:]' < "$W/repo/config/terraform-version"); case "$(uname
+      -m)" in aarch64) P=linux_arm64 ;; *) P=linux_amd64 ;; esac; Z="terraform_${V}_${P}.zip"; { curl -fsSL -o "$W/$Z"
+      "https://releases.hashicorp.com/terraform/$V/$Z" && curl -fsSL -o "$W/sums"
+      "https://releases.hashicorp.com/terraform/$V/terraform_${V}_SHA256SUMS" && ( cd "$W" && grep " $Z\$" sums | sha256sum
+      -c --quiet - ) && unzip -qo "$W/$Z" -d "$W/bin"; } >> "$L" 2>&1 || { echo TERRAFORM_INSTALL_FAILED; exit 1; }; export
+      PATH="$W/bin:$PATH"; command -v jq > /dev/null || { echo JQ_ABSENT; exit 1; }; aws ssm get-parameter --name
+      /secret/agent-platform-terraform-personal-tfvars --with-decryption --query Parameter.Value --output text >
+      "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT; exit 1; }; A=$(aws sts
+      get-caller-identity --query Account --output text 2>> "$L"); test -n "$A" || { echo IDENTITY_FAILED; exit 1; };
+      B="$W/repo/terraform/bootstrap"; terraform -chdir="$B" init -input=false -backend-config="region=$R" > /dev/null 2>>
+      "$L" || { echo INIT_FAILED; exit 1; }; terraform -chdir="$B" plan -lock=false -input=false -no-color
+      -detailed-exitcode -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" -out="$W/head.bin" >
+      "$W/plan.txt" 2>> "$L"; echo "HEAD_PLAN_EXIT $?"; grep -E '^Plan: ' "$W/plan.txt"; terraform -chdir="$B" show -json
+      "$W/head.bin" | jq -r '.resource_changes[] | select(.change.actions != ["no-op"]) | "\(.change.actions | join(","))
+      \(.address)"' | LC_ALL=C sort; echo "PR_HEAD_SHA $PR_HEAD_SHA"; P=$(terraform -chdir="$B" show -json "$W/head.bin" |
+      jq -r '.resource_changes[] | select(.address ==
+      "aws_cloudwatch_log_metric_filter.platform_security[\"platform-security-ducklake-api-change\"]") |
+      .change.after.pattern'); t() { printf 'TMF %s %s\n' "$1" "$(aws logs test-metric-filter --filter-pattern "$P"
+      --log-event-messages "$2" --query 'length(matches)' --output text 2>> "$L")"; }; t create-deployment
+      '{"eventSource":"apigateway.amazonaws.com","eventName":"CreateDeployment","readOnly":false,"requestParameters":{"restApiId":"apiid00000"}}';
+      t update-policy
+      '{"eventSource":"apigateway.amazonaws.com","eventName":"UpdateRestApi","readOnly":false,"requestParameters":{"restApiId":"apiid00000","patchOperations":[{"op":"replace","path":"/policy"}]}}';
+      t permission-by-name
+      '{"eventSource":"lambda.amazonaws.com","eventName":"AddPermission20150331v2","readOnly":false,"requestParameters":{"functionName":"agent-platform-ducklake-reader","principal":"apigateway.amazonaws.com"}}';
+      t permission-by-arn
+      '{"eventSource":"lambda.amazonaws.com","eventName":"RemovePermission20150331v2","readOnly":false,"requestParameters":{"functionName":"arn:aws:lambda:REGION:ACCOUNT:function:agent-platform-ducklake-telemetry-writer","statementId":"AgentDuckLakeApi"}}';
+      t permission-denied
+      '{"eventSource":"lambda.amazonaws.com","eventName":"AddPermission20150331v2","readOnly":false,"errorCode":"AccessDenied","errorMessage":"User:
+      arn:aws:sts::ACCOUNT:assumed-role/X/s is not authorized to perform: lambda:AddPermission on resource:
+      arn:aws:lambda:REGION:ACCOUNT:function:agent-platform-ducklake-writer with an explicit deny in a permissions
+      boundary","requestParameters":null}'; t log-role-upper
+      '{"eventSource":"iam.amazonaws.com","eventName":"DeleteRolePolicy","readOnly":false,"requestParameters":{"roleName":"AGENT-PLATFORM-DUCKLAKE-API-LOGS","policyName":"agent-platform-ducklake-api-logs"}}';
+      t get-apis
+      '{"eventSource":"apigateway.amazonaws.com","eventName":"GetRestApis","readOnly":true,"requestParameters":null}'; t
+      maintenance
+      '{"eventSource":"lambda.amazonaws.com","eventName":"AddPermission20150331v2","readOnly":false,"requestParameters":{"functionName":"agent-platform-ducklake-maintenance","principal":"events.amazonaws.com"}}';
+      t reader-role
+      '{"eventSource":"iam.amazonaws.com","eventName":"DeleteRolePolicy","readOnly":false,"requestParameters":{"roleName":"agent-platform-ducklake-reader","policyName":"x"}}';
+      echo "BOUNDARY_BYTES $(terraform -chdir="$B" show -json "$W/head.bin" | jq -r '.resource_changes[] | select(.address
+      == "aws_iam_policy.github_ci_apply_boundary") | .change.after.policy' | jq -c . | tr -d '\n' | wc -c)" )
+    expected: >-
+      SCREEN_OK; HEAD_PLAN_EXIT 2; Plan: 34 to add, 1 to change, 0 to destroy.; exactly thirty-five lines: update
+      aws_iam_policy.github_ci_apply_boundary, and create for aws_api_gateway_account.agent_ducklake[0],
+      aws_api_gateway_deployment.agent_ducklake[0], aws_api_gateway_method_settings.agent_ducklake[0],
+      aws_api_gateway_rest_api.agent_ducklake[0], aws_api_gateway_rest_api_policy.agent_ducklake[0],
+      aws_api_gateway_stage.agent_ducklake[0], aws_cloudwatch_log_group.agent_ducklake_api_access[0],
+      aws_iam_role.agent_ducklake_api_logs[0], aws_iam_role_policy.agent_ducklake_api_logs[0],
+      aws_servicequotas_service_quota.apigateway_integration_timeout[0], aws_api_gateway_resource.agent_ducklake_domain
+      ["ops"] and ["telemetry"], and the four route keys of each of aws_api_gateway_resource.agent_ducklake_route,
+      aws_api_gateway_method.agent_ducklake_route, aws_api_gateway_integration.agent_ducklake_route,
+      aws_lambda_permission.agent_ducklake_route and aws_ssm_parameter.agent_ducklake_route_url, plus
+      aws_cloudwatch_log_metric_filter.platform_security["platform-security-ducklake-api-change"] and
+      aws_cloudwatch_metric_alarm.platform_security_ducklake_api_change; PR_HEAD_SHA with the build's sha; BOUNDARY_BYTES
+      at or below 5632; TMF create-deployment 1, update-policy 1, permission-by-name 1, permission-by-arn 1,
+      permission-denied 1, log-role-upper 1, get-apis 0, maintenance 0, reader-role 0.
+    fix_if: >-
+      SCREEN_REFUSED: nothing was planned; if main moved under terraform/ the build rebases and asks the word again,
+      else the head carries HCL beyond scope and the build stops. A setup failure line: the operator reads
+      $HOME/aps-tf.err and re-pastes. A validation error on timeout_milliseconds means the resolved provider predates
+      the raised cap: report the provider version line from aps-tf.err and return to planning (no lock file pins it;
+      plan B's owed rec 2 commits one). Any other address, an update other than the boundary, or a destroy (for example
+      another merged-unapplied bootstrap change): stop, do not merge, report to the coordinator. BOUNDARY_BYTES above
+      5632: Decision 230's boundary-headroom condition fires; stop and return to planning. A TMF count other than
+      expected is a pattern defect: fix the filter and its fixture before merge.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: >-
+      OPERATOR STEP, AWS CloudShell in the PROD account, after merge. The same fetch, install, variable and init lines
+      as VP 6 at the merge sha (the build writes the full sha into M), with VP 6's screen run on the merge commit's own
+      diff, then a saved plan applied only when its summary is exactly 34 to add, 1 to change, 0 to destroy and its
+      thirty-five addresses are exactly VP 6's, then a fresh plan. The operator's paste is the direction for the apply
+      (Decision 126 cl.1). It prints NOW first; keep that line for VP 8. Expected emails from the apply itself:
+      platform-security-detector-tamper (its PutMetricFilter and PutMetricAlarm on platform-security-* names) and
+      platform-security-ducklake-api-change (the API's own creation events, once they reach the log group after the
+      filter exists).
+    command: >-
+      ( set -o pipefail; echo "NOW $(date -u +%Y-%m-%dT%H:%M:%SZ)"; M=<full merge sha>; W="${TMPDIR:-/tmp}/aps-api-merge";
+      L="$HOME/aps-tf.err"; rm -rf "$W"; mkdir -p "$W/bin"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE; { git init
+      -q "$W/repo" && git -C "$W/repo" fetch -q --depth 2 https://github.com/otl-labs/ontheloop.git "$M" && git -C "$W/repo"
+      checkout -q --detach FETCH_HEAD; } 2>> "$L" || { echo CLONE_FAILED; exit 1; }; F=$(git -C "$W/repo" diff --name-only
+      HEAD^ HEAD -- terraform config/aws-region config/terraform-version 2>> "$L" | LC_ALL=C sort | tr '\n' ' '); X=$(git -C
+      "$W/repo" diff HEAD^ HEAD -- terraform 2>> "$L" | grep -E '^\+' | grep -cE 'data "(external|http)"|provider
+      "|required_providers|module "|provisioner|local-exec'); [ "$F" = "terraform/bootstrap/agent_ducklake_api.tf
+      terraform/bootstrap/github_ci_apply_boundary.tf terraform/bootstrap/platform_security_alarms.tf " ] && [ "$X" = 0 ] ||
+      { echo SCREEN_REFUSED; exit 1; }; echo SCREEN_OK; R=$(tr -d '[:space:]' < "$W/repo/config/aws-region"); export
+      AWS_REGION="$R" AWS_DEFAULT_REGION="$R"; V=$(tr -d '[:space:]' < "$W/repo/config/terraform-version"); case "$(uname
+      -m)" in aarch64) P=linux_arm64 ;; *) P=linux_amd64 ;; esac; Z="terraform_${V}_${P}.zip"; { curl -fsSL -o "$W/$Z"
+      "https://releases.hashicorp.com/terraform/$V/$Z" && curl -fsSL -o "$W/sums"
+      "https://releases.hashicorp.com/terraform/$V/terraform_${V}_SHA256SUMS" && ( cd "$W" && grep " $Z\$" sums | sha256sum
+      -c --quiet - ) && unzip -qo "$W/$Z" -d "$W/bin"; } >> "$L" 2>&1 || { echo TERRAFORM_INSTALL_FAILED; exit 1; }; export
+      PATH="$W/bin:$PATH"; command -v jq > /dev/null || { echo JQ_ABSENT; exit 1; }; aws ssm get-parameter --name
+      /secret/agent-platform-terraform-personal-tfvars --with-decryption --query Parameter.Value --output text >
+      "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT; exit 1; }; A=$(aws sts
+      get-caller-identity --query Account --output text 2>> "$L"); test -n "$A" || { echo IDENTITY_FAILED; exit 1; };
+      B="$W/repo/terraform/bootstrap"; terraform -chdir="$B" init -input=false -backend-config="region=$R" > /dev/null 2>>
+      "$L" || { echo INIT_FAILED; exit 1; }; terraform -chdir="$B" plan -input=false -no-color -var-file="$W/vars.tfvars"
+      -var "account_id=$A" -var "aws_profile=" -out="$W/merge.bin" > "$W/plan.txt" 2>> "$L"; s=$(grep -E '^Plan: '
+      "$W/plan.txt"); echo "MERGE_PLAN $s"; a=$(terraform -chdir="$B" show -json "$W/merge.bin" | jq -r '.resource_changes[]
+      | select(.change.actions != ["no-op"]) | "\(.change.actions | join(",")) \(.address)"' | LC_ALL=C sort | tr '\n' ' ');
+      e='create aws_api_gateway_account.agent_ducklake[0] create aws_api_gateway_deployment.agent_ducklake[0] create
+      aws_api_gateway_integration.agent_ducklake_route["ops/reader"] create
+      aws_api_gateway_integration.agent_ducklake_route["ops/writer"] create
+      aws_api_gateway_integration.agent_ducklake_route["telemetry/reader"] create
+      aws_api_gateway_integration.agent_ducklake_route["telemetry/writer"] create
+      aws_api_gateway_method.agent_ducklake_route["ops/reader"] create
+      aws_api_gateway_method.agent_ducklake_route["ops/writer"] create
+      aws_api_gateway_method.agent_ducklake_route["telemetry/reader"] create
+      aws_api_gateway_method.agent_ducklake_route["telemetry/writer"] create
+      aws_api_gateway_method_settings.agent_ducklake[0] create aws_api_gateway_resource.agent_ducklake_domain["ops"] create
+      aws_api_gateway_resource.agent_ducklake_domain["telemetry"] create
+      aws_api_gateway_resource.agent_ducklake_route["ops/reader"] create
+      aws_api_gateway_resource.agent_ducklake_route["ops/writer"] create
+      aws_api_gateway_resource.agent_ducklake_route["telemetry/reader"] create
+      aws_api_gateway_resource.agent_ducklake_route["telemetry/writer"] create aws_api_gateway_rest_api.agent_ducklake[0]
+      create aws_api_gateway_rest_api_policy.agent_ducklake[0] create aws_api_gateway_stage.agent_ducklake[0] create
+      aws_cloudwatch_log_group.agent_ducklake_api_access[0] create
+      aws_cloudwatch_log_metric_filter.platform_security["platform-security-ducklake-api-change"] create
+      aws_cloudwatch_metric_alarm.platform_security_ducklake_api_change create aws_iam_role.agent_ducklake_api_logs[0]
+      create aws_iam_role_policy.agent_ducklake_api_logs[0] create aws_lambda_permission.agent_ducklake_route["ops/reader"]
+      create aws_lambda_permission.agent_ducklake_route["ops/writer"] create
+      aws_lambda_permission.agent_ducklake_route["telemetry/reader"] create
+      aws_lambda_permission.agent_ducklake_route["telemetry/writer"] create
+      aws_servicequotas_service_quota.apigateway_integration_timeout[0] create
+      aws_ssm_parameter.agent_ducklake_route_url["ops/reader"] create
+      aws_ssm_parameter.agent_ducklake_route_url["ops/writer"] create
+      aws_ssm_parameter.agent_ducklake_route_url["telemetry/reader"] create
+      aws_ssm_parameter.agent_ducklake_route_url["telemetry/writer"] update aws_iam_policy.github_ci_apply_boundary '; if [
+      "$s" = "Plan: 34 to add, 1 to change, 0 to destroy." ] && [ "$a" = "$e" ]; then terraform -chdir="$B" apply
+      -input=false -no-color "$W/merge.bin" 2>> "$L" | grep -E '^Apply complete!'; terraform -chdir="$B" plan -input=false
+      -no-color -detailed-exitcode -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" > /dev/null 2>> "$L";
+      echo "BOOTSTRAP_PLAN_EXIT $?"; else echo APPLY_SKIPPED; fi; echo "MERGE_SHA $M" )
+    expected: >-
+      NOW with a time; SCREEN_OK; MERGE_PLAN Plan: 34 to add, 1 to change, 0 to destroy.; Apply complete! Resources: 34
+      added, 1 changed, 0 destroyed.; BOOTSTRAP_PLAN_EXIT 0; MERGE_SHA with the merge sha.
+    fix_if: >-
+      SCREEN_REFUSED, APPLY_SKIPPED or any other count: nothing was applied; stop and report to the coordinator as a
+      plan defect, never a second paste. An apply error on aws_api_gateway_account naming the role's permissions (IAM
+      propagation) after the provider's own retries: report it; the build re-plans and posts a block that applies only
+      the remaining creates, never a hand edit. BOOTSTRAP_PLAN_EXIT 2 after the apply: stop and report; a half-applied
+      state is re-planned, never hand-edited.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: >-
+      OPERATOR STEP, CloudShell, at least 15 minutes after VP 7's apply: read back what the apply made, printing only
+      counts and tokens. Each route's integration timeout; each function's API Gateway statement whose SourceArn ends
+      with its exact route and that none ends with a wildcard; the stage's access-log destination; the quota value; and
+      the new filter's matches since VP 7's NOW (the apply's own API Gateway events). S is set in front of the block to
+      VP 7's NOW. The route URLs stay in CloudShell.
+    command: >-
+      ( unset AWS_PROFILE; A=$(aws apigateway get-rest-apis --query "items[?name=='agent-platform-ducklake-api'].id"
+      --output text); echo "APIS $(printf '%s' "$A" | wc -w)"; for r in ops/reader ops/writer telemetry/reader
+      telemetry/writer; do R=$(aws apigateway get-resources --rest-api-id "$A" --query "items[?path=='/$r'].id" --output
+      text); echo "TIMEOUT $r $(aws apigateway get-integration --rest-api-id "$A" --resource-id "$R" --http-method POST
+      --query timeoutInMillis --output text)"; done; for f in reader:ops/reader writer:ops/writer
+      telemetry-reader:telemetry/reader telemetry-writer:telemetry/writer; do p=$(aws lambda get-policy --function-name
+      "agent-platform-ducklake-${f%%:*}" --query Policy --output text); echo "PERMISSION ${f%%:*} exact $(printf '%s' "$p"
+      | jq --arg r "/live/POST/${f#*:}" '[.Statement[] | select(.Principal.Service == "apigateway.amazonaws.com") |
+      select(.Condition.ArnLike."AWS:SourceArn" | endswith($r))] | length') wildcard $(printf '%s' "$p" | jq
+      '[.Statement[] | select(.Principal.Service == "apigateway.amazonaws.com") | select(.Condition.ArnLike."AWS:SourceArn"
+      | test("[*]"))] | length')"; done; aws apigateway get-stage --rest-api-id "$A" --stage-name live --query
+      'accessLogSettings.destinationArn' --output text | grep -q ':log-group:/aws/apigateway/agent-platform-ducklake-api$'
+      && echo ACCESS_LOG_OK || echo ACCESS_LOG_ABSENT; aws service-quotas get-service-quota --service-code apigateway
+      --quota-code L-E5AE38E3 --query 'Quota.Value' --output text | sed 's/^/QUOTA_VALUE /'; aws cloudwatch
+      get-metric-statistics --namespace PlatformSecurity --metric-name DuckLakeApiChange --start-time "$S" --end-time
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --period 60 --statistics Sum --query 'sum(Datapoints[].Sum)' --output text | sed
+      's/^/API_CHANGE_MATCHES /' )
+    expected: >-
+      APIS 1; TIMEOUT 120000 for each of the four routes; PERMISSION exact 1 wildcard 0 for each of the four functions;
+      ACCESS_LOG_OK; QUOTA_VALUE 120000.0; API_CHANGE_MATCHES of 1 or more (and the alarm's email arrived).
+    fix_if: >-
+      TIMEOUT 29000 or another value: the integration did not take the quota; report it (a plan defect, fixed by a
+      reviewed bootstrap PR). PERMISSION exact 0 or wildcard above 0: stop; the function policy is not what Decision
+      {{N}} cl.1 allows; the operator removes the stray statement only through a reviewed bootstrap change.
+      API_CHANGE_MATCHES 0 after 30 minutes: the filter missed the apply's own events; check them in CloudWatch with
+      the build (VP 6's TMF lines first) and fix forward. A match with no email: read the alarm's history, then the
+      topic and subscription; report it; it does not block VP 9.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: >-
+      PROXY SIGNING PROBE through the API, with the agent environment's current (old) key and no new grant. Operator
+      prep: in CloudShell, read the ops/reader route URL (aws ssm get-parameter --name
+      /agent-platform/ducklake/api_url/ops/reader --query Parameter.Value --output text) and its host; in the current
+      agent environment, make sure that host is on the AWS network secret's allowed hosts (the temporary regional
+      wildcard from plan B's VP 4 already matches it if still present; else add the exact host), and set
+      DUCKLAKE_API_PROBE_URL to the URL and AWS_PROFILE=agent_static in the env-var field. The coordinator starts a fresh
+      thread in that environment on the operator's word; it runs only this block, through the placeholder agent_static
+      profile (no role step, so no AssumeRole), and reports the lines to the build thread; the operator then clears
+      both variables (the host may stay until plan B's cutover sets the final list: the resource policy refuses the old
+      identity). API Gateway checks the signature before IAM, so an explicit deny naming the old user proves the proxy
+      signed the execute-api host correctly; the absent route is the control showing what a wrong path answers. Only
+      tokens are printed, never the error text, which names the account. The request body is an empty JSON object, so
+      a handler that were reached would answer 400.
+    command: |-
+      date -u +%Y-%m-%dT%H:%M:%SZ | sed 's/^/STARTED_AT /'
+      bin/venv-python - <<'PY'
+      import json, os
+      import boto3, requests
+      from botocore.auth import SigV4Auth
+      from botocore.awsrequest import AWSRequest
+      url = os.environ.get("DUCKLAKE_API_PROBE_URL", "")
+      if not url.endswith("/ops/reader"):
+          raise SystemExit("PROBE NO_URL")
+      base = url[: -len("/ops/reader")]
+      region = open("config/aws-region").read().strip()
+      creds = boto3.Session(profile_name="agent_static").get_credentials().get_frozen_credentials()
+      def token(text):
+          t = text.lower()
+          if "injection failed" in t:
+              return "PROXY_REFUSED"
+          if "explicit deny" in t:
+              return "EXPLICIT_DENY_OLD_USER" if ":user/agent-service-account " in text else "EXPLICIT_DENY_OTHER"
+          if "missing authentication token" in t:
+              return "MISSING_AUTH_TOKEN"
+          if "should be scoped" in t:
+              return "SCOPE_WRONG"
+          if "signature" in t:
+              return "SIGNATURE_MISMATCH"
+          if "security token" in t:
+              return "TOKEN_INVALID"
+          return "OTHER"
+      for route in ("ops/reader", "ops/writer", "telemetry/reader", "telemetry/writer", "ops/absent"):
+          body = json.dumps({})
+          req = AWSRequest(method="POST", url=f"{base}/{route}", data=body, headers={"Content-Type": "application/json"})
+          SigV4Auth(creds, "execute-api", region).add_auth(req)
+          try:
+              r = requests.post(f"{base}/{route}", data=body, headers=dict(req.headers), timeout=60)
+              print("PROBE", route, r.status_code, token(r.text))
+          except Exception as e:
+              print("PROBE", route, "STOP_" + type(e).__name__)
+      PY
+    expected: >-
+      STARTED_AT with a time; PROBE ops/reader 403 EXPLICIT_DENY_OLD_USER, the same for ops/writer, telemetry/reader and
+      telemetry/writer; PROBE ops/absent 403 MISSING_AUTH_TOKEN. The build records them, labelled operator-environment,
+      in a counts-only PR comment.
+    fix_if: >-
+      PROBE NO_URL: the variable is unset or not the ops/reader URL; the operator fixes it and the probe re-runs.
+      PROXY_REFUSED or STOP_ProxyError: the host is not on the list (the operator adds it exactly) or the proxy refuses
+      execute-api hosts (stop: reversal condition proxy-signs-function-urls' sibling, returned to planning as a vendor
+      finding). SCOPE_WRONG, SIGNATURE_MISMATCH or TOKEN_INVALID: the proxy signs this host with the wrong service or
+      not at all; stop and return to planning, nothing is widened. EXPLICIT_DENY_OTHER: another identity signed; check
+      the environment's key. A 2xx or a handler's 4xx on a real route: the resource policy did not refuse the old
+      identity; a security finding, reported to the operator at once (reversal condition resource-policy-semantics).
+      Never retried with another identity.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: post-deploy
+    action: >-
+      OPERATOR STEP, CloudShell, at least 5 minutes after VP 9: count the access-log events since VP 9's STARTED_AT
+      (S set in front of the block), proving the log role works and the caller record is written. Only counts print.
+    command: >-
+      ( unset AWS_PROFILE; G=/aws/apigateway/agent-platform-ducklake-api; s=$(($(date -u -d "$S" +%s) * 1000)); aws logs
+      filter-log-events --log-group-name "$G" --start-time "$s" --filter-pattern '{ $.status = "403" }' --query
+      'length(events)' --output text | sed 's/^/DENIED_LINES /'; aws logs filter-log-events --log-group-name "$G"
+      --start-time "$s" --filter-pattern '{ ($.status = "403") && ($.caller = "*:user/agent-service-account") }' --query
+      'length(events)' --output text | sed 's/^/OLD_USER_LINES /' )
+    expected: DENIED_LINES 5 (four routes and the absent one) and OLD_USER_LINES 4 or more.
+    fix_if: >-
+      DENIED_LINES 0: no access log reached the group; check the stage's log settings and the account role (UNPROVEN
+      that the four scoped logs actions suffice); fix forward by a reviewed bootstrap PR. OLD_USER_LINES 0 with
+      DENIED_LINES above 0: the caller variable is empty for a denied call; record it in the PR comment (the caller
+      record for allowed calls is still checked after plan B's cutover).
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: terraform/bootstrap/agent_ducklake_api.tf
+    behavior: >-
+      Four exact AWS_IAM POST routes as credential-free AWS_PROXY integrations at the quota's timeout; exact-route
+      permissions only; a resource policy admitting only the session user; a body-free access log; per-route URL
+      parameters; sandbox-only.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_agent_ducklake_api.py
+    red_green_expectation: red before (file absent), green after
+  - source: terraform/bootstrap/github_ci_apply_boundary.tf
+    behavior: No bounded identity may write API Gateway, and the ceiling grants no API Gateway action.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_agent_ducklake_api.py::test_boundary_denies_api_gateway_writes
+    red_green_expectation: red before (DenyApiGatewayWrite absent), green after
+  - source: terraform/bootstrap/platform_security_alarms.tf
+    behavior: A sixth filter and alarm match API Gateway writes, DuckLake permission edits and log-role writes.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_platform_role_iam_change_alarms.py::TestPlatformRoleIamChangeDetector::test_filter_patterns
+    red_green_expectation: red before (ALARMS names a sixth filter the HCL lacks), green after
+  - source: scripts/ci/security_detector_probe.py
+    behavior: The liveness probe expects the sixth alarm.
+    verification_step: 1
+    test_selector: tests/test_security_detector_probe.py::TestSecurityDetectorProbe::test_expected_alarms_match_the_hcl
+    red_green_expectation: red before (the HCL names an alarm the probe does not expect), green after
+constraints:
+  - "No rescue agents or workaround loops (Decision 55); never attempt or retry sts:AssumeRole or any other credential-minting call. VP 9 runs on the placeholder agent_static profile, which has no role step."
+  - Never write a key, account id, API id, execute-api host, Function URL host or ARN containing an account id into the repo, a PR, a comment or the shared folder (AGENTS.md public boundary, Decision 101); probes and read-backs print tokens and counts, never AWS error text or URLs.
+  - The governed file gets exactly the sidecar's words (Decision 246); the operator's word on the final diff is still required for the IAM and API text under terraform/bootstrap (coordinator always_ask), and comes before VP 6 plans that head.
+  - "No grant to any identity: the agent user and its execute-api:Invoke are plan B's. No client, handler or Lambda code change."
+  - Loosens no assertion (Decision 235); the changed test nodes are exactly those the test rows name.
+  - Files other projects own are not edited (the telemetry functions' code and contracts are Feedback Loop's; this plan only fronts them, as the Function URLs do).
+context:
+  - "Decision-scout r2 FLAGS_FOUND (/mnt/project-files/agent-aws-access/SCOUT-r2.md, triaged 206 of 206; it scoped the single amended plan before the split). NORTH STAR: NS.5 3/5, no Serves line; NS.5's 'Lambda Function URLs with AWS_IAM in the cloud tier' is left unedited and read through its 'transport is an adapter' wording (operator fork 5). 213 WARN resolved by the sidecar (cl.2's generalised invariant, exact source ARNs, the handler-shape rule, the boundary's API Gateway Deny, the access log as caller record); its 'Coverage extended' ask is met by text tests and VP 9's live explicit deny, not new simulate rows (an unconditioned Deny has no condition-key semantics to re-prove; the iam-simulate fixture is at 647 of 650). 212 WARN (ports.yaml) moves to plan B, which changes the adapter code. CITE: 144, 230 (VP 6 measures the boundary), 126 cl.1, 223 (cross-root dependency in infrastructure_dependencies), 202 cl.1/cl.4, 84 I-1 (cl.5), 200 cl.1 (plan B), 246, 167 cl.3 (entry measured), 177 (dated notes only), 101, 79 (no handler edit here), 59. SPIRIT: 239's content reader gets no route (rec-4696); 24 met by the service quota resource in IaC."
+  - "Design evidence: blind Fable consults /mnt/project-files/agent-aws-access/ADVICE-r4.md (route: REST over HTTP API's 30 s cap and over direct Invoke), ADVICE-r5.md (admin root, exact source ARNs, no integration credentials, own boundary for the user, quota then codify, probe with an absent-route control, stage settings, separate alarm) and ADVICE-r6.md (one API with /ops and /telemetry prefixes, per-route URL config so a split is cheap; switch-to-two triggers in the reversal stanza). Operator: REST 14:06Z; forks 1-5 and the decided-with-notice list 14:21Z; quota filed 14:32Z."
+  - "Deviations from the decided-with-notice list, disclosed to the operator: per-method detailed metrics are off (about 28 custom metrics, roughly $8 a month); per-route breakdown comes from the access log's resourcePath and status. ports.yaml moves to plan B."
+  - "Handler compatibility [verified by reading]: the reader, writer and telemetry reader handlers read only body (a string, base64 only if the event says so) and answer {statusCode, headers, body}, the shape a Lambda proxy integration requires; the reader's typed 413 passes AWS_PROXY intact (Decision 215 cl.6). The telemetry writer's _require_caller reads requestContext.authorizer.iam, which a REST proxy event never carries, so its route answers 403 until plan B's handler change (requestContext.identity, Decision 184 cl.2 keeps the event-shape read in the handler)."
+  - "Durations, 30 Oct - 12 Nov (operator CloudShell read 14:03Z): reader 14,015 calls, max 120 s, p99 109.7 s (its read deadline, 120 s timeout minus the 10 s margin); writer p99 27.8 s; telemetry reader p99 58.1 s; telemetry writer p99 20.8 s. Cold connects 11-14 s (rec-5042). So the 29 s default is too short and 120 s fits the reader's deadline."
+  - "UNPROVEN until VP 6: that the provider ~> 5.0 CloudShell resolves accepts timeout_milliseconds 120000 (later 5.x releases lifted the 29,000 validation cap; inferred) and that aws_servicequotas_service_quota at the already-applied value files no request. UNPROVEN until VP 9: that the proxy signs the execute-api host as it signs ssm and logs (same amazonaws.com regional shape; inferred). UNPROVEN until VP 10: that the four scoped logs actions are enough for API Gateway's access-log delivery (AWS's managed policy grants more). UNPROVEN, owed to plan B's cutover: whether the proxy holds a request open for 120 s."
+  - "Throttle 20 rps, burst 40 per the stage default: a runaway guard sized without peak data (about 3,000 calls a day in total); plan B's clients treat 429 as retryable. Reserved concurrency, which actually protects Postgres from parallel 110 s reads, is an owed rec."
+  - "Owed follow-on recs (added to /mnt/project-files/agent-aws-access/OWED-RECS.md, filed with plan B's VP 13): reserved concurrency per DuckLake verb function; idempotent writes when a 504 is retried (a 504 does not stop the Lambda); reads that run to the deadline (submit-and-poll or paging); CI callers onto the API; asking the vendor to sign on.aws hosts; SIT's own API once its functions exist (rec-5026 note); a long-hold proxy timeout test after cutover; per-route 5XX alarms from the access log."
+  - "Overlaps: plan B (PLAN-agent-proxy-signed-access, unbuilt; amended next) also adds a sixth detector pair in the same four detector files and a new Decision at the DECISIONS.md head; it builds second and rebases (its pair becomes the seventh). PLAN-sit-organization (rec-5026) must learn that bootstrap now declares a sandbox-only API. rec-4233 PR 1's bootstrap change queues after both."
+  - "V3 resolution: VP 6's operator-run pre-merge plan at the PR head substitutes for pre-merge post-deploy evidence; behavioural acceptance is VP 7-10 after merge, with the operator's returned lines labelled operator-reported in a counts-only PR comment. VP 5 is the CloudShell analog of the ENVIRONMENT CHECK (plan B's owed rec 2 re-grounds it on environment identity)."
+  - "Approvals at build start: the operator's CI-RCA override while the recs reader is unreachable (Decision 215 fails closed; this plan PR's override does not carry over). red_overlap is not run: its reader lookup goes through the refused profile chain; main's GitHub CI state is the substitute evidence."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}  # SCOUT-r2.md, run on the pre-split amendment
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections (213, 84, 202, 223, 230, 126, 144)
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+  - "Start condition for merge (not for the build): VP 4 shows the quota granted, and #1987 (rec-5025) is applied, so this is the only merged-unapplied bootstrap change; until then the build stops at CI green and tells the coordinator."
+execution_steps:
+  - "At build start, post VP 4 to the operator; coding proceeds while it waits, writing the service quota resource last. Until plan B's cutover the build prefixes every repo command it runs with AWS_PROFILE=agent-platform-unset, so it stops at ProfileNotFound before any request; preflight runs degraded with null recs fields, and the CI-RCA override is asked at build start."
+  - "Tests first per the test scope rows (the new test file, the detector's pattern helper, red-case list and fixture), seen red on the unchanged tree (record the red run), except test_expected_alarms_match_the_hcl, red only between the HCL edit and the EXPECTED_ALARMS edit. Post: the named nodes exist and fail."
+  - "terraform/bootstrap/agent_ducklake_api.tf per scope row 1 (no added line, comments included, may carry a token VP 6's screen refuses: provider or module followed by a quote, required_providers, provisioner, local-exec, an external or http data source), the boundary statement, the sixth detector pair and EXPECTED_ALARMS. Post: VP 1-2 pass."
+  - "Hand-apply the sidecar's three blocks verbatim, {{N}} the next free Decision number at build time and {{DATE}} the build date, and fill {{N}} in the boundary comment (a rebase that renumbers re-fills both sites). Post: VP 3 passes."
+  - "Commit Flow (implement skill; git-ops.yaml handoff_sequence): full tier, push, PR. At CI green, with VP 4 granted, ask the operator's final-diff word on the head, naming its full sha; only after that word post VP 5 and VP 6 at that sha and record the returned lines; merge only the head both cover, only after #1987 is applied, and only when the operator is ready to run VP 7 in the same sitting."
+  - "After merge: post VP 7; on its lines, VP 8; then ask the coordinator for VP 9's fresh thread with the operator's prep; on VP 9's lines, post VP 10. Then tell plan B's planning thread (Redesign agent AWS access without role assumption) and the build thread that the API is live."
+  - "Report: what was implemented, the validation_result --verify-head verdict, the postflight output, the operator-reported lines, VP 9-10's results and the merge SHA."
+rollback: >-
+  Before plan B's cutover nothing uses the API, so rollback is a revert PR the operator applies from CloudShell: it
+  destroys the API, its stage, policy, log group, log role, account setting, permissions, parameters and the sixth
+  alarm pair, and removes the boundary statement (the quota stays raised; the service quota resource is dropped from
+  state by a removed block with destroy = false, since destroying it cannot lower a quota). After plan B's cutover,
+  the agent user's execute-api grant is revoked first by plan B's rollback.
