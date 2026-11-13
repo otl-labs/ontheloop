@@ -40,6 +40,33 @@ _DUCKLAKE_READER_FUNCTION_NAME = "agent-platform-ducklake-reader"
 _DUCKLAKE_READER_SSM_PATH = "/agent-platform/ducklake/reader_url"
 _DUCKLAKE_WRITER_SSM_PATH = "/agent-platform/ducklake/writer_url"
 
+# Transport switch (PLAN-agent-proxy-signed-access): the agent proxy signs only amazonaws.com hosts, so an agent
+# environment sets execute_api and reads through plan A's REST API; unset or function_url keeps the Function URLs.
+TRANSPORT_ENV = "OTL_OPS_VERBS_TRANSPORT"
+API_URL_PARAMETER_PREFIX = "/agent-platform/ducklake/api_url/"
+_API_HOST_RE = re.compile(r"^https://[^/.]+\.execute-api\.([a-z0-9-]+)\.amazonaws\.com(?:/|$)")
+_FUNCTION_URL_HOST_RE = re.compile(r"^https://[^/.]+\.lambda-url\.([a-z0-9-]+)\.on\.aws(?:/|$)")
+
+
+def api_transport(env: Any = os.environ) -> bool:
+    """True when TRANSPORT_ENV selects the execute-api path; ValueError for an unknown value (never at import)."""
+    value = env.get(TRANSPORT_ENV)
+    if value in (None, "", "function_url"):
+        return False
+    if value == "execute_api":
+        return True
+    raise ValueError(f"{TRANSPORT_ENV} must be 'execute_api' or 'function_url' (or unset); got {value!r}")
+
+
+def signing_scope(url: str, default_region: str) -> tuple[str, str]:
+    """(service, region) to sign *url* for; the proxy re-signs by the scope the client signed."""
+    if m := _API_HOST_RE.match(url):
+        return "execute-api", m.group(1)
+    if m := _FUNCTION_URL_HOST_RE.match(url):
+        return "lambda", m.group(1)
+    return "lambda", default_region
+
+
 # Transient reader-invoke resilience: reader ops are idempotent, so retry a transient 5xx with backoff before
 # loud-failing. A 502 is a process exit or a deadline overrun, a 503 catalog_unavailable (a dead catalog connection);
 # a typed 504 read_deadline_exceeded is the one answer never retried (the same read overruns again).
@@ -102,6 +129,17 @@ def _resolve_function_url_via_api(function_name: str, *, profile: str | None, re
     except Exception as exc:  # noqa: BLE001 -- best-effort fallback; caller raises if this returns None
         logger.warning("ducklake_reader_client: GetFunctionUrlConfig fallback failed for %s: %s", function_name, exc)
         return None
+
+
+def api_route_url(route: str, profile: str | None, region: str) -> str:
+    """Read plan A's API route URL for *route* from SSM; RuntimeError naming the parameter (never a value) when absent."""
+    from scripts.aws_profile import resolve_aws_profile  # noqa: PLC0415
+
+    name = API_URL_PARAMETER_PREFIX + route
+    url = _resolve_function_url_via_ssm(name, profile=resolve_aws_profile(profile, default="agent_platform"), region=region)
+    if not url:
+        raise RuntimeError(f"SSM parameter {name!r} unavailable -- cannot reach the DuckLake API route {route!r}")
+    return url
 
 
 class Reader(Protocol):
@@ -371,6 +409,7 @@ class DuckLakeReader:
 
         Resolution order (Decision 79 SSOT):
           1. env DUCKLAKE_READER_URL -- CI / explicit override
+          (under OTL_OPS_VERBS_TRANSPORT=execute_api: the API route parameter, no Function URL fallback)
           2. SSM /agent-platform/ducklake/reader_url -- CC-web (no terraform binary)
           3. terraform output ducklake_reader_function_url -- local dev with initialized checkout
           4. lambda:GetFunctionUrlConfig -- last resort (CI runner, github_ci OIDC role)
@@ -380,6 +419,8 @@ class DuckLakeReader:
         url = os.environ.get(_DUCKLAKE_READER_URL_ENV)
         if url:
             return url.rstrip("/")
+        if api_transport():
+            return api_route_url("ops/reader", self._profile, self._region)
         ssm_url = _resolve_function_url_via_ssm(_DUCKLAKE_READER_SSM_PATH, profile=self._profile, region=self._region)
         if ssm_url:
             return ssm_url
@@ -427,7 +468,8 @@ class DuckLakeReader:
         for attempt in range(_READER_MAX_ATTEMPTS):
             # Re-sign per attempt: SigV4 carries a timestamp, so a fresh request avoids skew on retry.
             aws_req = AWSRequest(method="POST", url=url, data=body, headers={"Content-Type": "application/json"})
-            SigV4Auth(creds, "lambda", self._region).add_auth(aws_req)
+            service, region = signing_scope(url, self._region)
+            SigV4Auth(creds, service, region).add_auth(aws_req)
             resp = requests.post(url, data=body, headers=dict(aws_req.headers), timeout=180)
             if resp.status_code == 200:
                 return resp.json()
