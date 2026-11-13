@@ -139,7 +139,7 @@ def permissions_problems(t: dict[str, Any]) -> list[str]:
         problems.append("permissions: source_arn is not the exact stage, method and route")
     for name, text in (t.get("extra") or {}).items():
         for m in re.finditer(r'resource\s+"aws_lambda_permission"\s+"\w+"\s*\{', _strip_comments(text)):
-            if "apigateway.amazonaws.com" in _block_body(_strip_comments(text), m.end() - 1):
+            if re.search(r'principal\s*=\s*"apigateway\.amazonaws\.com"', _block_body(_strip_comments(text), m.end() - 1)):
                 problems.append(f"permissions: {name} holds another apigateway-principal permission")
     return problems
 
