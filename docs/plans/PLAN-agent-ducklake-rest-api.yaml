@@ -38,7 +38,7 @@ scope:
       DenyAllButAgentSession, Effect Deny, Principal "*", Action execute-api:Invoke, Resource
       "${execution_arn}/*", Condition StringNotEquals aws:PrincipalArn = local.ducklake_api_session_user_arn; no Allow:
       a same-account caller is allowed by its identity policy unless a Deny matches); aws_cloudwatch_log_group.
-      agent_ducklake_api_access (name /aws/apigateway/agent-platform-ducklake-api, retention 400 days, the trail bucket's, since it is the API path's caller record);
+      agent_ducklake_api_access (name /aws/apigateway/agent-platform-ducklake-api, retention 400 days, the trail bucket's, since it is the API path's caller record, and skip_destroy true, so a revert leaves the record in place);
       aws_iam_role.agent_ducklake_api_logs (name ducklake-api-access-logs, outside agent-platform-* so no CI IAM grant
       reaches it, the name the new Decision's cl.4 authorises as Decision 248 cl.4 did its two roles; Decision 144
       cl.3's mandatory boundary binds agent-platform-* roles, and a service role holding four logs actions gains nothing
@@ -93,7 +93,7 @@ scope:
       names a DuckLake function); test_api_policy_admits_only_the_session_user (exactly one statement, the Deny of row 1
       with the aws:PrincipalArn exception equal to arn:aws:iam::${var.account_id}:user/agent-platform-session, no
       Allow); test_api_stage_logs_no_bodies (logging_level OFF, data_trace_enabled false, metrics_enabled false, both
-      throttle fields set; the access-log format names $context.identity.userArn, $context.resourcePath and
+      throttle fields set; the log group keeps retention_in_days 400 and skip_destroy true; the access-log format names $context.identity.userArn, $context.resourcePath and
       $context.status and no $input, body or header variable); test_api_redeploys_on_change (the deployment's
       redeployment trigger references the policy, the methods and the integrations, and create_before_destroy is set);
       test_api_log_role_is_scoped (the role's name is ducklake-api-access-logs and does not start agent-platform-; its
@@ -110,9 +110,18 @@ scope:
       terraform/personal, an Allow added to the policy, a second exception principal, data_trace_enabled true,
       $context.requestBody in the format, the policy dropped from the trigger, a boundary on the log role, the log role
       renamed agent-platform-ducklake-api-logs, a fifth logs action, a /secret/ parameter name, DenyApiGatewayWrite dropped, apigateway:GET added to it, apigateway:P* narrowed to
-      apigateway:POST, and apigateway:* added to DataPlaneAllow. About 350 SLOC by the iam_tf files' density (ten
-      predicates and about twenty-three mutation rows); the build measures it against 500 and, over budget, moves the
-      predicates into a _agent_ducklake_api_predicates.py helper beside it (Decision 128).
+      apigateway:POST, apigateway:* added to DataPlaneAllow, $context.identity.userArn dropped from the access-log format, logging_level
+      INFO, create_before_destroy removed, a second trust principal on the log role, a qualifier on a permission and
+      skip_destroy dropped from the log group. About 370 SLOC by the iam_tf files' density (ten predicates and about
+      twenty-nine mutation rows); the build measures it against 500 and, over budget, moves the
+      predicates into a _agent_ducklake_api_predicates.py helper beside it (Decision 128; next row).
+  - file: tests/checks/iam_tf/_agent_ducklake_api_predicates.py
+    action: Create
+    purpose: >-
+      Conditional: created only if test_agent_ducklake_api.py measures over 500 SLOC at build. It then holds the ten
+      predicates and their parsers (a helper module whose names never start with test_, so the cross-test-import guard
+      passes), and test_agent_ducklake_api.py keeps every node, the mutation table and the quoted basename literals
+      --pre's data-edge channel reads. Otherwise not created.
   - file: terraform/bootstrap/github_ci_apply_boundary.tf
     action: Modify
     purpose: >-
@@ -125,8 +134,11 @@ scope:
       association ones; inferred from memory) sit outside this Deny but also outside the ceiling, so they stay denied;
       the test's no-apigateway-Allow clause keeps them so. The compact action form keeps the statement to about 110 B: the boundary renders about 5,266 B minified
       today (estimated by rendering the HCL with a twelve-digit account id) and about 5,376 B after, against Decision
-      230's 5,632 B boundary-headroom tripwire; PLAN-telemetry-content-reader-lock (unbuilt, Feedback Loop's) also
-      adds to the boundary, so whichever builds second re-measures. VP 6 measures the real rendering.
+      230's 5,632 B boundary-headroom tripwire. PLAN-telemetry-content-reader-lock (unbuilt, Feedback Loop's) and
+      PLAN-bootstrap-ci-gated-apply (unbuilt; an about 322 B Deny, its row 34) also add to the boundary: with the
+      latter the two come to about 5,698 B, over the tripwire, so whichever builds second re-measures on its rebased
+      main and, over 5,632 B, stops for the operator's Decision 230 re-decision rather than compacting other
+      statements. VP 6 measures the real rendering.
   - file: terraform/bootstrap/platform_security_alarms.tf
     action: Modify
     purpose: >-
@@ -188,6 +200,17 @@ scope:
       EXPECTED_ALARMS gains platform-security-ducklake-api-change (test_expected_alarms_match_the_hcl pins the set to
       the HCL's alarm names); the docstring says six alarms. The hourly liveness run reports it missing between merge
       and VP 7's apply; infrastructure_dependencies keeps that window to one sitting.
+  - file: tests/checks/iam_tf/test_platform_role_metadata_admin_scope.py
+    action: Modify
+    purpose: >-
+      Conditional: edited only if PLAN-bootstrap-ci-gated-apply's BUILD PR 1 is on main when this build starts (it makes
+      _SCANNED_BOOTSTRAP_FILES every terraform/bootstrap/*.tf outside an explicit _UNSCANNED_BOOTSTRAP_FILES mapping,
+      and a node fails on a new file in neither). Then agent_ducklake_api.tf joins the scanned tuple, as that plan's
+      coupling line says: it holds no iam Allow whose Resource matches PlatformDev or PlatformAdmin, so
+      test_real_tree_has_no_leak stays green, and the fail-closed count check must agree on its jsonencode statements
+      (a disagreement is a parser gap reported to the coordinator, never an unscanned entry). Otherwise no edit; that
+      plan's build adds it. No assertion changes; registry shard platform-admin-absent-from-ci-write-patterns is kept
+      (its nodes untouched).
   - file: docs/DECISIONS.md
     action: Modify
     purpose: >-
@@ -198,19 +221,19 @@ scope:
 bundled_recommendations: []
 followon_recs: []
 infrastructure_dependencies:
-  - "terraform/bootstrap is admin-only (environment-taxonomy.yaml axis_a): the operator plans it pre-merge (VP 5-6) and applies it post-merge (VP 7) from AWS CloudShell as user/platform-breakglass, each block self-contained (public-repo fetch at a sha, pinned terraform checked against HashiCorp's SHA256SUMS, variables from SSM, account id from the caller), the shape plan B's operator blocks reuse."
+  - "terraform/bootstrap is admin-only (environment-taxonomy.yaml axis_a): the operator plans it pre-merge (VP 5-6) and applies it post-merge (VP 7) from AWS CloudShell as user/platform-breakglass, each block self-contained (public-repo fetch at a sha, pinned terraform checked against HashiCorp's SHA256SUMS, variables from SSM, account id from the caller), the shape plan B's operator blocks reuse. Applier authority: Decision 202 cl.1 says the root is applied only by PlatformAdmin under the human-gated admin tier; the operator ruled on 2026-11-13 15:56Z (decision card, critique r3 finding 1) that Decision 126 cl.2's 'operators may always invoke it directly' covers the operator's own CloudShell applies, so 202 cl.1 binds applies an agent executes; plan B's sidecar note decision-202-note later records the reading in DECISIONS.md, and this plan's sidecar is unchanged."
   - "Quota first: VP 4 shows quota L-E5AE38E3 granted at 120000 before the build writes the service quota resource or VP 6 plans; the operator filed the request 2026-11-13 14:32Z (PENDING, current value 29000)."
   - "One merged-unapplied bootstrap change at a time: this PR merges only when no other bootstrap change is merged and unapplied (today #1987, rec-5025, whose apply is 0/0/0 by design and paused). If #1987 is still unapplied at CI green, VP 6's exact plan carries its merged content and shows no pending delta from it; the coordinator puts that evidence to the operator, whose ruling the one-at-a-time rule is. Plan B's bootstrap change queues after this apply; rec-4233 PR 1 after both."
   - "Merge and VP 7 happen in one operator sitting: from merge, security_detector_probe.py expects the sixth alarm, so an hourly liveness run before the apply reports it missing; a security_detector_stale rec filed in that window is closed with VP 7's read-back once recs are reachable."
   - "Cross-root dependency (Decision 223): the four permissions sit on functions terraform/personal owns. A personal-root replacement of a function drops its permission and the route returns 5XX until the operator re-applies this root; CI cannot re-create it (DenyDuckLakeResourcePolicyEdit). Code deploys change no function policy. No deploy-paths.yaml row indexes that heal yet (owed rec 20); owed rec 18's per-route 5XX alarms are its detection."
-  - "Who can plan this root afterwards: PlatformAdmin's AdminOps grants no apigateway action, so once this lands only the break-glass user (the CloudShell lane VP 5 checks) can refresh terraform/bootstrap; terraform/bootstrap/CLAUDE.md's agent_platform_admin runbook already cannot run (the proxy refuses the role step). PLAN-bootstrap-ci-gated-apply's roles need API Gateway and Service Quotas refresh reads for this root; its planning thread is told."
+  - "Who can plan this root afterwards: PlatformAdmin's AdminOps grants no apigateway action, so once this lands only the break-glass user (the CloudShell lane VP 5 checks) can refresh terraform/bootstrap; terraform/bootstrap/CLAUDE.md's agent_platform_admin runbook already cannot run (the proxy refuses the role step). PLAN-bootstrap-ci-gated-apply's roles need API Gateway and Service Quotas refresh reads for this root; its planning thread is told, and its row 1 carries them. Accepted residual (critique r3): this plan gives PlatformAdmin no apigateway read, since no session can assume PlatformAdmin while the proxy refuses the role step, and the CloudShell lane and that plan's CI path are the root's refresh paths."
   - "No Lambda code changes and no client changes: no deploy channel runs. Until plan B deploys the telemetry writer's REST caller read, that route fails closed (its handler finds no requestContext.authorizer.iam and answers 403 missing_caller_identity); the resource policy refuses every caller before then anyway."
 acceptance_criteria:
   - "terraform/bootstrap declares one Regional REST API with exactly four AWS_IAM POST routes (/ops/reader, /ops/writer, /telemetry/reader, /telemetry/writer) as AWS_PROXY integrations without credentials at 120000 ms, one stage with a body-free access log, a resource policy that denies every principal but agent-platform-session, one exact-route Lambda permission per function and one URL parameter per route, all gated to the sandbox environment; test_agent_ducklake_api.py's ten real-tree nodes pass and its red-case node shows each predicate failing on its mutations."
   - "The permissions boundary denies apigateway:DELETE and apigateway:P* (PATCH, POST, PUT) on every resource to every bounded identity, and its ceiling holds no apigateway or execute-api action (test_boundary_denies_api_gateway_writes); VP 6 measures the boundary at or below 5,632 B minified."
   - "Decision 202's detector gains platform-security-ducklake-api-change, matching any API Gateway write, any Lambda permission or resource-policy edit on a DuckLake verb function or denied, and any IAM write to the log role (fixture events, red cases, live logs:TestMetricFilter in VP 6; security_detector_probe.py expects six alarms); metric data shows it matching the apply's own API Gateway events (VP 8)."
   - "DECISIONS.md carries exactly the sidecar's words (approved_text verify passes)."
-  - "After the operator's apply, a signed call from the agent environment's old identity to each route is refused by the resource policy's explicit deny, naming that identity, and a call to an absent route answers Missing Authentication Token, or the same explicit deny if API Gateway applies the policy before route matching (VP 9); the access log records the denied calls with status 403, its caller field recorded either way for denied calls, and plan B's caller-record step proves the field names the caller on allowed calls (VP 10); each integration reads 120000 ms (VP 8)."
+  - "After the operator's apply, a signed call from the agent environment's old identity to each route is refused by the resource policy's explicit deny, naming that identity, and a call to an absent route answers Missing Authentication Token, or the same explicit deny if API Gateway applies the policy before route matching (VP 9); the access log records the denied calls with status 403 (their caller field is informational: OLD_USER_LINES 0 is recorded, not a failure), and plan B's caller-record step (its VP 16) proves the field names the caller on allowed calls (VP 10); each integration reads 120000 ms (VP 8)."
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -219,10 +242,12 @@ verification_plan:
       bin/venv-python -m pytest tests/checks/iam_tf/test_agent_ducklake_api.py
       tests/checks/iam_tf/test_url_only_invoke_guard.py tests/checks/iam_tf/test_platform_role_iam_change_alarms.py
       tests/test_security_detector_probe.py tests/checks/iam_tf/test_platform_security_heartbeat_canary.py
-      tests/checks/iam_tf/test_telemetry_prefix_fence.py tests/checks/iam_tf/test_ci_branch_boundary_state_fence.py -q
+      tests/checks/iam_tf/test_telemetry_prefix_fence.py tests/checks/iam_tf/test_ci_branch_boundary_state_fence.py
+      tests/checks/iam_tf/test_platform_role_metadata_admin_scope.py -q
     expected: >-
       All pass, including test_agent_ducklake_api.py's eleven nodes, the detector's pattern, fixture and five new
-      red-case nodes, and test_expected_alarms_match_the_hcl.
+      red-case nodes, test_expected_alarms_match_the_hcl and test_platform_role_metadata_admin_scope.py (scanning
+      agent_ducklake_api.tf once PLAN-bootstrap-ci-gated-apply's BUILD PR 1 is on main).
     fix_if: Any failure; fix the code or the Terraform, never an assertion's meaning (Decision 235).
     hermetic: true
     graduation: waive
@@ -392,7 +417,8 @@ verification_plan:
       precondition failure names the oversized policy: split it. Any other address, an update other than the boundary,
       or a destroy (for example another merged-unapplied bootstrap change): stop, do not merge, report to the
       coordinator. BOUNDARY_BYTES above
-      5632: Decision 230's boundary-headroom condition fires; stop and return to planning. A TMF count other than
+      5632: Decision 230's boundary-headroom condition fires (it will, at about 5,698 B, if PLAN-bootstrap-ci-gated-apply's
+      Deny is on main first); stop and return to planning for the operator's re-decision. A TMF count other than
       expected is a pattern defect: fix the filter and its fixture before merge.
     hermetic: false
     graduation: not-applicable
@@ -586,7 +612,8 @@ verification_plan:
       the environment's key. A 2xx or a handler's 4xx on a real route: the resource policy did not refuse the old
       identity; a security finding, reported to the operator at once (reversal condition resource-policy-semantics).
       ops/absent EXPLICIT_DENY_OLD_USER: the resource policy answered before route matching; record it, not a failure.
-      Never retried with another identity.
+      MISSING_AUTH_TOKEN or any other token on a real route: the call was unsigned or reached the wrong stage or route;
+      stop and report; nothing is widened. Never retried with another identity.
     hermetic: false
     graduation: not-applicable
   - step: 10
@@ -645,13 +672,13 @@ constraints:
 context:
   - "Decision-scout r2 FLAGS_FOUND (/mnt/project-files/agent-aws-access/SCOUT-r2.md, triaged 206 of 206; it scoped the single amended plan before the split). NORTH STAR: NS.5 3/5, no Serves line; NS.5's 'Lambda Function URLs with AWS_IAM in the cloud tier' is left unedited and read through its 'transport is an adapter' wording (operator fork 5). 213 WARN resolved by the sidecar (cl.2's generalised invariant, exact source ARNs, the handler-shape rule, the boundary's API Gateway Deny, the access log as caller record); its 'Coverage extended' ask is met by text tests and VP 9's live explicit deny, not new simulate rows (an unconditioned Deny has no condition-key semantics to re-prove; the iam-simulate fixture is at 647 of 650). 212 WARN (ports.yaml) moves to plan B, which changes the adapter code. CITE: 144, 230 (VP 6 measures the boundary), 126 cl.1, 223 (cross-root dependency in infrastructure_dependencies), 202 cl.1/cl.4, 84 I-1 (cl.5), 200 cl.1 (plan B), 246, 167 cl.3 (entry measured), 177 (dated notes only), 101, 79 (no handler edit here), 59. SPIRIT: 239's content reader gets no route (rec-4696); 24 met by the service quota resource in IaC."
   - "Design evidence: blind Fable consults /mnt/project-files/agent-aws-access/ADVICE-r4.md (route: REST over HTTP API's 30 s cap and over direct Invoke), ADVICE-r5.md (admin root, exact source ARNs, no integration credentials, own boundary for the user, quota then codify, probe with an absent-route control, stage settings, separate alarm) and ADVICE-r6.md (one API with /ops and /telemetry prefixes, per-route URL config so a split is cheap; switch-to-two triggers in the reversal stanza). Operator: REST 14:06Z; forks 1-5 and the decided-with-notice list 14:21Z; quota filed 14:32Z."
-  - "Deviations from the decided-with-notice list, disclosed to the operator: per-method detailed metrics are off (about 28 custom metrics, roughly $8 a month); per-route breakdown comes from the access log's resourcePath and status. ports.yaml moves to plan B. The log role is ducklake-api-access-logs, outside agent-platform-*, and its trust carries no aws:SourceAccount condition (owed rec 19). The Lambda timeouts stay 120 s, equal to the integration timeout: the reader's 110 s deadline answers first, and a call that runs the full 120 s gets the gateway's 504 (owed rec 13)."
+  - "Deviations from the decided-with-notice list, disclosed to the operator: per-method detailed metrics are off (about 28 custom metrics, roughly $8 a month); per-route breakdown comes from the access log's resourcePath and status. ports.yaml moves to plan B. The log role is ducklake-api-access-logs, outside agent-platform-*, and its trust carries no aws:SourceAccount condition (owed rec 19). The Lambda timeouts stay 120 s, equal to the integration timeout: the reader's 110 s deadline answers first, and a call that runs the full 120 s gets the gateway's 504 (owed rec 13). Three ADVICE-r5 suggestions are not followed: §6's probe-first MOCK API (VP 9 probes the real routes after the apply; a refusal there costs one revert sitting and no security, since the resource policy refuses every other caller); §7's tighter writer throttles (one stage-wide 20/40 runaway guard until peak data exists); §8's alarm on Service Quotas requests (VP 8 reads OPEN_REQUESTS once after the apply)."
   - "Handler compatibility [verified by reading]: the reader, writer and telemetry reader handlers read only body (a string, base64 only if the event says so) and answer {statusCode, headers, body}, the shape a Lambda proxy integration requires; the reader's typed 413 passes AWS_PROXY intact (Decision 215 cl.6). The telemetry writer's _require_caller reads requestContext.authorizer.iam, which a REST proxy event never carries, so its route answers 403 until plan B's handler change (requestContext.identity, Decision 184 cl.2 keeps the event-shape read in the handler)."
   - "Durations, 30 Oct - 12 Nov (operator CloudShell read 14:03Z): reader 14,015 calls, max 120 s, p99 109.7 s (its read deadline, 120 s timeout minus the 10 s margin); writer p99 27.8 s; telemetry reader p99 58.1 s; telemetry writer p99 20.8 s. Cold connects 11-14 s (rec-5042). So the 29 s default is too short and 120 s fits the reader's deadline."
   - "UNPROVEN until VP 6: that the provider ~> 5.0 CloudShell resolves accepts timeout_milliseconds 120000 (later 5.x releases lifted the 29,000 validation cap; inferred) UNPROVEN until VP 7, read in VP 8: that aws_servicequotas_service_quota at the already-applied value files no request (a plan never runs Create). UNPROVEN until VP 9: that the proxy signs the execute-api host as it signs ssm and logs (same amazonaws.com regional shape; inferred). UNPROVEN until VP 10: that the four scoped logs actions are enough for API Gateway's access-log delivery (AWS's managed policy grants more). UNPROVEN, owed to plan B's cutover: whether the proxy holds a request open for 120 s."
   - "Throttle 20 rps, burst 40 per the stage default: a runaway guard sized without peak data (about 3,000 calls a day in total); plan B's clients treat 429 as retryable. Reserved concurrency, which actually protects Postgres from parallel 110 s reads, is an owed rec."
   - "Owed follow-on recs (numbered as in /mnt/project-files/agent-aws-access/OWED-RECS.md, filed with plan B's last VP): (11) reserved concurrency per DuckLake verb function; (12) idempotent writes when a 504 is retried (a 504 does not stop the Lambda); (13) reads that run to the deadline (submit-and-poll or paging); (14) CI callers onto the API; (15) asking the vendor to sign on.aws hosts; (16) SIT's own API once its functions exist (rec-5026 note); (17) a long-hold proxy timeout test after cutover; (18) per-route 5XX alarms from the access log; (19) whether API Gateway supplies aws:SourceAccount when it assumes the account CloudWatch role, and a SourceAccount condition on the log role's trust if it does; (20) a deploy-paths.yaml heal row for a DuckLake function replaced by terraform/personal, whose API permission this root must re-create."
-  - "Overlaps: plan B (PLAN-agent-proxy-signed-access, unbuilt; amended next) also adds a sixth detector pair in the same four detector files and a new Decision at the DECISIONS.md head; it builds second and rebases (its pair becomes the seventh). Plan B also moves agent-platform-session onto its own boundary carrying execute-api:Invoke: under the shared deployer boundary, whose DataPlaneAllow names no execute-api action, that grant would be denied. Plan B therefore owes, for the one principal this API admits: (a) a boundary whose ceiling holds no apigateway action and no lambda permission or resource-policy action, pinned by a test, so the new Decision's cl.2 stays true for it; (b) the user named exactly agent-platform-session at the default path (/), the ARN this plan's resource policy names; (c) the allowed-call access-log caller check VP 10 defers; (d) the execute-api host on the final allowed-hosts list; (e) the writer and reader contracts' Function-URL transport text updated or owed when clients move (the telemetry contracts are Feedback Loop's); (f) its rec-filing step counting this plan's recs 11-20. PLAN-sit-organization (rec-5026) must learn that bootstrap now declares a sandbox-only API. rec-4233 PR 1's bootstrap change queues after both."
+  - "Overlaps: plan B (PLAN-agent-proxy-signed-access, unbuilt; amended next) also adds a sixth detector pair in the same four detector files and a new Decision at the DECISIONS.md head; it builds second and rebases (its pair becomes the seventh). Plan B also moves agent-platform-session onto its own boundary carrying execute-api:Invoke: under the shared deployer boundary, whose DataPlaneAllow names no execute-api action, that grant would be denied. Plan B therefore owes, for the one principal this API admits: (a) a boundary whose ceiling holds no apigateway action and no lambda permission or resource-policy action, pinned by a test, so the new Decision's cl.2 stays true for it; (b) the user named exactly agent-platform-session at the default path (/), the ARN this plan's resource policy names; (c) the allowed-call access-log caller check VP 10 defers; (d) the execute-api host on the final allowed-hosts list; (e) the writer and reader contracts' Function-URL transport text updated or owed when clients move (the telemetry contracts are Feedback Loop's); (f) its rec-filing step counting this plan's recs 11-20. PLAN-sit-organization (rec-5026) must learn that bootstrap now declares a sandbox-only API (the after-merge step asks the coordinator to tell its planning thread). PLAN-bootstrap-ci-gated-apply (unbuilt) shares the boundary (headroom, row 3) and the admin-scope guard's scan list (its conditional row here); whichever builds second rebases. rec-4233 PR 1's bootstrap change queues after both."
   - "V3 resolution: VP 6's operator-run pre-merge plan at the PR head substitutes for pre-merge post-deploy evidence; behavioural acceptance is VP 7-10 after merge, with the operator's returned lines labelled operator-reported in a counts-only PR comment. VP 5 is the CloudShell analog of the ENVIRONMENT CHECK."
   - "Approvals at build start: the operator's CI-RCA override while the recs reader is unreachable (Decision 215 fails closed; this plan PR's override does not carry over). red_overlap is not run: its reader lookup goes through the refused profile chain; main's GitHub CI state is the substitute evidence."
 gate_rounds:
@@ -660,6 +687,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 9}
   - {gate: wording-check, round: 2, verdict: PASS, digest: fa80c82105411947f741122e13b555567b354e820a7f3ef07f23f7243e984d7c, base: 75e6a7382ab202cb904f997895cb600b4d17b3b7, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 10}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 9}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -672,12 +700,13 @@ execution_steps:
   - "Tests first per the test scope rows (the new test file, the detector's pattern helper, red-case list and fixture), seen red on the unchanged tree (record the red run), except test_expected_alarms_match_the_hcl, red only between the HCL edit and the EXPECTED_ALARMS edit. Post: the named nodes exist and fail."
   - "terraform/bootstrap/agent_ducklake_api.tf per scope row 1 (no added line, comments included, may carry a token VP 6's screen refuses: provider or module followed by a quote, required_providers, provisioner, local-exec, an external or http data source), the boundary statement, the sixth detector pair and EXPECTED_ALARMS. Post: VP 1-2 pass."
   - "Hand-apply the sidecar's three blocks verbatim, {{N}} the next free Decision number at build time and {{DATE}} the build date, and fill {{N}} in the boundary comment (a rebase that renumbers re-fills both sites). Post: VP 3 passes."
-  - "Commit Flow (implement skill; git-ops.yaml handoff_sequence): full tier, push, PR. At CI green, with VP 4 granted, ask the operator's final-diff word on the head, naming its full sha; only after that word post VP 5 and VP 6 at that sha and record the returned lines; merge only the head both cover, only after #1987 is applied, and only when the operator is ready to run VP 7 in the same sitting."
-  - "After merge: post VP 7; on its lines, VP 8; then ask the coordinator for VP 9's fresh thread with the operator's prep; on VP 9's lines, post VP 10. Then tell plan B's planning thread (Redesign agent AWS access without role assumption) and the build thread that the API is live."
+  - "Commit Flow (implement skill; git-ops.yaml handoff_sequence): full tier, push, PR. At CI green, with VP 4 granted, ask the operator's final-diff word on the head, naming its full sha; only after that word post VP 5 and VP 6 at that sha and record the returned lines; merge only the head both cover, only after #1987 is applied or the operator has ruled on VP 6's evidence (infrastructure_dependencies), and only when the operator is ready to run VP 7 in the same sitting."
+  - "After merge: post VP 7; on its lines, VP 8; then ask the coordinator for VP 9's fresh thread with the operator's prep; on VP 9's lines, post VP 10. Then tell plan B's planning thread (Redesign agent AWS access without role assumption) and the build thread that the API is live, and ask the coordinator to tell PLAN-sit-organization's planning thread (Finish the SIT account bootstrap plans) that terraform/bootstrap now declares a sandbox-only API (count 0 in SIT)."
   - "Report: what was implemented, the validation_result --verify-head verdict, the postflight output, the operator-reported lines, VP 9-10's results and the merge SHA."
 rollback: >-
   Before plan B's cutover nothing uses the API, so rollback is a revert PR the operator applies from CloudShell: it
-  destroys the API, its stage, policy, log group, log role, account setting, permissions, parameters and the sixth
-  alarm pair, and removes the boundary statement (the quota stays raised; the service quota resource is dropped from
+  destroys the API, its stage, policy, log role, account setting, permissions, parameters and the sixth alarm pair
+  (the log group, skip_destroy, stays as the caller record), and removes the boundary statement (the quota stays raised; the service quota resource is dropped from
   state by a removed block with destroy = false, since destroying it cannot lower a quota). After plan B's cutover,
-  the agent user's execute-api grant is revoked first by plan B's rollback. Destroying aws_api_gateway_account under provider 5.x only drops it from state, so the account's CloudWatch role setting keeps naming the deleted role: the revert's CloudShell block clears it with one update-account call (patch op replace, path /cloudwatchRoleArn, empty value) and reads it back empty.
+  the agent user's execute-api grant is revoked first by plan B's rollback. Destroying aws_api_gateway_account under provider 5.x only drops it from state, so the account's CloudWatch role setting keeps naming the deleted role: the revert's CloudShell block clears it with one update-account call (patch op replace, path /cloudwatchRoleArn, empty value) and reads it back empty. The revert leaves docs/DECISIONS.md alone (Decision 177 cl.1's append-only lock refuses
+  deleting an entry): the new Decision gets a dated note saying it is reversed instead.
