@@ -66,9 +66,12 @@ scope:
       DeletePolicy, DeletePolicyVersion, SetDefaultPolicyVersion, TagPolicy, UntagPolicy on
       policy/agent-platform-github-ci-apply-boundary, policy/agent-platform-session-*, policy/platform-security-* and
       policy/bootstrap-*; DenyBoundaryRemoval iam:DeleteRolePermissionsBoundary, DeleteUserPermissionsBoundary,
-      PutUserPermissionsBoundary on "*"; DenyProviderAndAccountWrite the OIDC and SAML provider lifecycle and tag verbs,
-      iam:CreateServiceLinkedRole, DeleteServiceLinkedRole, account alias and password-policy verbs and
-      SetSecurityTokenServicePreferences on "*"; DenyDetectorWrite with NotAction equal to bootstrap-plan-reads' read
+      PutUserPermissionsBoundary on "*"; DenyProviderAndAccountWrite iam:CreateOpenIDConnectProvider,
+      DeleteOpenIDConnectProvider, UpdateOpenIDConnectProviderThumbprint, AddClientIDToOpenIDConnectProvider,
+      RemoveClientIDFromOpenIDConnectProvider, TagOpenIDConnectProvider, UntagOpenIDConnectProvider, CreateSAMLProvider,
+      UpdateSAMLProvider, DeleteSAMLProvider, TagSAMLProvider, UntagSAMLProvider, CreateServiceLinkedRole,
+      DeleteServiceLinkedRole, CreateAccountAlias, DeleteAccountAlias, UpdateAccountPasswordPolicy,
+      DeleteAccountPasswordPolicy and SetSecurityTokenServicePreferences on "*"; DenyDetectorWrite with NotAction equal to bootstrap-plan-reads' read
       actions on every platform-security-* resource (roles, policies, the log group and its metric filters, the alarms,
       the trail, the trail bucket and its objects, the state machine, the schedule group and schedule; Decision 202
       cl.1: the detector statements are left out of the Allows, not allowed and denied); DenyGithubSettingsKey every
@@ -82,7 +85,9 @@ scope:
       behind materialise-tfvars' get-parameter --with-decryption, inferred, not probed) is not denied by it, while a
       direct call is (the key policy's kms:ViaService still bounds the forwarded one); DenyObjectReadOutsideState s3:GetObject* with NotResource the state object; DenyParameterReadOutsideTfvars
       ssm:GetParameter* with NotResource the tfvars ARN. No literal account id, bucket name or region; no
-      aws_iam_access_key, inline aws_iam_role_policy or import block.
+      aws_iam_access_key, inline aws_iam_role_policy or import block. Before VP 4 the build measures each rendered
+      document (terraform console with no credentials on a locals-only copy, as this plan measured the boundary); one
+      over 6,144 B is a plan amendment, because a split changes the addresses VP 5 and VP 6 pin.
   - file: terraform/bootstrap/.terraform.lock.hcl
     action: Create
     purpose: >-
@@ -110,12 +115,12 @@ scope:
   - file: terraform/bootstrap/main.tf
     action: Modify
     purpose: >-
-      BUILD PR 1. Header comment only: the "NEVER auto-apply ... applied only manually under agent_platform_admin"
-      paragraph says instead that terraform-bootstrap-apply.yml applies this root from main after one operator approval,
+      BUILD PR 1. Header comment only: lines 8-9 ("NEVER auto-apply: this root must only be applied manually under
+      agent_platform_admin ... Never add terraform/bootstrap/** to any apply-workflow path") say instead that terraform-bootstrap-apply.yml applies this root from main after one operator approval,
       only for changes outside the protected set (the operator's CloudShell applies the rest), and that it is never on
-      an auto-apply path; the WHY paragraph's "admin-applied root" says the same. No line may carry a token VP 5's
-      screen refuses (provider or module followed by a quote,
-      required_providers, provisioner, local-exec, an external or http data source).
+      an auto-apply path; the WHY paragraph's "admin-applied root" says the same. No line may carry a phrase VP 12
+      sweeps for or a token VP 5's screen refuses (provider or module followed by a quote, required_providers,
+      provisioner, local-exec, an external or http data source).
   - file: terraform/github/environments.tf
     action: Modify
     purpose: >-
@@ -148,7 +153,10 @@ scope:
       agent-platform-github-ci-apply-boundary or agent-platform-session-* is matched by a Deny resource pattern, with a
       parsed set of at least PlatformAdmin, PlatformDev, github-settings-apply, bootstrap-apply and the boundary, so an
       empty parse fails); test_bootstrap_detector_resources_denied (every platform-security-* resource type the root
-      declares has an ARN pattern in DenyDetectorWrite); test_bootstrap_lock_pins_aws (git ls-files lists the lock, so it is
+      declares has an ARN pattern in DenyDetectorWrite); test_boundary_denies_protected_role_writes (the boundary's
+      DenyBoundedWriteOnProtectedRoles carries exactly row 34's actions and resources, and every role
+      terraform/bootstrap declares whose name is not agent-platform-* matches one of its resources);
+      test_bootstrap_lock_pins_aws (git ls-files lists the lock, so it is
       tracked rather than merely present, and it holds one provider, hashicorp/aws, with the version and hash list of
       terraform/personal's lock); test_bootstrap_apply_environment_declared
       (environments.tf declares tf-bootstrap-apply with reviewers, can_admins_bypass false, custom branch policies, a
@@ -156,7 +164,7 @@ scope:
       parametrized over one mutation per class: an extra Allow verb, an IAM write on a non-prefixed resource, a missing
       boundary condition, a ref subject, a StringLike trust, a second trust statement, a boundary added to a role, a
       write Allow on the preview, a dropped protected Deny resource, a new non-prefixed role in another bootstrap file
-      without a Deny, a missing detector pattern, a lock with a second provider, an Environment with admin bypass.
+      without a Deny, a missing detector pattern, a dropped boundary protected-role resource, a lock with a second provider, an Environment with admin bypass.
   - file: tests/checks/iam_tf/test_terraform_github_import_blocks.py
     action: Modify
     purpose: >-
@@ -167,11 +175,20 @@ scope:
   - file: tests/checks/iam_tf/test_platform_role_metadata_admin_scope.py
     action: Modify
     purpose: >-
-      BUILD PR 1. Decision 225 cl.5's guard scans terraform/bootstrap/bootstrap_ci_apply.tf too and gains exactly one
-      allowance, named for Decision {{N}} (225's bootstrap-plan-under-ci-identity answer): Allow statements of
-      bootstrap-plan-reads whose every action is iam:Get* or iam:List* may match the PlatformDev and PlatformAdmin ARNs.
-      Every other Allow in the file that can reach either ARN still fails, and two red nodes prove it: an iam:Put* added
-      to IAMRead, and IAMRoleMetadataWrite widened to role/*. No existing node or assertion changes (Decision 235).
+      BUILD PR 1. Decision 225 cl.5's guard scans every terraform/bootstrap/*.tf: _SCANNED_BOOTSTRAP_FILES becomes the
+      directory's files minus one explicit _UNSCANNED_BOOTSTRAP_FILES mapping, each entry with its reason
+      (github_ci_apply_boundary.tf is a ceiling that grants nothing; platform_roles.tf, platform_admin_policies.tf,
+      platform_admin_data_policies.tf and platform_dev_policies.tf hold those two roles and their own grants, which
+      Decision 223 keeps operator-applied; the four platform_security_* files are the detector's, Decision 202), so a
+      new bootstrap file is scanned by default and bootstrap_ci_apply.tf is scanned. On main's tree the remaining files
+      pass every predicate of the file (measured at plan time). It gains exactly one allowance, named for Decision {{N}}
+      (225's bootstrap-plan-under-ci-identity answer): Allow statements of bootstrap-plan-reads whose every action is
+      iam:Get* or iam:List* may match the PlatformDev and PlatformAdmin ARNs. Every other Allow in a scanned file that
+      can reach either ARN still fails, and red nodes prove it: an iam:Put* added to IAMRead, IAMRoleMetadataWrite
+      widened to role/*, and a synthetic new bootstrap file whose Allow grants iam:UpdateAssumeRolePolicy on
+      role/PlatformDev; a fourth node asserts every _UNSCANNED_BOOTSTRAP_FILES entry names an existing file, and
+      test_scanned_set_is_non_empty_and_every_expected_file_present's required list gains bootstrap_ci_apply.tf. No
+      existing assertion loses meaning (Decision 235); decompose (Decision 128) if the file nears 500 SLOC.
   - file: .github/workflows/terraform-bootstrap-apply.yml
     action: Create
     purpose: >-
@@ -183,7 +200,9 @@ scope:
       terraform-bootstrap-apply, cancel-in-progress false. preview job: if github.ref == 'refs/heads/main';
       environment {name: tf-trusted-plan, deployment: false}; permissions id-token write, contents read, actions read;
       outputs reviewed, has_changes, verdict; env TF_IN_AUTOMATION 1, TF_INPUT 0 and MASK_AWS_ROLE_ID_ACCOUNT_PART.
-      Steps: checkout (persist-credentials false, pinned sha as the precedent); ./.github/actions/aws-region;
+      Steps: checkout (persist-credentials false, pinned sha as the precedent); python3 -I
+      scripts/ci/terraform_bootstrap_apply_gate.py screen (before any credential or terraform step);
+      ./.github/actions/aws-region;
       configure-aws-credentials (pinned) with role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/bootstrap-preview;
       ./.github/actions/materialise-tfvars; read config/terraform-version; setup-terraform (pinned, wrapper off);
       setup-python 3.12; read-only plan through scripts/ci/quiet_run.sh: init -input=false -lockfile=readonly, then plan
@@ -194,10 +213,12 @@ scope:
       --environment tf-bootstrap-apply --require-no-admin-bypass (the exact command check_upstream derives from
       can_admins_bypass = false); always: delete plan.bin, plan.json and the tfvars file. apply job: needs preview; if
       main and (needs.preview.outputs.has_changes == 'true' or inputs.prove_gate); environment tf-bootstrap-apply; same
-      permissions; env TF_IN_AUTOMATION, TF_INPUT and MASK_AWS_ROLE_ID_ACCOUNT_PART as the precedent's apply job; first
+      permissions; env MASK_AWS_ROLE_ID_ACCOUNT_PART as the precedent's apply job, plus TF_IN_AUTOMATION 1 and
+      TF_INPUT 0; first
       step after checkout python3 -I scripts/ci/environment_reviewer_preflight.py approvals --environment
       tf-bootstrap-apply with env GH_TOKEN ${{ github.token }} and REVIEWER_LOGINS ${{
-      vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }} exactly as the precedent's approvals step; then aws-region,
+      vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }} exactly as the precedent's approvals step; then the gate's screen
+      step, aws-region,
       credentials for role/bootstrap-apply, materialise-tfvars, terraform and python setup, and one step bash
       scripts/ci/terraform_bootstrap_apply.sh with REVIEWED, PROVE_GATE and GH_TOKEN ${{ github.token }} in env; always
       delete the tfvars file. Never uploads an artifact or prints plan text.
@@ -206,7 +227,7 @@ scope:
     purpose: >-
       BUILD PR 2. Standard-library-only gate, shaped like terraform_github_apply_gate.py (reuse plan_names_core.py
       where it fits). classify(row): CI-writable only when actions are ["create"] or ["update"] (never delete, replace,
-      read, forget or importing), the type is aws_iam_role, aws_iam_role_policy, aws_iam_role_policy_attachment or
+      read, forget, importing or a previous_address from a moved block), the type is aws_iam_role, aws_iam_role_policy, aws_iam_role_policy_attachment or
       aws_iam_policy, and the target name (role name, the policy's role, the attachment's role and policy name, or the
       policy name) starts agent-platform- and is not agent-platform-github-ci-apply-boundary or agent-platform-session-*,
       and an aws_iam_role's permissions_boundary ends with :policy/agent-platform-github-ci-apply-boundary; an unknown
@@ -218,10 +239,16 @@ scope:
       role. An aws_iam_role row that sets or changes inline_policy or managed_policy_arns is protected (those grants
       would bypass the GRANT flag). An update to an existing role's assume_role_policy is CI-writable only for a role in
       TRUST_WRITABLE_ROLES (one module constant equal to IAMRoleTrustWrite's list); a new role's trust is set by its
-      create. Names are read from plan values and never printed beyond the address. preview: rows of address, action,
+      create. A row whose policy document gains an Allow with NotAction or NotResource, an iam: action other than
+      Get*, List*, Simulate* or Generate* on "*" or on any resource outside role/agent-platform-* and
+      policy/agent-platform-*, or the Secrets Manager GetSecretValue action or any ssm:GetParameter* action, is
+      protected: a bounded role must not reach the protected set or a secret through a names-only review (row 34's boundary Deny is the IAM
+      backstop). A row whose configuration carries a provisioner is protected. Rows are keyed by their full address,
+      for_each and count keys included, never a normalised one. Names are read from plan values and never printed
+      beyond the address and the name parts below. preview: rows of address, action,
       changed attribute names and flags (NEW_ROLE, TRUST for a changed or new assume_role_policy, GRANT for a new or
       changed policy document or a new attachment, with the IAM action names an Allow statement gains, which are public
-      HCL and contain no ARN; GRANT_SHAPE with the statement Sids when a Deny statement is removed or changed or an
+      HCL and contain no ARN, and the part after the account of each iam: Resource it names (role/agent-platform-x); GRANT_SHAPE with the statement Sids when a Deny statement is removed or changed or an
       Allow loses a Condition or widens its Resource; NARROWS, fail-safe, on any change to the grant documents of
       agent-platform-github-ci-apply: its inline policies, a managed policy attached to it, or an attachment), a first
       line "N changes; K privilege-affecting",
@@ -230,10 +257,16 @@ scope:
       exits 0 with ::warning::CLOUDSHELL_REQUIRED and the count, a dispatch run exits 1; an unreadable plan exits 1.
       check: exit 0 only when every change is CI-writable and matches a reviewed row (same address and actions, changed
       names within the reviewed names), and print SIMULATE_OWED when an applied row changes the grant surface of
-      agent-platform-github-ci-apply (its inline policy or a managed policy attached to it); prove: exit 0 only when the
+      agent-platform-github-ci-apply (its inline policies, a managed policy attached to it, or an attachment added or
+      removed); prove: exit 0 only when the
       plan has no change; pending: with GH_TOKEN, list (run id and status only) queued, waiting and in-progress runs of
       terraform-apply-sandbox.yml and reconcile.yml (both apply terraform/personal as agent-platform-github-ci-apply)
-      through the GitHub REST API (urllib), exit 1 when any exists. PROTECTED_NAME_PATTERNS
+      through the GitHub REST API (urllib), leaving out pull_request and pull_request_target runs, which apply nothing,
+      and exit 1 when any exists; screen: read terraform/bootstrap/*.tf and its lock file as text with a stdlib block
+      scanner and exit 1 with SCREEN_REFUSED, the file and the block type (never a value) on a provisioner, local-exec,
+      remote-exec or connection block, a module block, a data block whose type does not start aws_, a provider block or
+      required_providers entry other than aws (hashicorp/aws), a backend other than s3, or a lock file holding any
+      provider but registry.terraform.io/hashicorp/aws. PROTECTED_NAME_PATTERNS
       is one module constant the tests compare with the HCL guard. Why not terraform_apply_guard's classifier: that one
       decides terraform/personal's auto-apply budget for one role's own grants; this one decides which other roles a
       gated role may write and must match a names-only preview exactly, with a different protected set. Decompose into
@@ -253,15 +286,15 @@ scope:
     action: Create
     purpose: >-
       BUILD PR 2. Registered fast-tier fence over the workflow, mirroring validate_github_settings_apply (decompose into a
-      facade package if it nears 500 SLOC): (a) triggers are exactly push to main with row 7's paths and
+      facade package if it nears 500 SLOC): (a) triggers are exactly push to main with row 11's paths and
       workflow_dispatch with prove_gate; no pull_request*, workflow_call, workflow_run or schedule; (b) exactly the jobs
-      preview and apply with row 7's environments, if-guards and needs; (c) role/bootstrap-preview is assumed only by
+      preview and apply with row 11's environments, if-guards and needs; (c) role/bootstrap-preview is assumed only by
       the preview job and role/bootstrap-apply only by the apply job, and no other workflow file assumes either; (d) the
       apply job's first step after checkout is the approvals preflight for tf-bootstrap-apply; (e) no upload-artifact,
       no tee or cat of a plan file and no terraform invocation outside quiet_run.sh; (f) both roles' job_workflow_ref
       in bootstrap_ci_apply.tf names this workflow at refs/heads/main and their subjects name these two Environments;
-      (g) .github/CODEOWNERS covers the workflow, both scripts and this check. Predicates take parsed data so red
-      cases run on synthetic input.
+      (g) .github/CODEOWNERS covers the workflow, both scripts and this check; (h) each job runs the gate's screen
+      step before any credentials or terraform step. Predicates take parsed data so red cases run on synthetic input.
   - file: scripts/checks/ci_guards/_manifest.py
     action: Modify
     purpose: >-
@@ -296,14 +329,20 @@ scope:
       an import, an unknown name with no resolvable reference and an update to an agent-platform-* managed policy
       attached to PlatformDev, an aws_iam_role setting inline_policy, one setting managed_policy_arns, and a trust
       update on an agent-platform-* role outside TRUST_WRITABLE_ROLES (a trust update on agent-platform-github-ci-apply
-      is accepted); it accepts a new role whose inline policy and attachment reference it by address (names
+      is accepted), an inline policy update on agent-platform-github-ci-apply granting iam:UpdateAssumeRolePolicy on
+      role/PlatformAdmin, one granting iam:PutRolePolicy on "*", one granting ssm:GetParameter on a /secret/ parameter,
+      one adding an Allow with NotResource, a resource with a provisioner and a row with a previous_address; it accepts a new role whose inline policy and attachment reference it by address (names
       unknown until apply, resolved through configuration references). Flags: NARROWS on an Allow action removed, a
       Resource narrowed, a Condition added and a new attachment on agent-platform-github-ci-apply, and not on an
       unrelated role; GRANT_SHAPE on a removed Deny, a dropped Condition and a widened Resource. Pending: a stubbed
       REST response with a waiting terraform-apply-sandbox.yml run, and one with an in-progress reconcile.yml run, each
-      exit 1; empty responses exit 0; only run ids and statuses are printed. SIMULATE_OWED prints for an applied change to the apply role's
+      exit 1; a pull_request run of either file and empty responses exit 0; only run ids and statuses are printed.
+      Screen: the real tree passes, and a provisioner, a local-exec, a module block, an external and an http data
+      source, a second provider, a required_providers entry for another provider, a non-s3 backend and a lock with a
+      second provider each refuse. Two instances of one for_each resource are two rows, each printed with its key. SIMULATE_OWED prints for an applied change to the apply role's
       inline policy and not for a new unrelated role. Preview: NO_CHANGES, REVIEWABLE with flags and added action names, CLOUDSHELL_REQUIRED
-      neutral on push and failing on dispatch, no ARN or account-shaped string in any output. Check: an unlisted change,
+      neutral on push and failing on dispatch, an iam: Resource printed as its name part, no ARN or account-shaped
+      string in any output. Check: an unlisted change,
       a changed name outside the reviewed names and a protected change each refuse. test_protected_patterns_match_hcl_denies:
       every PROTECTED_NAME_PATTERNS entry is covered by a Deny resource in bootstrap_ci_apply.tf and the reverse.
   - file: tests/test_terraform_bootstrap_apply_sh.py
@@ -317,29 +356,39 @@ scope:
   - file: tests/checks/ci_guards/test_validate_bootstrap_apply.py
     action: Create
     purpose: >-
-      BUILD PR 2. One real-tree node and one red node per predicate (a)-(g) on synthetic input (for example a
+      BUILD PR 2. One real-tree node and one red node per predicate (a)-(h) on synthetic input (for example a
       pull_request trigger, the apply role named in the preview, a third workflow assuming bootstrap-apply, a step before
-      the approvals check, an upload-artifact step, a job_workflow_ref on another file, a CODEOWNERS line removed).
+      the approvals check, an upload-artifact step, a job_workflow_ref on another file, a CODEOWNERS line removed, a
+      screen step after the credentials step).
   - file: tests/checks/ci_guards/test_validate_trusted_plan_environment.py
     action: Modify
     purpose: >-
       BUILD PR 2. test_bootstrap_apply_preview_is_governed: the real tree's terraform-bootstrap-apply.yml preview job
       passes predicates (a), (c), (g), (h), (i) and (l), and a copy with the preview's deployment: false removed fails
-      (l).
+      (l). test_trusted_workflows_are_unchanged_and_the_apply_workflow_may_declare_env's equality gains the new file
+      (v.ENV_WORKFLOWS == v.TRUSTED_WORKFLOWS | {_APPLY_WF, "terraform-bootstrap-apply.yml"}): an exact set extended to
+      the tree, still an equality (Decision 235).
   - file: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
     action: Modify
     purpose: >-
       BUILD PR 2. test_bootstrap_apply_jobs_check_their_environment: the real tree passes, and a copy whose apply job
-      runs a step before the approvals check, or whose preview drops the Environment check, fails. The existing
-      test_real_tree_gates_every_reviewer_job's exact count assert len(gated) == 6 becomes 7 (the new gated apply job):
-      an exact count tracking the tree, not a change of the assertion's meaning.
+      runs a step before the approvals check, or whose preview drops the Environment check, fails. The two exact counts
+      (test_real_tree_is_green's examined == 6 and test_real_tree_gates_every_reviewer_job's len(gated) == 6) take the
+      tests/CLAUDE.md growth-safe form: a membership floor naming each (workflow, job) pair main gates today plus
+      ("terraform-bootstrap-apply.yml", "apply"), uniqueness of the gated pairs, and examined at least the floor's
+      size. Each named pair says more than the bare count did, and the approvals-first loop over every gated job is
+      unchanged.
   - file: tests/checks/ci_guards/test__manifest.py
     action: Modify
     purpose: BUILD PR 2. The mirror test lists the new Entry.
   - file: terraform/bootstrap/CLAUDE.md
     action: Modify
     purpose: >-
-      BUILD PR 2. The "NEVER auto-apply this module" section and the ongoing-apply runbook say: changes merge by PR,
+      BUILD PR 2. The "NEVER auto-apply this module" section's lines 14-17 ("must NEVER be added to any auto-apply
+      workflow or the terraform_apply_guard.py guard path. Apply this module manually, by hand, every time, using the
+      agent_platform_admin profile") say instead that the root stays out of terraform-apply-sandbox.yml and
+      terraform_apply_guard.py's path and is applied by terraform-bootstrap-apply.yml or the operator's CloudShell, with
+      no phrase VP 12 sweeps for; that section and the ongoing-apply runbook say: changes merge by PR,
       terraform-bootstrap-apply.yml applies them on one approval unless its preview ends CLOUDSHELL_REQUIRED, and then
       the operator applies the whole plan from CloudShell with the block the change's plan carries
       (deploy-paths.yaml admin_out_of_band.bootstrap_ci_apply). Net-shrinking (prose budget S2; the build lowers the
@@ -347,9 +396,10 @@ scope:
   - file: terraform/CLAUDE.md
     action: Modify
     purpose: >-
-      BUILD PR 2. The table row "Apply terraform/bootstrap ... Operator action only" splits into one row naming
-      terraform-bootstrap-apply.yml (approve in tf-bootstrap-apply) and the CloudShell path for a CLOUDSHELL_REQUIRED
-      plan; net bytes not above main's (S2; lower the entry to the measured bytes, never a raise).
+      BUILD PR 2. Line 48's table row "Apply `terraform/bootstrap`, or apply `terraform/personal` by hand ... Operator
+      action only" splits: a terraform/bootstrap row names terraform-bootstrap-apply.yml (approve in tf-bootstrap-apply)
+      and the CloudShell path for a CLOUDSHELL_REQUIRED plan, and the terraform/personal by-hand cases keep their
+      Operator action only row; net bytes not above main's (S2; lower the entry to the measured bytes, never a raise).
   - file: config/prose_budgets.yaml
     action: Modify
     purpose: >-
@@ -389,20 +439,44 @@ scope:
       owner: platform} with a rationale in terraform-github-apply's shape (an operator-gated apply from main; waiting,
       rejected and cancelled runs and a CLOUDSHELL_REQUIRED preview are expected states the dispatching agent reads). Two lines
       exactly: the file then sits at its 500-line cap (498 today), so a third line is a compaction, never a raise.
+  - file: terraform/bootstrap/github_ci_apply_boundary.tf
+    action: Modify
+    purpose: >-
+      BUILD PR 1 (row 34). One new Deny statement in the CI apply boundary, DenyBoundedWriteOnProtectedRoles: iam:Create*,
+      Put*, Attach*, Detach*, Delete*, Update*, Tag*, Untag* and PassRole on role/PlatformAdmin, role/PlatformDev,
+      role/bootstrap-*, role/github-settings-* and role/platform-security-* (ARNs built with ${var.account_id} like
+      DenyBoundaryPolicyModification's), with a comment naming Decision {{N}}: bootstrap-apply may change a bounded role's
+      grants after a names-only review, and the ceiling allows UpdateAssumeRolePolicy, DeleteRole, DetachRolePolicy,
+      DeleteRolePolicy and PassRole on "*", so without it such a grant could reach the protected roles. No other
+      statement changes; no bounded role writes these roles today (terraform/personal names none of them). The rendered
+      document measures 5,266 B on main and about 5,710 B after, under the 6,144 B precondition. It narrows the CI apply
+      role's grant surface, so VP 6 runs deploy-paths' PRE-APPLY and POST-APPLY steps. No line may carry a token VP 5's
+      screen refuses.
+  - file: docs/contracts/iam-simulate-fixture.yaml
+    action: Modify
+    purpose: >-
+      BUILD PR 1 (row 35). The six rows row 34's Deny now denies explicitly flip from implicitDeny to explicitDeny
+      (platformdev-tag-role, platformdev-untag-role, platformdev-update-role, platformdev-update-role-description,
+      platformadmin-update-role-description-negative and platformadmin-update-role-negative), each why naming
+      DenyBoundedWriteOnProtectedRoles on its one line; one amendment_log line at the top in rec-4049's flip shape. No
+      row is added: the file sits 3 effective lines under its 650 cap (647), so VP 6's inline SIM cases carry the two
+      new boundary checks (boundary-admin-trust, boundary-bootstrap-pass) and owed rec 7 moves them into the fixture.
+      The two read rows (platformdev-get-role-negative, platformadmin-get-role-policy-negative) stay implicitDeny; no
+      other row's verb and target match the Deny (checked at plan time).
 bundled_recommendations: []
 followon_recs: []
 infrastructure_dependencies:
-  - "terraform/bootstrap is admin-only (environment-taxonomy.yaml axis_a): BUILD PR 1 gets the operator's pre-merge screened CloudShell plan (VP 4-5) and the operator's post-merge CloudShell apply (VP 6), in phase one's VP 6-8 shape, so the roles exist before the workflow does. BUILD PR 2 changes no non-Markdown bootstrap file, so it needs no CloudShell plan; its first live contact is the merge push's preview (VP 10)."
+  - "terraform/bootstrap is admin-only (environment-taxonomy.yaml axis_a): BUILD PR 1 gets the operator's pre-merge screened CloudShell plan (VP 4-5) and the operator's post-merge CloudShell apply (VP 6), in phase one's VP 6-8 shape, so the roles exist before the workflow does. PR 1's boundary Deny narrows the CI apply role's grant surface, so VP 6 also runs deploy-paths' PRE-APPLY drain check and POST-APPLY simulate. BUILD PR 2 changes no non-Markdown bootstrap file, so it needs no CloudShell plan; its first live contact is the merge push's preview (VP 10)."
   - "One merged-unapplied bootstrap change at a time: PR 1 merges only when no other bootstrap change is merged and unapplied (phase one's and #1987 included) and when the operator can run VP 6 in the same sitting."
   - "Order: PR 1 merged and applied (VP 6), then the Environment created (VP 7), then PR 2 merges. If PR 2 merged first its preview would fail to assume a missing role (a red main run); if the Environment were missing, GitHub would auto-create it unprotected and the approvals check would refuse the run."
-  - "No start dependency on PLAN-agent-proxy-signed-access (back in planning 2026-11-13): this build needs no session AWS identity (CI runs on its own OIDC roles; every operator step runs in CloudShell) and clause 7 reads in either landing order. The two share DECISIONS.md, AGENTS.md and deploy-paths.yaml: whichever merges second rebases, and its re-plan drops its admin-environment clause, which this Decision supersedes."
+  - "No start dependency on PLAN-agent-proxy-signed-access (merged #2022; its build is back with its planner since 2026-11-13): this build needs no session AWS identity (CI runs on its own OIDC roles; every operator step runs in CloudShell) and clause 7 reads in either landing order. The two share DECISIONS.md, AGENTS.md and deploy-paths.yaml: whichever merges second rebases, and its re-plan drops its admin-environment clause, which this Decision supersedes."
   - "No Lambda code changes: no deploy channel runs. No new repository secret or variable: the workflow reuses AWS_ACCOUNT_ID, AWS_ROLE_ID_ACCOUNT_PART and TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS (no project-configuration.yaml row)."
 acceptance_criteria:
-  - "terraform/bootstrap declares bootstrap-apply and bootstrap-preview with one gated trust statement each, no boundary, and exactly row 1's four policies; test_bootstrap_ci_roles.py's real-tree nodes pass and its red node shows each predicate failing on its mutation; the Decision 225 guard admits only the reads allowance."
-  - "After PR 1's apply, live IAM simulation of the applied policies returns VP 6's expected decision for each of its twenty-four named cases: allowed for the three CI-writable cases (an inline policy, a managed policy version and the trust of agent-platform-github-ci-apply) and the preview's state read, implicitDeny for a trust write on a terraform/personal role, explicitDeny for each protected case it names (PlatformAdmin, PlatformDev, bootstrap-apply's own trust, github-settings-apply, the detector role, policy and trail, the apply App key, the boundary policy and its removal, a session-user key, the session policy, the OIDC provider, secret values, role assumption) and for the preview's writes and direct decrypt, and implicitDeny for the preview's forwarded decrypt (VP 6)."
+  - "terraform/bootstrap declares bootstrap-apply and bootstrap-preview with one gated trust statement each, no boundary, and exactly row 1's four policies; test_bootstrap_ci_roles.py's real-tree nodes pass and its red node shows each predicate failing on its mutation; the Decision 225 guard scans every bootstrap file outside its named exemptions and admits only the reads allowance; the CI apply boundary denies its roles every write to the protected roles (row 34)."
+  - "After PR 1's apply, live IAM simulation of the applied policies returns VP 6's expected decision for each of its twenty-six named cases: allowed for the three CI-writable cases (an inline policy, a managed policy version and the trust of agent-platform-github-ci-apply) and the preview's state read, implicitDeny for a trust write on a terraform/personal role, explicitDeny for each protected case it names (PlatformAdmin, PlatformDev, bootstrap-apply's own trust, github-settings-apply, the detector role, policy and trail, the apply App key, the boundary policy and its removal, a session-user key, the session policy, the OIDC provider, secret values, role assumption) and for the preview's writes and direct decrypt, implicitDeny for the preview's forwarded decrypt, and explicitDeny for the CI apply role's trust write on PlatformAdmin and PassRole on bootstrap-apply; the POST-APPLY fixture simulate reports no mismatch (VP 6)."
   - "tf-bootstrap-apply exists with a required reviewer, a main-only deployment policy and no admin bypass, created by one approved terraform-github-apply.yml run (VP 7) and read back by the preview's Environment check (VP 11)."
   - "terraform-bootstrap-apply.yml's preview runs on PR 2's merge push and reports NO_CHANGES (VP 10); a prove_gate dispatch waits for the operator's approval, its apply job passes the approvals check, assumes bootstrap-apply, plans no change and prints PROVE_OK (VP 11)."
-  - "The gate refuses every protected, destroy, replace and import case in fixtures (including role inline_policy and managed_policy_arns, a trust update outside TRUST_WRITABLE_ROLES and an update to a policy attached to a protected principal), flags NARROWS for any apply-role grant-document change, and the workflow fence, trusted-plan fence and reviewer-preflight fence pass with their red cases (VP 8)."
+  - "The gate refuses every protected, destroy, replace and import case in fixtures (including role inline_policy and managed_policy_arns, a trust update outside TRUST_WRITABLE_ROLES, an update to a policy attached to a protected principal, an IAM write grant outside agent-platform-*, a secret read grant, a provisioner and a moved row), screen refuses every foreign block, flags NARROWS for any apply-role grant-document change, and the workflow fence, trusted-plan fence and reviewer-preflight fence pass with their red cases (VP 8)."
   - "DECISIONS.md, AGENTS.md, deploy-paths.yaml and environment-taxonomy.yaml carry exactly the sidecar's words (approved_text verify passes), and the stale-reference sweep finds no live 'bootstrap is never CI-applied' instruction (VP 12)."
 verification_plan:
   - step: 1
@@ -478,52 +552,55 @@ verification_plan:
       against HashiCorp's SHA256SUMS, read the variable values from /secret/agent-platform-terraform-personal-tfvars and
       account_id from the caller without printing either, init with the new lock file and plan terraform/bootstrap
       read-only (-lock=false) on the sign-in's own credentials. The screen refuses (SCREEN_REFUSED) a head whose
-      terraform/ and config diff from main's tip names any file but the four PR 1 terraform rows, or whose added .tf
+      terraform/ and config diff from main's tip names any file but PR 1's five terraform files, or whose added .tf
       lines carry a provider, module, required_providers, provisioner, local-exec, external or http data source token,
       or whose lock file holds any provider but hashicorp/aws. An EXIT trap deletes the folder; errors go to
       $HOME/bca-tf.err, read in CloudShell only. The build records the returned lines as a counts-only PR comment.
     command: >-
-      ( set -o pipefail; PR_HEAD_SHA=<full PR head sha>; W="${TMPDIR:-/tmp}/bca-head"; L="$HOME/bca-tf.err"; rm -rf "$W";
-      mkdir -p "$W/bin"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE; { git init -q "$W/repo" && git -C
+      ( set -o pipefail; PR_HEAD_SHA=<full PR head sha>; W="${TMPDIR:-/tmp}/bca-head"; L="$HOME/bca-tf.err"; rm -rf
+      "$W"; mkdir -p "$W/bin"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE; { git init -q "$W/repo" && git -C
       "$W/repo" fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git +refs/heads/main:refs/o/main && git -C
       "$W/repo" fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git "$PR_HEAD_SHA" && git -C "$W/repo" checkout
       -q --detach FETCH_HEAD; } 2>> "$L" || { echo CLONE_FAILED; exit 1; }; F=$(git -C "$W/repo" diff --name-only
       refs/o/main HEAD -- terraform config/aws-region config/terraform-version 2>> "$L" | LC_ALL=C sort | tr '\n' ' ');
-      X=$(git -C "$W/repo" diff refs/o/main HEAD -- 'terraform/*.tf' 2>> "$L" | grep -E '^\+' | grep -cE
-      'data "(external|http)"|provider "|required_providers|module "|provisioner|local-exec'); K=$(grep -cE '^provider '
+      X=$(git -C "$W/repo" diff refs/o/main HEAD -- 'terraform/*.tf' 2>> "$L" | grep -E '^\+' | grep -cE 'data
+      "(external|http)"|provider "|required_providers|module "|provisioner|local-exec'); K=$(grep -cE '^provider '
       "$W/repo/terraform/bootstrap/.terraform.lock.hcl" 2>> "$L"); H=$(grep -cE '^provider
       "registry.terraform.io/hashicorp/aws" ' "$W/repo/terraform/bootstrap/.terraform.lock.hcl" 2>> "$L"); [ "$F" =
-      "terraform/bootstrap/.terraform.lock.hcl terraform/bootstrap/bootstrap_ci_apply.tf terraform/bootstrap/main.tf terraform/github/environments.tf " ]
+      "terraform/bootstrap/.terraform.lock.hcl terraform/bootstrap/bootstrap_ci_apply.tf
+      terraform/bootstrap/github_ci_apply_boundary.tf terraform/bootstrap/main.tf terraform/github/environments.tf " ]
       && [ "$X" = 0 ] && [ "$K" = 1 ] && [ "$H" = 1 ] || { echo SCREEN_REFUSED; exit 1; }; echo SCREEN_OK; R=$(tr -d
-      '[:space:]' < "$W/repo/config/aws-region"); export AWS_REGION="$R" AWS_DEFAULT_REGION="$R"; V=$(tr -d '[:space:]' <
-      "$W/repo/config/terraform-version"); case "$(uname -m)" in aarch64) P=linux_arm64 ;; *) P=linux_amd64 ;; esac;
-      Z="terraform_${V}_${P}.zip"; { curl -fsSL -o "$W/$Z" "https://releases.hashicorp.com/terraform/$V/$Z" && curl -fsSL
-      -o "$W/sums" "https://releases.hashicorp.com/terraform/$V/terraform_${V}_SHA256SUMS" && ( cd "$W" && grep " $Z\$"
-      sums | sha256sum -c --quiet - ) && unzip -qo "$W/$Z" -d "$W/bin"; } >> "$L" 2>&1 || { echo TERRAFORM_INSTALL_FAILED;
-      exit 1; }; export PATH="$W/bin:$PATH"; command -v jq > /dev/null || { echo JQ_ABSENT; exit 1; }; aws ssm
-      get-parameter --name /secret/agent-platform-terraform-personal-tfvars --with-decryption --query Parameter.Value
-      --output text > "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT; exit 1; }; A=$(aws
-      sts get-caller-identity --query Account --output text 2>> "$L"); test -n "$A" || { echo IDENTITY_FAILED; exit 1; };
-      B="$W/repo/terraform/bootstrap"; terraform -chdir="$B" init -input=false -lockfile=readonly
-      -backend-config="region=$R" > /dev/null 2>> "$L" || { echo INIT_FAILED; exit 1; }; terraform -chdir="$B" plan
-      -lock=false -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" -var "account_id=$A" -var
-      "aws_profile=" -out="$W/head.bin" > "$W/plan.txt" 2>> "$L"; echo "HEAD_PLAN_EXIT $?"; grep -E '^Plan: '
-      "$W/plan.txt"; terraform -chdir="$B" show -json "$W/head.bin" | jq -r '.resource_changes[] |
+      '[:space:]' < "$W/repo/config/aws-region"); export AWS_REGION="$R" AWS_DEFAULT_REGION="$R"; V=$(tr -d '[:space:]'
+      < "$W/repo/config/terraform-version"); case "$(uname -m)" in aarch64) P=linux_arm64 ;; *) P=linux_amd64 ;; esac;
+      Z="terraform_${V}_${P}.zip"; { curl -fsSL -o "$W/$Z" "https://releases.hashicorp.com/terraform/$V/$Z" && curl
+      -fsSL -o "$W/sums" "https://releases.hashicorp.com/terraform/$V/terraform_${V}_SHA256SUMS" && ( cd "$W" && grep "
+      $Z\$" sums | sha256sum -c --quiet - ) && unzip -qo "$W/$Z" -d "$W/bin"; } >> "$L" 2>&1 || { echo
+      TERRAFORM_INSTALL_FAILED; exit 1; }; export PATH="$W/bin:$PATH"; command -v jq > /dev/null || { echo JQ_ABSENT;
+      exit 1; }; aws ssm get-parameter --name /secret/agent-platform-terraform-personal-tfvars --with-decryption --query
+      Parameter.Value --output text > "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT;
+      exit 1; }; A=$(aws sts get-caller-identity --query Account --output text 2>> "$L"); test -n "$A" || { echo
+      IDENTITY_FAILED; exit 1; }; B="$W/repo/terraform/bootstrap"; terraform -chdir="$B" init -input=false
+      -lockfile=readonly -backend-config="region=$R" > /dev/null 2>> "$L" || { echo INIT_FAILED; exit 1; }; terraform
+      -chdir="$B" plan -lock=false -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" -var
+      "account_id=$A" -var "aws_profile=" -out="$W/head.bin" > "$W/plan.txt" 2>> "$L"; echo "HEAD_PLAN_EXIT $?"; grep -E
+      '^Plan: ' "$W/plan.txt"; terraform -chdir="$B" show -json "$W/head.bin" | jq -r '.resource_changes[] |
       select(.change.actions != ["no-op"]) | "\(.change.actions | join(",")) \(.address)"' | LC_ALL=C sort; echo
       "PR_HEAD_SHA $PR_HEAD_SHA" )
     expected: >-
-      SCREEN_OK; HEAD_PLAN_EXIT 2; Plan: 11 to add, 0 to change, 0 to destroy.; exactly eleven create lines, for
-      aws_iam_policy.bootstrap_apply_guard, aws_iam_policy.bootstrap_apply_write, aws_iam_policy.bootstrap_plan_reads,
-      aws_iam_policy.bootstrap_preview_guard, aws_iam_role.bootstrap_apply, aws_iam_role.bootstrap_preview and
-      aws_iam_role_policy_attachment.bootstrap_apply_guard, .bootstrap_apply_reads, .bootstrap_apply_write,
-      .bootstrap_preview_guard and .bootstrap_preview_reads; PR_HEAD_SHA with the sha the build wrote.
+      SCREEN_OK; HEAD_PLAN_EXIT 2; Plan: 11 to add, 1 to change, 0 to destroy.; exactly twelve lines: eleven create
+      lines, for aws_iam_policy.bootstrap_apply_guard, aws_iam_policy.bootstrap_apply_write,
+      aws_iam_policy.bootstrap_plan_reads, aws_iam_policy.bootstrap_preview_guard, aws_iam_role.bootstrap_apply,
+      aws_iam_role.bootstrap_preview and aws_iam_role_policy_attachment.bootstrap_apply_guard, .bootstrap_apply_reads,
+      .bootstrap_apply_write, .bootstrap_preview_guard and .bootstrap_preview_reads, then update
+      aws_iam_policy.github_ci_apply_boundary; PR_HEAD_SHA with the sha the build wrote.
     fix_if: >-
       SCREEN_REFUSED: nothing was initialised; if main moved under terraform/ the build rebases and asks the word again,
       else the head carries files beyond scope and the build stops and reports; the screen is never widened. A setup
       failure line: the operator reads $HOME/bca-tf.err in CloudShell and re-pastes. INIT_FAILED with a lock checksum
       error: the lock is wrong; fix it before merge. Any other address, an update or a destroy (for example another
       merged-unapplied bootstrap change): stop, do not merge, report to the coordinator. A precondition failure names
-      the oversized policy: split it.
+      the oversized policy: stop; a split changes the addresses this step and VP 6 pin, so it is a plan amendment,
+      never a build-time change.
     hermetic: false
     graduation: not-applicable
   - step: 6
@@ -531,9 +608,12 @@ verification_plan:
     action: >-
       BUILD PR 1. OPERATOR STEP, AWS CloudShell in the PROD account, in the same sitting as the merge. VP 5's fetch,
       screen, install, variable and init lines at the merge sha M (the screen on the merge commit's own diff), then a
-      saved plan applied only when its summary is exactly 11 to add, 0 to change, 0 to destroy and its addresses are
-      exactly VP 5's, a fresh plan, and IAM simulation of the applied policies (24 named cases) (read-only; the ARNs are built from the
-      caller's account in-shell and never printed). The operator's paste is the direction for the apply (Decision 126
+      saved plan applied only when its summary is exactly 11 to add, 1 to change, 0 to destroy and its addresses are
+      exactly VP 5's, a fresh plan, IAM simulation of the applied policies (26 named cases) and the POST-APPLY fixture
+      simulate (deploy-paths procedure, iam_simulate from the clone with no profile), all read-only; the ARNs are built
+      from the caller's account in-shell and never printed. Before posting, the build runs the PRE-APPLY drain check:
+      mcp__github__actions_list shows no queued, waiting or in-progress push, dispatch or schedule run of
+      terraform-apply-sandbox.yml or reconcile.yml, or the build waits for them to finish. The operator's paste is the direction for the apply (Decision 126
       cl.1). No detector email is expected: no filter matches bootstrap-* names.
     command: >-
       ( set -o pipefail; set -f; M=<full merge sha>; W="${TMPDIR:-/tmp}/bca-merge"; L="$HOME/bca-tf.err"; rm -rf "$W";
@@ -545,36 +625,37 @@ verification_plan:
       "|required_providers|module "|provisioner|local-exec'); K=$(grep -cE '^provider '
       "$W/repo/terraform/bootstrap/.terraform.lock.hcl" 2>> "$L"); H=$(grep -cE '^provider
       "registry.terraform.io/hashicorp/aws" ' "$W/repo/terraform/bootstrap/.terraform.lock.hcl" 2>> "$L"); [ "$F" =
-      "terraform/bootstrap/.terraform.lock.hcl terraform/bootstrap/bootstrap_ci_apply.tf terraform/bootstrap/main.tf
-      terraform/github/environments.tf " ] && [ "$X" = 0 ] && [ "$K" = 1 ] && [ "$H" = 1 ] || { echo SCREEN_REFUSED;
-      exit 1; }; echo SCREEN_OK; R=$(tr -d '[:space:]' < "$W/repo/config/aws-region"); export AWS_REGION="$R"
-      AWS_DEFAULT_REGION="$R"; V=$(tr -d '[:space:]' < "$W/repo/config/terraform-version"); case "$(uname -m)" in
-      aarch64) P=linux_arm64 ;; *) P=linux_amd64 ;; esac; Z="terraform_${V}_${P}.zip"; { curl -fsSL -o "$W/$Z"
-      "https://releases.hashicorp.com/terraform/$V/$Z" && curl -fsSL -o "$W/sums"
-      "https://releases.hashicorp.com/terraform/$V/terraform_${V}_SHA256SUMS" && ( cd "$W" && grep " $Z\$" sums |
-      sha256sum -c --quiet - ) && unzip -qo "$W/$Z" -d "$W/bin"; } >> "$L" 2>&1 || { echo TERRAFORM_INSTALL_FAILED; exit
-      1; }; export PATH="$W/bin:$PATH"; command -v jq > /dev/null || { echo JQ_ABSENT; exit 1; }; aws ssm get-parameter
-      --name /secret/agent-platform-terraform-personal-tfvars --with-decryption --query Parameter.Value --output text >
-      "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT; exit 1; }; A=$(aws sts
-      get-caller-identity --query Account --output text 2>> "$L"); test -n "$A" || { echo IDENTITY_FAILED; exit 1; };
-      B="$W/repo/terraform/bootstrap"; terraform -chdir="$B" init -input=false -lockfile=readonly
-      -backend-config="region=$R" > /dev/null 2>> "$L" || { echo INIT_FAILED; exit 1; }; terraform -chdir="$B" plan
-      -input=false -no-color -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" -out="$W/merge.bin" >
-      "$W/plan.txt" 2>> "$L"; s=$(grep -E '^Plan: ' "$W/plan.txt"); echo "MERGE_PLAN $s"; a=$(terraform -chdir="$B" show
-      -json "$W/merge.bin" | jq -r '.resource_changes[] | select(.change.actions != ["no-op"]) | "\(.change.actions |
-      join(",")) \(.address)"' | LC_ALL=C sort | tr '\n' ' '); e="create aws_iam_policy.bootstrap_apply_guard create
-      aws_iam_policy.bootstrap_apply_write create aws_iam_policy.bootstrap_plan_reads create
-      aws_iam_policy.bootstrap_preview_guard create aws_iam_role.bootstrap_apply create aws_iam_role.bootstrap_preview
-      create aws_iam_role_policy_attachment.bootstrap_apply_guard create
-      aws_iam_role_policy_attachment.bootstrap_apply_reads create aws_iam_role_policy_attachment.bootstrap_apply_write
-      create aws_iam_role_policy_attachment.bootstrap_preview_guard create
-      aws_iam_role_policy_attachment.bootstrap_preview_reads "; if [ "$s" = "Plan: 11 to add, 0 to change, 0 to
-      destroy." ] && [ "$a" = "$e" ]; then terraform -chdir="$B" apply -input=false -no-color "$W/merge.bin" 2>> "$L" |
-      grep -E '^Apply complete!'; terraform -chdir="$B" plan -input=false -no-color -detailed-exitcode
-      -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" > /dev/null 2>> "$L"; echo
-      "BOOTSTRAP_PLAN_EXIT $?"; else echo APPLY_SKIPPED; exit 1; fi; r() { aws iam simulate-principal-policy
-      --policy-source-arn "arn:aws:iam::$A:role/$1" --action-names "$2" --resource-arns "$3" ${4:+--context-entries
-      "$4"} --query 'EvaluationResults[0].EvalDecision' --output text 2>> "$L"; };
+      "terraform/bootstrap/.terraform.lock.hcl terraform/bootstrap/bootstrap_ci_apply.tf
+      terraform/bootstrap/github_ci_apply_boundary.tf terraform/bootstrap/main.tf terraform/github/environments.tf " ]
+      && [ "$X" = 0 ] && [ "$K" = 1 ] && [ "$H" = 1 ] || { echo SCREEN_REFUSED; exit 1; }; echo SCREEN_OK; R=$(tr -d
+      '[:space:]' < "$W/repo/config/aws-region"); export AWS_REGION="$R" AWS_DEFAULT_REGION="$R"; V=$(tr -d '[:space:]'
+      < "$W/repo/config/terraform-version"); case "$(uname -m)" in aarch64) P=linux_arm64 ;; *) P=linux_amd64 ;; esac;
+      Z="terraform_${V}_${P}.zip"; { curl -fsSL -o "$W/$Z" "https://releases.hashicorp.com/terraform/$V/$Z" && curl
+      -fsSL -o "$W/sums" "https://releases.hashicorp.com/terraform/$V/terraform_${V}_SHA256SUMS" && ( cd "$W" && grep "
+      $Z\$" sums | sha256sum -c --quiet - ) && unzip -qo "$W/$Z" -d "$W/bin"; } >> "$L" 2>&1 || { echo
+      TERRAFORM_INSTALL_FAILED; exit 1; }; export PATH="$W/bin:$PATH"; command -v jq > /dev/null || { echo JQ_ABSENT;
+      exit 1; }; aws ssm get-parameter --name /secret/agent-platform-terraform-personal-tfvars --with-decryption --query
+      Parameter.Value --output text > "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT;
+      exit 1; }; A=$(aws sts get-caller-identity --query Account --output text 2>> "$L"); test -n "$A" || { echo
+      IDENTITY_FAILED; exit 1; }; B="$W/repo/terraform/bootstrap"; terraform -chdir="$B" init -input=false
+      -lockfile=readonly -backend-config="region=$R" > /dev/null 2>> "$L" || { echo INIT_FAILED; exit 1; }; terraform
+      -chdir="$B" plan -input=false -no-color -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile="
+      -out="$W/merge.bin" > "$W/plan.txt" 2>> "$L"; s=$(grep -E '^Plan: ' "$W/plan.txt"); echo "MERGE_PLAN $s";
+      a=$(terraform -chdir="$B" show -json "$W/merge.bin" | jq -r '.resource_changes[] | select(.change.actions !=
+      ["no-op"]) | "\(.change.actions | join(",")) \(.address)"' | LC_ALL=C sort | tr '\n' ' '); e="create
+      aws_iam_policy.bootstrap_apply_guard create aws_iam_policy.bootstrap_apply_write create
+      aws_iam_policy.bootstrap_plan_reads create aws_iam_policy.bootstrap_preview_guard create
+      aws_iam_role.bootstrap_apply create aws_iam_role.bootstrap_preview create
+      aws_iam_role_policy_attachment.bootstrap_apply_guard create aws_iam_role_policy_attachment.bootstrap_apply_reads
+      create aws_iam_role_policy_attachment.bootstrap_apply_write create
+      aws_iam_role_policy_attachment.bootstrap_preview_guard create
+      aws_iam_role_policy_attachment.bootstrap_preview_reads update aws_iam_policy.github_ci_apply_boundary "; if [ "$s"
+      = "Plan: 11 to add, 1 to change, 0 to destroy." ] && [ "$a" = "$e" ]; then terraform -chdir="$B" apply
+      -input=false -no-color "$W/merge.bin" 2>> "$L" | grep -E '^Apply complete!'; terraform -chdir="$B" plan
+      -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" >
+      /dev/null 2>> "$L"; echo "BOOTSTRAP_PLAN_EXIT $?"; else echo APPLY_SKIPPED; exit 1; fi; r() { aws iam
+      simulate-principal-policy --policy-source-arn "arn:aws:iam::$A:role/$1" --action-names "$2" --resource-arns "$3"
+      ${4:+--context-entries "$4"} --query 'EvaluationResults[0].EvalDecision' --output text 2>> "$L"; };
       Q="ContextKeyName=iam:PermissionsBoundary,ContextKeyType=string,ContextKeyValues=arn:aws:iam::$A:policy/agent-platform-github-ci-apply-boundary";
       V0="ContextKeyName=aws:ViaAWSService,ContextKeyType=boolean,ContextKeyValues=false";
       V1="ContextKeyName=aws:ViaAWSService,ContextKeyType=boolean,ContextKeyValues=true"; I="arn:aws:iam::$A";
@@ -601,10 +682,13 @@ verification_plan:
       bootstrap-preview s3:GetObject arn:aws:s3:::agent-platform-bootstrap-tfstate/terraform.tfstate"
       "preview-state-write bootstrap-preview s3:PutObject
       arn:aws:s3:::agent-platform-bootstrap-tfstate/terraform.tfstate" "preview-decrypt-direct bootstrap-preview
-      kms:Decrypt * $V0" "preview-decrypt-forwarded bootstrap-preview kms:Decrypt * $V1"; do set -- $c; echo "SIM $1 $(r
-      "$2" "$3" "$4" "$5")"; done; echo "MERGE_SHA $M" )
+      kms:Decrypt * $V0" "preview-decrypt-forwarded bootstrap-preview kms:Decrypt * $V1" "boundary-admin-trust
+      agent-platform-github-ci-apply iam:UpdateAssumeRolePolicy $I:role/PlatformAdmin" "boundary-bootstrap-pass
+      agent-platform-github-ci-apply iam:PassRole $I:role/bootstrap-apply"; do set -- $c; echo "SIM $1 $(r "$2" "$3"
+      "$4" "$5")"; done; ( cd "$W/repo" && python3 -m scripts.ci.iam_simulate 2>> "$L" | grep -E 'triples
+      simulated|MISMATCH|PASS:' ); echo "FIXTURE_SIM_EXIT $?"; echo "MERGE_SHA $M" )
     expected: >-
-      SCREEN_OK; MERGE_PLAN Plan: 11 to add, 0 to change, 0 to destroy.; Apply complete! Resources: 11 added, 0 changed,
+      SCREEN_OK; MERGE_PLAN Plan: 11 to add, 1 to change, 0 to destroy.; Apply complete! Resources: 11 added, 1 changed,
       0 destroyed.; BOOTSTRAP_PLAN_EXIT 0; SIM ci-inline allowed, SIM ci-reads-version allowed, SIM ci-trust allowed,
       SIM personal-trust implicitDeny, SIM admin-inline explicitDeny, SIM dev-trust explicitDeny, SIM self-trust
       explicitDeny, SIM settings-inline explicitDeny, SIM detector-role explicitDeny, SIM detector-policy explicitDeny,
@@ -612,13 +696,19 @@ verification_plan:
       explicitDeny, SIM boundary-removal explicitDeny, SIM session-policy explicitDeny, SIM oidc explicitDeny, SIM
       secret explicitDeny, SIM assume explicitDeny, SIM preview-write explicitDeny, SIM preview-state allowed, SIM
       preview-state-write explicitDeny, SIM preview-decrypt-direct explicitDeny, SIM preview-decrypt-forwarded
-      implicitDeny; MERGE_SHA with the merge sha.
+      implicitDeny, SIM boundary-admin-trust explicitDeny, SIM boundary-bootstrap-pass explicitDeny; the fixture
+      simulate's 'N triples simulated, 0 mismatch(es).' line and its PASS line; FIXTURE_SIM_EXIT 0; MERGE_SHA with the
+      merge sha.
     fix_if: >-
       SCREEN_REFUSED, APPLY_SKIPPED or any other count: nothing was applied; stop and report to the coordinator as a plan
       defect, never a second paste. BOOTSTRAP_PLAN_EXIT 2 after the apply: stop and report; a half-applied state is
       re-planned, never hand-edited. A SIM line other than expected is a policy defect: PR 2 does not start until a
       fix (a protected-set change, so a CloudShell apply again) makes it match. KEY_LOOKUP_FAILED: the App key secret
-      is absent or renamed; stop and report. The build fills only M; set -f keeps the * resources literal.
+      is absent or renamed; stop and report. FIXTURE_SIM_EXIT not 0 with a MISMATCH line: a policy defect, as a SIM
+      mismatch. FIXTURE_SIM_EXIT not 0 without one: the operator reads $HOME/bca-tf.err in CloudShell (for example a
+      missing boto3 or PyYAML module or a Python older than the script needs, UNPROVEN in CloudShell); the apply stands
+      but is not complete (deploy-paths POST-APPLY), PR 2 waits, and the build reports to the coordinator; the block
+      never installs a package. The build fills only M; set -f keeps the * resources literal.
     hermetic: false
     graduation: not-applicable
   - step: 7
@@ -652,7 +742,8 @@ verification_plan:
       tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py tests/checks/ci_guards/test__manifest.py
       tests/checks/iam_tf/test_bootstrap_ci_roles.py -q
     expected: >-
-      All pass, including test_protected_patterns_match_hcl_denies, every refusal fixture, each predicate's red node,
+      All pass, including test_protected_patterns_match_hcl_denies, every refusal and screen fixture, each predicate's
+      red node,
       test_bootstrap_apply_preview_is_governed and test_bootstrap_apply_jobs_check_their_environment.
     fix_if: Any failure; fix the code, never an assertion's meaning (Decision 235).
     hermetic: true
@@ -721,16 +812,24 @@ verification_plan:
     phase: pre-deploy
     action: BUILD PR 2. Stale-reference sweep for the retired "bootstrap is never CI-applied" instruction.
     command: >-
-      rg -n -i "never be added to any auto-apply workflow|bootstrap root is admin-only out-of-band|applied only manually
-      under agent_platform_admin|which CI never applies" AGENTS.md terraform/ docs/contracts/ .claude/ scripts/ || echo
-      SWEEP_CLEAN
+      P='never be added to any auto-apply|bootstrap root is admin-only out-of-band|only be applied manually|applied
+      only manually under agent_platform_admin|Apply this module manually|Apply `terraform/bootstrap`[^|]*[|] Operator
+      action only|which CI never applies'; for f in AGENTS.md terraform/bootstrap/main.tf terraform/bootstrap/CLAUDE.md
+      terraform/CLAUDE.md; do git show "75e6a7382ab202cb904f997895cb600b4d17b3b7:$f" | grep -q -i -E "$P" && echo
+      "RED_BEFORE_HIT $f" || echo "RED_BEFORE_MISS $f"; done; grep -r -I -n -i -E "$P" AGENTS.md terraform/
+      docs/contracts/ .claude/ scripts/ || echo SWEEP_CLEAN
     expected: >-
-      SWEEP_CLEAN, or only lines inside dated history (amendment_log entries, DECISIONS.md text the notes amend) and
-      the terraform/bootstrap/CLAUDE.md sentence that still forbids adding the root to terraform-apply-sandbox.yml or
-      any auto-apply path, which stays true.
-    fix_if: A live instruction elsewhere is listed in the PR body and becomes owed rec 5's item, owner asked first.
+      Four RED_BEFORE_HIT lines (AGENTS.md:46, terraform/bootstrap/main.tf:8, terraform/bootstrap/CLAUDE.md:16-17 and
+      terraform/CLAUDE.md:48 at this plan's base commit, the red-before run measured at plan time), then SWEEP_CLEAN.
+    fix_if: >-
+      A RED_BEFORE_MISS line: the pattern set no longer matches the base text; fix the pattern, never drop the file. A
+      sweep hit in a file this plan edits: reword it. A live instruction elsewhere is listed in the PR body and becomes
+      owed rec 5's item, owner asked first.
     hermetic: false
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: >-
+      A one-off sweep of a retired phrase set over the build's tree; a standing check would pin wording rather than
+      behaviour, and the red-before run against the plan's base commit proves the patterns hit all four sites.
   - step: 13
     phase: post-deploy
     action: >-
@@ -787,17 +886,17 @@ test_obligations:
     test_selector: tests/checks/iam_tf/test_bootstrap_ci_roles.py::test_bootstrap_apply_environment_declared
     red_green_expectation: red before (Environment absent), green after
   - source: tests/checks/iam_tf/test_platform_role_metadata_admin_scope.py
-    behavior: Decision 225's guard admits only bootstrap-plan-reads' iam reads on PlatformDev and PlatformAdmin.
+    behavior: Decision 225's guard scans every bootstrap file outside its named exemptions and admits only bootstrap-plan-reads' iam reads on PlatformDev and PlatformAdmin.
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_platform_role_metadata_admin_scope.py
-    red_green_expectation: red before (the new file's IAMRead matches both ARNs), green after the allowance
+    red_green_expectation: red before (the new file's IAMRead matches both ARNs, and a synthetic new bootstrap file is not scanned), green after the allowance and the derived scan set
   - source: .github/workflows/terraform-bootstrap-apply.yml
     behavior: Triggers, jobs, Environments, role partition, approvals-first and no plan output are fenced.
     verification_step: 8
     test_selector: tests/checks/ci_guards/test_validate_bootstrap_apply.py
     red_green_expectation: red before (workflow and check absent), green after
   - source: scripts/ci/terraform_bootstrap_apply_gate.py
-    behavior: Protected, destroy, replace, import and unknown rows never apply; names-only output; matching against the reviewed set.
+    behavior: Protected, destroy, replace, import, moved, provisioner, out-of-prefix IAM grant, secret grant and unknown rows never apply; screen refuses foreign blocks; names-only output; matching against the reviewed set.
     verification_step: 8
     test_selector: tests/test_terraform_bootstrap_apply_gate.py
     red_green_expectation: red before (module absent), green after
@@ -857,6 +956,18 @@ test_obligations:
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_terraform_github_import_blocks.py::TestTerraformGithubImportBlocks::test_real_tree_one_import_per_managed_resource
     red_green_expectation: red before (environments.tf declares two addresses without imports), green after
+  - source: terraform/bootstrap/github_ci_apply_boundary.tf
+    behavior: The CI apply boundary denies every role it bounds the role writes on PlatformAdmin, PlatformDev and the bootstrap, github-settings and detector roles.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_bootstrap_ci_roles.py::test_boundary_denies_protected_role_writes
+    red_green_expectation: red before (no such Deny in the boundary), green after
+  - source: docs/contracts/iam-simulate-fixture.yaml
+    behavior: Six protected-role rows read explicitDeny under the boundary's new Deny.
+    verification_step: 3
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: >-
+      Contract data; validate_iam_simulate_fixture_shape checks the rows' shape in the fast tier, and VP 6's POST-APPLY
+      simulate checks each flipped row against the live policy.
   - source: config/composite_action_body_baseline.yaml
     behavior: Every inline run body of the new workflow has its r3_workflows entry.
     verification_step: 9
@@ -875,7 +986,7 @@ constraints:
   - "No rescue agents or workaround loops (Decision 55); never attempt or retry sts:AssumeRole or any other credential-minting call from a session. Until phase one's cutover, prefix every repo command with AWS_PROFILE=agent-platform-unset."
   - Never write a key, account id, ExternalId or ARN containing an account id into the repo, a PR, a comment, a job log or the shared folder (AGENTS.md public boundary, Decision 101); CI output is names and tokens only.
   - The governed files get exactly the sidecar's words (Decision 246). The operator's word on the final diff is required for PR 1's IAM and Environment text before VP 4-5, and for PR 2's workflow and both scripts before merge (coordinator always_ask; CODEOWNERS does not bind agent PRs, rec-2827).
-  - No grant beyond scope row 1; a missing refresh read found in VP 10 or a SIM mismatch in VP 6 is a plan defect handled by amendment, never a build-time widening.
+  - No grant beyond scope row 1 and no boundary change beyond row 34's Deny; a missing refresh read found in VP 10 or a SIM mismatch in VP 6 is a plan defect handled by amendment, never a build-time widening.
   - Loosens no assertion (Decision 235); the Decision 225 guard gains exactly the named reads allowance. Never adds terraform/bootstrap to terraform-apply-sandbox.yml or terraform_apply_guard.py.
   - Files other projects own are not edited; in terraform/github/environments.tf only the new resource pair is added.
 context:
@@ -883,17 +994,17 @@ context:
   - "Design evidence: blind Fable consults ADVICE-r2.md (CI-first) and ADVICE-r3.md (principal, pre-merge plan, split) in /mnt/project-files/admin-environment/; the operator chose CI-first (card, 2026-11-13) and said 'write the plan' 12:26Z. Taken from r3: a dedicated gated role, not PlatformAdmin's trust; keep the operator's pre-merge plan until a PR-time plan (r3's option a); explicit Denies as the real control; privilege flags; reviewer and Environment main-only. Changed from r3 and from the 12:39Z message, and chosen by the operator on a card 13:23Z: no separate anchor root; the two roles sit in terraform/bootstrap under explicit self-Denies, because a new root would escape the bootstrap-scoped standing checks (validate_iam_policy_size, validate_secret_parameter_grants, validate_account_portable_names) and the Deny already stops any CI run changing them."
   - "Split: one plan, two build PRs with disjoint files and a fixed order (infrastructure_dependencies). PR 1: roles, lock file, header, Environment and their tests (CloudShell plan and apply, one tap). PR 2: workflow, gate, fences, docs and the sidecar's governed words (no CloudShell plan; one tap for the proof run). The governed words ride PR 2 because approved_text binds all fifteen blocks in one PR."
   - "Operator flow after this lands, until a PR-time trusted plan covers the root: a bootstrap PR gets the operator's screened CloudShell plan before merge (pre_merge_live_plan, unchanged), then one tap after merge; a CLOUDSHELL_REQUIRED plan gets the operator's CloudShell apply instead, as today."
-  - "UNPROVEN until VP 6: that IAM simulation evaluates each guard Deny as written (fixtures only before). UNPROVEN until VP 10: that bootstrap-plan-reads covers every refresh read the provider makes for this root's 21 resource types (per-service read families chosen so no iterative discovery is expected). UNPROVEN until VP 11: that the OIDC claims of a tf-bootstrap-apply job match the trust exactly. UNPROVEN until the first CI-writable bootstrap change: the apply path's write grants end to end (copied from github_ci_apply's proven Sids). UNPROVEN, never probed live: that a job outside tf-bootstrap-apply cannot assume bootstrap-apply (static tests only; IAM StringEquals)."
+  - "UNPROVEN until VP 6: that IAM simulation evaluates each guard Deny as written (fixtures only before), and that CloudShell's python3 runs scripts.ci.iam_simulate (boto3, PyYAML, version). UNPROVEN until VP 10: that bootstrap-plan-reads covers every refresh read the provider makes for this root's 21 resource types (per-service read families chosen so no iterative discovery is expected). UNPROVEN until VP 11: that the OIDC claims of a tf-bootstrap-apply job match the trust exactly. UNPROVEN until the first CI-writable bootstrap change: the apply path's write grants end to end (copied from github_ci_apply's proven Sids). UNPROVEN, never probed live: that a job outside tf-bootstrap-apply cannot assume bootstrap-apply (static tests only; IAM StringEquals)."
   - "Graduated shards kept unchanged (their test files are only extended, no node renamed or removed): dependabot-config-guard-is-pre-tier-on-config-edits, platform-admin-absent-from-ci-write-patterns, terraform-gate-lock-readonly (whole-file node, so the renamed exact-set test stays in it), terraform-github-import-blocks, trusted-plan-deployment-false, trusted-plan-environment-fence. validate_bootstrap_apply declares examined()/skipped() (Decision 170) and its graduation is waived in VP 8 (owed rec 6)."
   - "Proxy independence (2026-11-13: proxy signing of Function URLs fails, IAM signs): nothing in either build PR or the pipeline is signed by the session proxy; only VP 13's rec filing uses the recs store, and it falls back to the drafts."
   - "SIT (Decision 252): like the github-settings roles, the two roles also land in SIT's bootstrap state when the operator applies SIT, unused there until SIT's bootstrap gets its own pipeline (owed rec 5); this workflow plans and applies the PROD backend only. PROD bootstrap is thus CI-applied from main while SIT bootstrap stays admin-applied, a deliberate gap in 252's promote-only intent until rec 5."
-  - "Procedure steps on the CI path (deploy-paths admin_out_of_band.procedure): PRE-APPLY drain is the gate's pending check for a NARROWS plan; POST-APPLY simulate stays the operator's CloudShell step after a SIMULATE_OWED run (iam_simulate with no profile from a clone of main; that CloudShell has boto3 and PyYAML is UNPROVEN, and the block the agent posts installs neither), until owed rec 7. So a CI-role grant change costs the operator one pre-merge CloudShell plan, one tap and one CloudShell simulate until recs 1 and 7 land."
+  - "Procedure steps on the CI path (deploy-paths admin_out_of_band.procedure): PRE-APPLY drain is the gate's pending check for a NARROWS plan; POST-APPLY simulate stays the operator's CloudShell step after a SIMULATE_OWED run (iam_simulate with no profile from a clone of main; that CloudShell has boto3 and PyYAML is UNPROVEN, and the block the agent posts installs neither), until owed rec 7. PR 1 itself narrows the apply role's grant surface (row 34), so VP 6 runs the PRE-APPLY drain check and the POST-APPLY fixture simulate. So a CI-role grant change costs the operator one pre-merge CloudShell plan, one tap and one CloudShell simulate until recs 1 and 7 land."
   - "Inferred, not probed: registry.terraform.io serves hashicorp/aws to GitHub runners, so no provider mirror grant is needed; on a registry outage a run fails red and is re-run."
   - "V3 resolution: VP 5's operator-run pre-merge plan at PR 1's head substitutes for pre-merge post-deploy evidence for PR 1; PR 2 changes no non-Markdown bootstrap file. Behavioural acceptance is VP 6 (apply and IAM simulation), VP 7 (the Environment), VP 10 (first preview) and VP 11 (approved no-op run), with the operator's returned lines labelled operator-reported in counts-only PR comments naming the applied sha."
   - "Approvals at build start: the operator's CI-RCA override while the recs reader is unreachable (Decision 215 fails closed; this plan PR's override does not carry over), nothing else. The build session holds no AWS identity; VP 4-6 are the operator's CloudShell blocks and VP 7 and VP 11 are the operator's GitHub approvals. The operator's final-diff words (constraints) are asked at each PR's CI green."
   - "red_overlap: the recs reader is unreachable (Decision 215 fails closed; scripts.ci_rca.red_overlap exits 2 and its reader lookup goes through the refused profile chain, so it is not re-run); main's GitHub CI state is the substitute evidence and the operator's override is asked before the plan PR merges."
-  - "Overlaps: PLAN-agent-proxy-signed-access (back in planning) edits DECISIONS.md after the same 223 anchor and the same deploy-paths anchors (amendment_log, pre_merge_live_plan) and compacts other log entries; whichever builds second re-anchors (VP 9 fix_if). rec-4638 PR 5 (#2021) edits the HCL screen policy file this plan does not touch. rec-4233 PR 1 and rec-5026 carry their own CloudShell bootstrap blocks; after PR 2 lands their CI-writable parts may ride this pipeline instead, by their planners' amendment, never silently."
-  - "Owed follow-on recs, filed in VP 13 (exactly seven): 1 PR-time screened trusted plan for terraform/bootstrap (a terraform_hcl_screen policy row, the trusted-plan role's reads, the plan reviewer on a values-stripped bootstrap digest in a credential-free job), which retires clause 5's CloudShell pre-merge plan (L, High). 2 Decision 202's detector watches the gate's root of trust: any IAM write to bootstrap-* roles and policies, and any write made by bootstrap-apply (CreateRole and UpdateAssumeRolePolicy above all, since an approved run can create a role any principal may assume), alarms (S, High). 3 gated CI admin runbook (fixed menu: login provisioning invokes, IAM simulation, named secret uses) on its own role and Environment, retiring the remaining ADMIN-session carve-outs (213 cl.5, 230 cl.4, 237 cl.6, 251 cl.1, 204 cl.2) one by one (L, Medium). 4 broad SIT-only agent user once SIT exists, capped by an SCP (M, Low). 5 the Organization root on the same pattern after the organization trail lands, plus any live stale instruction VP 12 lists (M, Low). 6 graduate test_bootstrap_ci_roles.py and the gate tests as registry shards (S, Low). 7 run the POST-APPLY simulate in CI after a grant-surface change, so SIMULATE_OWED needs no CloudShell paste, and carry VP 6's 24 guard cases as fixture rows under a second principal so each simulate re-proves the guard (the trusted-plan fence forbids third-party Python in a tf-trusted-plan job, so it needs a stdlib simulate or a separate gated job; M, High). Drafts: /mnt/project-files/admin-environment/OWED-RECS.md."
+  - "Overlaps: PLAN-agent-proxy-signed-access (merged #2022; its build is back with its planner) edits DECISIONS.md after the same 223 anchor and the same deploy-paths anchors (amendment_log, pre_merge_live_plan) and compacts other log entries; whichever builds second re-anchors (VP 9 fix_if). rec-4638 PR 5 (#2021) edits the HCL screen policy file this plan does not touch. PLAN-telemetry-content-reader-lock (unbuilt) also edits the boundary and pins its rendered size at most 5,632 B; both together render about 5,900 B, under the 6,144 B precondition but over that trigger, so whichever builds second re-measures and the trigger is that plan's amendment. iam-simulate-fixture.yaml sits 3 lines under its cap and this plan adds one; PLAN-persona-verdict-credential and that plan also scope it, so the second to build compacts. rec-4233 PR 1 and rec-5026 carry their own CloudShell bootstrap blocks; after PR 2 lands their CI-writable parts may ride this pipeline instead, by their planners' amendment, never silently."
+  - "Owed follow-on recs, filed in VP 13 (exactly seven): 1 PR-time screened trusted plan for terraform/bootstrap (a terraform_hcl_screen policy row, the trusted-plan role's reads, the plan reviewer on a values-stripped bootstrap digest in a credential-free job), which retires clause 5's CloudShell pre-merge plan (L, High). 2 Decision 202's detector watches the gate's root of trust: any IAM write to bootstrap-* roles and policies, and any write made by bootstrap-apply (CreateRole and UpdateAssumeRolePolicy above all, since an approved run can create a role any principal may assume), alarms (S, High). 3 gated CI admin runbook (fixed menu: login provisioning invokes, IAM simulation, named secret uses) on its own role and Environment, retiring the remaining ADMIN-session carve-outs (213 cl.5, 230 cl.4, 237 cl.6, 251 cl.1, 204 cl.2) one by one (L, Medium). 4 broad SIT-only agent user once SIT exists, capped by an SCP (M, Low). 5 SIT's bootstrap root (Decision 252 cl.7) and the Organization root on the same pattern after the organization trail lands, plus any live stale instruction VP 12 lists (M, Low). 6 graduate test_bootstrap_ci_roles.py and the gate tests as registry shards (S, Low). 7 run the POST-APPLY simulate in CI after a grant-surface change, so SIMULATE_OWED needs no CloudShell paste, and carry VP 6's 26 cases as fixture rows (bootstrap-apply's under a second principal) so each simulate re-proves the guard and the boundary Deny, compacting the fixture to fit its cap (the trusted-plan fence forbids third-party Python in a tf-trusted-plan job, so it needs a stdlib simulate or a separate gated job; M, High). Drafts: /mnt/project-files/admin-environment/OWED-RECS.md."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND}
@@ -903,6 +1014,8 @@ gate_rounds:
   - {gate: wording-check, round: 3, verdict: PASS, digest: cf5b379be6ac9826e40e9d25c031249a03bc91a67a0c7f788a46917d9b5da200, base: 75e6a7382ab202cb904f997895cb600b4d17b3b7, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 4, nits: 8}
   - {gate: wording-check, round: 4, verdict: PASS, digest: f9c85fd2b716d02993867a71522920341082b54243b6b8d6132ee7cf8458bc13, base: 75e6a7382ab202cb904f997895cb600b4d17b3b7, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 3, nits: 11}
+  - {gate: wording-check, round: 5, verdict: PASS, digest: 6bc01dcddfcc98aff0eefedae45c8c05244627f9b133ef093ea6c627ddc57a6f, base: 75e6a7382ab202cb904f997895cb600b4d17b3b7, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -911,15 +1024,15 @@ pre_implementation_checklist:
   - Acceptance criteria understood and verifiable
   - "Start condition (infrastructure_dependencies): this plan merged and the operator's CI-RCA override given; no wait on PLAN-agent-proxy-signed-access."
 execution_steps:
-  - "BUILD PR 1. Tests first (scope rows 5-6), seen red on the unchanged tree; then terraform/bootstrap/bootstrap_ci_apply.tf, the lock file (copy terraform/personal's hashicorp/aws block), the main.tf header and the environments.tf pair. Post: VP 1-2 pass."
-  - "PR 1 Commit Flow (implement skill; git-ops.yaml handoff_sequence): VP 3, push, PR. At CI green ask the operator's final-diff word naming the full head sha; then post VP 4 and VP 5 at that sha and record the lines; merge only the head both cover, only when no other bootstrap change is merged and unapplied, and only when the operator is ready to run VP 6 in the same sitting. After merge post VP 6 expanded in full, then run VP 7."
-  - "BUILD PR 2, from main after VP 6 and VP 7 pass. Tests first (rows 15-19), then the gate, the shell script, the workflow, the fence and manifest entry, the two fence edits, CODEOWNERS and the two ci_rca_taxonomy rows. Post: VP 8 passes."
+  - "BUILD PR 1. Tests first (scope rows 4 and 8-10), seen red on the unchanged tree; then terraform/bootstrap/bootstrap_ci_apply.tf, the boundary's Deny and the fixture rows (rows 34-35), the lock file (copy terraform/personal's hashicorp/aws block), the main.tf header and the environments.tf pair. Post: VP 1-2 pass."
+  - "PR 1 Commit Flow (implement skill; git-ops.yaml handoff_sequence): VP 3, push, PR. At CI green ask the operator's final-diff word naming the full head sha; then post VP 4 and VP 5 at that sha and record the lines; merge only the head both cover, only when no other bootstrap change is merged and unapplied, and only when the operator is ready to run VP 6 in the same sitting. After merge run VP 6's PRE-APPLY drain check, post VP 6 expanded in full, then run VP 7."
+  - "BUILD PR 2, from main after VP 6 and VP 7 pass. Tests first (rows 19-24), then the gate, the shell script, the workflow, the fence and manifest entry, the two fence edits, CODEOWNERS and the two ci_rca_taxonomy rows. Post: VP 8 passes."
   - "Hand-apply the sidecar's fifteen blocks verbatim, {{N}} the next free Decision number at build time and {{DATE}} the build date, and fill {{N}} the same way in the environments.tf comment, the Decision 225 guard allowance comment and the ENV_WORKFLOWS comment; edit both CLAUDE.md files net-shrinking and lower the three prose budgets to the measured bytes. Post: VP 9 and VP 12 pass."
   - "PR 2 Commit Flow: full tier, push, PR, the operator's final-diff word at CI green (the workflow and both scripts), merge. Then VP 10, VP 11 and VP 13."
   - "Execute Verification Plan: run each step; loop until pass; on an unrecoverable V3 failure stop and RCA (Decision 55)."
   - "Report: what was implemented, the validation_result --verify-head verdicts, the operator-reported lines of VP 4-6, the run ids of VP 7, VP 10 and VP 11, the filed rec ids and both merge SHAs."
 rollback: >-
   PR 2: revert its squash commit; the workflow disappears and bootstrap applies return to CloudShell, which needs no
-  other change. PR 1: the roles are harmless without the workflow; to remove them, a reviewed PR drops prevent_destroy
+  other change. PR 1: the roles are harmless without the workflow, and the boundary's added Deny only denies; to remove them, a reviewed PR drops prevent_destroy
   and the resources and the operator applies it from CloudShell; the Environment goes by a terraform-github-apply.yml
   run that names it, after its prevent_destroy is removed in a reviewed PR.
