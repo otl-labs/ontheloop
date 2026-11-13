@@ -75,7 +75,9 @@ def _hermetic_aws_profile(request: pytest.FixtureRequest, monkeypatch: pytest.Mo
 
     Consolidates the former _clear_aws_credential_env fixture. Deletes the ambient
     credential-signal env vars scripts.aws_profile.resolve_aws_profile and boto3 consult
-    (AWS_PROFILE, AWS_DEFAULT_PROFILE, AWS_ACCESS_KEY_ID, AWS_LAMBDA_FUNCTION_NAME) -- a
+    (AWS_PROFILE, AWS_DEFAULT_PROFILE, AWS_ACCESS_KEY_ID, AWS_LAMBDA_FUNCTION_NAME) and
+    OTL_OPS_VERBS_TRANSPORT (an agent environment exports it after cutover; without this the
+    clients' Function URL nodes would take the execute-api path) -- a
     delete-credential-signals design, never a fake AWS_ACCESS_KEY_ID, which would flip
     resolve_aws_profile to None and silently break named-profile resolution
     (tests/test_aws_profile.py) -- and redirects AWS_CONFIG_FILE / AWS_SHARED_CREDENTIALS_FILE
@@ -90,7 +92,13 @@ def _hermetic_aws_profile(request: pytest.FixtureRequest, monkeypatch: pytest.Mo
     """
     if request.node.get_closest_marker("integration") is not None:
         return
-    for var in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_LAMBDA_FUNCTION_NAME"):
+    for var in (
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_LAMBDA_FUNCTION_NAME",
+        "OTL_OPS_VERBS_TRANSPORT",
+    ):
         monkeypatch.delenv(var, raising=False)
     nonexistent_dir = tmp_path / _NONEXISTENT_AWS_DIR_SEGMENT
     monkeypatch.setenv("AWS_CONFIG_FILE", str(nonexistent_dir / "config"))
