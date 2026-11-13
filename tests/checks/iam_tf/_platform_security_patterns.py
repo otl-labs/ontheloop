@@ -20,7 +20,9 @@ ALARMS = {
     "platform-security-detector-tamper",
     "platform-security-alerts-topic-change",
     "platform-security-iam-event-heartbeat",
+    "platform-security-agent-session-iam-change",
 }
+AGENT_SESSION = "platform-security-agent-session-iam-change"
 HEARTBEAT = "platform-security-iam-event-heartbeat"
 _REGEX_ALLOWED = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:_#=@/;,-^$?[]{}|\\*+.")
 
@@ -64,6 +66,54 @@ def _denied_role_regex_problems(pattern: str) -> list[str]:
     ]
 
 
+_USER_CLASSES = r"(?:[A-Za-z]|\[[A-Za-z]{2}\]|-)+"
+
+
+def _agent_user_regex_problems(pattern: str) -> list[str]:
+    m = re.search(r"\$\.requestParameters\.userName\s*=\s*%([^%]*)%", pattern)
+    if m is None:
+        return ["agent-session filter lacks a regex userName clause"]
+    span = m.group(1)
+    if "|" in span or not re.fullmatch(rf"\^{_USER_CLASSES}\$", span):
+        return ["userName regex is not one anchored character-class alternative"]
+    rx = re.compile(span)
+    hits = ["agent-platform-session", "AGENT-PLATFORM-SESSION", "Agent-Platform-Session"]
+    misses = ["agent-platform-session-x", "xagent-platform-session", "agent-service-account", "agent-platform-sessio"]
+    return [f"userName regex misses {n}" for n in hits if not rx.fullmatch(n)] + [
+        f"userName regex matches {n}" for n in misses if rx.fullmatch(n)
+    ]
+
+
+def _agent_denied_regex_problems(pattern: str) -> list[str]:
+    """A denied call carries requestParameters null: the user or its policy is named only in errorMessage."""
+    m = re.search(r"\$\.errorMessage\s*=\s*%([^%]*)%", pattern)
+    if m is None:
+        return ["agent-session filter lacks a regex errorMessage clause (denied calls carry requestParameters null)"]
+    span = m.group(1)
+    alts = span.split("|")
+    if (
+        len(alts) != 2
+        or not re.fullmatch(rf"user\.{_USER_CLASSES}\\s", alts[0])
+        or alts[1] != "policy.agent-platform-session-"
+    ):
+        return ["errorMessage regex is not user.<character classes>\\s | policy.agent-platform-session-"]
+    rx = re.compile(span)
+    hits = [
+        _denied_message("user agent-platform-session"),
+        _denied_message("user AGENT-PLATFORM-SESSION"),
+        "User: arn:aws:iam::ACCOUNT:user/agent-platform-session is not authorized to perform: iam:TagRole on resource: x",
+        _denied_message("policy arn:aws:iam::ACCOUNT:policy/agent-platform-session-guard"),
+    ]
+    misses = [
+        _denied_message("user agent-platform-session-x"),
+        _denied_message("user agent-service-account"),
+        _denied_message("policy arn:aws:iam::ACCOUNT:policy/agent-platform-github-ci-apply-boundary"),
+    ]
+    return [f"errorMessage regex misses {r}" for r in hits if not rx.search(r)] + [
+        f"errorMessage regex matches {r}" for r in misses if rx.search(r)
+    ]
+
+
 _REQUIRED_CLAUSES = {
     "platform-security-platform-role-iam-change": (
         '$.eventSource = "iam.amazonaws.com"',
@@ -96,6 +146,11 @@ _REQUIRED_CLAUSES = {
         '"*:agent-platform-alerts:*"',
     ),
     HEARTBEAT: ('$.eventSource = "iam.amazonaws.com"',),
+    AGENT_SESSION: (
+        '$.eventSource = "iam.amazonaws.com"',
+        "$.readOnly IS FALSE",
+        '"*:policy/agent-platform-session-*"',
+    ),
 }
 
 
@@ -115,6 +170,9 @@ def pattern_problems(patterns: dict[str, str]) -> list[str]:
         problems += [f"{name}: regex uses {sorted(set(s) - _REGEX_ALLOWED)}" for s in spans if set(s) - _REGEX_ALLOWED]
     if with_regex > 5:
         problems.append(f"{with_regex} patterns carry a regex (> 5)")
+    agent = patterns.get(AGENT_SESSION, "")
+    problems += _agent_user_regex_problems(agent)
+    problems += _agent_denied_regex_problems(agent)
     role = patterns.get("platform-security-platform-role-iam-change", "")
     problems += _role_regex_problems(role)
     problems += _denied_role_regex_problems(role)
@@ -161,3 +219,16 @@ def fixture_problems(fixture_text: str, filter_names: set[str]) -> list[str]:
                 "(requestParameters null, errorMessage naming the resource)"
             )
     return problems
+
+
+_AGENT_CLASSES = "[Aa][Gg][Ee][Nn][Tt]-[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm]-[Ss][Ee][Ss][Ss][Ii][Oo][Nn]"
+_AGENT_USER_RX = f"%^{_AGENT_CLASSES}$%"
+_AGENT_ERR_RX = f"%user.{_AGENT_CLASSES}\\s|policy.agent-platform-session-%"
+# (label, filter name, old, new): each edits the agent-session filter and must be detected.
+AGENT_SESSION_PATTERN_REDS: list[tuple[str, str, str, str]] = [
+    ("agent userName exact case", AGENT_SESSION, _AGENT_USER_RX, '"agent-platform-session"'),
+    ("agent errorMessage clause dropped", AGENT_SESSION, f" || ($.errorMessage = {_AGENT_ERR_RX})", ""),
+    ("agent errorMessage policy alternative dropped", AGENT_SESSION, "|policy.agent-platform-session-%", "%"),
+    ("agent policyArn clause dropped", AGENT_SESSION, "*:policy/agent-platform-session-*", "x"),
+    ("agent readOnly clause dropped", AGENT_SESSION, " && ($.readOnly IS FALSE)", ""),
+]
