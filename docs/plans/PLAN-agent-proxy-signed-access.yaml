@@ -63,7 +63,9 @@ scope:
       under terraform/ whose trust mentions sts:ExternalId are exactly the roles DenyExternalIdTrustRead names, and that
       set holds at least PlatformDev and PlatformAdmin, so an empty parse fails); test_agent_session_escalation_denied
       (DenySessionEscalation covers sts:AssumeRole*, GetSessionToken, GetFederationToken, iam:Create* and iam:PassRole);
-      test_agent_session_has_no_key_resource (no aws_iam_access_key or aws_iam_user_policy anywhere under terraform/);
+      test_agent_session_has_no_key_resource (no resource "aws_iam_access_key" or resource "aws_iam_user_policy"
+      block, matched as whole resource types so aws_iam_user_policy_attachment does not count, anywhere under
+      terraform/);
       test_agent_session_boundary_holds_no_user_write (the boundary's Allow ceiling in github_ci_apply_boundary.tf names
       no iam action containing User, AccessKey, LoginProfile, PolicyVersion, ServiceSpecificCredential, SSHPublicKey,
       SigningCertificate or MFA, and no iam wildcard: the premise context's Decision 144/225 note rests on).
@@ -125,7 +127,8 @@ scope:
       Header only: one template for every agent environment. The AWS network secret holds the agent-platform-session
       key with the exact host list (deploy-paths.yaml admin_out_of_band.agent_session_identity); the setup field
       writes [profile agent_platform] (and [profile agent_static], kept so scripts naming it still resolve) with
-      credential_process placeholders, region and output only, no role_arn, source_profile, external_id or
+      credential_process placeholders, region, sts_regional_endpoints = regional and output only, no role_arn,
+      source_profile, external_id or
       duration_seconds, no agent_platform_admin profile; no template line sets AWS_PROFILE. Markers the tests anchor on
       stay in order: "# DEV environment" opens the one template, "# boto3 then resolves" follows it (now: the proxy
       signs each call as the user, no role step), "# ADMIN environment" says that environment holds no admin identity
@@ -137,8 +140,8 @@ scope:
     action: Modify
     purpose: >-
       test_proxy_template_resolves_agent_static_through_credential_process keeps its name (its graduated shard
-      setup-cloud-env-proxy-template pins it); it runs the one template once (its admin loop and the
-      sts_regional_endpoints count go) and asserts agent_static resolves the placeholder key with no role step and no
+      setup-cloud-env-proxy-template pins it); it runs the one template once (its admin loop goes; the
+      sts_regional_endpoints count becomes one per profile, 2) and asserts agent_static resolves the placeholder key with no role step and no
       agent_platform_admin profile; _template_block loses its admin branch. New
       test_proxy_template_profiles_are_placeholder_only (agent_platform resolves the same placeholder key; no role_arn,
       source_profile, external_id or agent_platform_admin in the written config).
@@ -156,12 +159,14 @@ scope:
       local.platform_security_filter_patterns entry, platform-security-agent-session-iam-change (metric
       AgentSessionIamChange), plain literals under 1,024 characters: { ($.eventSource = "iam.amazonaws.com") &&
       ($.readOnly IS FALSE) && (($.requestParameters.userName = %<anchored character-class regex for
-      agent-platform-session>%) || ($.errorMessage = %user.<the same character classes>\s%) ||
-      ($.requestParameters.policyArn = "*:policy/agent-platform-session-*")) }. The userName regex is case-insensitive
-      as the role regex is (IAM names are case-insensitive in API calls); the errorMessage clause catches denied calls
-      (requestParameters null) on the user and, by design, any IAM write the user itself is denied ("User: ...
-      user/agent-platform-session is not authorized"); the policyArn clause covers policy-version verbs and
-      DeletePolicy on the three policies and any Attach or Detach of them. A sixth aws_cloudwatch_metric_alarm,
+      agent-platform-session>%) || ($.errorMessage = %user.<the same character classes>\s|policy.agent-platform-session-%)
+      || ($.requestParameters.policyArn = "*:policy/agent-platform-session-*")) }. The userName regex is
+      case-insensitive as the role regex is (IAM names are case-insensitive in API calls); the errorMessage span (one
+      span, two alternatives) catches denied calls, which carry requestParameters null: on the user, by design any IAM
+      write the user itself is denied ("User: ... user/agent-platform-session is not authorized"), and on its policies
+      ("on resource: policy arn:...:policy/agent-platform-session-guard because" or "on resource:
+      arn:...:policy/agent-platform-session-guard with an explicit deny"); the policyArn clause covers policy-version
+      verbs and DeletePolicy on the three policies and any Attach or Detach of them. A sixth aws_cloudwatch_metric_alarm,
       platform_security_agent_session_iam_change, in the role-change alarm's exact shape (period 300, threshold 1,
       notBreaching, the alerts topic), its description naming the user and its policies before the shared triage
       text. Header comment says six pairs. No existing pattern, alarm or the triage query changes.
@@ -172,13 +177,16 @@ scope:
       readOnly IS FALSE and "*:policy/agent-platform-session-*"); pattern_problems gains a user-regex predicate in
       _role_regex_problems' shape (hits agent-platform-session, AGENT-PLATFORM-SESSION, Agent-Platform-Session; misses
       agent-platform-session-x, xagent-platform-session, agent-service-account, agent-platform-sessio) and a denied
-      predicate in _denied_role_regex_problems' shape over "on resource: user <name> because" and "User:
-      arn:aws:iam::ACCOUNT:user/<name> is not authorized" (misses: user/agent-platform-session-x, user/agent-service-account).
+      predicate in _denied_role_regex_problems' shape over "on resource: user <name> because", "User:
+      arn:aws:iam::ACCOUNT:user/<name> is not authorized" and both denied policy forms naming
+      policy/agent-platform-session-guard (misses: user/agent-platform-session-x, user/agent-service-account,
+      policy/agent-platform-github-ci-apply-boundary).
   - file: tests/checks/iam_tf/test_platform_role_iam_change_alarms.py
     action: Modify
     purpose: >-
-      Module docstring says six alarms. _PATTERN_REDS gains four rows on the new filter, each detected: userName exact
-      case, errorMessage clause dropped, policyArn clause dropped, and readOnly clause dropped. Node names unchanged
+      Module docstring says six alarms. _PATTERN_REDS gains five rows on the new filter, each detected: userName exact
+      case, errorMessage clause dropped, the errorMessage policy alternative dropped, policyArn clause dropped, and
+      readOnly clause dropped; the existing "sixth alarm" red-case label is renamed for an extra alarm. Node names unchanged
       (the graduated shard platform-role-iam-change-detector-declared pins the class). The file's SLOC stays under 500
       (the build measures it; over budget, the rows move into _platform_security_patterns.py).
   - file: tests/fixtures/platform_security_filter_events.yaml
@@ -187,14 +195,17 @@ scope:
       Events naming the new filter in must_match, in the fixture's sanitised shape (literal ACCOUNT): CreateAccessKey
       with userName agent-platform-session; DeleteUserPermissionsBoundary with userName AGENT-PLATFORM-SESSION;
       CreatePolicyVersion on policy/agent-platform-session-guard; a denied CreateAccessKey (requestParameters null, the
-      user named in errorMessage) that also names the denied-write filter; and two that must not match it:
+      user named in errorMessage) and a denied CreatePolicyVersion by another principal (requestParameters null,
+      errorMessage "on resource: policy arn:aws:iam::ACCOUNT:policy/agent-platform-session-guard because ..."), each
+      also naming the denied-write filter; and two that must not match it:
       CreateAccessKey for agent-service-account and a GetUser read. Each must_match is the event's exact filter set,
       the heartbeat included for iam events.
   - file: scripts/ci/security_detector_probe.py
     action: Modify
     purpose: >-
       EXPECTED_ALARMS gains platform-security-agent-session-iam-change (test_expected_alarms_match_the_hcl pins the set
-      to the HCL's alarm names). The hourly liveness run therefore reports it missing between merge and VP 8's apply;
+      to the HCL's alarm names); the docstring says six alarms. The hourly liveness run therefore reports it missing
+      between merge and VP 8's apply;
       infrastructure_dependencies keeps that window to one sitting.
   - file: docs/DECISIONS.md
     action: Modify
@@ -219,7 +230,7 @@ bundled_recommendations: []
 followon_recs: []
 infrastructure_dependencies:
   - "terraform/bootstrap is admin-only (environment-taxonomy.yaml axis_a): the operator plans it pre-merge (VP 6-7) and applies it post-merge (VP 8) from AWS CloudShell as user/platform-breakglass. Each block is self-contained (public-repo fetch at a sha, pinned terraform whose zip is checked against HashiCorp's SHA256SUMS, an integrity check, not a signature check; variables from SSM; account id from the caller), the same shape as PLAN-sit-portable-roots' paused CloudShell amendment, so this plan does not wait for that amendment."
-  - "One merged-unapplied bootstrap change at a time: this PR merges only after #1987 (rec-5025) is applied, and before rec-4233 PR 1 and rec-5026's bootstrap changes merge."
+  - "One merged-unapplied bootstrap change at a time: this PR merges only after #1987 (rec-5025) is applied, and before rec-4233 PR 1 and rec-5026's bootstrap changes merge. #1987's apply is 0/0/0 by design and its own operator block is paused; if it is still unapplied at this build's CI green, VP 7's exact nine-create plan (which carries #1987's merged content) shows it has no pending delta, and the coordinator puts that evidence to the operator, whose ruling the one-at-a-time rule is, instead of the build waiting silently."
   - "Proxy signing is proven before merge: VP 4 needs the operator to widen the current environment's allowed hosts (old key, no new grant) and set DUCKLAKE_READER_URL; a STOP there ends the build before anything is created."
   - "Apply precedes cutover: VP 9's key and network-secret edits need the user that VP 8 creates; the code changes merge with the PR and take effect at cutover."
   - "Merge and VP 8 happen in one operator sitting: from merge, security_detector_probe.py expects the sixth alarm, so an hourly security-detector-liveness run before the apply reports it missing; a security_detector_stale rec filed in that window is closed in VP 13 with VP 8's read-back."
@@ -291,10 +302,11 @@ verification_plan:
       sts:AssumeRole; then, in the current agent environment, add ssm, logs and monitoring in the project region,
       iam.amazonaws.com and the reader's Function URL host (printed in CloudShell by aws ssm get-parameter --name
       /agent-platform/ducklake/reader_url --query Parameter.Value --output text) to the AWS network secret's allowed
-      hosts and set DUCKLAKE_READER_URL to that URL in the env-var field. The build session predates that change, so
+      hosts, and set DUCKLAKE_READER_URL to that URL and AWS_PROFILE=agent_static in the env-var field (so the new
+      thread's session-start hook and preflight never try the old role profile). The build session predates that change, so
       the coordinator starts a fresh thread in that environment on the operator's word; it runs only this block,
       through the placeholder agent_static profile (no role step, so no AssumeRole), and reports the lines to the build
-      thread. The operator removes the added hosts and the variable as soon as the lines are back (VP 9 sets the final
+      thread. The operator removes the added hosts and both variables as soon as the lines are back (VP 9 sets the final
       list), so the old user's grants are reachable on the new hosts for minutes only. AWS checks a signature before
       permissions, so AccessDenied (or success, if the old user happens to hold the right) proves the proxy signed that
       host class correctly; the Function URL case passes only on the access-denied form of 403, never the signature or
@@ -414,7 +426,11 @@ verification_plan:
       t denied-resource '{"eventSource":"iam.amazonaws.com","eventName":"CreateAccessKey","readOnly":false,"errorCode":"AccessDenied","errorMessage":"User:
       arn:aws:sts::ACCOUNT:assumed-role/X/s is not authorized to perform: iam:CreateAccessKey on resource: user
       agent-platform-session because no identity-based policy allows the iam:CreateAccessKey
-      action","requestParameters":null}'; t other-user
+      action","requestParameters":null}'; t denied-policy
+      '{"eventSource":"iam.amazonaws.com","eventName":"CreatePolicyVersion","readOnly":false,"errorCode":"AccessDenied","errorMessage":"User:
+      arn:aws:sts::ACCOUNT:assumed-role/X/s is not authorized to perform: iam:CreatePolicyVersion on resource: policy
+      arn:aws:iam::ACCOUNT:policy/agent-platform-session-guard because no identity-based policy allows the
+      iam:CreatePolicyVersion action","requestParameters":null}'; t other-user
       '{"eventSource":"iam.amazonaws.com","eventName":"CreateAccessKey","readOnly":false,"requestParameters":{"userName":"agent-service-account"}}';
       t read
       '{"eventSource":"iam.amazonaws.com","eventName":"GetUser","readOnly":true,"requestParameters":{"userName":"agent-platform-session"}}'
@@ -427,7 +443,7 @@ verification_plan:
       aws_iam_user_policy_attachment.agent_session_ducklake, create aws_iam_user_policy_attachment.agent_session_guard and
       create aws_iam_user_policy_attachment.agent_session_observe; PR_HEAD_SHA with the sha the build wrote; then the
       new pattern evaluated live by logs:TestMetricFilter, which changes nothing: TMF key-create 1, TMF upper-boundary 1,
-      TMF policy-version 1, TMF denied-resource 1, TMF other-user 0, TMF read 0.
+      TMF policy-version 1, TMF denied-resource 1, TMF denied-policy 1, TMF other-user 0, TMF read 0.
     fix_if: >-
       Any *_FAILED, JQ_ABSENT or TFVARS_ABSENT line means nothing was planned; the operator reads $HOME/aps-tf.err in
       CloudShell, fixes and re-pastes. Any other address, an update or a destroy (for example another merged-unapplied
@@ -489,32 +505,35 @@ verification_plan:
     phase: post-deploy
     action: >-
       OPERATOR STEP, cutover, per deploy-paths.yaml admin_out_of_band.agent_session_identity. (a) At least 20 minutes
-      after VP 8's apply, run this block in CloudShell; it must show ALARM_STATE OK, ACTIVE_KEYS 0 and MATCHES_20M 0
-      (the apply's own creation events have aged out of the window), else wait 10 minutes and re-run. (b) In the IAM
+      after VP 8's apply, run this block in CloudShell; it must show ALARM_STATE OK, ACTIVE_KEYS 0 and MATCHES 0 over
+      the last 20 minutes (the apply's own creation events have aged out), else wait 10 minutes and re-run; keep its
+      NOW line. (b) In the IAM
       console (Users, agent-platform-session, Security credentials) create one access key and paste its two values
       straight into each agent environment's AWS network secret in place of the old key, never into a chat, a file or a
-      shell, and without downloading the .csv. (c) About 10 minutes later re-run the block: ACTIVE_KEYS 1 and
-      MATCHES_20M of 1 or more prove from metric data that the new filter matched the key creation; because (a) showed
+      shell, and without downloading the .csv. (c) About 10 minutes later re-run the block with S set to (a)'s NOW
+      value (typed as S=<that value>; in front of the block, so the subshell inherits it): ACTIVE_KEYS 1 and MATCHES of 1 or more since (a) prove
+      from metric data that the new filter matched the key creation; because (a) showed
       OK, the agent-session ALARM email should arrive too. The block also prints the four Function URL hosts, read in
       CloudShell only. (d) Set each environment secret's allowed hosts to exactly the procedure's list, re-paste the
       setup field from the merged bin/setup-cloud-env.sh header and clear AWS_PROFILE and any DUCKLAKE_READER_URL left
       from VP 4 in the env-var field. (e) Start a fresh session and reply "cutover done" in the build thread.
     command: >-
-      ( unset AWS_PROFILE; aws cloudwatch describe-alarms --alarm-names platform-security-agent-session-iam-change
+      ( unset AWS_PROFILE; N=$(date -u +%Y-%m-%dT%H:%M:%SZ); echo "NOW $N"; S=${S:-$(date -u -d '-20 min'
+      +%Y-%m-%dT%H:%M:%SZ)}; aws cloudwatch describe-alarms --alarm-names platform-security-agent-session-iam-change
       --query 'MetricAlarms[0].StateValue' --output text | sed 's/^/ALARM_STATE /'; aws iam list-access-keys --user-name
       agent-platform-session --query 'length(AccessKeyMetadata[?Status==`Active`])' --output text | sed
       's/^/ACTIVE_KEYS /'; aws cloudwatch get-metric-statistics --namespace PlatformSecurity --metric-name
-      AgentSessionIamChange --start-time "$(date -u -d '-20 min' +%Y-%m-%dT%H:%M:%SZ)" --end-time "$(date -u
-      +%Y-%m-%dT%H:%M:%SZ)" --period 60 --statistics Sum --query 'sum(Datapoints[].Sum)' --output text | sed
-      's/^/MATCHES_20M /'; for p in reader writer telemetry_reader telemetry_writer; do aws ssm get-parameter --name
+      AgentSessionIamChange --start-time "$S" --end-time "$N" --period 60 --statistics Sum --query
+      'sum(Datapoints[].Sum)' --output text | sed 's/^/MATCHES /'; for p in reader writer telemetry_reader telemetry_writer; do aws ssm get-parameter --name
       "/agent-platform/ducklake/${p}_url" --query Parameter.Value --output text | sed -E 's#^https://([^/]+).*#\1#'; done )
     expected: >-
-      First run: ALARM_STATE OK, ACTIVE_KEYS 0, MATCHES_20M 0. Second run: ACTIVE_KEYS 1, MATCHES_20M 1 or more and four
-      lambda-url hosts, read in CloudShell only (they never go into the repo, a PR or a chat); the operator returns the
-      ALARM_STATE, ACTIVE_KEYS and MATCHES_20M lines and whether the agent-session email arrived, then "cutover done".
+      First run: ALARM_STATE OK, ACTIVE_KEYS 0, MATCHES 0. Second run (S from the first): ACTIVE_KEYS 1, MATCHES 1 or
+      more and four lambda-url hosts, read in CloudShell only (they never go into the repo, a PR or a chat); the
+      operator returns the ALARM_STATE, ACTIVE_KEYS and MATCHES lines and whether the agent-session email arrived, then
+      "cutover done".
     fix_if: >-
-      First run ALARM or MATCHES_20M above 0: wait 10 minutes and re-run before creating the key. ACTIVE_KEYS 2 or more:
-      deactivate the extra key in the console first, so exactly one key is live. Second run MATCHES_20M 0 twenty minutes
+      First run ALARM or MATCHES above 0: wait 10 minutes and re-run before creating the key. ACTIVE_KEYS 2 or more:
+      deactivate the extra key in the console first, so exactly one key is live. Second run MATCHES 0 twenty minutes
       after the key's creation: stop before (d); the filter did not match the key creation, so the build and the operator
       check it in CloudWatch (VP 7's TMF lines first) and fix forward before any session uses the key. A match with no
       email is an alerts-topic or subscription fault: report it; it does not block (d).
@@ -571,14 +590,15 @@ verification_plan:
       never retried. The denied TagRole matches platform-security-denied-iam-write and the new agent-session filter
       (its errorMessage names the user as caller); VP 13 proves that from metric data, and any emails are expected.
     command: >-
-      aws iam get-role --profile agent_platform --role-name PlatformDev --query Role.RoleName 2>&1 | grep -o
+      date -u +%Y-%m-%dT%H:%M:%SZ | sed 's/^/STARTED_AT /'; aws iam get-role --profile agent_platform --role-name
+      PlatformDev --query Role.RoleName 2>&1 | grep -o
       AccessDenied | head -1; aws ssm get-parameter --profile agent_platform --name
       /secret/agent-platform-terraform-personal-tfvars --query Parameter.Name 2>&1 | grep -o AccessDenied | head -1; aws
       iam tag-role --profile agent_platform --role-name agent-session-probe-absent --tags Key=probe,Value=x 2>&1 | grep -o AccessDenied
       | head -1; aws logs describe-log-streams --profile agent_platform --log-group-name /aws/lambda/probe-outside-scope
       2>&1 | grep -o AccessDenied | head -1
     expected: >-
-      AccessDenied four times.
+      A STARTED_AT line, then AccessDenied four times.
     fix_if: >-
       Any success is a security finding; report to the operator at once and deactivate the key per the procedure. A
       proxy refusal in place of AccessDenied proves nothing about IAM; fix the host list and re-run.
@@ -587,8 +607,8 @@ verification_plan:
   - step: 13
     phase: post-deploy
     action: >-
-      At least 10 minutes after VP 12 (a scheduled wake, never a sleep), read the detector's per-minute metrics for the
-      last hour as the session user: every minute with a DeniedIamWrite datapoint also has an AgentSessionIamChange one,
+      At least 10 minutes after VP 12 (a scheduled wake, never a sleep), read the detector's per-minute metrics since
+      VP 12's STARTED_AT as the session user (a fixed start, so a late read still sees them): every minute with a DeniedIamWrite datapoint also has an AgentSessionIamChange one,
       so VP 12's denied TagRole matched the new filter's denied-call clause live. Then file the ten owed follow-on recs
       in context's list through the portal (get_rec_write_guidance first), read them back by id, close any
       security_detector_stale rec filed between merge and VP 8 with VP 8's read-back, record rec-4043's disposition
@@ -596,7 +616,7 @@ verification_plan:
       name this plan for the routine principal and owed rec 2 for the admin one), then post a coordinator log entry
       (issue #1963) naming the cutover and the residue owners.
     command: >-
-      ( s=$(date -u -d '-60 min' +%Y-%m-%dT%H:%M:%SZ); e=$(date -u +%Y-%m-%dT%H:%M:%SZ); m() { aws cloudwatch
+      ( s=<VP 12's STARTED_AT>; e=$(date -u +%Y-%m-%dT%H:%M:%SZ); m() { aws cloudwatch
       get-metric-statistics --profile agent_platform --namespace PlatformSecurity --metric-name "$1" --start-time "$s"
       --end-time "$e" --period 60 --statistics Sum --query 'Datapoints[].Timestamp' --output text | tr '\t' '\n' | grep .
       | LC_ALL=C sort; }; d=$(m DeniedIamWrite); a=$(m AgentSessionIamChange); echo "DENIED_MINUTES $(printf '%s\n' "$d"
@@ -608,7 +628,8 @@ verification_plan:
       DENIED_MINUTES n MATCHED n with n of 1 or more; RECS 10 MISSING 0 ['open']; then the log comment id
       mcp__github__add_issue_comment returns.
     fix_if: >-
-      DENIED_MINUTES 0: the denied TagRole has not reached the log group yet; re-read after another wake. MATCHED below
+      DENIED_MINUTES 0 within 30 minutes of VP 12: the denied TagRole did not reach the log group; check the trail's
+      delivery with the operator rather than waiting further. MATCHED below
       DENIED_MINUTES: the denied-call clause missed (or another principal's denied write shares the hour); check the
       events in CloudWatch with the operator before closing the build. A write that fails loudly is re-filed after the
       cause is fixed (Decision 84 I-4); never an offline outbox.
@@ -683,10 +704,12 @@ gate_rounds:
   - {gate: wording-check, round: 5, verdict: PASS, digest: cbfd45b6cb2596262ab3812534df40baed6381a03b36874c31966a758fa81448, base: 9412b0ec4385060058ad545ddf35ecba8793c030, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 3, nits: 10}
   - {gate: wording-check, round: 6, verdict: PASS, digest: e731130e4c95f4d3e968cb2bdc14e1bc25e8d4490fa08ec4fd79751f5b8d45dd, base: 9412b0ec4385060058ad545ddf35ecba8793c030, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 16}
+  - {gate: wording-check, round: 7, verdict: PASS, digest: 7fb1d4c304c8dad371c58b51aeb04daa930363c6800df5698e7cfbe86e0d2eb0, base: 9412b0ec4385060058ad545ddf35ecba8793c030, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
-  - Only the plan-cited decision sections (113, 213, 144, 223, 237, 238, 248, 252, 143)
+  - Only the plan-cited decision sections (113, 202, 213, 144, 223, 237, 238, 248, 252, 143)
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
   - "Start condition for merge (not for the build): #1987 (rec-5025) is applied, so this is the only merged-unapplied bootstrap change; until then the build stops at CI green and tells the coordinator."
@@ -696,7 +719,7 @@ execution_steps:
   - "terraform/bootstrap/agent_session_user.tf per scope row 1, reusing platform_dev_policies.tf's function locals and Deny statements, then the sixth detector pair in platform_security_alarms.tf and EXPECTED_ALARMS in security_detector_probe.py. Post: VP 1-2 pass."
   - "scripts/aws_identity.py, .claude/hooks/session_start_aws.sh and the bin/setup-cloud-env.sh header per their rows. Post: VP 1 and VP 5 pass."
   - "Hand-apply the sidecar's ten blocks verbatim, {{N}} the next free Decision number at build time and {{DATE}} the build date; AGENTS.md shrinks, so lower config/prose_budgets.yaml's S1 root_ambient_load_set to the measured value (the prose_budgets_ratchet_down sanction). Post: VP 3 passes."
-  - "Commit Flow (implement skill; git-ops.yaml handoff_sequence): full tier, push, PR. At CI green, with VP 4 passed, post VP 6 and VP 7's blocks for the operator, record the returned lines, ask the operator's final-diff word; merge only when VP 7 matched, #1987 is applied and the operator is ready to run VP 8 in the same sitting."
+  - "Commit Flow (implement skill; git-ops.yaml handoff_sequence): full tier, push, PR. At CI green, with VP 4 passed, post VP 6 and VP 7's blocks for the operator, record the returned lines, ask the operator's final-diff word; merge only the head VP 7 matched (any new head, a rebase for {{N}} included, re-runs VP 6-7 first), only after #1987 is applied, and only when the operator is ready to run VP 8 in the same sitting."
   - "After merge: post VP 8's block; on its lines, post VP 9's procedure; on 'cutover done', run VP 10-13 in a fresh session (the build thread itself if it was started after cutover, else a fresh one the coordinator starts)."
   - "Report: what was implemented, the operator-reported lines, VP 4 and VP 10-12 results, the filed rec ids and the merge SHA."
 rollback: >-
