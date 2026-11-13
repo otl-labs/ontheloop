@@ -2,7 +2,7 @@
 
 Pins terraform/bootstrap/platform_security_{admin_policy,trail,alarms}.tf (Decision 202): a
 multi-region, global-events, log-file-validated trail homed in var.aws_region with a protected
-CloudTrail-only bucket; exactly five alarms targeting the alerts topic, each filter pattern carrying
+CloudTrail-only bucket; exactly six alarms targeting the alerts topic, each filter pattern carrying
 its required clauses inside CloudWatch Logs' documented limits; the platform-security-* name family;
 no region literal or provider alias; and no CI identity statement able to write the detector. The
 heartbeat alarm is now fed by platform-security-heartbeat-canary (its own declaration, roles, cadence
@@ -317,6 +317,7 @@ _ROLE = "platform-security-platform-role-iam-change"
 _ROLE_RX = "%^[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Dd][Ee][Vv]$|^[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Aa][Dd][Mm][Ii][Nn]$%"
 _ERR_RX = "%role.[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Dd][Ee][Vv]\\s|role.[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Aa][Dd][Mm][Ii][Nn]\\s%"
 _IAM = '$.eventSource = "iam.amazonaws.com"'
+_API = "platform-security-ducklake-api-change"
 _LOG_GROUP_ARN = '"arn:aws:logs:${var.aws_region}:${var.account_id}:log-group:platform-security-*"'
 
 # (label, predicate, file key, old, new[, count]) -- one HCL text edit each.
@@ -363,6 +364,26 @@ _PATTERN_REDS: list[tuple] = [
     ("three regex spans", HEARTBEAT, f"{{ ({_IAM}) && ($.a = %a%) && ($.b = %b%) && ($.c = %c%) }}"),
     ("interpolated pattern", "platform-security-alerts-topic-change", "sns.amazonaws.com", "${var.x}"),
     ("overlong pattern", "platform-security-detector-tamper", "{ ", "{ " + " " * 300),
+    ("api gateway clause dropped", _API, '($.eventSource = "apigateway.amazonaws.com") && ($.readOnly IS FALSE)', '$.a = "b"'),
+    (
+        "lambda readOnly clause dropped",
+        _API,
+        '($.eventSource = "lambda.amazonaws.com") && ($.readOnly IS FALSE) && ',
+        '($.eventSource = "lambda.amazonaws.com") && ',
+    ),
+    ("api errorCode alternative dropped", _API, ' && (($.errorCode = "AccessDenied*") ||', " && ("),
+    (
+        "telemetry function clause dropped",
+        _API,
+        ' || ($.requestParameters.functionName = "*agent-platform-ducklake-telemetry-*")',
+        "",
+    ),
+    (
+        "log role regex exact case",
+        _API,
+        "%^[Dd][Uu][Cc][Kk][Ll][Aa][Kk][Ee]-[Aa][Pp][Ii]-[Aa][Cc][Cc][Ee][Ss][Ss]-[Ll][Oo][Gg][Ss]$%",
+        '"ducklake-api-access-logs"',
+    ),
     ("heartbeat narrowed", HEARTBEAT, f"{{ ({_IAM}) && ($.readOnly IS FALSE) }}"),
     (
         "scheduler clause dropped",
@@ -386,7 +407,7 @@ _OTHER_REDS: dict[str, Callable[[], list[str]]] = {
     "data selector first, write-only management second": lambda: trail_problems(
         _data_first(_MGMT.replace('"All"', '"WriteOnly"'))
     ),
-    "sixth alarm": lambda: alarm_problems(
+    "seventh alarm": lambda: alarm_problems(
         _alarms()
         + '\nresource "aws_cloudwatch_metric_alarm" "platform_security_extra" {\n  alarm_name = "platform-security-x"\n}\n'
     ),

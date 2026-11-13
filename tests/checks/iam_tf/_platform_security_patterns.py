@@ -20,6 +20,7 @@ ALARMS = {
     "platform-security-detector-tamper",
     "platform-security-alerts-topic-change",
     "platform-security-iam-event-heartbeat",
+    "platform-security-ducklake-api-change",
 }
 HEARTBEAT = "platform-security-iam-event-heartbeat"
 _REGEX_ALLOWED = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:_#=@/;,-^$?[]{}|\\*+.")
@@ -38,6 +39,23 @@ def _role_regex_problems(pattern: str) -> list[str]:
     misses = ["agent-platform-github-ci-branch", "PlatformDevX", "xPlatformAdmin", "PlatformAdm"]
     return [f"roleName regex misses {n}" for n in hits if not rx.fullmatch(n)] + [
         f"roleName regex matches {n}" for n in misses if rx.fullmatch(n)
+    ]
+
+
+def _log_role_regex_problems(pattern: str) -> list[str]:
+    m = re.search(r"\$\.requestParameters\.roleName\s*=\s*%([^%]*)%", pattern)
+    if m is None:
+        return ["ducklake-api filter lacks a regex roleName clause"]
+    rx = re.compile(m.group(1))
+    hits = ["ducklake-api-access-logs", "DUCKLAKE-API-ACCESS-LOGS", "DuckLake-Api-Access-Logs"]
+    misses = [
+        "ducklake-api-access-logs-x",
+        "xducklake-api-access-logs",
+        "agent-platform-ducklake-reader",
+        "ducklake-api-access-log",
+    ]
+    return [f"log-role regex misses {n}" for n in hits if not rx.fullmatch(n)] + [
+        f"log-role regex matches {n}" for n in misses if rx.fullmatch(n)
     ]
 
 
@@ -95,6 +113,17 @@ _REQUIRED_CLAUSES = {
         '"*:agent-platform-alerts"',
         '"*:agent-platform-alerts:*"',
     ),
+    "platform-security-ducklake-api-change": (
+        '$.eventSource = "apigateway.amazonaws.com"',
+        '($.eventSource = "lambda.amazonaws.com") && ($.readOnly IS FALSE)',
+        '"AddPermission*"',
+        '"RemovePermission*"',
+        '"*ResourcePolicy*"',
+        '$.errorCode = "AccessDenied*"',
+        '$.requestParameters.functionName = "*agent-platform-ducklake-reader*"',
+        '$.requestParameters.functionName = "*agent-platform-ducklake-writer*"',
+        '$.requestParameters.functionName = "*agent-platform-ducklake-telemetry-*"',
+    ),
     HEARTBEAT: ('$.eventSource = "iam.amazonaws.com"',),
 }
 
@@ -113,11 +142,12 @@ def pattern_problems(patterns: dict[str, str]) -> list[str]:
         if len(spans) > 2:
             problems.append(f"{name}: {len(spans)} regex spans > 2")
         problems += [f"{name}: regex uses {sorted(set(s) - _REGEX_ALLOWED)}" for s in spans if set(s) - _REGEX_ALLOWED]
-    if with_regex > 5:
-        problems.append(f"{with_regex} patterns carry a regex (> 5)")
+    if with_regex > 6:
+        problems.append(f"{with_regex} patterns carry a regex (> 6)")
     role = patterns.get("platform-security-platform-role-iam-change", "")
     problems += _role_regex_problems(role)
     problems += _denied_role_regex_problems(role)
+    problems += _log_role_regex_problems(patterns.get("platform-security-ducklake-api-change", ""))
     if "errorCode" in role:
         problems.append("role-change filter conditions on errorCode (denied attempts must match)")
     if set(re.findall(r"\$\.([\w.]+)", patterns.get(HEARTBEAT, ""))) != {"eventSource"}:

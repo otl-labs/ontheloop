@@ -1,6 +1,6 @@
 # Metric filters + alarms of the platform-security-* IAM-change detector (rec-4044, Decision 202).
 #
-# Five filter/alarm pairs on the trail's log group, all targeting the EXISTING agent-platform-alerts
+# Six filter/alarm pairs on the trail's log group, all targeting the EXISTING agent-platform-alerts
 # topic (Decision 39; the topic stays in terraform/personal and is referenced by ARN template only).
 #
 # Pattern rules (TestPlatformRoleIamChangeDetector enforces each):
@@ -39,6 +39,12 @@ locals {
     # A mutating call on the alerts topic or one of its subscriptions.
     "platform-security-alerts-topic-change" = "{ ($.eventSource = \"sns.amazonaws.com\") && ($.readOnly IS FALSE) && (($.requestParameters.topicArn = \"*:agent-platform-alerts\") || ($.requestParameters.subscriptionArn = \"*:agent-platform-alerts:*\")) }"
 
+    # Any API Gateway write in the account (bounded identities hold none, so each is an admin act or an attack), a Lambda
+    # permission or resource-policy edit that names a DuckLake verb function or was denied (a denied call carries
+    # requestParameters null but keeps its eventName), or an IAM write to the API's access-log role (Decision 255).
+    # The role regex is case-insensitive, as the role-change filter's is.
+    "platform-security-ducklake-api-change" = "{ (($.eventSource = \"apigateway.amazonaws.com\") && ($.readOnly IS FALSE)) || (($.eventSource = \"lambda.amazonaws.com\") && ($.readOnly IS FALSE) && (($.eventName = \"AddPermission*\") || ($.eventName = \"RemovePermission*\") || ($.eventName = \"*ResourcePolicy*\")) && (($.errorCode = \"AccessDenied*\") || ($.requestParameters.functionName = \"*agent-platform-ducklake-reader*\") || ($.requestParameters.functionName = \"*agent-platform-ducklake-writer*\") || ($.requestParameters.functionName = \"*agent-platform-ducklake-telemetry-*\"))) || (($.eventSource = \"iam.amazonaws.com\") && ($.readOnly IS FALSE) && ($.requestParameters.roleName = %^[Dd][Uu][Cc][Kk][Ll][Aa][Kk][Ee]-[Aa][Pp][Ii]-[Aa][Cc][Cc][Ee][Ss][Ss]-[Ll][Oo][Gg][Ss]$%)) }"
+
     # ANY IAM event, reads included: the platform-security-heartbeat-canary schedule (rec-4044,
     # Decision 202) makes an iam:GetRole call every 5 minutes, so this metric proves the
     # global-event path every other alarm depends on is alive without depending on unrelated CI or
@@ -52,6 +58,7 @@ locals {
     "platform-security-detector-tamper"          = "DetectorTamper"
     "platform-security-alerts-topic-change"      = "AlertsTopicChange"
     "platform-security-iam-event-heartbeat"      = "IamEventHeartbeat"
+    "platform-security-ducklake-api-change"      = "DuckLakeApiChange"
   }
 
   platform_security_alarm_triage = "Read who changed what: CloudWatch Logs Insights on log group platform-security-cloudtrail -- fields eventTime, userIdentity.arn, eventName, requestParameters.roleName, errorCode, errorMessage, eventID | sort eventTime desc | limit 50. Console: https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#logsV2:logs-insights"
@@ -118,6 +125,20 @@ resource "aws_cloudwatch_metric_alarm" "platform_security_alerts_topic_change" {
   alarm_description   = "A write changed the agent-platform-alerts topic or one of its subscriptions. ${local.platform_security_alarm_triage}"
   namespace           = "PlatformSecurity"
   metric_name         = aws_cloudwatch_log_metric_filter.platform_security["platform-security-alerts-topic-change"].metric_transformation[0].name
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [local.platform_security_alerts_topic_arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "platform_security_ducklake_api_change" {
+  alarm_name          = "platform-security-ducklake-api-change"
+  alarm_description   = "A write touched the DuckLake REST API, a Lambda permission or resource policy of the four DuckLake verb functions, or the ducklake-api-access-logs role. ${local.platform_security_alarm_triage}"
+  namespace           = "PlatformSecurity"
+  metric_name         = aws_cloudwatch_log_metric_filter.platform_security["platform-security-ducklake-api-change"].metric_transformation[0].name
   statistic           = "Sum"
   period              = 300
   evaluation_periods  = 1

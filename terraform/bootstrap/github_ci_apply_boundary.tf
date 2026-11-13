@@ -237,6 +237,15 @@ locals {
         }
       },
       {
+        # Decision 255 cl.2: no bounded identity creates, changes, redeploys or deletes any API Gateway resource,
+        # the account's CloudWatch role setting included. The ceiling holds no apigateway action today; this keeps a
+        # later widening from reaching the DuckLake API. GET stays outside.
+        Sid      = "DenyApiGatewayWrite"
+        Effect   = "Deny"
+        Action   = ["apigateway:DELETE", "apigateway:P*"]
+        Resource = "*"
+      },
+      {
         # Decision 230 cl.5: the production telemetry catalog's data prefix and its blob root are reachable only by
         # the roles that serve or maintain that catalog. PlatformDev and the CI roles carry this boundary, so their
         # bucket-wide S3 grants are fenced here without an identity-side edit. The roles may not exist yet, which
