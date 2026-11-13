@@ -479,7 +479,7 @@ resource "aws_iam_role" "bootstrap_preview" {
   }
 }
 
-resource "aws_iam_policy" "bootstrap_apply_reads" {
+resource "aws_iam_policy" "bootstrap_plan_reads" {
   name        = "bootstrap-plan-reads"
   description = "Plan-time refresh reads for the bootstrap CI roles (PLAN-bootstrap-ci-gated-apply)"
   policy      = local.bootstrap_plan_reads_json
@@ -533,7 +533,7 @@ resource "aws_iam_policy" "bootstrap_preview_guard" {
 
 resource "aws_iam_role_policy_attachment" "bootstrap_apply_reads" {
   role       = aws_iam_role.bootstrap_apply.name
-  policy_arn = aws_iam_policy.bootstrap_apply_reads.arn
+  policy_arn = aws_iam_policy.bootstrap_plan_reads.arn
 }
 
 resource "aws_iam_role_policy_attachment" "bootstrap_apply_write" {
@@ -548,7 +548,7 @@ resource "aws_iam_role_policy_attachment" "bootstrap_apply_guard" {
 
 resource "aws_iam_role_policy_attachment" "bootstrap_preview_reads" {
   role       = aws_iam_role.bootstrap_preview.name
-  policy_arn = aws_iam_policy.bootstrap_apply_reads.arn
+  policy_arn = aws_iam_policy.bootstrap_plan_reads.arn
 }
 
 resource "aws_iam_role_policy_attachment" "bootstrap_preview_guard" {
