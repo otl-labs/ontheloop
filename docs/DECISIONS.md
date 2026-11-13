@@ -2,6 +2,63 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 255: An agent merge is refused unless every required check, and every persona check a verdict_source row selects, concluded success on the merge-time head -- fail closed, no agent override, an operator merge stays the release valve (amends Decision 83) (Decided)
+
+```yaml
+number: 255
+status: Decided
+decided_date: "2026-11-12"
+kind:
+  value: direction
+  justification: >-
+    Clause 3 makes a human gate: a refusal only agents face, with no agent override and an operator merge as the
+    release valve, narrowing Decision 83's commitment to autonomous merge again; undone, an agent merges on red.
+amends: [83]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant: a standing, no-override refusal that binds every merging session and every persona
+    flip (T4.32 c5 requires its own Decision in the Decision 245 clause 3 form). Not a git-ops.yaml note: a contract
+    records the gate's shape, not the authority to refuse a tool call (Decision 203's rejected home). Not
+    amendment_forms on Decision 245: it adds a second predicate with its own read surface and fallback rule.
+```
+
+**Status:** Decided
+**Date:** 2026-11-12
+**Warehouse ID:** dec-255 (per Decision 84 backfill)
+
+**Problem:** Agents merged #1265 and #1261 while the required pr-validate check on their exact heads had concluded failure (rec-4080). The agents' merge identity holds the ruleset's admin bypass (Decision 83), so GitHub does not stop it, and "merge once green" was prose only, the Decision 163 cl.2 failure. Every pre-merge gate is advisory while this holds, and the verdict personas' checks, which T4.32 c5 makes the gate when a persona flips, would be too.
+
+**Intent:** An agent can merge only what GitHub shows green on the exact head it merges.
+
+**Decision:**
+1. **Required checks.** The merge gate (Decision 245) refuses mcp__github__merge_pull_request and mcp__github__enable_pr_auto_merge on this repository unless, on the PR's head, every required status check of main's live ruleset has as its newest check run one by the GitHub Actions app that completed with conclusion success. Skipped, neutral, pending, a newer re-run, a missing run and a commit status in its place all refuse. It judges the PR's own head, never main's post-merge full tier (Decision 73 cl.2-3).
+2. **One head.** merge_pull_request must name expectedHeadSha, and it must equal the head whose checks were read (Decision 205 cl.2). enable_pr_auto_merge, which names none, is judged when it is called, so it is refused until every check has succeeded and gives an agent nothing a merge does not.
+3. **Fail closed, no override (amends Decision 83).** An unreadable ruleset, check list or row, a refused or rate-limited read, a timeout or a crashed gate refuses, and no agent override exists (the Decision 203 cl.3 pattern). The gate reads only public GitHub endpoints of this public repository, with no credential. This narrows Decision 83's non-wedging property for agent merges only: the ruleset, strict=false and the admin bypass are unchanged, and an operator merge in the GitHub UI is the release valve, also for a red the PR did not cause. Native required checks without a bypass need a merge identity without it (Decision 217 cl.3, rec-2827); until then this gate stands in for them (Decision 100).
+4. **Persona checks.** When a gates.<persona>.verdict_source row of docs/contracts/project-configuration.yaml on origin/main reads actions, the gate also requires that persona's verdict check run under clause 1's rules on the PRs that persona serves, and "critique PROCEED" and "code review PROCEED" mean that check (T4.32 c5). A row reading in_session adds nothing. These checks become required status checks only after rec-4624.
+5. **Outage fallback.** While a row reads actions and its persona's Actions lane is down, the fallback (Decision 229 cl.4) is entered by returning that row to in_session on main, visibly; the gate never accepts an in-session verdict in its place. The gate also refuses an agent merge of a pull request that changes a gates.<persona>.verdict_source row from actions to in_session or removes one, so the operator merges it in the GitHub UI. A fallback entered without the operator, such as T4.32's spend pause or the persona run on another verdict plane, needs its own Decision and plan naming what the gate reads in its place: a record the operator approves on GitHub (the Decision 246 cl.1 pattern) or that plane's check run.
+6. **Coverage (Decision 181 cl.2).** Clauses 1-3: the gate and its hook tests. Clause 4 and cl.5's rollback refusal: PLAN-gate-consumers-flag-aware, a residual until built. Rest of cl.5: procedural. Residuals: GitHub UI merges; a push after auto-merge is enabled, which GitHub's required checks cover but no persona check does until rec-4624; agent merges by gh or REST from a shell (rec-2827); a PR that adds or edits a workflow posting a run named like a required check, a gap native required checks share; a session that re-points origin or its git configuration, the trust root the gate's fetch already has (rec-4085). docs/contracts/git-ops.yaml records the mechanism.
+
+```yaml reversal-conditions
+decision: 255
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan; never add an agent override"
+conditions:
+  - id: native-gate-available
+    kind: manual
+    description: "rec-4624 lets the ruleset require the persona checks, or a merge identity without the admin bypass lands (Decision 217 cl.3, rec-2827): retire the clauses GitHub then enforces."
+  - id: read-surface-lost
+    kind: manual
+    description: "A merge surface cannot read GitHub's public REST endpoints, or the repository stops being public: re-decide the read surface before agent merges wedge."
+  - id: inherited-red-wedge
+    kind: manual
+    description: "Reds a PR did not cause repeatedly refuse agent merges: add a deterministic inherited-red release (the rec-4087 pattern) rather than an override."
+```
+
+**Related:** Decisions 73, 76, 83, 89, 100, 163, 181, 203, 205, 212, 217, 224, 229, 234, 245, 246; T4.32; rec-2827, rec-4080, rec-4085, rec-4087, rec-4624, rec-4874, rec-4891.
+
+---
+
 ## Decision 254: The full tier runs post-merge on batches of main, a red batch is searched for its culprit, and code deploys consume the newest commit a passing run covers; a red pauses deploys, never merging (amends Decisions 72, 73, 159, 163, 201, 203, 205, 226, 244, 245 and 249) (Decided)
 
 ```yaml
@@ -756,6 +813,8 @@ conditions:
 
 **Related:** Decisions 73, 76, 83, 101, 170, 181, 187, 233, 234, 238, 239; rec-2827, rec-4080, rec-4695, rec-4769, rec-4907.
 
+> **Update (2026-11-12, PLAN-merge-requires-green-checks):** Clause 6's residual "an agent can still merge on red through the admin bypass (rec-4080)" is covered by Decision 255: the merge gate refuses an agent merge whose required checks, pr-validate among them, have not concluded success.
+
 ---
 
 ## Decision 245: An agent merge is refused when main has changed, since the PR's base, a file the PR also changes -- a fail-closed presubmit heuristic with no agent override, the post-merge full tier stays the authority (amends Decision 83) (Decided)
@@ -819,6 +878,8 @@ conditions:
 ```
 
 **Related:** Decisions 55, 72, 73, 76, 83, 100, 135, 163, 177, 181, 186, 201, 203, 217, 226, 234, 241, 243; rec-2827, rec-4080, rec-4085, rec-4451, rec-4790, rec-4869, rec-4873, rec-4874.
+
+> **Update (2026-11-12, PLAN-merge-requires-green-checks):** Decision 255 covers clause 6's "merge on red (rec-4080)" and "auto-merge enabled before checks finish" residuals: the same gate refuses either tool unless every required check concluded success on the head it names. The other residuals stand.
 
 > **Amended by Decision 254 (2026-11-12):** Decision 254 fires tap-promotion-lands: clause 5's end state is decided (a last-green ref, not a promotion in environment-taxonomy.yaml's sense). The refusal stays as written until the culprit step has named the culprit correctly on three real multi-commit reds, none misattributed; it then narrows to overlapping files under terraform/** and governed deploy paths, and the update-branch remedy gains an attempt cap (Decision 254 cl.8).
 
@@ -1983,6 +2044,8 @@ child criteria; the self-review gap -- rec-4476.
 > runs that gate only as cl.4's outage fallback, so the end state is no nested personas.
 
 > **Amended by Decision 247 (2026-11-02):** Clause 1's interim reading is final: the legacy executor and STRATEGIC plans are retired for good, and the /overseer is no longer an interim coordinator: the coordinator alone starts a planning or implementation agent. Clause 4's CD.17 hold is discharged: CD.17 is superseded with no successor trigger.
+
+> **Update (2026-11-12, PLAN-merge-requires-green-checks):** Decision 255 cl.5 reads cl.4's outage fallback: once a persona's flag reads actions, the fallback is entered by returning that flag to in_session on main, and the operator merges that change in the GitHub UI, since the merge gate refuses it to an agent.
 
 ---
 
@@ -11345,6 +11408,8 @@ conditions:
 > **Update (2026-11-03):** Decision 245 clause 3 narrows the non-wedging property for agent merges: a fail-closed gate refuses a merge whose stale base shares a changed file with main. The ruleset configuration above is unchanged.
 
 > **Update (2026-11-05):** Decision 246 clause 5 narrows it again for pull requests that add or change approved text: such a PR stays red until the operator approves the wording on GitHub, and an operator merge in the GitHub UI stays the release valve.
+
+> **Update (2026-11-12, PLAN-merge-requires-green-checks):** Decision 255 narrows it a third time for agent merges: the merge gate refuses a merge unless every required check, and every persona check a verdict_source row selects, concluded success on the merge-time head. The ruleset configuration above is unchanged.
 
 ---
 

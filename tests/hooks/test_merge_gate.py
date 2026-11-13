@@ -36,6 +36,10 @@ def _run(env: dict[str, Path], payload: str, cwd: str = "other", **kw):  # noqa:
     return fx.run_shim(env["project"], payload, cwd=env[cwd], **kw)
 
 
+def _head(env: dict[str, Path], number: int) -> str:
+    return fx.git(env["origin"], "rev-parse", f"refs/pull/{number}/head")
+
+
 def _no_private_ref(env: dict[str, Path]) -> None:
     refs = fx.git(env["project"], "for-each-ref", "refs/merge-overlap")
     assert refs == ""
@@ -56,13 +60,14 @@ def test_overlap_denies_naming_files_and_remedy(env: dict[str, Path]) -> None:
 
 
 def test_clear_allows_silently(env: dict[str, Path]) -> None:
-    r = _run(env, fx.merge_payload(2))
+    r = _run(env, fx.merge_payload(2, expectedHeadSha=_head(env, 2)))
     assert (r.returncode, r.stdout, r.stderr) == (0, "", "")
     _no_private_ref(env)
 
 
 def test_float_pull_number_accepted(env: dict[str, Path]) -> None:
-    assert _run(env, fx.merge_payload(2.0)).returncode == 0
+    payload = fx.merge_payload(2.0, expectedHeadSha=_head(env, 2))
+    assert _run(env, payload).returncode == 0
 
 
 def test_auto_merge_and_full_server_gated_the_same(env: dict[str, Path]) -> None:
@@ -184,7 +189,7 @@ def test_foreign_trailer_in_commit_message_denies(env: dict[str, Path]) -> None:
 
 
 def test_branch_trailer_in_commit_message_allows(env: dict[str, Path]) -> None:
-    r = _run(env, fx.merge_payload(3, commit_message=_BUILD))
+    r = _run(env, fx.merge_payload(3, commit_message=_BUILD, expectedHeadSha=_head(env, 3)))
     assert (r.returncode, r.stdout, r.stderr) == (0, "", "")
 
 
@@ -194,8 +199,10 @@ def test_dropped_branch_trailer_denies(env: dict[str, Path]) -> None:
 
 
 def test_no_commit_message_or_no_trailer_unchanged(env: dict[str, Path]) -> None:
-    assert _run(env, fx.merge_payload(3)).returncode == 0
-    assert _run(env, fx.merge_payload(2, commit_message="pr 2\n")).returncode == 0
+    named_3 = fx.merge_payload(3, expectedHeadSha=_head(env, 3))
+    named_2 = fx.merge_payload(2, commit_message="pr 2\n", expectedHeadSha=_head(env, 2))
+    assert _run(env, named_3).returncode == 0
+    assert _run(env, named_2).returncode == 0
 
 
 def test_non_string_commit_message_denies(env: dict[str, Path]) -> None:
