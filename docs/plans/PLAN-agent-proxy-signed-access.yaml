@@ -291,7 +291,7 @@ scope:
   - file: tests/conftest.py
     action: Modify
     purpose: >-
-      The fixture PR (with the next row only). _hermetic_aws_profile also deletes OTL_OPS_VERBS_TRANSPORT (one more name
+      The fixture PR (with the next row and the project-configuration.yaml row only). _hermetic_aws_profile also deletes OTL_OPS_VERBS_TRANSPORT (one more name
       in the tuple it deletes; the docstring names it). After cutover every agent environment exports the variable and
       pytest inherits it, so without this the clients' existing Function URL nodes would take the API path and fail in
       every cut-over session while CI stays green: test_ducklake_reader.py's
@@ -302,7 +302,8 @@ scope:
       monkeypatch; @pytest.mark.integration tests keep the environment's value, as they keep AWS_PROFILE. A
       root-conftest edit makes PR CI's --pre run the whole suite (Decision 153's full_suite_forced path: a waiver up to
       its 1,500 s forced-run ceiling, then a hard fail, inside pr-validate's 30-minute timeout). Measured at planning:
-      the selection_budget predictor gives 1,131 modules, cost 1,893.6 s, predicted 1,203-4,561 s (forced_ceiling_breach
+      the selection_budget predictor gives 1,131 modules, cost 1,893.6 s, predicted total CI elapsed 1,203-4,561 s (test
+      half 1,146-4,403 s; forced_ceiling_breach
       at the high end; the low end is the recorded median ratio, PREDICT_COST_RATIO_LOW 0.58); a local forced-scope run
       (pytest tests -m 'not integration' with the fast tier's -n auto, timeout and seed flags, untraced as a
       conftest-only diff is, 4 CPUs) took 674.7 s for 23,878 passed and 3 skipped on 2026-11-13, so the ceiling is
@@ -440,6 +441,9 @@ scope:
   - file: docs/contracts/project-configuration.yaml
     action: Modify
     purpose: >-
+      The fixture PR, so the row lands before the reader-client PR adds the variable's first reader (scripts/CLAUDE.md's
+      same-change rule; the forced full suite adds no selection, while the reader-client PR would breach at 174 modules,
+      high end 1,128 s). Its readers all exist on main, which is all validate_project_configuration asks of them.
       Decision 224's row for the new variable: id ports.ops_verbs.function_url.transport, kind machine, basis
       PLAN-agent-proxy-signed-access (the agent proxy signs only amazonaws.com hosts), applies_when {port: ops_verbs,
       adapter: function_url}, homes {local: clone_file, ci: null, cloud: null}, variable OTL_OPS_VERBS_TRANSPORT,
@@ -520,18 +524,21 @@ verification_plan:
     action: >-
       Run the transport-switch and caller-read tests with the variable exported, as a cut-over session runs them, so
       the existing Function URL nodes prove the suite deletes it. Not hermetic: test_writer_transport.py and the
-      telemetry writer handler tests import DuckDB, which a venv-less replay lacks, so -rs shows any skip.
+      telemetry writer handler tests import DuckDB, which a venv-less replay lacks, so -rs shows any skip. The marker
+      filter deselects test_conftest_hermeticity.py's integration-marked nodes, as the fast and full tiers do: they keep
+      the session's AWS_PROFILE, which before cutover is the unresolvable prefix (ProfileNotFound); none is named here.
     command: >-
       OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -m pytest
       tests/common/ducklake_reader_client/test_transport_selection.py tests/common/ducklake_reader_client/test_ducklake_reader.py
       tests/ops_data_portal/test_writer_transport.py tests/telemetry_capture/test_transport.py
       tests/telemetry_capture/test_read_route.py tests/lambdas/ducklake_telemetry_writer/test_caller_shapes.py
-      tests/lambdas/ducklake_telemetry_writer/test_handler.py tests/test_conftest_hermeticity.py -q -rs
+      tests/lambdas/ducklake_telemetry_writer/test_handler.py tests/test_conftest_hermeticity.py -q -rs -m "not integration"
     expected: >-
       All pass with no skipped test: test_transport_selection.py's seven nodes, the two new writer-transport nodes, the
       four new telemetry transport nodes, the two new read-route nodes and test_caller_shapes.py's four nodes, with
       every existing node in those files, and test_handler.py, unchanged and green, the six Function URL nodes the
-      tests/conftest.py row names included, and test_transport_selection_env_var_deleted green (the fixture PR is on main).
+      tests/conftest.py row names included, and test_transport_selection_env_var_deleted green (the fixture PR is on main);
+      the integration-marked nodes show as deselected, which is not a skip.
     fix_if: >-
       A skip naming duckdb: the venv lacks it, so the run proves nothing; sync the venv and re-run. Any failure: fix the
       code, never an assertion's meaning (Decision 235).
@@ -576,8 +583,9 @@ verification_plan:
       configured profile before cutover (constraints). Coverage below 100% on
       src/lambdas/ducklake_telemetry_writer/handler.py: a changed line only a REST event reaches; rewrite it as a
       straight-line expression (scope row), never a coverage-baseline entry or an edit to test_handler.py. PR CI's
-      --pre budget breach on any of the four PRs (each measured below the 1,110 s cap, execution_steps[0]; Decision
-      208): stop and report to the coordinator with the run's elapsed and dominant phase; never bypass.
+      --pre budget breach on the reader-client, read-route or main build PR (each measured below the 1,110 s cap,
+      execution_steps[0]; Decision 208): stop and report to the coordinator with the run's elapsed and dominant phase;
+      never bypass. The fixture PR's forced run follows the tests/conftest.py row instead.
     hermetic: false
     graduation: not-applicable
   - step: 5
@@ -1185,6 +1193,7 @@ gate_rounds:
   - {gate: plan-critique, round: 13, verdict: REVISE, blocking: 1, nits: 4}
   - {gate: plan-critique, round: 14, verdict: REVISE, blocking: 2, nits: 8}
   - {gate: plan-critique, round: 15, verdict: REVISE, blocking: 4, nits: 4}
+  - {gate: plan-critique, round: 16, verdict: REVISE, blocking: 1, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -1199,11 +1208,11 @@ execution_steps:
   - "Four build PRs, split by measured selection (Decision 208 cl.1: the single PR's prediction, 326 modules at cost 744.8 s,
     breaches at the 1,110 s cap, so it splits until each clears; predictor run via selection_budget._report, since its
     CLI crashes, owed rec 23). Three early PRs start when this plan merges, change no behaviour before cutover and wait
-    on no operator word: the fixture PR (tests/conftest.py and test_conftest_hermeticity.py; forced full suite, Decision
-    153); the reader-client PR (src/common/ducklake_reader_client.py and test_transport_selection.py; 167 modules, cost
+    on no operator word: the fixture PR (tests/conftest.py, test_conftest_hermeticity.py and the project-configuration.yaml
+    row; forced full suite, Decision 153); the reader-client PR (src/common/ducklake_reader_client.py and test_transport_selection.py; 167 modules, cost
     474.0 s, test half 283-1,099 s, breadth_waived); the read-route PR, after the reader-client PR is on main
-    (scripts/telemetry_capture/read_route.py and test_read_route.py; 81 modules, cost 421.1 s, 249-973 s,
-    breadth_waived). The main build PR is every other row (236 modules, cost 356.5 s, 218-831 s, breadth_waived). From
+    (scripts/telemetry_capture/read_route.py and test_read_route.py; 81 modules, cost 421.1 s, test half 249-973 s,
+    breadth_waived). The main build PR is every other row (236 modules, cost 356.5 s, test half 218-831 s, breadth_waived). From
     the first PR until cutover the build prefixes every repo command it runs (bin/venv-python, the fast and full tiers,
     preflight, postflight) with AWS_PROFILE=agent-platform-unset, so it stops at ProfileNotFound before any request and
     never tries the refused role chain; preflight then runs in its degraded mode with null recs fields, and the CI-RCA
@@ -1211,24 +1220,26 @@ execution_steps:
     edits (scripts/telemetry_capture/transport.py, read_route.py, the telemetry writer handler, their tests and the new
     test_caller_shapes.py) before the read-route PR opens."
   - "Each early PR: its tests first, seen red on the unchanged tree (record the red run), then its source rows; run its test
-    files and the fast tier; Commit Flow without the declaration: an early PR leaves the plan file and
+    files with -m 'not integration' (as VP 2) and the fast tier; Commit Flow without the declaration: an early PR leaves the plan file and
     implementation_declared untouched (only the main build PR declares, so validate_merge_step and the VP replay judge
-    the whole build once); merge on green CI. The fixture PR's PR CI --pre is the forced full suite: on a ceiling breach
+    the whole build once); merge on green CI with merge_pull_request (squash, an explicit commit_message and
+    expectedHeadSha, through the merge gate). merge_step premerge and readback run on the main build PR only: an early
+    PR applies none of the sidecar's blocks, so premerge's approved-text leg would report the bound files as mismatched. The fixture PR's PR CI --pre is the forced full suite: on a ceiling breach
     or a timeout, follow the tests/conftest.py row, never a bypass. The reader-client PR's merge wakes
     deploy-ducklake-lambdas.yml (src/common/ducklake_* is a watched path): an inert redeploy, since the Lambdas never
-    set OTL_OPS_VERBS_TRANSPORT; read that run green before the read-route PR merges, and a red run follows VP 10's
-    fix_if."
+    set OTL_OPS_VERBS_TRANSPORT; read that run green before the read-route PR merges, and a skipped or red run (Decision 254's batched full tier
+    makes a gate skip the likelier) follows VP 10's fix_if."
   - "The main build PR, once the three early PRs are on main. At its start run VP 5; on any missing line stop and tell the
     coordinator."
   - "Tests first per the main build PR's test scope rows (the new test files, the changed ones, the detector's pattern helper, red-case list and fixture), seen red on the unchanged tree (record the red run), except test_no_session_code_mints_credentials, which is green before and after (its synthetic red case proves it can fail), and test_expected_alarms_match_the_hcl, red only between the HCL edit and the EXPECTED_ALARMS edit. Post: the named nodes exist and fail."
   - "terraform/bootstrap/agent_session_user.tf per scope row 1, reusing platform_dev_policies.tf's Deny statements and plan A's route locals (no added line, comments included, may carry a token VP 8's screen refuses: provider or module followed by a quote, required_providers, provisioner, local-exec, an external or http data source), then the seventh detector pair in platform_security_alarms.tf and EXPECTED_ALARMS in security_detector_probe.py, and, only if PLAN-bootstrap-ci-gated-apply's BUILD PR 1 is on the rebased main before merge, the _UNSCANNED_BOOTSTRAP_FILES entry per its row. Post: VP 1 and VP 3 pass."
   - "scripts/aws_identity.py, .claude/hooks/session_start_aws.sh and the bin/setup-cloud-env.sh header per their rows. Post: VP 1 and VP 6 pass."
   - "The transport switch (the fixture, reader-client and read-route PRs are on main): writer_transport.py, scripts/telemetry_capture/transport.py and the telemetry writer handler per their rows. Post: VP 2 passes."
-  - "docs/contracts/ports.yaml and project-configuration.yaml per their rows, measured against main (ports.yaml at or under 500 effective lines). Post: VP 3 passes."
+  - "docs/contracts/ports.yaml per its row, measured against main (at or under 500 effective lines); project-configuration.yaml's row landed with the fixture PR. Post: VP 3 passes."
   - "Hand-apply the sidecar's ten blocks verbatim, {{N}} the next free Decision number at build time and {{DATE}} the build date, and fill {{N}} the same way in scripts/aws_identity.py's docstring and the bin/setup-cloud-env.sh header (a rebase that renumbers re-fills every site); AGENTS.md shrinks, so lower config/prose_budgets.yaml's S1 root_ambient_load_set to the measured value (the prose_budgets_ratchet_down sanction). Post: VP 4 passes."
   - "Commit Flow (implement skill; git-ops.yaml handoff_sequence): full tier, push, PR. At CI green ask the operator's final-diff word on the head, naming its full sha (the terraform/bootstrap IAM text, the session-start hook and the telemetry writer handler first); only after that word post VP 7 and VP 8's blocks at that sha and record the returned lines; merge only the head both cover (any new head, a rebase for {{N}} included, needs the word and VP 7-8 again first), only after #1987 and plan A's change are applied, and only when the operator is ready to run VP 9 in the same sitting. Just before merge, fetch main: if main's test_platform_role_metadata_admin_scope.py defines _UNSCANNED_BOOTSTRAP_FILES and the head lacks agent_session_user.tf's entry, rebase and add it per its row (a new head, so the word and VP 7-8 again)."
   - "After merge: post VP 9's block; on its lines, run VP 10; when both channels are green, post VP 11's procedure; on 'cutover done', run VP 12-15 in a fresh session (the build thread itself if it was started after cutover, else a fresh one the coordinator starts); then post VP 16's block."
-  - "Report: what was implemented, the validation_result --verify-head verdict, the postflight output, the operator-reported lines, VP 5, VP 10 and VP 12-16 results, the filed rec ids, each PR's merge SHA and recorded red run, and the fixture PR's PR CI forced-run outcome and elapsed."
+  - "Report: what was implemented, each PR's validation_result --verify-head verdict, the postflight output, the operator-reported lines, VP 5, VP 10 and VP 12-16 results, the filed rec ids, each PR's merge SHA and recorded red run, and the fixture PR's PR CI forced-run outcome and elapsed."
 rollback: >-
   The three early PRs stay (inert without the variable). Before cutover: revert the main build PR's squash commit and, if VP 9 ran, the operator applies the revert from CloudShell after a
   reviewed PR removes prevent_destroy (the user, its policies, its boundary and the seventh alarm pair go); the
