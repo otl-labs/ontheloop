@@ -1,0 +1,202 @@
+name: terraform-bootstrap-apply
+
+# CI apply of terraform/bootstrap behind one operator approval (Decision 257, PLAN-bootstrap-ci-gated-apply).
+# Never auto-applies (Decision 77): every apply waits for the apply job's reviewer-gated Environment.
+#
+# preview (ungated, tf-trusted-plan with deployment: false so it creates no deployment record, role bootstrap-preview:
+# state read only): the gate screens the whole root first, then a read-only plan; the gate's preview table (address,
+# action, changed attribute names, flags) goes to the step summary and is the reviewed set. It asks for no approval
+# when nothing would change. A plan holding any change the gate protects ends CLOUDSHELL_REQUIRED: a push run ends
+# neutral with a ::warning::, a dispatch run fails, and the operator applies the whole plan from CloudShell.
+# apply (tf-bootstrap-apply, role bootstrap-apply): scripts/ci/terraform_bootstrap_apply.sh plans, applies that plan
+# only if each change matches a reviewed one, and re-plans clean. Read the preview's summary before approving.
+#
+# Fail closed: preview, when it would ask for approval, checks that the apply job's Environment exists with required
+# reviewers and no admin bypass; apply, right after its checkout and before any credential step, checks that the run
+# holds a recorded approval for its Environment by a listed reviewer (scripts/ci/environment_reviewer_preflight.py).
+# validate_bootstrap_apply fences this file; validate_trusted_plan_environment governs the preview job.
+# Configuration: repository variable TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS; the two roles live in
+# terraform/bootstrap/bootstrap_ci_apply.tf.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'terraform/bootstrap/**'
+      - '.github/workflows/terraform-bootstrap-apply.yml'
+      - 'scripts/ci/terraform_bootstrap_apply*'
+      - 'scripts/ci/plan_names_core.py'
+      - 'scripts/ci/environment_reviewer_preflight.py'
+      - 'scripts/ci/terraform_hcl_screen.py'
+      - 'scripts/ci/terraform_hcl_screen_policy.py'
+      - 'scripts/ci/terraform_hcl_lexer.py'
+      - 'config/terraform-version'
+      - 'config/aws-region'
+      - '.github/actions/aws-region/**'
+      - '.github/actions/materialise-tfvars/**'
+  workflow_dispatch:
+    inputs:
+      prove_gate:
+        description: Run the apply job's gate against the current tree and apply nothing (needs the approval)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-bootstrap-apply
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: {name: tf-trusted-plan, deployment: false}
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    outputs:
+      reviewed: ${{ steps.gate.outputs.reviewed }}
+      has_changes: ${{ steps.gate.outputs.has_changes }}
+      verdict: ${{ steps.gate.outputs.verdict }}
+    env:
+      TF_IN_AUTOMATION: "1"
+      TF_INPUT: "0"
+      MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Screen the root (before any credential or terraform step)
+        run: python3 -I scripts/ci/terraform_bootstrap_apply_gate.py screen
+
+      - uses: ./.github/actions/aws-region
+
+      - name: Configure AWS credentials (OIDC -- bootstrap-preview, state read only)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/bootstrap-preview
+          role-session-name: terraform-bootstrap-preview
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: ./.github/actions/materialise-tfvars
+
+      - name: Read pinned Terraform version
+        id: tfver
+        run: echo "version=$(cat config/terraform-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: ${{ steps.tfver.outputs.version }}
+          terraform_wrapper: false
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Read-only plan (-lock=false, text never logged)
+        id: plan
+        run: |
+          q="$GITHUB_WORKSPACE/scripts/ci/quiet_run.sh"
+          bash "$q" "$RUNNER_TEMP/tf.log" -- terraform -chdir=terraform/bootstrap init -input=false -lockfile=readonly || { echo "::error::TF_BOOTSTRAP_PREVIEW_FAILED init"; exit 1; }
+          rc=0
+          bash "$q" "$RUNNER_TEMP/tf.log" -- terraform -chdir=terraform/bootstrap plan -lock=false -input=false -no-color -detailed-exitcode -var-file="$GITHUB_WORKSPACE/terraform/personal/terraform.personal.tfvars" -var aws_profile= -out=plan.bin || rc=$?
+          [ "$rc" = 0 ] || [ "$rc" = 2 ] || { echo "::error::TF_BOOTSTRAP_PREVIEW_FAILED plan exit ${rc}"; exit 1; }
+          bash "$q" "$RUNNER_TEMP/tf.log" --stdout "$RUNNER_TEMP/plan.json" -- terraform -chdir=terraform/bootstrap show -json plan.bin
+          rm -f terraform/bootstrap/plan.bin
+
+      - name: Preview (names, actions and flags only)
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          rc=0
+          python3 -I scripts/ci/terraform_bootstrap_apply_gate.py preview --plan-json "$RUNNER_TEMP/plan.json" \
+            --github-output "$GITHUB_OUTPUT" --event-name "$EVENT_NAME" > "$RUNNER_TEMP/preview.md" || rc=$?
+          cat "$RUNNER_TEMP/preview.md" >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/preview.md"
+          exit "$rc"
+
+      - name: Check the apply Environment has reviewers and no admin bypass
+        if: ${{ steps.gate.outputs.has_changes == 'true' || inputs.prove_gate }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEWER_LOGINS: ${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}
+        run: python3 -I scripts/ci/environment_reviewer_preflight.py environment --environment tf-bootstrap-apply --require-no-admin-bypass
+
+      - name: Delete plan files (never persisted or uploaded)
+        if: always()
+        run: rm -f terraform/bootstrap/plan.bin "$RUNNER_TEMP/plan.json" terraform/personal/terraform.personal.tfvars
+
+  apply:
+    needs: preview
+    if: ${{ github.ref == 'refs/heads/main' && (needs.preview.outputs.has_changes == 'true' || inputs.prove_gate) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: tf-bootstrap-apply
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    env:
+      MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+      TF_IN_AUTOMATION: "1"
+      TF_INPUT: "0"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Check the reviewer approval for tf-bootstrap-apply
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEWER_LOGINS: ${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}
+        run: python3 -I scripts/ci/environment_reviewer_preflight.py approvals --environment tf-bootstrap-apply
+
+      - name: Screen the root (before any credential or terraform step)
+        run: python3 -I scripts/ci/terraform_bootstrap_apply_gate.py screen
+
+      - uses: ./.github/actions/aws-region
+
+      - name: Configure AWS credentials (OIDC -- bootstrap-apply)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/bootstrap-apply
+          role-session-name: terraform-bootstrap-apply
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: ./.github/actions/materialise-tfvars
+
+      - name: Read pinned Terraform version
+        id: tfver
+        run: echo "version=$(cat config/terraform-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+        with:
+          terraform_version: ${{ steps.tfver.outputs.version }}
+          terraform_wrapper: false
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Apply only what the preview listed
+        env:
+          REVIEWED: ${{ needs.preview.outputs.reviewed }}
+          PROVE_GATE: ${{ inputs.prove_gate }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/terraform_bootstrap_apply.sh
+
+      - name: Delete the tfvars file
+        if: always()
+        run: rm -f terraform/personal/terraform.personal.tfvars

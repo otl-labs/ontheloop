@@ -46,9 +46,33 @@ def _violations(wfs, tree, declared) -> list[str]:
     return v.check_gated_jobs(wfs, declared)[0] + v.check_environment_names(wfs, declared) + v.check_upstream(wfs, declared)
 
 
+_GATED_FLOOR = (
+    ("approved-text-approval.yml", "approve"),
+    ("publish-ontheloop.yml", "publish"),
+    ("reconcile.yml", "gated-apply-reconcile"),
+    ("terraform-apply-sandbox.yml", "gated-apply"),
+    ("terraform-bootstrap-apply.yml", "apply"),
+    ("terraform-github-apply.yml", "apply"),
+)
+
+
+def test_bootstrap_apply_jobs_check_their_environment(tree) -> None:
+    wfs = copy.deepcopy(tree[0])
+    assert v.run_all(wfs, *tree[1:])[0] == []
+    apply = wfs["terraform-bootstrap-apply.yml"]["jobs"]["apply"]
+    apply["steps"].insert(1, {"run": "echo before the approvals check"})
+    assert any("terraform-bootstrap-apply.yml" in x for x in v.run_all(wfs, *tree[1:])[0])
+    dropped = copy.deepcopy(tree[0])
+    preview = dropped["terraform-bootstrap-apply.yml"]["jobs"]["preview"]
+    preview["steps"] = [
+        s for s in preview["steps"] if "environment_reviewer_preflight.py environment" not in str(s.get("run", ""))
+    ]
+    assert any("terraform-bootstrap-apply.yml" in x for x in v.run_all(dropped, *tree[1:])[0])
+
+
 def test_real_tree_is_green(tree) -> None:
     out, examined = v.run_all(*tree)
-    assert out == [] and examined == 6
+    assert out == [] and examined >= len(_GATED_FLOOR)
 
 
 def test_real_tree_gates_every_reviewer_job(tree, declared) -> None:
@@ -56,7 +80,7 @@ def test_real_tree_gates_every_reviewer_job(tree, declared) -> None:
     envs = v.reviewer_envs(declared)
     assert {"approved-text", "tf-gated-apply", "pypi"} <= envs and "deployment-approval-probe" not in envs
     gated = [(f, j) for f, w in wfs.items() for j, job in v._jobs(w).items() if v._env_name(job) in envs]
-    assert len(gated) == 6
+    assert len(gated) == len(set(gated)) and set(_GATED_FLOOR) <= set(gated)
     for fname, jname in gated:
         name = v._env_name(wfs[fname]["jobs"][jname])
         steps = [s for s in v._steps(wfs[fname]["jobs"][jname]) if not v._is_checkout(s)]
