@@ -45,7 +45,8 @@ not restate that classification.
 | Apply an out-of-budget IAM / trust / destroy `terraform/personal` change | Open a PR; CD routes to the `tf-gated-apply` GitHub Environment | Approve in GitHub Actions (benjamin-blake); CD applies the same reviewed plan.bin -- never from a laptop |
 | Recover from a red convergence record (failed/refused apply, or drift) | Red commit's HCL still right: dispatch Reconcile (`reconcile.yml`). Fix merged after the red commit: `terraform-apply-sandbox` `workflow_dispatch` acknowledge-and-retry. Rule + admin split-apply (never for PlatformDev/PlatformAdmin IAM, a `terraform/bootstrap` apply): `docs/contracts/deploy-paths.yaml` reconcile row | None |
 | Apply `terraform/` (legacy hashicorp/*-only roots) or `terraform/github` | Same PR -> CD path where a workflow exists | See `docs/contracts/terraform-cc-web-operations.yaml`'s operator-only / break-glass section |
-| Apply `terraform/bootstrap`, or apply `terraform/personal` by hand (bootstrap, reversing a manual admin change, or a guard-BLOCKed case with no CD path yet) | Operator action only | See `docs/contracts/terraform-cc-web-operations.yaml`'s operator-only / break-glass section |
+| Apply `terraform/bootstrap` | PR; `terraform-bootstrap-apply.yml` applies it on one approval (`tf-bootstrap-apply`); a CLOUDSHELL_REQUIRED preview goes to the operator (`deploy-paths.yaml` `admin_out_of_band.bootstrap_ci_apply`) | Approve in GitHub Actions |
+| Apply `terraform/personal` by hand (reversing a manual admin change, or a guard-BLOCKed case with no CD path) | Operator action only | See `terraform-cc-web-operations.yaml`'s operator-only section |
 
 ## Out-of-band IAM grants (drift -- not managed by this module)
 
@@ -71,12 +72,10 @@ elsewhere will not restore it; reapply manually if needed.
 - **PlatformDev runtime grant (CODIFIED 2026-05-29):** the `agent_platform` runtime role; `max_session_duration =
   36000` (the 3600 max blocked CC-web's 10h unattended sessions); `DailyOps` grants S3 read-write on
   `agent-platform-data-lake`, DynamoDB on `agent-platform-counters` and URL-only DuckLake verb invokes (Decision 213).
-  Codification overwrote a stale pre-rename `DailyOps` (dead `bblake-*` targets + a Bedrock invoke-model grant,
-  dropped as unused); the trust policy was verified unchanged.
+  Codification replaced a stale `DailyOps` (dead `bblake-*` targets, an unused Bedrock grant); trust unchanged.
 
-Follow-up (remaining): remove the now-redundant `AgentPlatformRuntime` inline policy via `platform_breakglass`
-(its grants are fully covered by the codified `DailyOps`). Decision 113 records the static-key credential model
-(Pattern B: the two roles behind one static-key user, separated by ExternalId).
+Follow-up: remove the redundant `AgentPlatformRuntime` inline policy (covered by `DailyOps`). Decision 113: static-key
+model, two roles behind one user, separated by ExternalId.
 
 - **DuckLake IAM read-wildcard closure (PLAN-terraform-sandbox-convergence-closure, 2026-06-18; SSM List* completion PLAN-ci-apply-ssm-list-closure rec-2276, 2026-06-18, `github_ci_apply` inline policy, out-of-band admin apply):**
   The iterative-discovery anti-pattern for `github_ci_apply` refresh-READ grants (rec-2223 round, rec-2251 round) is

@@ -2,6 +2,168 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 258: The CI apply boundary's headroom trigger is re-anchored once, to the size it reaches restoring agents' AWS access during the critical workflow failure (amends Decisions 230 and 239) (Decided)
+
+```yaml
+number: 258
+status: Decided
+decided_date: "2026-11-14"
+kind:
+  value: direction
+  justification: >-
+    Yes: clause 2 moves the boundary size at which Decisions 230 and 239 require the operator's re-decision.
+amends: [230, 239]
+significance:
+  value: numbered_decision
+  justification: >-
+    It sets a standing trigger and a standing rule (clauses 2 and 3), not a one-off fact (operational_fact,
+    considered); a dated note on each of 230 and 239 (amendment_forms, considered) would split one ruling in two, and
+    no contract holds Decision triggers.
+```
+
+**Status:** Decided
+**Date:** 2026-11-14
+**Warehouse ID:** dec-258 (per Decision 84 backfill)
+
+**Problem:** PLAN-agent-ducklake-rest-api's API Gateway Deny and PLAN-bootstrap-ci-gated-apply's protected-role Deny
+together take the CI apply boundary past the 5,632-byte headroom trigger of Decisions 230 and 239, the first
+crossing since Decision 230 set it.
+
+**Intent:** Agents get AWS access back without moving either fence out of the boundary, and the exception stays tied
+to the failure that caused it.
+
+**Decision:**
+1. **Exceptional circumstance.** This re-anchor is made only to restore AWS access to agents during a critical
+   workflow failure: since 2026-11-12 no agent session can assume a role, so all agent work has stopped and every
+   warehouse interaction, recommendations and telemetry included, is down. Both Denies are part of the fix. It grants
+   no headroom for any other fence.
+2. **New trigger.** The boundary-headroom conditions of Decisions 230 and 239 fire when the boundary's minified
+   PROD rendering passes 5696 bytes, its size once both Denies are on main, as measured by the build that lands this
+   entry; the SIT rendering, longer only by its bucket names, fires on the same growth. Both fences stay in the
+   boundary.
+3. **Not a precedent.** No later change may cite this entry to argue that exceeding, re-anchoring or otherwise
+   circumventing a size limit is acceptable. Growth past clause 2's size fires the trigger: the operator re-decides
+   via /plan where the fences live, and no build compacts another plan's statements to stay under it. The 6,144-byte
+   managed-policy limit, held by the boundary's terraform precondition, stays the hard ceiling.
+
+**Rationale:** Re-anchoring is the smallest change that keeps both fences where every bounded principal carries them.
+Rejected: moving a fence to a separate policy or an SCP (an IAM redesign that delays restoring access); compacting
+PLAN-agent-ducklake-rest-api's Deny (another plan's approved words); a number fixed at plan time (the operator chose
+the measured size, so no margin is pre-granted).
+
+**Coverage (Decision 181 cl.2):** clause 2's trigger stays manual, as it was in Decisions 230 and 239, and the build
+that lands this entry checks its number against the measured size; clause 3's ceiling is the boundary's precondition,
+whose presence validate_iam_policy_size checks; clause 1's no-headroom rule and clause 3's no-citation rule are
+unenforced residuals that only the decision scout and plan critique read, owned by a rec this entry's build files.
+
+```yaml reversal-conditions
+decision: 258
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: access-restored
+    kind: manual
+    description: "Agents hold AWS access again and the workflow failure is over: review whether clause 2's size stands or a fence moves out."
+```
+
+**Related:** Decisions 230, 239, 181, 126.
+
+---
+
+## Decision 257: terraform/bootstrap is CI-applied behind one operator approval; its protected set and root of trust stay the operator's (amends Decisions 92, 126, 144, 223, 225 and 238) (Decided)
+
+```yaml
+number: 257
+status: Decided
+decided_date: "2026-11-14"
+kind:
+  value: direction
+  justification: >-
+    Yes: clause 1 moves terraform/bootstrap's human gate from running each apply to approving a CI job.
+amends: [92, 126, 144, 223, 225, 238]
+serves: [NS.9]
+significance:
+  value: numbered_decision
+  justification: >-
+    It reverses the bootstrap-off-CI stance of Decisions 92 pt 4, 126, 223 and 225 for most bootstrap changes; a
+    deploy-paths.yaml note (considered) cannot amend Decision clauses.
+```
+
+**Status:** Decided
+**Date:** 2026-11-14
+**Warehouse ID:** dec-257 (per Decision 84 backfill)
+
+**Problem:** Since 2026-11-12 no agent session holds an admin identity, so the operator pastes every
+terraform/bootstrap apply into CloudShell, though most only grant CI roles.
+
+**Intent:** Agents propose bootstrap changes; CI applies them after the operator's approval, and no CI run can change
+who approves, who may assume the applying role, or what watches it.
+
+**Decision:**
+1. **Trigger.** .github/workflows/terraform-bootstrap-apply.yml applies terraform/bootstrap's PROD backend from main
+   only, on a push touching the root or the workflow and on dispatch. Every apply waits for one operator approval in
+   the tf-bootstrap-apply Environment (required reviewer, main-only deployment policy, no admin bypass, never
+   destroyed); it never auto-applies (Decision 77). The SIT bootstrap root stays admin-tier (Decision 252 cl.7).
+2. **Preview and apply (as Decision 248 cl.2-3).** An ungated read-only preview lists each change by address, action
+   and changed attribute names, flagging new roles, trust changes and grants with the actions they add. The gated job
+   re-plans, applies only if every change matches a listed one, and re-plans clean. A plan that touches the
+   protected set (clause 3), grants an IAM write beyond agent-platform-* or destroys, replaces or imports anything is
+   never split or applied by CI: the preview names CloudShell, where the operator applies it whole.
+3. **Roles and the protected set.** Two roles in terraform/bootstrap, named outside agent-platform-*, each trust one
+   Environment subject and this workflow's job_workflow_ref at main. bootstrap-preview reads only the root's
+   resources, state and tfvars parameter. bootstrap-apply may create and change only agent-platform-* roles carrying
+   the CI apply boundary, their inline policies and attachments, and agent-platform-* managed policies other than the
+   boundary and the agent users' policies. Both are boundary-free by explicit exclusion (as Decision 144 cl.3): the
+   boundary denies reads and policy versions they need. Explicit Denies keep from bootstrap-apply: the boundary,
+   PlatformAdmin, PlatformDev, every IAM user and group, the platform-security-* detector and trail, the
+   github-settings roles and the App key's resource policy (Decision 248), both bootstrap roles and their policies,
+   identity providers, role assumption and secret values. The CI apply boundary denies its roles any write to the
+   protected roles. No CI identity can write its own policy or trust (Decision 92 pt 4).
+4. **Root of trust.** The protected set and the Environment's rules change only by the operator's CloudShell apply
+   or an approved terraform-github-apply.yml run, never by this workflow.
+5. **Pre-merge plan.** deploy-paths.yaml admin_out_of_band.pre_merge_live_plan still binds terraform/bootstrap until
+   a screened PR-time trusted plan covers it, bringing the plan reviewer (Decision 205) with it.
+6. **Two appliers, one state.** CI and the operator share the state; the S3 lockfile serialises them and each apply
+   plans fresh.
+7. **Admin direction.** No admin key is held at the vendor: admin Terraform runs per clauses 1-6, and other admin
+   operations stay the operator's CloudShell steps until gated CI runbooks replace them. This supersedes the
+   admin-environment direction PLAN-agent-proxy-signed-access drafted, whichever lands first.
+8. **Coverage (Decision 181 cl.2).** Clause 3: tests/checks/iam_tf/test_bootstrap_ci_roles.py; clauses 1-2 and 4:
+   validate_bootstrap_apply, validate_trusted_plan_environment, validate_environment_reviewer_preflight, the gate's
+   tests and the first approved no-op run. Residuals: an approved run can create a boundary-capped role trusted by any
+   principal, which only the flags, the operator and the alarms stand against; the operator approves names, not
+   values; CODEOWNERS does not bind agent PRs (rec-2827); the detector sits in the account it watches until
+   the organization trail (Decision 252 cl.8).
+
+**Rationale:** A reviewer-gated Environment and an exact workflow-bound role are controls an agent cannot satisfy for
+itself (Decisions 239, 248). Rejected: re-pointing PlatformAdmin's trust at the gated job (an approved run could
+rewrite it); a separate operator-only root for the two roles (the Denies already protect them, and it would escape
+the checks that scan terraform/bootstrap); dropping the pre-merge plan (incident #1316); the plan reviewer in the
+state-reading job (Decision 238 cl.3).
+
+```yaml reversal-conditions
+decision: 257
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan; stop CI applies of terraform/bootstrap until then"
+conditions:
+  - id: unreviewed-apply
+    kind: manual
+    description: "An apply changes something its preview did not list: re-decide clause 2."
+  - id: protected-write
+    kind: manual
+    description: "bootstrap-apply writes, or may write, a protected-set resource: re-decide clause 3."
+  - id: pr-time-plan-lands
+    kind: manual
+    description: "A screened PR-time trusted plan covers terraform/bootstrap: re-decide clause 5."
+  - id: org-trail-lands
+    kind: manual
+    description: "The organization trail (Decision 252 cl.8) replaces this account's detector: re-check clauses 3 and 8."
+```
+
+**Related:** Decisions 77, 94, 113, 143, 172, 180, 202, 205, 233, 237, 239, 246, 248, 252.
+
+---
+
 ## Decision 256: Agent sessions reach AWS only as a proxy-held IAM user that signs each call itself -- no session assumes a role or holds an AWS key, and admin authority stays out of agent environments (amends Decisions 113, 202, 223, 248 and 252) (Decided)
 
 ```yaml
@@ -1415,7 +1577,7 @@ conditions:
     description: "A session token can approve a pending deployment (rec-4695): re-decide clause 5."
   - id: boundary-size
     kind: manual
-    description: "The permissions boundary passes Decision 230's 5,632 bytes: re-decide where the fence lives."
+    description: "The permissions boundary passes Decision 258 cl.2's size: re-decide where the fence lives."
 ```
 
 **Related:** Decisions 236, 230, 126, 81, 91 (amended), 143, 154, 181, 199, 213, 235, 238, 101.
@@ -1506,6 +1668,8 @@ conditions:
 ```
 
 > **Update (2026-11-06):** Decision 248 clause 4 amends clause 2: tf-trusted-plan also admits terraform-github-apply.yml's preview job; the trusted-plan role's trust is unchanged.
+
+> **Amended by Decision 257 (2026-11-14):** Clause 2's tf-trusted-plan also admits terraform-bootstrap-apply.yml's preview job under its own role, bootstrap-preview, which reads terraform/bootstrap's state (its trust documents carry ExternalIds) and shows names only; no LLM runs in it (clause 3).
 
 ---
 
@@ -2050,7 +2214,7 @@ conditions:
     description: "A DuckLake extension bump changes the statements a writer verb issues: re-measure clause 3's grants before the bump merges."
   - id: boundary-headroom
     kind: manual
-    description: "The boundary's minified size passes 5,632 bytes: re-decide where clause 5's fence lives."
+    description: "The boundary's minified size passes Decision 258 cl.2's size: re-decide where clause 5's fence lives."
 ```
 
 **Related:** Decision 216, 213, 81, 214, 222, 204, 143, 144, 202, 126, 88, 181.
@@ -2484,6 +2648,8 @@ conditions:
 **Related:** Decisions 180 (amended), 223, 202, 144, 126, 143, 176, 179, 177, 181; rec-4049, rec-3358,
 rec-4043.
 
+> **Amended by Decision 257 (2026-11-14):** Clause 6's "terraform/bootstrap, which CI never applies" reads "terraform/bootstrap, which only the gated bootstrap-apply role applies". bootstrap-plan-under-ci-identity and ci-root-declares-platform-role both fire and are answered there: the plan's reads, both roles' trust documents included, are granted to bootstrap-preview and bootstrap-apply in their own policies, never to a terraform/personal CI role, and clause 1 stands for writes. non-prefixed-role-in-ci-root does not fire: both roles carry no boundary and are terraform/bootstrap's own.
+
 ---
 
 ## Decision 224: One home per kind of user-set configuration -- project settings in ontheloop/platform.yaml, secret values never tracked and resolved by name, per-clone choices in .ontheloop/, one registry (amends Decision 211 clause 5 and Decision 212 clause 8) (Decided)
@@ -2689,6 +2855,8 @@ conditions:
 PLAN-platform-iam-bootstrap-adopt, PLAN-platform-iam-personal-release.
 
 > **Update (2026-10-18):** The Coverage loose ends rec-4049 owned (CI's read quartet on both roles and its metadata grant on PlatformDev) are retired by Decision 225, which also makes clause 3's deferred reversal (a) ruling.
+
+> **Amended by Decision 257 (2026-11-14):** Clause 1's "never in a CI-applied root" reads "never in a root an ungated CI role applies": terraform/bootstrap is applied by a gated role that is denied every write on PlatformDev, PlatformAdmin and their policies, and the CI apply boundary denies every role it bounds the same role writes, so clause 2's placement stands, ci-writable-again does not fire, and a change to any of the seven is still an operator CloudShell apply of the whole plan.
 
 > **Amended by Decision 256 (2026-11-13):** separate-admin-principal is re-checked: Decision 256 separates the routine principal instead, a user declared in terraform/bootstrap per clause 1 with its policies beside it. Clause 2 stands; clause 1 reads "managed IAM role or user".
 
@@ -8099,6 +8267,8 @@ post-merge, never written directly).
 
 > **Amended by Decision 252 (2026-11-10):** Clause 6's live_full gate on Organizations, the organisation trail and SCPs is lifted: the Organization is stood up now. SCPs add to the permissions boundary and never replace it, so the Reversal's supersession of this boundary does not fire (Decision 252 cl.1 and cl.8).
 
+> **Amended by Decision 257 (2026-11-14):** Clause 3's one explicit exclusion becomes three: bootstrap-apply and bootstrap-preview are boundary-free by name, outside agent-platform-*, and held by explicit Denies instead (Decision 257 cl.3). Clause 4's admin-create path for bootstrap-tier roles stays for the protected set; a boundary-carrying agent-platform-* role declared in terraform/bootstrap is created by that workflow's approved apply.
+
 ---
 
 ## Decision 143: Privileged-verb Lambda decomposition -- scope identities by worst reachable verb; enforce the boundary in a primitive outside the agent merge loop (amends Decision 81 cl.1) (Decided)
@@ -9255,6 +9425,8 @@ mutation. `deploy-paths.yaml`'s admin_out_of_band.scoped_login_provisioning inde
 > **Update (2026-11-09):** Decision 251 cl.1 admits the restore rehearsal sitting (docs/contracts/restore-rehearsal.yaml) to the admin tier for an ADMIN-container agent under explicit human direction, on ephemeral functions and a throwaway Neon branch only.
 
 > **Amended by Decision 252 (2026-11-10):** Once SIT stands, clause 1's provision intent applies on merge to SIT; once PROD is promote-only, PROD receives the same saved plan through the gated promotion. The Organization root and the SIT bootstrap root join the admin tier (Decision 252 cl.6 and cl.7).
+
+> **Amended by Decision 257 (2026-11-14):** Clause 1's operator-only admin tier no longer covers every terraform/bootstrap change: terraform-bootstrap-apply.yml applies it from main on one operator approval, and its protected set, any change outside bootstrap-apply's write grant and any destroy, replace or import stay the operator's CloudShell apply. An agent's move is a pull request, never an apply (clause 2 stands).
 ---
 
 ## Decision 125: Ratify decoupling DuckLake Lambda code deploys from terraform/personal infra apply (environment-taxonomy.md section 5 conformance) (Decided)
@@ -11068,6 +11240,10 @@ T5.2 (teardown) was considered but excluded: it is a near-due cost-saver (grace 
 > **Amended by Decision 238 (2026-10-28):** the Wave 2 speculative plan ratified here as direction
 > no longer runs under a PR-sub planner session; it runs under an environment- and workflow-bound
 > role. This body is otherwise unedited; see Decision 238.
+
+> **Amended by Decision 257 (2026-11-14):** point 4's separation now means no CI identity applies its own IAM:
+> the gated bootstrap-apply role, which no CI identity can write, applies the CI roles' IAM from main after one
+> operator approval, and the protected set stays out-of-band. This body is otherwise unedited; see Decision 257.
 
 **Problem:**
 CD.35 (Agent-native Terraform CI/CD) specified a five-wave architecture ratified via the log-decision
