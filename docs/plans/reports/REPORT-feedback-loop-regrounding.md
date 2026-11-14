@@ -1,9 +1,9 @@
-# REPORT: telemetry feedback-loop re-grounding against main (2026-11-12)
+# REPORT: telemetry feedback-loop re-grounding against main (2026-11-12, refreshed 2026-11-14)
 
 > REPORT-ONLY deliverable of `docs/plans/PLAN-feedback-loop-regrounding.yaml` (Decision 86 cl.2; file-router
 > report-deliverables route). A dated, point-in-time reading of the October 2026 feedback-loop designs (the eight
 > wave 2-4 component reports among `docs/plans/reports/REPORT-w1-*.md`, the W2 synthesis and the W3 staging report)
-> against main at 5291a39e. The other two W1 reports, `REPORT-w1-reader-verbs.md` and
+> against main at 5291a39e, refreshed at 0d51ede0 on 2026-11-14 (section 1.3). The other two W1 reports, `REPORT-w1-reader-verbs.md` and
 > `REPORT-w1-capture-producer-wiring.md`, are wave 1, built, and out of scope. It supersedes the eight by reference
 > for their premises and anchors; it edits none of them, because W1 and W3 text is cited by line elsewhere
 > (Decision 221 cites REPORT-w3:423 and :627). It plans no wave 2-4 work: the operator's 2026-11-10 gate holds
@@ -15,12 +15,13 @@
 > Section 11's readings are not rulings: each one's home is the Decision or design it cites.
 
 Evidence base and claim marks:
-- **[repo]** read on main at 5291a39e, with path:line where it matters. Decisions are cited by number and clause,
+- **[repo]** read on main at 5291a39e, with path:line where it matters; every cited file that changed by 0d51ede0
+  was re-read there (section 1.3). Decisions are cited by number and clause,
   not DECISIONS.md line, because new Decisions are inserted at the top of that file.
-- **[recs]** read from the rec store through the ducklake-reads named verbs on 2026-11-10 to 2026-11-12.
+- **[recs]** read from the rec store through the ducklake-reads named verbs on 2026-11-10 to 2026-11-14.
 - **[review]** a finding of the 2026-10-05 feedback-loop review, which is not in this repository; each finding this
   report relies on is restated here.
-- **[probe]** a W1 plan's own verification command, last re-run on 2026-11-12 at 5291a39e (section 12).
+- **[probe]** a W1 plan's own verification command, last re-run on 2026-11-14 at 0d51ede0 (section 12).
 - **[reported]** stated by another workspace on the shared coordinator log (issue #1963), not re-read here.
 - **[inferred]** a reading not verified. **[partial]** only partly checked.
 
@@ -43,7 +44,9 @@ Evidence base and claim marks:
    (config/telemetry/arrival.yaml lost_windows). Minus the two no-backfill gaps (about 4.5 days), about 11 clean days
    exist on 2026-11-12. Counting clean days in total, the register's 28-day, the ladder's 30-day and
    back-validation's 57-day reads cannot seed before about 2026-11-29, 2026-12-01 and 2026-12-28; if a window must be
-   gap-free, about 2026-12-09, 2026-12-11 and 2027-01-07. Which rule applies is each component plan's choice. Window
+   gap-free, about 2026-12-09, 2026-12-11 and 2027-01-07. Which rule applies is each component plan's choice. A
+   third gap during the 2026-11-12 to 2026-11-14 agent AWS outage is likely but not yet recorded (section 1.3); if
+   it is added, every date moves later by its length **[inferred]**. Window
    reach comes next: window verbs are capped at 7 days, cold window reads time out (rec-4474; rec-5130 on 2026-11-12,
    section 1.2), pagination truncates with no cursor (rec-4363), and responses carry no completeness watermark.
    Snapshots are kept 30 days (SNAPSHOT_RETAIN_DAYS), so no long input can be re-read as it was judged. The operator
@@ -70,7 +73,7 @@ Evidence base and claim marks:
    X2. Whether X2 needs a numbered Decision is open (section 16).
 8. **The allow-list's premises moved again**: 19 closed vocabularies, not 15; no `enforced: false` flags; its column
    inventory no longer matches; Decision 221 cl.1 keeps `cost_usd` out of any crossing set.
-9. **New since October and since the 2026-11-10 draft** (section 1): Decisions 249, 250, 252, 253 and 254; two
+9. **New since October and since the 2026-11-10 draft** (section 1): Decisions 249, 250, 252 to 258; two
    no-backfill capture gaps; the arrival oracle dates lost-window excuses by commit author date; the inference tier
    selection (#1969) changes the LiteLLM lane's reasoning premise.
 10. **Wave order holds; prerequisites changed** (section 15). T3.4 also needs T1.13, which the operator ruled is the
@@ -130,13 +133,35 @@ Evidence base and claim marks:
 - rec-5130 (Critical, filed by ci-rca): the telemetry-arrival check could not read its 7-day window
   (`ReadDeadlineExceededError`) on 4 of 5 runs from 16:10Z on 2026-11-12, recovered after the 18:53Z compaction, and
   was closed as environment-only; rec-4474 holds the durable fix and was offered to this workspace
-  **[reported; not read in the rec store]**. Cold reads can fail even inside the 7-day cap, which bears on R2's
+  **[reported; rec-5130 closed per the rec store, 2026-11-14]**. Cold reads can fail even inside the 7-day cap, which bears on R2's
   lateness bound and on any stitched seed read (section 8).
 - New related recs: rec-5056 (High; harness_key_missing alarm, 2 sessions; any join on `harness_session_key`
   inherits it); rec-5061 (High; threads started in the checkout's parent store branch `HEAD`, so a branch-prefix
   read miscounts them); rec-5042 (DuckLake Lambda cold connect 11-14 s on any backend, beside rec-4474) **[recs]**.
 - T3.4 is still titled "(STRATEGIC)" (docs/ROADMAP-PLATFORM.yaml, T3.4 name), but Decision 247 retired that plan
   type; the plan that next scopes T3.4 re-grounds the title **[repo]**.
+
+### 1.3 Since 5291a39e (to 0d51ede0, 2026-11-14)
+
+- From about 20:30Z on 2026-11-12 the agent egress proxy refused sts:AssumeRole, so no agent session could reach
+  the rec store or the telemetry API until the cutover on 2026-11-14 (Decision 256's Problem) **[repo]**. Agent
+  sessions now sign as one proxy-held agent user with no role assumption (Decision 256 cl.1-2) and reach the
+  reader and writer verbs through one IAM-authenticated REST API (Decision 255 cl.1); the verbs and the single
+  backend are unchanged (Decision 255 cl.5), so Decision 84 I-1 and I-3 read as before. The changed client and
+  transport files (src/common/ducklake_reader_client.py, scripts/ops_portal/writer_transport.py,
+  scripts/telemetry_capture/{read_route,transport}.py, the telemetry writer handler) change the route, not any verb,
+  table or contract this report cites; no report anchor sits in them **[repo: git diff]**.
+- **Decision 257** (2026-11-14): terraform/bootstrap is CI-applied from main behind one operator approval, and a plan
+  touching the protected set (the CI apply boundary among it) is applied whole by the operator in CloudShell
+  (cl.1-3); CI and the operator share one state and each apply plans fresh (cl.6). **Decision 258** re-anchors the
+  boundary's headroom trigger at 5,696 bytes; growth past it sends the fences' home back to the operator through
+  /plan (cl.2-3). Both bear on rec-4696, whose build adds Denies to the CI apply boundary (X1, section 16) **[repo]**.
+- **rec-5144** (Critical, ci_rca, filed 2026-11-13 16:32Z): the telemetry-arrival check found the merged session of
+  #2022 (2026-11-13 10:04Z) missing from telemetry_sessions. It falls inside the outage, so capture likely stopped
+  then; config/telemetry/arrival.yaml carries no lost window for it at 0d51ede0 **[recs; repo; cause inferred]**.
+  It is past its repair SLO, so `red_overlap` blocks every plan until it is repaired (Decision 226 cl.3).
+- rec-5130 is closed and rec-4474 (cold window reads, High) is open **[recs, 2026-11-14]**.
+- No probe input that a W1 hermetic step reads moved its result except where section 12 says **[probe]**.
 
 ---
 
@@ -641,29 +666,33 @@ not a reading (section 8).
 
 ---
 
-## 12. Probe re-runs (each W1 plan's own hermetic VPs, 2026-11-12, last at 5291a39e)
+## 12. Probe re-runs (each W1 plan's own hermetic VPs, 2026-11-12 to 2026-11-14, last at 0d51ede0)
 
-Each W1 plan's hermetic verification steps were re-run with a 200 s limit per step; steps that fetch old SHAs, run
+Each W1 plan's hermetic verification steps were re-run with a 200 s limit per step; steps that fetch several old SHAs, run
 `--pre` or render the plan document were skipped. "Pass" means exit 0 and every `expected_literals` string printed.
 The 2026-11-10 run at f866f98b is superseded, because probe inputs moved in between (section 1.2). The suite ran at
 d8283f55, 3f8edd12, b4d76e92 and 5291a39e, each time main had moved probe inputs, in a venv synced to main's pins.
 The only change across the four runs is deliberation VP 3, which runs since mcp 2.x landed (#1984); the 5291a39e run
-(after #1987's Terraform and check changes) matched b4d76e92 step for step. Raw outputs are not committed.
-**[probe]**
+(after #1987's Terraform and check changes) matched b4d76e92 step for step. On 2026-11-14 the suite ran again at
+0d51ede0, after the agent access cutover (#2036-#2038) moved probe inputs (section 1.3): every step printed what it
+printed at 5291a39e, and the three long simulations, given 900 to 2,400 s, finished and passed (cost VP 4, Goodhart
+VP 4, ladder VP 5). Two history-fetching steps failed once on a transient `git fetch` error and passed on a re-run.
+Raw outputs are not committed. **[probe]**
 
 | Component | Steps run | Pass | Differs from the pinned literal (what moved) | Did not finish |
 |---|---|---|---|---|
 | friction | VP 1 (by hand: the suite skips it on a skip word in its fixture text), 2, 4, 5, 6 | 2, 6 | VP 1 raises `TypeError` (`build_observations` now needs `sidecars`, #1405). VP 4: registered hooks in .claude/settings.json 13 to 21; none falls back to `hook:PreToolUse.Bash` (the plugin hooks' fallbacks are in section 3). VP 5: rework and exception inputs widened to the k2 set | - |
 | deliberation | VP 1-5 | 4, 5 | VP 1: parser_version 2 to 9; diagnostics also count `absent_usage_key`. VP 2: parser 9; `reasoning_effort` joined the reasoning fields; LiteLLM tier 1 is `['deepseek/deepseek-flash']`, was `['deepseek/deepseek-chat', 'deepseek/deepseek-reasoner']` (#1969). VP 3: with mcp 2.3.0 (#1984, rec-3795 closed) it runs and prints the pinned behaviour (reasoning content returned, echoed back, a single-space placeholder when stripped under explicit thinking) on litellm 1.106.2, not the pinned 1.102.1 | - |
-| Goodhart register | VP 2-5 | 3, 5 | VP 2: two failure_signal readers exist (was 0); `drill_markers=0` because the probe misses `ops_projects.purpose` | VP 4 (over 200 s) |
-| cost and egress | VP 2-5 | 3, 5 | VP 2: a telemetry catalog-stats alarm exists (`tf_catalog_stats_lines` 0 to 1); capture hooks include SessionEnd, Stop, StopFailure and UserPromptSubmit | VP 4 (over 200 s) |
+| Goodhart register | VP 1-5 | 3, 4, 5 | VP 2: two failure_signal readers exist (was 0); `drill_markers=0` because the probe misses `ops_projects.purpose` | - |
+| cost and egress | VP 1-5 | 3, 4, 5 | VP 2: a telemetry catalog-stats alarm exists (`tf_catalog_stats_lines` 0 to 1); capture hooks include SessionEnd, Stop, StopFailure and UserPromptSubmit | - |
 | rec filer | VP 1-5 | all | - | - |
 | back-validation | VP 1-5 | 1, 2, 3, 5 | VP 4: `session_code_cols` is `[checkout_base_sha, checkout_sha]` (was empty) | - |
-| maturity ladder | VP 1, 2, 4, 5, 6 | 1, 2, 4, 6 | - | VP 5 (over 200 s) |
+| maturity ladder | VP 1-6 | 1, 2, 4, 5, 6 | - | - |
 | allow-list | VP 1, 2, 4-7 | 4, 5, 6, 7 | VP 1: 19 vocabularies (was 15). VP 2: fidelity 136/140, column order 1/4 | - |
 
 Reading: the designs' internal logic still passes wherever it ran; what differs is where main moved under them.
-Three long runs did not finish and were not retried **[partial]**.
+Steps without pinned literals (Goodhart and cost VP 1, ladder and allow-list VP 3) exit 0 and are listed as run,
+not pass.
 
 ---
 
@@ -690,7 +719,9 @@ live; its 2026-11-12 note carries R1, S6 and the named gate list as input.
 ## 14. Recs filed and noted by this re-grounding
 
 Duplicate search: `scripts.recs_related --terms` over the draft's 48 terms (2026-11-10) and seven targeted queries
-plus a read of rec-5040 to rec-5089 (2026-11-11) **[recs]**. Each id was read back after its write.
+plus a read of rec-5040 to rec-5089 (2026-11-11) **[recs]**. Each id was read back after its write. The notes on
+rec-4438, rec-5077, rec-5080, rec-4031, rec-4606, rec-4388, rec-4696, rec-5079 and rec-4028 were last written on
+2026-11-14 through `update_rec` and read back, one note per rec **[recs]**.
 
 | Rec | What | Priority | Origin |
 |---|---|---|---|
@@ -700,7 +731,7 @@ plus a read of rec-5040 to rec-5089 (2026-11-11) **[recs]**. Each id was read ba
 | rec-5080 | Integer version per event verb beside the digest, lockstep check; a wave 3 prerequisite if R2's series is keyed on it; the digest's scope to narrow first | Low | S1 |
 | rec-5097 | Friction G1 absorb with absorbed count; G2 NULL-name closes out of repeat runs; classifier_version 2 | Medium | draft P5; R3 |
 | rec-4706 (note) | `component` stamp on the telemetry reader's request line | - | draft P4, folded |
-| rec-4606 (note) | `rec_ids` held until back-validation planning (R1); the other nine decided there (S6, proposed); the named gate list (S4, proposed; rec-4913 closed, rec-4914 declined; CD.46, 47, 48, 50, 51); this report's path | - | R1, S4, S6 |
+| rec-4606 (note) | `rec_ids` held until back-validation planning (R1); the other nine decided there (S6, proposed); the named gate list (S4, proposed; rec-4913 closed, rec-4914 declined; rec-4696's apply route under Decisions 257 and 258; CD.46, 47, 48, 50, 51); this report's path | - | R1, S4, S6 |
 | rec-4438 (note) | The monitor's per-day counts become rows of R2's settled kind only once the amending Decision exists, and only if it admits a non-verb producer; the acceptance below is stale | - | R2 |
 | rec-5077 (note) | R2 as ruled, its precondition, and the open design points of section 8 | - | R2 |
 | rec-4388 (note) | The one-filer dated exception and its no-third-dedupe condition, at Decision 221 cl.7's coverage home | - | X2 |
@@ -720,7 +751,8 @@ prerequisite (if R2's series is keyed on it), so its priority is for wave 3 plan
 
 ## 15. Waves and their prerequisites
 
-Earliest seed dates assume no new capture gap (section 0): counting clean days in total, 28 days about 2026-11-29,
+Earliest seed dates assume no new capture gap (section 0; the 2026-11-12 to 11-14 outage gap, if recorded, moves
+them later by its length): counting clean days in total, 28 days about 2026-11-29,
 30 about 2026-12-01 and 57 about 2026-12-28; gap-free, about 2026-12-09, 2026-12-11 and 2027-01-07.
 
 | Wave | Component | On main | Waits on (owner) |
@@ -746,7 +778,8 @@ workspace tells it, on the coordinator log, that T3.4 is near (X1) **[reported]*
 
 - **The feedback-loop gate** (operator, 2026-11-10): no wave 2-4 plan or build starts until alarm triage; the
   GitHub Environment tidy (rec-4913, closed 2026-11-12 with #1986; rec-4914 declined) and the content reader lock
-  (rec-4696); the friction recs rec-4605 and rec-4959; and the operator's filing of the staged candidate decisions
+  (rec-4696; an operator CloudShell apply under Decision 257 cl.2, and a Decision 258 re-decision if the boundary
+  passes 5,696 bytes); the friction recs rec-4605 and rec-4959; and the operator's filing of the staged candidate decisions
   with the open answers below are complete. In practice the filing set is CD.46, CD.47, CD.48, CD.50 and CD.51:
   CD.49 is retired into CD.50, and CD.52's substance landed as Decision 199's 2026-10-16 note (its T2.52
   reactivation half is open). Read-only re-grounding (this report) may run first. S2 is a technical reading and
@@ -800,7 +833,7 @@ confirms it (section 16).
 | R3 | Friction G1: absorb the tool_error into the gate label, and report the absorbed count | 2026-11-12 | rec-5097 |
 | R4 | This report is a dated snapshot; lasting rulings live in recs | 2026-11-11 | this section (about this report only) |
 | R5 | rec-4028 (LiteLLM producer) is the Agents in GitHub workspace's; this workspace reviews its reasoning mapping | 2026-11-11 | rec-4028 note |
-| X1 | T1.13 is the CI Reform workspace's, which plans its close-out when this workspace says T3.4 is near; T1.13 c2's back-validation is ci-rca's own `ops_data_portal --back-validate`, not this loop's; rec-4233 is CI Reform's; rec-4696 is this workspace's and, as a terraform/bootstrap change, waits its turn behind any other merged but unapplied bootstrap change (#1987's apply was still pending at 20:35Z on 2026-11-12) | 2026-11-12 | coordinator log; rec-4606 note (gate) |
+| X1 | T1.13 is the CI Reform workspace's, which plans its close-out when this workspace says T3.4 is near; T1.13 c2's back-validation is ci-rca's own `ops_data_portal --back-validate`, not this loop's; rec-4233 is CI Reform's; rec-4696 is this workspace's. Read against Decision 257 (2026-11-14): its build adds Denies to the CI apply boundary, which is in the protected set, so the operator applies that plan whole in CloudShell together with whatever other bootstrap change is pending, and the apply plans fresh (cl.2-3, cl.6); growth past Decision 258's 5,696-byte trigger sends the fence's home back to the operator through /plan (cl.2-3) | 2026-11-12 | coordinator log; rec-4606 note (gate) |
 | X2 | ci-rca and every rec_episode filer stay separate filers, recorded as a dated exception and revisited when the loop's filer is planned; the loop's filer reuses their dedupe and adds no third. The route (scope reading or numbered Decision) is open (section 16) | 2026-11-12 | coordinator log; rec-4388 note |
 | S1 | Integer verb versions beside the digest (the digest's scope to narrow first, section 8) | 2026-11-11 | rec-5080 |
 | S2 | As a technical dependency, the content reader deploy is needed only for forensic deliberation reads; the operator's gate is unchanged | 2026-11-11 | rec-4696 note |
@@ -813,8 +846,7 @@ confirms it (section 16).
 
 ## 18. Known gaps
 
-- The W1 VPs that need git history at old SHAs or a network fetch were skipped; three long simulations did not
-  finish (section 12).
+- The W1 VPs that need `--pre`, render a plan document or fetch several old SHAs were skipped (section 12).
 - G1 and G2 were re-read against the live SQL, not re-probed with vectors (rec-5097 adds them).
 - Which hooks rec-4959 affects, and the 17 friction vectors' exact coverage, were not re-derived.
 - Whether the post-merge `deterministic_auto_close` venue can close a telemetry-routed acceptance without a verdict
@@ -828,7 +860,8 @@ confirms it (section 16).
 - Overlaps with other workspaces are named from rec text, the shared coordinator log and the operator's
   description only. The X rulings were read on the coordinator log as relayed by another workspace, not heard from
   the operator in this thread; producer admission ownership is not settled.
-- rec-5130 and rec-4474's offer were read on the coordinator log, not in the rec store, because rec store access
-  from this session failed late on 2026-11-12.
+- rec-4474's offer to this workspace was read on the coordinator log only; rec-5130's closure and rec-4474's state
+  were read in the rec store on 2026-11-14, after agent access was restored.
+- Whether rec-5144's missing session is an outage gap (a lost window) or a live capture drop was not settled here.
 - R2's design points (section 8) are open: the amending Decision and rec-5077's design settle them, not this
   report.
