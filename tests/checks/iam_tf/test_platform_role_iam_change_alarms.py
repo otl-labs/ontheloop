@@ -2,7 +2,7 @@
 
 Pins terraform/bootstrap/platform_security_{admin_policy,trail,alarms}.tf (Decision 202): a
 multi-region, global-events, log-file-validated trail homed in var.aws_region with a protected
-CloudTrail-only bucket; exactly six alarms targeting the alerts topic, each filter pattern carrying
+CloudTrail-only bucket; exactly seven alarms targeting the alerts topic, each filter pattern carrying
 its required clauses inside CloudWatch Logs' documented limits; the platform-security-* name family;
 no region literal or provider alias; and no CI identity statement able to write the detector. The
 heartbeat alarm is now fed by platform-security-heartbeat-canary (its own declaration, roles, cadence
@@ -318,6 +318,8 @@ _ROLE_RX = "%^[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Dd][Ee][Vv]$|^[Pp][Ll][Aa][Tt][Ff
 _ERR_RX = "%role.[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Dd][Ee][Vv]\\s|role.[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm][Aa][Dd][Mm][Ii][Nn]\\s%"
 _IAM = '$.eventSource = "iam.amazonaws.com"'
 _API = "platform-security-ducklake-api-change"
+_SESSION = "platform-security-agent-session-iam-change"
+_SESSION_ERR = "$.errorMessage = %user."
 _LOG_GROUP_ARN = '"arn:aws:logs:${var.aws_region}:${var.account_id}:log-group:platform-security-*"'
 
 # (label, predicate, file key, old, new[, count]) -- one HCL text edit each.
@@ -384,6 +386,16 @@ _PATTERN_REDS: list[tuple] = [
         "%^[Dd][Uu][Cc][Kk][Ll][Aa][Kk][Ee]-[Aa][Pp][Ii]-[Aa][Cc][Cc][Ee][Ss][Ss]-[Ll][Oo][Gg][Ss]$%",
         '"ducklake-api-access-logs"',
     ),
+    (
+        "session userName exact case",
+        _SESSION,
+        "$.requestParameters.userName = %",
+        '$.requestParameters.userName = "agent-platform-session" || $.x = %',
+    ),
+    ("session errorMessage clause dropped", _SESSION, _SESSION_ERR, "$.errorMessage = %nomatch."),
+    ("session errorMessage policy alternative dropped", _SESSION, "|policy.agent-platform-session-%", "%"),
+    ("session policyArn clause dropped", _SESSION, "*:policy/agent-platform-session-*", "x"),
+    ("session readOnly clause dropped", _SESSION, " && ($.readOnly IS FALSE)", ""),
     ("heartbeat narrowed", HEARTBEAT, f"{{ ({_IAM}) && ($.readOnly IS FALSE) }}"),
     (
         "scheduler clause dropped",

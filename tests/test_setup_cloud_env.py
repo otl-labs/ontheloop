@@ -66,18 +66,11 @@ def _header_block(script: str, start_marker: str, end_marker: str) -> list[str]:
     return [line[2:] if line.startswith("# ") else "" for line in lines[start + 1 : end] if line.startswith("#")]
 
 
-def _template_block(script: str, admin: bool) -> str:
+def _template_block(script: str) -> str:
     dev = _header_block(script, "# DEV environment", "# boto3 then resolves")
     body = [line.removeprefix("    ") for line in dev if line.startswith("    ")]
     body = [line for line in body if not line.startswith("cd /home/user/ontheloop")]
-    if admin:
-        admin_lines = _header_block(script, "# ADMIN environment", "# and set this")
-        start = next(i for i, line in enumerate(admin_lines) if line.startswith("    [profile"))
-        profile = [line.removeprefix("    ") for line in admin_lines[start:] if line.startswith("    ")]
-        eof = max(i for i, line in enumerate(body) if line == "EOF")
-        body = body[:eof] + [""] + profile + body[eof:]
-    text = "\n".join(body) + "\n"
-    return text.replace("<ACCOUNT_ID>", "acct").replace("<PLACEHOLDER>", "extid")
+    return "\n".join(body) + "\n"
 
 
 def _install_block(script: str) -> str:
@@ -86,12 +79,12 @@ def _install_block(script: str) -> str:
     return script[start:end]
 
 
-def _run_template(tmp_path: Path, admin: bool) -> tuple[Path, subprocess.CompletedProcess[str]]:
+def _run_template(tmp_path: Path) -> tuple[Path, subprocess.CompletedProcess[str]]:
     script = SETUP_SCRIPT.read_text(encoding="utf-8")
     home = tmp_path / "home"
     (home / ".aws").mkdir(parents=True)
     (home / ".aws" / "credentials").write_text("[agent_static]\naws_access_key_id = stale\n", encoding="utf-8")
-    harness = f"REPO_ROOT={Path.cwd()}\nlog() {{ :; }}\n" + _template_block(script, admin) + _install_block(script)
+    harness = f"REPO_ROOT={Path.cwd()}\nlog() {{ :; }}\n" + _template_block(script) + _install_block(script)
     env = {"PATH": os.environ["PATH"], "HOME": str(home)}
     result = subprocess.run(
         ["bash", "-c", harness], capture_output=True, text=True, encoding="utf-8", env=env, timeout=30, check=False
@@ -110,18 +103,23 @@ def _resolve(home: Path, profile: str, monkeypatch: pytest.MonkeyPatch) -> botoc
 def test_proxy_template_resolves_agent_static_through_credential_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    for admin in (False, True):
-        sub = tmp_path / ("admin" if admin else "dev")
-        sub.mkdir()
-        home, result = _run_template(sub, admin)
-        assert result.returncode == 0, result.stderr
-        assert not (home / ".aws" / "credentials").exists()
-        config = (home / ".aws" / "config").read_text(encoding="utf-8")
-        assert "[profile agent_platform]" in config
-        assert ("[profile agent_platform_admin]" in config) is admin
-        assert config.count("sts_regional_endpoints = regional") == (2 if admin else 1)
-        creds = _resolve(home, "agent_static", monkeypatch).get_credentials()
-        assert creds.access_key == "proxy-injected-key-id"
+    home, result = _run_template(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert not (home / ".aws" / "credentials").exists()
+    config = (home / ".aws" / "config").read_text(encoding="utf-8")
+    assert "[profile agent_platform]" in config
+    assert config.count("sts_regional_endpoints = regional") == 2
+    creds = _resolve(home, "agent_static", monkeypatch).get_credentials()
+    assert creds.access_key == "proxy-injected-key-id"
+
+
+def test_proxy_template_profiles_are_placeholder_only(tmp_path: Path) -> None:
+    home, result = _run_template(tmp_path)
+    assert result.returncode == 0, result.stderr
+    config = (home / ".aws" / "config").read_text(encoding="utf-8")
+    for forbidden in ("role_arn", "source_profile", "external_id", "duration_seconds", "agent_platform_admin"):
+        assert forbidden not in config
+    assert config.count("credential_process = ") == 2
 
 
 def test_placeholder_install_precedes_first_aws_call() -> None:
@@ -149,10 +147,14 @@ def test_header_template_has_no_static_key_and_current_path() -> None:
     assert "aws_secret_access_key" not in script
     assert "/home/user/agent-platform" not in script
     assert "cd /home/user/ontheloop && bash bin/setup-cloud-env.sh" in script
-    allowed = re.search(r"allowed host (\S+) ONLY", script)
-    assert allowed is not None
-    assert allowed.group(1) == "sts.eu-west-2.amazonaws.com"
-    assert "network secret" in script
+    header = "\n".join(_header_block(script, "# AWS credentials", "# DEV environment"))
+    assert "sts.eu-west-2.amazonaws.com" in header
+    assert "/agent-platform/ducklake/api_url/ops/reader" in header
+    assert "s3." not in header and "on.aws" not in header and "*." not in header
+    assert "OTL_OPS_VERBS_TRANSPORT=execute_api" in header
+    assert "network secret" in header
+    template = _template_block(script)
+    assert "AWS_PROFILE" not in template
 
 
 def test_admin_template_sets_install_terraform_inline() -> None:
@@ -162,23 +164,6 @@ def test_admin_template_sets_install_terraform_inline() -> None:
     assert "the agent proxy never signs its requests" in admin
     dev = "\n".join(_header_block(script, "# DEV environment", "# boto3 then resolves"))
     assert "INSTALL_TERRAFORM" not in dev
-
-
-def _role_max_session(resource: str) -> int:
-    tf = Path("terraform/bootstrap/platform_roles.tf").read_text(encoding="utf-8")
-    match = re.search(r'resource "aws_iam_role" "' + resource + r'" \{.*?max_session_duration\s*=\s*(\d+)', tf, re.DOTALL)
-    assert match is not None
-    return int(match.group(1))
-
-
-def test_template_duration_seconds_fit_each_roles_max_session_duration() -> None:
-    script = SETUP_SCRIPT.read_text(encoding="utf-8")
-    dev = "\n".join(_header_block(script, "# DEV environment", "# boto3 then resolves"))
-    admin = "\n".join(_header_block(script, "# ADMIN environment", "# and set this"))
-    dev_seconds = int(re.search(r"duration_seconds = (\d+)", dev).group(1))
-    admin_seconds = int(re.search(r"duration_seconds = (\d+)", admin).group(1))
-    assert dev_seconds <= _role_max_session("platform_dev")
-    assert admin_seconds <= _role_max_session("platform_admin")
 
 
 def _code_lines(script: str) -> str:

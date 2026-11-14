@@ -1,9 +1,11 @@
 """The telemetry writer client for the capture hooks (rules TR-1..TR-4).
 
-A fourth SigV4 Function-URL client (PC-01) with its own SSM lookup and a status-returning invoke, because the others raise
-on non-200. Every HTTP request, blob PUT, SSM and STS call is bounded by the pass budget: each timeout is
-min(130 s, remaining), and one botocore Config (a single attempt, timeouts clamped) is installed as the botocore session's
-default client config so the SSM client and the assume-role STS client behind the profile both inherit it.
+A fourth SigV4 client (PC-01) with its own SSM lookup and a status-returning invoke, because the others raise on
+non-200. It reaches the writer over its AWS_IAM Function URL or, where OTL_OPS_VERBS_TRANSPORT=execute_api selects it,
+over the telemetry/writer route of the IAM-auth REST API; each URL is signed for its own service and region. Every HTTP
+request, blob PUT and SSM call is bounded by the pass budget: each timeout is min(130 s, remaining), and one botocore
+Config (a single attempt, timeouts clamped) is installed as the botocore session's default client config so the SSM
+client and the credential chain behind the profile both inherit it.
 """
 
 from __future__ import annotations
@@ -11,7 +13,6 @@ from __future__ import annotations
 import json
 import os
 import random
-import re
 import time
 import urllib.error
 import urllib.request
@@ -23,6 +24,7 @@ from typing import Any
 
 from scripts.aws_profile import DEFAULT_SSO_PROFILE, resolve_aws_profile
 from scripts.telemetry_capture.state import CaptureState
+from src.common.ducklake_reader_client import API_URL_PARAMETER_PREFIX, api_transport, signing_scope
 from src.telemetry.blobs import blob_row
 from src.turn_capture.render import render_datetime
 
@@ -37,7 +39,7 @@ MAX_ROWS_PER_REQUEST = 5000
 RETRY_STATUSES = frozenset({0, 429, 503})
 BACKOFF_BASE_S = 0.5
 BACKOFF_CAP_S = 8.0
-_URL_REGION = re.compile(r"\.lambda-url\.([a-z0-9-]+)\.on\.aws")
+API_SSM_PARAMETER = API_URL_PARAMETER_PREFIX + "telemetry/writer"
 
 Http = Callable[[str, str, bytes, Mapping[str, str], float], tuple[int, bytes]]
 Item = tuple[str, dict[str, Any]]
@@ -161,19 +163,21 @@ class WriterClient:
 
 
 def url_region(url: str) -> str:
-    found = _URL_REGION.search(url)
-    if found is None:
+    region = signing_scope(url, "")[1]
+    if not region:
         raise CaptureUnavailable("no_writer_url")
-    return found.group(1)
+    return region
 
 
-def resolve_url(env: Mapping[str, str], state: CaptureState | None, ssm_get: Callable[[], str | None]) -> str:
-    """TR-1: the env override, else the state dir's cached URL, else the SSM parameter (then cached)."""
+def resolve_url(
+    env: Mapping[str, str], state: CaptureState | None, ssm_get: Callable[[], str | None], service: str = "lambda"
+) -> str:
+    """TR-1: the env override, else the state dir's cached URL of this transport's service, else the SSM parameter."""
     url = (env.get(URL_ENV) or "").rstrip("/")
     if url:
         return url
     cached = state.writer_url() if state is not None else None
-    if cached:
+    if cached and signing_scope(cached, "")[0] == service:
         return cached
     try:
         url = (ssm_get() or "").rstrip("/")
@@ -230,16 +234,20 @@ def make_client(
         raise CaptureUnavailable("credential_error") from None
     ssm_region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or DEFAULT_REGION
 
+    api = api_transport()
+    parameter = API_SSM_PARAMETER if api else SSM_PARAMETER
+
     def ssm_get() -> str | None:
-        answer = session.client("ssm", region_name=ssm_region).get_parameter(Name=SSM_PARAMETER, WithDecryption=False)
+        answer = session.client("ssm", region_name=ssm_region).get_parameter(Name=parameter, WithDecryption=False)
         return answer["Parameter"]["Value"]
 
-    url = resolve_url(env, state, ssm_get)
-    region = url_region(url)
+    url = resolve_url(env, state, ssm_get, "execute-api" if api else "lambda")
+    url_region(url)
+    service, region = signing_scope(url, DEFAULT_REGION)
 
     def sign(body: bytes) -> Mapping[str, str]:
         request = AWSRequest(method="POST", url=url, data=body, headers={"Content-Type": "application/json"})
-        SigV4Auth(credentials.get_frozen_credentials(), "lambda", region).add_auth(request)
+        SigV4Auth(credentials.get_frozen_credentials(), service, region).add_auth(request)
         return dict(request.headers.items())
 
     return WriterClient(url, sign, budget, sleep=sleep, rng=rng)
