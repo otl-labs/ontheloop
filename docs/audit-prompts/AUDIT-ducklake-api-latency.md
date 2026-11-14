@@ -342,7 +342,7 @@ The bar you judge each surface against. These are judgment bars, not absolutes: 
   production, and enforced by something that fails or alarms. (The project's own loop names latency
   as a signal to observe and improve: `docs/PROJECT_CONTEXT.md`, "Recursive self-improvement model".)
 - NS3 Slow paths fail fast and typed. A request that cannot finish answers a typed error before any
-  platform timeout does it for it, and a retry is spent only where it can change the outcome.
+  Lambda or gateway timeout does it for it, and a retry is spent only where it can change the outcome.
 - NS4 Mechanism fits workload. The cheapest mechanism that serves the access pattern is the right
   one. An engine, a runtime language or a compute substrate is challenged only on a measured share
   of the latency and only with a named alternative (the operator's stated bar).
