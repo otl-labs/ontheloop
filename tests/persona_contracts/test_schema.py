@@ -83,5 +83,6 @@ def test_persona_row_registry_key_is_a_string() -> None:
         PersonaRow.model_validate(_row(registry_key=5))
 
 
-def test_persona_row_registry_key_may_be_absent() -> None:
-    assert PersonaRow.model_validate(_row()).registry_key is None
+def test_persona_row_requires_registry_key() -> None:
+    with pytest.raises(ValidationError):
+        PersonaRow.model_validate(_row())

@@ -2,8 +2,8 @@
 
 Registered check and the evaluator of docs/contracts/executor-personas.yaml: the closed capability vocabulary, the
 refused targets and verbs, every personas row's contract shape, budget, schema dialect, rendered prompt and skill
-tether, a row's optional registry_key (a registered, unique source_registry.yaml canonical_id equal to the contract's
-skill_tether.skill; the registry is read only when a row carries a key), and the leash's own paths being executor
+tether, a row's required registry_key (a registered, unique source_registry.yaml canonical_id equal to the contract's
+skill_tether.skill; the registry is read whenever the index has a row), and the leash's own paths being executor
 boundary paths. Never imports jsonschema (fast tier).
 """
 
@@ -170,7 +170,7 @@ def _registry_ids(root: Path) -> set[str] | None:
 
 
 def _registry_key_failures(index: PersonaIndex, root: Path) -> list[str]:
-    keyed = [r for r in index.personas if r.registry_key is not None]
+    keyed = list(index.personas)
     if not keyed:
         return []
     ids = _registry_ids(root)
@@ -280,7 +280,7 @@ def _contract_failures(row: Any, index: PersonaIndex, root: Path) -> list[str]:
     out += _rendered_failures(persona, row, raw, contract, index, root)
     out += _tether_failures(persona, contract, root)
     tether = contract.skill_tether
-    if row.registry_key is not None and tether is not None and row.registry_key != tether.skill:
+    if tether is not None and row.registry_key != tether.skill:
         out.append(f"{_LABEL}: {persona}: registry_key '{row.registry_key}' differs from skill_tether.skill '{tether.skill}'")
     return out
 
