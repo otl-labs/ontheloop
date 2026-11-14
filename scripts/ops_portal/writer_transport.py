@@ -1,4 +1,7 @@
-"""DuckLake writer Function-URL SigV4 transport (T2.19 / Decision 81; sole backend per Decision 84 I-1).
+"""DuckLake writer SigV4 transport (T2.19 / Decision 81; sole backend per Decision 84 I-1).
+
+Two transports reach the writer: its AWS_IAM Function URL, or, where OTL_OPS_VERBS_TRANSPORT=execute_api selects it
+(agent environments, whose proxy cannot sign the Function URL hosts), the ops/writer route of the IAM-auth REST API.
 
 Owner-concern: getting a validated record onto the wire and back. The Single-Portal
 caller surface (file_rec/update_rec/file_decision/update_decision/sync) is unchanged;
@@ -24,7 +27,6 @@ logger = logging.getLogger(__name__)
 
 _DUCKLAKE_WRITER_URL_ENV = "DUCKLAKE_WRITER_URL"
 _DUCKLAKE_WRITER_FUNCTION_NAME = "agent-platform-ducklake-writer"
-_AWS_LAMBDA_SERVICE = "lambda"
 # SSM path declared in src/lambdas/ducklake_writer/manifest.yaml runtime_config[] (Decision 79 SSOT).
 _DUCKLAKE_WRITER_SSM_PATH = "/agent-platform/ducklake/writer_url"
 
@@ -41,7 +43,8 @@ _WRITER_RETRY_BACKOFF_S = (2.0, 5.0)
 def _resolve_writer_url(profile: Optional[str] = None) -> str:
     """Resolve the ducklake_writer Function URL.
 
-    Resolution order (Decision 79 SSOT):
+    Under OTL_OPS_VERBS_TRANSPORT=execute_api the order is DUCKLAKE_WRITER_URL, then the ops/writer API route
+    from SSM, with no Function URL fallback. Otherwise (Decision 79 SSOT):
       1. env DUCKLAKE_WRITER_URL -- CI / explicit override
       2. SSM /agent-platform/ducklake/writer_url -- CC-web (no terraform binary)
       3. terraform output ducklake_writer_function_url -- local dev with initialized checkout
@@ -55,10 +58,13 @@ def _resolve_writer_url(profile: Optional[str] = None) -> str:
     from src.common.ducklake_reader_client import (
         _resolve_function_url_via_ssm as _ssm_resolver,
     )
+    from src.common.ducklake_reader_client import api_route_url, api_transport  # noqa: PLC0415
 
     url = os.environ.get(_DUCKLAKE_WRITER_URL_ENV)
     if url:
         return url.rstrip("/")
+    if api_transport():
+        return api_route_url("ops/writer", profile, _AWS_REGION).rstrip("/")
     ssm_url = _ssm_resolver(_DUCKLAKE_WRITER_SSM_PATH, profile=profile, region=_AWS_REGION)
     if ssm_url:
         return ssm_url
@@ -123,7 +129,10 @@ def _ducklake_write(
     from botocore.auth import SigV4Auth  # noqa: PLC0415
     from botocore.awsrequest import AWSRequest  # noqa: PLC0415
 
+    from src.common.ducklake_reader_client import signing_scope  # noqa: PLC0415
+
     url = _resolve_writer_url(profile=profile)
+    service, region = signing_scope(url, _AWS_REGION)
     payload = {"action": action, "table": table, "record": _project_ops_record(table, record)}
     if idempotency_ulid is not None:
         payload["idempotency_ulid"] = idempotency_ulid
@@ -138,7 +147,7 @@ def _ducklake_write(
     for attempt in range(_WRITER_MAX_ATTEMPTS):
         # Re-sign per attempt: SigV4 carries a timestamp.
         aws_req = AWSRequest(method="POST", url=url, data=body, headers=dict(headers))
-        SigV4Auth(creds, _AWS_LAMBDA_SERVICE, _AWS_REGION).add_auth(aws_req)
+        SigV4Auth(creds, service, region).add_auth(aws_req)
         try:
             resp = requests.post(url, data=body, headers=dict(aws_req.headers), timeout=180)
         except requests.RequestException as exc:

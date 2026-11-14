@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read-only liveness probe for the platform-security-* IAM-change detector (rec-4044, Decision 202).
 
-A second channel that does not depend on SNS delivery: it reads the six detector alarms and the
+A second channel that does not depend on SNS delivery: it reads the seven detector alarms and the
 alerts topic directly and fails when the detector could be silently blind --
 
   - an expected alarm is missing, has ActionsEnabled false, or does not target the alerts topic;
@@ -40,6 +40,7 @@ EXPECTED_ALARMS = frozenset(
         "platform-security-detector-tamper",
         "platform-security-alerts-topic-change",
         "platform-security-ducklake-api-change",
+        "platform-security-agent-session-iam-change",
         HEARTBEAT_ALARM,
     }
 )

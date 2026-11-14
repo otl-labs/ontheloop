@@ -60,6 +60,7 @@ _SCANNED_BOOTSTRAP_FILES = (
 )
 _UNSCANNED_BOOTSTRAP_FILES = {
     "github_ci_apply_boundary.tf": "a ceiling that grants nothing",
+    "agent_session_user.tf": "the session user and its own policies, operator-applied (Decision 256)",
     "platform_roles.tf": "PlatformDev and PlatformAdmin themselves, operator-applied (Decision 223)",
     "platform_admin_policies.tf": "PlatformAdmin's own grants, operator-applied (Decision 223)",
     "platform_admin_data_policies.tf": "PlatformAdmin's own grants, operator-applied (Decision 223)",

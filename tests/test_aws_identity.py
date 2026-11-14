@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -22,21 +21,20 @@ def _session_with_creds() -> MagicMock:
     return session
 
 
-def test_identity_call_uses_probe_region() -> None:
+def test_identity_call_uses_profile_session() -> None:
     session = _session_with_creds()
     client = MagicMock()
     client.get_caller_identity.return_value = {"Arn": ROLE_ARN}
+    session.client.return_value = client
     with (
         patch.object(aws_identity.boto3, "Session", return_value=session) as session_cls,
-        patch.object(aws_identity.boto3, "client", return_value=client) as client_fn,
+        patch.object(aws_identity.boto3, "client") as client_fn,
     ):
         assert aws_identity.caller_arn("agent_platform") == ROLE_ARN
     assert session_cls.call_args.kwargs == {"profile_name": "agent_platform"}
-    kwargs = client_fn.call_args.kwargs
-    assert client_fn.call_args.args == ("sts",)
-    assert kwargs["region_name"] == aws_identity.IDENTITY_PROBE_REGION
-    assert kwargs["config"] is aws_identity._IDENTITY_CONFIG
-    assert (kwargs["aws_access_key_id"], kwargs["aws_secret_access_key"], kwargs["aws_session_token"]) == FROZEN
+    client_fn.assert_not_called()
+    assert session.client.call_args.args == ("sts",)
+    assert session.client.call_args.kwargs == {"config": aws_identity._IDENTITY_CONFIG}
 
 
 def test_profile_none_uses_default_chain(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -44,10 +42,8 @@ def test_profile_none_uses_default_chain(monkeypatch: pytest.MonkeyPatch) -> Non
     session = _session_with_creds()
     client = MagicMock()
     client.get_caller_identity.return_value = {"Arn": ROLE_ARN}
-    with (
-        patch.object(aws_identity.boto3, "Session", return_value=session) as session_cls,
-        patch.object(aws_identity.boto3, "client", return_value=client),
-    ):
+    session.client.return_value = client
+    with patch.object(aws_identity.boto3, "Session", return_value=session) as session_cls:
         aws_identity.caller_arn(None)
     assert session_cls.call_args.kwargs == {"profile_name": None}
 
@@ -98,8 +94,3 @@ def test_identity_config_is_bounded() -> None:
     assert cfg.connect_timeout == 5
     assert cfg.read_timeout == 10
     assert cfg.retries == {"max_attempts": 2}
-
-
-def test_probe_region_differs_from_project_region() -> None:
-    project_region = Path("config/aws-region").read_text(encoding="utf-8").strip()
-    assert aws_identity.IDENTITY_PROBE_REGION != project_region
