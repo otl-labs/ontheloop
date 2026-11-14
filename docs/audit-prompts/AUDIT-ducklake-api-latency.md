@@ -62,8 +62,10 @@ outcome:
     in progress.
 - `holds-not-defect`: the candidate holds as stated and is not a defect (the expected outcome for
   C19-C21 if they hold, and for any other candidate that describes a sound trade-off). Add a
-  `rejected_candidates` row naming the compensating control or the trade-off.
+  `rejected_candidates` row naming the compensating control or the trade-off, or stating that the
+  fact describes no defect.
 - `false`: the evidence refutes the candidate. Add a `rejected_candidates` row naming that evidence.
+  If what refutes it is itself a defect, file the finding and name its id in this row's `findings`.
 - `covered`: it holds and is a defect, but an owner with an adequate remedy has it built or in
   progress. Add a `rejected_candidates` row naming the owner.
 - `undetermined`: you could not confirm or refute it with the data available. Say what data would
@@ -146,7 +148,9 @@ Candidates (each is a hypothesis; the facts behind them are in Section 10):
   Section 15.
 - From 2026-11-12 until the cutover on 2026-11-14 no agent session could reach AWS, so those days
   hold CI traffic only. Say which days a per-day figure covers, and give agent-facing rates from the
-  cutover onward where your sample allows, stating how many hours or days that covers.
+  cutover onward where your sample allows, stating how many hours or days that covers. Take the
+  cutover as the first telemetry writer line on 2026-11-14 whose `caller_role` is
+  `agent-platform-session`.
 - The reader, writer and telemetry reader log no verb. A difference between two calls on one route
   can be a difference of verb, not of path; excess over a route's median therefore mixes verb cost
   with avoidable latency. Say so where you use it, and prefer same-verb probe pairs for causes.
@@ -181,6 +185,9 @@ Candidates (each is a hypothesis; the facts behind them are in Section 10):
   own wall time), the REPORT line's `Duration` (the Lambda runtime's wall time), and API Gateway
   `Latency` / `IntegrationLatency`. Unless a rule here says otherwise, "a call over 29 s" means
   REPORT `Duration` above 29,000 ms.
+- "Writer" names two functions: the ops writer (`agent-platform-ducklake-writer`, whose metrics are
+  in the `DuckLakeWriter` namespace) and the telemetry writer
+  (`agent-platform-ducklake-telemetry-writer`, namespace `DuckLakeTelemetryWriter`).
 - "Reader" names three functions: the ops reader (`agent-platform-ducklake-reader`), the telemetry
   reader (`agent-platform-ducklake-telemetry-reader`) and a telemetry content reader that has no API
   route and is OUT of scope.
@@ -228,8 +235,8 @@ Vocabulary:
   - `connectionless`: the paired line has `connect_reused: null`.
   - `reused_connection`: the paired line has `connect_reused: true`.
   - `new_env`: the paired line has `connect_reused: false`, it is the first such line in its stream,
-    and a REPORT line carrying `Init Duration` appears in that stream at or before it inside your
-    window (the environment's first connect).
+    and a REPORT line carrying `Init Duration` appears in that stream, inside your window, no later
+    than this request's own REPORT line (the environment's first connect).
   - `fresh_connection`: every other paired line with `connect_reused: false` (a reconnect in an
     environment that was already running).
   Path percentiles are over REPORT `Duration` unless a phase definition says otherwise.
@@ -244,8 +251,8 @@ Vocabulary:
   - `first_file_touch`: on `reused_connection`, the excess of a statement over the same verb's
     steady time when it is the first use of that table's data in that environment (cold-start kind
     4). Estimated from pairs of calls.
-  - `steady_statement`: statement time on `reused_connection` for repeat use; estimated by the
-    route's `reused_connection` p50.
+  - `steady_statement`: statement time on `reused_connection` for repeat use; its p50 and p95 are
+    the route's `reused_connection` p50 and p95 of `Duration`.
   - `catalog_wake`: extra connect or statement time attributable to the Postgres catalog resuming
     (cold-start kind 5). Write `null` with a note if you cannot separate it.
 - Tuning and redesign (used for opportunities): a `tuning` change keeps the four functions, their
@@ -293,7 +300,7 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
 3. Rec dedup probe -- run it whatever step 2 did:
    `bin/venv-python -m scripts.recs_related --terms "cold start latency lambda" --limit 5 --table`.
    IF this fails: do NOT abort -- set `meta.degraded_dedup = true`, set every finding and inventory
-   row whose ownership rests on a rec search to `confidence: HYPOTHESIS` (findings also get
+   row whose owner rests on a rec search to `confidence: HYPOTHESIS` (findings also get
    `roadmap_crossref.dedup_hit_count: null`), dedup against the roadmap and `docs/DECISIONS.md`
    only, and use the rec descriptions in Section 10 (G11) as the only rec content. Proceed.
 4. Roadmap parse check:
@@ -307,6 +314,9 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
    samples in Section 10 (G10) as your only observed numbers, and give every finding, inventory row
    and `latency_decomposition` row that rests on them `confidence: HYPOTHESIS`. Proceed. The same
    rule applies if metrics work but the first Section 11 part A log command fails after one retry.
+   Under this flag, write `null` for any observed count or percentile G10 does not give. Part C
+   probes may still run if step 6 passes: what a probe's own response measures is observed and may
+   be CONFIRMED, but a probe whose path needs a log read to identify is unusable for path claims.
 6. Live probe check: run the Section 11 part C recipe once with route `ops/reader` and payload
    `{"action":"describe"}` (this call counts toward the part C limit). IF it does not print
    `"http": 200`: set `meta.live_probe_unavailable = true`, skip part C, and proceed.
@@ -362,7 +372,8 @@ in under 29 s. A call that a deadline would end early with an error has not comp
 does not count as fitting. Fill `timeout_outlook`, one row per route: what you observed, and your
 estimate of how many of the sampled calls over 29 s would remain over 29 s if the tuning rows of
 your inventory were built, and if the redesign rows were too. These are estimates; state how you
-made them in `basis`, and write `null` where you cannot. Calls with no phase data (`unattributed`)
+made them in `basis`, including which rows each estimate assumes (one per `alternative_group`) and
+whether any of them carries a monthly cost, and write `null` where you cannot. Calls with no phase data (`unattributed`)
 are estimated from context; say what you assumed. Report the numbers as information; recommend no
 target. Per-route verdict (your judgment, by these meanings):
 - `within_default`: no sampled call on the route ran over 29 s.
@@ -386,32 +397,33 @@ substantial part but not most; `insufficient` if little of it. If your estimates
 judge, answer `partial` and say so.
 
 Q4. How does the path rate against industry practice, and do the engine and the language stand up?
-Rate each row of the EXTERNAL CHECKLIST below in `external_checklist` (`met` | `partial` | `missed`;
-`partial` requires an argued, property-matched compensating control in `evidence`). Then fill
+Rate each row of the EXTERNAL CHECKLIST below in `external_checklist` on your own evidence: `met`
+(every clause of the row holds), `missed` (none holds), `partial` (some clauses hold, or none holds
+but an argued, property-matched compensating control exists; say which in `evidence`), or `n/a` (the
+row does not apply to this system; say why). Then fill
 `architecture_challenges` with one row for each of the two subjects the operator named: the engine
 (DuckDB with DuckLake) and the Lambda runtime language (Python). Rows for `compute_substrate` and
 `sync_request_model` are optional. Row verdicts:
-- `challenge_with_alternative`: requires a measured share of latency attributable to the subject AND
-  a concrete named alternative with its migration cost, expected gain and what would be lost. Use it
-  only when you judge the alternative's gain over tuning large enough to justify the migration.
-- `keep_and_tune`: the subject carries a material share, and tuning rows in your inventory address
-  it. This is also the verdict when a share is material and you can name no better alternative.
-- `keep`: you measured the subject's share and judge it not material.
+- `keep`: the gross share is not material.
+- `keep_and_tune`: the gross share is material and your tuning rows remove most of it (the net
+  share is not material), or the net share is material and you can name no better alternative.
+- `challenge_with_alternative`: the net share is material AND you name a concrete alternative with
+  its migration cost, expected gain and what would be lost, AND you judge the gain over tuning
+  large enough to justify the migration.
 - `undetermined`: you could not measure the subject's share (always the case under
   `meta.degraded_empirical`).
-Measuring a share: state in `measured_share` what you measured, how, and against what total. Count
-toward a subject only time that would change if the subject were replaced: for the engine, time in
-DuckDB and DuckLake work that a different engine or table format would not spend; for the runtime
-language, time in the Python interpreter and Python-level code (interpreter start, imports,
-serialisation). Time that a different file layout, a different place for initialisation or a
-different client would remove under the same engine and language is not the subject's share; record
-it as the corresponding tuning row. Whether a share is material is your judgment; give the
-reasoning in `rationale`. On the `engine` row, say in `concerns` whether your verdict is about the
-in-Lambda query engine (DuckDB), the table format and catalog (DuckLake), or both.
+Measuring a share: state in `measured_share` two figures and how you got them. GROSS is the time
+spent inside the subject: for the engine, time in DuckDB and DuckLake work (extension loads, ATTACH,
+statement execution with its file and catalog reads); for the runtime language, time in the Python
+interpreter and Python-level code (interpreter start, imports, serialisation). NET is what would
+remain of the gross figure if the tuning rows of your inventory were built. Give both against the
+same stated total. Whether a share is material is your judgment; give the reasoning in `rationale`.
+On the `engine` row, say in `concerns` whether your verdict is about the in-Lambda query engine
+(DuckDB), the table format and catalog (DuckLake), or both.
 "It would be faster" without a measured share is never `challenge_with_alternative`.
-Verdict for Q4, from the checklist alone: `sufficient` if no row is `missed` and at most two are
-`partial`; `insufficient` if four or more rows are `missed`; `partial` in every other case. This
-verdict summarises conformance to the checklist. The fit of the engine and the language is carried
+Verdict for Q4, from the checklist alone (`n/a` rows are ignored): `sufficient` if no row is `missed`
+and at most two are `partial`; `insufficient` if four or more rows are `missed`; `partial` in every
+other case. This verdict summarises conformance to the checklist. The fit of the engine and the language is carried
 by `architecture_challenges`, not by this verdict.
 
 EXTERNAL CHECKLIST (the single source for the maturity top tier, Section 15). The surfaces in
@@ -475,6 +487,8 @@ uses the `answers` shape (Section 14), not a verdict.
 - Which of the session flows could be answered without calling a Lambda at all?
 - How likely is an agent session to meet a call over 29 s, and which session flows would break if
   the timeout went back to 29 s today?
+- How do the main costs move as data grows (the ops catalog's file count rose from 918 to 936 in
+  72 h), and is 120 s itself holding (calls that still time out)? Use the 14-day window for trend.
 - Is anything in the record measuring the wrong thing (a gate or metric whose subject is not the
   latency an agent experiences)?
 
@@ -635,6 +649,7 @@ G6 Clients
   `:78` one reader call per tool call.
 
 G7 Session flows (round trips as read from the code; re-count them)
+- MCP server start: two `describe` calls, then one reader call per tool call (anchors in G6).
 - Preflight (`scripts/session/preflight.py`): `:208` primes the reader URL into the process
   environment once (`scripts/preflight/aws_infra.py:67`); `:211` one telemetry window read on a
   thread with a 60 s deadline (`scripts/preflight/session_history.py:19`); `:224` `warm_sync`, three
@@ -780,8 +795,8 @@ G11 Ownership already on record (dedup pointers; read each before judging it)
 
 Three parts, in this order: A (baseline logs), B (metrics), C (live probes). Pull the part A
 baseline BEFORE any part C call so your own probes are not in it. Tag every finding
-`evidence_kind: observed` when it rests on something you measured here and `static` when it rests
-on reading code or configuration. At equal severity an observed finding outranks a static one.
+`evidence_kind: observed` when a sample supports it (one you took here, or a G10 sample under
+`meta.degraded_empirical`) and `static` when it rests only on reading code or configuration. At equal severity an observed finding outranks a static one.
 Write command output to scratch files outside the repository tree and summarise with a script; do
 not page raw log output through your context.
 
@@ -961,14 +976,15 @@ recorded in `meta.contract_notes` and skipped.
 
 ## 13. DEDUP DISCIPLINE
 
-Before filing any finding, and before setting `ownership` on any inventory row, search the ownership
+Before filing any finding, and before setting `owner_state` on any inventory row, search the ownership
 surfaces: the roadmap (`tier_items[]` criteria text and `candidate_decisions[]`), `docs/DECISIONS.md`
 headers and clauses, and open recs
 (`bin/venv-python -m scripts.recs_related --terms "<terms>" --table`, paging with `--exclude`, which
 takes the comma-joined rec ids the previous page printed as `next_exclude`; at most 3 pages per
 search). To read a rec in full:
 `bin/venv-python -c "from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids; import json,sys; print(json.dumps(fetch_recs_by_ids(make_reader(), sys.argv[1].split(','))[0], default=str, indent=1))" rec-5042,rec-4474`
-(at most 50 ids per call).
+(at most 50 ids per call). These two commands read through the ops reader: run at most 40 of them
+in total -- do NOT exceed -- and never in the middle of a part C probe batch on `ops/reader`.
 
 IF a dedup command fails mid-run: retry it once; if it still fails, set
 `meta.degraded_dedup = true` and apply Section 5 step 3's rule to every finding and inventory row
@@ -1028,7 +1044,7 @@ audit:
     - {q: Q2, verdict: inherent|avoidable-by-tuning|avoidable-by-redesign|undetermined, basis: [], prose: ""}
     - {q: Q3, verdict: sufficient|partial|insufficient, basis: [], prose: ""}
     - {q: Q4, verdict: sufficient|partial|insufficient, basis: [], prose: "",
-       external_checklist: [{property: EC-1, rating: met|partial|missed, evidence: ""}]}   # EC-1..EC-10, all ten
+       external_checklist: [{property: EC-1, rating: met|partial|missed|n/a, evidence: ""}]}   # EC-1..EC-10, all ten
     - {q: Q5, verdict: process-gap|accepted-tradeoff|mixed, basis: [], prose: ""}
     - {q: Q6, verdict: sufficient|partial|insufficient, basis: [], prose: ""}
     - {q: Q7, answers: [{question: "", answer: "", basis: [<finding ids>]}]}
@@ -1042,19 +1058,20 @@ audit:
        p50_ms: 0, p95_ms: 0, n: 0, source: "", confidence: CONFIRMED|HYPOTHESIS, note: ""}
   slow_calls:
     - {route: "", sampled_calls: 0, over_29s: 0,
-       over_29s_by_path: {new_env: 0, fresh_connection: 0, reused_connection: 0, unattributed: 0},
+       over_29s_by_path: {new_env: 0, fresh_connection: 0, reused_connection: 0, connectionless: 0,
+                          unattributed: 0},
        main_cause: "", confidence: CONFIRMED|HYPOTHESIS}
   optimisation_inventory:
     - {id: OPT-01, finding: <finding id or null>, mechanism: "", kind: tuning|redesign,
        alternative_group: <label or null>, routes: [],
-       path_affected: new_env|fresh_connection|reused_connection|connectionless|failure|all,
+       paths_affected: [new_env|fresh_connection|reused_connection|connectionless|failure],
+       serves: agent|ci|both|unknown,
        est_saving: {p50_ms: 0, p95_ms: 0, basis: ""}, calls_affected_share: 0.0,
-       est_daily_seconds_saved: 0,
+       est_daily_seconds_saved: 0, est_slow_calls_removed: 0,
        effort: XS|S|M|L, monthly_cost_usd: 0, cost_basis: "", risk: low|medium|high, risk_note: "",
        prerequisites: [<OPT ids>],
-       ownership: unowned|owned-in-progress|owned-unbuilt|owned-insufficient,
-       owned_by: [<rec or roadmap ids>], owner_delivers_saving: yes|partly|no|n/a,
-       confidence: CONFIRMED|HYPOTHESIS}
+       owner_state: none|in-progress|not-in-progress, owned_by: [<rec or roadmap ids>],
+       owner_delivers_saving: yes|partly|no|n/a, confidence: CONFIRMED|HYPOTHESIS}
   timeout_outlook:
     - {route: "", current_timeout_s: 120, sampled_calls: 0, observed_p99_s: 0, observed_max_s: 0,
        observed_over_29s: 0, est_over_29s_after_tuning: 0, est_over_29s_after_redesign: 0,
@@ -1083,7 +1100,8 @@ audit:
        evidence: "file:line|item-id|sample", note: ""}
   findings:
     - {id: LAT-01, surface: S1|S2|S3|S4|S5|shared, affected_surfaces: [], candidates: [<C ids>],
-       question: Q1, dimension: VD1, title: "", evidence: "file:line|item-id|sample",
+       question: Q1, dimension: VD1, serves: agent|ci|both|unknown, title: "",
+       evidence: "file:line|item-id|sample",
        evidence_kind: static|observed, current_behavior: "", ideal_behavior: "", gap: "",
        compensating_controls_considered: "",
        change_type: add|remove|relocate|tune|rescope|enforce|unify|persist|clarify|retune_gate,
@@ -1112,11 +1130,18 @@ Rules, binding:
   `process_trace`, `rubric_ratings`, `per_surface_assessment`) is a system of record, referenced from findings where relevant and never
   counted as findings. `top_improvements` (at most 5) and `highest_leverage_change` MUST be finding
   ids; with zero findings, write `[]` and `null`. Order `top_improvements` by severity, then observed
-  before static, then agent-facing before CI-only. `top_opportunities` (at most 5) MUST be inventory
-  ids, the five largest `est_daily_seconds_saved`.
-- `evidence_kind` is `observed` if any sample you took supports the finding, otherwise `static`.
+  before static, then `serves: agent` or `both` before `ci`. `top_opportunities` (at most 5) MUST be
+  inventory ids: the largest non-null `est_daily_seconds_saved`, at most one row per
+  `alternative_group`.
+- `basis` in `question_answers` is a list of finding ids; the reasoning goes in `prose`. Elsewhere
+  `basis` is free text.
+- `serves` (findings and inventory rows): who meets the behaviour -- `agent` (interactive agent
+  sessions), `ci` (scheduled CI callers), `both`, or `unknown` where the logs cannot tell.
+- `depends_on` lists findings whose change must land before this one can. `sequencing`:
+  `safe_to_queue_now` is true when the change could be planned and built today with nothing else
+  landing first; `blocked_behind` lists the finding, rec or roadmap ids that must land first.
 - `candidate_adjudication` has exactly one row per candidate C1-C21. `findings` is non-empty only
-  when `outcome` is `finding`. Every `holds-not-defect`, `false` and `covered` row has a matching
+  when `outcome` is `finding`, or `false` with a defect behind the refutation (Section 2). Every `holds-not-defect`, `false` and `covered` row has a matching
   `rejected_candidates` row whose `candidate` field starts with the candidate id.
 - `flow_round_trips` has one row per flow in Section 10 (G7) that you traced. `timeout_ladder` lists
   every timeout and deadline from the client to the statement, outermost first.
@@ -1130,9 +1155,10 @@ Rules, binding:
   finding whose `proposed_change` would reduce latency has at least one inventory row pointing at
   it. Alternative ways to remove the same cost are separate rows sharing one `alternative_group`
   label; rows that can be combined have `alternative_group: null`.
-- `ownership`: `unowned` if no owner; `owned-in-progress` if the owner is in progress (Section 2);
-  `owned-unbuilt` if an adequate owner exists and is not in progress; `owned-insufficient` if the
-  owner's acceptance would not deliver this row. `owner_delivers_saving` is `n/a` when `unowned`.
+- `owner_state`: `none` if no roadmap item, Decision or open rec owns the row; `in-progress` if the
+  owner is in progress (Section 2); `not-in-progress` otherwise. `owner_delivers_saving` is your
+  judgment of whether the owner's stated acceptance would deliver the row's saving, and is `n/a`
+  when `owner_state` is `none`.
 - Scales. `effort`: XS = one small pull request, no infrastructure change, under half a day; S = one
   pull request with tests, about a day; M = one plan of several pull requests or an infrastructure
   apply, days; L = several plans, a migration or a new Decision, weeks. `risk`: low = reverted by a
@@ -1142,8 +1168,9 @@ Rules, binding:
   `est_saving` is the saving per affected call (the p50 and p95 of what an affected call would
   save). `calls_affected_share` is the fraction of the sampled calls on the listed routes, taken
   together, that the row would speed up. `est_daily_seconds_saved` is the wall time the row would
-  save per day at sampled traffic. `path_affected: all` means every path; `failure` marks rows about
-  timeouts, deadlines and retries. Do not count the same time twice: rows that remove the same cost
+  save per day at sampled traffic. `est_slow_calls_removed` is how many of the sampled calls over
+  29 s on the listed routes the row would let complete in under 29 s. `paths_affected` lists every
+  path the row speeds up; `failure` marks rows about timeouts, deadlines and retries. Do not count the same time twice: rows that remove the same cost
   share an `alternative_group`, and a row never saves more than the cost it removes. Where you
   cannot estimate, write `null`, say why in `basis`, and set `confidence: HYPOTHESIS`.
   `monthly_cost_usd` is the added running cost at sampled traffic (0 when none); `cost_basis` states
@@ -1180,10 +1207,11 @@ order. The word cap of 1500 applies to everything after the Intake section, coun
    count of calls over 29 s per route.
 3. `## Is 120 s inherent`: a paragraph for Q2, with the per-route outlook.
 4. `## Findings`: a table of every finding (id, severity, title), most severe first.
-5. `## Optimisation inventory`: a table of at most the 12 rows with the largest
-   `est_daily_seconds_saved` (the YAML holds them all), grouped by effort (XS, S, M, L in that
-   order) and, within a group, ordered by `est_daily_seconds_saved` descending. Columns: mechanism,
-   saving per call (p50 / p95), seconds per day, monthly cost, risk, owner.
+5. `## Optimisation inventory`: a table of at most 12 rows (the YAML holds them all): those with
+   the largest `est_daily_seconds_saved`, then any row with a null figure there but a non-zero
+   `est_slow_calls_removed`. Group by effort (XS, S, M, L in that order) and, within a group, order
+   by `est_daily_seconds_saved` descending, nulls last. Columns: mechanism, saving per call
+   (p50 / p95), seconds per day, slow calls removed, monthly cost, risk, owner.
 6. `## Engine and language`: the two verdicts and their basis, a paragraph each.
 7. `## How it came to be built this way`: Q5, and whether present governance catches it (Q6).
 8. `## Open points`: the Q7 answers the operator most needs, what you could not determine, and what
@@ -1260,7 +1288,8 @@ on the design as written.
   edit code, Terraform, the roadmap, Decisions, contracts, skills, commands or workflows; do NOT
   file or update a recommendation; do NOT deploy, apply Terraform, dispatch a workflow, or change
   any AWS resource or setting.
-- Live system: only the calls Section 11 allows, within its limits. No write verb, ever.
+- Live system: only the calls Section 11 allows and the read commands of Sections 5 and 13, within
+  their limits. No write verb, ever.
 - Never write an AWS account id, ARN, API id, API or Function URL, ExternalId, credential or secret
   value in either deliverable or in the PR (public repository). Function names, log group names,
   route names and metric names are fine.
