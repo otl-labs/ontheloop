@@ -54,6 +54,8 @@ PROTECTED_NAME_PATTERNS = frozenset(
 STATE_OBJECT_ARNS = (
     "arn:aws:s3:::agent-platform-bootstrap-tfstate/terraform.tfstate",
     "arn:aws:s3:::agent-platform-bootstrap-tfstate/terraform.tfstate.tflock",
+    "arn:aws:s3:::agent-platform-bootstrap-tfstate-sit/terraform.tfstate",
+    "arn:aws:s3:::agent-platform-bootstrap-tfstate-sit/terraform.tfstate.tflock",
 )
 SYNTHETIC_ARNS = (
     "arn:aws:iam::<account>:user/x",
@@ -68,7 +70,13 @@ IAM_WRITE_PROBES = (
     "iam:createaccesskey", "iam:attachuserpolicy", "iam:putuserpolicy", "iam:creategroup", "iam:addusertogroup",
     "iam:createopenidconnectprovider", "iam:tagrole", "iam:updaterole",
 )  # fmt: skip
-SECRET_PROBES = ("secretsmanager:getsecretvalue", "ssm:getparameter", "ssm:getparameters", "ssm:getparametersbypath")
+SECRET_PROBES = (
+    "secretsmanager:getsecretvalue",
+    "secretsmanager:batchgetsecretvalue",
+    "ssm:getparameter",
+    "ssm:getparameters",
+    "ssm:getparametersbypath",
+)
 _ACCOUNT_RE = re.compile(r"[0-9]{12}")
 _READ_VERBS = ("get", "list", "describe")
 
@@ -215,6 +223,7 @@ def protected_arns(plan: Plan) -> list[str]:
         if str(r.get("type")) in CI_TYPES and _name_ok(name):
             continue
         arns += [str(values[k]) for k in ("arn", "execution_arn") if isinstance(values.get(k), str)]
+    arns += [f"{a}/*" for a in arns if a.startswith("arn:aws:s3:::") and "/" not in a[len("arn:aws:s3:::") :]]
     return [a.lower() for a in arns]
 
 
@@ -226,7 +235,9 @@ def _grant_protected(action: str, resource: str, protected: list[str]) -> str | 
         return "iam_write_outside_agent_platform"
     if any(fnmatch.fnmatchcase(p, a) for p in SECRET_PROBES):
         return "secret_read"
-    if fnmatch.fnmatchcase("s3:getobject", a) and any(fnmatch.fnmatchcase(s, r) for s in STATE_OBJECT_ARNS):
+    if any(fnmatch.fnmatchcase(v, a) for v in ("s3:getobject", "s3:getobjectversion")) and any(
+        fnmatch.fnmatchcase(s, r) for s in STATE_OBJECT_ARNS
+    ):
         return "state_read"
     verb = a.split(":", 1)[-1]
     if not verb.startswith(_READ_VERBS) and any(fnmatch.fnmatchcase(p, r) for p in protected):
@@ -248,7 +259,8 @@ def _role_reasons(plan: Plan, address: str, change: dict[str, Any]) -> list[str]
         isinstance(boundary, str) and boundary.endswith(BOUNDARY_SUFFIX)
     ):
         reasons.append("boundary")
-    if after.get("inline_policy") or after.get("managed_policy_arns"):
+    unknown = _dict(change.get("after_unknown"))
+    if any(after.get(k) or unknown.get(k) for k in ("inline_policy", "managed_policy_arns")):
         reasons.append("inline_or_managed_grant")
     updates_trust = change.get("actions") == ["update"] and "assume_role_policy" in _core.changed_names(change)
     if updates_trust and not set(target_names(plan, address)) <= TRUST_WRITABLE_ROLES:
@@ -368,7 +380,7 @@ def build_rows(plan: Plan) -> list[dict[str, Any]]:
     for rc in plan.changes:
         change = _dict(rc.get("change"))
         actions = [str(a) for a in change.get("actions") or []]
-        if _core.action_bucket(actions, bool(change.get("importing"))) is None:
+        if _core.action_bucket(actions, bool(change.get("importing"))) is None and not rc.get("previous_address"):
             continue
         groups.setdefault(_core.normalise_address(str(rc.get("address", ""))), []).append(rc)
     protected = protected_arns(plan)

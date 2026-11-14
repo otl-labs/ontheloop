@@ -380,7 +380,8 @@ def test_protected_patterns_match_hcl_denies() -> None:
 
 def test_state_object_arns_match_hcl_locals() -> None:
     assert "agent-platform-bootstrap-tfstate" in (ROOT / "terraform/bootstrap/main.tf").read_text(encoding="utf-8")
-    assert all(a.startswith("arn:aws:s3:::agent-platform-bootstrap-tfstate/terraform.tfstate") for a in cls.STATE_OBJECT_ARNS)
+    prefixes = ("arn:aws:s3:::agent-platform-bootstrap-tfstate/", "arn:aws:s3:::agent-platform-bootstrap-tfstate-sit/")
+    assert all(a.startswith(prefixes) and "terraform.tfstate" in a for a in cls.STATE_OBJECT_ARNS)
 
 
 def tree(**overrides: str | None) -> dict[str, str]:
@@ -447,3 +448,40 @@ def test_screen_accepts_heredoc_without_interpolation_and_cli_prints_the_rule(
     (tmp_path / "x.tf").write_text('module "m" {}\n', encoding="utf-8")
     assert gate.main(["screen", "--root", str(tmp_path)]) == 1
     assert "SCREEN_REFUSED module_block x.tf:1" in capsys.readouterr().out
+
+
+def test_interpolation_does_not_corrupt_the_screen_block_stack() -> None:
+    body = 'provider "aws" {\n region = "${var.r}"\n endpoints {\n sts = "https://x"\n }\n}\n'
+    assert "provider_argument" in rules(tree(**{"extra.tf": body}))
+    backend = 'terraform {\n backend "s3" {\n bucket = "${var.b}"\n endpoints = {\n s3 = "x"\n }\n }\n}\n'
+    assert "backend_argument" in rules(tree(**{"extra.tf": backend}))
+
+
+@pytest.mark.parametrize(
+    ("action", "resource", "why"),
+    [
+        ("s3:DeleteObject", "arn:aws:s3:::acct-trail/*", "write_reaches_protected"),
+        ("s3:GetObjectVersion", cls.STATE_OBJECT_ARNS[0], "state_read"),
+        ("secretsmanager:BatchGetSecretValue", "*", "secret_read"),
+    ],
+)
+def test_trail_objects_versioned_state_reads_and_batch_secret_reads_are_refused(action: str, resource: str, why: str) -> None:
+    bucket = prior("aws_s3_bucket", "aws_s3_bucket.trail", arn="arn:aws:s3:::acct-trail")
+    assert why in reasons(plan(grant(action, resource), prior=[bucket]))
+
+
+def test_unknown_managed_policy_arns_and_a_pure_moved_row_are_protected() -> None:
+    unknown = role_row()
+    unknown["change"]["after_unknown"] = {"managed_policy_arns": True}
+    assert "inline_or_managed_grant" in reasons(plan(unknown))
+    moved = row(
+        "aws_iam_role.agent_platform_new", ["no-op"], {"name": "agent-platform-new"}, previous_address="aws_iam_role.old"
+    )
+    rows = rows_of(plan(moved))
+    assert len(rows) == 1 and "action" in rows[0]["protected"]
+
+
+def test_policy_strings_cannot_inject_workflow_commands_into_the_table() -> None:
+    hostile = grant("logs:Describe*", "arn:aws:s3:::b/x\n::add-mask::y")
+    text = gate.table(rows_of(plan(hostile)), "t")
+    assert "\n::add-mask::" not in text and "::add-mask::" not in text.replace(": :", "")

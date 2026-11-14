@@ -23,6 +23,7 @@ FILE_FUNCTIONS = frozenset(
 )
 BAD_BLOCKS = frozenset({"provisioner", "connection", "module"})
 PROVIDER_ARGS = frozenset({"region", "profile", "default_tags"})
+BACKEND_ARGS = frozenset({"bucket", "key", "encrypt", "use_lockfile", "region"})
 Finding = tuple[str, str, int]  # rule, file, line
 
 
@@ -134,7 +135,7 @@ class _Scanner:
                 self.i += 2
                 self.out.append(("punct", "${", self.line))
                 self._code(True)
-                self.out.append(("punct", "}", self.line))
+                self.out.append(("punct", "$}", self.line))
             elif ch in "$%" and self._peek(1) == ch and self._peek(2) == "{":
                 buf.append("${")
                 self.i += 3
@@ -235,6 +236,8 @@ def _ident_rules(name: str, toks: list[Tok], idx: int, names: tuple[str, ...]) -
         out.append(("required_providers_entry", name, line))
     if names == ("terraform",) and val == "backend" and not (nxt[0] == "str" and nxt[1] == "s3"):
         out.append(("backend", name, line))
+    if names == ("terraform", "backend") and nxt[1] in ("=", "{") and val not in BACKEND_ARGS:
+        out.append(("backend_argument", name, line))
     return out
 
 

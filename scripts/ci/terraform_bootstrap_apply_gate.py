@@ -19,6 +19,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import sys
 import urllib.request
 from pathlib import Path
@@ -44,6 +45,10 @@ _CLOUDSHELL_OUTPUT = "has_changes=false\nverdict=CLOUDSHELL_REQUIRED\n"  # pragm
 _CHECK_KEYS = ("address", "actions", "allows", "resources", "flags", "sids")
 
 
+def _cell(text: str) -> str:
+    return re.sub(r"[\x00-\x1f|]", " ", text).replace("::", ": :")
+
+
 def table(rows: list[dict[str, Any]], title: str) -> str:
     privileged = sum(1 for r in rows if r["flags"])
     lines = [f"### {title}", "", f"{len(rows)} changes; {privileged} privilege-affecting"]
@@ -62,7 +67,7 @@ def table(rows: list[dict[str, Any]], title: str) -> str:
             ", ".join(r["resources"]),
             "PROTECTED " + ",".join(r["protected"]) if r["protected"] else "",
         ]
-        lines.append("| " + " | ".join(cells) + " |")
+        lines.append("| " + " | ".join(_cell(c) for c in cells) + " |")
     return "\n".join(lines) + "\n"
 
 
