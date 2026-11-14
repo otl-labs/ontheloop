@@ -20,9 +20,9 @@ There is NO target latency in this audit. You quantify; the operator decides. Do
 a threshold and do not recommend replacing a component in order to reach a number.
 
 Questions (full text in Section 7): Q1 where does the time go; Q2 is the 120 s timeout inherent or
-avoidable; Q3 what would cut latency and do the remedies already owned cover it; Q4 does the
-architecture fit the workload against industry practice, including the engine and the Lambda
-language; Q5 how and why was it built this way; Q6 does present governance catch what Q5 found; Q7
+avoidable; Q3 what would cut latency and do the remedies already owned cover it; Q4 how does the
+path rate against industry practice, and do the engine and the Lambda language stand up; Q5 how and
+why was it built this way; Q6 does present governance catch what Q5 found; Q7
 questions the operator did not ask.
 
 Deliverables, both under the repository-root `audits/` directory:
@@ -39,7 +39,7 @@ live system only as Section 11 permits. You draft; the human disposes.
 This prompt hands you FACTS (Section 10) and CANDIDATE hypotheses (below). It hands you no verdicts.
 ASSUME NO CANDIDATE IS A REAL DEFECT UNTIL YOU TRACE IT. A run that merely confirms the candidates
 below has failed. Candidates may be deliberate trade-offs, already owned, false, or irrelevant to the
-latency agents experience. C19 and C20 state the opposite reading on purpose; weigh them as
+latency agents experience. C19, C20 and C21 state the opposite reading on purpose; weigh them as
 seriously as the rest.
 
 Two different things are recorded, and they are not the same:
@@ -51,7 +51,7 @@ Two different things are recorded, and they are not the same:
   at a finding or stand alone: a trade-off that costs money or effort to buy speed (for example
   provisioned capacity) is an opportunity with no finding.
 
-Adjudicate every candidate C1-C20 in `candidate_adjudication` (Section 14), one row each, with one
+Adjudicate every candidate C1-C21 in `candidate_adjudication` (Section 14), one row each, with one
 outcome:
 - `finding`: the candidate holds and is a defect. Name the finding id(s). The finding's
   `roadmap_crossref.classification` is then one of:
@@ -60,15 +60,25 @@ outcome:
     would not remove the defect.
   - `planned-unbuilt`: an owner exists with an adequate remedy, and the remedy is neither built nor
     in progress.
-- `rejected`: name the reason in a `rejected_candidates` row. Reasons: the candidate is false; it
-  holds but is not a defect (name the compensating control or the trade-off); or it is owned,
-  the remedy is adequate, and it is built or in progress (name the owner).
+- `holds-not-defect`: the candidate holds as stated and is not a defect (the expected outcome for
+  C19-C21 if they hold, and for any other candidate that describes a sound trade-off). Add a
+  `rejected_candidates` row naming the compensating control or the trade-off.
+- `false`: the evidence refutes the candidate. Add a `rejected_candidates` row naming that evidence.
+- `covered`: it holds and is a defect, but an owner with an adequate remedy has it built or in
+  progress. Add a `rejected_candidates` row naming the owner.
 - `undetermined`: you could not confirm or refute it with the data available. Say what data would
-  settle it. No finding and no rejection row.
+  settle it. No finding and no `rejected_candidates` row.
 
-"In progress" is pinned: a roadmap item or criterion whose status is `in_progress` or `complete`; or
-a rec whose id appears in a plan file under `docs/plans/` (grep the id); or a rec whose own text
-records a merged implementing pull request. An open rec with none of these is not in progress.
+"In progress" is pinned: a roadmap item whose status is `in_progress` or `complete`; a roadmap
+exit criterion whose status is `met`; a rec whose id is listed under `bundled_recommendations:` in a
+plan file under `docs/plans/` (a plan that implements it; a mention elsewhere in a plan, or under
+`followon_recs:`, does not count); or a rec whose own text records a merged implementing pull
+request. Anything else is not in progress.
+
+A deferred owner (a roadmap item with status `deferred_post_mvp`) is an owner that is not in
+progress. Whether the defect should wait for it is your judgment: if it should not wait, file a
+`planned-unbuilt` finding with `change_type: rescope`; if waiting is sound, the outcome is
+`holds-not-defect` and the rejection row names the deferral (Decision 93).
 
 A compound candidate may be split: give the outcome that fits its main claim and describe the rest
 in `note`. One candidate may feed several findings, and one finding may list several candidates.
@@ -110,11 +120,12 @@ Candidates (each is a hypothesis; the facts behind them are in Section 10):
 - C18. Session flows (preflight, MCP server start, a telemetry capture pass) make more round trips
   than their purpose needs, including `describe` calls whose answer rarely changes.
 - C19. The path is already adequate for most calls: the reused-connection median is well under a
-  second on the read routes, slow calls are a small tail, and removing the tail would cost more than
-  it returns.
+  second on the read routes, and slow calls are a small tail confined to new execution environments.
 - C20. Raising the timeout to 120 s was a deliberate, evidence-based trade-off made under time
   pressure to restore agent access, with the follow-up work recorded as recs; the process worked as
   intended.
+- C21. Neither the engine nor the Python runtime is a material contributor to the latency once file
+  layout, where initialisation runs and client overhead are accounted for.
 
 ## 3. READ FIRST -- DISAMBIGUATION TRAPS
 
@@ -126,8 +137,19 @@ Candidates (each is a hypothesis; the facts behind them are in Section 10):
   (4) first touch of a table's data files on a connection that is already open (C2);
   (5) Neon scale-to-zero wake of the Postgres catalog.
 - Paths are mutually exclusive (definitions in Section 4): `new_env`, `fresh_connection`,
-  `reused_connection`, `connectionless`. A new environment also opens a connection, but it is
-  counted ONLY as `new_env`.
+  `reused_connection`, `connectionless`, `unattributed`. An environment's first connect is counted
+  ONLY as `new_env`, even when a connectionless request (for example `describe`) reached that
+  environment first.
+- A request that times out or whose process exits prints no invocation line. Never borrow the
+  previous request's line for it; it is `unattributed` (Section 4).
+- "Tier" names three unrelated things: the timeout tiers of Section 14 (`tier_1` to `tier_3`),
+  roadmap item ids (`T1.9`, `T2.18`), and the maturity levels of Section 15.
+- From 2026-11-12 until the cutover on 2026-11-14 no agent session could reach AWS, so those days
+  hold CI traffic only. Say which days a per-day figure covers, and give agent-facing rates from the
+  cutover onward.
+- The reader, writer and telemetry reader log no verb. A difference between two calls on one route
+  can be a difference of verb, not of path; excess over a route's median therefore mixes verb cost
+  with avoidable latency. Say so where you use it, and prefer same-verb probe pairs for causes.
 - "The 120 s" is two separate limits with different histories: the Lambda function timeout on all
   four functions (120 s since each was created, the first in June 2026) and the API Gateway
   integration timeout quota (raised from 29 s to 120 s in November 2026). The quota raise is what the
@@ -142,7 +164,9 @@ Candidates (each is a hypothesis; the facts behind them are in Section 10):
   which has timings but no verb, caller or transport. The telemetry writer prints
   `telemetry_request`, which has `verb` and `caller_role` (the signed caller's role or user name, so
   agent-session calls and CI calls can be told apart on that one function) but no `connect_ms` and
-  no `elapsed_ms`. Section 10 (G4) lists both field sets.
+  no `elapsed_ms`. On that function `connect_reused` is `null` for `describe`, for `attach_check`
+  (which does use a connection) and for requests refused before a verb runs, so `connectionless`
+  there means "no connection information". Section 10 (G4) lists both field sets.
 - The REST API had been live for a few hours when this prompt was written (first agent traffic
   2026-11-14). Its metrics are thin. Treat any REST-specific percentile as low confidence unless you
   reproduce it; build the latency picture from the Lambda logs, which hold 14 days across both
@@ -191,17 +215,24 @@ Vocabulary:
 - Execution environment: one Lambda container. Each has its own CloudWatch log stream, so
   `logStreamName` identifies it. Within a stream, a request's invocation line is the last one before
   that request's `REPORT RequestId` line.
-- Path, per invocation, mutually exclusive:
-  - `new_env`: its REPORT line carries `Init Duration` (the first request of an environment).
-  - `fresh_connection`: not `new_env`, and its invocation line has `connect_reused: false`.
-  - `reused_connection`: its invocation line has `connect_reused: true`.
-  - `connectionless`: its invocation line has `connect_reused: null` (for example `describe`).
+- Path, per invocation, mutually exclusive. Pair a REPORT line with an invocation line only when
+  the invocation line is in the same stream and at most one second earlier:
+  - `unattributed`: the REPORT line has no paired invocation line (a timeout or a process exit). It
+    counts in `Duration` statistics and in calls over 29 s, and has no phase data.
+  - `connectionless`: the paired line has `connect_reused: null`.
+  - `reused_connection`: the paired line has `connect_reused: true`.
+  - `new_env`: the paired line has `connect_reused: false`, it is the first such line in its stream,
+    and a REPORT line carrying `Init Duration` appears in that stream at or before it inside your
+    window (the environment's first connect).
+  - `fresh_connection`: every other paired line with `connect_reused: false` (a reconnect in an
+    environment that was already running).
+  Path percentiles are over REPORT `Duration` unless a phase definition says otherwise.
 - Phase (used in `latency_decomposition`):
   - `client_overhead`: time in the calling process before the HTTP request is sent (URL resolution,
     credential resolution, signing). Measured client-side.
   - `transport`: client wall time of the HTTP exchange minus the function's REPORT `Duration`
     (proxy, TLS, API Gateway).
-  - `lambda_init`: REPORT `Init Duration` (`new_env` only).
+  - `lambda_init`: REPORT `Init Duration` of the environment (report it on the `new_env` path).
   - `connect`: `connect_ms`.
   - `first_statement`: `elapsed_ms - connect_ms` on `new_env` and `fresh_connection` invocations.
   - `first_file_touch`: on `reused_connection`, the excess of a statement over the same verb's
@@ -246,7 +277,8 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
    HEAD" in `meta.contract_notes`. IF `git switch -c` fails for any other reason: record the error
    in `meta.contract_notes`, do the audit on the current branch, and at Section 16 skip steps 3-5:
    leave the two deliverables uncommitted and end the turn with a final message naming their paths
-   and the error.
+   and the error. IF the current branch is `main`, or you cannot write under `audits/`, write the
+   two deliverables to a scratch directory outside the repository instead and name those paths.
 2. `bin/venv-python -m scripts.session.preflight --roadmap-detail full` -- writes
    `logs/.preflight-report.json` (gitignored; expected). Recommendations have no local cache in this
    repository; rec dedup uses the live reader (step 3). IF this fails: record the error in
@@ -266,7 +298,8 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
    `aws cloudwatch list-metrics --namespace DuckLakeWriter --query 'length(Metrics)' --output text`.
    IF it fails: set `meta.degraded_empirical = true`, skip Section 11 parts A and B, use the dated
    samples in Section 10 (G10) as your only observed numbers, and give every finding, inventory row
-   and `latency_decomposition` row that rests on them `confidence: HYPOTHESIS`. Proceed.
+   and `latency_decomposition` row that rests on them `confidence: HYPOTHESIS`. Proceed. The same
+   rule applies if metrics work but the first Section 11 part A log command fails after one retry.
 6. Live probe check: run the Section 11 part C recipe once with route `ops/reader` and payload
    `{"action":"describe"}` (this call counts toward the part C limit). IF it does not print
    `"http": 200`: set `meta.live_probe_unavailable = true`, skip part C, and proceed.
@@ -308,14 +341,17 @@ depends on a table, fill the table first.
 Q1. Where does the time go? For each route and each path, decompose a request's wall time into the
 phases of Section 4, and state what share of calls over 29 s each phase explains. Fill
 `latency_decomposition`; the prose points to it.
-Verdict: `decomposed` if, for every route, the phases you could measure account for the wall time on
-every path that holds calls over 29 s; `partially-decomposed` if at least one such phase could not
-be separated (name the missing instrumentation); `not-decomposable` if no route could be decomposed.
+Verdict: `decomposed` if, for every route and every path that holds calls over 29 s, the p50 costs
+of the phases you measured sum to within 20 percent of that path's p50 `Duration`;
+`partially-decomposed` if that fails for at least one such path (name the missing instrumentation);
+`not-decomposable` if it fails for all of them.
 
-Q2. Is the 120 s integration timeout inherent to this workload, or avoidable? Fill `timeout_outlook`,
-one row per route, by the tier rules in Section 14. Report the numbers as information; recommend no
-target. Per-route verdict:
-- `within_default`: the route's observed p99 `Duration` is already at or under 29 s.
+Q2. Is the 120 s integration timeout inherent to this workload, or avoidable? A timeout is set by
+the slowest calls, not by a percentile, so the test here is whether calls over 29 s remain. A route
+FITS 29 s when no more than 1 in 1,000 of its sampled calls has `Duration` over 29 s (none, if the
+sample is under 1,000 calls). Fill `timeout_outlook`, one row per route, by the tier rules in
+Section 14. Report the numbers as information; recommend no target. Per-route verdict:
+- `within_default`: the route already fits 29 s in your baseline sample.
 - `avoidable-by-tuning`: `fits_29s_after` is `tier_1` or `tier_2` (tuning rows only).
 - `avoidable-by-redesign`: `fits_29s_after` is `tier_3` (reached only with a redesign row).
 - `inherent`: `fits_29s_after` is `none`, and you can name the work the request needs that takes
@@ -323,8 +359,8 @@ target. Per-route verdict:
 - `undetermined`: `fits_29s_after` is `unknown`, or it is `none` and you cannot name that work.
 The Q2 verdict is taken over the routes that are not `within_default`, as the first of this list
 that any of them has: `undetermined`, `inherent`, `avoidable-by-redesign`, `avoidable-by-tuning`. If
-every route is `within_default`, the Q2 verdict is `avoidable-by-tuning` and the prose says the tail
-above p99 is what needed the quota.
+every route is `within_default`, the Q2 verdict is `undetermined` and the prose says your sample
+held no call that needed more than 29 s.
 
 Q3. What would reduce latency, and do the remedies already owned by open recs and roadmap items
 cover it? Build `optimisation_inventory`: one row per opportunity, including alternative ways to
@@ -333,32 +369,42 @@ remove the same cost and options that are pure trade-offs. For each row that has
 Verdict, from `est_daily_seconds_saved` summed over tuning rows (within an `alternative_group` count
 only the row with the largest value): let OWNED be the sum over rows whose `ownership` starts with
 `owned` (`owner_delivers_saving: yes` counts in full, `partly` counts half, `no` counts zero) and
-ALL be the sum over every tuning row. `sufficient` if OWNED / ALL is at least 0.8; `partial` if at
-least 0.3; `insufficient` below that. If more than half the tuning rows have a null estimate, answer
-`partial` and say the estimate base is too thin to rank.
+ALL be the sum over every tuning row; a null estimate counts as zero. `sufficient` if OWNED / ALL is
+at least 0.8; `partial` if at least 0.3; `insufficient` below that. If ALL is zero, or more than
+half the tuning rows have a null estimate, answer `partial` and say the estimate base is too thin
+to rank.
 
-Q4. Does the architecture fit the workload when rated against industry practice? Rate each row of
-the EXTERNAL CHECKLIST below in `external_checklist` (`met` | `partial` | `missed`; `partial`
-requires an argued, property-matched compensating control in `evidence`). Then fill
+Q4. How does the path rate against industry practice, and do the engine and the language stand up?
+Rate each row of the EXTERNAL CHECKLIST below in `external_checklist` (`met` | `partial` | `missed`;
+`partial` requires an argued, property-matched compensating control in `evidence`). Then fill
 `architecture_challenges` with one row for each of the two subjects the operator named: the engine
 (DuckDB with DuckLake) and the Lambda runtime language (Python). Rows for `compute_substrate` and
 `sync_request_model` are optional. Row verdicts:
 - `challenge_with_alternative`: requires a measured share of latency attributable to the subject AND
   a concrete named alternative with its migration cost, expected gain and what would be lost.
-- `keep_and_tune`: the subject carries a measured share, and tuning rows in your inventory address
-  it.
-- `keep`: you measured the subject's share and it is not a material contributor.
+- `keep_and_tune`: the subject carries a material measured share, and tuning rows in your inventory
+  address it.
+- `keep`: you measured the subject's share and it is not material.
 - `undetermined`: you could not measure the subject's share (always the case under
   `meta.degraded_empirical`).
+Measuring a share: the denominator is the excess seconds per day of Q7's cost method, summed over
+the four routes. The engine's share is the part of it spent in native DuckDB and DuckLake work
+(extension loads, ATTACH, statement execution including file reads and catalog metadata). The
+runtime language's share is the part spent in the Python runtime and Python-level code (interpreter
+start, module imports, Python-side serialisation, client-side Python overhead). Time you cannot
+assign to either (network, AWS services, waiting) belongs to neither. A share is material at 10
+percent or more. Where a phase mixes the two and you cannot split it, say so and use `undetermined`.
 "It would be faster" without a measured share is never `challenge_with_alternative`.
-Verdict for Q4, from the checklist: `sufficient` if no row is `missed` and at most two are
-`partial`; `partial` if one to three rows are `missed`; `insufficient` if four or more are.
+Verdict for Q4, from the checklist alone: `sufficient` if no row is `missed` and at most two are
+`partial`; `insufficient` if four or more rows are `missed`; `partial` in every other case. This
+verdict summarises conformance to the checklist. The fit of the engine and the language is carried
+by `architecture_challenges`, not by this verdict.
 
 EXTERNAL CHECKLIST (the single source for the maturity top tier, Section 15). The surfaces in
 brackets are the ones each row counts against.
 - EC-1 [S5] Latency objectives per endpoint, stated as percentiles, measured and alarmed.
-- EC-2 [S2, S3] The synchronous request path finishes well inside the gateway's default timeout;
-  longer work uses pagination or an asynchronous submit-and-poll pattern.
+- EC-2 [S2, S3] Synchronous requests are bounded: each finishes inside the gateway timeout in force
+  with margin, and work that cannot is paged or uses an asynchronous submit-and-poll pattern.
 - EC-3 [S3] Cold-start mitigation for latency-sensitive serverless functions: heavy initialisation
   runs in the init phase, or the function uses snapshot restore, provisioned capacity or a keep-warm
   schedule; package and extension size is kept small.
@@ -382,7 +428,9 @@ Q5. How and why was the system built this way? Reconstruct the decision points i
 at each, what latency evidence existed and what the process did with it. Classify each row `kind` as
 `chosen-tradeoff` (someone weighed the latency cost with evidence in hand and accepted it),
 `unexamined-consequence` (the latency effect was not examined at that point) or `unclear`. Mark
-`bears_on_dominant_cost: yes` on rows that led to a phase your Q1 answer shows as dominant.
+`bears_on_dominant_cost: yes` on rows that led to a dominant phase. A phase is dominant on a route
+if its `share_of_calls_over_29s` is the largest on that route or is at least 0.25; on a route with
+no call over 29 s, the dominant phase is the one with the largest `p95_ms`.
 Verdict, over rows with `bears_on_dominant_cost: yes`, ignoring `unclear` rows: `accepted-tradeoff`
 if all are `chosen-tradeoff`; `process-gap` if all are `unexamined-consequence`; `mixed` otherwise
 (including when no row qualifies; say so).
@@ -401,7 +449,8 @@ uses the `answers` shape (Section 14), not a verdict.
 - Does the decided catalog move to RDS PostgreSQL (Decision 253) change any phase you measured?
 - What does this latency cost per day? Method: per route, sum over your sampled calls of
   `max(0, Duration - that route's reused_connection p50)`, divided by the sample's days. Report
-  seconds per day per route and say that it mixes agent and CI calls except on the telemetry writer.
+  seconds per day per route, and say that it mixes agent and CI calls except on the telemetry writer
+  and mixes verbs on the three routes that log none.
 - What does the present path cost per month to run (Lambda and API Gateway at sampled traffic), as
   the baseline against which an opportunity's added cost should be read?
 - Do client retries turn a slow dependency into a longer outage for the caller, and can a retried
@@ -448,13 +497,15 @@ rating or a finding to fill a cell.
   functions (the ops reader, the telemetry reader and the writer differ in memory, catalog and file
   count) and the live probes in Section 11 part C. State what you could not separate.
 - DD-C Client round trip and flow fan-out (feeds Q1, Q3, Q7). For each flow in Section 10 (G7),
-  count round trips, classify each as needed or avoidable for the flow's purpose, and estimate the
-  flow's wall time on the reused and new-environment paths.
+  count round trips, classify each as needed or avoidable for the flow's purpose, estimate the
+  flow's wall time on the reused and new-environment paths, and say whether the flow blocks an
+  interactive agent turn or runs detached. Record it in `flow_round_trips` (Section 14).
 - DD-D Failure path (feeds Q2, Q7). Lay out every timeout and deadline from client to statement, in
   order, with its value and what the caller receives when it fires; include the egress proxy's own
   limit if you can observe one, and say so if you cannot. Compute the worst-case wall time of one
   logical read and one logical write under the retry policies. Identify which failures are retried
-  although a retry cannot change the outcome, and whether a retried write can duplicate.
+  although a retry cannot change the outcome, and whether a retried write can duplicate. Record
+  the ladder in `timeout_ladder` (Section 14).
 - DD-E Decision trace (feeds Q5, Q6). Build the `process_trace` from Section 10 (G9) and your own
   reading of the cited Decisions, plans and recs.
 
@@ -524,8 +575,10 @@ G4 Handlers and log lines
   fields include `verb`, `status`, `error_type`, `request_bytes`, `occ_retries`, `commit_ms`,
   `connect_reused`, `caller_role`. `caller_role` comes from the signed caller's ARN
   (`src/lambdas/ducklake_telemetry_writer/handler.py:96-100`). No `connect_ms`, no `elapsed_ms`: on
-  this route use REPORT `Duration` for wall time, and write `null` with a note for the `connect` and
-  `first_statement` phases.
+  this route use REPORT `Duration` for wall time. Its `attach_check` response body reports
+  `connect_ms` and `reused` (`handler.py:179-189`) while its log line carries `connect_reused: null`,
+  so a probe is the only source for this route's `connect` phase; write `null` with a note for any
+  phase you cannot source.
 
 G5 Data layout and maintenance
 - `config/lambda/ducklake/field_semantics.yaml:105-107` default partition transforms: history tables
@@ -541,7 +594,9 @@ G5 Data layout and maintenance
   warm connections, (ii) never re-query data already in the local read cache, (iii) keep the catalog
   compacted, (iv) size the DR dump cadence to measured egress; an amendment at `:11490` (from
   Decision 214 clause 2, `:3295`) adds (v) the catalog stats index is present and valid on every
-  catalog schema, reported as the `StatsIndexValid` metric.
+  catalog schema, reported as the `StatsIndexValid` metric. Decision 215 (`:3209`) replaces
+  invariant (ii) for recommendations: no full local recs cache exists, preflight's recs read model
+  is two bounded named-verb calls, and `rec_by_id` is deprecated in favour of `recs_by_ids`.
 - `docs/DECISIONS.md:443` Decision 253, `:471-472`: "The 11-14 s cold start is DuckDB extension
   loading and ATTACH, the same on either backend (rec-5042)."
 
@@ -557,7 +612,8 @@ G6 Clients
   present or the action is `update_ops`; `:152` `timeout=180`.
 - `scripts/telemetry_capture/transport.py:35` `MAX_TIMEOUT_S = 130.0`; `:39-41` retry statuses
   0/429/503, backoff base 0.5 s, cap 8 s; `:174-190` the writer URL is cached in an on-disk state
-  file per working tree.
+  file under a per-session directory (`scripts/telemetry_capture/state.py:52-53`, file `writer_url`
+  at `:125`), so a new session resolves it through SSM again.
 - `scripts/telemetry_capture/read_route.py:93` the telemetry reader route; `:117` the content reader
   has no API route.
 - `scripts/agent_sdk/mcp_server.py:133-137` two `describe` calls when the server process starts;
@@ -620,6 +676,8 @@ G9 History (dates and artifacts; the reading is yours)
 - 2026-11-09, rec-5042 is filed: cold connect 11-14 s, independent of the catalog backend.
 - 2026-11-10, Decision 253: the catalog moves to RDS PostgreSQL.
 - 2026-11-12/13: the egress proxy stops allowing role assumption; Decisions 255 and 256 follow.
+  `docs/plans/PLAN-agent-ducklake-rest-api.yaml:19`: "since 2026-11-12 no agent session reaches
+  AWS".
   `docs/plans/PLAN-agent-ducklake-rest-api.yaml:880`: "reader 14,015 calls, max 120 s, p99 109.7 s
   ... So the 29 s default is too short and 120 s fits the reader's deadline." `:266` the quota
   request was filed 2026-11-13. `:353-355` a grant below 120000 stops the plan ("a lower timeout
@@ -631,7 +689,9 @@ G9 History (dates and artifacts; the reading is yours)
   the latter (`:1139`, `:1149`) lists as unproven whether the proxy holds a request open for 120 s.
 - 2026-11-14: agent sessions cut over to the REST API (commits `4bdf58a9`, `c4c41b7f`).
 
-G10 Measured samples (taken 2026-11-14 between 16:25Z and 17:40Z; small windows; re-derive)
+G10 Measured samples (taken 2026-11-14; small windows; re-derive). The 24 h log pulls and the
+metric pulls ended about 16:30Z; the client timings and probes ran between 16:35Z and 17:20Z; the
+path-classified pull ended about 17:40Z. Later pulls will differ.
 Lambda invocation lines, 24 h, both transports mixed (ms). In this table "Fresh" means every line
 with `connect_reused: false`, new environments and reconnects together:
 
@@ -646,6 +706,11 @@ with `connect_reused: false`, new environments and reconnects together:
   (writer), 630 of 1024 MB (telemetry reader), 468 of 3008 MB (telemetry writer). Two ops reader
   invocations ended `Status: timeout` at 120,000 ms. Telemetry writer `Duration`: p50 763, p90
   2,029, p99 21,550, max 27,554 over 412 invocations.
+- The ops reader's 24 h ending about 17:40Z, classified by the path rules of Section 4: 1,017
+  calls, of which 36 `new_env` (29 over 29 s), 0 `fresh_connection`, 950 `reused_connection` (16
+  over 29 s; p50 129, p95 1,165, p99 43,456), 29 `connectionless`, 2 `unattributed` (both
+  `Status: timeout`); 47 calls over 29 s in all. The telemetry writer over the same window: 454
+  calls, none over 29 s; 23 `new_env` (`Duration` p50 16,664, p95 25,575).
 - REPORT lines carrying `Init Duration`, 24 h: 40, 31, 36, 21 (ops reader, writer, telemetry
   reader, telemetry writer). Gaps over five minutes between consecutive invocations: 36, 28, 30, 15.
   Maximum concurrent executions: 3, 1, 3, 4.
@@ -688,6 +753,7 @@ G11 Ownership already on record (dedup pointers; read each before judging it)
   invocation line. rec-2867 (open): point reads should be point reads. rec-4237 (open): claim-check
   export for large reads. rec-4221 (open): telemetry ingestion shape. rec-4482 (open): telemetry
   writer warm wall time metric and a warm-wall p95 alarm.
+- rec-4240 (open): consolidate `rec_by_id` into `recs_by_ids` and remove deprecated verbs.
 - rec-5158 (open): move CI callers onto the REST API. rec-5159 (open): ask whether the proxy can
   sign Function URL hosts.
 - Roadmap (`docs/ROADMAP-PLATFORM.yaml`): T1.9 (`:2438`, SLO alarms, deferred); T2.18 (`:3442`,
@@ -715,13 +781,72 @@ Counterfactual tests, applied to every sample you use:
 
 Part A -- Lambda logs (read-only). Log groups `/aws/lambda/agent-platform-ducklake-reader`,
 `-writer`, `-telemetry-reader`, `-telemetry-writer`. Baseline window: the 7 days ending when you
-start (use the full 14-day retention only to check a trend). At most 40 `aws logs filter-log-events`
-commands in total -- do NOT exceed (one command may paginate; splitting a window by day uses one
-command per day). One command per function fetches both line types with the stream name, which is
-the join key (Section 4):
-`aws logs filter-log-events --log-group-name /aws/lambda/agent-platform-ducklake-reader --start-time <epoch-ms> --end-time <epoch-ms> --filter-pattern '?"REPORT RequestId" ?"ducklake_invocation"' --query 'events[].[logStreamName,timestamp,message]' --output json`
+start (use the full 14-day retention only to check a trend; mind the CI-only days named in Section
+3). At most 40 `aws logs filter-log-events` commands in total -- do NOT exceed. One command may
+paginate; splitting a window by day uses one command per day; the log reads that match probes to
+lines (part C) count too. One command per function fetches both line types with the stream name:
+`aws logs filter-log-events --log-group-name /aws/lambda/agent-platform-ducklake-reader --start-time <epoch-ms> --end-time <epoch-ms> --filter-pattern '?"REPORT RequestId" ?"ducklake_invocation"' --query 'events[].[logStreamName,timestamp,message]' --output json > <scratch>/reader.json`
 (for the telemetry writer use `'?"REPORT RequestId" ?"telemetry_request"'`). Your own Section 5
 reads fall inside the baseline; they are a handful of calls and need no exclusion.
+
+This script applies the path rules of Section 4 to one such file and prints per-path counts and
+percentiles. Use it or extend it (per-day splits, the tier simulation of Section 14):
+
+```
+bin/venv-python - <scratch>/reader.json <<'PY'
+import collections, json, re, sys
+
+events = json.load(open(sys.argv[1]))
+streams = collections.defaultdict(list)
+for stream, ts, message in events:
+    streams[stream].append((ts, message))
+calls = []
+for stream, rows in streams.items():
+    rows.sort(key=lambda r: r[0])
+    line = line_ts = None
+    init_seen = connected = False
+    for ts, message in rows:
+        if "REPORT RequestId" not in message:
+            try:
+                line, line_ts = json.loads(message), ts
+            except ValueError:
+                pass
+            continue
+        dur = float(re.search(r"\tDuration: ([\d.]+) ms", message).group(1))
+        init = re.search(r"Init Duration: ([\d.]+) ms", message)
+        init_seen = init_seen or bool(init)
+        paired = line if line is not None and ts - line_ts <= 1000 else None
+        line = None
+        if paired is None:
+            path = "unattributed"
+        elif paired.get("connect_reused") is None:
+            path = "connectionless"
+        elif paired["connect_reused"]:
+            path = "reused_connection"
+        else:
+            path = "new_env" if init_seen and not connected else "fresh_connection"
+            connected = True
+        calls.append({"path": path, "duration": dur, "init": float(init.group(1)) if init else None,
+                      "connect": (paired or {}).get("connect_ms"), "elapsed": (paired or {}).get("elapsed_ms"),
+                      "status": re.search(r"Status: (\w+)", message).group(1) if "Status:" in message else "ok"})
+
+def q(values, p):
+    values = sorted(v for v in values if v is not None)
+    return round(values[min(len(values) - 1, int(p * len(values)))]) if values else None
+
+durations = [c["duration"] for c in calls]
+print(f"all: n={len(calls)} p50={q(durations, .5)} p99={q(durations, .99)} max={q(durations, 1)} over_29s={sum(d > 29000 for d in durations)}")
+for path in ("new_env", "fresh_connection", "reused_connection", "connectionless", "unattributed"):
+    sel = [c for c in calls if c["path"] == path]
+    if not sel:
+        continue
+    d = [c["duration"] for c in sel]
+    first = [c["elapsed"] - c["connect"] for c in sel if c["connect"] and c["elapsed"] is not None]
+    print(f"{path}: n={len(sel)} duration p50/p95/p99={q(d, .5)}/{q(d, .95)}/{q(d, .99)} over_29s={sum(x > 29000 for x in d)} "
+          f"connect p50/p95={q([c['connect'] for c in sel if c['connect']], .5)}/{q([c['connect'] for c in sel if c['connect']], .95)} "
+          f"elapsed-connect p50/p95={q(first, .5)}/{q(first, .95)} timeouts={sum(c['status'] == 'timeout' for c in sel)}")
+PY
+```
 
 Part B -- CloudWatch metrics (read-only). At most 60 `get-metric-statistics` or `list-metrics`
 commands in total -- do NOT exceed. Namespaces: `AWS/Lambda` (dimension `FunctionName`),
@@ -783,7 +908,9 @@ PY
 ```
 
 Rules for probes:
-- The printed `wall_ms` excludes URL and credential resolution. Never print or record the URL.
+- The printed `wall_ms` excludes URL and credential resolution. Never print or record the URL. To
+  measure the `client_overhead` phase you may add timers around the `api_route_url` call and the
+  credentials line of the recipe; a run that sends a request counts as one live call.
 - A `named_read` response does not say which path it took. After a batch of probes on one route,
   read that route's log once (a part A command over the last few minutes, with `logStreamName`) and
   match each probe to its line by order, action, and `elapsed_ms` close to `wall_ms` minus the
@@ -791,7 +918,8 @@ Rules for probes:
   match is not unique, discard the probe.
 - After every `reset_warm_connection`, send your own measured call on the same route at once, so
   that your call pays the reconnect and no other caller inherits it. The reset may land on one
-  environment and the next call on another; confirm from the stream names.
+  environment and the next call on another; confirm from the stream names. You cannot target an
+  environment: if your follow-up landed elsewhere, record the pair as unusable and move on.
 - You cannot create a new execution environment on demand. `new_env` data comes from the baseline
   logs. Do not idle-wait for one.
 - The reset is the one state change this prompt sanctions; it changes no AWS resource or setting.
@@ -803,13 +931,14 @@ recorded in `meta.contract_notes` and skipped.
 
 - P1 Read: Section 10 anchors in full for S1-S4; Decisions 82, 88, 214, 253, 255, 256; the recs in
   G11; the two plans cited in G9.
-- P2 Trace: work C1-C20 against the code and the record.
+- P2 Trace: work C1-C21 against the code and the record.
 - P3 Deep-dives DD-A to DD-E.
 - P4 Empirical pass (Section 11), applying the counterfactual tests.
 - P5 Rate the rubric (Section 8) and the external checklist (Q4).
 - P6 Dedup every finding and every inventory row's ownership (Section 13).
 - P7 Build `candidate_adjudication`, `latency_decomposition`, `optimisation_inventory`,
-  `timeout_outlook`, `architecture_challenges` and `process_trace` (Section 14).
+  `timeout_outlook`, `flow_round_trips`, `timeout_ladder`, `architecture_challenges` and
+  `process_trace` (Section 14).
 - P8 Synthesize: answer Q1-Q7 by their pinned rules, then compute severity and maturity LAST
   (Section 15).
 
@@ -846,6 +975,8 @@ latency, never whether they should exist):
   functions only through the signed REST API (Decisions 213, 255 clauses 1-2, 256). The API's IAM
   authorisation, resource policy and operator-only apply are fixed. Decision 255 clause 3 (the
   timeout) IS in scope.
+- No full local recommendations cache, and preflight's recs read model stays bounded named-verb
+  calls (Decision 215). A different bounded read model may be proposed; a full local cache may not.
 - One AWS region (Decision 202).
 - The public-repository content boundary (AGENTS.md "PUBLIC repository / confidential-data
   boundary", which cites Decisions 73, 83 and 101).
@@ -883,10 +1014,11 @@ audit:
     - {q: Q6, verdict: sufficient|partial|insufficient, basis: [], prose: ""}
     - {q: Q7, answers: [{question: "", answer: "", basis: [<finding ids>]}]}
   candidate_adjudication:
-    - {candidate: C1, outcome: finding|rejected|undetermined, findings: [<finding ids>], note: ""}   # C1..C20, all twenty
+    - {candidate: C1, outcome: finding|holds-not-defect|false|covered|undetermined,
+       findings: [<finding ids>], note: ""}   # C1..C21, all twenty-one
   latency_decomposition:
     - {route: ops/reader|ops/writer|telemetry/reader|telemetry/writer,
-       path: new_env|fresh_connection|reused_connection|connectionless,
+       path: new_env|fresh_connection|reused_connection|connectionless|unattributed,
        phase: client_overhead|transport|lambda_init|connect|first_statement|first_file_touch|steady_statement|catalog_wake,
        p50_ms: 0, p95_ms: 0, n: 0, source: "", share_of_calls_over_29s: 0.0,
        confidence: CONFIRMED|HYPOTHESIS, note: ""}
@@ -902,11 +1034,18 @@ audit:
        owned_by: [<rec or roadmap ids>], owner_delivers_saving: yes|partly|no|n/a,
        confidence: CONFIRMED|HYPOTHESIS}
   timeout_outlook:
-    - {route: "", current_timeout_s: 120, observed_p99_s: 0, observed_max_s: 0,
-       after_tier_1_p99_s: 0, after_tier_2_p99_s: 0, after_tier_3_p99_s: 0,
-       fits_29s_after: tier_1|tier_2|tier_3|none|unknown,
+    - {route: "", current_timeout_s: 120, sampled_calls: 0, observed_p99_s: 0, observed_max_s: 0,
+       observed_over_29s: 0, after_tier_1_over_29s: 0, after_tier_2_over_29s: 0,
+       after_tier_3_over_29s: 0, after_tier_2_p99_s: 0,
+       fits_29s_after: n/a|tier_1|tier_2|tier_3|none|unknown,
        verdict: within_default|inherent|avoidable-by-tuning|avoidable-by-redesign|undetermined,
        confidence: CONFIRMED|HYPOTHESIS, note: ""}
+  flow_round_trips:
+    - {flow: "", round_trips: 0, avoidable_round_trips: 0, blocks_interactive_turn: yes|no,
+       est_wall_ms_reused: 0, est_wall_ms_new_env: 0, evidence: "file:line", note: ""}
+  timeout_ladder:
+    - {order: 1, layer: "", value_s: 0, fires_when: "", caller_receives: "", typed: yes|no,
+       evidence: "file:line"}
   architecture_challenges:
     - {subject: engine|runtime_language|compute_substrate|sync_request_model,
        measured_share: "", verdict: keep|keep_and_tune|challenge_with_alternative|undetermined,
@@ -948,14 +1087,16 @@ Rules, binding:
   len(findings) = novel_count + planned_insufficient_count + planned_unbuilt_count`. Candidates
   rejected under Section 2 live in `rejected_candidates`, NOT in findings. Every other block
   (`question_answers`, `candidate_adjudication`, `latency_decomposition`, `optimisation_inventory`,
-  `timeout_outlook`, `architecture_challenges`, `process_trace`, `rubric_ratings`,
-  `per_surface_assessment`) is a system of record, referenced from findings where relevant and never
+  `timeout_outlook`, `flow_round_trips`, `timeout_ladder`, `architecture_challenges`,
+  `process_trace`, `rubric_ratings`, `per_surface_assessment`) is a system of record, referenced from findings where relevant and never
   counted as findings. `top_improvements` (at most 5) and `highest_leverage_change` MUST be finding
   ids; with zero findings, write `[]` and `null`. `top_opportunities` (at most 5) MUST be inventory
   ids, the five largest `est_daily_seconds_saved`.
-- `candidate_adjudication` has exactly one row per candidate C1-C20. `findings` is non-empty only
-  when `outcome` is `finding`. Every `rejected` row has a matching `rejected_candidates` row whose
-  `candidate` field starts with the candidate id.
+- `candidate_adjudication` has exactly one row per candidate C1-C21. `findings` is non-empty only
+  when `outcome` is `finding`. Every `holds-not-defect`, `false` and `covered` row has a matching
+  `rejected_candidates` row whose `candidate` field starts with the candidate id.
+- `flow_round_trips` has one row per flow in Section 10 (G7) that you traced. `timeout_ladder` lists
+  every timeout and deadline from the client to the statement, outermost first.
 - `surface: shared` requires a non-empty `affected_surfaces`; otherwise `affected_surfaces` is `[]`.
   `question` and `dimension` on a finding hold the ONE question and ONE dimension it serves most.
 - `change_type` meanings: `add` a missing mechanism; `remove` avoidable work; `relocate` work to a
@@ -975,22 +1116,36 @@ Rules, binding:
   revert, touches no data, layout or auth path; medium = touches the request path or infrastructure,
   with a rollback; high = touches data layout, the catalog or auth, or is hard to reverse.
 - `est_saving` is the saving per affected call: the p50 and p95 of what an affected call would
-  save. State the arithmetic in `basis`. `calls_affected_share` is the fraction of the sampled calls
-  on the listed routes (taken together) that the row would speed up. `est_daily_seconds_saved` is
-  computed over your sample: for each sampled call the row affects, the saving for that call (never
-  more than the measured cost of the phase it removes), summed and divided by the sample's days and
-  by 1000. Where you cannot estimate, write `null` for the numbers, say why in `basis`, and set
-  `confidence: HYPOTHESIS`. `monthly_cost_usd` is the added running cost at sampled traffic (0 when
-  none); `cost_basis` states the price and quantity assumed.
+  save. State the arithmetic in `basis`, including the rule you used to decide which sampled calls
+  the row affects (that selection is your judgment; record it). `path_affected: all` matches every
+  path; `failure` marks rows about timeouts and retries. `calls_affected_share` is the fraction of
+  the sampled calls on the listed routes (taken together) that the row would speed up.
+- Per-call saving, used by `est_daily_seconds_saved` and by the tiers. Where the removed phase is
+  recorded per call (`lambda_init`, `connect`, `first_statement`), a call's saving is that call's
+  measured cost of the phase times the fraction of the phase the row removes (state the fraction in
+  `basis`). Where it is not recorded per call (`client_overhead`, `transport`, `first_file_touch`,
+  `catalog_wake`, a round trip removed from a flow), use the row's `est_saving.p50_ms` as a flat
+  amount for each affected call, and set `confidence: HYPOTHESIS` unless a same-verb probe pair
+  measured it. Rows that remove the same phase on the same path either share an `alternative_group`
+  or state in `basis` how the phase is split between them; the total taken off one phase of one
+  call never exceeds its cost. `failure` rows are left out of both calculations unless you can count
+  the affected calls in your sample (for example REPORT lines with `Status: timeout`).
+- `est_daily_seconds_saved` is the sum of per-call savings over the sampled calls the row affects,
+  divided by the sample's days and by 1000. Where you cannot estimate, write `null` for the numbers,
+  say why in `basis`, and set `confidence: HYPOTHESIS`. `monthly_cost_usd` is the added running cost
+  at sampled traffic (0 when none); `cost_basis` states the price and quantity assumed.
 - Tiers for `timeout_outlook`: tier 1 = every `tuning` row of effort XS or S; tier 2 = every
-  `tuning` row; tier 3 = every row. Within an `alternative_group` a tier applies only the available
-  row with the largest `est_saving.p95_ms`. To estimate a route's p99 after a tier, re-compute over
-  your sampled calls on that route: subtract from each call's `Duration` the saving of every applied
-  row whose `path_affected` matches the call's path (bounded as above, and never taking a call below
-  the route's `reused_connection` p50), then take the p99 of the adjusted sample. `observed_p99_s`
-  and `observed_max_s` are REPORT `Duration` over your baseline window, all paths together.
-  `fits_29s_after` names the first tier whose estimated p99 is at or under 29 s, `none` if no tier
-  reaches it, `unknown` if the rows that matter have null estimates (then the tier fields are
+  `tuning` row; tier 3 = every row. Within an `alternative_group` a tier applies only one row: the
+  one in that tier with the largest non-null `est_saving.p95_ms`. To evaluate a tier on a route,
+  re-compute over your sampled calls on that route: subtract from each call's `Duration` its
+  per-call saving under every applied row (never taking a call below the route's
+  `reused_connection` p50 `Duration`), then count the adjusted calls still over 29 s.
+  `sampled_calls`, `observed_p99_s`, `observed_max_s` and `observed_over_29s` are REPORT `Duration`
+  over your baseline window, all paths together; `after_tier_N_over_29s` are the counts after each
+  tier and `after_tier_2_p99_s` is the p99 of the tier-2 adjusted sample. `fits_29s_after` is `n/a`
+  for a `within_default` route (the after-tier fields are then `null`); otherwise the first tier
+  after which the route fits 29 s by Q2's definition, `none` if no tier reaches it, `unknown` if
+  rows that affect this route's calls over 29 s have null estimates (the after-tier fields are then
   `null`). One row per route. The per-route `verdict` follows Q2's rule.
 - `architecture_challenges` has at least the `engine` and `runtime_language` rows. `alternative`,
   `migration_cost`, `expected_gain` and `what_is_lost` are required when `verdict` is
@@ -1009,18 +1164,20 @@ Rules, binding:
 - Readers of the meta flags: the report's Intake section (below) prints every `meta` flag that is
   true, both call counters and `sample_windows`, so a reader knows what the numbers rest on.
 
-Write `audits/ducklake-api-latency-<sha>.md`. It begins with a section headed `## Intake`; the word
-cap of 1500 applies to everything after that section (from the next `## ` heading to the end).
+Write `audits/ducklake-api-latency-<sha>.md` with exactly these seven `## ` sections, in this
+order. The word cap of 1500 applies to everything after the Intake section, counted with `wc -w`
+(table cells count as words).
 1. `## Intake`: audited commit, model, the true meta flags, `live_calls_used`, `resets_used`, the
    sample windows.
-2. Where the time goes, in one short table (route by path, dominant phase and its cost).
-3. Is 120 s inherent (Q2), in a paragraph, with the per-route outlook.
-4. The optimisation inventory as a table: grouped by effort (XS, S, M, L in that order) and, within
-   a group, ordered by `est_daily_seconds_saved` descending. Columns: mechanism, saving per call
-   (p50 / p95), seconds per day, monthly cost, risk, owner.
-5. Engine and language: the two verdicts and their basis, in a paragraph each.
-6. How it came to be built this way (Q5) and whether present governance catches it (Q6).
-7. What you could not determine, and what data would settle it.
+2. `## Where the time goes`: one short table (route by path, dominant phase and its cost).
+3. `## Is 120 s inherent`: a paragraph for Q2, with the per-route outlook.
+4. `## Optimisation inventory`: a table of at most the 12 rows with the largest
+   `est_daily_seconds_saved` (the YAML holds them all), grouped by effort (XS, S, M, L in that
+   order) and, within a group, ordered by `est_daily_seconds_saved` descending. Columns: mechanism,
+   saving per call (p50 / p95), seconds per day, monthly cost, risk, owner.
+5. `## Engine and language`: the two verdicts and their basis, a paragraph each.
+6. `## How it came to be built this way`: Q5, and whether present governance catches it (Q6).
+7. `## Not determined`: what you could not determine, and what data would settle it.
 No finding or opportunity appears in the report that is not in the YAML.
 
 ## 15. SEVERITY + MATURITY
@@ -1034,8 +1191,8 @@ class, never inherited from this prompt's framing:
 - high: calls made by those session flows are lengthened by seconds to minutes on a path taken
   daily, or a regression of that size would pass unseen, AND the compensating controls you
   considered are insufficient. A timeout that a retry recovers is at most high.
-- medium: avoidable overhead, redundancy or inconsistency with a clear fix, on a rare path or worth
-  under about a second per call.
+- medium: any other defect that is not low: avoidable overhead, redundancy or inconsistency with a
+  clear fix. A defect that affects only scheduled CI callers is at most medium.
 - low: clarity or wording.
 
 Compensating controls must PROPERTY-MATCH: the control exercises the same property AND would fail if
@@ -1062,7 +1219,7 @@ as written.
    `meta.audited_commit`; the branch name carries any `-rN` suffix Section 5 step 1 added.
 2. Pre-push gate: the YAML parses
    (`bin/venv-python -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" audits/ducklake-api-latency-<sha>.yaml`),
-   the counting invariant and the C1-C20 coverage rule hold, the report is within its cap (count
+   the counting invariant and the C1-C21 coverage rule hold, the report is within its cap (count
    the words after the Intake section), and neither deliverable contains an AWS account id, an ARN,
    an API id, a URL of the API or a Function URL. Running
    `bin/venv-python -m scripts.validate --pre` is OPTIONAL (advisory outside CI); if you run it and
@@ -1072,6 +1229,8 @@ as written.
    harness instructs for commits) using the session's configured identity and signing (do not
    override the author, do not disable or force signing, do not amend). If a pre-commit hook rejects
    the commit, fix the cause inside your two deliverables and commit again; never bypass the hook.
+   IF the cause lies outside your two deliverables: make no commit and end the turn with a final
+   message naming the deliverable paths and the hook's output.
 4. Run `git push -u origin HEAD` as a tool call on its own (no pipe, redirect or second command).
    On a network error retry up to 4 times. IF the push still fails, or fails for a non-network
    reason: do not open a PR; end the turn with a final message naming the branch, the commit sha,
