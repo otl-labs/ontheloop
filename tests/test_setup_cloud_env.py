@@ -149,7 +149,8 @@ def test_header_template_has_no_static_key_and_current_path() -> None:
     assert "cd /home/user/ontheloop && bash bin/setup-cloud-env.sh" in script
     header = "\n".join(_header_block(script, "# AWS credentials", "# DEV environment"))
     hosts = set(re.findall(r"[a-z0-9.-]+\.amazonaws\.com", header))
-    assert "sts.eu-west-2.amazonaws.com" in hosts
+    region = (Path("config") / "aws-region").read_text(encoding="utf-8").strip()
+    assert f"sts.{region}.amazonaws.com" in hosts
     assert "/agent-platform/ducklake/api_url/ops/reader" in header
     assert "s3." not in header and "on.aws" not in header and "*." not in header
     assert "OTL_OPS_VERBS_TRANSPORT=execute_api" in header
