@@ -1,0 +1,2754 @@
+# AUDIT: latency of the agent-facing DuckLake verb path (S1-S5)
+# Deliverable 1 of 2 (structured record). Companion prose: ducklake-api-latency-442ff085.md
+# Audited tree: origin/main @ 442ff085. Public-repository boundary (Decision 101): no account id,
+# ARN, API id, API URL or Function URL appears in this file.
+
+audit:
+  meta:
+    audited_commit: 442ff085
+    base_branch: main
+    model: Claude (Anthropic); exact model id withheld from committed artifacts per harness policy
+    methodology_version: 1
+    scope_surfaces:
+    - S1
+    - S2
+    - S3
+    - S4
+    - S5
+    degraded_dedup: false
+    degraded_empirical: false
+    live_probe_unavailable: false
+    web_unavailable: false
+    live_calls_used: 50
+    resets_used: 3
+    sample_windows:
+    - source: Lambda logs, four functions, REPORT + invocation lines (baseline)
+      window_start: '2026-11-07T21:46:00Z'
+      window_end: '2026-11-14T21:46:00Z'
+      n: 19460
+    - source: Lambda logs, four functions (trend only; retention edge)
+      window_start: '2026-10-31T21:30:00Z'
+      window_end: '2026-11-07T21:46:00Z'
+      n: 16926
+    - source: Lambda logs read back to match probes
+      window_start: '2026-11-14T21:46:00Z'
+      window_end: '2026-11-14T22:13:30Z'
+      n: 50
+    - source: CloudWatch AWS/ApiGateway (the REST API's whole life; agent-session traffic only)
+      window_start: '2026-11-13T00:00:00Z'
+      window_end: '2026-11-14T22:00:00Z'
+      n: 661
+    - source: CloudWatch DuckLakeMaintenance merge passes (ops and telemetry file counts)
+      window_start: '2026-10-31T00:00:00Z'
+      window_end: '2026-11-14T22:00:00Z'
+      n: 60
+    - source: CloudWatch DuckLakeWriter CommitLatencyMs
+      window_start: '2026-11-07T21:46:00Z'
+      window_end: '2026-11-14T21:46:00Z'
+      n: 518
+    - source: Live probes (Section 11 part C recipe)
+      window_start: '2026-11-14T21:45:19Z'
+      window_end: '2026-11-14T22:12:48Z'
+      n: 50
+    - source: This session's own preflight run (client wall time, matched to log lines)
+      window_start: '2026-11-14T21:39:02Z'
+      window_end: '2026-11-14T21:44:24Z'
+      n: 1
+    contract_notes: '(1) Budgets used: 14 of 40 filter-log-events commands, 28 of 60 metric commands, 50 of 60 live calls
+      (3 of 10 resets), 16 of 40 rec read commands, 9 of 12 web lookups. (2) Section 5 step 2: the first attempt wrapped
+      preflight in /usr/bin/time, which this image lacks (rc 127, nothing ran); the re-run with shell timing passed (rc
+      0, 322 s wall, one live HTTP 504 retried). (3) Web: the AWS documentation host does not resolve from this session
+      (2 fetches failed); external facts come from 7 web searches. London-region prices were not confirmed, so every price
+      uses the published US East example rate and price-dependent rows are HYPOTHESIS. (4) meta.model carries no model id:
+      the harness forbids model identifiers in pushed artifacts. (5) Section 3 calls CommitLatencyMs ''the catalog commit
+      only''; the code times the whole write transaction from before BEGIN to after COMMIT including OCC retries (src/common/ducklake_writes.py:180-234).
+      (6) The session-start hook reported a failed unshallow fetch; the repository is not shallow and all seven G9 commits
+      resolve. (7) Per-table data file counts cannot be read by a session (no verb exposes them, the maintenance log group
+      is outside Section 11); file counts per table are inferred from timings and marked HYPOTHESIS. (8) The first connect
+      after one of my connect_probe calls in a new environment is new_env by the Section 4 rule although the process was
+      already loaded; those calls are outside the baseline and are not used for path statistics. (9) A new environment cannot
+      be made on demand; four probes happened to land on new environments and are reported as such. (10) Agent and CI calls
+      cannot be separated in the logs outside the telemetry writer; the REST API metrics are agent-only and are used for
+      agent-facing rates. Per-day figures for 2026-11-12, 2026-11-13 and 2026-11-14 before 12:30:37Z (the cutover) are CI-only.
+      (11) The optional fast validation tier (scripts.validate --pre) was run on the tree holding both deliverables and
+      passed; it is advisory outside CI.'
+    stale_anchors: []
+  question_answers:
+  - q: Q1
+    verdict: partially-decomposed
+    basis:
+    - LAT-01
+    - LAT-05
+    - LAT-10
+    prose: 'Seven-day baseline, REPORT Duration, both transports mixed: 19,460 calls, 533 over 29 s (ops/reader 359, telemetry/reader
+      167, telemetry/writer 5, ops/writer 2). Two phases carry them. (1) First touch of a table''s data files. On ops/reader
+      a new environment''s first statement costs 87.0 s at p50 (n=300) against 11.3 s of connect; setting it to zero would
+      bring 242 of the 359 slow calls under 29 s, setting connect to zero only 30. The other 105 slow calls are on reused
+      connections and occur in young environments (167 of 176 reused calls over 10 s fall in the first 15 minutes of an
+      environment). What the function is doing: opening the table''s Parquet files on S3 one request after another on one
+      DuckDB thread and keeping the bytes in that connection''s memory. Probes on one environment, same connection state:
+      a metadata-only count answered in 81 ms as the first statement after a reconnect (so loading catalog metadata is not
+      the cost); a point read of one recommendation took 5.6 s; the same row through the batch verb, which cannot prune,
+      took 84.1 s; count_by_status took 96.4 s and 0.58 s when repeated; a second verb needing two other columns paid 30.3
+      s more; the 257-row decisions table took 16.8 s. A forced reconnect repays the whole cost, so the cache is per connection.
+      Merge passes do not explain reused-path slowness (0 slow calls in 266 calls made in the hour after a merge in environments
+      older than 15 minutes). (2) Connect on a new process: 11.3 s p50 on the readers, 14.0 s on the writer, about 15.9
+      s on the telemetry writer. On one writer environment the phased probe measured attach 15.5 s on a cold process and
+      0.49 s on the warm process seconds later, with the catalog 2-4 ms away (TCP) and 16-33 ms to authenticate: the time
+      is import and extension loading in the process, not the catalog. Lambda init is 0.2 s. Outside the function every
+      call pays about 0.5 s of route lookup (SSM) and about 0.45 s of transport, which is 0.95 s around a 0.26 s warm read.
+      Not decomposed: which step inside the 10-15 s cold connect takes the time and why the 3,008 MB functions are slower
+      than the 1,024 MB ones (no step timers; rec-5042 step 1 would settle it); which verbs the telemetry reader''s 167
+      slow calls are (no verb on its line; rec-4706); one 41.7 s commit on a reused telemetry-writer connection; and how
+      many files each table holds (needs the maintenance catalog_stats breakdown or a per-table file-count metric). Hence
+      partially-decomposed.'
+  - q: Q2
+    verdict: avoidable-by-tuning
+    basis:
+    - LAT-01
+    - LAT-02
+    - LAT-05
+    prose: 'ops/reader drives the verdict: it has 359 of the 533 calls over 29 s and all 12 timeouts. Its slow calls are
+      not slow because the work is large: the answers are a few hundred bytes to a few kilobytes over a table of about 5,000
+      rows, and the same statements take 0.1-0.8 s once the bytes are cached. The time is the number of files opened serially.
+      If the current tables were kept to a bounded number of files (OPT-01, no monthly cost) the model leaves 0 of the 359
+      over 29 s; raising DuckDB threads alone (OPT-02) leaves about 178. ops/writer (2) and telemetry/writer (5) are over
+      29 s only through cold connect; a cold-start row removes them bar one unexplained 41.7 s commit (keep-warm about 0.2
+      USD a month, snapshot restore about 32 USD a month at US East rates). telemetry/reader (167) is estimated to fall
+      to about 30 with more frequent compaction and parallel reads; that estimate is verb-blind and HYPOTHESIS. So 120 s
+      is not inherent to this workload. It is also not holding: the ops catalog''s after-merge file count rose from 807
+      to 944 in 14 days without ever falling, the slowest first statements rose from 103.5 s to 109.0 s, and the limit they
+      must fit is 120 s minus 11.3 s of connect. Twelve reads hit the 120 s function timeout in the last 7 days (all of
+      them since 2026-11-11), including one in this session''s own preflight whose retry finished in 117.97 s.'
+  - q: Q3
+    verdict: insufficient
+    basis:
+    - LAT-01
+    - LAT-03
+    - LAT-02
+    - LAT-05
+    - LAT-08
+    prose: 'The tuning rows, one per alternative group, describe about 7,500 s a day: ops first touch 3,996 (OPT-01), cold
+      connect 1,621 (OPT-07), telemetry first touch 1,192 (OPT-10), and about 700 across the client and failure-path rows.
+      Built to their stated acceptance the owned remedies deliver little of it. The largest row has no adequate owner: T2.18
+      and Decision 88 clause 1(iii) require a merge on every table, which already runs and does not bound the files a read
+      opens. rec-5042''s acceptance is a step-timer test (0 s saved); its scope text names snapshot restore, which would
+      deliver the 1,621. rec-4474''s acceptance is that a window read fits the reader timeout, not that it is fast. rec-5157
+      prescribes paging or submit-and-poll, which changes how a 100 s wait is delivered and not its length, and rests on
+      a 110 s deadline the ops reader does not have. rec-4240 would move every point read onto the verb that costs 84 s
+      instead of 6 s on first touch. If the recs'' scope text were built instead of their acceptance, about a third of the
+      saving would be delivered. Slow calls removed follow the same split: 359 by the unowned row, 67 by the cold-connect
+      row, 126 by the telemetry row.'
+  - q: Q4
+    verdict: partial
+    basis:
+    - LAT-01
+    - LAT-02
+    - LAT-05
+    - LAT-08
+    - LAT-10
+    prose: 'Checklist: 0 met, 8 partial, 2 missed (EC-2 bounded synchronous requests, EC-3 cold-start mitigation), so partial
+      by the pinned rule. The pattern is consistent: each practice exists somewhere on the path and is absent where the
+      time goes. A typed read deadline exists on the telemetry reader and not on the ops reader; file-count alarms exist
+      on the telemetry catalog and not on the ops catalog; verb and caller are logged on the telemetry writer and nowhere
+      else; an idempotency key covers creates and not updates; the route URL is cached by preflight and the capture runner
+      and not by the reader or writer clients. Engine and language are judged in architecture_challenges: the engine is
+      keep_and_tune (it is where 99 percent of function time is spent and tuning removes about 70 percent of that), the
+      language is keep (under 2 percent).'
+    external_checklist:
+    - property: EC-1
+      rating: partial
+      evidence: 'Two percentile budgets exist, both for the writer (warm wall p95 2,000 ms, cold attach p95 3 s; Decision
+        214 cl.4); none per route. Measured only by a post-deploy smoke gate on pre-warmed containers (scripts/ducklake_smoke/lambda_ec_gates.py:106-116,155)
+        and by manual log pulls. One latency alarm exists (telemetry writer CommitLatencyMs p95, terraform/personal/ducklake_telemetry_writer.tf:283-293).
+        Sample: writer reused p95 6,997 ms and cold connect p95 20,561 ms, both over budget, no alarm.'
+    - property: EC-2
+      rating: missed
+      evidence: 'Neither clause holds for the path as a whole: ops/reader p99 is 113.7 s against a 120 s gateway timeout
+        and 12 calls reached it in 7 days; no verb is paged or asynchronous (rec-5157 unbuilt). The telemetry reader''s
+        110 s deadline bounds that one route with a 10 s margin; it is a control on one route, not a property-matched control
+        for the ops reader.'
+    - property: EC-3
+      rating: missed
+      evidence: 'Init Duration is 0.2 s while connect_ms is 11-14 s inside the first request; no SnapStart, provisioned
+        concurrency or keep-warm rule in terraform/; three extensions total 99 MB (rec-5042). Warm connection reuse (Decision
+        88 inv. i) lowers connects per environment but does nothing for a new environment, so it is not a property-matched
+        control. External: SnapStart supports Python 3.12 and later (https://docs.aws.amazon.com/lambda/latest/dg/snapstart.html
+        via search).'
+    - property: EC-4
+      rating: partial
+      evidence: 'Server: one warm connection per environment (src/common/ducklake_runtime.py:420-498). Client: the route
+        URL is re-read from SSM on every call unless an env override is set (src/common/ducklake_reader_client.py:407-422;
+        probes: 444-774 ms, median about 500); credentials are re-resolved per call (11-18 ms); no shared HTTP session (probe:
+        no measurable gain from one through the proxy). Preflight primes the reader URL and the capture runner caches its
+        URL on disk.'
+    - property: EC-5
+      rating: partial
+      evidence: 'Point lookups prune: rec_by_id 5.6 s on first touch and 0.26 s steady against 84.1 s for the unprunable
+        batch verb on the same row. Compaction does not bound files: MergeOpsFilesAfterTotal rose 807 to 944 in 14 days
+        and never fell; a full read of the 5,000-row current table costs 84-106 s on first touch.'
+    - property: EC-6
+      rating: partial
+      evidence: 'Ladder (timeout_ladder): no statement deadline on ops reads, function 120 s, gateway 120 s, client 180
+        s per attempt. Function and gateway are equal, so the order is not strict and the answer at 120 s is an untyped
+        504. The telemetry reader answers a typed 504 at 110 s; connect is bounded at 10 s; OCC exhaustion is a typed 503.'
+    - property: EC-7
+      rating: partial
+      evidence: 'Bounded attempts and backoff exist (reader 3 attempts, 2 s and 4 s; writer 3, 2 s and 5 s), jitter only
+        in the capture client. A typed read deadline and a 413 are not retried; the untyped gateway 504 of a full-timeout
+        overrun is. file_ops carries an idempotency ULID; update_ops is retried without one and a replay adds a history
+        row (src/lambdas/ducklake_writer/handler.py:316-320). No overall time budget: 366 s worst case for one read.'
+    - property: EC-8
+      rating: partial
+      evidence: Verb and caller are logged only by the telemetry writer (telemetry_log.py:104-141); the other three lines
+        carry action, connect_ms and elapsed_ms only (ducklake_metrics.py:60-89). No step timers inside connect or statement,
+        no request id shared by client, gateway and function; per-method gateway metrics are off and the access log is unreadable
+        from a session (agent_ducklake_api.tf:228-264).
+    - property: EC-9
+      rating: partial
+      evidence: 'Server-side filtering and aggregation through named verbs, a typed 413 at 6 MB, limit on paginable verbs,
+        a batch verb. Against that: only 2 paginable verbs, a 2.2 MB decisions pull 14 times a day, 8.3 percent of ops reader
+        responses over 500 kB, a per-row rec_by_id loop (scripts/convergence_health/budget_ingest.py:397-400), status filtered
+        in Python after a source-wide read (scripts/ops_portal/ci_rca_runtime.py:72,84-85).'
+    - property: EC-10
+      rating: partial
+      evidence: 'A deploy-pipeline gate measures warm write wall p95 against 2,000 ms on the smoke pair and fails the deploy
+        (lambda_ec_gates.py:155). It pre-warms its containers and covers no read, no cold path and no production table;
+        there is no standing canary. Sample: the reader''s cold first statement rose from 103.5 s to 109.0 s (daily maximum)
+        in 14 days with no signal.'
+  - q: Q5
+    verdict: mixed
+    basis:
+    - LAT-09
+    - LAT-08
+    prose: 'The main costs came from four decisions at which read latency was not examined and two at which it was. Not
+      examined: the June 2026 storage design (one Parquet file per write into history and current tables, inlining off for
+      durability, small files left to a scheduled merge); the single DuckDB thread added on 2026-06-07 for an in-container
+      churn gate that Decision 82 replaced the same day; Decision 88''s compaction invariant, written for catalog egress
+      and never checked against the files a read opens; and the 2026-10-18 measurement that recorded the reader''s cold
+      elapsed p95 at 90 s, attributed it to the catalog waking, and opened no item for it. Examined with evidence and accepted:
+      the telemetry cold-read diagnosis of 2026-10-19 (0.135 s per file, serial), which shipped a typed deadline and compaction
+      for telemetry only, and rec-5042 of 2026-11-09, which measured cold connect and deferred it. The quota raise the operator
+      asked about was a chosen trade-off: agents had no AWS access, the durations were read from CloudWatch, the operator
+      picked the REST API and 120 s, and follow-ups were filed. But the evidence was misread (the ops reader''s p99 of 109.7
+      s was called its read deadline; it has none) and the plan had no step that measured or explained latency, so the raise
+      accommodated a cost nobody had traced. It does not bear on the main costs; it bears on why they were still there to
+      accommodate.'
+  - q: Q6
+    verdict: insufficient
+    basis:
+    - LAT-08
+    - LAT-09
+    - LAT-10
+    prose: 'No enforced mechanism today would catch any of the unexamined rows. The planning skill''s four assessments and
+      the data-modelling walk ask for grain, write mode and partitioning, never for what a read will open or cost. The 2,000
+      ms gate runs on pre-warmed containers against the smoke table pair. The ops catalog''s file count has no alarm (the
+      telemetry catalog''s has, and the entity-counter table has a live-file ceiling). Decision 214''s latency reversal
+      condition is manual and its clock was defined to start after a change that was never built. The reader has no error
+      alarm, so 12 timeouts in a week raised nothing. Smallest changes that would have altered a row: a per-route duration
+      and timeout alarm plus a live-file ceiling on the ops tables (LAT-08; rows of 2026-06-16, 2026-10-18 and 2026-11-14);
+      a latency assessment in planning and critique that fires on any change to a verb path, a timeout or a quota and requires
+      a measured decomposition before a limit is raised (LAT-09; rows of 2026-06-04, 2026-06-06, 2026-06-07 and 2026-11-13);
+      and verb, caller and phase on the invocation line (LAT-10), without which neither of the first two can be evaluated
+      cheaply.'
+  - q: Q7
+    answers:
+    - question: Does the decided catalog move to RDS PostgreSQL (Decision 253) change any phase you measured?
+      answer: 'No material change is expected. The catalog is already 2-4 ms away (TCP connect in the phased probe) and
+        authenticates in 16-33 ms; the first catalog statement on a fresh connection took 81 ms; cold connect is process-side
+        (attach 15.5 s cold against 0.49 s warm on the same environment); first touch is S3. The move removes Neon''s scale-to-zero
+        wake, which I could not measure (one reopened connection in 19,460 calls: environments die before the catalog session
+        does).'
+      basis:
+      - LAT-05
+    - question: What does this latency cost per day?
+      answer: 'Sum of max(0, Duration minus the route''s reused p50) over the 7-day baseline, per day: ops/reader 4,774
+        s (new_env 3,280, reused 1,272, timeouts 205); telemetry/reader 2,621 s; telemetry/writer 852 s; ops/writer 514
+        s; 8,761 s a day in all, about 2.4 hours. It mixes agent and CI calls except on the telemetry writer (90 percent
+        agent callers) and mixes verbs on the three routes that log none. On ops/reader 90 percent of the excess comes from
+        calls over 29 s.'
+      basis:
+      - LAT-01
+    - question: What does the present path cost per month to run?
+      answer: 'About 6.6 USD a month at list price before any free tier: 89,709 GB-seconds in 7 days is about 384,000 a
+        month, 6.41 USD at 0.0000166667 USD per GB-second (US East example rate; London unconfirmed), plus about 83,000
+        requests (0.02 USD) and about 45,000 REST API calls (0.16 USD at 3.50 USD per million). On ops/reader 81 percent
+        of billed time is first-touch statements. Read added costs against this: keep-warm about 0.2 USD, SnapStart about
+        32 USD, provisioned concurrency about 85 USD a month for all four.'
+      basis: []
+    - question: Do client retries turn a slow dependency into a longer outage, and can a retried write duplicate?
+      answer: 'Yes to both. A read that reaches the gateway timeout is retried up to twice: 366 s worst case for one logical
+        read (3 x 120 s plus 6 s backoff). Observed: 9 retries after timeouts, each 101.6-118.0 s, so a recovered read costs
+        about 227 s. A write is retried on a transport error or 502/503/504 when it carries an idempotency ULID or is update_ops:
+        worst case 547 s. file_ops is replay-safe; a retried update_ops whose first attempt committed appends a second history
+        version with a new ULID (the current row converges). No writer call came near 120 s in the sample (max 32.2 s),
+        so the gateway path to that duplicate is not taken today; a lost response is.'
+      basis:
+      - LAT-07
+      - LAT-02
+    - question: With reads that can run 110-120 s, what bounds the number of concurrent catalog connections?
+      answer: 'One warm connection per environment and slot, so connections equal live environments. The telemetry reader
+        and writer have reserved concurrency 5 and both reached 5 in the week; the ops reader and writer have none and are
+        bounded only by the stage throttle (20 requests a second), the account''s concurrency and the catalog''s connection
+        limit. Observed maxima: reader 3, writer 2. A slow read also breeds environments: 21 percent of new ops-reader environments
+        were created while another invocation was running. rec-5155 owns reserved concurrency (open).'
+      basis:
+      - LAT-05
+    - question: Did the quota raise itself carry a cost or a risk?
+      answer: 'Cost: none measured. Risk one, documented by AWS: raising the integration timeout ''might require a reduction
+        in your Region-level throttle quota for your account'' (https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-execution-service-limits-table
+        via search); I could not read the account''s quota, and the stage''s 20 requests a second sits far below any plausible
+        value. Risk two, settled here: the egress proxy does hold a request for 120 s; it relayed the gateway''s 504 at
+        120.0 s and returned a 117.97 s call. Risk three is the real one: the raise removed the symptom that would have
+        forced a diagnosis while the cost keeps growing toward the new limit.'
+      basis:
+      - LAT-09
+    - question: Which of the session flows could be answered without calling a Lambda at all?
+      answer: The decisions pull (docs/DECISIONS.md is in the working tree and is the source ops_decisions is built from,
+        so the latest decision and its timestamp are derivable locally); both describe calls at MCP start and the describe
+        before every capture pass (the verb registries are repository content with a version stamp); and every route URL
+        lookup after the first. Preflight's telemetry gauge and the recs signals need the warehouse.
+      basis:
+      - LAT-11
+      - LAT-06
+    - question: How likely is an agent session to meet a call over 29 s, and which flows would break at 29 s?
+      answer: 'On the cutover day 6.5 percent of REST calls exceeded 29 s (gateway Latency p93 26.3 s, p94 33.0 s, n=661;
+        p95 38.0 s), and 8 answered 5XX. A session that starts after more than five minutes of quiet starts cold with near
+        certainty (70 percent of new reader environments follow such a gap), and its preflight then makes three calls over
+        29 s: the decisions pull (32.6 s), the recs tally (120 s timeout, then 117.97 s) and the signal rows (33.0 s) in
+        this session. At 29 s today the following fail cold: preflight''s recs inputs (after three attempts, since each
+        retry starts a new environment while the first is still running), any full-table verb called first (count_by_status,
+        open_recs_tally, recs_by_ids, recs_related), the decisions pull on the margin, telemetry window reads (new_env p50
+        21.9 s, p90 66.5 s) and DQ checks. Point reads (rec_by_id, decision_by_id) and writes fit except on the slowest
+        cold connects (writer new_env p95 26.5 s).'
+      basis:
+      - LAT-01
+      - LAT-03
+    - question: How do the main costs move as data grows, and is 120 s itself holding?
+      answer: 'They grow with the file count and 120 s is not holding. Ops after-merge files: 807 on 2026-10-31, 944 on
+        2026-11-14, monotonic, about 9.8 a day; telemetry 54 to 129. New-environment first statement on ops/reader: daily
+        p50 between 80 and 94 s on 11 of the 13 days since 2026-11-02, daily maximum 103.5 s rising to 109.0 s. The first
+        statement must fit in 120 s minus 11.3 s of connect. Timeouts at 120 s: 2 on 2026-11-05, then 2, 5, 0 and 5 on 2026-11-11
+        to 11-14. The 9 immediate retries seen all succeeded, in 101.6-118.0 s. At 1 percent more files a day the typical
+        first read of the recommendations table (88-96 s) reaches the limit in about two weeks (HYPOTHESIS, linear); from
+        then the retries fail too and every cold session loses its recs signals.'
+      basis:
+      - LAT-01
+      - LAT-02
+    - question: Is anything in the record measuring the wrong thing?
+      answer: Five things. The 2,000 ms gate measures warm writes to the smoke pair on pre-warmed containers, not a production
+        read or a cold path. CommitLatencyMs is the whole write transaction including OCC retries, not the catalog commit.
+        MergeOpsFilesAfterTotal is one catalog-wide total with no alarm on the ops series, so a 17 percent rise in 14 days
+        was invisible and the table holding the files cannot be named. Every server-side latency (Lambda Duration, gateway
+        Latency) omits about 0.95 s of client lookup and transport per call. And Decision 214's reversal clock was defined
+        to start after a compute change that was never built, so 'no trigger has fired' (Decision 253) is true by construction
+        while both budgets have been over since 2026-10-18.
+      basis:
+      - LAT-08
+      - LAT-10
+    - question: 'Own question: does a slow read make cold starts more frequent?'
+      answer: 'Yes. An environment serves one request at a time, so a 100 s first read occupies the only warm environment
+        and the next caller gets a new one and pays its own connect and first touch: 69 of 335 new ops-reader environments
+        (21 percent) were created while another invocation was running. Environments live 3 minutes at the median and 90
+        of 335 served a single call.'
+      basis:
+      - LAT-05
+      - LAT-01
+    - question: 'Own question: does the planned verb consolidation (rec-4240) make point reads slower?'
+      answer: 'Yes, as the batch verb is written today. rec_by_id filters with an equality the engine prunes on; recs_by_ids
+        filters with list_contains over a split string and opens every file: 5.6 s against 84.1 s for the same row on first
+        touch, 0.26 s against 0.81 s steady. update_rec''s fetch-before-update and the dependency check use rec_by_id today
+        and rec-4240 would move them.'
+      basis:
+      - LAT-03
+    - question: 'Own question: what did the path cost this audit session itself?'
+      answer: Preflight took 322 s. A batched read of 23 recommendations took 116 s (new environment, 12.8 s connect, 100.8
+        s first statement). Four of its first six ops reader calls exceeded 29 s. That is one session; it matches the post-cutover
+        sample (35 of 484 ops/reader calls over 29 s, 4 timeouts).
+      basis:
+      - LAT-01
+  candidate_adjudication:
+  - candidate: C1
+    outcome: finding
+    findings:
+    - LAT-01
+    note: 'Holds on the readers. ops/reader new_env: connect p50 11.3 s, first statement p50 87.0 s (n=300). Counterfactual
+      on its 359 calls over 29 s: zero first statement makes 242 fit, zero connect 30. telemetry/reader: 102 against 35.
+      Not on the writers, where connect is the larger part (14.0 s against 4.3 s).'
+  - candidate: C2
+    outcome: finding
+    findings:
+    - LAT-01
+    note: 'Holds with one correction. A reused connection paid 96.4 s, 30.3 s and 16.8 s the first time it needed a table''s
+      files or further columns of them (probes), and 105 baseline calls over 29 s were on reused connections. But the cost
+      is tied to the connection''s cache: a forced reconnect in the same process repaid it in full (0.72 s before the reset,
+      96.4 s after).'
+  - candidate: C3
+    outcome: finding
+    findings:
+    - LAT-01
+    note: 'The driver holds: with connection state held equal, cost moved with the files a statement must open (metadata-only
+      count 81 ms, pruned point read 5.6 s, unpruned read of the same row 84.1 s), matching rec-4474''s 0.135 s per file.
+      That the merge policy keeps the number from falling holds from metrics (after-merge total 807 to 944, monotonic) and
+      code (the rewrite step is never scheduled). Which tables hold the files is HYPOTHESIS: a session cannot read per-table
+      counts. The day-partition layout sets a rising floor on history tables, but history reads prune (2.7 s) and are not
+      the main cost.'
+  - candidate: C4
+    outcome: finding
+    findings:
+    - LAT-05
+    note: 'The fact holds (Init Duration 0.2 s; imports, three LOADs, DSN fetch and ATTACH inside connect_ms). The defect
+      is not the placement: for an on-demand caller init is part of the same wait, init time is billed since 2025-08-01,
+      and 11-15 s would breach the 10 s init limit. The defect is that nothing avoids per-environment work at all; lazy
+      loading in the request also blocks snapshot restore and provisioned capacity. Owner rec-5042, unbuilt.'
+  - candidate: C5
+    outcome: finding
+    findings:
+    - LAT-04
+    note: 'Split. Threads: holds as a defect (stale rationale, serial file opens); the size of the effect on this function
+      is HYPOTHESIS (rec-4474''s local pair: 40.7 s to 7.9 s at 8 threads). Memory: not supported. Cold connect is slower
+      on the 3,008 MB functions (14.0-15.5 s) than on the 1,024 MB reader (11.3 s); only the per-connection attach on a
+      warm process scales with memory (1.1-1.4 s against 0.49-0.62 s). The effect of memory on file opens could not be separated.'
+  - candidate: C6
+    outcome: finding
+    findings:
+    - LAT-05
+    note: 'Holds. New environments in 7 days: reader 335, writer 203, telemetry reader 305, telemetry writer 240; 70, 91,
+      74 and 65 percent of them follow an idle gap over five minutes. Environment lifetime p50 3 minutes on ops/reader.
+      36 percent of ops/writer calls land on a new environment. No keep-warm, provisioned or snapshot setting exists.'
+  - candidate: C7
+    outcome: finding
+    findings:
+    - LAT-02
+    note: 'Holds. src/lambdas/ducklake_reader/handler.py:350 takes no remaining-time callable; tests/lambdas/ducklake_reader/test_event_routing.py:104
+      pins it. 12 invocations ended Status: timeout at 120,000 ms in 7 days; each reset the process (the retry reconnected
+      in 10.3-11.9 s).'
+  - candidate: C8
+    outcome: finding
+    findings:
+    - LAT-06
+    note: 'Split. The SSM lookup holds: 444-774 ms per resolution (median about 500, n=22), once per call in DuckLakeReader._invoke
+      and the writer transport. The credential session costs 11-18 ms and a shared HTTP session bought nothing through the
+      proxy (447/426/437 ms against 486/451/430 ms), so those two parts are refuted as material. The fixed cost that remains
+      is about 450 ms of transport per call, inside the egress proxy and outside the repository''s control.'
+  - candidate: C9
+    outcome: finding
+    findings:
+    - LAT-07
+    note: Holds. Worst case 366 s for one read. Today the retry is what recovers a timed-out read (9 of 9 visible retries
+      succeeded, 101.6-118.0 s) because the second attempt runs about 10 percent faster; the policy has no time budget and
+      treats a full-timeout overrun as transient, so it turns into three timeouts once the read no longer fits. Timeout
+      value 180 s per attempt holds; statuses 502/503/504 hold.
+  - candidate: C10
+    outcome: finding
+    findings:
+    - LAT-11
+    - LAT-03
+    note: 'Holds for over-fetch and loops (2.2 MB decisions pull per preflight; status filtered in Python; per-row rec_by_id
+      loop). It inverts for the batch verb: the batch verb is the slow one (LAT-03), so moving loops onto it as written
+      would cost more, not less.'
+  - candidate: C11
+    outcome: finding
+    findings:
+    - LAT-10
+    note: Holds. This audit needed 50 live probes and time-matching to name the verb behind any reader duration. The telemetry
+      writer is the exception for verb and caller and has no elapsed or connect time.
+  - candidate: C12
+    outcome: finding
+    findings:
+    - LAT-08
+    note: 'Holds. Both paper budgets were recorded over on 2026-10-18 (3.79 s and 13-21 s) and are over in this sample (6,997
+      ms and 20,561 ms); nothing gates or alarms; the reversal condition is kind: manual.'
+  - candidate: C13
+    outcome: finding
+    findings:
+    - LAT-09
+    - LAT-02
+    note: Holds for both limits. The function timeout has been 120 s since commit e9edc810 (2026-06-06) with no stated reason
+      and was copied to the two telemetry functions. The integration timeout was fitted to an observed p99 of 109.7 s that
+      the plan called the reader's read deadline; the ops reader has none, and the distribution continues to 120 s.
+  - candidate: C14
+    outcome: finding
+    findings:
+    - LAT-09
+    note: Holds. .claude/skills/planning/SKILL.md has four assessments (lines 126, 140, 147, 157), none on latency; plan-critique
+      mentions performance once as an example of a vague criterion (line 45); code review has one bullet (line 102); the
+      data-modelling walk has no read-cost step.
+  - candidate: C15
+    outcome: finding
+    findings:
+    - LAT-12
+    note: 'Holds. ops/writer reused: p50 1,448 ms, p95 6,997 ms (update_ops 1,821 / 7,833; file_ops 1,680 / 2,687; write_ops
+      692 / 2,430). The telemetry writer does not share it (append p50 483 ms).'
+  - candidate: C16
+    outcome: finding
+    findings:
+    - LAT-08
+    note: 'Holds: 15 open recs and one deferred roadmap item each own a slice, none of them in progress by the pinned rule
+      except rec-4474, and the largest slice (first touch of the ops current tables, 3,996 s a day) belongs to none of them.'
+  - candidate: C17
+    outcome: holds-not-defect
+    findings: []
+    note: Holds. The catalog is 2-4 ms away and answers its first statement in 81 ms; the dominant costs are in the function
+      process and on S3.
+  - candidate: C18
+    outcome: finding
+    findings:
+    - LAT-11
+    note: Holds. describe is 3,132 of 6,922 telemetry-writer calls (45 percent), one before every capture pass; MCP start
+      makes 5 round trips before the first tool call; preflight makes 13.
+  - candidate: C19
+    outcome: 'false'
+    findings:
+    - LAT-01
+    note: 'The first half holds (reused p50 262 ms and 375 ms on the read routes; 90 percent of ops reads finish in 2.6
+      s). The rest is refuted: 29 percent of ops/reader calls over 29 s and 39 percent of telemetry/reader ones were on
+      reused connections, and the tail is not small for a session (6.8 percent of ops reads, 6.5 percent of agent REST calls,
+      and three of the five ops reads in a cold preflight).'
+  - candidate: C20
+    outcome: holds-not-defect
+    findings: []
+    note: 'Holds as a trade-off: access had been lost for a day, durations were read from CloudWatch, the operator chose
+      the route and the value, the quota is in Terraform with a reversal condition, and five follow-up recs were filed.
+      ''The process worked as intended'' is true of the process as designed; that design has no latency step, the evidence
+      was misread and the follow-up rec repeats the misreading. That gap is LAT-09, not this candidate.'
+  - candidate: C21
+    outcome: holds-not-defect
+    findings: []
+    note: Holds. Python is under 2 percent of function time. The engine is where 99 percent is spent, but about 70 percent
+      of that is file layout and per-environment loading, which tuning removes; what remains is sub-second statement work
+      per read. See architecture_challenges.
+  latency_decomposition:
+  - route: ops/reader
+    path: new_env
+    phase: lambda_init
+    p50_ms: 194
+    p95_ms: 239
+    n: 272
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: REPORT Init Duration.
+  - route: ops/reader
+    path: new_env
+    phase: connect
+    p50_ms: 11313
+    p95_ms: 12856
+    n: 300
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: 'About 10 s of it is one-time process work: a reconnect in the same process costs 1.3 s (below).'
+  - route: ops/reader
+    path: new_env
+    phase: first_statement
+    p50_ms: 86967
+    p95_ms: 104846
+    n: 300
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: 'Bimodal: 79 statements under 20 s (pruned or small tables), 175 between 80 and 110 s (full reads of the recommendations
+      table). Verb-mixed.'
+  - route: ops/reader
+    path: fresh_connection
+    phase: connect
+    p50_ms: 1323
+    p95_ms: 1362
+    n: 3
+    source: probes after reset_warm_connection
+    confidence: CONFIRMED
+    note: 1,362 / 1,323 / 1,295 ms. The one baseline fresh_connection (11,604 ms) followed a timeout that restarted the
+      process.
+  - route: ops/reader
+    path: fresh_connection
+    phase: first_statement
+    p50_ms: 96363
+    p95_ms: 106172
+    n: 3
+    source: 2 probes plus 1 baseline line
+    confidence: CONFIRMED
+    note: 'Full-table statements only: 84,145 (recs_by_ids), 96,363 (count_by_status), 106,172 (open_recs_tally). Pruned
+      first statements after a reset: 5,559 ms (rec_by_id); metadata-only: 81 ms (dq row count).'
+  - route: ops/reader
+    path: reused_connection
+    phase: steady_statement
+    p50_ms: 262
+    p95_ms: 1800
+    n: 4711
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: 'Route''s reused Duration; includes first touches. Probe steady values: rec_by_id 262, count_by_status 578-720,
+      recs_by_ids 808, decisions_max_updated 104, rec_history 165 ms.'
+  - route: ops/reader
+    path: reused_connection
+    phase: first_file_touch
+    p50_ms: 19200
+    p95_ms: 95700
+    n: 8
+    source: same-verb probe pairs
+    confidence: CONFIRMED
+    note: 'Excess of first use over steady, one environment: recommendations full read 95.7 s and 83.3 s, two further columns
+      30.0 s, decisions full read 16.7 s and 19.2 s, point reads 5.3 s, 2.8 s and 2.5 s. Baseline: 176 of 4,711 reused calls
+      over 10 s, 105 over 29 s.'
+  - route: ops/reader
+    path: connectionless
+    phase: steady_statement
+    p50_ms: 3
+    p95_ms: 250
+    n: 228
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: describe; 242 ms when it is an environment's first call.
+  - route: ops/reader
+    path: unattributed
+    phase: first_statement
+    p50_ms: null
+    p95_ms: null
+    n: 13
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: 'No phase data: 12 timeouts at 120,000 ms (11 on a new environment''s first request) and one 328 ms line.'
+  - route: ops/reader
+    path: reused_connection
+    phase: client_overhead
+    p50_ms: 513
+    p95_ms: 750
+    n: 22
+    source: probes, one session
+    confidence: CONFIRMED
+    note: Route URL through SSM 444-774 ms (median about 500), credentials 11-18 ms, signing 0.3 ms. Same on every path;
+      skipped only where the URL is primed in the environment.
+  - route: ops/reader
+    path: reused_connection
+    phase: transport
+    p50_ms: 448
+    p95_ms: 533
+    n: 26
+    source: probe wall minus matched REPORT Duration
+    confidence: CONFIRMED
+    note: Range 414-538 ms regardless of call length; the gateway adds about 9 ms of it. A new environment adds 0.7-1.0
+      s.
+  - route: ops/reader
+    path: new_env
+    phase: catalog_wake
+    p50_ms: null
+    p95_ms: null
+    n: 0
+    source: none
+    confidence: HYPOTHESIS
+    note: 'Not separable: no reopened connection in the baseline; with the catalog awake TCP is 2-4 ms and authentication
+      16-33 ms.'
+  - route: ops/writer
+    path: new_env
+    phase: lambda_init
+    p50_ms: 190
+    p95_ms: 233
+    n: 201
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: ''
+  - route: ops/writer
+    path: new_env
+    phase: connect
+    p50_ms: 13990
+    p95_ms: 20561
+    n: 201
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: 'Phased probe on one new environment: attach 15,500 ms on the cold process, 489 ms seconds later; authentication
+      116 and 16 ms.'
+  - route: ops/writer
+    path: new_env
+    phase: first_statement
+    p50_ms: 4280
+    p95_ms: 8675
+    n: 201
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: ''
+  - route: ops/writer
+    path: reused_connection
+    phase: steady_statement
+    p50_ms: 1448
+    p95_ms: 6997
+    n: 361
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: update_ops 1,821 / 7,833; file_ops 1,680 / 2,687; write_ops 692 / 2,430. Not attributable to a step.
+  - route: ops/writer
+    path: reused_connection
+    phase: first_file_touch
+    p50_ms: null
+    p95_ms: null
+    n: 0
+    source: none
+    confidence: HYPOTHESIS
+    note: No read verb is allowed on this route, so no pair exists.
+  - route: ops/writer
+    path: reused_connection
+    phase: transport
+    p50_ms: 439
+    p95_ms: 454
+    n: 3
+    source: probe wall minus matched REPORT Duration
+    confidence: CONFIRMED
+    note: ''
+  - route: telemetry/reader
+    path: new_env
+    phase: lambda_init
+    p50_ms: 196
+    p95_ms: 244
+    n: 250
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: ''
+  - route: telemetry/reader
+    path: new_env
+    phase: connect
+    p50_ms: 11362
+    p95_ms: 12847
+    n: 284
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: Two probe-time new environments connected in 5,083 and 10,828 ms.
+  - route: telemetry/reader
+    path: new_env
+    phase: first_statement
+    p50_ms: 11530
+    p95_ms: 82873
+    n: 284
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: p90 55.6 s; 9 ended at the 110 s deadline.
+  - route: telemetry/reader
+    path: reused_connection
+    phase: steady_statement
+    p50_ms: 375
+    p95_ms: 7426
+    n: 6180
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: 65 over 29 s; 12 ended at the 110 s deadline.
+  - route: telemetry/reader
+    path: reused_connection
+    phase: first_file_touch
+    p50_ms: 1750
+    p95_ms: 1750
+    n: 1
+    source: one same-verb probe pair
+    confidence: HYPOTHESIS
+    note: 'tool_use_rollup over one compacted day: 2,116 ms then 364 ms. One pair on a quiet day; the baseline tail (p99
+      33 s) shows much larger values on wider windows.'
+  - route: telemetry/reader
+    path: reused_connection
+    phase: transport
+    p50_ms: 708
+    p95_ms: 910
+    n: 5
+    source: probe wall minus matched REPORT Duration
+    confidence: CONFIRMED
+    note: 435 ms for a small answer, 0.7-0.9 s for 122-816 kB answers.
+  - route: telemetry/writer
+    path: new_env
+    phase: lambda_init
+    p50_ms: 243
+    p95_ms: 300
+    n: 240
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: ''
+  - route: telemetry/writer
+    path: new_env
+    phase: connect
+    p50_ms: 15863
+    p95_ms: 22064
+    n: 203
+    source: Duration minus commit_ms on new_env appends
+    confidence: HYPOTHESIS
+    note: The line has no connect_ms; this proxy includes request validation. One attach_check probe on a new environment
+      reported connect_ms 13,889.
+  - route: telemetry/writer
+    path: new_env
+    phase: first_statement
+    p50_ms: 514
+    p95_ms: 8019
+    n: 203
+    source: commit_ms on new_env appends
+    confidence: CONFIRMED
+    note: ''
+  - route: telemetry/writer
+    path: reused_connection
+    phase: steady_statement
+    p50_ms: 518
+    p95_ms: 3635
+    n: 3535
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: 'append_telemetry: Duration 483 / 3,906, commit_ms 473 / 3,792; 8 ms outside the transaction at p50.'
+  - route: telemetry/writer
+    path: connectionless
+    phase: steady_statement
+    p50_ms: 2
+    p95_ms: 108
+    n: 3149
+    source: 7-day baseline logs
+    confidence: CONFIRMED
+    note: describe is 3,132 of these.
+  slow_calls:
+  - route: ops/reader
+    sampled_calls: 5253
+    over_29s: 359
+    over_29s_by_path:
+      new_env: 241
+      fresh_connection: 1
+      reused_connection: 105
+      connectionless: 0
+      unattributed: 12
+    main_cause: 'first_statement on new environments and first_file_touch on reused connections: serial opening of the recommendations
+      (84-106 s) and decisions (17-20 s) current tables'' data files; connect adds 11 s.'
+    confidence: CONFIRMED
+  - route: ops/writer
+    sampled_calls: 565
+    over_29s: 2
+    over_29s_by_path:
+      new_env: 2
+      fresh_connection: 0
+      reused_connection: 0
+      connectionless: 0
+      unattributed: 0
+    main_cause: connect on a new process (20-22 s on both calls) plus a first statement of about 10 s.
+    confidence: CONFIRMED
+  - route: telemetry/reader
+    sampled_calls: 6720
+    over_29s: 167
+    over_29s_by_path:
+      new_env: 102
+      fresh_connection: 0
+      reused_connection: 65
+      connectionless: 0
+      unattributed: 0
+    main_cause: first_statement and first_file_touch over day windows of telemetry files, 21 of them cut at the 110 s deadline;
+      connect adds 11 s on 102. Verbs unknown.
+    confidence: HYPOTHESIS
+  - route: telemetry/writer
+    sampled_calls: 6922
+    over_29s: 5
+    over_29s_by_path:
+      new_env: 4
+      fresh_connection: 0
+      reused_connection: 1
+      connectionless: 0
+      unattributed: 0
+    main_cause: connect on a new process (about 15 s) plus commits of 8-20 s on four; one unexplained 41.5 s commit on a
+      reused connection.
+    confidence: CONFIRMED
+  optimisation_inventory:
+  - id: OPT-01
+    finding: LAT-01
+    mechanism: 'Bound the live data files of the ops current tables: a scheduled rewrite of files that carry deletes followed
+      by the existing merge (or a periodic rebuild of the current projection), with a per-table live-file ceiling asserted
+      by control_health.'
+    kind: tuning
+    alternative_group: ops-first-touch
+    routes:
+    - ops/reader
+    paths_affected:
+    - new_env
+    - fresh_connection
+    - reused_connection
+    - failure
+    serves: both
+    est_saving:
+      p50_ms: 63906
+      p95_ms: 102429
+      basis: 'Baseline ops/reader: every statement over 5 s (451 calls) is taken as first touch and assumed to fall to 3
+        s once a full read opens about 16 files instead of several hundred (8 buckets, 0.16 s per file measured). Sum 3,795
+        s a day plus 201 s for the 12 timeouts. Slow calls: 347 with phase data plus the 12 timeouts, assumed to be the
+        same first touch. The file counts are inferred, not read.'
+    calls_affected_share: 0.088
+    est_daily_seconds_saved: 3996
+    est_slow_calls_removed: 359
+    effort: M
+    monthly_cost_usd: 0
+    cost_basis: A few seconds of maintenance Lambda time per pass.
+    risk: high
+    risk_note: 'Touches data layout: rewrites files and leaves the old ones to the weekly GC; needs the restore-drill and
+      guard posture the existing GC has.'
+    prerequisites: []
+    owner_state: in-progress
+    owned_by:
+    - T2.18
+    owner_delivers_saving: 'no'
+    confidence: HYPOTHESIS
+  - id: OPT-02
+    finding: LAT-04
+    mechanism: Raise DuckDB threads on the ops read connection (4 to 8) so file opens run in parallel.
+    kind: tuning
+    alternative_group: ops-first-touch
+    routes:
+    - ops/reader
+    paths_affected:
+    - new_env
+    - fresh_connection
+    - reused_connection
+    serves: both
+    est_saving:
+      p50_ms: 50179
+      p95_ms: 79072
+      basis: Same 451 statements at one quarter of their time (rec-4474's local pair gave 5.2 times at 8 threads; 4 times
+        assumed at 0.58 vCPU). Not measured on this function.
+    calls_affected_share: 0.086
+    est_daily_seconds_saved: 2991
+    est_slow_calls_removed: 181
+    effort: XS
+    monthly_cost_usd: 0
+    cost_basis: None.
+    risk: medium
+    risk_note: Request path; the ops connection has no memory limit and peaks at 331 of 1,024 MB today; the telemetry slot
+      failed at 8 threads under its 300 MB limit.
+    prerequisites: []
+    owner_state: not-in-progress
+    owned_by:
+    - rec-4493
+    owner_delivers_saving: 'no'
+    confidence: HYPOTHESIS
+  - id: OPT-03
+    finding: null
+    mechanism: Move to a DuckDB release with asynchronous remote I/O (2.x), which issues Parquet requests in parallel independently
+      of the thread count.
+    kind: tuning
+    alternative_group: ops-first-touch
+    routes:
+    - ops/reader
+    - telemetry/reader
+    paths_affected:
+    - new_env
+    - fresh_connection
+    - reused_connection
+    serves: both
+    est_saving:
+      p50_ms: null
+      p95_ms: null
+      basis: 'Not estimated: the pinned engine is 1.5.4 and no measurement of the newer I/O path exists here. Source: https://duckdb.org/docs/2.0/guides/performance/how_to_tune_workloads
+        (via search).'
+    calls_affected_share: null
+    est_daily_seconds_saved: null
+    est_slow_calls_removed: null
+    effort: M
+    monthly_cost_usd: 0
+    cost_basis: None.
+    risk: medium
+    risk_note: Version lockstep with the DuckLake format (clone rehearsal policy); behaviour changes across a major.
+    prerequisites: []
+    owner_state: none
+    owned_by: []
+    owner_delivers_saving: n/a
+    confidence: HYPOTHESIS
+  - id: OPT-04
+    finding: LAT-03
+    mechanism: 'Make recs_by_ids prunable: bind the ids so the engine sees equality or IN predicates on id, or run the point
+      verb once per id server-side; keep rec_by_id until it is.'
+    kind: tuning
+    alternative_group: null
+    routes:
+    - ops/reader
+    paths_affected:
+    - new_env
+    - fresh_connection
+    - reused_connection
+    serves: both
+    est_saving:
+      p50_ms: 546
+      p95_ms: 78586
+      basis: 'Probe pair on one connection state, same row: 84,145 ms against 5,559 ms on first touch, 808 ms against 262
+        ms steady. Share and daily total unknown: the line names no verb. With OPT-01 built the first-touch gap shrinks
+        to a second or two; the steady gap stays.'
+    calls_affected_share: null
+    est_daily_seconds_saved: null
+    est_slow_calls_removed: null
+    effort: S
+    monthly_cost_usd: 0
+    cost_basis: None.
+    risk: low
+    risk_note: Verb SQL only; read_version re-stamps.
+    prerequisites: []
+    owner_state: none
+    owned_by: []
+    owner_delivers_saving: n/a
+    confidence: HYPOTHESIS
+  - id: OPT-05
+    finding: LAT-06
+    mechanism: 'Resolve each route URL once: memoise it in the client process and cache it per session on disk, or export
+      the four URLs at session start.'
+    kind: tuning
+    alternative_group: null
+    routes:
+    - ops/reader
+    - ops/writer
+    - telemetry/reader
+    - telemetry/writer
+    paths_affected:
+    - new_env
+    - fresh_connection
+    - reused_connection
+    - connectionless
+    serves: both
+    est_saving:
+      p50_ms: 495
+      p95_ms: 735
+      basis: 'Probes: 22 lookups, 444-774 ms. Agent calls on the cutover day: 661; about 55 percent pay the lookup (capture
+        and primed preflight reads do not): 661 x 0.55 x 0.5 s. CI calls not counted.'
+    calls_affected_share: 0.5
+    est_daily_seconds_saved: 180
+    est_slow_calls_removed: 0
+    effort: XS
+    monthly_cost_usd: 0
+    cost_basis: None.
+    risk: low
+    risk_note: A stale URL after an API re-create; bound the cache by session.
+    prerequisites: []
+    owner_state: not-in-progress
+    owned_by:
+    - rec-2184
+    owner_delivers_saving: partly
+    confidence: HYPOTHESIS
+  - id: OPT-06
+    finding: LAT-02
+    mechanism: Give ops reads the deadline the telemetry reader has (remaining time minus a margin, typed answer, connection
+      kept) and set the function timeout below the gateway's; let the client retry a typed ops deadline once, since the
+      kept cache makes the second attempt short.
+    kind: tuning
+    alternative_group: null
+    routes:
+    - ops/reader
+    paths_affected:
+    - failure
+    serves: both
+    est_saving:
+      p50_ms: 100000
+      p95_ms: 110000
+      basis: 12 timeouts in 7 days. Today each costs 120 s plus a 101-118 s retry on a restarted process. With the connection
+        kept, the retry reads only what the first attempt did not reach. Saving taken as 105 s per event; the 10 slow retries
+        seen would finish under 29 s. Not measured.
+    calls_affected_share: 0.002
+    est_daily_seconds_saved: 180
+    est_slow_calls_removed: 10
+    effort: S
+    monthly_cost_usd: 0
+    cost_basis: None.
+    risk: medium
+    risk_note: Request path; an interrupt must leave the connection usable (shown for the telemetry slot in rec-4474).
+    prerequisites: []
+    owner_state: not-in-progress
+    owned_by:
+    - rec-5157
+    owner_delivers_saving: 'no'
+    confidence: HYPOTHESIS
+  - id: OPT-07
+    finding: LAT-05
+    mechanism: 'Lambda SnapStart on the four functions: imports and the three extension LOADs run before the snapshot, credentials
+      and the catalog connection are re-made in an after-restore hook.'
+    kind: tuning
+    alternative_group: cold-connect
+    routes:
+    - ops/reader
+    - ops/writer
+    - telemetry/reader
+    - telemetry/writer
+    paths_affected:
+    - new_env
+    serves: both
+    est_saving:
+      p50_ms: 10500
+      p95_ms: 20000
+      basis: 'connect_ms minus the 1.3 s (readers) or 0.6 s (writer) a warm process needs, over 1,018 new-environment calls:
+        407 + 358 + 377 + 479 s a day (telemetry writer from Duration minus commit_ms). Slow calls: 28 + 2 + 33 + 4. Restore
+        time for this process image is not measured.'
+    calls_affected_share: 0.052
+    est_daily_seconds_saved: 1621
+    est_slow_calls_removed: 67
+    effort: M
+    monthly_cost_usd: 32
+    cost_basis: 'US East example rates: cache 0.0000015046 USD per GB-second x 7.9 GB x 2.59 M s = 30.7; restores 0.00014
+      USD per GB x about 8,000 GB = 1.1. London rate unconfirmed. Readers about 4 each, writers about 12 each. Source: https://docs.aws.amazon.com/lambda/latest/dg/snapstart.html
+      (via search).'
+    risk: medium
+    risk_note: Published versions and aliases on both transports; snapshot hygiene for credentials; cannot be combined with
+      provisioned concurrency.
+    prerequisites: []
+    owner_state: not-in-progress
+    owned_by:
+    - rec-5042
+    owner_delivers_saving: partly
+    confidence: HYPOTHESIS
+  - id: OPT-08
+    finding: LAT-05
+    mechanism: 'Keep-warm schedule: an EventBridge rule invokes a no-op action on each function every four minutes so one
+      environment per function stays connected.'
+    kind: tuning
+    alternative_group: cold-connect
+    routes:
+    - ops/reader
+    - ops/writer
+    - telemetry/reader
+    - telemetry/writer
+    paths_affected:
+    - new_env
+    serves: both
+    est_saving:
+      p50_ms: 10100
+      p95_ms: 19900
+      basis: 'Only new environments that follow more than four minutes of quiet (186, 186, 181 and about 150 of the four
+        functions'' new-environment calls): 256 + 331 + 243 + 313 s a day; slow calls 24 + 1 + 25 + 3. Environments created
+        because another call was running (21 percent on ops/reader) are not helped.'
+    calls_affected_share: 0.036
+    est_daily_seconds_saved: 1143
+    est_slow_calls_removed: 53
+    effort: S
+    monthly_cost_usd: 0.2
+    cost_basis: 'About 43,000 invocations a month across four functions at well under a second each: about 0.15 USD of duration
+      and 0.01 USD of requests at US East rates.'
+    risk: low
+    risk_note: Adds scheduled traffic to the logs; a ping must not itself take the environment for long.
+    prerequisites: []
+    owner_state: none
+    owned_by: []
+    owner_delivers_saving: n/a
+    confidence: HYPOTHESIS
+  - id: OPT-09
+    finding: LAT-05
+    mechanism: Provisioned concurrency of 1 per function, with connect moved into init.
+    kind: tuning
+    alternative_group: cold-connect
+    routes:
+    - ops/reader
+    - ops/writer
+    - telemetry/reader
+    - telemetry/writer
+    paths_affected:
+    - new_env
+    serves: both
+    est_saving:
+      p50_ms: 10500
+      p95_ms: 20000
+      basis: 'Between OPT-08 and OPT-07: covers idle gaps and recycling but not concurrency above 1. Taken as 1,450 s a
+        day and 60 slow calls.'
+    calls_affected_share: 0.045
+    est_daily_seconds_saved: 1450
+    est_slow_calls_removed: 60
+    effort: M
+    monthly_cost_usd: 85
+    cost_basis: US East example rate 0.0000041667 USD per GB-second x 7.9 GB x 2.59 M s; London unconfirmed. About 13 times
+      the present Lambda bill.
+    risk: medium
+    risk_note: Init longer than 10 s is allowed only under provisioned concurrency; versions and aliases as OPT-07.
+    prerequisites: []
+    owner_state: not-in-progress
+    owned_by:
+    - rec-5042
+    owner_delivers_saving: partly
+    confidence: HYPOTHESIS
+  - id: OPT-10
+    finding: null
+    mechanism: 'Telemetry first touch: merge open-day partitions more often than every 6 h (or on a file-count trigger)
+      and read the telemetry slot in parallel within its memory limit.'
+    kind: tuning
+    alternative_group: null
+    routes:
+    - telemetry/reader
+    paths_affected:
+    - new_env
+    - reused_connection
+    serves: both
+    est_saving:
+      p50_ms: 8549
+      p95_ms: 47017
+      basis: '606 statements over 5 s that answered 200, reduced by 70 percent (files between merges are the bulk on busy
+        days: up to about 1,000 a day against about 130 after a merge). Verb-blind.'
+    calls_affected_share: 0.09
+    est_daily_seconds_saved: 1192
+    est_slow_calls_removed: 126
+    effort: M
+    monthly_cost_usd: 0
+    cost_basis: 'More merge passes: seconds of maintenance time each.'
+    risk: medium
+    risk_note: Maintenance cadence and the 300 MB slot limit (8 threads failed there on 2026-10-19).
+    prerequisites: []
+    owner_state: in-progress
+    owned_by:
+    - rec-4474
+    owner_delivers_saving: partly
+    confidence: HYPOTHESIS
+  - id: OPT-11
+    finding: LAT-12
+    mechanism: 'Ops writer: record OccRetryCount and CommitLatencyMs in the log line as embedded metrics, as the telemetry
+      writer does, instead of two PutMetricData calls on newly built clients per write.'
+    kind: tuning
+    alternative_group: null
+    routes:
+    - ops/writer
+    paths_affected:
+    - new_env
+    - reused_connection
+    serves: both
+    est_saving:
+      p50_ms: 250
+      p95_ms: 500
+      basis: 'Static: two sessions, two clients and two HTTPS calls after each commit (src/common/ducklake_metrics.py:33-41).
+        250 ms assumed; the telemetry writer spends 8 ms outside its transaction. 74 writes a day.'
+    calls_affected_share: 0.92
+    est_daily_seconds_saved: 18
+    est_slow_calls_removed: 0
+    effort: XS
+    monthly_cost_usd: 0
+    cost_basis: None.
+    risk: low
+    risk_note: Alarms that read the metric must find the same name and namespace.
+    prerequisites: []
+    owner_state: none
+    owned_by: []
+    owner_delivers_saving: n/a
+    confidence: HYPOTHESIS
+  - id: OPT-12
+    finding: LAT-11
+    mechanism: 'Capture runner: keep the writer''s describe answer per session and re-read it only when the registry stamp
+      changes.'
+    kind: tuning
+    alternative_group: null
+    routes:
+    - telemetry/writer
+    paths_affected:
+    - connectionless
+    serves: agent
+    est_saving:
+      p50_ms: 450
+      p95_ms: 600
+      basis: 3,132 describe calls in 7 days, one per pass with rows; each costs the detached runner one round trip (about
+        0.47 s of transport; 2 ms in the function).
+    calls_affected_share: 0.45
+    est_daily_seconds_saved: 210
+    est_slow_calls_removed: 0
+    effort: XS
+    monthly_cost_usd: 0
+    cost_basis: None.
+    risk: low
+    risk_note: 'Detached work: saves runner time, not agent wait.'
+    prerequisites: []
+    owner_state: none
+    owned_by: []
+    owner_delivers_saving: n/a
+    confidence: CONFIRMED
+  - id: OPT-13
+    finding: LAT-11
+    mechanism: 'MCP server start: cache the two describe answers by registry stamp and the three parameters it reads.'
+    kind: tuning
+    alternative_group: null
+    routes:
+    - ops/reader
+    - telemetry/reader
+    paths_affected:
+    - connectionless
+    serves: agent
+    est_saving:
+      p50_ms: 470
+      p95_ms: 1500
+      basis: 5 round trips before the first tool call, about 2.4 s warm and 4.5 s when both functions are cold (describe
+        on a new environment 1.3-1.5 s). 438 describe calls in 7 days on the two readers.
+    calls_affected_share: 0.037
+    est_daily_seconds_saved: 70
+    est_slow_calls_removed: 0
+    effort: S
+    monthly_cost_usd: 0
+    cost_basis: None.
+    risk: low
+    risk_note: The server must still fail loudly when a stamp mismatches.
+    prerequisites: []
+    owner_state: none
+    owned_by: []
+    owner_delivers_saving: n/a
+    confidence: CONFIRMED
+  - id: OPT-14
+    finding: LAT-11
+    mechanism: 'Preflight: stop pulling the whole decisions table each session; derive the latest decision from docs/DECISIONS.md
+      or pull only rows newer than the cache.'
+    kind: tuning
+    alternative_group: null
+    routes:
+    - ops/reader
+    paths_affected:
+    - new_env
+    - reused_connection
+    serves: agent
+    est_saving:
+      p50_ms: 2500
+      p95_ms: 5000
+      basis: 101 pulls in 7 days at 15.3 s p50 (177 s a day in all). Nearly all of that is first touch and is already counted
+        in OPT-01; the figure here is what remains after OPT-01 (2.3 MB to serialise and carry).
+    calls_affected_share: 0.019
+    est_daily_seconds_saved: 36
+    est_slow_calls_removed: 0
+    effort: S
+    monthly_cost_usd: 0
+    cost_basis: None.
+    risk: low
+    risk_note: Other tools read the local decisions cache.
+    prerequisites: []
+    owner_state: not-in-progress
+    owned_by:
+    - rec-2867
+    owner_delivers_saving: partly
+    confidence: HYPOTHESIS
+  - id: OPT-15
+    finding: null
+    mechanism: Serve the hot ops reads from a compact read model fed from the warehouse (one current snapshot per table,
+      refreshed after each commit), behind the same verbs.
+    kind: redesign
+    alternative_group: ops-first-touch
+    routes:
+    - ops/reader
+    paths_affected:
+    - new_env
+    - fresh_connection
+    - reused_connection
+    - failure
+    serves: both
+    est_saving:
+      p50_ms: 63906
+      p95_ms: 102429
+      basis: Removes the same first-touch cost as OPT-01 by a different route; never more than that cost.
+    calls_affected_share: 0.088
+    est_daily_seconds_saved: 3996
+    est_slow_calls_removed: 359
+    effort: L
+    monthly_cost_usd: 0
+    cost_basis: One small object per table.
+    risk: medium
+    risk_note: A second store to keep consistent with the catalog; read-your-write needs a rule.
+    prerequisites: []
+    owner_state: none
+    owned_by: []
+    owner_delivers_saving: n/a
+    confidence: HYPOTHESIS
+  - id: OPT-16
+    finding: null
+    mechanism: Turn DuckLake data inlining back on for the small ops tables with a scheduled flush, so single-row writes
+      stop producing files.
+    kind: tuning
+    alternative_group: ops-first-touch
+    routes:
+    - ops/reader
+    - ops/writer
+    paths_affected:
+    - new_env
+    - fresh_connection
+    - reused_connection
+    serves: both
+    est_saving:
+      p50_ms: null
+      p95_ms: null
+      basis: Stops new small files at the source; the existing residue still needs one rewrite, so no separate figure. Upstream
+        default since DuckLake 1.0 is on at 10 rows (https://ducklake.select/docs/stable/duckdb/advanced_features/data_inlining
+        via search).
+    calls_affected_share: null
+    est_daily_seconds_saved: null
+    est_slow_calls_removed: null
+    effort: L
+    monthly_cost_usd: 0
+    cost_basis: None.
+    risk: high
+    risk_note: 'Rows live in the catalog until flushed: reverses the durability ruling behind CD.34 and Decision 107; open
+      upstream defects on Postgres catalogs.'
+    prerequisites: []
+    owner_state: none
+    owned_by: []
+    owner_delivers_saving: n/a
+    confidence: HYPOTHESIS
+  - id: OPT-17
+    finding: null
+    mechanism: Paged or submit-and-poll contract for slow reads (the remedy rec-5157 names).
+    kind: redesign
+    alternative_group: null
+    routes:
+    - ops/reader
+    - telemetry/reader
+    paths_affected:
+    - failure
+    serves: both
+    est_saving:
+      p50_ms: 0
+      p95_ms: 0
+      basis: The work is unchanged, so no time is saved; the wait moves from one call to several. A full-table aggregate
+        that returns 300 bytes cannot be paged.
+    calls_affected_share: 0.045
+    est_daily_seconds_saved: 0
+    est_slow_calls_removed: 0
+    effort: M
+    monthly_cost_usd: 0
+    cost_basis: None.
+    risk: medium
+    risk_note: Changes a verb's contract for every caller.
+    prerequisites: []
+    owner_state: not-in-progress
+    owned_by:
+    - rec-5157
+    owner_delivers_saving: 'no'
+    confidence: HYPOTHESIS
+  - id: OPT-18
+    finding: null
+    mechanism: Raise the ops reader's memory size (more CPU share).
+    kind: tuning
+    alternative_group: null
+    routes:
+    - ops/reader
+    paths_affected:
+    - new_env
+    - fresh_connection
+    serves: both
+    est_saving:
+      p50_ms: null
+      p95_ms: null
+      basis: Not estimated. The only part seen to scale with memory is the reconnect on a warm process (1.3 s at 1,024 MB,
+        0.6 s at 3,008 MB); cold connect is slower on the larger functions.
+    calls_affected_share: null
+    est_daily_seconds_saved: null
+    est_slow_calls_removed: null
+    effort: XS
+    monthly_cost_usd: 2
+    cost_basis: 'Reader GB-seconds x 1.73 at 1,769 MB: about 1.8 USD a month at US East rates.'
+    risk: low
+    risk_note: None beyond cost.
+    prerequisites: []
+    owner_state: not-in-progress
+    owned_by:
+    - rec-5042
+    owner_delivers_saving: 'no'
+    confidence: HYPOTHESIS
+  - id: OPT-19
+    finding: LAT-07
+    mechanism: Total time budget on the reader and writer clients' retries, and no blind retry of a full-timeout overrun.
+    kind: tuning
+    alternative_group: null
+    routes:
+    - ops/reader
+    - ops/writer
+    paths_affected:
+    - failure
+    serves: both
+    est_saving:
+      p50_ms: 0
+      p95_ms: 0
+      basis: 'Saves nothing while retries still succeed (9 of 9 seen). It bounds the worst case: 366 s for a read and 547
+        s for a write become the stated budget once a read no longer fits.'
+    calls_affected_share: 0.002
+    est_daily_seconds_saved: 0
+    est_slow_calls_removed: 0
+    effort: S
+    monthly_cost_usd: 0
+    cost_basis: None.
+    risk: low
+    risk_note: A budget set too tight would fail reads that a second attempt recovers today.
+    prerequisites: []
+    owner_state: not-in-progress
+    owned_by:
+    - rec-5157
+    - rec-5156
+    owner_delivers_saving: partly
+    confidence: HYPOTHESIS
+  timeout_outlook:
+  - route: ops/reader
+    current_timeout_s: 120
+    sampled_calls: 5253
+    observed_p99_s: 113.7
+    observed_max_s: 120.0
+    observed_over_29s: 359
+    est_over_29s_after_tuning: 0
+    est_over_29s_after_redesign: 0
+    verdict: avoidable-by-tuning
+    basis: Assumes OPT-01 (group ops-first-touch), OPT-04 and OPT-06; none has a monthly cost. Every sampled call over 29
+      s with phase data has a statement over 5 s; with that at 3 s the longest is connect plus a few seconds. The 12 unattributed
+      timeouts are assumed to be the same first touch (11 are a new environment's first request). With OPT-02 in place of
+      OPT-01 about 178 remain. Redesign row OPT-15 gives the same 0.
+    confidence: HYPOTHESIS
+  - route: ops/writer
+    current_timeout_s: 120
+    sampled_calls: 565
+    observed_p99_s: 27.4
+    observed_max_s: 32.2
+    observed_over_29s: 2
+    est_over_29s_after_tuning: 0
+    est_over_29s_after_redesign: null
+    verdict: avoidable-by-tuning
+    basis: 'Both calls are new environments with 20-22 s of connect. Assumes one cold-connect row: OPT-08 (0.2 USD a month)
+      or OPT-07 (32 USD a month for all four). No redesign row.'
+    confidence: HYPOTHESIS
+  - route: telemetry/reader
+    current_timeout_s: 120
+    sampled_calls: 6720
+    observed_p99_s: 63.3
+    observed_max_s: 110.4
+    observed_over_29s: 167
+    est_over_29s_after_tuning: 30
+    est_over_29s_after_redesign: 5
+    verdict: avoidable-by-tuning
+    basis: Assumes OPT-10 and one cold-connect row. 126 of the 167 fit when statements over 5 s shrink by 70 percent, about
+      10 more when connect goes. The remainder are taken to be wide windows whose cost is computation under the 300 MB limit,
+      not file opens (telemetry_orphan_counts, rec-4488); OPT-17's paging would split most of those. Verb-blind estimate.
+    confidence: HYPOTHESIS
+  - route: telemetry/writer
+    current_timeout_s: 120
+    sampled_calls: 6922
+    observed_p99_s: 20.1
+    observed_max_s: 41.7
+    observed_over_29s: 5
+    est_over_29s_after_tuning: 1
+    est_over_29s_after_redesign: null
+    verdict: avoidable-by-tuning
+    basis: Four are new environments (about 15 s of connect plus 8-20 s commits) and fit under a cold-connect row. One 41.5
+      s commit on a reused connection is unexplained and assumed to remain. No redesign row.
+    confidence: HYPOTHESIS
+  flow_round_trips:
+  - flow: MCP server start
+    round_trips: 5
+    avoidable_round_trips: 3
+    blocks_interactive_turn: 'yes'
+    est_wall_ms_reused: 2400
+    est_wall_ms_new_env: 4500
+    evidence: scripts/agent_sdk/mcp_server.py:133-137; scripts/telemetry_capture/read_route.py:76-96
+    note: 'Two describe calls and three parameter reads (two route URLs, the catalog name). The three reads are avoidable
+      outright; the two describes are avoidable when cached by registry stamp. Observed describe: 0.43-0.49 s warm, 1.3-1.5
+      s on a new environment.'
+  - flow: MCP tool call (one verb)
+    round_trips: 2
+    avoidable_round_trips: 1
+    blocks_interactive_turn: 'yes'
+    est_wall_ms_reused: 1200
+    est_wall_ms_new_env: 100000
+    evidence: scripts/agent_sdk/mcp_server.py:78; src/common/ducklake_reader_client.py:407-422,451-493
+    note: 'Route lookup (about 0.5 s) plus the read (0.45 s transport plus 0.26 s for a warm point read). On a new environment:
+      11 s connect plus 3-6 s for a pruned read or 85-106 s for a full read of the recommendations table; the value given
+      is the full-read case.'
+  - flow: Session preflight
+    round_trips: 13
+    avoidable_round_trips: 4
+    blocks_interactive_turn: 'yes'
+    est_wall_ms_reused: 10000
+    est_wall_ms_new_env: 175000
+    evidence: scripts/session/preflight.py:208-239; scripts/preflight/aws_infra.py:14-25,68,118-122; scripts/sync/ops.py:84-85,465-469;
+      scripts/preflight/recs_signals_source.py:41-44; scripts/preflight/session_history.py:19; scripts/preflight/telemetry_health.py:26-30
+    note: 'One identity check, one convergence-record read, one primed route lookup, five ops reads (decisions 2.3 MB, queue,
+      plans, recs tally, signal rows) and, for telemetry, one catalog-name read, two route lookups and two reads. Avoidable:
+      the catalog-name read, the two telemetry lookups and the full decisions pull. Observed in this session on a new environment:
+      322 s, of which 240 s was one timeout and its retry; 175 s is the same run without the timeout.'
+  - flow: Ops portal update_rec
+    round_trips: 4
+    avoidable_round_trips: 2
+    blocks_interactive_turn: 'yes'
+    est_wall_ms_reused: 4000
+    est_wall_ms_new_env: 38000
+    evidence: scripts/ops_data_portal.py:443; scripts/ops_portal/writer_transport.py:134-152
+    note: 'One point read and one write, each preceded by a route lookup (the avoidable two). Warm: 1.2 s plus 2.8 s. Both
+      functions cold: 18 s plus 20 s.'
+  - flow: Ops portal file_rec (one dependency)
+    round_trips: 4
+    avoidable_round_trips: 2
+    blocks_interactive_turn: 'yes'
+    est_wall_ms_reused: 3900
+    est_wall_ms_new_env: 38000
+    evidence: scripts/ops_portal/write_validators.py:87,129; scripts/ops_portal/writer_transport.py:134-152
+    note: One write plus one rec_by_id per dependency, each with a route lookup. The dependency read is a pruned point read
+      today; rec-4240 would move it to the unpruned batch verb.
+  - flow: Rec lookup by ids (fetch_recs_by_ids, recs_related)
+    round_trips: 2
+    avoidable_round_trips: 1
+    blocks_interactive_turn: 'yes'
+    est_wall_ms_reused: 1750
+    est_wall_ms_new_env: 116000
+    evidence: src/common/ducklake_reader_client.py:564-577; scripts/recs_related
+    note: 'Route lookup plus one full-table verb. Observed: 3.7 s warm including interpreter start; 116 s for a 23-id fetch
+      on a new environment (12.8 s connect, 100.8 s first statement).'
+  - flow: Convergence budget ingest (CI)
+    round_trips: 4
+    avoidable_round_trips: 2
+    blocks_interactive_turn: 'no'
+    est_wall_ms_reused: 2800
+    est_wall_ms_new_env: 25000
+    evidence: scripts/convergence_health/budget_ingest.py:395-400
+    note: One prefix read then one rec_by_id per resolved row; shown for three rows. All but one of the per-row calls are
+      avoidable with a batch read. CI caller over the Function URL.
+  - flow: CI-RCA dedup read (CI)
+    round_trips: 1
+    avoidable_round_trips: 0
+    blocks_interactive_turn: 'no'
+    est_wall_ms_reused: 1000
+    est_wall_ms_new_env: 100000
+    evidence: scripts/ops_portal/ci_rca_runtime.py:72,84-85
+    note: 'One read of every ci_rca row with all columns, then status is filtered in Python: no extra round trip, but an
+      unpruned read and an over-wide answer.'
+  - flow: Telemetry capture pass
+    round_trips: 2
+    avoidable_round_trips: 1
+    blocks_interactive_turn: 'no'
+    est_wall_ms_reused: 1400
+    est_wall_ms_new_env: 18600
+    evidence: scripts/telemetry_capture/runner.py:59,99-102,326; scripts/telemetry_capture/transport.py:174-190
+    note: 'describe then one append per chunk (plus begin_blobs when blobs exist); detached with a 600 s budget. The describe
+      is avoidable. New environment: describe 1.4 s, append 17.2 s at p50.'
+  - flow: Telemetry verification monitor (CI)
+    round_trips: 10
+    avoidable_round_trips: 0
+    blocks_interactive_turn: 'no'
+    est_wall_ms_reused: 8000
+    est_wall_ms_new_env: 110000
+    evidence: scripts/telemetry_verify/monitor.py:28-40
+    note: Four calls per tree plus two per extra session, budgeted at 450 s worst case each and 800 calls a run; shown for
+      one tree of four sessions. Not traced call by call; its windows are where the telemetry reader's 110 s deadline fires.
+  timeout_ladder:
+  - order: 1
+    layer: Reader client retry envelope (3 attempts on 502/503/504, backoff 2 s then 4 s)
+    value_s: 366
+    fires_when: each attempt ends in a gateway 504 at 120 s
+    caller_receives: ReaderInvokeError after about 366 s
+    typed: 'no'
+    evidence: src/common/ducklake_reader_client.py:73-75,466-492
+  - order: 2
+    layer: Writer client retry envelope (3 attempts when idempotent or update_ops, backoff 2 s then 5 s)
+    value_s: 547
+    fires_when: each attempt hangs to the 180 s client timeout (367 s if each ends in a gateway 504)
+    caller_receives: RuntimeError; an update_ops whose first attempt committed has by then written a second history row
+    typed: 'no'
+    evidence: scripts/ops_portal/writer_transport.py:38-40,144-152
+  - order: 3
+    layer: Capture runner pass budget
+    value_s: 600
+    fires_when: the detached pass has not finished
+    caller_receives: pass ends with reason deadline
+    typed: 'yes'
+    evidence: scripts/telemetry_capture/runner.py:59
+  - order: 4
+    layer: Reader and writer client HTTP timeout, per attempt
+    value_s: 180
+    fires_when: no response for 180 s
+    caller_receives: requests timeout exception (the reader does not retry it; the writer does when retryable)
+    typed: 'no'
+    evidence: src/common/ducklake_reader_client.py:473; scripts/ops_portal/writer_transport.py:152
+  - order: 5
+    layer: Capture client HTTP timeout, per request
+    value_s: 130
+    fires_when: no response within the remaining budget, capped at 130 s
+    caller_receives: status 0, retried with jitter while the budget allows
+    typed: 'yes'
+    evidence: scripts/telemetry_capture/transport.py:35,39-41
+  - order: 6
+    layer: Preflight session-history thread
+    value_s: 60
+    fires_when: the telemetry window read has not returned in 60 s
+    caller_receives: session history reported unavailable; preflight continues
+    typed: 'yes'
+    evidence: scripts/preflight/session_history.py:19
+  - order: 7
+    layer: Session egress proxy
+    value_s: null
+    fires_when: 'not observed to fire: it relayed a gateway 504 after 120.0 s and a 200 after 117.97 s'
+    caller_receives: unknown; its own limit is at least 120 s
+    typed: 'no'
+    evidence: this session's preflight, 2026-11-14 21:39:45Z to 21:43:45Z
+  - order: 8
+    layer: API Gateway integration timeout
+    value_s: 120
+    fires_when: the function has not answered in 120 s
+    caller_receives: HTTP 504 from the gateway; the function keeps running
+    typed: 'no'
+    evidence: terraform/bootstrap/agent_ducklake_api.tf:24,183
+  - order: 9
+    layer: Lambda function timeout (all four functions)
+    value_s: 120
+    fires_when: the invocation reaches 120 s
+    caller_receives: Function URL callers get 502; behind the gateway it races layer 7 (504 observed). The process is restarted
+      and its connection and file cache are lost
+    typed: 'no'
+    evidence: terraform/personal/ducklake_lambdas.tf:305,350; ducklake_telemetry_reader.tf:84; ducklake_telemetry_writer.tf:128
+  - order: 10
+    layer: Telemetry reader statement deadline (remaining time minus 10 s, or the caller's deadline_ms)
+    value_s: 110
+    fires_when: an event verb is still running
+    caller_receives: HTTP 504 read_deadline_exceeded; the connection survives; not retried
+    typed: 'yes'
+    evidence: src/common/ducklake_read_deadline.py:19; src/lambdas/ducklake_telemetry_reader/handler.py:176,233
+  - order: 11
+    layer: Ops reader statement deadline
+    value_s: null
+    fires_when: 'never: there is none'
+    caller_receives: nothing before layer 8
+    typed: 'no'
+    evidence: src/lambdas/ducklake_reader/handler.py:350; tests/lambdas/ducklake_reader/test_event_routing.py:104
+  - order: 12
+    layer: Catalog connect timeout (libpq)
+    value_s: 10
+    fires_when: the catalog does not accept the connection in 10 s
+    caller_receives: typed 503 catalog_unavailable or 500 runtime
+    typed: 'yes'
+    evidence: src/common/ducklake_runtime.py:249
+  architecture_challenges:
+  - subject: engine
+    concerns: both
+    measured_share: 'Total: 9,531 s a day of function time, four routes, 7-day baseline. GROSS about 9,440 s a day (99 percent):
+      connect 1,747 (which includes a small Python share I cannot split out), statements 7,486, and 206 of timed-out reads.
+      NET about 2,630 s a day (28 percent of the same total) once OPT-01 (3,996), one cold-connect row (1,621), OPT-10 (1,192)
+      are removed; OPT-01''s figure includes the timed-out reads. Method: sums of connect_ms and elapsed_ms minus connect_ms
+      from the invocation lines; commit_ms on the telemetry writer.'
+    verdict: keep_and_tune
+    alternative: ''
+    migration_cost: ''
+    expected_gain: ''
+    what_is_lost: ''
+    rationale: 'The gross share is material and tuning removes about 70 percent of it. Both halves contribute. The table
+      format and its use here (one Parquet file per write, a current projection maintained by delete plus insert, compaction
+      that does not bound files) produce the first-touch cost; the query engine as deployed (99 MB of extensions loaded
+      per process, one thread, synchronous file I/O in 1.5.4) produces the cold connect and makes the file opens serial.
+      What remains after tuning is statement work of about 0.9 s per call on average, 0.1-0.8 s for reads and 1.4 s for
+      writes, on tables of thousands of rows. That is high for the data size and would be milliseconds on a row store, but
+      I do not judge the gain over tuning large enough to justify leaving Decision 84''s single backend: the tuned path
+      would sit far inside any gateway limit. Revisit if, after OPT-01 and a cold-connect row, warm writes still exceed
+      their 2,000 ms budget.'
+    confidence: HYPOTHESIS
+  - subject: runtime_language
+    concerns: n/a
+    measured_share: 'Same total, 9,531 s a day. GROSS between 80 and 160 s a day (0.8 to 1.7 percent): Init Duration 33
+      s, first-call module work on a new environment about 0.25 s x 155 a day = 39 s, handler overhead about 3 ms a call
+      = 8 s, plus an unmeasured boto3 import inside connect of at most about 77 s. NET about 15 s a day if a snapshot row
+      absorbs init and imports. Method: Init Duration lines; connectionless describe Duration on warm (3 ms) and new (242
+      ms) environments.'
+    verdict: keep
+    alternative: ''
+    migration_cost: ''
+    expected_gain: ''
+    what_is_lost: ''
+    rationale: The gross share is not material. The 11-15 s people attribute to Python start-up is native library and extension
+      loading that any host language would pay.
+    confidence: CONFIRMED
+  - subject: compute_substrate
+    concerns: n/a
+    measured_share: Same total. GROSS about 1,780 s a day (19 percent) is work repeated per execution environment (connect
+      plus init) because environments live 3 minutes at the median; first touch (about 6,000 s a day across the two readers)
+      is also repaid per environment. NET about 160 s a day with one cold-connect row and OPT-01.
+    verdict: keep_and_tune
+    alternative: ''
+    migration_cost: ''
+    expected_gain: ''
+    what_is_lost: ''
+    rationale: Material, and removed by tuning rows that keep Lambda. A long-lived service would remove it too, at a standing
+      cost several times the present bill; nothing measured calls for it.
+    confidence: HYPOTHESIS
+  - subject: sync_request_model
+    concerns: n/a
+    measured_share: 'No share of its own: the contract adds no time, it sets how long a caller may wait. 533 of 19,460 calls
+      exceed 29 s today; an estimated 31 after tuning.'
+    verdict: keep
+    alternative: ''
+    migration_cost: ''
+    expected_gain: ''
+    what_is_lost: ''
+    rationale: Once first touch is bounded the synchronous contract fits with margin; an asynchronous contract would deliver
+      the same wait in more calls.
+    confidence: HYPOTHESIS
+  process_trace:
+  - date: '2026-06-04'
+    artifact: Decision 81; roadmap CD.33 / CD.34 (docs/ROADMAP-PLATFORM.yaml:1256-1279)
+    latency_evidence_available: None on read time. Capability claims were checked against the DuckLake documentation; the
+      concern recorded was durability on a catalog with about 6 h of point-in-time recovery.
+    what_the_process_did: Chose a history and a current table per entity, written by MERGE with one Parquet file per write,
+      inlining off for every table, and left small-file growth to a scheduled merge.
+    kind: unexamined-consequence
+    bears_on_main_costs: 'yes'
+    caught_today_by: ''
+    note: The cost of reading a current table that is maintained by delete plus insert was never stated or measured.
+  - date: '2026-06-06'
+    artifact: commit e9edc810, terraform/personal/ducklake_lambdas.tf
+    latency_evidence_available: None.
+    what_the_process_did: Created the reader and writer with timeout = 120 and no stated reason; the telemetry writer (c21ba7da,
+      2026-10-10) and telemetry reader (a4e6a409, 2026-10-25) copied it.
+    kind: unexamined-consequence
+    bears_on_main_costs: 'no'
+    caught_today_by: ''
+    note: Bears on the limit the operator later met, not on the cost.
+  - date: '2026-06-07'
+    artifact: commit 1ce1fce0 (#89); Decision 82
+    latency_evidence_available: Wall to CPU ratio 31.7 at 1,024 MB with 8 writers in one container; cold start about 18
+      s noted.
+    what_the_process_did: Added SET threads=1 on every connection for the in-container churn gate, then redefined the gate
+      as pre-warmed concurrent invocations and assigned cold start to a separate attach check. The thread setting stayed
+      with its old reason; rec-2096 (the gate cannot see cold regressions) was closed by documenting the boundary.
+    kind: unexamined-consequence
+    bears_on_main_costs: 'yes'
+    caught_today_by: ''
+    note: Makes every first touch serial.
+  - date: '2026-06-16'
+    artifact: Decision 88; rec-2184 (2026-06-11, still open)
+    latency_evidence_available: A data-quality run took over 150 s per check from a session; a catalog egress breach on
+      2026-06-15.
+    what_the_process_did: Decision 88 added warm connection reuse and 'keep the catalog compacted' through a merge on every
+      ops table, for egress. Nobody checked that the merge bounds the files a read opens. rec-2184 blamed the slow checks
+      on URL resolution and stayed open.
+    kind: unexamined-consequence
+    bears_on_main_costs: 'yes'
+    caught_today_by: ''
+    note: The telemetry catalog later got file-count alarms (Decision 236); the ops catalog has none.
+  - date: '2026-10-09'
+    artifact: Decision 214
+    latency_evidence_available: Lambda p95 26-55 s and commit p95 5.5 s against a 2,000 ms budget.
+    what_the_process_did: Created the catalog stats index instead of moving backend; named per-invocation wall time as the
+      signal (warm writer p95 2,000 ms, cold attach p95 3 s) with a manual reversal condition.
+    kind: chosen-tradeoff
+    bears_on_main_costs: 'no'
+    caught_today_by: ''
+    note: 'It removed a different cost: reader warm p95 fell from 37.2 s to 1.88 s.'
+  - date: '2026-10-18'
+    artifact: rec-4170 and rec-4220, step 13 (7 days after the index)
+    latency_evidence_available: Writer warm p95 3.79 s; cold attach p95 13.1 s and 21.2 s; reader cold elapsed p95 82 s,
+      then 90 s.
+    what_the_process_did: Recorded all three. Attributed the cold figures to 'Neon wake / ATTACH cost'. Ruled that the reversal
+      clock starts after a compute change (rec-4220) that has not been built. Opened no item for the reader's 90 s cold
+      read.
+    kind: unexamined-consequence
+    bears_on_main_costs: 'yes'
+    caught_today_by: ''
+    note: The main cost was in the record four weeks before the quota raise, under the wrong cause.
+  - date: '2026-10-19'
+    artifact: rec-4474; commits 441b774a (#1578) and 1c41dc19 (#1582); Decision 236 (2026-10-25)
+    latency_evidence_available: 'Cold telemetry reads cost 0.135 s per file, serially (64, 320 and 724 files: 11.3, 45.4
+      and 100.4 s); 8 threads cut a local run from 40.7 s to 7.9 s.'
+    what_the_process_did: Shipped a typed 110 s deadline for event verbs, withdrew the 8 threads the same day (the slot
+      spilled under its 300 MB limit), then gave the telemetry catalog its own reader, a 6-hourly merge and file-count alarms.
+      The ops reader kept no deadline and its tables were not checked for the same cause.
+    kind: chosen-tradeoff
+    bears_on_main_costs: 'yes'
+    caught_today_by: ''
+    note: Correct diagnosis, applied to one catalog.
+  - date: '2026-11-09'
+    artifact: rec-5042
+    latency_evidence_available: Cold connect p50 11.3-14.3 s on any backend; 1,416 cold starts in 7 days.
+    what_the_process_did: Measured it, showed the catalog is not the cause, proposed step timers then SnapStart, filed it
+      Medium and not urgent. Unbuilt.
+    kind: chosen-tradeoff
+    bears_on_main_costs: 'yes'
+    caught_today_by: ''
+    note: ''
+  - date: '2026-11-10'
+    artifact: Decision 253
+    latency_evidence_available: rec-5042's result.
+    what_the_process_did: Decided the move to RDS on other grounds and recorded that none of Decision 214's measured triggers
+      has fired, which is true only because the clock of 2026-10-18 never started.
+    kind: unclear
+    bears_on_main_costs: 'no'
+    caught_today_by: ''
+    note: ''
+  - date: '2026-11-13'
+    artifact: Decision 255; docs/plans/PLAN-agent-ducklake-rest-api.yaml:353-355,880
+    latency_evidence_available: 'Operator CloudShell read, 30 Oct to 12 Nov: reader 14,015 calls, max 120 s, p99 109.7 s;
+      writer p99 27.8 s; telemetry reader p99 58.1 s.'
+    what_the_process_did: Chose a REST API with the integration timeout raised to 120 s over an HTTP API's 30 s cap, because
+      agents had no AWS access. Read the reader's p99 as 'its read deadline'; the ops reader has none. The plan has no step
+      that measures or explains request latency; follow-ups were owed as recs.
+    kind: chosen-tradeoff
+    bears_on_main_costs: 'no'
+    caught_today_by: ''
+    note: A deliberate trade made on evidence that was misread. It accommodated the cost and did not cause it.
+  - date: '2026-11-14'
+    artifact: commits 4bdf58a9 and c4c41b7f (cutover); rec-5155 to rec-5159 filed 13:10Z
+    latency_evidence_available: 'First day on the REST API: gateway p95 38.0 s, 8 answers of 5XX in 661 calls, 4 reader
+      timeouts after the cutover.'
+    what_the_process_did: Filed the owed follow-ups. rec-5157 repeats that the reader's p99 equals a 110 s deadline and
+      prescribes paging or submit-and-poll.
+    kind: unexamined-consequence
+    bears_on_main_costs: 'no'
+    caught_today_by: ''
+    note: The remedy on record addresses the limit, not the cause.
+  per_surface_assessment:
+  - surface: S1
+    maturity: frontier
+    strengths: 'Label by the pinned formula: no high finding and no missed checklist row on this surface; it still carries
+      three medium findings. Typed errors are mapped, a typed deadline and a 413 are not retried, creates carry an idempotency
+      key, preflight primes its URL and the capture runner caches its own.'
+    top_gaps:
+    - LAT-06
+    - LAT-07
+    - LAT-11
+  - surface: S2
+    maturity: strong
+    strengths: The gateway adds about 9 ms; IAM-authorised, declared in Terraform with the quota; the proxy relays a 120
+      s call. Not frontier because EC-2 is missed.
+    top_gaps: []
+  - surface: S3
+    maturity: solid
+    strengths: Warm connection reuse works (reused p50 262-518 ms); typed errors on every handler path; a typed read deadline
+      on the telemetry reader; a size guard with a typed 413.
+    top_gaps:
+    - LAT-02
+    - LAT-05
+    - LAT-04
+    - LAT-12
+    - LAT-10
+  - surface: S4
+    maturity: solid
+    strengths: Point reads prune (5.6 s cold, 0.26 s warm); a metadata-only count answers in 81 ms; the telemetry catalog
+      is merged, bounded and alarmed; verbs filter and aggregate server-side.
+    top_gaps:
+    - LAT-01
+    - LAT-03
+  - surface: S5
+    maturity: solid
+    strengths: Budgets and a deploy gate exist for warm writes; reversal conditions are written down; the telemetry catalog
+      has measured thresholds with alarms; individual costs were measured carefully when someone looked (rec-4474, rec-5042).
+    top_gaps:
+    - LAT-08
+    - LAT-09
+    - LAT-10
+  rubric_ratings:
+  - surface: S1
+    dimension: VD1
+    rating: absent
+    evidence: src/common/ducklake_reader_client.py:73-75,473
+    note: Timeouts only; no latency budget.
+  - surface: S1
+    dimension: VD2
+    rating: absent
+    evidence: src/common/ducklake_reader_client.py:451-493
+    note: No timing or request id is recorded.
+  - surface: S1
+    dimension: VD3
+    rating: weak
+    evidence: 'probes: SSM lookup 444-774 ms per process; MCP start 5 round trips'
+    note: ''
+  - surface: S1
+    dimension: VD4
+    rating: weak
+    evidence: 'probes: 0.5 s lookup around a 0.26 s read'
+    note: LAT-06.
+  - surface: S1
+    dimension: VD5
+    rating: weak
+    evidence: 'baseline: describe is 45 percent of telemetry-writer calls; budget_ingest.py:397-400'
+    note: LAT-11.
+  - surface: S1
+    dimension: VD6
+    rating: weak
+    evidence: src/common/ducklake_reader_client.py:466-492; writer_transport.py:144-152
+    note: LAT-07.
+  - surface: S1
+    dimension: VD7
+    rating: adequate
+    evidence: SigV4 over the one host the proxy signs (Decision 256)
+    note: ''
+  - surface: S1
+    dimension: VD8
+    rating: weak
+    evidence: scripts/session/preflight.py:205-208; scripts/sync/ops.py:447-453
+    note: Priming and the warm-up pull show latency was considered for preflight only.
+  - surface: S2
+    dimension: VD1
+    rating: absent
+    evidence: terraform/bootstrap/agent_ducklake_api.tf:250-264
+    note: A throttle guard, no latency alarm.
+  - surface: S2
+    dimension: VD2
+    rating: weak
+    evidence: terraform/bootstrap/agent_ducklake_api.tf:228-264
+    note: The access log has latency per route but a session cannot read it; per-method metrics are off.
+  - surface: S2
+    dimension: VD3
+    rating: adequate
+    evidence: 'probes: a new environment adds 0.7-1.0 s to transport'
+    note: ''
+  - surface: S2
+    dimension: VD4
+    rating: adequate
+    evidence: 'probes: transport 414-538 ms, gateway about 9 ms of it'
+    note: The rest is the egress proxy, outside the repository.
+  - surface: S2
+    dimension: VD5
+    rating: n/a
+    evidence: ''
+    note: ''
+  - surface: S2
+    dimension: VD6
+    rating: weak
+    evidence: terraform/bootstrap/agent_ducklake_api.tf:24,183; ducklake_lambdas.tf:350
+    note: Gateway and function timeouts are equal; the 504 is untyped.
+  - surface: S2
+    dimension: VD7
+    rating: adequate
+    evidence: Decision 255
+    note: The only signable transport.
+  - surface: S2
+    dimension: VD8
+    rating: weak
+    evidence: docs/plans/PLAN-agent-ducklake-rest-api.yaml:880
+    note: Durations read, cause misread.
+  - surface: S3
+    dimension: VD1
+    rating: weak
+    evidence: src/common/ducklake_writes.py:66; scripts/ducklake_smoke/lambda_ec_gates.py:106-116,155
+    note: Budgets for warm writes and cold attach; enforced only on a pre-warmed smoke pair.
+  - surface: S3
+    dimension: VD2
+    rating: weak
+    evidence: src/common/ducklake_metrics.py:60-89
+    note: Action, connect_ms and elapsed_ms only.
+  - surface: S3
+    dimension: VD3
+    rating: weak
+    evidence: 'baseline: connect p50 11.3-14.0 s on 1,018 new environments in 7 days'
+    note: LAT-05.
+  - surface: S3
+    dimension: VD4
+    rating: adequate
+    evidence: 'baseline: reused p50 262, 375 and 518 ms; writer 1,448 ms'
+    note: Reads adequate; warm writes over their budget (LAT-12).
+  - surface: S3
+    dimension: VD5
+    rating: adequate
+    evidence: src/lambdas/ducklake_reader/handler.py:323-347
+    note: Typed 413 at 6 MB; limit on paginable verbs.
+  - surface: S3
+    dimension: VD6
+    rating: weak
+    evidence: src/lambdas/ducklake_reader/handler.py:350; ducklake_read_deadline.py:19
+    note: LAT-02.
+  - surface: S3
+    dimension: VD7
+    rating: weak
+    evidence: src/common/ducklake_runtime.py:296; rec-5042
+    note: 99 MB of extensions loaded per short-lived process; one thread.
+  - surface: S3
+    dimension: VD8
+    rating: weak
+    evidence: rec-5042; rec-4474; commit 1ce1fce0
+    note: Measured twice with care; the thread setting was not revisited.
+  - surface: S4
+    dimension: VD1
+    rating: weak
+    evidence: terraform/personal/ducklake_maintenance_telemetry.tf:25-33
+    note: File-count and merge-duration thresholds exist for the telemetry catalog only.
+  - surface: S4
+    dimension: VD2
+    rating: absent
+    evidence: src/lambdas/ducklake_maintenance/handler.py:445-452
+    note: One catalog-wide file total; no per-table count, no files or bytes per statement.
+  - surface: S4
+    dimension: VD3
+    rating: weak
+    evidence: 'probes: 84-106 s first full read of a 5,000-row table; 5.6 s pruned'
+    note: LAT-01, LAT-03.
+  - surface: S4
+    dimension: VD4
+    rating: adequate
+    evidence: 'probes: 0.10-0.81 s steady statements'
+    note: ''
+  - surface: S4
+    dimension: VD5
+    rating: adequate
+    evidence: src/common/ducklake_named_reads.py:101-250
+    note: Server-side filters and aggregates; 2 paginable verbs.
+  - surface: S4
+    dimension: VD6
+    rating: n/a
+    evidence: ''
+    note: ''
+  - surface: S4
+    dimension: VD7
+    rating: weak
+    evidence: MergeOpsFilesAfterTotal 807 to 944; src/common/ducklake_maintenance.py:371-384
+    note: File-per-write layout for small mutable entities with no step that bounds files.
+  - surface: S4
+    dimension: VD8
+    rating: weak
+    evidence: docs/contracts/data-modeling-standard.yaml:363-372,405-440
+    note: The design walk names grain, write mode and partitioning; no read-cost step.
+  - surface: S5
+    dimension: VD1
+    rating: weak
+    evidence: docs/DECISIONS.md:3297,3310-3312; docs/ROADMAP-PLATFORM.yaml:2438
+    note: Budgets on paper, manual reversal, T1.9 deferred (rated on the design as written).
+  - surface: S5
+    dimension: VD2
+    rating: weak
+    evidence: rec-4706; rec-5042; rec-4482
+    note: Owners exist for parts; all unbuilt.
+  - surface: S5
+    dimension: VD3
+    rating: n/a
+    evidence: ''
+    note: ''
+  - surface: S5
+    dimension: VD4
+    rating: n/a
+    evidence: ''
+    note: ''
+  - surface: S5
+    dimension: VD5
+    rating: n/a
+    evidence: ''
+    note: ''
+  - surface: S5
+    dimension: VD6
+    rating: weak
+    evidence: rec-5157; docs/DECISIONS.md:335-337
+    note: The owning rec rests on a deadline that does not exist.
+  - surface: S5
+    dimension: VD7
+    rating: n/a
+    evidence: ''
+    note: ''
+  - surface: S5
+    dimension: VD8
+    rating: absent
+    evidence: .claude/skills/planning/SKILL.md:126-163; .claude/skills/plan-critique/SKILL.md:45
+    note: No latency assessment in planning or critique. LAT-09.
+  findings:
+  - id: LAT-01
+    surface: S4
+    affected_surfaces: []
+    candidates:
+    - C1
+    - C2
+    - C3
+    - C19
+    question: Q1
+    dimension: VD3
+    serves: both
+    title: 'The ops current tables are not kept compact: a first full read of the recommendations table costs 84-106 s per
+      connection, sits at the 120 s limit and grows about 1 percent a day'
+    evidence: probes 2026-11-14 22:01-22:13Z on one environment (count_by_status 96,363 ms first and 578 ms repeated; recs_by_ids
+      84,145 ms; decisions_max_updated 16,812 ms; dq row count 81 ms; rec_by_id 5,559 ms); baseline ops/reader new_env first_statement
+      p50 86,967 ms n=300; DuckLakeMaintenance MergeOpsFilesAfterTotal 807 to 944 in 14 days; src/lambdas/ducklake_maintenance/handler.py:409;
+      src/common/ducklake_maintenance.py:371-384
+    evidence_kind: observed
+    current_behavior: 'The 6-hourly maintenance pass runs merge_adjacent_files on every ops table and nothing else; the
+      rewrite step exists in the library and is in no cadence. The catalog''s after-merge file count has risen at every
+      pass for 14 days. A statement that cannot prune opens every live file of its table over S3, one request after another,
+      and the bytes are kept only in that connection: 96 s for a count grouped by status over about 5,000 rows, 17 s for
+      a maximum over 257 decisions, repaid on every new environment and every reconnect.'
+    ideal_behavior: A current table of a few thousand rows is a handful of files (one or two per bucket), so its first read
+      on a new connection costs a second or two; the number of live files per table is measured and has a ceiling that alarms.
+    gap: No step bounds the files of a table that is maintained by delete plus insert, and nothing reports files per table.
+      Decision 88 clause 1(iii) asks that a merge run on every table, which it does; it does not ask that a read open a
+      bounded number of files. Which tables hold the files is inferred from timings (about 600 for the recommendations current
+      table at 0.16 s a file), not read.
+    compensating_controls_considered: 'Warm connection reuse (Decision 88 inv. i): it exercises reuse within one environment,
+      and environments live 3 minutes at the median, so it would not fail if this defect were real. Client retry: it recovers
+      a timeout by paying the cost again. The 6-hourly merge: it runs and the count still rises. None is property-matched.'
+    change_type: tune
+    proposed_change: First read the per-table file counts with the maintenance catalog_stats action (operator, read-only)
+      to confirm where the files are. Then add a scheduled compaction that bounds current-table files (rewrite of files
+      carrying deletes followed by the merge, or a periodic rebuild of the current projection), under the guard set the
+      weekly GC already has, and report live files per table with a ceiling in control_health.
+    acceptance: After a maintenance pass each ops current table has no more live data files than a declared ceiling, reported
+      per table as a metric and asserted by control_health; on the deployed reader a first count_by_status on a fresh connection
+      completes in under 5 s; MergeOpsFilesAfterTotal no longer rises week over week.
+    severity: high
+    severity_rationale: Session flows (preflight, rec lookups, MCP reads) are lengthened by one to two minutes on a path
+      taken at every cold session start; 359 calls over 29 s and 12 timeouts in 7 days. Every immediate retry seen succeeded
+      (9 of 9), which caps this at high; the margin is 2-18 s and shrinking, and when a retry stops fitting the same defect
+      becomes critical.
+    confidence: CONFIRMED
+    roadmap_crossref:
+      classification: planned-insufficient
+      item_ids:
+      - T2.18
+      - dec-088
+      dedup_search_terms:
+      - compaction rewrite current files delete merge_adjacent_files small
+      dedup_hit_count: 1
+      note: 'recs_related returned 161 raw rows; the only related rec, rec-4474, owns the telemetry tables. The subject
+        owner is T2.18 (in_progress): its criterion c1 (met) lists a rewrite in the maintenance sequence, but no cadence
+        runs one, and Decision 88 cl.1(iii) is satisfied by the merge that exists.'
+    effort: M
+    depends_on: []
+    sequencing:
+      safe_to_queue_now: true
+      blocked_behind: []
+      note: The read-only file-count check can run today; the compaction change is one plan.
+  - id: LAT-02
+    surface: S3
+    affected_surfaces: []
+    candidates:
+    - C7
+    - C13
+    question: Q2
+    dimension: VD6
+    serves: both
+    title: 'The ops reader has no read deadline and its function timeout equals the gateway''s: a slow read ends as an untyped
+      504 at 120 s, the environment is reset and the retry starts from nothing'
+    evidence: 'src/lambdas/ducklake_reader/handler.py:350; tests/lambdas/ducklake_reader/test_event_routing.py:104; terraform/personal/ducklake_lambdas.tf:350;
+      terraform/bootstrap/agent_ducklake_api.tf:24; baseline: 12 REPORT lines with Status: timeout at 120,000 ms; this session
+      21:39:45Z (timeout) then 21:41:47Z (reconnect 11,604 ms, 117,970 ms)'
+    evidence_kind: observed
+    current_behavior: Ops reads run until the Lambda timeout. At 120 s the runtime kills the invocation and restarts the
+      process, dropping the connection and every byte it had fetched; the gateway answers 504 with no type; the client sleeps
+      2 s and sends the same read to a process that must connect again (10.3-11.9 s) and read everything again (90-106 s).
+    ideal_behavior: A read that will not finish answers a typed error a margin before the function timeout, the connection
+      and its cache survive, and the function timeout is strictly shorter than the gateway's.
+    gap: The deadline guard exists and ships on the telemetry reader (src/common/ducklake_read_deadline.py); the ops reader
+      was left without it when the event verbs moved out, and Decision 255 and rec-5157 both describe the ops reader as
+      having a 110 s deadline.
+    compensating_controls_considered: 'The client''s retry: it does recover today, by repeating the full cost. The telemetry
+      reader''s deadline: a different function. Neither would fail if this defect were real.'
+    change_type: add
+    proposed_change: Run ops named reads, read_ops_current, read_ops_history and dq_check under the existing deadline runner
+      (remaining time minus the margin), answer the typed 504, and keep the connection. Set the function timeout below the
+      integration timeout or the reverse, never equal.
+    acceptance: 'An ops read that cannot finish answers HTTP 504 read_deadline_exceeded before the function timeout and
+      the next call on that environment reports connect_reused true; no reader REPORT line carries Status: timeout over
+      7 days; test_ops_verbs_run_without_a_deadline is replaced by its opposite.'
+    severity: high
+    severity_rationale: A timed-out read costs its caller about 227 s (120 s, a 2 s pause, then a retry of 102-118 s) where
+      the read itself needs about 100 s, on a path session flows take daily. The 9 retries seen all recovered, so at most
+      high.
+    confidence: CONFIRMED
+    roadmap_crossref:
+      classification: planned-insufficient
+      item_ids:
+      - rec-5157
+      dedup_search_terms:
+      - deadline timeout typed 504 reader
+      dedup_hit_count: 1
+      note: 102 raw rows. rec-5157 owns 'stop reads from running to the integration timeout' but states the reader already
+        has a 110 s deadline and prescribes paging or submit-and-poll; its acceptance would not add a deadline. rec-4474
+        built the deadline for event verbs only.
+    effort: S
+    depends_on: []
+    sequencing:
+      safe_to_queue_now: true
+      blocked_behind: []
+      note: Independent of LAT-01; cheaper and worth having even after it.
+  - id: LAT-03
+    surface: S4
+    affected_surfaces: []
+    candidates:
+    - C10
+    question: Q3
+    dimension: VD3
+    serves: both
+    title: 'The batch verb recs_by_ids cannot prune: the same single row costs 84.1 s through it and 5.6 s through rec_by_id
+      on first touch, and the planned consolidation moves every point read onto it'
+    evidence: 'src/common/ducklake_named_reads.py:114,121; probes 2026-11-14 22:06:08Z (rec_by_id rec-4474: Duration 5,559
+      ms) and 22:06:15Z (recs_by_ids rec-4474: 84,145 ms), then 262 ms and 808 ms steady; rec-4240'
+    evidence_kind: observed
+    current_behavior: rec_by_id filters with id = ?, which the engine uses to skip files. recs_by_ids filters with list_contains(string_split(?,
+      ','), id), which it cannot, so a lookup of one id opens every file of the table. fetch_recs_by_ids (planning, merge
+      step, audits) and the MCP tool use the batch verb; rec-4240 would move update_rec's fetch-before-update and the dependency
+      check onto it and delete rec_by_id.
+    ideal_behavior: A lookup by id opens only the files that can hold that id, whether one id or fifty are asked for.
+    gap: The two verbs were judged to 'differ only in one id versus many' (rec-4240, owner direction of 2026-10-09); they
+      differ in what the engine can prune, and nothing measured that.
+    compensating_controls_considered: None found. Decision 215's bounded-verb rule bounds the answer, not the files opened.
+    change_type: tune
+    proposed_change: Render recs_by_ids so the id predicate is prunable (bound equality or IN terms generated server-side
+      for at most 50 ids, or one pruned read per id inside the handler), pin it with a registry test, and hold rec-4240's
+      removal of rec_by_id until it is.
+    acceptance: On a fresh connection recs_by_ids for one id completes within twice the time of rec_by_id for the same id
+      on the deployed reader; a test pins that the rendered SQL carries no list_contains over id.
+    severity: high
+    severity_rationale: A rec lookup, made daily by planning and agent tool calls, is lengthened by about 79 s on first
+      touch and tripled when warm; no control limits it. It shrinks to seconds if LAT-01 is fixed, which is why it is not
+      rated above LAT-01.
+    confidence: CONFIRMED
+    roadmap_crossref:
+      classification: novel
+      item_ids: []
+      dedup_search_terms:
+      - recs_by_ids pruning pushdown list_contains scan
+      dedup_hit_count: 0
+      note: 72 raw rows, none about pruning. rec-4240 and rec-2867 touch the verbs; neither owns this and rec-4240 as written
+        would spread it.
+    effort: S
+    depends_on: []
+    sequencing:
+      safe_to_queue_now: true
+      blocked_behind: []
+      note: Should land before rec-4240 is planned.
+  - id: LAT-04
+    surface: S3
+    affected_surfaces: []
+    candidates:
+    - C5
+    question: Q3
+    dimension: VD3
+    serves: both
+    title: DuckDB is held to one thread on every connection for a reason that lapsed the day it was written, so first-touch
+      file opens are serial
+    evidence: src/common/ducklake_runtime.py:293-296; commit 1ce1fce0 (2026-06-07); Decision 82; rec-4474 (local run 40.7
+      s at 1 thread, 7.9 s at 8)
+    evidence_kind: static
+    current_behavior: open_connection sets threads=1 with the comment that the churn gate runs 8 Python threads in one container.
+      Decision 82 replaced that gate the same day with concurrent invocations, one connection per container. The setting
+      still applies to every reader and writer connection, and on the pinned engine (1.5.4) one thread means one S3 request
+      at a time.
+    ideal_behavior: Thread count on each connection is chosen for that connection's work and memory, and the reason is current.
+    gap: 'The size of the effect on this function is not measured (HYPOTHESIS: about 4 times on first touch, from rec-4474''s
+      local pair); the 8-thread trial of 2026-10-19 was on the telemetry slot under a 300 MB limit and says nothing about
+      the ops connection, which has no limit and peaks at 331 MB.'
+    compensating_controls_considered: 'rec-4493 (size threads against memory): a sizing invariant, not a change, and written
+      for the telemetry slot''s limit.'
+    change_type: tune
+    proposed_change: Set threads on the ops read connection from a measured value (start at 4), keep 1 only where a harness
+      needs it, and state the reason at the setting and in the reader contract.
+    acceptance: A first count_by_status on a fresh connection is recorded at the old and new setting on the deployed reader;
+      Max Memory Used stays under the function size; the comment at the setting states the present reason.
+    severity: medium
+    severity_rationale: Avoidable overhead with a clear fix. The minutes it contributes are attributed to LAT-01; its own
+      effect here is unmeasured, so it is not rated high.
+    confidence: CONFIRMED
+    roadmap_crossref:
+      classification: planned-insufficient
+      item_ids:
+      - rec-4493
+      - rec-4474
+      dedup_search_terms:
+      - threads thread serial parallel duckdb
+      dedup_hit_count: 1
+      note: 162 raw rows. rec-4493 owns thread sizing per slot; its acceptance is a sizing test, which would not raise the
+        ops connection's threads. rec-4474's lever 2 was the telemetry slot and was withdrawn.
+    effort: XS
+    depends_on: []
+    sequencing:
+      safe_to_queue_now: true
+      blocked_behind: []
+      note: An alternative to LAT-01's change for the same cost, not an addition to it.
+  - id: LAT-05
+    surface: S3
+    affected_surfaces: []
+    candidates:
+    - C4
+    - C6
+    question: Q1
+    dimension: VD3
+    serves: both
+    title: Every new execution environment spends 11-15 s loading the engine inside its first request, environments live
+      3 minutes, and nothing avoids or shortens it
+    evidence: 'baseline: connect_ms p50 11,313 (reader, n=300), 13,990 (writer, n=201), 11,362 (telemetry reader, n=284);
+      1,083 Init Duration lines in 7 days; probe 2026-11-14 22:08:40Z on a new writer environment (attach 15,500 ms, then
+      489 ms at 22:08:57Z; tcp 2.75 ms, auth 116 and 16 ms); src/common/ducklake_spike.py:49-67; src/common/ducklake_runtime.py:290-334;
+      no SnapStart, provisioned concurrency or schedule in terraform/personal/ducklake_lambdas.tf'
+    evidence_kind: observed
+    current_behavior: Lambda init takes 0.2 s because the engine is imported lazily; the first request then imports DuckDB
+      and boto3, loads three extensions (99 MB), fetches the DSN and attaches. A reconnect in a process that has done this
+      once takes 0.5-1.4 s, so about 10-15 s is one-time work per process. 70 to 91 percent of new environments follow more
+      than five minutes of quiet; 36 percent of writer calls land on one.
+    ideal_behavior: Per-process loading is paid before a caller waits on it (snapshot restore, a provisioned or kept-warm
+      environment) or is small enough not to matter.
+    gap: 'No mitigation is configured, and the lazy placement also rules out the two that depend on init. Which step takes
+      the time, and why the 3,008 MB functions are slower than the 1,024 MB ones, is unknown: there are no step timers.'
+    compensating_controls_considered: 'Warm connection reuse within an environment: real, and irrelevant to a new environment.'
+    change_type: relocate
+    proposed_change: 'Build rec-5042 as scoped: step timers first, then move imports and LOADs to init under SnapStart with
+      an after-restore reconnect; or accept a keep-warm schedule as the cheaper partial measure (OPT-08).'
+    acceptance: connect_ms p95 on new environments is under 3 s (Decision 214 cl.4's own budget) over 7 days on all four
+      functions, or a recorded decision accepts the present figure with the monthly cost of each alternative stated.
+    severity: high
+    severity_rationale: Adds 11-15 s to about 155 calls a day across the four functions, including a third of all ops writes;
+      the only owner is unbuilt and rated not urgent.
+    confidence: CONFIRMED
+    roadmap_crossref:
+      classification: planned-unbuilt
+      item_ids:
+      - rec-5042
+      dedup_search_terms:
+      - snapstart provisioned concurrency keep-warm warm cold
+      dedup_hit_count: 1
+      note: 57 raw rows. rec-5042's scope (timers, then SnapStart, with alternatives) is adequate; it is open, in no plan,
+        and its acceptance test covers only the timers.
+    effort: M
+    depends_on: []
+    sequencing:
+      safe_to_queue_now: true
+      blocked_behind: []
+      note: The timers (rec-5042 step 1) are a day's work and also serve LAT-10.
+  - id: LAT-06
+    surface: S1
+    affected_surfaces: []
+    candidates:
+    - C8
+    question: Q3
+    dimension: VD4
+    serves: both
+    title: 'The reader and writer clients look the route URL up in SSM on every call: about 0.5 s around a 0.26 s read'
+    evidence: 'src/common/ducklake_reader_client.py:97-113,420-422,460; scripts/ops_portal/writer_transport.py:134; probes:
+      22 lookups, 444-774 ms; rec-2184'
+    evidence_kind: observed
+    current_behavior: DuckLakeReader._invoke and the writer transport resolve the URL each time through a new boto3 session
+      and client unless an environment variable is set. Preflight sets it for the ops reader; the MCP server, the ops portal,
+      recs_related and the telemetry read route do not.
+    ideal_behavior: A process resolves each route once; a session resolves it once.
+    gap: No memoisation in the client. The telemetry capture client already caches its URL on disk per session.
+    compensating_controls_considered: 'Preflight''s priming (scripts/preflight/aws_infra.py:68): covers one process and
+      one route.'
+    change_type: remove
+    proposed_change: Memoise the resolved URL per route in the client, and cache it per session as the capture runner does.
+    acceptance: A process that makes several verb calls makes one get_parameter call per route; a test pins it for the reader
+      client and the writer transport.
+    severity: medium
+    severity_rationale: Avoidable overhead with a clear fix; half a second per call, not seconds.
+    confidence: CONFIRMED
+    roadmap_crossref:
+      classification: planned-insufficient
+      item_ids:
+      - rec-2184
+      dedup_search_terms:
+      - ssm url resolution cache per call session keep-alive
+      dedup_hit_count: 1
+      note: 196 raw rows. rec-2184 (open since 2026-06-11) names the un-memoised lookup as its prime suspect; its acceptance
+        is one data-quality run finishing in 120 s, which does not require the fix.
+    effort: XS
+    depends_on: []
+    sequencing:
+      safe_to_queue_now: true
+      blocked_behind: []
+      note: ''
+  - id: LAT-07
+    surface: S1
+    affected_surfaces: []
+    candidates:
+    - C9
+    question: Q7
+    dimension: VD6
+    serves: both
+    title: 'Client retries have no time budget and treat a full-timeout overrun as transient: 366 s worst case for one read,
+      547 s for one write, and a retried update can add a second history version'
+    evidence: 'src/common/ducklake_reader_client.py:73-75,466-492; scripts/ops_portal/writer_transport.py:38-40,144-171;
+      src/lambdas/ducklake_writer/handler.py:316-320; baseline: 9 retries after timeouts, 101.6-118.0 s each'
+    evidence_kind: observed
+    current_behavior: The reader client retries 502, 503 and 504 twice with 2 s and 4 s pauses and refuses to retry only
+      a typed deadline, which the ops reader never sends. The writer client retries update_ops on 5XX and on transport errors
+      although it carries no idempotency key; the handler notes that a replay adds a history row while the current row converges.
+    ideal_behavior: A retry is spent where it can change the outcome, inside a stated total budget, and a write is retried
+      only when a replay is a no-op.
+    gap: Today the read retry does change the outcome, by about a 10 percent margin; the policy has no way to tell that
+      case from a read that will overrun again, and no budget for when it does.
+    compensating_controls_considered: 'file_ops'' idempotency ULID: property-matched for creates only. No writer call came
+      near 120 s in the sample (max 32.2 s), so the gateway path to a duplicate update is not taken today; a lost response
+      is.'
+    change_type: tune
+    proposed_change: Give each logical call a total time budget; retry an ops read after a typed deadline at most once (after
+      LAT-02 the cache survives); do not retry update_ops on 504 or a transport error until it carries an idempotency key
+      (rec-5156).
+    acceptance: A test shows a read's total wall time bounded by the stated budget when every attempt overruns, and an update_ops
+      whose first attempt committed is not written twice.
+    severity: medium
+    severity_rationale: The duplicate is an identical extra history version under a grain that is one row per write, the
+      current row converges and no flow reads history as state, so it is not rated as a wrong-but-trusted outcome; the unbounded
+      retry is latent while retries still succeed.
+    confidence: CONFIRMED
+    roadmap_crossref:
+      classification: planned-insufficient
+      item_ids:
+      - rec-5156
+      - rec-5157
+      - rec-4121
+      dedup_search_terms:
+      - retry retries backoff 504 amplification budget
+      dedup_hit_count: 2
+      note: 49 raw rows. rec-5156 (idempotent writes under 504 retries) is adequate for the write half and unbuilt; nothing
+        owns a retry budget for reads, and rec-5157's remedy does not provide one.
+    effort: S
+    depends_on: []
+    sequencing:
+      safe_to_queue_now: true
+      blocked_behind: []
+      note: The read half is simpler once LAT-02 gives the client a typed answer.
+  - id: LAT-08
+    surface: S5
+    affected_surfaces: []
+    candidates:
+    - C12
+    - C16
+    question: Q6
+    dimension: VD1
+    serves: both
+    title: No latency objective, alarm or gate covers the path agents use, both paper budgets have been over since 2026-10-18
+      with nothing firing, and no item owns a route's end-to-end latency
+    evidence: 'docs/DECISIONS.md:3297,3310-3312; rec-4170 step 13; baseline: writer reused p95 6,997 ms against 2,000 ms,
+      new_env connect p95 20,561 ms against 3 s, 12 reader timeouts with no alarm; scripts/ducklake_smoke/lambda_ec_gates.py:106-116;
+      terraform/personal/ducklake_lambdas.tf:463; docs/ROADMAP-PLATFORM.yaml:2438 (T1.9 deferred_post_mvp)'
+    evidence_kind: observed
+    current_behavior: The only budgets are the writer's warm wall p95 and cold attach p95. One is checked by a deploy gate
+      on pre-warmed containers against the smoke table pair; the other by nobody. Their reversal condition is manual and
+      its clock was defined to start after a change that was never built. The reader has no error alarm. The ops file count
+      has no alarm. Fifteen open recs own slices; the largest cost belongs to none.
+    ideal_behavior: Each route has stated percentiles for warm and cold calls, measured from production lines, with an alarm
+      on breach and on any timeout, and one item owns them.
+    gap: T1.9 would supply alarms and is deferred on the ground that interactive writes fail loudly at the call site; the
+      failures here are reads that degrade quietly (preflight reports signals unavailable) and a trend that fails nothing
+      until it fails everything.
+    compensating_controls_considered: 'The telemetry writer''s commit-latency alarm and the telemetry catalog''s file alarms:
+      other routes, other catalog. The churn gate: warm smoke writes only.'
+    change_type: rescope
+    proposed_change: 'Pull a thin slice of T1.9 forward: an alarm on reader errors and timeouts, a Duration p95 alarm per
+      function, a live-file ceiling on the ops tables, and per-route objectives owned by one item and evaluated from the
+      invocation lines, so Decision 214''s condition is read by a metric.'
+    acceptance: A timeout on any of the four functions and a breach of each route's stated p95 raise an alarm within one
+      evaluation period; the roadmap names one item that owns per-route latency objectives.
+    severity: high
+    severity_rationale: 'A regression of minutes passes unseen: 12 timeouts, a 17 percent rise in files and two budgets
+      over for four weeks produced no signal. Waiting for T1.9''s deferral to lift is not sound while the path sits at its
+      timeout.'
+    confidence: CONFIRMED
+    roadmap_crossref:
+      classification: planned-unbuilt
+      item_ids:
+      - T1.9
+      - rec-4170
+      - rec-4482
+      dedup_search_terms:
+      - slo alarm duration p95 p99 latency budget canary
+      dedup_hit_count: 1
+      note: 151 raw rows. T1.9's criteria (p50/p99 latency, error and throttle alarms per Lambda) are adequate and deferred_post_mvp
+        (Decision 93); rec-4170 and rec-4482 own a writer gate and a telemetry-writer alarm, both unbuilt.
+    effort: M
+    depends_on: []
+    sequencing:
+      safe_to_queue_now: true
+      blocked_behind: []
+      note: An infrastructure apply; the alarms need LAT-10 only for per-verb splits.
+  - id: LAT-09
+    surface: S5
+    affected_surfaces: []
+    candidates:
+    - C13
+    - C14
+    question: Q5
+    dimension: VD8
+    serves: both
+    title: 'The design method never asks what a call will cost, and a measured tail can be accommodated without its cause
+      being traced: the 120 s limits were inherited and then fitted to a misread p99'
+    evidence: .claude/skills/planning/SKILL.md:126-163; .claude/skills/plan-critique/SKILL.md:45; .claude/skills/code-review/SKILL.md:102;
+      docs/contracts/data-modeling-standard.yaml:405-440; docs/plans/PLAN-agent-ducklake-rest-api.yaml:880; docs/DECISIONS.md:280-282,303-304;
+      commit e9edc810
+    evidence_kind: static
+    current_behavior: Planning has four assessments (infrastructure, complexity, data model, divergence from main); critique
+      checks that criteria are testable; the data-modelling walk asks for grain, key, write mode and partitioning. None
+      asks for expected latency, the limit it must fit, or what a read opens. The REST API plan quoted the durations, called
+      the reader's p99 its read deadline, and needed no step to check that.
+    ideal_behavior: A change to a verb path, a table layout, a timeout, a quota or a retry states the call's expected warm
+      and cold time with a measured decomposition and its margin; a limit is raised only with the cause of the tail named
+      and traced to code.
+    gap: Six of the eleven decision points in process_trace had no latency examination, and at the 2026-11-13 one the evidence
+      was read without its cause.
+    compensating_controls_considered: Code review's performance bullet reviews code, not budgets. The churn gate measures
+      warm smoke writes. Neither would have failed at any row of the trace.
+    change_type: add
+    proposed_change: Add a latency assessment to the planning skill and to plan-critique, triggered by scope that touches
+      a verb handler, verb SQL, a client transport, a table layout or maintenance cadence, or any timeout, quota or retry
+      value; add a read-cost step to the data-modelling walk (files a read opens after compaction); require latency reversal
+      conditions to be evaluated by a metric.
+    acceptance: The planning skill and plan-critique carry the section, a compliance check fails a plan that changes a timeout,
+      quota, retry or verb SQL without it, and the data-modelling walk names the read-cost step.
+    severity: high
+    severity_rationale: A design that adds minutes to session flows passes planning and critique unseen, as it did here;
+      the controls considered do not exercise the property.
+    confidence: CONFIRMED
+    roadmap_crossref:
+      classification: novel
+      item_ids: []
+      dedup_search_terms:
+      - planning latency performance assessment design critique skill
+      dedup_hit_count: 0
+      note: 26 raw rows, none about a latency step in the method.
+    effort: S
+    depends_on: []
+    sequencing:
+      safe_to_queue_now: true
+      blocked_behind: []
+      note: ''
+  - id: LAT-10
+    surface: shared
+    affected_surfaces:
+    - S3
+    - S5
+    candidates:
+    - C11
+    question: Q1
+    dimension: VD2
+    serves: both
+    title: Latency cannot be attributed to a verb, a caller or a transport on three of the four functions, nor to a step
+      on any
+    evidence: src/common/ducklake_metrics.py:60-89; src/lambdas/ducklake_telemetry_writer/telemetry_log.py:104-141; terraform/bootstrap/agent_ducklake_api.tf:228-264;
+      rec-4706; rec-5042
+    evidence_kind: static
+    current_behavior: The reader, writer and telemetry reader print action, status, connect_ms and elapsed_ms. The handler
+      knows the verb and drops it; the caller and transport are in the event and unread. No function times the steps of
+      connect or reports files opened or bytes fetched. The client sends no request id.
+    ideal_behavior: Every second is attributable to a route, a verb, a phase and a caller class from recorded lines.
+    gap: Naming the verb behind one duration took a live probe and a log read matched by time; the telemetry reader's 167
+      slow calls cannot be named at all.
+    compensating_controls_considered: 'The telemetry writer''s line (verb, caller): one function, and without wall time.'
+    change_type: persist
+    proposed_change: Put verb, caller class, transport, connect step timers, statement time and files opened on the invocation
+      line of all four functions, and carry a client request id into it.
+    acceptance: Every invocation line on the four functions carries those fields, and a client-sent request id appears in
+      the function's line for the same call.
+    severity: medium
+    severity_rationale: It lengthens no call; it is why the other findings were expensive to establish and why regressions
+      are hard to see.
+    confidence: CONFIRMED
+    roadmap_crossref:
+      classification: planned-insufficient
+      item_ids:
+      - rec-4706
+      - rec-5042
+      - rec-4482
+      dedup_search_terms:
+      - invocation line verb caller attribution timers request id
+      dedup_hit_count: 3
+      note: 200 raw rows. rec-4706 owns the verb on the telemetry reader's line, rec-5042 step 1 the connect timers, rec-4482
+        wall time on the telemetry writer; none owns verb, caller and transport on the ops reader and writer, or a statement-level
+        timer.
+    effort: S
+    depends_on: []
+    sequencing:
+      safe_to_queue_now: true
+      blocked_behind: []
+      note: ''
+  - id: LAT-11
+    surface: S1
+    affected_surfaces: []
+    candidates:
+    - C10
+    - C18
+    question: Q7
+    dimension: VD5
+    serves: both
+    title: Session flows make round trips and fetches their purpose does not need
+    evidence: 'baseline: describe is 3,132 of 6,922 telemetry-writer calls; scripts/telemetry_capture/runner.py:99-102,326;
+      scripts/agent_sdk/mcp_server.py:133-137; scripts/session/preflight.py:224; baseline: 101 pulls of the 2.2 MB decisions
+      table in 7 days; scripts/convergence_health/budget_ingest.py:395-400; scripts/ops_portal/ci_rca_runtime.py:72,84-85'
+    evidence_kind: observed
+    current_behavior: The capture runner asks the writer to describe itself before every pass that has rows. The MCP server
+      makes five round trips before its first tool call. Preflight pulls every decision each session although docs/DECISIONS.md
+      is in the working tree. One CI flow reads a rec per row in a loop; another reads every ci_rca row and filters status
+      in Python.
+    ideal_behavior: A flow makes the calls its purpose needs and asks the server for what it will use.
+    gap: Each is small beside LAT-01 today (the decisions pull is 15 s at the median only because of first touch); together
+      they are about 320 s a day of round trips, most of it detached.
+    compensating_controls_considered: 'Decision 215''s two bounded reads for preflight recs: holds for recs, not for decisions
+      or describe.'
+    change_type: remove
+    proposed_change: Cache the describe answers by registry stamp (capture runner, MCP server); derive the latest decision
+      locally or pull only newer rows; batch the per-row loop once LAT-03 is fixed; push the status filter into a verb.
+    acceptance: A capture session makes one describe call; MCP start makes no parameter read after the session's first;
+      preflight does not pull the full decisions table when the working tree has it.
+    severity: medium
+    severity_rationale: Avoidable round trips with clear fixes; the seconds they cost are counted under LAT-01 and LAT-06.
+    confidence: CONFIRMED
+    roadmap_crossref:
+      classification: planned-insufficient
+      item_ids:
+      - rec-2867
+      - rec-4240
+      dedup_search_terms:
+      - describe round trips preflight warm_sync decisions pull mcp server start
+      dedup_hit_count: 2
+      note: 171 raw rows. rec-2867 owns whole-table pulls for point lookups, rec-4240 the per-row loops (onto a verb that
+        is slower today); nothing owns the describe calls.
+    effort: S
+    depends_on: []
+    sequencing:
+      safe_to_queue_now: true
+      blocked_behind: []
+      note: ''
+  - id: LAT-12
+    surface: S3
+    affected_surfaces: []
+    candidates:
+    - C15
+    question: Q1
+    dimension: VD4
+    serves: both
+    title: Warm ops writes run at 3.5 times their own p95 budget and cannot be attributed to a step; one avoidable step
+      is visible in the code
+    evidence: 'baseline: ops/writer reused_connection p50 1,448 ms, p95 6,997 ms, n=361 (update_ops 1,821 / 7,833); src/common/ducklake_writes.py:66,448-453;
+      src/common/ducklake_metrics.py:34-43; src/lambdas/ducklake_writer/handler.py:94,127,149; baseline: telemetry writer
+      append 483 ms with 8 ms outside its transaction'
+    evidence_kind: observed
+    current_behavior: A write on a reused connection takes 1.4 s at the median and 7 s at p95 against a 2,000 ms p95 budget.
+      The line has no commit time, so the share of the existing-row read, the two MERGEs, the commit and the metrics is
+      unknown. After each commit the writer makes two PutMetricData calls, each on a newly built boto3 session and client.
+    ideal_behavior: The write's steps are timed on its line, the budget is met or re-decided with the decomposition attached,
+      and metrics cost the caller nothing.
+    gap: rec-4170 has recorded the overage since 2026-10-05 and asks for a gate and a root cause; neither exists.
+    compensating_controls_considered: 'The churn gate: smoke tables on warm containers, where the budget is met.'
+    change_type: tune
+    proposed_change: Time the steps on the writer's line, emit the two metrics through the log line as the telemetry writer
+      does, then decide from the numbers.
+    acceptance: The writer line reports its step timers; reused-connection wall p95 over 7 days is under 2,000 ms or the
+      budget is re-decided with the decomposition recorded.
+    severity: medium
+    severity_rationale: About five seconds over budget at p95 on about four writes a day, cause undetermined; the one avoidable
+      step identified is sub-second (HYPOTHESIS).
+    confidence: CONFIRMED
+    roadmap_crossref:
+      classification: planned-insufficient
+      item_ids:
+      - rec-4170
+      dedup_search_terms:
+      - PutMetricData EMF metric emission writer commit wall
+      dedup_hit_count: 1
+      note: 55 raw rows. rec-4170 owns the overage; its acceptance is that a gate reads warm wall p95, which would not reduce
+        it or explain it.
+    effort: S
+    depends_on: []
+    sequencing:
+      safe_to_queue_now: true
+      blocked_behind: []
+      note: The step timers are LAT-10's change applied to the writer.
+  rejected_candidates:
+  - candidate: 'C17: the catalog move to RDS PostgreSQL will not change the dominant costs'
+    why_dismissed: It holds and describes no defect. The catalog is 2-4 ms away, authenticates in 16-33 ms and answered
+      the first statement on a fresh connection in 81 ms; cold connect is process-side (15.5 s cold against 0.49 s warm
+      on one environment) and first touch is S3.
+    compensating_control: ''
+    control_property_match: ''
+    decision_or_item_id: Decision 253
+  - candidate: 'C19: the path is already adequate for most calls and slow calls are a small tail confined to new environments'
+    why_dismissed: Refuted. 105 of 359 ops/reader calls over 29 s and 65 of 167 telemetry/reader ones were on reused connections;
+      6.8 percent of ops reads and 6.5 percent of agent REST calls exceed 29 s; a cold preflight meets three. The median
+      is fine and that is all that holds. The refuting evidence is itself the defect filed as LAT-01.
+    compensating_control: ''
+    control_property_match: ''
+    decision_or_item_id: LAT-01
+  - candidate: 'C20: raising the timeout to 120 s was a deliberate, evidence-based trade-off and the process worked as intended'
+    why_dismissed: 'It holds as a trade-off: agents had been without AWS access for a day, the durations came from CloudWatch,
+      the operator chose the route and the value, the quota is declared with a reversal condition and the follow-ups were
+      filed the next day. The trade bought access at the price of hiding a growing cost. That the evidence was misread and
+      that the plan needed no latency step is the method gap filed as LAT-09.'
+    compensating_control: ''
+    control_property_match: ''
+    decision_or_item_id: Decision 255
+  - candidate: 'C21: neither the engine nor the Python runtime is a material contributor once layout, initialisation and
+      client overhead are accounted for'
+    why_dismissed: It holds and describes no defect. Python is 0.8 to 1.7 percent of function time. The engine holds 99
+      percent gross and 28 percent net of tuning; the net is statement work under a second per read.
+    compensating_control: ''
+    control_property_match: ''
+    decision_or_item_id: Decision 84
+  summary:
+    total_findings: 12
+    novel_count: 2
+    planned_insufficient_count: 8
+    planned_unbuilt_count: 2
+    top_improvements:
+    - LAT-01
+    - LAT-02
+    - LAT-03
+    - LAT-05
+    - LAT-08
+    highest_leverage_change: LAT-01
+    top_opportunities:
+    - OPT-01
+    - OPT-07
+    - OPT-10
+    - OPT-12
+    - OPT-05
+    maturity_S1: frontier
+    maturity_S2: strong
+    maturity_S3: solid
+    maturity_S4: solid
+    maturity_S5: solid
