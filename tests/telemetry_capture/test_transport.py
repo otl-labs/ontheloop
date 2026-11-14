@@ -9,6 +9,7 @@ import types
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from email.message import Message
 from pathlib import Path
 from typing import Any
 
@@ -118,7 +119,7 @@ def test_urllib_request_maps_http_errors_and_hides_the_url(monkeypatch: pytest.M
     assert seen == {"timeout": 7.0, "headers": {"X-a": "1"}, "method": "POST"}
 
     def http_error(request, timeout):
-        raise urllib.error.HTTPError(URL, 413, "too big", {}, io.BytesIO(b'{"error_type": "x"}'))
+        raise urllib.error.HTTPError(URL, 413, "too big", Message(), io.BytesIO(b'{"error_type": "x"}'))
 
     monkeypatch.setattr(urllib.request, "urlopen", http_error)
     assert transport.urllib_request("POST", URL, b"{}", {}, 1.0) == (413, b'{"error_type": "x"}')
@@ -203,6 +204,70 @@ def test_make_client_installs_one_clamped_single_attempt_config(monkeypatch: pyt
     assert seen["client"][0] == "ssm" and made.url == URL
     assert made._sign(b"{}") == {"Content-Type": "application/json", "Authorization": "AWS4-HMAC-SHA256 signed"}
     assert seen["sigv4"] == ("lambda", "eu-west-2")
+
+
+API_URL = "https://abc123.execute-api.eu-west-2.amazonaws.com/v1/telemetry/writer"
+
+
+def test_api_transport_reads_the_api_writer_parameter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OTL_OPS_VERBS_TRANSPORT", "execute_api")
+    creds = types.SimpleNamespace(get_frozen_credentials=lambda: object())
+    seen = _fake_botocore(monkeypatch, credentials=creds, ssm_value=API_URL)
+    names: list[str] = []
+
+    class Session:
+        def __init__(self, botocore_session: Any, profile_name: Any) -> None:
+            pass
+
+        def get_credentials(self) -> Any:
+            return creds
+
+        def client(self, name: str, region_name: str) -> Any:
+            def get_parameter(**kw: Any) -> Any:
+                names.append(kw["Name"])
+                return {"Parameter": {"Value": API_URL}}
+
+            return types.SimpleNamespace(get_parameter=get_parameter)
+
+    monkeypatch.setitem(sys.modules, "boto3", types.SimpleNamespace(Session=Session))
+    made = transport.make_client({}, CaptureState(tmp_path), Budget.start(600.0))
+    assert names == ["/agent-platform/ducklake/api_url/telemetry/writer"]
+    assert made.url == API_URL
+    made._sign(b"{}")
+    assert seen["sigv4"] == ("execute-api", "eu-west-2")
+
+
+def test_cached_url_of_the_other_transport_is_ignored(tmp_path: Path) -> None:
+    state = CaptureState(tmp_path / "s")
+    state.remember_writer_url(URL)
+    assert transport.resolve_url({}, state, lambda: API_URL, service="execute-api") == API_URL
+    assert state.writer_url() == API_URL
+    assert transport.resolve_url({}, state, lambda: URL) == URL
+
+
+def test_signs_for_the_url_scope(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("OTL_OPS_VERBS_TRANSPORT", raising=False)
+    creds = types.SimpleNamespace(get_frozen_credentials=lambda: object())
+    seen = _fake_botocore(monkeypatch, credentials=creds, ssm_value=URL)
+    transport.make_client({}, None, Budget.start(600.0))._sign(b"{}")
+    assert seen["sigv4"] == ("lambda", "eu-west-2")
+    seen = _fake_botocore(monkeypatch, credentials=creds, ssm_value=URL)
+    transport.make_client({transport.URL_ENV: API_URL}, None, Budget.start(600.0))._sign(b"{}")
+    assert seen["sigv4"] == ("execute-api", "eu-west-2")
+
+
+def test_unknown_host_is_no_writer_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    for transport_value in (None, "execute_api"):
+        if transport_value:
+            monkeypatch.setenv("OTL_OPS_VERBS_TRANSPORT", transport_value)
+        else:
+            monkeypatch.delenv("OTL_OPS_VERBS_TRANSPORT", raising=False)
+        creds = types.SimpleNamespace(get_frozen_credentials=lambda: object())
+        _fake_botocore(monkeypatch, credentials=creds, ssm_value="https://example.invalid")
+        with pytest.raises(CaptureUnavailable) as raised:
+            transport.make_client({}, None, Budget.start(600.0))
+        assert raised.value.reason == "no_writer_url"
+    assert transport.url_region(API_URL) == "eu-west-2"
 
 
 @pytest.mark.parametrize(("credentials", "token"), [(None, "no_credentials"), ("raise", "credential_error")])

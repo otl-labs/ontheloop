@@ -103,6 +103,53 @@ class TestDuckLakeTransportHelpers:
         monkeypatch.setattr(ir, "_resolve_function_url_via_api", lambda name, **kw: "https://api.example/")
         assert p._resolve_writer_url() == "https://api.example"
 
+    def test_resolve_writer_url_api_route(self, monkeypatch) -> None:
+        """Under execute_api the only SSM name read is the ops/writer API route, never a Function URL."""
+        import scripts.ops_data_portal as p
+        import src.common.ducklake_reader_client as ir
+
+        monkeypatch.delenv("DUCKLAKE_WRITER_URL", raising=False)
+        monkeypatch.delenv("AWS_PROFILE", raising=False)
+        monkeypatch.setenv("OTL_OPS_VERBS_TRANSPORT", "execute_api")
+        seen: list[tuple[str, str | None]] = []
+
+        def _ssm(name, profile=None, region=None):
+            seen.append((name, profile))
+            return "https://api.example/ops/writer" if name == "/agent-platform/ducklake/api_url/ops/writer" else None
+
+        monkeypatch.setattr(ir, "_resolve_function_url_via_ssm", _ssm)
+        monkeypatch.setattr(ir, "_resolve_function_url_via_api", lambda *a, **k: pytest.fail("GetFunctionUrlConfig used"))
+        monkeypatch.setattr("subprocess.run", lambda *a, **k: pytest.fail("terraform used"))
+        assert p._resolve_writer_url() == "https://api.example/ops/writer"
+        assert [n for n, _ in seen] == ["/agent-platform/ducklake/api_url/ops/writer"]
+        assert seen[0][1] == "agent_platform"
+
+        monkeypatch.setattr(ir, "_resolve_function_url_via_ssm", lambda *a, **k: None)
+        with pytest.raises(RuntimeError, match="/agent-platform/ducklake/api_url/ops/writer"):
+            p._resolve_writer_url()
+
+    def test_ducklake_write_signs_for_the_url_scope(self, monkeypatch) -> None:
+        from botocore.auth import SigV4Auth
+
+        import scripts.ops_data_portal as p
+
+        scopes: list[tuple[str, str]] = []
+        for url, expected in (
+            ("https://abc123.execute-api.eu-west-2.amazonaws.com/v1/ops/writer", ("execute-api", "eu-west-2")),
+            ("https://abc123.lambda-url.eu-west-2.on.aws/", ("lambda", "eu-west-2")),
+        ):
+            monkeypatch.setenv("DUCKLAKE_WRITER_URL", url)
+            _patch_writer_transport(monkeypatch, [_FakeResp(200, {"ok": True})])
+            real_init = SigV4Auth.__init__
+
+            def _init(self, creds, service, region, _real=real_init):
+                scopes.append((service, region))
+                _real(self, creds, service, region)
+
+            monkeypatch.setattr(SigV4Auth, "__init__", _init)
+            p._ducklake_write("ops_recommendations", {"id": "rec-1", "status": "open"}, action="write_ops")
+            assert scopes[-1] == expected
+
     def test_project_ops_record_drops_derived_and_unknown(self) -> None:
         import scripts.ops_data_portal as p
 

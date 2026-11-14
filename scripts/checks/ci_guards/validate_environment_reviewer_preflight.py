@@ -35,7 +35,11 @@ SCRIPT = "scripts/ci/environment_reviewer_preflight.py"
 GUARD = "scripts/checks/ci_guards/validate_environment_reviewer_preflight.py"
 UI_MANAGED = {"pypi": "rec-4549"}
 EXEMPT = frozenset({"deployment-approval-probe"})
-UPSTREAM = {"approved-text-approval.yml": ("render", "approve"), "terraform-github-apply.yml": ("preview", "apply")}
+UPSTREAM = {
+    "approved-text-approval.yml": ("render", "approve"),
+    "terraform-github-apply.yml": ("preview", "apply"),
+    "terraform-bootstrap-apply.yml": ("preview", "apply"),
+}
 SIDE_CHECKOUT = ".dispatch-tooling"
 TOKEN_EXPR = "${{ github.token }}"
 LOGINS_EXPR = "${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}"

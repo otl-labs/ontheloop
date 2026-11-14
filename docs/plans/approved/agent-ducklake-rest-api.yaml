@@ -1,0 +1,123 @@
+schema_version: 1
+slug: agent-ducklake-rest-api
+tldr: 'One IAM-authorised REST API, applied by you from terraform/bootstrap, fronts the DuckLake reader, writer,
+  telemetry reader and telemetry writer, so agents reach them on an amazonaws.com host the proxy signs. Its policy
+  refuses every caller but the agent session user; each Lambda permission names one exact route; no bounded role may
+  write API Gateway. Timeout 120 s by quota. An alarm watches API and permission edits. Decision 213 now allows the
+  Function URL or the named route.'
+blocks:
+- id: decision-new
+  file: docs/DECISIONS.md
+  before: |
+    The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
+  after: |
+    The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
+
+    ## Decision {{N}}: Agents reach the DuckLake verb Lambdas through one IAM-authorised REST API that only the operator applies -- an identity-trusting handler's open paths are its Function URL and its named API route (amends Decisions 213 and 84) (Decided)
+
+    ```yaml
+    number: {{N}}
+    status: Decided
+    decided_date: "{{DATE}}"
+    kind:
+      value: direction
+      justification: >-
+        Yes: clause 1 opens a new caller path into the identity-trusting functions and keeps every change to it behind
+        the operator's admin apply, a human gate applied to a new population.
+    amends: [213, 84]
+    significance:
+      value: numbered_decision
+      justification: >-
+        Durable: it rewrites Decision 213 cl.1's invariant and adds an API whose permissions, policy and timeout carry
+        reversal conditions. Decision 177 lets 213 change only through a new entry and a dated note.
+    ```
+
+    **Status:** Decided
+    **Date:** {{DATE}}
+    **Warehouse ID:** dec-{{N}} (per Decision 84 backfill)
+
+    **Problem:** The agent egress proxy signs only hosts under amazonaws.com and refuses the on.aws Function URL
+    hosts (probe 2026-11-13), so agents cannot reach the DuckLake verbs as Decision 213 cl.1 allows. Reads run up to
+    110 s, past an HTTP API's 30 s cap, and a direct lambda:Invoke delivers a forgeable event.
+
+    **Intent:** Agents reach the four DuckLake verb functions over a host the proxy signs, no caller can forge its
+    identity, and no agent or CI identity can open, widen or re-point that path.
+
+    **Decision:**
+    1. **One REST API, operator-applied.** One Regional REST API, agent-platform-ducklake-api, declared in
+       terraform/bootstrap (Decision 223 cl.1), fronts the reader, writer, telemetry reader and telemetry writer: one
+       POST method per function under an /ops/ or /telemetry/ prefix, AWS_IAM authorisation, Lambda proxy integrations
+       without integration credentials, one stage. Each function's only API Gateway permission names that exact stage,
+       method and route as its source ARN, never the API id with a wildcard. Clients read each route's URL from its own
+       parameter under /agent-platform/ducklake/; the API id and host are never committed (Decision 101). Any change to
+       a route, permission, policy or stage is a terraform/bootstrap admin apply (Decision 126 cl.1). A second API
+       needs a new Decision.
+    2. **Amends Decision 213 cl.1.** A handler may trust a signed caller field only when every path to it other than
+       its AWS_IAM Function URL and its named API route is closed. The API path is closed at its control points: the
+       API's resource policy denies execute-api:Invoke to every principal but agent-platform-session
+       (aws:PrincipalArn); the permissions boundary denies every API Gateway write to every bounded identity; cl.1's
+       resource-policy Deny still stops every bounded identity, CI included, adding a Lambda permission. A handler reads
+       the caller only from the event shape of the path that delivered it and fails closed on any other shape. The
+       Function URL path and cl.1's three Denies are unchanged.
+    3. **Timeout by quota.** The integration timeout is 120 s under the account quota "Maximum integration timeout in
+       milliseconds", raised by an operator request and declared in Terraform at the granted value once granted.
+    4. **Records and detection.** The stage's access log, in its own log group and never carrying a request body, is
+       the caller record for API calls (Lambda data events now name the API Gateway service principal). A Decision
+       202 filter and alarm match any API Gateway write, any Lambda permission or resource-policy edit naming a
+       DuckLake verb function or denied, and any IAM write to the access-log role, which is named outside
+       agent-platform-* (ducklake-api-access-logs) so no CI IAM grant reaches it (as Decision 248 cl.4). Stage
+       throttling is a runaway guard only; per-method detailed metrics stay off.
+    5. **Amends Decision 84 I-1.** Its "closed reader/writer Function-URL boundary" reads as the closed named-verb
+       boundary over either transport, the Function URL or the named API route. The verbs and the single backend are
+       unchanged.
+
+    **Rationale:** The ops and telemetry domains share callers, auth, operator, root and cadence, so one API is one
+    deployment unit; no API Gateway quota is near at about 3,000 calls a day, and a URL parameter per route makes a
+    later split cheap. API Gateway builds the caller fields from the verified signature.
+
+    **Coverage (Decision 181 cl.2):** text tests pin the exact source ARNs, the resource policy's one exception, the
+    boundary's API Gateway Deny, the routes and the environment gate; the post-apply probe shows a signed call by
+    another identity refused by the resource policy's explicit deny. Residuals: PlatformAdmin and root stay unbounded
+    trusted operators (Decision 144 cl.3); CI can still write the route URL parameters, as it can the Function URL
+    parameters; a terraform/personal
+    replacement of a function drops its API permission until the operator re-applies (a cross-root dependency,
+    Decision 223); SIT gets its own API once its functions exist.
+
+    ```yaml reversal-conditions
+    decision: {{N}}
+    review_by: 2027-05-31
+    on_trigger: "re-decide via /plan"
+    conditions:
+      - id: proxy-signs-function-urls
+        kind: manual
+        description: "The proxy signs Function URL hosts: re-decide whether clause 1's API is still needed."
+      - id: quota-below-deadline
+        kind: manual
+        description: "AWS grants or later sets the integration timeout below 120 s: re-decide clause 3 (paging or submit-and-poll for slow reads)."
+      - id: split-trigger
+        kind: manual
+        description: "A data owner gets its own apply rights or cadence, a domain needs other auth, WAF or non-agent consumers, or a shared deployment causes an incident: re-decide the one-API rule."
+      - id: resource-policy-semantics
+        kind: manual
+        description: "A signed call by an identity other than the agent session user stops returning the resource policy's explicit deny: re-decide clause 2."
+    ```
+
+    **Related:** Decision 213 (amended), 84 (amended), 101, 126, 143, 144, 181 cl.2, 184 cl.2, 200 cl.1, 202, 212, 214, 215 cl.6, 223, 230, 237.
+
+    ---
+- id: decision-213-note
+  file: docs/DECISIONS.md
+  before: |
+    [Amendment 2026-10-27, Decision 237: cl.5's scoped-login value lives in its /secret/ SecureString parameter; the password is never displayed or stored outside it.]
+  after: |
+    [Amendment 2026-10-27, Decision 237: cl.5's scoped-login value lives in its /secret/ SecureString parameter; the password is never displayed or stored outside it.]
+
+    [Amendment {{DATE}}, Decision {{N}}: cl.1's invariant reads "every path other than the Function URL and the function's named API route is closed"; the API path's control points are Decision {{N}} cl.2, and for that path cl.4's caller record is the API access log.]
+- id: decision-84-note
+  file: docs/DECISIONS.md
+  before: |
+    > **Update (2026-11-10):** Decision 253 moves the catalog to RDS PostgreSQL; once PROD moves (rec-4223), I-1's DuckLake-on-Neon reads DuckLake-on-RDS. The single-backend rule is unchanged.
+  after: |
+    > **Update (2026-11-10):** Decision 253 moves the catalog to RDS PostgreSQL; once PROD moves (rec-4223), I-1's DuckLake-on-Neon reads DuckLake-on-RDS. The single-backend rule is unchanged.
+
+    > **Update ({{DATE}}):** Decision {{N}} cl.5: I-1's "closed reader/writer Function-URL boundary" reads as the closed named-verb boundary over the Function URL or the named API route.
