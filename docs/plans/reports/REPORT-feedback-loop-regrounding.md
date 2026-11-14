@@ -679,8 +679,8 @@ The 2026-11-10 run at f866f98b is superseded, because probe inputs moved in betw
 d8283f55, 3f8edd12, b4d76e92 and 5291a39e, each time main had moved probe inputs, in a venv synced to main's pins.
 The only change across the four runs is deliberation VP 3, which runs since mcp 2.x landed (#1984); the 5291a39e run
 (after #1987's Terraform and check changes) matched b4d76e92 step for step. On 2026-11-14 the suite ran again at
-0d51ede0, after the agent access cutover (#2036-#2038) moved probe inputs (section 1.3): every step printed what it
-printed at 5291a39e, and the three long simulations, given 900 to 2,400 s, finished and passed (cost VP 4, Goodhart
+0d51ede0, after the agent access cutover (#2036-#2038) moved probe inputs (section 1.3): every step's output matches
+this table, the 5291a39e record, and the three long simulations, given 900 to 2,400 s, finished and passed (cost VP 4, Goodhart
 VP 4, ladder VP 5). Cost VP 1 and Goodhart VP 1, which fetch one old commit, failed on a transient `git fetch`
 error (run concurrently) and printed their earlier lines when re-run, Goodhart VP 1 alone.
 Raw outputs are not committed. **[probe]**
