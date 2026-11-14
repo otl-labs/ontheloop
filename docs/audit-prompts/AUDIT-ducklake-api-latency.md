@@ -142,11 +142,11 @@ Candidates (each is a hypothesis; the facts behind them are in Section 10):
   environment first.
 - A request that times out or whose process exits prints no invocation line. Never borrow the
   previous request's line for it; it is `unattributed` (Section 4).
-- "Tier" names three unrelated things: the timeout tiers of Section 14 (`tier_1` to `tier_3`),
-  roadmap item ids (`T1.9`, `T2.18`), and the maturity levels of Section 15.
+- "Tier" names two unrelated things: roadmap item ids (`T1.9`, `T2.18`) and the maturity levels of
+  Section 15.
 - From 2026-11-12 until the cutover on 2026-11-14 no agent session could reach AWS, so those days
   hold CI traffic only. Say which days a per-day figure covers, and give agent-facing rates from the
-  cutover onward.
+  cutover onward where your sample allows, stating how many hours or days that covers.
 - The reader, writer and telemetry reader log no verb. A difference between two calls on one route
   can be a difference of verb, not of path; excess over a route's median therefore mixes verb cost
   with avoidable latency. Say so where you use it, and prefer same-verb probe pairs for causes.
@@ -159,7 +159,9 @@ Candidates (each is a hypothesis; the facts behind them are in Section 10):
   code before repeating it.
 - Two transports reach the same four functions: the REST API (`OTL_OPS_VERBS_TRANSPORT=execute_api`,
   agent sessions) and AWS_IAM Lambda Function URLs (CI and anything else). The REST API is the newer
-  path and is NOT the subject by itself: the latency lives in the functions both transports share.
+  path and is NOT the subject by itself: the four functions are shared by both transports. (In the
+  one 48 h sample in G10, API Gateway's latency and its integration latency were nearly equal;
+  measure the `transport` phase yourself.)
 - Two log line formats exist. The reader, writer and telemetry reader print `ducklake_invocation`,
   which has timings but no verb, caller or transport. The telemetry writer prints
   `telemetry_request`, which has `verb` and `caller_role` (the signed caller's role or user name, so
@@ -167,8 +169,8 @@ Candidates (each is a hypothesis; the facts behind them are in Section 10):
   no `elapsed_ms`. On that function `connect_reused` is `null` for `describe`, for `attach_check`
   (which does use a connection) and for requests refused before a verb runs, so `connectionless`
   there means "no connection information". Section 10 (G4) lists both field sets.
-- The REST API had been live for a few hours when this prompt was written (first agent traffic
-  2026-11-14). Its metrics are thin. Treat any REST-specific percentile as low confidence unless you
+- The REST API received its first calls on 2026-11-13 and its first agent traffic on 2026-11-14,
+  hours before this prompt was written. Its metrics are thin. Treat any REST-specific percentile as low confidence unless you
   reproduce it; build the latency picture from the Lambda logs, which hold 14 days across both
   transports.
 - CI callers run on a schedule; time matters less to them. Rank interactive agent-session impact
@@ -182,9 +184,13 @@ Candidates (each is a hypothesis; the facts behind them are in Section 10):
 - "Reader" names three functions: the ops reader (`agent-platform-ducklake-reader`), the telemetry
   reader (`agent-platform-ducklake-telemetry-reader`) and a telemetry content reader that has no API
   route and is OUT of scope.
-- `reset_warm_connection` drops the cached connection in the one container that receives the call.
-  The process, its imported modules and its file cache survive. A reconnect after a reset is a
-  `fresh_connection`, never a `new_env`; do not report one as the other.
+- `reset_warm_connection` closes the cached DuckDB connection in the one container that receives the
+  call. The process and its imported modules survive, and so does the operating system's page cache;
+  state held inside the DuckDB connection is dropped with it. Whether any other cache survives a
+  reset is for you to establish. A reconnect after a reset is a `fresh_connection`, never a
+  `new_env`; do not report one as the other.
+- `connect_probe` is logged as `connectionless` (`connect_reused: null`) although it opens a
+  connection of its own to time the phases; leave it out of `connectionless` statistics.
 - The catalog backend is Neon today. Decision 253 moves it to RDS PostgreSQL; that is decided and
   not built. "RDS" in the record is a plan, not the running system.
 - The smoke catalog (`ducklake_smoke`), the telemetry writer's smoke twin, the maintenance function
@@ -278,7 +284,8 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
    in `meta.contract_notes`, do the audit on the current branch, and at Section 16 skip steps 3-5:
    leave the two deliverables uncommitted and end the turn with a final message naming their paths
    and the error. IF the current branch is `main`, or you cannot write under `audits/`, write the
-   two deliverables to a scratch directory outside the repository instead and name those paths.
+   two deliverables to a scratch directory outside the repository instead, skip Section 16 entirely
+   and end the turn with a final message naming those paths and the reason.
 2. `bin/venv-python -m scripts.session.preflight --roadmap-detail full` -- writes
    `logs/.preflight-report.json` (gitignored; expected). Recommendations have no local cache in this
    repository; rec dedup uses the live reader (step 3). IF this fails: record the error in
@@ -339,40 +346,44 @@ Each question gets its own entry in `question_answers`. Verdict rules are pinned
 depends on a table, fill the table first.
 
 Q1. Where does the time go? For each route and each path, decompose a request's wall time into the
-phases of Section 4, and state what share of calls over 29 s each phase explains. Fill
-`latency_decomposition`; the prose points to it.
-Verdict: `decomposed` if, for every route and every path that holds calls over 29 s, the p50 costs
-of the phases you measured sum to within 20 percent of that path's p50 `Duration`;
-`partially-decomposed` if that fails for at least one such path (name the missing instrumentation);
-`not-decomposable` if it fails for all of them.
+phases of Section 4. Fill `latency_decomposition` (per-phase costs) and `slow_calls` (per route, how
+many calls ran over 29 s, on which paths, and what you judge to be their main cause); the prose
+points to both. Assigning time to a phase is not yet an explanation: for the phases that carry the
+slow calls, say what the function is doing during them (DD-A, DD-B).
+Verdict (your judgment; state the basis in `prose`): `decomposed` if, on every route, you can
+account for the calls over 29 s by named phases with measured costs and can say what those phases
+spend their time on; `partially-decomposed` if some slow calls, or what a slow phase is doing,
+remain unexplained (name what, and the instrumentation that would settle it); `not-decomposable` if
+you could not account for the slow calls on any route.
 
 Q2. Is the 120 s integration timeout inherent to this workload, or avoidable? A timeout is set by
-the slowest calls, not by a percentile, so the test here is whether calls over 29 s remain. A route
-FITS 29 s when no more than 1 in 1,000 of its sampled calls has `Duration` over 29 s (none, if the
-sample is under 1,000 calls). Fill `timeout_outlook`, one row per route, by the tier rules in
-Section 14. Report the numbers as information; recommend no target. Per-route verdict:
-- `within_default`: the route already fits 29 s in your baseline sample.
-- `avoidable-by-tuning`: `fits_29s_after` is `tier_1` or `tier_2` (tuning rows only).
-- `avoidable-by-redesign`: `fits_29s_after` is `tier_3` (reached only with a redesign row).
-- `inherent`: `fits_29s_after` is `none`, and you can name the work the request needs that takes
-  the time.
-- `undetermined`: `fits_29s_after` is `unknown`, or it is `none` and you cannot name that work.
-The Q2 verdict is taken over the routes that are not `within_default`, as the first of this list
-that any of them has: `undetermined`, `inherent`, `avoidable-by-redesign`, `avoidable-by-tuning`. If
-every route is `within_default`, the Q2 verdict is `undetermined` and the prose says your sample
-held no call that needed more than 29 s.
+the slowest calls, so the question is whether the calls that run over 29 s could complete their work
+in under 29 s. A call that a deadline would end early with an error has not completed its work and
+does not count as fitting. Fill `timeout_outlook`, one row per route: what you observed, and your
+estimate of how many of the sampled calls over 29 s would remain over 29 s if the tuning rows of
+your inventory were built, and if the redesign rows were too. These are estimates; state how you
+made them in `basis`, and write `null` where you cannot. Calls with no phase data (`unattributed`)
+are estimated from context; say what you assumed. Report the numbers as information; recommend no
+target. Per-route verdict (your judgment, by these meanings):
+- `within_default`: no sampled call on the route ran over 29 s.
+- `avoidable-by-tuning`: you judge that tuning rows alone would let the route's calls complete in
+  under 29 s, bar rare exceptions you can name.
+- `avoidable-by-redesign`: tuning would not, and a redesign row would.
+- `inherent`: neither would, and you can name the work that takes the time.
+- `undetermined`: you cannot estimate well enough to choose.
+The Q2 verdict is your judgment across the routes, led by the route with the most calls over 29 s;
+say in `prose` which route drives it and why. If no route had a call over 29 s in your sample, the
+Q2 verdict is `undetermined` and the prose says so.
 
 Q3. What would reduce latency, and do the remedies already owned by open recs and roadmap items
 cover it? Build `optimisation_inventory`: one row per opportunity, including alternative ways to
 remove the same cost and options that are pure trade-offs. For each row that has an owner, judge in
 `owner_delivers_saving` whether the owner's stated acceptance would deliver the row's saving.
-Verdict, from `est_daily_seconds_saved` summed over tuning rows (within an `alternative_group` count
-only the row with the largest value): let OWNED be the sum over rows whose `ownership` starts with
-`owned` (`owner_delivers_saving: yes` counts in full, `partly` counts half, `no` counts zero) and
-ALL be the sum over every tuning row; a null estimate counts as zero. `sufficient` if OWNED / ALL is
-at least 0.8; `partial` if at least 0.3; `insufficient` below that. If ALL is zero, or more than
-half the tuning rows have a null estimate, answer `partial` and say the estimate base is too thin
-to rank.
+Verdict (your judgment; state the basis in `prose`, using `est_daily_seconds_saved` and the slow
+calls each row would remove where you have them): `sufficient` if the owned remedies, built to
+their stated acceptance, would deliver most of the saving your tuning rows describe; `partial` if a
+substantial part but not most; `insufficient` if little of it. If your estimates are too thin to
+judge, answer `partial` and say so.
 
 Q4. How does the path rate against industry practice, and do the engine and the language stand up?
 Rate each row of the EXTERNAL CHECKLIST below in `external_checklist` (`met` | `partial` | `missed`;
@@ -381,19 +392,22 @@ Rate each row of the EXTERNAL CHECKLIST below in `external_checklist` (`met` | `
 (DuckDB with DuckLake) and the Lambda runtime language (Python). Rows for `compute_substrate` and
 `sync_request_model` are optional. Row verdicts:
 - `challenge_with_alternative`: requires a measured share of latency attributable to the subject AND
-  a concrete named alternative with its migration cost, expected gain and what would be lost.
-- `keep_and_tune`: the subject carries a material measured share, and tuning rows in your inventory
-  address it.
-- `keep`: you measured the subject's share and it is not material.
+  a concrete named alternative with its migration cost, expected gain and what would be lost. Use it
+  only when you judge the alternative's gain over tuning large enough to justify the migration.
+- `keep_and_tune`: the subject carries a material share, and tuning rows in your inventory address
+  it. This is also the verdict when a share is material and you can name no better alternative.
+- `keep`: you measured the subject's share and judge it not material.
 - `undetermined`: you could not measure the subject's share (always the case under
   `meta.degraded_empirical`).
-Measuring a share: the denominator is the excess seconds per day of Q7's cost method, summed over
-the four routes. The engine's share is the part of it spent in native DuckDB and DuckLake work
-(extension loads, ATTACH, statement execution including file reads and catalog metadata). The
-runtime language's share is the part spent in the Python runtime and Python-level code (interpreter
-start, module imports, Python-side serialisation, client-side Python overhead). Time you cannot
-assign to either (network, AWS services, waiting) belongs to neither. A share is material at 10
-percent or more. Where a phase mixes the two and you cannot split it, say so and use `undetermined`.
+Measuring a share: state in `measured_share` what you measured, how, and against what total. Count
+toward a subject only time that would change if the subject were replaced: for the engine, time in
+DuckDB and DuckLake work that a different engine or table format would not spend; for the runtime
+language, time in the Python interpreter and Python-level code (interpreter start, imports,
+serialisation). Time that a different file layout, a different place for initialisation or a
+different client would remove under the same engine and language is not the subject's share; record
+it as the corresponding tuning row. Whether a share is material is your judgment; give the
+reasoning in `rationale`. On the `engine` row, say in `concerns` whether your verdict is about the
+in-Lambda query engine (DuckDB), the table format and catalog (DuckLake), or both.
 "It would be faster" without a measured share is never `challenge_with_alternative`.
 Verdict for Q4, from the checklist alone: `sufficient` if no row is `missed` and at most two are
 `partial`; `insufficient` if four or more rows are `missed`; `partial` in every other case. This
@@ -428,10 +442,9 @@ Q5. How and why was the system built this way? Reconstruct the decision points i
 at each, what latency evidence existed and what the process did with it. Classify each row `kind` as
 `chosen-tradeoff` (someone weighed the latency cost with evidence in hand and accepted it),
 `unexamined-consequence` (the latency effect was not examined at that point) or `unclear`. Mark
-`bears_on_dominant_cost: yes` on rows that led to a dominant phase. A phase is dominant on a route
-if its `share_of_calls_over_29s` is the largest on that route or is at least 0.25; on a route with
-no call over 29 s, the dominant phase is the one with the largest `p95_ms`.
-Verdict, over rows with `bears_on_dominant_cost: yes`, ignoring `unclear` rows: `accepted-tradeoff`
+`bears_on_main_costs: yes` on the rows that, in your judgment, led to the costs your Q1 prose names
+as the main ones.
+Verdict, over rows with `bears_on_main_costs: yes`, ignoring `unclear` rows: `accepted-tradeoff`
 if all are `chosen-tradeoff`; `process-gap` if all are `unexamined-consequence`; `mixed` otherwise
 (including when no row qualifies; say so).
 
@@ -460,6 +473,8 @@ uses the `answers` shape (Section 14), not a verdict.
   AWS may lower the account's Region-level throttle quota when it raises the integration timeout;
   another records as unproven whether the egress proxy holds a request open for 120 s.)
 - Which of the session flows could be answered without calling a Lambda at all?
+- How likely is an agent session to meet a call over 29 s, and which session flows would break if
+  the timeout went back to 29 s today?
 - Is anything in the record measuring the wrong thing (a gate or metric whose subject is not the
   latency an agent experiences)?
 
@@ -774,9 +789,9 @@ Counterfactual tests, applied to every sample you use:
 - For a claim that phase P causes slow calls: "if P cost zero, would this call's `Duration` have
   been at or under 29 s?" Count the calls for which the answer is yes.
 - For a claim that cause X explains a cost: find a pair of observations that differ in X and little
-  else (the same verb on a reused and a fresh connection; the same verb before and after a merge
-  pass; a reconnect after a reset against a new execution environment; the ops reader against the
-  telemetry reader) and report whether the cost moves with X. A cause with no such pair is
+  else (the same verb on a reused and a fresh connection; calls shortly before and after a merge
+  pass in the baseline logs; a reconnect after a reset against a new execution environment; the ops
+  reader against the telemetry reader) and report whether the cost moves with X. A cause with no such pair is
   HYPOTHESIS.
 
 Part A -- Lambda logs (read-only). Log groups `/aws/lambda/agent-platform-ducklake-reader`,
@@ -790,7 +805,8 @@ lines (part C) count too. One command per function fetches both line types with 
 reads fall inside the baseline; they are a handful of calls and need no exclusion.
 
 This script applies the path rules of Section 4 to one such file and prints per-path counts and
-percentiles. Use it or extend it (per-day splits, the tier simulation of Section 14):
+percentiles. Use it or extend it (per-day splits; per-verb and per-caller splits on the telemetry
+writer):
 
 ```
 bin/venv-python - <scratch>/reader.json <<'PY'
@@ -863,7 +879,8 @@ closed list:
   (any registered verb), `read_ops_current` (with a `filter` or a `limit`), `read_ops_history` (with
   a `key` or a `limit`), `dq_check`.
 - `ops/writer`: `describe`, `attach_check`, `connect_probe`, `reset_warm_connection`.
-- `telemetry/reader`: `describe`, `attach_check`, `named_read`.
+- `telemetry/reader`: `describe`, `attach_check`, `named_read` (any served verb; keep a window
+  parameter to one day or less).
 - `telemetry/writer`: `describe`, `attach_check`.
 Any other action is forbidden, in particular every write verb, `create_ops_tables`, `write_probe`
 and the writer's smoke, churn and probe actions other than those listed.
@@ -913,9 +930,9 @@ Rules for probes:
   credentials line of the recipe; a run that sends a request counts as one live call.
 - A `named_read` response does not say which path it took. After a batch of probes on one route,
   read that route's log once (a part A command over the last few minutes, with `logStreamName`) and
-  match each probe to its line by order, action, and `elapsed_ms` close to `wall_ms` minus the
-  connectionless round trip you measured. Note the UTC time of each probe to make the match. Where a
-  match is not unique, discard the probe.
+  match each probe to its line by time, order and action (and `verb` on the telemetry writer),
+  checking that `elapsed_ms` is plausible against the probe's `wall_ms`. Note the UTC time of each
+  probe to make the match. The match is your judgment; where it is not unique, discard the probe.
 - After every `reset_warm_connection`, send your own measured call on the same route at once, so
   that your call pays the reconnect and no other caller inherits it. The reset may land on one
   environment and the next call on another; confirm from the stream names. You cannot target an
@@ -936,9 +953,9 @@ recorded in `meta.contract_notes` and skipped.
 - P4 Empirical pass (Section 11), applying the counterfactual tests.
 - P5 Rate the rubric (Section 8) and the external checklist (Q4).
 - P6 Dedup every finding and every inventory row's ownership (Section 13).
-- P7 Build `candidate_adjudication`, `latency_decomposition`, `optimisation_inventory`,
-  `timeout_outlook`, `flow_round_trips`, `timeout_ladder`, `architecture_challenges` and
-  `process_trace` (Section 14).
+- P7 Build `candidate_adjudication`, `latency_decomposition`, `slow_calls`,
+  `optimisation_inventory`, `timeout_outlook`, `flow_round_trips`, `timeout_ladder`,
+  `architecture_challenges` and `process_trace` (Section 14).
 - P8 Synthesize: answer Q1-Q7 by their pinned rules, then compute severity and maturity LAST
   (Section 15).
 
@@ -963,7 +980,9 @@ row -- `recs_related` always returns its nearest matches; record the raw returne
 `roadmap_crossref.note`. `dedup_hit_count` counts owning hits only. A hit means a sufficiency
 assessment (`planned-insufficient` or `planned-unbuilt`) or a rejection (Section 2) -- never a fresh
 discovery. A `novel` finding requires a recorded negative search (`dedup_hit_count: 0`); a `novel`
-finding without one is HYPOTHESIS.
+finding without one is HYPOTHESIS. A defect that came from no candidate and that an owner already
+has built or in progress is not filed at all; `rejected_candidates` is for candidates only. Name
+the owner on the inventory row it relates to, if there is one.
 
 DO NOT FLAG (deliberate constraints; you may assess how they are implemented and what they cost in
 latency, never whether they should exist):
@@ -1020,8 +1039,11 @@ audit:
     - {route: ops/reader|ops/writer|telemetry/reader|telemetry/writer,
        path: new_env|fresh_connection|reused_connection|connectionless|unattributed,
        phase: client_overhead|transport|lambda_init|connect|first_statement|first_file_touch|steady_statement|catalog_wake,
-       p50_ms: 0, p95_ms: 0, n: 0, source: "", share_of_calls_over_29s: 0.0,
-       confidence: CONFIRMED|HYPOTHESIS, note: ""}
+       p50_ms: 0, p95_ms: 0, n: 0, source: "", confidence: CONFIRMED|HYPOTHESIS, note: ""}
+  slow_calls:
+    - {route: "", sampled_calls: 0, over_29s: 0,
+       over_29s_by_path: {new_env: 0, fresh_connection: 0, reused_connection: 0, unattributed: 0},
+       main_cause: "", confidence: CONFIRMED|HYPOTHESIS}
   optimisation_inventory:
     - {id: OPT-01, finding: <finding id or null>, mechanism: "", kind: tuning|redesign,
        alternative_group: <label or null>, routes: [],
@@ -1035,11 +1057,9 @@ audit:
        confidence: CONFIRMED|HYPOTHESIS}
   timeout_outlook:
     - {route: "", current_timeout_s: 120, sampled_calls: 0, observed_p99_s: 0, observed_max_s: 0,
-       observed_over_29s: 0, after_tier_1_over_29s: 0, after_tier_2_over_29s: 0,
-       after_tier_3_over_29s: 0, after_tier_2_p99_s: 0,
-       fits_29s_after: n/a|tier_1|tier_2|tier_3|none|unknown,
+       observed_over_29s: 0, est_over_29s_after_tuning: 0, est_over_29s_after_redesign: 0,
        verdict: within_default|inherent|avoidable-by-tuning|avoidable-by-redesign|undetermined,
-       confidence: CONFIRMED|HYPOTHESIS, note: ""}
+       basis: "", confidence: CONFIRMED|HYPOTHESIS}
   flow_round_trips:
     - {flow: "", round_trips: 0, avoidable_round_trips: 0, blocks_interactive_turn: yes|no,
        est_wall_ms_reused: 0, est_wall_ms_new_env: 0, evidence: "file:line", note: ""}
@@ -1048,12 +1068,13 @@ audit:
        evidence: "file:line"}
   architecture_challenges:
     - {subject: engine|runtime_language|compute_substrate|sync_request_model,
-       measured_share: "", verdict: keep|keep_and_tune|challenge_with_alternative|undetermined,
+       concerns: query_engine|table_format|both|n/a, measured_share: "",
+       verdict: keep|keep_and_tune|challenge_with_alternative|undetermined,
        alternative: "", migration_cost: "", expected_gain: "", what_is_lost: "",
        rationale: "", confidence: CONFIRMED|HYPOTHESIS}
   process_trace:
     - {date: "", artifact: "", latency_evidence_available: "", what_the_process_did: "",
-       kind: chosen-tradeoff|unexamined-consequence|unclear, bears_on_dominant_cost: yes|no,
+       kind: chosen-tradeoff|unexamined-consequence|unclear, bears_on_main_costs: yes|no,
        caught_today_by: "", note: ""}
   per_surface_assessment:
     - {surface: S1, maturity: frontier|strong|solid|nascent, strengths: "", top_gaps: [<finding ids>]}
@@ -1086,12 +1107,14 @@ Rules, binding:
 - COUNTING INVARIANT: `findings[]` is the SOLE enumerated list of defects. `total_findings =
   len(findings) = novel_count + planned_insufficient_count + planned_unbuilt_count`. Candidates
   rejected under Section 2 live in `rejected_candidates`, NOT in findings. Every other block
-  (`question_answers`, `candidate_adjudication`, `latency_decomposition`, `optimisation_inventory`,
-  `timeout_outlook`, `flow_round_trips`, `timeout_ladder`, `architecture_challenges`,
+  (`question_answers`, `candidate_adjudication`, `latency_decomposition`, `slow_calls`,
+  `optimisation_inventory`, `timeout_outlook`, `flow_round_trips`, `timeout_ladder`, `architecture_challenges`,
   `process_trace`, `rubric_ratings`, `per_surface_assessment`) is a system of record, referenced from findings where relevant and never
   counted as findings. `top_improvements` (at most 5) and `highest_leverage_change` MUST be finding
-  ids; with zero findings, write `[]` and `null`. `top_opportunities` (at most 5) MUST be inventory
+  ids; with zero findings, write `[]` and `null`. Order `top_improvements` by severity, then observed
+  before static, then agent-facing before CI-only. `top_opportunities` (at most 5) MUST be inventory
   ids, the five largest `est_daily_seconds_saved`.
+- `evidence_kind` is `observed` if any sample you took supports the finding, otherwise `static`.
 - `candidate_adjudication` has exactly one row per candidate C1-C21. `findings` is non-empty only
   when `outcome` is `finding`. Every `holds-not-defect`, `false` and `covered` row has a matching
   `rejected_candidates` row whose `candidate` field starts with the candidate id.
@@ -1115,46 +1138,30 @@ Rules, binding:
   apply, days; L = several plans, a migration or a new Decision, weeks. `risk`: low = reverted by a
   revert, touches no data, layout or auth path; medium = touches the request path or infrastructure,
   with a rollback; high = touches data layout, the catalog or auth, or is hard to reverse.
-- `est_saving` is the saving per affected call: the p50 and p95 of what an affected call would
-  save. State the arithmetic in `basis`, including the rule you used to decide which sampled calls
-  the row affects (that selection is your judgment; record it). `path_affected: all` matches every
-  path; `failure` marks rows about timeouts and retries. `calls_affected_share` is the fraction of
-  the sampled calls on the listed routes (taken together) that the row would speed up.
-- Per-call saving, used by `est_daily_seconds_saved` and by the tiers. Where the removed phase is
-  recorded per call (`lambda_init`, `connect`, `first_statement`), a call's saving is that call's
-  measured cost of the phase times the fraction of the phase the row removes (state the fraction in
-  `basis`). Where it is not recorded per call (`client_overhead`, `transport`, `first_file_touch`,
-  `catalog_wake`, a round trip removed from a flow), use the row's `est_saving.p50_ms` as a flat
-  amount for each affected call, and set `confidence: HYPOTHESIS` unless a same-verb probe pair
-  measured it. Rows that remove the same phase on the same path either share an `alternative_group`
-  or state in `basis` how the phase is split between them; the total taken off one phase of one
-  call never exceeds its cost. `failure` rows are left out of both calculations unless you can count
-  the affected calls in your sample (for example REPORT lines with `Status: timeout`).
-- `est_daily_seconds_saved` is the sum of per-call savings over the sampled calls the row affects,
-  divided by the sample's days and by 1000. Where you cannot estimate, write `null` for the numbers,
-  say why in `basis`, and set `confidence: HYPOTHESIS`. `monthly_cost_usd` is the added running cost
-  at sampled traffic (0 when none); `cost_basis` states the price and quantity assumed.
-- Tiers for `timeout_outlook`: tier 1 = every `tuning` row of effort XS or S; tier 2 = every
-  `tuning` row; tier 3 = every row. Within an `alternative_group` a tier applies only one row: the
-  one in that tier with the largest non-null `est_saving.p95_ms`. To evaluate a tier on a route,
-  re-compute over your sampled calls on that route: subtract from each call's `Duration` its
-  per-call saving under every applied row (never taking a call below the route's
-  `reused_connection` p50 `Duration`), then count the adjusted calls still over 29 s.
-  `sampled_calls`, `observed_p99_s`, `observed_max_s` and `observed_over_29s` are REPORT `Duration`
-  over your baseline window, all paths together; `after_tier_N_over_29s` are the counts after each
-  tier and `after_tier_2_p99_s` is the p99 of the tier-2 adjusted sample. `fits_29s_after` is `n/a`
-  for a `within_default` route (the after-tier fields are then `null`); otherwise the first tier
-  after which the route fits 29 s by Q2's definition, `none` if no tier reaches it, `unknown` if
-  rows that affect this route's calls over 29 s have null estimates (the after-tier fields are then
-  `null`). One row per route. The per-route `verdict` follows Q2's rule.
+- Inventory estimates are yours; state the arithmetic and the sample behind each in `basis`.
+  `est_saving` is the saving per affected call (the p50 and p95 of what an affected call would
+  save). `calls_affected_share` is the fraction of the sampled calls on the listed routes, taken
+  together, that the row would speed up. `est_daily_seconds_saved` is the wall time the row would
+  save per day at sampled traffic. `path_affected: all` means every path; `failure` marks rows about
+  timeouts, deadlines and retries. Do not count the same time twice: rows that remove the same cost
+  share an `alternative_group`, and a row never saves more than the cost it removes. Where you
+  cannot estimate, write `null`, say why in `basis`, and set `confidence: HYPOTHESIS`.
+  `monthly_cost_usd` is the added running cost at sampled traffic (0 when none); `cost_basis` states
+  the price and quantity assumed.
+- `timeout_outlook`: one row per route. The observed fields are REPORT `Duration` over your
+  baseline window, all paths together. The two estimates and the verdict follow Q2; an estimate is
+  `null` when you cannot make it, and `est_over_29s_after_redesign` is `null` when you have no
+  redesign row for the route.
+- `slow_calls`: one row per route. Counts come from your baseline sample by the path rules of
+  Section 4; `main_cause` is your judgment in a sentence, naming the phase or phases.
 - `architecture_challenges` has at least the `engine` and `runtime_language` rows. `alternative`,
   `migration_cost`, `expected_gain` and `what_is_lost` are required when `verdict` is
-  `challenge_with_alternative` and are empty strings otherwise.
+  `challenge_with_alternative` and are empty strings otherwise. `concerns` is `n/a` on rows other
+  than `engine`.
 - `process_trace` has at most 14 rows, in date order. `caught_today_by` is filled only on
   `unexamined-consequence` rows (Q6).
 - `latency_decomposition`: include a row only where you have a number or a stated reason for none
-  (`p50_ms: null` with `note`). `share_of_calls_over_29s` is the fraction of that route's calls with
-  `Duration` over 29 s for which this phase passes the first counterfactual test in Section 11.
+  (`p50_ms: null` with `note`).
 - `control_property_match` is REQUIRED whenever a compensating control is the reason for a
   dismissal: name the property the control exercises, cite where it operates (mechanism or
   file:line), and state why the control would FAIL if the defect were real. Otherwise it is an empty
@@ -1164,20 +1171,23 @@ Rules, binding:
 - Readers of the meta flags: the report's Intake section (below) prints every `meta` flag that is
   true, both call counters and `sample_windows`, so a reader knows what the numbers rest on.
 
-Write `audits/ducklake-api-latency-<sha>.md` with exactly these seven `## ` sections, in this
+Write `audits/ducklake-api-latency-<sha>.md` with exactly these eight `## ` sections, in this
 order. The word cap of 1500 applies to everything after the Intake section, counted with `wc -w`
 (table cells count as words).
 1. `## Intake`: audited commit, model, the true meta flags, `live_calls_used`, `resets_used`, the
-   sample windows.
-2. `## Where the time goes`: one short table (route by path, dominant phase and its cost).
+   sample windows, and `contract_notes` and `stale_anchors` when non-empty.
+2. `## Where the time goes`: one short table (route by path, main phase and its cost) and the
+   count of calls over 29 s per route.
 3. `## Is 120 s inherent`: a paragraph for Q2, with the per-route outlook.
-4. `## Optimisation inventory`: a table of at most the 12 rows with the largest
+4. `## Findings`: a table of every finding (id, severity, title), most severe first.
+5. `## Optimisation inventory`: a table of at most the 12 rows with the largest
    `est_daily_seconds_saved` (the YAML holds them all), grouped by effort (XS, S, M, L in that
    order) and, within a group, ordered by `est_daily_seconds_saved` descending. Columns: mechanism,
    saving per call (p50 / p95), seconds per day, monthly cost, risk, owner.
-5. `## Engine and language`: the two verdicts and their basis, a paragraph each.
-6. `## How it came to be built this way`: Q5, and whether present governance catches it (Q6).
-7. `## Not determined`: what you could not determine, and what data would settle it.
+6. `## Engine and language`: the two verdicts and their basis, a paragraph each.
+7. `## How it came to be built this way`: Q5, and whether present governance catches it (Q6).
+8. `## Open points`: the Q7 answers the operator most needs, what you could not determine, and what
+   data would settle it.
 No finding or opportunity appears in the report that is not in the YAML.
 
 ## 15. SEVERITY + MATURITY
@@ -1207,8 +1217,8 @@ Maturity, computed LAST, per surface, top-down, first match wins. A finding coun
 - solid = at most 1 critical.
 - nascent = otherwise.
 The top tier remains reachable where you argued a property-matched compensating control; this
-prompt's framing does not foreclose it. For the designed-unbuilt parts of S4 and S5, rate the design
-as written.
+prompt's framing does not foreclose it. In the rubric, rate the designed-unbuilt parts of S4 and S5
+on the design as written.
 
 ## 16. COMMIT / PR MECHANICS
 
