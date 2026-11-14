@@ -147,7 +147,8 @@ Evidence base and claim marks:
   the rec store or the telemetry API until the cutover on 2026-11-14 (Decision 256's Problem) **[repo]**. Agent
   sessions now sign as one proxy-held agent user with no role assumption (Decision 256 cl.1-2) and reach the
   reader and writer verbs through one IAM-authenticated REST API (Decision 255 cl.1); the verbs and the single
-  backend are unchanged (Decision 255 cl.5), so Decision 84 I-1 and I-3 read as before. The changed client and
+  backend are unchanged; Decision 255 cl.5 amends Decision 84 I-1 so its closed boundary covers either transport,
+  and the named-verb boundary this report relies on (I-1, I-3) holds. The changed client and
   transport files (src/common/ducklake_reader_client.py, scripts/ops_portal/writer_transport.py,
   scripts/telemetry_capture/{read_route,transport}.py, the telemetry writer handler) change the route, not any verb,
   table or contract this report cites; no report anchor sits in them **[repo: git diff]**.
@@ -159,7 +160,10 @@ Evidence base and claim marks:
 - **rec-5144** (Critical, ci_rca, filed 2026-11-13 16:32Z): the telemetry-arrival check found the merged session of
   #2022 (2026-11-13 10:04Z) missing from telemetry_sessions. It falls inside the outage, so capture likely stopped
   then; config/telemetry/arrival.yaml carries no lost window for it at 0d51ede0 **[recs; repo; cause inferred]**.
-  It is past its repair SLO, so `red_overlap` blocks every plan until it is repaired (Decision 226 cl.3).
+  It is past its repair SLO. Decision 226 cl.4 made a past-SLO red block every new plan, but Decision 254's
+  2026-11-12 amendment replaced that block with an alarm to the operator; `red_overlap` (red-main-recovery.yaml
+  rule 1, `slo_breached`) has not caught up and still exits 1 for every plan, so this plan logs a deferral rationale
+  (planning skill Step 8) **[repo]**.
 - rec-5130 is closed and rec-4474 (cold window reads, High) is open **[recs, 2026-11-14]**.
 - No probe input that a W1 hermetic step reads moved its result except where section 12 says **[probe]**.
 
@@ -668,15 +672,17 @@ not a reading (section 8).
 
 ## 12. Probe re-runs (each W1 plan's own hermetic VPs, 2026-11-12 to 2026-11-14, last at 0d51ede0)
 
-Each W1 plan's hermetic verification steps were re-run with a 200 s limit per step; steps that fetch several old SHAs, run
-`--pre` or render the plan document were skipped. "Pass" means exit 0 and every `expected_literals` string printed.
+Each W1 plan's hermetic verification steps were re-run with a 200 s limit per step. Each plan's own plan-document
+render, branch-scope diff and `--pre` steps were skipped, as was friction VP 3 (it reads one fixed old commit);
+friction VP 1 was run by hand. "Pass" means exit 0 and every `expected_literals` string printed.
 The 2026-11-10 run at f866f98b is superseded, because probe inputs moved in between (section 1.2). The suite ran at
 d8283f55, 3f8edd12, b4d76e92 and 5291a39e, each time main had moved probe inputs, in a venv synced to main's pins.
 The only change across the four runs is deliberation VP 3, which runs since mcp 2.x landed (#1984); the 5291a39e run
 (after #1987's Terraform and check changes) matched b4d76e92 step for step. On 2026-11-14 the suite ran again at
 0d51ede0, after the agent access cutover (#2036-#2038) moved probe inputs (section 1.3): every step printed what it
 printed at 5291a39e, and the three long simulations, given 900 to 2,400 s, finished and passed (cost VP 4, Goodhart
-VP 4, ladder VP 5). Two history-fetching steps failed once on a transient `git fetch` error and passed on a re-run.
+VP 4, ladder VP 5). Cost VP 1 and Goodhart VP 1, which fetch one old commit, failed on a transient `git fetch`
+error (run concurrently) and printed their earlier lines when re-run, Goodhart VP 1 alone.
 Raw outputs are not committed. **[probe]**
 
 | Component | Steps run | Pass | Differs from the pinned literal (what moved) | Did not finish |
@@ -732,7 +738,7 @@ rec-4438, rec-5077, rec-5080, rec-4031, rec-4606, rec-4388, rec-4696, rec-5079 a
 | rec-5097 | Friction G1 absorb with absorbed count; G2 NULL-name closes out of repeat runs; classifier_version 2 | Medium | draft P5; R3 |
 | rec-4706 (note) | `component` stamp on the telemetry reader's request line | - | draft P4, folded |
 | rec-4606 (note) | `rec_ids` held until back-validation planning (R1); the other nine decided there (S6, proposed); the named gate list (S4, proposed; rec-4913 closed, rec-4914 declined; rec-4696's apply route under Decisions 257 and 258; CD.46, 47, 48, 50, 51); this report's path | - | R1, S4, S6 |
-| rec-4438 (note) | The monitor's per-day counts become rows of R2's settled kind only once the amending Decision exists, and only if it admits a non-verb producer; the acceptance below is stale | - | R2 |
+| rec-4438 (note) | The monitor's per-day counts become rows of R2's settled kind only once the amending Decision exists, and only if it admits a non-verb producer; otherwise the acceptance's separate results table may stay its home | - | R2 |
 | rec-5077 (note) | R2 as ruled, its precondition, and the open design points of section 8 | - | R2 |
 | rec-4388 (note) | The one-filer dated exception and its no-third-dedupe condition, at Decision 221 cl.7's coverage home | - | X2 |
 | rec-4696 (note) | Technical dependency only: the deliberation verb reads no content; the gate still holds; a proposal shown with notice, not a ruling | - | S2 |
@@ -778,8 +784,9 @@ workspace tells it, on the coordinator log, that T3.4 is near (X1) **[reported]*
 
 - **The feedback-loop gate** (operator, 2026-11-10): no wave 2-4 plan or build starts until alarm triage; the
   GitHub Environment tidy (rec-4913, closed 2026-11-12 with #1986; rec-4914 declined) and the content reader lock
-  (rec-4696; an operator CloudShell apply under Decision 257 cl.2, and a Decision 258 re-decision if the boundary
-  passes 5,696 bytes); the friction recs rec-4605 and rec-4959; and the operator's filing of the staged candidate decisions
+  (rec-4696; an operator CloudShell apply under Decision 257 cl.2. Its Denies are not in the boundary yet and
+  Decision 258 cl.1 grants no headroom for any other fence, so unless its fence lives outside the boundary its
+  build passes the 5,696-byte trigger and needs the operator's /plan re-decision first, cl.2-3); the friction recs rec-4605 and rec-4959; and the operator's filing of the staged candidate decisions
   with the open answers below are complete. In practice the filing set is CD.46, CD.47, CD.48, CD.50 and CD.51:
   CD.49 is retired into CD.50, and CD.52's substance landed as Decision 199's 2026-10-16 note (its T2.52
   reactivation half is open). Read-only re-grounding (this report) may run first. S2 is a technical reading and
@@ -833,7 +840,7 @@ confirms it (section 16).
 | R3 | Friction G1: absorb the tool_error into the gate label, and report the absorbed count | 2026-11-12 | rec-5097 |
 | R4 | This report is a dated snapshot; lasting rulings live in recs | 2026-11-11 | this section (about this report only) |
 | R5 | rec-4028 (LiteLLM producer) is the Agents in GitHub workspace's; this workspace reviews its reasoning mapping | 2026-11-11 | rec-4028 note |
-| X1 | T1.13 is the CI Reform workspace's, which plans its close-out when this workspace says T3.4 is near; T1.13 c2's back-validation is ci-rca's own `ops_data_portal --back-validate`, not this loop's; rec-4233 is CI Reform's; rec-4696 is this workspace's. Read against Decision 257 (2026-11-14): its build adds Denies to the CI apply boundary, which is in the protected set, so the operator applies that plan whole in CloudShell together with whatever other bootstrap change is pending, and the apply plans fresh (cl.2-3, cl.6); growth past Decision 258's 5,696-byte trigger sends the fence's home back to the operator through /plan (cl.2-3) | 2026-11-12 | coordinator log; rec-4606 note (gate) |
+| X1 | T1.13 is the CI Reform workspace's, which plans its close-out when this workspace says T3.4 is near; T1.13 c2's back-validation is ci-rca's own `ops_data_portal --back-validate`, not this loop's; rec-4233 is CI Reform's; rec-4696 is this workspace's. Read against Decision 257 (2026-11-14): its build adds Denies to the CI apply boundary, which is in the protected set, so the operator applies that plan whole in CloudShell together with whatever other bootstrap change is pending, and the apply plans fresh (cl.2-3, cl.6); Decision 258 cl.1 grants no headroom for any other fence, so unless its fence lives outside the boundary its build passes the 5,696-byte trigger and the operator re-decides the fence's home through /plan first (cl.2-3) | 2026-11-12 | coordinator log; rec-4606 note (gate) |
 | X2 | ci-rca and every rec_episode filer stay separate filers, recorded as a dated exception and revisited when the loop's filer is planned; the loop's filer reuses their dedupe and adds no third. The route (scope reading or numbered Decision) is open (section 16) | 2026-11-12 | coordinator log; rec-4388 note |
 | S1 | Integer verb versions beside the digest (the digest's scope to narrow first, section 8) | 2026-11-11 | rec-5080 |
 | S2 | As a technical dependency, the content reader deploy is needed only for forensic deliberation reads; the operator's gate is unchanged | 2026-11-11 | rec-4696 note |
@@ -846,7 +853,8 @@ confirms it (section 16).
 
 ## 18. Known gaps
 
-- The W1 VPs that need `--pre`, render a plan document or fetch several old SHAs were skipped (section 12).
+- Each W1 plan's plan-document render, branch-scope diff and `--pre` steps, and friction VP 3, were skipped (section
+  12).
 - G1 and G2 were re-read against the live SQL, not re-probed with vectors (rec-5097 adds them).
 - Which hooks rec-4959 affects, and the 17 friction vectors' exact coverage, were not re-derived.
 - Whether the post-merge `deterministic_auto_close` venue can close a telemetry-routed acceptance without a verdict
