@@ -34,6 +34,10 @@ _PERSONA_VERDICT_REASON = (
     "created by the first approved terraform-github-apply.yml dispatch naming it in gate_change (Decision 248,"
     " PLAN-persona-verdict-credential); the remote object does not exist before it"
 )
+_BOOTSTRAP_APPLY_REASON = (
+    "created by the approved terraform-github-apply.yml dispatch naming it (PLAN-bootstrap-ci-gated-apply, VP 7);"
+    " the remote object does not exist before it"
+)
 EXEMPT: dict[str, str] = {
     "github_repository_environment.approved_text": _APPROVED_TEXT_REASON,
     "github_repository_environment_deployment_policy.approved_text_main": _APPROVED_TEXT_REASON,
@@ -41,6 +45,8 @@ EXEMPT: dict[str, str] = {
     "github_repository_environment_deployment_policy.tf_github_apply_main": _APPROVED_TEXT_REASON,
     "github_repository_environment.persona_verdict": _PERSONA_VERDICT_REASON,
     "github_repository_environment_deployment_policy.persona_verdict_main": _PERSONA_VERDICT_REASON,
+    "github_repository_environment.tf_bootstrap_apply": _BOOTSTRAP_APPLY_REASON,
+    "github_repository_environment_deployment_policy.tf_bootstrap_apply_main": _BOOTSTRAP_APPLY_REASON,
 }
 
 _REQUIRED_IGNORED = (

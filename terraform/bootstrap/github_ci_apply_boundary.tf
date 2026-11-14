@@ -338,6 +338,18 @@ locals {
             ]
           }
         }
+      },
+      {
+        # PLAN-bootstrap-ci-gated-apply: bootstrap-apply may change a bounded role's grants after a names-only
+        # review, and this ceiling allows UpdateAssumeRolePolicy, DeleteRole, DetachRolePolicy, DeleteRolePolicy
+        # and PassRole on "*", so without this Deny such a grant could reach the protected roles. Compact on
+        # purpose (headroom): the six families cover every write a role takes (Attach, Create, Delete, Detach,
+        # Put, PassRole, Tag, Untag, Update); IAM's reads (Get*, List*, Simulate*, Generate*) match none. The
+        # account segment is * because a wider Deny is safe and saves bytes.
+        Sid      = "DenyBoundedWriteOnProtectedRoles"
+        Effect   = "Deny"
+        Action   = ["iam:A*", "iam:C*", "iam:D*", "iam:P*", "iam:T*", "iam:U*"]
+        Resource = ["arn:aws:iam::*:role/Platform*", "arn:aws:iam::*:role/bootstrap-*", "arn:aws:iam::*:role/github-settings-*", "arn:aws:iam::*:role/platform-security-*", "arn:aws:iam::*:role/ducklake-api-*"]
       }
     ]
   })

@@ -207,3 +207,36 @@ resource "github_repository_environment_deployment_policy" "persona_verdict_main
   environment    = github_repository_environment.persona_verdict.environment
   branch_pattern = "main"
 }
+
+# GitHub Environment: tf-bootstrap-apply (PLAN-bootstrap-ci-gated-apply).
+#
+# The gate for terraform-bootstrap-apply.yml's apply job: the bootstrap-apply role's OIDC trust names this
+# Environment as its only subject. Required reviewers from var.gated_apply_reviewer_user_ids, no admin bypass, and
+# the explicit main-only policy (rec-4651). Created by an approved terraform-github-apply.yml dispatch that names
+# both addresses. Destroying it fails open: GitHub would auto-create an unprotected Environment of the same name,
+# so the approvals preflight refuses a run against it.
+resource "github_repository_environment" "tf_bootstrap_apply" {
+  repository          = github_repository.this.name
+  environment         = "tf-bootstrap-apply"
+  prevent_self_review = false
+  can_admins_bypass   = false
+
+  reviewers {
+    users = var.gated_apply_reviewer_user_ids
+  }
+
+  deployment_branch_policy {
+    protected_branches     = false
+    custom_branch_policies = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "github_repository_environment_deployment_policy" "tf_bootstrap_apply_main" {
+  repository     = github_repository.this.name
+  environment    = github_repository_environment.tf_bootstrap_apply.environment
+  branch_pattern = "main"
+}
