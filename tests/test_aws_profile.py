@@ -12,7 +12,7 @@ from unittest import mock
 
 from scripts.aws_profile import resolve_aws_profile
 
-_CREDENTIAL_ENV_KEYS = ("AWS_ACCESS_KEY_ID", "AWS_LAMBDA_FUNCTION_NAME", "AWS_PROFILE")
+_CREDENTIAL_ENV_KEYS = ("AWS_ACCESS_KEY_ID", "AWS_LAMBDA_FUNCTION_NAME", "AWS_PROFILE", "AWS_CONFIG_FILE")
 
 
 def _env(**overrides: str) -> dict[str, str]:
@@ -54,3 +54,56 @@ def test_env_credentials_short_circuit_explicit_override():
     # even if a caller passes an explicit profile.
     with mock.patch.dict(os.environ, _env(AWS_ACCESS_KEY_ID="AKIAEXAMPLE"), clear=True):
         assert resolve_aws_profile("explicit-profile", default="agent_platform") is None
+
+
+_SELF_SUFFICIENT = "[profile agent_platform]\nregion = eu-west-2\ncredential_process = /x/placeholder\n"
+
+
+def _with_config(tmp_path, text: str | None, **overrides: str) -> dict[str, str]:
+    path = tmp_path / "config"
+    if text is not None:
+        path.write_text(text, encoding="utf-8")
+    return _env(AWS_CONFIG_FILE=str(path), **overrides)
+
+
+def test_proxy_placeholder_env_credentials_keep_a_self_sufficient_profile(tmp_path):
+    for akid in ("proxy-injected", "any-other-placeholder"):
+        with mock.patch.dict(os.environ, _with_config(tmp_path, _SELF_SUFFICIENT, AWS_ACCESS_KEY_ID=akid), clear=True):
+            assert resolve_aws_profile() == "agent_platform"
+            assert resolve_aws_profile("agent_platform") == "agent_platform"
+
+
+def test_env_credentials_with_a_profile_lacking_credential_process_use_the_default_chain(tmp_path):
+    for text in (
+        None,
+        "[profile other]\ncredential_process = /x\n",
+        "[profile agent_platform]\nregion = eu-west-2\n",
+        "not ini [",
+    ):
+        with mock.patch.dict(os.environ, _with_config(tmp_path, text, AWS_ACCESS_KEY_ID="AKIAEXAMPLE"), clear=True):
+            assert resolve_aws_profile() is None
+
+
+def test_lambda_never_takes_a_profile_even_with_a_config(tmp_path):
+    with mock.patch.dict(os.environ, _with_config(tmp_path, _SELF_SUFFICIENT, AWS_LAMBDA_FUNCTION_NAME="fn"), clear=True):
+        assert resolve_aws_profile() is None
+
+
+def test_name_precedence_is_checked_against_the_config_under_env_credentials(tmp_path):
+    text = _SELF_SUFFICIENT + "[profile custom]\ncredential_process = /y\n[default]\ncredential_process = /z\n"
+    env = _with_config(tmp_path, text, AWS_ACCESS_KEY_ID="proxy-injected", AWS_PROFILE="custom")
+    with mock.patch.dict(os.environ, env, clear=True):
+        assert resolve_aws_profile() == "custom"
+        assert resolve_aws_profile("agent_platform") == "agent_platform"
+        assert resolve_aws_profile("absent") is None
+    with mock.patch.dict(os.environ, _with_config(tmp_path, text, AWS_ACCESS_KEY_ID="proxy-injected"), clear=True):
+        assert resolve_aws_profile(default="default") == "default"
+
+
+def test_config_defaults_to_the_home_file_and_an_unreadable_path_counts_as_absent(tmp_path):
+    (tmp_path / ".aws").mkdir()
+    (tmp_path / ".aws" / "config").write_text(_SELF_SUFFICIENT, encoding="utf-8")
+    with mock.patch.dict(os.environ, _env(HOME=str(tmp_path), AWS_ACCESS_KEY_ID="proxy-injected"), clear=True):
+        assert resolve_aws_profile() == "agent_platform"
+    with mock.patch.dict(os.environ, _env(AWS_CONFIG_FILE=str(tmp_path), AWS_ACCESS_KEY_ID="proxy-injected"), clear=True):
+        assert resolve_aws_profile() is None
