@@ -95,3 +95,44 @@ def test_h_a_screen_step_after_the_credentials_step_is_refused(wf: dict[str, Any
     assert any(x.startswith("h:") for x in v.check_screen_first(wf))
     del wf["jobs"]["apply"]["steps"][_step(wf["jobs"]["apply"], "terraform_bootstrap_apply_gate.py screen")]
     assert len(v.check_screen_first(wf)) == 2
+
+
+def test_missing_workflow_is_reported_and_other_predicates_tolerate_it() -> None:
+    assert v.check_triggers(None) == ["a: terraform-bootstrap-apply.yml is missing"]
+    assert v.check_jobs(None) == []
+
+
+def test_b_an_extra_job_is_refused(wf: dict[str, Any]) -> None:
+    wf["jobs"]["extra"] = {"runs-on": "ubuntu-latest", "steps": []}
+    assert any("exactly preview and apply" in x for x in v.check_jobs(wf))
+
+
+def test_f_a_role_trust_not_using_the_shared_refs_local_is_refused(tree: Tree) -> None:
+    hcl = tree[2].replace("= local.bootstrap_ci_workflow_refs", "= []", 1)
+    assert any("job_workflow_ref" in x for x in v.check_hcl(hcl))
+
+
+def test_registered_check_passes_on_the_real_tree(capsys: pytest.CaptureFixture[str]) -> None:
+    failed: list[str] = []
+    v.validate_bootstrap_apply(failed)
+    assert failed == [] and "PASS: predicates (a)-(h)" in capsys.readouterr().out
+
+
+def test_registered_check_reports_violations(monkeypatch: pytest.MonkeyPatch, tree: Tree) -> None:
+    wf = copy.deepcopy(tree[0])
+    assert wf is not None
+    wf["on"]["pull_request"] = {}
+    monkeypatch.setattr(v, "_load_tree", lambda: (wf, *tree[1:]))
+    failed: list[str] = []
+    v.validate_bootstrap_apply(failed)
+    assert failed and all(f.startswith("bootstrap-apply: ") for f in failed)
+
+
+def test_registered_check_fails_closed_when_inputs_are_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom() -> Tree:
+        raise OSError("gone")
+
+    monkeypatch.setattr(v, "_load_tree", boom)
+    failed: list[str] = []
+    v.validate_bootstrap_apply(failed)
+    assert failed == ["bootstrap-apply: inputs unreadable, so no predicate ran"]
