@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -78,7 +79,7 @@ def test_root_resolution_from_chdir_cd_pushd_env_c_and_cwd() -> None:
 
 
 def test_secret_read_covers_every_value_verb() -> None:
-    sr = ("secret-read", "any")
+    sr = ("secret-read", "unknown")
     commands = [
         "aws secretsmanager get-secret-value --secret-id x",
         "aws secretsmanager batch-get-secret-value --secret-id-list x",
@@ -109,7 +110,7 @@ def test_secret_read_covers_every_value_verb() -> None:
     for command in commands:
         assert any(h[0] == "secret-read" for h in hits(command)), command
     assert ("secret-read", "/secret/x") in hits("aws ssm get-parameter --name /secret/x --with-decryption")
-    assert ("secret-read", "/p") in hits("aws ssm get-parameters-by-path --path=/p --with-decryption")
+    assert ("secret-read", "unknown") in hits("aws ssm get-parameters-by-path --path=/p --with-decryption")
     assert sr in hits("aws secretsmanager get-secret-value")
     for command in (
         "aws ssm get-parameter --name /x",
@@ -160,10 +161,10 @@ def test_heredoc_bodies_by_receiver() -> None:
     assert hits("git commit -F - <<'EOF'\n--profile agent_platform_admin get_secret_value\nEOF\n") == set()
     assert ("tf-state-change", "github") in hits("bash <<EOF\nterraform -chdir=terraform/github apply\nEOF\n")
     body = "import boto3\nboto3.client('x').get_secret_value()\n"
-    assert ("secret-read", "any") in hits(f"bin/venv-python - <<'EOF'\n{body}EOF\n")
+    assert ("secret-read", "unknown") in hits(f"bin/venv-python - <<'EOF'\n{body}EOF\n")
     admin = "boto3.Session(profile_name='agent_platform_admin')\n"
     assert ("admin-credential", ADMIN) in hits(f"bin/venv-python - <<'EOF'\n{admin}EOF\n")
-    assert ("secret-read", "any") in hits('python3 <<< "x(WithDecryption=True)"')
+    assert ("secret-read", "unknown") in hits('python3 <<< "x(WithDecryption=True)"')
     tf = ("tf-state-change", "github")
     assert tf in hits("cat <<< x\nterraform -chdir=terraform/github apply")
     assert tf in hits("echo $((1<<2))\nterraform -chdir=terraform/github apply")
@@ -287,3 +288,135 @@ def test_fast_path_and_lexer_errors() -> None:
 def test_contract_without_a_class_classifies_nothing_for_it() -> None:
     bare = {"gate": {"live_roots": {}, "admin_profiles": []}, "classes": []}
     assert match.classify("terraform -chdir=terraform/github apply", bare, "agent_platform", "/r") == []
+
+
+BNT = "bin/sync-terraform-assets.sh --tfvars"
+TFVARS = "/secret/agent-platform-terraform-personal-tfvars"
+
+
+def secret_targets(command: str) -> set[str]:
+    return {h.target for h in match.classify(command, CONTRACT, "agent_platform", "/work/repo") if h.cls == "secret-read"}
+
+
+def test_entry_point_target_is_its_declared_secret() -> None:
+    assert secret_targets("bash scripts/ci/neon_api_key.sh run -- echo --name harmless") == {"/secret/neon-api-key"}
+    assert secret_targets("bash scripts/ci/neon_api_key.sh --secret-id x --names /y") == {"/secret/neon-api-key"}
+    assert secret_targets("bash bin/sync-terraform-assets.sh --tfvars") == {TFVARS}
+    assert secret_targets("bash scripts/ci/terraform_github_apply.sh") == {"agent-platform-terraform-github-apply-app"}
+    assert all(h.exact for h in match.classify("bash scripts/ci/neon_api_key.sh", CONTRACT, "agent_platform", "/r"))
+    bare = {"classes": [{"id": "secret-read", "entry_points": ["scripts/ci/neon_api_key.sh"], "approval": "session"}]}
+    assert {h.target for h in match.classify("bash scripts/ci/neon_api_key.sh", bare, "agent_platform", "/r")} == {"unknown"}
+    wrong = {**bare, "classes": [{**bare["classes"][0], "entry_point_reads": {"scripts/ci/neon_api_key.sh": []}}]}
+    assert {h.target for h in match.classify("bash scripts/ci/neon_api_key.sh", wrong, "agent_platform", "/r")} == {"unknown"}
+
+
+def test_secret_targets_one_per_name() -> None:
+    ssm = "aws ssm {} --with-decryption"
+    assert secret_targets(ssm.format("get-parameters --names /a /b")) == {"/a", "/b"}
+    assert secret_targets(ssm.format("get-parameters --name /a /b")) == {"/a", "/b"}
+    assert secret_targets(ssm.format("get-parameters --name /a --name /b")) == {"/a", "/b"}
+    assert secret_targets(ssm.format("get-parameters --names=/a /b")) == {"/a", "/b"}
+    assert secret_targets(ssm.format("get-parameters --names /a,/b")) == {"/a", "/b"}
+    assert secret_targets(ssm.format("get-parameter --name /a:3 --profile p")) == {"/a"}
+    assert secret_targets(ssm.format("get-parameter --name /a:label")) == {"/a"}
+    sm = "aws secretsmanager {}"
+    assert secret_targets(sm.format("batch-get-secret-value --secret-id-list a b")) == {"a", "b"}
+    assert secret_targets(sm.format("batch-get-secret-value --secret-id a b")) == {"a", "b"}
+    assert secret_targets(sm.format("get-secret-value --secret-id a --region r")) == {"a"}
+
+
+def test_unnameable_secret_reads_are_unknown() -> None:
+    ssm = "aws ssm {} --with-decryption"
+    sm = "aws secretsmanager {}"
+    unnameable = [
+        ssm.format('get-parameter --name "$(cat f)"'),
+        ssm.format("get-parameter --name `cat f`"),
+        ssm.format("get-parameter --name $X"),
+        sm.format('get-secret-value --secret-id "pre-$(echo x)"'),
+        ssm.format('get-parameters --names \'["/a","/b"]\''),
+        sm.format("batch-get-secret-value --secret-id-list '[\"a\"]'"),
+        sm.format("get-secret-value --secret-id file://x"),
+        sm.format("get-secret-value --secret-id fileb://x"),
+        ssm.format("get-parameter --name http://x"),
+        ssm.format("get-parameter --name https://x"),
+        ssm.format("get-parameter --name arn:aws:ssm:r:1:parameter/a"),
+        sm.format("get-secret-value --secret-id arn:aws:secretsmanager:r:1:secret:a"),
+        sm.format("get-secret-value --secret-id a:b"),
+        sm.format("batch-get-secret-value --filters Key=name,Values=a"),
+        sm.format("get-secret-value --cli-input-json file://x"),
+        sm.format("get-secret-value --cli-input-yaml file://x"),
+        sm.format("get-secret-value"),
+        sm.format("get-secret-value --secret-id"),
+        sm.format("get-secret-value --secret-id=''"),
+        ssm.format("get-parameter --name :3"),
+        ssm.format("get-parameters-by-path --path /p"),
+        ssm.format("get-parameters-by-path --path=/p"),
+        "python3 -c 'get_secret_value()'",
+    ]
+    for command in unnameable:
+        assert secret_targets(command) == {"unknown"}, command
+    assert secret_targets(ssm.format("get-parameters --names /a $X")) == {"/a", "unknown"}
+
+
+def test_entry_point_profiles_raise_admin_credential() -> None:
+    both = hits(f"bash {BNT}")
+    assert both == {("secret-read", TFVARS), ("admin-credential", ADMIN)}
+    assert ("admin-credential", ADMIN) not in hits("bash scripts/ci/neon_api_key.sh")
+    no_key = {
+        **CONTRACT,
+        "classes": [{k: v for k, v in c.items() if k != "entry_point_profiles"} for c in CONTRACT["classes"]],
+    }
+    got = {(h.cls, h.target) for h in match.classify(f"bash {BNT}", no_key, "agent_platform", "/r")}
+    assert not any(c == "admin-credential" for c, _ in got)
+    merged = match.classify(f"AWS_PROFILE={ADMIN} bash {BNT}", CONTRACT, "agent_platform", "/r")
+    assert [h.target for h in merged if h.cls == "admin-credential"] == [ADMIN]
+
+
+def _script_reads(spec: str) -> tuple[set[str], set[str]]:
+    path = spec.split()[0]
+    script = (ROOT / path).read_text(encoding="utf-8")
+    code = [ln for ln in script.splitlines() if not ln.strip().startswith("#")]
+    profiles = set(re.findall(r"AWS_PROFILE=([A-Za-z0-9_]+)", "\n".join(code)))
+    if path == "bin/sync-terraform-assets.sh":
+        delegate = re.search(r'DELEGATE="?\$REPO_ROOT/([^"\s]+)"?', script)
+        assert delegate, "no DELEGATE= in sync-terraform-assets.sh"
+        script = (ROOT / delegate.group(1)).read_text(encoding="utf-8")
+    script = re.sub(r"\\\n\s*", " ", script)
+    variables = dict(re.findall(r'^([A-Za-z_]+)="([^"$]*)"\s*(?:#.*)?$', script, re.MULTILINE))
+    names: set[str] = set()
+    for raw in script.splitlines():
+        line = re.sub(r"\s+#.*$", "", raw).strip()
+        if not line or line.startswith("#"):
+            continue
+        assert "get_secret_value" not in line and "WithDecryption" not in line, (spec, line)
+        for var, value in variables.items():
+            line = line.replace(f'"${var}"', value).replace(f"${{{var}}}", value).replace(f"${var}", value)
+        line = re.sub(r"^(?:(?:if|elif|while|until|then|do|!|\{|\()\s+)+", "", line)
+        if not re.search(r"aws\s+(?:ssm|secretsmanager)\b", line):
+            continue
+        found = match.classify(re.sub(r"[;&|]+\s*$", "", line), CONTRACT, "agent_platform", "/r")
+        secret = [h for h in found if h.cls == "secret-read"]
+        assert secret or not re.search(r"aws\s+(?:ssm\s+get-parameter|secretsmanager\s+get-secret-value)", line), (spec, line)
+        for h in secret:
+            assert h.target != "unknown", (spec, line)
+            names.add(h.target)
+    return names, profiles
+
+
+def test_entry_point_reads_bind_to_their_scripts() -> None:
+    spec = classes("secret-read")
+    reads = spec["entry_point_reads"]
+    assert set(reads) == set(spec["entry_points"])
+    admins = set(CONTRACT["gate"]["admin_profiles"])
+    declared = classes("admin-credential")["entry_point_profiles"]
+    for entry, declared_names in reads.items():
+        names, profiles = _script_reads(entry)
+        assert names == set(declared_names), entry
+        assert {p for p in profiles if p in admins} == ({declared[entry]} if entry in declared else set()), entry
+    assert set(declared) <= set(reads)
+
+
+def test_option_value_reads_both_flag_forms() -> None:
+    assert match._option_value(["aws", "--profile", "p"], ("--profile",)) == "p"
+    assert match._option_value(["aws", "--profile=p"], ("--profile",)) == "p"
+    assert match._option_value(["aws", "--profile"], ("--profile",)) is None
