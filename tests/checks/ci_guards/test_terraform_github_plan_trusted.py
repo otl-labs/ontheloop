@@ -155,6 +155,8 @@ def _header_violations(text: str) -> list[str]:
     joined = " ".join(ln.lstrip("# ").strip() for ln in header)
     if "Accepted residual until VP 17" not in joined or "repository-level secret" not in joined:
         out.append("header: the VP 17 residual sentence")
+    if "operator's own plan" in joined:
+        out.append("header: operator's own plan")
     return out
 
 
@@ -223,6 +225,9 @@ def _mutations() -> dict[str, Callable[[str], str]]:
         "key_in_repo_secret_header": lambda t: t.replace(
             "# Configuration: tf-trusted-plan environment secret " + KEY, "# Configuration: repository secret " + KEY, 1
         ),
+        "operators_own_plan_header": lambda t: t.replace(
+            "such a change first meets the provider", "gets the operator's own plan of the PR branch before merge; x", 1
+        ),
         "residual_missing": lambda t: t.replace("Accepted residual until VP 17", "Accepted residual", 1),
     }
 
@@ -254,3 +259,87 @@ def test_loader_rule_codeowners_must_name_the_core_and_the_gate() -> None:
 @pytest.mark.parametrize("path", [WORKFLOW, PERSONAL], ids=lambda p: p.name)
 def test_trusted_workflows_default_to_bash_pipefail(path: Path) -> None:
     assert _load(_text(path)).get("defaults") == {"run": {"shell": "bash"}}
+
+
+TRANSFER = ROOT / "docs" / "contracts" / "github-org-transfer.yaml"
+INVENTORY = ROOT / "docs" / "contracts" / "account-credential-inventory.yaml"
+APPLY = ROOT / ".github" / "workflows" / "terraform-github-apply.yml"
+ENV_SECRET = "tf-trusted-plan environment secret"  # pragma: allowlist secret
+HISTORY_KEYS = ("amendment_log", "evidence_ledger")
+
+
+def _plan_app_location_violations(transfer: dict[str, Any], inventory: dict[str, Any]) -> list[str]:
+    out = []
+    app = next(r for r in transfer["breakage_map"] if r["id"] == "terraform_github_plan_app")
+    if not any(ENV_SECRET in loc and "repository secret" not in loc for loc in app["locations"]):
+        out.append("breakage_map.terraform_github_plan_app locations")
+    cred = next(r for r in transfer["transfer_credentials"] if r["name"] == "terraform/github plan App installation")
+    if cred["held"] != "tf-trusted-plan environment secret":
+        out.append(f"transfer_credentials held: {cred['held']!r}")
+    gh09 = next(r for r in inventory["rows"] if r["id"] == "GH-09")
+    if ENV_SECRET not in gh09["location"] or "repository secret" in gh09["location"]:
+        out.append(f"GH-09 location: {gh09['location']!r}")
+    prereq = next(r for r in transfer["prerequisites"] if r["id"] == "terraform-github-pr-time-plan")
+    satisfied = " ".join(str(prereq["satisfied_by"]).split())
+    if "rec-4638" not in satisfied or "main.tf or the lockfile is refused" not in satisfied:
+        out.append("terraform-github-pr-time-plan satisfied_by")
+    return out
+
+
+def _stale_location_lines(text: str) -> list[str]:
+    top, hits = "", []
+    for ln in text.splitlines():
+        if ln and not ln[0].isspace() and not ln.startswith("#"):
+            top = ln.split(":", 1)[0]
+        if top in HISTORY_KEYS:
+            continue
+        if ("plan App" in ln or KEY in ln) and "repository secret" in ln:
+            hits.append(ln.strip()[:80])
+    return hits
+
+
+def _load_contracts() -> tuple[dict[str, Any], dict[str, Any]]:
+    return yaml.safe_load(_text(TRANSFER)), yaml.safe_load(_text(INVENTORY))
+
+
+def test_plan_app_key_location_is_the_environment_secret() -> None:
+    transfer, inventory = _load_contracts()
+    assert _plan_app_location_violations(transfer, inventory) == []
+    assert _stale_location_lines(_text(TRANSFER)) == []
+    assert _stale_location_lines(_text(INVENTORY)) == []
+
+
+def test_plan_app_location_pins_have_red_cases() -> None:
+    transfer, inventory = _load_contracts()
+    app = next(r for r in transfer["breakage_map"] if r["id"] == "terraform_github_plan_app")
+    app["locations"] = ["operator console", "repository secrets (App private key)"]
+    cred = next(r for r in transfer["transfer_credentials"] if r["name"] == "terraform/github plan App installation")
+    cred["held"] = "existing repository secret"
+    next(r for r in inventory["rows"] if r["id"] == "GH-09")["location"] = "repository secret " + KEY
+    prereq = next(r for r in transfer["prerequisites"] if r["id"] == "terraform-github-pr-time-plan")
+    prereq["satisfied_by"] = "on every PR touching it,"
+    assert len(_plan_app_location_violations(transfer, inventory)) == 4
+    assert _stale_location_lines("rows:\n  - {item: terraform/github plan App installation, held: existing repository secret}")
+    assert _stale_location_lines("amendment_log:\n  - {summary: plan App repository secret}\nrows:\n  - x") == []
+
+
+def test_apply_workflow_header_names_the_environment_secret() -> None:
+    assert _header_secret_violations(_text(APPLY)) == []
+    old = _text(APPLY).replace(
+        "# Configuration: tf-trusted-plan environment secret " + KEY, "# Configuration: repository secret " + KEY, 1
+    )
+    assert _header_secret_violations(old)
+    assert _header_secret_violations(_text(APPLY).replace("tf-trusted-plan environment secret", "x", 1))
+
+
+def _header_secret_violations(text: str) -> list[str]:
+    header = _header(text)
+    out = [f"header: line {ln!r}" for ln in header if KEY in ln and "repository secret" in ln]
+    if not any(KEY in ln and ENV_SECRET in ln for ln in header):
+        out.append("header: no line names the environment secret")
+    return out
+
+
+def test_plan_workflow_header_never_says_operators_own_plan() -> None:
+    assert not any("operator's own plan" in ln for ln in _header(_text()))
+    assert _header_violations(_text().replace("such a change first meets the provider", "gets the operator's own plan", 1))
