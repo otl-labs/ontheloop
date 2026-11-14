@@ -680,7 +680,8 @@ d8283f55, 3f8edd12, b4d76e92 and 5291a39e, each time main had moved probe inputs
 The only change across the four runs is deliberation VP 3, which runs since mcp 2.x landed (#1984); the 5291a39e run
 (after #1987's Terraform and check changes) matched b4d76e92 step for step. On 2026-11-14 the suite ran again at
 0d51ede0, after the agent access cutover (#2036-#2038) moved probe inputs (section 1.3): every step's output matches
-this table, the 5291a39e record, and the three long simulations, given 900 to 2,400 s, finished and passed (cost VP 4, Goodhart
+this table, the 5291a39e record, and the three long simulations, given 900 to 2,400 s, finished and passed
+(cost VP 4, Goodhart
 VP 4, ladder VP 5). Cost VP 1 and Goodhart VP 1, which fetch one old commit, failed on a transient `git fetch`
 error (run concurrently) and printed their earlier lines when re-run, Goodhart VP 1 alone.
 Raw outputs are not committed. **[probe]**
@@ -694,7 +695,7 @@ Raw outputs are not committed. **[probe]**
 | rec filer | VP 1-5 | all | - | - |
 | back-validation | VP 1-5 | 1, 2, 3, 5 | VP 4: `session_code_cols` is `[checkout_base_sha, checkout_sha]` (was empty) | - |
 | maturity ladder | VP 1-6 | 1, 2, 4, 5, 6 | - | - |
-| allow-list | VP 1, 2, 4-7 | 4, 5, 6, 7 | VP 1: 19 vocabularies (was 15). VP 2: fidelity 136/140, column order 1/4 | - |
+| allow-list | VP 1-7 | 4, 5, 6, 7 | VP 1: 19 vocabularies (was 15). VP 2: fidelity 136/140, column order 1/4 | - |
 
 Reading: the designs' internal logic still passes wherever it ran; what differs is where main moved under them.
 Steps without pinned literals (Goodhart and cost VP 1, ladder and allow-list VP 3) exit 0 and are listed as run,
