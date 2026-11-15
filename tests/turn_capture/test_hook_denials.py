@@ -160,3 +160,14 @@ def test_open_turn_emits_no_denial_row() -> None:
 
 def test_denial_text_constants_are_the_probe_shape() -> None:
     assert PERMISSION_HOOK["source"] == "hook" and MARKER_NEVER_ON_MAIN.startswith("HOOK-BLOCK v1 hook=")
+
+
+def test_tool_call_without_a_result_emits_no_denial_row() -> None:
+    root = [
+        prompt("u1", 1, "p1", "go"),
+        assistant("a1", 2, "m1", [tool_use_block("tu1", "Write", {"file_path": "x.txt"})]),
+        witness("w1", 3),
+    ]
+    result = _capture(make_files(root))
+    assert [r for r in _denials(result) if r["name"] != "hook:stop_log_turn"] == []
+    assert _closes(result) == ["interrupted"]
