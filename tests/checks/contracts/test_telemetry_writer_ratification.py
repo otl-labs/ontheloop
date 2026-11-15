@@ -418,7 +418,10 @@ class TestWriterContractRatification:
             "Declared residual (principal classes)",
         ):
             assert needle in invariants
-        newest = [(e["change_class"], e["semantic_break"]) for e in raw["amendment_log"][:3]]
+        log = raw["amendment_log"]
+        at = next(i for i, e in enumerate(log) if e["summary"].startswith("PLAN-ratify-telemetry-writer-contract"))
+        assert all(str(e["date"]) > "2026-10-29" for e in log[:at])
+        newest = [(e["change_class"], e["semantic_break"]) for e in log[at : at + 3]]
         assert newest == [("governance_note_add", False), ("field_add", False), ("prose_improvement", False)]
 
     def test_registry_matches_contract(self) -> None:
