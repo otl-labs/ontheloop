@@ -30,7 +30,9 @@ COARSE = (
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 _SECRET_OPS = frozenset({"get-secret-value", "batch-get-secret-value"})
 _SSM_OPS = frozenset({"get-parameter", "get-parameters", "get-parameters-by-path", "get-parameter-history"})
-_TARGET_FLAGS = ("--secret-id", "--name", "--names", "--path")
+_NAME_FLAGS = ("--secret-id", "--name", "--names", "--secret-id-list")
+_UNNAMEABLE_FLAGS = ("--filters", "--cli-input-json", "--cli-input-yaml")
+_LOADED_PREFIXES = ("file://", "fileb://", "http://", "https://")
 _DECRYPT_RE = re.compile(r"WithDecryption['\"]?\s*[=:]\s*['\"]?True")
 _PROFILE_RE = re.compile(r"profile(?:_name)?['\"]?\s*[=:]\s*['\"]?([A-Za-z0-9_.@-]+)", re.IGNORECASE)
 _NON_LITERAL = re.compile(r"[$`*?{}\[\]~]")
@@ -46,6 +48,7 @@ class Hit:
     default_only: bool = False
     root_dir: str | None = None
     from_cwd: bool = False
+    exact: bool = False
 
 
 def fast_path_ok(command: str, ambient_profile: str, admin_profiles: tuple[str, ...] = ("agent_platform_admin",)) -> bool:
@@ -201,7 +204,7 @@ def _option_value(words: list[str], flags: tuple[str, ...]) -> str | None:
     return None
 
 
-def _entry_hit(simple: sh.Simple, entry_points: list[str]) -> bool:
+def _entry_spec(simple: sh.Simple, entry_points: list[str]) -> str | None:
     words = simple.words
     operand = None
     if simple.command in ("bash", "sh", "source", "."):
@@ -210,28 +213,80 @@ def _entry_hit(simple: sh.Simple, entry_points: list[str]) -> bool:
         path, *args = spec.split()
         script = operand if operand is not None else words[0]
         if script.endswith(path) and all(a in words for a in args):
-            return True
-    return False
+            return spec
+    return None
+
+
+def _flag_values(words: list[str]) -> list[str]:
+    values: list[str] = []
+    i = 0
+    while i < len(words):
+        flag, eq, rest = words[i].partition("=")
+        if flag not in _NAME_FLAGS:
+            i += 1
+            continue
+        if eq:
+            values.append(rest)
+        i += 1
+        while i < len(words) and not words[i].startswith("-"):
+            values.append(words[i])
+            i += 1
+    return values
+
+
+def _secret_name(part: str, ssm: bool) -> str:
+    if (
+        not part
+        or part.startswith(_LOADED_PREFIXES)
+        or "SUBSTX" in part
+        or _NON_LITERAL.search(part)
+        or any(c.isspace() for c in part)
+    ):
+        return "unknown"
+    if ssm:
+        name = "unknown" if part.startswith("arn:") else part.split(":", 1)[0]
+    else:
+        name = "unknown" if ":" in part else part
+    return name or "unknown"
+
+
+def _named_secrets(words: list[str]) -> list[str]:
+    if "get-parameters-by-path" in words or any(w.partition("=")[0] in _UNNAMEABLE_FLAGS for w in words):
+        return ["unknown"]
+    values = _flag_values(words)
+    ssm = "ssm" in words
+    names = [_secret_name(part, ssm) for value in values for part in value.split(",")]
+    return list(dict.fromkeys(names)) or ["unknown"]
+
+
+def _declared_reads(table: Any, spec: str) -> list[str]:
+    reads = table.get(spec) if isinstance(table, dict) else None
+    if isinstance(reads, list) and reads and all(isinstance(r, str) and r for r in reads):
+        return list(reads)
+    return ["unknown"]
 
 
 def _secret_hits(simple: sh.Simple, contract: Mapping[str, Any]) -> list[Hit]:
     spec = _class(contract, "secret-read")
     approval, control = _class_info(contract, "secret-read")
+    exact = spec.get("target_case") == "exact"
     words = simple.words
-    hit = False
-    if simple.command == "aws":
-        hit = ("secretsmanager" in words and any(w in _SECRET_OPS for w in words)) or (
-            "ssm" in words and "--with-decryption" in words and any(w in _SSM_OPS for w in words)
-        )
-    hit = hit or _entry_hit(simple, spec.get("entry_points") or [])
-    target = (_option_value(words, _TARGET_FLAGS) or "any") if hit else "any"
-    return [Hit("secret-read", target, approval, control)] if hit else []
+    targets: list[str] = []
+    if simple.command == "aws" and (
+        ("secretsmanager" in words and any(w in _SECRET_OPS for w in words))
+        or ("ssm" in words and "--with-decryption" in words and any(w in _SSM_OPS for w in words))
+    ):
+        targets.extend(_named_secrets(words))
+    entry = _entry_spec(simple, spec.get("entry_points") or [])
+    if entry is not None:
+        targets.extend(_declared_reads(spec.get("entry_point_reads"), entry))
+    return [Hit("secret-read", t, approval, control, exact=exact) for t in dict.fromkeys(targets)]
 
 
 def _inline_secret(inline: list[str], contract: Mapping[str, Any]) -> list[Hit]:
     approval, control = _class_info(contract, "secret-read")
     if any("get_secret_value" in code or _DECRYPT_RE.search(code) for code in inline):
-        return [Hit("secret-read", "any", approval, control)]
+        return [Hit("secret-read", "unknown", approval, control)]
     return []
 
 
@@ -281,6 +336,10 @@ def _admin_hits(simple: sh.Simple, contract: Mapping[str, Any], inline: list[str
     spec = _class(contract, "admin-credential")
     approval, control = _class_info(contract, "admin-credential")
     hits = [Hit("admin-credential", p, approval, control) for p in _selected_profiles(simple, inline, admins)]
+    profiles = spec.get("entry_point_profiles") or {}
+    entry = _entry_spec(simple, list(profiles))
+    if entry is not None and isinstance(profiles[entry], str) and profiles[entry]:
+        hits.append(Hit("admin-credential", profiles[entry], approval, control))
     if not _contacts_aws(simple):
         return hits
     if simple.command == "terraform":
@@ -317,6 +376,7 @@ def _merge(hits: list[Hit]) -> list[Hit]:
                 old.default_only and hit.default_only,
                 hit.root_dir,
                 hit.from_cwd,
+                hit.exact,
             )
     return list(merged.values())
 
