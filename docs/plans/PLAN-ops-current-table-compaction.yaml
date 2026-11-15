@@ -14,22 +14,31 @@ plan_type: IMPLEMENTATION
 verification_tier: V3
 plan_path: docs/plans/PLAN-ops-current-table-compaction.yaml
 phase: >-
-  T2.18 (DuckLake maintenance pipeline; in_progress). Rec-driven (rec-5179): the item's intent names "(+ optional
-  rewrite for compaction)" and no cadence runs one. Closes no T2.18 criterion; c2 and c8 stay open and untouched.
+  T2.18 (DuckLake maintenance pipeline; in_progress), as the ad_hoc_rec soft-warn category (rec-5179; tier-item
+  lifecycle): the item's intent names "(+ optional rewrite for compaction)" and no cadence runs one. Not a follow-on
+  plan: it closes no T2.18 criterion, and c2 and c8 stay open and untouched.
 scope:
   - file: src/common/ducklake_current_compaction.py
     action: Create
     purpose: >-
-      compact_current_tables(con, discovered, *, semantics, registry, policy, catalog, emit): resolves verb
-      rewrite_current_deletes via scope.resolve_scope (scope errors wrapped in a DuckLakeRuntimeError subclass,
-      partition_actions precedent); refuses a non-current registry side even when its cell applies, and a table with
-      legacy-scheme files (read_partition_layout); per table one transaction tagged by a unique commit-message token
-      runs maint.rewrite at CURRENT_REWRITE_DELETE_THRESHOLD (0.0) under the writer's bounded OCC policy; no proof when
-      files_processed is 0 (no snapshot is committed); post-commit row count + full-row digest AT the commit's
-      immediate predecessor snapshot vs AT commit (ducklake_partition_rewrite._row_proof). Never AT the in-transaction
-      pre snapshot: a non-conflicting insert can commit between them. Transient failures isolate per table; a proof mismatch raises
-      CurrentCompactionProofError (a DuckLakeMaintenanceError) at once. Emits CurrentCompactionFilesRewritten,
-      CurrentCompactionFailures and CurrentCompactionDurationMs and prints one value-free CURRENT_COMPACTION line.
+      compact_current_tables(con, discovered, *, semantics, registry, policy, catalog, emit, budget_s) -> {per_table,
+      skipped, refused, deferred, failures, elapsed_ms}. Resolves verb rewrite_current_deletes via scope.resolve_scope
+      and reads read_partition_layout once; a catalog-level error there (a scope error, a layout read error or an
+      unclassified table) is one recorded failure, never a raise, so the merge still runs. Order: smoke_harness tables
+      first (the in-pass canary), then the rest by name. A scoped history-side table is a recorded skip. A table with
+      an active scheme and legacy_scheme_files > 0 is a collected refusal. Per table: re-prove its latest
+      rewrite_current_deletes commit (token "rewrite_current_deletes:<table>:<uuid>", the Decision 204 verb's
+      set_commit_message precedent) at its immediate predecessor snapshot vs the commit, a predecessor past retention
+      being a recorded skip; then, unless elapsed time passes COMPACTION_TIME_BUDGET_S (420, half the function
+      timeout), one transaction under that token runs maint.rewrite at CURRENT_REWRITE_DELETE_THRESHOLD (0.0) under the
+      writer's bounded OCC policy; the proof is decided by token lookup, not by files_processed; post-commit row count +
+      full-row digest at the commit's immediate predecessor vs the commit (never the in-transaction pre snapshot: a
+      non-conflicting insert can commit between them). files_processed > 0 with no snapshot for the token, or any
+      digest mismatch, raises CurrentCompactionProofError (a DuckLakeMaintenanceError) at once. A table left unstarted
+      by the budget is recorded under deferred. Every other per-table error is an isolated failure. Emits
+      CurrentCompactionFilesRewritten, CurrentCompactionFailures, CurrentCompactionRefused and
+      CurrentCompactionDurationMs (ops series undimensioned; non-ops catalogs through the CATALOG_METRICS filter) and
+      prints one value-free CURRENT_COMPACTION line (table names, counts, snapshot ids, proof verdicts; no row value).
     new_imports:
       - src.common.ducklake_maintenance
       - src.common.ducklake_maintenance_scope
@@ -48,9 +57,10 @@ scope:
   - file: config/lambda/ducklake/field_semantics.static.yaml
     action: Modify
     purpose: >-
-      maintenance_policy cells for rewrite_current_deletes: scd2 true (the verb itself refuses a non-current side),
+      maintenance_policy cells for rewrite_current_deletes: scd2 true (the verb itself skips a history side),
       smoke_harness true, append_only false (no current projection, no delete files), control false
-      (ops_entity_counters: allocation-serialization contention, Decision 84 I-2; measured by the follow-on rec).
+      (ops_entity_counters: allocation-serialization contention, Decision 84 I-2; rec-5201). The header comment's list
+      of production consumers names merge_ops's rewrite_current_deletes resolution.
   - file: config/lambda/ducklake/field_semantics.yaml
     action: Modify
     purpose: Regenerated by bin/venv-python -m scripts.schema_to_field_semantics; never hand-edited.
@@ -58,34 +68,48 @@ scope:
     action: Modify
     purpose: >-
       action_merge_ops: one call to compact_current_tables after scope resolution and before the merge loop; the 200
-      body gains `compaction`; compaction failures join MergeOpsPassFailed and the post-loop aggregate raise. A proof
-      error propagates (breaker 500). Thin call site only (484 of 500 SLOC on main today).
+      body gains `compaction`; compaction failures and refusals join MergeOpsPassFailed and the post-loop aggregate
+      raise (the merge loop always runs); a CurrentCompactionProofError propagates to the breaker 500 before any merge.
+      Thin call site only (484 of 500 SLOC on main today).
     new_imports:
       - src.common.ducklake_current_compaction
   - file: src/lambdas/ducklake_maintenance/manifest.yaml
     action: Modify
-    purpose: Ship src/common/ducklake_current_compaction.py in the maintenance bundle only.
+    purpose: Ship src/common/ducklake_current_compaction.py in the maintenance bundle.
+  - file: src/lambdas/data-pipeline/manifest.yaml
+    action: Modify
+    purpose: >-
+      Exclude src/common/ducklake_current_compaction.py from the wildcard src/ include, as for the other ducklake_*
+      maintenance modules; data-pipeline's packaged bytes are unchanged and its deploy gate (PROD_SOURCE_PATHSPECS) does
+      not cover the manifest, so no data-pipeline deploy follows.
+  - file: tests/lambda_manifest/test_bundle_checks.py
+    action: Modify
+    purpose: test_current_compaction_module_bundled_and_excluded, in the shape of test_maintenance_scope_module_bundled_and_excluded.
   - file: src/common/ducklake_control_health.py
     action: Modify
     purpose: >-
-      CURRENT_LIVE_FILE_CEILING (100): every registry current-side table present in the catalog reports live and
-      delete-bearing file counts; a live count above the ceiling is an invariant violation (existing
-      ControlTableInvariantViolation alarm); OpsCurrentLiveFilesMax emitted every run.
+      CURRENT_LIVE_FILE_CEILING (200; the busiest merge-to-merge window of 2026-11-08..15 carried 104 ops writes): every
+      registry current-side table present in the catalog reports live and delete-bearing file counts; a live count
+      above the ceiling is an invariant violation (existing ControlTableInvariantViolation alarm); OpsCurrentLiveFilesMax
+      emitted every run when any current table is present.
     new_imports:
       - src.common.ducklake_maintenance_scope
   - file: docs/contracts/ducklake_maintenance.yaml
     action: Modify
     purpose: >-
-      merge_ops entry: the rewrite_current_deletes step, threshold, proof, failure split, breaker mapping, the
-      `compaction` body key and metrics; control_health: the current-table ceiling. Relief first (NEAR_CAP).
+      merge_ops entry: the rewrite_current_deletes step (threshold, proof and re-proof, refusal, deferral, failure
+      split, breaker mapping, the `compaction` body key, metrics) classified non-destructive; the control_health ceiling
+      sentence; the audit_invariants line naming maintenance_policy's production consumers; one amendment_log row.
+      Relief first (NEAR_CAP).
   - file: docs/DECISIONS.md
     action: Modify
     purpose: >-
       Bound verbatim by docs/plans/approved/ops-current-table-compaction.yaml: one new numbered Decision (amends 188,
       191, 192; number and date filled at implementation, max-plus-one after rebasing) with a reversal-conditions
-      stanza; a dated note on Decision 204 (re-lay is a partition-layout rewrite; current tables can always be rebuilt
-      from the immutable, append-only history tables, procedure rec-5202) and on Decision 192 (the VERB_UNIVERSE
-      literal); pointer lines after the Related paragraphs of 191 and 188.
+      stanza; an Update note on Decision 204 (re-lay is a partition-layout rewrite; the history tables are the true
+      append-only record, and every current table can always be rebuilt from them, procedure rec-5202); a dated note
+      on Decision 192 (the VERB_UNIVERSE literal); pointer lines on 191 (after its Warehouse ID) and 188 (after its
+      Decision 193 pointer).
   - file: tests/common/test_ducklake_current_compaction.py
     action: Create
     purpose: Unit tests with connection doubles (mirror file; full branch coverage of the new module).
@@ -93,21 +117,25 @@ scope:
     action: Create
     purpose: >-
       Integration-marked real-engine conformance on the pinned engine (precedent
-      tests/common/test_ducklake_gc_engine_conformance.py): a bucket(8, rec_id) MERGE-maintained table with merged,
-      delete-bearing files; the default threshold rewrites nothing and a compaction is invisible inside its own
-      transaction (Decision 99 pins); compaction then merge leaves at most 8 files and no delete file with rows and
-      digest equal; both update-race directions conflict and the writer's error classifies as an OCC collision; a
+      tests/common/test_ducklake_gc_engine_conformance.py) that drives compact_current_tables itself on a local file
+      catalog: a bucket(8, rec_id) MERGE-maintained table with merged, delete-bearing files; the default threshold
+      rewrites nothing and a compaction is invisible inside its own transaction (Decision 99 pins); compaction then
+      merge leaves at most 8 files and no delete file, with the token lookup, predecessor resolution and AT VERSION
+      proof equal; both update-race directions conflict and the writer's error classifies as an OCC collision; a
       concurrent new-key insert commits without conflict and the predecessor proof still holds. Its node
       test_compaction_bounds_live_files_and_preserves_rows is rec-5179's acceptance.
   - file: tests/lambdas/ducklake_maintenance/handler/test_merge_ops_compaction.py
     action: Create
-    purpose: Wiring -- compaction before merge; a transient failure still merges every table and fails the pass; a proof failure merges nothing and maps to the breaker 500.
+    purpose: >-
+      Wiring: compaction before merge; a transient failure or a refusal still merges every table and fails the pass;
+      a proof failure merges nothing and maps to the breaker 500; the real compact_current_tables beside an
+      unclassified table records a failure and every classified table still merges.
   - file: tests/lambdas/ducklake_maintenance/handler/test_merge_ops_discovery.py
     action: Modify
     purpose: Test semantics builders declare the new verb's cells apply=false; real-registry tests patch compact_current_tables.
   - file: tests/lambdas/ducklake_maintenance/handler/test_operational_actions.py
     action: Modify
-    purpose: Same fixture change for its two semantics builders.
+    purpose: Same fixture change for its two semantics builders (_merge_ops_semantics and _telemetry_semantics).
   - file: tests/common/test_ducklake_maintenance_scope.py
     action: Modify
     purpose: VERB_UNIVERSE pin and the declared cells per class.
@@ -119,7 +147,7 @@ scope:
     purpose: Its verb tuple gains the verb; a missing rewrite_current_deletes cell fails the matrix check.
   - file: tests/test_ducklake_control_health.py
     action: Modify
-    purpose: Current-table ceiling violation and per-table reporting.
+    purpose: Current-table ceiling violation, per-table reporting and the OpsCurrentLiveFilesMax emission.
   - file: tests/test_ducklake_maintenance.py
     action: Modify
     purpose: rewrite() requires delete_threshold and renders it.
@@ -132,23 +160,28 @@ followon_recs:
 infrastructure_dependencies: []
 acceptance_criteria:
   - >-
-    On the pinned engine, a production-shaped current table's compaction then merge leaves at most one live data file
-    per bucket and no delete file, with row count and full-row digest equal at the pre and commit snapshots; the
-    engine's default threshold rewrites nothing.
+    On the pinned engine, compact_current_tables then merge leaves a production-shaped current table at most one live
+    data file per bucket and no delete file, with row count and full-row digest equal at the commit's predecessor and
+    the commit; the engine's default threshold rewrites nothing.
   - >-
     rewrite_current_deletes is a declared per-table verb with a cell for every class; the pass rewrites only
-    current-side tables whose cell applies, never at an implicit threshold, refuses legacy-scheme files, and is a
-    no-op on the telemetry catalog.
+    current-side tables whose cell applies, smoke_harness first, never at an implicit threshold; a history side is a
+    recorded skip, a legacy-scheme table a collected refusal, and the telemetry catalog a no-op.
   - >-
-    A transient compaction failure isolates to its table, every table still merges and the pass ends non-successfully;
-    a proof mismatch aborts the pass before any merge as a breaker trip.
-  - control_health fails a current table whose live file count exceeds CURRENT_LIVE_FILE_CEILING and reports every one.
-  - The new Decision, the two dated notes and the two pointers match the approved-text sidecar.
+    A transient per-table failure, a refusal or a catalog-level compaction error is recorded, every table still merges
+    and the pass ends non-successfully; a table the time budget leaves unstarted is deferred, not failed; a proof
+    mismatch or an unresolvable token aborts the pass before any merge as a breaker trip.
+  - Each pass re-proves a table's latest rewrite_current_deletes commit before rewriting it again.
   - >-
-    After the deploy, the first production pass logs CURRENT_COMPACTION with files rewritten and proof equal for
+    control_health fails a current table whose live file count exceeds CURRENT_LIVE_FILE_CEILING, reports every one
+    and emits OpsCurrentLiveFilesMax.
+  - The new module ships in the maintenance bundle and is excluded from data-pipeline and every other bundle.
+  - The new Decision, the two notes and the two pointers match the approved-text sidecar.
+  - >-
+    After the deploy, the operator's first pass logs CURRENT_COMPACTION with files rewritten and proof equal for
     ops_recommendations_current and ops_decisions_current, MergeOpsFilesAfterTotal falls below 400 (946 at
-    2026-11-15T06:30Z), a first count_by_status spends under 5,000 ms outside connect, and the next control_health is
-    clean.
+    2026-11-15T06:30Z), a first count_by_status on a fresh connection spends under 5,000 ms outside connect, and the
+    next control_health is clean.
   - rec-5179 is closed with its acceptance test green.
 verification_plan:
   - step: 1
@@ -157,14 +190,23 @@ verification_plan:
     command: >-
       bin/venv-python -m pytest -q
       tests/common/test_ducklake_current_compaction.py::test_rewrite_runs_at_explicit_threshold
-      tests/common/test_ducklake_current_compaction.py::test_history_side_refused_even_when_cell_applies
-      tests/common/test_ducklake_current_compaction.py::test_legacy_scheme_files_refused
-      tests/common/test_ducklake_current_compaction.py::test_noop_rewrite_skips_proof
+      tests/common/test_ducklake_current_compaction.py::test_history_side_is_a_recorded_skip
+      tests/common/test_ducklake_current_compaction.py::test_legacy_scheme_refusal_collected
+      tests/common/test_ducklake_current_compaction.py::test_unpartitioned_current_table_is_not_refused
+      tests/common/test_ducklake_current_compaction.py::test_catalog_level_error_is_a_recorded_failure
+      tests/common/test_ducklake_current_compaction.py::test_smoke_harness_tables_compact_first
       tests/common/test_ducklake_current_compaction.py::test_occ_exhaustion_isolates_table
       tests/common/test_ducklake_current_compaction.py::test_proof_mismatch_raises_breaker_error
       tests/common/test_ducklake_current_compaction.py::test_proof_reads_the_commit_predecessor_snapshot
+      tests/common/test_ducklake_current_compaction.py::test_token_snapshot_proved_even_when_count_zero
+      tests/common/test_ducklake_current_compaction.py::test_unresolvable_token_after_rewrite_trips_breaker
+      tests/common/test_ducklake_current_compaction.py::test_prior_unproven_commit_reproved_before_rewrite
+      tests/common/test_ducklake_current_compaction.py::test_reproof_mismatch_trips_breaker
+      tests/common/test_ducklake_current_compaction.py::test_expired_predecessor_recorded_not_failed
+      tests/common/test_ducklake_current_compaction.py::test_budget_exceeded_defers_rewrites
       tests/common/test_ducklake_current_compaction.py::test_append_only_catalog_rewrites_nothing
-    expected: Eight passed.
+      tests/common/test_ducklake_current_compaction.py::test_compaction_line_keys_and_value_free
+    expected: Seventeen passed.
     fix_if: A failure names the branch; fix the module, never the assertion.
     hermetic: true
     graduation: graduate
@@ -176,8 +218,10 @@ verification_plan:
       bin/venv-python -m pytest -q
       tests/lambdas/ducklake_maintenance/handler/test_merge_ops_compaction.py::test_compaction_runs_before_merge
       tests/lambdas/ducklake_maintenance/handler/test_merge_ops_compaction.py::test_transient_failure_still_merges_every_table
+      tests/lambdas/ducklake_maintenance/handler/test_merge_ops_compaction.py::test_refusal_still_merges_and_fails_pass
       tests/lambdas/ducklake_maintenance/handler/test_merge_ops_compaction.py::test_proof_failure_merges_nothing_and_trips_breaker
-    expected: Three passed.
+      tests/lambdas/ducklake_maintenance/handler/test_merge_ops_compaction.py::test_unclassified_table_with_real_compaction_still_merges
+    expected: Five passed.
     fix_if: Keep the handler call site thin; the split lives in the module.
     hermetic: true
     graduation: graduate
@@ -201,7 +245,8 @@ verification_plan:
       bin/venv-python -m pytest -q
       tests/test_ducklake_control_health.py::test_current_table_over_ceiling_is_a_violation
       tests/test_ducklake_control_health.py::test_current_tables_reported_per_table
-    expected: Two passed.
+      tests/test_ducklake_control_health.py::test_ops_current_live_files_max_emitted
+    expected: Three passed.
     fix_if: Fix control_health; the ceiling is a guardrail, never tuned to pass (Decision 55).
     hermetic: true
     graduation: graduate
@@ -233,28 +278,35 @@ verification_plan:
       already runs it as an integration-marked test on every post-merge validation.
   - step: 7
     phase: pre-deploy
-    action: The new module ships only in the maintenance bundle.
+    action: The new module ships in the maintenance bundle and no other.
     command: >-
-      grep -q 'src/common/ducklake_current_compaction.py' src/lambdas/ducklake_maintenance/manifest.yaml && ! grep -l
+      bin/venv-python -m pytest -q
+      tests/lambda_manifest/test_bundle_checks.py::test_current_compaction_module_bundled_and_excluded && ! grep -l
       'ducklake_current_compaction' src/lambdas/ducklake_reader/manifest.yaml src/lambdas/ducklake_writer/manifest.yaml
-      src/lambdas/ducklake_maintenance_smoke/manifest.yaml && echo MANIFEST_SCOPE_OK
-    expected: The marker printed.
-    fix_if: Add it to the maintenance manifest and remove it from any other.
+      src/lambdas/ducklake_maintenance_smoke/manifest.yaml src/lambdas/ducklake_telemetry_reader/manifest.yaml
+      src/lambdas/ducklake_telemetry_writer/manifest.yaml && echo BUNDLE_SCOPE_OK
+    expected: One passed, no other manifest names the module, then BUNDLE_SCOPE_OK.
+    fix_if: Add the include to the maintenance manifest and the exclude to data-pipeline; remove it from any other.
     hermetic: true
     expected_literals:
-      - MANIFEST_SCOPE_OK
+      - BUNDLE_SCOPE_OK
     graduation: graduate
     graduation_check_id: ops-current-compaction-bundle-scope
   - step: 8
     phase: pre-deploy
     action: The new Decision, notes and pointers are exactly the approved words.
-    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug ops-current-table-compaction
-    expected: The approved-text OK line naming the slug's blocks.
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug ops-current-table-compaction --expect
+      "$APPROVED_DIGEST"
+    expected: The approved-text OK line naming the slug's five blocks; $APPROVED_DIGEST is the digest the operator approved.
     fix_if: Place the sidecar's words verbatim; a wording change needs a new approval, never an edit to match.
     hermetic: true
     expected_literals:
       - APPROVED-TEXT OK
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: >-
+      Build-base-bound moment claim: it checks this build's head against this sidecar and base; validate_merge_step
+      re-checks it on the PR against the operator's approval run.
   - step: 9
     phase: pre-deploy
     action: Fast presubmit on the branch.
@@ -280,31 +332,37 @@ verification_plan:
       The governed deploy shipped the merge commit: deploy-ducklake-lambdas.yml deploys the last-green ref and skips a
       superseded commit (Decision 254 cl.5), so read with mcp__github__actions_list the first run whose gate sha
       (LAMBDA_ARTIFACT_SHA) is $MERGE_SHA or a first-parent descendant of it, and save its jobs to $DEPLOY_JOBS_JSON.
+      The regenerated field_semantics.yaml and the scope module ship in every DuckLake function, so every deploy and
+      smoke job counts.
     command: >-
       test -s "$DEPLOY_JOBS_JSON" && bin/venv-python -c "import json,os;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));
       jobs={x['name']:x.get('conclusion') for x in (j.get('jobs') if isinstance(j,dict) else j)};print(jobs);
-      assert all(any(n.startswith(w) and c=='success' for n,c in jobs.items()) for w in ['deploy-maintenance','maintenance-smoke']),jobs;print('DEPLOY_OK')"
-    expected: deploy-maintenance and maintenance-smoke concluded success, then DEPLOY_OK.
+      want=['deploy-maintenance','maintenance-smoke','reconcile-gate','deploy-serving','smoke','deploy-telemetry-twin','telemetry-twin-smoke','deploy-telemetry','telemetry-smoke'];
+      assert all(any(n.startswith(w) and c=='success' for n,c in jobs.items()) for w in want),jobs;print('DEPLOY_OK')"
+    expected: Every named deploy and smoke job concluded success (a skipped job fails this step), then DEPLOY_OK.
     fix_if: A red deploy job is root-caused and fixed forward, never re-run to green (Decision 55).
     hermetic: false
     graduation: not-applicable
   - step: 12
     phase: post-deploy
     action: >-
-      First production pass: the operator runs merge_ops once from CloudShell after step 11 (command in context), or
-      the next scheduled :30 pass runs it. Save the pass's CURRENT_COMPACTION line to $COMPACTION_LINE_FILE.
+      First production pass, operator-invoked from CloudShell after step 11 (command in context), then the pass's
+      CURRENT_COMPACTION line saved to $COMPACTION_LINE_FILE. The smoke_harness canary compacts first; its result is
+      reported, and a canary with no delete files is reported as vacuous, never as a pass.
     command: >-
       aws logs filter-log-events --profile agent_platform --region eu-west-2 --log-group-name
       /aws/lambda/agent-platform-ducklake-maintenance --start-time "$DEPLOY_EPOCH_MS" --filter-pattern
       '"CURRENT_COMPACTION"' --query 'events[-1].message' --output text > "$COMPACTION_LINE_FILE" && bin/venv-python -c
       "import json,os;t=open(os.environ['COMPACTION_LINE_FILE']).read();d=json.loads(t[t.index('{'):]);
-      p={r['table']:r for r in d['per_table']};print(p);assert not d['failures'],d['failures'];
+      p={r['table']:r for r in d['per_table']};print(p, d.get('skipped'), d.get('deferred'));
+      assert not d['failures'] and not d['refused'],(d['failures'],d['refused']);
       assert all(p[x]['files_processed']>0 and p[x]['proof']=='equal' for x in ['ops_recommendations_current','ops_decisions_current']),p;
       print('COMPACTION_LIVE_OK')"
-    expected: No failures; both tables rewrote files and proved equal, then COMPACTION_LIVE_OK.
+    expected: No failure or refusal; both tables rewrote files and proved equal, then COMPACTION_LIVE_OK.
     fix_if: >-
-      A proof failure has already paged (MaintenanceBreakerTrip): STOP and file a Critical rec naming both snapshot
-      ids; restoration is a rebuild of current from history (Decision 81 cl.8), separately planned, never improvised.
+      A deferred table means the first pass hit the time budget: let the next scheduled pass finish it and re-read. A
+      proof failure has already paged (MaintenanceBreakerTrip): STOP and file a Critical rec naming both snapshot ids;
+      restoration is a rebuild of current from history (Decision 81 cl.8; rec-5202), separately planned.
     hermetic: false
     graduation: not-applicable
   - step: 13
@@ -314,7 +372,8 @@ verification_plan:
       aws cloudwatch get-metric-statistics --profile agent_platform --region eu-west-2 --namespace DuckLakeMaintenance
       --metric-name MergeOpsFilesAfterTotal --start-time "$DEPLOY_ISO" --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       --period 300 --statistics Minimum --query 'min(Datapoints[].Minimum)' --output text | bin/venv-python -c
-      "import sys;v=float(sys.stdin.read().strip());print(v);assert v<400,v;print('FILES_FELL_OK')"
+      "import sys;r=sys.stdin.read().strip();assert r not in ('','None'),'no datapoint: no pass ran yet';v=float(r);print(v);
+      assert v<400,v;print('FILES_FELL_OK')"
     expected: A value below 400 (946 before the deploy), then FILES_FELL_OK.
     fix_if: No datapoint means no pass ran yet; a value near 946 means the rewrite did not reach the current tables.
     hermetic: false
@@ -322,37 +381,41 @@ verification_plan:
   - step: 14
     phase: post-deploy
     action: >-
-      First read after compaction: call count_by_status once through the ducklake-reads tool, then save that call's
-      ducklake_invocation line from /aws/lambda/agent-platform-ducklake-reader to $READ_LINE_FILE.
+      First read after compaction on a fresh connection: after at least 10 quiet minutes, call count_by_status once
+      through the ducklake-reads tool, then save that call's ducklake_invocation line from
+      /aws/lambda/agent-platform-ducklake-reader to $READ_LINE_FILE.
     command: >-
       bin/venv-python -c "import json,os;t=open(os.environ['READ_LINE_FILE']).read();d=json.loads(t[t.index('{'):]);
-      s=d['elapsed_ms']-d.get('connect_ms',0);print(d.get('action'),d.get('status'),s);
+      s=d['elapsed_ms']-(d.get('connect_ms') or 0);print(d.get('action'),d.get('status'),d.get('connect_reused'),s);
+      assert d.get('connect_reused') is False,'reused connection: not the fresh path';
       assert str(d.get('status')) in ('200','ok') and s<5000,d;print('FIRST_READ_FAST')"
-    expected: Status 200 and under 5,000 ms outside connect (96,363 ms on 2026-11-14), then FIRST_READ_FAST.
+    expected: A fresh connection, status 200 and under 5,000 ms outside connect (96,363 ms on 2026-11-14), then FIRST_READ_FAST.
     fix_if: >-
-      Over 5 s on compacted tables points at another cost (threads, rec-5182; the batch predicate, rec-5181): record the
-      number in the PR body and on rec-5179, never loosen the bound.
+      A reused connection: wait longer and repeat. Over 5 s on compacted tables points at another cost (threads,
+      rec-5182; the batch predicate, rec-5181): record the number in the PR body, never loosen the bound.
     hermetic: false
     graduation: not-applicable
   - step: 15
     phase: post-deploy
     action: >-
       Pre-registered latency outcome (NS.6; Decision 214 cl.4's per-invocation wall signal), run at least 24 h after
-      the first pass (schedule a wake; never poll): over the ops reader's ducklake_invocation lines, count calls with
-      elapsed_ms over 29,000 and take elapsed_ms p95, for the 24 h before the deploy and the 24 h after the first pass
-      (Logs Insights on /aws/lambda/agent-platform-ducklake-reader, one query per window: fields @message | filter
-      @message like /ducklake_invocation/ | parse @message '"elapsed_ms": *,' as e | stats count(*) as n, sum(e >
-      29000) as slow, pct(e, 95) as p95), saved to $LATENCY_JSON as
-      {"before": {"slow": n, "p95": ms}, "after": {...}}.
+      the first pass (schedule a wake; never poll). This identity cannot run Logs Insights (StartQuery denied,
+      2026-11-15), so for the 24 h before the deploy and the 24 h after the first pass, save each window's
+      aws logs filter-log-events --log-group-name /aws/lambda/agent-platform-ducklake-reader --filter-pattern
+      '{ $.event = "ducklake_invocation" }' --query 'events[].message' output to $BEFORE_JSON and $AFTER_JSON.
     command: >-
-      bin/venv-python -c "import json,os;d=json.load(open(os.environ['LATENCY_JSON']));b,a=d['before'],d['after'];print(d);
-      assert a['slow']<=2 and a['p95']<b['p95'],d;print('LATENCY_OUTCOME_OK')"
+      bin/venv-python -c "import json,os;
+      f=lambda p:sorted(json.loads(m[m.index('{'):])['elapsed_ms'] for m in json.load(open(os.environ[p])));
+      b,a=f('BEFORE_JSON'),f('AFTER_JSON');q=lambda x:x[int(0.95*(len(x)-1))];
+      r={'before':{'n':len(b),'slow':sum(e>29000 for e in b),'p95':q(b)},'after':{'n':len(a),'slow':sum(e>29000 for e in a),'p95':q(a)}};
+      print(r);assert r['after']['slow']<=2 and r['after']['p95']<r['before']['p95'],r;print('LATENCY_OUTCOME_OK')"
     expected: >-
       At most 2 calls over 29 s in the 24 h after (about 51 a day before: 359 in 7 days) and a lower p95, then
-      LATENCY_OUTCOME_OK; both windows' numbers go in the PR body and on rec-5179.
+      LATENCY_OUTCOME_OK; both windows' figures go in the PR body and on rec-5200.
     fix_if: >-
       More slow calls on compacted tables means another cost dominates (rec-5181 batch predicate, rec-5182 threads,
-      rec-5180 deadline): record it, never loosen the bound.
+      rec-5180 deadline): file a new rec citing rec-5179 (closed at merge) with both windows' figures, never loosen the
+      bound.
     hermetic: false
     graduation: not-applicable
   - step: 16
@@ -362,7 +425,8 @@ verification_plan:
       aws cloudwatch get-metric-statistics --profile agent_platform --region eu-west-2 --namespace DuckLakeMaintenance
       --metric-name ControlTableInvariantViolation --start-time "$PASS_ISO" --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       --period 300 --statistics Maximum --query 'max(Datapoints[].Maximum)' --output text | bin/venv-python -c
-      "import sys;v=float(sys.stdin.read().strip());assert v==0,v;print('CEILING_HOLDS')"
+      "import sys;r=sys.stdin.read().strip();assert r not in ('','None'),'no control_health run yet';
+      assert float(r)==0,r;print('CEILING_HOLDS')"
     expected: 0, then CEILING_HOLDS.
     fix_if: A violation names its table in the control_health 500 log body; read it before changing anything.
     hermetic: false
@@ -377,12 +441,12 @@ verification_plan:
     graduation: not-applicable
 test_obligations:
   - source: src/common/ducklake_current_compaction.py
-    behavior: Explicit threshold, current-side and legacy-file refusal, no-op skip, OCC isolation, proof abort.
+    behavior: Explicit threshold, skips, refusal, catalog-level errors, ordering, OCC isolation, re-proof, budget, proof abort.
     verification_step: 1
     test_selector: tests/common/test_ducklake_current_compaction.py::test_proof_mismatch_raises_breaker_error
     red_green_expectation: red before (module absent), green after
   - source: src/lambdas/ducklake_maintenance/handler.py
-    behavior: merge_ops compacts before merging; transient failures still merge; a proof failure merges nothing.
+    behavior: merge_ops compacts before merging; failures and refusals still merge; a proof failure merges nothing.
     verification_step: 2
     test_selector: tests/lambdas/ducklake_maintenance/handler/test_merge_ops_compaction.py::test_proof_failure_merges_nothing_and_trips_breaker
     red_green_expectation: red before (node absent), green after
@@ -392,7 +456,7 @@ test_obligations:
     test_selector: tests/common/test_ducklake_maintenance_scope.py::test_rewrite_current_deletes_declared_for_every_class
     red_green_expectation: red before (node absent), green after
   - source: src/common/ducklake_control_health.py
-    behavior: Current-table live-file ceiling.
+    behavior: Current-table live-file ceiling and its metric.
     verification_step: 4
     test_selector: tests/test_ducklake_control_health.py::test_current_table_over_ceiling_is_a_violation
     red_green_expectation: red before (node absent), green after
@@ -405,91 +469,104 @@ constraints:
   - No rescue agents or workaround loops (Decision 55); guardrail constants are never tuned to make a check pass.
   - The scheduled path stays agent-free (Decision 81 cl.6); no agent invokes the maintenance function.
   - Non-destructive at rewrite time; superseded files leave only through the weekly guarded gc_ops (Decision 188).
-  - Never auto-restore on a proof failure; current rebuilds from history (Decision 81 cl.8).
+  - Never auto-restore on a proof failure; current rebuilds from history (Decision 81 cl.8; rec-5202).
   - Code reaches production only through deploy-ducklake-lambdas.yml (Decisions 125, 126); no Terraform change.
   - handler.py stays under 500 SLOC and the contract under its cap; relieve, never raise (Decision 128).
   - field_semantics.yaml is regenerated, never hand-edited.
   - >-
-    Graduated shards kept (node ids unchanged; only assertions in their files change, all green after): control-health-asserts-invariants, control-health-catalog-aware, ducklake-merge-ops-smoke-harness-and-outcome-metrics, ducklake-partition-normalizer-and-verbs, ducklake-policy-matrix-smoke-harness-universe, ducklake-scope-smoke-harness-registry, g4-guards-bound-the-post-expiry-set-with-real-sizes, gc-ops-emits-full-metric-set, guard-live-set-is-universal, maintenance-helpers-raise-on-introspection-error, maintenance-policy-matrix-exhaustive, maintenance-scope-predicates-discriminate, matrix-carries-no-catalog-wide-verb, merge-ops-count-pair-nulled-together, merge-ops-discovery-and-loud-isolation.
+    Graduated shards kept (node ids unchanged; only assertions in their files change, all green after): control-health-asserts-invariants, control-health-catalog-aware, ducklake-merge-ops-smoke-harness-and-outcome-metrics, ducklake-partition-normalizer-and-verbs, ducklake-policy-matrix-smoke-harness-universe, ducklake-scope-smoke-harness-registry, g4-guards-bound-the-post-expiry-set-with-real-sizes, gc-ops-emits-full-metric-set, guard-live-set-is-universal, maintenance-helpers-raise-on-introspection-error, maintenance-policy-matrix-exhaustive, maintenance-scope-predicates-discriminate, matrix-carries-no-catalog-wide-verb, merge-ops-count-pair-nulled-together, merge-ops-discovery-and-loud-isolation, control-modules-track-scd2-membership, handler-errors-module-bundled, maintenance-scope-module-manifest-wiring, reader-dq-check-bundle, shared-reader-serves-no-telemetry, telemetry-kernel-excluded-from-data-pipeline, telemetry-reader-content-bundle, turn-capture-excluded-from-data-pipeline.
 context:
   - >-
-    Decision-scout r3: FLAGS_FOUND; round-2 flags all resolved. WARN 163 (full-tier VP step): step 10 added. NOTE 254:
-    step 11 keys on the last-green ref. NOTE 243: the kind justification names clause 3's restore rule as a restatement
-    (55, 204 cl.3, 81 cl.8). Wording: 204 cl.1's row-count and digest measure; 81 cl.6 for the cadence count. Decisions
-    triaged: 210 of 210. Roadmap items intersected: 12; CONFLICT: 0; RELATED: 12. Serves: NS.3 4/5.
+    Decision-scout r3: FLAGS_FOUND; round-2 flags all resolved; WARN 163 (step 10), NOTE 254 (step 11), NOTE 243 (kind
+    justification restates 55 and 81 cl.8) and two citations fixed. Decisions triaged: 210 of 210. Roadmap items
+    intersected: 12; CONFLICT: 0; RELATED: 12. Serves: NS.3 4/5. r2 (WARN 191, NOTEs 192, 81, 88, SPIRIT NS.6) and r1
+    (NOTEs 204 cl.3, 191 cl.3, SPIRIT 88) resolved by the numbered Decision, the predecessor proof and step 15.
   - >-
-    Decision-scout r2: FLAGS_FOUND (WARN 191, NOTEs 192, 81, 88, SPIRIT NS.6), resolved by the numbered Decision, the
-    predecessor-snapshot proof and step 15. r1 (NOTEs 204 cl.3, 191 cl.3, SPIRIT 88) resolved by the rulings below.
+    Operator rulings 2026-11-15: new per-table verb; 204 cl.3 re-lay = partition-layout rewrite, and current tables can
+    always be rebuilt from the append-only history tables; ceiling in control_health; threshold 0.0 (rec-5200); a proof
+    failure aborts the pass; ops_entity_counters excluded (rec-5201); rebuild procedure rec-5202; one numbered Decision.
+    The operator delegated later forks to blind Fable consults and approves the final wording.
   - >-
-    Operator rulings 2026-11-15: new per-table verb (after a blind Fable consult: Decision 191 cl.1 "exclusion is a
-    declared cell, never an absence"); 204 cl.3 re-lay = partition-layout rewrite, and current tables can always be
-    rebuilt from the immutable, append-only history tables; ceiling in control_health; threshold 0.0 with a
-    measurement rec (rec-5200); a proof failure aborts the pass; ops_entity_counters excluded with a measurement rec
-    (rec-5201); the rebuild procedure is a follow-on rec (rec-5202); one numbered Decision (amends 188, 191, 192).
+    Fable consult after critique r1 (adopted): a legacy-scheme table is a collected refusal, only under an active
+    scheme; no production-copy rehearsal (Decision 251 cl.3: no maintenance verb on a restored catalog; clone_catalog
+    writes the production data path), the production-resident smoke_harness current table compacts first as the canary;
+    each pass re-proves a table's latest commit, plus a 420 s budget that defers unstarted tables.
   - >-
-    Decided with notice: the verb is resolved only inside merge_ops, not a standalone action (the operator invokes
-    merge_ops); a pre-commit proof is vacuous (local evidence below), so the proof is post-commit only.
+    Local rehearsal 2026-11-15, DuckDB 1.5.4: default threshold rewrote 0 of 45 delete-bearing files, 0.0 all, merge
+    then 8 files with rows and digest equal; rewrite and merge in one transaction left 16; a no-op rewrite commits no
+    snapshot; update races conflict (is_occ_collision matches), a new-key insert does not. Legacy files 0 on both
+    target tables (bucket(8, id)) in tests/fixtures/partition_rewrite_evidence.json (2026-09-28).
   - >-
-    Local rehearsal 2026-11-15, DuckDB 1.5.4: default threshold rewrote 0 of 45 delete-bearing files; 0.0 rewrote all
-    and a merge left 8 files, rows and digest equal; rewrite and merge in ONE transaction left 16 (a compaction table
-    function is not visible inside its own transaction), so they stay two commits; a no-op rewrite commits no
-    snapshot; both race directions raise "Transaction conflict", which is_occ_collision matches.
+    Live probes 2026-11-15 (agent_platform): metrics and the maintenance and reader log groups readable, Logs Insights
+    denied; ducklake_invocation lines are compact JSON. Writer: 516 writes in 7 days, busiest merge-to-merge window
+    104, median 9 (the ceiling basis). UNPROVEN: the first pass's duration (about 100 s per full read at threads=1;
+    the 420 s budget bounds it).
   - >-
-    Live probes 2026-11-15 (agent_platform): MergeOpsFilesAfterTotal readable (934 -> 946 over six passes); maintenance
-    log group readable. Function: 900 s timeout, 1,536 MB; merge_ops cron(30 */6), control_health cron(15 */6), gc_ops
-    weekly ENABLED. First pass reads each current table once (about 100 s at threads=1). UNPROVEN: first-pass duration
-    on the deployed function; the reader line's connect_ms field name (step 14 reads it).
+    Operator, CloudShell: before the merge, catalog_stats and a reconcile_partitions dry run; after step 11, one
+    merge_ops invoke (command in the post-deploy execution step; without it the first control_health at :15 sees 580
+    files and pages once), then catalog_stats again.
   - >-
-    Ordering: control_health (:15) precedes merge_ops (:30), so without an operator pass the first control_health after
-    the deploy sees 580 files and pages once. Operator, CloudShell, before merge and after step 12: catalog_stats
-    (Decision 88 cl.2 baseline for the follow-on rec); after step 11: aws lambda invoke --function-name
-    agent-platform-ducklake-maintenance --cli-binary-format raw-in-base64-out --payload
-    '{"action":"merge_ops","data_path":"<prod data path>","meta_schema":"ducklake_ops"}' out.json
+    ci-rca deferral: red_overlap blocked on rec-5194 (Critical, past its 4 h SLO; telemetry-arrival, PR #2045's session
+    missing, config/telemetry/arrival.yaml). Shared files: none; the build waits for its repair (Decision 226).
   - >-
-    ci-rca deferral: red_overlap blocked on rec-5194 (Critical, product_regression, past its 4 h SLO; telemetry-arrival:
-    PR #2045's session missing from telemetry_sessions, config/telemetry/arrival.yaml). Shared files: none; this plan
-    touches no telemetry producer, arrival config or workflow it runs, so it neither repairs nor worsens that red.
+    Not bundled: rec-2216, rec-2218, rec-2220, rec-5181, rec-5182. rec-5179's stale_target verdict is only its
+    to-be-created file. Ops MergeOpsPassFailed is unalarmed (rec-5185), so a refusal pages through the ceiling.
   - >-
-    Not bundled: rec-2216, rec-2218, rec-2220 (merge_ops hygiene), rec-5181 (recs_by_ids), rec-5182 (threads).
-    rec-5179's relevance verdict is stale_target only because its file is the module this plan creates; its acceptance
-    is repointed at the engine test.
-  - >-
-    Size: handler.py 484/500 SLOC, docs/contracts/ducklake_maintenance.yaml 497/500 effective lines (NEAR_CAP;
-    re-measure on main at build time). Overlap: unbuilt PLAN-sit-restore-spike scopes the same handler, manifest and
-    contract; whichever builds second rebases.
+    Size: handler.py 484/500 SLOC, the contract 497/500 effective lines (NEAR_CAP; re-measure on main at build time).
+    Overlap: unbuilt PLAN-sit-restore-spike scopes the same handler, manifest and contract; second to build rebases.
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND}
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND}
   - {gate: wording-check, round: 1, verdict: PASS, digest: efb0a0684533ce06d7d3af6818c3e6a2a10325e863d312ad7a1ef7ceff9d9f64, base: ec2948e4cf7808f1b78f3a23f1b150b806e9121a, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: PASS, digest: b2f0a5a7329985b8b07cc48557ea665675299006b92ec5d910bad3449b292db9, base: ec2948e4cf7808f1b78f3a23f1b150b806e9121a, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 10, nits: 18}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
-  - Only the plan-cited decision sections read (81 cl.6/cl.8, 88 cl.1-2, 188, 191, 192 cl.2, 204)
+  - Only the plan-cited decision sections read (55, 81 cl.6/cl.8, 88 cl.1-2, 188, 191, 192 cl.2, 204, 251 cl.3)
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
+  - rec-5194 repaired or its overlap verdict re-run clear (Decision 226) before the build starts
 execution_steps:
   - >-
-    Operator baseline: ask the operator to run catalog_stats from CloudShell and record file_column_stats_rows_est on
-    the measurement follow-on rec before the merge.
+    Operator readouts before the merge (context): catalog_stats and the reconcile_partitions dry run; record both on
+    rec-5200 with update_rec and read it back with recs_by_ids. A current table with legacy_scheme_files > 0 stops the
+    build: it would be refused, so re-plan with rec-5202 first.
   - src/common/ducklake_maintenance.py rewrite(); step 5 red then green.
   - >-
-    VERB_UNIVERSE, the four cells, regenerate field_semantics.yaml, and the scope / matrix / gc_ops test pins plus the
-    two merge_ops fixture files; step 3 red then green, the existing merge_ops suites green.
+    VERB_UNIVERSE, the four cells and the header comment, regenerate field_semantics.yaml, the scope / matrix / gc_ops
+    test pins and the two merge_ops fixture files; step 3 red then green, the existing merge_ops suites green.
   - src/common/ducklake_current_compaction.py with its unit tests; step 1 red then green.
-  - The engine conformance file; step 6 green on the pinned engine with no skip.
+  - The engine conformance file driving compact_current_tables; step 6 green on the pinned engine with no skip.
   - handler.py thin call and the wiring tests; step 2 red then green.
   - control_health ceiling and its tests; step 4 red then green.
+  - Both manifests and the bundle test; step 7 red then green.
   - >-
     docs/contracts/ducklake_maintenance.yaml: relief first (NEAR_CAP; condense the merge_ops response prose without
-    dropping a stated rule), then the compaction and ceiling text; if it cannot fit, stop and amend the plan, never
-    raise the cap. handler.py relief if the call site would cross 500 SLOC: move action_merge_ops's body to
-    src/lambdas/ducklake_maintenance/merge_actions.py by plan amendment (gc_ops thin-dispatch precedent).
+    dropping a stated rule), then the compaction, ceiling, consumer-list and amendment_log text; if it cannot fit, stop
+    and amend the plan, never raise the cap. handler.py relief if the call site would cross 500 SLOC: move
+    action_merge_ops's body to src/lambdas/ducklake_maintenance/merge_actions.py by plan amendment (gc_ops precedent).
   - >-
-    Manifest (step 7). docs/DECISIONS.md: place the sidecar's five blocks verbatim, filling {{N}} with MAX(decision
-    number in DECISIONS.md and DECISIONS_ARCHIVE.md) + 1 after rebasing and {{DATE}} with the build date; regenerate
-    docs/decisions-index.json (step 8).
+    docs/DECISIONS.md: place the sidecar's five blocks verbatim, filling {{N}} with MAX(decision number in DECISIONS.md
+    and DECISIONS_ARCHIVE.md) + 1 after rebasing and {{DATE}} with the build date; regenerate docs/decisions-index.json;
+    step 8 with the approved digest.
+  - >-
+    CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit with
+    Resolves: rec-5179; rebase on origin/main; steps 1-9; code review in a fresh context.
+  - >-
+    Closure evidence, recorded as four SEPARATE facts: GitHub readiness state; parent validator evidence (step 10 full
+    tier plus validation_result --verify-head for the pushed HEAD; backgrounded from the top-level session, a timeout
+    is BLOCKED, no push); structured postflight evidence (scripts.session.postflight --evidence); the real outcome --
+    push, PR, CI green by event-driven wake (never polled), squash-merge on code review PROCEED and green CI under the
+    sidecar's standing authorisation with Resolves: rec-5179 in the squash body, reporting PR number, run ids and SHA.
+  - >-
+    Post-deploy sequence: step 11; ask the operator for the first pass, AWS_MAX_ATTEMPTS=1 aws lambda invoke
+    --function-name agent-platform-ducklake-maintenance --region eu-west-2 --cli-read-timeout 960
+    --cli-binary-format raw-in-base64-out --payload
+    '{"action":"merge_ops","data_path":"<prod data path>","meta_schema":"ducklake_ops"}' out.json (the default 60 s
+    read timeout would re-send a long first pass), and the second catalog_stats (record on rec-5200, read back); steps 12, 13, 14 and 16; schedule a wake 24 h after the first pass for step 15 and record its
+    figures on rec-5200 and the PR; step 17.
   - Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)
   - 'Report: what was implemented, verification results'
 rollback: >-
