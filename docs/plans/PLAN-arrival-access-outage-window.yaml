@@ -1,0 +1,186 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: arrival-access-outage-window
+intent: >-
+  Clear the Critical telemetry-arrival red rec-5144 by recording the 2026-11-12 to 2026-11-14 agent AWS access outage
+  as a lost window, so the arrival oracle's denominator again counts only sessions that could have been captured (NS.6:
+  telemetry evidence proven, not assumed). No backfill and no oracle code change.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-arrival-access-outage-window.yaml
+phase: >-
+  ci_rca (soft-warn exception category): Track B repair of rec-5144 under docs/contracts/red-main-recovery.yaml
+  (Decision 226). No tier_item is targeted and no exit criterion is closed, so closes_criteria is empty.
+closes_criteria: []
+scope:
+  - file: config/telemetry/arrival.yaml
+    action: Modify
+    purpose: >-
+      lost_windows gains `- {from: "2026-11-12T20:54:23Z", to: "2026-11-14T12:24:48Z", owner: rec-5144, reason: "agent
+      AWS access outage, sessions could not reach the telemetry writer, no backfill"}` after
+      the rec-5055 row, word for word as docs/plans/approved/arrival-access-outage-window.yaml binds it. Nothing else
+      in the file changes. Bounds (writer log, context): from is the last session-side turn_capture append before the
+      gap, to the first one after it.
+    new_imports: []
+  - file: tests/telemetry_verify/test_session_presence.py
+    action: Modify
+    purpose: >-
+      New node test_the_shipped_config_records_the_rec_5144_lost_window, after the rec-5055 window node and in its
+      shape: load_config(ROOT) passes check_config; a lost_windows row with owner rec-5144 runs from
+      2026-11-12T20:54:23Z to 2026-11-14T12:24:48Z (no assertion on the row count or its position, Decision 244 cl.4); with the shipped config, five lone uncaptured commits whose PRs
+      were created at the five red PRs' creation times (2026-11-13T05:12:38Z, 17:24:42Z, 17:43:08Z, 19:01:53Z,
+      21:29:08Z) read lost_window=5 missing=0 and not red; a PR created at the row's from reads lost_window=1, and one
+      created one second before its to reads lost_window=1. Negative controls in the same node: no other lost_windows row contains any of the five creation times (so this row
+      alone excuses them); a config holding only this row reads missing=1
+      for a PR created exactly at its to (the end is exclusive; the node calls sp.judge without pr_key_authored_at, so the author-date rule is off and cannot confound it). Existing nodes byte-identical.
+    new_imports: []
+bundled_recommendations: [rec-5144]
+followon_recs: [rec-5176]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "config/telemetry/arrival.yaml records a lost window from 2026-11-12T20:54:23Z to 2026-11-14T12:24:48Z owned by rec-5144, and the shipped config turns the five red PRs' creation times into lost_window=5 missing=0."
+  - "After the merge, telemetry-arrival on main lists none of 75e6a7382ab2, f505ce20b0b9, b0417f74c185, 3905a4063910, f43a1624d836 in ARRIVAL_MISSING and reads missing=0 unless a new sha is missing, and rec-5144 is closed by the squash's Resolves trailer."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The shipped config records the rec-5144 lost window.
+    command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence.py::test_the_shipped_config_records_the_rec_5144_lost_window" -q
+    expected: exit 0; red before (node absent, and with the node but no config row, the row assertion fails and missing=5).
+    fix_if: lost_window stays 0 (a bound typo, or the owner pattern refused by check_config)
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: arrival-config-records-rec-5144-lost-window
+  - step: 2
+    phase: pre-deploy
+    action: The whole oracle suite still passes (no existing node edited).
+    command: bin/venv-python -m pytest tests/telemetry_verify/test_session_presence.py tests/telemetry_verify/test_session_presence_authored.py -q
+    expected: exit 0
+    fix_if: an existing node fails -- the edit touched more than the one row and the one node
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: waive
+    graduation_waiver_reason: >-
+      Duplicates the two files' already-graduated nodes (telemetry-arrival-oracle,
+      arrival-config-records-rec-5055-lost-window, arrival-config-enables-author-date-rule) and the full tier's run of
+      both files; step 1 graduates the new node.
+  - step: 3
+    phase: pre-deploy
+    action: Bind the config edit to the approved words.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug arrival-access-outage-window --base origin/main
+    expected: exit 0; the one block matches word for word
+    fix_if: any word differs; fix the edit, never the sidecar (operator-approved text)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      PR-relative to origin/main, so vacuous once merged; validate_merge_step's approved-text leg enforces the sidecar
+      on every PR declaring this plan.
+  - step: 4
+    phase: pre-deploy
+    action: On the build branch, the arrival check against the live warehouse with the new row.
+    command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival
+    expected: >-
+      the ARRIVAL line reads status=green (or skipped) with missing=0 and lost_window at least 1 for each of the five still
+      inside judge_days (5 until 2026-11-16T10:04Z); record the line in the PR body. At plan write an in-memory run with this row (main 4d607844) read status=green judged=41 captured=36
+      missing=0 lost_window=5 excused=0.
+    fix_if: >-
+      status=unreadable is a reader or config problem (fix, re-run); a missing sha other than the five is a new red:
+      read its PR's creation time and the key's commit author dates against the windows, then stop and report to the
+      coordinator, never widen the row here
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: rec-5144's operator-confirmed replacement acceptance and closure_artifact are written and read back before the squash (Decisions 186, 201).
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "import json; from src.common.ducklake_reader_client import
+      fetch_recs_by_ids, make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5144']); r = rows[0];
+      print(r['status']); print(r['acceptance']); print(json.loads(r['context_v2_json']).get('closure_artifact'))"
+    expected: >-
+      prints open, then the VP 1 pytest command for test_the_shipped_config_records_the_rec_5144_lost_window, then
+      shard:arrival-config-records-rec-5144-lost-window
+    fix_if: >-
+      the acceptance is still the live arrival probe or closure_artifact is unset: stop and report to the coordinator
+      (the swap is the operator's word, written by the planning session); never squash on the live-probe acceptance
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it from the top-level session, backgrounded with a 2 h limit, and read only the attestation.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure -- fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and step 1 carries the durable regression.
+  - step: 7
+    phase: post-deploy
+    action: The arrival oracle is no longer red on main.
+    command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival
+    expected: >-
+      no ARRIVAL_MISSING line names any of the five shas and the ARRIVAL line reads lost_window at least 1 while they are
+      inside judge_days, with missing=0 unless another sha is missing; also record the next telemetry-arrival workflow
+      run id on main and its status (a workflow_dispatch run on main counts when the scheduled run is late).
+    fix_if: "missing>0 on another sha is a new red: read its PR's creation time and the key's commit author dates against the windows before suspecting capture; ci-rca files it"
+    hermetic: false
+  - step: 8
+    phase: post-deploy
+    action: rec-5144 is closed by the merge's Resolves trailer, its closure_artifact shard resolving once the graduated shard is on main.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
+      make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5144']); print(rows[0]['id'], rows[0]['status'])"
+    expected: prints rec-5144 closed after the closure job runs on the merge commit; record that run id.
+    fix_if: >-
+      still open: read the closure job's log for a ClosureArtifactRequired or acceptance refusal marker. Leading causes:
+      the squash body lacks Resolves for rec-5144, or the graduated shard is not on main. Never close it with a direct
+      status write after a Decision 186 refusal; fix the cause and re-run the closure route.
+    hermetic: false
+test_obligations:
+  - source: config/telemetry/arrival.yaml
+    behavior: the agent AWS access outage is a bounded, owner-bound lost window with an exclusive end
+    verification_step: 1
+    test_selector: tests/telemetry_verify/test_session_presence.py::test_the_shipped_config_records_the_rec_5144_lost_window
+    red_green_expectation: red before (missing=5), green after
+constraints:
+  - "The arrival oracle's code and its missing semantics are unchanged (Decision 250 cl.5): scripts/telemetry_verify/** is not in scope."
+  - "Earlier lost_windows and excused_sessions rows keep their bounds; no excused_sessions row is added."
+  - "The lost_windows row lands word for word as the approved-text sidecar docs/plans/approved/arrival-access-outage-window.yaml binds it (Decision 246); rec-5144's replacement acceptance is operator-confirmed with the plan (Decisions 181, 235). A change to either is a plan amendment that goes to the operator first."
+  - "No backfill of the outage's sessions (operator ruling 2026-11-05: capture gaps are not backfilled)."
+  - "No existing assertion is loosened beyond the one owner-bound window row (Decision 235); no existing test node is edited."
+  - "No rescue agents or workaround loops (Decision 55)."
+context:
+  - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: 250 (cl.5 the denominator the row corrects; cl.4 arrival gates no merge; cl.2 unreadable is red, binding VP 4 and 7), 226 (Track B, Critical; cl.3 the red never blocks the plan that bundles it; cl.4 as amended by 254; cl.5 preventive_action names rec-5176), 246 (the row lands word for word from the sidecar; the PR stays red until the approved-text run is approved), 235 (cl.1: the window row and the acceptance swap both need the human-confirmed plan), 201 (replacement acceptance written and read back before the squash), 186 (cl.4 the shard lands in the Resolves commit; cl.7 refusal leaves the rec open), 244 (cl.4 the node asserts this row and the five classifications, never the row count), 132, 189 (the graduating node is red on main today), 256 (its Problem text is the outage the row's reason names). Flags: 226 cl.5 WARN fixed (rec-5176 filed, rec-5144 preventive_action names it, read back); 181 WARN answered by keeping the live end state as VP 4 and 7 with the swap operator-confirmed; 250 SPIRIT NOTE fixed (the end moved from the environment-swap log entry 14:05:36Z to the evidenced first capture write 12:24:48Z; the rec-5084 author-date grace covers straddling sessions)."
+  - "Serves: NS.6 (keeps the arrival oracle's denominator honest, so its reds mean real absence). Decision 250 reversal condition halt-cost: rec-5144 is an arrival red with a cause outside the repo that has halted planning past 24 h; measured count this quarter: three (rec-4939, rec-5055, rec-5144), so the trigger (twice in a quarter) is plausibly met; whether to start the cl.4 re-decide is the operator's call, raised in the handback."
+  - "Red: telemetry-arrival run 43462387308 status=red judged=45 captured=40 missing=1 (75e6a7382ab2). Reproduced at main 0d51ede0 on 2026-11-14 ~14:20Z: status=red judged=41 captured=36 missing=5 lost_window=0 (PR creation order: 75e6a7382ab2 #2022 05:12:38Z, f505ce20b0b9 #2026 17:24:42Z, 3905a4063910 #2028 17:43:08Z, b0417f74c185 #2030 19:01:53Z, f43a1624d836 #2033 21:29:08Z, all 2026-11-13). None of the five keys is in telemetry_root_sessions 2026-11-10..14; the keys have the ordinary shape of captured keys, so not a normalisation fault."
+  - "Writer log (/aws/lambda/agent-platform-ducklake-telemetry-writer, FilterLogEvents, read 2026-11-14): last append_telemetry turn_capture status 200 before the gap 2026-11-12T20:54:23Z; four missing_caller_identity refusals 2026-11-14T12:13:30Z-12:16:45Z; first append_telemetry turn_capture status 200 after 2026-11-14T12:24:48Z. Root sessions: none interactive started 2026-11-12T20:42:13Z to 2026-11-14T12:09:47Z; one CI session captured 2026-11-13T16:28Z (OIDC path unaffected). Cause per Decision 256 Problem and CI Reform's log entries (#1963, 2026-11-13 00:05Z and 00:10Z)."
+  - "Sessions still on a pre-swap container after 12:24:48Z cannot capture either; a merged one is lost_window under the rec-5084 author-date rule when its own commit was authored inside the window and its PR opens within 7 days after it. Any other is a new red judged on its own evidence (VP 7 fix_if), never by widening this row."
+  - "Open PRs created inside the window (#2016, #2017, #2018, #2019, #2021, #2023) are judged lost_window if their sessions were not captured when they merge; posted on the coordinator log (#1963) 2026-11-14 14:40Z and 14:42Z."
+  - "Precedents: PLAN-plugin-hooks-locate-checkout (rec-5055 lost window row and node), PLAN-arrival-reopened-outage-session (rec-5081 plan shape, acceptance swap), PLAN-arrival-lost-window-author-date (rec-5084)."
+  - "Graduated shards kept unchanged (tests/telemetry_verify/test_session_presence.py gains one node, the claims hold): arrival-config-excuses-rec-5004-key, arrival-config-excuses-reopened-rec-5055-session, arrival-config-records-rec-5055-lost-window, telemetry-arrival-oracle."
+  - "red_overlap --plan on the draft: verdict clear, rec-5144 rule repairs_this_red (track product_regression, age 21.95 h)."
+  - "rec-5144 at plan write: open, Critical; context_v2 why_chain, corrective_action and preventive_action corrected via correct_rec_context and read back 2026-11-14 (the filed failure_category code_regression is not the cause). Acceptance swapped with the operator's approval (read back 2026-11-15T10:11:49Z): from the live probe (needs warehouse credentials the closure job lacks, and passes on skipped) to bin/venv-python -m pytest \"tests/telemetry_verify/test_session_presence.py::test_the_shipped_config_records_the_rec_5144_lost_window\" -q, with closure_artifact shard:arrival-config-records-rec-5144-lost-window stamped in context_v2_json; VP 5 reads both back again before the squash. The live end state stays proven by VP 4 and 7."
+  - "Approvals: the operator wrote approved in this plan's thread 2026-11-15T10:10:07Z in answer to the handback asking him to confirm the plan, approve the approved-text run and confirm rec-5144's acceptance swap (recommended option 'Write it, with the acceptance swap'), approving the plan, the window row and the swap (Decisions 181, 235). The row's wording is bound by the sidecar and approved on GitHub through approved-text run 43605350311 (sidecar commit ababd304; approved_text record: record digest e52750b1, approved-words digest c8278bdc, fingerprint zebra-coral-poppy-buckle), approved by benjamin-blake, run concluded success 2026-11-15T10:10:11Z; validate_merge_step reads that approval. Run 43604950916 on the earlier end was cancelled."
+  - "fork: window end | chosen: first capture write after the gap (12:24:48Z) | class: asked | precedent: Decision 250 | precedent_kind: decision | reversible: yes | persisted: config/telemetry/arrival.yaml"
+  - "fork: owner of the row | chosen: rec-5144 (no separate outage rec exists; the cause is Decision 256's Problem) | class: consistency-only | precedent: Decision 250 | precedent_kind: decision | reversible: yes | persisted: config/telemetry/arrival.yaml"
+  - "fork: rec-5144 acceptance | chosen: the pytest node, live probe kept as VP 4 and 7 | class: asked | precedent: Decision 181; Decision 186; Decision 235 | precedent_kind: decision | reversible: yes | persisted: rec-5144 acceptance and closure_artifact (warehouse)"
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+  - {gate: wording-check, round: 1, verdict: PASS, digest: 75dd1510fcc14c28a172654d4ee1061adaba7abba569dd4fdb72f7409e2310e5, base: 4d607844328a686bb38f3da4c4cc50de6a3525fb, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 2, verdict: PASS, digest: e52750b1f9b07023413b9995617ff417aea0afe9795fa0493b589b7289b41ab7, base: 4d607844328a686bb38f3da4c4cc50de6a3525fb, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 3}
+  - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 3}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 3}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 186, 226, 235, 246 and 250 sections read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Config: add the lost_windows row; the session_presence node; run VP 1 and 2."
+  - "Add the graduated shard config/agent/verification_registry/entries/arrival-config-records-rec-5144-lost-window.yaml (VP 1's graduation, same shape as arrival-config-records-rec-5055-lost-window.yaml)."
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit with Resolves: rec-5144 in the message; git fetch origin main && git rebase origin/main; VP 3; VP 4; VP 5; VP 6 (full tier backgrounded from the top-level session, then --verify-head; a timeout is BLOCKED, no push); push; open the PR (its body states the row's weakening disposition, planned-change citing acceptance_criteria[0], a denominator correction for a declared outage, and names rec-5144 as the authorising rec); subscribe; code review in a fresh context; squash-merge on green with Resolves: rec-5144 in the squash body; VP 7 and 8."
+  - "Report: what was implemented, verification results"
+rollback: Revert the build PR; arrival turns red again on the five shas until they leave the judge window (f43a1624 last, 2026-11-17T10:32Z).
