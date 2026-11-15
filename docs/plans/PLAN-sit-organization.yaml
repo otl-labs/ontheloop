@@ -28,6 +28,14 @@ scope:
       the operator's CloudShell session as role OrganizationAdmin), default_tags Project agent-platform, ManagedBy
       terraform-organization, Owner var.alerts_email. data aws_caller_identity for the management account id; no account
       id literal anywhere in the root (Decision 101).
+  - file: terraform/organization/.terraform.lock.hcl
+    action: Create
+    purpose: >-
+      The committed provider lock: exactly terraform/bootstrap/.terraform.lock.hcl's registry.terraform.io/hashicorp/aws
+      block (version 5.100.0, constraints "~> 5.0", every hash), copied so no provider egress is needed and both roots
+      pin one build (5.100.0 carries aws_iam_organizations_features). Steps 5 and 7 init with -lockfile=readonly, so
+      ROOT_TREE pins the provider too; _terraform.py's readonly flag and validate_terraform_lock_coherence pick it up
+      once tracked (critique r11 BLK-3).
   - file: terraform/organization/variables.tf
     action: Create
     purpose: >-
@@ -122,7 +130,8 @@ scope:
       Logs: CreateLogGroup, PutRetentionPolicy, TagResource, TagLogGroup, ListTagsForResource, ListTagsLogGroup,
       PutMetricFilter on its log group; DescribeLogGroups, DescribeMetricFilters and TestMetricFilter on "*" (the last
       for step 7's live pattern check, as PROD's PlatformSecurityLogsRead grants it). CloudWatch: PutMetricAlarm,
-      TagResource, ListTagsForResource on its alarms; DescribeAlarms on "*". SNS: CreateTopic, SetTopicAttributes,
+      TagResource, ListTagsForResource on its alarms; DescribeAlarms and GetMetricStatistics (step 8's live alarm
+      proof; it takes no resource scoping) on "*". SNS: CreateTopic, SetTopicAttributes,
       GetTopicAttributes, TagResource, ListTagsForResource, Subscribe, ListSubscriptionsByTopic on its topic; ListTopics
       and, in its own Sid TopicSubscriptionRead, GetSubscriptionAttributes on "*" (the repo's CI policies record that
       it takes no resource scoping: github_ci_apply_reads.tf Sid SNSSubscriptionRead; critique r5 B1). IAM, the delivery role (role/agent-platform-org-security-*):
@@ -144,7 +153,7 @@ scope:
       grant (OrgRead, OrgManage, OrgTrustedAccessIam, OrgServiceLinkedRole, RootFeatures,
       OrgSecurityTrailManage, OrgSecurityTrailRead, BucketManage, StateObjects, LogGroupManage, LogsRead, AlarmManage,
       AlarmRead, TopicManage, TopicSubscriptionRead, DeliveryRole, DeliveryRolePass, SelfUser, SelfRole, TfvarsRead;
-      20 statements, 105 actions after critiques r5 and r6) renders to 5,131 characters (re-measured after r6) with 12-digit and region stand-ins, json.dumps with no whitespace; Amendment 1's CloudShellUse Sid (7 actions) and the user rename add an estimated 270, about 5,400 (an estimate: the build measures it). If the build's grant measures
+      20 statements, 105 actions after critiques r5 and r6) renders to 5,131 characters (re-measured after r6) with 12-digit and region stand-ins, json.dumps with no whitespace; Amendment 1's CloudShellUse Sid (7 actions), GetMetricStatistics and the user rename add an estimated 300, about 5,430 (an estimate: the build measures it). If the build's grant measures
       over 7,000, STOP and amend the plan (an operator-seeded, imported customer-managed policy changes the seed, the
       import count and step 7's expected list) and re-critique; the build never mints or attaches a policy itself,
       as Decision 156 cl.3 keeps iam:CreatePolicy* off github_ci_apply's own identity, the precedent for a self-applying role (critique r4 BLK-1; critique r2
@@ -189,7 +198,9 @@ scope:
       would make step 5's console read unknown, and an account id would never match the fixture; critique r7 N1). The
       five patterns live in one map,
       local.org_security_filter_patterns, keyed by quoted alarm-name strings ("name" = "pattern", because the
-      _platform_security_hcl _local_map parser reads only quoted keys; critique r9 N5), so the fixture and the live check read them as PROD's do
+      _platform_security_hcl _local_map parser reads only quoted keys; critique r9 N5), and the metric filters are
+      for_each over that map, so each planned filter's index is its alarm name (step 5 reads the patterns from the
+      saved plan), so the fixture and the live check read them as PROD's do
       (local.platform_security_filter_patterns). Names
       sit under the agent-platform-* family Decision 101(b) freezes, so no new name family is authorised.
   - file: terraform/organization/CLAUDE.md
@@ -203,8 +214,9 @@ scope:
       password and MFA in the IAM console); the block conventions every sitting uses (public repo fetched at a
       full sha into ${TMPDIR:-/tmp}, pinned terraform checked against HashiCorp's SHA256SUMS, TF_DATA_DIR and the
       plugin cache under that folder, an EXIT trap that removes it, errors to a file under /tmp read in CloudShell
-      only, printed lines only, every placeholder filled by the agent before posting, BLOCK_NOT_FILLED otherwise); the
-      sitting order (steps 4-8) and its stop rules; announcing each sitting in the thread first, since it alarms by
+      only, printed lines only, every placeholder filled by the agent before posting, BLOCK_NOT_FILLED otherwise; a role-session block
+      prints its identity as 'caller-arn check: ADMIN_CHAIN_OK', the marker validate_admin_root_premerge_gate reads in
+      the child plans); the sitting order (steps 4-8) and its stop rules; announcing each sitting in the thread first, since it alarms by
       design; that a root-only task in a member account runs as a centralized root session from this account; and the
       emergency detach (aws organizations detach-policy from a role session, then a PR to match). Never names an
       account id, e-mail or the break-glass name.
@@ -244,7 +256,9 @@ scope:
       CloudTrail emits; PROD's filter 1 once never fired for that reason).
   - file: .gitignore
     action: Modify
-    purpose: Ignore terraform/**/terraform.organization.tfvars (lock files are already ignored by terraform/**/.terraform.lock.hcl).
+    purpose: >-
+      Ignore terraform/**/terraform.organization.tfvars, and add the exception !terraform/organization/.terraform.lock.hcl
+      beside the github, personal and bootstrap ones (terraform/**/.terraform.lock.hcl ignores lock files by default).
   - file: .github/CODEOWNERS
     action: Modify
     purpose: /terraform/organization/ @benjamin-blake beside /terraform/bootstrap/.
@@ -414,7 +428,7 @@ verification_plan:
       tier before handoff, started backgrounded with a 2 h limit from the top-level session and read on its completion
       with validation_result --verify-head. Not hermetic: the pr-validate runner has no terraform binary.
     command: >-
-      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir=terraform/organization init -backend=false -input=false > /dev/null && terraform -chdir=terraform/organization validate -no-color && terraform fmt -check -recursive terraform/organization && bin/venv-python -m scripts.roadmap.approved_text verify --slug sit-organization &&
+      TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir=terraform/organization init -backend=false -input=false -lockfile=readonly > /dev/null && terraform -chdir=terraform/organization validate -no-color && terraform fmt -check -recursive terraform/organization && bin/venv-python -m scripts.roadmap.approved_text verify --slug sit-organization &&
       bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
     expected: >-
       exit 0; validate prints "Success! The configuration is valid."; fmt lists nothing; approved_text verify exits 0;
@@ -428,8 +442,8 @@ verification_plan:
     action: >-
       OPERATOR STEP (Amendment 1), at CI green, before any sitting. Console acts first: sign up the management account
       with its company-mailbox root e-mail, root MFA on, company payment method and tax settings; in Parameter Store
-      create the SecureString /secret/agent-platform-terraform-organization-tfvars holding alerts_email = "<company
-      alerts address>" (typed in the console, never in a shell). Then, signed in as root with MFA, the operator pastes
+      create, in the config/aws-region region, the SecureString /secret/agent-platform-terraform-organization-tfvars
+      holding alerts_email = "<company alerts address>" (typed in the console, never in a shell). Then, signed in as root with MFA, the operator pastes
       this seed block into AWS CloudShell; the build writes the CI-green head sha and the three templates' sha256 values
       into it before posting (BLOCK_NOT_FILLED otherwise), so root runs only the reviewed templates. It renders
       ${account_id} and ${region} with sed in a folder under /tmp, creates user org-admin-operator with its
@@ -441,24 +455,25 @@ verification_plan:
       operator says in the thread when it ran. Registering a second root MFA device is advised, not required.
     command: >-
       ( set -o pipefail; H=__PR_HEAD_SHA__; S1=__SHA256_ORGANIZATION_ADMIN__; S2=__SHA256_ORGANIZATION_ADMIN_TRUST__; S3=__SHA256_ASSUME_ORGANIZATION_ADMIN__;
-      case "$H$S1$S2$S3" in *__*) echo BLOCK_NOT_FILLED; exit 1 ;; esac; W="${TMPDIR:-/tmp}/org-seed"; rm -rf "$W"; mkdir -p "$W"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE;
-      case "$(aws sts get-caller-identity --query Arn --output text 2>/dev/null)" in *:root) ;; *) echo NOT_ROOT; exit 1 ;; esac;
-      { git init -q "$W/repo" && git -C "$W/repo" fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git "$H" && git -C "$W/repo" checkout -q --detach FETCH_HEAD; } 2>/dev/null || { echo CLONE_FAILED; exit 1; };
+      case "$H$S1$S2$S3" in *__*) echo BLOCK_NOT_FILLED; exit 1 ;; esac; W="${TMPDIR:-/tmp}/org-seed"; L="${TMPDIR:-/tmp}/org-seed.err"; rm -rf "$W"; mkdir -p "$W"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE;
+      case "$(aws sts get-caller-identity --query Arn --output text 2>> "$L")" in *:root) ;; *) echo NOT_ROOT; exit 1 ;; esac;
+      { git init -q "$W/repo" && git -C "$W/repo" fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git "$H" && git -C "$W/repo" checkout -q --detach FETCH_HEAD; } 2>> "$L" || { echo CLONE_FAILED; exit 1; };
       P="$W/repo/terraform/organization/policies"; for f in "organization_admin $S1" "organization_admin_trust $S2" "assume_organization_admin $S3"; do set -- $f; echo "$2  $P/$1.json.tftpl" | sha256sum -c --quiet - > /dev/null 2>&1 || { echo "TEMPLATE_MISMATCH $1"; exit 1; }; done;
-      ID=$(aws sts get-caller-identity --query Account --output text); R=$(tr -d '[:space:]' < "$W/repo/config/aws-region"); export AWS_REGION="$R" AWS_DEFAULT_REGION="$R";
+      ID=$(aws sts get-caller-identity --query Account --output text 2>> "$L"); R=$(tr -d '[:space:]' < "$W/repo/config/aws-region"); export AWS_REGION="$R" AWS_DEFAULT_REGION="$R";
       for n in organization_admin organization_admin_trust assume_organization_admin; do sed -e 's/\${account_id}/'"$ID"'/g' -e 's/\${region}/'"$R"'/g' "$P/$n.json.tftpl" > "$W/$n.json"; done;
       { aws iam create-user --user-name org-admin-operator > /dev/null && aws iam put-user-policy --user-name org-admin-operator --policy-name AssumeOrganizationAdmin --policy-document "file://$W/assume_organization_admin.json" &&
       aws iam create-role --role-name OrganizationAdmin --max-session-duration 3600 --assume-role-policy-document "file://$W/organization_admin_trust.json" > /dev/null &&
-      aws iam put-role-policy --role-name OrganizationAdmin --policy-name OrganizationAdminOps --policy-document "file://$W/organization_admin.json"; } > /dev/null 2>&1 && echo SEED_OK || echo SEED_FAILED;
-      aws ssm get-parameter --name /secret/agent-platform-terraform-organization-tfvars --query Parameter.Type --output text 2>/dev/null | sed 's/^/TFVARS_TYPE /'; echo "HEAD $H" )
+      aws iam put-role-policy --role-name OrganizationAdmin --policy-name OrganizationAdminOps --policy-document "file://$W/organization_admin.json"; } > /dev/null 2>> "$L" && echo SEED_OK || echo SEED_FAILED;
+      aws ssm get-parameter --name /secret/agent-platform-terraform-organization-tfvars --query Parameter.Type --output text 2>> "$L" | sed 's/^/TFVARS_TYPE /'; echo "HEAD $H" )
     expected: >-
       SEED_OK, TFVARS_TYPE SecureString and HEAD <the CI-green head sha>, sent by the operator to the build thread, then
       CloudShell open in the OrganizationAdmin role session.
     fix_if: >-
       BLOCK_NOT_FILLED -- the build posted a block with a placeholder: it re-posts it filled; NOT_ROOT -- sign in as
       root for this block only; TEMPLATE_MISMATCH -- the posted sha256 values do not match the head: STOP, the build
-      recomputes them at the head and re-posts; SEED_FAILED -- the operator reads the IAM console (an existing user or
-      role from an earlier run is deleted there, then the block re-run); no TFVARS_TYPE line -- create the parameter;
+      recomputes them at the head and re-posts; SEED_FAILED -- the operator reads /tmp/org-seed.err in CloudShell only and
+      the IAM console (an existing user or role from an earlier run is deleted there, then the block re-run); no
+      TFVARS_TYPE line -- create the parameter in the config/aws-region region;
       CloudShell refuses to open in the role -- STOP and amend CloudShellUse (never attach a managed policy)
     hermetic: false
     graduation: not-applicable
@@ -471,37 +486,39 @@ verification_plan:
       probes the state bucket's global name (head-bucket with the expected owner: success ours, 404 free, otherwise
       taken) and creates it only when free, which is the block's one write and is said so on the PR; fetches the head
       into /tmp, installs the pinned terraform checked against HashiCorp's SHA256SUMS, reads the tfvars from SSM and
-      prints their Version and the head's terraform/organization tree hash (the two values step 7 pins), inits with the
-      backend, plans -lock=false to a saved file and prints counts by action and type, the changed attribute names of
+      prints their Version, the pinned terraform version and the head's terraform/organization tree hash, lock file
+      included (the values step 7 pins), inits with the backend and -lockfile=readonly, plans -lock=false to a saved file and prints counts by action and type, the changed attribute names of
       any imported item and PLAN_DIGEST (sha256 of the sorted action and address lines, imports included); then
-      evaluates every filter pattern live with logs test-metric-filter against the committed JSON fixture (critique r6
+      evaluates every metric filter's planned pattern (read from the saved plan, keyed by the for_each key that is
+      its alarm name, so no console call takes the state lock) live with logs test-metric-filter against the committed
+      JSON fixture (critique r6
       B1; PROD's precedent is PLAN-platform-role-iam-change-alarms step 13). The saved plan, tfvars and clone are
       deleted by an EXIT trap; terraform errors go to /tmp/org-pre-tf.err, read in CloudShell only. The operator's
       paste is the direction (Decision 126 cl.1, Decision 256 cl.3); no agent session runs it.
     command: >-
       ( set -o pipefail; H=__PR_HEAD_SHA__; case "$H" in *__*) echo BLOCK_NOT_FILLED; exit 1 ;; esac; W="${TMPDIR:-/tmp}/org-pre"; L="${TMPDIR:-/tmp}/org-pre-tf.err";
       rm -rf "$W"; mkdir -p "$W/bin" "$W/plugins"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE;
-      case "$(aws sts get-caller-identity --query Arn --output text 2>> "$L")" in *:assumed-role/OrganizationAdmin/*) echo ADMIN_CHAIN_OK ;; *) echo ADMIN_CHAIN_ABSENT; exit 1 ;; esac;
+      printf 'caller-arn check: '; case "$(aws sts get-caller-identity --query Arn --output text 2>> "$L")" in *:assumed-role/OrganizationAdmin/*) echo ADMIN_CHAIN_OK ;; *) echo ADMIN_CHAIN_ABSENT; exit 1 ;; esac;
       aws iam get-account-summary --query 'SummaryMap.[AccountMFAEnabled,AccountAccessKeysPresent]' --output text 2>> "$L" | awk '{print "ROOT_MFA " $1; print "ROOT_KEYS " $2}';
       { git init -q "$W/repo" && git -C "$W/repo" fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git "$H" && git -C "$W/repo" checkout -q --detach FETCH_HEAD; } 2>> "$L" || { echo CLONE_FAILED; exit 1; };
       R=$(tr -d '[:space:]' < "$W/repo/config/aws-region"); export AWS_REGION="$R" AWS_DEFAULT_REGION="$R" TF_DATA_DIR="$W/tfdata" TF_PLUGIN_CACHE_DIR="$W/plugins" CHECKPOINT_DISABLE=1;
       V=$(tr -d '[:space:]' < "$W/repo/config/terraform-version"); case "$(uname -m)" in x86_64) P=linux_amd64 ;; aarch64) P=linux_arm64 ;; *) echo UNSUPPORTED_ARCH; exit 1 ;; esac; Z="terraform_${V}_${P}.zip";
       { curl -fsSL -o "$W/$Z" "https://releases.hashicorp.com/terraform/$V/$Z" && curl -fsSL -o "$W/sums" "https://releases.hashicorp.com/terraform/$V/terraform_${V}_SHA256SUMS" &&
       ( cd "$W" && grep " $Z\$" sums | sha256sum -c --quiet - ) && unzip -qo "$W/$Z" -d "$W/bin"; } >> "$L" 2>&1 || { echo TERRAFORM_INSTALL_FAILED; exit 1; }; export PATH="$W/bin:$PATH";
-      ID=$(aws sts get-caller-identity --query Account --output text); B=agent-platform-organization-tfstate;
+      ID=$(aws sts get-caller-identity --query Account --output text 2>> "$L"); B=agent-platform-organization-tfstate; echo "TF_VERSION $V";
       if aws s3api head-bucket --bucket $B --expected-bucket-owner "$ID" > /dev/null 2> "$W/hb.err"; then echo BUCKET_OWNED;
       elif grep -q '(404)' "$W/hb.err"; then { aws s3api create-bucket --bucket $B --create-bucket-configuration LocationConstraint=$R > /dev/null && aws s3api head-bucket --bucket $B --expected-bucket-owner "$ID"; } 2>> "$L" && echo BUCKET_CREATED || { echo BUCKET_CREATE_FAILED; exit 1; };
       else echo NAME_TAKEN; exit 1; fi;
-      N=/secret/agent-platform-terraform-organization-tfvars; aws ssm get-parameter --name $N --with-decryption --query Parameter.Value --output text > "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT; exit 1; };
-      echo "TFVARS_VERSION $(aws ssm get-parameter --name $N --query Parameter.Version --output text)"; echo "ROOT_TREE $(git -C "$W/repo" rev-parse HEAD:terraform/organization)"; O="$W/repo/terraform/organization";
-      terraform -chdir="$O" init -input=false -backend-config="region=$R" > /dev/null 2>> "$L" || { echo INIT_FAILED; exit 1; };
+      N=/secret/agent-platform-terraform-organization-tfvars; aws ssm get-parameter --name $N --with-decryption --output json 2>> "$L" | python3 -c "import json,sys; p=json.load(sys.stdin)['Parameter']; open(sys.argv[1], 'w').write(p['Value'] + '\n'); print('TFVARS_VERSION', p['Version'])" "$W/vars.tfvars"; test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT; exit 1; };
+      echo "ROOT_TREE $(git -C "$W/repo" rev-parse HEAD:terraform/organization)"; O="$W/repo/terraform/organization";
+      terraform -chdir="$O" init -input=false -lockfile=readonly -backend-config="region=$R" > /dev/null 2>> "$L" || { echo INIT_FAILED; exit 1; };
       terraform -chdir="$O" plan -input=false -no-color -lock=false -detailed-exitcode -var-file="$W/vars.tfvars" -out="$W/p.bin" > /dev/null 2>> "$L"; rc=$?;
-      terraform -chdir="$O" show -json "$W/p.bin" 2>> "$L" | python3 -c "import json,sys,collections,hashlib; rc=[r for r in json.load(sys.stdin).get('resource_changes', []) if r['change']['actions'] != ['no-op'] or r['change'].get('importing')]; k=lambda r: ('import ' if r['change'].get('importing') else '') + '+'.join(r['change']['actions']); d=lambda ch: sorted(x for x in set(ch.get('before') or {}) | set(ch.get('after') or {}) if (ch.get('before') or {}).get(x) != (ch.get('after') or {}).get(x)); print('COUNTS', dict(sorted(collections.Counter(k(r) + ' ' + r['type'] for r in rc).items()))); print('IMPORT_CHANGES', [(r['address'], d(r['change'])) for r in rc if r['change'].get('importing') and 'update' in r['change']['actions']]); print('PLAN_DIGEST', hashlib.sha256('\n'.join(sorted(k(r) + ' ' + r['address'] for r in rc)).encode()).hexdigest())";
-      echo 'jsonencode(local.org_security_filter_patterns)' | terraform -chdir="$O" console -var-file="$W/vars.tfvars" 2>> "$L" | python3 -c "import json,subprocess,sys; pats=json.loads(json.loads(sys.stdin.read())); ev=json.load(open(sys.argv[1]))['events']; bad=[(n, e['name']) for e in ev for n, p in pats.items() if bool(json.loads(subprocess.run(['aws', 'logs', 'test-metric-filter', '--filter-pattern', p, '--log-event-messages', json.dumps(e['event']), '--output', 'json'], check=True, capture_output=True, text=True).stdout)['matches']) != (n in e['must_match'])]; sys.exit('MISMATCH ' + repr(bad)) if bad else print('FILTERS OK -- %d patterns x %d events' % (len(pats), len(ev)))" "$W/repo/tests/fixtures/organization_security_filter_events.json";
+      terraform -chdir="$O" show -json "$W/p.bin" > "$W/p.json" 2>> "$L"; python3 -c "import json,sys,collections,hashlib; rc=[r for r in json.load(open(sys.argv[1])).get('resource_changes', []) if r['change']['actions'] != ['no-op'] or r['change'].get('importing')]; k=lambda r: ('import ' if r['change'].get('importing') else '') + '+'.join(r['change']['actions']); d=lambda ch: sorted(x for x in set(ch.get('before') or {}) | set(ch.get('after') or {}) if (ch.get('before') or {}).get(x) != (ch.get('after') or {}).get(x)); print('COUNTS', dict(sorted(collections.Counter(k(r) + ' ' + r['type'] for r in rc).items()))); print('IMPORT_CHANGES', [(r['address'], d(r['change'])) for r in rc if r['change'].get('importing') and 'update' in r['change']['actions']]); print('PLAN_DIGEST', hashlib.sha256('\n'.join(sorted(k(r) + ' ' + r['address'] for r in rc)).encode()).hexdigest())" "$W/p.json";
+      python3 -c "import json,subprocess,sys; pats={r['index']: r['change']['after']['pattern'] for r in json.load(open(sys.argv[2])).get('resource_changes', []) if r['type'] == 'aws_cloudwatch_log_metric_filter'}; ev=json.load(open(sys.argv[1]))['events']; bad=[(n, e['name']) for e in ev for n, p in pats.items() if bool(json.loads(subprocess.run(['aws', 'logs', 'test-metric-filter', '--filter-pattern', p, '--log-event-messages', json.dumps(e['event']), '--output', 'json'], check=True, capture_output=True, text=True).stdout)['matches']) != (n in e['must_match'])]; sys.exit('MISMATCH ' + repr(bad)) if bad else print('FILTERS OK -- %d patterns x %d events' % (len(pats), len(ev)))" "$W/repo/tests/fixtures/organization_security_filter_events.json" "$W/p.json" 2>> "$L" || echo FILTER_CHECK_FAILED;
       echo "EXIT $rc"; echo "HEAD $H" )
     expected: >-
-      ADMIN_CHAIN_OK, ROOT_MFA 1, ROOT_KEYS 0, BUCKET_CREATED on the first sitting (BUCKET_OWNED on a re-run),
-      TFVARS_VERSION <n>, ROOT_TREE <hash>, COUNTS with exactly: 5 imports (the state bucket,
+      caller-arn check: ADMIN_CHAIN_OK, ROOT_MFA 1, ROOT_KEYS 0, TF_VERSION <config/terraform-version>,
+      BUCKET_CREATED on the first sitting (BUCKET_OWNED on a re-run), TFVARS_VERSION <n>, ROOT_TREE <hash>, COUNTS with exactly: 5 imports (the state bucket,
       aws_iam_user.org_admin_operator, aws_iam_user_policy, aws_iam_role, aws_iam_role_policy), each no-op or a tag
       update only (IMPORT_CHANGES names tags or tags_all alone); creates: 1 aws_organizations_organization, 1
       aws_iam_organizations_features, 2 aws_organizations_organizational_unit, 1 aws_organizations_policy (baseline), 1
@@ -512,8 +529,8 @@ verification_plan:
     fix_if: >-
       ADMIN_CHAIN_ABSENT -- CloudShell is not in the role session: switch role and reopen CloudShell; ROOT_MFA 0 or
       ROOT_KEYS not 0 -- the operator fixes root first (MFA on, any root key deleted); NAME_TAKEN -- STOP, the backend
-      name needs an amendment; a delete or replace anywhere -- STOP; MISMATCH, or a Python traceback from a refused
-      pattern or a throttled call -- fix the pattern in HCL (or the fixture if it does not carry CloudTrail's real
+      name needs an amendment; a delete or replace anywhere -- STOP; MISMATCH or FILTER_CHECK_FAILED (a refused
+      pattern or a throttled call; read /tmp/org-pre-tf.err) -- fix the pattern in HCL (or the fixture if it does not carry CloudTrail's real
       shape), push, and re-run steps 1 and 5 at the new head; never drop a clause silently and never fix a MISMATCH by
       excluding errored events (denied attempts must alarm); IMPORT_CHANGES naming anything but tags or tags_all -- the
       seed differs from the template: re-seed from the same sha, never edit the template to match a hand edit; EXIT 1
@@ -540,48 +557,52 @@ verification_plan:
     phase: post-deploy
     action: >-
       OPERATOR STEP (Amendment 1): after merge, one block pasted into CloudShell in the OrganizationAdmin role session.
-      Before posting it the build writes in the merge sha and step 6's three pins, and checks locally that
-      git rev-parse <merge sha>:terraform/organization equals ROOT_TREE (a squash changes the commit, never this tree).
+      Before posting it the build writes in the merge sha and step 6's four pins (PLAN_DIGEST, ROOT_TREE with the
+      committed lock file inside it, TFVARS_VERSION and TF_VERSION), and checks locally that git rev-parse <merge
+      sha>:terraform/organization equals ROOT_TREE (a squash changes the commit, never this tree).
       The block repeats step 5's identity check, fetch and terraform install, refuses a different root tree
-      (TREE_MISMATCH) or tfvars Version (TFVARS_VERSION_CHANGED), inits, plans with the state lock to a saved file and
+      (TREE_MISMATCH), terraform version (TF_VERSION_CHANGED) or tfvars Version (TFVARS_VERSION_CHANGED), reads the
+      tfvars at exactly that Version, inits with -lockfile=readonly, plans with the state lock to a saved file and
       applies that saved file only when the plan exit is 2 and its PLAN_DIGEST equals step 6's; then it re-plans and
       reads back the Organization (feature set and SCP type, root features, the two OUs, the policies on the sit OU),
-      the trail, the alarm count and the confirmed subscriptions, names, states and counts only. Otherwise it prints
+      the trail and the alarm count, names, states and counts only (the subscription is step 8's). Otherwise it prints
       APPLY_SKIPPED with COUNTS. The digest does not cover attribute values; the tree and Version pins narrow that
       residual. The operator's paste is the direction (Decision 126 cl.1); no approve line is asked.
     command: >-
-      ( set -o pipefail; M=__MERGE_SHA__; XD=__PLAN_DIGEST__; XT=__ROOT_TREE__; XV=__TFVARS_VERSION__; case "$M$XD$XT$XV" in *__*) echo BLOCK_NOT_FILLED; exit 1 ;; esac;
+      ( set -o pipefail; M=__MERGE_SHA__; XD=__PLAN_DIGEST__; XT=__ROOT_TREE__; XV=__TFVARS_VERSION__; XF=__TF_VERSION__; case "$M$XD$XT$XV$XF" in *__*) echo BLOCK_NOT_FILLED; exit 1 ;; esac;
       W="${TMPDIR:-/tmp}/org-merge"; L="${TMPDIR:-/tmp}/org-merge-tf.err"; rm -rf "$W"; mkdir -p "$W/bin" "$W/plugins"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE;
-      case "$(aws sts get-caller-identity --query Arn --output text 2>> "$L")" in *:assumed-role/OrganizationAdmin/*) echo ADMIN_CHAIN_OK ;; *) echo ADMIN_CHAIN_ABSENT; exit 1 ;; esac;
+      printf 'caller-arn check: '; case "$(aws sts get-caller-identity --query Arn --output text 2>> "$L")" in *:assumed-role/OrganizationAdmin/*) echo ADMIN_CHAIN_OK ;; *) echo ADMIN_CHAIN_ABSENT; exit 1 ;; esac;
       { git init -q "$W/repo" && git -C "$W/repo" fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git "$M" && git -C "$W/repo" checkout -q --detach FETCH_HEAD; } 2>> "$L" || { echo CLONE_FAILED; exit 1; };
       [ "$(git -C "$W/repo" rev-parse HEAD:terraform/organization)" = "$XT" ] || { echo TREE_MISMATCH; exit 1; };
       R=$(tr -d '[:space:]' < "$W/repo/config/aws-region"); export AWS_REGION="$R" AWS_DEFAULT_REGION="$R" TF_DATA_DIR="$W/tfdata" TF_PLUGIN_CACHE_DIR="$W/plugins" CHECKPOINT_DISABLE=1;
-      V=$(tr -d '[:space:]' < "$W/repo/config/terraform-version"); case "$(uname -m)" in x86_64) P=linux_amd64 ;; aarch64) P=linux_arm64 ;; *) echo UNSUPPORTED_ARCH; exit 1 ;; esac; Z="terraform_${V}_${P}.zip";
+      V=$(tr -d '[:space:]' < "$W/repo/config/terraform-version"); [ "$V" = "$XF" ] || { echo TF_VERSION_CHANGED; exit 1; }; case "$(uname -m)" in x86_64) P=linux_amd64 ;; aarch64) P=linux_arm64 ;; *) echo UNSUPPORTED_ARCH; exit 1 ;; esac; Z="terraform_${V}_${P}.zip";
       { curl -fsSL -o "$W/$Z" "https://releases.hashicorp.com/terraform/$V/$Z" && curl -fsSL -o "$W/sums" "https://releases.hashicorp.com/terraform/$V/terraform_${V}_SHA256SUMS" &&
       ( cd "$W" && grep " $Z\$" sums | sha256sum -c --quiet - ) && unzip -qo "$W/$Z" -d "$W/bin"; } >> "$L" 2>&1 || { echo TERRAFORM_INSTALL_FAILED; exit 1; }; export PATH="$W/bin:$PATH";
       N=/secret/agent-platform-terraform-organization-tfvars; [ "$(aws ssm get-parameter --name $N --query Parameter.Version --output text 2>> "$L")" = "$XV" ] || { echo TFVARS_VERSION_CHANGED; exit 1; };
-      aws ssm get-parameter --name $N --with-decryption --query Parameter.Value --output text > "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT; exit 1; }; O="$W/repo/terraform/organization";
-      terraform -chdir="$O" init -input=false -backend-config="region=$R" > /dev/null 2>> "$L" || { echo INIT_FAILED; exit 1; };
+      aws ssm get-parameter --name "$N:$XV" --with-decryption --query Parameter.Value --output text > "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT; exit 1; }; O="$W/repo/terraform/organization";
+      terraform -chdir="$O" init -input=false -lockfile=readonly -backend-config="region=$R" > /dev/null 2>> "$L" || { echo INIT_FAILED; exit 1; };
       terraform -chdir="$O" plan -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" -out="$W/merge.bin" > /dev/null 2>> "$L"; rc=$?; echo "MERGE_PLAN_EXIT $rc";
       D=$(terraform -chdir="$O" show -json "$W/merge.bin" 2>> "$L" | python3 -c "import json,sys,hashlib; rc=[r for r in json.load(sys.stdin).get('resource_changes', []) if r['change']['actions'] != ['no-op'] or r['change'].get('importing')]; k=lambda r: ('import ' if r['change'].get('importing') else '') + '+'.join(r['change']['actions']); print(hashlib.sha256('\n'.join(sorted(k(r) + ' ' + r['address'] for r in rc)).encode()).hexdigest())");
-      if [ "$rc" = 2 ] && [ "$D" = "$XD" ]; then terraform -chdir="$O" apply -input=false -no-color "$W/merge.bin" 2>> "$L" | grep -E '^Apply complete!';
+      if [ "$rc" = 2 ] && [ "$D" = "$XD" ]; then terraform -chdir="$O" apply -input=false -no-color "$W/merge.bin" 2>> "$L" | grep -E '^Apply complete!'; echo "APPLY_EXIT $?";
       terraform -chdir="$O" plan -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" > /dev/null 2>> "$L"; echo "ORG_PLAN_EXIT $?";
-      echo "FEATURE_SET $(aws organizations describe-organization --query Organization.FeatureSet --output text)"; ROOT=$(aws organizations list-roots --query 'Roots[0].Id' --output text);
+      { echo "FEATURE_SET $(aws organizations describe-organization --query Organization.FeatureSet --output text)"; ROOT=$(aws organizations list-roots --query 'Roots[0].Id' --output text);
       echo "SCP_TYPE $(aws organizations list-roots --query "Roots[0].PolicyTypes[?Type=='SERVICE_CONTROL_POLICY'].Status" --output text)"; echo "ROOT_FEATURES $(aws iam list-organizations-features --query EnabledFeatures --output text)";
       echo "OUS $(aws organizations list-organizational-units-for-parent --parent-id "$ROOT" --query 'OrganizationalUnits[].Name' --output text)"; SIT=$(aws organizations list-organizational-units-for-parent --parent-id "$ROOT" --query "OrganizationalUnits[?Name=='sit'].Id" --output text);
       echo "SIT_OU_POLICIES $(aws organizations list-policies-for-target --target-id "$SIT" --filter SERVICE_CONTROL_POLICY --query 'Policies[].Name' --output text)"; echo "TRAIL_LOGGING $(aws cloudtrail get-trail-status --name agent-platform-org-security-trail --query IsLogging --output text)";
-      echo "ALARMS $(aws cloudwatch describe-alarms --alarm-name-prefix agent-platform-org-security- --query 'length(MetricAlarms)' --output text)";
+      echo "ALARMS $(aws cloudwatch describe-alarms --alarm-name-prefix agent-platform-org-security- --query 'length(MetricAlarms)' --output text)"; } 2>> "$L";
       else echo APPLY_SKIPPED; [ "$rc" = 2 ] && terraform -chdir="$O" show -json "$W/merge.bin" 2>> "$L" | python3 -c "import json,sys,collections; rc=json.load(sys.stdin).get('resource_changes', []); print('COUNTS', dict(sorted(collections.Counter(('import ' if r['change'].get('importing') else '') + '+'.join(r['change']['actions']) + ' ' + r['type'] for r in rc if r['change']['actions'] != ['no-op'] or r['change'].get('importing')).items())))"; fi; echo "MERGE_SHA $M" )
     expected: >-
-      ADMIN_CHAIN_OK, MERGE_PLAN_EXIT 2, "Apply complete!" with step 5's counts, ORG_PLAN_EXIT 0, FEATURE_SET ALL,
+      caller-arn check: ADMIN_CHAIN_OK, MERGE_PLAN_EXIT 2, "Apply complete!" with step 5's counts, APPLY_EXIT 0,
+      ORG_PLAN_EXIT 0, FEATURE_SET ALL,
       SCP_TYPE ENABLED, ROOT_FEATURES RootCredentialsManagement RootSessions (either order), OUS prod sit (either order),
       SIT_OU_POLICIES FullAWSAccess baseline (either order), TRAIL_LOGGING True, ALARMS 5 and MERGE_SHA <merge sha>,
       sent by the operator to the build thread.
     fix_if: >-
-      BLOCK_NOT_FILLED -- the build re-posts it filled; TREE_MISMATCH or TFVARS_VERSION_CHANGED -- nothing was planned:
+      BLOCK_NOT_FILLED -- the build re-posts it filled; TREE_MISMATCH, TF_VERSION_CHANGED or TFVARS_VERSION_CHANGED --
+      nothing was planned:
       STOP, step 5 re-runs at the merge sha (H set to it) and the build re-posts this block with the new pins;
       APPLY_SKIPPED -- nothing was applied: send COUNTS too; the build reports the difference to the coordinator as a
-      plan defect, never a second paste; ORG_PLAN_EXIT 2 after the apply -- STOP and report; never paste again without
+      plan defect, never a second paste; APPLY_EXIT not 0 or ORG_PLAN_EXIT 2 after the apply -- STOP and report; never paste again without
       a fresh read of the cause; any *_FAILED or TFVARS_ABSENT -- read /tmp/org-merge-tf.err in CloudShell, fix and
       re-paste; a read-back value differs -- report it, the build posts it on the PR
     hermetic: false
@@ -596,18 +617,22 @@ verification_plan:
       (decision-scout r2 SPIRIT on Decision 202's 'proven live'); at least 15 minutes after the switch (CloudTrail to CloudWatch Logs
       delivery) the operator pastes this read-only block. It prints the confirmed subscription count and the sum over the
       last 6 hours of each alarm's metric, so a SwitchRole or failed ConsoleLogin shape the fixture got wrong shows as 0. The
-      e-mail that switch sends is also the delivery proof. Names and counts only.
+      e-mail that switch sends is also the delivery proof. The build writes config/aws-region's value into the block
+      (BLOCK_NOT_FILLED otherwise), since CloudShell opens in whatever region the console shows. Errors go to
+      /tmp/org-proof.err, read in CloudShell only. Names and counts only.
     command: >-
-      ( unset AWS_PROFILE; T=$(aws sns list-topics --query "Topics[?ends_with(TopicArn, ':agent-platform-org-security-alerts')].TopicArn" --output text);
-      echo "SUBSCRIPTIONS_CONFIRMED $(aws sns list-subscriptions-by-topic --topic-arn "$T" --query "length(Subscriptions[?SubscriptionArn!='PendingConfirmation'])" --output text)";
-      aws cloudwatch describe-alarms --alarm-name-prefix agent-platform-org-security- --query 'MetricAlarms[].[AlarmName,Namespace,MetricName]' --output text | while read -r A NS MN; do
-      echo "$A $(aws cloudwatch get-metric-statistics --namespace "$NS" --metric-name "$MN" --start-time "$(date -u -d '-6 hours' +%Y-%m-%dT%H:%M:%SZ)" --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --period 21600 --statistics Sum --query 'sum(Datapoints[].Sum)' --output text)"; done )
+      ( R=__REGION__; case "$R" in *__*) echo BLOCK_NOT_FILLED; exit 1 ;; esac; export AWS_REGION="$R" AWS_DEFAULT_REGION="$R"; L="${TMPDIR:-/tmp}/org-proof.err"; : > "$L"; unset AWS_PROFILE;
+      T=$(aws sns list-topics --query "Topics[?ends_with(TopicArn, ':agent-platform-org-security-alerts')].TopicArn" --output text 2>> "$L"); test -n "$T" || { echo TOPIC_ABSENT; exit 1; };
+      echo "SUBSCRIPTIONS_CONFIRMED $(aws sns list-subscriptions-by-topic --topic-arn "$T" --query "length(Subscriptions[?SubscriptionArn!='PendingConfirmation'])" --output text 2>> "$L")";
+      aws cloudwatch describe-alarms --alarm-name-prefix agent-platform-org-security- --query 'MetricAlarms[].[AlarmName,Namespace,MetricName]' --output text 2>> "$L" | while read -r A NS MN; do
+      echo "$A $(aws cloudwatch get-metric-statistics --namespace "$NS" --metric-name "$MN" --start-time "$(date -u -d '-6 hours' +%Y-%m-%dT%H:%M:%SZ)" --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --period 21600 --statistics Sum --query 'sum(Datapoints[].Sum)' --output text 2>> "$L")"; done )
     expected: >-
       SUBSCRIPTIONS_CONFIRMED 1; the role-assumed alarm's line and the sign-in alarm's line each show a sum of 1 or
       more (the switch and the failed sign-in for this block); the other three lines show what the sitting did (the policy-change alarm counts the apply's IAM and SCP writes),
       sent by the operator to the build thread.
     fix_if: >-
-      SUBSCRIPTIONS_CONFIRMED 0 -- the operator clicks the confirmation e-mail and re-pastes; the role-assumed sum is 0
+      TOPIC_ABSENT or empty alarm lines -- the region is wrong or the apply did not finish: check the block's region
+      and step 7's lines; SUBSCRIPTIONS_CONFIRMED 0 -- the operator clicks the confirmation e-mail and re-pastes; the role-assumed sum is 0
       or None after 30 minutes, or the sign-in sum is -- that pattern or fixture does not match CloudTrail's real event: the build
       files it as a plan defect with the alarm line, never edits a pattern outside a PR
     hermetic: false
@@ -652,10 +677,15 @@ test_obligations:
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_organization_baseline.py
     red_green_expectation: red before (root absent)
+  - source: terraform/organization/.terraform.lock.hcl
+    behavior: hashicorp/aws pinned to the bootstrap root's build and coherent with required_providers
+    verification_step: 3
+    command: TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir=terraform/organization init -backend=false -input=false -lockfile=readonly > /dev/null && terraform -chdir=terraform/organization validate -no-color
+    waiver_reason: A copied lock file; readonly init proves it matches the root, and validate_terraform_lock_coherence checks it in the fast tier.
   - source: terraform/organization/accounts.tf
     behavior: comment only; the child items add its resources
     verification_step: 3
-    command: TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir=terraform/organization init -backend=false -input=false > /dev/null && terraform -chdir=terraform/organization validate -no-color
+    command: TF_CLI_CONFIG_FILE=$HOME/.terraform-mirror.tfrc terraform -chdir=terraform/organization init -backend=false -input=false -lockfile=readonly > /dev/null && terraform -chdir=terraform/organization validate -no-color
     waiver_reason: A comment-only file with no resource; validate proves the root parses with it.
   - source: terraform/organization/management_admin.tf
     behavior: no access key; templates read through try with a Deny-all fallback
@@ -733,7 +763,7 @@ test_obligations:
     test_selector: tests/validate/test_terraform_checks.py
     red_green_expectation: the -chdir list case is red before the tuple gains the root
   - source: docs/contracts/protected-actions.yaml
-    behavior: the root and profile are protected
+    behavior: the root is a protected live root
     verification_step: 2
     test_selector: tests/test_session_protected_action_match.py
     red_green_expectation: the organization cases are red before the contract rows land
@@ -743,7 +773,7 @@ test_obligations:
     test_selector: tests/checks/verification/test_validate_admin_root_premerge_gate.py
     red_green_expectation: the derived-roots case is red before the row lands
   - source: docs/contracts/deploy-paths.yaml
-    behavior: the organization_provisioning row and the gate's management check
+    behavior: the organization_provisioning row and the pre-merge rule's root list
     verification_step: 3
     command: bin/venv-python -m scripts.roadmap.approved_text verify --slug sit-organization
     waiver_reason: Governing prose bound word for word by the operator-approved sidecar (validate_merge_step); its enforcement is the premerge gate check stepped in 2.
@@ -768,10 +798,10 @@ test_obligations:
     command: terraform fmt -check -recursive terraform/organization
     waiver_reason: Agent-instruction prose; the prose budget check measures its size and steps 4-8 exercise its blocks.
   - source: .gitignore
-    behavior: the organization tfvars file is ignored
+    behavior: the organization tfvars file is ignored and its lock file is not
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_organization_baseline.py
-    red_green_expectation: a case asserting git check-ignore on terraform/organization/terraform.organization.tfvars is red before the line lands
+    red_green_expectation: a case asserting git check-ignore on terraform/organization/terraform.organization.tfvars, and that the lock file is tracked and not ignored, is red before the lines land
   - source: .github/CODEOWNERS
     behavior: the root is code-owned
     verification_step: 1
@@ -847,13 +877,14 @@ context:
   - "Critique r7 (REVISE, 1 blocking, 5 nits), dispositions: B1 the denied PutRolePolicy is in the policy-change filter's must_match and its near-miss is an unlisted call, the test pins no errorCode clause, and step 7's fix_if forbids excluding errors; N1 patterns are plain literals, tested; N2 the tamper filter covers any non-read cloudtrail call, the alarm verbs and the trail bucket's policy and lifecycle writes, as PROD's does; N3 Decision 202 cl.5's blinding residual named and carried to rec-5059; N4 the stale actor wording fixed; N5 step 7's expected order matches its output, and a traceback is named in fix_if."
   - "Critique r8 (REVISE, 1 blocking, 4 nits), dispositions: B1 the root's text tests split across three declared files (baseline, admin grant, alarms) with the acceptance node path unchanged, and STOP-and-amend if one still nears 500; N1 the tamper filter uses PROD's per-source readOnly IS FALSE form on the trail bucket prefix, the log group and the topic; N2 the alarm test requires an errored fixture event in the policy-change filter's must_match and pins no requestParameters clause; N3 alarm-action stripping named as uncompensated and the delivery claim marked inferred; N4 both residuals appended to rec-5059's context and read back."
   - "Critique r9 (PROCEED, 0 blocking, 5 nits), all folded in: N1 step 1 and AC1 name the three test files; N2 the baseline test file has its own obligation; N3 the sns tamper clause also matches subscriptionArn and the fixture carries an Unsubscribe event; N4 the baseline file's purpose names feature set ALL, the SCP type and the two OUs, and the trail.tf obligation leaves names to the baseline file; N5 the patterns map uses quoted keys for the _local_map parser. None touches a sidecar-bound word."
+  - "Critique r11 (Amendment 1; REVISE, 3 blocking, 11 nits), dispositions: BLK-1 GetMetricStatistics added to OrganizationAdminOps for step 8, step 8's errors to a /tmp file; BLK-2 step 8 takes the region the build writes in; BLK-3 a committed lock file copied from terraform/bootstrap's hashicorp/aws block with a .gitignore exception, -lockfile=readonly in steps 5 and 7, and step 7 pins the terraform version too; N1 'caller-arn check:' label in steps 5 and 7 and a CLAUDE.md convention for the child plans, the ENVIRONMENT CHECK clause's staleness named; N2 step 5 reads the patterns from the saved plan instead of a console that takes the state lock; N3 every block's errors go to a /tmp file; N4 APPLY_EXIT; N5 step 7's text; N6 one tfvars read in step 5 and a Version-bound read in step 7; N7 the two sidecar sentences reworded before any approval run; N8 two obligation lines; N9 Decisions 256 and 257 in the checklist; N10 overlap line; N11 the parameter's region."
   - "Critique r10 (confirming; PROCEED, 0 blocking, 2 nits): the five r9 folds confirmed. NIT-1 the alarms test purpose names the sns subscriptionArn clause; NIT-2 since the r8 split the fixture and filter-pattern checks that the r5 and r6 lines give to the baseline test belong to test_organization_alarms.py (those lines are left as recorded)."
   - "PR shape: one PR. It declares this plan, carries every sidecar block, flips T2.57 c4 and carries 'Resolves: rec-5026'."
-  - "Amendment 1 (2026-11-15, rec-5026 build not started): the agent-run management environment, its static key and profile agent_platform_admin_org are gone, because Decision 256 cl.3 (2026-11-13) gives every admin step to the operator in AWS CloudShell, Decision 257 cl.7 keeps admin keys off the vendor and Decision 252 cl.7 allows no CI role in the management account; the operator chose CloudShell for rec-5026 on 2026-11-12 (planning thread cards) and said on 2026-11-15 that approvals carry into the fresh thread. Steps 4-10 are rebuilt as operator blocks on the rec-5025 pattern (PLAN-sit-portable-roots step 8); the hook, shim and admin-profile changes for the dropped profile are out; the admin user becomes the console-only org-admin-operator with an MFA trust and a CloudShellUse Sid; two alarm filters are re-scoped to a role switch and a sign-in anomaly; the fixture becomes JSON. Blind Fable consult: /mnt/project-files/sit-account-bootstrap/ADVICE-3-cloudshell.md (adopted with the adaptations listed there). The sidecar's bound words changed, so a new approval run binds them. terraform/bootstrap's sandbox-only agent DuckLake REST API (agent_ducklake_api.tf, #2028 and #2035, Decision 255) is untouched here: terraform/organization declares no API, and SIT's map index is rec-5027's. Decision-scout r2 FLAGS_FOUND (/mnt/project-files/sit-account-bootstrap/SCOUT-organization-r2.md; Decisions triaged: 210 of 210; Roadmap items intersected: 6; CONFLICT: 0; RELATED: 6; Serves: NS.9 4/5): the Decision 257 NOTE is the constraint line on 257 cl.7, the Decision 202 SPIRIT flag is step 8's deliberate failed sign-in. The critique and wording lines above Amendment 1 record the plan as it stood then (old step numbers and the management environment included)."
+  - "Amendment 1 (2026-11-15, rec-5026 build not started): the agent-run management environment, its static key and profile agent_platform_admin_org are gone, because Decision 256 cl.3 (2026-11-13) gives every admin step to the operator in AWS CloudShell, Decision 257 cl.7 keeps admin keys off the vendor and Decision 252 cl.7 allows no CI role in the management account; the operator chose CloudShell for rec-5026 on 2026-11-12 (planning thread cards) and said on 2026-11-15 that approvals carry into the fresh thread. Steps 4-10 are rebuilt as operator blocks on the rec-5025 pattern (PLAN-sit-portable-roots step 8); the hook, shim and admin-profile changes for the dropped profile are out; the admin user becomes the console-only org-admin-operator with an MFA trust and a CloudShellUse Sid; two alarm filters are re-scoped to a role switch and a sign-in anomaly; the fixture becomes JSON. Blind Fable consult: /mnt/project-files/sit-account-bootstrap/ADVICE-3-cloudshell.md (adopted with the adaptations listed there). The sidecar's bound words changed, so a new approval run binds them. terraform/bootstrap's sandbox-only agent DuckLake REST API (agent_ducklake_api.tf, #2028 and #2035, Decision 255) is untouched here: terraform/organization declares no API, and SIT's map index is rec-5027's. deploy-paths.yaml pre_merge_live_plan's ENVIRONMENT CHECK clause still names only the PlatformAdmin chain and an ADMIN session for every root; refreshing it for Decision 256 is outside this plan (owed as a rec, named in the handoff). Decision-scout r2 FLAGS_FOUND (/mnt/project-files/sit-account-bootstrap/SCOUT-organization-r2.md; Decisions triaged: 210 of 210; Roadmap items intersected: 6; CONFLICT: 0; RELATED: 6; Serves: NS.9 4/5): the Decision 257 NOTE is the constraint line on 257 cl.7, the Decision 202 SPIRIT flag is step 8's deliberate failed sign-in. The critique and wording lines above Amendment 1 record the plan as it stood then (old step numbers and the management environment included)."
   - "Cost check (AWS public price list, eu-west-2, 2026-11-10): five standard alarms $0.50/month; management-account events are a first trail copy (free) at a volume of a few hundred a month, so CloudWatch Logs ingestion and S3 storage are cents; Organizations, SCPs and an SSM standard parameter cost nothing. Total about $0.60/month."
   - "Carried to the child items (in their contexts at filing, 2026-11-11 12:58Z-13:00Z, each read back): rec-5064 -- the AccountMFAEnabled read is replaced by list-organizations-features plus an audit that SIT has no root password, and every SIT read goes through a separate regional STS client with frozen role credentials (scripts.aws_identity's pattern), because a chained assume-role to the project region's STS host is re-signed as the management user; the account quota read must not override the profile region. rec-5065 -- the PROD acceptance by the break-glass user, the import with prevent_destroy and ignore_changes, and consolidated billing moving PROD's Cost Explorer and CUR view to the payer (tell the Cost Optimisation project). rec-5066 -- the 400-day region and root lookback over PROD's trail with a bounded wait on query status (no foreground sleep); only PROD-health checks (portal round trip, drift, bootstrap plan, alarms) trigger an emergency detach, while a wrong simulator line triggers investigation through the fallback call, with aws:PrincipalArn passed as a context entry; each --selftest-roundtrip writes one probe rec; PRs that do not declare that plan run validate_scope_boundary through its plan_paths seam as a VP step."
   - "Out of scope, owned elsewhere: the organisation trail and detector cutover (rec-5059, before rec-5029); RDS guard rows and denies (rec-5058); the SIT account (rec-5064); PROD joining (rec-5065); PROD's staged baseline (rec-5066); SIT bootstrap (rec-5027); workload SCPs (rec-5029). The ci.yml terraform-validate comment that lists roots by example is left as it is (not a list the check reads)."
-  - "Overlap: docs/contracts/deploy-paths.yaml (500/500) is also scoped by unbuilt PLAN-telemetry-content-reader-lock (rec-4696, Feedback Loop project) and PLAN-neon-key-out-of-pr-plans; the inventory is also edited by the Property Transfer project. The build checks those projects' open PRs at start and asks the operator before editing a file one of them changes."
+  - "Overlap: docs/contracts/deploy-paths.yaml (478 of 500 effective lines, NEAR_CAP) is also scoped by unbuilt PLAN-telemetry-content-reader-lock (rec-4696, Feedback Loop project) and PLAN-neon-key-out-of-pr-plans; the inventory is also edited by the Property Transfer project. The build checks those projects' open PRs at start and asks the operator before editing a file one of them changes."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: wording-check, round: 1, verdict: FAIL, digest: 69d8df86f0b9245d5eff95b0b6d6aed3eb17fbf28ff31c195bae8104a4770870, base: f866f98bff974d3109b8a0a140e49d5cf1e58eac, selection: complete}  # pragma: allowlist secret
@@ -873,10 +904,11 @@ gate_rounds:
   - {gate: plan-critique, round: 10, verdict: PROCEED, blocking: 0, nits: 2}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND}
   - {gate: wording-check, round: 6, verdict: PASS, digest: 9511cd00823a6ba8f494dccb86021c34b730044fea52f4e1d4deb9826c99483d, base: fdc9f86bdc46d7716544f86c59513d59f0ed73ef, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 11, verdict: REVISE, blocking: 3, nits: 11}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
-  - Decisions 101, 113, 126, 202, 223, 237, 242, 248 and 252 read
+  - Decisions 101, 113, 126, 202, 223, 237, 242, 248, 252, 256 and 257 read
   - The rec-5024 and rec-5025 builds are merged; no other admin apply in flight
   - The rec-5025 build is merged and applied (#1987, 8c231181; operator CloudShell 2026-11-13, rec-5025 closed)
 execution_steps:
