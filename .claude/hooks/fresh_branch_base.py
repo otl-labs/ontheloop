@@ -40,6 +40,8 @@ best-effort so an offline remote never stalls or fails a branch cut.
 Set CLAUDE_HOOK_BRANCH_OVERRIDE to simulate the current branch without
 actually switching (mirrors never_on_main.py). TEST-ONLY -- never set in
 a shell rc.
+
+Rule HB-1: every block message ends with its own versioned marker line; src/turn_capture/markers.py holds the grammar.
 """
 
 from __future__ import annotations
@@ -102,6 +104,7 @@ _BLOCK_MESSAGE = (
     "Branch directly off the remote ref instead:\n"
     "  git checkout -b <name> origin/main\n"
     "See docs/contracts/git-ops.yaml for the local-main-sync / branch-off-remote-main guard.\n"
+    "HOOK-BLOCK v1 hook=fresh_branch_base\n"
 )
 
 

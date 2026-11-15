@@ -17,6 +17,8 @@ Behaviour:
 Testing:
   Set CC_HOOK_AGENT_OVERRIDE=1 to bypass the hook for local testing without
   unsetting CC_SCHEDULED_AGENT_NAME.
+
+Rule HB-1: every block message ends with its own versioned marker line; src/turn_capture/markers.py holds the grammar.
 """
 
 from __future__ import annotations
@@ -70,6 +72,7 @@ def main() -> int:
         f"{tool_name} to '{file_path_str}' is not permitted for agent '{agent_name}'.\n"
         f"Permitted paths:\n"
         f"  - logs/agents/{agent_name}/\n"
+        "HOOK-BLOCK v1 hook=scheduled_agent_log_only\n"
     )
     return 2
 

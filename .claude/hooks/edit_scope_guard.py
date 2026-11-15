@@ -21,6 +21,8 @@ Failure-mode: malformed input JSON -> exit 0 ALLOW (defensive, per never_on_main
 Activation (how /implement sets CLAUDE_ACTIVE_PLAN or the marker file) is a separate
 integration concern.  This baseline ships the mechanism + registration + tests, inert until
 a plan context is declared.
+
+Rule HB-1: every block message ends with its own versioned marker line; src/turn_capture/markers.py holds the grammar.
 """
 
 from __future__ import annotations
@@ -104,6 +106,7 @@ def main() -> int:
             f"BLOCKED by .claude/hooks/edit_scope_guard.py: "
             f"active plan {active} could not be read or parsed (fail-closed).\n"
             "Fix the plan file or unset CLAUDE_ACTIVE_PLAN / remove .claude/active_plan.\n"
+            "HOOK-BLOCK v1 hook=edit_scope_guard\n"
         )
         return 2
 
@@ -136,6 +139,7 @@ def main() -> int:
         f"Active plan: {active}\n"
         "To edit out-of-scope files: unset CLAUDE_ACTIVE_PLAN / remove .claude/active_plan, "
         "or add the file to the plan's Scope and re-activate.\n"
+        "HOOK-BLOCK v1 hook=edit_scope_guard\n"
     )
     return 2
 
