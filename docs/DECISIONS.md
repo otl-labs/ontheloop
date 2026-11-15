@@ -2,6 +2,57 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 262: A plan PR whose last decision-scout row is BLOCK fails its check, with no exemption and no agent override -- the operator's admin bypass merge is the release valve (amends Decision 83) (Decided)
+
+```yaml
+number: 262
+status: Decided
+decided_date: "2026-11-15"
+kind:
+  value: direction
+  justification: >-
+    Clause 1 makes a human gate: a plan the scout still blocks merges only by the operator's own merge, narrowing
+    Decision 83's commitment to autonomous merge; undone, an agent merges a plan the scout blocked.
+amends: [83]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant: a standing refusal with no agent override that binds every planning session, recorded
+    in the Decision 245 cl.3 form. Not a ledger note: a contract records a check's shape, not a narrowing of Decision
+    83 (Decision 246).
+```
+
+**Status:** Decided
+**Date:** 2026-11-15
+**Warehouse ID:** dec-262 (per Decision 84 backfill)
+
+**Problem:** When a decision-scout BLOCK recurs after a pivot, the planning skill lets the operator accept it, and an agent then merges the plan. The acceptance is a plan field an agent writes, so nothing on GitHub shows the operator gave it, and T4.32 c6 says an accepted BLOCK is an approved override run, never a plan edit. Such BLOCKs are rare (one so far). Operator ruling 2026-11-12 (PLAN-plan-rescout-on-fingerprint): the block binds everyone but him.
+
+**Intent:** A plan the scout blocks reaches main only after a pivot the scout no longer blocks, or by the operator's own merge.
+
+**Decision:**
+1. **BLOCK always fails (amends Decision 83).** pr-validate's re-scout barrier fails a PR that adds or changes a plan whose last decision-scout gate_rounds row has verdict BLOCK, at any schema version, escalated and accept-with-deferral rows included; no plan field, escalation choice or agent override exempts it. This narrows Decision 83's non-wedging property for agent merges of such plans only: the ruleset and its admin bypass are unchanged, and the operator's admin bypass merge in the GitHub UI, audit-logged by GitHub, is the release valve.
+2. **Forward path.** An agent clears a BLOCK only by pivoting the plan and re-running the scout until its last row is not BLOCK; the barrier then compares that row's fingerprint (Decision 229 cl.4).
+3. **Later route.** Once T4.32 c6's approved override run, an operator approval on GitHub, is built (T4.32 c6, which rec-4944 closed into), a plan that amends this Decision may make it the release valve in place of the bypass.
+4. **Coverage (Decision 181 cl.2).** Clause 1: the barrier and its tests. Residuals: an agent merge of the red PR until PLAN-merge-requires-green-checks builds (rec-4080); clause 2's non-BLOCK row recorded without a scout run (rec-5129).
+
+```yaml reversal-conditions
+decision: 262
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan; never add an agent override"
+conditions:
+  - id: override-run-built
+    kind: manual
+    description: "T4.32 c6's approved override run is built: decide whether it replaces the admin bypass as clause 1's release valve."
+  - id: bypass-wedge
+    kind: manual
+    description: "Accepted BLOCKs become frequent enough that admin bypass merges are routine: re-decide before the bypass becomes the normal path."
+```
+
+**Related:** Decisions 83, 163, 181, 229, 235, 245, 246; T4.32; rec-4080, rec-4490, rec-5128.
+
+---
+
 ## Decision 258: The CI apply boundary's headroom trigger is re-anchored once, to the size it reaches restoring agents' AWS access during the critical workflow failure (amends Decisions 230 and 239) (Decided)
 
 ```yaml
@@ -11718,6 +11769,8 @@ conditions:
 > **Update (2026-11-03):** Decision 245 clause 3 narrows the non-wedging property for agent merges: a fail-closed gate refuses a merge whose stale base shares a changed file with main. The ruleset configuration above is unchanged.
 
 > **Update (2026-11-05):** Decision 246 clause 5 narrows it again for pull requests that add or change approved text: such a PR stays red until the operator approves the wording on GitHub, and an operator merge in the GitHub UI stays the release valve.
+
+> **Update (2026-11-15, PLAN-plan-rescout-on-fingerprint):** Decision 262 narrows it again for plan pull requests whose last decision-scout row is BLOCK: the re-scout barrier fails them with no exemption, and the operator's admin bypass merge in the GitHub UI is the release valve. The ruleset configuration above is unchanged.
 
 ---
 
