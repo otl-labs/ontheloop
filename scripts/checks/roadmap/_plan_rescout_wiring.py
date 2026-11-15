@@ -31,6 +31,13 @@ def newest_version_findings(added_names: Collection[str], docs: Mapping[str, Any
     ]
 
 
+def seam_names(plans_dir: Path | None, added: set[str] | None, modified: set[str] | None) -> dict[str, set[str]]:
+    """The plans_dir test seam's name sets for run(): empty sets (never None) so no git path is reached."""
+    if plans_dir is None:
+        return {}
+    return {"added_plan_names": added or set(), "modified_plan_names": modified or set()}
+
+
 def run(
     *,
     docs: Mapping[str, Any],

@@ -181,13 +181,6 @@ def _test_obligation_failures(path: Path, doc: Any) -> list[str]:
     ]
 
 
-def _seam_names(plans_dir: Path | None, added: set[str] | None, modified: set[str] | None) -> dict[str, set[str]]:
-    """The plans_dir test seam's name sets for the re-scout legs: empty sets (never None) so no git path is reached."""
-    if plans_dir is None:
-        return {}
-    return {"added_plan_names": added or set(), "modified_plan_names": modified or set()}
-
-
 @registry.register("validate_plan_documents", owner="platform")
 def validate_plan_documents(
     failed: list[str],
@@ -266,7 +259,7 @@ def validate_plan_documents(
             advisories.append(
                 "no merge base resolves, so no wording-check row or approval lookup is required (planning SKILL.md Step 8b)"
             )
-        seam_names = _seam_names(plans_dir, added_plan_names, modified_plan_names)
+        seam_names = _plan_rescout_wiring.seam_names(plans_dir, added_plan_names, modified_plan_names)
         rescout_failures, rescout_warnings, rescout_line = _plan_rescout_wiring.run(
             docs=docs,
             plan_paths=plan_paths,

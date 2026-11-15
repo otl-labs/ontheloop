@@ -142,3 +142,9 @@ def test_real_barrier_over_a_fixture_tree_fails_a_stale_row(tmp_path: Path) -> N
     failures, _, line = module.run(**kw)
     assert len(failures) == 1 and "re-scout required" in failures[0]
     assert line == " re-scout barrier: 1 plan(s) examined, 1 compared, 1 failing"
+
+
+def test_seam_names_are_empty_sets_when_plans_dir_is_given_and_absent_otherwise(tmp_path: Path) -> None:
+    assert module.seam_names(None, {"a"}, {"b"}) == {}
+    assert module.seam_names(tmp_path, None, None) == {"added_plan_names": set(), "modified_plan_names": set()}
+    assert module.seam_names(tmp_path, {"a"}, {"b"}) == {"added_plan_names": {"a"}, "modified_plan_names": {"b"}}
