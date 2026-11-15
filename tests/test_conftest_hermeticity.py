@@ -178,3 +178,23 @@ class TestClassLevelMarkerInheritanceNetworkAndSubprocess:
         non-existent binary) rather than the guard's own RuntimeError."""
         with pytest.raises(FileNotFoundError):
             subprocess.run(["gemini.CMD"], capture_output=True)
+
+
+class TestTransportVariableHermeticity:
+    """PLAN-agent-proxy-signed-access: after cutover every agent environment exports
+    OTL_OPS_VERBS_TRANSPORT, which would make the clients' Function URL nodes take the API path.
+    The root conftest's _hermetic_aws_profile must delete it for every non-integration test.
+
+    The class-scoped fixture is a @classmethod (as above) so it is set up before the root
+    conftest's function-scoped fixtures; the class carries no integration marker, so the
+    deletion applies and -m 'not integration' selects it."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _set_transport_variable(cls):  # type: ignore[misc]
+        with pytest.MonkeyPatch.context() as class_patch:
+            class_patch.setenv("OTL_OPS_VERBS_TRANSPORT", "execute_api")
+            yield
+
+    def test_transport_selection_env_var_deleted(self) -> None:
+        assert "OTL_OPS_VERBS_TRANSPORT" not in os.environ

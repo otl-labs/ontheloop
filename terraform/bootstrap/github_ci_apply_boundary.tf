@@ -237,6 +237,15 @@ locals {
         }
       },
       {
+        # Decision 255 cl.2: no bounded identity creates, changes, redeploys or deletes any API Gateway resource,
+        # the account's CloudWatch role setting included. The ceiling holds no apigateway action today; this keeps a
+        # later widening from reaching the DuckLake API. GET stays outside.
+        Sid      = "DenyApiGatewayWrite"
+        Effect   = "Deny"
+        Action   = ["apigateway:DELETE", "apigateway:P*"]
+        Resource = "*"
+      },
+      {
         # Decision 230 cl.5: the production telemetry catalog's data prefix and its blob root are reachable only by
         # the roles that serve or maintain that catalog. PlatformDev and the CI roles carry this boundary, so their
         # bucket-wide S3 grants are fenced here without an identity-side edit. The roles may not exist yet, which
@@ -329,6 +338,18 @@ locals {
             ]
           }
         }
+      },
+      {
+        # PLAN-bootstrap-ci-gated-apply: bootstrap-apply may change a bounded role's grants after a names-only
+        # review, and this ceiling allows UpdateAssumeRolePolicy, DeleteRole, DetachRolePolicy, DeleteRolePolicy
+        # and PassRole on "*", so without this Deny such a grant could reach the protected roles. Compact on
+        # purpose (headroom): the six families cover every write a role takes (Attach, Create, Delete, Detach,
+        # Put, PassRole, Tag, Untag, Update); IAM's reads (Get*, List*, Simulate*, Generate*) match none. The
+        # account segment is * because a wider Deny is safe and saves bytes.
+        Sid      = "DenyBoundedWriteOnProtectedRoles"
+        Effect   = "Deny"
+        Action   = ["iam:A*", "iam:C*", "iam:D*", "iam:P*", "iam:T*", "iam:U*"]
+        Resource = ["arn:aws:iam::*:role/Platform*", "arn:aws:iam::*:role/bootstrap-*", "arn:aws:iam::*:role/github-settings-*", "arn:aws:iam::*:role/platform-security-*", "arn:aws:iam::*:role/ducklake-api-*"]
       }
     ]
   })

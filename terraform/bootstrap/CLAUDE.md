@@ -12,10 +12,10 @@ PLAN-platform-iam-bootstrap-adopt, PlatformDev and PlatformAdmin with their five
 
 ## NEVER auto-apply this module
 
-The `terraform-apply-sandbox.yml` path filter is `terraform/personal/**`. This module
-(`terraform/bootstrap/**`) is intentionally excluded and must NEVER be added to any auto-apply
-workflow or the `terraform_apply_guard.py` guard path. Apply this module manually, by hand, every
-time, using the `agent_platform_admin` profile (PlatformAdmin, `iam:*`).
+`terraform-apply-sandbox.yml` filters `terraform/personal/**`; this module stays out of it and of
+`terraform_apply_guard.py`. `terraform-bootstrap-apply.yml` applies merged changes on one approval
+(`tf-bootstrap-apply`) unless its preview ends CLOUDSHELL_REQUIRED; then the operator applies the whole
+plan from CloudShell (`deploy-paths.yaml` `admin_out_of_band.bootstrap_ci_apply`).
 
 ## Prerequisites
 
@@ -95,8 +95,8 @@ After a bootstrap import succeeds (no replace/destroy), release the address from
 
 ## Ongoing apply runbook
 
-Any change to `github_ci_apply.tf` (e.g. adding a new IAM action to the inline policy or
-adjusting the permissions boundary) must be applied manually under `agent_platform_admin`:
+A CLOUDSHELL_REQUIRED change (e.g. `github_ci_apply.tf`'s inline policy or the boundary) is applied
+by the operator under `agent_platform_admin`:
 
 PRE-APPLY: if this apply NARROWS the grant surface, first drain any dependent in-flight
 terraform/personal destroy or gated apply (`deploy-paths.yaml#admin_out_of_band.procedure`).

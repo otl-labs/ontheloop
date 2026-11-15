@@ -43,7 +43,8 @@ ENV = "tf-trusted-plan"
 TRUSTED_WORKFLOWS = frozenset({"terraform-plan-trusted.yml", "terraform-github-plan.yml"})
 # Decision 248 cl.4 (amends Decision 238 cl.2): the workflows that may declare ENV. TRUSTED_WORKFLOWS stays the
 # trusted-plan role's job_workflow_ref set; terraform-github-apply.yml's preview job uses its own role.
-ENV_WORKFLOWS = TRUSTED_WORKFLOWS | {"terraform-github-apply.yml"}
+# Decision 257 (amends Decision 238 cl.2): terraform-bootstrap-apply.yml's preview job also declares it.
+ENV_WORKFLOWS = TRUSTED_WORKFLOWS | {"terraform-github-apply.yml", "terraform-bootstrap-apply.yml"}
 TEMP_NO_ENV_JOBS: frozenset[tuple[str, str]] = frozenset()
 
 _PRT = "pull_request_target"

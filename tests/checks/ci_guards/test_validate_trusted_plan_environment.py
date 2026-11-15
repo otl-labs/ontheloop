@@ -472,7 +472,17 @@ def _preview(workflows: dict[str, dict[str, Any]]) -> dict[str, Any]:
 
 def test_trusted_workflows_are_unchanged_and_the_apply_workflow_may_declare_env() -> None:
     assert frozenset({"terraform-plan-trusted.yml", "terraform-github-plan.yml"}) == v.TRUSTED_WORKFLOWS
-    assert v.ENV_WORKFLOWS == v.TRUSTED_WORKFLOWS | {_APPLY_WF}
+    assert v.ENV_WORKFLOWS == v.TRUSTED_WORKFLOWS | {_APPLY_WF, "terraform-bootstrap-apply.yml"}
+
+
+def test_bootstrap_apply_preview_is_governed(real_workflows) -> None:
+    name = "terraform-bootstrap-apply.yml"
+    assert {jid for jid, _ in v._governed(name, real_workflows[name])} == {"preview"}
+    assert not any(name in x for x in v.check_environment_references(real_workflows))
+    assert v.check_deployment_false(real_workflows) == []
+    mutated = copy.deepcopy(real_workflows)
+    mutated[name]["jobs"]["preview"]["environment"] = {"name": "tf-trusted-plan"}
+    assert any(name in x for x in v.check_deployment_false(mutated))
 
 
 def test_the_apply_workflows_preview_job_is_governed(real_workflows) -> None:
