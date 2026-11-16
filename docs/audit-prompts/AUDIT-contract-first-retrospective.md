@@ -381,24 +381,20 @@ candidates. A `basis` list may be empty.
 **Q1 Routing effect.** Has what is written as a numbered Decision changed since the intervention,
 and is the content it was meant to displace reaching contracts, code or the change record?
 Evidence: the content partition of the newest entries against the 2026-08-07 baseline (E1), the
-bar test on the same entries (E1), the contract-change samples (E2), G23, and C1-C4. Default rule.
+bar test on the same entries (E1), the contract-change comparisons (E2), G23, and C1-C4.
 For each E1 entry compute `spec_share` = (specification + change-record) / (specification +
 rationale + change-record), as a percentage: class (4) is left out so that envelopes and
 annotations, which the baseline entries did not carry, cannot move it. `mean_spec_share` is the
 plain mean of the 12 values. The baseline's value, from its means, is 65 (62 of 95), stated as
-plus or minus 10. A minted share is the share of one E2 group's samples with governing content
-(any classification other than `housekeeping`) that are `would_have_minted_before: yes`:
-`minted_share_p2` over group (a), `minted_share_p0` over group (c), the control. `minted_delta` is
-`minted_share_p2` minus `minted_share_p0`. All three are fractions from 0 to 1; a share is `null`
-when its group has no sample with governing content, and `minted_delta` is `null` when either
-share is. Contract changes with no Decision were already common in P0 (G23), so only the
-difference counts toward a shift. `shifted` when `mean_spec_share` is 45 or lower AND
-`minted_delta` is one third or more; `not-shifted` when `mean_spec_share` is 55 or higher AND
-`minted_delta` is under one third; otherwise `partially-shifted`. IF `minted_delta` is `null`:
-rule on `mean_spec_share` alone (45 or lower `shifted`, 55 or higher `not-shifted`, otherwise
-`partially-shifted`). IF `minted_share_p0` is two thirds or more, the difference cannot reach one
-third whatever P2 shows: say so, and say what `mean_spec_share`, G23 and group (b) then support.
-Both legs rest on small samples (12 entries; 6 and 6 commits): `prose` says so.
+plus or minus 10. Rule: bounds, then judgment. `mean_spec_share` is the one measure here with a
+like-for-like baseline, so it bounds the verdict as a default rule: at 55 or higher `shifted` is
+not available; at 45 or lower `not-shifted` is not available; between the two all three are.
+Inside the bounds the verdict is your judgment over the E1 bar test, the two E2 comparisons
+(`rule_share` and `restating_share`, each P2 against P0), G23 and C1-C4. `prose` states the
+threshold you applied, which inputs carried the verdict, and each input that points the other
+way. Contract changes with no Decision were already common in P0 (G23), so their presence in P2
+is not by itself evidence of a shift; only a difference from P0 is. The samples are small (12
+entries; 6, 6, 4 and 4 commits) and no single E2 figure decides the verdict: `prose` says so.
 Verdict: `shifted | partially-shifted | not-shifted | cannot-determine`.
 
 **Q2 Context cost.** What does the decision and contract system cost an agent now against before?
@@ -525,8 +521,11 @@ conditions whose review dates fall between 2026-11-17 and 2026-12-01 (G14). For 
 conditions listed in G14, decide from evidence whether it has fired, and recommend a disposition.
 G14 gives a test for the two prose conditions and a note on two of the stanza conditions. For
 every stanza condition the test is its own `description` read literally, against the evidence you
-already hold plus at most 2 further repository reads each; where its wording leaves a threshold
-open ("materially", "measured"), state the one you applied in `evidence`. Fill `condition_reviews`
+already hold plus at most 2 further repository reads each (G14 gives one condition 4); where
+its wording leaves a threshold open ("materially", "measured"), state the one you applied in
+`evidence`; where it leaves a comparison base or an evidence source open, G14 names it. The
+verdict follows the wording; whether the concern behind a condition still applies belongs in the
+disposition. Fill `condition_reviews`
 (Section 14). This question's entry carries no verdict of its own; its `prose` points at the
 block.
 
@@ -1043,10 +1042,26 @@ three. At `197c800c` all eight listed commits exceed the combined size (the smal
 bytes), so the first two legs decide it.
 
 Decision 179's `index-read-context-cost` is worded as a problem arising "before T2.56 c1 or T1.5 c1
-lands"; T2.56 c1 is `met` (G1). That criterion concerns the ambient instruction layer (`AGENTS.md`,
-`CLAUDE.md` and the skills), not the index, and the index grew over the same period (G8). Whether
-the criterion being met forecloses the condition, or only overtakes its wording while the cost it
-names remains, is your judgment; `foreclosed` needs the first.
+lands"; T2.56 c1 is `met` (G1). Read as written, the window the description names has closed,
+which is what `foreclosed` means (Section 14 field rules), unless you find the problem was
+already measured before that criterion was met: that is `fired`. Two facts bear on the
+disposition, not on the verdict. T2.56 c1 concerns the ambient instruction layer (`AGENTS.md`,
+`CLAUDE.md` and the skills), not the index. The index's size at the three boundaries is in G8.
+Whether a concern of the kind this condition names applies at the audited commit is for you to
+establish under Q2; it decides between `retire-condition` and `re-arm` with new wording.
+
+Decision 179's `inflow-unguarded` reads "Inflow rises materially with no stock guard". Decision
+179 is dated 2026-08-31, inside P1, so the base for "rises" is P1's `entries_per_day` and the
+comparison is P2's against it (DD-A). Give P0's rate beside them: P1 was the migration window.
+"Materially" is the threshold you state. Whether a stock guard exists is a fact to read at the
+audited commit (G21).
+
+Decision 177's `legitimate-shape-blocked-twice` needs two corrections that could not be expressed
+in the append-only dialect. The guard that would have blocked one was retired on 2026-08-27 (G6),
+so look for corrections an author reshaped or abandoned to fit the dialect: one search of commit
+messages (`git log -i --grep='append-only' --format='%h %cs %s' <sha>`) and one `recs_related`
+search, which counts toward Section 13's limit. `not-fired` when they show fewer than two; say
+how thin the record is.
 
 Decision 167's `mis-routed-past-both-gates` names two gates: the conformance check and
 plan-critique's category-consistency verdict. Every entry on main passed the first by being
@@ -1265,11 +1280,14 @@ the audited commit.** For each:
    elements class (4) lists are class (4) whatever they say, including dated annotations:
    blockquote lines beginning `> **` and trailing `[Amendment ...]` brackets (these are what C2
    counts); "first match wins" orders classes (1) to (3) for the remaining body text. A fenced
-   `yaml reversal-conditions` stanza is class (3): the rule names reversal conditions there. One
-   clarification for body text: a block that does more than one job goes whole to the class most
-   of its bytes serve, and "first match wins" decides only a block split evenly. The baseline
-   recorded the rule and not how it treated such blocks; name that in `prose` as a limit on the
-   comparison with G20. Record the four shares to the nearest 5 points, and `spec_share` (Q1) from
+   `yaml reversal-conditions` stanza is class (3): the rule names reversal conditions there. For
+   body text apply the rule as written, block by block: a block holding content of more than one
+   class goes whole to the first of classes (1), (2), (3) that any of its content matches; the
+   tie-break sentence settles which class one sentence is content of. The baseline recorded the
+   rule and not how it treated such blocks. IF it judged a mixed block by its main job instead,
+   this reading puts more bytes into `spec_share` than the baseline's did, so today's value would
+   read high against 65: name that in `prose` as a limit on the comparison with G20, with its
+   direction. Record the four shares to the nearest 5 points, and `spec_share` (Q1) from
    those recorded shares.
 2. Bar test. Apply the three questions of `significance.routing_rule`
    (`docs/contracts/decision-entry.yaml:430-437`) to the entry's own clauses and classify:
@@ -1287,7 +1305,7 @@ Finish all 12 before computing the means; each mean is the plain mean of the 12 
 every entry weighted equally. Then set them beside G20. State in `prose` the dates the 12 span:
 they show the newest practice, not every entry since Decision 167.
 
-**E2 Contract changes with and without a Decision -- at most 16 commits.** List the `feat(`
+**E2 Contract changes with and without a Decision -- at most 20 commits.** List the `feat(`
 commits on main that changed a contract, newest first, each marked by whether it also changed
 `docs/DECISIONS.md`. For P2:
 
@@ -1297,31 +1315,38 @@ for c in $(git log --first-parent --since=2026-09-13T00:00:00Z --format=%h <sha>
 
 At `197c800c` this prints 214 commits: 130 `no-decision` and 84 `with-decision`. For P0, run it
 again with `--since=2026-06-16T00:00:00Z --until=2026-08-07T23:59:59Z` in place of the `--since`
-argument: at `197c800c` that prints 63 commits, 43 `no-decision` and 20 `with-decision`. Group (a):
-the 3 newest and the 3 oldest P2 `no-decision` commits. Group (b): the 2 newest and the 2 oldest
-P2 `with-decision` commits. Group (c), the control: the 3 newest and the 3 oldest P0 `no-decision`
-commits. For each sample read what the commit added to the contract or contracts
+argument: at `197c800c` that prints 63 commits, 43 `no-decision` and 20 `with-decision`.
+
+Four groups, two comparisons, each P2 against P0. Group (a): the 6 newest P2 `no-decision`
+commits. Group (c): the 6 newest P0 `no-decision` commits. Group (b): the 4 newest P2
+`with-decision` commits. Group (d): the 4 newest P0 `with-decision` commits. The newest of each
+period are taken so that each group shows practice at the end of its period: now, and just
+before the intervention (early P0 held a different set of contracts, Trap 17). Work through
+groups (c) and (d) before (a) and (b), so P0 is not judged against what P2 showed you.
+
+For each sample read what the commit added to the contract or contracts
 (`git show <sample commit> -- docs/contracts/`) and classify the main addition: `mechanism-rule` (a rule,
 threshold, procedure or enforcement binding), `field-semantics` (the meaning or constraints of a
 field or key), `operational-fact` (what is currently true, a status or a pointer), or
 `housekeeping` (wording, renames, pin or count updates with no governing content). List any second
 kind of addition in `also`. Quote the added line that best shows what kind of content it is.
 
-Groups (a) and (c), one test. The comparison set is Decisions 161 to 166 as they stand at the
-audited commit, leaving out their dated annotation lines: six of the ten entries (157-166) the
-baseline partitioned. Read them once, for all twelve samples. `would_have_minted_before` is `yes`
-when a comparison entry states content of the sample's classification at a like grain -- a
-threshold with its value, a field with its allowed values, a status with its date (name the entry
-and clause in `evidence`); `no` when no comparison entry holds content of that classification;
-`unclear` when the likeness is arguable; `n/a` for a `housekeeping` sample. For group (c) the
-field asks the same thing of its own time: did Decisions then record content of this kind.
-Classify and test group (c) before group (a), so the control is not judged against what P2
-showed you. Write `overlap: n/a`.
+Groups (a) and (c): write `overlap: n/a`. `rule_share` is the share of a group's samples whose
+main addition is `mechanism-rule`: `rule_share_p2` over group (a), `rule_share_p0` over group (c).
+It asks whether rules now land in a contract with no Decision more often than they did.
 
-Group (b) overlap. Read the Decision entry the same commit added or changed. `overlap` is `none`
-when the entry gives the reason and points at the contract, `partial` when it restates some of
-the contract's specification, `restated` when the same specification is in both. Write
-`would_have_minted_before: n/a`.
+Groups (b) and (d): also read what the same commit added to the decision file
+(`git show <sample commit> -- docs/DECISIONS.md`; where it touched several entries, the one with
+the most added lines). `overlap` is `none` when the entry gives the reason and points at the
+contract, `partial` when it restates some of the specification the commit put in the contract,
+`restated` when the same specification is in both, and `n/a` when the commit added only
+annotation or status lines to the decision file. `restating_share` is the share of a group's
+samples, leaving out `n/a`, whose `overlap` is `partial` or `restated`: `restating_share_p2` over
+group (b), `restating_share_p0` over group (d). It asks whether a Decision still carries the
+specification of the contract it lands with.
+
+All four shares are fractions from 0 to 1, `null` for a group with nothing to count. Write them
+in Q1's entry.
 
 **E3 Evaluator samples -- at most 12 Class D contracts.** Sort the 12 `agent_surface` contracts by
 basename and take every second one starting with the first (6). Sort the `check` contracts by
@@ -1496,7 +1521,8 @@ audit:
                  method: ""}
   question_answers:
     - {q: Q1, verdict: shifted|partially-shifted|not-shifted|cannot-determine,
-       minted_share_p2: null, minted_share_p0: null, minted_delta: null, basis: [], prose: ""}
+       rule_share_p2: null, rule_share_p0: null, restating_share_p2: null, restating_share_p0: null,
+       basis: [], prose: ""}
     - {q: Q2, verdict: reduced|held|grown|cannot-determine,
        root_agent_direction: reduced|held|grown, gate_subagent_direction: reduced|held|grown,
        basis: [], prose: ""}
@@ -1539,9 +1565,9 @@ audit:
     baseline_means: {specification_pct: 43, rationale_pct: 33, change_record_pct: 19, other_pct: 6,
                      mean_spec_share: 65}
   samples:                        # E2, E3, E4 rows
-    - {id: E2-01, sample_set: E2, group: a|b|c, subject: "<commit short sha>",
+    - {id: E2-01, sample_set: E2, group: a|b|c|d, subject: "<commit short sha>",
        classification: mechanism-rule|field-semantics|operational-fact|housekeeping, also: [],
-       would_have_minted_before: yes|no|unclear|n/a, overlap: none|partial|restated|n/a, evidence: ""}
+       overlap: none|partial|restated|n/a, evidence: ""}
     - {id: E3-01, sample_set: E3, subject: "<contract basename>", evaluator: "", statement_tested: "",
        classification: asserts-this-statement|asserts-other-content|reads-structure-only|instructs-agent-at-trigger|mention-only,
        evidence: "file:line"}
@@ -1590,7 +1616,7 @@ Field rules:
   `not-fired` or `cannot-determine` -> `re-arm` for a stanza condition (keep it and propose a new
   review date in `rationale`) or `keep-as-is` for a prose condition. You may recommend another
   value of the enum where the evidence supports it (for example `re-arm` with new wording for a
-  `foreclosed` condition whose underlying cost remains); `rationale` then says why. For
+  `foreclosed` condition where you find the concern behind it still applies); `rationale` then says why. For
   `cannot-determine`, name in `rationale` the evidence a reviewer would need.
 - `improvement_sequence`: a step with `opportunity: false` has at least one finding id in `closes`;
   a step with `opportunity: true` has `closes: []`. `moves` names what it moves, for example
