@@ -46,8 +46,9 @@ scope:
       prints one value-free line per pass, when compaction finishes and before the merge loop, and also on the
       CurrentCompactionProofError path just before the raise: the literal prefix CURRENT_COMPACTION then one JSON object with keys
       per_table (each {table, files_before, delete_files_before, files_processed, files_after, attempts, duration_ms,
-      pre_snapshot_id, commit_snapshot_id, proof}, proof one of equal | none | reproved, or mismatch | unresolved only on
-      the CurrentCompactionProofError line), skipped, refused, deferred, failures and elapsed_ms; no row value.
+      pre_snapshot_id, commit_snapshot_id, reproof, proof}; reproof one of equal | expired | none, proof one of equal |
+      none, and mismatch, or for proof unresolved, only on the CurrentCompactionProofError line), skipped, refused,
+      deferred, failures (each {table, null for a catalog-level failure, and error_class}) and elapsed_ms; no row value.
       files_processed 0 with no snapshot for the token is clean (proof none).
     new_imports:
       - src.common.ducklake_maintenance
@@ -144,9 +145,11 @@ scope:
       rewrites nothing and a compaction is invisible inside its own transaction (Decision 99 pins); compaction then
       merge leaves at most 8 files and no delete file, with the token lookup, predecessor resolution and AT VERSION
       proof equal; both update-race directions conflict and the writer's error classifies as an OCC collision; a
-      concurrent new-key insert commits without conflict and the predecessor proof still holds. With
+      concurrent new-key insert commits without conflict and the predecessor proof still holds; a second compaction
+      of the compacted, delete-free table processes 0 files and commits no snapshot. With
       CURRENT_COMPACTION_EVIDENCE_OUT set it writes its measured counts (files and delete files before and after,
-      files_processed under the default and the explicit threshold, row counts and digest equality) to that path.
+      files_processed under the default and the explicit threshold and on the second compaction, row counts and digest
+      equality) to that path.
   - file: tests/fixtures/current_compaction_engine_evidence.json
     action: Create
     purpose: >-
@@ -213,8 +216,9 @@ acceptance_criteria:
   - The new module ships in the maintenance bundle and is excluded from data-pipeline and every other bundle.
   - The new Decision, the two notes and the three pointers (191, 188, 88) match the approved-text sidecar.
   - >-
-    After the deploy, no pass logs a compaction failure, refusal or proof failure and MaintenanceBreakerTrip stays 0,
-    and the first pass that rewrote each of
+    After the deploy, no pass logs a proof failure, every per-table failure is healed by a later pass, the latest pass
+    is clean, MaintenanceBreakerTrip stays 0 after the first compacted pass (a page before it is expected when the
+    operator's pass comes after the next :15 control_health), and the first pass that rewrote each of
     ops_recommendations_current and ops_decisions_current logs files rewritten and proof equal; MergeOpsFilesAfterTotal falls below 400 (946 at
     2026-11-15T06:30Z), a first count_by_status on a fresh connection spends under 5,000 ms outside connect, and the
     next control_health is clean.
@@ -403,15 +407,17 @@ verification_plan:
       /aws/lambda/agent-platform-ducklake-maintenance --start-time "$DEPLOY_EPOCH_MS" --filter-pattern
       '"CURRENT_COMPACTION"' --query 'events[].message' --output json > "$COMPACTION_LINE_FILE" && bin/venv-python -c
       "import json,os;ms=json.load(open(os.environ['COMPACTION_LINE_FILE']));
-      ps=[json.loads(m[m.index('{'):]) for m in ms];assert ps,'no CURRENT_COMPACTION line yet';
-      [print(d['elapsed_ms'],'ms of 900000;',[(r['table'],r['files_processed'],r['proof'],r['duration_ms']) for r in d['per_table']],d['deferred']) for d in ps];
-      assert all(not d['failures'] and not d['refused'] for d in ps),[(d['failures'],d['refused']) for d in ps];
-      assert all(r['proof'] in ('equal','none','reproved') for d in ps for r in d['per_table']),'proof failure logged';
+      ps=[json.loads(m[m.index('{'):]) for m in ms if m.lstrip().startswith('CURRENT_COMPACTION')];assert ps,'no CURRENT_COMPACTION line yet';
+      [print(d['elapsed_ms'],'ms of 900000;',[(r['table'],r['files_processed'],r['reproof'],r['proof'],r['duration_ms']) for r in d['per_table']],d['deferred'],d['failures']) for d in ps];
+      assert all(r['proof'] in ('equal','none') and r['reproof'] in ('equal','expired','none') for d in ps for r in d['per_table']),'proof failure logged';
+      assert not ps[-1]['failures'] and not ps[-1]['refused'],(ps[-1]['failures'],ps[-1]['refused']);
+      assert all(f['table'] is None or any(r['table']==f['table'] and r['proof'] in ('equal','none') for e in ps[i+1:] for r in e['per_table']) for i,d in enumerate(ps) for f in d['failures']),'unhealed failure';
       assert all(any(r['table']==x and r['files_processed']>0 and r['proof']=='equal' for d in ps for r in d['per_table']) for x in ['ops_recommendations_current','ops_decisions_current']);
       print('COMPACTION_LIVE_OK')"
     expected: >-
-      Every pass since the deploy free of failures, refusals and proof failures, each target table rewritten and proved equal in some
-      pass, each pass's elapsed time printed against the 900 s timeout, then COMPACTION_LIVE_OK.
+      No proof failure in any pass since the deploy, the latest pass free of failures and refusals, every earlier
+      per-table failure healed by a later pass, each target table rewritten and proved equal in some pass, each pass's
+      elapsed time printed against the 900 s timeout, then COMPACTION_LIVE_OK.
     fix_if: >-
       A deferred table means the first pass hit the time budget: let the next scheduled pass finish it and re-read. A
       pass with no CURRENT_COMPACTION line but a Task timed out REPORT line in the log group means the pass outran 900
@@ -454,7 +460,7 @@ verification_plan:
   - step: 15
     phase: post-deploy
     action: >-
-      Pre-registered latency outcome (NS.6; Decision 214 cl.4's per-invocation wall signal), run at least 24 h after
+      Pre-registered latency outcome (NS.6; the reader analogue of Decision 214 cl.4's per-invocation wall signal), run at least 24 h after
       the first pass (schedule a wake; never poll). This identity cannot run Logs Insights (StartQuery denied,
       2026-11-15), so for the 24 h before the deploy and the 24 h after the first pass, save each window's
       aws logs filter-log-events --log-group-name /aws/lambda/agent-platform-ducklake-reader --filter-pattern
@@ -477,15 +483,16 @@ verification_plan:
   - step: 16
     phase: post-deploy
     action: >-
-      The next control_health run after the first pass holds the ceiling, and no breaker tripped since the deploy (the
-      undimensioned ops series of MaintenanceBreakerTrip).
+      The next control_health run after the first compacted pass holds the ceiling, and no breaker tripped since that
+      pass ($PASS_ISO; the undimensioned ops series of MaintenanceBreakerTrip). A trip between the deploy and that pass
+      is the expected pre-pass ceiling page, not a failure.
     command: >-
       aws cloudwatch get-metric-statistics --profile agent_platform --region eu-west-2 --namespace DuckLakeMaintenance
       --metric-name ControlTableInvariantViolation --start-time "$PASS_ISO" --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       --period 300 --statistics Maximum --query 'max(Datapoints[].Maximum)' --output text | bin/venv-python -c
       "import sys;r=sys.stdin.read().strip();assert r not in ('','None'),'no control_health run yet';
       assert float(r)==0,r;print('CEILING_HOLDS')" && aws cloudwatch get-metric-statistics --profile agent_platform
-      --region eu-west-2 --namespace DuckLakeMaintenance --metric-name MaintenanceBreakerTrip --start-time "$DEPLOY_ISO"
+      --region eu-west-2 --namespace DuckLakeMaintenance --metric-name MaintenanceBreakerTrip --start-time "$PASS_ISO"
       --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --period 300 --statistics Maximum --query 'max(Datapoints[].Maximum)'
       --output text | bin/venv-python -c "import sys;r=sys.stdin.read().strip();
       assert r in ('','None') or float(r)==0,'breaker tripped: '+r;print('NO_BREAKER_TRIP')"
@@ -589,20 +596,21 @@ context:
     Live probes 2026-11-15 (agent_platform): metrics and the maintenance and reader log groups readable, Logs Insights
     denied; ducklake_invocation lines are compact JSON. Writer: 516 writes in 7 days, busiest merge-to-merge window
     104, median 9 (the ceiling basis). UNPROVEN: the first pass's duration (about 100 s per full read at threads=1;
-    the 450 s budget bounds it).
+    the 450 s budget bounds it). MergeOpsDurationMs over 2026-11-02..16: max 36.0 s, daily mean 5-15 s, so the merge
+    fits the remaining half; a timed-out pass gets EventBridge's async retries (up to 2).
   - >-
-    Operator, CloudShell: before the merge, catalog_stats and a reconcile_partitions dry run; after step 11, one
-    merge_ops invoke (command in the post-deploy execution step; without it the first control_health at :15 sees 580
-    files and pages once), then catalog_stats again.
+    Operator (CloudShell): pre-merge catalog_stats and a reconcile_partitions dry run; after step 11 one merge_ops
+    invoke (else the next :15 control_health pages once on 580 files), then catalog_stats again.
   - >-
-    ci-rca deferral: red_overlap blocked on rec-5194 (Critical, past its 4 h SLO; telemetry-arrival, PR #2045's session
-    missing, config/telemetry/arrival.yaml). Shared files: none; the build waits for its repair (Decision 226).
+    ci-rca deferral: red_overlap blocked on rec-5194 (Critical, past its 4 h SLO; telemetry-arrival, config/telemetry/
+    arrival.yaml); shared files none. Decision 254 cl.6 replaces a past-SLO block with an alarm (overlap test kept), but
+    red_overlap.py's slo_breached rule still blocks until rec-5108 builds that alarm: the build waits by choice.
   - >-
     Not bundled: rec-2216, rec-2218, rec-2220, rec-5181, rec-5182; T2.18 is a cross-reference only (its intent names
     the optional rewrite). rec-5179's stale_target verdict is only its to-be-created file. Ops MergeOpsPassFailed is unalarmed (rec-5185), so a refusal pages through the ceiling.
   - >-
-    Size: handler.py 484/500 SLOC, the contract 497/500 effective lines (NEAR_CAP; re-measure on main at build time).
-    Overlap: unbuilt PLAN-sit-restore-spike scopes the same handler, manifest and contract; second to build rebases.
+    Size: handler.py 484/500 SLOC, the contract 497/500 lines (NEAR_CAP; re-measure at build). PLAN-sit-restore-spike
+    (unbuilt) scopes the same handler, manifest and contract; the second to build rebases.
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND}
@@ -618,13 +626,14 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 7}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 8}
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 11}
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 2, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
   - Only the plan-cited decision sections read (55, 81 cl.6/cl.8, 88 cl.1-2, 188, 191, 192 cl.2, 204, 251 cl.3)
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
-  - rec-5194 repaired or its overlap verdict re-run clear (Decision 226) before the build starts
+  - rec-5194 repaired or red_overlap re-run clear before the build starts (Decision 254 cl.6; tool lag owned by rec-5108)
 execution_steps:
   - >-
     Operator readouts before the merge (context): catalog_stats and the reconcile_partitions dry run; record both on
