@@ -46,14 +46,17 @@ scope:
       subset, so a later addition does not break it); every sts: action in the guard is one of DenyCredentialMinting's;
       and every literal (non-wildcard) iam: or sts: action names an operation in botocore's model of that service, with
       a named allowlist for permission-only actions (iam:PassRole). A mutation case swapping the token back to sts: is
-      red on all three predicates.
+      red on all three predicates, and each failure message names its predicate. Statement parsing reuses the shared
+      helpers in tests/checks/iam_tf/_ci_platform_role_iam.py (_jsonencode_statement_blocks, _parse_jsonencode_statement)
+      or _platform_security_hcl.py, never another test module (Decision 131).
   - file: tests/checks/iam_tf/test_agent_session_guard_s3_prefix.py
     action: Create
     purpose: >-
       rec-5232, named by its acceptance command. test_no_s3_prefix_in_negative_context parses the session guard and
       DailyOps from the HCL and requires that no Deny carries s3:prefix under a positive string operator (StringLike,
       StringEquals and their IfExists and ForAnyValue/ForAllValues forms) and no Allow carries it under a negated one.
-      Red cases: today's StringLike deny, and an Allow switched to StringNotLike.
+      Red cases: today's StringLike deny, and an Allow switched to StringNotLike. Parsing reuses the same shared helpers,
+      never another test module (Decision 131).
   - file: tests/checks/iam_tf/test_platform_dev_data_lake_read_fence.py
     action: Modify
     purpose: >-
@@ -197,10 +200,11 @@ verification_plan:
       sort; jq -c '.resource_changes[] | select(.change.actions == ["update"]) | {a: .address, b: .change.before.policy,
       p: .change.after.policy}' "$W/plan.json" > "$W/docs.jsonl"; for PN in $(aws iam list-role-policies --role-name
       PlatformDev --query PolicyNames --output text 2>> "$L"); do [ "$PN" = DailyOps ] && continue; C=$(aws iam
-      get-role-policy --role-name PlatformDev --policy-name "$PN" --query PolicyDocument --output json 2>> "$L" | jq '[(.Statement | if type == "object" then [.] else . end)[]? |
+      get-role-policy --role-name PlatformDev --policy-name "$PN" --query PolicyDocument --output json 2>> "$L" | jq -r '(.Statement | if type == "object" then [.] else . end) as $s | "\([$s[]? |
       select(.Effect == "Allow") | (.Action | if type == "string" then [.] else . end)[]? | ascii_downcase |
       gsub("\\*"; ".*") | gsub("\\?"; ".") | . as $g |
-      select("s3:listbucketversions" | test("^" + $g + "$"))] | length'); echo "EXTRA $PN s3list_lines=$C"; done; echo "ATTACHED $(aws iam
+      select("s3:listbucketversions" | test("^" + $g + "$"))] | length) notaction=\([$s[]? | select(.Effect == "Allow" and
+      has("NotAction"))] | length)"'); echo "EXTRA $PN s3list_lines=$C"; done; echo "ATTACHED $(aws iam
       list-attached-role-policies --role-name PlatformDev --query 'length(AttachedPolicies)' --output text 2>> "$L")"; while IFS= read -r J; do N=$(jq -r .a <<< "$J"); for
       K in b p; do D=$(jq -r ".$K" <<< "$J"); T=$(aws accessanalyzer validate-policy --policy-type IDENTITY_POLICY
       --policy-document "$D" --query "findings[?findingType=='ERROR'||findingType=='SECURITY_WARNING'].[findingType,issueCode]"
@@ -215,7 +219,7 @@ verification_plan:
       aws_iam_policy.bootstrap_apply_guard CLEAN; VALIDATE p aws_iam_policy.agent_session_guard CLEAN; no VALIDATE p
       platform_dev_runtime line carrying S3_PREFIX_IN_NEGATIVE_CONTEXT, ERROR or CALL_ERROR; EXTRA lines only for inline
       policies other than DailyOps (names only; terraform/CLAUDE.md records an uncodified AgentPlatformRuntime), each
-      with s3list_lines 0; ATTACHED 0; the sha.
+      with s3list_lines 0 and notaction=0; ATTACHED 0; the sha.
     fix_if: >-
       SCREEN_REFUSED: nothing was initialised; if main moved under terraform/ the build rebases and re-posts, else the
       head carries files beyond scope and the build stops. A setup line: the operator reads $HOME/bgf-tf.err in
@@ -224,7 +228,7 @@ verification_plan:
       re-run VP 1-5. A VALIDATE p finding on agent_session_guard or platform_dev_runtime that the StringNotLike shape
       itself draws: stop, do not merge, and take the fork back to the operator with the issue code; the build never
       picks another shape. A remaining DailyOps SECURITY_WARNING with another code: record it, file a rec, and merge (class
-      other shows it, never refuses it). An EXTRA line with s3list_lines above 0, or ATTACHED above 0: a live grant may
+      other shows it, never refuses it). An EXTRA line with s3list_lines or notaction above 0, or ATTACHED above 0: a live grant may
       list versions outside the two prefixes, which the new deny would remove; stop, do not merge, and take it to the
       operator.
     hermetic: false
@@ -379,6 +383,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 4}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 4}
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:494ddb9a97742b72d00654645d0e52c615ac68e318110c9fbd2242d316b54169'}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
