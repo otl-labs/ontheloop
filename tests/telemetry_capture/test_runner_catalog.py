@@ -159,6 +159,17 @@ def test_a_no_rows_pass_keeps_the_recorded_catalog(tmp_path: Path) -> None:
     assert _envelope(tmp_path)["catalog"] == PROD and _envelope(tmp_path)["reset_at"] == 1.0
 
 
+def test_a_first_no_rows_pass_records_no_catalog(tmp_path: Path) -> None:
+    write(tmp_path, make_files(records(0)))
+    prod = _prod()
+    first = run(tmp_path, prod)
+    assert first.outcome == "no_rows" and not state(tmp_path).state_file.exists()
+    write(tmp_path, make_files(records(1)))
+    second = run(tmp_path, prod)
+    assert second.outcome == "sent" and "catalog_reset" not in second.diag["diag"]
+    assert _envelope(tmp_path)["catalog"] == PROD
+
+
 def test_a_catalog_reset_pass_schedules_a_check(tmp_path: Path) -> None:
     _smoke_tree(tmp_path)
     st = state(tmp_path)

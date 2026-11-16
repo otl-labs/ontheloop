@@ -14,6 +14,7 @@ account-id, or ARN literal is inlined here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -137,7 +138,7 @@ def _ducklake_write(
     if idempotency_ulid is not None:
         payload["idempotency_ulid"] = idempotency_ulid
     body = json.dumps(payload)
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "X-Amz-Content-Sha256": hashlib.sha256(body.encode("utf-8")).hexdigest()}
     session = boto3.Session(profile_name=resolve_aws_profile(profile, default=_SSO_PROFILE))
     creds = session.get_credentials().get_frozen_credentials()
 

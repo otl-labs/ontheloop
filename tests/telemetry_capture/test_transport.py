@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import sys
@@ -13,7 +14,11 @@ from email.message import Message
 from pathlib import Path
 from typing import Any
 
+import botocore.auth  # noqa: F401 -- the real modules, loaded before any test swaps them
+import botocore.awsrequest  # noqa: F401
+import botocore.config  # noqa: F401
 import botocore.exceptions as botocore_exceptions
+import botocore.session
 import pytest
 
 from scripts.telemetry_capture import transport
@@ -202,8 +207,39 @@ def test_make_client_installs_one_clamped_single_attempt_config(monkeypatch: pyt
     made = transport.make_client({}, CaptureState(tmp_path), Budget(530.0, clock))
     assert seen["config"].kw == {"retries": {"total_max_attempts": 1}, "connect_timeout": 30.0, "read_timeout": 30.0}
     assert seen["client"][0] == "ssm" and made.url == URL
-    assert made._sign(b"{}") == {"Content-Type": "application/json", "Authorization": "AWS4-HMAC-SHA256 signed"}
+    assert made._sign(b"{}") == {
+        "Content-Type": "application/json",
+        "X-Amz-Content-Sha256": hashlib.sha256(b"{}").hexdigest(),
+        "Authorization": "AWS4-HMAC-SHA256 signed",
+    }
     assert seen["sigv4"] == ("lambda", "eu-west-2")
+
+
+def test_signed_request_carries_the_body_sha256(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import boto3
+
+    frozen = types.SimpleNamespace(access_key="AK", secret_key="SK", token=None)  # pragma: allowlist secret
+    credentials = types.SimpleNamespace(get_frozen_credentials=lambda: frozen)
+
+    class Session:
+        def __init__(self, botocore_session: Any = None, profile_name: Any = None) -> None:
+            pass
+
+        def get_credentials(self) -> Any:
+            return credentials
+
+        def client(self, name: str, region_name: str) -> Any:
+            return types.SimpleNamespace(get_parameter=lambda **kw: {"Parameter": {"Value": URL}})
+
+    monkeypatch.setattr(boto3, "Session", Session)
+    monkeypatch.setattr(
+        botocore.session, "get_session", lambda: types.SimpleNamespace(set_default_client_config=lambda c: None)
+    )
+    made = transport.make_client({}, CaptureState(tmp_path), Budget(530.0, Clock()))
+    body = b'{"action": "describe"}' + b" " * 2_000_000
+    headers = made._sign(body)
+    assert headers["X-Amz-Content-Sha256"] == hashlib.sha256(body).hexdigest()
+    assert "x-amz-content-sha256" in headers["Authorization"].split("SignedHeaders=")[1].split(",")[0]
 
 
 API_URL = "https://abc123.execute-api.eu-west-2.amazonaws.com/v1/telemetry/writer"
