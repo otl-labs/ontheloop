@@ -530,7 +530,7 @@ class TestEscalatePortalValidators:
 
     def test_persistent_red_files_rec(self) -> None:
         from scripts.ops_portal.risk_scoring import _derive_computed_fields
-        from scripts.ops_portal.write_validators import gate_write
+        from tests.fixtures.portal_gate import assert_portal_gate_clean
 
         captured: dict[str, Any] = {}
 
@@ -550,7 +550,7 @@ class TestEscalatePortalValidators:
         # Mirrors file_rec()'s own pre-validation step: it derives risk/automatable/
         # created_timestamp in-place before running the row-rule gate.
         _derive_computed_fields(captured["fields"])
-        gate_write("ops_recommendations", captured["fields"], insert=True)
+        assert_portal_gate_clean("ops_recommendations", captured["fields"], insert=True)
 
 
 class TestEscalateLiveFetchAndPortal:

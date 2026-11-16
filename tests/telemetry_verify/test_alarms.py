@@ -142,7 +142,7 @@ def test_every_alarm_record_passes_the_portal_row_gate(caller: int, cls: str, sc
     from scripts.executor.jsonl_store import Recommendation  # noqa: PLC0415
     from scripts.executor.rec_write_guidance import validate_source  # noqa: PLC0415
     from scripts.ops_portal.risk_scoring import _derive_computed_fields  # noqa: PLC0415
-    from scripts.ops_portal.write_validators import gate_write  # noqa: PLC0415
+    from tests.fixtures.portal_gate import assert_portal_gate_clean  # noqa: PLC0415
 
     file, acceptance_for, parser_version = _callers()[caller]
     portal = Portal()
@@ -150,7 +150,7 @@ def test_every_alarm_record_passes_the_portal_row_gate(caller: int, cls: str, sc
     fields = dict(portal.calls[0][1])
     _derive_computed_fields(fields)
     validate_source(fields["source"])
-    gate_write("ops_recommendations", fields, insert=True)
+    assert_portal_gate_clean("ops_recommendations", fields, insert=True)
     Recommendation.model_validate({**fields, "id": "rec-0", "date": "2026-10-26"})
 
 

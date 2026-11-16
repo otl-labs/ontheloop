@@ -102,3 +102,12 @@ def test_coverage_sentence_and_decision_annotation_name_the_conformance_check() 
     assert (
         "(validate_write_time_enforcement_conformance); a declared rule is enforced, so the enforced key is retired" in section
     )
+
+
+def test_advisory_leg_names_its_amending_decision() -> None:
+    _, rule, decisions_text = _load()
+    statement = _norm(rule["statement"])
+    match = re.search(r"advisory: true, runs it and reports each finding without refusing \(decision (\d+)\)", statement)
+    assert match, "the rule statement must name the amending Decision for advisory legs"
+    section = _norm(_section(decisions_text, match.group(1)))
+    assert "amends: [240, 210]" in section

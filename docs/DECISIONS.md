@@ -2,6 +2,72 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 269: The rec portal reports glossary findings on rec text instead of refusing the write, and a repository-state rule may be declared advisory (amends Decisions 240 clause 5 and 210) (Decided)
+
+```yaml
+number: 269
+status: Decided
+decided_date: "2026-11-16"
+kind:
+  value: mechanism
+  justification: >-
+    Only the means: Decision 240 cl.3's house-style rule and its scope are unchanged; clause 1 moves its check on rec
+    text from a refusal at the portal to a report plus a scheduled re-run, so undoing it changes no goal or human gate.
+amends: [240, 210]
+significance:
+  value: numbered_decision
+  justification: >-
+    It re-assigns Decision 240 cl.5's portal leg and Coverage line and qualifies Decision 210's 2026-10-04 and
+    2026-10-15 amendments; a dated amendment_forms note (considered) cannot re-assign a ratified clause (Decision 210's
+    own envelope), and docs/contracts/data-modeling-standard.yaml (considered) carries the operational rule text, not
+    which clauses the Decisions sanction.
+```
+
+**Status:** Decided
+**Date:** 2026-11-16
+**Warehouse ID:** dec-269 (per Decision 84 backfill)
+
+**Problem:** Only the rec portal checks rec title, context and verification against the glossary, by refusing the
+write. No write can decide that rule (it reads this repository's glossary), so the writer cannot run it, and any
+session can call the writer route directly under the one shared session identity (Decision 256): the refusal guards
+portal writes only, while Decision 240 cl.5 and the contract read as a guarantee. The refusal also holds a filing over
+wording alone.
+
+**Intent:** Rec wording is checked and reported on every portal write and re-checked on a schedule, and no text
+claims a write-time guarantee the writer cannot give.
+
+**Decision:**
+1. **Report, never refuse.** On rec title, context and verification the portal runs glossary_lint on every file_rec
+   and update_rec and reports each finding with its fix; a finding, or a glossary the lint cannot load, never refuses
+   the write. The contract marks those legs advisory: true. get_rec_write_guidance still carries the glossary, so an
+   author sees it first; the rest of cl.5 holds.
+2. **Advisory repository-state rules.** Decision 210's 2026-10-04 amendment reads: a repository_state exemption names
+   its producer, which enforces the rule or, on a leg the contract declares advisory: true, runs it and reports
+   without refusing. A declared advisory leg is run and reported, not enforced (the 2026-10-15 amendment). Cl.4 does
+   not reach such a rule, which no write can decide; its detection is a DQ monitor under cl.2.
+3. **Acceptance unchanged.** acceptance_lint keeps refusing a probe that does not discriminate: trailer closure
+   (Decision 201) checks only that a probe is decidable, so the portal is the only shape gate. It becomes advisory
+   only through a later plan, once rec-5239's scheduled re-run is live, that re-checks this closure path.
+
+**Coverage (Decision 181 cl.2):** cl.1 -- the portal's advisory glossary_lint report, and rec-5239's scheduled
+re-run of both lints over recent writes, an unenforced residual owned by rec-5239 until it runs; cl.2 --
+data-modeling-standard.yaml rule write-time-enforcement and validate_ops_rule_source's grammar and ratchet; cl.3 --
+the portal's acceptance_lint refusal.
+
+```yaml reversal-conditions
+decision: 269
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: findings-ignored
+    kind: manual
+    description: "rec-5239's re-run finds glossary findings on more than a tenth of the recs written in a month: re-decide cl.1 (refuse again, or move the check)."
+```
+
+**Related:** Decisions 240 (amended), 210 (amended), 201, 181, 211, 66, 256; rec-5239, rec-4768.
+
+---
+
 ## Decision 267: An AWS clock dispatches the three hourly loops through a dedicated GitHub App held inside the agent merge loop -- an accepted residual against Decision 143 clause 1 (Decided)
 
 ```yaml
@@ -1889,6 +1955,8 @@ conditions:
 **Related:** Decisions 77, 84, 86, 177, 178, 181, 184, 195, 196, 198, 200, 205, 209, 211, 220, 226, 232, 233; rec-3925, rec-4560, rec-4676.
 
 > **Update (2026-11-02):** clause 4's older text is now the records: the files glossary.yaml's read_as.records lists (Decision bodies older than this entry, plans, audit prompts, the roadmap below its header, the two archives), amendment_log rows, and recs filed before this entry. Records keep their wording and read through the read_as rows. PLAN-glossary-sweep (rec-4676) rewrote the rest to glossary names, README.md and the roadmap's header included; no other clause's meaning changes. Coverage: the reads-through note on each Decision in read_as.noted_decisions -- validate_glossary's note leg; clause 3's other files -- its whole-file leg; records -- the read_as rows. The reversal stanza's read-as-misread was re-armed to match.
+
+> **Amended by Decision 269 (2026-11-16):** Clause 5's portal leg reports, never refuses: the rec portal runs glossary_lint on a rec title, context or verification and reports each finding while the write proceeds; the Coverage line's "the portal's glossary_lint rule" reads as that report plus rec-5239's scheduled re-run, an unenforced residual until it runs (Decision 269 cl.1).
 
 ---
 
@@ -3963,6 +4031,8 @@ producer. Detail: data-modeling-standard.yaml.]
 [Amendment 2026-10-15, rec-4158: the writer-conformance residual is closed for row-local rules on every writer verb
 (validate_write_time_enforcement_conformance); a declared rule is enforced, so the enforced key is retired; value removal and
 new exemptions ratchet. Detail: data-modeling-standard.yaml.]
+
+> **Amended by Decision 269 (2026-11-16):** The 2026-10-04 amendment's repository_state exemption names its producer, which enforces the rule or, on a leg the contract declares advisory: true, runs it and reports without refusing; the 2026-10-15 amendment's declared rule is run and reported, not enforced, on such a leg; cl.4 does not reach it, and its detection is a DQ monitor under cl.2 (Decision 269 cl.2).
 
 > **Update (2026-10-18):** the Coverage line's rec-4101 residual is enforced by telemetry_orphan_counts and telemetry-verification workflow; rec-4439 owns the rest. No clause changes.
 
