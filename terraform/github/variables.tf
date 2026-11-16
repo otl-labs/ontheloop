@@ -11,7 +11,7 @@ variable "repository_name" {
 }
 
 variable "main_protection_ruleset_id" {
-  description = "Numeric id of the main-protection ruleset, used only by its import block. Re-read it from the API after a transfer: rulesets are not documented to carry over."
+  description = "Numeric id of the main-protection ruleset, used only by its import block. Re-read it from the API after a transfer or a ruleset re-create: rulesets are not documented to carry over."
   type        = number
   default     = 17117072
 }
