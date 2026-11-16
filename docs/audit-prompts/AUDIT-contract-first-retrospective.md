@@ -63,7 +63,8 @@ in a plan file under `docs/plans/` (a mention elsewhere in a plan, or under `fol
 not count); or a recommendation whose own text records a merged implementing pull request. Anything
 else is not in progress. "Built" means the remedy is merged on main at the audited commit. A
 Decision clause that owns a defect is built when something is bound to the rule it states (the
-binding test of Section 11 E1) and is otherwise not in progress. A roadmap
+binding test of Section 11 E1, with at most 2 repository reads per owner) and is otherwise not in
+progress. A roadmap
 `candidate_decisions[]` entry is an owner that is not in progress.
 
 A deferred owner (a roadmap item with status `deferred_post_mvp`) is an owner that is not in
@@ -253,6 +254,8 @@ Vocabulary:
   budget is a flow governor, not a hard limit: reaching it forces a split or a trim, which is its
   designed response.
 - Audit day: the UTC date on which you run Section 5.
+- Repository read: one file opened, or one git command run, against the audited commit or a
+  boundary commit. Limits stated in "repository reads" count these.
 
 Out of scope (do not file findings on these):
 
@@ -407,14 +410,18 @@ assignment to all three boundaries (a file absent at a boundary contributes 0): 
 `on_demand` (a pointer the run follows only for some plans, or reads in part). Precedence when a
 file fits two bands: `always_read`, then `gate_subagent`, then `on_demand`. Say in `prose` if you
 can see that a file's role changed between boundaries (for example content that left `AGENTS.md`
-for a contract). A file the workflow tells a planning run to read that is not among the 16 goes in
-`extra_files` and in `prose`, never in a total: at most 12 rows, largest first, each with its
-bytes at the three boundaries, its band and `when` (`every-plan`, or the condition that triggers
-the read). Include files that `.claude/commands/plan.md` and the planning skill named as read
-targets at the 2026-08-07 boundary and that are now gone or no longer named: read those two files
-at that boundary once (`git show <boundary commit>:<path>`, the commit Script A prints). The 16
-were fixed from the workflow as it stood at `197c800c`, so `prose` says which way the
-`extra_files` rows would move the comparison, and C9 is adjudicated with them in view. `logs/.preflight-report.json` is not in git and is
+for a contract). The 16 were fixed from the workflow as it stood at `197c800c`, so also list the other read
+targets. A candidate is a repository file path, not among the 16, that
+`.claude/commands/plan.md` or `.claude/skills/planning/SKILL.md` names as something to read,
+at the audited commit or at the 2026-08-07 boundary (read those two files at that boundary once:
+`git show <boundary commit>:<path>`, the commit Script A prints); a path named only as an output
+is not a candidate. Size every candidate at the three boundaries (0 when absent).
+`extra_files_totals` holds the candidate count and their total bytes at each boundary.
+`extra_files` holds the 12 candidates with the largest size at any one boundary, largest first,
+each with its three sizes, its band (by today's workflow, or by the 2026-08-07 workflow for a
+file no longer named) and `when` (`every-plan`, the condition that triggers the read, or
+`2026-08-07 only`). None of this enters a total or the default rule; `prose` says which way the
+candidates would move the comparison, and C9 is adjudicated with them in view. `logs/.preflight-report.json` is not in git and is
 excluded from every static figure; give its current size in `prose`. `token_estimate` is
 `(always_read_bytes + gate_subagent_bytes) // 4`. (b) Planning context footprint, observed, and
 sessions needing compaction, from telemetry (E5); telemetry begins 2026-10-20, so there is no
@@ -451,11 +458,14 @@ is `holding` or `holding-with-side-effect`. `all-holding`: no row is `eroded` or
 Then the earlier audit's own findings. For each of CFG-01 to CFG-11 (G24), decide whether the
 defect it described still holds at the audited commit, and fill `baseline_findings` (Section 14).
 Test the defect, not the paperwork: read the finding's `current_behavior` and `acceptance` in the
-earlier audit, then look for that behavior at the audited commit, with at most 3 repository reads
-per row beyond what you already hold. `closed`: the behavior no longer occurs (cite what you
-observed). `partly-closed`: part of it still occurs (say which part). `open`: it occurs as
-described. `superseded`: a later Decision removed the premise, so the finding no longer applies as
-written (cite the Decision and clause). `cannot-determine`: say what would settle it. A row is
+earlier audit, then test them at the audited commit, with at most 3 repository reads per row
+beyond what you already hold. First match wins, in this order. `closed`: the finding's
+`acceptance` is met (cite what you observed). `partly-closed`: part of it is met (say which part
+is not). `superseded`: it is not met, and a later Decision removed or replaced the mechanism the
+finding is about, so `current_behavior` no longer occurs for that reason (cite the Decision and
+clause). `open`: it is not met and `current_behavior` still occurs. `cannot-determine`: say what
+would settle it. `closed_by` names the commit, Decision clause or roadmap criterion that met the
+acceptance or removed the mechanism, and is empty for `open` and `cannot-determine`. A row is
 not a finding. IF a defect it names is one you file, list that finding's id in the row's
 `findings`; IF the row is `open` or `partly-closed` and you file nothing, `note` says why (an
 owner has it, it is not a defect now, or it is out of scope). These rows do not change this
@@ -559,7 +569,9 @@ the seed names its own method; where the repository cannot answer a seed, say so
   root (conditional reads included; the two files themselves included). Apply that one list to
   all three dates: sum the files' bytes at 2026-08-07, 2026-09-12 and the audited commit with
   `git cat-file -s <commit>:<path>` (0 when the file is absent), and give the three totals and the
-  file count. No bands.
+  file count. No bands. The list comes from today's workflow: say so, and say how many of its
+  files the two files did not name at the 2026-08-07 boundary (read them at that boundary once;
+  a file absent then named none).
 - Did outcomes change, as well as cost and routing? Say what evidence exists here that agents make
   fewer governance mistakes since the intervention (a contradiction merged, rework, a red main with
   a governance cause), and whether the repository can measure that at all.
@@ -1028,7 +1040,7 @@ mechanism, at least one cannot be applied without the other (name the clause tha
 other entry), and their combined size at first appearance exceeds 6,144 bytes. Two entries on
 related subjects that each stand alone do not fire it. `not-fired` when no commit meets all
 three. At `197c800c` all eight listed commits exceed the combined size (the smallest pair is 8,593
-bytes) and no pair has an `amends` edge between its members, so the first two legs decide it.
+bytes), so the first two legs decide it.
 
 Decision 179's `index-read-context-cost` is worded as a problem arising "before T2.56 c1 or T1.5 c1
 lands"; T2.56 c1 is `met` (G1). That criterion concerns the ambient instruction layer (`AGENTS.md`,
@@ -1036,14 +1048,18 @@ lands"; T2.56 c1 is `met` (G1). That criterion concerns the ambient instruction 
 the criterion being met forecloses the condition, or only overtakes its wording while the cost it
 names remains, is your judgment; `foreclosed` needs the first.
 
-Decision 167's `mis-routed-past-both-gates` names two gates. An E1 entry classified
-`routable-elsewhere` is a candidate instance, not a firing: it passed the conformance check by
-being merged, and it fires the condition only if its plan file also records a plan-critique
-`PROCEED` (a `gate_rounds` row with `gate: plan-critique`, G22; the row holds the gate's overall
-verdict, not its category-consistency check on its own). Check at most the 2 highest-numbered
-such entries. The plan is `docs/plans/PLAN-<slug>.yaml`, the slug being the text in parentheses in
-the subject of the commit that added the entry. IF that file is absent or has no `gate_rounds`,
-the instance cannot be shown either way.
+Decision 167's `mis-routed-past-both-gates` names two gates: the conformance check and
+plan-critique's category-consistency verdict. Every entry on main passed the first by being
+merged. For the second, a plan's `gate_rounds` rows (G22) hold plan-critique's overall verdict
+only; the repository records no category-consistency verdict per entry, and `evidence` says so.
+An instance is an E1 entry you classified `routable-elsewhere` and would defend clause by clause.
+For at most the 2 highest-numbered instances, look for the plan behind the entry: a
+`docs/plans/PLAN-*.yaml` file changed by the commit that added the entry, or
+`docs/plans/PLAN-<slug>.yaml` where the commit subject carries a slug in parentheses (at most 4
+repository reads for this condition). `fired`: at least one instance whose plan records a
+plan-critique `PROCEED`. `cannot-determine`: instances exist and no plan could be identified or
+none records the gate. `not-fired`: no instance among the 12 entries E1 examined (say that the
+sample was 12).
 
 **G15 Adjacent records** (Script A unless stated).
 
@@ -1214,10 +1230,9 @@ and subject are that audit's, as of 2026-08-07). Each entry starts at the line g
 
 The last column counts first-parent commits on main whose message contains the id, at `197c800c`:
 `git log --first-parent --format='%h %cs %s' --grep='CFG-03' <sha>` lists them for one id, and
-`--grep='CFG-[0-9]'` prints 13 commits for all ids together. The subjects of `b0cab73c` and
-`70410a42` say they close CFG-06 and CFG-08. What a commit, plan or Decision says it closed tells
-you where to look; it is not a disposition, and a count of 0 says nothing about whether the
-behavior remains.
+`--grep='CFG-[0-9]'` prints 13 commits for all ids together. What a commit, plan or Decision
+says it closed tells you where to look; it is not a disposition, and a count of 0 says nothing
+about whether the behavior remains.
 
 ## 11. EMPIRICAL PASS
 
@@ -1286,7 +1301,7 @@ argument: at `197c800c` that prints 63 commits, 43 `no-decision` and 20 `with-de
 the 3 newest and the 3 oldest P2 `no-decision` commits. Group (b): the 2 newest and the 2 oldest
 P2 `with-decision` commits. Group (c), the control: the 3 newest and the 3 oldest P0 `no-decision`
 commits. For each sample read what the commit added to the contract or contracts
-(`git show <sha> -- docs/contracts/`) and classify the main addition: `mechanism-rule` (a rule,
+(`git show <sample commit> -- docs/contracts/`) and classify the main addition: `mechanism-rule` (a rule,
 threshold, procedure or enforcement binding), `field-semantics` (the meaning or constraints of a
 field or key), `operational-fact` (what is currently true, a status or a pointer), or
 `housekeeping` (wording, renames, pin or count updates with no governing content). List any second
@@ -1348,9 +1363,12 @@ plan: say so; these are upper bounds for one plan. IF fewer than 3 trees match: 
 did (none: `observed: []` and `null` summary fields), note it in `meta.contract_notes`, and do not
 widen the window. Then compaction: with at most 2 further reads, try to read a count of `compact` events for the
 same trees. Each read is a named verb of the telemetry reader other than the seven G17 lists
-(`TelemetryReader.named(...)` as in the G17 one-liner; the verbs are listed in
-`scripts/telemetry_capture/read_route.py` and `src/common/ducklake_reader_client.py`). No other
-route: no SQL and no direct table read. IF you find no route: set `meta.compaction_unreadable = true`, write
+(`TelemetryReader.named(...)` as in the G17 one-liner; the verbs are the keys of `EVENT_READS` in
+`src/common/ducklake_event_read_verbs.py`). Use only verbs that return derived rows: never
+`transcript_content`, `session_tree_rows` or a content-route verb, which return raw rows or
+transcript text. No other route: no SQL and no direct table read. IF the only route reads one
+session or one tree per call, read the 2 sampled trees with the most model calls;
+`sessions_examined` then says how many sessions that covered. IF you find no route: set `meta.compaction_unreadable = true`, write
 `metrics.compaction.readable: false`, and adjudicate C18 on that evidence. Do not write telemetry
 tenant ids, project ids or session ULIDs in either deliverable; identify a sample by its merge
 commit short sha.
@@ -1467,6 +1485,7 @@ audit:
       static:                     # exactly 3 rows: 2026-08-07, 2026-09-12, the audited commit
         - {boundary: "", read_set_bytes: 0, always_read_bytes: 0, gate_subagent_bytes: 0,
            on_demand_bytes: 0, token_estimate: 0}
+      extra_files_totals: {files: 0, bytes_0807: 0, bytes_0912: 0, bytes_now: 0}
       extra_files: []             # at most 12 read targets outside the 16:
                                   #   [{file, bytes_0807: 0, bytes_0912: 0, bytes_now: 0, band, when: "", basis}]
       observed: []                # [{merge_commit, plans_in_tree: 1, model_calls: 0, sessions: 0,
