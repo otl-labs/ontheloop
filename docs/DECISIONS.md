@@ -2,6 +2,98 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 265: Wording approval follows a declared gated set -- north stars, direction Decisions, every Intent line and the text that defines a gate keep the operator's per-change approval, and other wording is settled with notice on a ladder lane (amends Decisions 83, 165, 187, 243 and 246) (Decided)
+
+```yaml
+number: 265
+status: Decided
+decided_date: "2026-11-16"
+kind:
+  value: direction
+  justification: >-
+    Clause 1 narrows a human gate: wording outside the gated set no longer needs the operator's approval run.
+    Undone, every Decision and governing contract text needs a run again.
+amends: [83, 165, 187, 243, 246]
+serves: [NS.8, NS.9]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant: it moves which wording the operator approves and rests on evidence that can fail.
+    Not an approval-routing.yaml note: the contract holds the map, not the choice to narrow the operator's gate.
+    Not amendment_forms: it amends five entries.
+```
+
+**Status:** Decided
+**Date:** 2026-11-16
+**Warehouse ID:** dec-265 (per Decision 84 backfill)
+
+**Problem:** Decision 243 gave every new Decision a kind, but kind "grants and gates nothing", so all Decision text
+and an undefined "governing contract text" still needed a Decision 246 run: 71 runs from 2026-11-06 to 2026-11-12,
+44 approved, none rejected at the gate. The operator revises about one presentation in five, mostly a frame-locked
+choice sent to a blind consult, always in session before the run (operator, 2026-11-12). Approved text freezes
+later mechanical fixes. NS.9's failure_signal fires: a gate approved so near-always it no longer discriminates.
+
+**Intent:** The operator approves direction and intent word for word; agents write mechanism wording in the open,
+and it earns autonomy on evidence and loses it on a misroute.
+
+**Decision:**
+1. **Gated set.** docs/contracts/approval-routing.yaml names, as paths, YAML keys and Markdown sections, the text
+   whose every change needs the operator's approval of a sidecar (Decision 246): the north-star file; the decision
+   corpus; the text that defines a human gate; the root files a person meets first, every CLAUDE.md and CODEOWNERS;
+   and the map itself, except appending a demotion. Other wording in the map's surfaces (docs, skills and commands,
+   config, agent prompts) is notice class: written under the plan the operator confirmed with "write the plan", with
+   no run. Code, tests and workflows keep their review rules until clause 7 demotes one. Every other always-ask
+   item, Decision 246 cl.4's final-diff word and "write the plan" itself are unchanged.
+2. **Kind on a new entry (amends 243 cl.8).** A direction entry is approved whole. For a mechanism entry the
+   approval pins its Intent line and the rest is context. An entry is mechanism only if it is its plan's only draft, a
+   fresh subagent given it without its kind field also says mechanism, it amends no direction or kind-less entry and
+   no north star carries it; otherwise it is direction. A gate clause goes in its own entry. A label can only escalate.
+3. **Class, not history (amends 246 cl.2).** Text once approved is gated or notice by its class today; a later
+   change to notice-class text needs no new run.
+4. **Check (amends 83).** validate_approval_routing reads the map at the base and fails, in pull-request CI only, a
+   PR that changes gated text no declared plan's base sidecar binds, or a plan whose drafted mechanism entry fails
+   clause 2; elsewhere it is advisory. An operator merge in the GitHub UI stays the release valve; a red-main repair
+   touching gated text takes Decision 226's planned route.
+5. **Marker authority (amends 165 cl.1, 187 cl.3-4).** An entry numbered above this one authorizes a marker only if
+   it is direction; a notice-class choice never authorizes an exception.
+6. **The lane.** Gated and notice are the read_all and sampled rungs of one wording lane, recorded in the form
+   Decision 221 cl.7's controller will consume and moved onto it when CD.46 ratifies. On sampled, a CI job posts
+   one line per merged notice-class change to one GitHub issue (intent, classes, tripwires, link; never a tracked
+   file, Decision 127), interim until T4.33. The operator reads every line for seven days, then a pre-registered
+   one-in-five sample.
+7. **Demotion.** An operator reclassification, a misroute found in a read, or a main commit reverting a change to a
+   file outside the gated set, code included, makes that file gated at once. Anyone may record a demotion; only an approved map change restores one
+   (NS.8: demotion automatic, promotion human-ratified).
+8. **Sequencing.** Clauses 1-7 bind when the map's lane reads sampled (PLAN-wording-approval-routing PR 2); until
+   then all Decision and governing contract text stays always-ask.
+
+**Coverage (Decision 181 cl.2):** cl.1-4 validate_approval_routing; cl.5 the shared marker guard; cl.6-7 the
+notice-digest job and the check's demotion read; reading the digest is procedural (follow-on rec).
+
+```yaml reversal-conditions
+decision: 265
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan; until then the lane returns to read_all"
+conditions:
+  - id: misroute
+    kind: manual
+    description: "A misroute in the first seven days on sampled, or two in any 30 days after."
+  - id: unread
+    kind: manual
+    description: "The operator stops reading the digest: the notice rung has no human behind it."
+  - id: drift
+    kind: manual
+    description: "Notice-class edits add up to a change in what gated text means: widen the map."
+  - id: controller
+    kind: manual
+    description: "CD.46 ratifies or is reshaped: move the lane onto the one controller and re-decide clause 6."
+```
+
+**Related:** Decisions 117, 127, 167, 177, 181, 185, 196, 221, 226, 232, 233, 235, 247; T4.29, T4.33, T4.36, T4.38;
+rec-2827, rec-4080, rec-5137.
+
+---
+
 ## Decision 264: An agent merge is refused unless every required check, and every persona check a verdict_source row selects, concluded success on the merge-time head -- fail closed, no agent override, an operator merge stays the release valve (amends Decision 83) (Decided)
 
 ```yaml
@@ -1274,6 +1366,8 @@ conditions:
 
 **Related:** Decisions 73, 76, 83, 101, 170, 181, 187, 233, 234, 238, 239; rec-2827, rec-4080, rec-4695, rec-4769, rec-4907.
 
+> **Amended by Decision 265 (2026-11-16):** Which wording needs a sidecar is now docs/contracts/approval-routing.yaml's gated set; text outside it needs no run, even where an earlier approval bound it (clause 2), and validate_approval_routing is a third check beside clause 3's two.
+
 > **Update (2026-11-12, PLAN-merge-requires-green-checks):** Clause 6's residual "an agent can still merge on red through the admin bypass (rec-4080)" is covered by Decision 264: the merge gate refuses an agent merge whose required checks, pr-validate among them, have not concluded success.
 
 ---
@@ -1461,6 +1555,8 @@ conditions:
 ```
 
 **Related:** Decisions 57, 78, 84, 86, 117, 126, 171, 175, 177, 184, 185, 194, 195, 196, 197, 200, 209, 210, 211, 212, 221, 224, 231, 232, 233, 234, 235, 240; T4.21, T4.24, T4.36; rec-3959.
+
+> **Amended by Decision 265 (2026-11-16):** Clause 8's "direction and intent are pinned at human approval" now binds through Decision 265: a direction entry is approved whole and a mechanism entry's Intent line is approved word for word, so kind routes approvals and a label can only escalate.
 
 ---
 
@@ -5555,6 +5651,8 @@ gate is ungated in `--pre`), Decision 55 (a missing and a passing oracle must ne
 > blocking, shadow, drop and dropping a shadowed check needs that record; below it clause 5 stands.
 > This body is otherwise unedited.
 
+> **Amended by Decision 265 (2026-11-16):** The cited Decision in clauses 3-4 must also meet Decision 265 clause 5: an entry numbered above Decision 265 authorizes only if it is direction. This body is otherwise unedited.
+
 ---
 
 ## Decision 186: Closure-time artifact obligation for escape-classified recs (Decided)
@@ -7103,6 +7201,8 @@ T1.5 (the STRATEGIC, CD.17-frozen portal cutover that eventually retires `docs/d
 **Reversal conditions:** If the retroactive scan's grandfather hook grows past a small, explainable handful, that is a signal the population assumption (rare, already-clean) no longer holds and the mechanism needs re-audit, not a bigger hook -- mirrors Decision 159/161's own reversal conditions. If a future declared `Governs:` marker (the design alternative considered and deferred at plan time) lands, this mention-based authorization becomes a fallback rather than the primary mechanism.
 
 **Related:** Decision 128 (the raise-marker mechanism this amends clause 3 of), Decision 159 (coverage tamper guard amended), Decision 161 (mypy tamper guard amended, including clause 4's first implementation), Decision 162 (composite R3 amended), Decision 149 (the compaction lifecycle whose compact-in-place interaction the supersession hop closes), Decision 151 (the forward-conformance precedent this retroactive scope departs from, bounded by the empty grandfather hook), Decision 134 (the shared decisions_md.py parser this module consumes, DAF-03 / clause 3), Decision 104 (`_common.py`'s five-primitive reservation; this module's top-level placement), Decision 86/127 (contract-vs-Decision routing this entry and `docs/contracts/marker-grammar.yaml` follow), Decision 130 (whole-repo SLOC scope; the raise-approved grammar's precedent), Decision 153 (composite guard's subprocess-free fast-tier budget, preserved). Bundled: rec-2974. Roadmap ref: audits/size-governance-expansion-3dee4a5.yaml finding SGE-07 (not a DECISIONS.md entry).
+
+> **Amended by Decision 265 (2026-11-16):** A cited entry numbered above Decision 265 authorizes a marker only if its kind is direction (docs/contracts/approval-routing.yaml lane.kind_floor); the shared marker guard enforces it for every token. This body is otherwise unedited.
 
 ---
 
@@ -11913,6 +12013,8 @@ conditions:
 > **Update (2026-11-03):** Decision 245 clause 3 narrows the non-wedging property for agent merges: a fail-closed gate refuses a merge whose stale base shares a changed file with main. The ruleset configuration above is unchanged.
 
 > **Update (2026-11-05):** Decision 246 clause 5 narrows it again for pull requests that add or change approved text: such a PR stays red until the operator approves the wording on GitHub, and an operator merge in the GitHub UI stays the release valve.
+
+> **Update (2026-11-16):** Decision 265 clause 4 narrows it for pull requests that change gated text (docs/contracts/approval-routing.yaml) with no declared plan's approved sidecar binding it: such a PR stays red, and an operator merge in the GitHub UI stays the release valve.
 
 > **Update (2026-11-12, PLAN-merge-requires-green-checks):** Decision 264 narrows it a third time for agent merges: the merge gate refuses a merge unless every required check, and every persona check a verdict_source row selects, concluded success on the merge-time head. The ruleset configuration above is unchanged.
 
