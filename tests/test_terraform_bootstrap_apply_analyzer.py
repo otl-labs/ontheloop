@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -26,6 +27,7 @@ from tests.fixtures.bootstrap_analyzer import (
     attach_rc,
     cfg_refs,
     doc,
+    inline_rc,
     plan,
     policy_rc,
     prior,
@@ -169,26 +171,43 @@ def test_an_unreadable_or_truncated_compare_sweeps_and_a_dispatch_never_does(
     assert run(plan(), "--full-sweep")[2]["mode"] == "full"
 
 
-def test_the_compare_fetch_reads_files_and_treats_300_as_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
-    class Resp:
-        def __init__(self, names: list[str]) -> None:
-            self.body = json.dumps({"files": [{"filename": n} for n in names]}).encode()
+def test_the_compare_fetch_pages_and_a_run_of_full_pages_up_to_300_is_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[str] = []
 
-        def __enter__(self) -> Resp:
-            return self
+    def serve(sizes: list[int]) -> Any:
+        class Resp:
+            def __init__(self, body: bytes) -> None:
+                self.body = body
 
-        def __exit__(self, *_a: Any) -> None:
-            return None
+            def __enter__(self) -> Resp:
+                return self
 
-        def read(self) -> bytes:
-            return self.body
+            def __exit__(self, *_a: Any) -> None:
+                return None
 
-    monkeypatch.setattr(an.urllib.request, "urlopen", lambda *_a, **_k: Resp(["a", "b"]))
-    assert an.fetch_changed("o/r", "t", "b", "h") == ["a", "b"]
-    monkeypatch.setattr(an.urllib.request, "urlopen", lambda *_a, **_k: Resp([f"f{i}" for i in range(300)]))
+            def read(self) -> bytes:
+                return self.body
+
+        def urlopen(req: Any, **_k: Any) -> Resp:
+            asked.append(req.full_url)
+            page = int(req.full_url.rsplit("page=", 1)[1])
+            n = sizes[page - 1] if page <= len(sizes) else 0
+            return Resp(json.dumps({"files": [{"filename": f"p{page}f{i}"} for i in range(n)]}).encode())
+
+        monkeypatch.setattr(an.urllib.request, "urlopen", urlopen)
+
+    serve([2])
+    assert an.fetch_changed("o/r", "t", "b", "h") == ["p1f0", "p1f1"] and len(asked) == 1
+    asked.clear()
+    serve([100, 100, 50])
+    assert len(an.fetch_changed("o/r", "t", "b", "h")) == 250 and len(asked) == 3
+    assert all("per_page=100" in u for u in asked)
+    serve([100, 100, 100])
+    with pytest.raises(an.Unreadable, match="truncated"):
+        an.fetch_changed("o/r", "t", "b", "h")
+    serve([300])
     with pytest.raises(an.Unreadable):
         an.fetch_changed("o/r", "t", "b", "h")
-    monkeypatch.setattr(an.urllib.request, "urlopen", lambda *_a, **_k: Resp([]))
     monkeypatch.setattr(an.urllib.request, "urlopen", lambda *_a, **_k: (_ for _ in ()).throw(OSError("net")))
     with pytest.raises(an.Unreadable):
         an.fetch_changed("o/r", "t", "b", "h")
@@ -497,3 +516,64 @@ def test_digests_equal_the_classifiers_and_no_output_leaks(run: Any) -> None:
     for text in ("\n".join(lines), stripped):
         assert not re.search(r"[0-9]{12}|arn:|" + FINDING_TEXT + "|" + marker + "|Statement", text)
     assert code == 1
+
+
+def test_a_decoy_label_never_makes_an_inline_policy_the_ceiling(run: Any) -> None:
+    bad = doc(allow("iam:PutRolePolicy", f"arn:aws:iam::{ACCT}:role/bootstrap-apply"))
+    inline = inline_rc("aws_iam_role_policy", "agent-platform-x", bad)
+    inline["address"] = "aws_iam_role_policy.aws_iam_policy_x"
+    inline["change"]["after"]["name"] = "agent-platform-github-ci-apply-boundary"
+    code, _lines, report, _fake = run(plan(inline))
+    assert (
+        code == 1
+        and verdicts(report, "aws_iam_role_policy.aws_iam_policy_x")["never:ci_writable:protected_role_write"] == "FAIL"
+    )
+
+
+def test_name_globs_ignore_case(run: Any) -> None:
+    p = plan(
+        policy_rc("harmless-name", S3_GRANT),
+        attach_rc("aws_iam_user_policy_attachment", SESSION_USER.upper(), f"{ARN}Harmless-Name"),
+    )
+    code, _lines, report, _fake = run(p)
+    assert code == 1 and verdicts(report, "aws_iam_policy.harmless_name")["never:session:s3_objects"] == "FAIL"
+
+
+def test_an_attachment_whose_policy_resolves_to_no_document_is_unchecked_and_named(run: Any) -> None:
+    unknown = attach_rc("aws_iam_user_policy_attachment", SESSION_USER, f"{ARN}elsewhere")
+    code, lines, report, fake = run(plan(unknown))
+    assert code == 0 and verdicts(report, unknown["address"]) == {"unknown-document": "UNCHECKED"} and fake.calls == []
+    assert f"ANALYZER {unknown['address']} unknown-document UNCHECKED" in lines
+    assert lines[-1].endswith("documents=1 fail=0 widens=0 unchecked=1")
+    assert run(plan(attach_rc("aws_iam_user_policy_attachment", SESSION_USER, f"{ARN}x", ["delete"])))[2]["results"] == []
+
+
+def test_an_inline_policy_update_runs_check_no_new_access(run: Any) -> None:
+    now, before = (
+        doc(allow("logs:Describe*", sid="A"), allow("logs:GetLogEvents", sid="B")),
+        doc(allow("logs:Describe*", sid="A")),
+    )
+    inline = inline_rc("aws_iam_role_policy", "agent-platform-i", now, before={"policy": before})
+    inline["change"]["actions"] = ["update"]
+    code, _lines, report, fake = run(plan(inline))
+    assert code == 0 and verdicts(report, inline["address"])["no-new-access"] == "WIDENS"
+    assert "check-no-new-access" in subs(fake)
+
+
+def test_a_missing_cli_a_timeout_an_unset_region_and_an_internal_error_exit_two_with_a_code(
+    run: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    p = plan(policy_rc("agent-platform-a", doc(allow("logs:Describe*"))))
+    for boom in (FileNotFoundError("aws"), an.subprocess.TimeoutExpired("aws", 1)):
+        assert run(p, fake=lambda _a, boom=boom: (_ for _ in ()).throw(boom))[:2] == (2, ["ANALYZER_UNREADABLE cli_error"])
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        an.subprocess, "run", lambda *_a, **kw: seen.update(kw) or SimpleNamespace(returncode=0, stdout="", stderr="")
+    )
+    an.run_cli(["aws"])
+    assert seen["timeout"] == an.CLI_TIMEOUT
+    monkeypatch.setattr(an.sel, "build", lambda *_a: 1 / 0)
+    assert run(p)[:2] == (2, ["ANALYZER_UNREADABLE internal_error"])
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    with pytest.raises(an.Unreadable, match="region"):
+        an.Cli()

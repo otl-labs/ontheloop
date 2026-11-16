@@ -38,31 +38,50 @@ SWEEP_TRIGGERS = ("config/iam-invariants.json",)
 SWEEP_PREFIXES = ("scripts/ci/terraform_bootstrap_apply_analyzer",)
 SWEEP_FILES = ("scripts/ci/terraform_bootstrap_apply_classify.py", "scripts/ci/plan_names_core.py")
 COMPARE_LIMIT = 300
+COMPARE_PAGE = 100
+CLI_TIMEOUT = 120
 ACCESS_CHUNK = 100
 _SID_RE = re.compile(r"[A-Za-z0-9]{1,64}")
 _ERR_RE = re.compile(r"[A-Za-z]+(?:Exception|Error)")
 
 
 def run_cli(args: list[str]) -> tuple[int, str, str]:
-    done = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+    done = subprocess.run(
+        args, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=CLI_TIMEOUT
+    )
     return done.returncode, done.stdout, done.stderr
 
 
 RUN = run_cli
 
 
-def fetch_changed(repo: str, token: str, before: str, head: str) -> list[str]:
-    url = f"https://api.github.com/repos/{repo}/compare/{before}...{head}?per_page=100"
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
+def _run(args: list[str]) -> tuple[int, str, str]:
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
-            body = json.loads(resp.read().decode("utf-8"))
-        files = [str(f.get("filename")) for f in body["files"]]
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise Unreadable("compare") from exc
-    if len(files) >= COMPARE_LIMIT:
-        raise Unreadable("compare truncated")
-    return files
+        return RUN(args)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Unreadable("cli_error") from exc
+
+
+def fetch_changed(repo: str, token: str, before: str, head: str) -> list[str]:
+    """Changed files of before...head, paged; a run of full pages up to COMPARE_LIMIT is truncated, so Unreadable."""
+    files: list[str] = []
+    for page in range(1, COMPARE_LIMIT // COMPARE_PAGE + 1):
+        url = f"https://api.github.com/repos/{repo}/compare/{before}...{head}?per_page={COMPARE_PAGE}&page={page}"
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+                body = json.loads(resp.read().decode("utf-8"))
+            got = [str(f.get("filename")) for f in body["files"]]
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise Unreadable("compare") from exc
+        files += got
+        if len(files) >= COMPARE_LIMIT:
+            break
+        if len(got) < COMPARE_PAGE:
+            return files
+    raise Unreadable("compare truncated")
 
 
 def full_sweep_wanted(args: argparse.Namespace) -> bool:
@@ -90,6 +109,8 @@ class Cli:
     def __init__(self) -> None:
         self.account = ""
         self.region = os.environ.get("AWS_REGION", "")
+        if not self.region:
+            raise Unreadable("region")
 
     def call(self, args: list[str], docs: dict[str, Any]) -> Any:
         paths: list[str] = []
@@ -101,7 +122,7 @@ class Cli:
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     json.dump(doc, fh)
                 full += [flag, f"file://{path}"]
-            rc, out, err = RUN(full)
+            rc, out, err = _run(full)
         finally:
             for path in paths:
                 Path(path).unlink(missing_ok=True)
@@ -114,7 +135,7 @@ class Cli:
             raise Unreadable("cli_error") from exc
 
     def identity(self) -> None:
-        rc, out, err = RUN(["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"])
+        rc, out, err = _run(["aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text"])
         if rc != 0 or not out.strip():
             raise Unreadable("cli_error")
         self.account = out.strip()
@@ -205,11 +226,11 @@ def unit_checks(
             cache[key] = fn()
         checks.append({"check": check, "verdict": cache[key][0], "loc": cache[key][1]})
 
+    if unit.kind == "unknown":
+        checks.append({"check": "unknown-document", "verdict": "UNCHECKED", "loc": ""})
+        return checks
     if unit.kind == "managed":
-        classes = sel.classes_of(inv, unit)
-        hit = (
-            any(c["id"] == "session" for c in classes) and bool(unit.principals) or any(n is None for _w, n in unit.principals)
-        )
+        hit = any(c["id"] == "session" for c in sel.classes_of(inv, unit)) and bool(unit.principals)
         checks.append({"check": "managed-on-session", "verdict": "FAIL" if hit else "UNCHECKED", "loc": ""})
         return checks
     if unit.kind == "trust":
@@ -318,6 +339,9 @@ def main(argv: list[str] | None = None) -> int:
         report = analyse(plan_json, inv, full_sweep_wanted(args), Cli())
     except Unreadable as exc:
         print(f"ANALYZER_UNREADABLE {str(exc).split()[0] if str(exc) else 'cli_error'}")
+        return 2
+    except Exception:  # noqa: BLE001 - names only: a traceback could carry document text, so any other failure is a code
+        print("ANALYZER_UNREADABLE internal_error")
         return 2
     Path(args.out).write_text(json.dumps(report, sort_keys=True), encoding="utf-8")
     sys.stdout.write(render(report))

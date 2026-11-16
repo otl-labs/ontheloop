@@ -30,6 +30,7 @@ core = cls._core
 Unreadable = cls.Unreadable
 SWEPT_TYPES = ("aws_iam_policy", "aws_iam_role_policy", "aws_iam_user_policy", "aws_iam_role")
 ATTACH_TYPES = ("aws_iam_role_policy_attachment", "aws_iam_user_policy_attachment")
+INLINE_OR_MANAGED = ("aws_iam_policy", "aws_iam_role_policy", "aws_iam_user_policy")
 
 
 def load_invariants(path: str) -> dict[str, Any]:
@@ -41,8 +42,13 @@ def load_invariants(path: str) -> dict[str, Any]:
         raise Unreadable("invariants") from exc
 
 
+def _same(a: str | None, b: str | None) -> bool:
+    return a is not None and b is not None and a.casefold() == b.casefold()
+
+
 def _match(name: str | None, globs: list[str]) -> bool:
-    return name is not None and any(fnmatch.fnmatchcase(name, g) for g in globs)
+    """IAM names are case-insensitive, so a glob matches either case (the fail-closed direction)."""
+    return name is not None and any(fnmatch.fnmatchcase(name.casefold(), g.casefold()) for g in globs)
 
 
 def attachments(plan: Any) -> list[tuple[str, str | None, str | None]]:
@@ -63,7 +69,7 @@ def attachments(plan: Any) -> list[tuple[str, str | None, str | None]]:
 
 
 class Unit:
-    """One checked document: its kind (identity, trust or managed), its classes and its checks' inputs."""
+    """One checked document: its kind (identity, trust, managed or unknown), its classes and its checks' inputs."""
 
     def __init__(self, address: str, kind: str, doc: Any, names: tuple[str | None, list[tuple[str, str | None]]]) -> None:
         self.address, self.kind, self.doc = address, kind, doc
@@ -85,7 +91,7 @@ def _unit_names(plan: Any, address: str, kind: str, values: dict[str, Any] | Non
 
     if kind == "aws_iam_policy":
         name = get("name")
-        return name, [(w, p) for w, p, pol in attachments(plan) if pol == name and name]
+        return name, [(w, p) for w, p, pol in attachments(plan) if name and _same(pol, name)]
     who = "user" if "user" in kind else "role"
     if kind in ("aws_iam_role_policy", "aws_iam_user_policy"):
         inline = get("name")
@@ -110,14 +116,15 @@ def classes_of(inv: dict[str, Any], unit: Unit) -> list[dict[str, Any]]:
 
 
 def is_ceiling(inv: dict[str, Any], plan: Any, unit: Unit) -> bool:
-    if unit.kind != "identity" or unit.policy_name not in inv.get("ceilings", []):
+    if unit.kind != "identity" or not any(_same(unit.policy_name, c) for c in inv.get("ceilings", [])):
         return False
-    return not any(pol == unit.policy_name for _w, _p, pol in attachments(plan)) and "aws_iam_policy" in unit.address
+    return cls._row_type(unit.address) == "aws_iam_policy" and not any(
+        _same(pol, unit.policy_name) for _w, _p, pol in attachments(plan)
+    )
 
 
-def _prior_policy(plan: Any, address: str) -> Any:
-    rc = plan.by_address.get(address)
-    change = cls._dict(rc.get("change")) if rc else {}
+def _prior_policy(rc: dict[str, Any]) -> Any:
+    change = cls._dict(rc.get("change"))
     if change.get("actions") == ["update"]:
         return cls._parsed(cls._dict(change.get("before")).get("policy"))
     return None
@@ -133,8 +140,9 @@ def _changed_units(plan: Any, groups: dict[str, list[dict[str, Any]]], full: boo
             change = cls._dict(rc.get("change"))
             after = cls._dict(change.get("after"))
             doc = cls.checked_document(plan, rc)
-            if kind in ATTACH_TYPES and doc is None and is_managed(plan, rc):
-                units.append(Unit(inst, "managed", None, _unit_names(plan, inst, kind, None, after)))
+            if kind in ATTACH_TYPES and doc is None and is_fresh(rc):
+                shape = "managed" if is_managed(plan, rc) else "unknown"
+                units.append(Unit(inst, shape, None, _unit_names(plan, inst, kind, None, after)))
             elif doc is None and full and kind == "aws_iam_role" and "delete" not in (change.get("actions") or []):
                 trust = (
                     None
@@ -147,18 +155,21 @@ def _changed_units(plan: Any, groups: dict[str, list[dict[str, Any]]], full: boo
                 units.append(Unit(inst, "trust", doc, (None, [])))
             elif doc is not None:
                 unit = Unit(inst, "identity", doc, _unit_names(plan, inst, kind, None, after))
-                unit.prior = _prior_policy(plan, inst) if kind == "aws_iam_policy" else None
+                unit.prior = _prior_policy(rc) if kind in INLINE_OR_MANAGED else None
                 units.append(unit)
         out[address] = units
     return out
 
 
-def is_managed(plan: Any, rc: dict[str, Any]) -> bool:
-    address = core.normalise_address(str(rc.get("address", "")))
+def is_fresh(rc: dict[str, Any]) -> bool:
     change = cls._dict(rc.get("change"))
     actions = [str(a) for a in change.get("actions") or []]
-    fresh = "create" in actions or bool(change.get("importing")) or bool(rc.get("previous_address"))
-    return fresh and cls.is_managed_arn(plan.value(address, "policy_arn"))
+    return "create" in actions or bool(change.get("importing")) or bool(rc.get("previous_address"))
+
+
+def is_managed(plan: Any, rc: dict[str, Any]) -> bool:
+    address = core.normalise_address(str(rc.get("address", "")))
+    return is_fresh(rc) and cls.is_managed_arn(plan.value(address, "policy_arn"))
 
 
 def _swept_units(plan: Any, groups: dict[str, list[dict[str, Any]]]) -> dict[str, list[Unit]]:
