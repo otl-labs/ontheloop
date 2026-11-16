@@ -35,7 +35,7 @@ scope:
     action: Modify
     purpose: >-
       rec-5232. The session guard's copy of DenyStateAndConvergenceVersionList gets the same StringNotLike condition,
-      byte-equal to DailyOps' (the mirror test_agent_session_carries_platform_dev_denies requires it).
+      equal to DailyOps' after whitespace normalisation (the mirror test_agent_session_carries_platform_dev_denies requires it).
   - file: tests/checks/iam_tf/test_bootstrap_ci_roles.py
     action: Modify
     purpose: >-
@@ -47,8 +47,10 @@ scope:
     purpose: >-
       rec-5232. _check_list_deny requires a StringNotLike s3:prefix condition (and no StringLike) whose values equal
       _EXPECTED_LIST_CONDITION_PREFIXES, the Allow's set; the condition parser takes the operator as a parameter; the
-      fixture's list deny moves to the new shape; new red cases: the old StringLike-over-state-prefixes deny, and a
-      StringNotLike set that differs from the Allow's. Declared re-authoring of a graduated row's node file, approved with
+      fixture's list deny moves to the new shape; a new assertion that none of convergence/personal/*,
+      tfplan/personal/* or tfstate/personal/* matches any StringNotLike value (fnmatch), so the state prefixes stay
+      denied whatever the constant holds; new red cases: the old StringLike-over-state-prefixes deny, a StringNotLike set
+      that differs from the Allow's, and one that admits a state prefix. Declared re-authoring of a graduated row's node file, approved with
       this plan (operator, 2026-11-16): the new deny is a strict superset of the old one.
 bundled_recommendations: [rec-5231, rec-5232]
 followon_recs: []
@@ -76,7 +78,7 @@ acceptance_criteria:
     (test_bootstrap_ci_roles.py, VP 1); live, bootstrap-apply simulates explicitDeny for
     iam:SetSecurityTokenServicePreferences (VP 6).
   - >-
-    DailyOps' and the session guard's DenyStateAndConvergenceVersionList are byte-equal Denies of s3:ListBucketVersions
+    DailyOps' and the session guard's DenyStateAndConvergenceVersionList are Denies, equal after whitespace normalisation, of s3:ListBucketVersions
     on the data-lake bucket with StringNotLike s3:prefix equal to DataLakeVersionListRead's two values, and no
     StringLike (test_platform_dev_data_lake_read_fence.py and test_agent_session_user.py, VP 1); live, PlatformDev
     simulates allowed for prefix ducklake/ and ducklake-neon-smoke/, and explicitDeny for tfstate/personal/, tf and no
@@ -115,9 +117,13 @@ verification_plan:
     graduation_waiver_reason: Standing checks already run in the fast tier; this step only runs them early.
   - step: 3
     phase: pre-deploy
-    action: Fast and full tiers on the PR head.
-    command: bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.checks.validation_result --verify-head
-    expected: --pre exits 0; the backgrounded full tier's verify-head verdict is PASS for the head sha.
+    action: Fast and full tiers before handoff.
+    command: >-
+      bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m
+      scripts.checks.validation_result --verify-head
+    expected: >-
+      Both tiers pass and validation_result verifies the head sha. The full tier is started in the background with a
+      2 h limit from the top-level session; its verdict is --verify-head's, never a pipe's exit status.
     fix_if: >-
       A failure caused by this diff is fixed on the branch; a failure that reproduces on origin/main is cited by its
       existing rec in the PR body, never fixed inline.
@@ -186,8 +192,10 @@ verification_plan:
       SCREEN_REFUSED: nothing was initialised; if main moved under terraform/ the build rebases and re-posts, else the
       head carries files beyond scope and the build stops. A setup line: the operator reads $HOME/bgf-tf.err in
       CloudShell and re-pastes. Any other address or action (another merged-unapplied bootstrap change): stop, do not
-      merge, report to the coordinator. A VALIDATE p finding on either guard: the fix is wrong; amend the Terraform and
-      re-run VP 1-5. A remaining DailyOps SECURITY_WARNING with another code: record it, file a rec, and merge (class
+      merge, report to the coordinator. A VALIDATE p finding on bootstrap-apply-guard: the token fix is wrong; amend and
+      re-run VP 1-5. A VALIDATE p finding on agent_session_guard or platform_dev_runtime that the StringNotLike shape
+      itself draws: stop, do not merge, and take the fork back to the operator with the issue code; the build never
+      picks another shape. A remaining DailyOps SECURITY_WARNING with another code: record it, file a rec, and merge (class
       other shows it, never refuses it).
     hermetic: false
     graduation: not-applicable
@@ -256,19 +264,23 @@ verification_plan:
       amendment's CloudShell block, never by -target. SIM dev_ducklake or dev_smoke not allowed: PlatformDev lost a
       listing it had; a forward-fix PR restores it before anything else merges to terraform/bootstrap. SIM dev_none or
       session_none implicitDeny instead of explicitDeny: the simulator treats the absent key differently from the IAM
-      reference; record it, and confirm with a live no-prefix ListObjectVersions as PlatformDev before closing rec-5232.
+      reference; record it, do not close rec-5232, and route the question to the operator (a live no-prefix
+      ListObjectVersions needs PlatformDev's ExternalId trust, so any such probe is a plan amendment with its own
+      written CloudShell block).
       PLAN-bootstrap-iam-analyzer-checks PR 2 does not merge until this step passes.
     hermetic: false
     graduation: not-applicable
   - step: 7
     phase: post-deploy
-    action: Close both bundled recs through the portal and read them back.
+    action: >-
+      After VP 6 passes, close rec-5231 and rec-5232 with update_rec (status closed, naming the merge sha and VP 6's
+      result), then read them back. The squash commit carries no Resolves trailer, so nothing closes them before VP 6.
     command: >-
       bin/venv-python -c "from src.common import ducklake_reader_client as rc; rows, missing =
       rc.fetch_recs_by_ids(rc.make_reader(), ['rec-5231', 'rec-5232']); print(sorted((r['id'], r['status']) for r in
       rows), missing)"
     expected: Both rows with status closed; missing empty.
-    fix_if: A row still open; update_rec it closed with the merge sha and VP 6's result, then re-read.
+    fix_if: A row still open; re-run the update_rec and re-read; a portal failure is reported, never retried in a loop.
     hermetic: false
     graduation: not-applicable
 test_obligations:
@@ -283,7 +295,7 @@ test_obligations:
     test_selector: tests/checks/iam_tf/test_platform_dev_data_lake_read_fence.py
     red_green_expectation: red before (the HCL still holds StringLike over the state prefixes), green after
   - source: terraform/bootstrap/agent_session_user.tf
-    behavior: The session guard's version-list deny stays byte-equal to DailyOps'.
+    behavior: The session guard's version-list deny stays equal to DailyOps' after whitespace normalisation.
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_agent_session_user.py::test_agent_session_carries_platform_dev_denies
     red_green_expectation: red if only DailyOps changes, green when both change
@@ -300,7 +312,7 @@ test_obligations:
 constraints:
   - "No rescue agents or workaround loops (Decision 55). Never attempt sts:AssumeRole or any credential-minting call from a session; live calls run only in the operator's CloudShell (VP 4-6)."
   - "Never write an account id, ARN with an account, ExternalId, key or host into the repo, a PR, a comment or the shared folder (Decision 101). Analyzer output is finding type and issue code only."
-  - "No change to any statement but the two named; Sid names stay; no grant changes. PlatformDev's S3List (unconditioned s3:ListBucket on the bucket) is out of scope and goes to a rec (recommended to the operator 2026-11-16)."
+  - "No change to any statement but the two named; Sid names stay; no grant changes. PlatformDev's S3List (unconditioned s3:ListBucket on the bucket) is out of scope: filed as rec-5240 (2026-11-16)."
   - "No assertion is loosened (Decision 235): the fence test's list-deny assertion is re-authored to a strictly broader deny, approved with this plan (operator, 2026-11-16)."
 context:
   - "Decision-scout r1 NO_FLAGS (fingerprint in gate_rounds). Decisions triaged: 214 of 214. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.9 3/5. CITE: 257, 256, 223, 238, 235, 244, 126. 235 cl.5 and 244 cl.5: the fence test guards a terraform/ boundary path and is a graduated node file, so its re-authored list-deny assertion needs the operator's recorded word before the build starts (handoff names it). 238 cl.1: VP 6 dev_tfstate, dev_short and dev_none prove state-prefix listings stay denied. 223 cl.2: no -target."
@@ -310,10 +322,12 @@ context:
   - "Equivalence: PlatformDev's only ListBucketVersions Allow is DataLakeVersionListRead (StringLike over the same two values), so the new deny removes nothing PlatformDev can do today; the session user's boundary grants no s3: action, so for it the deny is depth only. A negated operator on an absent key evaluates true (IAM condition-operator reference, recalled, proven by VP 6's dev_none and session_none)."
   - "Graduated rows: platformdev-state-convergence-denies-intact keeps passing (Sid names and the three state prefixes in DenyStateAndConvergenceVersionRead are unchanged); platform-dev-data-lake-read-fence's node file is re-authored here; its guard_target still names terraform/personal (rec-4047's residual)."
   - "Ordering: PLAN-bootstrap-iam-analyzer-checks PR 2 merges only after VP 6 passes; the build tells that build thread when it does. Main gained #2079 (github_ci_apply_reads.tf, a CI-applied bootstrap change) after this plan was drafted: the build confirms its tf-bootstrap-apply run completed before merging, since VP 6 applies only an exact three-update plan."
-  - "Approvals: the operator chose StringNotLike on both documents (decision card, 2026-11-16) and said 'write the plan' on 2026-11-16 to this plan, which names the fence test's re-authored list-deny assertion (Decision 235 cl.1 and cl.5, Decision 244 cl.5); no final-diff word is asked for work he has approved (operator, 2026-11-16). The operator's CloudShell pastes of VP 4-6 are the only other operator actions."
+  - "Approvals at build start: none for the build session. It runs no secret read, admin credential or terraform command; VP 4-6 are the operator's own CloudShell blocks, and the rec reads in VP 7 use the routine agent_platform profile."
+  - "Approvals given in planning: the operator chose StringNotLike on both documents (decision card, 2026-11-16) and said 'write the plan' on 2026-11-16 after the draft of this plan, naming the fence test's re-authored list-deny assertion (scope row 5), was shown to him; that is the human confirmation Decision 235 cl.1 and cl.5 and Decision 244 cl.5 require. The message ids are in the handoff note, never the repository. No final-diff word is asked for work he has approved (operator, 2026-11-16)."
   - "V3 resolution: VP 5's operator-run pre-merge plan at the PR head substitutes for pre-merge post-deploy evidence; behavioural acceptance is VP 6, operator-reported in a counts-only PR comment naming the applied sha."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:563103130e6c94361753148b70e62fb6d7203a1a13d5a06916e56193891fe669'}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 8}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
