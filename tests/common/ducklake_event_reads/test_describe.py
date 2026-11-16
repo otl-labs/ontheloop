@@ -62,7 +62,8 @@ def test_read_version_moves_with_every_datum_sql_and_column(monkeypatch: pytest.
 
     seen = {base}
     data = dict(entry.data)
-    for key, value in (("repeat_threshold", 4), ("classifier_version", 2), ("run_label", "other_label")):
+    bumped = verbs.FRICTION_RULES["classifier_version"] + 1
+    for key, value in (("repeat_threshold", 4), ("classifier_version", bumped), ("run_label", "other_label")):
         seen.add(changed(data=data | {key: value}))
     seen.add(changed(data=data | {"rules": data["rules"][:-1]}))
     assert changed(sql=entry.sql + "   ") == base, "whitespace-only SQL edits must not re-version"

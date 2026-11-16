@@ -22,6 +22,7 @@ def _approved_provenance(monkeypatch):
     monkeypatch.setattr(
         _plan_sidecar_approval, "sidecar_provenance", lambda slug, root, in_push, deadline: (approved, "enforce", None)
     )
+    monkeypatch.setattr(module._plan_rescout_wiring, "run", lambda **_: ([], [], " re-scout barrier: stubbed"))
 
 
 _SCOUTED = {"gate": "decision-scout", "round": 1, "verdict": "NO_FLAGS"}
@@ -248,7 +249,7 @@ def test_canonical_plan_template_declares_the_gated_schema_version() -> None:
     skill = Path(__file__).resolve().parents[3] / ".claude" / "skills" / "planning" / "SKILL.md"
     declared = re.search(r"^schema_version: (\d+)", skill.read_text(encoding="utf-8"), re.MULTILINE)
     assert declared is not None, "planning SKILL.md has no schema_version line in its plan template"
-    assert int(declared.group(1)) == module._MIN_NEW_PLAN_SCHEMA_VERSION
+    assert int(declared.group(1)) == module._newest_schema_version()
 
 
 def test_empty_directory_passes(tmp_path: Path, capsys) -> None:
