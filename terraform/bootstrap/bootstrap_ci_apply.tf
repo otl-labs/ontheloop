@@ -303,7 +303,7 @@ locals {
           "iam:TagOpenIDConnectProvider", "iam:UntagOpenIDConnectProvider",
           "iam:CreateSAMLProvider", "iam:UpdateSAMLProvider", "iam:DeleteSAMLProvider", "iam:TagSAMLProvider", "iam:UntagSAMLProvider",
           "iam:CreateServiceLinkedRole", "iam:DeleteServiceLinkedRole", "iam:CreateAccountAlias", "iam:DeleteAccountAlias",
-          "iam:UpdateAccountPasswordPolicy", "iam:DeleteAccountPasswordPolicy", "sts:SetSecurityTokenServicePreferences",
+          "iam:UpdateAccountPasswordPolicy", "iam:DeleteAccountPasswordPolicy", "iam:SetSecurityTokenServicePreferences",
         ]
         Resource = ["*"]
       },
