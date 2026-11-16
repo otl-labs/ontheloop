@@ -21,7 +21,7 @@ scope:
   - file: src/common/ducklake_current_compaction.py
     action: Create
     purpose: >-
-      compact_current_tables(con, discovered, *, semantics, registry, policy, catalog, emit, budget_s) -> {per_table,
+      compact_current_tables(con, discovered, *, semantics, registry, policy, catalog, meta_schema, emit, budget_s) -> {meta_schema, per_table,
       skipped, refused, deferred, failures, elapsed_ms}. Resolves verb rewrite_current_deletes via scope.resolve_scope
       and reads read_partition_layout once; a catalog-level error there (a scope error, a layout read error or an
       unclassified table) is one recorded failure, never a raise, so the merge still runs (an unclassified table
@@ -45,16 +45,17 @@ scope:
       CurrentCompactionDurationMs (ops series undimensioned; non-ops catalogs through the CATALOG_METRICS filter) and
       prints one value-free line per pass, when compaction finishes and before the merge loop, and also on the
       CurrentCompactionProofError path just before the raise: the literal prefix CURRENT_COMPACTION then one JSON object with keys
-      per_table (each {table, files_before, delete_files_before, files_processed, files_after, attempts, duration_ms,
-      pre_snapshot_id, commit_snapshot_id, reproof, proof}; reproof one of equal | expired | none, proof one of equal |
-      none, and mismatch, or for proof unresolved, only on the CurrentCompactionProofError line), skipped, refused,
+      meta_schema (the catalog's meta-schema name, a schema name and no row value), per_table (each {table, files_before, delete_files_before, files_processed, files_after, attempts, duration_ms,
+      pre_snapshot_id, commit_snapshot_id, reproof, proof}; reproof one of equal | expired | none | mismatch, proof one
+      of equal | none | mismatch | unresolved, mismatch and unresolved only on the CurrentCompactionProofError line),
+      skipped, refused,
       deferred, failures (each {table, null for a catalog-level failure, and error_class}) and elapsed_ms; no row value.
       files_processed 0 with no snapshot for the token is clean (proof none).
     new_imports:
       - src.common.ducklake_maintenance
       - src.common.ducklake_maintenance_scope
       - src.common.ducklake_partition_layout
-      - src.common.ducklake_partition_rewrite
+      - src.common.ducklake_partition_rewrite  # _row_proof, the Decision 204 digest (precedent: that module imports ducklake_writes._occ_backoff)
       - src.common.ducklake_writes
   - file: src/common/ducklake_maintenance.py
     action: Modify
@@ -78,7 +79,7 @@ scope:
   - file: src/lambdas/ducklake_maintenance/handler.py
     action: Modify
     purpose: >-
-      action_merge_ops: one call to compact_current_tables after scope resolution and before the merge loop; the 200
+      action_merge_ops: one call to compact_current_tables (passing the event's meta_schema) after scope resolution and before the merge loop; the 200
       body gains `compaction`; compaction failures and refusals join MergeOpsPassFailed and the post-loop aggregate
       raise (the merge loop always runs); a CurrentCompactionProofError propagates to the breaker 500 before any merge.
       Thin call site only (484 of 500 SLOC on main today).
@@ -216,8 +217,8 @@ acceptance_criteria:
   - The new module ships in the maintenance bundle and is excluded from data-pipeline and every other bundle.
   - The new Decision, the two notes and the three pointers (191, 188, 88) match the approved-text sidecar.
   - >-
-    After the deploy, no pass logs a proof failure, every per-table failure is healed by a later pass, the latest pass
-    is clean, MaintenanceBreakerTrip stays 0 after the first compacted pass (a page before it is expected when the
+    After the deploy, considering only ops-catalog (meta_schema ducklake_ops) lines: no pass logs a proof failure, every
+    per-table failure is healed by a later pass, the latest ops pass is clean, MaintenanceBreakerTrip stays 0 after the first compacted pass (a page before it is expected when the
     operator's pass comes after the next :15 control_health), and the first pass that rewrote each of
     ops_recommendations_current and ops_decisions_current logs files rewritten and proof equal; MergeOpsFilesAfterTotal falls below 400 (946 at
     2026-11-15T06:30Z), a first count_by_status on a fresh connection spends under 5,000 ms outside connect, and the
@@ -252,7 +253,9 @@ verification_plan:
       tests/common/test_ducklake_current_compaction.py::test_noop_rewrite_without_snapshot_is_not_a_failure
       tests/common/test_ducklake_current_compaction.py::test_budget_stops_occ_retries
       tests/common/test_ducklake_current_compaction.py::test_budget_is_half_the_function_timeout
-    expected: Twenty-one passed.
+      tests/common/test_ducklake_current_compaction.py::test_largest_delete_count_first_after_canary
+      tests/common/test_ducklake_current_compaction.py::test_reproof_not_started_past_budget
+    expected: Twenty-three passed.
     fix_if: A failure names the branch; fix the module, never the assertion.
     hermetic: true
     graduation: graduate
@@ -391,7 +394,7 @@ verification_plan:
       test -s "$DEPLOY_JOBS_JSON" && bin/venv-python -c "import json,os;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));
       jobs={x['name']:x.get('conclusion') for x in (j.get('jobs') if isinstance(j,dict) else j)};print(jobs);
       want=['deploy-maintenance','maintenance-smoke','reconcile-gate','deploy-serving','smoke','deploy-telemetry-twin','telemetry-twin-smoke','deploy-telemetry','telemetry-smoke'];
-      assert all(any(n.startswith(w) and c=='success' for n,c in jobs.items()) for w in want),jobs;print('DEPLOY_OK')"
+      assert all(jobs.get(w)=='success' for w in want),jobs;print('DEPLOY_OK')"
     expected: Every named deploy and smoke job concluded success (a skipped job fails this step), then DEPLOY_OK.
     fix_if: A red deploy job is root-caused and fixed forward, never re-run to green (Decision 55).
     hermetic: false
@@ -407,7 +410,8 @@ verification_plan:
       /aws/lambda/agent-platform-ducklake-maintenance --start-time "$DEPLOY_EPOCH_MS" --filter-pattern
       '"CURRENT_COMPACTION"' --query 'events[].message' --output json > "$COMPACTION_LINE_FILE" && bin/venv-python -c
       "import json,os;ms=json.load(open(os.environ['COMPACTION_LINE_FILE']));
-      ps=[json.loads(m[m.index('{'):]) for m in ms if m.lstrip().startswith('CURRENT_COMPACTION')];assert ps,'no CURRENT_COMPACTION line yet';
+      ps=[d for d in (json.loads(m[m.index('{'):]) for m in ms if m.lstrip().startswith('CURRENT_COMPACTION')) if d.get('meta_schema')=='ducklake_ops'];
+      assert ps,'no ops-catalog CURRENT_COMPACTION line yet';
       [print(d['elapsed_ms'],'ms of 900000;',[(r['table'],r['files_processed'],r['reproof'],r['proof'],r['duration_ms']) for r in d['per_table']],d['deferred'],d['failures']) for d in ps];
       assert all(r['proof'] in ('equal','none') and r['reproof'] in ('equal','expired','none') for d in ps for r in d['per_table']),'proof failure logged';
       assert not ps[-1]['failures'] and not ps[-1]['refused'],(ps[-1]['failures'],ps[-1]['refused']);
@@ -415,7 +419,8 @@ verification_plan:
       assert all(any(r['table']==x and r['files_processed']>0 and r['proof']=='equal' for d in ps for r in d['per_table']) for x in ['ops_recommendations_current','ops_decisions_current']);
       print('COMPACTION_LIVE_OK')"
     expected: >-
-      No proof failure in any pass since the deploy, the latest pass free of failures and refusals, every earlier
+      Over ops-catalog lines only (the telemetry catalog's :50 merge_ops writes its own): no proof failure in any pass
+      since the deploy, the latest ops pass free of failures and refusals, every earlier
       per-table failure healed by a later pass, each target table rewritten and proved equal in some pass, each pass's
       elapsed time printed against the 900 s timeout, then COMPACTION_LIVE_OK.
     fix_if: >-
@@ -530,7 +535,7 @@ test_obligations:
     test_selector: tests/test_ducklake_control_health.py::test_current_table_over_ceiling_is_a_violation
     red_green_expectation: red before (node absent), green after
   - source: src/common/ducklake_maintenance.py
-    behavior: rewrite() needs an explicit delete_threshold.
+    behavior: rewrite() needs an explicit delete_threshold and returns the summed files_processed (the node asserts both).
     verification_step: 5
     test_selector: tests/test_ducklake_maintenance.py::test_rewrite_requires_explicit_delete_threshold
     red_green_expectation: red before (node absent), green after
@@ -627,6 +632,7 @@ gate_rounds:
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 8}
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 11}
   - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 2, nits: 7}
+  - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
