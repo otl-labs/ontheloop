@@ -360,3 +360,8 @@ def test_platform_file_without_a_gates_key_passes(root: Path) -> None:
     failed: list[str] = []
     validate_project_configuration(failed, root=root)
     assert failed == []
+
+
+def test_rejects_unreadable_persona_registry(root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (root / "docs/contracts/executor-personas.yaml").write_text("personas: [unclosed\n", encoding="utf-8")
+    _expect_failure(root, capsys, "executor-personas.yaml cannot be read for rule (l)")

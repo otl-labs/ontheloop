@@ -234,7 +234,7 @@ class TestTelemetryFieldRealizationRegistered:
 
 
 class TestProjectConfigurationRuleLInputs:
-    """Rule (l) reads executor-personas.yaml and ontheloop/platform.yaml, so a diff touching only either reruns the check in --pre."""
+    """Rule (l) reads executor-personas.yaml and ontheloop/platform.yaml: a diff touching only either reruns the check."""
 
     @pytest.mark.parametrize("path", ["docs/contracts/executor-personas.yaml", "ontheloop/platform.yaml"])
     def test_rule_l_input_matches_a_pre_glob(self, path: str) -> None:

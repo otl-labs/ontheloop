@@ -267,7 +267,10 @@ def _check_gate_rows(body: ProjectConfigurationBody, root: Path) -> list[str]:
         match = _GATE_ID.match(row.id)
         if match:
             rows.setdefault(match.group(1), []).append(row)
-    personas = _verdict_personas(root)
+    try:
+        personas = _verdict_personas(root)
+    except (OSError, yaml.YAMLError, KeyError, TypeError) as exc:
+        return [f"docs/contracts/executor-personas.yaml cannot be read for rule (l): {exc}"]
     out = [f"gates.{p}.verdict_source row is missing for verdict persona {p}" for p in sorted(personas - rows.keys())]
     out += [f"gates.{p}.verdict_source names {p}, which is not a verdict persona" for p in sorted(rows.keys() - personas)]
     for persona, group in sorted(rows.items()):

@@ -86,7 +86,7 @@ def verdict_sources(config_text: str) -> dict[str, str] | str:
     try:
         data = yaml.safe_load(config_text)
     except yaml.YAMLError as exc:
-        return f"the configuration does not parse: {exc}".splitlines()[0]
+        return "the configuration does not parse: " + (str(exc).splitlines() or ["unreadable"])[0]
     settings = data.get("settings") if isinstance(data, dict) else None
     if not isinstance(settings, list):
         return "the configuration has no settings list"
