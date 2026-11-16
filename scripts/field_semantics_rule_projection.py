@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from scripts.contract_rules import CONTRACTS_DIR, DeclaredRule, declared_rules
-from src.row_rules.rules import WRITER_REFERENCE_KINDS, RowRules
+from src.common.ducklake_write_rules import WRITER_REFERENCE_KINDS
+from src.row_rules.rules import RowRules
 
 
 def _rule_value(rule: DeclaredRule) -> Any:

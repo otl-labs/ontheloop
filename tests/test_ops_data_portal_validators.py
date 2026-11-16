@@ -436,12 +436,12 @@ def test_array_element_reference_skips_reader_when_all_elements_memoised():
 
 
 def test_reference_precheck_runs_from_writer_leg():
-    """The pre-check is driven by RowRules.references (Decision 268), not a producer exemption: no exemption remains."""
-    from src.row_rules.rules import RowRules  # noqa: PLC0415
+    """The pre-check is driven by reference_columns (Decision 268), not a producer exemption: no exemption remains."""
+    from src.common.ducklake_write_rules import reference_columns  # noqa: PLC0415
 
-    rules = RowRules.from_projection(rt.resolve_table_spec("ops_recommendations").fields)
-    assert "dependencies" in rules.references
-    assert ("dependencies", "array_element_reference") not in rules.producer_exemptions
+    fields = rt.resolve_table_spec("ops_recommendations").fields
+    assert "dependencies" in reference_columns(fields)
+    assert ("dependencies", "array_element_reference") not in RowRules.from_projection(fields).producer_exemptions
     _write_validators._rec_exists_memo.clear()
     reader = MagicMock()
     reader.named.return_value = []

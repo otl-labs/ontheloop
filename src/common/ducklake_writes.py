@@ -210,7 +210,7 @@ def write_scd2(
                     else (created_override if created_override is not None else identity.timestamp)
                 )
             check_write(spec, rules, record, created_ts, identity.timestamp, identity.ulid, prior)
-            check_references(con, spec, rules, record, prior)
+            check_references(con, spec, record, prior)
             params = _write_params(spec, record, identity, created_ts)
             con.execute(merge_history_sql, params)
             if merge_current_sql is not None:
@@ -405,7 +405,7 @@ def file_scd2(
                     created_timestamp=replay[0][1],
                     last_updated_timestamp=identity.timestamp,
                 )
-            check_references(con, spec, rules, record, None)
+            check_references(con, spec, record, None)
             key = _allocate_entity_id(con, spec)
             existing = con.execute(select_existing_sql, [key]).fetchall()
             if existing:

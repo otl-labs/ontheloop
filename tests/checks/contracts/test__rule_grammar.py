@@ -10,7 +10,8 @@ import pytest
 import yaml
 
 from scripts.checks.contracts import _rule_grammar as grammar
-from src.row_rules.rules import EXEMPTABLE_LEGS, PRODUCER_SIDE_KINDS, WAIVABLE_KINDS, WRITER_REFERENCE_KINDS
+from src.common.ducklake_write_rules import WRITER_REFERENCE_KINDS
+from src.row_rules.rules import EXEMPTABLE_LEGS, PRODUCER_SIDE_KINDS, WAIVABLE_KINDS
 
 _ROOT = Path(__file__).resolve().parents[3]
 _WHY = {"class": "temporary", "reason": "staged", "owner": "rec-1", "review_by": "2027-01-31"}

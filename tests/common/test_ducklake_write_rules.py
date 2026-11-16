@@ -15,13 +15,15 @@ from scripts.ducklake_smoke.lambda_ops_gates import ROW_RULES_BASE, ROW_RULES_CA
 from scripts.ops_portal.writer_transport import _project_ops_record
 from src.common import ducklake_runtime as rt
 from src.common.ducklake_write_rules import (
+    WRITER_REFERENCE_KINDS,
     RowRuleViolationError,
     check_references,
     check_write,
     existing_row_select,
+    reference_columns,
     rules_for,
 )
-from src.row_rules.rules import RowRules
+from src.row_rules.rules import RowRules, RuleProjectionError
 from tests.fixtures.ducklake_fakes import FakeCon, ops_rec_fields, ops_rec_record
 from tests.fixtures.ducklake_smoke_fakes import _Resp
 
@@ -68,7 +70,7 @@ def test_violation_is_a_schema_gate_error_without_values() -> None:
     assert rt.RowRuleViolationError is RowRuleViolationError
 
 
-def test_select_widens_only_with_dated_rules() -> None:
+def test_select_widens_only_with_dated_rules() -> None:  # and with a reference column (Decision 268)
     sql, columns = existing_row_select(SPEC, RULES, True)
     assert columns[:2] == ("created_timestamp", "status")
     dated = {"title", "source", "effort", "priority", "automatable", "risk", "file", "context", "acceptance", "tags"}
@@ -78,9 +80,9 @@ def test_select_widens_only_with_dated_rules() -> None:
     assert ";" not in sql and sql.count("SELECT") == 1  # one statement (Decision 88)
     undated = RowRules.from_projection({"id": {"nullable": False}, "status": {"nullable": False}})
     assert existing_row_select(SPEC, undated, True)[0] == (
-        "SELECT created_timestamp, status FROM ops_catalog.ops_recommendations_current WHERE id = ?"
+        "SELECT created_timestamp, status, dependencies FROM ops_catalog.ops_recommendations_current WHERE id = ?"
     )
-    assert existing_row_select(SPEC, undated, False)[1] == ("created_timestamp",)
+    assert existing_row_select(SPEC, undated, False)[1] == ("created_timestamp", "dependencies")
     smoke = rt.resolve_table_spec(None)
     assert rules_for(smoke) is None
     assert existing_row_select(smoke, None, False)[1] == ("created_timestamp",)
@@ -89,7 +91,7 @@ def test_select_widens_only_with_dated_rules() -> None:
     two_column = RowRules.from_projection(
         {"a": {"nullable": True, "not_before": "b", "exclude_before": {"not_before": "2026-09-01"}}, "b": {"nullable": True}}
     )
-    assert existing_row_select(SPEC, two_column, False)[1] == ("created_timestamp", "a", "b")
+    assert existing_row_select(SPEC, two_column, False)[1] == ("created_timestamp", "a", "b", "dependencies")
 
 
 def test_older_rows_verdicts_on_the_real_projection() -> None:
@@ -176,7 +178,7 @@ def test_row_rule_gate_cases_trip_their_rule() -> None:
             record = {**base, **overrides}
             _check(record)  # a row-local pass: the lookup is the writer adapter's, not the engine's
             with pytest.raises(RowRuleViolationError) as raised:
-                check_references(_NoRowsCon(), SPEC, RULES, record, None)
+                check_references(_NoRowsCon(), SPEC, record, None)
             assert (raised.value.rule, raised.value.column) == (rule, column)
             continue
         error = _violation({**base, **overrides})
@@ -194,11 +196,11 @@ class _NoRowsCon:
 def test_check_references_names_rule_and_column_without_values() -> None:
     leaked = "rec-424242424"
     with pytest.raises(RowRuleViolationError) as raised:
-        check_references(_NoRowsCon(), SPEC, RULES, ops_rec_record(dependencies=[leaked]), None)
+        check_references(_NoRowsCon(), SPEC, ops_rec_record(dependencies=[leaked]), None)
     error = raised.value
     assert (error.table, error.rule, error.column) == ("ops_recommendations", "array_element_reference", "dependencies")
     assert leaked not in str(error) and leaked not in repr(error.args)
-    check_references(_NoRowsCon(), SPEC, None, ops_rec_record(dependencies=[leaked]), None)  # no rules: nothing to look up
+    check_references(_NoRowsCon(), rt.resolve_table_spec(None), {"dependencies": [leaked]}, None)  # no reference column
 
 
 def test_portal_normalized_update_of_an_older_row_passes() -> None:
@@ -306,3 +308,31 @@ def test_a_table_without_rules_writes_unchecked_and_selects_no_extra_columns() -
         }
     )
     assert _dated_columns(two_column) == ["a", "b"]
+
+
+_WHY = {"class": "cross_row", "reason": "r", "owner": "rec-1"}
+
+
+def test_reference_columns_built_from_projected_leg() -> None:
+    fields = {"id": {"nullable": False}, "deps": {"nullable": True, "array_element_reference": True}}
+    assert reference_columns(fields) == frozenset({"deps"})
+    assert reference_columns({"id": {"nullable": False}}) == frozenset()
+    assert WRITER_REFERENCE_KINDS == frozenset({"array_element_reference"})
+    assert reference_columns(SPEC.fields) == frozenset({"dependencies"})
+    RowRules.from_projection(fields)  # the engine accepts the key and never evaluates it
+
+
+@pytest.mark.parametrize("value", [False, None, {}, "yes", 1])
+def test_reference_leg_value_must_be_true(value: object) -> None:
+    with pytest.raises(RuleProjectionError, match="must be true"):
+        reference_columns({"deps": {"nullable": True, "array_element_reference": value}})
+
+
+def test_reference_leg_with_its_exemption_is_refused() -> None:
+    both = {
+        "deps": {"nullable": True, "array_element_reference": True, "write_time_exemptions": {"array_element_reference": _WHY}}
+    }
+    with pytest.raises(RuleProjectionError, match="exempt and must not also ship"):
+        reference_columns(both)
+    exempt_only = {"deps": {"nullable": True, "write_time_exemptions": {"array_element_reference": _WHY}}}
+    assert reference_columns(exempt_only) == frozenset()

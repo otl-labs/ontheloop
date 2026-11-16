@@ -25,11 +25,11 @@ import yaml
 from scripts import contract_rules
 from scripts.checks import _common, registry
 from src.common import ducklake_control_tables as control
+from src.common.ducklake_write_rules import WRITER_REFERENCE_KINDS, reference_columns
 from src.row_rules.rules import (
     EXEMPTABLE_LEGS,
     PRODUCER_SIDE_KINDS,
     WAIVABLE_KINDS,
-    WRITER_REFERENCE_KINDS,
     RowRules,
     RuleProjectionError,
 )
@@ -50,7 +50,7 @@ def _frozen_condition(cond: Mapping[str, Any]) -> tuple[tuple[str, tuple[Any, ..
 
 
 def _expected_and_actual(
-    rules_decl: list[contract_rules.DeclaredRule], rules: RowRules, nullable_false: set[str]
+    rules_decl: list[contract_rules.DeclaredRule], rules: RowRules, nullable_false: set[str], references: frozenset[str]
 ) -> dict[str, tuple[Any, Any]]:
     live = [r for r in rules_decl if r.exemption is None]
     by_kind = lambda kind: [r for r in live if r.kind == kind]  # noqa: E731
@@ -92,7 +92,7 @@ def _expected_and_actual(
         out[kind] = ({r.column: r.params["value"] for r in by_kind(kind)}, dict(getattr(rules, kind)))
     out["array_element_reference"] = (
         {r.column: True for r in live if r.kind in WRITER_REFERENCE_KINDS},
-        dict.fromkeys(sorted(rules.references), True),
+        dict.fromkeys(sorted(references), True),
     )
     out["representation_of"] = (
         frozenset(r.column for r in by_kind("representation_of")),
@@ -189,13 +189,14 @@ def _check_contract_table(table: str, entry: dict[str, Any], contracts_dir: Path
     errors = _declared_errors(table, declared, columns, read_derived)
     try:
         rules = RowRules.from_projection(columns, entry.get("table_rules"))
+        references = reference_columns(columns)
     except RuleProjectionError as exc:
         return [*errors, f"{table}: the projection does not build an engine ({exc})"], len(kept)
     intents = contract_rules.read_intents(
         table, {}, contracts_dir=contracts_dir, repo_root=repo_root, registry_key_ref=contract_rules.REGISTRY_KEY_REF
     )
     nullable_false = _contract_nullable_false(raw_fields, contracts_dir) & set(columns)
-    compare = _expected_and_actual(kept, rules, nullable_false)
+    compare = _expected_and_actual(kept, rules, nullable_false, references)
     exempt_expected = _exemption_maps({c: i for c, i in intents.items() if c in columns})
     actual_exempt = {
         "producer exemption": dict(rules.producer_exemptions),

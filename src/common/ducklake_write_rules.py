@@ -10,10 +10,10 @@ Kept out of ducklake_scd2_schema.py, which is being split (telemetry slice 2a-2 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Mapping
 
 from src.common.ducklake_scd2_schema import CATALOG_ALIAS, ScdTableSpec, SchemaGateError
-from src.row_rules.rules import RowRuleError, RowRules, check_row
+from src.row_rules.rules import RowRuleError, RowRules, RuleProjectionError, check_row
 
 
 class RowRuleViolationError(SchemaGateError):
@@ -25,6 +25,26 @@ class RowRuleViolationError(SchemaGateError):
         self.column = column
         self.exclude_before = exclude_before
         super().__init__(f"{table}.{column}: row rule {rule} violated")
+
+
+WRITER_REFERENCE_KINDS = frozenset({"array_element_reference"})
+
+
+def reference_columns(fields: Mapping[str, Mapping[str, Any]]) -> frozenset[str]:
+    """The columns whose elements must name an existing merge key of the same table (Decision 268), from the projection.
+
+    A projected array_element_reference must be true and must not share a column with its write_time_exemptions entry.
+    The pure engine never evaluates it: the writer does, inside its own transaction (check_references).
+    """
+    columns: set[str] = set()
+    for name, spec in fields.items():
+        for kind in sorted(WRITER_REFERENCE_KINDS & set(spec)):
+            if spec[kind] is not True:
+                raise RuleProjectionError(f"{name}: {kind} must be true")
+            if kind in (spec.get("write_time_exemptions") or {}):
+                raise RuleProjectionError(f"{name}: {kind} is exempt and must not also ship as a rule")
+            columns.add(name)
+    return frozenset(columns)
 
 
 def rules_for(spec: ScdTableSpec) -> RowRules | None:
@@ -57,7 +77,7 @@ def existing_row_select(spec: ScdTableSpec, rules: RowRules | None, include_stat
     columns = ["created_timestamp"]
     if include_status:
         columns.append("status")
-    wanted = {*_dated_columns(rules), *(rules.references if rules is not None else ())}
+    wanted = {*_dated_columns(rules), *(reference_columns(spec.fields) if rules is not None else ())}
     columns.extend(c for c in sorted(wanted) if c not in columns)
     sql = f"SELECT {', '.join(columns)} FROM {CATALOG_ALIAS}.{spec.current_table} WHERE {spec.merge_key} = ?"
     return sql, tuple(columns)
@@ -93,18 +113,14 @@ def check_write(
         raise RowRuleViolationError(spec.table, exc.rule, exc.column, since.date().isoformat() if since else None) from exc
 
 
-def check_references(
-    con: Any, spec: ScdTableSpec, rules: RowRules | None, record: dict[str, Any], prior: dict[str, Any] | None
-) -> None:
+def check_references(con: Any, spec: ScdTableSpec, record: dict[str, Any], prior: dict[str, Any] | None) -> None:
     """Reject an element of a reference column that names no existing merge key of this table (Decision 268).
 
     Runs on the caller's open transaction: one SELECT of the merge key from the current table, one placeholder per distinct
     element. It binds on an insert (prior None) or when the write changes the column, so an unchanged stored value is never
     re-read. The error names the table, rule and column and carries no value.
     """
-    if rules is None:
-        return
-    for column in sorted(rules.references):
+    for column in sorted(reference_columns(spec.fields)):
         value = record.get(column)
         if not value or (prior is not None and value == prior.get(column)):
             continue

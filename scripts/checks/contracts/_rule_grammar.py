@@ -17,7 +17,8 @@ import yaml
 
 from scripts import contract_rules
 from scripts.field_semantics_event_projection import KNOWN_DQ_KEYS as EVENT_DQ_KEYS
-from src.row_rules.rules import EXEMPTABLE_LEGS, PRODUCER_SIDE_KINDS, WAIVABLE_KINDS, WRITER_REFERENCE_KINDS
+from src.common.ducklake_write_rules import WRITER_REFERENCE_KINDS
+from src.row_rules.rules import EXEMPTABLE_LEGS, PRODUCER_SIDE_KINDS, WAIVABLE_KINDS
 
 SCD2_VOCABULARY = frozenset(
     {
