@@ -4,6 +4,7 @@ url.insteadOf mapping back to the file path. Test-only."""
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -64,10 +65,43 @@ class Fixture:
         commit(self.work, "b.txt", "b\n", "seed b")
         git(self.work, "push", "-u", "origin", "main")
         self.set_github_identity(self.work)
+        self.set_required(["pr-validate", "terraform-validate"])
 
     def set_github_identity(self, repo: Path, url: str = GITHUB_URL) -> None:
         git(repo, "config", "remote.origin.url", url)
         git(repo, "config", f"url.{self.origin_url}.insteadOf", url)
+
+    def set_required(self, contexts: list[str] | None) -> None:
+        """Write the file:// API seam's rules/branches/main answer: one required_status_checks rule, or none."""
+        rules: list[dict[str, object]] = [{"type": "deletion"}]
+        if contexts:
+            checks = [{"context": c} for c in contexts]
+            rules.append({"type": "required_status_checks", "parameters": {"required_status_checks": checks}})
+        self.write_api("rules-branches-main.json", rules)
+
+    def set_checks(self, sha: str, runs: list[dict[str, object]], total_count: int | None = None) -> None:
+        body = {"total_count": len(runs) if total_count is None else total_count, "check_runs": runs}
+        self.write_api(f"check-runs/{sha}.json", body)
+
+    def write_api(self, rel: str, body: object) -> None:
+        write(self.origin / "merge-gate-api", rel, json.dumps(body))
+
+    @staticmethod
+    def green_runs() -> list[dict[str, object]]:
+        return [
+            {
+                "id": i,
+                "name": n,
+                "status": "completed",
+                "conclusion": "success",
+                "started_at": "2026-11-12T10:00:00Z",
+                "app": {"slug": "github-actions"},
+            }
+            for i, n in ((1, "pr-validate"), (2, "terraform-validate"))
+        ]
+
+    def head_of(self, number: int) -> str:
+        return git(self.origin, "rev-parse", f"refs/pull/{number}/head")
 
     def branch_pr(self, number: int, rel: str, text: str, name: str = "pr", *, message: str | None = None) -> str:
         """Branch off main (the current main), commit one file, push it as refs/pull/<number>/head, back to main."""
@@ -75,6 +109,7 @@ class Fixture:
         sha = commit(self.work, rel, text, message if message is not None else f"pr {number}")
         git(self.work, "push", "origin", f"HEAD:refs/pull/{number}/head")
         git(self.work, "checkout", "-q", "main")
+        self.set_checks(sha, self.green_runs())
         return sha
 
     def advance_main(self, rel: str, text: str) -> str:
@@ -90,6 +125,7 @@ class Fixture:
         git(self.work, "push", "-f", "origin", f"HEAD:refs/pull/{number}/head")
         sha = git(self.work, "rev-parse", "HEAD")
         git(self.work, "checkout", "-q", "main")
+        self.set_checks(sha, self.green_runs())
         return sha
 
     def clone(self, dest_name: str, *, depth: int | None = None) -> Path:
@@ -111,6 +147,7 @@ def install_project(project: Path) -> None:
         ".claude/hooks/merge_gate.sh",
         ".claude/hooks/merge_gate.py",
         "scripts/session/merge_overlap.py",
+        "scripts/session/merge_checks.py",
         "scripts/session/session_trailer.py",
         "bin/venv-python",
     ):
